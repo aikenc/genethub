@@ -128,6 +128,9 @@ pub async fn stream(
                     if let Some(name) = call["function"]["name"].as_str() {
                         entry.name.push_str(name);
                     }
+                    if entry.id.is_empty() && !entry.name.is_empty() {
+                        entry.id = super::ensure_tool_call_id("");
+                    }
                     if !entry.started && !entry.id.is_empty() && !entry.name.is_empty() {
                         entry.started = true;
                         let _ = events.send(ProviderEvent::ToolCallStart {
@@ -173,13 +176,23 @@ pub async fn stream(
     if text_open {
         let _ = events.send(ProviderEvent::TextEnd);
     }
-    for (_, call) in tool_calls {
-        let arguments =
-            serde_json::from_str::<Value>(&call.arguments).unwrap_or_else(|_| json!({}));
+    for (_, mut call) in tool_calls {
+        if call.name.is_empty() {
+            continue;
+        }
+        if call.id.is_empty() {
+            call.id = super::ensure_tool_call_id("");
+        }
+        if !call.started {
+            let _ = events.send(ProviderEvent::ToolCallStart {
+                id: call.id.clone(),
+                name: call.name.clone(),
+            });
+        }
         let _ = events.send(ProviderEvent::ToolCallEnd {
             id: call.id,
             name: call.name,
-            arguments,
+            arguments: super::parse_tool_arguments(&call.arguments),
         });
     }
 

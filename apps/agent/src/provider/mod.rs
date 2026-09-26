@@ -10,7 +10,7 @@ pub(crate) mod transform;
 pub(crate) mod media;
 pub mod openai;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::ModelConfig;
@@ -56,6 +56,34 @@ pub async fn stream(
         "openai" => openai::stream(model, request, events).await,
         crate::config::FAKE_PROVIDER => fake::stream(model, request, events).await,
         other => anyhow::bail!("unsupported provider api: {other}"),
+    }
+}
+
+/// Empty arguments are an empty object. Invalid JSON is kept verbatim so the
+/// tool is not run against `{}`.
+pub(crate) fn parse_tool_arguments(raw: &str) -> Value {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return json!({});
+    }
+    match serde_json::from_str::<Value>(trimmed) {
+        Ok(value) => value,
+        Err(error) => json!({
+            "_unparsed": raw,
+            "_error": error.to_string(),
+        }),
+    }
+}
+
+pub(crate) fn unparsed_tool_arguments(arguments: &Value) -> Option<&str> {
+    arguments.get("_unparsed").and_then(Value::as_str)
+}
+
+pub(crate) fn ensure_tool_call_id(id: &str) -> String {
+    if id.is_empty() {
+        format!("call_{}", uuid::Uuid::new_v4().simple())
+    } else {
+        id.to_string()
     }
 }
 
@@ -138,6 +166,14 @@ mod tests {
 
     #[test]
     fn thinking_levels_map_to_budgets() {
+        assert_eq!(parse_tool_arguments(""), json!({}));
+        assert_eq!(parse_tool_arguments(r#"{"path":"a"}"#)["path"], "a");
+        assert_eq!(
+            unparsed_tool_arguments(&parse_tool_arguments("{")),
+            Some("{")
+        );
+        assert!(!ensure_tool_call_id("").is_empty());
+        assert_eq!(ensure_tool_call_id("call_1"), "call_1");
         assert_eq!(thinking_budget("off"), None);
         assert_eq!(thinking_budget("medium"), Some(4096));
         assert_eq!(thinking_budget("max"), Some(32768));

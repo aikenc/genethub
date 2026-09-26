@@ -2,6 +2,8 @@
 //! daemon rebuilds conversation history from these frames, so turns must open
 //! and close in the documented sequence.
 
+use std::collections::HashSet;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -484,63 +486,155 @@ async fn execute_calls(
     let interaction_is_valid = calls.len() == 1 && calls[0].1 == "request_user_input";
     let requested_input = interaction_is_valid
         && tools::user_input(&calls[0].2).is_ok();
-    let futures = calls.iter().map(|(id, name, arguments)| {
-        let emitter = emitter.clone();
-        let cwd = snapshot.cwd.clone();
-        let abort = abort.clone();
-        let model = snapshot.model.clone();
-        async move {
-            let result = if name == "request_user_input" && !interaction_is_valid {
-                tools::ToolResult::error(
-                    "request_user_input must be the only tool call in this assistant message",
+    let mut ordered: Vec<Option<Message>> = calls.iter().map(|_| None).collect();
+    for batch in mutation_batches(calls, &snapshot.cwd) {
+        let mut joins = Vec::new();
+        for index in batch {
+            let (id, name, arguments) = calls[index].clone();
+            let emitter = emitter.clone();
+            let cwd = snapshot.cwd.clone();
+            let abort = abort.clone();
+            let model = snapshot.model.clone();
+            joins.push(async move {
+                let message = execute_one(
+                    &emitter,
+                    &cwd,
+                    &abort,
+                    &model,
+                    tools_enabled,
+                    interaction_is_valid,
+                    &id,
+                    &name,
+                    &arguments,
                 )
-            } else if name == "request_user_input" {
-                match tools::user_input(arguments) {
-                    Ok(payload) => {
-                        emitter.send(json!({
-                            "type": "user_input_requested",
-                            "toolCallId": id,
-                            "questions": payload["questions"],
-                        }));
-                        tools::ToolResult::ok("Waiting for the user's response.")
-                    }
-                    Err(error) => tools::ToolResult::error(error),
-                }
-            } else if !tools_enabled {
-                tools::ToolResult::error("Tools are disabled for this private analysis run")
-            } else if abort.requested() {
-                tools::ToolResult::error("Operation aborted")
-            } else {
-                tokio::select! {
-                    result = tools::execute(name, arguments, &cwd) => result,
-                    () = abort.cancelled() => {
-                        eprintln!("event=tool_cancelled tool={name} tool_call_id={id}");
-                        tools::ToolResult::error("Operation aborted")
-                    }
-                }
-            };
-            let result = enforce_media_modality(result, &model);
-            emitter.send(json!({
-                "type": "tool_execution_end",
-                "toolCallId": id,
-                "toolName": name,
-                "result": crate::protocol::tool_result_value(&result.text, result.details.as_ref()),
-                "isError": result.is_error,
-            }));
-            Message::ToolResult {
-                tool_call_id: id.clone(),
-                tool_name: name.clone(),
-                content: vec![Content::text(result.text)],
-                details: result.details,
-                is_error: result.is_error,
-                timestamp: now_ms(),
-            }
+                .await;
+                (index, message)
+            });
         }
-    });
-
-    let results = futures_util::future::join_all(futures).await;
+        for (index, message) in futures_util::future::join_all(joins).await {
+            ordered[index] = Some(message);
+        }
+    }
+    let results = ordered
+        .into_iter()
+        .map(|message| message.expect("every tool call ran"))
+        .collect::<Vec<_>>();
     let attachments = results.iter().filter_map(registered_attachment).collect();
     (results, requested_input, attachments)
+}
+
+async fn execute_one(
+    emitter: &Emitter,
+    cwd: &Path,
+    abort: &crate::state::Abort,
+    model: &crate::config::ModelConfig,
+    tools_enabled: bool,
+    interaction_is_valid: bool,
+    id: &str,
+    name: &str,
+    arguments: &Value,
+) -> Message {
+    let result = if name == "request_user_input" && !interaction_is_valid {
+        tools::ToolResult::error(
+            "request_user_input must be the only tool call in this assistant message",
+        )
+    } else if name == "request_user_input" {
+        match tools::user_input(arguments) {
+            Ok(payload) => {
+                emitter.send(json!({
+                    "type": "user_input_requested",
+                    "toolCallId": id,
+                    "questions": payload["questions"],
+                }));
+                tools::ToolResult::ok("Waiting for the user's response.")
+            }
+            Err(error) => tools::ToolResult::error(error),
+        }
+    } else if !tools_enabled {
+        tools::ToolResult::error("Tools are disabled for this private analysis run")
+    } else if let Some(raw) = crate::provider::unparsed_tool_arguments(arguments) {
+        tools::ToolResult::error(format!(
+            "tool arguments are not valid JSON, so {name} was not run: {raw}"
+        ))
+    } else if abort.requested() {
+        tools::ToolResult::error("Operation aborted")
+    } else {
+        tokio::select! {
+            result = tools::execute(name, arguments, cwd) => result,
+            () = abort.cancelled() => {
+                eprintln!("event=tool_cancelled tool={name} tool_call_id={id}");
+                tools::ToolResult::error("Operation aborted")
+            }
+        }
+    };
+    let result = enforce_media_modality(result, model);
+    emitter.send(json!({
+        "type": "tool_execution_end",
+        "toolCallId": id,
+        "toolName": name,
+        "result": crate::protocol::tool_result_value(&result.text, result.details.as_ref()),
+        "isError": result.is_error,
+    }));
+    Message::ToolResult {
+        tool_call_id: id.to_string(),
+        tool_name: name.to_string(),
+        content: vec![Content::text(result.text)],
+        details: result.details,
+        is_error: result.is_error,
+        timestamp: now_ms(),
+    }
+}
+
+/// Writes and edits of one path run one batch at a time. Other calls stay in
+/// the earliest batch that does not already contain that path.
+fn mutation_batches(calls: &[(String, String, Value)], cwd: &Path) -> Vec<Vec<usize>> {
+    let mut batches: Vec<Vec<usize>> = Vec::new();
+    let mut current = Vec::new();
+    let mut paths = HashSet::new();
+    for (index, (_, name, arguments)) in calls.iter().enumerate() {
+        if let Some(path) = file_mutation_key(name, arguments, cwd) {
+            if !paths.insert(path) {
+                batches.push(std::mem::take(&mut current));
+                paths.clear();
+                if let Some(path) = file_mutation_key(name, arguments, cwd) {
+                    paths.insert(path);
+                }
+            }
+        }
+        current.push(index);
+    }
+    if !current.is_empty() {
+        batches.push(current);
+    }
+    batches
+}
+
+fn file_mutation_key(name: &str, arguments: &Value, cwd: &Path) -> Option<PathBuf> {
+    if name != "write" && name != "edit" {
+        return None;
+    }
+    let raw = arguments.get("path").and_then(Value::as_str)?;
+    let path = Path::new(raw);
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    Some(normalize_path(&joined))
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 /// The attachment a successful read_media call registered, if any.
@@ -730,6 +824,21 @@ mod tests {
             .iter()
             .map(|f| f["type"].as_str().unwrap_or_default().to_string())
             .collect()
+    }
+
+    #[test]
+    fn writes_to_one_file_wait_for_the_earlier_write() {
+        let cwd = PathBuf::from("/work");
+        let calls = vec![
+            ("1".into(), "write".into(), json!({"path": "a.txt"})),
+            ("2".into(), "ls".into(), json!({})),
+            ("3".into(), "write".into(), json!({"path": "./a.txt"})),
+            ("4".into(), "edit".into(), json!({"path": "b.txt"})),
+        ];
+        assert_eq!(
+            mutation_batches(&calls, &cwd),
+            vec![vec![0, 1], vec![2, 3]]
+        );
     }
 
     #[tokio::test]

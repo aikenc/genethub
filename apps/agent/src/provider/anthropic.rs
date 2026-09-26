@@ -97,7 +97,9 @@ pub async fn stream(
                     }
                     Some("tool_use") => {
                         block = Block::ToolCall;
-                        tool_id = event["content_block"]["id"].as_str().unwrap_or("").into();
+                        tool_id = super::ensure_tool_call_id(
+                            event["content_block"]["id"].as_str().unwrap_or(""),
+                        );
                         tool_name = event["content_block"]["name"].as_str().unwrap_or("").into();
                         tool_args.clear();
                         let _ = events.send(ProviderEvent::ToolCallStart {
@@ -135,8 +137,7 @@ pub async fn stream(
                             let _ = events.send(ProviderEvent::ThinkingEnd);
                         }
                         Block::ToolCall => {
-                            let arguments = serde_json::from_str::<Value>(&tool_args)
-                                .unwrap_or_else(|_| json!({}));
+                            let arguments = super::parse_tool_arguments(&tool_args);
                             let _ = events.send(ProviderEvent::ToolCallEnd {
                                 id: std::mem::take(&mut tool_id),
                                 name: std::mem::take(&mut tool_name),

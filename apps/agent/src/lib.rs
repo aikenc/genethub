@@ -175,7 +175,14 @@ async fn handle(state: &Arc<Mutex<State>>, command: Command) {
 
             let spawned = state.clone();
             let handle = tokio::spawn(async move {
-                agent::run_prompt_with_attachments(spawned, message, attachments).await;
+                let watched = spawned.clone();
+                let outcome = tokio::spawn(async move {
+                    agent::run_prompt_with_attachments(watched, message, attachments).await;
+                })
+                .await;
+                if outcome.is_err_and(|error| error.is_panic()) {
+                    recover_panicked_turn(&spawned).await;
+                }
             });
             state.lock().await.running = Some(handle);
         }
@@ -274,7 +281,14 @@ async fn handle(state: &Arc<Mutex<State>>, command: Command) {
             emitter.send(response(id, kind, Some(json!({ "agentInvoked": true }))));
             let spawned = state.clone();
             let handle = tokio::spawn(async move {
-                run_compaction(spawned).await;
+                let watched = spawned.clone();
+                let outcome = tokio::spawn(async move {
+                    run_compaction(watched).await;
+                })
+                .await;
+                if outcome.is_err_and(|error| error.is_panic()) {
+                    recover_panicked_turn(&spawned).await;
+                }
             });
             state.lock().await.running = Some(handle);
         }
@@ -298,6 +312,20 @@ struct ContextMaterial {
     text: String,
     source_index: String,
     fallback_error: Option<String>,
+}
+
+async fn recover_panicked_turn(state: &Arc<Mutex<State>>) {
+    let emitter = {
+        let mut guard = state.lock().await;
+        guard.streaming = false;
+        guard.compacting = false;
+        guard.emitter.clone()
+    };
+    emitter.send(json!({
+        "type": "agent_end",
+        "messages": [],
+        "error": "The agent task panicked before it could finish the turn."
+    }));
 }
 
 async fn run_compaction(state: Arc<Mutex<State>>) {
@@ -751,6 +779,38 @@ mod tests {
         assert_eq!(capsule_token_budget(Some(262_144)), 64_000);
         assert_eq!(capsule_token_budget(Some(524_288)), 64_000);
         assert_eq!(capsule_token_budget(Some(1_000)), 2_048);
+    }
+
+    #[tokio::test]
+    async fn a_panicked_turn_still_closes_with_agent_end() {
+        let (sink, mut frames) = tokio::sync::mpsc::unbounded_channel();
+        let dir = std::env::temp_dir();
+        let state = Arc::new(Mutex::new(State {
+            emitter: rpc::Emitter::collector(sink),
+            session: Session::in_memory(dir.clone()),
+            models: Vec::new(),
+            current_model: None,
+            thinking_level: "off".into(),
+            genehub_session_id: None,
+            skills: Vec::new(),
+            additional_system_prompts: Vec::new(),
+            cwd: dir,
+            stats: Usage::default(),
+            last_request: None,
+            streaming: true,
+            compacting: true,
+            tools_enabled: true,
+            abort: Arc::new(state::Abort::new()),
+            running: None,
+        }));
+        recover_panicked_turn(&state).await;
+        state.lock().await.emitter.flush().await;
+        let frame = frames.recv().await.expect("agent_end");
+        assert_eq!(frame["type"], "agent_end");
+        assert!(frame["error"].as_str().unwrap().contains("panicked"));
+        let guard = state.lock().await;
+        assert!(!guard.streaming);
+        assert!(!guard.compacting);
     }
 
     #[tokio::test]
