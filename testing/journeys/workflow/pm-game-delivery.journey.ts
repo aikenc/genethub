@@ -322,8 +322,16 @@ function scriptProductJourney(
     const delivery = deliveryForRequest(request, deliveries);
     const messages = (request as { messages?: Array<{ role: string; content?: unknown }> }).messages ?? [];
     const instructions = JSON.stringify(messages.filter(message => ["system", "developer"].includes(message.role)));
-    const latestUser = JSON.stringify(messages.filter(message => message.role === "user").at(-1)?.content ?? "");
-    const decision = latestUser.match(/RECORD_FIXTURE_DELIVERY: (wr_[a-f0-9]+)/)?.[1];
+    const latestContent = messages.filter(message => message.role === "user").at(-1)?.content;
+    let currentInput = typeof latestContent === "string" ? latestContent : JSON.stringify(latestContent ?? "");
+    const envelope = currentInput.match(/Inputs:\s*(\[[\s\S]*?\])\s*Current task facts:/);
+    if (envelope) {
+      // A durable inbox turn may carry prior sent inputs alongside newly
+      // queued ones. An old delivery decision must not consume a new review.
+      const inputs = JSON.parse(envelope[1]!) as Array<{ delivery: string; text?: string }>;
+      currentInput = inputs.filter(input => input.delivery === "queued").map(input => input.text ?? "").join("\n");
+    }
+    const decision = currentInput.match(/RECORD_FIXTURE_DELIVERY: (wr_[a-f0-9]+)/)?.[1];
     if (decision && !instructions.includes("<genehub_managed_session>")  ) {
       if (recordedDeliveries.has(decision)) return { text: "PM recorded the reviewed fixture delivery." };
       recordedDeliveries.add(decision);
