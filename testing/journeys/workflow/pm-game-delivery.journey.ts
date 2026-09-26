@@ -656,7 +656,10 @@ if(result.status===0)throw Error('stale Builder plan applied');`;
     return { text: "目标已由 Executor 推进完成；Coder 提交和 Reviewer 验收均已记录。" };
   };
 
-  mock.script(...Array.from({ length: 80 }, () => ({ respond })));
+  // PM disposition adds genuine model turns; asynchronous inbox handoffs may
+  // also consume scripted responses. Keep deterministic endpoint capacity above
+  // the bounded journey, without changing product budgets or its deadline.
+  mock.script(...Array.from({ length: 160 }, () => ({ respond })));
 }
 
 async function completedRun(
@@ -800,16 +803,19 @@ async function runPmDelivery(
     if (current?.status === "completed") return true;
     if (current && !["blocked", "failed", "cancelled"].includes(current.status)) return false;
     const failed = events.filter((event) => event.type === "turnFailed").length > failedBefore;
-    // Plan approval ends the first PM turn before its accepted continuation
-    // dispatches. That receipt is not the final result of the delivery input.
-    const returned = events.filter((event) => event.type === "turnCompleted").length >=
-      completedBefore + (expectApproval ? 2 : 1);
-    if (failed || returned || current) {
+    // Human approval and inbox continuations may end several PM turns
+    // before dispatch. Completion of a turn is not completion of this goal;
+    // await its actual Run under the existing deadline, failing on real errors.
+    if (failed || current) {
       const log = path.join(fixture.projectRoot, ".genethub/temp/preparation-command.log");
       throw new Error(`PM returned without a successful Run for ${taskId}: ${existsSync(log) ? readFileSync(log, "utf8").slice(-7000) : JSON.stringify(fixture.opened.mock.requests.slice(-2)).slice(-7000)}`);
     }
     return false;
-  }, FIFTEEN_MINUTES_MS);
+  }, FIFTEEN_MINUTES_MS).catch(async error => {
+    const history = await fixture.opened.client.call({ type: "workflow.history", payload: { workspaceId: fixture.projectId, limit: 20 } });
+    const pending = await fixture.opened.client.call({ type: "session.get", payload: { sessionId } });
+    throw new Error(`${error}; waitingTask=${taskId}; runs=${JSON.stringify(history)}; PM=${JSON.stringify(pending).slice(-10000)}; modelRequests=${fixture.opened.mock.requests.length}; tail=${JSON.stringify(fixture.opened.mock.requests.slice(-2)).slice(-10000)}`);
+  });
   await t.tools.waitUntil(
     () => events.filter((event) => event.type === "turnCompleted").length >= completedBefore + 2,
     120_000,
@@ -1456,7 +1462,9 @@ for (const scenario of ["approved", "repair", "limit"] as const) defineJourney({
       t.assertions.assert(matches.length <= 1, "review/repair created a second Run");
       run = matches[0];
       return Boolean(run && ["completed", "blocked", "failed"].includes(run.status));
-    }, 150_000);
+    }, 150_000).catch(error => {
+      throw new Error(`${error}; reviewFirst=${scenario}; run=${JSON.stringify(run)}; requests=${fixture.opened.mock.requests.length}; tail=${JSON.stringify(fixture.opened.mock.requests.slice(-2)).slice(-10000)}`);
+    });
     t.assertions.assert(run?.status === (scenario === "limit" ? "blocked" : "completed"), `review-first result: ${JSON.stringify(run)}`);
     const workers = run!.nodes.filter((node) => node.uses === "agent.session");
     const expectedReviews = scenario === "approved" ? 1 : scenario === "repair" ? 2 : 3;

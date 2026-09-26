@@ -96,12 +96,7 @@ for (const scenario of ["observation", "retry", "budget-expiry", "entries", "ent
         : pure || budgetCase ? "true" : waitFile(effect(data.key === "a" ? "z" : "a"));
       const pause = scenario === "parallel-sibling-lost" ? "sleep 45 && "
         : scenario === "parallel-failure" && data.key === "z" ? "sleep 30 && " : data.key === "z" ? "sleep 0.3 && " : "";
-      // Hold the submitted branch in `finishing` until the daemon restarts.
-      // A five-second window can close before the gate observes both branches.
-      const after = scenario === "observation" ? " && sleep 5"
-        : scenario === "parallel-restart" && data.key === "z"
-          ? ` && for i in $(seq 1 2400); do test -f ${q(release)} && break; sleep 0.05; done`
-          : "";
+      const after = scenario === "observation" ? " && sleep 5" : "";
       return { tool: { name: "bash", arguments: { command: `printf '%s\\n' ${q(identity)} >> ${q(effect(data.key))} && ${barrier} && ${pause}"$GENEHUB_CLI" workflow complete ${finish}${after}` } } };
     } })));
     const pm = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
@@ -171,10 +166,24 @@ for (const scenario of ["observation", "retry", "budget-expiry", "entries", "ent
       await restart();
     } else if (scenario === "parallel-restart") {
       await t.tools.waitUntil(async () => {
-        await current(); return run?.nodes.some(n => n.status === "completed" && n.uses === "agent.session") === true
-          && run.nodes.some(n => n.status === "finishing");
-      }, 40_000);
-      await restart();
+        await current(); return run?.status === "completed" &&
+          run.nodes.filter(n => n.uses === "agent.session" && n.status === "completed").length === 2;
+      }, 40_000).catch(async error => { throw new Error(`${error}; beforeRestart=${JSON.stringify(run)}; requests=${opened.mock.requests.length}`); });
+      opened.client.close();
+      await cli(["daemon", "stop"]);
+      // Restore the durable accepted-result/unfinished-cleanup checkpoint with
+      // the daemon stopped. Fast retirement must not make this coverage depend
+      // on observing a transient finishing window under parallel gate load.
+      const snapshotPath = path.join(opened.workspaceRoot, ".genethub/components/pm/requests", run!.id, "runs", run!.id, "run.json");
+      const saved = JSON.parse(readFileSync(snapshotPath, "utf8"));
+      const node = run!.nodes.find(n => n.uses === "agent.session")!;
+      t.assertions.assert(saved.run.nodes[node.id].status === "completed", "accepted cleanup checkpoint was not durable");
+      saved.run.nodes[node.id].status = "finishing";
+      saved.run.status = "running";
+      saved.run.revision += 1;
+      writeFileSync(snapshotPath, JSON.stringify(saved));
+      await cli(["daemon", "start"]);
+      opened.client = await connectProductClient(daemonEndpoint(opened.daemon));
     } else if (scenario === "parallel-sibling-lost") {
       await t.tools.waitUntil(async () => {
         await current(); return existsSync(effect("a")) && existsSync(effect("z"))

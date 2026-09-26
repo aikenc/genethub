@@ -73,6 +73,13 @@ export function trackResources(owner: string, rootPid: number) {
       let before = census();
       const deadline = Date.now() + 1500;
       while ((before.processes ?? 0) > 0 && Date.now() < deadline) { await pause(100); before = census(); }
+      // Bounded identity facts make a real leak diagnosable without recording
+      // argv, environment values, credentials or full executable paths.
+      const leakedProcesses = (before.processes ?? 0) > 0 ? scan().slice(0, 16).map(p => {
+        let executable = "unavailable";
+        try { executable = readlinkSync(`/proc/${p.pid}/exe`).split("/").at(-1) ?? "unavailable"; } catch { /* raced exit */ }
+        return { pid: p.pid, parent: p.parent, state: p.state, executable };
+      }) : undefined;
       for (const signal of ["SIGTERM", "SIGKILL"] as const) {
         for (const p of scan()) {
           if (p.pid !== process.pid && identity(p.pid)?.birth === p.birth) {
@@ -82,7 +89,7 @@ export function trackResources(owner: string, rootPid: number) {
         if ((census().processes ?? 0) === 0) break;
         await pause(signal === "SIGTERM" ? 500 : 100);
       }
-      return { before, after: census(), scope: "linux lease-tagged processes and observed descendants; TCP listeners and UDP sockets" };
+      return { before, after: census(), ...(leakedProcesses ? { leakedProcesses } : {}), scope: "linux lease-tagged processes and observed descendants; TCP listeners and UDP sockets" };
     },
   };
 }

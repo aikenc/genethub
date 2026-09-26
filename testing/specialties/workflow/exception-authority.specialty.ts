@@ -80,7 +80,8 @@ defineSpecialty({
         if (stage === 0) return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" workflow build --package game-delivery' } } };
         if (stage === 1) return { tool: { name: "request_user_input", arguments: { questions: [{ id: field(request, "challengeId"), header: "接管", question: "确认接管项目", options: [{ label: "yes", description: "接管" }, { label: "no", description: "不接管" }] }] } } };
         if (stage === 2) return { tool: { name: "bash", arguments: { command: `"$GENEHUB_CLI" workflow build --package game-delivery --apply --plan-digest ${field(request, "planDigest")} --revision ${field(request, "expectedRevision")} --action-id initial-takeover` } } };
-      } else if (command && body.includes(phase)) {
+      } else if (command && new RegExp(`(?<![A-Za-z0-9_])${phase}(?![A-Za-z0-9_])`).test(
+        JSON.stringify(messages.filter(message => message.role === "user").at(-1)?.content ?? ""))) {
         const value = command; command = undefined; commandTaken = true;
         return { emptyToolIdDeltas: true, tool: { name: "bash", arguments: { command: value } } };
       }
@@ -197,7 +198,7 @@ defineSpecialty({
     await t.tools.waitUntil(async () => (await history()).some(run => run.taskId === "recovered" && run.status === "completed"), 40_000)
       .catch(async error => { throw new Error(`${error}; retry=${recovered}; workerCalls=${workerCalls}; runs=${JSON.stringify(await history())}`); });
     const successor = (await history()).find(run => run.taskId === "recovered")!;
-    t.assertions.assert(successor.requestRunId === original.id && successor.parentSessionId === other, "recovery lost request lineage or responding PM");
+    t.assertions.assert(successor.requestRunId === original.id && successor.parentSessionId === other, `recovery lost request lineage or responding PM: expectedRoot=${original.id}; expectedPM=${other}; successor=${JSON.stringify(successor)}; dispatch=${recovered}`);
     // A successful recovery withdraws management escalation, but the user's next
     // business request must remain usable in this original conversation.
     const beforeAssessment = spawnSync("git", ["status", "--porcelain=v1"], { cwd: opened.workspaceRoot, env: opened.daemon.env, encoding: "utf8" }).stdout;
