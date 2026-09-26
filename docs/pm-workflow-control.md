@@ -4,8 +4,14 @@ The domain model and the distinction between Workflow definitions, Executor
 carriers and test projects are documented in
 [Workflow and Executor](./workflow-executor-model.md).
 
+The business term is **user requirement** (用户需求): the goal and constraints
+entrusted to PM, potentially spanning multiple Runs. Existing identifiers such
+as `requestRunId`, the `request.budget` capability and `requests/` storage retain
+their technical names. Transport requests and Human interaction requests are
+separate concepts.
+
 A Session describes the PM's own execution. `workSummary` derives task state from
-its original requests and related Runs. An idle PM with a running Worker remains
+its user requirements and related Runs. An idle PM with a running Worker remains
 an active task; user questions start or continue only the PM. Lists, filters and
 task cards use the same summary. The normal list refresh is at most ten seconds;
 a disconnected or failed projection is shown as needing reconciliation.
@@ -69,7 +75,7 @@ send, the existing orphan check yields a blocked exit instead of replaying a
 possibly executed assignment.
 
 The task button calls cancellation directly. PM can invoke the same command.
-The original-request fence is persisted first; dispatch, completion and recovery
+The user-requirement cancellation fence is persisted first; dispatch, completion and recovery
 check it. Related Workers, Executor and diagnostic Sessions are fenced, stopped,
 and their known descendant processes and ref leases reclaimed. Only confirmed
 cleanup yields `cancelled`; errors remain `cancelling` with a concrete reason.
@@ -80,85 +86,73 @@ Cancelled Session execution cannot reopen after reload. Artifact and evidence
 history remains accessible, including for older/broken Pack installations.
 
 `taskId` is still the dispatch idempotency key. `--retry-of` associates an explicit recovery
-with the original user request. Its Runs share a maximum of three attempts,
+with the original user requirement. Its Runs share a maximum of three attempts,
 two hours of accumulated execution excluding recorded Human waits and time in
 terminal states, and 256 **observed** LLM calls,
 including diagnosis. Changing dispatch keys does not reset these bounds.
 Unavailable token accounting stays unknown. Explicit recovery of a cancelled
-request requires both user input received after the cancellation fence and
+user requirement requires both user input received after the cancellation fence and
 `--resume-cancelled`. A delayed reply to an earlier PM question cannot reopen it.
 
 ## Mechanical supervision and project management
 
-A daemon controller checks unfinished Runs and each Worker attempt. At 180
-seconds without changing LLM/tool activity it records a silence episode and,
-when configured, starts a fresh evidence-only diagnostic Session. Heartbeats,
-PM questions and another Worker's activity cannot reset the stalled attempt.
-Human waits are excluded. Silence triggers diagnosis, not cancellation of a
-long operation. An idle Worker without a result is reconciled after a brief
-launch grace period.
+The daemon patrol runs every five seconds. It enumerates requirement records,
+skips Run snapshots for groups with a valid `settled` marker, and reconciles the
+remaining execution, cleanup, routes, Human interactions and PM notices. This
+is a programmatic check; it does not call an LLM for every Session or historical
+Run. Directory and marker reads still incur cost for settled history.
 
-Waiting questions retain their original Session/request IDs. Task cards expose
-the waiting reason and a link to the original interaction. Each request queues
-one decision-needed PM notice, within the bounded notice budget; repeated checks
-do not repeat the wakeup. Original interaction permissions remain in effect and
-the PM cannot supply a Human approval merely through project management authority.
+For a running Run, supervision records each node Session's changing output,
+observed LLM calls/tokens and tool facts through `execution_activity`. It also
+observes Session status and actual pending Human questions. An undispatched
+running node without a Session, or a Run with no Worker taking over, can reach
+the 180-second progress deadline. A live Agent may legitimately spend minutes
+inside a tool call; elapsed silence alone does not stop it. Budget enforcement
+and declared execution limits remain separate checks. Lost Worker attempts and
+cleanup are reconciled by the control layer.
 
-Normal progress uses no automatic WR calls. One diagnosis can run at a time;
-there are at most two per original request, each limited to 180 seconds/eight
-observed calls. Trigger identity survives restart. Missing/failed/exhausted WR
-retains a mechanical finding and a bounded PM notice; WR cannot recursively
-dispatch another diagnostic graph. `workflow.check` exposes outcomes, evidence
-gaps, execution inconsistencies, activity timestamps and diagnosis Sessions.
+Patrol considers every unfinished user requirement, including a completed
+assessment or budget/route block with no active successor. A missing or idle PM
+has a 180-second handoff window; a PM actively processing this requirement has
+30 minutes. The clock belongs to the requirement and does not reset on chat,
+heartbeats or another requirement's work. A valid unanswered Human card retains
+its responsibility, uses a 60-second audit interval and wakes on answer.
+The package-selected recovery Workflow remains customizable, with the built-in
+flow as default. Its independent default bounds are three Runs, 200 observed
+LLM calls and one hour; expansion requires Human exit c. Business quota
+exhaustion does not exclude independent recovery. Repeated patrol errors are
+visible in the requirement projection, with slower retries after three errors;
+write failures also have a bounded local diagnostic fallback.
 
-The Pack's WR Skill consumes the restricted checker. The engineering Reviewer
-also has `check-playability.mjs`: an entry digest plus a read-only
-`gameTestSnapshot()` contract lets Chromium check start, movement and firing.
-Level/Boss/item progression needs project-specific behavioral evidence.
-Unavailable observation is explicitly unverifiable.
+PM notices use stable IDs and the existing durable inbox. `accepted` records
+receipt; `handled` records input processing. Neither proves the requirement was
+delivered. Human questions preserve their interaction IDs and permissions;
+PM cannot supply a Human approval using project management authority.
+`workflow.check` exposes mechanical execution facts and declared evidence gaps,
+not a proof of business quality.
 
-Exception recovery is derived from daemon-owned Run facts, never from an Agent
-claim that something failed. An unresolved request with a blocked/failed Run,
-cleanup error, missing WR after a detected stall, or failed/limited/unknown WR diagnostic grants ordinary PM Sessions
-in that project recovery authority. It remains available while a successor is
-repairing the request; a completed or cancelled latest Run removes that exception.
-Unrelated projects, managed Workers and consultation around a pending Human
-request do not gain this authority.
+User requirements have `in_progress`, `completing`, `completed` and `cancelled`
+states. Run `completed` records execution completion only. PM uses
+`workflow deliver --run <id> --revision <requirement.revision> --reason <conclusion>
+--evidence delivery=<reference>` to confirm delivery. The advertised
+`workflow.requirement.v1` capability includes the authenticated
+`workflow.requirement.complete` RPC. The platform checks PM authority, revision,
+active execution/cleanup and unanswered decisions; PM and business Reviewers
+judge acceptance and references. A repeated identical decision is idempotent.
 
-During that exception, a project PM can activate workflows, manage project
-experts through exact change plans, control the project's managed Sessions,
-cancel work and retry a Run owned by another PM. The original request lineage,
-cancellation fence, execution budget and Human approval boundary remain in force.
-The execution deadline accumulates actual Run execution/cleanup time, subtracting
-Human waiting. Time after a Run is blocked or otherwise terminal does not spend
-that budget; retry still shares the original Run and LLM-call limits.
-A recovery or Pack upgrade does not transfer the persistent PM binding. Routine
-permissions return after resolution, without a second permission store or timer.
+Patrol observes PM status, changing execution activity, inbox Run references and
+the requirement decision clock. Input `handled` without a decision remains
+unfinished. Only a user cancellation withdraws the goal; an Agent stopping its
+execution leaves PM responsible. Settlement and writer release require a
+terminal requirement, quiescent execution and handled notices. This prevents a
+terminal Run save from releasing the writer between notice delivery and its
+receipt commit. Completed requirements leave high-frequency Run reconciliation
+without asking the platform to interpret industry acceptance contracts.
 
-WR automatic diagnosis has its own read-only instructions and supplied mechanical
-facts; it is not a graph node and does not submit `workflow complete`. A failed or
-budget-exhausted diagnosis is reported as such, with partial records clearly
-separated from a completed reply. OpenAI-compatible streams retain the initial
-nonempty tool ID when later argument chunks contain an empty ID.
-
-Diagnosis resolves its Worker within the Run's pinned Executor and execution
-root, including isolated trial material. The Worker's own directory remains its
-Session cwd; the project evidence root and bounded Session references do not
-change. Do not mount the whole formal project merely to work around a diagnostic
-startup error. A `genehub.workflow.role.v3` role declares one to four built-in
-`tags` (`Max`, `Pro`, `Flash`, `视频理解`, `图片理解`); it cannot pin `agentId`, `modelId`,
-permission mode or runtime values. Each dispatch resolves the currently
-available Agent/model whose machine-global tags contain every requested tag,
-choosing the current lowest cost at dispatch time. No resolved cost or route is
-cached. An `evidenceOnly` role skips routes whose adapter cannot enforce the
-boundary. If
-no route remains, the Run blocks with the rejected routes and asks a Human to
-repair machine-level setup. Restricted Session creation and restart enforce the
-same adapter declaration. Legacy role.v1/v2 Candidates remain readable but new
-source should use role.v3. Existing Runs retain their pinned role intent;
-updating source does not rewrite or retry a failed diagnosis. These boundaries are covered by
-`specialty.workflow.trial-materials.silence-wr` and
-`specialty.workflow.authoring-validation.contract`.
+Current exception-recovery authority is derived from daemon-owned Run facts,
+not an Agent's claim. It permits project PMs to manage workflows, experts and
+related Sessions while an unresolved failure is present. Requirement completion, recovery admission, task projections and
+settlement share the requirement-level conclusion.
 
 An existing ProjectControlBinding permits routine PM management in that
 project. Exact plan digest, action ID, revision and scope checks still apply;
@@ -198,7 +192,7 @@ explicit, approved actions.
 
 ## Business delegation and configuration control
 
-A project with an existing takeover binding allows its ordinary root PM conversations to dispatch work. The runtime still rejects managed/cross-project callers and preserves per-request ownership, cancellation fences and budgets. Delegating work does not transfer the configuration controller or grant Builder/upgrade/component authority; those retain controller and exceptional-recovery checks.
+A project with an existing takeover binding allows its ordinary root PM conversations to dispatch work. The runtime still rejects managed/cross-project callers and preserves per-requirement ownership, cancellation fences and budgets. Delegating work does not transfer the configuration controller or grant Builder/upgrade/component authority; those retain controller and exceptional-recovery checks.
 
 Game Pack v5 routes `game/assessment` and `game/review` to Game Reviewer, returning reports without implementing changes. `workflow/review` remains process diagnosis/evaluation. Old projects use the standard digest-checked Pack upgrade; in-flight Run definitions are retained.
 ## Preparing another Executor

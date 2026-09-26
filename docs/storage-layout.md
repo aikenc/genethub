@@ -64,7 +64,11 @@ agent CLI 自己的线程库（`~/.codex/` 之类）不归我们管，只在会�
 | 数据 | 位置 |
 | --- | --- |
 | Candidate、激活指针 | 包的 Executor Space 级 `components/executor/`；无独立载体的定义包使用项目根的同名目录 |
-| Run 快照（按请求归档） | 项目 PM Space 级 `components/pm/requests/<请求 id>/runs/<Run id>/run.json` |
-| Run ID 定位记录、请求写锁与引用租约 | 项目 PM Space 级 `components/pm/`；定位记录可从请求目录重建 |
+| Run 快照（按用户需求归档） | 项目 PM Space 级 `components/pm/requests/<用户需求 id>/runs/<Run id>/run.json` |
+| Run ID 定位记录、用户需求写锁与引用租约 | 项目 PM Space 级 `components/pm/`；定位记录可从用户需求目录重建 |
+
+`requests/` 保留现有磁盘名称，业务概念称“用户需求”，定义见 [Workflow 与 Executor 模型](./workflow-executor-model.md)。写锁只是避免多个执行者同时改写同一份需求记录的文件互斥；它不承担完成判断。
 
 旧版 `<data>/workflow-runtime/` 与 Executor 会话快照不自动导入，新版不从那里读取。
+
+PM `request.json` uses `genehub.workflow.request.v2` and stores the user requirement state, decision revision, PM conclusion/references, pending-decision clock and patrol diagnostics. Readers retain v1 history; older writers must reject v2 instead of discarding it. `genehub.workflow.settled.v2` is written only after explicit delivery/user cancellation and completed cleanup/notices.

@@ -395,6 +395,7 @@ pub fn required(request: &Request) -> Capability {
         | Request::WorkflowHuman { .. }
         | Request::WorkflowRecoveryReset { .. }
         | Request::WorkflowBudget { .. }
+        | Request::WorkflowRequirementComplete { .. }
         | Request::SessionSend { .. }
         | Request::SessionArtifactBegin { .. }
         | Request::SessionArtifactChunk { .. }

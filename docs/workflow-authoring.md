@@ -73,7 +73,7 @@ same serialization when both are omitted; old Runs are not rewritten.
 An ordinary task returns a persisted `output` containing `requestRunId`,
 `observedAtMs`, `budget` (revision/maxRuns/deadlineMs/maxLlmRounds), `usedRuns`,
 `observedLlmRounds`, `executionMs` and remainingRuns/remainingLlmRounds/remainingExecutionMs.
-It reads only its own shared request using the same accounting as admission and
+It reads only its own shared user requirement using the same accounting as admission and
 `workflow check`. The observation is neither a reservation nor authority to raise
 limits. It survives restart unchanged; query again to observe a budget amendment
 or subsequent usage. Thresholds and business exits belong to YAML; PM retains

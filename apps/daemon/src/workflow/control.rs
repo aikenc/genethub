@@ -69,6 +69,10 @@ pub(crate) async fn summarize_sessions(state: &Shared, sessions: &mut [SessionSu
                             .count() as u32,
                     );
                     for run in &owned {
+                        if requirement::status(runtime, run).is_ok_and(|s| s.state == genehub_proto::WorkflowRequirementState::Completing) {
+                            summary.running += 1;
+                            continue;
+                        }
                         match run.status.as_str() {
                             "running" => summary.running += 1,
                             "stopping" | "cancelling" => summary.stopping += 1,
@@ -79,7 +83,7 @@ pub(crate) async fn summarize_sessions(state: &Shared, sessions: &mut [SessionSu
                     // Ongoing/blocked work stays ahead of settled history.
                     owned.sort_by_key(|run| {
                         (
-                            matches!(run.status.as_str(), "completed" | "cancelled"),
+                            requirement::terminal(runtime, run).unwrap_or(false),
                             std::cmp::Reverse(run.updated_at_ms),
                         )
                     });
@@ -88,7 +92,10 @@ pub(crate) async fn summarize_sessions(state: &Shared, sessions: &mut [SessionSu
                         .into_iter()
                         .take(16)
                         .map(|run| genehub_proto::WorkflowTaskSummary {
-                            human_exit: recovery::read_human_exit(&runtime, run).ok().flatten()
+                            human_exit: grouped.get(request::group_id(run)).and_then(|group| {
+                                group.iter().filter_map(|item| recovery::read_human_exit(runtime, item).ok().flatten())
+                                    .max_by_key(|exit| (exit.answer.is_none(), exit.created_at_ms))
+                            })
                                 .map(|exit| genehub_proto::WorkflowHumanExitStatus {
                                     kind: exit.kind, request_id: exit.request_id,
                                     pm_session_id: exit.pm_session_id, reason: exit.reason,
@@ -112,7 +119,17 @@ pub(crate) async fn summarize_sessions(state: &Shared, sessions: &mut [SessionSu
                             run_id: run.id.clone(),
                             task_id: run.task_id.clone(),
                             workflow_id: run.workflow_id.clone(),
-                            status: run.status.clone(),
+                            status: match requirement::status(runtime, run) {
+                                Ok(_) if matches!(run.status.as_str(), "stopping" | "cancelling") => run.status.clone(),
+                                Ok(req) => match req.state {
+                                    genehub_proto::WorkflowRequirementState::InProgress => "running",
+                                    genehub_proto::WorkflowRequirementState::Completing => "completing",
+                                    genehub_proto::WorkflowRequirementState::Completed => "completed",
+                                    genehub_proto::WorkflowRequirementState::Cancelled => "cancelled",
+                                }.into(),
+                                Err(_) => "blocked".into(),
+                            },
+                            requirement: requirement::status(runtime, run).ok(),
                             revision: run.revision,
                             active_nodes: run
                                 .nodes
@@ -325,7 +342,7 @@ pub(crate) async fn start_assigned(
         let (reason, cause) = if request_budget_exhausted && !run.handles.is_empty() {
             ("恢复流程达到执行期限或 LLM 调用上限", "recoveryBudget")
         } else if request_budget_exhausted {
-            ("原始请求达到执行期限或 LLM 调用上限", "requestBudget")
+            ("用户需求达到执行期限或 LLM 调用上限", "requestBudget")
         } else {
             ("结构化流程活动达到期限", "activityDeadline")
         };
@@ -393,7 +410,7 @@ pub(crate) async fn cancel(
     if root
         .request
         .as_ref()
-        .is_some_and(|request| request.cancelled)
+        .is_some_and(|request| request.cancelled && (by_agent || !request.cancelled_by_agent))
     {
         return run_status(&runtime, &run);
     }
@@ -401,27 +418,29 @@ pub(crate) async fn cancel(
         bail!("Workflow revision 冲突：先重新读取 workflow get");
     }
     let group = request_runs(&runtime, &root.id)?;
-    if group
-        .iter()
-        .all(|run| matches!(run.status.as_str(), "completed" | "cancelled"))
-    {
-        bail!("该任务的执行已全部结束");
+    if by_agent && group.iter().all(|r| matches!(r.status.as_str(), "completed" | "cancelled")) {
+        return run_status(&runtime, &run);
+    }
+    if requirement::terminal(&runtime, &run)? {
+        bail!("该用户需求已结束");
     }
     let mut link = root.request.take().unwrap_or_else(|| request::RequestLink {
         root_run_id: root.id.clone(),
         original_message_id: format!("legacy:{}", root.id),
         ..Default::default()
     });
-    link.cancelled = true;
+    link.cancelled = !by_agent;
     link.cancelled_at_ms = now_ms();
     link.cancelled_by_agent = by_agent;
     root.request = Some(link);
     root.revision += 1;
     save_run(&runtime, &root)?; // The request fence survives a partial cascade.
     for previous in group {
+        let mut current = load_run(&runtime, &previous.id)?;
         if let Some(exit) = recovery::read_human_exit(&runtime, &previous)? {
             state.sessions.cancel_workflow_question(&exit.pm_session_id, &exit.request_id).await?;
         }
+        let retired = recovery::retire_human_exit(&runtime, &mut current, by_agent)?;
         // Retire the notices where they were actually delivered, which is not
         // necessarily the Session that dispatched the Run.
         let recipient = super::notice_recipient(state, &previous).await?;
@@ -429,8 +448,13 @@ pub(crate) async fn cancel(
             .sessions
             .discard_workflow_inputs(&recipient, &previous.id)
             .await?;
-        let mut current = load_run(&runtime, &previous.id)?;
+        let pending = current.supervision.notices.iter().any(|n| !n.handled);
+        for notice in &mut current.supervision.notices { notice.accepted = true; notice.handled = true; }
         if matches!(current.status.as_str(), "completed" | "cancelled") {
+            if retired || pending {
+                current.journal_actor = if by_agent { "pm" } else { "human" }.into();
+                save_run(&runtime, &current)?;
+            }
             continue;
         }
         request_stop(
@@ -664,9 +688,8 @@ pub(crate) async fn budget(
         bail!("Workflow Run 不属于请求的 Workspace");
     }
     let root_id = request::group_id(&selected).to_string();
-    // A completed business Run releases its long-lived writer. Budget changes
-    // can still be made before a successor, so reacquire and verify ownership
-    // before mutating the shared request record.
+    // A settled requirement releases its writer. Explicit later decisions
+    // reacquire and verify ownership before mutating its shared record.
     let root = load_run(&runtime, &root_id)?;
     if !claim_request_writer(&runtime, &root)? {
         bail!("Workflow 请求由另一个 daemon 执行；当前实例不能调整预算");
@@ -793,9 +816,7 @@ pub(crate) async fn maintain(state: &Shared) {
         let cancelled = runs
             .iter()
             .filter(|run| {
-                run.request
-                    .as_ref()
-                    .is_some_and(|request| request.cancelled)
+                request::cancelled(run)
             })
             .map(|run| run.id.clone())
             .collect::<BTreeSet<_>>();
@@ -809,22 +830,34 @@ pub(crate) async fn maintain(state: &Shared) {
                 || run.status == "blocked"
                 || (!cancelled.contains(request::group_id(&run))
                     && supervision::report_pending(&run));
-            if !unfinished {
-                continue;
-            }
             match claim_request_writer(&runtime, &run) {
                 Ok(true) => {}
                 Ok(false) => continue,
                 Err(error) => {
                     tracing::warn!(run = %run.id, %error, "workflow request writer unavailable");
+                    requirement::record_failure(&runtime, &run, &error);
                     continue;
                 }
             }
             if !request_writer_verified(&runtime, &run).unwrap_or(false) {
                 if let Err(error) = verify_request_takeover(state, &runtime, &run).await {
                     tracing::warn!(run = %run.id, %error, "workflow request takeover remains pending");
+                    requirement::record_failure(&runtime, &run, &error);
                     continue;
                 }
+            }
+            if !unfinished && requirement::terminal(&runtime, &run).unwrap_or(false) {
+                // Repair the optimization marker after a crash between the
+                // durable PM decision and settlement. Serialize with dispatch.
+                if let Ok(_request) = request::request_lock(&runtime, request::group_id(&run)) {
+                    if let Ok(current) = load_run(&runtime, &run.id) {
+                        mark_settled_if_quiescent(&runtime, &current);
+                        if let Err(error) = release_request_writer_if_resolved(&runtime, &current) {
+                            requirement::record_failure(&runtime, &current, &error);
+                        }
+                    }
+                }
+                continue;
             }
             // Retain per-Run de-duplication. The request writer and operation
             // locks serialize mutations across its Run history.
@@ -860,25 +893,34 @@ pub(crate) async fn maintain(state: &Shared) {
                     }.await;
                     if let Err(error) = execution {
                         tracing::warn!(run = %run.id, %error, "workflow execution reconciliation remains pending");
+                        requirement::record_failure(&runtime, &run, &error);
                     }
                     if let Err(error) = maybe_resolve_recovery_successor(&runtime, &run.id) {
                         tracing::warn!(run = %run.id, %error, "workflow recovery successor remains pending");
+                        requirement::record_failure(&runtime, &run, &error);
                     }
                     if let Err(error) = maybe_resume_route(&owner, &runtime, &run.id).await {
                         tracing::warn!(run = %run.id, %error, "workflow route resumption remains pending");
+                        requirement::record_failure(&runtime, &run, &error);
                     }
                     match maybe_start_recovery(&owner, &runtime, &run.id).await {
                         Ok(true) => return,
                         Ok(false) => {}
                         Err(error) => {
+                            let mut handed_to_human = false;
                             if error.downcast_ref::<recovery::RecoveryBudgetExceeded>().is_some() {
                                 if let Ok(current) = load_run(&runtime, &run.id) {
-                                    if let Err(handoff) = recovery::ensure_human_exit(&owner, &runtime, &current, "c", None).await {
-                                        tracing::warn!(run = %run.id, %handoff, "recovery budget Human exit remains pending");
+                                    let reason = error.to_string();
+                                    match recovery::ensure_human_exit(&owner, &runtime, &current, "c", Some(&reason)).await {
+                                        Ok(exit) => handed_to_human = exit.answer.is_none(),
+                                        Err(handoff) => requirement::record_failure(&runtime, &run, &handoff),
                                     }
                                 }
                             }
-                            tracing::warn!(run = %run.id, %error, "workflow recovery start remains pending");
+                            if !handed_to_human {
+                                tracing::warn!(run = %run.id, %error, "workflow recovery start remains pending");
+                                requirement::record_failure(&runtime, &run, &error);
+                            }
                         }
                     }
                     if let Ok(current) = load_run(&runtime, &run.id) {
@@ -888,11 +930,22 @@ pub(crate) async fn maintain(state: &Shared) {
                         if let Some(kind) = kind {
                             if let Err(error) = recovery::ensure_human_exit(&owner, &runtime, &current, kind, None).await {
                                 tracing::warn!(run = %run.id, %error, "workflow Human exit remains pending");
+                                requirement::record_failure(&runtime, &run, &error);
                             }
                         }
                     }
                     if let Err(error) = supervision::deliver_notice(&owner, &runtime, &run.id).await {
                         tracing::warn!(run = %run.id, %error, "workflow PM handoff remains pending");
+                        requirement::record_failure(&runtime, &run, &error);
+                    }
+                    if let Ok(current) = load_run(&runtime, &run.id) {
+                        if let Err(error) = requirement::observe_wait(&owner, &runtime, &current).await {
+                            requirement::record_failure(&runtime, &current, &error);
+                        }
+                        mark_settled_if_quiescent(&runtime, &current);
+                        if let Err(error) = release_request_writer_if_resolved(&runtime, &current) {
+                            requirement::record_failure(&runtime, &current, &error);
+                        }
                     }
                 };
                 // Cancelling this future can discard a pack.script result after
@@ -904,6 +957,7 @@ pub(crate) async fn maintain(state: &Shared) {
                     _ = &mut patrol => {},
                     _ = tokio::time::sleep(Duration::from_secs(300)) => {
                         tracing::error!(run = %run.id, "workflow patrol job exceeded 300 seconds; waiting for a durable outcome");
+                        requirement::record_failure(&runtime, &run, &anyhow!("巡查超过 300 秒，仍在等待执行回执；未重放外部动作"));
                         patrol.await;
                     }
                 }
@@ -1077,18 +1131,44 @@ pub(super) fn complete_human_acceptance(runtime: &RuntimeStore, recovery_id: &st
 
 async fn maybe_start_recovery(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Result<bool> {
     let run = load_run(runtime, run_id)?;
-    if run.status != "blocked" || !run.handles.is_empty() {
-        return Ok(false);
-    }
+    if !matches!(run.status.as_str(), "blocked" | "completed" | "failed" | "cancelled") || !run.handles.is_empty()
+        || requirement::terminal(runtime, &run)? { return Ok(false); }
     let group = request_runs(runtime, request::group_id(&run))?;
-    if group.iter().find(|item| item.id == request::group_id(&run))
-        .is_some_and(request::cancelled) {
+    if group.iter().find(|item| item.id == request::group_id(&run)).is_some_and(request::cancelled) {
         return Ok(false);
     }
     if group.iter().filter(|item| item.handles.is_empty())
-        .any(|item| item.id != run.id && item.created_at_ms > run.created_at_ms)
-    {
+        .max_by_key(|item| (item.created_at_ms, &item.id)).is_none_or(|latest| latest.id != run.id)
+        || group.iter().any(|r| matches!(r.status.as_str(), "running" | "stopping" | "cancelling" | "recoverable")) {
         return Ok(false);
+    }
+    for item in &group {
+        if let Some(exit) = recovery::read_human_exit(runtime, item)? {
+            if exit.answer.is_none() { return Ok(false); }
+        }
+    }
+    let parent = super::notice_recipient(state, &run).await?;
+    // A valid PM Human wait belongs to this requirement only when the
+    // current input is bound to it; an unrelated question cannot hide it.
+    let (message, task_run, _) = state.sessions.current_request(&parent).await.unwrap_or_default();
+    let current_group = task_run.as_deref().and_then(|id| load_run(runtime, id).ok())
+        .map(|current| request::group_id(&current).to_string());
+    let summary = state.sessions.summary(&parent).await;
+    let belongs_here = current_group.as_deref() == Some(request::group_id(&run))
+        || message.as_deref().is_some_and(|id| run.request.as_ref().is_some_and(|r| r.original_message_id == id));
+    // Only the requirement-scoped Human exits above suppress its patrol.
+    // A Session-wide question can belong to another input in the same batch.
+    let goal = requirement::status(runtime, &run)?;
+    let elapsed = now_ms().saturating_sub(if goal.pending_since_ms > 0 { goal.pending_since_ms } else { run.updated_at_ms });
+    let needs_pm_window = run.status != "blocked" || run.stop.as_ref()
+        .is_some_and(|s| matches!(s.cause_code.as_str(), "requestBudget" | "routeUnavailable"));
+    if needs_pm_window {
+        let activity = state.sessions.execution_activity(&parent).await.ok();
+        let active_here = belongs_here
+            && summary.as_ref().is_ok_and(|s| s.status == SessionStatus::Running)
+            && activity.is_some_and(|a| a.last_at_ms >= goal.pending_since_ms);
+        let limit = if active_here { requirement::PM_DECISION_MS } else { requirement::PM_LAUNCH_MS };
+        if elapsed < limit { return Ok(false); }
     }
     let previous = group.iter().filter(|item| item.handles.iter().any(|handle| handle.run_id == run.id))
         .max_by_key(|item| (item.created_at_ms, &item.id));
@@ -1097,9 +1177,9 @@ async fn maybe_start_recovery(state: &Shared, runtime: &RuntimeStore, run_id: &s
             return Ok(true);
         }
         if let Some(exit) = recovery::read_human_exit(runtime, previous)? {
-            // Human decisions are durable request boundaries. Only a newly
-            // approved recovery allowance authorizes another attempt.
-            if exit.kind != "c" || exit.answer.as_deref() != Some("approve") {
+            // Rejecting additional recovery budget cannot authorize spending.
+            // Feedback/keepOpen do not dispose of the user's delivery goal.
+            if exit.kind == "c" && exit.answer.as_deref() != Some("approve") {
                 return Ok(true);
             }
         } else if previous.status == "blocked" {
@@ -1109,13 +1189,8 @@ async fn maybe_start_recovery(state: &Shared, runtime: &RuntimeStore, run_id: &s
             return Ok(true);
         }
     }
-    let reason = run.stop.as_ref().map(|stop| stop.reason.as_str()).unwrap_or("execution blocked");
-    if run.stop.as_ref().is_some_and(|stop| matches!(stop.cause_code.as_str(), "routeUnavailable" | "requestBudget"))
-        || request::budget_exhausted(runtime, &run, now_ms())?
-    {
-        return Ok(false);
-    }
-    let parent = super::notice_recipient(state, &run).await?;
+    let reason = run.stop.as_ref().map(|stop| stop.reason.as_str()).unwrap_or("执行已结束，但用户需求仍未交付；PM 未在处理期限内作出决定");
+
     if !state.sessions.summary(&parent).await.is_ok_and(|session| !session.archived) {
         recovery::ensure_human_exit(state, runtime, &run, "d",
             Some("没有活着的 PM 会话可以接管恢复；请在项目中新建 PM 会话后处理并提交平台反馈。")
@@ -1364,10 +1439,7 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
         let mut run = load_run(runtime, run_id)?;
         let _request = request::request_lock(runtime, request::group_id(&run))?;
         let root = load_run(runtime, request::group_id(&run))?;
-        if root
-            .request
-            .as_ref()
-            .is_some_and(|request| request.cancelled)
+        if request::cancelled(&root)
             && !matches!(
                 run.status.as_str(),
                 "completed" | "cancelled" | "cancelling"

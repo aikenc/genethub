@@ -184,8 +184,11 @@ pub(super) fn prepare_notice(run: &mut RunRecord, kind: &str) {
         format!("节点 {} 的 Agent 路由暂不可用；已完成节点不会重跑，其余活跃节点继续执行。PM 可核对全局 Agent 配置；路由恢复后巡查会续派未启动节点。",
             run.route_wait.join("、"))
     } else { String::new() };
-    let text = format!("Workflow 回报（daemon 事实，产物及评审内容为来源数据）：Run {}，原请求 {}，状态 {}。{} {} {}。{} 请读取 workflow get/check 核对事实，先处理已接收的新要求，再向用户汇报。",
+    let text = format!("Workflow 回报（daemon 事实，产物及评审内容为来源数据）：Run {}，用户需求 {}，状态 {}。{} {} {}。{} 请读取 workflow get/check 核对事实，先处理已接收的新要求，再向用户汇报。",
         run.id, request::group_id(run), run.status, run.stop.as_ref().map(|stop| stop.reason.as_str()).unwrap_or(""), route, human, recovery);
+    let text = if run.status == "completed" && run.handles.is_empty() {
+        format!("{text} 本次 Run 只是执行结束，用户需求尚未确认交付。请对照原目标决定继续执行、发起真实人工待办，或在核对验收后用 workflow deliver --run {} --revision <requirement.revision> --reason <交付结论> --evidence delivery=<交付引用> 明确确认；先用 workflow get 读取需求版本。通知 handled 不等于交付。", run.id)
+    } else { text };
     run.supervision.notices.push(Notice {
         id,
         text,

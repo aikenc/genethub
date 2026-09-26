@@ -317,6 +317,16 @@ pub enum Request {
         #[ts(optional, type = "number")]
         max_llm_rounds: Option<u64>,
     },
+    /// An authenticated ordinary PM records its goal delivery decision.
+    #[serde(rename = "workflow.requirement.complete", rename_all = "camelCase")]
+    WorkflowRequirementComplete {
+        workspace_id: String,
+        run_id: String,
+        #[ts(type = "number")]
+        expected_revision: u64,
+        conclusion: String,
+        delivery_references: Vec<String>,
+    },
     /// Mounts, configures or removes one responsibility on an already-open,
     /// PipeBuilder-verified AgentSpace, or moves it in the ownership tree.
     ///

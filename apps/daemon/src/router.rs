@@ -855,6 +855,7 @@ async fn dispatch(
                 "service.preview.v1".to_string(),
                 "process.services.v1".to_string(),
                 "workflow.control.v1".to_string(),
+                "workflow.requirement.v1".to_string(),
                 "agentSpace.builderPlans.v1".to_string(),
                 "session.input.v1".to_string(),
                 "session.switch-agent.v1".to_string(),
@@ -1563,6 +1564,18 @@ async fn dispatch(
             }
         }
 
+        Request::WorkflowRequirementComplete { workspace_id, run_id, expected_revision, conclusion, delivery_references } => {
+            if let Err(error) = authorize_project_workflow_mutation(state, caller, &workspace_id).await {
+                return Handled::err(ErrorCode::Forbidden, error);
+            }
+            let Some(pm) = caller.session_controller_id() else {
+                return Handled::err(ErrorCode::Unauthorized, "delivery decisions require an ordinary PM Session");
+            };
+            match crate::workflow::complete_requirement(state, &workspace_id, pm, &run_id,
+                expected_revision, &conclusion, delivery_references).await {
+                Ok(run) => Handled::ok(Reply::WorkflowRun(run)), Err(error) => failed(error),
+            }
+        }
         Request::WorkflowBudget {
             workspace_id,
             run_id,
@@ -2493,7 +2506,12 @@ async fn dispatch(
                 .respond_permission(&session_id, &request_id, outcome, &providers)
                 .await
             {
-                Ok(()) => Handled::ok(Reply::Ack),
+                Ok(()) => {
+                    if let Err(error) = crate::workflow::wake_human(state, &session_id, &request_id).await {
+                        tracing::error!(%session_id, %request_id, %error, "Human answer persisted; requirement wakeup will retry");
+                    }
+                    Handled::ok(Reply::Ack)
+                },
                 Err(error) => failed(error),
             }
         }
@@ -3670,6 +3688,7 @@ fn diagnostic_operation(request: &Request) -> Option<&'static str> {
         Request::WorkflowHuman { .. } => Some("workflow.human"),
         Request::WorkflowRecoveryReset { .. } => Some("workflow.recovery.reset"),
         Request::WorkflowBudget { .. } => Some("workflow.budget"),
+        Request::WorkflowRequirementComplete { .. } => Some("workflow.requirement.complete"),
         Request::AgentSpaceBuilder { .. } => Some("agentSpace.builder"),
         Request::AgentSpaceChangePlan { .. } => Some("agentSpace.changePlan"),
         Request::ProjectApprovalRequest { .. } => Some("project.approval.request"),

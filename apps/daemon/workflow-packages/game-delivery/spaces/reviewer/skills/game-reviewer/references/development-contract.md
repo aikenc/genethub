@@ -68,3 +68,8 @@ shape checker validates structure, not that a cited check actually executed.
 Useful checks may be proposed to WM for project-library reuse even when they
 failed this time. Do not edit a public/default checklist during a delivery Run;
 promotion needs evidence of reuse value and the ordinary method-change process.
+
+Budget observations distinguish admission from execution. `currentRunAdmitted`
+means this attempt is already approved; `currentRunCanExecute` describes its
+remaining observed execution bounds. `remainingRuns=0` only prevents a later
+Run and is never sufficient to return `needsAuthorization` for this one.

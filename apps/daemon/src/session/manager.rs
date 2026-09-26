@@ -4408,6 +4408,7 @@ impl SessionManager {
             if let Some(broker) = &self.project_control {
                 broker.revoke_session(session_id).await?;
             }
+            live.prepare_shutdown().await?;
             self.end_what_it_left(session_id).await;
             live.shutdown().await?;
         }
@@ -4532,6 +4533,7 @@ impl SessionManager {
         };
         // Still stop the owned adapter when observation fails. The persisted
         // receipt keeps uncertainty visible across retries and daemon restart.
+        live.prepare_shutdown().await?;
         if let Err(error) = self.processes.stop_all_checked(session_id).await {
             tracing::warn!(session = session_id, %error, "descendant cleanup needs verification");
         }
@@ -4575,6 +4577,10 @@ impl SessionManager {
     pub async fn shutdown(&self) {
         let sessions: Vec<(String, Arc<Live>)> = self.sessions.write().await.drain().collect();
         for (session_id, live) in sessions {
+            if let Err(error) = live.prepare_shutdown().await {
+                tracing::error!(session = %session_id, %error, "session event retirement did not complete");
+                continue;
+            }
             self.end_what_it_left(&session_id).await;
             if let Err(error) = live.shutdown().await {
                 tracing::error!(session = %session_id, %error, "session shutdown did not complete");
@@ -5492,7 +5498,7 @@ impl Live {
         Ok(())
     }
 
-    async fn shutdown(self: &Arc<Self>) -> Result<()> {
+    async fn prepare_shutdown(self: &Arc<Self>) -> Result<u64> {
         self.closing.store(true, Ordering::SeqCst);
         let starting = {
             let owner = self.execution.lock().await;
@@ -5517,6 +5523,22 @@ impl Live {
                 })
                 .id
         };
+        {
+            let mut owner = self.execution.lock().await;
+            if let Some(execution) = owner.as_mut().filter(|execution| execution.id == id) {
+                execution.phase = ExecutionPhase::Stopping;
+                execution.cancel.send_replace(true);
+                execution.ready.send_replace(true);
+            }
+        }
+        // Keep the adapter alive for descendant ownership census, but retire
+        // event consumption before our controlled cleanup produces its exit.
+        self.stop_pump().await?;
+        Ok(id)
+    }
+
+    async fn shutdown(self: &Arc<Self>) -> Result<()> {
+        let id = self.prepare_shutdown().await?;
         retire_execution(self, id, None, true).await
     }
 }

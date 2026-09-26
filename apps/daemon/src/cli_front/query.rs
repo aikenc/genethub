@@ -16,7 +16,7 @@ use super::output::{self, CliFailure, CLI_SCHEMA};
 use super::rpc::{ConnectError, Refusal, Rpc, RpcError};
 use super::target::{self, Routing, Selection};
 
-const COMMAND_NAMES: [&str; 67] = [
+const COMMAND_NAMES: [&str; 68] = [
     "schema",
     "context",
     "capabilities",
@@ -53,6 +53,7 @@ const COMMAND_NAMES: [&str; 67] = [
     "workflow.journal",
     "workflow.check",
     "workflow.complete",
+    "workflow.deliver",
     "workflow.cancel",
     "workflow.recover",
     "workflow.recovery.start",
@@ -119,6 +120,7 @@ fn mutates(name: &str) -> bool {
             | "workflow.activate"
             | "workflow.dispatch"
             | "workflow.complete"
+            | "workflow.deliver"
             | "workflow.cancel"
             | "workflow.recover"
             | "workflow.recovery.start"
@@ -1311,6 +1313,15 @@ fn command_schema(name: &str) -> Value {
                 "reason": {"type": "string", "minLength": 1, "description": "required for a negative outcome"}
             }), &[],
         ),
+        "workflow.deliver" => workflow_schema(
+            "genet workflow deliver [--workspace <id>] --run <business-run> --revision <requirement.revision> --reason <conclusion> --evidence <key=reference>...",
+            json!({
+                "runId": {"type": "string", "minLength": 1},
+                "revision": {"type": "integer", "minimum": 0, "description": "User requirement revision from workflow get, not the Run revision"},
+                "reason": {"type": "string", "minLength": 1, "maxLength": 4096},
+                "evidence": {"type": "object", "minProperties": 1, "maxProperties": 16, "additionalProperties": {"type": "string", "minLength": 1, "maxLength": 2048}, "description": "Repeat --evidence <distinct-key=reference>; only the owning PM can confirm the user goal"}
+            }), &["runId", "revision", "reason", "evidence"],
+        ),
         "workflow.cancel" => workflow_schema(
             "genet workflow cancel [--workspace <id>] --run <id> --revision <n>",
             json!({"runId": {"type": "string", "minLength": 1}, "revision": {"type": "integer", "minimum": 0}}),
@@ -1510,6 +1521,7 @@ fn command_schema(name: &str) -> Value {
             }),
             "workflow.activate" => single_output("workflow.activated"),
             "workflow.complete" => single_output("workflow.completed"),
+            "workflow.deliver" => single_output("workflow.requirement.completed"),
             "workflow.cancel" => single_output("workflow.cancelling"),
             "workflow.recover" => single_output("workflow.recovered"),
             "workflow.recovery.start" => single_output("workflow.recovery.started"),

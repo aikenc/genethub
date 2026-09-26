@@ -79,6 +79,7 @@ enum Command {
         outcome: Option<genehub_proto::WorkflowNodeOutcome>,
         reason: Option<String>,
     },
+    Deliver { workspace_id: Option<String>, run_id: String, revision: u64, conclusion: String, references: Vec<String> },
     Cancel {
         workspace_id: Option<String>,
         run_id: String,
@@ -466,6 +467,16 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
                 }
             };
             output::succeed("workflow.completed", serde_json::to_value(run).unwrap());
+            Ok(EXIT_OK)
+        }
+        Command::Deliver { workspace_id, run_id, revision, conclusion, references } => {
+            let workspace_id = resolve_workspace(rpc, workspace_id).await?;
+            let Reply::WorkflowRun(run) = rpc.call(Request::WorkflowRequirementComplete {
+                workspace_id, run_id, expected_revision: revision, conclusion, delivery_references: references,
+            }).await.map_err(query::rpc_error)? else {
+                return Err(CliFailure::protocol("wrong reply to workflow.requirement.complete"));
+            };
+            output::succeed("workflow.requirement.completed", serde_json::to_value(run).unwrap());
             Ok(EXIT_OK)
         }
         Command::Cancel {
@@ -949,6 +960,13 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
             outcome: values.outcome,
             reason: values.reason,
         }),
+        "deliver" => Ok(Command::Deliver {
+            workspace_id: values.workspace.take(),
+            run_id: values.run.take().ok_or_else(|| CliFailure::invalid_args("workflow deliver needs --run"))?,
+            revision: values.revision.ok_or_else(|| CliFailure::invalid_args("workflow deliver needs --revision <requirement.revision>"))?,
+            conclusion: values.reason.take().ok_or_else(|| CliFailure::invalid_args("workflow deliver needs --reason <delivery conclusion>"))?,
+            references: values.evidence.into_values().collect(),
+        }),
         "cancel" => Ok(Command::Cancel {
             workspace_id: values.workspace.take(),
             run_id: values.run.take().ok_or_else(|| CliFailure::invalid_args("workflow cancel 需要 --run <id>"))?,
@@ -1020,7 +1038,7 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
 }
 
 const USAGE: &str =
-    "usage: genet workflow list|build|inspect|activate|dispatch|get|history|journal|check|complete|cancel|recover|continue|recovery|human|budget ...";
+    "usage: genet workflow list|build|inspect|activate|dispatch|get|history|journal|check|complete|deliver|cancel|recover|continue|recovery|human|budget ...";
 
 #[derive(Default)]
 struct Values {

@@ -42,6 +42,19 @@ pub(super) fn read_human_exit(runtime: &super::RuntimeStore, run: &super::RunRec
     Ok(Some(exit))
 }
 
+/// Called under the existing cancellation locks after the native card closed.
+pub(super) fn retire_human_exit(runtime: &super::RuntimeStore, run: &mut super::RunRecord, by_agent: bool) -> Result<bool> {
+    let Some(mut exit) = read_human_exit(runtime, run)? else { return Ok(false); };
+    if exit.answer.is_some() { return Ok(false); }
+    exit.answer = Some(if by_agent { "interrupted" } else { "cancelled" }.into());
+    crate::config::save_private(&exit_path(runtime, run, true)?, &serde_json::to_vec(&exit)?)?;
+    run.human_exit_journal = Some(super::HumanExitJournal {
+        request_id: exit.request_id, pm_session_id: exit.pm_session_id,
+        kind: exit.kind, answer: exit.answer,
+    });
+    Ok(true)
+}
+
 /// Reconcile the Human card's compact journal marker after its own file is
 /// durable. Retrying after a crash commits each reference at most once.
 fn sync_human_exit_journal(runtime: &super::RuntimeStore, run: &super::RunRecord,
@@ -63,11 +76,11 @@ fn sync_human_exit_journal(runtime: &super::RuntimeStore, run: &super::RunRecord
 
 fn exit_options(kind: &str) -> &'static [(&'static str, &'static str)] {
     match kind {
-        "a" => &[("approve", "批准增加 1 次业务 Run、128 轮 LLM 和 1 小时"), ("reject", "拒绝，保留受阻请求")],
-        "b" => &[("acceptScope", "接受缩减后的目标"), ("cancel", "取消原请求")],
-        "c" => &[("approve", "批准本请求增加 1 次恢复、100 轮 LLM 和 30 分钟"), ("reject", "拒绝，转平台反馈")],
-        "d" => &[("confirmFeedback", "确认并打开预填反馈"), ("keepOpen", "保留受阻请求")],
-        "e" => &[("handled", "所需安装或登录已处理"), ("abandon", "放弃原请求")],
+        "a" => &[("approve", "批准增加 1 次业务 Run、128 轮 LLM 和 1 小时"), ("reject", "拒绝，保留受阻需求")],
+        "b" => &[("acceptScope", "接受缩减后的目标"), ("cancel", "取消用户需求")],
+        "c" => &[("approve", "批准本需求增加 1 次恢复、100 轮 LLM 和 30 分钟"), ("reject", "拒绝，转平台反馈")],
+        "d" => &[("confirmFeedback", "确认并打开预填反馈"), ("keepOpen", "保留受阻需求")],
+        "e" => &[("handled", "所需安装或登录已处理"), ("abandon", "放弃用户需求")],
         "f" => &[("pass", "人工验收通过"), ("fail", "人工验收不通过")],
         _ => &[],
     }
@@ -101,7 +114,7 @@ pub(super) fn classify_human_exit(run: &super::RunRecord) -> Option<&'static str
     Some("d")
 }
 
-/// Materialize one native Human question per blocked Run. The file is the
+/// Materialize one current native Human question per Run. The file is the
 /// durable Workflow reference; Session storage owns the actual answer card.
 pub(super) async fn ensure_human_exit(
     state: &super::Shared,
@@ -113,20 +126,25 @@ pub(super) async fn ensure_human_exit(
     let (mut exit, created) = {
         let _run = super::lock_run(runtime, &run.id)?;
         let _request = super::request::request_lock(runtime, super::request::group_id(run))?;
-        if let Some(existing) = read_human_exit(runtime, run)? {
+        let existing = read_human_exit(runtime, run)?;
+        if let Some(existing) = existing.as_ref().filter(|exit| exit.answer.is_none()
+            || (exit.kind == kind && proposed_reason.is_none_or(|reason| reason.trim() == exit.reason.trim()))) {
             if existing.kind != kind { bail!("Workflow Human exit already has a different kind"); }
-            (existing, false)
+            (existing.clone(), false)
         } else {
             super::require_request_writer(runtime, run)?;
             let current = super::load_run(runtime, &run.id)?;
-            if current.status != "blocked" || current.revision != run.revision {
+            if !matches!(current.status.as_str(), "blocked" | "completed" | "failed" | "cancelled")
+                || super::requirement::terminal(runtime, &current)? || current.revision != run.revision {
                 bail!("Workflow Human exit target changed before question creation");
             }
             let session_id = super::notice_recipient(state, run).await?;
             let reason = proposed_reason.or_else(|| run.stop.as_ref().map(|stop| stop.reason.as_str()))
                 .unwrap_or("execution blocked");
             let exit = HumanExit {
-                run_id: run.id.clone(), request_id: format!("workflow-human-{}", run.id),
+                run_id: run.id.clone(), request_id: if existing.is_some() {
+                    format!("workflow-human-{}-decision-{}", run.id, super::now_ms())
+                } else { format!("workflow-human-{}", run.id) },
                 pm_session_id: session_id, kind: kind.into(),
                 reason: reason.chars().take(4096).collect(), created_at_ms: super::now_ms(),
                 answer: None,
@@ -212,17 +230,24 @@ async fn apply_answer_action(state: &super::Shared, runtime: &super::RuntimeStor
     run: &super::RunRecord, exit: &HumanExit) -> Result<()> {
     if matches!(exit.answer.as_deref(), Some("cancel" | "abandon")) {
         let current = super::load_run(runtime, &run.id)?;
+        let root = super::load_run(runtime, super::request::group_id(&current))?;
+        // A deliberate user resume already acknowledges the earlier stop.
+        // Re-reading that old card must not cancel the reopened goal again.
+        if root.request.as_ref().is_some_and(|link| link.resume_message_id.is_some()
+            && !super::request::cancelled(&root) && exit.created_at_ms <= link.cancelled_at_ms) {
+            return Ok(());
+        }
         super::control::cancel(state, &current.workspace_id, &current.id, current.revision, false).await?;
     }
     if exit.kind == "f" && exit.answer.as_deref() == Some("pass") {
         super::control::complete_human_acceptance(runtime, &run.id)?;
     }
     if let Some(answer) = exit.answer.as_deref() {
-        if !matches!(answer, "cancel" | "abandon" | "pass" | "confirmFeedback" | "keepOpen") {
+        if !matches!(answer, "cancel" | "abandon" | "pass" | "cancelled" | "interrupted") {
             let _run = super::lock_run(runtime, &run.id)?;
             let _request = super::request::request_lock(runtime, super::request::group_id(run))?;
             let mut current = super::load_run(runtime, &run.id)?;
-            let id = format!("flow-human-answer-{}", run.id);
+            let id = format!("flow-human-answer-{}", exit.request_id);
             if current.supervision.notices.iter().all(|notice| notice.id != id) {
                 current.supervision.notices.push(super::supervision::Notice {
                     id,
@@ -440,7 +465,7 @@ pub(super) fn builtin_bundle() -> Result<super::Bundle> {
     validate_contract(&definition)?;
     let mut roles = std::collections::BTreeMap::new();
     for (id, prompt, evidence_only) in [
-        ("recovery-reviewer", "只读复查被处理的 Run。先用 workflow journal 读取事件，再核对 Session 历史和最近的恢复总结。完成报告后，必须向控制者 PM 提出带 repair、resume、successor、human、cancel 五个选项的暂停点并等待答复；按答复用同名 outcome 提交。repair 需写明修复标准；被处理 Run 仍为 recoverable 时可用 workflow recover 原 Session 续办，已 blocked 时 resume 应由 PM 用 workflow dispatch --retry-of <被处理 Run ID> 以当前定义建立同目标后继；successor 可在激活新定义后使用同一后继命令。human/cancel 必须带具体原因，不得自行宣告请求完成。", true),
+        ("recovery-reviewer", "只读复查这条用户需求及其 Run，包括执行已 completed 但 PM 尚无交付决定的情形。先用 workflow get 读取 requirement、requestBudget 和结果；按 requestRunId 读取根 Run，再用 parentSessionId、originalMessageId 核对原始用户需求与后续约束，不能只检查最新子任务提示词；原目标缺失时保留未结束并报告不确定；currentRunAdmitted/currentRunCanExecute 与 remainingRuns 的含义不同，remainingRuns=0 不会撤回当前 Run 的准入。用 workflow journal 读取事件，再核对 Session 历史和最近的恢复总结。完成报告后，必须向控制者 PM 提出带 repair、resume、successor、human、cancel 五个选项的暂停点并等待答复；按答复用同名 outcome 提交。repair 需写明修复标准；被处理 Run 仍为 recoverable 时可用 workflow recover 原 Session 续办，执行已结束或 blocked 时，先交 PM 判断是否交付；仅需进一步执行时 resume 应由 PM 用 workflow dispatch --retry-of <被处理 Run ID> 以当前定义建立同目标后继；successor 可在激活新定义后使用同一后继命令。human/cancel 必须带具体原因，不得自行宣告用户需求完成，也不得把反馈卡答完或 PM 输入 handled 当作交付。PM 必须明确决定 workflow deliver、继续执行或真实人工待办；业务追加额度用 workflow human --kind a，恢复追加额度用 c，缩减目标用 b，安装/登录用 e，反馈 d 不能代替预算授权。", true),
         ("recovery-manager", "依据 PM 对复查建议的决定修复 Workflow。记录修复前后 Candidate digest，执行相关验证；缺少授权时提出暂停点，不能自行激活恢复流程变更。", false),
         ("recovery-acceptor", "只读验收 WM 的修复。读取执行日志、变更和测试证据；通过时给 PM 明确的 successor 建议并提交 verdict；不通过时用 changesRequested 和原因提出返工。", true),
     ] {

@@ -967,6 +967,9 @@ pub struct SessionInputSummary {
 pub struct WorkflowTaskSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
+    pub requirement: Option<WorkflowRequirementStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub human_exit: Option<WorkflowHumanExitStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -1034,6 +1037,11 @@ pub struct WorkflowRequestBudgetStatus {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct WorkflowRequestBudgetSnapshot {
+    /// Admission of this Run is independent of admission of a future Run.
+    #[serde(default)]
+    pub current_run_admitted: bool,
+    #[serde(default)]
+    pub current_run_can_execute: bool,
     pub request_run_id: String,
     #[ts(type = "number")]
     pub observed_at_ms: i64,
@@ -1333,6 +1341,9 @@ pub struct WorkflowCatalogEntryStatus {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct WorkflowRunStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub requirement: Option<WorkflowRequirementStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub human_exit: Option<WorkflowHumanExitStatus>,
@@ -2600,4 +2611,33 @@ mod tests {
             })
         );
     }
+}
+
+/// PM-owned goal state, independent of Workflow execution and inbox receipts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "index.ts")]
+pub enum WorkflowRequirementState {
+    #[default]
+    InProgress,
+    Completing,
+    Completed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct WorkflowRequirementStatus {
+    pub state: WorkflowRequirementState,
+    #[ts(type = "number")]
+    pub revision: u64,
+    #[ts(type = "number")]
+    pub pending_since_ms: i64,
+    pub pm_session_id: Option<String>,
+    #[ts(type = "number | null")]
+    pub completed_at_ms: Option<i64>,
+    pub conclusion: Option<String>,
+    pub delivery_references: Vec<String>,
+    pub patrol_error: Option<String>,
 }

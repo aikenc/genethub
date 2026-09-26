@@ -31,6 +31,8 @@ mod journal;
 mod output;
 mod package;
 mod request;
+mod requirement;
+pub(crate) use requirement::{complete_requirement, wake_human};
 mod recovery;
 mod script;
 mod structured;
@@ -1132,7 +1134,7 @@ async fn notice_recipient(state: &Shared, run: &RunRecord) -> Result<String> {
 }
 
 /// Temporary project recovery authority, derived from unresolved Run facts.
-/// No binding is changed: a successful successor removes the exception.
+/// No binding is changed: goal delivery/cancellation removes the exception.
 pub(crate) async fn exception_authority(
     state: &Shared,
     workspace_id: &str,
@@ -1160,13 +1162,17 @@ pub(crate) async fn exception_authority(
         let Some(latest) = group.iter().max_by_key(|run| run.created_at_ms) else {
             return false;
         };
-        if matches!(latest.status.as_str(), "completed" | "cancelled") {
+        if requirement::terminal(&runtime, latest).unwrap_or(false) {
             return false;
         }
         group.iter().any(|run| {
-            matches!(run.status.as_str(), "blocked" | "recoverable")
+            matches!(run.status.as_str(), "blocked" | "recoverable" | "failed")
+                || (!run.handles.is_empty() && matches!(run.status.as_str(), "running" | "stopping" | "cancelling"))
                 || run.stop.as_ref().is_some_and(|stop| stop.cleanup_error.is_some())
-        })
+        }) || requirement::status(&runtime, latest).is_ok_and(|goal|
+            goal.state == genehub_proto::WorkflowRequirementState::Completing
+                && goal.pending_since_ms > 0
+                && now_ms().saturating_sub(goal.pending_since_ms) >= requirement::PM_LAUNCH_MS)
     }))
 }
 
@@ -1850,8 +1856,9 @@ pub(crate) async fn start_recovery(
             return Ok(Transition { status: run_status(&project_runtime, &target)?, sessions: Vec::new() });
         }
     }
-    if target.status != "blocked" {
-        bail!("recovery target must be blocked before its execution is replaced");
+    if !matches!(target.status.as_str(), "blocked" | "completed" | "failed" | "cancelled")
+        || requirement::terminal(&project_runtime, &target)? {
+        bail!("recovery target must be an unfinished requirement with a stopped business Run");
     }
     // The Run pins its package. A damaged or deleted Candidate is precisely
     // when the built-in recovery path must still be available.
@@ -1916,12 +1923,13 @@ pub(crate) async fn request_human_exit(
     let workspace = state.workspaces.project_entry(workspace_id).await?;
     let runtime = RuntimeStore::new(&state.paths.root, workspace_id, &workspace.root)?;
     let run = load_run(&runtime, run_id)?;
-    if run.workspace_id != workspace_id || run.status != "blocked" || run.revision != expected_revision {
+    if run.workspace_id != workspace_id || !matches!(run.status.as_str(), "blocked" | "completed" | "failed" | "cancelled")
+        || requirement::terminal(&runtime, &run)? || run.revision != expected_revision {
         bail!("Workflow Human exit needs the current blocked Run revision");
     }
     request::ensure_open(&runtime, &run)?;
     match (kind, run.handles.is_empty()) {
-        ("a" | "e", true) | ("b" | "c" | "f", false) | ("d", _) => {}
+        ("a" | "e", true) | ("f", false) | ("b" | "c" | "d", _) => {}
         _ => bail!("Workflow Human exit kind does not match this Run"),
     }
     recovery::ensure_human_exit(state, &runtime, &run, kind, Some(reason)).await?;
@@ -2069,7 +2077,8 @@ pub(crate) async fn dispatch(
         if request::group_id(&target) != request.root_run_id || !target.handles.is_empty() {
             bail!("recovery target must be a business Run in the same request");
         }
-        if target.status != "blocked" {
+        if !matches!(target.status.as_str(), "blocked" | "completed" | "failed" | "cancelled")
+            || requirement::terminal(&runtime, &target)? {
             bail!("recovery target changed state before dispatch");
         }
         request::ensure_open(&runtime, &target)?;
@@ -2418,6 +2427,9 @@ fn maintenance_runs(runtime: &RuntimeStore) -> Result<Vec<RunRecord>> {
         if settled_marker_valid(runtime, &request_id) {
             continue;
         }
+        if request::read_record(runtime, &request_id).is_ok_and(|record| record.next_check_at_ms > now_ms()) {
+            continue;
+        }
         match request_runs(runtime, &request_id) {
             Ok(group) => runs.extend(group),
             Err(error) => tracing::error!(%request_id, %error,
@@ -2442,7 +2454,7 @@ fn settled_marker_valid(runtime: &RuntimeStore, request_id: &str) -> bool {
         };
         crate::config::reject_link_or_reparse(&path, &metadata)?;
         if !metadata.is_file() || metadata.len() > 128 { bail!("invalid Workflow settled marker"); }
-        Ok(fs::read(&path)? == format!("genehub.workflow.settled.v1:{request_id}\n").as_bytes())
+        Ok(fs::read(&path)? == format!("genehub.workflow.settled.v2:{request_id}\n").as_bytes())
     })();
     match result {
         Ok(valid) => valid,
@@ -2467,14 +2479,14 @@ fn mark_settled_if_quiescent(runtime: &RuntimeStore, run: &RunRecord) {
     let request_id = request::group_id(run);
     let result = (|| -> Result<()> {
         let group = request_runs(runtime, request_id)?;
-        if request_is_quiescent(&group)
+        if request_is_quiescent(&group) && requirement::terminal(runtime, run)?
             && group.iter().try_fold(true, |clear, item| {
                 let exit = recovery::read_human_exit(runtime, item)?;
                 Ok::<bool, anyhow::Error>(clear && exit.is_none_or(|exit| exit.answer.is_some()))
             })? {
             crate::config::save_private(
                 &settled_marker_path(runtime, request_id)?,
-                format!("genehub.workflow.settled.v1:{request_id}\n").as_bytes(),
+                format!("genehub.workflow.settled.v2:{request_id}\n").as_bytes(),
             )?;
         }
         Ok(())
@@ -2484,9 +2496,31 @@ fn mark_settled_if_quiescent(runtime: &RuntimeStore, run: &RunRecord) {
     }
 }
 
+/// Mechanical execution/cleanup facts, independently of the Run label.
+fn execution_unfinished(run: &RunRecord) -> bool {
+    matches!(run.status.as_str(), "running" | "stopping" | "cancelling" | "recoverable")
+        || run.nodes.values().any(|node| matches!(node.status.as_str(), "running" | "finishing"))
+        || run.stop.as_ref().is_some_and(|stop| stop.cleanup_error.is_some())
+}
+
+/// A business successor can retry a recovery or its original business Run.
+/// Both routes must use the same lineage for delivery and settlement.
+fn business_predecessors(group: &[RunRecord]) -> BTreeSet<&str> {
+    let mut predecessors = BTreeSet::new();
+    for business in group.iter().filter(|run| run.handles.is_empty()) {
+        if let Some(previous) = business.request.as_ref().and_then(|link| link.retry_of.as_deref()) {
+            predecessors.insert(previous);
+            if let Some(recovery) = group.iter().find(|run| run.id == previous && !run.handles.is_empty()) {
+                predecessors.extend(recovery.handles.iter().map(|handle| handle.run_id.as_str()));
+            }
+        }
+    }
+    predecessors
+}
+
 fn request_is_quiescent(group: &[RunRecord]) -> bool {
     let Some(root) = group.iter().find(|run| run.id == request::group_id(run)) else { return false; };
-    if group.iter().any(|run| matches!(run.status.as_str(), "running" | "stopping" | "cancelling" | "recoverable")
+    if group.iter().any(|run| execution_unfinished(run)
         || (!run.handles.is_empty() && run.status == "blocked")
         || supervision::report_pending(run)) {
         return false;
@@ -2494,8 +2528,7 @@ fn request_is_quiescent(group: &[RunRecord]) -> bool {
     if request::cancelled(root) { return true; }
     let business = group.iter().filter(|run| run.handles.is_empty()).collect::<Vec<_>>();
     if business.is_empty() { return false; }
-    let predecessors = business.iter().filter_map(|run| run.request.as_ref().and_then(|link| link.retry_of.as_deref()))
-        .collect::<BTreeSet<_>>();
+    let predecessors = business_predecessors(group);
     business.iter().filter(|run| !predecessors.contains(run.id.as_str())).all(|run| run.status == "completed")
 }
 
@@ -4893,6 +4926,7 @@ fn save_run_with_journal_options(runtime: &RuntimeStore, run: &RunRecord, journa
     let index = encode_private_record("Workflow Run index", &index, MAX_RUN_RECORD_BYTES)?;
     crate::config::save_private(&run_path(runtime, &run.id, true)?, &index)?;
     recovery::archive_terminal(runtime, run)?;
+    requirement::sync(runtime, run)?;
     if matches!(run.status.as_str(), "completed" | "cancelled") {
         release_request_writer_if_resolved(runtime, run)?;
     }
@@ -5316,9 +5350,11 @@ fn release_request_writer_if_resolved(runtime: &RuntimeStore, run: &RunRecord) -
         || (!item.handles.is_empty() && item.status == "blocked")) {
         return Ok(());
     }
-    let cancelled = group.iter().find(|item| item.id == request::group_id(run))
-        .is_some_and(request::cancelled);
-    if cancelled || group.iter().any(|item| item.handles.is_empty() && item.status == "completed") {
+    if request_is_quiescent(&group) && requirement::terminal(runtime, run)?
+        && group.iter().try_fold(true, |clear, item| {
+            Ok::<bool, anyhow::Error>(clear && recovery::read_human_exit(runtime, item)?
+                .is_none_or(|exit| exit.answer.is_some()))
+        })? {
         release_request_writer(runtime, run)?;
     }
     Ok(())
@@ -5331,6 +5367,7 @@ fn run_status(runtime: &RuntimeStore, run: &RunRecord) -> Result<WorkflowRunStat
         load_run(runtime, request::group_id(run))?
     };
     Ok(WorkflowRunStatus {
+        requirement: Some(requirement::status(runtime, run)?),
         human_exit: recovery::read_human_exit(runtime, run)?.map(|exit| genehub_proto::WorkflowHumanExitStatus {
             kind: exit.kind, request_id: exit.request_id, pm_session_id: exit.pm_session_id,
             reason: exit.reason, created_at_ms: exit.created_at_ms, answer: exit.answer,
@@ -5714,6 +5751,13 @@ mod tests {
         }
         assert!(claim_request_writer(&runtime, &run).unwrap());
         save_run(&runtime, &run).unwrap();
+        assert!(!settled_marker_valid(&runtime, &run.id));
+        // Storage fixture: settlement starts only after the PM decision is durable.
+        let mut record = request::read_record(&runtime, &run.id).unwrap();
+        record.requirement.state = genehub_proto::WorkflowRequirementState::Completed;
+        request::write_record(&runtime, &run.id, &record).unwrap();
+        mark_settled_if_quiescent(&runtime, &run);
+        release_request_writer_if_resolved(&runtime, &run).unwrap();
         assert!(settled_marker_valid(&runtime, &run.id));
         assert!(maintenance_runs(&runtime).unwrap().is_empty());
         assert_eq!(all_runs(&runtime).unwrap().iter().map(|item| item.id.as_str()).collect::<Vec<_>>(), ["wr_root"]);
@@ -6683,7 +6727,8 @@ mod tests {
         assert!(request_writer_verified(&runtime, &root).unwrap());
         assert!(control::maybe_resolve_recovery_successor(&runtime, &recovery.id).unwrap());
         assert_eq!(load_run(&runtime, &recovery.id).unwrap().status, "completed");
-        assert!(!request_writer_verified(&runtime, &root).unwrap());
+        assert!(request_writer_verified(&runtime, &root).unwrap()); // PM has not confirmed delivery.
+        release_request_writer(&runtime, &root).unwrap();
         let scoped = RuntimeStore::for_package(data.path(), "workspace", project.path(), TEST_PACKAGE).unwrap();
         let summaries = recovery::latest(&scoped).unwrap();
         assert_eq!(summaries.len(), 1);
@@ -6719,7 +6764,8 @@ mod tests {
         control::complete_human_acceptance(&runtime, &recovery.id).unwrap();
         assert_eq!(load_run(&runtime, &root.id).unwrap().status, "completed");
         assert_eq!(load_run(&runtime, &recovery.id).unwrap().status, "completed");
-        assert!(!request_writer_verified(&runtime, &root).unwrap());
+        assert!(request_writer_verified(&runtime, &root).unwrap()); // Human acceptance still needs PM delivery judgment.
+        release_request_writer(&runtime, &root).unwrap();
         let scoped = RuntimeStore::for_package(data.path(), "workspace", project.path(), TEST_PACKAGE).unwrap();
         assert_eq!(recovery::latest(&scoped).unwrap().len(), 1);
     }

@@ -1009,7 +1009,7 @@ output?: unknown,
 /**
  * Absent retains the existing successful-completion contract.
  */
-outcome?: WorkflowNodeOutcome, reason?: string, } } | { "type": "workflow.cancel", "payload": { workspaceId: string, runId: string, expectedRevision: number, } } | { "type": "workflow.recover", "payload": { workspaceId: string, runId: string, expectedRevision: number, } } | { "type": "workflow.recovery.start", "payload": { workspaceId: string, runId: string, reason: string, } } | { "type": "workflow.human", "payload": { workspaceId: string, runId: string, expectedRevision: number, kind: string, reason: string, } } | { "type": "workflow.recovery.reset", "payload": { workspaceId: string, packageId?: string, expectedRevision: number, } } | { "type": "workflow.budget", "payload": { workspaceId: string, runId: string, expectedRevision: number, maxRuns?: number, deadlineSeconds?: number, maxLlmRounds?: number, } } | { "type": "agentSpace.configure", "payload": { workspaceId: string, expectedRevision: number, operation: AgentSpaceOperation, 
+outcome?: WorkflowNodeOutcome, reason?: string, } } | { "type": "workflow.cancel", "payload": { workspaceId: string, runId: string, expectedRevision: number, } } | { "type": "workflow.recover", "payload": { workspaceId: string, runId: string, expectedRevision: number, } } | { "type": "workflow.recovery.start", "payload": { workspaceId: string, runId: string, reason: string, } } | { "type": "workflow.human", "payload": { workspaceId: string, runId: string, expectedRevision: number, kind: string, reason: string, } } | { "type": "workflow.recovery.reset", "payload": { workspaceId: string, packageId?: string, expectedRevision: number, } } | { "type": "workflow.budget", "payload": { workspaceId: string, runId: string, expectedRevision: number, maxRuns?: number, deadlineSeconds?: number, maxLlmRounds?: number, } } | { "type": "workflow.requirement.complete", "payload": { workspaceId: string, runId: string, expectedRevision: number, conclusion: string, deliveryReferences: Array<string>, } } | { "type": "agentSpace.configure", "payload": { workspaceId: string, expectedRevision: number, operation: AgentSpaceOperation, 
 /**
  * Required when the caller is a SessionController; omitted for a
  * direct authenticated Human UI action.
@@ -2209,7 +2209,11 @@ export type WorkflowRecoveryHandleStatus = { runId: string, triggerSeq: number, 
  * Remaining calls are based on observed usage, not reservations or a promise
  * that concurrent activities will fit. A completed query never changes.
  */
-export type WorkflowRequestBudgetSnapshot = { requestRunId: string, observedAtMs: number, budget: WorkflowRequestBudgetStatus, usedRuns: number, observedLlmRounds: number, executionMs: number, remainingRuns: number, remainingLlmRounds: number, remainingExecutionMs: number, };
+export type WorkflowRequestBudgetSnapshot = { 
+/**
+ * Admission of this Run is independent of admission of a future Run.
+ */
+currentRunAdmitted: boolean, currentRunCanExecute: boolean, requestRunId: string, observedAtMs: number, budget: WorkflowRequestBudgetStatus, usedRuns: number, observedLlmRounds: number, executionMs: number, remainingRuns: number, remainingLlmRounds: number, remainingExecutionMs: number, };
 
 /**
  * Mutable limits shared by one Human request and all Workflow retry Runs.
@@ -2219,11 +2223,18 @@ export type WorkflowRequestBudgetSnapshot = { requestRunId: string, observedAtMs
 export type WorkflowRequestBudgetStatus = { revision: number, maxRuns: number, deadlineMs: number, maxLlmRounds: number, };
 
 /**
+ * PM-owned goal state, independent of Workflow execution and inbox receipts.
+ */
+export type WorkflowRequirementState = "in_progress" | "completing" | "completed" | "cancelled";
+
+export type WorkflowRequirementStatus = { state: WorkflowRequirementState, revision: number, pendingSinceMs: number, pmSessionId: string | null, completedAtMs: number | null, conclusion: string | null, deliveryReferences: Array<string>, patrolError: string | null, };
+
+/**
  * Durable status of one project Workflow run. Node meaning comes entirely
  * from the pinned project definition; the daemon reports only generic graph
  * and evidence facts here.
  */
-export type WorkflowRunStatus = { humanExit?: WorkflowHumanExitStatus, 
+export type WorkflowRunStatus = { requirement?: WorkflowRequirementStatus, humanExit?: WorkflowHumanExitStatus, 
 /**
  * Immutable business Run references owned by a recovery Run.
  */
@@ -2281,7 +2292,7 @@ humanWaitMs: number,
  */
 recoveryWaitMs: number, waiting: boolean, nodeWallMs: number, };
 
-export type WorkflowTaskSummary = { humanExit?: WorkflowHumanExitStatus, executing?: boolean, waiting?: Array<WorkflowHumanWait>, requestRunId?: string, reportPending?: boolean, runId: string, taskId: string, workflowId: string, status: string, revision: number, activeNodes: Array<string>, executorSessionId?: string, reason?: string, cleanupError?: string, updatedAtMs: number, };
+export type WorkflowTaskSummary = { requirement?: WorkflowRequirementStatus, humanExit?: WorkflowHumanExitStatus, executing?: boolean, waiting?: Array<WorkflowHumanWait>, requestRunId?: string, reportPending?: boolean, runId: string, taskId: string, workflowId: string, status: string, revision: number, activeNodes: Array<string>, executorSessionId?: string, reason?: string, cleanupError?: string, updatedAtMs: number, };
 
 export type WorkspaceFileSource = { kind: WorkspaceFileSourceKind, workspaceHandle: string, path: string, };
 
