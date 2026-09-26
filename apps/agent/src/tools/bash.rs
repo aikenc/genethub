@@ -27,7 +27,6 @@ pub async fn run(args: &Value, cwd: &Path) -> ToolResult {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    own_process_group(&mut command);
 
     let started = output(command);
     let timeout_secs = arg_usize(args, "timeout");
@@ -81,59 +80,121 @@ pub async fn run(args: &Value, cwd: &Path) -> ToolResult {
 
 /// Runs a command while retaining a synchronous teardown guard. Dropping this
 /// future—because the turn was interrupted or its timeout elapsed—kills the
-/// whole process group, not only the shell at its root.
+/// shell and the descendants that still name it. A normal exit leaves
+/// background children in the agent process group.
+#[cfg(not(target_family = "wasm"))]
 async fn output(mut command: Command) -> std::io::Result<Output> {
     let child = command.spawn()?;
-    let mut group = ProcessGroup::new(child.id());
-    let output = child.wait_with_output().await;
-    group.disarm();
+    let mut guard = ProcessGroup::new(child);
+    let output = guard.wait_with_output().await;
+    guard.disarm();
     output
 }
 
-struct ProcessGroup {
-    pid: Option<u32>,
+#[cfg(target_family = "wasm")]
+async fn output(mut command: Command) -> std::io::Result<Output> {
+    let child = command.spawn()?;
+    child.wait_with_output().await
 }
 
+#[cfg(not(target_family = "wasm"))]
+struct ProcessGroup {
+    child: Option<tokio::process::Child>,
+}
+
+#[cfg(not(target_family = "wasm"))]
 impl ProcessGroup {
-    fn new(pid: Option<u32>) -> Self {
-        Self { pid }
+    fn new(child: tokio::process::Child) -> Self {
+        Self { child: Some(child) }
     }
 
     fn disarm(&mut self) {
-        self.pid = None;
+        self.child.take();
+    }
+
+    async fn wait_with_output(&mut self) -> std::io::Result<Output> {
+        let child = self.child.as_mut().expect("child");
+        let mut stdout = child.stdout.take();
+        let mut stderr = child.stderr.take();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let status = tokio::try_join!(
+            child.wait(),
+            read_pipe(stdout.as_mut(), &mut out),
+            read_pipe(stderr.as_mut(), &mut err),
+        )?
+        .0;
+        Ok(Output {
+            status,
+            stdout: out,
+            stderr: err,
+        })
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
+async fn read_pipe<R>(pipe: Option<&mut R>, buf: &mut Vec<u8>) -> std::io::Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    if let Some(pipe) = pipe {
+        use tokio::io::AsyncReadExt;
+        pipe.read_to_end(buf).await?;
+    }
+    Ok(())
+}
+
+#[cfg(not(target_family = "wasm"))]
 impl Drop for ProcessGroup {
     fn drop(&mut self) {
-        let Some(pid) = self.pid else { return };
+        let Some(pid) = self.child.as_ref().and_then(|child| child.id()) else {
+            return;
+        };
         eprintln!("event=tool_process_tree_kill pid={pid}");
         kill_process_group(pid);
     }
 }
 
 #[cfg(unix)]
-fn own_process_group(command: &mut Command) {
-    // SAFETY: the child-side closure performs only the async-signal-safe setsid
-    // syscall between fork and exec.
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-}
-
-#[cfg(not(unix))]
-fn own_process_group(_command: &mut Command) {}
-
-#[cfg(unix)]
 fn kill_process_group(pid: u32) {
-    // Negative pid addresses every process in the group created by setsid.
-    unsafe {
-        libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+    // The shell stays in the agent process group so the daemon can see
+    // background children. A timeout or abort kills this shell and the
+    // descendants that still name it, not the agent's group.
+    let mut victims = vec![pid];
+    let mut seen = std::collections::HashSet::from([pid]);
+    let mut index = 0;
+    while index < victims.len() {
+        let parent = victims[index];
+        index += 1;
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            break;
+        };
+        for entry in entries.flatten() {
+            let Ok(id) = entry.file_name().to_string_lossy().parse::<u32>() else {
+                continue;
+            };
+            if !seen.insert(id) {
+                continue;
+            }
+            let Ok(status) = std::fs::read_to_string(format!("/proc/{id}/status")) else {
+                seen.remove(&id);
+                continue;
+            };
+            let child = status.lines().any(|line| {
+                line.strip_prefix("PPid:")
+                    .is_some_and(|rest| rest.trim() == parent.to_string())
+            });
+            if child {
+                victims.push(id);
+            } else {
+                seen.remove(&id);
+            }
+        }
+    }
+    for id in victims.into_iter().rev() {
+        unsafe {
+            libc::kill(id as libc::pid_t, libc::SIGKILL);
+        }
     }
 }
 
