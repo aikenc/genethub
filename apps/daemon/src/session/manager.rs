@@ -4579,11 +4579,17 @@ impl SessionManager {
         for (session_id, live) in sessions {
             if let Err(error) = live.prepare_shutdown().await {
                 tracing::error!(session = %session_id, %error, "session event retirement did not complete");
-                continue;
             }
+            // Daemon exit cannot leave an owned adapter running merely because
+            // its timeline writer failed. Preserve ownership for the descendant
+            // census, and keep the writer failure visible rather than claim a
+            // successful Session retirement.
             self.end_what_it_left(&session_id).await;
             if let Err(error) = live.shutdown().await {
                 tracing::error!(session = %session_id, %error, "session shutdown did not complete");
+                if let Err(error) = close_current_agent(&live).await {
+                    tracing::error!(session = %session_id, %error, "owned adapter shutdown failed");
+                }
             }
         }
     }
