@@ -212,10 +212,13 @@ pub fn definitions() -> Vec<Value> {
         }),
         json!({
             "name": "request_user_input",
-            "description": "Pause this turn and ask the user one to three structured questions. This never grants shell or filesystem authority. When a GeneHub Skill supplies an approval challenge, copy its challengeId exactly into the sole question id; do not invent or alter it.",
+            "description": "Pause this turn until a person answers. Provide a one-sentence title, a short summary, an optional markdown description, and one to three questions. This does not grant shell or filesystem authority. If a Skill names a challengeId, copy it into the sole question id.",
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "title": { "type": "string", "description": "One sentence the person sees first" },
+                    "summary": { "type": "string", "description": "One or two sentences naming what is being asked" },
+                    "description": { "type": "string", "description": "Optional markdown background" },
                     "questions": {
                         "type": "array",
                         "minItems": 1,
@@ -244,7 +247,7 @@ pub fn definitions() -> Vec<Value> {
                         }
                     }
                 },
-                "required": ["questions"]
+                "required": ["title", "summary", "questions"]
             }
         }),
     ];
@@ -266,15 +269,11 @@ pub async fn execute(name: &str, args: &Value, cwd: &Path) -> ToolResult {
     if evidence::enabled() {
         match name {
             "genet" => return evidence::run(args, cwd).await,
-            "read" | "ls" | "read_media" => {
-                if let Err(error) = evidence::check_path(args, cwd) {
-                    return ToolResult::error(error);
-                }
-            }
+            "read" | "ls" | "read_media" => {}
             _ => return ToolResult::error("tool is unavailable to evidence-only analysis"),
         }
     }
-    match name {
+    let mut result = match name {
         "read" => fs_tools::read(args, cwd),
         "read_media" => media::read(args, cwd),
         "write" => fs_tools::write(args, cwd),
@@ -284,13 +283,27 @@ pub async fn execute(name: &str, args: &Value, cwd: &Path) -> ToolResult {
         "find" => search::find(args, cwd),
         "bash" => bash::run(args, cwd).await,
         other => ToolResult::error(format!("Tool {other} not found")),
+    };
+    if evidence::enabled() && matches!(name, "read" | "ls" | "read_media") {
+        if let Some(hint) = evidence::path_hint(args, cwd) {
+            result.text = format!("{hint}\n{}", result.text);
+        }
     }
+    result
 }
 
 /// Validates the built-in Agent's stopped-interaction payload before it is
 /// emitted onto the daemon protocol. The daemon will independently decide
 /// whether this is an ordinary question or matches one of its own challenges.
 pub fn user_input(args: &Value) -> Result<Value, String> {
+    let title = required_line(args, "title")?;
+    let summary = required_line(args, "summary")?;
+    let description = args
+        .get("description")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string);
     let questions = args
         .get("questions")
         .and_then(Value::as_array)
@@ -327,7 +340,21 @@ pub fn user_input(args: &Value) -> Result<Value, String> {
             );
         }
     }
-    Ok(json!({ "questions": questions }))
+    Ok(json!({
+        "title": title,
+        "summary": summary,
+        "description": description,
+        "questions": questions,
+    }))
+}
+
+fn required_line(args: &Value, field: &str) -> Result<String, String> {
+    args.get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| format!("request_user_input: '{field}' is required"))
 }
 
 pub fn resolve_path(cwd: &Path, raw: &str) -> PathBuf {
@@ -453,15 +480,19 @@ mod tests {
 
     #[test]
     fn user_input_requires_bounded_structured_questions() {
-        assert!(user_input(&json!({"questions": [{
+        let accepted = user_input(&json!({
+            "title": "是否接管这个项目",
+            "summary": "应用共享的工作流包。",
+            "questions": [{
             "id": "challenge",
             "header": "项目接管",
             "question": "是否应用？",
             "options": [{"label": "确认", "description": "apply once"}]
         }]}))
-        .is_ok());
+        .unwrap();
+        assert_eq!(accepted["title"], "是否接管这个项目");
         assert!(user_input(&json!({"questions": []})).is_err());
-        assert!(user_input(&json!({"questions": [{"id": "x"}]})).is_err());
+        assert!(user_input(&json!({"title": "t", "summary": "s", "questions": [{"id": "x"}]})).is_err());
     }
 
     #[test]

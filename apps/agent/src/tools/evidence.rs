@@ -31,34 +31,35 @@ pub fn definition() -> Value {
     })
 }
 
-pub fn check_path(args: &Value, cwd: &Path) -> Result<(), String> {
-    let scope = scope()?;
+/// A note to prepend when evidence mode touches a private or out-of-project
+/// path. The read still proceeds: isolation is the process environment, not a
+/// path sandbox.
+pub fn path_hint(args: &Value, cwd: &Path) -> Option<String> {
+    let scope = scope().ok()?;
     let requested = args.get("path").and_then(Value::as_str).unwrap_or(".");
-    let path = super::resolve_path(cwd, requested)
-        .canonicalize()
-        .map_err(|e| e.to_string())?;
-    let root = scope.root.canonicalize().map_err(|e| e.to_string())?;
-    if !path.starts_with(&root) {
-        return Err("evidence file is outside the granted project".into());
+    let path = super::resolve_path(cwd, requested).canonicalize().ok()?;
+    let root = scope.root.canonicalize().ok()?;
+    let private = path_is_private(&path);
+    if private {
+        return Some(
+            "私有会话数据请用 `genet session …` 读取有界证据".into(),
+        );
     }
-    // Agent-private storage is not a deliverable; use the bounded session API.
+    if !path.starts_with(&root) {
+        return Some("路径在授予的项目之外。内建 Agent 不是沙箱。".into());
+    }
+    None
+}
+
+fn path_is_private(path: &Path) -> bool {
     let parts = path
-        .strip_prefix(&root)
-        .unwrap()
         .components()
-        // WASI canonicalization does not promise the on-disk casing. Reserve
-        // private names case-insensitively on every host; do not lowercase the
-        // scope containment comparison (Unix paths remain case-sensitive).
         .map(|part| part.as_os_str().to_string_lossy().to_ascii_lowercase())
         .collect::<Vec<_>>();
-    if parts.iter().any(|part| part == ".git")
+    parts.iter().any(|part| part == ".git")
         || parts.windows(2).any(|parts| {
             parts[0] == ".genethub" && matches!(parts[1].as_str(), "sessions" | "components")
         })
-    {
-        return Err("read private session/runtime evidence through genet instead".into());
-    }
-    Ok(())
 }
 
 pub async fn run(args: &Value, cwd: &Path) -> ToolResult {
@@ -247,5 +248,21 @@ mod tests {
             boundary.is_some_and(|error| error.contains("cannot redirect")),
             "the granted boundary must not be overridable"
         );
+    }
+
+    #[test]
+    fn a_private_path_is_hinted_and_still_readable() {
+        let root = std::env::temp_dir().join(format!(
+            "genet-hint-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git/config"), "secret").unwrap();
+        let scope = format!(r#"{{"root":"{}","sessions":{{}}}}"#, root.display());
+        let hint = with_scope(&scope, || {
+            path_hint(&json!({"path": ".git/config"}), &root)
+        });
+        assert!(hint.unwrap().contains("genet session"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

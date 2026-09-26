@@ -541,11 +541,14 @@ async fn execute_one(
     } else if name == "request_user_input" {
         match tools::user_input(arguments) {
             Ok(payload) => {
-                emitter.send(json!({
-                    "type": "user_input_requested",
-                    "toolCallId": id,
-                    "questions": payload["questions"],
-                }));
+                        emitter.send(json!({
+                            "type": "user_input_requested",
+                            "toolCallId": id,
+                            "title": payload["title"],
+                            "summary": payload["summary"],
+                            "description": payload["description"],
+                            "questions": payload["questions"],
+                        }));
                 tools::ToolResult::ok("Waiting for the user's response.")
             }
             Err(error) => tools::ToolResult::error(error),
