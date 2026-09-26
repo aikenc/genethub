@@ -2118,7 +2118,22 @@ async fn handle_control_request(
 ) {
     let request = frame.get("request").unwrap_or(&Value::Null);
     if request.get("subtype").and_then(Value::as_str) != Some("can_use_tool") {
-        // `interrupt` acks and anything else: nothing for the timeline to do.
+        // An unanswered control request can leave the CLI waiting. Reject
+        // anything this adapter does not implement.
+        if let Some(request_id) = frame.get("request_id").and_then(Value::as_str) {
+            let response = json!({
+                "type": "control_response",
+                "response": {
+                    "request_id": request_id,
+                    "subtype": "error",
+                    "error": "unsupported control request",
+                },
+            });
+            let mut stdin = control.stdin.lock().await;
+            if let Err(error) = write_json_line(&mut stdin, &response).await {
+                tracing::warn!("failed to reject an unknown claude control request: {error}");
+            }
+        }
         return;
     }
     let Some(request_id) = frame.get("request_id").and_then(Value::as_str) else {
@@ -3006,6 +3021,41 @@ mod tests {
             option.id == "allow_always" && option.kind == PermissionOptionKind::AllowAlways
         }));
 
+        let _ = child.start_kill();
+    }
+
+    #[tokio::test]
+    async fn an_unknown_control_request_is_rejected_instead_of_ignored() {
+        let mut child = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawning `cat` as a fake stdin sink");
+        let stdin = Arc::new(Mutex::new(child.stdin.take().expect("stdin was piped")));
+        let mut stdout = BufReader::new(child.stdout.take().expect("stdout was piped"));
+        let control = ControlState {
+            mode: Arc::new(Mutex::new(MODE_DEFAULT.to_string())),
+            stdin,
+        };
+        let turn = Arc::new(Mutex::new(state()));
+        let (tx, _rx) = crate::adapter::EventTx::channel(8);
+        handle_control_request(
+            &json!({
+                "type": "control_request",
+                "request_id": "req-unknown",
+                "request": { "subtype": "future_method" },
+            }),
+            &turn,
+            &tx,
+            &control,
+        )
+        .await;
+        let mut line = String::new();
+        stdout.read_line(&mut line).await.expect("the error reply");
+        let reply: Value = serde_json::from_str(line.trim()).expect("json reply");
+        assert_eq!(reply["type"], "control_response");
+        assert_eq!(reply["response"]["request_id"], "req-unknown");
+        assert_eq!(reply["response"]["subtype"], "error");
         let _ = child.start_kill();
     }
 
