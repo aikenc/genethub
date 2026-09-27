@@ -713,7 +713,11 @@ fn validate_tag_groups(preferences: &AgentSelectionPreferences) -> Result<()> {
         validate_tags(&group.tags, false)?;
         for tag in &group.tags {
             let key = tag.trim().to_lowercase();
-            let key = if key == "flush" { "flash".to_string() } else { key };
+            let key = if key == "flush" {
+                "flash".to_string()
+            } else {
+                key
+            };
             if builtins.contains(&key.as_str()) {
                 anyhow::bail!("内置标签不能加入自定义标签组");
             }
@@ -732,7 +736,11 @@ fn validate_tag_group_selection(
     let mut claimed = std::collections::BTreeSet::new();
     for tag in tags {
         let key = tag.trim().to_lowercase();
-        let key = if key == "flush" { "flash" } else { key.as_str() };
+        let key = if key == "flush" {
+            "flash"
+        } else {
+            key.as_str()
+        };
         let group = if ["max", "pro", "flash"].contains(&key) {
             Some("builtin-intelligence")
         } else {

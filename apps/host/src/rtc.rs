@@ -155,7 +155,8 @@ impl RtcSession {
             let srflx_tx = srflx_tx.clone();
             Box::pin(async move {
                 if candidate.as_ref().is_some_and(|item| {
-                    item.typ == webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType::Srflx
+                    item.typ
+                        == webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType::Srflx
                 }) {
                     if let Some(tx) = srflx_tx.lock().unwrap().take() {
                         let _ = tx.send(());

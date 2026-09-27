@@ -72,7 +72,11 @@ pub(crate) struct Manifest {
 
 impl Default for Manifest {
     fn default() -> Self {
-        Self { description: String::new(), dev: false, recovery: "builtin".into() }
+        Self {
+            description: String::new(),
+            dev: false,
+            recovery: "builtin".into(),
+        }
     }
 }
 
@@ -239,9 +243,7 @@ pub(crate) fn load(project_root: &Path, id: &str) -> Result<Package> {
     discover(project_root)?
         .into_iter()
         .find(|package| package.id == id)
-        .ok_or_else(|| {
-            anyhow!("Workflow 包不存在：{id}；用 `workflow list` 查看已 clone 的包")
-        })
+        .ok_or_else(|| anyhow!("Workflow 包不存在：{id}；用 `workflow list` 查看已 clone 的包"))
 }
 
 fn walk(
@@ -252,7 +254,10 @@ fn walk(
     found: &mut Vec<Package>,
 ) -> Result<()> {
     if depth > MAX_SCAN_DEPTH {
-        bail!("Workflow 包扫描深度超过 {MAX_SCAN_DEPTH} 层：{}", directory.display());
+        bail!(
+            "Workflow 包扫描深度超过 {MAX_SCAN_DEPTH} 层：{}",
+            directory.display()
+        );
     }
     if directory.join(MANIFEST_FILE).is_file() {
         found.push(load_package(packages_root, directory, collection_root)?);
@@ -380,7 +385,8 @@ fn read_manifest(path: &Path) -> Result<String> {
         );
     }
     let raw = fs::read(path).with_context(|| format!("读取 {}", path.display()))?;
-    String::from_utf8(raw).with_context(|| format!("{MANIFEST_FILE} 必须是 UTF-8：{}", path.display()))
+    String::from_utf8(raw)
+        .with_context(|| format!("{MANIFEST_FILE} 必须是 UTF-8：{}", path.display()))
 }
 
 /// Parses the closed two-field frontmatter, then falls back to the first prose
@@ -392,7 +398,9 @@ pub(crate) fn parse_manifest(raw: &str, id: &str) -> Result<Manifest> {
     let mut manifest = Manifest::default();
     let mut body = raw;
     if let Some(rest) = raw.strip_prefix("---") {
-        let rest = rest.strip_prefix('\n').or_else(|| rest.strip_prefix("\r\n"));
+        let rest = rest
+            .strip_prefix('\n')
+            .or_else(|| rest.strip_prefix("\r\n"));
         let Some(rest) = rest else {
             bail!("Workflow 包 {id} 的 {MANIFEST_FILE} frontmatter 起始行无效");
         };
@@ -535,10 +543,9 @@ fn discover_spaces(root: &Path, id: &str) -> Result<Vec<SpaceSource>> {
                 "Workflow 包 {id} 的 Space {name} 不能含有 .pipebuilder/；本地覆盖放在 {SKILLS_DIR}/"
             );
         }
-        let definition: SpaceDefinition = serde_json::from_slice(&read_source(
-            &directory.join(SPACE_FILE),
-        )?)
-        .with_context(|| format!("解析 Workflow 包 {id} 的 {name}/{SPACE_FILE}"))?;
+        let definition: SpaceDefinition =
+            serde_json::from_slice(&read_source(&directory.join(SPACE_FILE))?)
+                .with_context(|| format!("解析 Workflow 包 {id} 的 {name}/{SPACE_FILE}"))?;
         if !crate::agent_space::valid_lifecycle(&definition.lifecycle) {
             bail!(
                 "Workflow 包 {id} 的 Space {name} lifecycle 无效：{}",
@@ -568,7 +575,10 @@ fn discover_spaces(root: &Path, id: &str) -> Result<Vec<SpaceSource>> {
         let manifest_source = read_source(&directory.join(PIPESPACE_FILE))?;
         for folder in &definition.folders {
             validate_relative(&folder.path).with_context(|| {
-                format!("Workflow 包 {id} 的 Space {name} folders 路径无效：{}", folder.path)
+                format!(
+                    "Workflow 包 {id} 的 Space {name} folders 路径无效：{}",
+                    folder.path
+                )
             })?;
         }
         sources.push(SpaceSource {
@@ -801,7 +811,10 @@ mod tests {
         seed_package(root.path(), "outer");
         seed_package(root.path(), "outer/inner");
         let found = discover(root.path()).unwrap();
-        assert_eq!(found.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["outer"]);
+        assert_eq!(
+            found.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            ["outer"]
+        );
     }
 
     #[test]
@@ -816,14 +829,23 @@ mod tests {
     #[test]
     fn frontmatter_accepts_only_description_dev_and_recovery() {
         assert_eq!(
-            parse_manifest("---\ndescription: a\ndev: true\nrecovery: flows/repair.yaml\n---\nbody\n", "x").unwrap(),
+            parse_manifest(
+                "---\ndescription: a\ndev: true\nrecovery: flows/repair.yaml\n---\nbody\n",
+                "x"
+            )
+            .unwrap(),
             Manifest {
                 description: "a".into(),
                 dev: true,
                 recovery: "flows/repair.yaml".into(),
             }
         );
-        assert_eq!(parse_manifest("---\nrecovery: builtin\n---\n", "x").unwrap().recovery, "builtin");
+        assert_eq!(
+            parse_manifest("---\nrecovery: builtin\n---\n", "x")
+                .unwrap()
+                .recovery,
+            "builtin"
+        );
         assert!(parse_manifest("---\nrecovery: ../escape.yaml\n---\n", "x").is_err());
         let error = parse_manifest("---\ncategory: game\n---\n", "x")
             .unwrap_err()
@@ -833,7 +855,8 @@ mod tests {
 
     #[test]
     fn a_missing_description_falls_back_to_the_first_prose_line() {
-        let manifest = parse_manifest("---\ndev: true\n---\n\n# Title\n\nwhat it does\n", "x").unwrap();
+        let manifest =
+            parse_manifest("---\ndev: true\n---\n\n# Title\n\nwhat it does\n", "x").unwrap();
         assert_eq!(manifest.description, "what it does");
         assert!(manifest.dev);
     }

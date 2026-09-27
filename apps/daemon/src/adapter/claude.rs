@@ -384,7 +384,6 @@ async fn initialize(program: &std::path::Path, flavor: ClaudeFlavor) -> Option<V
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    super::owned_child(&mut command);
 
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -431,6 +430,14 @@ async fn initialize(program: &std::path::Path, flavor: ClaudeFlavor) -> Option<V
         None
     })
     .await;
+
+    if matches!(&answer, Ok(None)) {
+        let status = child.try_wait().ok().flatten();
+        tracing::warn!(
+            ?status,
+            "claude closed its catalog stream without an initialize answer"
+        );
+    }
 
     // The process is only alive to answer this one question, and it does not exit
     // on its own: `--print` waits for a prompt it is never going to get.

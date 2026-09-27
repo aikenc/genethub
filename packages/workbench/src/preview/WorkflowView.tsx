@@ -95,7 +95,7 @@ export function WorkflowView({ target, client, onClose, onSessionNavigation }: {
           auditFolders.set(folder, ready);
         }
         await ready;
-        const stamp = new Date(Date.now() + 8 * 3600000).toISOString().replace(/[-:T]/g, "").slice(2, 14);
+        const stamp = new Date(Date.now() + 8 * 3600000).toISOString().replace(/-|:|T/g, "").slice(2, 14);
         const name = `${stamp.slice(0,6)}-${stamp.slice(6)}_${crypto.randomUUID().replaceAll("-", "").slice(0,16)}.json`;
         await client.call({type:"file.write",payload:{workspaceId:target.workspaceId,path:`${folder}/${name}`,content:JSON.stringify({...origin,phase:"requested"})}});
       } catch {

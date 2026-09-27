@@ -200,7 +200,9 @@ pub async fn handle(
         return Handled::err(ErrorCode::Forbidden, message);
     }
     let operation = diagnostic_operation(&request);
-    let handled = dispatch(state, transport, caller, request).await;
+    // The dispatch future contains every RPC arm. Keep that large value off
+    // the caller's stack when native runtime workers pass this future around.
+    let handled = Box::pin(dispatch(state, transport, caller, request)).await;
     if let Some(operation) = operation {
         let (outcome, code) = match &handled.reply {
             Ok(_) => ("ok", None),

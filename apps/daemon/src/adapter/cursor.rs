@@ -1650,7 +1650,9 @@ mod tests {
     fn print_args_pin_model_resume_and_read_only_modes() {
         let args = print_args(Some("grok-4.7-low-fast"), Some("chat-1"), Some("plan"));
         let joined = args.join(" ");
-        assert!(joined.starts_with("--print --single-turn --output-format stream-json --stream-partial-output"));
+        assert!(joined.starts_with(
+            "--print --single-turn --output-format stream-json --stream-partial-output"
+        ));
         assert!(joined.contains("--model grok-4.7-low-fast"));
         assert!(joined.contains("--resume chat-1"));
         assert!(joined.ends_with("--mode plan"));
