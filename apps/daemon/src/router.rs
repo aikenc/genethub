@@ -1339,12 +1339,14 @@ async fn dispatch(
             };
             let transition = match crate::workflow::dispatch(
                 state,
-                &workspace_id,
-                parent_session_id,
-                &package_id,
-                &workflow_id,
-                &task_id,
-                &prompt,
+                crate::workflow::DispatchRequest {
+                    root_workspace_id: &workspace_id,
+                    parent_session_id,
+                    package_id: &package_id,
+                    workflow_id: &workflow_id,
+                    task_id: &task_id,
+                    task_prompt: &prompt,
+                },
                 crate::workflow::DispatchOptions {
                     agent_target: agent_target.as_ref(),
                     candidate_digest: candidate_digest.as_deref(),
@@ -1723,9 +1725,11 @@ async fn dispatch(
                 caller.session_controller_id(),
                 &run_id,
                 expected_revision,
-                max_runs,
-                deadline_seconds,
-                max_llm_rounds,
+                crate::workflow::BudgetUpdate {
+                    max_runs,
+                    deadline_seconds,
+                    max_llm_rounds,
+                },
             )
             .await
             {
@@ -2269,12 +2273,14 @@ async fn dispatch(
                 state
                     .sessions
                     .fork_import_routed(
-                        &workspace_id,
-                        workspace.root,
+                        crate::session::manager::ForkImportContext {
+                            workspace_id: &workspace_id,
+                            cwd: workspace.root,
+                            source_accessible: true,
+                        },
                         transfer,
                         target,
                         &providers,
-                        true,
                         routing_tags,
                         media_tags,
                     )
@@ -2360,12 +2366,14 @@ async fn dispatch(
             match state
                 .sessions
                 .fork_import_routed(
-                    &workspace_id,
-                    workspace.root,
+                    crate::session::manager::ForkImportContext {
+                        workspace_id: &workspace_id,
+                        cwd: workspace.root,
+                        source_accessible: false,
+                    },
                     transfer,
                     target,
                     &providers,
-                    false,
                     routing_tags,
                     media_tags,
                 )
@@ -2740,12 +2748,14 @@ async fn dispatch(
         } => match state
             .set_provider(
                 &provider_id,
-                api_key,
-                base_url,
-                label,
-                dialect,
-                models,
-                model_inputs,
+                crate::state::ProviderUpdate {
+                    api_key,
+                    base_url,
+                    label,
+                    dialect,
+                    models,
+                    model_inputs,
+                },
             )
             .await
         {

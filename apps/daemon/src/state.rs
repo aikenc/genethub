@@ -20,6 +20,16 @@ use crate::remote::SharedRemote;
 use crate::session::{SessionManager, Store, WorkspaceHomes};
 use crate::workspace::Workspaces;
 
+#[derive(Default)]
+pub(crate) struct ProviderUpdate {
+    pub api_key: Option<String>,
+    pub base_url: Option<String>,
+    pub label: Option<String>,
+    pub dialect: Option<String>,
+    pub models: Option<Vec<String>>,
+    pub model_inputs: Option<std::collections::BTreeMap<String, Vec<String>>>,
+}
+
 pub struct AppState {
     pub(crate) logical_connections: Arc<crate::dataplane::logical_registry::Registry>,
     pub client_debug: crate::client_debug::Broker,
@@ -494,16 +504,19 @@ impl AppState {
     /// An empty key clears the entry rather than storing a blank one: a stored
     /// empty string would read as "configured" everywhere and fail only at the
     /// moment the user runs a task.
-    pub async fn set_provider(
+    pub(crate) async fn set_provider(
         &self,
         provider_id: &str,
-        api_key: Option<String>,
-        base_url: Option<String>,
-        label: Option<String>,
-        dialect: Option<String>,
-        models: Option<Vec<String>>,
-        model_inputs: Option<std::collections::BTreeMap<String, Vec<String>>>,
+        update: ProviderUpdate,
     ) -> Result<Settings> {
+        let ProviderUpdate {
+            api_key,
+            base_url,
+            label,
+            dialect,
+            models,
+            model_inputs,
+        } = update;
         {
             let mut config = self.config.write().await;
             let mut entry = config
@@ -925,12 +938,12 @@ mod machine_state_tests {
         let result = state
             .set_provider(
                 "private",
-                Some("sk-secret".into()),
-                Some("http://192.168.1.20:8080/v1".into()),
-                None,
-                None,
-                Some(vec!["model".into()]),
-                None,
+                ProviderUpdate {
+                    api_key: Some("sk-secret".into()),
+                    base_url: Some("http://192.168.1.20:8080/v1".into()),
+                    models: Some(vec!["model".into()]),
+                    ..Default::default()
+                },
             )
             .await;
         assert!(result.is_err());

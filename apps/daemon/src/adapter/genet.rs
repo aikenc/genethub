@@ -611,22 +611,21 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &broadcast::Sen
             started_at_ms: 0,
         }),
 
-        "message_start" => {
+        "message_start"
             if frame
                 .get("message")
                 .and_then(|message| message.get("role"))
                 .and_then(Value::as_str)
                 == Some("assistant")
-                && !state.assistant_in_flight
-            {
-                // The built-in Agent emits this before any reasoning/text/tool
-                // item. Attribute the LLM call to that item and show the round
-                // while it is still running, not only after message_end.
-                state.assistant_in_flight = true;
-                state.usage.llm_rounds += 1;
-                usage::record_round_start(&mut state.usage);
-                usage::emit_progress(events, &turn_id, &state.usage);
-            }
+                && !state.assistant_in_flight =>
+        {
+            // The built-in Agent emits this before any reasoning/text/tool
+            // item. Attribute the LLM call to that item and show the round
+            // while it is still running, not only after message_end.
+            state.assistant_in_flight = true;
+            state.usage.llm_rounds += 1;
+            usage::record_round_start(&mut state.usage);
+            usage::emit_progress(events, &turn_id, &state.usage);
         }
 
         "user_input_requested" => {

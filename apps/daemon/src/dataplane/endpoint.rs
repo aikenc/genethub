@@ -227,7 +227,7 @@ impl Writer {
         let completion = answer
             .await
             .map_err(|_| anyhow!("the data-plane writer dropped a frame"))??;
-        if let (Some(timings), Some(began)) = (timings.as_deref_mut(), began) {
+        if let (Some(timings), Some(began)) = (timings, began) {
             timings.completion_us += began.elapsed().as_micros() as u64;
             timings.actor_queue_us += completion.actor_queue_us;
             timings.actor_send_us += completion.actor_send_us;

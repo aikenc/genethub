@@ -925,7 +925,7 @@ fn tool_item(event: &Value, completed: bool, state: &mut TurnState) -> Option<Ti
     let failure = || {
         result
             .filter(|_| success.is_none())
-            .map(|result| compact_json(result))
+            .map(compact_json)
             .unwrap_or_default()
     };
     let empty = Value::Null;

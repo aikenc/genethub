@@ -422,11 +422,13 @@ fn contains_run(bytes: &[u8], run_id: &str) -> bool {
     false
 }
 
+#[cfg(test)]
 pub(super) fn latest(runtime: &super::RuntimeStore) -> Result<Vec<Summary>> {
     let dir = runtime.executor_directory(Path::new(""), false)?;
     latest_in(&dir)
 }
 
+#[cfg(test)]
 fn latest_in(dir: &Path) -> Result<Vec<Summary>> {
     let mut records = Vec::new();
     for filename in ["recoveries.1.jsonl", "recoveries.jsonl"] {

@@ -167,6 +167,7 @@ pub(crate) fn media_tags_for_timeline(items: &[TimelineItem]) -> Vec<String> {
 /// Selects the cheapest live Agent/model whose tags contain every requirement.
 /// Cost ties use opaque ids only to make the result deterministic; this is not
 /// a Human-editable priority order.
+#[cfg(test)]
 pub(crate) fn select_tag_route(
     preferences: &AgentSelectionPreferences,
     required_tags: &[String],
@@ -184,7 +185,7 @@ pub(crate) fn select_tag_route(
     )
 }
 
-/// Same live tag/cost selection as [`select_tag_route`], excluding exact
+/// Selects a live Agent/model by tag and cost, excluding exact
 /// Agent/model routes that have already failed during the current operation.
 /// Exclusions are deliberately supplied by the caller instead of entering the
 /// machine-global preferences: a transient provider failure must not rewrite

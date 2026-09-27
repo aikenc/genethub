@@ -494,7 +494,7 @@ pub struct ChatLog {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "camelCase")]
 enum ChatRow {
-    Item { item: TimelineItem },
+    Item { item: Box<TimelineItem> },
     Round { round: RoundRecord },
 }
 
@@ -1346,7 +1346,9 @@ impl Store {
         let rows: Vec<ChatRow> = items
             .iter()
             .filter(|item| !is_work_item(item))
-            .map(|item| ChatRow::Item { item: item.clone() })
+            .map(|item| ChatRow::Item {
+                item: Box::new(item.clone()),
+            })
             .collect();
         self.append_chat_rows(workspace_id, session_id, &rows)
     }
@@ -1422,6 +1424,7 @@ impl Store {
             }
             match serde_json::from_str::<ChatRow>(&line) {
                 Ok(ChatRow::Item { item }) => {
+                    let item = *item;
                     // A failed append may have written complete rows before
                     // returning an error. Retrying preserves one item per id.
                     match item_positions.get(item.id()) {
@@ -1490,7 +1493,9 @@ impl Store {
             writeln!(
                 body,
                 "{}",
-                serde_json::to_string(&ChatRow::Item { item: item.clone() })?
+                serde_json::to_string(&ChatRow::Item {
+                    item: Box::new(item.clone())
+                })?
             )?;
         }
         crate::config::save_private(&path, &body)
@@ -1516,7 +1521,7 @@ impl Store {
             .lines()
             .filter(|line| !line.trim().is_empty())
             .map(|line| match serde_json::from_str::<ChatRow>(line)? {
-                ChatRow::Item { item } => Ok(item),
+                ChatRow::Item { item } => Ok(*item),
                 _ => anyhow::bail!("unexpected row in the interrupted answer"),
             })
             .collect()

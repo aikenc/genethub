@@ -171,10 +171,8 @@ fn root_for_message(runtime: &RuntimeStore, message_id: &str) -> Result<Option<S
                 return Err(error).with_context(|| format!("读取 Workflow 请求 {id}"));
             }
         };
-        if record.original_message_id == message_id {
-            if found.replace(record.root_run_id).is_some() {
-                bail!("多个 Workflow 请求绑定同一 PM 消息");
-            }
+        if record.original_message_id == message_id && found.replace(record.root_run_id).is_some() {
+            bail!("多个 Workflow 请求绑定同一 PM 消息");
         }
     }
     Ok(found)

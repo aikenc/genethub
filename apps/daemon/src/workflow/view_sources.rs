@@ -63,10 +63,7 @@ pub(super) fn validate(files: &BTreeMap<String, Vec<u8>>) -> Result<()> {
             .get(&entry)
             .ok_or_else(|| anyhow!("工作流视图缺少入口：{entry}"))?;
         let html = std::str::from_utf8(bytes).context("工作流视图 HTML 不是 UTF-8")?;
-        if !title
-            .captures(html)
-            .is_some_and(|c| !c[1].trim().is_empty())
-        {
+        if title.captures(html).is_none_or(|c| c[1].trim().is_empty()) {
             bail!("工作流视图需要非空 title：{entry}");
         }
     }

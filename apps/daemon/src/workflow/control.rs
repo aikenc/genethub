@@ -92,17 +92,16 @@ pub(crate) async fn summarize_sessions(state: &Shared, sessions: &mut [SessionSu
                         .into_iter()
                         .take(16)
                         .map(|run| genehub_proto::WorkflowTaskSummary {
-                            human_exit: recovery::read_human_exit(&runtime, run)
-                                .ok()
-                                .flatten()
-                                .map(|exit| genehub_proto::WorkflowHumanExitStatus {
+                            human_exit: recovery::read_human_exit(runtime, run).ok().flatten().map(
+                                |exit| genehub_proto::WorkflowHumanExitStatus {
                                     kind: exit.kind,
                                     request_id: exit.request_id,
                                     pm_session_id: exit.pm_session_id,
                                     reason: exit.reason,
                                     created_at_ms: exit.created_at_ms,
                                     answer: exit.answer,
-                                }),
+                                },
+                            ),
                             observation: observability::summary(runs, run).ok(),
                             executing: Some(executing_runs.contains(&run.id)),
                             waiting: (run.status == "running"
@@ -641,16 +640,25 @@ pub(crate) async fn recover(
     run_status(&runtime, &load_run(&runtime, run_id)?)
 }
 
+pub(crate) struct BudgetUpdate {
+    pub max_runs: Option<u32>,
+    pub deadline_seconds: Option<u64>,
+    pub max_llm_rounds: Option<u64>,
+}
+
 pub(crate) async fn budget(
     state: &Shared,
     workspace_id: &str,
     actor_session_id: Option<&str>,
     run_id: &str,
     expected_revision: u64,
-    max_runs: Option<u32>,
-    deadline_seconds: Option<u64>,
-    max_llm_rounds: Option<u64>,
+    update: BudgetUpdate,
 ) -> Result<WorkflowRunStatus> {
+    let BudgetUpdate {
+        max_runs,
+        deadline_seconds,
+        max_llm_rounds,
+    } = update;
     validate_id(run_id, "runId")?;
     if max_runs.is_none() && deadline_seconds.is_none() && max_llm_rounds.is_none() {
         bail!("workflow.budget 至少需要一个预算上限");
@@ -966,10 +974,10 @@ pub(super) fn maybe_resolve_recovery_successor(
     let mut run = load_run(runtime, run_id)?;
     if run.handles.is_empty()
         || run.status != "blocked"
-        || !run
+        || run
             .stop
             .as_ref()
-            .is_some_and(|stop| stop.cause_code == "recoveryNoExit")
+            .is_none_or(|stop| stop.cause_code != "recoveryNoExit")
     {
         return Ok(false);
     }
@@ -1018,10 +1026,10 @@ async fn maybe_resume_route(state: &Shared, runtime: &RuntimeStore, run_id: &str
         if !matches!(run.status.as_str(), "running" | "blocked")
             || run.route_wait.is_empty()
             || (run.status == "blocked"
-                && !run
+                && run
                     .stop
                     .as_ref()
-                    .is_some_and(|stop| stop.cause_code == "routeUnavailable"))
+                    .is_none_or(|stop| stop.cause_code != "routeUnavailable"))
             || recovery::read_human_exit(runtime, &run)?.is_some()
         {
             return Ok(false);

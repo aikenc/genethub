@@ -54,6 +54,12 @@ const IMPORT_CANDIDATE_TTL_MS: i64 = 10 * 60 * 1000;
 /// boundary: keeps a single request from turning into an unbounded scan.
 const MAX_BATCH_GET: usize = 64;
 
+pub(crate) struct ForkImportContext<'a> {
+    pub workspace_id: &'a str,
+    pub cwd: PathBuf,
+    pub source_accessible: bool,
+}
+
 /// A session id that matches nothing in memory or on disk. The router maps
 /// this typed error to `notFound`; the Display text is user-facing and free
 /// to change without touching the wire classification.
@@ -1076,12 +1082,14 @@ impl SessionManager {
         source_accessible: bool,
     ) -> Result<SessionSummary> {
         self.fork_import_with_routing(
-            workspace_id,
-            cwd,
+            ForkImportContext {
+                workspace_id,
+                cwd,
+                source_accessible,
+            },
             transfer,
             target,
             providers,
-            source_accessible,
             None,
         )
         .await
@@ -1089,22 +1097,18 @@ impl SessionManager {
 
     pub(crate) async fn fork_import_routed(
         &self,
-        workspace_id: &str,
-        cwd: PathBuf,
+        context: ForkImportContext<'_>,
         transfer: ForkTransfer,
         target: ForkTarget,
         providers: &ProviderMap,
-        source_accessible: bool,
         routing_tags: Vec<String>,
         media_tags: Vec<String>,
     ) -> Result<SessionSummary> {
         self.fork_import_with_routing(
-            workspace_id,
-            cwd,
+            context,
             transfer,
             target,
             providers,
-            source_accessible,
             Some((routing_tags, media_tags)),
         )
         .await
@@ -1112,14 +1116,17 @@ impl SessionManager {
 
     async fn fork_import_with_routing(
         &self,
-        workspace_id: &str,
-        cwd: PathBuf,
+        context: ForkImportContext<'_>,
         mut transfer: ForkTransfer,
         target: ForkTarget,
         providers: &ProviderMap,
-        source_accessible: bool,
         routing: Option<(Vec<String>, Vec<String>)>,
     ) -> Result<SessionSummary> {
+        let ForkImportContext {
+            workspace_id,
+            cwd,
+            source_accessible,
+        } = context;
         let blob_appendix = std::mem::take(&mut transfer.blob_appendix);
         if target.workspace_id.as_deref() != Some(workspace_id) {
             anyhow::bail!("the fork target workspace does not match the validated workspace");

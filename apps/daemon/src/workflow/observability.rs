@@ -196,7 +196,7 @@ pub(super) async fn stamp_rate(state: &Shared, session: &SessionSummary) -> Resu
         .model_profiles
         .iter()
         .find(|p| p.agent_id == session.agent_id && p.model_id == session.model_id)
-        .and_then(|p| p.cost.clone());
+        .and_then(|p| p.cost);
     let level_configured = configured.is_some();
     let level = match configured {
         Some(level) => level,
