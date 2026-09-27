@@ -87,11 +87,107 @@ pub(super) fn classify_human_exit(run: &super::RunRecord) -> Option<&'static str
     Some("d")
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StoredChoice {
+    option_id: String,
+}
+
+fn choice_file(project_root: &Path, directory: &str, id: &str) -> Result<std::path::PathBuf> {
+    if id.is_empty()
+        || id.len() > 160
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        bail!("Human choice id is not a file name");
+    }
+    Ok(project_root
+        .join(".genethub/components/pm")
+        .join(directory)
+        .join(format!("{id}.json")))
+}
+
+fn read_choice(path: &Path) -> Result<Option<String>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(
+            serde_json::from_slice::<StoredChoice>(&bytes)?.option_id,
+        )),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn write_choice(path: &Path, option_id: &str, replace: bool) -> Result<()> {
+    if let Some(existing) = read_choice(path)? {
+        if existing == option_id {
+            return Ok(());
+        }
+        if !replace {
+            bail!("Human choice already has a different answer");
+        }
+    }
+    crate::config::save_private(
+        path,
+        &serde_json::to_vec(&StoredChoice {
+            option_id: option_id.to_string(),
+        })?,
+    )
+}
+
+/// Recovery-activation approval is not a Run exit. The question id is the
+/// file name, so the next wait on the same session cannot erase the answer.
+pub(crate) fn record_activation_choice(
+    project_root: &Path,
+    request_id: &str,
+    option_id: &str,
+) -> Result<()> {
+    if !matches!(option_id, "approve" | "reject") {
+        bail!("recovery activation selected an unknown option");
+    }
+    write_choice(
+        &choice_file(project_root, "activation-choices", request_id)?,
+        option_id,
+        false,
+    )
+}
+
+pub(crate) fn activation_choice(project_root: &Path, request_id: &str) -> Result<Option<String>> {
+    read_choice(&choice_file(project_root, "activation-choices", request_id)?)
+}
+
+/// The recovery reviewer names its own question. The latest answer for that
+/// session is what a later node completion is allowed to match.
+pub(crate) fn record_recovery_review(
+    project_root: &Path,
+    session_id: &str,
+    option_id: &str,
+) -> Result<()> {
+    if !matches!(option_id, "repair" | "resume" | "successor" | "human" | "cancel") {
+        bail!("recovery review selected an unknown option");
+    }
+    write_choice(
+        &choice_file(project_root, "recovery-reviews", session_id)?,
+        option_id,
+        true,
+    )
+}
+
+pub(crate) fn recovery_review_choice(
+    project_root: &Path,
+    session_id: &str,
+) -> Result<Option<String>> {
+    read_choice(&choice_file(project_root, "recovery-reviews", session_id)?)
+}
+
 pub(crate) fn record_human_exit_answer(
     project_root: &Path,
     request_id: &str,
     option_id: &str,
 ) -> Result<()> {
+    if request_id.starts_with("workflow-human-recovery-activation-") {
+        return record_activation_choice(project_root, request_id, option_id);
+    }
     let Some(run_id) = request_id.strip_prefix("workflow-human-") else {
         return Ok(());
     };
@@ -477,6 +573,14 @@ mod tests {
         assert_eq!(stored.answer.as_deref(), Some("approve"));
         let conflict = record_human_exit_answer(root.path(), &exit.request_id, "reject").unwrap_err();
         assert!(conflict.to_string().contains("different answer"));
+        let activation = "workflow-human-recovery-activation-0123456789abcdef0123456789abcdef";
+        record_human_exit_answer(root.path(), activation, "approve").unwrap();
+        assert_eq!(activation_choice(root.path(), activation).unwrap().as_deref(), Some("approve"));
+        let again = record_human_exit_answer(root.path(), activation, "reject").unwrap_err();
+        assert!(again.to_string().contains("different answer"));
+        record_recovery_review(root.path(), "s_pm", "repair").unwrap();
+        record_recovery_review(root.path(), "s_pm", "resume").unwrap();
+        assert_eq!(recovery_review_choice(root.path(), "s_pm").unwrap().as_deref(), Some("resume"));
     }
 }
 

@@ -1205,10 +1205,30 @@ async fn dispatch(
             };
             if let Some((request_id, detail)) = recovery_change {
                 if let Some(session_id) = caller.session_controller_id() {
-                    match state.sessions.workflow_question_outcome(session_id, &request_id).await {
-                        Ok(Some(genehub_proto::PermissionOutcome::Selected { option_id })) if option_id == "approve" => {}
-                        Ok(Some(_)) => return Handled::err(ErrorCode::Forbidden, "Human rejected the recovery flow change"),
-                        Ok(None) => {
+                    let stored = match crate::workflow::activation_choice(&workspace.root, &request_id) {
+                        Ok(choice) => choice,
+                        Err(error) => return failed(error),
+                    };
+                    let option_id = match stored {
+                        Some(option_id) => Some(option_id),
+                        None => match state.sessions.workflow_question_outcome(session_id, &request_id).await {
+                            Ok(Some(genehub_proto::PermissionOutcome::Selected { option_id })) => {
+                                if let Err(error) = crate::workflow::record_activation_choice(
+                                    &workspace.root, &request_id, &option_id,
+                                ) {
+                                    return failed(error);
+                                }
+                                Some(option_id)
+                            }
+                            Ok(Some(_)) => Some(String::new()),
+                            Ok(None) => None,
+                            Err(error) => return failed(error),
+                        },
+                    };
+                    match option_id.as_deref() {
+                        Some("approve") => {}
+                        Some(_) => return Handled::err(ErrorCode::Forbidden, "Human rejected the recovery flow change"),
+                        None => {
                             let request = genehub_proto::PermissionRequest {
                                 id: request_id,
                                 kind: genehub_proto::PermissionRequestKind::Question,
@@ -1224,7 +1244,6 @@ async fn dispatch(
                             }
                             return Handled::err(ErrorCode::BadRequest, "recoveryActivationPending: Human approval is required before retrying this Candidate");
                         }
-                        Err(error) => return failed(error),
                     }
                 }
                 // A direct LocalUser call is itself an explicit Human action.
@@ -2375,13 +2394,24 @@ async fn dispatch(
                 .await
             {
                 Ok(()) => {
-                    if let Some(option_id) = selected {
-                        if let Ok(summary) = state.sessions.summary(&session_id).await {
-                            if let Ok(workspace) = state.workspaces.get(&summary.workspace_id).await {
+                    if let Ok(summary) = state.sessions.summary(&session_id).await {
+                        if let Ok(workspace) = state.workspaces.get(&summary.workspace_id).await {
+                            if let Some(option_id) = selected {
                                 if let Err(error) = crate::workflow::record_human_exit_answer(
                                     &workspace.root,
                                     &request_id,
                                     &option_id,
+                                ) {
+                                    return failed(error);
+                                }
+                            }
+                            if let Ok(Some(choice)) =
+                                state.sessions.workflow_recovery_choice(&session_id).await
+                            {
+                                if let Err(error) = crate::workflow::record_recovery_review(
+                                    &workspace.root,
+                                    &session_id,
+                                    &choice,
                                 ) {
                                     return failed(error);
                                 }

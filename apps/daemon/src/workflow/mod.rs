@@ -41,6 +41,36 @@ pub(crate) fn record_human_exit_answer(
 ) -> Result<()> {
     recovery::record_human_exit_answer(project_root, request_id, option_id)
 }
+
+pub(crate) fn record_activation_choice(
+    project_root: &std::path::Path,
+    request_id: &str,
+    option_id: &str,
+) -> Result<()> {
+    recovery::record_activation_choice(project_root, request_id, option_id)
+}
+
+pub(crate) fn activation_choice(
+    project_root: &std::path::Path,
+    request_id: &str,
+) -> Result<Option<String>> {
+    recovery::activation_choice(project_root, request_id)
+}
+
+pub(crate) fn record_recovery_review(
+    project_root: &std::path::Path,
+    session_id: &str,
+    option_id: &str,
+) -> Result<()> {
+    recovery::record_recovery_review(project_root, session_id, option_id)
+}
+
+pub(crate) fn recovery_review_choice(
+    project_root: &std::path::Path,
+    session_id: &str,
+) -> Result<Option<String>> {
+    recovery::recovery_review_choice(project_root, session_id)
+}
 mod script;
 mod structured;
 mod supervision;
@@ -2696,7 +2726,16 @@ pub(crate) async fn complete(
     }
     if !run.handles.is_empty() && run.workflow_id == "builtin-recovery" && node.id == "review"
         && matches!(event.as_str(), "repair" | "resume" | "successor" | "human" | "cancel") {
-        let chosen = state.sessions.workflow_recovery_choice(caller_session_id).await?;
+        let chosen = match recovery_review_choice(&workspace.root, caller_session_id)? {
+            Some(choice) => Some(choice),
+            None => {
+                let from_session = state.sessions.workflow_recovery_choice(caller_session_id).await?;
+                if let Some(choice) = from_session.as_deref() {
+                    record_recovery_review(&workspace.root, caller_session_id, choice)?;
+                }
+                from_session
+            }
+        };
         if chosen.as_deref() != Some(event.as_str()) {
             bail!("recovery review outcome requires the matching durable PM question answer");
         }
