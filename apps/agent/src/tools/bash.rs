@@ -27,6 +27,8 @@ pub async fn run(args: &Value, cwd: &Path) -> ToolResult {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    #[cfg(target_family = "wasm")]
+    command.independent_session(false);
 
     let started = output(command);
     let timeout_secs = arg_usize(args, "timeout");

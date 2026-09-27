@@ -36,18 +36,14 @@ interface process {
     try-wait: func() -> result<option<u32>, string>;
   }
 
-  /// `env` is applied on top of the shell's own environment.
-  ///
-  /// Every child leads a session of its own, so that "it and everything it
-  /// started" has a name later. Killing a pid reaches that pid alone, and a
-  /// dev server forked from a shell that was stopped would otherwise hold its
-  /// port until the machine was rebooted. The guest cannot arrange this — it
-  /// has no fork to run code between — so the shell does it at spawn, and
-  /// `terminate` / `kill` address the group rather than the child.
+  /// `independent-session` puts the child in a session of its own. Evidence
+  /// collection and the `genet` CLI keep that. A shell that should leave
+  /// background children in the agent's process group passes false.
   spawn: func(
     argv: list<string>,
     env: list<tuple<string, string>>,
     cwd: option<string>,
+    independent-session: bool,
   ) -> result<child, spawn-error>;
 
   /// Where `name` is installed on this machine, or nothing.

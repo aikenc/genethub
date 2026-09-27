@@ -81,6 +81,7 @@ impl PipeBuffer {
 pub struct ChildHandle {
     child: tokio::process::Child,
     pid: Option<u32>,
+    own_group: bool,
     stdout: PipeBuffer,
     stderr: PipeBuffer,
     stdin: Option<mpsc::Sender<Vec<u8>>>,
@@ -91,6 +92,7 @@ impl ChildHandle {
         argv: &[String],
         env: &[(String, String)],
         cwd: Option<&str>,
+        independent_session: bool,
     ) -> Result<Self, String> {
         let (program, arguments) = argv.split_first().ok_or("empty argv")?;
         let mut command =
@@ -108,7 +110,9 @@ impl ChildHandle {
         if let Some(cwd) = cwd {
             command.current_dir(crate::guest_paths::host_path_from_guest(cwd));
         }
-        own_session(&mut command);
+        if independent_session {
+            own_session(&mut command);
+        }
 
         let mut child = command.spawn().map_err(|error| error.to_string())?;
         let pid = child.id();
@@ -142,6 +146,7 @@ impl ChildHandle {
         Ok(ChildHandle {
             child,
             pid,
+            own_group: independent_session,
             stdout,
             stderr,
             stdin,
@@ -199,13 +204,13 @@ impl wit::HostChild for crate::load::Host {
 
     async fn terminate(&mut self, this: Resource<ChildHandle>) -> Result<(), String> {
         let child = self.table.get_mut(&this).map_err(|e| e.to_string())?;
-        signal_group(child.pid, TERM);
+        child.stop(TERM);
         Ok(())
     }
 
     async fn kill(&mut self, this: Resource<ChildHandle>) -> Result<(), String> {
         let child = self.table.get_mut(&this).map_err(|e| e.to_string())?;
-        signal_group(child.pid, KILL);
+        child.stop(KILL);
         // Still asked for, so a child that somehow escaped the group is at
         // least reaped rather than left behind as a zombie.
         let _ = child.child.start_kill();
@@ -216,7 +221,7 @@ impl wit::HostChild for crate::load::Host {
         let Ok(child) = self.table.get_mut(&this) else {
             return false;
         };
-        group_alive(child.pid)
+        child.still_alive()
     }
 
     async fn try_wait(&mut self, this: Resource<ChildHandle>) -> Result<Option<u32>, String> {
@@ -232,7 +237,9 @@ impl wit::HostChild for crate::load::Host {
         // and reap it, and a reaped pid can no longer be asked what group it
         // led. The rest of the group would then be unreachable.
         if let Ok(child) = self.table.get(&this) {
-            signal_group(child.pid, KILL);
+            if child.own_group {
+                signal_group(child.pid, KILL);
+            }
         }
         let _ = self.table.delete(this);
         Ok(())
@@ -245,8 +252,9 @@ impl wit::Host for crate::load::Host {
         argv: Vec<String>,
         env: Vec<(String, String)>,
         cwd: Option<String>,
+        independent_session: bool,
     ) -> Result<Resource<ChildHandle>, wit::SpawnError> {
-        let child = ChildHandle::spawn(&argv, &env, cwd.as_deref())
+        let child = ChildHandle::spawn(&argv, &env, cwd.as_deref(), independent_session)
             .map_err(|message| wit::SpawnError { message })?;
         self.table.push(child).map_err(|error| wit::SpawnError {
             message: error.to_string(),
@@ -304,6 +312,43 @@ fn own_session(_command: &mut tokio::process::Command) {}
 
 /// Signals the group a pid leads. Best effort: every failure here means the
 /// process is already gone, or somebody else already stopped it.
+///
+/// Only for a child that leads its own session. A child that shares the
+/// agent's group is signaled by pid, so a shell stop cannot take the host
+/// with it.
+#[cfg(unix)]
+fn signal_one(pid: Option<u32>, signal: libc::c_int) {
+    let Some(pid) = pid else { return };
+    unsafe { libc::kill(pid as libc::pid_t, signal) };
+}
+
+#[cfg(unix)]
+impl ChildHandle {
+    fn stop(&self, signal: libc::c_int) {
+        if self.own_group {
+            signal_group(self.pid, signal);
+        } else {
+            signal_one(self.pid, signal);
+        }
+    }
+
+    fn still_alive(&self) -> bool {
+        if self.own_group {
+            return group_alive(self.pid);
+        }
+        let Some(pid) = self.pid else { return false };
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+}
+
+#[cfg(not(unix))]
+impl ChildHandle {
+    fn stop(&self, _signal: i32) {}
+
+    fn still_alive(&self) -> bool {
+        false
+    }
+}
 #[cfg(unix)]
 fn signal_group(pid: Option<u32>, signal: libc::c_int) {
     let Some(pid) = pid else { return };
