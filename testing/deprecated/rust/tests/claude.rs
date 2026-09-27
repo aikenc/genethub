@@ -639,7 +639,6 @@ fn configure_claude_backend() {
                             }
                         }
                     }
-                    return;
                 }
             }
         }

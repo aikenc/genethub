@@ -6254,7 +6254,7 @@ mod tests {
             "roles": {}, "nodes": {}, "leases": {}, "createdAtMs": 1, "updatedAtMs": 2
         }))
         .unwrap();
-        assert!(!request_is_quiescent(&[root.clone()]));
+        assert!(!request_is_quiescent(std::slice::from_ref(&root)));
         let mut successor = root.clone();
         successor.id = "wr_successor".into();
         successor.request.as_mut().unwrap().retry_of = Some(root.id.clone());

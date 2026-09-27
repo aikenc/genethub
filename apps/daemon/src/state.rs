@@ -816,12 +816,14 @@ mod machine_state_tests {
                 tags: tags.into_iter().map(str::to_string).collect(),
                 cost: Some(genehub_proto::AgentCostLevel::Medium),
             };
-        let mut preferences = AgentSelectionPreferences::default();
-        preferences.model_profiles = vec![profile(
-            "codex",
-            "model",
-            vec!["Max", "图片理解", "视频理解", "私有"],
-        )];
+        let mut preferences = AgentSelectionPreferences {
+            model_profiles: vec![profile(
+                "codex",
+                "model",
+                vec!["Max", "图片理解", "视频理解", "私有"],
+            )],
+            ..Default::default()
+        };
         validate_agent_preferences(&preferences).expect("four distinct tags are valid");
 
         preferences.model_profiles[0].tags.push("第五个".into());

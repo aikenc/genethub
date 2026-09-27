@@ -8152,12 +8152,13 @@ mod tests {
             vec![None],
             "the ACP handle is not passed on"
         );
-        let sent = prompts.lock().unwrap();
-        assert_eq!(sent.len(), 1);
-        assert!(sent[0].text.contains("Investigate the failing deploy"));
-        assert!(sent[0].text.contains("The health check path is stale"));
-        assert!(sent[0].text.contains("Continue the investigation"));
-        drop(sent);
+        {
+            let sent = prompts.lock().unwrap();
+            assert_eq!(sent.len(), 1);
+            assert!(sent[0].text.contains("Investigate the failing deploy"));
+            assert!(sent[0].text.contains("The health check path is stale"));
+            assert!(sent[0].text.contains("Continue the investigation"));
+        }
         let live = sessions.live(&created.id).await.unwrap();
         assert!(live.meta.lock().await.persist.is_none());
         assert_eq!(

@@ -159,10 +159,18 @@ for (const scenario of ["observation", "retry", "budget-expiry", "entries", "ent
       await t.tools.waitUntil(async () => (await current())?.nodes.some(n => n.uses === "agent.session" && n.status === "finishing") === true, 25_000);
       await restart();
     } else if (scenario === "parallel-restart") {
-      await t.tools.waitUntil(async () => {
-        await current(); return run?.nodes.some(n => n.status === "completed" && n.uses === "agent.session") === true
-          && run.nodes.some(n => n.status === "finishing");
-      }, 40_000);
+      try {
+        await t.tools.waitUntil(async () => {
+          await current(); return run?.nodes.some(n => n.status === "completed" && n.uses === "agent.session") === true
+            && run.nodes.some(n => n.status === "finishing");
+        }, 40_000);
+      } catch (error) {
+        const facts = (await history()).map(item => ({ id: item.id, taskId: item.taskId,
+          status: item.status, reason: item.reason, handles: item.handles,
+          nodes: item.nodes.map(node => ({ id: node.id, status: node.status,
+            uses: node.uses, reason: node.reason })) }));
+        throw new Error(`${error}; public Run facts: ${JSON.stringify(facts).slice(0, 8000)}`);
+      }
       await restart();
     } else if (scenario === "parallel-sibling-lost") {
       await t.tools.waitUntil(async () => {
