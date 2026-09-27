@@ -402,17 +402,22 @@ pub(super) fn append_at_with_limit(
             .human_exit_journal
             .as_ref()
             .ok_or_else(|| anyhow!("Workflow Human journal marker cannot disappear"))?;
-        if current.request_id != previous.request_id
-            || current.kind != previous.kind
-            || previous.answer.is_some() && current.answer != previous.answer
+        if (current.request_id == previous.request_id
+            && (current.kind != previous.kind
+                || previous.answer.is_some() && current.answer != previous.answer))
+            || (current.request_id != previous.request_id && previous.answer.is_none())
         {
             bail!("Workflow Human journal marker cannot change its decision");
         }
     }
     if let Some(human) = &run.human_exit_journal {
-        if human.request_id != format!("workflow-human-{}", run.id)
-            || !matches!(human.kind.as_str(), "a" | "b" | "c" | "d" | "e" | "f")
-        {
+        let base = format!("workflow-human-{}", run.id);
+        let identity_valid = human.request_id == base
+            || human
+                .request_id
+                .strip_prefix(&format!("{base}-decision-"))
+                .is_some_and(|suffix| suffix.parse::<i64>().is_ok_and(|at| at > 0));
+        if !identity_valid || !matches!(human.kind.as_str(), "a" | "b" | "c" | "d" | "e" | "f") {
             bail!("Workflow Human journal marker has invalid identity");
         }
         let mut add_human_event = |event_type: &str, actor: &str, rule: &str| {
@@ -430,15 +435,31 @@ pub(super) fn append_at_with_limit(
                 handled_run_id: None,
             });
         };
-        if previous_human.is_none() {
+        let new_question = previous_human
+            .as_ref()
+            .is_none_or(|previous| previous.request_id != human.request_id);
+        if new_question {
             add_human_event("pause.requested", "event", "human-exit");
         }
         if human.answer.is_some()
-            && previous_human
-                .as_ref()
-                .is_none_or(|previous| previous.answer.is_none())
+            && (new_question
+                || previous_human
+                    .as_ref()
+                    .is_none_or(|previous| previous.answer.is_none()))
         {
-            add_human_event("pause.answered", "human", "human-exit");
+            if matches!(human.answer.as_deref(), Some("cancelled" | "interrupted")) {
+                add_human_event(
+                    "pause.resolved",
+                    if human.answer.as_deref() == Some("interrupted") {
+                        "pm"
+                    } else {
+                        "human"
+                    },
+                    "human-exit",
+                );
+            } else {
+                add_human_event("pause.answered", "human", "human-exit");
+            }
             if human.answer.as_deref() == Some("approve") {
                 if human.kind == "a" {
                     add_human_event("run.budgetUpdated", "human", "human-budget-approved");

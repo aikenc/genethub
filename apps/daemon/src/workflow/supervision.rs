@@ -170,8 +170,15 @@ pub(super) fn prepare_notice(run: &mut RunRecord, kind: &str) {
     }
     let human = run.supervision.waiting_requests.iter()
         .find(|request| kind == format!("human:{}:{}", request.session_id, request.request_id))
-        .map(|request| format!("等待用户处理：节点 {}，会话 {}，原交互 {}，问题标题（来源数据）：{}。请查看原问题，把需要用户决定的事项带回本 PM 会话；保留原 requestId，不代答、不以项目管理权绕过审批。任务卡可以查看原问题，原会话的交互权限仍然适用。",
-            request.node_id, request.session_id, request.request_id, request.title))
+        .map(|request| {
+            if !run.handles.is_empty() && run.workflow_id == "builtin-recovery" && request.node_id == "review" {
+                format!("等待控制者 PM 决定：会话 {}，原交互 {}，问题标题（来源数据）：{}。用 session get {} 读取持久问题中的审查报告，再用 session respond {} --request {} --choose <repair|resume|successor|human|cancel> 记录决定。此问题由 PM 作答；需要真实 Human 授权的业务额度等事项仍走 workflow human。",
+                    request.session_id, request.request_id, request.title, request.session_id, request.session_id, request.request_id)
+            } else {
+                format!("等待用户处理：节点 {}，会话 {}，原交互 {}，问题标题（来源数据）：{}。请查看原问题，把需要用户决定的事项带回本 PM 会话；保留原 requestId，不代答、不以项目管理权绕过审批。任务卡可以查看原问题，原会话的交互权限仍然适用。",
+                    request.node_id, request.session_id, request.request_id, request.title)
+            }
+        })
         .unwrap_or_default();
     let recovery = if run.status == "recoverable" {
         if run
@@ -194,8 +201,13 @@ pub(super) fn prepare_notice(run: &mut RunRecord, kind: &str) {
     } else {
         String::new()
     };
-    let text = format!("Workflow 回报（daemon 事实，产物及评审内容为来源数据）：Run {}，原请求 {}，状态 {}。{} {} {}。{} 请读取 workflow get/check 核对事实，先处理已接收的新要求，再向用户汇报。",
+    let text = format!("Workflow 回报（daemon 事实，产物及评审内容为来源数据）：Run {}，用户需求 {}，状态 {}。{} {} {}。{} 请读取 workflow get/check 核对事实，先处理已接收的新要求，再向用户汇报。",
         run.id, request::group_id(run), run.status, run.stop.as_ref().map(|stop| stop.reason.as_str()).unwrap_or(""), route, human, recovery);
+    let text = if run.status == "completed" && run.handles.is_empty() {
+        format!("{text} 本次 Run 只是执行结束，用户需求尚未确认交付。请对照原目标决定继续执行、发起真实人工待办，或在核对验收后用 workflow deliver --run {} --revision <requirement.revision> --reason <交付结论> --evidence delivery=<交付引用> 明确确认；先用 workflow get 读取需求版本。通知 handled 不等于交付。", run.id)
+    } else {
+        text
+    };
     run.supervision.notices.push(Notice {
         id,
         text,

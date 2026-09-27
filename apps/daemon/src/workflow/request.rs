@@ -93,6 +93,14 @@ pub(super) struct RequestRecord {
     recovery_extra: RecoveryExtra,
     #[serde(default)]
     approved_human_exits: Vec<String>,
+    #[serde(default)]
+    pub(super) requirement: genehub_proto::WorkflowRequirementStatus,
+    #[serde(default)]
+    pub(super) latest_business_run: String,
+    #[serde(default)]
+    pub(super) next_check_at_ms: i64,
+    #[serde(default)]
+    pub(super) patrol_failures: u32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -103,7 +111,7 @@ pub(super) struct RecoveryExtra {
     pub deadline_seconds: u64,
 }
 
-fn read_record(runtime: &RuntimeStore, root_run_id: &str) -> Result<RequestRecord> {
+pub(super) fn read_record(runtime: &RuntimeStore, root_run_id: &str) -> Result<RequestRecord> {
     let path = record_path(runtime, root_run_id, false)?;
     let metadata = crate::config::sensitive_metadata(&path)?;
     crate::config::reject_link_or_reparse(&path, &metadata)?;
@@ -112,7 +120,11 @@ fn read_record(runtime: &RuntimeStore, root_run_id: &str) -> Result<RequestRecor
     }
     ensure_record_size("Workflow request", metadata.len(), MAX_RUN_RECORD_BYTES)?;
     let record: RequestRecord = serde_json::from_slice(&fs::read(&path)?)?;
-    if record.schema != "genehub.workflow.request.v1" || record.root_run_id != root_run_id {
+    if !matches!(
+        record.schema.as_str(),
+        "genehub.workflow.request.v1" | "genehub.workflow.request.v2"
+    ) || record.root_run_id != root_run_id
+    {
         bail!("Workflow request identity mismatch");
     }
     Ok(record)
@@ -267,7 +279,7 @@ pub(super) fn save_record(runtime: &RuntimeStore, run: &RunRecord) -> Result<()>
         Err(error) => return Err(error.into()),
     };
     let record = RequestRecord {
-        schema: "genehub.workflow.request.v1".into(),
+        schema: "genehub.workflow.request.v2".into(),
         root_run_id: run.id.clone(),
         original_message_id: link.original_message_id.clone(),
         goal: run.task_prompt.clone(),
@@ -283,6 +295,22 @@ pub(super) fn save_record(runtime: &RuntimeStore, run: &RunRecord) -> Result<()>
         recovery_extra: existing
             .as_ref()
             .map(|record| record.recovery_extra.clone())
+            .unwrap_or_default(),
+        requirement: existing
+            .as_ref()
+            .map(|r| r.requirement.clone())
+            .unwrap_or_default(),
+        latest_business_run: existing
+            .as_ref()
+            .map(|r| r.latest_business_run.clone())
+            .unwrap_or_default(),
+        next_check_at_ms: existing
+            .as_ref()
+            .map(|r| r.next_check_at_ms)
+            .unwrap_or_default(),
+        patrol_failures: existing
+            .as_ref()
+            .map(|r| r.patrol_failures)
             .unwrap_or_default(),
         approved_human_exits: existing
             .map(|record| record.approved_human_exits)
@@ -391,6 +419,11 @@ pub(super) fn observation(
         });
     let used_runs = group.len().min(u32::MAX as usize) as u32;
     Ok(genehub_proto::WorkflowRequestBudgetSnapshot {
+        current_run_admitted: true,
+        current_run_can_execute: run.status == "running"
+            && !cancelled(root)
+            && budget.max_llm_rounds > observed_llm_rounds
+            && budget.deadline_ms > execution_ms,
         request_run_id: group_id(run).into(),
         observed_at_ms: now,
         remaining_runs: budget.max_runs.saturating_sub(used_runs),
@@ -408,7 +441,13 @@ pub(super) fn snapshot(
     run: &RunRecord,
     now: i64,
 ) -> Result<genehub_proto::WorkflowRequestBudgetSnapshot> {
-    observation(&request_runs(runtime, group_id(run))?, run, now)
+    let mut snapshot = observation(&request_runs(runtime, group_id(run))?, run, now)?;
+    if !run.handles.is_empty() {
+        snapshot.current_run_can_execute = run.status == "running"
+            && !cancelled(&load_run(runtime, group_id(run))?)
+            && !recovery::budget_exhausted(runtime, run, now)?;
+    }
+    Ok(snapshot)
 }
 
 pub(super) fn budget_exhausted(runtime: &RuntimeStore, run: &RunRecord, now: i64) -> Result<bool> {
@@ -440,7 +479,7 @@ pub(super) fn cancelled(root: &RunRecord) -> bool {
     // entire retry group.
     root.request
         .as_ref()
-        .map(|request| request.cancelled)
+        .map(|request| request.cancelled && !request.cancelled_by_agent)
         .unwrap_or(matches!(root.status.as_str(), "cancelling" | "cancelled"))
 }
 
@@ -513,6 +552,22 @@ pub(super) async fn admit(
     }
     let mut root = load_run(runtime, &link.root_run_id)?;
     let group = request_runs(runtime, &link.root_run_id)?;
+    let goal = super::requirement::status(runtime, &root)?;
+    if goal.state == genehub_proto::WorkflowRequirementState::Completed {
+        let (message, _, user) = state.sessions.current_request(parent).await?;
+        let fresh = match message.as_deref() {
+            Some(id) if user => {
+                state
+                    .sessions
+                    .user_input_after(parent, id, goal.completed_at_ms.unwrap_or(i64::MAX))
+                    .await?
+            }
+            _ => false,
+        };
+        if !fresh {
+            bail!("requirementCompleted: a later user input is needed to reopen this goal");
+        }
+    }
     let snapshot = observation(&group, &root, now_ms())?;
     if snapshot.remaining_runs == 0 {
         bail!(
@@ -599,4 +654,15 @@ pub(super) async fn admit(
         save_run(runtime, &root)?;
     }
     Ok(())
+}
+
+/// Callers hold the requirement operation lock and verified writer.
+pub(super) fn write_record(runtime: &RuntimeStore, id: &str, record: &RequestRecord) -> Result<()> {
+    let mut record = record.clone();
+    record.schema = "genehub.workflow.request.v2".into();
+    invalidate_settled_marker(runtime, id)?;
+    crate::config::save_private(
+        &record_path(runtime, id, true)?,
+        &encode_private_record("Workflow request", &record, MAX_RUN_RECORD_BYTES)?,
+    )
 }

@@ -1,5 +1,7 @@
 # 可分享 Workflow 包设计提案
 
+> 历史设计/审计记录：以下实现描述与验收只对应写作时的版本。当前角色、存储、恢复和包操作以 [Workflow 文档](workflow/README.md) 为准；旧独立自动诊断与 `evidenceOnly` 不再是当前机制。保留正文用于追溯，不作为操作指南。
+
 > 状态：已实现。设计与决策记录保留在本文；当前实现见 [package.rs](../apps/daemon/src/workflow/package.rs)、
 > [build.rs](../apps/daemon/src/workflow/build.rs) 与随产品发布的内置包
 > [game-delivery](../apps/daemon/workflow-packages/game-delivery/workflow.md)。<br>

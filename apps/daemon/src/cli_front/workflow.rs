@@ -75,6 +75,13 @@ enum Command {
         since: u64,
         limit: u32,
     },
+    Consult {
+        workspace_id: Option<String>,
+        run_id: Option<String>,
+        node_id: Option<String>,
+        revision: Option<u64>,
+        report: String,
+    },
     Complete {
         workspace_id: Option<String>,
         run_id: Option<String>,
@@ -84,6 +91,13 @@ enum Command {
         output: Option<serde_json::Value>,
         outcome: Option<genehub_proto::WorkflowNodeOutcome>,
         reason: Option<String>,
+    },
+    Deliver {
+        workspace_id: Option<String>,
+        run_id: String,
+        revision: u64,
+        conclusion: String,
+        references: Vec<String>,
     },
     Cancel {
         workspace_id: Option<String>,
@@ -494,6 +508,52 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
             );
             Ok(EXIT_OK)
         }
+        Command::Consult {
+            workspace_id,
+            run_id,
+            node_id,
+            revision,
+            report,
+        } => {
+            let binding = binding_for_missing(
+                workspace_id.is_none() || run_id.is_none() || node_id.is_none(),
+            )
+            .await?;
+            let workspace_id = resolve_workspace(
+                rpc,
+                workspace_id.or_else(|| binding.as_ref().map(|v| v.workspace_id.clone())),
+            )
+            .await?;
+            let run_id = run_id
+                .or_else(|| binding.as_ref().map(|v| v.run_id.clone()))
+                .ok_or_else(|| {
+                    CliFailure::invalid_args("workflow consult requires --run or a Worker binding")
+                })?;
+            let node_id = node_id
+                .or_else(|| binding.map(|v| v.node_id))
+                .ok_or_else(|| {
+                    CliFailure::invalid_args("workflow consult requires --node or a Worker binding")
+                })?;
+            let expected_revision = match revision {
+                Some(value) => value,
+                None => read_run(rpc, &workspace_id, &run_id).await?.revision,
+            };
+            let reply = rpc
+                .call(Request::WorkflowConsult {
+                    workspace_id,
+                    run_id,
+                    node_id,
+                    expected_revision,
+                    report,
+                })
+                .await
+                .map_err(query::rpc_error)?;
+            if !matches!(reply, Reply::Ack) {
+                return Err(CliFailure::protocol("wrong reply to workflow.consult"));
+            }
+            output::succeed("workflow.consult.requested", json!({"accepted": true}));
+            Ok(EXIT_OK)
+        }
         Command::Complete {
             workspace_id,
             run_id,
@@ -573,6 +633,35 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
                 }
             };
             output::succeed("workflow.completed", serde_json::to_value(run).unwrap());
+            Ok(EXIT_OK)
+        }
+        Command::Deliver {
+            workspace_id,
+            run_id,
+            revision,
+            conclusion,
+            references,
+        } => {
+            let workspace_id = resolve_workspace(rpc, workspace_id).await?;
+            let Reply::WorkflowRun(run) = rpc
+                .call(Request::WorkflowRequirementComplete {
+                    workspace_id,
+                    run_id,
+                    expected_revision: revision,
+                    conclusion,
+                    delivery_references: references,
+                })
+                .await
+                .map_err(query::rpc_error)?
+            else {
+                return Err(CliFailure::protocol(
+                    "wrong reply to workflow.requirement.complete",
+                ));
+            };
+            output::succeed(
+                "workflow.requirement.completed",
+                serde_json::to_value(run).unwrap(),
+            );
             Ok(EXIT_OK)
         }
         Command::Cancel {
@@ -1141,6 +1230,19 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
             since: values.since.unwrap_or(0),
             limit: values.limit.unwrap_or(100).min(1024),
         }),
+        "consult" => Ok(Command::Consult {
+            workspace_id: values.workspace.take(),
+            run_id: values.run.take(),
+            node_id: values.node.take(),
+            revision: values.revision,
+            report: values
+                .reason
+                .take()
+                .filter(|v| !v.trim().is_empty())
+                .ok_or_else(|| {
+                    CliFailure::invalid_args("workflow consult requires --reason <review report>")
+                })?,
+        }),
         "complete" => Ok(Command::Complete {
             workspace_id: values.workspace.take(),
             run_id: values.run.take(),
@@ -1150,6 +1252,20 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
             output: values.output,
             outcome: values.outcome,
             reason: values.reason,
+        }),
+        "deliver" => Ok(Command::Deliver {
+            workspace_id: values.workspace.take(),
+            run_id: values
+                .run
+                .take()
+                .ok_or_else(|| CliFailure::invalid_args("workflow deliver needs --run"))?,
+            revision: values.revision.ok_or_else(|| {
+                CliFailure::invalid_args("workflow deliver needs --revision <requirement.revision>")
+            })?,
+            conclusion: values.reason.take().ok_or_else(|| {
+                CliFailure::invalid_args("workflow deliver needs --reason <delivery conclusion>")
+            })?,
+            references: values.evidence.into_values().collect(),
         }),
         "cancel" => Ok(Command::Cancel {
             workspace_id: values.workspace.take(),
@@ -1262,7 +1378,7 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
 }
 
 const USAGE: &str =
-    "usage: genet workflow list|build|inspect|activate|dispatch|get|profile|history|journal|check|complete|cancel|recover|continue|recovery|human|budget ...";
+    "usage: genet workflow list|build|inspect|activate|dispatch|get|profile|history|journal|check|consult|complete|deliver|cancel|recover|continue|recovery|human|budget ...";
 
 #[derive(Default)]
 struct Values {

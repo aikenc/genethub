@@ -38,7 +38,7 @@ defineSpecialty({
     const dispatched = new Set<string>();
     const respond = (request: unknown) => {
       const body = JSON.stringify(request);
-      if (body.includes("只读复查被处理的 Run")) return { text: "Waiting for the PM recovery decision." };
+      if (body.includes("只读复查这条用户需求及其 Run")) return { text: "Waiting for the PM recovery decision." };
       if (body.includes("DAMAGED_REQUEST_WORKER")) {
         const task = ["isolation-one", "isolation-two", "isolation-three", "isolation-broken"].find(id => body.includes(id));
         if (!task || submitted.has(task)) return { text: "Result was already submitted." };

@@ -66,7 +66,7 @@ defineSpecialty({
     let blocked: WorkflowRunStatus | undefined;
     await t.tools.waitUntil(async () => {
       blocked = (await history()).find(run => run.taskId === "resume-original");
-      return blocked?.status === "blocked" && !!blocked.reason?.includes("RouteUnavailable");
+      return blocked?.status === "blocked" && blocked.reason?.includes("RouteUnavailable") === true;
     }, 30_000);
     t.assertions.assert(!workerSubmitted && blocked!.nodes.find(node => node.id === "work")?.sessionId === undefined,
       "route block already started a Worker");

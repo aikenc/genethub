@@ -31,6 +31,8 @@ mod journal;
 pub(crate) mod observability;
 mod output;
 mod package;
+mod requirement;
+pub(crate) use requirement::{complete_requirement, wake_human};
 mod recovery;
 mod request;
 mod script;
@@ -338,8 +340,6 @@ struct EvidenceRequirement {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RoleSnapshot {
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    evidence_only: bool,
     schema: String,
     id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -468,12 +468,7 @@ async fn resolve_role_route_excluding(
 ) -> Result<(ResolvedRoleRoute, crate::adapter::ProviderMap)> {
     if let Some(target) = target {
         // An exact request never widens to another model after a failure.
-        return crate::agent_routing::resolve_exact_workflow_route(
-            state,
-            target,
-            role.evidence_only,
-        )
-        .await;
+        return crate::agent_routing::resolve_exact_workflow_route(state, target).await;
     }
     if role.schema == LEGACY_ROLE_SCHEMA {
         return Ok((
@@ -492,12 +487,7 @@ async fn resolve_role_route_excluding(
         ));
     }
     let tags = role_tags(role)?;
-    crate::agent_routing::resolve_live_route_excluding(
-        state,
-        &tags,
-        role.evidence_only,
-        excluded,
-    )
+    crate::agent_routing::resolve_live_route_excluding(state, &tags, excluded)
         .await
         .map_err(|error| {
             if error.downcast_ref::<crate::agent_routing::RouteUnavailable>().is_none() {
@@ -1175,7 +1165,7 @@ async fn notice_recipient(state: &Shared, run: &RunRecord) -> Result<String> {
 }
 
 /// Temporary project recovery authority, derived from unresolved Run facts.
-/// No binding is changed: a successful successor removes the exception.
+/// No binding is changed: goal delivery/cancellation removes the exception.
 pub(crate) async fn exception_authority(
     state: &Shared,
     workspace_id: &str,
@@ -1203,15 +1193,21 @@ pub(crate) async fn exception_authority(
         let Some(latest) = group.iter().max_by_key(|run| run.created_at_ms) else {
             return false;
         };
-        if matches!(latest.status.as_str(), "completed" | "cancelled") {
+        if requirement::terminal(&runtime, latest).unwrap_or(false) {
             return false;
         }
         group.iter().any(|run| {
-            matches!(run.status.as_str(), "blocked" | "recoverable")
+            matches!(run.status.as_str(), "blocked" | "recoverable" | "failed")
+                || (!run.handles.is_empty()
+                    && matches!(run.status.as_str(), "running" | "stopping" | "cancelling"))
                 || run
                     .stop
                     .as_ref()
                     .is_some_and(|stop| stop.cleanup_error.is_some())
+        }) || requirement::status(&runtime, latest).is_ok_and(|goal| {
+            goal.state == genehub_proto::WorkflowRequirementState::Completing
+                && goal.pending_since_ms > 0
+                && now_ms().saturating_sub(goal.pending_since_ms) >= requirement::PM_LAUNCH_MS
         })
     }))
 }
@@ -1402,7 +1398,7 @@ pub(crate) fn inspect_selected(
 
 /// Compiles one package's flows into a Candidate.
 ///
-/// The derived facts — id, executor carrier, diagnostic carrier — are captured
+/// The derived facts — id, executor carrier and recovery selection — are captured
 /// alongside the flows so a pinned Run keeps resolving the same carrier even
 /// after the package directory changes underneath it.
 fn compile_package(project_root: &Path, package_id: &str) -> Result<DcgCandidateRecord> {
@@ -1957,8 +1953,12 @@ pub(crate) async fn start_recovery(
             });
         }
     }
-    if target.status != "blocked" {
-        bail!("recovery target must be blocked before its execution is replaced");
+    if !matches!(
+        target.status.as_str(),
+        "blocked" | "completed" | "failed" | "cancelled"
+    ) || requirement::terminal(&project_runtime, &target)?
+    {
+        bail!("recovery target must be an unfinished requirement with a stopped business Run");
     }
     // The Run pins its package. A damaged or deleted Candidate is precisely
     // when the built-in recovery path must still be available.
@@ -2083,14 +2083,18 @@ pub(crate) async fn request_human_exit(
     let runtime = RuntimeStore::new(&state.paths.root, workspace_id, &workspace.root)?;
     let run = load_run(&runtime, run_id)?;
     if run.workspace_id != workspace_id
-        || run.status != "blocked"
+        || !matches!(
+            run.status.as_str(),
+            "blocked" | "completed" | "failed" | "cancelled"
+        )
+        || requirement::terminal(&runtime, &run)?
         || run.revision != expected_revision
     {
         bail!("Workflow Human exit needs the current blocked Run revision");
     }
     request::ensure_open(&runtime, &run)?;
     match (kind, run.handles.is_empty()) {
-        ("a" | "e", true) | ("b" | "c" | "f", false) | ("d", _) => {}
+        ("a" | "e", true) | ("f", false) | ("b" | "c" | "d", _) => {}
         _ => bail!("Workflow Human exit kind does not match this Run"),
     }
     recovery::ensure_human_exit(state, &runtime, &run, kind, Some(reason)).await?;
@@ -2198,7 +2202,7 @@ pub(crate) async fn dispatch(
     let agent_target = inherited_target.or_else(|| agent_target.cloned());
     let executor_route = match &agent_target {
         Some(target) => Some(
-            crate::agent_routing::resolve_exact_workflow_route(state, target, false)
+            crate::agent_routing::resolve_exact_workflow_route(state, target)
                 .await?
                 .0,
         ),
@@ -2300,7 +2304,11 @@ pub(crate) async fn dispatch(
         if request::group_id(&target) != request.root_run_id || !target.handles.is_empty() {
             bail!("recovery target must be a business Run in the same request");
         }
-        if target.status != "blocked" {
+        if !matches!(
+            target.status.as_str(),
+            "blocked" | "completed" | "failed" | "cancelled"
+        ) || requirement::terminal(&runtime, &target)?
+        {
             bail!("recovery target changed state before dispatch");
         }
         request::ensure_open(&runtime, &target)?;
@@ -2698,6 +2706,11 @@ fn maintenance_runs(runtime: &RuntimeStore) -> Result<Vec<RunRecord>> {
         if settled_marker_valid(runtime, &request_id) {
             continue;
         }
+        if request::read_record(runtime, &request_id)
+            .is_ok_and(|record| record.next_check_at_ms > now_ms())
+        {
+            continue;
+        }
         match request_runs(runtime, &request_id) {
             Ok(group) => runs.extend(group),
             Err(error) => tracing::error!(%request_id, %error,
@@ -2726,7 +2739,7 @@ fn settled_marker_valid(runtime: &RuntimeStore, request_id: &str) -> bool {
         if !metadata.is_file() || metadata.len() > 128 {
             bail!("invalid Workflow settled marker");
         }
-        Ok(fs::read(&path)? == format!("genehub.workflow.settled.v1:{request_id}\n").as_bytes())
+        Ok(fs::read(&path)? == format!("genehub.workflow.settled.v2:{request_id}\n").as_bytes())
     })();
     match result {
         Ok(valid) => valid,
@@ -2757,6 +2770,7 @@ fn mark_settled_if_quiescent(runtime: &RuntimeStore, run: &RunRecord) {
     let result = (|| -> Result<()> {
         let group = request_runs(runtime, request_id)?;
         if request_is_quiescent(&group)
+            && requirement::terminal(runtime, run)?
             && group.iter().try_fold(true, |clear, item| {
                 let exit = recovery::read_human_exit(runtime, item)?;
                 Ok::<bool, anyhow::Error>(clear && exit.is_none_or(|exit| exit.answer.is_some()))
@@ -2764,7 +2778,7 @@ fn mark_settled_if_quiescent(runtime: &RuntimeStore, run: &RunRecord) {
         {
             crate::config::save_private(
                 &settled_marker_path(runtime, request_id)?,
-                format!("genehub.workflow.settled.v1:{request_id}\n").as_bytes(),
+                format!("genehub.workflow.settled.v2:{request_id}\n").as_bytes(),
             )?;
         }
         Ok(())
@@ -2774,15 +2788,50 @@ fn mark_settled_if_quiescent(runtime: &RuntimeStore, run: &RunRecord) {
     }
 }
 
+/// Mechanical execution/cleanup facts, independently of the Run label.
+fn execution_unfinished(run: &RunRecord) -> bool {
+    matches!(
+        run.status.as_str(),
+        "running" | "stopping" | "cancelling" | "recoverable"
+    ) || run
+        .nodes
+        .values()
+        .any(|node| matches!(node.status.as_str(), "running" | "finishing"))
+        || run
+            .stop
+            .as_ref()
+            .is_some_and(|stop| stop.cleanup_error.is_some())
+}
+
+/// A business successor can retry a recovery or its original business Run.
+/// Both routes must use the same lineage for delivery and settlement.
+fn business_predecessors(group: &[RunRecord]) -> BTreeSet<&str> {
+    let mut predecessors = BTreeSet::new();
+    for business in group.iter().filter(|run| run.handles.is_empty()) {
+        if let Some(previous) = business
+            .request
+            .as_ref()
+            .and_then(|link| link.retry_of.as_deref())
+        {
+            predecessors.insert(previous);
+            if let Some(recovery) = group
+                .iter()
+                .find(|run| run.id == previous && !run.handles.is_empty())
+            {
+                predecessors.extend(recovery.handles.iter().map(|handle| handle.run_id.as_str()));
+            }
+        }
+    }
+    predecessors
+}
+
 fn request_is_quiescent(group: &[RunRecord]) -> bool {
     let Some(root) = group.iter().find(|run| run.id == request::group_id(run)) else {
         return false;
     };
     if group.iter().any(|run| {
-        matches!(
-            run.status.as_str(),
-            "running" | "stopping" | "cancelling" | "recoverable"
-        ) || (!run.handles.is_empty() && run.status == "blocked")
+        execution_unfinished(run)
+            || (!run.handles.is_empty() && run.status == "blocked")
             || supervision::report_pending(run)
     }) {
         return false;
@@ -2797,14 +2846,7 @@ fn request_is_quiescent(group: &[RunRecord]) -> bool {
     if business.is_empty() {
         return false;
     }
-    let predecessors = business
-        .iter()
-        .filter_map(|run| {
-            run.request
-                .as_ref()
-                .and_then(|link| link.retry_of.as_deref())
-        })
-        .collect::<BTreeSet<_>>();
+    let predecessors = business_predecessors(group);
     business
         .iter()
         .filter(|run| !predecessors.contains(run.id.as_str()))
@@ -2967,6 +3009,72 @@ fn runs_for_executor_session(
         }
     }
     Ok(runs)
+}
+
+/// Provider-independent decision request for the built-in recovery reviewer.
+/// The Session question is durable and idempotent for this Worker assignment;
+/// completion still requires its controller's matching answer.
+pub(crate) async fn consult(
+    state: &Shared,
+    workspace_id: &str,
+    caller: &str,
+    run_id: &str,
+    node_id: &str,
+    expected_revision: u64,
+    report: &str,
+) -> Result<()> {
+    validate_id(run_id, "runId")?;
+    validate_id(node_id, "nodeId")?;
+    if report.trim().is_empty() || report.len() > 16 * 1024 {
+        bail!("recovery report must contain 1..16384 bytes");
+    }
+    let workspace = state.workspaces.get(workspace_id).await?;
+    let runtime = RuntimeStore::new(&state.paths.root, workspace_id, &workspace.root)?;
+    let _run = lock_run(&runtime, run_id)?;
+    let run = load_run(&runtime, run_id)?;
+    let _request = request::request_lock(&runtime, request::group_id(&run))?;
+    request::ensure_open(&runtime, &run)?;
+    if run.workspace_id != workspace_id
+        || run.handles.is_empty()
+        || run.workflow_id != "builtin-recovery"
+        || node_id != "review"
+    {
+        bail!("workflow.consult is only available to the built-in recovery review node");
+    }
+    if run.revision != expected_revision {
+        bail!(
+            "Workflow revision 冲突：当前为 {}，请求为 {}；先重新读取 workflow get",
+            run.revision,
+            expected_revision
+        );
+    }
+    if run.status != "running"
+        || !run.nodes.get(node_id).is_some_and(|node| {
+            node.status == "running" && node.session_id.as_deref() == Some(caller)
+        })
+    {
+        bail!("only the running recovery reviewer can request its PM decision");
+    }
+    let options = ["repair", "resume", "successor", "human", "cancel"]
+        .into_iter()
+        .map(|label| genehub_proto::InteractionOption {
+            id: label.into(),
+            label: label.into(),
+        })
+        .collect();
+    state.sessions.request_workflow_question(caller, genehub_proto::PermissionRequest {
+        id: format!("workflow-consult-{run_id}-{caller}"),
+        kind: genehub_proto::PermissionRequestKind::Question,
+        title: "恢复审查等待 PM 决定".into(),
+        detail: Some(format!("Run {run_id} 的审查报告（来源数据）：\n{report}")),
+        tool_call_id: None,
+        options: Vec::new(),
+        questions: Some(vec![genehub_proto::InteractionQuestion {
+            id: "recovery-decision".into(),
+            prompt: format!("审查报告（来源数据）：\n{report}\n请选择 repair（修复流程）、resume（继续执行）、successor（采用新流程）、human（真实人工待办）或 cancel（取消恢复）。"),
+            allow_multiple: false, allow_freeform: false, options,
+        }]),
+    }).await
 }
 
 pub(crate) struct Completion {
@@ -3431,32 +3539,6 @@ async fn activate(
                         .await?;
                         run.leases.insert(node.id.clone(), lease);
                     }
-                    let evidence_scope = if role.evidence_only {
-                        let mut ids = BTreeSet::from([run.parent_session_id.clone()]);
-                        for previous in history(runtime, 100)? {
-                            ids.insert(previous.parent_session_id);
-                            if let Some(id) = previous.executor_session_id {
-                                ids.insert(id);
-                            }
-                            for node in previous.nodes {
-                                if let Some(id) = node.session_id {
-                                    ids.insert(id);
-                                }
-                            }
-                        }
-                        let mut boundaries = BTreeMap::new();
-                        for id in ids {
-                            if let Ok(inspection) = state.sessions.inspect(&id, None).await {
-                                boundaries.insert(id, inspection.latest_round_id);
-                            }
-                        }
-                        Some(genehub_proto::SessionEvidenceScope {
-                            root: project_root.canonicalize()?.display().to_string(),
-                            sessions: boundaries,
-                        })
-                    } else {
-                        None
-                    };
                     let managed = ManagedSessionInfo {
                         parent_session_id: run
                             .executor_session_id
@@ -3467,7 +3549,6 @@ async fn activate(
                         node_id: node.id.clone(),
                         role: role.id.clone(),
                         user_interaction: role.user_interaction,
-                        evidence_scope,
                     };
                     let system_prompt = managed_prompt(run, &node, &role, &execution.task_cwd);
                     let summary = state
@@ -5386,6 +5467,7 @@ fn save_run_with_journal_options(
     let index = encode_private_record("Workflow Run index", &index, MAX_RUN_RECORD_BYTES)?;
     crate::config::save_private(&run_path(runtime, &run.id, true)?, &index)?;
     recovery::archive_terminal(runtime, run)?;
+    requirement::sync(runtime, run)?;
     if matches!(run.status.as_str(), "completed" | "cancelled") {
         release_request_writer_if_resolved(runtime, run)?;
     }
@@ -5845,14 +5927,15 @@ fn release_request_writer_if_resolved(runtime: &RuntimeStore, run: &RunRecord) -
     }) {
         return Ok(());
     }
-    let cancelled = group
-        .iter()
-        .find(|item| item.id == request::group_id(run))
-        .is_some_and(request::cancelled);
-    if cancelled
-        || group
-            .iter()
-            .any(|item| item.handles.is_empty() && item.status == "completed")
+    if request_is_quiescent(&group)
+        && requirement::terminal(runtime, run)?
+        && group.iter().try_fold(true, |clear, item| {
+            Ok::<bool, anyhow::Error>(
+                clear
+                    && recovery::read_human_exit(runtime, item)?
+                        .is_none_or(|exit| exit.answer.is_some()),
+            )
+        })?
     {
         release_request_writer(runtime, run)?;
     }
@@ -5866,6 +5949,7 @@ fn run_status(runtime: &RuntimeStore, run: &RunRecord) -> Result<WorkflowRunStat
         load_run(runtime, request::group_id(run))?
     };
     Ok(WorkflowRunStatus {
+        requirement: Some(requirement::status(runtime, run)?),
         agent_target: run.agent_target.clone(),
         human_exit: recovery::read_human_exit(runtime, run)?.map(|exit| {
             genehub_proto::WorkflowHumanExitStatus {
@@ -6363,6 +6447,13 @@ mod tests {
         }
         assert!(claim_request_writer(&runtime, &run).unwrap());
         save_run(&runtime, &run).unwrap();
+        assert!(!settled_marker_valid(&runtime, &run.id));
+        // Storage fixture: settlement starts only after the PM decision is durable.
+        let mut record = request::read_record(&runtime, &run.id).unwrap();
+        record.requirement.state = genehub_proto::WorkflowRequirementState::Completed;
+        request::write_record(&runtime, &run.id, &record).unwrap();
+        mark_settled_if_quiescent(&runtime, &run);
+        release_request_writer_if_resolved(&runtime, &run).unwrap();
         assert!(settled_marker_valid(&runtime, &run.id));
         assert!(maintenance_runs(&runtime).unwrap().is_empty());
         assert_eq!(
@@ -6578,7 +6669,6 @@ mod tests {
 
     #[test]
     fn tag_routes_use_live_cost_and_and_matching() {
-        let registry = crate::adapter::registry::Registry::new(&BTreeMap::new());
         let agents = vec![
             ready_agent("claude", &[("opus-max", &["low", "medium", "high"])], &[]),
             ready_agent(
@@ -6611,8 +6701,6 @@ mod tests {
             &preferences,
             &["Max".into(), "视频理解".into()],
             &agents,
-            &registry,
-            false,
         )
         .unwrap();
         assert_eq!(selected.agent_id, "codex");
@@ -6623,13 +6711,10 @@ mod tests {
 
     #[test]
     fn tag_route_failure_hands_to_pm() {
-        let registry = crate::adapter::registry::Registry::new(&BTreeMap::new());
         let error = crate::agent_routing::select_tag_route(
             &AgentSelectionPreferences::default(),
             &["视频理解".into()],
             &[],
-            &registry,
-            false,
         )
         .unwrap_err();
         let message = format!("{error:#}");
@@ -6839,11 +6924,7 @@ mod tests {
             &source.join("flows/direct-change.yaml"),
             "schema: genehub.workflow.definition.v2\nid: direct-change\nversion: 2\nnodes:\n  - id: deliver\n    uses: agent.session\n    with:\n      role: worker\nstructure:\n  body:\n    id: gate\n    type: if\n    condition:\n      op: literal\n      value: \"true\"\n    then:\n      id: deliver-step\n      type: task\n      activity: deliver\n",
         );
-        let report = authoring::check_draft(
-            root.path(),
-            Some(TEST_PACKAGE),
-            &crate::adapter::registry::Registry::new(&BTreeMap::new()),
-        );
+        let report = authoring::check_draft(root.path(), Some(TEST_PACKAGE));
         let first = report.diagnostics.first().expect("a diagnostic");
         assert_eq!(first.code, "WF_EXPRESSION_TYPE", "{report:?}");
         assert_eq!(first.path, "/structure/body/condition", "{report:?}");
@@ -7381,7 +7462,8 @@ mod tests {
             load_run(&runtime, &recovery.id).unwrap().status,
             "completed"
         );
-        assert!(!request_writer_verified(&runtime, &root).unwrap());
+        assert!(request_writer_verified(&runtime, &root).unwrap()); // PM has not confirmed delivery.
+        release_request_writer(&runtime, &root).unwrap();
         let scoped =
             RuntimeStore::for_package(data.path(), "workspace", project.path(), TEST_PACKAGE)
                 .unwrap();
@@ -7428,7 +7510,8 @@ mod tests {
             load_run(&runtime, &recovery.id).unwrap().status,
             "completed"
         );
-        assert!(!request_writer_verified(&runtime, &root).unwrap());
+        assert!(request_writer_verified(&runtime, &root).unwrap()); // Human acceptance still needs PM delivery judgment.
+        release_request_writer(&runtime, &root).unwrap();
         let scoped =
             RuntimeStore::for_package(data.path(), "workspace", project.path(), TEST_PACKAGE)
                 .unwrap();

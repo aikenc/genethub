@@ -13,7 +13,7 @@ import { observationLabel, workflowObservation } from "./workflow-observation";
 
 const labels: Record<string, string> = {
   running: "进行中", stopping: "停止中", cancelling: "停止中",
-  blocked: "受阻", failed: "失败", cancelled: "已取消", completed: "执行完成",
+  blocked: "受阻", failed: "失败", cancelled: "已取消", completed: "已交付", completing: "交付判定中",
 };
 
 const CANCEL_ATTEMPTS = 4;
@@ -73,10 +73,12 @@ export function TaskProgress({ session, onReportSession }: { session: SessionSum
   if (!summary) return null;
   const stateLabel = summary.stopping ? "停止中" : summary.blocked ? "受阻"
     : summary.tasks.some(task => task.waiting?.length) ? "等待处理"
+    : summary.tasks.some(task => task.recovery && task.executing) ? "恢复审查中"
     : summary.tasks.some(task => task.executing) ? "小队执行中"
     : summary.running ? "等待推进"
     : summary.tasks.some(task => task.status === "failed") ? "失败"
-    : summary.tasks.length && summary.tasks.every(task => task.status === "cancelled") ? "已取消" : "执行记录";
+    : summary.tasks.some(task => task.status === "completed" && !task.requirement) ? "交付待核对"
+    : summary.tasks.length && summary.tasks.every(task => task.status === "cancelled") ? "已取消" : summary.tasks.length && summary.tasks.every(task => ["completed", "cancelled"].includes(task.status)) ? "已交付" : "等待推进";
   const ready = connection === "ready" && !activity.error && !summary.error;
   const heading = `小队任务 · ${ready ? stateLabel : "待同步"} · ${summary.tasks.length + summary.more} 项${ready && summary.tasks.length === 1 && summary.more === 0 && summary.tasks[0]?.observation ? ` · ${observationLabel(summary.tasks[0].observation)}` : ""}`;
   const canCancel = ready && client?.identity?.features?.includes("workflow.control.v1");
@@ -85,13 +87,14 @@ export function TaskProgress({ session, onReportSession }: { session: SessionSum
       onClick={() => setExpanded(true)}><span className="min-w-0 truncate">{heading}</span><span aria-hidden>›</span></button>{ready && summary.tasks.length === 1 && summary.more === 0 && <WorkflowViewLinks workspaceId={session.workspaceId} runId={summary.tasks[0]!.runId} compact />}</div>
     {error && !expanded && <p role="alert" className="pb-2 text-danger">{error}</p>}
     {expanded && <WorkspaceDetailsDialog title="小队任务" onClose={() => setExpanded(false)}>
+      {current.inputSummary?.paused && <p role="status" className="mt-2 text-muted">PM 会话已暂停；后台任务状态见下方。发送新消息或答复待处理问题后继续。</p>}
       {!ready && <p role="status" className="mt-2 text-muted">{summary.error ?? "任务状态待核对，连接恢复后更新。"}</p>}
       {!ready && summary.checkedAtMs > 0 && <p className="mt-1 text-xs text-muted">最近核对：{new Date(summary.checkedAtMs).toLocaleTimeString()}。</p>}
       {error && <p role="alert" className="mt-2 text-danger">{error}</p>}
       <ul className="mt-2 space-y-3">
         {summary.tasks.map((task, index) => <li key={task.runId} className="border-t border-line pt-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <span>{activity.sessions?.find(item => item.id === task.executorSessionId)?.title || `任务 ${index + 1}`} · {task.executing ? "小队执行中" : task.status === "running" && task.waiting?.length ? "等待处理" : labels[task.status] ?? task.status}</span>
+            <span>{activity.sessions?.find(item => item.id === task.executorSessionId)?.title || `任务 ${index + 1}`} · {task.executing ? "小队执行中" : task.status === "running" && task.waiting?.length ? "等待处理" : task.status === "completed" && !task.requirement ? "执行已结束，交付待核对" : labels[task.status] ?? task.status}</span>
             {canCancel && !["completed", "cancelled"].includes(task.status) && <button type="button"
               title={`终止 ${task.taskId} 及其小队；不影响 PM 本轮和其他任务`}
               className="min-h-9 px-2 text-danger disabled:opacity-50" disabled={!!busy || task.status === "cancelling"}
@@ -110,6 +113,9 @@ export function TaskProgress({ session, onReportSession }: { session: SessionSum
                   .finally(() => { if (useWorkbench.getState().client === owner) setBusy(null); });
               }}>{busy === task.runId ? "正在提交终止…" : task.status === "cancelling" ? "停止中" : "终止任务"}</button>}
           </div>
+          {task.recovery && <p role="status" className="mt-1 text-xs text-muted">恢复流程 · {task.waiting?.length ? "等待 PM 决定" : task.runStatus === "completed" ? "执行已结束，需求仍需核对交付" : labels[task.runStatus ?? ""] ?? "状态待同步"}</p>}
+          {task.requirement?.patrolError && <p role="alert" className="mt-1 text-xs text-danger">{task.requirement.patrolError}</p>}
+          {task.requirement?.conclusion && <p className="mt-1 text-xs text-muted">交付结论：{task.requirement.conclusion}</p>}
           {task.reportPending && <p className="mt-1 text-xs text-muted">{task.status === "running" ? "任务有新情况，待 PM 处理。" : "执行结果待 PM 核对新消息并汇报。"}</p>}
           {task.humanExit && <div role="status" className="mt-2 rounded-lg border border-line px-2 py-2 text-xs">
             <p className="font-medium">人工决定 · 出口 {task.humanExit.kind}{task.humanExit.answer ? ` · 已选择 ${task.humanExit.answer}` : " · 待答复"}</p>
@@ -119,7 +125,7 @@ export function TaskProgress({ session, onReportSession }: { session: SessionSum
               || (task.humanExit.kind === "c" && task.humanExit.answer === "reject")) && onReportSession &&
               <button type="button" className="mt-1 min-h-9 text-accent" onClick={() => onReportSession(
                 task.humanExit!.pmSessionId,
-                `Workflow 恢复失败\nRun: ${task.runId}\n请求: ${task.requestRunId ?? task.runId}\n原因: ${task.humanExit!.reason}\n日志引用: workflow journal --run ${task.runId}`,
+                `Workflow 恢复失败\nRun: ${task.runId}\n用户需求: ${task.requestRunId ?? task.runId}\n原因: ${task.humanExit!.reason}\n日志引用: workflow journal --run ${task.runId}`,
               )}>打开预填反馈</button>}
           </div>}
           <WorkflowViewLinks workspaceId={session.workspaceId} runId={task.runId} />

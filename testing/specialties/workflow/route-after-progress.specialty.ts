@@ -89,7 +89,7 @@ for (const shape of ["graph", "structured"] as const) defineSpecialty({
     let blocked: WorkflowRunStatus | undefined;
     await t.tools.waitUntil(async () => {
       blocked = (await history()).find(run => run.taskId === "route-after-progress");
-      return blocked?.status === "blocked" && !!blocked.reason?.includes("RouteUnavailable");
+      return blocked?.status === "blocked" && blocked.reason?.includes("RouteUnavailable") === true;
     }, 50_000);
     t.assertions.assert(firstSubmitted && !secondSubmitted && blocked!.nodes.some(node => node.status === "completed" && node.uses === "agent.session"),
       "the first Worker did not settle before the route block");

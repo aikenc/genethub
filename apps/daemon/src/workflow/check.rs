@@ -18,11 +18,7 @@ pub(crate) async fn check(
             checked_at_ms: now_ms(),
             findings: Vec::new(),
             runs: Vec::new(),
-            draft: Some(authoring::check_draft(
-                &workspace.root,
-                package_id,
-                &state.registry,
-            )),
+            draft: Some(authoring::check_draft(&workspace.root, package_id)),
         });
     }
     let runtime = RuntimeStore::new(&state.paths.root, workspace_id, &workspace.root)?;

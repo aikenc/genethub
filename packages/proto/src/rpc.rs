@@ -249,6 +249,17 @@ pub enum Request {
         #[serde(default)]
         limit: Option<u32>,
     },
+    /// Ask the controller to decide a built-in recovery review. The daemon
+    /// owns the durable question so this does not require native Agent tools.
+    #[serde(rename = "workflow.consult", rename_all = "camelCase")]
+    WorkflowConsult {
+        workspace_id: String,
+        run_id: String,
+        node_id: String,
+        #[ts(type = "number")]
+        expected_revision: u64,
+        report: String,
+    },
     /// Supplies explicit evidence for the node owned by this managed Session.
     /// `expectedRevision` is a project-run CAS, not a best-effort hint.
     #[serde(rename = "workflow.complete", rename_all = "camelCase")]
@@ -340,6 +351,16 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional, type = "number")]
         max_llm_rounds: Option<u64>,
+    },
+    /// An authenticated ordinary PM records its goal delivery decision.
+    #[serde(rename = "workflow.requirement.complete", rename_all = "camelCase")]
+    WorkflowRequirementComplete {
+        workspace_id: String,
+        run_id: String,
+        #[ts(type = "number")]
+        expected_revision: u64,
+        conclusion: String,
+        delivery_references: Vec<String>,
     },
     /// Mounts, configures or removes one responsibility on an already-open,
     /// PipeBuilder-verified AgentSpace, or moves it in the ownership tree.
