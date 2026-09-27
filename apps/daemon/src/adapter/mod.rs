@@ -15,6 +15,8 @@ pub mod registry;
 pub mod stdio;
 pub mod usage;
 
+use std::collections::HashMap;
+use std::hash::Hash;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -568,6 +570,55 @@ pub(super) fn append_system_prompt_arg(
 pub async fn kill_tree(child: &mut crate::os_process::Child) {
     if let Err(error) = kill_tree_checked(child).await {
         tracing::warn!(%error, "could not confirm child cleanup");
+    }
+}
+
+/// Drops every in-flight reply. The sender closing is the failure: each
+/// adapter reads that as the process having gone away.
+pub(super) async fn fail_open_requests<K, T>(
+    pending: &Arc<Mutex<HashMap<K, tokio::sync::oneshot::Sender<T>>>>,
+    message: &'static str,
+) where
+    K: Eq + Hash,
+{
+    let waiting: Vec<_> = pending
+        .lock()
+        .await
+        .drain()
+        .map(|(_, sender)| sender)
+        .collect();
+    if !waiting.is_empty() {
+        tracing::warn!(outstanding = waiting.len(), "{message}");
+    }
+}
+
+/// Polls until the process is gone, then fails requests still waiting on it.
+///
+/// Stdout can stay open after the process exits when a grandchild inherited
+/// the pipe. Waiting for EOF in that shape waits forever.
+pub(super) async fn watch_process_exit<K, T>(
+    child: Arc<Mutex<Option<crate::os_process::Child>>>,
+    pending: Arc<Mutex<HashMap<K, tokio::sync::oneshot::Sender<T>>>>,
+    message: &'static str,
+) where
+    K: Eq + Hash + Send + 'static,
+    T: Send + 'static,
+{
+    loop {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let gone = {
+            let Ok(mut held) = child.try_lock() else {
+                continue;
+            };
+            match held.as_mut() {
+                None => return,
+                Some(child) => matches!(child.try_wait(), Ok(Some(_)) | Err(_)),
+            }
+        };
+        if gone {
+            fail_open_requests(&pending, message).await;
+            return;
+        }
     }
 }
 

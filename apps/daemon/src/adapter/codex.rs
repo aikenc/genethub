@@ -1529,39 +1529,16 @@ async fn read_loop(reader: Reader) {
 }
 
 async fn abandon_pending(pending: &PendingMap) {
-    let waiting: Vec<_> = pending
-        .lock()
-        .await
-        .drain()
-        .map(|(_, sender)| sender)
-        .collect();
-    if !waiting.is_empty() {
-        tracing::warn!(
-            outstanding = waiting.len(),
-            "Codex went away with requests still open"
-        );
-    }
+    super::fail_open_requests(pending, "Codex went away with requests still open").await;
 }
 
-const EXIT_POLL: Duration = Duration::from_millis(500);
-
 async fn watch_for_exit(child: Arc<Mutex<Option<Child>>>, pending: PendingMap) {
-    loop {
-        tokio::time::sleep(EXIT_POLL).await;
-        let gone = {
-            let Ok(mut held) = child.try_lock() else {
-                continue;
-            };
-            match held.as_mut() {
-                None => return,
-                Some(child) => matches!(child.try_wait(), Ok(Some(_)) | Err(_)),
-            }
-        };
-        if gone {
-            abandon_pending(&pending).await;
-            return;
-        }
-    }
+    super::watch_process_exit(
+        child,
+        pending,
+        "Codex went away with requests still open",
+    )
+    .await;
 }
 
 /// One request the CLI is waiting on.

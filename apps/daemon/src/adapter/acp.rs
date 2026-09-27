@@ -1584,46 +1584,18 @@ async fn read_loop(
 /// sender as the agent having gone away mid-turn, and reports it with the
 /// process's exit code and last words rather than a bare timeout.
 async fn abandon_pending(pending: &PendingMap) {
-    let waiting: Vec<_> = pending
-        .lock()
-        .await
-        .drain()
-        .map(|(_, sender)| sender)
-        .collect();
-    if !waiting.is_empty() {
-        tracing::warn!(
-            outstanding = waiting.len(),
-            "an ACP agent went away with requests still open"
-        );
-    }
+    super::fail_open_requests(pending, "an ACP agent went away with requests still open").await;
 }
 
-/// How often to ask whether the agent process is still there.
-///
-/// Only reached when the process is gone but its stdout is not: a shim that
-/// exits leaving the real CLI holding the pipe, or a grandchild that inherited
-/// it. Waiting for EOF in that shape waits forever.
-const EXIT_POLL: Duration = Duration::from_millis(500);
-
 async fn watch_for_exit(child: Arc<Mutex<Option<crate::os_process::Child>>>, pending: PendingMap) {
-    loop {
-        tokio::time::sleep(EXIT_POLL).await;
-        let gone = {
-            // Never queue behind `close`: it holds this lock while it kills the
-            // tree, and it takes the child away when it is done.
-            let Ok(mut held) = child.try_lock() else {
-                continue;
-            };
-            match held.as_mut() {
-                None => return,
-                Some(child) => matches!(child.try_wait(), Ok(Some(_)) | Err(_)),
-            }
-        };
-        if gone {
-            abandon_pending(&pending).await;
-            return;
-        }
-    }
+    // Never queue behind `close`: the shared watcher uses `try_lock`, and
+    // `close` holds this lock while it kills the tree.
+    super::watch_process_exit(
+        child,
+        pending,
+        "an ACP agent went away with requests still open",
+    )
+    .await;
 }
 
 /// Builds a `session/prompt` content block array from a turn's text and

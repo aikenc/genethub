@@ -1530,39 +1530,20 @@ async fn read_loop(
 }
 
 async fn abandon_awaiting(awaiting: &Awaiting) {
-    let waiting: Vec<_> = awaiting
-        .lock()
-        .await
-        .drain()
-        .map(|(_, sender)| sender)
-        .collect();
-    if !waiting.is_empty() {
-        tracing::warn!(
-            outstanding = waiting.len(),
-            "Claude Code went away with control requests still open"
-        );
-    }
+    super::fail_open_requests(
+        awaiting,
+        "Claude Code went away with control requests still open",
+    )
+    .await;
 }
 
-const EXIT_POLL: std::time::Duration = std::time::Duration::from_millis(500);
-
 async fn watch_for_exit(child: Arc<Mutex<Option<Child>>>, awaiting: Awaiting) {
-    loop {
-        tokio::time::sleep(EXIT_POLL).await;
-        let gone = {
-            let Ok(mut held) = child.try_lock() else {
-                continue;
-            };
-            match held.as_mut() {
-                None => return,
-                Some(child) => matches!(child.try_wait(), Ok(Some(_)) | Err(_)),
-            }
-        };
-        if gone {
-            abandon_awaiting(&awaiting).await;
-            return;
-        }
-    }
+    super::watch_process_exit(
+        child,
+        awaiting,
+        "Claude Code went away with control requests still open",
+    )
+    .await;
 }
 
 /// The CLI's out-of-band frames about itself: which session this is, and when it
