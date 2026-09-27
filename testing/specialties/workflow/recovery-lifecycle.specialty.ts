@@ -2,9 +2,10 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { SessionSnapshot, WorkflowRunStatus } from "@genehub/proto";
 
-import { connectProductClient, daemonEndpoint, defineSpecialty, runGenetAsync } from "../../framework/public.ts";
+import { connectProductClient, daemonEndpoint, defineSpecialty, openWorkbenchPage, runGenetAsync } from "../../framework/public.ts";
 
-for (const mode of ["normal", "resume", "bypass", "corrupt", "proactive", "human-b", "human-f", "cancel", "queue"] as const) {
+for (const mode of ["normal", "consult", "resume", "bypass", "corrupt", "proactive", "human-b", "human-f", "cancel", "queue"] as const) {
+const consult = mode === "consult";
 const resume = mode === "resume";
 const bypass = mode === "bypass";
 const corrupt = mode === "corrupt";
@@ -14,8 +15,8 @@ const humanF = mode === "human-f";
 const cancelExit = mode === "cancel";
 const queue = mode === "queue";
 defineSpecialty({
-  id: `specialty.workflow.${resume ? "recovery-resume" : bypass ? "recovery-pm-gate" : corrupt ? "recovery-corrupt-fallback" : proactive ? "recovery-proactive" : humanB ? "recovery-human-b" : humanF ? "recovery-human-f" : cancelExit ? "recovery-cancel" : queue ? "recovery-package-queue" : "recovery-lifecycle"}`,
-  title: bypass ? "WR cannot choose a PM recovery decision without a durable answer" : resume ? "PM-selected resume continues a blocked goal through a same-definition successor" : corrupt ? "A damaged custom Candidate falls back to built-in recovery" : proactive ? "PM can proactively start recovery for unhealthy execution" : humanB ? "Recovery can hand a reduced-scope decision to a Human" : humanF ? "Human acceptance closes a business request" : cancelExit ? "A recovery cancellation recommendation waits for PM to cancel the request" : queue ? "Failed requests enter package recovery one at a time" : "A blocked request completes through the built-in recovery graph",
+  id: `specialty.workflow.${consult ? "recovery-consult" : resume ? "recovery-resume" : bypass ? "recovery-pm-gate" : corrupt ? "recovery-corrupt-fallback" : proactive ? "recovery-proactive" : humanB ? "recovery-human-b" : humanF ? "recovery-human-f" : cancelExit ? "recovery-cancel" : queue ? "recovery-package-queue" : "recovery-lifecycle"}`,
+  title: consult ? "CLI recovery consultation survives restart and is visible on the PM page" : bypass ? "WR cannot choose a PM recovery decision without a durable answer" : resume ? "PM-selected resume continues a blocked goal through a same-definition successor" : corrupt ? "A damaged custom Candidate falls back to built-in recovery" : proactive ? "PM can proactively start recovery for unhealthy execution" : humanB ? "Recovery can hand a reduced-scope decision to a Human" : humanF ? "Human acceptance closes a business request" : cancelExit ? "A recovery cancellation recommendation waits for PM to cancel the request" : queue ? "Failed requests enter package recovery one at a time" : "A blocked request completes through the built-in recovery graph",
   oracle: corrupt
     ? "A damaged active Candidate cannot silence a blocked request: the patrol starts the built-in WR and commits a fallback journal event"
     : proactive
@@ -29,14 +30,16 @@ defineSpecialty({
         : "A failed business Run enters WR review, waits for a PM choice, lets WM activate a repaired Candidate, passes WR acceptance, then completes a business successor and writes one recovery summary",
   catches: ["blocked business work has no recovery owner", "WR bypasses the PM decision", "repair is lost before successor", "recovery completion is mistaken for business completion", "recovery summary is missing or duplicated"],
   tags: ["core", "workflow", "workflow-recovery"],
+  runner: consult ? "playwright" : undefined,
   llm: { default: "mock" }, expectedDurationMs: 65_000, timeoutMs: 180_000,
-  resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
+  resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: consult ? 1 : 0, pool: consult ? "browser" : "standard" },
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
   surfaces: ["daemon", "agent", "genet-cli", "workbench-client", "filesystem"],
-  productInterfaces: ["workflow.activate", "workflow.dispatch", "workflow.journal", "workflow.complete", "workflow.history", "session.respondPermission"],
+  productInterfaces: ["workflow.activate", "workflow.dispatch", "workflow.journal", "workflow.complete", "workflow.consult", "workflow.history", "session.respondPermission"],
 }, async t => {
   t.data.git.init(t.env.workspace);
   const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
+  let browser: Awaited<ReturnType<typeof openWorkbenchPage>> | undefined;
   let stage = "setup";
   let reviewerId = "";
   let questionId = "";
@@ -73,6 +76,7 @@ defineSpecialty({
     }
 
     let started = false, successorRequested = false, initialSubmitted = false, secondSubmitted = false, successorSubmitted = false;
+    let reportRead = false;
     let decisionSent = false, reviewerCalls = 0, managerCalls = 0, acceptorCalls = 0;
     const bodyOf = (request: unknown) => JSON.stringify(request);
     const cli = (args: string[]) => ({ tool: { name: "bash", arguments: { command: ["\"$GENEHUB_CLI\"", ...args.map(arg => `'${arg.replaceAll("'", `'\\''`)}'`)].join(" ") } } });
@@ -104,6 +108,7 @@ defineSpecialty({
           return cli(["workflow", "journal", "--run", handled]);
         }
         if (reviewerCalls === 2 && bypass) return cli(["workflow", "complete", "--outcome", "repair", "--evidence", "report=claimed-without-PM"]);
+        if (reviewerCalls === 2 && consult) return cli(["workflow", "consult", "--reason", "Review evidence: repair the failed delivery flow, then independently verify it."]);
         if (reviewerCalls === 2) return { tool: { name: "request_user_input", arguments: { questions: [{
           id: "decision", header: "恢复", question: "选择受控恢复动作", options: [
             { label: "repair", description: "修复流程" }, { label: "resume", description: "续办" },
@@ -127,6 +132,12 @@ defineSpecialty({
         return { text: "Repair accepted." };
       }
       if (!decisionSent && body.includes("APPROVE_RECOVERY_REPAIR")) {
+        if (consult && !reportRead) {
+          reportRead = true;
+          return cli(["session", "get", reviewerId]);
+        }
+        if (consult) t.assertions.assert(body.includes("Review evidence: repair the failed delivery flow, then independently verify it."),
+          "PM could not read the durable review report through session get before deciding");
         decisionSent = true;
         return { tool: { name: "bash", arguments: {
           command: `"$GENEHUB_CLI" session respond ${reviewerId} --request ${questionId} --choose ${humanB ? "human" : cancelExit ? "cancel" : resume ? "resume" : "repair"}`,
@@ -285,6 +296,19 @@ defineSpecialty({
     const question = (await snapshot(reviewer)).pendingPermissions[0]!;
     t.assertions.assert(question.questions?.[0]?.options.map(option => option.label).join(",") === "repair,resume,successor,human,cancel", "WR did not ask PM the five-way decision");
     questionId = question.id;
+    if (consult) {
+      t.assertions.assert(question.id.startsWith("workflow-consult-"), "CLI did not create a daemon-owned decision");
+      const unauthorized = await opened.client.call({ type: "workflow.consult", payload: {
+        workspaceId: opened.workspaceId, runId: recovery!.id, nodeId: "review", expectedRevision: recovery!.revision, report: "Human impersonation",
+      } }).then(() => false, () => true);
+      t.assertions.assert(unauthorized, "Human bypassed the Worker-only consultation entry");
+      await t.tools.waitUntil(async () => (await snapshot(pm)).summary.workSummary?.tasks.some(task =>
+        task.runId === recovery!.id && task.recovery && task.runStatus === "running" && task.waiting?.some(wait => wait.requestId === questionId)) === true, 15_000);
+      browser = await openWorkbenchPage(t.openRoot, () => daemonEndpoint(opened.daemon), opened.workspaceId, pm);
+      await browser.page.getByRole("region", { name: "任务进度" }).getByRole("button", { name: /小队任务/ }).click();
+      await browser.page.getByRole("dialog", { name: "小队任务", exact: true }).getByText("恢复流程 · 等待 PM 决定").waitFor();
+      await browser.close(); browser = undefined;
+    }
     await t.tools.waitUntil(async () => (await journal(recovery!.id))
       .some(event => event.eventType === "pause.requested" && event.messageId === questionId), 15_000);
     stage = "restart with one pending recovery question";
@@ -409,6 +433,7 @@ defineSpecialty({
     const roleCalls = opened.mock.requests.filter(request => JSON.stringify(request).includes("只读复查这条用户需求及其 Run")).length;
     throw new Error(`${stage}: ${error}; runs=${JSON.stringify(runs).slice(0, 3500)}; reviewer=${JSON.stringify(reviewerState).slice(0, 6500)}; roleCalls=${roleCalls}`);
   } finally {
+    await browser?.close();
     opened.client.close();
     opened.daemon.stop();
     await opened.mock.stop();

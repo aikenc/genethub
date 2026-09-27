@@ -39,6 +39,7 @@ for (const exit of ["d", "a", "e"] as const) defineSpecialty({
         modelId: "deepseek/deepseek-v4-flash", tags: ["Flash"], cost: "low" }],
     } } });
     let dispatched = false;
+    let pmReplies = 0;
     let original: WorkflowRunStatus | undefined;
     opened.mock.script(...Array.from({ length: 24 }, () => ({ respond: (request: unknown) => {
       if (exit !== "d" && JSON.stringify(request).includes("ASK_BUSINESS_HUMAN")) {
@@ -46,7 +47,7 @@ for (const exit of ["d", "a", "e"] as const) defineSpecialty({
           `"$GENEHUB_CLI" workflow human --run ${original!.id} --revision ${original!.revision} --kind ${exit} --reason "PM needs a Human decision"`,
         } } };
       }
-      if (dispatched) return { text: "The route remains unavailable." };
+      if (dispatched) { pmReplies++; return { text: "The route remains unavailable." }; }
       dispatched = true;
       return { tool: { name: "bash", arguments: { command:
         '"$GENEHUB_CLI" workflow activate --revision 0 && "$GENEHUB_CLI" workflow dispatch --workflow pm-timeout --task overdue-route --message "deliver after route repair" --no-wait',
@@ -114,6 +115,15 @@ for (const exit of ["d", "a", "e"] as const) defineSpecialty({
     const deleted = await opened.client.call({ type: "session.delete", payload: { sessionId: pm } });
     t.assertions.assert(deleted?.type === "ack", "original PM conversation could not be deleted");
     pm = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
+    await opened.client.call({ type: "session.send", payload: {
+      sessionId: pm, messageId: "u_pause_pm_before_human", text: "Track this request, then wait.",
+      attachments: [], continuesRound: null, artifactPreviewBaseUrl: null,
+    } });
+    await t.tools.waitUntil(async () => {
+      const reply = await opened.client.call({ type: "session.get", payload: { sessionId: pm } });
+      return reply?.type === "snapshot" && reply.data.summary.status === "idle";
+    }, 15_000);
+    await opened.client.call({ type: "session.interrupt", payload: { sessionId: pm } });
     await t.tools.waitUntil(async () => {
       const reply = await opened.client.call({ type: "session.get", payload: { sessionId: pm } });
       return reply?.type === "snapshot" && reply.data.summary.workSummary?.tasks
@@ -156,6 +166,10 @@ for (const exit of ["d", "a", "e"] as const) defineSpecialty({
     t.assertions.assert(stoppedAgain.code === 0, `second stop failed: ${stoppedAgain.stderr}`);
     await start();
     await t.tools.waitUntil(async () => (await pmCard()).length === 1, 10_000);
+    const paused = await opened.client.call({ type: "session.get", payload: { sessionId: pm } });
+    t.assertions.assert(paused?.type === "snapshot" && paused.data.summary.inputSummary?.paused,
+      "ordinary notices or restart unexpectedly resumed the paused PM");
+    const beforeAnswer = pmReplies;
     const answered = await opened.client.call({ type: "session.respondPermission", payload: {
       sessionId: pm, requestId: card.id, outcome: { outcome: "selected", optionId: "confirmFeedback" },
     } });
@@ -163,6 +177,18 @@ for (const exit of ["d", "a", "e"] as const) defineSpecialty({
     await t.tools.waitUntil(async () => (await history())[0]?.humanExit?.answer === "confirmFeedback", 20_000);
     t.assertions.assert((await pmCard()).length === 0 && (await history()).length === 1,
       "answered feedback card remained pending or changed the request lineage");
+    await t.tools.waitUntil(async () => {
+      const reply = await opened.client.call({ type: "session.get", payload: { sessionId: pm } });
+      return pmReplies > beforeAnswer && reply?.type === "snapshot" && !reply.data.summary.inputSummary?.paused
+        && reply.data.summary.status === "idle";
+    }, 20_000);
+    await opened.client.call({ type: "session.interrupt", payload: { sessionId: pm } });
+    await opened.client.call({ type: "session.respondPermission", payload: {
+      sessionId: pm, requestId: card.id, outcome: { outcome: "selected", optionId: "confirmFeedback" },
+    } });
+    const replayed = await opened.client.call({ type: "session.get", payload: { sessionId: pm } });
+    t.assertions.assert(replayed?.type === "snapshot" && replayed.data.summary.inputSummary?.paused,
+      "replaying an answer undid the user's later stop");
   } finally {
     opened.client.close();
     opened.daemon.stop();

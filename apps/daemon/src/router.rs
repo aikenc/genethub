@@ -1420,6 +1420,16 @@ async fn dispatch(
             }
         }
 
+        Request::WorkflowConsult { workspace_id, run_id, node_id, expected_revision, report } => {
+            let Some(caller_session_id) = caller.session_controller_id() else {
+                return Handled::err(ErrorCode::Unauthorized, "workflow.consult requires the recovery reviewer Session");
+            };
+            match crate::workflow::consult(state, &workspace_id, caller_session_id,
+                &run_id, &node_id, expected_revision, &report).await {
+                Ok(()) => Handled::ok(Reply::Ack),
+                Err(error) => failed(error),
+            }
+        }
         Request::WorkflowComplete {
             workspace_id,
             run_id,
@@ -3685,6 +3695,7 @@ fn diagnostic_operation(request: &Request) -> Option<&'static str> {
         Request::WorkflowBuild { .. } => Some("workflow.build"),
         Request::WorkflowActivate { .. } => Some("workflow.activate"),
         Request::WorkflowDispatch { .. } => Some("workflow.dispatch"),
+        Request::WorkflowConsult { .. } => Some("workflow.consult"),
         Request::WorkflowComplete { .. } => Some("workflow.complete"),
         Request::WorkflowCancel { .. } => Some("workflow.cancel"),
         Request::WorkflowRecover { .. } => Some("workflow.recover"),

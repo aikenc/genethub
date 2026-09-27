@@ -162,8 +162,15 @@ pub(super) fn prepare_notice(run: &mut RunRecord, kind: &str) {
     }
     let human = run.supervision.waiting_requests.iter()
         .find(|request| kind == format!("human:{}:{}", request.session_id, request.request_id))
-        .map(|request| format!("等待用户处理：节点 {}，会话 {}，原交互 {}，问题标题（来源数据）：{}。请查看原问题，把需要用户决定的事项带回本 PM 会话；保留原 requestId，不代答、不以项目管理权绕过审批。任务卡可以查看原问题，原会话的交互权限仍然适用。",
-            request.node_id, request.session_id, request.request_id, request.title))
+        .map(|request| {
+            if !run.handles.is_empty() && run.workflow_id == "builtin-recovery" && request.node_id == "review" {
+                format!("等待控制者 PM 决定：会话 {}，原交互 {}，问题标题（来源数据）：{}。用 session get {} 读取持久问题中的审查报告，再用 session respond {} --request {} --choose <repair|resume|successor|human|cancel> 记录决定。此问题由 PM 作答；需要真实 Human 授权的业务额度等事项仍走 workflow human。",
+                    request.session_id, request.request_id, request.title, request.session_id, request.session_id, request.request_id)
+            } else {
+                format!("等待用户处理：节点 {}，会话 {}，原交互 {}，问题标题（来源数据）：{}。请查看原问题，把需要用户决定的事项带回本 PM 会话；保留原 requestId，不代答、不以项目管理权绕过审批。任务卡可以查看原问题，原会话的交互权限仍然适用。",
+                    request.node_id, request.session_id, request.request_id, request.title)
+            }
+        })
         .unwrap_or_default();
     let recovery = if run.status == "recoverable" {
         if run

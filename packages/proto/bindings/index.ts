@@ -1001,7 +1001,7 @@ packageId?: string,
 /**
  * Validate current source without creating a Candidate, Run or Worker.
  */
-draft?: boolean, } } | { "type": "workflow.get", "payload": { workspaceId: string, runId: string, } } | { "type": "workflow.journal", "payload": { workspaceId: string, runId: string, since: bigint, limit: number, } } | { "type": "workflow.history", "payload": { workspaceId: string, limit: number | null, } } | { "type": "workflow.complete", "payload": { workspaceId: string, runId: string, nodeId: string, expectedRevision: number, evidence: { [key in string]?: string }, 
+draft?: boolean, } } | { "type": "workflow.get", "payload": { workspaceId: string, runId: string, } } | { "type": "workflow.journal", "payload": { workspaceId: string, runId: string, since: bigint, limit: number, } } | { "type": "workflow.history", "payload": { workspaceId: string, limit: number | null, } } | { "type": "workflow.consult", "payload": { workspaceId: string, runId: string, nodeId: string, expectedRevision: number, report: string, } } | { "type": "workflow.complete", "payload": { workspaceId: string, runId: string, nodeId: string, expectedRevision: number, evidence: { [key in string]?: string }, 
 /**
  * Bounded business data, checked against the node's declared output shape.
  */
@@ -2287,7 +2287,11 @@ humanWaitMs: number,
  */
 recoveryWaitMs: number, waiting: boolean, nodeWallMs: number, };
 
-export type WorkflowTaskSummary = { requirement?: WorkflowRequirementStatus, humanExit?: WorkflowHumanExitStatus, executing?: boolean, waiting?: Array<WorkflowHumanWait>, requestRunId?: string, reportPending?: boolean, runId: string, taskId: string, workflowId: string, status: string, revision: number, activeNodes: Array<string>, executorSessionId?: string, reason?: string, cleanupError?: string, updatedAtMs: number, };
+export type WorkflowTaskSummary = { 
+/**
+ * Execution is independent from the user requirement's delivery state.
+ */
+runStatus?: string, recovery?: boolean, requirement?: WorkflowRequirementStatus, humanExit?: WorkflowHumanExitStatus, executing?: boolean, waiting?: Array<WorkflowHumanWait>, requestRunId?: string, reportPending?: boolean, runId: string, taskId: string, workflowId: string, status: string, revision: number, activeNodes: Array<string>, executorSessionId?: string, reason?: string, cleanupError?: string, updatedAtMs: number, };
 
 export type WorkspaceFileSource = { kind: WorkspaceFileSourceKind, workspaceHandle: string, path: string, };
 

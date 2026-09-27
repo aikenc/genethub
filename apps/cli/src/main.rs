@@ -221,6 +221,7 @@ pub fn usage() -> i32 {
                                     validate, authorize or reset recovery configuration
   genet workflow human --run <id> --revision <n> --kind <a|b|c|d|e|f> --reason <text>
                                     PM asks for a classified Human decision
+  genet workflow consult --reason <review-report>
   genet workflow complete --run <id> --node <id> --revision <n> --evidence <key=value>...
                                     submit exact node evidence from its managed session
                               [--outcome <name> --reason <text>]

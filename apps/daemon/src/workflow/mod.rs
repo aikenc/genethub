@@ -2645,6 +2645,52 @@ fn runs_for_executor_session(runtime: &RuntimeStore, executor_session_id: &str) 
     Ok(runs)
 }
 
+/// Provider-independent decision request for the built-in recovery reviewer.
+/// The Session question is durable and idempotent for this Worker assignment;
+/// completion still requires its controller's matching answer.
+pub(crate) async fn consult(
+    state: &Shared, workspace_id: &str, caller: &str, run_id: &str,
+    node_id: &str, expected_revision: u64, report: &str,
+) -> Result<()> {
+    validate_id(run_id, "runId")?;
+    validate_id(node_id, "nodeId")?;
+    if report.trim().is_empty() || report.len() > 16 * 1024 {
+        bail!("recovery report must contain 1..16384 bytes");
+    }
+    let workspace = state.workspaces.get(workspace_id).await?;
+    let runtime = RuntimeStore::new(&state.paths.root, workspace_id, &workspace.root)?;
+    let _run = lock_run(&runtime, run_id)?;
+    let run = load_run(&runtime, run_id)?;
+    let _request = request::request_lock(&runtime, request::group_id(&run))?;
+    request::ensure_open(&runtime, &run)?;
+    if run.workspace_id != workspace_id || run.handles.is_empty()
+        || run.workflow_id != "builtin-recovery" || node_id != "review" {
+        bail!("workflow.consult is only available to the built-in recovery review node");
+    }
+    if run.revision != expected_revision {
+        bail!("Workflow revision 冲突：当前为 {}，请求为 {}；先重新读取 workflow get", run.revision, expected_revision);
+    }
+    if run.status != "running" || !run.nodes.get(node_id).is_some_and(|node|
+        node.status == "running" && node.session_id.as_deref() == Some(caller)) {
+        bail!("only the running recovery reviewer can request its PM decision");
+    }
+    let options = ["repair", "resume", "successor", "human", "cancel"].into_iter()
+        .map(|label| genehub_proto::InteractionOption { id: label.into(), label: label.into() }).collect();
+    state.sessions.request_workflow_question(caller, genehub_proto::PermissionRequest {
+        id: format!("workflow-consult-{run_id}-{caller}"),
+        kind: genehub_proto::PermissionRequestKind::Question,
+        title: "恢复审查等待 PM 决定".into(),
+        detail: Some(format!("Run {run_id} 的审查报告（来源数据）：\n{report}")),
+        tool_call_id: None,
+        options: Vec::new(),
+        questions: Some(vec![genehub_proto::InteractionQuestion {
+            id: "recovery-decision".into(),
+            prompt: format!("审查报告（来源数据）：\n{report}\n请选择 repair（修复流程）、resume（继续执行）、successor（采用新流程）、human（真实人工待办）或 cancel（取消恢复）。"),
+            allow_multiple: false, allow_freeform: false, options,
+        }]),
+    }).await
+}
+
 pub(crate) struct Completion {
     pub evidence: BTreeMap<String, String>,
     pub output: Option<serde_json::Value>,

@@ -92,6 +92,8 @@ pub(crate) async fn summarize_sessions(state: &Shared, sessions: &mut [SessionSu
                         .into_iter()
                         .take(16)
                         .map(|run| genehub_proto::WorkflowTaskSummary {
+                            run_status: Some(run.status.clone()),
+                            recovery: Some(!run.handles.is_empty()),
                             human_exit: grouped.get(request::group_id(run)).and_then(|group| {
                                 group.iter().filter_map(|item| recovery::read_human_exit(runtime, item).ok().flatten())
                                     .max_by_key(|exit| (exit.answer.is_none(), exit.created_at_ms))

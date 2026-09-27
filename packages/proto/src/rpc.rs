@@ -225,6 +225,17 @@ pub enum Request {
         #[serde(default)]
         limit: Option<u32>,
     },
+    /// Ask the controller to decide a built-in recovery review. The daemon
+    /// owns the durable question so this does not require native Agent tools.
+    #[serde(rename = "workflow.consult", rename_all = "camelCase")]
+    WorkflowConsult {
+        workspace_id: String,
+        run_id: String,
+        node_id: String,
+        #[ts(type = "number")]
+        expected_revision: u64,
+        report: String,
+    },
     /// Supplies explicit evidence for the node owned by this managed Session.
     /// `expectedRevision` is a project-run CAS, not a best-effort hint.
     #[serde(rename = "workflow.complete", rename_all = "camelCase")]

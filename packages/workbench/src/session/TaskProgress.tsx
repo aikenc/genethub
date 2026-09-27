@@ -68,6 +68,7 @@ export function TaskProgress({ session, onReportSession }: { session: SessionSum
   if (!summary || session.managed) return null;
   const stateLabel = summary.stopping ? "停止中" : summary.blocked ? "受阻"
     : summary.tasks.some(task => task.waiting?.length) ? "等待处理"
+    : summary.tasks.some(task => task.recovery && task.executing) ? "恢复审查中"
     : summary.tasks.some(task => task.executing) ? "小队执行中"
     : summary.running ? "等待推进"
     : summary.tasks.some(task => task.status === "failed") ? "失败"
@@ -81,6 +82,7 @@ export function TaskProgress({ session, onReportSession }: { session: SessionSum
       onClick={() => setExpanded(true)}><span className="min-w-0 truncate">{heading}</span><span aria-hidden>›</span></button>
     {error && !expanded && <p role="alert" className="pb-2 text-danger">{error}</p>}
     {expanded && <WorkspaceDetailsDialog title="小队任务" onClose={() => setExpanded(false)}>
+      {current.inputSummary?.paused && <p role="status" className="mt-2 text-muted">PM 会话已暂停；后台任务状态见下方。发送新消息或答复待处理问题后继续。</p>}
       {!ready && <p role="status" className="mt-2 text-muted">{summary.error ?? "任务状态待核对，连接恢复后更新。"}</p>}
       {!ready && summary.checkedAtMs > 0 && <p className="mt-1 text-xs text-muted">最近核对：{new Date(summary.checkedAtMs).toLocaleTimeString()}。</p>}
       {error && <p role="alert" className="mt-2 text-danger">{error}</p>}
@@ -106,6 +108,7 @@ export function TaskProgress({ session, onReportSession }: { session: SessionSum
                   .finally(() => { if (useWorkbench.getState().client === owner) setBusy(null); });
               }}>{busy === task.runId ? "正在提交终止…" : task.status === "cancelling" ? "停止中" : "终止任务"}</button>}
           </div>
+          {task.recovery && <p role="status" className="mt-1 text-xs text-muted">恢复流程 · {task.waiting?.length ? "等待 PM 决定" : task.runStatus === "completed" ? "执行已结束，需求仍需核对交付" : labels[task.runStatus ?? ""] ?? "状态待同步"}</p>}
           {task.requirement?.patrolError && <p role="alert" className="mt-1 text-xs text-danger">{task.requirement.patrolError}</p>}
           {task.requirement?.conclusion && <p className="mt-1 text-xs text-muted">交付结论：{task.requirement.conclusion}</p>}
           {task.reportPending && <p className="mt-1 text-xs text-muted">{task.status === "running" ? "任务有新情况，待 PM 处理。" : "执行结果待 PM 核对新消息并汇报。"}</p>}

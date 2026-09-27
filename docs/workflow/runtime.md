@@ -14,7 +14,7 @@
 
 Human 请求保持自己的 ID、问题和明确答复。PM 对问题的咨询不能替代正式答复，也不能借项目管理权绕过授权。Workflow 通知经同一持久队列送回 PM，处理通知前仍需先核对新的用户要求。
 
-停止 PM 当前回合会暂停其自动续接，已有小队继续执行；取消任务使用独立的 Workflow 控制入口。前端 `workSummary` 汇总需求及 Run，PM 空闲但 Worker 仍在工作时，任务仍可显示执行中。
+停止 PM 当前回合会暂停其自动续接，已有小队继续执行；取消任务使用独立的 Workflow 控制入口。普通 Workflow 通知不会解除暂停。新的用户输入，或对仍待处理问题的明确答复，会恢复继续处理；重放同一答复不会覆盖后来发生的停止。前端 `workSummary` 汇总需求及 Run，PM 空闲但 Worker 仍在工作时，任务仍可显示执行中。
 
 ## 派发、节点与结果
 
@@ -73,6 +73,10 @@ recovery-reviewer 复查 → 等待持久 PM 决定
 内置图允许有限返工，具体边以 [builtin-recovery.yaml](../../apps/daemon/src/workflow/builtin-recovery.yaml) 为准。review 节点的五类决策必须与已保存的 PM 问题答复相符；聊天中的“批准”不替代该受控答复。
 
 这些专家是项目 Workspace 中新建的受管会话，不依赖项目 WM/WR Space 或旧 `diagnostic` 组件。自定义恢复使用正常包载体；当候选或恢复定义不可用时，宿主可进入内置兜底并记录降级原因。恢复 Worker 仍是图节点，须通过 `workflow complete` 提交结果。
+
+内置 `recovery-reviewer` 完成复查后使用 `workflow consult --reason <复查报告与建议>`。该入口只接受当前运行的内置恢复 review Worker，由 daemon 创建持久化五选项问题并暂停 Worker，不依赖 Agent 原生提问工具的选项数量或格式。报告最多 16 KiB，作为来源数据展示。控制者 PM 先用 `session get <Worker Session>` 读取问题中的报告，再用 `session respond <Worker Session> --request <requestId> --choose <repair|resume|successor|human|cancel>` 答复；Worker 恢复后按已记录的决定调用 `workflow complete`。PM 不能替 Worker 提交，真实 Human 授权也不能由这次 PM 决策替代。旧的原生问题答复校验保留，重复 consult 不创建第二张问题卡。
+
+PM 任务摘要分别提供需求状态、`runStatus` 和 `recovery`：恢复审查在后台运行、等待 PM、执行受阻都应可见，不能把恢复 Run 结束显示为原目标已经交付。
 
 恢复结束不会自动交付用户目标。PM 继续判断交付、原定义后继、新定义后继或真实人工待办；失败恢复不能靠无限递归诊断掩盖问题。
 

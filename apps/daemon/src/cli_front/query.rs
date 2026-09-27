@@ -16,7 +16,7 @@ use super::output::{self, CliFailure, CLI_SCHEMA};
 use super::rpc::{ConnectError, Refusal, Rpc, RpcError};
 use super::target::{self, Routing, Selection};
 
-const COMMAND_NAMES: [&str; 68] = [
+const COMMAND_NAMES: [&str; 69] = [
     "schema",
     "context",
     "capabilities",
@@ -52,6 +52,7 @@ const COMMAND_NAMES: [&str; 68] = [
     "workflow.history",
     "workflow.journal",
     "workflow.check",
+    "workflow.consult",
     "workflow.complete",
     "workflow.deliver",
     "workflow.cancel",
@@ -119,6 +120,7 @@ fn mutates(name: &str) -> bool {
             | "workflow.build"
             | "workflow.activate"
             | "workflow.dispatch"
+            | "workflow.consult"
             | "workflow.complete"
             | "workflow.deliver"
             | "workflow.cancel"
@@ -1302,6 +1304,12 @@ fn command_schema(name: &str) -> Value {
             "genet workflow check [--workspace <id>] [--run <id> | --draft]",
             json!({"runId": {"type": "string", "description": "--run; omitted checks all project Runs"}, "draft": {"type":"boolean", "description":"Read-only source validation; invalid draft exits nonzero with error.details.draft.diagnostics. Definition schema: schema workflow.definition"}}), &[],
         ),
+        "workflow.consult" => workflow_schema(
+            "genet workflow consult [--run <id>] [--node <id>] [--revision <n>] --reason <review report>",
+            json!({"runId": {"type": "string"}, "nodeId": {"type": "string"},
+                "revision": {"type": "integer", "minimum": 0},
+                "reason": {"type": "string", "minLength": 1, "description": "Bounded review report (up to 16 KiB). Only the running built-in recovery reviewer may call this. The daemon parks the Worker until its PM answers; then submit the selected outcome via workflow complete."}}), &["reason"],
+        ),
         "workflow.complete" => workflow_schema(
             "genet workflow complete [--workspace <id>] [--run <id>] [--node <id>] [--revision <n>] [--evidence <key=value>]... [--output <json>] [--outcome <name>] [--reason <text>]",
             json!({
@@ -1520,6 +1528,7 @@ fn command_schema(name: &str) -> Value {
                 }
             }),
             "workflow.activate" => single_output("workflow.activated"),
+            "workflow.consult" => single_output("workflow.consult.requested"),
             "workflow.complete" => single_output("workflow.completed"),
             "workflow.deliver" => single_output("workflow.requirement.completed"),
             "workflow.cancel" => single_output("workflow.cancelling"),

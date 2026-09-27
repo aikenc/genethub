@@ -388,6 +388,7 @@ pub fn required(request: &Request) -> Capability {
         | Request::WorkflowBuild { .. }
         | Request::WorkflowActivate { .. }
         | Request::WorkflowDispatch { .. }
+        | Request::WorkflowConsult { .. }
         | Request::WorkflowComplete { .. }
         | Request::WorkflowCancel { .. }
         | Request::WorkflowRecover { .. }

@@ -3893,6 +3893,14 @@ impl SessionManager {
             });
             next.pending_permission = None;
             next.pending_project_approval = false;
+            // An explicit accepted answer is a new continuation instruction.
+            // Ordinary Workflow notices still respect an existing inbox pause.
+            // Persist this once with the answer; replaying a receipt must not
+            // undo a later user stop. Cancelling a question is not a resume.
+            if continuation_for(&request, &outcome)?.is_some() {
+                next.inbox.paused = false;
+                next.inbox.error = None;
+            }
             self.store.save_meta(&next)?;
             *meta = next;
             drop(meta);
