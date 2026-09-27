@@ -231,3 +231,11 @@ N = 会话总 item 数，R = round 数，T = 某个 round 的 trunk 数，B = �
 - **版本单向：** `format` 高于本机的会话仍出现在列表里并说明原因，但打不开；本机只读它不会改动 `meta.json`。
 - **写入互斥：** 同一 session 的第二个 daemon 写入被拒绝并指出占用者，读取不受影响；不同 session 可跨 channel 并行写；占用者退出后无需重启即可恢复写入；从稳定 turn Fork 的新 session 不受源 session 锁影响。
 - **删除原子且可回收：** `session.delete` 持有该 session 的 writer lock 写入 durable tombstone；从此所有 channel 都隐藏并拒绝写入该 id。随后释放锁并删除整个会话目录，包括 blobs 与 scratch；Windows 若因开放 handle 暂时不能删除，启动/列表扫描会继续回收，墓碑保证残留目录永不复活。
+
+## 工作流观测
+
+工作流构建、请求与 Run 的权威路径见 [storage-layout.md](./storage-layout.md) §5。
+Agent 使用 `workflow get/profile` 获取运行事实，不直接扫描或修改组件内部记录。
+每轮活动累计调用次数，工作分配时固定有效成本档位、单价及配置摘要；成本是人民币估算，
+不代表服务账单。包内质量结果和依赖记录属于包数据，通过既有文件 API 读取。
+视图与规范随构建固定，变更当前包源不会重解释已启动 Run。

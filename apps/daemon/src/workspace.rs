@@ -420,16 +420,13 @@ impl Workspaces {
     /// `workflow list` reports "built but not authorized" and "authorized but
     /// drifted" as distinct facts, which needs both the registration and a
     /// fresh Builder verification of the directory as it stands now.
-    pub async fn registration_at(
-        &self,
-        project_root: &Path,
-        space_root: &Path,
-    ) -> (bool, bool) {
+    pub async fn registration_at(&self, project_root: &Path, space_root: &Path) -> (bool, bool) {
         let entries = self.entries.read().await;
         let config = self.config.read().await;
         let Some(entry) = entries.values().find(|entry| {
             !entry.removed
-                && entry.root.canonicalize().ok().as_deref() == space_root.canonicalize().ok().as_deref()
+                && entry.root.canonicalize().ok().as_deref()
+                    == space_root.canonicalize().ok().as_deref()
         }) else {
             return (false, false);
         };
@@ -683,6 +680,10 @@ impl Workspaces {
         // Workspace mutations consistently acquire entries before config.
         // Preserve that order here so an open/remove cannot deadlock against
         // a concurrent Workflow dispatch.
+        let selected_root = selected_root
+            .map(Path::canonicalize)
+            .transpose()
+            .context("读取选定的 Workflow executor 目录")?;
         let entries = self.entries.read().await;
         let config = self.config.read().await;
         let project = match config
@@ -701,7 +702,7 @@ impl Workspaces {
                 space.parent_workspace_id.as_deref() == Some(project_workspace_id)
                     && crate::agent_space::has_enabled_component(space, component_id)
                     && space.lifecycle != "ephemeral"
-                    && selected_root.is_none_or(|root| {
+                    && selected_root.as_deref().is_none_or(|root| {
                         entries.get(&space.workspace_id).is_some_and(|entry| {
                             entry.root.canonicalize().ok().as_deref() == Some(root)
                         })
@@ -715,7 +716,7 @@ impl Workspaces {
             // package has named the product directory it expects.
             anyhow::bail!(
                 "{}; found {}",
-                match selected_root {
+                match selected_root.as_deref() {
                     Some(root) => format!(
                         "no single reusable {component_id} AgentSpace at {}",
                         root.display()
@@ -2866,8 +2867,12 @@ mod tests {
             &["project", "pkg--executor", "pkg--coder", "pkg--wm"],
         )
         .await;
-        let (project, executor, coder, manager) =
-            (ids[0].clone(), ids[1].clone(), ids[2].clone(), ids[3].clone());
+        let (project, executor, coder, manager) = (
+            ids[0].clone(),
+            ids[1].clone(),
+            ids[2].clone(),
+            ids[3].clone(),
+        );
 
         let plan = vec![
             BootstrapSpaceRegistration {
@@ -2916,7 +2921,10 @@ mod tests {
             .expect("one plan registers the whole package team");
 
         let registered = spaces.agent_space(&executor).await.unwrap();
-        assert_eq!(registered.parent_workspace_id.as_deref(), Some(project.as_str()));
+        assert_eq!(
+            registered.parent_workspace_id.as_deref(),
+            Some(project.as_str())
+        );
         assert_eq!(
             spaces
                 .reusable_component_space_at(
@@ -2930,7 +2938,11 @@ mod tests {
             Some(executor.clone()),
         );
         assert_eq!(
-            spaces.worker_space_for_role(&executor, "coder").await.unwrap().id,
+            spaces
+                .worker_space_for_role(&executor, "coder")
+                .await
+                .unwrap()
+                .id,
             coder
         );
     }

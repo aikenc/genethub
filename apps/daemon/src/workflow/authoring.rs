@@ -19,6 +19,7 @@ pub(crate) fn schema() -> Value {
     schema["properties"]["nodes"]["minItems"] = json!(1);
     schema["properties"]["nodes"]["maxItems"] = json!(MAX_NODES);
     schema["x-genehub"] = json!({
+        "literalInclude": {"syntax": {"op":"include","path":"checklists/product.yaml"}, "rules":["package-relative UTF-8 YAML/JSON data is compiled into a literal before strict engine validation", "raw referenced bytes and compiled values belong to the same immutable workflow build", "data is not recursively interpreted as expressions"]},
         "dialect": "genehub.workflow.definition.v2", "legacyDialect": DEFINITION_SCHEMA,
         "validationCommand": "workflow check --draft", "maxDiagnostics": 64,
         "capabilities": ["agent.session", "result.publish", "request.budget"],
@@ -163,11 +164,7 @@ fn diagnostic(file: &str, error: &anyhow::Error) -> WorkflowDiagnostic {
 
 /// One causal diagnostic per failing flow (deduplicated), bounded at 64.
 /// Positive metadata is derived ONLY from the final consistent compiled snapshot.
-pub(super) fn check_draft(
-    root: &Path,
-    package_id: Option<&str>,
-    registry: &crate::adapter::registry::Registry,
-) -> WorkflowDraftReport {
+pub(super) fn check_draft(root: &Path, package_id: Option<&str>) -> WorkflowDraftReport {
     let mut report = WorkflowDraftReport {
         schema: "genehub.workflow.draft-check.v1".into(),
         root: package::packages_root(root).display().to_string(),
@@ -211,32 +208,6 @@ pub(super) fn check_draft(
     match compile_candidate(&package) {
         Err(error) => push(&mut report, diagnostic(package::MANIFEST_FILE, &error)),
         Ok(candidate) => {
-            for role in candidate
-                .workflows
-                .values()
-                .flat_map(|bundle| bundle.roles.values())
-            {
-                // Legacy role.v1 pins an exact adapter, so draft checking can
-                // still prove its evidence boundary. Current roles resolve a
-                // live tag route only when dispatched and filter every
-                // candidate by this same requirement then.
-                if role.evidence_only && role.schema == LEGACY_ROLE_SCHEMA {
-                    let agent_id = role.agent_id.as_deref().unwrap_or_default();
-                    if let Err(error) = registry.require_evidence_scope(agent_id) {
-                        push(&mut report, WorkflowDiagnostic {
-                            phase: "capability".into(), code: "WF_ROLE_CAPABILITY".into(), severity: "error".into(),
-                            file: format!("roles/{}.yaml", role.id), path: "/agentId".into(),
-                            message: format!("{error:#}"),
-                            hint: "Choose an Agent supporting evidenceOnly and a compatible model, then rerun `workflow check --draft`. Read-only interaction or a prompt alone cannot enforce the evidence boundary.".into(),
-                            expected: Some("adapter with bounded read-only evidence scope".into()), actual: Some(agent_id.chars().take(256).collect()),
-                            line: None, column: None,
-                        });
-                    }
-                }
-            }
-            if !report.diagnostics.is_empty() {
-                return report;
-            }
             report.valid = true;
             report.candidate_digest = Some(candidate.digest);
             report.executor_path = candidate.package.executor_path;

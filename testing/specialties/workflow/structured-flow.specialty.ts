@@ -7,11 +7,11 @@ const quote = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`;
 
 // Initial vertical slice: real PM -> daemon -> structured engine -> Worker -> disk.
 // Expressions are project-authored inputs, not imports of engine implementation.
-for (const scenario of ["zero", "repair", "limit", "zero-limit", "if-true", "if-false", "if-omitted", "condition-error", "choice-first", "choice-default", "nested", "parallel", "foreach", "foreach-empty", "call", "include", "budget", "collect", "fail-fast", "legacy-failure", "quorum", "restart", "cancel", "nested-loop", "item-keys", "duplicate-keys", "deadline", "activity-deadline", "stale-result", "deadline-restart", "parallel-loop", "nested-loop-restart"] as const) defineSpecialty({
+for (const scenario of ["zero", "repair", "limit", "zero-limit", "if-true", "if-false", "if-omitted", "condition-error", "choice-first", "choice-default", "nested", "parallel", "foreach", "foreach-empty", "call", "include", "budget", "collect", "fail-fast", "legacy-failure", "quorum", "restart", "cancel", "nested-loop", "item-keys", "duplicate-keys", "deadline", "deadline-before-tool", "activity-deadline", "stale-result", "deadline-restart", "parallel-loop", "nested-loop-restart"] as const) defineSpecialty({
   id: `specialty.workflow.structured.${scenario}`,
   title: `Structured workflow ${scenario} preserves real activity outcomes`,
   oracle: "A project-authored while loop executes zero or bounded rounds in one Run; real Worker artifacts agree with its public terminal state and no PM redispatch is needed",
-  catches: ["while executes once when initially false", "loop limit rejects final successful round", "node identity reuses a previous Worker", "negative evidence bypasses workflow conditions", "structured source is silently executed as a DAG", "an included procedure library runs a different program than the same content inline"],
+  catches: ["while executes once when initially false", "loop limit rejects final successful round", "node identity reuses a previous Worker", "negative evidence bypasses workflow conditions", "structured source is silently executed as a DAG", "an included procedure library runs a different program than the same content inline", "expired root deadline accepts Worker results or publishes"],
   tags: ["core", "workflow", "structured-workflow", ...(["parallel-loop","nested-loop-restart","nested-loop","parallel","foreach","include"].includes(scenario) ? ["structured-composition"] : [])],
   llm: { default: "mock" }, expectedDurationMs: 35_000, timeoutMs: 150_000,
   resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
@@ -88,7 +88,7 @@ for (const scenario of ["zero", "repair", "limit", "zero-limit", "if-true", "if-
       structure.limits = {maxOperations:1,maxConcurrency:2,maxFrames:64}; expectedWorkers = 1; blocked = true;
     }
     if (scenario === "activity-deadline") { body = {...task("slow"),timeoutMs:1000}; expectedWorkers = 1; blocked = true; }
-    if (["deadline","deadline-restart"].includes(scenario)) { structure.timeoutMs = scenario === "deadline-restart" ? 10000 : 5000; expectedWorkers = 1; blocked = true; }
+    if (["deadline","deadline-before-tool","deadline-restart"].includes(scenario)) { structure.timeoutMs = scenario === "deadline-restart" ? 10000 : 5000; expectedWorkers = 1; blocked = true; }
     const worker = {id:"work",uses:"agent.session",with:{role:"worker"},completion:{all:[{key:"done",verify:"value.nonEmpty"},{key:"checks",verify:"value.nonEmpty"}]}};
     if (scenario === "include") {
       // The callable procedure and the activity it needs live in a separate
@@ -119,6 +119,7 @@ for (const scenario of ["zero", "repair", "limit", "zero-limit", "if-true", "if-
         if (!operation) throw new Error("Worker request omitted current operation identity");
         if (!assigned.has(operation)) {
           assigned.add(operation);
+          if (scenario === "deadline-before-tool") return { hang: true as const };
           if (text.includes("LOOP_FRONT")) frontAttempts += 1;
           const success = (["repair","restart","stale-result"].includes(scenario) && assigned.size === 2) || (["nested","nested-loop","nested-loop-restart"].includes(scenario) && assigned.size % 2 === 0) || (scenario === "parallel-loop" && (text.includes("ONCE_BACK") || frontAttempts === 2));
           const concurrent = scenario === "parallel" || scenario === "parallel-loop" || scenario === "foreach";
@@ -177,9 +178,24 @@ for (const scenario of ["zero", "repair", "limit", "zero-limit", "if-true", "if-
     const workerNodes = run!.nodes.filter(node=>node.uses === "agent.session");
     t.assertions.assert((["fail-fast","legacy-failure"].includes(scenario) ? workerNodes.length >= 1 && workerNodes.length <= 2 : workerNodes.length === expectedWorkers),"wrong business iteration count");
     t.assertions.assert(new Set(workerNodes.map(n=>n.sessionId)).size === workerNodes.length,"iterations reused a Worker Session");
+    const deadlineBeforeResult = scenario === "deadline" || scenario === "deadline-before-tool";
+    if (deadlineBeforeResult) {
+      // The root deadline includes adapter/model startup. It can expire before
+      // the first tool executes, and must not accept a result or publish then.
+      // Keep the five-second limit; do not grant startup extra execution time.
+      t.assertions.assert(run!.reason?.includes("deadlineExceeded") === true,
+        `Root deadline was replaced by another failure: ${JSON.stringify(run)}`);
+      t.assertions.assert(workerNodes.every(node => !node.outcome && !node.evidence.done),
+        "Expired root deadline accepted a Worker result");
+    }
     if (expectedWorkers > 0) {
-      const entries = readFileSync(artifact,"utf8").trim().split("\n");
-      t.assertions.assert((["fail-fast","legacy-failure"].includes(scenario) ? entries.length >= 1 && entries.length <= 2 : entries.length === expectedWorkers) && new Set(entries).size === entries.length,"actual disk operations duplicated or missing");
+      const entries = existsSync(artifact) ? readFileSync(artifact,"utf8").trim().split("\n") : [];
+      t.assertions.assert((deadlineBeforeResult ? entries.length <= 1
+        : ["fail-fast","legacy-failure"].includes(scenario) ? entries.length >= 1 && entries.length <= 2
+        : entries.length === expectedWorkers) && new Set(entries).size === entries.length,
+        "actual disk operations duplicated or missing");
+      if (scenario === "deadline-before-tool") t.assertions.assert(entries.length === 0,
+        "Worker executed a tool while its model response was withheld");
     }
     if (scenario === "parallel" || scenario === "parallel-loop" || scenario === "foreach") {
       let live = 0, peak = 0;

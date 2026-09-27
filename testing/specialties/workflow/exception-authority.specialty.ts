@@ -45,8 +45,22 @@ defineSpecialty({
     let bootstrapStage = 0, command: string | undefined, workerCalls = 0;
     let phase = "bootstrap", commandTaken = false;
     const assessed = new Set<string>();
+    const cli = (args: string[]) => ({ tool: { name: "bash", arguments: { command: ["\"$GENEHUB_CLI\"", ...args.map(arg => `'${arg.replaceAll("'", `'\\''`)}'`)].join(" ") } } });
     const respond = (request: unknown) => {
       const body = JSON.stringify(request);
+      const messages = (request as { messages?: Array<{ role: string; content?: unknown }> }).messages ?? [];
+      const roleInstructions = JSON.stringify(messages.filter(message => ["system", "developer"].includes(message.role)));
+      if (roleInstructions.includes("角色标签为 `recovery-reviewer`")) {
+        // Derive submission from this conversation, rather than consuming a
+        // shared flag during a separate model request or another Session.
+        if (body.includes("controlled-recovery-assessment")) return { text: "Recovery report submitted." };
+        if (!body.includes("exception-recovery-choice")) return { tool: { name: "request_user_input", arguments: { questions: [{ id: "exception-recovery-choice", header: "Recovery", question: "Choose the controlled recovery action", options: [
+          { label: "repair", description: "Repair the workflow" }, { label: "resume", description: "Continue the same goal" },
+          { label: "successor", description: "Activate a successor" }, { label: "human", description: "Request a Human decision" },
+          { label: "cancel", description: "Stop execution" },
+        ] }] } } };
+        return cli(["workflow", "complete", "--outcome", "resume", "--evidence", "report=controlled-recovery-assessment"]);
+      }
       if (body.includes("<genehub_managed_session>") && body.includes("角色标签为 `reviewer`")) {
         const assessment = body.includes("`game-assessment`") ? "assessment" : "review";
         if (!assessed.has(assessment)) {
@@ -59,7 +73,7 @@ defineSpecialty({
       if (body.includes("EXCEPTION_TEST_WORKER")) {
         workerCalls++;
         if (workerCalls === 1) return { text: "Unable to finish; no node result submitted." };
-        if (workerCalls % 2 === 0) return { emptyToolIdDeltas: true, tool: { name: "genet", arguments: { args: ["workflow", "complete", "--evidence", "review=approved"] } } };
+        if (workerCalls % 2 === 0) return { emptyToolIdDeltas: true, ...cli(["workflow", "complete", "--evidence", "review=approved"]) };
         return { text: "Recovered result submitted." };
       }
       if (phase === "bootstrap") {
@@ -67,7 +81,8 @@ defineSpecialty({
         if (stage === 0) return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" workflow build --package game-delivery' } } };
         if (stage === 1) return { tool: { name: "request_user_input", arguments: { questions: [{ id: field(request, "challengeId"), header: "接管", question: "确认接管项目", options: [{ label: "yes", description: "接管" }, { label: "no", description: "不接管" }] }] } } };
         if (stage === 2) return { tool: { name: "bash", arguments: { command: `"$GENEHUB_CLI" workflow build --package game-delivery --apply --plan-digest ${field(request, "planDigest")} --revision ${field(request, "expectedRevision")} --action-id initial-takeover` } } };
-      } else if (command && body.includes(phase)) {
+      } else if (command && new RegExp(`(?<![A-Za-z0-9_])${phase}(?![A-Za-z0-9_])`).test(
+        JSON.stringify(messages.filter(message => message.role === "user").at(-1)?.content ?? ""))) {
         const value = command; command = undefined; commandTaken = true;
         return { emptyToolIdDeltas: true, tool: { name: "bash", arguments: { command: value } } };
       }
@@ -93,7 +108,7 @@ defineSpecialty({
     const schema = "genehub.workflow.definition.v1"; // This permission fixture intentionally exercises legacy compatibility.
     const roleFile = path.join(source, "roles/coder.yaml");
     const roleSchema = "genehub.workflow.role.v1";
-    writeFileSync(roleFile, JSON.stringify({ schema: roleSchema, id: "coder", agentId: "genet", modelId: "deepseek/deepseek-v4-flash", evidenceOnly: true, userInteraction: "readOnly", prompt: "prompts/exception-worker.md" }));
+    writeFileSync(roleFile, JSON.stringify({ schema: roleSchema, id: "coder", agentId: "genet", modelId: "deepseek/deepseek-v4-flash", userInteraction: "readOnly", prompt: "prompts/exception-worker.md" }));
     writeFileSync(path.join(source, "prompts/exception-worker.md"), "EXCEPTION_TEST_WORKER: complete assigned node only.");
     writeFileSync(workflowFile, JSON.stringify({ schema, id: "game-dev", version: 1, entry: "check", nodes: [
       { id: "check", uses: "agent.session", with: { role: "coder", workspace: "." }, completion: { all: [{ key: "review", verify: "value.equals", expected: "approved" }] }, on: { completed: ["publish"] } },
@@ -165,14 +180,26 @@ defineSpecialty({
     t.assertions.assert(updatedSpaces?.type === "workspaces" && updatedSpaces.data.find(space => space.id === coder.id)?.agentSpace?.revision === coder.agentSpace!.revision + 1, "exception management did not change the real expert");
     // The failed business Run automatically starts recovery. A second
     // business Run may only begin after that recovery execution settles.
+    let recoveryReviewer: string | undefined;
+    await t.tools.waitUntil(async () => {
+      const recovery = (await history()).find(run => run.handles.some(handle => handle.runId === original.id));
+      recoveryReviewer = recovery?.nodes.find(node => node.id === "review")?.sessionId ?? undefined;
+      return !!recoveryReviewer && (await snapshot(recoveryReviewer)).pendingPermissions.length > 0;
+    }, 40_000);
+    const recoveryQuestion = (await snapshot(recoveryReviewer!)).pendingPermissions[0]!;
+    // The durable reviewer question belongs to its delegating PM. Project
+    // repair authority does not transfer that question to another conversation.
+    const chosen = await runCommand(owner, "u_exception_recovery_choice",
+      `"$GENEHUB_CLI" session respond ${recoveryReviewer} --request ${recoveryQuestion.id} --choose resume`, original.id);
+    t.assertions.assert(!chosen.includes('"error"'), `Owning PM cannot answer recovery: ${chosen}`);
     await t.tools.waitUntil(async () => (await history()).some(run =>
-      run.handles.some(handle => handle.runId === original.id) && ["blocked", "completed", "cancelled"].includes(run.status)), 40_000);
+      run.handles.some(handle => handle.runId === original.id) && run.status === "blocked" && run.reason?.includes("controlled exit")), 40_000);
     const recovered = await runCommand(other, "u_exception_recover", `${dispatch("recovered")} --retry-of ${original.id}`, original.id);
     t.assertions.assert(!recovered.includes("retry target belongs to another PM"), "exception did not cross the original PM ownership boundary");
     await t.tools.waitUntil(async () => (await history()).some(run => run.taskId === "recovered" && run.status === "completed"), 40_000)
       .catch(async error => { throw new Error(`${error}; retry=${recovered}; workerCalls=${workerCalls}; runs=${JSON.stringify(await history())}`); });
     const successor = (await history()).find(run => run.taskId === "recovered")!;
-    t.assertions.assert(successor.requestRunId === original.id && successor.parentSessionId === other, "recovery lost request lineage or responding PM");
+    t.assertions.assert(successor.requestRunId === original.id && successor.parentSessionId === other, `recovery lost request lineage or responding PM: expectedRoot=${original.id}; expectedPM=${other}; successor=${JSON.stringify(successor)}; dispatch=${recovered}`);
     // A successful recovery withdraws management escalation, but the user's next
     // business request must remain usable in this original conversation.
     const beforeAssessment = spawnSync("git", ["status", "--porcelain=v1"], { cwd: opened.workspaceRoot, env: opened.daemon.env, encoding: "utf8" }).stdout;
@@ -189,6 +216,24 @@ defineSpecialty({
       t.assertions.assert(JSON.stringify(reportRun).includes("partial"), "negative business conclusion was lost or treated as acceptance");
     }
     t.assertions.assert(spawnSync("git", ["status", "--porcelain=v1"], { cwd: opened.workspaceRoot, env: opened.daemon.env, encoding: "utf8" }).stdout === beforeAssessment, "assessment changed project files");
+    // Execution completion leaves PM disposition outstanding. Record each
+    // actual deliverable through the same public PM entry before testing withdrawal.
+    for (const taskId of ["recovered", "business-assessment", "business-review"]) {
+      const goal = (await history()).find(run => run.taskId === taskId)!;
+      const decided = await runCommand(other, `u_delivery_${taskId}`,
+        `"$GENEHUB_CLI" workflow deliver --run ${goal.id} --revision ${goal.requirement!.revision} --reason "Requested report accepted" --evidence delivery=${goal.id}`);
+      if (decided.includes('"error"')) {
+        const recovery = (await history()).find(run => run.handles.length > 0)!;
+        const reviewer = recovery.nodes.find(node => node.sessionId)?.sessionId;
+        const inspection = reviewer ? await opened.client.call({ type: "session.inspect", payload: { sessionId: reviewer, throughRoundId: null } }) : null;
+        const trunk = reviewer && inspection?.type === "sessionInspection" && inspection.data.latestRoundId
+          ? await opened.client.call({ type: "round.trunk.get", payload: { sessionId: reviewer, roundId: inspection.data.latestRoundId, trunkIndex: 0 } }) : null;
+        const references = trunk?.type === "roundTrunk" ? trunk.data.batches.flatMap(batch => batch.blobs).filter(row => row.blob && row.kind === "toolCall") : [];
+        const tools = await Promise.all(references.map(row => opened.client.call({ type: "blob.get", payload: { sessionId: reviewer!, blob: row.blob! } })));
+        throw new Error(`PM delivery rejected: ${taskId}; ${decided}; recovery=${JSON.stringify(recovery)}; tools=${JSON.stringify(tools)}`);
+      }
+      await t.tools.waitUntil(async () => (await history()).find(run => run.id === goal.id)?.requirement?.state === "completed", 15_000);
+    }
     // Once the exception settles, the escalation it granted is gone: what
     // remains is ordinary project management, which every main Session in a
     // taken-over project has. Management is therefore still available here,

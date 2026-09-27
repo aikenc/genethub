@@ -2,9 +2,10 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { SessionSnapshot, WorkflowRunStatus } from "@genehub/proto";
 
-import { connectProductClient, daemonEndpoint, defineSpecialty, runGenetAsync } from "../../framework/public.ts";
+import { connectProductClient, daemonEndpoint, defineSpecialty, openWorkbenchPage, runGenetAsync } from "../../framework/public.ts";
 
-for (const mode of ["normal", "resume", "bypass", "corrupt", "proactive", "human-b", "human-f", "cancel", "queue"] as const) {
+for (const mode of ["normal", "consult", "resume", "bypass", "corrupt", "proactive", "human-b", "human-f", "cancel", "queue"] as const) {
+const consult = mode === "consult";
 const resume = mode === "resume";
 const bypass = mode === "bypass";
 const corrupt = mode === "corrupt";
@@ -14,8 +15,8 @@ const humanF = mode === "human-f";
 const cancelExit = mode === "cancel";
 const queue = mode === "queue";
 defineSpecialty({
-  id: `specialty.workflow.${resume ? "recovery-resume" : bypass ? "recovery-pm-gate" : corrupt ? "recovery-corrupt-fallback" : proactive ? "recovery-proactive" : humanB ? "recovery-human-b" : humanF ? "recovery-human-f" : cancelExit ? "recovery-cancel" : queue ? "recovery-package-queue" : "recovery-lifecycle"}`,
-  title: bypass ? "WR cannot choose a PM recovery decision without a durable answer" : resume ? "PM-selected resume continues a blocked goal through a same-definition successor" : corrupt ? "A damaged custom Candidate falls back to built-in recovery" : proactive ? "PM can proactively start recovery for unhealthy execution" : humanB ? "Recovery can hand a reduced-scope decision to a Human" : humanF ? "Human acceptance closes a business request" : cancelExit ? "A recovery cancellation recommendation waits for PM to cancel the request" : queue ? "Failed requests enter package recovery one at a time" : "A blocked request completes through the built-in recovery graph",
+  id: `specialty.workflow.${consult ? "recovery-consult" : resume ? "recovery-resume" : bypass ? "recovery-pm-gate" : corrupt ? "recovery-corrupt-fallback" : proactive ? "recovery-proactive" : humanB ? "recovery-human-b" : humanF ? "recovery-human-f" : cancelExit ? "recovery-cancel" : queue ? "recovery-package-queue" : "recovery-lifecycle"}`,
+  title: consult ? "CLI recovery consultation survives restart and is visible on the PM page" : bypass ? "WR cannot choose a PM recovery decision without a durable answer" : resume ? "PM-selected resume continues a blocked goal through a same-definition successor" : corrupt ? "A damaged custom Candidate falls back to built-in recovery" : proactive ? "PM can proactively start recovery for unhealthy execution" : humanB ? "Recovery can hand a reduced-scope decision to a Human" : humanF ? "Human acceptance closes a business request" : cancelExit ? "A recovery cancellation recommendation waits for PM to cancel the request" : queue ? "Failed requests enter package recovery one at a time" : "A blocked request completes through the built-in recovery graph",
   oracle: corrupt
     ? "A damaged active Candidate cannot silence a blocked request: the patrol starts the built-in WR and commits a fallback journal event"
     : proactive
@@ -29,16 +30,19 @@ defineSpecialty({
         : "A failed business Run enters WR review, waits for a PM choice, lets WM activate a repaired Candidate, passes WR acceptance, then completes a business successor and writes one recovery summary",
   catches: ["blocked business work has no recovery owner", "WR bypasses the PM decision", "repair is lost before successor", "recovery completion is mistaken for business completion", "recovery summary is missing or duplicated"],
   tags: ["core", "workflow", "workflow-recovery"],
+  runner: consult ? "playwright" : undefined,
   llm: { default: "mock" }, expectedDurationMs: 65_000, timeoutMs: 180_000,
-  resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
+  resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: consult ? 1 : 0, pool: consult ? "browser" : "standard" },
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
   surfaces: ["daemon", "agent", "genet-cli", "workbench-client", "filesystem"],
-  productInterfaces: ["workflow.activate", "workflow.dispatch", "workflow.journal", "workflow.complete", "workflow.history", "session.respondPermission"],
+  productInterfaces: ["workflow.activate", "workflow.dispatch", "workflow.journal", "workflow.complete", "workflow.consult", "workflow.history", "session.respondPermission"],
 }, async t => {
   t.data.git.init(t.env.workspace);
   const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
+  let browser: Awaited<ReturnType<typeof openWorkbenchPage>> | undefined;
   let stage = "setup";
   let reviewerId = "";
+  let pmId = "";
   let questionId = "";
   try {
     await t.flows.main.configureMockProvider(opened.client, opened.mock);
@@ -73,8 +77,10 @@ defineSpecialty({
     }
 
     let started = false, successorRequested = false, initialSubmitted = false, secondSubmitted = false, successorSubmitted = false;
+    let reportRead = false;
     let decisionSent = false, reviewerCalls = 0, managerCalls = 0, acceptorCalls = 0;
     const bodyOf = (request: unknown) => JSON.stringify(request);
+    const cli = (args: string[]) => ({ tool: { name: "bash", arguments: { command: ["\"$GENEHUB_CLI\"", ...args.map(arg => `'${arg.replaceAll("'", `'\\''`)}'`)].join(" ") } } });
     const respond = (request: unknown) => {
       const body = bodyOf(request);
       if (body.includes("RECOVERY_LIFECYCLE_BUSINESS")) {
@@ -95,14 +101,15 @@ defineSpecialty({
         initialSubmitted = true;
         return { tool: { name: "bash", arguments: { command: `${corrupt ? "sleep 8; " : ""}"$GENEHUB_CLI" workflow complete --outcome blocked --reason "business acceptance failed" --evidence result=failed` } } };
       }
-      if (body.includes("只读复查被处理的 Run")) {
+      if (body.includes("只读复查这条用户需求及其 Run")) {
         reviewerCalls++;
         if (reviewerCalls === 1) {
           const handled = body.match(/被处理 Run：(wr_[a-f0-9]+)/)?.[1];
           if (!handled) throw new Error("reviewer prompt omitted handled Run reference");
-          return { tool: { name: "genet", arguments: { args: ["workflow", "journal", "--run", handled] } } };
+          return cli(["workflow", "journal", "--run", handled]);
         }
-        if (reviewerCalls === 2 && bypass) return { tool: { name: "genet", arguments: { args: ["workflow", "complete", "--outcome", "repair", "--evidence", "report=claimed-without-PM"] } } };
+        if (reviewerCalls === 2 && bypass) return cli(["workflow", "complete", "--outcome", "repair", "--evidence", "report=claimed-without-PM"]);
+        if (reviewerCalls === 2 && consult) return cli(["workflow", "consult", "--reason", "Review evidence: repair the failed delivery flow, then independently verify it."]);
         if (reviewerCalls === 2) return { tool: { name: "request_user_input", arguments: { questions: [{
           id: "decision", header: "恢复", question: "选择受控恢复动作", options: [
             { label: "repair", description: "修复流程" }, { label: "resume", description: "续办" },
@@ -110,7 +117,7 @@ defineSpecialty({
             { label: "cancel", description: "取消" },
           ],
         }] } } };
-        if (reviewerCalls === 3) return { tool: { name: "genet", arguments: { args: ["workflow", "complete", "--outcome", humanB ? "human" : cancelExit ? "cancel" : resume ? "resume" : "repair", ...((humanB || cancelExit) ? ["--reason", humanB ? "The scope needs a Human decision" : "PM should cancel the request"] : []), "--evidence", "report=repair-approved"] } } };
+        if (reviewerCalls === 3) return cli(["workflow", "complete", "--outcome", humanB ? "human" : cancelExit ? "cancel" : resume ? "resume" : "repair", ...((humanB || cancelExit) ? ["--reason", humanB ? "The scope needs a Human decision" : "PM should cancel the request"] : []), "--evidence", "report=repair-approved"]);
         return { text: "PM decision was applied." };
       }
       if (body.includes("依据 PM 对复查建议的决定修复 Workflow")) {
@@ -122,10 +129,16 @@ defineSpecialty({
       }
       if (body.includes("只读验收 WM 的修复")) {
         acceptorCalls++;
-        if (acceptorCalls === 1) return { tool: { name: "genet", arguments: { args: ["workflow", "complete", ...(humanF ? ["--outcome", "human", "--reason", "Preview needs Human acceptance"] : []), "--evidence", "verdict=accepted"] } } };
+        if (acceptorCalls === 1) return cli(["workflow", "complete", ...(humanF ? ["--outcome", "human", "--reason", "Preview needs Human acceptance"] : []), "--evidence", "verdict=accepted"]);
         return { text: "Repair accepted." };
       }
       if (!decisionSent && body.includes("APPROVE_RECOVERY_REPAIR")) {
+        if (consult && !reportRead) {
+          reportRead = true;
+          return cli(["session", "get", reviewerId]);
+        }
+        if (consult) t.assertions.assert(body.includes("Review evidence: repair the failed delivery flow, then independently verify it."),
+          "PM could not read the durable review report through session get before deciding");
         decisionSent = true;
         return { tool: { name: "bash", arguments: {
           command: `"$GENEHUB_CLI" session respond ${reviewerId} --request ${questionId} --choose ${humanB ? "human" : cancelExit ? "cancel" : resume ? "resume" : "repair"}`,
@@ -156,6 +169,7 @@ defineSpecialty({
     opened.mock.script(...Array.from({ length: 80 }, () => ({ respond })));
 
     const pm = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
+    pmId = pm;
     const history = async (): Promise<WorkflowRunStatus[]> => {
       const reply = await opened.client.call({ type: "workflow.history", payload: { workspaceId: opened.workspaceId, limit: 20 } });
       if (reply?.type !== "workflowRuns") throw new Error("Workflow history unavailable");
@@ -176,7 +190,14 @@ defineSpecialty({
 
     let originalId = "";
     stage = "dispatch business Run";
-    await t.flows.main.sendPrompt(opened.client, pm, "START_RECOVERY_LIFECYCLE");
+    const send = async (sessionId: string, text: string) => {
+      const reply = await opened.client.call({ type: "session.send", payload: {
+        sessionId, messageId: `u_recovery_${mode}_${text}`, text,
+        attachments: [], continuesRound: null, artifactPreviewBaseUrl: null,
+      } });
+      t.assertions.assert(reply?.type === "ack", `Durable PM input rejected: ${text}`);
+    };
+    await send(pm, "START_RECOVERY_LIFECYCLE");
     if (proactive) {
       stage = "PM proactively starts recovery";
       await t.tools.waitUntil(async () => {
@@ -185,7 +206,7 @@ defineSpecialty({
         return original?.status === "running" && !!original.nodes.find(node => node.id === "work" && node.sessionId)
           && (await snapshot(pm)).summary.status === "idle";
       }, 30_000);
-      await t.flows.main.sendPrompt(opened.client, pm, "START_PROACTIVE_RECOVERY");
+      await send(pm, "START_PROACTIVE_RECOVERY");
     }
     if (corrupt) {
       stage = "damage active Candidate after business dispatch";
@@ -232,7 +253,7 @@ defineSpecialty({
       mkdirSync(damagedRequest, { recursive: true });
       writeFileSync(path.join(damagedRequest, "request.json"), "not a request snapshot\n");
       const pm2 = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
-      await t.flows.main.sendPrompt(opened.client, pm2, "START_SECOND_REQUEST");
+      await send(pm2, "START_SECOND_REQUEST");
       let second: WorkflowRunStatus | undefined;
       await t.tools.waitUntil(async () => {
         const runs = await history();
@@ -277,6 +298,19 @@ defineSpecialty({
     const question = (await snapshot(reviewer)).pendingPermissions[0]!;
     t.assertions.assert(question.questions?.[0]?.options.map(option => option.label).join(",") === "repair,resume,successor,human,cancel", "WR did not ask PM the five-way decision");
     questionId = question.id;
+    if (consult) {
+      t.assertions.assert(question.id.startsWith("workflow-consult-"), "CLI did not create a daemon-owned decision");
+      const unauthorized = await opened.client.call({ type: "workflow.consult", payload: {
+        workspaceId: opened.workspaceId, runId: recovery!.id, nodeId: "review", expectedRevision: recovery!.revision, report: "Human impersonation",
+      } }).then(() => false, () => true);
+      t.assertions.assert(unauthorized, "Human bypassed the Worker-only consultation entry");
+      await t.tools.waitUntil(async () => (await snapshot(pm)).summary.workSummary?.tasks.some(task =>
+        task.runId === recovery!.id && task.recovery && task.runStatus === "running" && task.waiting?.some(wait => wait.requestId === questionId)) === true, 15_000);
+      browser = await openWorkbenchPage(t.openRoot, () => daemonEndpoint(opened.daemon), opened.workspaceId, pm);
+      await browser.page.getByRole("region", { name: "任务进度" }).getByRole("button", { name: /小队任务/ }).click();
+      await browser.page.getByRole("dialog", { name: "小队任务", exact: true }).getByText("恢复流程 · 等待 PM 决定").waitFor();
+      await browser.close(); browser = undefined;
+    }
     await t.tools.waitUntil(async () => (await journal(recovery!.id))
       .some(event => event.eventType === "pause.requested" && event.messageId === questionId), 15_000);
     stage = "restart with one pending recovery question";
@@ -290,13 +324,14 @@ defineSpecialty({
       const runs = await history();
       const pending = await snapshot(reviewer);
       return runs.length === 2 && runs.some(run => run.id === recovery!.id)
-        && pending.pendingPermissions.some(request => request.id === questionId);
+        && pending.pendingPermissions.some(request => request.id === questionId)
+        && (await snapshot(pm)).summary.status === "idle";
     }, 30_000);
-    await t.flows.main.sendPrompt(opened.client, pm, "APPROVE_RECOVERY_REPAIR");
+    await send(pm, "APPROVE_RECOVERY_REPAIR");
     stage = "wait for WM and acceptance";
     await t.tools.waitUntil(async () => {
       recovery = (await history()).find(run => run.id === recovery!.id);
-      return recovery?.status === "blocked" && (humanB || humanF || cancelExit || recovery.reason?.includes("controlled exit"));
+      return recovery?.status === "blocked" && (humanB || humanF || cancelExit || recovery.reason?.includes("controlled exit") === true);
     }, 75_000);
     if (cancelExit) {
       t.assertions.assert(!recovery!.humanExit, "PM cancellation recommendation was incorrectly classified as Human exit d");
@@ -352,7 +387,7 @@ defineSpecialty({
       event.eventType === "pause.answered" && event.messageId === questionId).length === 1,
     "PM answer was missing or repeated in the committed journal");
 
-    await t.flows.main.sendPrompt(opened.client, pm, "CONTINUE_RECOVERY_LIFECYCLE");
+    await send(pm, "CONTINUE_RECOVERY_LIFECYCLE");
     stage = "wait for business successor";
     await t.tools.waitUntil(async () => {
       const runs = await history();
@@ -394,13 +429,17 @@ defineSpecialty({
   } catch (error) {
     const reply = await opened.client.call({ type: "workflow.history", payload: { workspaceId: opened.workspaceId, limit: 20 } }).catch(() => null);
     const reviewerReply = reviewerId ? await opened.client.call({ type: "session.get", payload: { sessionId: reviewerId } }).catch(() => null) : null;
+    const pmReply = pmId ? await opened.client.call({ type: "session.get", payload: { sessionId: pmId } }).catch(() => null) : null;
+    const pmState = pmReply?.type === "snapshot" ? { status: pmReply.data.summary.status,
+      pending: pmReply.data.pendingPermissions } : pmReply;
     const runs = reply?.type === "workflowRuns" ? reply.data.map(run => ({ id: run.id, taskId: run.taskId, status: run.status,
       reason: run.reason, nodes: run.nodes.map(node => ({ id: node.id, status: node.status, sessionId: node.sessionId })) })) : reply;
     const reviewerState = reviewerReply?.type === "snapshot" ? { status: reviewerReply.data.summary.status,
       pending: reviewerReply.data.pendingPermissions, items: reviewerReply.data.items.slice(-15) } : reviewerReply;
-    const roleCalls = opened.mock.requests.filter(request => JSON.stringify(request).includes("只读复查被处理的 Run")).length;
-    throw new Error(`${stage}: ${error}; runs=${JSON.stringify(runs).slice(0, 3500)}; reviewer=${JSON.stringify(reviewerState).slice(0, 6500)}; roleCalls=${roleCalls}`);
+    const roleCalls = opened.mock.requests.filter(request => JSON.stringify(request).includes("只读复查这条用户需求及其 Run")).length;
+    throw new Error(`${stage}: ${error}; runs=${JSON.stringify(runs).slice(0, 3500)}; pm=${JSON.stringify(pmState).slice(0, 2000)}; reviewer=${JSON.stringify(reviewerState).slice(0, 6500)}; roleCalls=${roleCalls}`);
   } finally {
+    await browser?.close();
     opened.client.close();
     opened.daemon.stop();
     await opened.mock.stop();

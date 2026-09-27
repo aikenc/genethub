@@ -160,7 +160,7 @@ for (const window of ["waiting", "approved", "applied", "rejected", "canceled"] 
       }, 90_000);
       t.assertions.assert(denied ? resumed === 0 : resumed > 0, "no approved adapter continuation occurred");
       const spaces = await client.call({ type: "workspace.list" });
-      t.assertions.assert(spaces?.type === "workspaces" && spaces.data.length === (denied ? 2 : 7), "bootstrap did not create exactly five children");
+      t.assertions.assert(spaces?.type === "workspaces" && spaces.data.length === (denied ? 2 : 8), "bootstrap did not create all six package children");
       if (window === "applied") {
         const team = spaces?.type === "workspaces" ? spaces.data.map((space) => space.id).sort().join(",") : "";
         t.assertions.assert(replayedApply && team === committedTeam && Boolean(team), "replayed apply changed the built team");

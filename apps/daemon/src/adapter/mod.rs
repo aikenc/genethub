@@ -32,7 +32,6 @@ use crate::config::ProviderConfig;
 /// Everything an adapter needs to start a session.
 #[derive(Debug, Clone)]
 pub struct SessionConfig {
-    pub evidence_scope: Option<genehub_proto::SessionEvidenceScope>,
     pub session_id: String,
     pub cwd: PathBuf,
     pub model_id: Option<String>,
@@ -133,12 +132,6 @@ pub trait AgentAdapter: Send + Sync {
     }
 
     fn capabilities(&self) -> Capabilities;
-
-    /// Can enforce the host-provided read-only paths and bounded Session set.
-    /// A prompt or an Agent's generic plan mode is not an evidence boundary.
-    fn supports_evidence_scope(&self) -> bool {
-        false
-    }
 
     /// Is it installed and does it answer? Never an error: "not installed" is a
     /// normal state that simply hides the agent from the picker.
@@ -492,7 +485,7 @@ pub(super) fn append_system_prompt_arg(
 /// the one we hold. They are reachable because the agent was started in a
 /// process group of its own (`crate::process::own_group`).
 pub async fn kill_tree(child: &mut crate::os_process::Child) {
-    if let Err(error) = kill_tree_checked(child).await {
+    if let Err(error) = crate::process::kill_child_tree(child).await {
         tracing::warn!(%error, "could not confirm child cleanup");
     }
 }
@@ -500,41 +493,11 @@ pub async fn kill_tree(child: &mut crate::os_process::Child) {
 pub async fn close_child(child: &Mutex<Option<crate::os_process::Child>>) -> Result<()> {
     let mut held = child.lock().await;
     if let Some(child) = held.as_mut() {
-        kill_tree_checked(child).await?;
+        crate::process::kill_child_tree(child).await?;
     }
     held.take();
     Ok(())
 }
-
-async fn kill_tree_checked(child: &mut crate::os_process::Child) -> Result<()> {
-    #[cfg(unix)]
-    if let Some(pid) = child.id() {
-        crate::process::stop_tree(pid);
-    }
-    #[cfg(windows)]
-    if let Some(pid) = child.id() {
-        let mut command = crate::os_process::Command::new("taskkill");
-        command
-            .args(["/T", "/F", "/PID", &pid.to_string()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true);
-        let _ = tokio::time::timeout(Duration::from_secs(2), command.status()).await;
-    }
-    if child.try_wait()?.is_some() {
-        return Ok(());
-    }
-    child.start_kill()?;
-    tokio::time::timeout(REAP_BUDGET, child.wait())
-        .await
-        .map_err(|_| {
-            anyhow::anyhow!("the killed agent has not exited; cleanup can be retried")
-        })??;
-    Ok(())
-}
-
-/// How long a killed agent gets to be reaped before the caller moves on.
-const REAP_BUDGET: Duration = Duration::from_secs(5);
 
 /// Finds an executable on `PATH`, honouring `PATHEXT` on Windows.
 pub fn find_executable(name: &str) -> Option<PathBuf> {
@@ -708,7 +671,6 @@ mod tests {
     fn every_agent_process_receives_the_exact_front_door_binding() {
         let mut command = crate::os_process::Command::new("agent");
         let config = SessionConfig {
-            evidence_scope: None,
             session_id: "s-bound".into(),
             cwd: PathBuf::from("/workspace"),
             model_id: None,

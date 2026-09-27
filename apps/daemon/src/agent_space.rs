@@ -24,9 +24,9 @@ pub const COMPONENT_PM: &str = "pm";
 pub const COMPONENT_EXECUTOR: &str = "executor";
 pub const COMPONENT_WORKER: &str = "worker";
 pub const COMPONENT_REVIEWER: &str = "reviewer";
-/// Carrier for the platform's bounded automatic diagnosis. The package chooses
-/// which Worker Space hosts it; every policy — trigger, quota, prompt, and the
-/// read-only evidence boundary — stays in `workflow::supervision`.
+/// Legacy Worker extension retained so installed Space registrations still load.
+/// Recovery now runs a Workflow selected by the package (or the built-in flow);
+/// this marker does not select a reviewer, schedule diagnosis or restrict tools.
 pub const COMPONENT_DIAGNOSTIC: &str = "diagnostic";
 
 /// Every component the first batch defines a contract for. Unknown ids are

@@ -627,7 +627,7 @@ mod tests {
     /// being asked to act on" stops being something the model has to infer.
     #[test]
     fn one_turn_carries_one_lane_and_defers_the_rest() {
-        let ready = vec![
+        let ready = [
             entry("m_notice", "workflow"),
             entry("m_typed", "user"),
             entry("m_second_notice", "workflow"),
@@ -661,7 +661,7 @@ mod tests {
 
     #[test]
     fn workflow_notices_still_form_a_turn_when_no_one_is_typing() {
-        let ready = vec![entry("m_a", "workflow"), entry("m_b", "workflow")];
+        let ready = [entry("m_a", "workflow"), entry("m_b", "workflow")];
         let primary = if ready.iter().any(|e| lane_of(e) == Lane::Human) {
             Lane::Human
         } else {

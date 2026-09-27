@@ -1,4 +1,5 @@
 import type { SessionSummary } from "@genehub/proto";
+import { observationLabel } from "./workflow-observation";
 
 export type AttentionFilter = "all" | "pending" | "running" | "blocked" | "unread";
 export const attentionFilters: readonly [AttentionFilter, string][] = [
@@ -73,7 +74,8 @@ export function sessionAttention(session: SessionSummary, sessions: readonly Ses
       : session.interactionSummary ? "等待继续执行" : "等待交互 · 待核对"
     : "";
   const attention = pending ? `待你处理${pending > 1 ? ` ${pending}` : ""}` : "";
-  const label = [attention, taskState, session.status === "failed" ? "运行异常" : "", activity, waiting]
+  const metrics = work && !work.error && work.tasks.length === 1 && work.more === 0 ? observationLabel(work.tasks[0]?.observation) : "";
+  const label = [attention, taskState, session.status === "failed" ? "运行异常" : "", activity, waiting, metrics]
     .filter(Boolean).join(" · ");
   return {
     pending, owners, pmRunning, teamRunning, inProgress, blocked,

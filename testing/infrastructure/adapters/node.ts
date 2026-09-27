@@ -25,9 +25,13 @@ export async function runNodeUnit(unit: WorkUnit, extraEnv: Record<string, strin
   const resultDir = mkdtempSync(path.join(tmpdir(), "testctl-result-"));
   const resultPath = path.join(resultDir, "result.json");
   const tsxLoader = pathToFileURL(require.resolve("tsx")).href;
+  const inherited = { ...process.env };
+  // Parent Agent capabilities are for a different daemon, never this lease.
+  delete inherited.GENEHUB_SESSION_ID;
+  delete inherited.GENEHUB_CONTROLLER_TOKEN;
   const child = spawnGroup(process.execPath, ["--import", tsxLoader, WORKER], {
     env: {
-      ...process.env,
+      ...inherited,
       ...lease.env,
       ...extraEnv,
       TESTCTL_UNIT_ID: unit.id,

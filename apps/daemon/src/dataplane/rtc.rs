@@ -22,7 +22,8 @@ pub(crate) const RTC_SIGNAL_BYTES: usize = 64 * 1024;
 /// connection may exist at all.
 pub(crate) const RTC_ADMISSION_LIFETIME: Duration = Duration::from_secs(30);
 /// How long to gather candidates before answering with what there is.
-pub(crate) const RTC_GATHER_TIMEOUT: Duration = Duration::from_secs(12);
+/// A server-reflexive candidate ends the wait sooner; see the carriers.
+pub(crate) const RTC_GATHER_TIMEOUT: Duration = Duration::from_secs(2);
 /// Records held for the endpoint in either direction. Small: this is a
 /// backpressure point, not a buffer.
 pub(crate) const RTC_CHANNEL_QUEUE: usize = 16;

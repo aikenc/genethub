@@ -3,6 +3,7 @@ import { useWorkbench } from "../session/store";
 import type { WorkbenchSection } from "../shell/WorkbenchNavigation";
 
 interface Page {
+  workflowView?: {workspaceId: string; runId: string; viewId?: string; nodeId?: string; params?: Record<string,unknown>} | null;
   section: WorkbenchSection;
   list: boolean;
   sessionId?: string | null;
@@ -12,7 +13,7 @@ interface Page {
   surface: string;
   depth: number;
 }
-const initial: Page = { section: "sessions", list: true, surface: "sessions", depth: 0 };
+const initial: Page = { workflowView: null, section: "sessions", list: true, surface: "sessions", depth: 0 };
 
 /** One browser history for page navigation. Root selection replaces the current
  * detail; content links push a child. Execution stays owned by the store. */
@@ -27,7 +28,7 @@ export function usePageNavigation() {
     const previous = current.current;
     const wb = useWorkbench.getState();
     const next = {...previous, ...patch, sessionId: wb.activeSessionId, workspaceId: wb.activeWorkspaceId,
-      tabId: wb.activeTabId, draftLocalId: wb.draft?.localId};
+      tabId: wb.activeTabId, draftLocalId: wb.draft?.localId, workflowView: wb.workflowView};
     if (JSON.stringify(previous) === JSON.stringify(next)) return;
     current.current = next;
     if (queued.current) return;
@@ -40,9 +41,9 @@ export function usePageNavigation() {
       const mode = intent.current;
       intent.current = "push";
       const next = current.current;
-      const root = mode === "root" || next.list;
+      const root = mode === "root" || next.list && !next.workflowView;
       const replace = mode === "replace" || root && !previous.list;
-      next.depth = root || previous.list ? 0 : mode === "replace" ? previous.depth : previous.depth + 1;
+      next.depth = root ? 0 : mode === "replace" ? previous.depth : next.workflowView ? previous.depth + 1 : previous.list ? 0 : previous.depth + 1;
       current.current = {...next};
       const state = {...window.history.state, genehubPage: current.current, genehubParent: next.depth > 0};
       if (replace) window.history.replaceState(state, "");
@@ -59,6 +60,7 @@ export function usePageNavigation() {
       current.current = saved;
       setPage(saved);
       const wb = useWorkbench.getState();
+      useWorkbench.setState({workflowView:saved.workflowView ?? null});
       let restored: Promise<unknown> = Promise.resolve();
       if (saved.draftLocalId && saved.workspaceId && wb.workspaces.some(w => w.id === saved.workspaceId)) {
         wb.newSession(saved.workspaceId, null, {localId: saved.draftLocalId, addressScope: "workspace"});
@@ -72,6 +74,10 @@ export function usePageNavigation() {
     window.addEventListener("popstate", restore);
     return () => window.removeEventListener("popstate", restore);
   }, []);
+  const workflowView = useWorkbench(state => state.workflowView);
+  useEffect(() => {
+    if (JSON.stringify(current.current.workflowView ?? null) !== JSON.stringify(workflowView)) update({workflowView});
+  }, [workflowView]);
   const mark = (mode: "replace" | "root") => {
     intent.current = mode;
     queueMicrotask(() => { if (!queued.current) intent.current = "push"; });

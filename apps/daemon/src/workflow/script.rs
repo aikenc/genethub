@@ -85,8 +85,12 @@ pub(crate) struct ScriptDefinition {
     pub(crate) cwd: Option<String>,
     /// Passed to the script as one JSON object on stdin. The platform does
     /// not interpret it.
-    #[serde(default)]
-    pub(crate) input: serde_json::Value,
+    #[serde(
+        default,
+        deserialize_with = "genehub_proto::deserialize_present_json",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) input: Option<serde_json::Value>,
     /// Seconds before the process group is reclaimed. No ceiling — a build
     /// or a render legitimately runs for hours.
     #[serde(default)]
@@ -141,6 +145,22 @@ pub(crate) fn resolve_script(package_root: &Path, declared: &str) -> Result<Path
     }
 }
 
+/// Native interpreters need host paths. In particular, Git Bash and Node's
+/// module loader do not consistently accept Windows canonicalize prefixes.
+fn interpreter_script_path(script: &Path) -> String {
+    let host = crate::guest_paths::host_form(&script.to_string_lossy()).into_owned();
+    if crate::guest_paths::windows_host() {
+        let path = if let Some(unc) = host.strip_prefix(r"\\?\UNC\") {
+            format!("//{unc}")
+        } else {
+            host.strip_prefix(r"\\?\").unwrap_or(&host).to_string()
+        };
+        path.replace('\\', "/")
+    } else {
+        host
+    }
+}
+
 /// Runs one script and returns its parsed result.
 ///
 /// `task_cwd` is the Run's own working directory. Nothing here confines the
@@ -163,7 +183,7 @@ pub(crate) async fn run(
     let (program, mut arguments) = match definition.interpreter.as_deref() {
         Some(interpreter) => (
             PathBuf::from(interpreter),
-            vec![script.display().to_string()],
+            vec![interpreter_script_path(script)],
         ),
         None => (script.to_path_buf(), Vec::new()),
     };
@@ -181,11 +201,7 @@ pub(crate) async fn run(
         None => task_cwd.to_path_buf(),
     };
 
-    let mut command = crate::process::command(
-        std::slice::from_ref(&program),
-        &arguments,
-        &cwd,
-    );
+    let mut command = crate::process::command(std::slice::from_ref(&program), &arguments, &cwd);
     command
         .envs(&definition.env)
         .stdin(std::process::Stdio::piped())
@@ -201,10 +217,9 @@ pub(crate) async fn run(
     }
     let stdout = read_bounded(child.stdout());
     let stderr = read_bounded(child.stderr());
-    let waited = tokio::time::timeout(
-        std::time::Duration::from_secs(timeout),
-        async { tokio::join!(stdout, stderr, child.wait()) },
-    )
+    let waited = tokio::time::timeout(std::time::Duration::from_secs(timeout), async {
+        tokio::join!(stdout, stderr, child.wait())
+    })
     .await;
     let (stdout, stderr, status) = match waited {
         Ok(joined) => joined,
@@ -219,11 +234,7 @@ pub(crate) async fn run(
     let stdout = stdout?;
     let stderr = stderr?;
     if !status.success() {
-        bail!(
-            "pack.script 退出码 {:?}：{}",
-            status.code(),
-            tail(&stderr)
-        );
+        bail!("pack.script 退出码 {:?}：{}", status.code(), tail(&stderr));
     }
     parse(&stdout).with_context(|| {
         format!(
@@ -292,8 +303,29 @@ mod tests {
             interpreter: Some(interpreter.into()),
             env: BTreeMap::new(),
             cwd: None,
-            input: serde_json::Value::Null,
+            input: Some(serde_json::Value::Null),
             timeout_seconds: Some(30),
+        }
+    }
+
+    // On Windows `bash` may name the WSL launcher rather than a POSIX
+    // interpreter for native host files. These fixtures declare Git's actual
+    // shell; they are testing a package-selected interpreter, not WSL setup.
+    fn shell_interpreter() -> String {
+        #[cfg(windows)]
+        {
+            let git = crate::adapter::find_executable("git").expect("Git is installed");
+            git.ancestors()
+                .skip(1)
+                .map(|directory| directory.join("bin/bash.exe"))
+                .find(|shell| shell.is_file())
+                .expect("Git Bash is installed beside Git")
+                .to_string_lossy()
+                .into_owned()
+        }
+        #[cfg(not(windows))]
+        {
+            "bash".into()
         }
     }
 
@@ -312,8 +344,14 @@ mod tests {
             package.join("scripts/ok.mjs").canonicalize().unwrap(),
         );
         // A program name stays a program name, for `PATH` to resolve.
-        assert_eq!(resolve_script(&package, "blender").unwrap(), PathBuf::from("blender"));
-        assert_eq!(resolve_script(&package, "/usr/bin/env").unwrap(), PathBuf::from("/usr/bin/env"));
+        assert_eq!(
+            resolve_script(&package, "blender").unwrap(),
+            PathBuf::from("blender")
+        );
+        assert_eq!(
+            resolve_script(&package, "/usr/bin/env").unwrap(),
+            PathBuf::from("/usr/bin/env")
+        );
         assert!(resolve_script(&package, "").is_err());
     }
 
@@ -338,10 +376,10 @@ mod tests {
             &ScriptDefinition {
                 script: "scripts/publish.sh".into(),
                 args: vec!["ran".into()],
-                interpreter: Some("bash".into()),
+                interpreter: Some(shell_interpreter()),
                 env: BTreeMap::new(),
                 cwd: None,
-                input: serde_json::Value::Null,
+                input: Some(serde_json::Value::Null),
                 timeout_seconds: Some(30),
             },
         )
@@ -349,7 +387,10 @@ mod tests {
         .unwrap();
 
         assert!(result.ok);
-        assert_eq!(result.evidence.get("shell").map(String::as_str), Some("ran"));
+        assert_eq!(
+            result.evidence.get("shell").map(String::as_str),
+            Some("ran")
+        );
     }
 
     /// Environment and working directory come from the node, and the
@@ -378,10 +419,13 @@ mod tests {
             &ScriptDefinition {
                 script: "scripts/probe.sh".into(),
                 args: Vec::new(),
-                interpreter: Some("bash".into()),
-                env: BTreeMap::from([("DEPOT".into(), elsewhere.display().to_string())]),
+                interpreter: Some(shell_interpreter()),
+                env: BTreeMap::from([(
+                    "DEPOT".into(),
+                    elsewhere.to_string_lossy().replace('\\', "/"),
+                )]),
                 cwd: Some("work".into()),
-                input: serde_json::Value::Null,
+                input: Some(serde_json::Value::Null),
                 timeout_seconds: Some(30),
             },
         )
@@ -406,6 +450,7 @@ mod tests {
         std::fs::write(
             package.join("scripts/echo.mjs"),
             r#"
+import { basename } from "node:path";
 let raw = "";
 process.stdin.on("data", (chunk) => { raw += chunk; });
 process.stdin.on("end", () => {
@@ -415,7 +460,7 @@ process.stdin.on("end", () => {
   process.stdout.write(JSON.stringify({
     ok: true,
     evidence: { review: input.verdict },
-    revision: "opaque/" + process.cwd().split("/").pop(),
+    revision: "opaque/" + basename(process.cwd()),
   }));
 });
 "#,
@@ -426,13 +471,16 @@ process.stdin.on("end", () => {
 
         let script = resolve_script(&package, "scripts/echo.mjs").unwrap();
         let definition = ScriptDefinition {
-            input: serde_json::json!({ "verdict": "approved" }),
+            input: Some(serde_json::json!({ "verdict": "approved" })),
             ..node("scripts/echo.mjs", "node")
         };
         let result = run(&script, &task, &definition).await.unwrap();
 
         assert!(result.ok);
-        assert_eq!(result.evidence.get("review").map(String::as_str), Some("approved"));
+        assert_eq!(
+            result.evidence.get("review").map(String::as_str),
+            Some("approved")
+        );
         assert_eq!(result.revision.as_deref(), Some("opaque/task-dir"));
     }
 
@@ -455,27 +503,35 @@ process.stdin.on("end", () => {
         std::fs::write(task.join("build/index.html"), "<!doctype html>").unwrap();
         std::fs::write(task.join("build/nested/app.js"), "console.log(1)").unwrap();
 
-        let script = resolve_script(&package, "scripts/publish-directory.mjs").unwrap();
+        let script = resolve_script(&package, "scripts/publish-directory.py").unwrap();
         let definition = ScriptDefinition {
-            input: serde_json::json!({
+            input: Some(serde_json::json!({
                 "source": "build",
                 "destination": "public",
                 "expectedFiles": 2,
-            }),
+            })),
             timeout_seconds: Some(60),
-            ..node("scripts/publish-directory.mjs", "node")
+            ..node("scripts/publish-directory.py", "python3")
         };
         let result = run(&script, &task, &definition).await.unwrap();
 
         assert!(result.ok);
-        assert_eq!(result.evidence.get("published").map(String::as_str), Some("2"));
         assert_eq!(
-            result.evidence.get("matchedExpectation").map(String::as_str),
+            result.evidence.get("published").map(String::as_str),
+            Some("2")
+        );
+        assert_eq!(
+            result
+                .evidence
+                .get("matchedExpectation")
+                .map(String::as_str),
             Some("true")
         );
         assert!(task.join("public/nested/app.js").is_file());
         // An opaque receipt: the platform stores it and never parses it.
-        assert!(result.revision.is_some_and(|revision| revision.starts_with("dir:")));
+        assert!(result
+            .revision
+            .is_some_and(|revision| revision.starts_with("dir:")));
         assert!(
             !task.join(".git").exists(),
             "the fixture must stay a plain directory for this test to mean anything"
@@ -537,7 +593,10 @@ process.stdin.on("end", () => {
         let parsed = parse(br#"{"ok":true,"evidence":{"review":"approved"},"revision":"r1"}"#)
             .expect("a well formed result");
         assert!(parsed.ok);
-        assert_eq!(parsed.evidence.get("review").map(String::as_str), Some("approved"));
+        assert_eq!(
+            parsed.evidence.get("review").map(String::as_str),
+            Some("approved")
+        );
         assert_eq!(parsed.revision.as_deref(), Some("r1"));
 
         assert!(parse(b"").is_err());

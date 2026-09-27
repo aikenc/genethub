@@ -3,11 +3,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   AssetPreviewError_,
+  authorizationRenewalDelay,
   Client,
   ClientQueueFullError,
   ClientRequestTimeoutError,
   ConnectionOutcomeUnknownError,
   type ClientDiagnosticDetail,
+  type ClientDiagnosticEvent,
   type ClientOptions,
   type LocalServerProof,
 } from "./client";
@@ -57,14 +59,16 @@ async function connected(options: Partial<ClientOptions> = {}): Promise<{
 }> {
   const proof = localProof();
   const queue = socketQueue({ secret: proof.proof, identity: localIdentity });
-  const client = new Client({
-    ...options,
+  // Keep the caller's options object. A later assignment to requestTimeoutMs
+  // applies only to exchanges started after that assignment.
+  const shared = Object.assign(options, {
     url: options.url ?? "ws://127.0.0.1:42123/ws",
     localServerProof: options.localServerProof ?? proof,
     socketFactory: options.socketFactory ?? queue.factory,
     rtcEnabled: options.rtcEnabled ?? false,
     backoffMs: options.backoffMs ?? (() => 0),
   });
+  const client = new Client(shared as ClientOptions);
   client.connect();
   const socket = queue.latest();
   socket.open();
@@ -303,6 +307,118 @@ describe("the logical peer connection", () => {
     client.close();
   });
 
+  it("resets backoff after a stable interval even when the page ran no timers", async () => {
+    let clock = 1_000_000;
+    const attempts: number[] = [];
+    const { client, queue } = await connected({
+      now: () => clock,
+      backoffMs: (attempt) => {
+        attempts.push(attempt);
+        return 0;
+      },
+    });
+
+    queue.latest().close(1006, "lost");
+    await waitFor(() => queue.sockets.length === 2);
+    queue.latest().open();
+    await waitFor(() => queue.latest().sent.some((message) => message.type === "hello"));
+    queue.latest().acceptHandshake();
+    await waitFor(() => client.connectionState === "ready");
+
+    // iOS froze the page right after it reconnected: the 30s grace elapsed on
+    // the wall clock while no timer could fire.
+    clock += 31_000;
+    queue.latest().close(1006, "lost after suspension");
+    await waitFor(() => queue.sockets.length === 3);
+
+    expect(attempts).toEqual([0, 0]);
+    client.close();
+  });
+
+  it("starts a fresh logical peer instead of resuming one silent past the daemon's window", async () => {
+    let clock = 1_000_000;
+    const events: ClientDiagnosticEvent[] = [];
+    const { client, queue } = await connected({
+      now: () => clock,
+      onDiagnostic: (event) => events.push(event),
+    });
+
+    clock += 10 * 60_000;
+    queue.latest().forgetSession();
+    queue.latest().close(1006, "suspended for ten minutes");
+    await waitFor(() => queue.sockets.length === 2);
+    queue.latest().open();
+    await waitFor(() => queue.latest().sent.some((message) => message.type === "hello"));
+    queue.latest().acceptHandshake();
+    await waitFor(() => client.connectionState === "ready");
+
+    expect(queue.sockets.length).toBe(2);
+    expect(events.some((event) => event.detail.phase === "resume-skipped")).toBe(true);
+    client.close();
+  });
+
+  it("redials at once without escalating backoff when the daemon lost the session", async () => {
+    const attempts: number[] = [];
+    const events: ClientDiagnosticEvent[] = [];
+    const { client, queue } = await connected({
+      backoffMs: (attempt) => {
+        attempts.push(attempt);
+        return 0;
+      },
+      onDiagnostic: (event) => events.push(event),
+    });
+
+    queue.latest().forgetSession();
+    queue.latest().close(1006, "lost");
+    await waitFor(() => queue.sockets.length === 2);
+    queue.latest().open();
+    await waitFor(() => queue.latest().sent.some((message) => message.type === "hello"));
+    queue.latest().acceptHandshake();
+
+    await waitFor(() => queue.sockets.length === 3);
+    queue.latest().open();
+    await waitFor(() => queue.latest().sent.some((message) => message.type === "hello"));
+    queue.latest().acceptHandshake();
+    await waitFor(() => client.connectionState === "ready");
+
+    expect(attempts).toEqual([0]);
+    expect(events.some((event) => event.detail.cause === "session-lost")).toBe(true);
+    client.close();
+  });
+
+  it("restarts backoff when the page returns shortly before the carrier drops", async () => {
+    const attempts: number[] = [];
+    const { client, queue } = await connected({
+      backoffMs: (attempt) => {
+        attempts.push(attempt);
+        return 0;
+      },
+    });
+    queue.latest().close(1012, "restart");
+    await waitFor(() => queue.sockets.length === 2);
+    queue.latest().open();
+    await waitFor(() => queue.latest().sent.some((message) => message.type === "hello"));
+    queue.latest().acceptHandshake();
+    await waitFor(() => client.connectionState === "ready");
+
+    document.dispatchEvent(new Event("visibilitychange"));
+    queue.latest().close(1006, "carrier died while the page was frozen");
+    await waitFor(() => queue.sockets.length === 3);
+
+    expect(attempts).toEqual([0, 0]);
+    client.close();
+  });
+
+  it("renews Hosted authorization by remaining grant, not on a fixed 30s cadence", () => {
+    const now = Date.parse("2026-09-26T00:00:00Z");
+    const at = (ms: number) => new Date(now + ms).toISOString();
+    expect(authorizationRenewalDelay(at(86_400_000), now)).toBe(43_200_000);
+    expect(authorizationRenewalDelay(at(60_000), now)).toBe(30_000);
+    expect(authorizationRenewalDelay(at(20_000), now)).toBe(5_000);
+    expect(authorizationRenewalDelay(at(-5_000), now)).toBe(1000);
+    expect(authorizationRenewalDelay(undefined, now)).toBe(30_000);
+  });
+
   it("settles a fake peer reply that races with closing the carrier", async () => {
     const { client, socket } = await connected();
     const pending = client.call({ type: "agent.list" });
@@ -412,7 +528,12 @@ describe("RPC exchanges are independent logical streams", () => {
     await expect(waiting).rejects.toBeInstanceOf(ClientRequestTimeoutError);
     offline.close();
 
-    const { client, socket } = await connected({ requestTimeoutMs: 5 });
+    // connection.identity uses the same request budget as later calls.
+    // The 5ms deadline starts after the handshake is ready, so a busy
+    // event loop cannot fail the connection before the exchange under test.
+    const session: Partial<ClientOptions> = {};
+    const { client, socket } = await connected(session);
+    session.requestTimeoutMs = 5;
     const unanswered = client.call({ type: "agent.list" });
     await waitFor(() => socket.sent.some((message) => message.type === "agent.list"));
     await expect(unanswered).rejects.toBeInstanceOf(ClientRequestTimeoutError);
@@ -562,11 +683,14 @@ describe("events, Preview and RTC use the same endpoint abstraction", () => {
         rtcSupported: true,
       },
     });
-    const rtcFactory = vi.fn<NonNullable<ClientOptions["rtcFactory"]>>(async (base) => ({
-      endpoint: base,
-      peer: {} as RTCPeerConnection,
-      close() {},
-    }));
+    let releaseRestricted: (() => void) | undefined;
+    const rtcFactory = vi.fn<NonNullable<ClientOptions["rtcFactory"]>>(async (base, _id, _diagnostic, options) => {
+      if (options?.policy === "direct-only") {
+        await new Promise<void>((resolve) => { releaseRestricted = resolve; });
+      }
+      await options?.attachWhen;
+      return { endpoint: base, peer: {} as RTCPeerConnection, close() {} };
+    });
     const client = new Client({
       url: "wss://relay.example/fabric/v2",
       channelCredential: { capabilityId: "cap-1", secret },
@@ -578,12 +702,18 @@ describe("events, Preview and RTC use the same endpoint abstraction", () => {
     queue.latest().open();
     await waitFor(() => queue.latest().sent.length === 1);
     queue.latest().acceptHandshake();
-    await waitFor(() => client.rtcState === "connected");
-
     await waitFor(() => rtcFactory.mock.calls.length === 2);
+    // Both ICE handshakes have started before the restricted identity can be
+    // checked. The business carrier still cannot attach until that check ends.
+    expect(client.rtcState).toBe("connecting");
     expect(rtcFactory).toHaveBeenCalledTimes(2);
     expect(rtcFactory.mock.calls[0]?.[3]).toEqual({ policy: "direct-only" });
-    expect(rtcFactory.mock.calls[1]?.[3]).toEqual({ endpoint: rtcFactory.mock.calls[1]?.[0] });
+    expect(rtcFactory.mock.calls[1]?.[3]).toEqual({
+      endpoint: rtcFactory.mock.calls[1]?.[0],
+      attachWhen: expect.any(Promise),
+    });
+    releaseRestricted?.();
+    await waitFor(() => client.rtcState === "connected");
     client.setRtcEnabled(false);
     expect(client.rtcState).toBe("disabled");
     client.close();

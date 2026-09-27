@@ -54,6 +54,12 @@ const IMPORT_CANDIDATE_TTL_MS: i64 = 10 * 60 * 1000;
 /// boundary: keeps a single request from turning into an unbounded scan.
 const MAX_BATCH_GET: usize = 64;
 
+pub(crate) struct ForkImportContext<'a> {
+    pub workspace_id: &'a str,
+    pub cwd: PathBuf,
+    pub source_accessible: bool,
+}
+
 /// A session id that matches nothing in memory or on disk. The router maps
 /// this typed error to `notFound`; the Display text is user-facing and free
 /// to change without touching the wire classification.
@@ -667,9 +673,6 @@ impl SessionManager {
         managed_system_prompt: String,
         stable_id: Option<String>,
     ) -> Result<SessionSummary> {
-        if managed.evidence_scope.is_some() {
-            self.registry.require_evidence_scope(agent_id)?;
-        }
         if let Some(id) = &stable_id {
             if let Ok(existing) = self.summary(id).await {
                 if existing.workspace_id != workspace_id
@@ -1076,12 +1079,14 @@ impl SessionManager {
         source_accessible: bool,
     ) -> Result<SessionSummary> {
         self.fork_import_with_routing(
-            workspace_id,
-            cwd,
+            ForkImportContext {
+                workspace_id,
+                cwd,
+                source_accessible,
+            },
             transfer,
             target,
             providers,
-            source_accessible,
             None,
         )
         .await
@@ -1089,22 +1094,18 @@ impl SessionManager {
 
     pub(crate) async fn fork_import_routed(
         &self,
-        workspace_id: &str,
-        cwd: PathBuf,
+        context: ForkImportContext<'_>,
         transfer: ForkTransfer,
         target: ForkTarget,
         providers: &ProviderMap,
-        source_accessible: bool,
         routing_tags: Vec<String>,
         media_tags: Vec<String>,
     ) -> Result<SessionSummary> {
         self.fork_import_with_routing(
-            workspace_id,
-            cwd,
+            context,
             transfer,
             target,
             providers,
-            source_accessible,
             Some((routing_tags, media_tags)),
         )
         .await
@@ -1112,14 +1113,17 @@ impl SessionManager {
 
     async fn fork_import_with_routing(
         &self,
-        workspace_id: &str,
-        cwd: PathBuf,
+        context: ForkImportContext<'_>,
         mut transfer: ForkTransfer,
         target: ForkTarget,
         providers: &ProviderMap,
-        source_accessible: bool,
         routing: Option<(Vec<String>, Vec<String>)>,
     ) -> Result<SessionSummary> {
+        let ForkImportContext {
+            workspace_id,
+            cwd,
+            source_accessible,
+        } = context;
         let blob_appendix = std::mem::take(&mut transfer.blob_appendix);
         if target.workspace_id.as_deref() != Some(workspace_id) {
             anyhow::bail!("the fork target workspace does not match the validated workspace");
@@ -3045,15 +3049,7 @@ impl SessionManager {
             return Ok(());
         }
         let mut meta = live.meta.lock().await.clone();
-        let adapter = if meta
-            .managed
-            .as_ref()
-            .is_some_and(|managed| managed.evidence_scope.is_some())
-        {
-            self.registry.require_evidence_scope(&meta.agent_id)?
-        } else {
-            self.registry.require(&meta.agent_id)?
-        };
+        let adapter = self.registry.require(&meta.agent_id)?;
         let offered = adapter.catalog(providers).await;
         if normalize_runtime_selection(&mut meta, &offered) {
             tracing::warn!(
@@ -3129,10 +3125,6 @@ impl SessionManager {
                     Some(guidance)
                 });
         let config = |resume: Option<PersistHandle>| SessionConfig {
-            evidence_scope: meta
-                .managed
-                .as_ref()
-                .and_then(|managed| managed.evidence_scope.clone()),
             session_id: meta.id.clone(),
             cwd: meta.cwd.clone(),
             model_id: meta.model_id.clone(),
@@ -3881,8 +3873,10 @@ impl SessionManager {
             .cloned()
             .ok_or_else(|| anyhow!("no pending interaction called '{request_id}'"))?;
 
-        if matches!(request.kind, PermissionRequestKind::PlanApproval | PermissionRequestKind::Question)
-            || request.id.starts_with("workflow-human-")
+        if matches!(
+            request.kind,
+            PermissionRequestKind::PlanApproval | PermissionRequestKind::Question
+        ) || request.id.starts_with("workflow-human-")
             || !live.meta.lock().await.inbox.entries.is_empty()
         {
             let mut project_approval = live.meta.lock().await.pending_project_approval;
@@ -3908,6 +3902,14 @@ impl SessionManager {
             });
             next.pending_permission = None;
             next.pending_project_approval = false;
+            // An explicit accepted answer is a new continuation instruction.
+            // Ordinary Workflow notices still respect an existing inbox pause.
+            // Persist this once with the answer; replaying a receipt must not
+            // undo a later user stop. Cancelling a question is not a resume.
+            if continuation_for(&request, &outcome)?.is_some() {
+                next.inbox.paused = false;
+                next.inbox.error = None;
+            }
             self.store.save_meta(&next)?;
             *meta = next;
             drop(meta);
@@ -4113,8 +4115,14 @@ impl SessionManager {
                 bail!("answer the current Human interaction before this Workflow question");
             }
         }
-        if live.meta.lock().await.human_continuation.as_ref()
-            .is_some_and(|decision| decision.request.id == request.id) {
+        if live
+            .meta
+            .lock()
+            .await
+            .human_continuation
+            .as_ref()
+            .is_some_and(|decision| decision.request.id == request.id)
+        {
             return Ok(());
         }
         if let Err(error) = stop_agent_for_interaction(&live, &self.store, &request, false).await {
@@ -4124,10 +4132,18 @@ impl SessionManager {
         }
         live.stop_pump().await?;
         let mut owner = live.execution.lock().await;
-        if let Some(turn_id) = owner.as_ref().and_then(|execution| execution.turn_id.clone()) {
+        if let Some(turn_id) = owner
+            .as_ref()
+            .and_then(|execution| execution.turn_id.clone())
+        {
             live.publish(SessionEvent::TurnCanceled { turn_id }).await;
         }
-        live.finish_execution(&mut owner, SessionEvent::PermissionRequested { request }, false).await?;
+        live.finish_execution(
+            &mut owner,
+            SessionEvent::PermissionRequested { request },
+            false,
+        )
+        .await?;
         Ok(())
     }
 
@@ -4137,7 +4153,12 @@ impl SessionManager {
         request_id: &str,
     ) -> Result<Option<PermissionOutcome>> {
         let live = self.live(session_id).await?;
-        let outcome = live.meta.lock().await.human_continuation.as_ref()
+        let outcome = live
+            .meta
+            .lock()
+            .await
+            .human_continuation
+            .as_ref()
             .filter(|decision| decision.request.id == request_id)
             .map(|decision| decision.outcome.clone());
         Ok(outcome)
@@ -4145,36 +4166,67 @@ impl SessionManager {
 
     /// The built-in recovery reviewer may only submit the choice recorded by
     /// its controller through the durable Session question path.
-    pub(crate) async fn workflow_recovery_choice(&self, session_id: &str) -> Result<Option<String>> {
+    pub(crate) async fn workflow_recovery_choice(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<String>> {
         let live = self.live(session_id).await?;
         let meta = live.meta.lock().await;
-        let Some(decision) = &meta.human_continuation else { return Ok(None); };
-        if decision.request.kind != PermissionRequestKind::Question { return Ok(None); }
-        let Some([question]) = decision.request.questions.as_deref() else { return Ok(None); };
+        let Some(decision) = &meta.human_continuation else {
+            return Ok(None);
+        };
+        if decision.request.kind != PermissionRequestKind::Question {
+            return Ok(None);
+        }
+        let Some([question]) = decision.request.questions.as_deref() else {
+            return Ok(None);
+        };
         let expected = ["repair", "resume", "successor", "human", "cancel"];
-        if question.options.iter().map(|option| option.label.as_str()).collect::<Vec<_>>() != expected {
+        if question
+            .options
+            .iter()
+            .map(|option| option.label.as_str())
+            .collect::<Vec<_>>()
+            != expected
+        {
             return Ok(None);
         }
         let selected = match &decision.outcome {
             PermissionOutcome::Selected { option_id } => Some(option_id.as_str()),
-            PermissionOutcome::Answered { answers } => answers.iter()
+            PermissionOutcome::Answered { answers } => answers
+                .iter()
                 .find(|answer| answer.question_id == question.id)
                 .and_then(|answer| answer.selected_option_ids.as_slice().first())
                 .map(String::as_str),
             _ => None,
         };
-        Ok(selected.and_then(|id| question.options.iter().find(|option| option.id == id || option.label == id))
+        Ok(selected
+            .and_then(|id| {
+                question
+                    .options
+                    .iter()
+                    .find(|option| option.id == id || option.label == id)
+            })
             .map(|option| option.label.clone()))
     }
 
-    pub(crate) async fn cancel_workflow_question(&self, session_id: &str, request_id: &str) -> Result<()> {
+    pub(crate) async fn cancel_workflow_question(
+        &self,
+        session_id: &str,
+        request_id: &str,
+    ) -> Result<()> {
         let live = match self.live(session_id).await {
             Ok(live) => live,
             Err(error) if error.is::<SessionMissing>() => return Ok(()),
             Err(error) => return Err(error),
         };
         let _interaction = live.interaction_lock.lock().await;
-        if live.meta.lock().await.pending_permission.as_ref()
+        if live
+            .meta
+            .lock()
+            .await
+            .pending_permission
+            .as_ref()
             .is_some_and(|pending| pending.id == request_id)
         {
             cancel_human_continuation(&live, &self.store).await?;
@@ -4408,6 +4460,7 @@ impl SessionManager {
             if let Some(broker) = &self.project_control {
                 broker.revoke_session(session_id).await?;
             }
+            live.prepare_shutdown().await?;
             self.end_what_it_left(session_id).await;
             live.shutdown().await?;
         }
@@ -4532,6 +4585,7 @@ impl SessionManager {
         };
         // Still stop the owned adapter when observation fails. The persisted
         // receipt keeps uncertainty visible across retries and daemon restart.
+        live.prepare_shutdown().await?;
         if let Err(error) = self.processes.stop_all_checked(session_id).await {
             tracing::warn!(session = session_id, %error, "descendant cleanup needs verification");
         }
@@ -4575,9 +4629,19 @@ impl SessionManager {
     pub async fn shutdown(&self) {
         let sessions: Vec<(String, Arc<Live>)> = self.sessions.write().await.drain().collect();
         for (session_id, live) in sessions {
+            if let Err(error) = live.prepare_shutdown().await {
+                tracing::error!(session = %session_id, %error, "session event retirement did not complete");
+            }
+            // Daemon exit cannot leave an owned adapter running merely because
+            // its timeline writer failed. Preserve ownership for the descendant
+            // census, and keep the writer failure visible rather than claim a
+            // successful Session retirement.
             self.end_what_it_left(&session_id).await;
             if let Err(error) = live.shutdown().await {
                 tracing::error!(session = %session_id, %error, "session shutdown did not complete");
+                if let Err(error) = close_current_agent(&live).await {
+                    tracing::error!(session = %session_id, %error, "owned adapter shutdown failed");
+                }
             }
         }
     }
@@ -5492,7 +5556,7 @@ impl Live {
         Ok(())
     }
 
-    async fn shutdown(self: &Arc<Self>) -> Result<()> {
+    async fn prepare_shutdown(self: &Arc<Self>) -> Result<u64> {
         self.closing.store(true, Ordering::SeqCst);
         let starting = {
             let owner = self.execution.lock().await;
@@ -5517,6 +5581,22 @@ impl Live {
                 })
                 .id
         };
+        {
+            let mut owner = self.execution.lock().await;
+            if let Some(execution) = owner.as_mut().filter(|execution| execution.id == id) {
+                execution.phase = ExecutionPhase::Stopping;
+                execution.cancel.send_replace(true);
+                execution.ready.send_replace(true);
+            }
+        }
+        // Keep the adapter alive for descendant ownership census, but retire
+        // event consumption before our controlled cleanup produces its exit.
+        self.stop_pump().await?;
+        Ok(id)
+    }
+
+    async fn shutdown(self: &Arc<Self>) -> Result<()> {
+        let id = self.prepare_shutdown().await?;
         retire_execution(self, id, None, true).await
     }
 }
@@ -5674,7 +5754,9 @@ fn question_answer(
         if request.options.is_empty() {
             let questions = request.questions.as_deref().unwrap_or_default();
             if let [question] = questions {
-                let matches = question.options.iter()
+                let matches = question
+                    .options
+                    .iter()
                     .filter(|option| option.id == *option_id || option.label == *option_id)
                     .collect::<Vec<_>>();
                 if let [option] = matches.as_slice() {
@@ -8091,12 +8173,13 @@ mod tests {
             vec![None],
             "the ACP handle is not passed on"
         );
-        let sent = prompts.lock().unwrap();
-        assert_eq!(sent.len(), 1);
-        assert!(sent[0].text.contains("Investigate the failing deploy"));
-        assert!(sent[0].text.contains("The health check path is stale"));
-        assert!(sent[0].text.contains("Continue the investigation"));
-        drop(sent);
+        {
+            let sent = prompts.lock().unwrap();
+            assert_eq!(sent.len(), 1);
+            assert!(sent[0].text.contains("Investigate the failing deploy"));
+            assert!(sent[0].text.contains("The health check path is stale"));
+            assert!(sent[0].text.contains("Continue the investigation"));
+        }
         let live = sessions.live(&created.id).await.unwrap();
         assert!(live.meta.lock().await.persist.is_none());
         assert_eq!(
@@ -9981,16 +10064,50 @@ mod tests {
         sessions.store.save_meta(&meta()).unwrap();
         let mut request = interaction(PermissionRequestKind::Question);
         request.id = "workflow-human-s1".into();
-        sessions.request_workflow_question("s1", request.clone()).await.unwrap();
-        sessions.request_workflow_question("s1", request.clone()).await.unwrap();
+        sessions
+            .request_workflow_question("s1", request.clone())
+            .await
+            .unwrap();
+        sessions
+            .request_workflow_question("s1", request.clone())
+            .await
+            .unwrap();
         let live = sessions.live("s1").await.unwrap();
         assert_eq!(live.snapshot().await.unwrap().pending_permissions.len(), 1);
-        assert_eq!(sessions.store.load_meta("w1", "s1").unwrap().pending_permission.unwrap().id, request.id);
-        let outcome = PermissionOutcome::Selected { option_id: "yes".into() };
-        sessions.respond_permission("s1", &request.id, outcome.clone(), &ProviderMap::new()).await.unwrap();
-        assert_eq!(sessions.workflow_question_outcome("s1", &request.id).await.unwrap(), Some(outcome));
-        sessions.request_workflow_question("s1", request).await.unwrap();
-        assert!(live.snapshot().await.unwrap().pending_permissions.is_empty());
+        assert_eq!(
+            sessions
+                .store
+                .load_meta("w1", "s1")
+                .unwrap()
+                .pending_permission
+                .unwrap()
+                .id,
+            request.id
+        );
+        let outcome = PermissionOutcome::Selected {
+            option_id: "yes".into(),
+        };
+        sessions
+            .respond_permission("s1", &request.id, outcome.clone(), &ProviderMap::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            sessions
+                .workflow_question_outcome("s1", &request.id)
+                .await
+                .unwrap(),
+            Some(outcome)
+        );
+        sessions
+            .request_workflow_question("s1", request)
+            .await
+            .unwrap();
+        assert!(live
+            .snapshot()
+            .await
+            .unwrap()
+            .pending_permissions
+            .is_empty());
     }
 
     /// Regression for the detached CLI: delivery is driven by the persisted

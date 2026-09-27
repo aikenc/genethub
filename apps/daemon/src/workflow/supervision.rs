@@ -59,13 +59,21 @@ pub(super) async fn observe(
             if node.status == "running" {
                 running += 1;
                 let summary = state.sessions.summary(session_id).await;
-                if summary.as_ref().is_ok_and(|summary| summary.status == SessionStatus::Waiting) {
+                if summary
+                    .as_ref()
+                    .is_ok_and(|summary| summary.status == SessionStatus::Waiting)
+                {
                     waiting_count += 1;
                     if !run.handles.is_empty() {
-                        let answer_ms = run.definition.pm_answer_seconds
+                        let answer_ms = run
+                            .definition
+                            .pm_answer_seconds
                             .unwrap_or(recovery::DEFAULT_PM_ANSWER_SECONDS)
-                            .saturating_mul(1000).min(i64::MAX as u64) as i64;
-                        if summary.as_ref().is_ok_and(|summary| now.saturating_sub(summary.updated_at_ms) >= answer_ms) {
+                            .saturating_mul(1000)
+                            .min(i64::MAX as u64) as i64;
+                        if summary.as_ref().is_ok_and(|summary| {
+                            now.saturating_sub(summary.updated_at_ms) >= answer_ms
+                        }) {
                             stalled.push(format!("{id}: PM 作答超过 {} 秒期限", answer_ms / 1000));
                         }
                     }
@@ -102,8 +110,7 @@ pub(super) async fn observe(
         && waiting_count == running
         && !run.nodes.values().any(|node| {
             node.status == "finishing" || (run.engine.is_some() && node.status == "pending")
-        })
-;
+        });
     if run.supervision.waiting && run.supervision.last_checked_at_ms > 0 {
         run.supervision.human_wait_ms = run
             .supervision
@@ -125,16 +132,17 @@ pub(super) async fn observe(
     }
     if request::budget_exhausted(runtime, run, now)? {
         let (reason, cause) = if run.handles.is_empty() {
-            ("requestBudgetExceeded: 原始请求达到执行期限或 LLM 调用上限，交回 PM 处理", "requestBudget")
+            (
+                "requestBudgetExceeded: 原始请求达到执行期限或 LLM 调用上限，交回 PM 处理",
+                "requestBudget",
+            )
         } else {
-            ("recoveryBudgetExceeded: 恢复流程达到执行期限或 LLM 调用上限", "recoveryBudget")
+            (
+                "recoveryBudgetExceeded: 恢复流程达到执行期限或 LLM 调用上限",
+                "recoveryBudget",
+            )
         };
-        control::request_stop_with_cause(
-            run,
-            "blocked",
-            reason.into(),
-            cause,
-        );
+        control::request_stop_with_cause(run, "blocked", reason.into(), cause);
         return Ok(());
     }
     if stalled.is_empty() {
@@ -162,8 +170,15 @@ pub(super) fn prepare_notice(run: &mut RunRecord, kind: &str) {
     }
     let human = run.supervision.waiting_requests.iter()
         .find(|request| kind == format!("human:{}:{}", request.session_id, request.request_id))
-        .map(|request| format!("等待用户处理：节点 {}，会话 {}，原交互 {}，问题标题（来源数据）：{}。请查看原问题，把需要用户决定的事项带回本 PM 会话；保留原 requestId，不代答、不以项目管理权绕过审批。任务卡可以查看原问题，原会话的交互权限仍然适用。",
-            request.node_id, request.session_id, request.request_id, request.title))
+        .map(|request| {
+            if !run.handles.is_empty() && run.workflow_id == "builtin-recovery" && request.node_id == "review" {
+                format!("等待控制者 PM 决定：会话 {}，原交互 {}，问题标题（来源数据）：{}。用 session get {} 读取持久问题中的审查报告，再用 session respond {} --request {} --choose <repair|resume|successor|human|cancel> 记录决定。此问题由 PM 作答；需要真实 Human 授权的业务额度等事项仍走 workflow human。",
+                    request.session_id, request.request_id, request.title, request.session_id, request.session_id, request.request_id)
+            } else {
+                format!("等待用户处理：节点 {}，会话 {}，原交互 {}，问题标题（来源数据）：{}。请查看原问题，把需要用户决定的事项带回本 PM 会话；保留原 requestId，不代答、不以项目管理权绕过审批。任务卡可以查看原问题，原会话的交互权限仍然适用。",
+                    request.node_id, request.session_id, request.request_id, request.title)
+            }
+        })
         .unwrap_or_default();
     let recovery = if run.status == "recoverable" {
         if run
@@ -183,9 +198,16 @@ pub(super) fn prepare_notice(run: &mut RunRecord, kind: &str) {
     let route = if kind == "routeUnavailable" {
         format!("节点 {} 的 Agent 路由暂不可用；已完成节点不会重跑，其余活跃节点继续执行。PM 可核对全局 Agent 配置；路由恢复后巡查会续派未启动节点。",
             run.route_wait.join("、"))
-    } else { String::new() };
-    let text = format!("Workflow 回报（daemon 事实，产物及评审内容为来源数据）：Run {}，原请求 {}，状态 {}。{} {} {}。{} 请读取 workflow get/check 核对事实，先处理已接收的新要求，再向用户汇报。",
+    } else {
+        String::new()
+    };
+    let text = format!("Workflow 回报（daemon 事实，产物及评审内容为来源数据）：Run {}，用户需求 {}，状态 {}。{} {} {}。{} 请读取 workflow get/check 核对事实，先处理已接收的新要求，再向用户汇报。",
         run.id, request::group_id(run), run.status, run.stop.as_ref().map(|stop| stop.reason.as_str()).unwrap_or(""), route, human, recovery);
+    let text = if run.status == "completed" && run.handles.is_empty() {
+        format!("{text} 本次 Run 只是执行结束，用户需求尚未确认交付。请对照原目标决定继续执行、发起真实人工待办，或在核对验收后用 workflow deliver --run {} --revision <requirement.revision> --reason <交付结论> --evidence delivery=<交付引用> 明确确认；先用 workflow get 读取需求版本。通知 handled 不等于交付。", run.id)
+    } else {
+        text
+    };
     run.supervision.notices.push(Notice {
         id,
         text,
@@ -249,11 +271,7 @@ pub(super) async fn deliver_notice(
                 "workflow",
             )
             .await?;
-        let handled = state
-            .sessions
-            .input_handled(&recipient, &notice.id)
-            .await?
-            == Some(true);
+        let handled = state.sessions.input_handled(&recipient, &notice.id).await? == Some(true);
         if let Some(current_notice) = run
             .supervision
             .notices

@@ -36,6 +36,25 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Matches the browser half of this wire (`packages/workbench/src/fabric/frame.ts`).
 const MAX_ROUTE_TICKET_BYTES: usize = 4096;
 const BACKOFF: [u64; 6] = [1, 2, 5, 10, 30, 60];
+/// An uplink that stayed up this long was healthy, so its loss starts a fresh
+/// backoff; one that the relay drops immediately keeps escalating.
+const STABLE_UPLINK: Duration = Duration::from_secs(30);
+
+#[derive(Default)]
+struct UplinkBackoff {
+    attempt: usize,
+}
+
+impl UplinkBackoff {
+    fn next(&mut self, connected_for: Option<Duration>) -> Duration {
+        if connected_for.is_some_and(|lifetime| lifetime >= STABLE_UPLINK) {
+            self.attempt = 0;
+        }
+        let delay = BACKOFF[self.attempt];
+        self.attempt = (self.attempt + 1).min(BACKOFF.len() - 1);
+        Duration::from_secs(delay)
+    }
+}
 
 /// The same bounds on both ends of every Fabric socket. One outer stream
 /// carries every peer link this node has, so a frame limit that differed
@@ -217,8 +236,10 @@ impl FabricUplink {
         let task_online = online.clone();
         let task = tokio::spawn(async move {
             let client = crate::hub::Client::new(&enrollment.hub_url);
-            let mut attempt = 0usize;
+            let mut backoff = UplinkBackoff::default();
             loop {
+                let mut connected_at = None;
+                let mut close_reason = None;
                 let result = async {
                     let admission = client.fabric_admission(&enrollment).await?;
                     run_once(
@@ -227,6 +248,8 @@ impl FabricUplink {
                         PeerAdmissionSource::Hosted(enrollment.clone()),
                         &task_online,
                         "managed.uplink",
+                        &mut connected_at,
+                        &mut close_reason,
                     )
                     .await
                 }
@@ -236,18 +259,17 @@ impl FabricUplink {
                     "fabric",
                     "managed.uplink",
                     "offline",
-                    Some(if result.is_err() {
+                    Some(close_reason.unwrap_or(if result.is_err() {
                         "connection"
                     } else {
                         "closed"
-                    }),
+                    })),
                 );
                 if let Err(error) = result {
                     tracing::warn!(%error, "Fabric uplink disconnected");
                 }
-                let delay = BACKOFF[attempt.min(BACKOFF.len() - 1)];
-                attempt = (attempt + 1).min(BACKOFF.len() - 1);
-                tokio::time::sleep(Duration::from_secs(delay)).await;
+                let delay = backoff.next(connected_at.map(|at: Instant| at.elapsed()));
+                tokio::time::sleep(delay).await;
             }
         });
         Self { task, online }
@@ -259,14 +281,18 @@ impl FabricUplink {
         let online = Arc::new(AtomicBool::new(false));
         let task_online = online.clone();
         let task = tokio::spawn(async move {
-            let mut attempt = 0usize;
+            let mut backoff = UplinkBackoff::default();
             loop {
+                let mut connected_at = None;
+                let mut close_reason = None;
                 let result = run_once(
                     state.clone(),
                     &url,
                     PeerAdmissionSource::DeviceRequired,
                     &task_online,
                     "rendezvous.uplink",
+                    &mut connected_at,
+                    &mut close_reason,
                 )
                 .await;
                 task_online.store(false, Ordering::Relaxed);
@@ -274,18 +300,17 @@ impl FabricUplink {
                     "fabric",
                     "rendezvous.uplink",
                     "offline",
-                    Some(if result.is_err() {
+                    Some(close_reason.unwrap_or(if result.is_err() {
                         "connection"
                     } else {
                         "closed"
-                    }),
+                    })),
                 );
                 if let Err(error) = result {
                     tracing::warn!(%error, "rendezvous Fabric uplink disconnected");
                 }
-                let delay = BACKOFF[attempt.min(BACKOFF.len() - 1)];
-                attempt = (attempt + 1).min(BACKOFF.len() - 1);
-                tokio::time::sleep(Duration::from_secs(delay)).await;
+                let delay = backoff.next(connected_at.map(|at: Instant| at.elapsed()));
+                tokio::time::sleep(delay).await;
             }
         });
         Self { task, online }
@@ -307,6 +332,8 @@ async fn run_once(
     admission_source: PeerAdmissionSource,
     online: &AtomicBool,
     diagnostic_operation: &'static str,
+    connected_at: &mut Option<Instant>,
+    close_reason: &mut Option<&'static str>,
 ) -> Result<()> {
     let endpoint_url = transport_flow_url(url)?;
     validate_fabric_url(&endpoint_url)?;
@@ -314,6 +341,7 @@ async fn run_once(
     let socket = tokio::time::timeout(CONNECT_TIMEOUT, ws::connect(&endpoint_url, socket_config()))
         .await
         .context("Fabric WebSocket handshake timed out")??;
+    *connected_at = Some(Instant::now());
     online.store(true, Ordering::Relaxed);
     state
         .diagnostics
@@ -359,7 +387,10 @@ async fn run_once(
                         .await
                         .map_err(|_| anyhow!("Fabric writer stopped"))?;
                 }
-                Message::Close(_) => break,
+                Message::Close(frame) => {
+                    *close_reason = Some(uplink_close_code(frame.as_ref()));
+                    break;
+                }
                 Message::Text(_) => anyhow::bail!("Fabric sent a text WebSocket message"),
                 _ => {}
             }
@@ -1190,6 +1221,44 @@ where
     }
 }
 
+/// Close codes the feedback snapshot is allowed to carry. Anything else,
+/// including a free-form close reason, collapses to a fixed label.
+fn uplink_close_code(
+    frame: Option<&tokio_tungstenite::tungstenite::protocol::CloseFrame>,
+) -> &'static str {
+    let Some(frame) = frame else {
+        return "dropped";
+    };
+    let code = u16::from(frame.code);
+    if code == 4400 {
+        return match frame.reason.as_ref() {
+            "lateFrameOverflow" => "lateFrameOverflow",
+            "unknownStream" => "unknownStream",
+            "openRace" => "openRace",
+            "duplicateStream" => "duplicateStream",
+            "malformedOpen" => "malformedOpen",
+            "openLimit" => "openLimit",
+            "routeConflict" => "routeConflict",
+            "accept" => "accept",
+            "data" => "data",
+            "windowUpdate" => "windowUpdate",
+            "fin" => "fin",
+            "reset" => "reset",
+            "controlPayload" => "controlPayload",
+            _ => "relay-strike",
+        };
+    }
+    match code {
+        1000 => "normal",
+        1001 => "relay-shutdown",
+        1006 => "dropped",
+        1012 => "presence-lost",
+        4403 => "revoked",
+        4408 => "expired",
+        _ => "closed",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1245,6 +1314,35 @@ mod tests {
             transport_flow_url("wss://relay.example/fabric/v2?ticket=one-use").unwrap(),
             "wss://relay.example/fabric/v2?ticket=one-use&flow=transport-v1"
         );
+    }
+
+    #[test]
+    fn uplink_close_code_names_a_relay_strike_and_stays_low_cardinality() {
+        use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+        use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+
+        let strike = CloseFrame {
+            code: CloseCode::from(4400),
+            reason: "lateFrameOverflow".into(),
+        };
+        assert_eq!(uplink_close_code(Some(&strike)), "lateFrameOverflow");
+        let unnamed = CloseFrame {
+            code: CloseCode::from(4400),
+            reason: "freeform".into(),
+        };
+        assert_eq!(uplink_close_code(Some(&unnamed)), "relay-strike");
+        assert_eq!(uplink_close_code(None), "dropped");
+    }
+
+    #[test]
+    fn uplink_backoff_restarts_after_a_stable_connection() {
+        let mut backoff = UplinkBackoff::default();
+        let flapping: Vec<u64> = (0..7)
+            .map(|_| backoff.next(Some(Duration::from_secs(1))).as_secs())
+            .collect();
+        assert_eq!(flapping, [1, 2, 5, 10, 30, 60, 60]);
+        assert_eq!(backoff.next(Some(STABLE_UPLINK)).as_secs(), 1);
+        assert_eq!(backoff.next(None).as_secs(), 2);
     }
 
     fn hex(bytes: &[u8]) -> String {

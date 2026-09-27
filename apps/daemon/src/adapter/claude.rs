@@ -184,6 +184,19 @@ fn apply_claude_sandbox_compat(command: &mut Command) {
     command.env(CLAUDE_SANDBOX_COMPAT_ENV.0, CLAUDE_SANDBOX_COMPAT_ENV.1);
 }
 
+/// A catalog lookup owns only a short-lived probe. TClaude normally creates a
+/// persistent gateway even for upstream help/version; ask the wrapper to keep
+/// that gateway inside this invocation instead. Actual sessions keep the CLI's
+/// normal lifecycle and the user's configuration.
+fn apply_catalog_environment(command: &mut Command, flavor: ClaudeFlavor) {
+    apply_claude_sandbox_compat(command);
+    if flavor.id == TCLAUDE.id {
+        command.env("TCLAUDE_DISABLE_DAEMON", "1");
+    }
+    command.kill_on_drop(true);
+    super::owned_child(command);
+}
+
 pub struct ClaudeAdapter {
     flavor: ClaudeFlavor,
     extra_dirs: Vec<PathBuf>,
@@ -257,11 +270,13 @@ impl ClaudeAdapter {
         }
         let help_args = self.flavor.help_args;
         let text = {
-            let mut text = Command::new(program)
-                .args(help_args)
-                .output()
+            let mut command = Command::new(program);
+            command.args(help_args);
+            apply_catalog_environment(&mut command, self.flavor);
+            let mut text = tokio::time::timeout(CONTROL_TIMEOUT, command.output())
                 .await
                 .ok()
+                .and_then(Result::ok)
                 .map(|out| {
                     let mut text = String::from_utf8_lossy(&out.stdout).to_string();
                     text.push_str(&String::from_utf8_lossy(&out.stderr));
@@ -284,6 +299,7 @@ impl ClaudeAdapter {
                         .args(&help_args[..help_args.len() - 1])
                         .args(["--permission-mode", mode, "--version"])
                         .kill_on_drop(true);
+                    apply_catalog_environment(&mut command, self.flavor);
                     if let Ok(Ok(output)) =
                         tokio::time::timeout(CONTROL_TIMEOUT, command.output()).await
                     {
@@ -299,6 +315,7 @@ impl ClaudeAdapter {
                         .args(&help_args[..help_args.len() - 1])
                         .args(["--permission-mode", mode, "--version"])
                         .kill_on_drop(true);
+                    apply_catalog_environment(&mut command, self.flavor);
                     if let Ok(Ok(output)) =
                         tokio::time::timeout(CONTROL_TIMEOUT, command.output()).await
                     {
@@ -336,7 +353,7 @@ impl ClaudeAdapter {
         if let Some(cached) = self.hello.read().await.clone() {
             return Some(cached);
         }
-        let found = initialize(program).await;
+        let found = initialize(program, self.flavor).await;
         if let Some(hello) = found.clone() {
             *self.hello.write().await = Some(hello);
         }
@@ -345,9 +362,9 @@ impl ClaudeAdapter {
 }
 
 /// Runs one `initialize` control request and takes the answer away with it.
-async fn initialize(program: &std::path::Path) -> Option<Value> {
+async fn initialize(program: &std::path::Path, flavor: ClaudeFlavor) -> Option<Value> {
     let mut command = Command::new(program);
-    apply_claude_sandbox_compat(&mut command);
+    apply_catalog_environment(&mut command, flavor);
     command
         .args([
             "--print",
@@ -367,7 +384,6 @@ async fn initialize(program: &std::path::Path) -> Option<Value> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    super::owned_child(&mut command);
 
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -414,6 +430,14 @@ async fn initialize(program: &std::path::Path) -> Option<Value> {
         None
     })
     .await;
+
+    if matches!(&answer, Ok(None)) {
+        let status = child.try_wait().ok().flatten();
+        tracing::warn!(
+            ?status,
+            "claude closed its catalog stream without an initialize answer"
+        );
+    }
 
     // The process is only alive to answer this one question, and it does not exit
     // on its own: `--print` waits for a prompt it is never going to get.
@@ -2919,7 +2943,6 @@ mod tests {
         let adapter = ClaudeAdapter::with_program(fake);
         let session = adapter
             .start(SessionConfig {
-                evidence_scope: None,
                 effort_id: None,
                 fast: None,
                 additional_system_prompt: None,

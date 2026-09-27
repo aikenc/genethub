@@ -115,8 +115,29 @@ export class RemoteFabricAuthority implements FabricAuthority {
     endpointHandle: string,
     connectionGeneration: number,
     state: FabricPresenceState,
+    detail?: { reasonCode: string; strikes: number },
   ): Promise<void> {
-    await this.post(FABRIC_PRESENCE, { endpointHandle, connectionGeneration, state });
+    const body = {
+      endpointHandle,
+      connectionGeneration,
+      state,
+      ...(detail ? { reasonCode: detail.reasonCode, strikes: detail.strikes } : {}),
+    };
+    try {
+      await this.post(FABRIC_PRESENCE, body);
+    } catch (error) {
+      // An older Control rejects unknown presence fields. The online/offline
+      // fact still has to land; the strike name is the part that can wait.
+      if (
+        detail &&
+        error instanceof AuthorityHttpError &&
+        error.status === 400
+      ) {
+        await this.post(FABRIC_PRESENCE, { endpointHandle, connectionGeneration, state });
+        return;
+      }
+      throw error;
+    }
   }
 
   onFabricRevoked(handler: (revocation: FabricRevocation) => void): void {

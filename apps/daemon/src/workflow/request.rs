@@ -93,6 +93,14 @@ pub(super) struct RequestRecord {
     recovery_extra: RecoveryExtra,
     #[serde(default)]
     approved_human_exits: Vec<String>,
+    #[serde(default)]
+    pub(super) requirement: genehub_proto::WorkflowRequirementStatus,
+    #[serde(default)]
+    pub(super) latest_business_run: String,
+    #[serde(default)]
+    pub(super) next_check_at_ms: i64,
+    #[serde(default)]
+    pub(super) patrol_failures: u32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -103,14 +111,20 @@ pub(super) struct RecoveryExtra {
     pub deadline_seconds: u64,
 }
 
-fn read_record(runtime: &RuntimeStore, root_run_id: &str) -> Result<RequestRecord> {
+pub(super) fn read_record(runtime: &RuntimeStore, root_run_id: &str) -> Result<RequestRecord> {
     let path = record_path(runtime, root_run_id, false)?;
     let metadata = crate::config::sensitive_metadata(&path)?;
     crate::config::reject_link_or_reparse(&path, &metadata)?;
-    if !metadata.is_file() { bail!("Workflow request 不是普通文件"); }
+    if !metadata.is_file() {
+        bail!("Workflow request 不是普通文件");
+    }
     ensure_record_size("Workflow request", metadata.len(), MAX_RUN_RECORD_BYTES)?;
     let record: RequestRecord = serde_json::from_slice(&fs::read(&path)?)?;
-    if record.schema != "genehub.workflow.request.v1" || record.root_run_id != root_run_id {
+    if !matches!(
+        record.schema.as_str(),
+        "genehub.workflow.request.v1" | "genehub.workflow.request.v2"
+    ) || record.root_run_id != root_run_id
+    {
         bail!("Workflow request identity mismatch");
     }
     Ok(record)
@@ -128,7 +142,9 @@ fn root_for_message(runtime: &RuntimeStore, message_id: &str) -> Result<Option<S
     let mut found = None;
     for entry in listing {
         let entry = entry?;
-        let Some(id) = entry.file_name().to_str().map(str::to_string) else { continue; };
+        let Some(id) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
         if let Err(error) = validate_id(&id, "request id") {
             // An invalid directory name cannot identify a committed request.
             tracing::warn!(request_id = %id, %error, "ignoring invalid Workflow request directory");
@@ -149,23 +165,26 @@ fn root_for_message(runtime: &RuntimeStore, message_id: &str) -> Result<Option<S
                 // prove that, fail closed: silently making a second root for
                 // the same message would duplicate work and side effects.
                 match load_run_indexed_raw(runtime, &id) {
-                    Ok(root) if group_id(&root) == id && root.request.as_ref()
-                        .is_some_and(|link| link.original_message_id != message_id) => {
+                    Ok(root)
+                        if group_id(&root) == id
+                            && root
+                                .request
+                                .as_ref()
+                                .is_some_and(|link| link.original_message_id != message_id) =>
+                    {
                         tracing::warn!(request_id = %id, %error,
                             "ignoring unrelated damaged Workflow request record");
                         continue;
                     }
-                    Ok(_) => {},
+                    Ok(_) => {}
                     Err(snapshot_error) => tracing::warn!(request_id = %id, %snapshot_error,
                         "cannot establish ownership of damaged Workflow request"),
                 }
                 return Err(error).with_context(|| format!("读取 Workflow 请求 {id}"));
             }
         };
-        if record.original_message_id == message_id {
-            if found.replace(record.root_run_id).is_some() {
-                bail!("多个 Workflow 请求绑定同一 PM 消息");
-            }
+        if record.original_message_id == message_id && found.replace(record.root_run_id).is_some() {
+            bail!("多个 Workflow 请求绑定同一 PM 消息");
         }
     }
     Ok(found)
@@ -178,67 +197,141 @@ pub(super) fn recovery_extra(runtime: &RuntimeStore, root_run_id: &str) -> Resul
 /// Called only after a daemon-authored Human question receives its answer.
 /// The request ID is the idempotency key, so a crash between this write and
 /// the Human exit receipt cannot spend approval twice.
-pub(super) fn apply_human_budget(runtime: &RuntimeStore, root_run_id: &str, request_id: &str, kind: &str) -> Result<()> {
+pub(super) fn apply_human_budget(
+    runtime: &RuntimeStore,
+    root_run_id: &str,
+    request_id: &str,
+    kind: &str,
+) -> Result<()> {
     let mut record = read_record(runtime, root_run_id)?;
-    if record.approved_human_exits.iter().any(|id| id == request_id) { return Ok(()); }
-    if record.approved_human_exits.len() >= 64 { bail!("Workflow Human approval history is full"); }
+    if record
+        .approved_human_exits
+        .iter()
+        .any(|id| id == request_id)
+    {
+        return Ok(());
+    }
+    if record.approved_human_exits.len() >= 64 {
+        bail!("Workflow Human approval history is full");
+    }
     match kind {
         "a" => {
-            record.budget.max_runs = record.budget.max_runs.saturating_add(1).min(MAX_CONFIGURED_REQUEST_RUNS);
-            record.budget.max_llm_rounds = record.budget.max_llm_rounds.saturating_add(128).min(MAX_CONFIGURED_LLM_ROUNDS);
-            record.budget.deadline_ms = record.budget.deadline_ms.saturating_add(3_600_000)
+            record.budget.max_runs = record
+                .budget
+                .max_runs
+                .saturating_add(1)
+                .min(MAX_CONFIGURED_REQUEST_RUNS);
+            record.budget.max_llm_rounds = record
+                .budget
+                .max_llm_rounds
+                .saturating_add(128)
+                .min(MAX_CONFIGURED_LLM_ROUNDS);
+            record.budget.deadline_ms = record
+                .budget
+                .deadline_ms
+                .saturating_add(3_600_000)
                 .min(MAX_CONFIGURED_REQUEST_DEADLINE_SECONDS.saturating_mul(1000));
             record.budget.revision = record.budget.revision.saturating_add(1);
         }
         "c" => {
-            record.recovery_extra.max_runs = record.recovery_extra.max_runs.saturating_add(1).min(recovery::MAX_RECOVERY_RUNS);
-            record.recovery_extra.max_llm_rounds = record.recovery_extra.max_llm_rounds.saturating_add(100).min(recovery::MAX_RECOVERY_LLM_ROUNDS);
-            record.recovery_extra.deadline_seconds = record.recovery_extra.deadline_seconds.saturating_add(1800).min(recovery::MAX_RECOVERY_DEADLINE_SECONDS);
+            record.recovery_extra.max_runs = record
+                .recovery_extra
+                .max_runs
+                .saturating_add(1)
+                .min(recovery::MAX_RECOVERY_RUNS);
+            record.recovery_extra.max_llm_rounds = record
+                .recovery_extra
+                .max_llm_rounds
+                .saturating_add(100)
+                .min(recovery::MAX_RECOVERY_LLM_ROUNDS);
+            record.recovery_extra.deadline_seconds = record
+                .recovery_extra
+                .deadline_seconds
+                .saturating_add(1800)
+                .min(recovery::MAX_RECOVERY_DEADLINE_SECONDS);
         }
         _ => bail!("Human exit {kind} does not adjust a budget"),
     }
     record.approved_human_exits.push(request_id.into());
-    crate::config::save_private(&record_path(runtime, root_run_id, true)?, &encode_private_record("Workflow request", &record, MAX_RUN_RECORD_BYTES)?)
+    crate::config::save_private(
+        &record_path(runtime, root_run_id, true)?,
+        &encode_private_record("Workflow request", &record, MAX_RUN_RECORD_BYTES)?,
+    )
 }
 
 fn record_path(runtime: &RuntimeStore, root_run_id: &str, create: bool) -> Result<PathBuf> {
     validate_id(root_run_id, "request id")?;
-    Ok(runtime.directory(&Path::new("requests").join(root_run_id), create)?.join("request.json"))
+    Ok(runtime
+        .directory(&Path::new("requests").join(root_run_id), create)?
+        .join("request.json"))
 }
 
 pub(super) fn save_record(runtime: &RuntimeStore, run: &RunRecord) -> Result<()> {
-    if group_id(run) != run.id { return Ok(()); }
-    let Some(link) = run.request.as_ref() else { return Ok(()); };
+    if group_id(run) != run.id {
+        return Ok(());
+    }
+    let Some(link) = run.request.as_ref() else {
+        return Ok(());
+    };
     let existing = match crate::config::sensitive_metadata(&record_path(runtime, &run.id, false)?) {
         Ok(_) => Some(read_record(runtime, &run.id)?),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.into()),
     };
     let record = RequestRecord {
-        schema: "genehub.workflow.request.v1".into(),
+        schema: "genehub.workflow.request.v2".into(),
         root_run_id: run.id.clone(),
         original_message_id: link.original_message_id.clone(),
         goal: run.task_prompt.clone(),
-        budget: existing.as_ref().filter(|record| record.budget.revision > link.budget.revision)
-            .map(|record| record.budget.clone()).unwrap_or_else(|| link.budget.clone()),
+        budget: existing
+            .as_ref()
+            .filter(|record| record.budget.revision > link.budget.revision)
+            .map(|record| record.budget.clone())
+            .unwrap_or_else(|| link.budget.clone()),
         cancelled: link.cancelled,
         cancelled_at_ms: link.cancelled_at_ms,
         cancelled_by_agent: link.cancelled_by_agent,
         resume_message_id: link.resume_message_id.clone(),
-        recovery_extra: existing.as_ref().map(|record| record.recovery_extra.clone()).unwrap_or_default(),
-        approved_human_exits: existing.map(|record| record.approved_human_exits).unwrap_or_default(),
+        recovery_extra: existing
+            .as_ref()
+            .map(|record| record.recovery_extra.clone())
+            .unwrap_or_default(),
+        requirement: existing
+            .as_ref()
+            .map(|r| r.requirement.clone())
+            .unwrap_or_default(),
+        latest_business_run: existing
+            .as_ref()
+            .map(|r| r.latest_business_run.clone())
+            .unwrap_or_default(),
+        next_check_at_ms: existing
+            .as_ref()
+            .map(|r| r.next_check_at_ms)
+            .unwrap_or_default(),
+        patrol_failures: existing
+            .as_ref()
+            .map(|r| r.patrol_failures)
+            .unwrap_or_default(),
+        approved_human_exits: existing
+            .map(|record| record.approved_human_exits)
+            .unwrap_or_default(),
     };
     let body = encode_private_record("Workflow request", &record, MAX_RUN_RECORD_BYTES)?;
     crate::config::save_private(&record_path(runtime, &run.id, true)?, &body)
 }
 
 pub(super) fn load_record(runtime: &RuntimeStore, run: &mut RunRecord) -> Result<()> {
-    if group_id(run) != run.id || run.request.is_none() { return Ok(()); }
+    if group_id(run) != run.id || run.request.is_none() {
+        return Ok(());
+    }
     let record = read_record(runtime, &run.id)?;
     if record.goal != run.task_prompt {
         bail!("Workflow request identity mismatch");
     }
-    let link = run.request.as_mut().ok_or_else(|| anyhow!("request root has no link"))?;
+    let link = run
+        .request
+        .as_mut()
+        .ok_or_else(|| anyhow!("request root has no link"))?;
     link.original_message_id = record.original_message_id;
     link.budget = record.budget;
     link.cancelled = record.cancelled;
@@ -289,13 +382,11 @@ pub(super) fn execution_ms(run: &RunRecord, now: i64) -> i64 {
 pub(super) fn activities(
     run: &RunRecord,
 ) -> impl Iterator<Item = &crate::session::store::ExecutionActivity> {
-    run.nodes
-        .values()
-        .flat_map(|node| {
-            node.prior_activity
-                .iter()
-                .chain(std::iter::once(&node.activity))
-        })
+    run.nodes.values().flat_map(|node| {
+        node.prior_activity
+            .iter()
+            .chain(std::iter::once(&node.activity))
+    })
 }
 
 /// One accounting projection for graph queries, check and admission. Replace
@@ -307,7 +398,9 @@ pub(super) fn observation(
 ) -> Result<genehub_proto::WorkflowRequestBudgetSnapshot> {
     let group = runs
         .iter()
-        .filter(|other| group_id(other) == group_id(run) && other.id != run.id && other.handles.is_empty())
+        .filter(|other| {
+            group_id(other) == group_id(run) && other.id != run.id && other.handles.is_empty()
+        })
         .chain(std::iter::once(run).filter(|run| run.handles.is_empty()))
         .collect::<Vec<_>>();
     let root = group
@@ -326,6 +419,11 @@ pub(super) fn observation(
         });
     let used_runs = group.len().min(u32::MAX as usize) as u32;
     Ok(genehub_proto::WorkflowRequestBudgetSnapshot {
+        current_run_admitted: true,
+        current_run_can_execute: run.status == "running"
+            && !cancelled(root)
+            && budget.max_llm_rounds > observed_llm_rounds
+            && budget.deadline_ms > execution_ms,
         request_run_id: group_id(run).into(),
         observed_at_ms: now,
         remaining_runs: budget.max_runs.saturating_sub(used_runs),
@@ -343,11 +441,19 @@ pub(super) fn snapshot(
     run: &RunRecord,
     now: i64,
 ) -> Result<genehub_proto::WorkflowRequestBudgetSnapshot> {
-    observation(&request_runs(runtime, group_id(run))?, run, now)
+    let mut snapshot = observation(&request_runs(runtime, group_id(run))?, run, now)?;
+    if !run.handles.is_empty() {
+        snapshot.current_run_can_execute = run.status == "running"
+            && !cancelled(&load_run(runtime, group_id(run))?)
+            && !recovery::budget_exhausted(runtime, run, now)?;
+    }
+    Ok(snapshot)
 }
 
 pub(super) fn budget_exhausted(runtime: &RuntimeStore, run: &RunRecord, now: i64) -> Result<bool> {
-    if !run.handles.is_empty() { return recovery::budget_exhausted(runtime, run, now); }
+    if !run.handles.is_empty() {
+        return recovery::budget_exhausted(runtime, run, now);
+    }
     let snapshot = snapshot(runtime, run, now)?;
     Ok(snapshot.remaining_llm_rounds == 0
         || (!run.supervision.waiting && snapshot.remaining_execution_ms == 0))
@@ -373,7 +479,7 @@ pub(super) fn cancelled(root: &RunRecord) -> bool {
     // entire retry group.
     root.request
         .as_ref()
-        .map(|request| request.cancelled)
+        .map(|request| request.cancelled && !request.cancelled_by_agent)
         .unwrap_or(matches!(root.status.as_str(), "cancelling" | "cancelled"))
 }
 
@@ -446,6 +552,22 @@ pub(super) async fn admit(
     }
     let mut root = load_run(runtime, &link.root_run_id)?;
     let group = request_runs(runtime, &link.root_run_id)?;
+    let goal = super::requirement::status(runtime, &root)?;
+    if goal.state == genehub_proto::WorkflowRequirementState::Completed {
+        let (message, _, user) = state.sessions.current_request(parent).await?;
+        let fresh = match message.as_deref() {
+            Some(id) if user => {
+                state
+                    .sessions
+                    .user_input_after(parent, id, goal.completed_at_ms.unwrap_or(i64::MAX))
+                    .await?
+            }
+            _ => false,
+        };
+        if !fresh {
+            bail!("requirementCompleted: a later user input is needed to reopen this goal");
+        }
+    }
     let snapshot = observation(&group, &root, now_ms())?;
     if snapshot.remaining_runs == 0 {
         bail!(
@@ -464,9 +586,10 @@ pub(super) async fn admit(
     // explicit cancel first added a step that could only ever be answered
     // one way. The states kept here are the ones where execution is still
     // genuinely in motion and a second Run would race it.
-    if group.iter().any(|run| {
-        matches!(run.status.as_str(), "running" | "stopping" | "cancelling")
-    }) {
+    if group
+        .iter()
+        .any(|run| matches!(run.status.as_str(), "running" | "stopping" | "cancelling"))
+    {
         bail!("activeRunConflict: finish or cancel the previous execution before rework");
     }
     if root
@@ -531,4 +654,15 @@ pub(super) async fn admit(
         save_run(runtime, &root)?;
     }
     Ok(())
+}
+
+/// Callers hold the requirement operation lock and verified writer.
+pub(super) fn write_record(runtime: &RuntimeStore, id: &str, record: &RequestRecord) -> Result<()> {
+    let mut record = record.clone();
+    record.schema = "genehub.workflow.request.v2".into();
+    invalidate_settled_marker(runtime, id)?;
+    crate::config::save_private(
+        &record_path(runtime, id, true)?,
+        &encode_private_record("Workflow request", &record, MAX_RUN_RECORD_BYTES)?,
+    )
 }

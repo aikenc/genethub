@@ -23,7 +23,7 @@ defineSpecialty({
     const profiles = (available: boolean) => ({
       runtimes: {}, selectedTags: ["Max"], modelProfiles: [{
         agentId: "genet", modelId: "deepseek/deepseek-v4-flash",
-        tags: available ? ["Max"] : ["Flash"], cost: "low",
+        tags: available ? ["Max"] : ["Flash"], cost: "low" as const,
       }],
     });
     await opened.client.call({ type: "settings.setAgentPreferences", payload: { preferences: profiles(false) } });
@@ -66,7 +66,7 @@ defineSpecialty({
     let blocked: WorkflowRunStatus | undefined;
     await t.tools.waitUntil(async () => {
       blocked = (await history()).find(run => run.taskId === "resume-original");
-      return blocked?.status === "blocked" && blocked.reason?.includes("RouteUnavailable");
+      return blocked?.status === "blocked" && blocked.reason?.includes("RouteUnavailable") === true;
     }, 30_000);
     t.assertions.assert(!workerSubmitted && blocked!.nodes.find(node => node.id === "work")?.sessionId === undefined,
       "route block already started a Worker");
