@@ -94,15 +94,14 @@ for (const scenario of ["observation", "retry", "budget-expiry", "entries", "ent
         : `--output ${q(JSON.stringify({ passed: scenario !== "entries" || data.key !== "z" }))}`;
       const barrier = scenario === "observation" || scenario === "budget-expiry" || scenario === "parallel-human-wait" ? waitFile(release)
         : pure || budgetCase ? "true" : waitFile(effect(data.key === "a" ? "z" : "a"));
+      // Both real Workers must start before either can submit. For the restart
+      // checkpoint, let the first retire before the second submits its result.
+      const checkpoint = scenario === "parallel-restart" && data.key === "z"
+        ? ` && ${waitFile(release)}` : "";
       const pause = scenario === "parallel-sibling-lost" ? "sleep 45 && "
         : scenario === "parallel-failure" && data.key === "z" ? "sleep 30 && " : data.key === "z" ? "sleep 0.3 && " : "";
-      // Hold the submitted branch in `finishing` until the daemon restarts.
-      // A five-second window can close before the gate observes both branches.
-      const after = scenario === "observation" ? " && sleep 5"
-        : scenario === "parallel-restart" && data.key === "z"
-          ? ` && for i in $(seq 1 2400); do test -f ${q(release)} && break; sleep 0.05; done`
-          : "";
-      return { tool: { name: "bash", arguments: { command: `printf '%s\\n' ${q(identity)} >> ${q(effect(data.key))} && ${barrier} && ${pause}"$GENEHUB_CLI" workflow complete ${finish}${after}` } } };
+      const after = scenario === "observation" ? " && sleep 5" : "";
+      return { tool: { name: "bash", arguments: { command: `printf '%s\\n' ${q(identity)} >> ${q(effect(data.key))} && ${barrier}${checkpoint} && ${pause}"$GENEHUB_CLI" workflow complete ${finish}${after}` } } };
     } })));
     const pm = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
     let inputSeq = 0;
@@ -161,7 +160,11 @@ for (const scenario of ["observation", "retry", "budget-expiry", "entries", "ent
     } else if (scenario === "parallel-restart") {
       try {
         await t.tools.waitUntil(async () => {
-          await current(); return run?.nodes.some(n => n.status === "completed" && n.uses === "agent.session") === true
+          await current();
+          if (run?.nodes.some(n => n.status === "completed" && n.uses === "agent.session")
+            && run.nodes.some(n => n.status === "running" && n.uses === "agent.session")
+            && !existsSync(release)) writeFileSync(release, "submit after peer retirement");
+          return run?.nodes.some(n => n.status === "completed" && n.uses === "agent.session") === true
             && run.nodes.some(n => n.status === "finishing");
         }, 40_000);
       } catch (error) {
