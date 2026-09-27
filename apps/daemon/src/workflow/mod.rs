@@ -6380,10 +6380,11 @@ mod tests {
         for (name, source) in sources {
             // Stop at each file's own test module: fixtures and this scanner
             // are not the kernel's execution paths.
+            let source = source.replace("\r\n", "\n");
             let production = source
                 .split_once("\n#[cfg(test)]\n")
                 .map(|(before, _)| before)
-                .unwrap_or(source);
+                .unwrap_or(&source);
             for (index, line) in production.lines().enumerate() {
                 let code = line.split("//").next().unwrap_or("");
                 if !code.contains("crate::git::") {
@@ -6487,9 +6488,11 @@ mod tests {
             &package.join("roles/worker.yaml"),
             "schema: genehub.workflow.role.v1\nid: worker\nuserInteraction: readOnly\nprompt: prompts/direct-worker.md\n",
         );
-        let error = compile_package(root.path(), TEST_PACKAGE)
-            .expect_err("a missing agentId is still refused")
-            .to_string();
+        let error = format!(
+            "{:#}",
+            compile_package(root.path(), TEST_PACKAGE)
+                .expect_err("a missing agentId is still refused")
+        );
         assert!(error.contains("agentId"), "{error}");
     }
 
@@ -6651,6 +6654,7 @@ mod tests {
             [
                 "spaces/game-delivery--coder",
                 "spaces/game-delivery--executor",
+                "spaces/game-delivery--owner",
                 "spaces/game-delivery--reviewer",
                 "spaces/game-delivery--workflow-manager",
                 "spaces/game-delivery--workflow-reviewer",
@@ -6928,6 +6932,7 @@ mod tests {
     #[test]
     fn oversized_activation_history_is_rejected_before_use() {
         let root = tempfile::tempdir().unwrap();
+        seed_package(root.path());
         let runtime = test_runtime(root.path());
         let digest = format!("sha256:{}", "a".repeat(64));
         let history = (0..=MAX_ACTIVATION_HISTORY)
@@ -6960,6 +6965,7 @@ mod tests {
         // Reaching the cap used to refuse every further activation, so a
         // long-lived project could never adopt a new DCG again.
         let root = tempfile::tempdir().unwrap();
+        seed_package(root.path());
         let runtime = test_runtime(root.path());
         let digest = format!("sha256:{}", "a".repeat(64));
         let history = (0..MAX_ACTIVATION_HISTORY)
@@ -7464,10 +7470,14 @@ mod tests {
         let untrusted = project.path().join(".genethub/runtime/workflows");
         fs::create_dir_all(untrusted.join("runs")).unwrap();
         fs::write(untrusted.join("runs/wr_forged.json"), b"{}").unwrap();
-        assert!(load_run(&runtime, "wr_forged")
-            .unwrap_err()
-            .to_string()
-            .contains("不存在"));
+        let error = load_run(&runtime, "wr_forged").unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .map(std::io::Error::kind),
+            Some(std::io::ErrorKind::NotFound),
+            "{error:#}"
+        );
 
         let lease = LeaseRecord {
             run_id: "wr_forged".into(),
@@ -7567,8 +7577,14 @@ mod tests {
         assert_eq!(candidate.digest, active);
         assert_eq!(revision, Some(1));
         let activation = activation_path(&runtime, false).unwrap();
-        assert!(activation.starts_with(data.path().canonicalize().unwrap()));
-        assert!(!activation.starts_with(project.path().canonicalize().unwrap()));
+        assert!(activation.starts_with(
+            project
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join(".genethub/components/executor")
+        ));
+        assert!(!activation.starts_with(data.path().canonicalize().unwrap()));
     }
 
     #[test]
@@ -8089,7 +8105,10 @@ mod tests {
             delivery_queue: Vec::new(),
             created_at_ms: 1,
             updated_at_ms: 1,
-            snapshot_relative: None,
+            snapshot_relative: Some(
+                pm_snapshot_relative(&runtime, &format!("wr_{status}"), &format!("wr_{status}"))
+                    .unwrap(),
+            ),
         };
         let busy = |space: &str, parent: Option<&str>| {
             !carrier_active_run_ids(data.path(), "w_project", project.path(), space, parent)

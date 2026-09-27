@@ -802,7 +802,14 @@ mod tests {
         let collection = found.iter().find(|p| p.id == "studio/game-build").unwrap();
         assert_eq!(
             collection.collection_root.as_deref(),
-            Some(root.path().join(PACKAGES_DIR).join("studio").as_path())
+            Some(
+                root.path()
+                    .canonicalize()
+                    .unwrap()
+                    .join(PACKAGES_DIR)
+                    .join("studio")
+                    .as_path()
+            )
         );
         assert!(found
             .iter()
