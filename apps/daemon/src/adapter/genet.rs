@@ -1559,7 +1559,8 @@ mod tests {
             &tx,
         );
         translate_frame(&update(json!({"type": "thinking_start"})), &mut state, &tx);
-        let events = drain(&mut rx);
+        // `drain` drops progress, and the order of progress is what is tested.
+        let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         assert!(matches!(
             &events[0],
             SessionEvent::TurnProgress { usage, .. } if usage.llm_rounds == 1

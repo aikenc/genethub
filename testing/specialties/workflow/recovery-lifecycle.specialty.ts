@@ -289,9 +289,11 @@ defineSpecialty({
     await t.tools.waitUntil(async () => {
       const runs = await history();
       const pending = await snapshot(reviewer);
+      const pmStatus = (await snapshot(pm)).summary.status;
       return runs.length === 2 && runs.some(run => run.id === recovery!.id)
-        && pending.pendingPermissions.some(request => request.id === questionId);
-    }, 30_000);
+        && pending.pendingPermissions.some(request => request.id === questionId)
+        && pmStatus === "idle";
+    }, 45_000);
     await t.flows.main.sendPrompt(opened.client, pm, "APPROVE_RECOVERY_REPAIR");
     stage = "wait for WM and acceptance";
     await t.tools.waitUntil(async () => {
@@ -352,6 +354,8 @@ defineSpecialty({
       event.eventType === "pause.answered" && event.messageId === questionId).length === 1,
     "PM answer was missing or repeated in the committed journal");
 
+    stage = "wait for PM to settle after recovery";
+    await t.tools.waitUntil(async () => (await snapshot(pm)).summary.status === "idle", 30_000);
     await t.flows.main.sendPrompt(opened.client, pm, "CONTINUE_RECOVERY_LIFECYCLE");
     stage = "wait for business successor";
     await t.tools.waitUntil(async () => {

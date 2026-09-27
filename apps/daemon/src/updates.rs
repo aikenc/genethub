@@ -1042,12 +1042,14 @@ mod tests {
     async fn the_router_answers_an_app_check_with_this_machines_status() {
         let dir = tempfile::tempdir().unwrap();
         let state = test_state(dir.path()).await;
-        let handled = crate::router::handle(
+        // The whole router future does not fit on a test thread's stack in a
+        // debug build.
+        let handled = Box::pin(crate::router::handle(
             &state,
             genehub_proto::TransportKind::Loopback,
             &crate::authz::Principal::LocalUser,
             genehub_proto::Request::UpdateAppCheck,
-        )
+        ))
         .await;
         // The tree's manifest URL is empty (local is not on a release scale),
         // which is the one answer that needs no network: current, nothing to
