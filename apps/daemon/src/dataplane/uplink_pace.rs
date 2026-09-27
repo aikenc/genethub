@@ -137,8 +137,10 @@ mod tests {
 
     #[tokio::test]
     async fn bulk_waits_once_the_floor_is_full_and_resumes_on_ack() {
-        let pace = Arc::new(UplinkPace::new(3 * 1024 * 1024));
-        let share = PaceShare::new(pace.clone(), 3 * 1024 * 1024);
+        // Fix the ceiling to test Notify blocking independently of the default
+        // network tuning. Both200KiB chunks fit alone, but not together.
+        let pace = Arc::new(UplinkPace::new(256 * 1024));
+        let share = PaceShare::new(pace.clone(), 256 * 1024);
         share.reserve(200 * 1024).await;
         let second = share.reserve(200 * 1024);
         tokio::pin!(second);
