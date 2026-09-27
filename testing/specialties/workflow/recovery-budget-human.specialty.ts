@@ -79,18 +79,24 @@ defineSpecialty({
     };
     let root: WorkflowRunStatus | undefined;
     let recovery: WorkflowRunStatus | undefined;
+    let card: { id: string; options?: Array<{ id: string }> } | undefined;
     stage = "wait for recovery budget Human card";
     await t.tools.waitUntil(async () => {
       const runs = await history();
       root = runs.find(run => run.taskId === "budget-business");
       recovery = runs.find(run => run.handles.some(handle => handle.runId === root?.id));
-      return recovery?.status === "blocked" && recovery.humanExit?.kind === "c";
+      if (!(recovery?.status === "blocked" && recovery.humanExit?.kind === "c")) return false;
+      const cardReply = await opened.client.call({ type: "session.get", payload: { sessionId: pm } });
+      if (cardReply?.type !== "snapshot") return false;
+      const found = cardReply.data.pendingPermissions.find(item => item.id === recovery!.humanExit!.requestId);
+      if (!found) return false;
+      const ids = found.options?.map(option => option.id).join(",") ?? "";
+      if (ids !== "approve,reject") throw new Error(`exit c options are incorrect: ${ids || "none"}`);
+      card = found;
+      return true;
     }, 55_000);
     t.assertions.assert(root?.status === "blocked" && recovery!.reason?.includes("recoveryBudgetExceeded"),
       "recovery budget did not stop the recovery Worker while preserving the business request");
-    const cardReply = await opened.client.call({ type: "session.get", payload: { sessionId: pm } });
-    if (cardReply?.type !== "snapshot") throw new Error("PM card unavailable");
-    const card = cardReply.data.pendingPermissions.find(item => item.id === recovery!.humanExit!.requestId);
     t.assertions.assert(card?.options?.map(option => option.id).join(",") === "approve,reject", "exit c options are incorrect");
     const answered = await opened.client.call({ type: "session.respondPermission", payload: {
       sessionId: pm, requestId: card!.id, outcome: { outcome: "selected", optionId: "approve" },
