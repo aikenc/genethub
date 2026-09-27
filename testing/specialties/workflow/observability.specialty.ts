@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync, cpSync, readFileSync, readdirSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, cpSync, readFileSync, readdirSync, existsSync, renameSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { defineSpecialty, openBrowser, openPreviewBrowser, daemonEndpoint } from "../../framework/public.ts";
@@ -7,7 +7,7 @@ defineSpecialty({
   id: "specialty.workflow.observability",
   title: "Pinned views and request estimates survive source and rate changes",
   oracle: "A real Worker Run reads its original view after source changes, reports actual priced calls once, excludes PM turns and preserves historical estimates after global rates change",
-  catches: ["view reads latest source rather than the Run build", "model rates retroactively reprice history", "PM conversation is counted as Worker cost", "unknown historical rate silently treated as zero"],
+  catches: ["view reads latest source rather than the Run build", "old Run build locator follows editable executor topology", "archiving editable package source disables the pinned view", "model rates retroactively reprice history", "PM conversation is counted as Worker cost", "unknown historical rate silently treated as zero"],
   retention:true, tags: ["workflow", "observability", "core", "browser"], runner: "playwright", llm: {default: "mock"},
   expectedDurationMs: 30000, timeoutMs: 120000,
   resources: {environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 1},
@@ -146,6 +146,23 @@ defineSpecialty({
       await browser.page.locator(`[data-workflow-node-id="${focused}"]`).waitFor({state:'visible'});
       t.assertions.assert(!consumer.errors.length,consumer.errors.join('; '));
     } finally {await browser.close();await consumer?.close();}
-    t.note(`Pinned build=${catalog.build}; Worker calls=${before.cost.pricedCalls}; estimate=${before.cost.milliCny} milliCNY`);
+    // WM may change a package's next executor carrier or archive its source.
+    // Neither changes the bytes already pinned by this completed Run.
+    const nextExecutor=join(root,'spaces/next-executor');
+    mkdirSync(nextExecutor,{recursive:true});
+    writeFileSync(join(nextExecutor,'space.json.src'),JSON.stringify({lifecycle:'pooled',components:[{componentId:'executor'}]}));
+    writeFileSync(join(nextExecutor,'pipespace.json.src'),JSON.stringify({schema:'pipespace.v1',name:'next-executor',agents:['codex'],skills:[],skillProviders:[],tags:[]}));
+    const topologyAsset=await opened.client.call({type:'workflow.view',payload:{workspaceId:opened.workspaceId,runId,path:'views/progress/index.html'}});
+    t.assertions.assert(topologyAsset?.type==='workflowView','changing editable executor topology disabled the old Run view');
+    equal(Buffer.from((topologyAsset as any).data.base64,'base64').toString(),original,'old Run followed the next executor build location');
+    renameSync(root,join(opened.workspaceRoot,'archived-workflow-source'));
+    const archivedAsset=await opened.client.call({type:'workflow.view',payload:{workspaceId:opened.workspaceId,runId,path:'views/progress/index.html'}});
+    t.assertions.assert(archivedAsset?.type==='workflowView','archiving editable package source disabled the old Run view');
+    equal(Buffer.from((archivedAsset as any).data.base64,'base64').toString(),original,'archived source changed pinned view bytes');
+    const archivedCatalog=await opened.client.call({type:'workflow.view',payload:{workspaceId:opened.workspaceId,runId,path:null}});
+    t.assertions.assert(archivedCatalog?.type==='workflowView','archived Run view catalog unavailable');
+    equal((archivedCatalog as any).data.build,catalog.build,'archived source changed Run build identity');
+    await t.assertions.expectProtocolCode(()=>opened.client.call({type:'workflow.view',payload:{workspaceId:opened.workspaceId,runId,path:'../../config.json'}}),'internal');
+    t.note(`Pinned build=${catalog.build}; Worker calls=${before.cost.pricedCalls}; estimate=${before.cost.milliCny} milliCNY; executor topology changed and source archived`);
   } finally {opened.client.close(); opened.daemon.stop(); await opened.mock.stop();}
 });
