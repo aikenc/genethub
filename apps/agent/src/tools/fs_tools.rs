@@ -34,7 +34,14 @@ pub fn read(args: &Value, cwd: &Path) -> ToolResult {
         .join("\n");
 
     let truncation = truncate_head(&selected, limit.min(DEFAULT_MAX_LINES), DEFAULT_MAX_BYTES);
-    ToolResult::ok(truncation.content.clone()).with_truncation(&truncation)
+    let mut result = ToolResult::ok(truncation.content.clone()).with_truncation(&truncation);
+    if truncation.truncated {
+        let next = offset + truncation.output_lines.max(1);
+        result.text.push_str(&format!(
+            "\n\n[Output truncated. Continue with offset {next}.]"
+        ));
+    }
+    result
 }
 
 pub fn write(args: &Value, cwd: &Path) -> ToolResult {
@@ -209,11 +216,18 @@ pub fn ls(args: &Value, cwd: &Path) -> ToolResult {
     }
 
     names.sort();
+    let omitted = names.len().saturating_sub(limit);
     names.truncate(limit);
 
     // Entry count is already capped, so only the byte limit applies here.
     let truncation = truncate_head(&names.join("\n"), usize::MAX, DEFAULT_MAX_BYTES);
-    ToolResult::ok(truncation.content.clone()).with_truncation(&truncation)
+    let mut result = ToolResult::ok(truncation.content.clone()).with_truncation(&truncation);
+    if omitted > 0 || truncation.truncated {
+        result.text.push_str(
+            "\n\n[More directory entries omitted. Narrow the path or raise limit.]",
+        );
+    }
+    result
 }
 
 #[cfg(test)]

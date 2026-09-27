@@ -1,7 +1,11 @@
 //! Offline provider used to exercise the full loop without an API key.
 //!
-//! First turn: some text plus an `ls` tool call. After a tool result comes
-//! back: a short closing message. That covers every event the daemon renders.
+//! The default script sends some text plus an `ls` tool call, then a short
+//! closing message after a tool result. Tests can register a script of rounds
+//! for one model id; each call consumes the next round.
+
+use std::collections::{HashMap, VecDeque};
+use std::sync::Mutex;
 
 use serde_json::json;
 use tokio::sync::mpsc::UnboundedSender;
@@ -10,20 +14,43 @@ use super::{ProviderEvent, Request};
 use crate::config::ModelConfig;
 use crate::protocol::{Message, StopReason, Usage};
 
+#[derive(Clone, Debug)]
+pub struct Round {
+    pub thinking: bool,
+    pub text: Option<String>,
+}
+
+fn scripts() -> std::sync::MutexGuard<'static, HashMap<String, VecDeque<Round>>> {
+    static SCRIPTS: std::sync::OnceLock<Mutex<HashMap<String, VecDeque<Round>>>> =
+        std::sync::OnceLock::new();
+    SCRIPTS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("fake script lock")
+}
+
+pub fn register_rounds(model_id: &str, rounds: Vec<Round>) {
+    scripts().insert(model_id.to_string(), VecDeque::from(rounds));
+}
+
+fn take_round(model_id: &str) -> Option<Round> {
+    scripts().get_mut(model_id).and_then(VecDeque::pop_front)
+}
+
 pub async fn stream(
     model: &ModelConfig,
     request: Request,
     events: UnboundedSender<ProviderEvent>,
 ) -> anyhow::Result<()> {
-    if model.id == "reasoning-only-once" || model.id == "reasoning-only-always" {
-        let _ = events.send(ProviderEvent::ThinkingStart);
-        let _ = events.send(ProviderEvent::ThinkingDelta("checking".into()));
-        let _ = events.send(ProviderEvent::ThinkingEnd);
-        if model.id == "reasoning-only-once"
-            && request.system_prompt.contains("previous model response")
-        {
+    if let Some(round) = take_round(&model.id) {
+        if round.thinking {
+            let _ = events.send(ProviderEvent::ThinkingStart);
+            let _ = events.send(ProviderEvent::ThinkingDelta("checking".into()));
+            let _ = events.send(ProviderEvent::ThinkingEnd);
+        }
+        if let Some(text) = round.text {
             let _ = events.send(ProviderEvent::TextStart);
-            let _ = events.send(ProviderEvent::TextDelta("Here is the result.".into()));
+            let _ = events.send(ProviderEvent::TextDelta(text));
             let _ = events.send(ProviderEvent::TextEnd);
         }
         let _ = events.send(ProviderEvent::Done(StopReason::Stop));

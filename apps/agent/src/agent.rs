@@ -745,12 +745,9 @@ async fn finish_without_model(
 }
 
 fn emit_update(emitter: &Emitter, draft: &AssistantDraft, mut event: Value) {
-    let message = draft.to_value();
-    event["partial"] = message.clone();
     event["contentIndex"] = json!(draft.content.len().saturating_sub(1));
     emitter.send(json!({
         "type": "message_update",
-        "message": message,
         "assistantMessageEvent": event,
     }));
 }
@@ -972,6 +969,19 @@ mod tests {
         let (emitter, rx) = capture();
         let mut model = fake_model();
         model.id = "reasoning-only-once".into();
+        crate::provider::fake::register_rounds(
+            &model.id,
+            vec![
+                crate::provider::fake::Round {
+                    thinking: true,
+                    text: None,
+                },
+                crate::provider::fake::Round {
+                    thinking: true,
+                    text: Some("Here is the result.".into()),
+                },
+            ],
+        );
         let state = state_with(Some(model), emitter, std::env::temp_dir());
         run_prompt(state, "resolve this".into()).await;
 
@@ -1010,6 +1020,19 @@ mod tests {
         let (emitter, rx) = capture();
         let mut model = fake_model();
         model.id = "reasoning-only-always".into();
+        crate::provider::fake::register_rounds(
+            &model.id,
+            vec![
+                crate::provider::fake::Round {
+                    thinking: true,
+                    text: None,
+                },
+                crate::provider::fake::Round {
+                    thinking: true,
+                    text: None,
+                },
+            ],
+        );
         let state = state_with(Some(model), emitter, std::env::temp_dir());
         run_prompt(state, "resolve this".into()).await;
 

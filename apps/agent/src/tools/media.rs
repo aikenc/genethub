@@ -7,8 +7,6 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use base64::{engine::general_purpose::STANDARD, Engine as _};
-
 use super::{arg_str, resolve_path, ToolResult};
 use crate::protocol::MediaAttachment;
 use crate::provider::media;
@@ -21,7 +19,7 @@ pub const ATTACHMENT_DETAIL: &str = "mediaAttachment";
 pub fn definition() -> Value {
     json!({
         "name": NAME,
-        "description": "Read an image or video file so you can see its content. Supported: jpg/jpeg/png/webp/gif up to 8MB, mp4/webm/mov/mpg/mpeg/avi up to 64MB. Files inside the workspace are attached by reference, anything else you can read is attached inline; the media becomes visible to you on the next model call. Use `read` for text files.",
+        "description": "Read an image or video file so you can see its content. Supported: jpg/jpeg/png/webp/gif up to 8MB, mp4/webm/mov/mpg/mpeg/avi up to 64MB. The file is attached by path and encoded when the next model request is built. Use `read` for text files.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -110,30 +108,17 @@ pub fn read(args: &Value, cwd: &Path) -> ToolResult {
             limit / 1024 / 1024
         ));
     }
-    // A path the provider can re-read is cheaper than carrying bytes in the
-    // session history; anything else still works, inlined.
-    let attachment = match encode_root(cwd)
+    // The session stores a path. Bytes are read when the provider request is
+    // built, so a file outside the workspace is not copied into the transcript.
+    let relative = encode_root(cwd)
         .canonicalize()
         .ok()
         .and_then(|root| file.strip_prefix(&root).ok().map(Path::to_path_buf))
-        .and_then(|relative| relative.to_str().map(str::to_string))
-    {
-        Some(relative) => MediaAttachment {
-            path: Some(relative),
-            ..probe
-        },
-        None => {
-            let bytes = match std::fs::read(&file) {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    return ToolResult::error(format!("read_media: 读取 {raw_path} 失败：{error}"));
-                }
-            };
-            MediaAttachment {
-                data_base64: Some(STANDARD.encode(bytes)),
-                ..probe
-            }
-        }
+        .and_then(|relative| relative.to_str().map(str::to_string));
+    let stored = relative.unwrap_or_else(|| file.to_string_lossy().into_owned());
+    let attachment = MediaAttachment {
+        path: Some(stored),
+        ..probe
     };
     ToolResult::ok(format!(
         "已附加 {}（{}，{:.1}MB）。它将作为消息附件随下一次模型调用送入，届时你可以直接看到其内容。",
@@ -202,10 +187,10 @@ mod tests {
 
         assert!(!result.is_error, "{}", result.text);
         let attachment = attachment_of(&result);
-        assert!(attachment.path.is_none());
+        assert!(attachment.data_base64.is_none());
         assert_eq!(
-            attachment.data_base64.as_deref(),
-            Some(STANDARD.encode(b"webm-bytes")).as_deref()
+            attachment.path.as_deref(),
+            Some(outside.canonicalize().unwrap().to_string_lossy()).as_deref()
         );
         std::fs::remove_file(&outside).unwrap();
     }

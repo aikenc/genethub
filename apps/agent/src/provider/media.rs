@@ -38,16 +38,23 @@ pub fn data_url(
         }
         (Some(path), None) => {
             let relative = Path::new(path);
-            if relative.is_absolute() {
-                bail!("{} 的附件路径必须在当前工作区内", attachment.name);
-            }
-            let root = cwd.canonicalize().context("读取工作区路径")?;
-            let file = root
-                .join(relative)
-                .canonicalize()
-                .with_context(|| format!("读取附件 {}", attachment.name))?;
-            if !file.starts_with(&root) || !file.is_file() {
-                bail!("{} 的附件路径不在当前工作区内", attachment.name);
+            let file = if relative.is_absolute() {
+                relative
+                    .canonicalize()
+                    .with_context(|| format!("读取附件 {}", attachment.name))?
+            } else {
+                let root = cwd.canonicalize().context("读取工作区路径")?;
+                let file = root
+                    .join(relative)
+                    .canonicalize()
+                    .with_context(|| format!("读取附件 {}", attachment.name))?;
+                if !file.starts_with(&root) || !file.is_file() {
+                    bail!("{} 的附件路径不在当前工作区内", attachment.name);
+                }
+                file
+            };
+            if !file.is_file() {
+                bail!("{} 的附件路径不是文件", attachment.name);
             }
             let size = file.metadata()?.len();
             if size > limit as u64 {

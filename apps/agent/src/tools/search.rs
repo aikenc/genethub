@@ -104,7 +104,13 @@ pub fn grep_cancellable(args: &Value, cwd: &Path, cancel: &dyn Fn() -> bool) -> 
 
     // The match limit already caps rows, so only the byte limit applies.
     let truncation = truncate_head(&rows.join("\n"), usize::MAX, DEFAULT_MAX_BYTES);
-    ToolResult::ok(truncation.content.clone()).with_truncation(&truncation)
+    let mut result = ToolResult::ok(truncation.content.clone()).with_truncation(&truncation);
+    if matches >= limit || truncation.truncated {
+        result.text.push_str(
+            "\n\n[More matches omitted. Narrow the pattern or raise limit.]",
+        );
+    }
+    result
 }
 
 pub fn find(args: &Value, cwd: &Path) -> ToolResult {

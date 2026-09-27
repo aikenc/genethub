@@ -146,7 +146,6 @@ impl State {
                 "cacheWrite": self.stats.cache_write,
                 "total": self.stats.total_tokens,
             },
-            "cost": self.stats.cost.total,
         });
         if let Some(file) = &self.session.file {
             value["sessionFile"] = json!(file.to_string_lossy());
@@ -315,7 +314,6 @@ mod tests {
         assert_eq!(value["toolCalls"], 1);
         assert_eq!(value["toolResults"], 1);
         assert_eq!(value["totalMessages"], 3);
-        assert_eq!(value["cost"], 0.0);
     }
 
     #[tokio::test]
