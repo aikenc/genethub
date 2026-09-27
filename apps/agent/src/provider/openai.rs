@@ -311,6 +311,16 @@ pub fn convert_messages(
                     })
                     .collect::<Vec<_>>()
                     .join("");
+                let reasoning = content
+                    .iter()
+                    .filter_map(|block| match block {
+                        Content::Thinking { thinking, .. } if !thinking.is_empty() => {
+                            Some(thinking.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
                 let calls: Vec<Value> = content
                     .iter()
                     .filter_map(|block| match block {
@@ -330,12 +340,15 @@ pub fn convert_messages(
                     })
                     .collect();
 
-                if text.is_empty() && calls.is_empty() {
+                if text.is_empty() && calls.is_empty() && reasoning.is_empty() {
                     continue;
                 }
                 let mut entry = json!({ "role": "assistant", "content": text });
                 if !calls.is_empty() {
                     entry["tool_calls"] = Value::Array(calls);
+                }
+                if !reasoning.is_empty() {
+                    entry["reasoning_content"] = json!(reasoning);
                 }
                 out.push(entry);
             }
@@ -449,6 +462,33 @@ mod tests {
         assert_eq!(converted[0]["role"], "system");
         assert_eq!(converted[0]["content"], "be nice");
         assert_eq!(converted[1]["role"], "user");
+    }
+
+    #[test]
+    fn reasoning_content_is_replayed_from_thinking_text() {
+        let messages = vec![Message::Assistant {
+            content: vec![
+                Content::Thinking {
+                    thinking: "plan".into(),
+                    signature: None,
+                },
+                Content::ToolCall {
+                    id: "call_1".into(),
+                    name: "ls".into(),
+                    arguments: json!({}),
+                },
+            ],
+            api: "openai".into(),
+            provider: "openai".into(),
+            model: "m".into(),
+            usage: Usage::default(),
+            stop_reason: StopReason::ToolUse,
+            error_message: None,
+            timestamp: 0,
+        }];
+        let converted = convert_messages(&model(), Path::new("."), "sys", &messages).unwrap();
+        assert_eq!(converted[1]["reasoning_content"], "plan");
+        assert_eq!(converted[1]["tool_calls"][0]["function"]["name"], "ls");
     }
 
     #[test]

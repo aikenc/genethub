@@ -327,11 +327,12 @@ async fn stream_assistant(
             ProviderEvent::ThinkingStart => {
                 draft.content.push(Content::Thinking {
                     thinking: String::new(),
+                    signature: None,
                 });
                 emit_update(emitter, &draft, json!({ "type": "thinking_start" }));
             }
             ProviderEvent::ThinkingDelta(delta) => {
-                if let Some(Content::Thinking { thinking }) = draft.content.last_mut() {
+                if let Some(Content::Thinking { thinking, .. }) = draft.content.last_mut() {
                     thinking.push_str(&delta);
                 }
                 emit_update(
@@ -339,6 +340,14 @@ async fn stream_assistant(
                     &draft,
                     json!({ "type": "thinking_delta", "delta": delta }),
                 );
+            }
+            ProviderEvent::ThinkingSignature(signature) => {
+                if let Some(Content::Thinking {
+                    signature: slot, ..
+                }) = draft.content.last_mut()
+                {
+                    *slot = Some(signature);
+                }
             }
             ProviderEvent::ThinkingEnd => {
                 emit_update(emitter, &draft, json!({ "type": "thinking_end" }));

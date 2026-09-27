@@ -120,6 +120,11 @@ pub async fn stream(
                             let _ = events.send(ProviderEvent::ThinkingDelta(text.into()));
                         }
                     }
+                    Some("signature_delta") => {
+                        if let Some(signature) = event["delta"]["signature"].as_str() {
+                            let _ = events.send(ProviderEvent::ThinkingSignature(signature.into()));
+                        }
+                    }
                     Some("input_json_delta") => {
                         if let Some(part) = event["delta"]["partial_json"].as_str() {
                             tool_args.push_str(part);
@@ -281,6 +286,14 @@ pub fn convert_messages(
                         Content::Text { text } if !text.is_empty() => {
                             Some(json!({ "type": "text", "text": text }))
                         }
+                        Content::Thinking {
+                            thinking,
+                            signature: Some(signature),
+                        } => Some(json!({
+                            "type": "thinking",
+                            "thinking": thinking,
+                            "signature": signature,
+                        })),
                         Content::ToolCall {
                             id,
                             name,
@@ -398,6 +411,36 @@ mod tests {
         assert_eq!(body["tools"][0]["name"], "read");
         assert_eq!(body["tools"][0]["input_schema"]["type"], "object");
         assert!(body.get("thinking").is_none());
+    }
+
+    #[test]
+    fn a_signed_thinking_block_is_replayed_and_an_unsigned_one_is_not() {
+        let messages = vec![Message::Assistant {
+            content: vec![
+                Content::Thinking {
+                    thinking: "old".into(),
+                    signature: None,
+                },
+                Content::Thinking {
+                    thinking: "new".into(),
+                    signature: Some("sig".into()),
+                },
+                Content::text("answer"),
+            ],
+            api: "anthropic".into(),
+            provider: "anthropic".into(),
+            model: "claude-test".into(),
+            usage: Usage::default(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp: 0,
+        }];
+        let body = convert_messages(&model(), std::path::Path::new("."), &messages).unwrap();
+        assert_eq!(body[0]["content"].as_array().unwrap().len(), 2);
+        assert_eq!(body[0]["content"][0]["type"], "thinking");
+        assert_eq!(body[0]["content"][0]["thinking"], "new");
+        assert_eq!(body[0]["content"][0]["signature"], "sig");
+        assert_eq!(body[0]["content"][1]["text"], "answer");
     }
 
     #[test]

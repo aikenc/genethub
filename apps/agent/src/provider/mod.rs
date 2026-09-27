@@ -23,6 +23,7 @@ pub enum ProviderEvent {
     TextEnd,
     ThinkingStart,
     ThinkingDelta(String),
+    ThinkingSignature(String),
     ThinkingEnd,
     ToolCallStart {
         id: String,

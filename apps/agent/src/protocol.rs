@@ -19,7 +19,13 @@ pub enum Content {
     #[serde(rename = "text")]
     Text { text: String },
     #[serde(rename = "thinking")]
-    Thinking { thinking: String },
+    Thinking {
+        thinking: String,
+        /// Anthropic returns this on the thinking block and rejects a later
+        /// turn that replays the block without it. Absent on older transcripts.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
     #[serde(rename = "toolCall")]
     ToolCall {
         id: String,
@@ -307,6 +313,19 @@ pub fn tool_result_value(text: &str, details: Option<&Value>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_old_thinking_block_still_loads_without_a_signature() {
+        let block: Content =
+            serde_json::from_value(json!({"type": "thinking", "thinking": "hmm"})).unwrap();
+        assert!(matches!(
+            block,
+            Content::Thinking {
+                thinking,
+                signature: None
+            } if thinking == "hmm"
+        ));
+    }
 
     #[test]
     fn assistant_message_matches_session_format() {
