@@ -158,6 +158,41 @@ pub(crate) fn activation_choice(project_root: &Path, request_id: &str) -> Result
 
 /// The recovery reviewer names its own question. The latest answer for that
 /// session is what a later node completion is allowed to match.
+pub(crate) fn review_label(wait: &crate::session::store::HumanWait) -> Option<String> {
+    let request = wait.request.as_ref()?;
+    if request.kind != genehub_proto::PermissionRequestKind::Question {
+        return None;
+    }
+    let [question] = request.questions.as_deref()? else {
+        return None;
+    };
+    let expected = ["repair", "resume", "successor", "human", "cancel"];
+    if question
+        .options
+        .iter()
+        .map(|option| option.label.as_str())
+        .collect::<Vec<_>>()
+        != expected
+    {
+        return None;
+    }
+    let decision = wait.decision.as_ref()?;
+    let selected = match &decision.outcome {
+        genehub_proto::PermissionOutcome::Selected { option_id } => Some(option_id.as_str()),
+        genehub_proto::PermissionOutcome::Answered { answers } => answers
+            .iter()
+            .find(|answer| answer.question_id == question.id)
+            .and_then(|answer| answer.selected_option_ids.first())
+            .map(String::as_str),
+        _ => None,
+    }?;
+    question
+        .options
+        .iter()
+        .find(|option| option.id == selected || option.label == selected)
+        .map(|option| option.label.clone())
+}
+
 pub(crate) fn record_recovery_review(
     project_root: &Path,
     session_id: &str,
@@ -285,7 +320,13 @@ pub(super) async fn ensure_human_exit(
             exit = current;
         }
     }
-    if let Some(answer) = state.sessions.workflow_question_outcome(&exit.pm_session_id, &exit.request_id).await? {
+    if let Some(answer) = state
+        .sessions
+        .human_wait_of(&exit.pm_session_id)
+        .await?
+        .filter(|wait| wait.id == exit.request_id)
+        .and_then(|wait| wait.decision.map(|decision| decision.outcome))
+    {
         let selected = match answer {
             genehub_proto::PermissionOutcome::Selected { option_id } => Some(option_id),
             _ => None,

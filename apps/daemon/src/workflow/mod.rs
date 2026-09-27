@@ -57,6 +57,10 @@ pub(crate) fn activation_choice(
     recovery::activation_choice(project_root, request_id)
 }
 
+pub(crate) fn review_label(wait: &crate::session::store::HumanWait) -> Option<String> {
+    recovery::review_label(wait)
+}
+
 pub(crate) fn record_recovery_review(
     project_root: &std::path::Path,
     session_id: &str,
@@ -2729,7 +2733,12 @@ pub(crate) async fn complete(
         let chosen = match recovery_review_choice(&workspace.root, caller_session_id)? {
             Some(choice) => Some(choice),
             None => {
-                let from_session = state.sessions.workflow_recovery_choice(caller_session_id).await?;
+                let from_session = state
+                    .sessions
+                    .human_wait_of(caller_session_id)
+                    .await?
+                    .as_ref()
+                    .and_then(review_label);
                 if let Some(choice) = from_session.as_deref() {
                     record_recovery_review(&workspace.root, caller_session_id, choice)?;
                 }

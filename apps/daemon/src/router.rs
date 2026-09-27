@@ -1211,17 +1211,20 @@ async fn dispatch(
                     };
                     let option_id = match stored {
                         Some(option_id) => Some(option_id),
-                        None => match state.sessions.workflow_question_outcome(session_id, &request_id).await {
-                            Ok(Some(genehub_proto::PermissionOutcome::Selected { option_id })) => {
-                                if let Err(error) = crate::workflow::record_activation_choice(
-                                    &workspace.root, &request_id, &option_id,
-                                ) {
-                                    return failed(error);
+                        None => match state.sessions.human_wait_of(session_id).await {
+                            Ok(Some(wait)) if wait.id == request_id => match wait.decision.map(|decision| decision.outcome) {
+                                Some(genehub_proto::PermissionOutcome::Selected { option_id }) => {
+                                    if let Err(error) = crate::workflow::record_activation_choice(
+                                        &workspace.root, &request_id, &option_id,
+                                    ) {
+                                        return failed(error);
+                                    }
+                                    Some(option_id)
                                 }
-                                Some(option_id)
-                            }
-                            Ok(Some(_)) => Some(String::new()),
-                            Ok(None) => None,
+                                Some(_) => Some(String::new()),
+                                None => None,
+                            },
+                            Ok(_) => None,
                             Err(error) => return failed(error),
                         },
                     };
@@ -2405,8 +2408,14 @@ async fn dispatch(
                                     return failed(error);
                                 }
                             }
-                            if let Ok(Some(choice)) =
-                                state.sessions.workflow_recovery_choice(&session_id).await
+                            if let Some(choice) = state
+                                .sessions
+                                .human_wait_of(&session_id)
+                                .await
+                                .ok()
+                                .flatten()
+                                .as_ref()
+                                .and_then(crate::workflow::review_label)
                             {
                                 if let Err(error) = crate::workflow::record_recovery_review(
                                     &workspace.root,

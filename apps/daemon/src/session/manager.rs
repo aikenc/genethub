@@ -4191,40 +4191,13 @@ impl SessionManager {
         Ok(())
     }
 
-    pub(crate) async fn workflow_question_outcome(
+    pub(crate) async fn human_wait_of(
         &self,
         session_id: &str,
-        request_id: &str,
-    ) -> Result<Option<PermissionOutcome>> {
+    ) -> Result<Option<crate::session::store::HumanWait>> {
         let live = self.live(session_id).await?;
-        let outcome = live.meta.lock().await.human_continuation.as_ref()
-            .filter(|decision| decision.request.id == request_id)
-            .map(|decision| decision.outcome.clone());
-        Ok(outcome)
-    }
-
-    /// The built-in recovery reviewer may only submit the choice recorded by
-    /// its controller through the durable Session question path.
-    pub(crate) async fn workflow_recovery_choice(&self, session_id: &str) -> Result<Option<String>> {
-        let live = self.live(session_id).await?;
-        let meta = live.meta.lock().await;
-        let Some(decision) = &meta.human_continuation else { return Ok(None); };
-        if decision.request.kind != PermissionRequestKind::Question { return Ok(None); }
-        let Some([question]) = decision.request.questions.as_deref() else { return Ok(None); };
-        let expected = ["repair", "resume", "successor", "human", "cancel"];
-        if question.options.iter().map(|option| option.label.as_str()).collect::<Vec<_>>() != expected {
-            return Ok(None);
-        }
-        let selected = match &decision.outcome {
-            PermissionOutcome::Selected { option_id } => Some(option_id.as_str()),
-            PermissionOutcome::Answered { answers } => answers.iter()
-                .find(|answer| answer.question_id == question.id)
-                .and_then(|answer| answer.selected_option_ids.as_slice().first())
-                .map(String::as_str),
-            _ => None,
-        };
-        Ok(selected.and_then(|id| question.options.iter().find(|option| option.id == id || option.label == id))
-            .map(|option| option.label.clone()))
+        let wait = live.meta.lock().await.human_wait.clone();
+        Ok(wait)
     }
 
     pub(crate) async fn cancel_workflow_question(&self, session_id: &str, request_id: &str) -> Result<()> {
@@ -10059,7 +10032,12 @@ mod tests {
         assert_eq!(sessions.store.load_meta("w1", "s1").unwrap().pending_permission.unwrap().id, request.id);
         let outcome = PermissionOutcome::Selected { option_id: "yes".into() };
         sessions.respond_permission("s1", &request.id, outcome.clone(), &ProviderMap::new()).await.unwrap();
-        assert_eq!(sessions.workflow_question_outcome("s1", &request.id).await.unwrap(), Some(outcome));
+        assert!(sessions
+            .human_wait_of("s1")
+            .await
+            .unwrap()
+            .and_then(|wait| wait.decision)
+            .is_some_and(|decision| decision.outcome == outcome));
         sessions.request_workflow_question("s1", request).await.unwrap();
         assert!(live.snapshot().await.unwrap().pending_permissions.is_empty());
     }
