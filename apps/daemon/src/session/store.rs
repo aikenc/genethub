@@ -178,6 +178,13 @@ pub struct HumanWait {
     pub origin: WaitOrigin,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision: Option<HumanDecision>,
+    /// The request the card and the resume prompt are built from. Absent only
+    /// on a wait written before this field existed; load fills it from the
+    /// older records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<PermissionRequest>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub grant_recorded: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,41 +234,82 @@ fn plain_text(value: &str, limit: usize) -> String {
     flat.chars().take(limit).collect()
 }
 
-/// Fold a pre-`human_wait` meta into the single record. Existing fields stay
-/// so current readers keep working until they move over.
-/// Rebuild `human_wait` from the fields current writers still update.
-/// A completed continuation with no pending card is a finished wait.
+/// A completed continuation with no pending card is a finished wait. Otherwise
+/// a wait that already carries its request is the record writers update, and
+/// the older fields are a projection of it. A meta from before that request
+/// was stored is folded once.
 pub fn sync_human_wait(meta: &mut SessionMeta) {
     let settled = meta
         .human_continuation
         .as_ref()
         .is_some_and(|continuation| continuation.completed)
         && meta.pending_permission.is_none();
-    meta.human_wait = None;
-    if !settled {
-        adopt_human_wait(meta);
+    if settled {
+        meta.human_wait = None;
+        meta.pending_project_approval = false;
+        return;
     }
+    if meta
+        .human_wait
+        .as_ref()
+        .is_some_and(|wait| wait.request.is_some())
+    {
+        project_legacy_from_wait(meta);
+        return;
+    }
+    meta.human_wait = None;
+    adopt_human_wait(meta);
+}
+
+pub fn install_human_wait(meta: &mut SessionMeta, request: PermissionRequest, project: bool) {
+    meta.pending_permission = Some(request);
+    meta.pending_project_approval = project;
+    meta.human_continuation = None;
+    meta.human_wait = None;
+    adopt_human_wait(meta);
+}
+
+pub fn decide_human_wait(
+    meta: &mut SessionMeta,
+    request: PermissionRequest,
+    outcome: genehub_proto::PermissionOutcome,
+    project: bool,
+) {
+    meta.pending_permission = None;
+    meta.pending_project_approval = false;
+    meta.human_continuation = Some(HumanContinuation {
+        request,
+        outcome,
+        decided_at_ms: now_ms(),
+        project_approval: project,
+        grant_recorded: false,
+        completed: false,
+    });
+    meta.human_wait = None;
+    adopt_human_wait(meta);
 }
 
 pub fn adopt_human_wait(meta: &mut SessionMeta) {
     if meta.human_wait.is_some() {
         return;
     }
-    let (request, decision, project) = if let Some(continuation) = meta.human_continuation.clone() {
-        let project = continuation.project_approval || meta.pending_project_approval;
-        (
-            continuation.request,
-            Some(HumanDecision {
-                outcome: continuation.outcome,
-                decided_at_ms: continuation.decided_at_ms,
-            }),
-            project,
-        )
-    } else if let Some(request) = meta.pending_permission.clone() {
-        (request, None, meta.pending_project_approval)
-    } else {
-        return;
-    };
+    let (request, decision, project, grant_recorded) =
+        if let Some(continuation) = meta.human_continuation.clone() {
+            let project = continuation.project_approval || meta.pending_project_approval;
+            (
+                continuation.request,
+                Some(HumanDecision {
+                    outcome: continuation.outcome,
+                    decided_at_ms: continuation.decided_at_ms,
+                }),
+                project,
+                continuation.grant_recorded,
+            )
+        } else if let Some(request) = meta.pending_permission.clone() {
+            (request, None, meta.pending_project_approval, false)
+        } else {
+            return;
+        };
     let workflow = request
         .id
         .strip_prefix("workflow-human-")
@@ -313,7 +361,38 @@ pub fn adopt_human_wait(meta: &mut SessionMeta) {
             .collect(),
         origin,
         decision,
+        request: Some(request),
+        grant_recorded,
     });
+}
+
+fn project_legacy_from_wait(meta: &mut SessionMeta) {
+    let Some(wait) = meta.human_wait.clone() else {
+        return;
+    };
+    let Some(request) = wait.request.clone() else {
+        return;
+    };
+    let project = matches!(wait.origin, WaitOrigin::Project { .. });
+    match wait.decision {
+        Some(decision) => {
+            meta.pending_permission = None;
+            meta.pending_project_approval = false;
+            meta.human_continuation = Some(HumanContinuation {
+                request,
+                outcome: decision.outcome,
+                decided_at_ms: decision.decided_at_ms,
+                project_approval: project,
+                grant_recorded: wait.grant_recorded,
+                completed: false,
+            });
+        }
+        None => {
+            meta.pending_permission = Some(request);
+            meta.pending_project_approval = project;
+            meta.human_continuation = None;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -261,9 +261,9 @@ impl SessionManager {
                 .iter()
                 .any(|entry| entry.state != "handled");
             let has_decision = meta
-                .human_continuation
+                .human_wait
                 .as_ref()
-                .is_some_and(|c| !c.completed);
+                .is_some_and(|wait| wait.decision.is_some());
             if !meta.openable() || !(has_input || has_decision) {
                 continue;
             }
@@ -293,15 +293,20 @@ impl SessionManager {
         let lives: Vec<_> = self.sessions.read().await.values().cloned().collect();
         for live in lives {
             let eligible = {
+                let busy = live
+                    .execution
+                    .try_lock()
+                    .map(|guard| guard.is_some())
+                    .unwrap_or(true);
                 let meta = live.meta.lock().await;
                 !meta.inbox.paused
                     && (meta.inbox.entries.iter().any(|entry| {
                         matches!(entry.state.as_str(), "receiving" | "queued" | "sent")
                     }) || (meta
-                        .human_continuation
+                        .human_wait
                         .as_ref()
-                        .is_some_and(|c| !c.completed)
-                        && !live.continuation_dispatched.load(Ordering::SeqCst)))
+                        .is_some_and(|wait| wait.decision.is_some())
+                        && !busy))
             };
             if !eligible
                 || live.closing.load(Ordering::SeqCst)
@@ -419,9 +424,9 @@ impl SessionManager {
             let capabilities = self.registry.require(&meta.agent_id)?.capabilities();
             let decision_waiting = execution.consultation
                 && meta
-                    .human_continuation
+                    .human_wait
                     .as_ref()
-                    .is_some_and(|decision| !decision.completed);
+                    .is_some_and(|wait| wait.decision.is_some());
             if (user_waiting || decision_waiting)
                 && capabilities.interrupt
                 && capabilities.resume
@@ -534,7 +539,9 @@ impl SessionManager {
         };
         let mut summary = vec![self.summary(&meta.id).await?];
         crate::workflow::summarize_sessions(state, &mut summary).await;
-        let consultation = !live.pending_permissions.lock().await.is_empty();
+        let consultation = meta.human_wait.as_ref().is_some_and(|wait| {
+            wait.decision.is_none() && wait.request.is_some()
+        });
         // Deferred lanes are announced as counts and ids only. Their content
         // is deliberately withheld: an Agent that needs it reads the
         // authoritative Run state, rather than inferring the project's status
