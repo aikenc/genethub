@@ -374,7 +374,9 @@ impl Journal {
         l.log_bytes += size;
         Ok(seq)
     }
-    pub fn next_record(&mut self) -> Result<Option<Vec<u8>>> {
+    /// Inspect the next replay frame without advancing the attempted watermark.
+    /// The transport can acquire its own quota before committing this record.
+    pub fn next_frame(&self) -> Result<Option<(u64, &Frame)>> {
         self.live()?;
         if !self.active {
             return Ok(None);
@@ -382,13 +384,16 @@ impl Journal {
         let Some(seq) = self.cursor.checked_add(1) else {
             return Ok(None);
         };
-        let Some(entry) = self.log.get(&seq) else {
+        Ok(self.log.get(&seq).map(|entry| (seq, &entry.frame)))
+    }
+    pub fn next_record(&mut self) -> Result<Option<Vec<u8>>> {
+        let Some((seq, frame)) = self.next_frame()? else {
             return Ok(None);
         };
         let bytes = Payload {
             epoch: self.epoch,
             seq,
-            frame: entry.frame.clone(),
+            frame: frame.clone(),
         }
         .encode()?;
         self.cursor = seq;
@@ -721,6 +726,18 @@ mod tests {
         a.update_grants(w.data_grant, w.progress_grant).unwrap();
         assert_eq!(a.enqueue(frame(3)), Ok(7));
         assert_eq!(a.stats().log_bytes, 75);
+    }
+    #[test]
+    fn inspecting_a_backpressured_record_does_not_authorize_an_ack() {
+        let (mut a, mut b) = pair(Policy::RelayAllowed);
+        a.enqueue(frame(3)).unwrap();
+        for _ in 0..3 {
+            assert_eq!(a.next_frame().unwrap().map(|(seq, _)| seq), Some(1));
+            assert_eq!(a.acknowledge(1), Err(Error::ProtocolViolation));
+        }
+        assert_eq!(deliver(&mut a, &mut b).0, 1);
+        a.acknowledge(1).unwrap();
+        assert!(a.next_frame().unwrap().is_none());
     }
     #[test]
     fn gaps_ack_forgery_and_resume_state_loss_are_atomic() {

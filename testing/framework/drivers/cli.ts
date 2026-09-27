@@ -164,7 +164,7 @@ export function locateWasm(openRoot: string): string {
 
 export function genetEnv(openRoot: string, extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   const wasm = tryLocateWasm(openRoot);
-  const env = {
+  const env: NodeJS.ProcessEnv = {
     ...process.env,
     ...extra,
     ...(wasm ? { GENET_APP_WASM: wasm } : {}),

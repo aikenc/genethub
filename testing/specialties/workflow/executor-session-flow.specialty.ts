@@ -148,6 +148,10 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
           return { text: "实现节点已完成。" };
         }
         if (body.includes("你是小游戏项目的 Reviewer")) {
+          // Keep this fault fixture running even if orderly shutdown settles
+          // the first Worker and legitimately starts its reviewer before the
+          // snapshot is damaged. The oracle below fences the actual saved set.
+          if (outcome === "corrupt-frontier") return { hang: true as const };
           const operation = body.match(/当前节点：(operation-\d+)/)?.[1];
           if (operation) reviewerOperations.add(operation);
           const afterRepair = operation ? [...reviewerOperations].indexOf(operation) > 0 : body.includes("当前节点：review-after-repair");
@@ -304,10 +308,17 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
         // stops/starts; a synchronous child command blocks this Node event loop.
         const stopped = await runGenetAsync(opened.daemon.genet, ["daemon", "stop"], opened.daemon.env);
         t.assertions.assert(stopped.code === 0, `daemon stop failed: ${stopped.stderr}`);
+        let workersBeforeFault: Array<[string, string]> = [];
         if (outcome === "corrupt-frontier") {
           const snapshotPath = path.join(projectRoot,".genethub","components","pm","requests",accepted!.id,"runs",accepted!.id,"run.json");
           const saved = JSON.parse(readFileSync(snapshotPath,"utf8"));
           t.assertions.assert(!!saved.run.engine,"fault fixture lacks a structured snapshot");
+          t.assertions.assert(saved.run.status === "running", "fault fixture must damage an unfinished execution");
+          workersBeforeFault = Object.entries(saved.run.nodes as Record<string, {sessionId?: string}>)
+            .filter((entry): entry is [string, {sessionId: string}] => typeof entry[1].sessionId === "string")
+            .map(([id, node]): [string, string] => [id, node.sessionId]).sort(([a], [b]) => a.localeCompare(b));
+          t.assertions.assert(workersBeforeFault.length > 0, "fault fixture has no assigned Worker");
+          t.note(`fault boundary: observedBeforeStop=${accepted!.nodes.filter(node => node.sessionId).length}; stoppedWorkers=${JSON.stringify(workersBeforeFault)}`);
           saved.run.engine.frames[saved.run.engine.root].cursor = {phase:"selected",child:999999};
           writeFileSync(snapshotPath,JSON.stringify(saved));
           t.note("Daemon stopped; changed the isolated persisted root cursor to an invalid child before restart.");
@@ -319,10 +330,15 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
           await t.tools.waitUntil(async()=>{
             const reply = await opened.client.call({type:"workflow.get",payload:{workspaceId:projectId,runId:accepted!.id}});
             if(reply?.type !== "workflowRun" || reply.data.status !== "blocked") return false;
-            t.assertions.assert(reply.data.reason?.includes("快照") && reply.data.nodes.filter(n=>n.sessionId).length === 1,"invalid snapshot guessed a successor or concealed its reason");
-            const worker=reply.data.nodes.find(n=>n.sessionId)!;
-            const session=await opened.client.call({type:"session.get",payload:{sessionId:worker.sessionId!}});
-            return session?.type === "snapshot" && session.data.summary.status === "closed";
+            const after = reply.data.nodes.filter(node => node.sessionId)
+              .map((node): [string, string] => [node.id, node.sessionId!]).sort(([a], [b]) => a.localeCompare(b));
+            t.assertions.assert(reply.data.reason?.includes("快照") === true && JSON.stringify(after) === JSON.stringify(workersBeforeFault),
+              `invalid snapshot guessed a successor or concealed its reason: ${JSON.stringify({before: workersBeforeFault, after, reason: reply.data.reason})}`);
+            for (const [, sessionId] of workersBeforeFault) {
+              const session = await opened.client.call({type: "session.get", payload: {sessionId}});
+              if (session?.type !== "snapshot" || session.data.summary.status !== "closed") return false;
+            }
+            return true;
           },35_000);
           await t.tools.waitUntil(async()=>{
             const reply=await opened.client.call({type:"workflow.history",payload:{workspaceId:projectId,limit:10}});

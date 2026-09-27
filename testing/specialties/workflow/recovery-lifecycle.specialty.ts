@@ -166,6 +166,27 @@ defineSpecialty({
       if (reply?.type !== "snapshot") throw new Error(`Session ${id} unavailable`);
       return reply.data;
     };
+    const sendWhenAccepted = async (sessionId: string, text: string) => {
+      let conflicts = 0;
+      await t.tools.waitUntil(async () => {
+        if ((await snapshot(sessionId)).summary.status !== "idle") return false;
+        try {
+          await t.flows.main.sendPrompt(opened.client, sessionId, text);
+          return true;
+        } catch (error) {
+          // Patrol can claim the idle session between snapshot and send. This
+          // exact admission rejection precedes message persistence; transport
+          // failures or an unknown handover result must never be retried.
+          if (!(error instanceof Error) || error.name !== "ProtocolError"
+            || error.message !== "a turn is already running or awaiting a response in this session") throw error;
+          conflicts++;
+          return false;
+        }
+      }, 30_000);
+      const accepted = (await snapshot(sessionId)).items.filter(item => item.type === "userMessage" && item.text === text);
+      t.assertions.assert(accepted.length === 1, `${text} must be admitted exactly once`);
+      if (conflicts) t.note(`${text}: ${conflicts} pre-admission conflicts, one accepted message`);
+    };
     const journal = async (runId: string): Promise<Array<{ eventType: string; actor?: string; messageId?: string }>> => {
       const result = await runGenetAsync(opened.daemon.genet,
         ["workflow", "journal", "--run", runId, "--since", "0", "--limit", "100"],
@@ -185,7 +206,7 @@ defineSpecialty({
         return original?.status === "running" && !!original.nodes.find(node => node.id === "work" && node.sessionId)
           && (await snapshot(pm)).summary.status === "idle";
       }, 30_000);
-      await t.flows.main.sendPrompt(opened.client, pm, "START_PROACTIVE_RECOVERY");
+      await sendWhenAccepted(pm, "START_PROACTIVE_RECOVERY");
     }
     if (corrupt) {
       stage = "damage active Candidate after business dispatch";
@@ -294,11 +315,11 @@ defineSpecialty({
         && pending.pendingPermissions.some(request => request.id === questionId)
         && pmStatus === "idle";
     }, 45_000);
-    await t.flows.main.sendPrompt(opened.client, pm, "APPROVE_RECOVERY_REPAIR");
+    await sendWhenAccepted(pm, "APPROVE_RECOVERY_REPAIR");
     stage = "wait for WM and acceptance";
     await t.tools.waitUntil(async () => {
       recovery = (await history()).find(run => run.id === recovery!.id);
-      return recovery?.status === "blocked" && (humanB || humanF || cancelExit || recovery.reason?.includes("controlled exit"));
+      return recovery?.status === "blocked" && (humanB || humanF || cancelExit || recovery.reason?.includes("controlled exit") === true);
     }, 75_000);
     if (cancelExit) {
       t.assertions.assert(!recovery!.humanExit, "PM cancellation recommendation was incorrectly classified as Human exit d");
@@ -355,8 +376,7 @@ defineSpecialty({
     "PM answer was missing or repeated in the committed journal");
 
     stage = "wait for PM to settle after recovery";
-    await t.tools.waitUntil(async () => (await snapshot(pm)).summary.status === "idle", 30_000);
-    await t.flows.main.sendPrompt(opened.client, pm, "CONTINUE_RECOVERY_LIFECYCLE");
+    await sendWhenAccepted(pm, "CONTINUE_RECOVERY_LIFECYCLE");
     stage = "wait for business successor";
     await t.tools.waitUntil(async () => {
       const runs = await history();

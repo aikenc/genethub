@@ -93,6 +93,7 @@ struct Frame {
 
 #[derive(Clone)]
 struct Writer {
+    pace: Arc<crate::dataplane::uplink_pace::UplinkPace>,
     messages: mpsc::Sender<Message>,
 }
 
@@ -351,6 +352,9 @@ async fn run_once(
     let (mut sink, mut source) = socket.split();
     let (messages_tx, mut messages_rx) = mpsc::channel::<Message>(WRITER_QUEUE);
     let writer = Writer {
+        pace: Arc::new(crate::dataplane::uplink_pace::UplinkPace::new(
+            genehub_proto::INITIAL_STREAM_WINDOW_BYTES as u64,
+        )),
         messages: messages_tx.clone(),
     };
     let socket_writer = tokio::spawn(async move {
@@ -631,7 +635,8 @@ async fn serve_peer_inner(
             }
         });
     }
-    let (inbound, mut outbound, carrier) = endpoint::carrier_channels();
+    let (inbound, mut outbound, mut carrier) = endpoint::carrier_channels();
+    carrier.uplink_pace = Some(writer.pace.clone());
     let flow = StreamFlow::from_wire(frame.value)?;
     peers.lock().await.insert(
         frame.stream_id,
@@ -1009,9 +1014,13 @@ pub async fn dial(
         }
     });
     let writer = Writer {
+        pace: Arc::new(crate::dataplane::uplink_pace::UplinkPace::new(
+            genehub_proto::INITIAL_STREAM_WINDOW_BYTES as u64,
+        )),
         messages: messages_tx,
     };
-    let (inbound, mut outbound, carrier) = endpoint::carrier_channels();
+    let (inbound, mut outbound, mut carrier) = endpoint::carrier_channels();
+    carrier.uplink_pace = Some(writer.pace.clone());
 
     let reader_writer = writer.clone();
     let reader_flow = flow.clone();

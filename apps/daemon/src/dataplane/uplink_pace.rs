@@ -6,16 +6,14 @@
 //! the rate implied by client acks, about 200ms of that rate. One completed
 //! window of at least half the start size that returns within 900ms opens
 //! straight to the protocol ceiling, including a fast loopback drain. The
-//! opened cap stays for the next transfer on the same daemon. A full window
+//! opened cap is retained only while its physical uplink is busy. A full window
 //! still unacked after 900ms shrinks the cap to what drained in 900ms, never
-//! below the start, so a 5Mbps first RPC is not stuck behind a larger window
-//! even after the uplink slows down.
+//! below the start. An idle path starts conservatively again; already sent
+//! bytes cannot be recalled if capacity falls during an active transmission.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-
-use tokio::sync::Notify;
 
 const START_BYTES: u64 = 640 * 1024;
 const RATE_TARGET: Duration = Duration::from_millis(200);
@@ -24,9 +22,10 @@ const RATE_TARGET: Duration = Duration::from_millis(200);
 const OPEN_DRAIN_MAX: Duration = Duration::from_millis(900);
 
 pub struct UplinkPace {
+    ceiling: u64,
+    changes: tokio::sync::watch::Sender<()>,
     outstanding: Mutex<u64>,
     cap: AtomicU64,
-    notify: Notify,
     control: Mutex<Control>,
 }
 
@@ -36,21 +35,24 @@ struct Control {
     cap_at_fill: u64,
     sample_bytes: u64,
     sample_started: Option<Instant>,
+    idle_since: Option<Instant>,
 }
 
 impl UplinkPace {
     pub fn new(ceiling: u64) -> Self {
         let floor = START_BYTES.min(ceiling);
         Self {
+            ceiling,
+            changes: tokio::sync::watch::channel(()).0,
             outstanding: Mutex::new(0),
             cap: AtomicU64::new(floor),
-            notify: Notify::new(),
             control: Mutex::new(Control {
                 filled_at: None,
                 acked_since_fill: 0,
                 cap_at_fill: floor,
                 sample_bytes: 0,
                 sample_started: None,
+                idle_since: None,
             }),
         }
     }
@@ -60,19 +62,54 @@ impl UplinkPace {
     }
 
     pub async fn reserve(&self, bytes: u64) {
+        let mut changes = self.changes();
         loop {
-            let notified = self.notify.notified();
-            {
-                let mut outstanding = self.outstanding.lock().unwrap();
-                let cap = self.cap.load(Ordering::Relaxed);
-                if bytes > cap || outstanding.saturating_add(bytes) <= cap {
-                    *outstanding = outstanding.saturating_add(bytes);
-                    self.note_filled(*outstanding, cap);
-                    return;
-                }
+            if self.try_reserve(bytes) {
+                return;
             }
-            notified.await;
+            // watch retains a release between the failed reservation and the
+            // first poll. Notify::notify_waiters does not retain that wake.
+            let _ = changes.changed().await;
         }
+    }
+
+    pub(crate) fn can_reserve(&self, bytes: u64) -> bool {
+        let outstanding = *self.outstanding.lock().unwrap();
+        outstanding.saturating_add(bytes) <= self.cap()
+    }
+
+    fn try_reserve(&self, bytes: u64) -> bool {
+        let mut outstanding = self.outstanding.lock().unwrap();
+        if *outstanding == 0 {
+            let mut control = self.control.lock().unwrap();
+            if control
+                .idle_since
+                .take()
+                .is_some_and(|at| at.elapsed() >= Duration::from_millis(100))
+            {
+                self.cap
+                    .store(START_BYTES.min(self.ceiling), Ordering::Relaxed);
+            }
+        }
+        let cap = self.cap.load(Ordering::Relaxed);
+        if bytes > cap || outstanding.saturating_add(bytes) <= cap {
+            *outstanding = outstanding.saturating_add(bytes);
+            self.note_filled(*outstanding, cap);
+            return true;
+        }
+        self.note_filled(*outstanding, *outstanding);
+        false
+    }
+
+    pub(crate) fn changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.changes.subscribe()
+    }
+
+    pub(crate) fn try_acquire(self: &Arc<Self>, bytes: u64) -> Option<Charge> {
+        self.try_reserve(bytes).then(|| Charge {
+            pace: self.clone(),
+            bytes,
+        })
     }
 
     fn note_filled(&self, outstanding: u64, cap: u64) {
@@ -94,7 +131,27 @@ impl UplinkPace {
             *outstanding == 0
         };
         self.observe(bytes, ceiling, idle);
-        self.notify.notify_waiters();
+        self.changes.send_replace(());
+    }
+
+    /// Release abandoned occupancy without inventing delivery or rate samples.
+    pub fn discard(&self, bytes: u64) {
+        if bytes == 0 {
+            return;
+        }
+        let mut outstanding = self.outstanding.lock().unwrap();
+        *outstanding = outstanding.saturating_sub(bytes);
+        let mut control = self.control.lock().unwrap();
+        control.filled_at = None;
+        control.acked_since_fill = 0;
+        control.sample_bytes = 0;
+        control.sample_started = None;
+        if *outstanding == 0 {
+            control.idle_since = Some(Instant::now());
+        }
+        drop(control);
+        drop(outstanding);
+        self.changes.send_replace(());
     }
 
     fn observe(&self, bytes: u64, ceiling: u64, idle: bool) {
@@ -188,6 +245,7 @@ impl UplinkPace {
         // profile on this daemon would otherwise see a multi-second drain and
         // pin the cap at the floor.
         if idle {
+            control.idle_since = Some(Instant::now());
             control.filled_at = None;
             control.acked_since_fill = 0;
             control.sample_bytes = 0;
@@ -196,45 +254,55 @@ impl UplinkPace {
     }
 }
 
-/// Outstanding bulk bytes of one preview, released if the stream disappears
-/// before the client acknowledges them.
+/// One actual transmission on one physical uplink. Only a validated ACK for
+/// its active logical epoch is delivery; replacing a channel abandons its debit.
+pub(crate) struct Charge {
+    pace: Arc<UplinkPace>,
+    bytes: u64,
+}
+impl Charge {
+    pub(crate) fn acknowledge(mut self) {
+        self.pace.release(self.bytes, self.pace.ceiling);
+        self.bytes = 0;
+    }
+}
+impl Drop for Charge {
+    fn drop(&mut self) {
+        self.pace.discard(self.bytes);
+    }
+}
+
+/// Fixed-owner bootstrap streams do not have a replay journal.
 pub struct PaceShare {
     pace: Arc<UplinkPace>,
     ceiling: u64,
-    outstanding: Mutex<u64>,
+    outstanding: AtomicU64,
 }
-
 impl PaceShare {
     pub fn new(pace: Arc<UplinkPace>, ceiling: u64) -> Self {
         Self {
             pace,
             ceiling,
-            outstanding: Mutex::new(0),
+            outstanding: AtomicU64::new(0),
         }
     }
-
     pub async fn reserve(&self, bytes: u64) {
         self.pace.reserve(bytes).await;
-        *self.outstanding.lock().unwrap() += bytes;
+        self.outstanding.fetch_add(bytes, Ordering::Relaxed);
     }
-
     pub fn release(&self, bytes: u64) {
-        let mut outstanding = self.outstanding.lock().unwrap();
-        let bytes = bytes.min(*outstanding);
-        *outstanding -= bytes;
-        drop(outstanding);
-        if bytes > 0 {
-            self.pace.release(bytes, self.ceiling);
-        }
+        let previous = self
+            .outstanding
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                Some(n.saturating_sub(bytes))
+            })
+            .unwrap();
+        self.pace.release(bytes.min(previous), self.ceiling);
     }
 }
-
 impl Drop for PaceShare {
     fn drop(&mut self) {
-        let left = std::mem::take(&mut *self.outstanding.lock().unwrap());
-        if left > 0 {
-            self.pace.release(left, self.ceiling);
-        }
+        self.pace.discard(self.outstanding.load(Ordering::Relaxed));
     }
 }
 
@@ -257,6 +325,33 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), second)
             .await
             .expect("ack should let the next chunk through");
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_waiter_does_not_consume_the_next_release() {
+        let pace = Arc::new(UplinkPace::new(START_BYTES));
+        pace.reserve(START_BYTES).await;
+        let mut cancelled = Box::pin(pace.reserve(START_BYTES));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut cancelled)
+                .await
+                .is_err()
+        );
+        // Two blocked callers must observe the same release; dropping one
+        // waiter cannot steal it or reserve bytes on behalf of that caller.
+        let mut survivor = Box::pin(pace.reserve(START_BYTES));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut survivor)
+                .await
+                .is_err()
+        );
+        drop(cancelled);
+        pace.discard(START_BYTES);
+        tokio::time::timeout(Duration::from_secs(1), &mut survivor)
+            .await
+            .unwrap();
+        assert_eq!(*pace.outstanding.lock().unwrap(), START_BYTES);
+        pace.discard(START_BYTES);
     }
 
     #[tokio::test]
@@ -344,5 +439,55 @@ mod tests {
         share.release(64 * 1024);
         assert_eq!(pace.cap(), START_BYTES);
         share.release(ceiling - 64 * 1024);
+    }
+    #[tokio::test]
+    async fn cancellation_frees_budget_without_training_the_path() {
+        let pace = Arc::new(UplinkPace::new(3 * 1024 * 1024));
+        {
+            let share = PaceShare::new(pace.clone(), 3 * 1024 * 1024);
+            share.reserve(START_BYTES).await;
+        }
+        assert_eq!(pace.cap(), START_BYTES);
+        assert_eq!(*pace.outstanding.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn abandoned_old_channel_cannot_train_or_release_a_new_channel() {
+        let ceiling = 3 * 1024 * 1024;
+        let old = Arc::new(UplinkPace::new(ceiling));
+        let new = Arc::new(UplinkPace::new(ceiling));
+        let old_charge = old.try_acquire(START_BYTES).unwrap();
+        let new_charge = new.try_acquire(START_BYTES).unwrap();
+        drop(old_charge);
+        assert_eq!(*old.outstanding.lock().unwrap(), 0);
+        assert_eq!(old.cap(), START_BYTES);
+        assert_eq!(*new.outstanding.lock().unwrap(), START_BYTES);
+        assert_eq!(new.cap(), START_BYTES);
+        drop(new_charge);
+        assert_eq!(*new.outstanding.lock().unwrap(), 0);
+        assert_eq!(new.cap(), START_BYTES);
+    }
+
+    #[tokio::test]
+    async fn an_unaligned_cap_observes_blocking_and_can_shrink() {
+        let pace = Arc::new(UplinkPace::new(3 * 1024 * 1024));
+        pace.cap.store(START_BYTES + 17, Ordering::Relaxed);
+        pace.reserve(START_BYTES).await;
+        assert!(pace.try_acquire(4096).is_none());
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        pace.release(32 * 1024, pace.ceiling);
+        assert_eq!(pace.cap(), START_BYTES);
+        pace.discard(START_BYTES - 32 * 1024);
+    }
+    #[tokio::test]
+    async fn an_idle_path_reprobes_instead_of_inheriting_an_old_fast_window() {
+        let pace = Arc::new(UplinkPace::new(3 * 1024 * 1024));
+        pace.reserve(START_BYTES).await;
+        pace.release(START_BYTES, pace.ceiling);
+        assert_eq!(pace.cap(), pace.ceiling);
+        pace.control.lock().unwrap().idle_since = Some(Instant::now() - Duration::from_secs(1));
+        pace.reserve(1024).await;
+        assert_eq!(pace.cap(), START_BYTES);
+        pace.discard(1024);
     }
 }

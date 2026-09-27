@@ -87,7 +87,7 @@ function neteffMeta(input: {
       ? ["network-risk-v2", "multichannel", "neteff", "performance", "connectivity", "wasm-guest", "relay"]
       : ["network-risk-v2", "multichannel", "neteff", "performance", "connectivity", "wasm-guest"],
     llm: { default: "none" as const },
-    expectedDurationMs: 20_000,
+    expectedDurationMs: input.id.endsWith("bulk-high-rtt") ? 65_000 : 20_000,
     timeoutMs: 90_000,
     resources: {
       environments: 1,
@@ -266,7 +266,7 @@ function recordUtilization(
     ` genehubMs=${input.product.elapsedMs.toFixed(0)} genehubMiBps=${input.product.mibPerSec.toFixed(2)}` +
     ` bandwidthUtilization=${(utilization * 100).toFixed(1)}%` +
     ` target=${(input.target * 100).toFixed(0)}% gap=${gapPp.toFixed(1)}pp` +
-    ` productMs=${input.product.productMs ?? "-"}`;
+    ` productMs=${input.product.productMs ?? "-"} firstByteMs=${input.product.firstByteMs} transferMs=${input.product.transferMs}`;
   return {
     label: input.label,
     sizeMiB: input.file.sizeBytes / MIB,
@@ -747,9 +747,13 @@ defineSpecialty(
   },
 );
 
+for (const startup of ["warm", "cold-small", "cold-bulk", "cold-abrupt"] as const) {
+const coldStart = startup !== "warm";
+const coldSmall = startup === "cold-small";
+const coldBulk = startup === "cold-bulk" || startup === "cold-abrupt";
 defineSpecialty(
   neteffMeta({
-    id: "specialty.neteff.preview-relay-leg-utilization",
+    id: coldStart ? (coldSmall ? "specialty.neteff.review-relay-cold-high-rtt" : (startup === "cold-abrupt" ? "specialty.neteff.relay-abrupt-close-bulk-high-rtt" : "specialty.neteff.relay-cold-bulk-high-rtt")) : "specialty.neteff.preview-relay-leg-utilization",
     title: "Preview bandwidth utilization across independently shaped relay legs",
     oracle:
       "a real rendezvous relay carries exact preview bytes through independently shaped client and daemon legs, compared with a raw two-leg TCP splice using the same profiles",
@@ -763,13 +767,13 @@ defineSpecialty(
   }),
   async (t) => {
     requireWasmArtifacts(t.openRoot);
-    const file = seedImage(t, "neteff-relay-4m.png", 4 * MIB);
+    const file = seedImage(t, "neteff-relay.png", (coldBulk ? 24 : 4) * MIB);
     const rawServer = await startTcpPayloadServer(file.sizeBytes);
     const relay = await startRelay({ openRoot: t.openRoot });
     const zeroProfile = { rttMs: 0, bandwidthMbps: LINK_BANDWIDTH_MBPS };
     const daemonLink = await startShapedTcpProxy({ targetUrl: relay.origin, profile: zeroProfile });
     const clientLink = await startShapedTcpProxy({ targetUrl: relay.origin, profile: zeroProfile });
-    t.env.env.GENEHUB_LOCAL_LOG = "info";
+    t.env.env.GENEHUB_LOCAL_LOG = "warn,genet_daemon::dataplane::uplink_pace=info,genet_daemon::dataplane::preview=debug";
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
     const samples: UtilizationSample[] = [];
     let busyRpcMs: number | null = null;
@@ -823,7 +827,7 @@ defineSpecialty(
         pairing.close();
       }
 
-      const points = [
+      const points = coldStart ? Array.from({length: coldBulk ? 9 : 3}, () => ({ clientRttMs: 100, daemonRttMs: 100 })) : [
         { clientRttMs: 0, daemonRttMs: 0 },
         { clientRttMs: 100, daemonRttMs: 0 },
         { clientRttMs: 50, daemonRttMs: 50 },
@@ -858,8 +862,34 @@ defineSpecialty(
           redial: async () => ({ url: routedRendezvous, credential }),
         }).catch((error: unknown) => { throw new Error(`${error instanceof Error ? error.message : String(error)}; ${label}; ${probe.summary()}`); });
         try {
+          if (!coldStart) {
+            // Sustained utilization is measured after a same-profile transfer,
+            // not after samples from a different RTT or expired idle state.
+            await measurePreview(t, {client, opened, file, probe});
+          }
+          const logPath = path.join(t.env.data, "logs", "daemon.log");
+          const timingsBefore = readFileSync(logPath, "utf8").split("\n").filter(line => line.includes("preview_stage_timing")).length;
+          const throttleCount = () => {
+            try { return Number(/nr_throttled (\d+)/.exec(readFileSync("/sys/fs/cgroup/cpu/cpu.stat", "utf8"))?.[1] ?? 0); }
+            catch { return 0; }
+          };
+          const throttledBefore = throttleCount();
+          const progress: number[][] = [];
+          const traceStarted = performance.now();
+          let traceTick = traceStarted, maxTickGapMs = 0;
+          const trace = coldBulk ? setInterval(() => {
+            const now = performance.now();
+            maxTickGapMs = Math.max(maxTickGapMs, now - traceTick); traceTick = now;
+            if (progress.length < 150) progress.push([Math.round(now - traceStarted),
+              Math.round(daemonLink.stats().clientToTargetBytes / 1024), Math.round(clientLink.stats().targetToClientBytes / 1024)]);
+          }, 100) : undefined;
           let previewFinished = false;
-          const preview = measurePreview(t, { client, opened, file, probe }).then(result => { previewFinished = true; return result; });
+          const preview = measurePreview(t, { client, opened, file, probe }).then(result => { previewFinished = true; return result; }).finally(() => {
+            if (trace) {
+              clearInterval(trace);
+              if (performance.now() - traceStarted > 2800) t.note(`slow trace ${samples.length + 1} [ms,sentKiB,arrivedKiB]: ${JSON.stringify(progress.filter((row, i) => i > 4 && row[1]! - progress[i-1]![1]! < 800))}; maxTickGapMs=${maxTickGapMs.toFixed(1)}`);
+            }
+          });
           void preview.catch(() => {});
           if (point.clientRttMs === 100 && point.daemonRttMs === 100) {
             await t.tools.waitUntil(() => clientLink.stats().targetToClientBytes >= 64 * 1024, 10000);
@@ -877,6 +907,14 @@ defineSpecialty(
             );
           }
           const product = await preview;
+          if (coldStart) t.note(`sample${samples.length + 1}: tcp=${tcp.elapsedMs.toFixed(0)} product=${product.elapsedMs.toFixed(0)} first=${product.firstByteMs} body=${product.transferMs} rpc=${busyRpcMs?.toFixed(0)} throttledPeriods=${throttleCount() - throttledBefore}`);
+          // The receiver finishing precedes the final ACK reaching the sender.
+          // Keep that stream alive long enough to record its completed stages.
+          if (startup !== "cold-abrupt") await t.tools.waitUntil(() => readFileSync(logPath, "utf8").split("\n").filter(line => line.includes("preview_stage_timing")).length > timingsBefore, 3000);
+          if (product.elapsedMs > 2800) {
+            const line = readFileSync(logPath, "utf8").split("\n").filter(line => line.includes("preview_stage_timing")).at(-1);
+            t.note(`slow stages: ${line}`);
+          }
           samples.push(
             recordUtilization(t, {
               label,
@@ -886,7 +924,7 @@ defineSpecialty(
               tcp,
               product,
               productLinkStats: [clientLink.stats(), daemonLink.stats()],
-              target: RELAY_TARGET_UTILIZATION,
+              target: coldSmall ? tcp.elapsedMs / (tcp.elapsedMs + point.clientRttMs + point.daemonRttMs + 100) : RELAY_TARGET_UTILIZATION,
             }),
           );
         } finally {
@@ -900,12 +938,14 @@ defineSpecialty(
       const daemonOnly = samples.find(
         (sample) => sample.clientRttMs === 0 && sample.daemonRttMs === 100,
       );
-      t.assertions.assert(clientOnly !== undefined && daemonOnly !== undefined, "relay symmetry points missing");
-      const symmetryDelta = Math.abs(clientOnly!.utilization - daemonOnly!.utilization);
-      t.assertions.assert(
-        symmetryDelta <= 0.2,
-        `moving the same 100ms RTT between relay legs changes utilization by ${(symmetryDelta * 100).toFixed(1)}pp`,
-      );
+      if (!coldStart) {
+        t.assertions.assert(clientOnly !== undefined && daemonOnly !== undefined, "relay symmetry points missing");
+        const symmetryDelta = Math.abs(clientOnly!.utilization - daemonOnly!.utilization);
+        t.assertions.assert(
+          symmetryDelta <= 0.2,
+          `moving the same 100ms RTT between relay legs changes utilization by ${(symmetryDelta * 100).toFixed(1)}pp`,
+        );
+      }
     } catch (error) {
       const tail = relay.logTail().trim();
       if (error instanceof Error && tail.length > 0) {
@@ -921,7 +961,19 @@ defineSpecialty(
       relay.stop();
       await rawServer.stop();
     }
+    const decisions = readFileSync(path.join(t.env.data, "logs", "daemon.log"), "utf8").split("\n").filter(line => (line.includes('event="uplink_pace"') || line.includes('preview_stage_timing')));
+    t.note(`pace decisions: ${decisions.slice(-8).join(" | ")}`);
+    t.note(`startup=${startup}; ${samples.map(sample => sample.line).join("; ")}`);
     for (const sample of samples) {
+      if (coldSmall) {
+        // Cold budget discovery costs at most one RTT plus the actor's 100ms
+        // scheduling interval. Keep the latency result separate from the
+        // unchanged >=80% warm and cold-large-file throughput requirements.
+        const startupBudget = sample.clientRttMs + sample.daemonRttMs + 100;
+        t.assertions.assert(sample.product.elapsedMs - sample.tcp.elapsedMs <= startupBudget,
+          `${sample.label}: cold startup added ${(sample.product.elapsedMs - sample.tcp.elapsedMs).toFixed(0)}ms; budget=${startupBudget}ms`);
+        continue;
+      }
       t.assertions.assert(
         sample.utilization >= RELAY_TARGET_UTILIZATION,
         `${sample.label}: ${(sample.utilization * 100).toFixed(1)}% of same-link TCP is below the phase-2 ${(RELAY_TARGET_UTILIZATION * 100).toFixed(0)}% target`,
@@ -929,12 +981,14 @@ defineSpecialty(
     }
     t.note(
       `neteff preview-relay-leg-utilization (daemon=wasm guest, real relay, each leg=${LINK_BANDWIDTH_MBPS}Mbps)\n` +
-        `${headline("Relay", samples, RELAY_TARGET_UTILIZATION)}\n` +
+        `${coldSmall ? "Cold-small latency: TCP plus one RTT and 100ms scheduling budget" : headline("Relay", samples, RELAY_TARGET_UTILIZATION)}\n` +
         `fairness rpcDuring4MiBAt100+100ms=${busyRpcMs?.toFixed(0) ?? "-"}ms target<=1500ms\n` +
         samples.map((sample) => sample.line).join("\n"),
     );
   },
 );
+
+}
 
 async function pairRelayedDevice(
   opened: Opened,
@@ -962,6 +1016,57 @@ async function pairRelayedDevice(
     pairing.close();
   }
 }
+
+defineSpecialty({
+  ...neteffMeta({
+    id: "specialty.neteff.review-preview-cancel-rate",
+    title: "Closing a preview on a slow uplink does not count abandoned bytes as fast acknowledgements",
+    oracle: "A real Client close before a slow first window drains must not open the shared pacing ceiling",
+    catches: ["preview teardown feeds abandoned bytes into the rate estimator"], relay: true,
+  }),
+  expectedDurationMs: 20000, timeoutMs: 90000,
+}, async t => {
+  requireWasmArtifacts(t.openRoot);
+  const file = seedImage(t, "cancel-review.png", 24 * MIB);
+  const relay = await startRelay({openRoot: t.openRoot});
+  const link = await startShapedTcpProxy({targetUrl: relay.origin, profile: {rttMs: 40, bandwidthMbps: 5}});
+  t.env.env.GENEHUB_LOCAL_LOG = "warn,genet_daemon::dataplane::uplink_pace=info";
+  const opened = await t.flows.main.openWorkspace({openRoot: t.openRoot, lease: t.env});
+  let client: ProductClient | undefined;
+  try {
+    const attached = await opened.client.call({type: "device.remoteAttach", payload: {relayUrl: link.urlFor(relay.origin), joinToken: relay.joinToken}});
+    if (attached?.type !== "remoteAccess" || !attached.data.rendezvousUrl) throw new Error("remote attach failed");
+    await t.tools.waitUntil(async () => {
+      const devices = await opened.client.call({type: "device.list"});
+      return devices?.type === "devices" && devices.data.remote.online;
+    }, 20000);
+    const url = attached.data.rendezvousUrl;
+    const credential = await pairRelayedDevice(opened, url, "cancel-review");
+    client = await connectProductClient({url, credential});
+    link.resetStats();
+    const probe = new PreviewProbe();
+    const began = performance.now();
+    let completed = false, settled = false;
+    const transfer = measurePreview(t, {client, opened, file, probe})
+      .then(() => { settled = true; completed = true; return "completed"; }, () => { settled = true; return "cancelled"; });
+    await t.tools.waitUntil(() => link.stats().clientToTargetBytes >= 64 * 1024, 10000);
+    const before = link.stats();
+    const elapsed = performance.now() - began;
+    const logPath = path.join(t.env.data, "logs", "daemon.log");
+    const earlier = readFileSync(logPath, "utf8").split("\n").filter(line => (line.includes('event="uplink_pace"') || line.includes('preview_stage_timing')));
+    t.assertions.assert(!settled, "preview already settled before the cancellation fault");
+    client.close();
+    const outcome = await transfer;
+    t.assertions.assert(outcome === "cancelled", "closing the in-flight preview did not cancel it");
+    await new Promise(r => setTimeout(r, 1500));
+    const events = readFileSync(logPath, "utf8").split("\n").filter(line => (line.includes('event="uplink_pace"') || line.includes('preview_stage_timing')));
+    const after = events.slice(earlier.length);
+    const summary = `closeAfterMs=${elapsed.toFixed(0)} sentWireBytes=${before.clientToTargetBytes} completedBeforeClose=${completed} outcome=${outcome} eventsBefore=${earlier.length} after=${after.join(" | ")}`;
+    t.note(summary);
+    t.assertions.assert(!completed && elapsed < 900 && earlier.length === 0, `slow first-window cancellation precondition not met: ${summary}`);
+    t.assertions.assert(!after.some(line => line.includes("cap_bytes=3145728")), `cancelled bytes opened pacing ceiling: ${summary}`);
+  } finally { client?.close(); opened.client.close(); opened.daemon.stop(); await opened.mock.stop(); await link.stop(); relay.stop(); }
+});
 
 defineSpecialty(
   neteffMeta({
@@ -1062,10 +1167,12 @@ defineSpecialty(
   },
 );
 
+for (const bandwidthOrder of ["slow-fast", "fast-slow", "medium-slow", "same-socket-fast-slow", "same-socket-medium-slow"] as const) {
+const sameSocket = bandwidthOrder.startsWith("same-socket");
 defineSpecialty(
   {
     ...neteffMeta({
-      id: "specialty.neteff.relay-uplink-window-vs-bandwidth",
+      id: sameSocket ? `specialty.neteff.review-uplink-${bandwidthOrder}` : bandwidthOrder === "fast-slow" ? "specialty.neteff.review-uplink-fast-then-slow" : bandwidthOrder === "medium-slow" ? "specialty.neteff.review-uplink-medium-then-slow" : "specialty.neteff.relay-uplink-window-vs-bandwidth",
       title: "Interactive latency behind one bulk preview stays under a second on a slow shared uplink",
       oracle:
         "while a 24 MiB Preview crosses a shared daemon uplink, another client's workspace.list stays within 1200ms at 5Mbps and within 800ms at 100Mbps",
@@ -1081,17 +1188,23 @@ defineSpecialty(
     requireWasmArtifacts(t.openRoot);
     const file = seedImage(t, "neteff-window-24m.png", 24 * MIB);
     const relay = await startRelay({ openRoot: t.openRoot });
+    t.env.env.GENEHUB_LOCAL_LOG = "warn,genet_daemon::dataplane::uplink_pace=info";
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
     const rows: string[] = [];
     const worst = new Map<number, number>();
+    let retained: {daemonLink: Awaited<ReturnType<typeof startShapedTcpProxy>>; clientLink: Awaited<ReturnType<typeof startShapedTcpProxy>>; routed: string} | undefined;
     try {
-      for (const bandwidthMbps of [5, 100]) {
-        const daemonLink = await startShapedTcpProxy({ targetUrl: relay.origin, profile: { rttMs: 40, bandwidthMbps } });
-        const clientLink = await startShapedTcpProxy({ targetUrl: relay.origin, profile: { rttMs: 20, bandwidthMbps: LINK_BANDWIDTH_MBPS } });
+      for (const bandwidthMbps of (bandwidthOrder.endsWith("fast-slow") ? [100, 5] : bandwidthOrder.endsWith("medium-slow") ? [20, 5] : [5, 100])) {
+        const daemonLink = retained?.daemonLink ?? await startShapedTcpProxy({ targetUrl: relay.origin, profile: { rttMs: 40, bandwidthMbps } });
+        const clientLink = retained?.clientLink ?? await startShapedTcpProxy({ targetUrl: relay.origin, profile: { rttMs: 20, bandwidthMbps: LINK_BANDWIDTH_MBPS } });
+        daemonLink.setProfile({rttMs: 40, bandwidthMbps});
+        daemonLink.resetStats();
         const busy: number[] = [];
         let probedUnderLoad = false;
         let bulk = "";
         try {
+          let routed = retained?.routed;
+          if (!routed) {
           const attached = await opened.client.call({
             type: "device.remoteAttach",
             payload: { relayUrl: daemonLink.urlFor(relay.origin), joinToken: relay.joinToken },
@@ -1099,11 +1212,13 @@ defineSpecialty(
           if (attached?.type !== "remoteAccess" || typeof attached.data.rendezvousUrl !== "string") {
             throw new Error(`device.remoteAttach returned ${attached?.type}`);
           }
-          const routed = clientLink.urlFor(attached.data.rendezvousUrl);
+          routed = clientLink.urlFor(attached.data.rendezvousUrl);
           await t.tools.waitUntil(async () => {
             const devices = await opened.client.call({ type: "device.list" });
             return devices?.type === "devices" && devices.data.remote.online === true;
           }, 20_000);
+          if (sameSocket) retained = {daemonLink, clientLink, routed};
+          }
           const bulkCredential = await pairRelayedDevice(opened, routed, `neteff-window-bulk-${bandwidthMbps}`);
           const interactiveCredential = await pairRelayedDevice(opened, routed, `neteff-window-b-${bandwidthMbps}`);
           const probe = new PreviewProbe();
@@ -1135,10 +1250,13 @@ defineSpecialty(
             bulkClient.close();
           }
         } finally {
-          await opened.client.call({ type: "device.remoteDetach" }).catch(() => undefined);
-          await clientLink.stop();
-          await daemonLink.stop();
+          if (!sameSocket) {
+            await opened.client.call({ type: "device.remoteDetach" }).catch(() => undefined);
+            await clientLink.stop();
+            await daemonLink.stop();
+          }
         }
+        t.assertions.assert(probedUnderLoad, `${bandwidthMbps}Mbps preview finished before interactive probes ended`);
         const max = Math.max(...busy);
         worst.set(bandwidthMbps, max);
         rows.push(
@@ -1152,11 +1270,17 @@ defineSpecialty(
       }
       throw error;
     } finally {
+      if (retained) {
+        await opened.client.call({ type: "device.remoteDetach" }).catch(() => undefined);
+        await retained.clientLink.stop(); await retained.daemonLink.stop();
+      }
       opened.client.close();
       opened.daemon.stop();
       await opened.mock.stop();
       relay.stop();
     }
+    const pace = readFileSync(path.join(t.env.data, "logs", "daemon.log"), "utf8").split("\n").filter(line => (line.includes('event="uplink_pace"') || line.includes('preview_stage_timing')));
+    t.note(`pace decisions: ${pace.slice(-8).join(" | ")}`);
     const slow = worst.get(5) ?? 0;
     const fast = worst.get(100) ?? 0;
     t.note(`24MiB Preview on the shared daemon uplink, client B workspace.list while bytes are in flight\n${rows.join("\n")}`);
@@ -1164,3 +1288,5 @@ defineSpecialty(
     t.assertions.assert(fast <= 800, `at 100Mbps client B waited ${fast.toFixed(0)}ms behind the preview`);
   },
 );
+
+}

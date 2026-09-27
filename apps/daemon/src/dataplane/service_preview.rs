@@ -339,7 +339,14 @@ pub(crate) async fn process_snapshot(
     crate::config::restrict_dir_to_owner(&directory)?;
     let mut registrations = Vec::new();
     for item in std::fs::read_dir(&directory)?.take(128) {
-        let path = item?.path();
+        // WASI may stat a directory entry while advancing the iterator. A
+        // publisher can unlink its temporary file after it was enumerated;
+        // that missing entry must not fail the whole process inventory.
+        let path = match item {
+            Ok(entry) => entry.path(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }

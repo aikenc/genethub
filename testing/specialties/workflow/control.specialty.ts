@@ -91,6 +91,29 @@ for (const structured of [false,true]) for (const scenario of ["negative", "orph
         if (reply?.type !== "workflowRun") throw new Error("missing Run");
         return reply.data;
       };
+      const cancelCurrent = async (runId: string): Promise<WorkflowRunStatus> => {
+        stage = `cancel current Workflow Run ${runId}`;
+        let accepted: WorkflowRunStatus | undefined;
+        await t.tools.waitUntil(async () => {
+          const current = await get(runId);
+          try {
+            const reply = await opened.client.call({ type: "workflow.cancel", payload: {
+              workspaceId: opened.workspaceId, runId, expectedRevision: current.revision,
+            } });
+            if (reply?.type !== "workflowRun") throw new Error("missing cancellation result");
+            accepted = reply.data;
+            return true;
+          } catch (error) {
+            // The executor may advance after get(). A revision conflict is an
+            // explicit non-commit; reread instead of replaying a stale write.
+            // All other failures, including unknown delivery, remain fatal.
+            if (!(error instanceof Error) || error.name !== "ProtocolError"
+              || error.message !== "Workflow revision 冲突：先重新读取 workflow get") throw error;
+            return false;
+          }
+        }, 10_000);
+        return accepted!;
+      };
       const check = async (runId: string) => {
         const reply = await opened.client.call({ type: "workflow.check", payload: { workspaceId: opened.workspaceId, runId } });
         if (reply?.type !== "workflowCheck") throw new Error("missing checker report");
@@ -194,7 +217,7 @@ for (const structured of [false,true]) for (const scenario of ["negative", "orph
             t.note(`scenario=${scenario}; retry=${resumed.id}; PM received the blocked request handoff`);
             return;
           }
-          await opened.client.call({ type: "workflow.cancel", payload: { workspaceId: opened.workspaceId, runId: resumed.id, expectedRevision: (await get(resumed.id)).revision } });
+          await cancelCurrent(resumed.id);
           await t.tools.waitUntil(async () => (await get(resumed.id)).status === "cancelled", 35_000);
           t.note(`scenario=${scenario}; worker calls=${workerCalls}; PM calls=${pmCalls}`);
           return;
@@ -206,8 +229,8 @@ for (const structured of [false,true]) for (const scenario of ["negative", "orph
         }
         run = await get(original);
         const pmCallsBeforeCancel = pmCalls;
-        const cancel = await opened.client.call({ type: "workflow.cancel", payload: { workspaceId: opened.workspaceId, runId: original, expectedRevision: run.revision } });
-        t.assertions.assert(cancel?.type === "workflowRun" && cancel.data.status === "cancelling", "cancel did not persist a fence before cleanup");
+        const cancel = await cancelCurrent(original);
+        t.assertions.assert(cancel.status === "cancelling", "cancel did not persist a fence before cleanup");
         await t.tools.waitUntil(async () => (await get(original)).status === "cancelled", 35_000);
         if (scenario === "cancel") {
           await new Promise(resolve => setTimeout(resolve, 4_000));
@@ -224,7 +247,7 @@ for (const structured of [false,true]) for (const scenario of ["negative", "orph
         if (independent) {
           const other = await get(independent.id);
           t.assertions.assert(other.status === "running", "cancelling one original request stopped another independent task");
-          await opened.client.call({ type: "workflow.cancel", payload: { workspaceId: opened.workspaceId, runId: other.id, expectedRevision: other.revision } });
+          await cancelCurrent(other.id);
           await t.tools.waitUntil(async () => (await get(other.id)).status === "cancelled", 30_000);
         }
         if (scenario === "cancel" || scenario === "late-resume") {
@@ -237,7 +260,7 @@ for (const structured of [false,true]) for (const scenario of ["negative", "orph
           await t.tools.waitUntil(async () => (await history()).length === 2, 30_000);
           const resumed = (await history()).find(other => other.id !== original)!;
           t.assertions.assert(resumed.requestRunId === original && resumed.status === "running", "explicit recovery lost original request bounds");
-          await opened.client.call({ type: "workflow.cancel", payload: { workspaceId: opened.workspaceId, runId: resumed.id, expectedRevision: resumed.revision } });
+          await cancelCurrent(resumed.id);
           await t.tools.waitUntil(async () => (await get(resumed.id)).status === "cancelled", 30_000);
         }
       }

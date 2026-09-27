@@ -15,15 +15,15 @@ import { allocatePort } from "../../infrastructure/public.ts";
  * The page uses the same Client as the workbench; the only browser fault seam
  * records native RTCPeerConnections and closes them without altering behavior.
  */
-export async function openMultichannelBrowser(t: CaseContext, mode: "rendezvous" | "hosted" = "rendezvous") {
-  if (!t.browser) throw new BlockedError("native Chromium WebRTC is required");
+export async function openMultichannelBrowser(t: CaseContext, mode: "rendezvous" | "hosted" = "rendezvous", browser = t.browser) {
+  if (!browser) throw new BlockedError("native Chromium WebRTC is required");
   let hub: Awaited<ReturnType<typeof startHub>> | undefined;
   let fabric: Awaited<ReturnType<typeof startFaultLink>> | undefined;
   let admissionStatus: (() => Promise<number>) | undefined;
   let relay: Awaited<ReturnType<typeof startRelay>> | undefined;
   let opened: Awaited<ReturnType<CaseContext["flows"]["main"]["openWorkspace"]>> | undefined;
   let app: { close(): Promise<void> } | undefined;
-  const page = await t.browser.newPage();
+  const page = await browser.newPage();
   const stop = async () => {
     await page.close().catch(() => {});
     await app?.close();

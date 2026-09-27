@@ -392,6 +392,9 @@ export class Client {
       this.setRtcState("disabled");
       return;
     }
+    this.rtcPaused = false;
+    this.rtcFailures = 0;
+    this.rtcRetryDelay = 1000;
     this.setRtcState("standby");
     if (this.endpoint && this.epoch && this.identity && this.state === "ready") {
       void this.startRtc(this.endpoint, this.epoch);
@@ -546,6 +549,43 @@ export class Client {
   }
 
   async preview(workspaceHandle: string, path: string): Promise<AssetPreviewResult> {
+    const deadline = this.now() + PREVIEW_HEAD_TIMEOUT_MS;
+    try {
+      return await this.previewAttempt(workspaceHandle, path, deadline);
+    } catch (error) {
+      // Resume replays records without reinvoking the handler. Only an explicit
+      // loss of that logical session permits one fresh read. Discard the whole
+      // old body: never splice bytes from two file versions. Writes use rpc()
+      // and retain their outcome-unknown contract.
+      if (this.stopped || !(error instanceof Error) ||
+          (error.message !== "SessionLost" && error.message !== "ResumeExpired")) throw error;
+      await this.waitForPreviewRecovery(deadline);
+      return this.previewAttempt(workspaceHandle, path, deadline);
+    }
+  }
+
+  private waitForPreviewRecovery(deadline: number): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const remaining = deadline - this.now();
+      if (remaining <= 0) { reject(new ClientRequestTimeoutError("asset preview recovery timed out")); return; }
+      const timer = setTimeout(() => {
+        stop(); reject(new ClientRequestTimeoutError("asset preview recovery timed out"));
+      }, remaining);
+      const check = () => {
+        if (this.stopped) {
+          clearTimeout(timer); stop(); reject(new DataPlaneError("client closed"));
+        } else if (this.state === "ready" && this.endpoint?.state === "open") {
+          clearTimeout(timer); stop(); resolve();
+        }
+      };
+      const stop = this.onStateChange(check);
+      check();
+    });
+  }
+
+  private async previewAttempt(workspaceHandle: string, path: string, deadline: number): Promise<AssetPreviewResult> {
+    const remaining = deadline - this.now();
+    if (remaining <= 0) throw new ClientRequestTimeoutError("asset preview response head timed out");
     const endpoint = this.requireReadyEndpoint();
     const requestId = diagnosticId("preview");
     const started = this.now();
@@ -577,7 +617,7 @@ export class Client {
           await stream.finish();
           return stream.responseHead;
         })(),
-        PREVIEW_HEAD_TIMEOUT_MS,
+        remaining,
         "asset preview response head timed out",
         () => stream.reset(DataReset.Timeout),
       );
@@ -1723,7 +1763,7 @@ export class Client {
   }
 
   private async startRtc(base: DataEndpoint, epoch: symbol): Promise<void> {
-    if (this.rtcNegotiating) return;
+    if (this.rtcNegotiating || this.rtcPaused || this.stopped) return;
     if (!this.rtcEnabled) {
       this.rtcFailure_ = null;
       this.setRtcState("disabled");

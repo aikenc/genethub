@@ -149,6 +149,7 @@ impl Credit {
 }
 
 struct WriterCommand {
+    bulk: bool,
     stream_id: u32,
     frame: Frame,
     complete: oneshot::Sender<Result<WriterCompletion>>,
@@ -188,10 +189,15 @@ pub(crate) struct WriteTimings {
 
 impl Writer {
     async fn send(&self, frame: Frame) -> Result<()> {
-        self.send_inner(frame, None).await
+        self.send_inner(frame, None, false).await
     }
 
-    async fn send_inner(&self, frame: Frame, mut timings: Option<&mut WriteTimings>) -> Result<()> {
+    async fn send_inner(
+        &self,
+        frame: Frame,
+        mut timings: Option<&mut WriteTimings>,
+        bulk: bool,
+    ) -> Result<()> {
         let stream_id = frame.stream_id;
         let (complete, answer) = oneshot::channel();
         let budget = if frame.kind as u8 >= 4 {
@@ -211,6 +217,7 @@ impl Writer {
         let count = self.count.clone().acquire_owned().await?;
         self.commands
             .send(WriterCommand {
+                bulk,
                 stream_id,
                 frame,
                 complete,
@@ -252,6 +259,7 @@ impl Writer {
         let count = self.count.clone().try_acquire_owned()?;
         self.commands
             .try_send(WriterCommand {
+                bulk: false,
                 stream_id,
                 frame,
                 complete,
@@ -434,6 +442,7 @@ impl ServerStream {
                         payload: bytes[offset..offset + length].to_vec(),
                     },
                     timings.as_deref_mut(),
+                    self.head.method == "asset.preview",
                 )
                 .await?;
             if let Some(timings) = timings.as_deref_mut() {
@@ -511,6 +520,7 @@ pub(crate) struct PeerServices {
     event_receiver: tokio::sync::Mutex<Option<mpsc::Receiver<ServerFrame>>>,
     subscriptions: Mutex<SubscriptionTasks>,
     pub(crate) carrier_kind: CarrierKind,
+    physical_pace: Option<Arc<super::uplink_pace::UplinkPace>>,
 }
 
 /// Logical peer state has one lifetime owner, independent of record crypto.
@@ -647,6 +657,10 @@ async fn serve_streams(
         count: Arc::new(Semaphore::new(256)),
     };
     let (writer_failed_tx, mut writer_failed) = oneshot::channel();
+    let physical_pace = match &channel_writer {
+        PeerWriter::Logical(_) => None,
+        PeerWriter::Physical(writer) => writer.uplink_pace.clone(),
+    };
     let writer_task = tokio::spawn(run_writer(channel_writer, writer_rx, writer_failed_tx));
     let (commands_tx, mut commands) = mpsc::channel::<EndpointCommand>(WRITER_COMMAND_QUEUE);
     let (event_sender, event_receiver) = mpsc::channel(EVENT_QUEUE);
@@ -657,6 +671,7 @@ async fn serve_streams(
         event_receiver: tokio::sync::Mutex::new(Some(event_receiver)),
         subscriptions: Mutex::new(SubscriptionTasks::default()),
         carrier_kind,
+        physical_pace,
     });
 
     // A terminal is shared across a user's own devices on purpose, but this
@@ -853,17 +868,17 @@ fn dispatch(
             genehub_proto::INITIAL_STREAM_WINDOW_BYTES as usize,
         ));
         let credit = Credit::new(frame.value)?;
-        // Only the Fabric uplink is one socket shared by every relayed client.
-        // Direct and RTC peers each have their own carrier, so pacing them
-        // only cuts a high-BDP preview to the start window.
-        let paced = head.method == "asset.preview"
-            && matches!(services.carrier_kind, CarrierKind::Fabric);
-        let pace = paced.then(|| {
-            Arc::new(super::uplink_pace::PaceShare::new(
-                services.state.uplink_pace.clone(),
-                genehub_proto::INITIAL_STREAM_WINDOW_BYTES as u64,
-            ))
-        });
+        // Logical DATA (including replay) is paced at the active carrier's
+        // send pump. Bootstrap physical streams retain their fixed owner.
+        let pace = (head.method == "asset.preview")
+            .then(|| services.physical_pace.as_ref())
+            .flatten()
+            .map(|pace| {
+                Arc::new(super::uplink_pace::PaceShare::new(
+                    pace.clone(),
+                    genehub_proto::INITIAL_STREAM_WINDOW_BYTES as u64,
+                ))
+            });
         streams.insert(
             frame.stream_id,
             StreamState {
@@ -1677,7 +1692,7 @@ async fn run_logical_writer(
                         .zip(actor_started)
                         .map(|(queued, started)| started.duration_since(queued).as_micros() as u64)
                         .unwrap_or_default();
-                    let result = writer.send(command.frame).await;
+                    let result = writer.send_classified(command.frame, command.bulk).await;
                     let report = result
                         .as_ref()
                         .map(|_| WriterCompletion {
@@ -1734,6 +1749,7 @@ mod tests {
     #[test]
     fn writer_queue_rotates_streams_without_business_priorities() {
         let command = |stream_id| WriterCommand {
+            bulk: false,
             stream_id,
             frame: Frame {
                 kind: Kind::Data,
