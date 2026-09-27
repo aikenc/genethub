@@ -74,7 +74,7 @@ pub(crate) async fn summarize_sessions(state: &Shared, sessions: &mut [SessionSu
                             continue;
                         }
                         match run.status.as_str() {
-                            "running" => summary.running += 1,
+                            "running" | "awaitingPm" => summary.running += 1,
                             "stopping" | "cancelling" => summary.stopping += 1,
                             "blocked" | "failed" | "recoverable" => summary.blocked += 1,
                             _ => {}
@@ -829,7 +829,7 @@ pub(crate) async fn maintain(state: &Shared) {
                     run.status.as_str(),
                     "running" | "stopping" | "cancelling" | "recoverable"
                 )
-                || run.status == "blocked"
+                || matches!(run.status.as_str(), "blocked" | "awaitingPm")
                 || (!cancelled.contains(request::group_id(&run))
                     && supervision::report_pending(&run));
             match claim_request_writer(&runtime, &run) {
@@ -972,8 +972,8 @@ pub(crate) async fn maintain(state: &Shared) {
 pub(super) fn maybe_resolve_recovery_successor(runtime: &RuntimeStore, run_id: &str) -> Result<bool> {
     let _guard = lock_run(runtime, run_id)?;
     let mut run = load_run(runtime, run_id)?;
-    if run.handles.is_empty() || run.status != "blocked"
-        || !run.stop.as_ref().is_some_and(|stop| stop.cause_code == "recoveryNoExit")
+    if run.handles.is_empty() || !(run.status == "awaitingPm"
+        || (run.status == "blocked" && run.stop.as_ref().is_some_and(|stop| stop.cause_code == "recoveryNoExit")))
     {
         return Ok(false);
     }
@@ -1073,6 +1073,7 @@ async fn maybe_resume_route(state: &Shared, runtime: &RuntimeStore, run_id: &str
             if let Some(node) = run.nodes.get_mut(id) { node.reason = None; }
         }
         settle_if_terminal(&mut run);
+        release_recovery_handoff_leases(runtime, &mut run).await;
         run.revision = run.revision.saturating_add(1);
         run.updated_at_ms = now_ms();
         run.journal_actor = "patrol".into();
@@ -1175,7 +1176,7 @@ async fn maybe_start_recovery(state: &Shared, runtime: &RuntimeStore, run_id: &s
     let previous = group.iter().filter(|item| item.handles.iter().any(|handle| handle.run_id == run.id))
         .max_by_key(|item| (item.created_at_ms, &item.id));
     if let Some(previous) = previous {
-        if matches!(previous.status.as_str(), "running" | "stopping" | "cancelling" | "recoverable") {
+        if matches!(previous.status.as_str(), "running" | "stopping" | "cancelling" | "recoverable" | "awaitingPm") {
             return Ok(true);
         }
         if let Some(exit) = recovery::read_human_exit(runtime, previous)? {
@@ -1390,6 +1391,7 @@ async fn finish_nodes(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> R
                     }
                 };
             settle_if_terminal(&mut run);
+            release_recovery_handoff_leases(runtime, &mut run).await;
             run.revision += 1;
             run.updated_at_ms = now_ms();
             record_assigned_messages(&mut run, &sessions)?;

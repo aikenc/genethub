@@ -109,3 +109,17 @@ Agent 取消执行仍把原目标留给 PM 处置；直接 Human 取消或明确
 会话、需求、Run 的格式版本及迁移接受范围以源码反序列化检查为准。不得手改私有记录，或把旧 daemon 能忽略未知字段当成迁移保证。目录与旧数据兼容范围见[存储规范](../storage-layout.md)。
 
 实现：[输入调度](../../apps/daemon/src/session/manager.rs)、[控制循环](../../apps/daemon/src/workflow/control.rs)、[监督](../../apps/daemon/src/workflow/supervision.rs)、[恢复](../../apps/daemon/src/workflow/recovery.rs)、[需求](../../apps/daemon/src/workflow/requirement.rs)。
+
+### 恢复审查后的责任交接
+
+恢复图结束后进入 `awaitingPm`（等待 PM 落实），不等于失败或原需求已交付。
+PM 应核对预算与候选，建立同目标业务后继、确认交付、取消或提出真实人工待办。
+后继建立后巡查将恢复 Run 收为 completed；等待期间不重复启动恢复。
+超过流程的 PM 处理期限仍未落实时，巡查提出平台反馈人工出口。页面优先显示尚待答复的人工决定。
+
+人工预算审批使用固定档位：a 最多增加 1 次业务 Run、128 轮 LLM、60 分钟；c 最多增加
+1 次恢复、100 轮 LLM、30 分钟，均受平台上限约束。审批卡额度与记账共用定义，PM 原因文字不改变额度。
+PM 申请时应引用该档位，不在原因文字中另行承诺数值；获批后读取实际预算，不重复追加。
+
+开发期 Candidate 使用当前格式。旧格式无法通过摘要校验时，先 `workflow check --draft` 核对项目源，
+再以当前激活 revision 执行 `workflow activate` 重建候选。原候选不可读时，平台无法比较恢复策略，必须由 Human 确认新候选后才能激活；不迁移旧格式。不要手工修补快照摘要；已存在 Run 的固定定义不随激活改变。

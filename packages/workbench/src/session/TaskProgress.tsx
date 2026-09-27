@@ -9,6 +9,7 @@ import { WorkflowStructureDetails } from "./StructuredWorkflow";
 import { canHandleInteraction } from "./attention";
 
 const labels: Record<string, string> = {
+  awaitingPm: "等待 PM 落实",
   running: "进行中", stopping: "停止中", cancelling: "停止中",
   blocked: "受阻", failed: "失败", cancelled: "已取消", completed: "已交付", completing: "交付判定中",
 };
@@ -67,7 +68,9 @@ export function TaskProgress({ session, onReportSession }: { session: SessionSum
   }, [client, connection, session.id, session.status]);
   if (!summary || session.managed) return null;
   const stateLabel = summary.stopping ? "停止中" : summary.blocked ? "受阻"
+    : summary.tasks.some(task => task.humanExit && !task.humanExit.answer) ? "等待人工决定"
     : summary.tasks.some(task => task.waiting?.length) ? "等待处理"
+    : summary.tasks.some(task => task.runStatus === "awaitingPm") ? "等待 PM 落实"
     : summary.tasks.some(task => task.recovery && task.executing) ? "恢复审查中"
     : summary.tasks.some(task => task.executing) ? "小队执行中"
     : summary.running ? "等待推进"
@@ -108,7 +111,7 @@ export function TaskProgress({ session, onReportSession }: { session: SessionSum
                   .finally(() => { if (useWorkbench.getState().client === owner) setBusy(null); });
               }}>{busy === task.runId ? "正在提交终止…" : task.status === "cancelling" ? "停止中" : "终止任务"}</button>}
           </div>
-          {task.recovery && <p role="status" className="mt-1 text-xs text-muted">恢复流程 · {task.waiting?.length ? "等待 PM 决定" : task.runStatus === "completed" ? "执行已结束，需求仍需核对交付" : labels[task.runStatus ?? ""] ?? "状态待同步"}</p>}
+          {task.recovery && <p role="status" className="mt-1 text-xs text-muted">恢复流程 · {task.humanExit && !task.humanExit.answer ? "等待人工决定" : task.waiting?.length ? "等待 PM 决定" : task.runStatus === "completed" ? "执行已结束，需求仍需核对交付" : labels[task.runStatus ?? ""] ?? "状态待同步"}</p>}
           {task.requirement?.patrolError && <p role="alert" className="mt-1 text-xs text-danger">{task.requirement.patrolError}</p>}
           {task.requirement?.conclusion && <p className="mt-1 text-xs text-muted">交付结论：{task.requirement.conclusion}</p>}
           {task.reportPending && <p className="mt-1 text-xs text-muted">{task.status === "running" ? "任务有新情况，待 PM 处理。" : "执行结果待 PM 核对新消息并汇报。"}</p>}

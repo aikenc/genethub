@@ -1159,7 +1159,7 @@ pub(crate) async fn exception_authority(
             return false;
         }
         group.iter().any(|run| {
-            matches!(run.status.as_str(), "blocked" | "recoverable" | "failed")
+            matches!(run.status.as_str(), "blocked" | "recoverable" | "failed" | "awaitingPm")
                 || (!run.handles.is_empty() && matches!(run.status.as_str(), "running" | "stopping" | "cancelling"))
                 || run.stop.as_ref().is_some_and(|stop| stop.cleanup_error.is_some())
         }) || requirement::status(&runtime, latest).is_ok_and(|goal|
@@ -1400,9 +1400,6 @@ pub(crate) fn recovery_activation_change(
     if current.as_ref().map_or(0, |record| record.revision) != expected_revision {
         bail!("DCG activation revision 冲突");
     }
-    let before = current.as_ref()
-        .map(|record| load_candidate(runtime, &record.active_digest))
-        .transpose()?;
     let recovery_identity = |candidate: &DcgCandidateRecord| -> Result<String> {
         let Some(flow) = candidate.package.recovery.strip_prefix("flows/") else { return Ok("builtin".into()); };
         let id = flow.strip_suffix(".yaml").ok_or_else(|| anyhow!("recovery selector invalid"))?;
@@ -1411,7 +1408,14 @@ pub(crate) fn recovery_activation_change(
     let old = if current.as_ref().is_some_and(|record| record.recovery_builtin_override) {
         "builtin".into()
     } else {
-        before.as_ref().map(&recovery_identity).transpose()?.unwrap_or_else(|| "builtin".into())
+        match current.as_ref() {
+            None => "builtin".into(),
+            Some(record) => load_candidate(runtime, &record.active_digest)
+                .and_then(|candidate| recovery_identity(&candidate))
+                // An unreadable prior snapshot grants no implicit permission.
+                // Human approves the verified new Candidate; no old format is migrated.
+                .unwrap_or_else(|_| "unavailable (原候选不可读，需重新确认恢复策略)".into()),
+        }
     };
     let new = recovery_identity(&next)?;
     if old == new { return Ok((next.digest, None)); }
@@ -1916,7 +1920,7 @@ pub(crate) async fn request_human_exit(
     let workspace = state.workspaces.project_entry(workspace_id).await?;
     let runtime = RuntimeStore::new(&state.paths.root, workspace_id, &workspace.root)?;
     let run = load_run(&runtime, run_id)?;
-    if run.workspace_id != workspace_id || !matches!(run.status.as_str(), "blocked" | "completed" | "failed" | "cancelled")
+    if run.workspace_id != workspace_id || !matches!(run.status.as_str(), "blocked" | "completed" | "failed" | "cancelled" | "awaitingPm")
         || requirement::terminal(&runtime, &run)? || run.revision != expected_revision {
         bail!("Workflow Human exit needs the current blocked Run revision");
     }
@@ -2018,7 +2022,7 @@ pub(crate) async fn dispatch(
     let (active, activation_revision) = match dispatch_candidate(&workspace.root, &runtime) {
         Ok(active) => active,
         Err(error) if builtin_recovery => {
-            tracing::warn!(package = %package_id, %error, "custom recovery Candidate unavailable; using built-in recovery");
+            tracing::warn!(package = %package_id, %error, "active project Candidate unavailable; running platform built-in recovery");
             (builtin_recovery_candidate(package_id)?, None)
         }
         Err(error) => return Err(error),
@@ -2238,6 +2242,7 @@ pub(crate) async fn dispatch(
         }
     };
     settle_if_terminal(&mut run);
+    release_recovery_handoff_leases(&runtime, &mut run).await;
     run.revision = 1;
     run.updated_at_ms = now_ms();
     record_flow_start(&mut run, &sessions)?;
@@ -2514,7 +2519,7 @@ fn business_predecessors(group: &[RunRecord]) -> BTreeSet<&str> {
 fn request_is_quiescent(group: &[RunRecord]) -> bool {
     let Some(root) = group.iter().find(|run| run.id == request::group_id(run)) else { return false; };
     if group.iter().any(|run| execution_unfinished(run)
-        || (!run.handles.is_empty() && run.status == "blocked")
+        || (!run.handles.is_empty() && matches!(run.status.as_str(), "blocked" | "awaitingPm"))
         || supervision::report_pending(run)) {
         return false;
     }
@@ -3408,14 +3413,16 @@ fn settle_if_terminal(run: &mut RunRecord) {
             // Completing a recovery graph alone cannot close the user's
             // request. A controlled business successor or a human handoff is
             // required before the recovery attempt may settle successfully.
-            run.status = "blocked".into();
-            run.stop = Some(control::StopRequest {
-                target: "blocked".into(),
-                reason: "recovery flow ended without a controlled exit".into(),
-                cause_code: "recoveryNoExit".into(),
-                actor: String::new(),
-                cleanup_error: None,
-            });
+            run.status = "awaitingPm".into();
+            run.stop = None;
+        }
+    }
+}
+
+async fn release_recovery_handoff_leases(runtime: &RuntimeStore, run: &mut RunRecord) {
+    if run.status == "awaitingPm" {
+        if let Err(error) = release_leases(runtime, run).await {
+            control::request_stop(run, "blocked", format!("恢复审查结束，但写租约收尾失败：{error:#}"));
         }
     }
 }
@@ -3861,7 +3868,7 @@ fn validate_candidate(candidate: &DcgCandidateRecord) -> Result<()> {
     validate_candidate_sources(&candidate.source_files)?;
     let snapshot_digest = digest_snapshot(&candidate.package, &candidate.workflows)?;
     if candidate.snapshot_digest != snapshot_digest {
-        bail!("DCG Candidate snapshot digest 不匹配");
+        bail!("DCG Candidate snapshot digest 不匹配；请用当前版本 workflow check --draft 核对项目源，再 workflow activate --revision <当前激活版本> 重建并激活候选。不要修改持久快照或摘要");
     }
     if candidate.digest != digest_candidate(&candidate.source_files, &snapshot_digest) {
         bail!("DCG Candidate digest 未绑定源文件与执行快照");
@@ -4880,7 +4887,7 @@ fn save_run_with_journal_options(runtime: &RuntimeStore, run: &RunRecord, journa
     }
     if matches!(
         stored.status.as_str(),
-        "completed" | "blocked" | "failed" | "recoverable"
+        "completed" | "blocked" | "failed" | "recoverable" | "awaitingPm"
     ) {
         let kind = stored.status.clone();
         supervision::prepare_notice(&mut stored, &kind);
@@ -5359,7 +5366,7 @@ fn release_request_writer_if_resolved(runtime: &RuntimeStore, run: &RunRecord) -
         }
     };
     if group.iter().any(|item| matches!(item.status.as_str(), "running" | "stopping" | "cancelling" | "recoverable")
-        || (!item.handles.is_empty() && item.status == "blocked")) {
+        || (!item.handles.is_empty() && matches!(item.status.as_str(), "blocked" | "awaitingPm"))) {
         return Ok(());
     }
     if request_is_quiescent(&group) && requirement::terminal(runtime, run)?

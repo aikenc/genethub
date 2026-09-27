@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { WorkflowRunStatus } from "@genehub/proto";
 import { connectProductClient, daemonEndpoint, defineSpecialty, runGenetAsync } from "../../framework/public.ts";
@@ -36,7 +36,7 @@ for (const scenario of ["pending", "deliver", "cancel", "recover", "recover-busy
       writeFileSync(path.join(source, "workflow.md"), "---\ndescription: requirement review and delivery\nrecovery: flows/recovery.yaml\n---\n");
       writeFileSync(path.join(source, "roles/requirement-reviewer.yaml"), JSON.stringify({ schema: "genehub.workflow.role.v1", id: "requirement-reviewer", agentId: "genet", modelId: "deepseek/deepseek-v4-flash", userInteraction: "readOnly", prompt: "prompts/requirement-reviewer.md" }));
       writeFileSync(path.join(source, "prompts/requirement-reviewer.md"), "REQUIREMENT_RECOVERY_REVIEW: the assessment exists; return the disposition to PM.\n");
-      writeFileSync(path.join(source, "flows/recovery.yaml"), JSON.stringify({ schema: "genehub.workflow.definition.v1", id: "recovery", version: 1, entry: "review", budget: { maxRuns: 3, maxLlmRounds: 200, deadlineSeconds: 3600 }, outcomes: { resume: { success: true }, human: { success: false } }, nodes: [{ id: "review", uses: "agent.session", with: { role: "requirement-reviewer" }, completion: { all: [{ key: "report", verify: "value.nonEmpty" }] }, on: { resume: ["publish"], human: [] } }, { id: "publish", uses: "result.publish" }] }));
+      writeFileSync(path.join(source, "flows/recovery.yaml"), JSON.stringify({ schema: "genehub.workflow.definition.v1", id: "recovery", version: 1, entry: "review", budget: { maxRuns: 3, maxLlmRounds: 200, deadlineSeconds: 3600 }, outcomes: { resume: { success: true }, human: { success: false } }, nodes: [{ id: "review", uses: "agent.session", with: { role: "requirement-reviewer", writeLease: { ttlSeconds: 900 } }, completion: { all: [{ key: "report", verify: "value.nonEmpty" }] }, on: { resume: ["publish"], human: [] } }, { id: "publish", uses: "result.publish" }] }));
       const activation = await runGenetAsync(opened.daemon.genet, ["workflow", "activate", "--revision", "0"], opened.daemon.env, { cwd: opened.workspaceRoot });
       t.assertions.assert(activation.code === 0, "Custom recovery activation failed");
     }
@@ -166,7 +166,11 @@ for (const scenario of ["pending", "deliver", "cancel", "recover", "recover-busy
       if (scenario === "deliver-contradiction") await restart(false);
       if (scenario === "recover-deliver" || scenario === "recover-successor") {
         await restart(true);
-        await t.tools.waitUntil(async () => (await history()).some(item => item.handles.length > 0 && item.status === "blocked" && item.reason?.includes("controlled exit")), 30_000);
+        await t.tools.waitUntil(async () => (await history()).some(item => item.handles.length > 0 && item.status === "awaitingPm"), 30_000);
+        const leases = path.join(opened.workspaceRoot, ".genethub/components/pm/ref-leases");
+        t.assertions.assert(existsSync(leases) && readdirSync(leases).some(file => file.endsWith(".guard"))
+          && !readdirSync(leases).some(file => file.endsWith(".json")),
+          "completed recovery review retained a write lease while awaiting PM action");
         if (scenario === "recover-successor") {
           recoveryId = (await history()).find(item => item.handles.length > 0)!.id;
           await send("DISPATCH_RECOVERY_SUCCESSOR");

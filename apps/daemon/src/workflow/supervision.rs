@@ -182,6 +182,8 @@ pub(super) fn prepare_notice(run: &mut RunRecord, kind: &str) {
         } else {
             "旧 Worker Session 已封禁并关闭；无写租约节点可由 PM 在核对潜在副作用与预算后用 workflow recover --run <id> --revision <current> 显式重试。无写租约不等于无外部副作用；本操作创建新 Worker 尝试，不保证副作用恰好一次，也不重开整张图。"
         }
+    } else if run.status == "awaitingPm" {
+        "恢复审查已完成，等待 PM 落实决定。先核对业务预算与当前候选；继续执行用 workflow dispatch --retry-of <被处理业务 Run ID> 创建后继。缺业务额度用 workflow human --kind a，目标已交付用 workflow deliver，取消用 workflow cancel。不要重复启动恢复，不要把审查结束当成交付。"
     } else if matches!(run.status.as_str(), "blocked" | "failed") {
         "异常处置：本项目 PM 可直接管理流程与专家、取消或恢复任务，框架会逐次核对异常事实；不因原任务属于另一条 PM 会话而要求用户换会话。成功恢复或取消后回到正常权限。"
     } else {

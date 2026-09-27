@@ -4,9 +4,11 @@ import type { SessionSnapshot, WorkflowRunStatus } from "@genehub/proto";
 
 import { connectProductClient, daemonEndpoint, defineSpecialty, openWorkbenchPage, runGenetAsync } from "../../framework/public.ts";
 
-for (const mode of ["normal", "consult", "resume", "bypass", "corrupt", "proactive", "human-b", "human-f", "cancel", "queue"] as const) {
+for (const mode of ["normal", "consult", "handoff-timeout", "handoff-cancel", "resume", "bypass", "corrupt", "proactive", "human-b", "human-f", "cancel", "queue"] as const) {
 const consult = mode === "consult";
-const resume = mode === "resume";
+const handoffTimeout = mode === "handoff-timeout";
+const handoffCancel = mode === "handoff-cancel";
+const resume = mode === "resume" || handoffTimeout || handoffCancel;
 const bypass = mode === "bypass";
 const corrupt = mode === "corrupt";
 const proactive = mode === "proactive";
@@ -15,8 +17,8 @@ const humanF = mode === "human-f";
 const cancelExit = mode === "cancel";
 const queue = mode === "queue";
 defineSpecialty({
-  id: `specialty.workflow.${consult ? "recovery-consult" : resume ? "recovery-resume" : bypass ? "recovery-pm-gate" : corrupt ? "recovery-corrupt-fallback" : proactive ? "recovery-proactive" : humanB ? "recovery-human-b" : humanF ? "recovery-human-f" : cancelExit ? "recovery-cancel" : queue ? "recovery-package-queue" : "recovery-lifecycle"}`,
-  title: consult ? "CLI recovery consultation survives restart and is visible on the PM page" : bypass ? "WR cannot choose a PM recovery decision without a durable answer" : resume ? "PM-selected resume continues a blocked goal through a same-definition successor" : corrupt ? "A damaged custom Candidate falls back to built-in recovery" : proactive ? "PM can proactively start recovery for unhealthy execution" : humanB ? "Recovery can hand a reduced-scope decision to a Human" : humanF ? "Human acceptance closes a business request" : cancelExit ? "A recovery cancellation recommendation waits for PM to cancel the request" : queue ? "Failed requests enter package recovery one at a time" : "A blocked request completes through the built-in recovery graph",
+  id: `specialty.workflow.${handoffTimeout ? "recovery-handoff-timeout" : handoffCancel ? "recovery-handoff-cancel" : consult ? "recovery-consult" : resume ? "recovery-resume" : bypass ? "recovery-pm-gate" : corrupt ? "recovery-corrupt-fallback" : proactive ? "recovery-proactive" : humanB ? "recovery-human-b" : humanF ? "recovery-human-f" : cancelExit ? "recovery-cancel" : queue ? "recovery-package-queue" : "recovery-lifecycle"}`,
+  title: handoffTimeout ? "An overdue completed recovery review escalates once without rerunning Workers" : handoffCancel ? "A user can cancel while a completed recovery review awaits PM action" : consult ? "CLI recovery consultation survives restart and is visible on the PM page" : bypass ? "WR cannot choose a PM recovery decision without a durable answer" : resume ? "PM-selected resume continues a blocked goal through a same-definition successor" : corrupt ? "A damaged custom Candidate falls back to built-in recovery" : proactive ? "PM can proactively start recovery for unhealthy execution" : humanB ? "Recovery can hand a reduced-scope decision to a Human" : humanF ? "Human acceptance closes a business request" : cancelExit ? "A recovery cancellation recommendation waits for PM to cancel the request" : queue ? "Failed requests enter package recovery one at a time" : "A blocked request completes through the built-in recovery graph",
   oracle: corrupt
     ? "A damaged active Candidate cannot silence a blocked request: the patrol starts the built-in WR and commits a fallback journal event"
     : proactive
@@ -328,7 +330,7 @@ defineSpecialty({
     stage = "wait for WM and acceptance";
     await t.tools.waitUntil(async () => {
       recovery = (await history()).find(run => run.id === recovery!.id);
-      return recovery?.status === "blocked" && (humanB || humanF || cancelExit || recovery.reason?.includes("controlled exit") === true);
+      return recovery?.status === ((humanB || humanF || cancelExit) ? "blocked" : "awaitingPm");
     }, 75_000);
     if (cancelExit) {
       t.assertions.assert(!recovery!.humanExit, "PM cancellation recommendation was incorrectly classified as Human exit d");
@@ -384,6 +386,58 @@ defineSpecialty({
       event.eventType === "pause.answered" && event.messageId === questionId).length === 1,
     "PM answer was missing or repeated in the committed journal");
 
+    t.assertions.assert(!recovery!.reason && !recovery!.cleanupError && !recovery!.humanExit,
+      "completed recovery review was reported as an execution failure or premature Human escalation");
+    if (consult) {
+      browser = await openWorkbenchPage(t.openRoot, () => daemonEndpoint(opened.daemon), opened.workspaceId, pm);
+      await browser.page.getByRole("region", { name: "任务进度" }).getByRole("button", { name: /小队任务/ }).click();
+      await browser.page.getByRole("dialog", { name: "小队任务", exact: true }).getByText("恢复流程 · 等待 PM 落实").waitFor();
+      await browser.close(); browser = undefined;
+    }
+    if (handoffCancel) {
+      const business = (await history()).find(run => run.id === originalId)!;
+      const cancelled = await opened.client.call({ type: "workflow.cancel", payload: {
+        workspaceId: opened.workspaceId, runId: originalId, expectedRevision: business.revision,
+      } });
+      t.assertions.assert(cancelled?.type === "workflowRun", "handoff cancellation was refused");
+      await t.tools.waitUntil(async () => (await history()).every(run => run.status === "cancelled"), 25_000);
+      t.assertions.assert((await history()).length === 2, "cancellation started another recovery");
+      return;
+    }
+    if (resume || consult) {
+      stage = "restart while PM owns the completed review";
+      opened.client.close();
+      for (const verb of ["stop", "start"]) {
+        const result = await runGenetAsync(opened.daemon.genet, ["daemon", verb], opened.daemon.env, { cwd: opened.workspaceRoot });
+        t.assertions.assert(result.code === 0, `handoff daemon ${verb} failed: ${result.stderr || result.stdout}`);
+        if (handoffTimeout && verb === "stop") {
+          // Inject elapsed wall time only after stopping the real daemon.
+          const file = path.join(opened.workspaceRoot, ".genethub/components/pm/requests", originalId, "runs", recovery!.id, "run.json");
+          const record = JSON.parse(readFileSync(file, "utf8"));
+          record.run.updatedAtMs = Date.now() - 1_805_000;
+          writeFileSync(file, JSON.stringify(record));
+        }
+      }
+      opened.client = await connectProductClient(daemonEndpoint(opened.daemon));
+      await t.tools.waitUntil(async () => {
+        const runs = await history();
+        return runs.length === 2 && runs.find(run => run.id === recovery!.id)?.status === "awaitingPm";
+      }, 30_000);
+      t.assertions.assert(!(await snapshot(reviewer)).pendingPermissions.length,
+        "restart recreated a previously answered PM question");
+    }
+    if (handoffTimeout) {
+      stage = "expired handoff requires one Human decision";
+      await t.tools.waitUntil(async () => {
+        const runs = await history();
+        recovery = runs.find(run => run.id === recovery!.id);
+        return runs.length === 2 && recovery?.humanExit?.kind === "d"
+          && (await snapshot(pm)).pendingPermissions.filter(card => card.id === recovery!.humanExit!.requestId).length === 1;
+      }, 25_000);
+      t.assertions.assert(recovery!.humanExit!.reason.includes("PM 未在期限内落实"), "timeout lost its actionable PM handoff reason");
+      t.assertions.assert(recovery!.status === "awaitingPm" && !recovery!.reason, "timeout forged an execution failure");
+      return;
+    }
     await send(pm, "CONTINUE_RECOVERY_LIFECYCLE");
     stage = "wait for business successor";
     await t.tools.waitUntil(async () => {

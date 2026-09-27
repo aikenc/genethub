@@ -74,19 +74,27 @@ fn sync_human_exit_journal(runtime: &super::RuntimeStore, run: &super::RunRecord
     super::save_run(runtime, &current)
 }
 
-fn exit_options(kind: &str) -> &'static [(&'static str, &'static str)] {
-    match kind {
-        "a" => &[("approve", "批准增加 1 次业务 Run、128 轮 LLM 和 1 小时"), ("reject", "拒绝，保留受阻需求")],
+fn exit_options(kind: &str) -> Vec<(String, String)> {
+    if let Some(grant) = super::request::human_budget_grant(kind) {
+        return vec![("approve".into(), format!("批准{}", grant.description())),
+            ("reject".into(), if kind == "c" { "拒绝，转平台反馈" } else { "拒绝，保留受阻需求" }.into())];
+    }
+    let options: &[(&str, &str)] = match kind {
         "b" => &[("acceptScope", "接受缩减后的目标"), ("cancel", "取消用户需求")],
-        "c" => &[("approve", "批准本需求增加 1 次恢复、100 轮 LLM 和 30 分钟"), ("reject", "拒绝，转平台反馈")],
         "d" => &[("confirmFeedback", "确认并打开预填反馈"), ("keepOpen", "保留受阻需求")],
         "e" => &[("handled", "所需安装或登录已处理"), ("abandon", "放弃用户需求")],
         "f" => &[("pass", "人工验收通过"), ("fail", "人工验收不通过")],
         _ => &[],
-    }
+    };
+    options.iter().map(|(id, label)| ((*id).into(), (*label).into())).collect()
 }
 
 pub(super) fn classify_human_exit(run: &super::RunRecord) -> Option<&'static str> {
+    if run.status == "awaitingPm" {
+        let answer_ms = run.definition.pm_answer_seconds.unwrap_or(DEFAULT_PM_ANSWER_SECONDS)
+            .saturating_mul(1000).min(i64::MAX as u64) as i64;
+        return (super::now_ms().saturating_sub(run.updated_at_ms) >= answer_ms).then_some("d");
+    }
     if run.status != "blocked" { return None; }
     let cause = run.stop.as_ref().map(|stop| stop.cause_code.as_str()).unwrap_or("");
     if run.handles.is_empty() {
@@ -134,13 +142,15 @@ pub(super) async fn ensure_human_exit(
         } else {
             super::require_request_writer(runtime, run)?;
             let current = super::load_run(runtime, &run.id)?;
-            if !matches!(current.status.as_str(), "blocked" | "completed" | "failed" | "cancelled")
+            if !matches!(current.status.as_str(), "blocked" | "completed" | "failed" | "cancelled" | "awaitingPm")
                 || super::requirement::terminal(runtime, &current)? || current.revision != run.revision {
                 bail!("Workflow Human exit target changed before question creation");
             }
             let session_id = super::notice_recipient(state, run).await?;
             let reason = proposed_reason.or_else(|| run.stop.as_ref().map(|stop| stop.reason.as_str()))
-                .unwrap_or("execution blocked");
+                .unwrap_or(if run.status == "awaitingPm" {
+                    "恢复审查已完成，但 PM 未在期限内落实后继执行、交付决定或人工待办；请核对 PM 会话与原需求"
+                } else { "execution blocked" });
             let exit = HumanExit {
                 run_id: run.id.clone(), request_id: if existing.is_some() {
                     format!("workflow-human-{}-decision-{}", run.id, super::now_ms())
@@ -185,7 +195,7 @@ pub(super) async fn ensure_human_exit(
             _ => None,
         };
         if let Some(selected) = selected {
-            if !exit_options(&exit.kind).iter().any(|(id, _)| *id == selected) {
+            if !exit_options(&exit.kind).iter().any(|(id, _)| id == &selected) {
                 bail!("Workflow Human selected an unknown option");
             }
             {
@@ -203,13 +213,16 @@ pub(super) async fn ensure_human_exit(
         }
         return Ok(exit);
     }
-    let options = exit_options(&exit.kind).iter().map(|(id, label)| genehub_proto::PermissionOption {
-        id: (*id).into(), label: (*label).into(), kind: genehub_proto::PermissionOptionKind::AllowOnce,
+    let options = exit_options(&exit.kind).into_iter().map(|(id, label)| genehub_proto::PermissionOption {
+        id, label, kind: genehub_proto::PermissionOptionKind::AllowOnce,
     }).collect();
+    let budget_contract = super::request::human_budget_grant(&exit.kind)
+        .map(|grant| format!("本卡审批固定额度：{}（受平台上限约束）。申请原因中的其他数字不改变此额度；不同意该额度请选择拒绝。\n", grant.description()))
+        .unwrap_or_default();
     let request = genehub_proto::PermissionRequest {
         id: exit.request_id.clone(), kind: genehub_proto::PermissionRequestKind::Question,
         title: format!("Workflow 请求需要人工决定（出口 {}）", exit.kind),
-        detail: Some(format!("Run {}：{}。答复会持久记录，相关动作由内核执行或通知 PM 继续。", run.id, exit.reason)),
+        detail: Some(format!("{budget_contract}Run {}\n申请原因（PM 或执行记录提供）：{}\n答复会持久记录，相关动作由内核执行或通知 PM 继续。", run.id, exit.reason)),
         tool_call_id: None, options, questions: None,
     };
     if let Err(error) = state.sessions.request_workflow_question(&exit.pm_session_id, request).await {
@@ -251,7 +264,10 @@ async fn apply_answer_action(state: &super::Shared, runtime: &super::RuntimeStor
             if current.supervision.notices.iter().all(|notice| notice.id != id) {
                 current.supervision.notices.push(super::supervision::Notice {
                     id,
-                    text: format!("Workflow Human 已回答出口 {}：{}。Run {} 仍需 PM 核对请求目标、现有预算与受控后继；请先读取 workflow get/check/journal。", exit.kind, answer, run.id),
+                    text: format!("Workflow Human 已回答出口 {}：{}。{} Run {} 仍需 PM 核对请求目标、现有预算与受控后继；请先读取 workflow get/check/journal。", exit.kind, answer,
+                        super::request::human_budget_grant(&exit.kind).filter(|_| answer == "approve")
+                            .map(|grant| format!("已按本卡固定档位记账：{}；实际总额以 workflow get 为准，不得重复追加。", grant.description()))
+                            .unwrap_or_default(), run.id),
                     accepted: false,
                     handled: false,
                 });
