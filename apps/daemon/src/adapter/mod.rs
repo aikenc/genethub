@@ -492,7 +492,7 @@ pub(super) fn append_system_prompt_arg(
 /// the one we hold. They are reachable because the agent was started in a
 /// process group of its own (`crate::process::own_group`).
 pub async fn kill_tree(child: &mut crate::os_process::Child) {
-    if let Err(error) = kill_tree_checked(child).await {
+    if let Err(error) = crate::process::kill_child_tree(child).await {
         tracing::warn!(%error, "could not confirm child cleanup");
     }
 }
@@ -500,41 +500,11 @@ pub async fn kill_tree(child: &mut crate::os_process::Child) {
 pub async fn close_child(child: &Mutex<Option<crate::os_process::Child>>) -> Result<()> {
     let mut held = child.lock().await;
     if let Some(child) = held.as_mut() {
-        kill_tree_checked(child).await?;
+        crate::process::kill_child_tree(child).await?;
     }
     held.take();
     Ok(())
 }
-
-async fn kill_tree_checked(child: &mut crate::os_process::Child) -> Result<()> {
-    #[cfg(unix)]
-    if let Some(pid) = child.id() {
-        crate::process::end_tree(pid).await;
-    }
-    #[cfg(windows)]
-    if let Some(pid) = child.id() {
-        let mut command = crate::os_process::Command::new("taskkill");
-        command
-            .args(["/T", "/F", "/PID", &pid.to_string()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true);
-        let _ = tokio::time::timeout(Duration::from_secs(2), command.status()).await;
-    }
-    if child.try_wait()?.is_some() {
-        return Ok(());
-    }
-    child.start_kill()?;
-    tokio::time::timeout(REAP_BUDGET, child.wait())
-        .await
-        .map_err(|_| {
-            anyhow::anyhow!("the killed agent has not exited; cleanup can be retried")
-        })??;
-    Ok(())
-}
-
-/// How long a killed agent gets to be reaped before the caller moves on.
-const REAP_BUDGET: Duration = Duration::from_secs(5);
 
 /// Finds an executable on `PATH`, honouring `PATHEXT` on Windows.
 pub fn find_executable(name: &str) -> Option<PathBuf> {
