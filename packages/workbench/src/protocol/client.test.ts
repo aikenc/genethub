@@ -59,14 +59,16 @@ async function connected(options: Partial<ClientOptions> = {}): Promise<{
 }> {
   const proof = localProof();
   const queue = socketQueue({ secret: proof.proof, identity: localIdentity });
-  const client = new Client({
-    ...options,
+  // Keep the caller's options object. A later assignment to requestTimeoutMs
+  // applies only to exchanges started after that assignment.
+  const shared = Object.assign(options, {
     url: options.url ?? "ws://127.0.0.1:42123/ws",
     localServerProof: options.localServerProof ?? proof,
     socketFactory: options.socketFactory ?? queue.factory,
     rtcEnabled: options.rtcEnabled ?? false,
     backoffMs: options.backoffMs ?? (() => 0),
   });
+  const client = new Client(shared as ClientOptions);
   client.connect();
   const socket = queue.latest();
   socket.open();
@@ -526,7 +528,12 @@ describe("RPC exchanges are independent logical streams", () => {
     await expect(waiting).rejects.toBeInstanceOf(ClientRequestTimeoutError);
     offline.close();
 
-    const { client, socket } = await connected({ requestTimeoutMs: 5 });
+    // connection.identity uses the same request budget as later calls.
+    // The 5ms deadline starts after the handshake is ready, so a busy
+    // event loop cannot fail the connection before the exchange under test.
+    const session: Partial<ClientOptions> = {};
+    const { client, socket } = await connected(session);
+    session.requestTimeoutMs = 5;
     const unanswered = client.call({ type: "agent.list" });
     await waitFor(() => socket.sent.some((message) => message.type === "agent.list"));
     await expect(unanswered).rejects.toBeInstanceOf(ClientRequestTimeoutError);
