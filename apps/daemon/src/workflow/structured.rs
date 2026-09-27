@@ -253,8 +253,11 @@ pub(super) async fn drive(state: &Shared, runtime: &RuntimeStore, run_id: &str) 
             // A host observation may have been committed just before a crash.
             // Settle its stored value, never resample a completed query.
             if run.nodes.get(&id).is_some_and(|record| {
-                record.status == "completed"
-                    && matches!(record.uses.as_str(), "result.publish" | "request.budget")
+                matches!(record.status.as_str(), "completed" | "failed")
+                    && matches!(
+                        record.uses.as_str(),
+                        "result.publish" | "request.budget" | "pack.script"
+                    )
             }) {
                 settled(&mut run, &id)?;
                 finalize(runtime, &mut run).await;
@@ -280,8 +283,8 @@ pub(super) async fn drive(state: &Shared, runtime: &RuntimeStore, run_id: &str) 
                             // receive its turn. Reconciliation decides that one
                             // node; failing here would stall every later pass
                             // and freeze the whole Run.
-                            Err(error)
-                                if error.is::<crate::session::manager::SessionMissing>() => {}
+                            Err(error) if error.is::<crate::session::manager::SessionMissing>() => {
+                            }
                             Err(error) => return Err(error),
                         }
                     }
@@ -301,6 +304,7 @@ pub(super) async fn drive(state: &Shared, runtime: &RuntimeStore, run_id: &str) 
                 run.nodes.insert(
                     id.clone(),
                     NodeRecord {
+                        input: Some(op.input.clone()),
                         output: None,
                         scope: engine::ancestry(&p, run.engine.as_ref().unwrap(), op.frame)?,
                         definition_id: Some(op.activity.clone()),
@@ -390,10 +394,10 @@ pub(super) async fn drive(state: &Shared, runtime: &RuntimeStore, run_id: &str) 
             }
             if matches!(
                 run.nodes[&id].uses.as_str(),
-                "result.publish" | "request.budget"
+                "result.publish" | "request.budget" | "pack.script"
             ) {
                 // Persist the observation before allowing dependent control flow.
-                // No external side effect or Worker participates in these capabilities.
+                // Script results, too, settle the engine after their durable host observation.
                 save_run(runtime, &run)?;
                 settled(&mut run, &id)?;
                 finalize(runtime, &mut run).await;

@@ -1,0 +1,18 @@
+{
+  "lifecycle": "pooled",
+  "components": [
+    {
+      "componentId": "worker",
+      "role": "owner"
+    }
+  ],
+  "folders": [
+    {
+      "name": "project",
+      "path": "../.."
+    }
+  ],
+  "guidance": [
+    "需求负责人：冻结需求验收项，产品需求按产品经理、技术需求按技术负责人视角拆解"
+  ]
+}

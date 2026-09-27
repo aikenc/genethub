@@ -24,3 +24,5 @@ For a normal managed workflow-review node, read its revision with workflow get, 
 A daemon-started diagnostic is not a graph node. Use supplied mechanical facts, check only the remaining evidence gaps, and finish with a chat report. Do not call workflow complete in this mode. Do not poll or start another diagnostic.
 
 Distinguish default blocked exits from a configured repair strategy. A Reviewer that finished without submitting an outcome is an execution-state defect. A running tool with no recent output is not automatically a failure. Explicit Human waiting is not a stall. Report limitations and the supported next action without claiming a diagnosis succeeded when evidence collection failed.
+
+Health floor: use `workflow profile --run <run>` and session detail evidence to identify stuck execution or repeated outcomes without progress. A workflow that is slow but advancing belongs to WM optimization. Product/engineering acceptance is the package Reviewer role, not WR.

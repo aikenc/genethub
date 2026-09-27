@@ -7,7 +7,7 @@ nodes:
     uses: request.budget
   - id: requirements
     uses: agent.session
-    with: {role: reviewer}
+    with: {role: owner}
     completion:
       output:
         type: object

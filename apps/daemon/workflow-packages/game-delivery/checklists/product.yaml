@@ -1,0 +1,45 @@
+- id: hand-1
+  category: 操作手感
+  requirement: 输入到画面响应 ≤ 1 帧
+- id: hand-2
+  category: 操作手感
+  requirement: 连续快速输入不丢失
+- id: hand-3
+  category: 操作手感
+  requirement: 触屏手势识别率 ≥ 98%
+- id: hand-4
+  category: 操作手感
+  requirement: 键盘与触屏操作结果一致
+- id: hand-5
+  category: 操作手感
+  requirement: 暂停/继续响应 ≤ 100ms
+- id: fx-1
+  category: 反馈与特效
+  requirement: 得分、碰撞、胜负都有即时反馈
+- id: fx-2
+  category: 反馈与特效
+  requirement: 音效与画面同步，偏差 ≤ 50ms
+- id: fx-3
+  category: 反馈与特效
+  requirement: 数值变化有过渡动画
+- id: fx-4
+  category: 反馈与特效
+  requirement: 特效不遮挡操作主体
+- id: fx-5
+  category: 反馈与特效
+  requirement: 危险状态有预警
+- id: look-1
+  category: 画面与适配
+  requirement: 配色在色盲模拟下可区分
+- id: look-2
+  category: 画面与适配
+  requirement: 720p 与 1080p 下不模糊
+- id: look-3
+  category: 画面与适配
+  requirement: 390 宽手机上不溢出
+- id: look-4
+  category: 画面与适配
+  requirement: 深浅主题都清晰可读
+- id: look-5
+  category: 画面与适配
+  requirement: 音乐与音效可分别关闭

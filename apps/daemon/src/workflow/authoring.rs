@@ -19,6 +19,7 @@ pub(crate) fn schema() -> Value {
     schema["properties"]["nodes"]["minItems"] = json!(1);
     schema["properties"]["nodes"]["maxItems"] = json!(MAX_NODES);
     schema["x-genehub"] = json!({
+        "literalInclude": {"syntax": {"op":"include","path":"checklists/product.yaml"}, "rules":["package-relative UTF-8 YAML/JSON data is compiled into a literal before strict engine validation", "raw referenced bytes and compiled values belong to the same immutable workflow build", "data is not recursively interpreted as expressions"]},
         "dialect": "genehub.workflow.definition.v2", "legacyDialect": DEFINITION_SCHEMA,
         "validationCommand": "workflow check --draft", "maxDiagnostics": 64,
         "capabilities": ["agent.session", "result.publish", "request.budget"],

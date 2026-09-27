@@ -7,6 +7,9 @@ import { refreshAgentActivities, useAgentActivities } from "../workspace/useAgen
 import { useWorkbench } from "./store";
 import { WorkflowStructureDetails } from "./StructuredWorkflow";
 import { canHandleInteraction } from "./attention";
+import { buildAgentSpaceTree } from "../workspace/agent-space-tree";
+import { WorkflowViewLinks } from "./WorkflowViewLinks";
+import { observationLabel, workflowObservation } from "./workflow-observation";
 
 const labels: Record<string, string> = {
   running: "进行中", stopping: "停止中", cancelling: "停止中",
@@ -56,6 +59,7 @@ export function TaskProgress({ session, onReportSession }: { session: SessionSum
   const client = useWorkbench((state) => state.client);
   const connection = useWorkbench((state) => state.connection);
   const selectSession = useWorkbench((state) => state.selectSession);
+  const workspaces = useWorkbench(state => state.workspaces);
   const activity = useAgentActivities();
   const current = activity.sessions?.find((item) => item.id === session.id) ?? session;
   const summary = current.workSummary;
@@ -65,7 +69,8 @@ export function TaskProgress({ session, onReportSession }: { session: SessionSum
   useEffect(() => {
     if (client && connection === "ready") void refreshAgentActivities(client);
   }, [client, connection, session.id, session.status]);
-  if (!summary || session.managed) return null;
+  if (session.managed) return <WorkflowViewLinks workspaceId={buildAgentSpaceTree(workspaces).projectRootById[session.workspaceId] ?? session.workspaceId} runId={session.managed.workflowRunId} nodeId={session.managed.nodeId} compact />;
+  if (!summary) return null;
   const stateLabel = summary.stopping ? "停止中" : summary.blocked ? "受阻"
     : summary.tasks.some(task => task.waiting?.length) ? "等待处理"
     : summary.tasks.some(task => task.executing) ? "小队执行中"
@@ -73,11 +78,11 @@ export function TaskProgress({ session, onReportSession }: { session: SessionSum
     : summary.tasks.some(task => task.status === "failed") ? "失败"
     : summary.tasks.length && summary.tasks.every(task => task.status === "cancelled") ? "已取消" : "执行记录";
   const ready = connection === "ready" && !activity.error && !summary.error;
-  const heading = `小队任务 · ${ready ? stateLabel : "待同步"} · ${summary.tasks.length + summary.more} 项`;
+  const heading = `小队任务 · ${ready ? stateLabel : "待同步"} · ${summary.tasks.length + summary.more} 项${ready && summary.tasks.length === 1 && summary.more === 0 && summary.tasks[0]?.observation ? ` · ${observationLabel(summary.tasks[0].observation)}` : ""}`;
   const canCancel = ready && client?.identity?.features?.includes("workflow.control.v1");
   return <section aria-label="任务进度" className="shrink-0 border-b border-line bg-raised px-4 text-sm">
-    <button type="button" aria-expanded={expanded} aria-haspopup="dialog" className="flex min-h-11 w-full items-center justify-between gap-2 text-left font-medium"
-      onClick={() => setExpanded(true)}><span className="min-w-0 truncate">{heading}</span><span aria-hidden>›</span></button>
+    <div className="flex items-center gap-2"><button type="button" aria-expanded={expanded} aria-haspopup="dialog" className="flex min-h-11 min-w-0 flex-1 items-center justify-between gap-2 text-left font-medium"
+      onClick={() => setExpanded(true)}><span className="min-w-0 truncate">{heading}</span><span aria-hidden>›</span></button>{ready && summary.tasks.length === 1 && summary.more === 0 && <WorkflowViewLinks workspaceId={session.workspaceId} runId={summary.tasks[0]!.runId} compact />}</div>
     {error && !expanded && <p role="alert" className="pb-2 text-danger">{error}</p>}
     {expanded && <WorkspaceDetailsDialog title="小队任务" onClose={() => setExpanded(false)}>
       {!ready && <p role="status" className="mt-2 text-muted">{summary.error ?? "任务状态待核对，连接恢复后更新。"}</p>}
@@ -117,7 +122,9 @@ export function TaskProgress({ session, onReportSession }: { session: SessionSum
                 `Workflow 恢复失败\nRun: ${task.runId}\n请求: ${task.requestRunId ?? task.runId}\n原因: ${task.humanExit!.reason}\n日志引用: workflow journal --run ${task.runId}`,
               )}>打开预填反馈</button>}
           </div>}
-          {task.activeNodes.length > 0 && <p className="mt-1 text-xs text-muted">当前步骤：{task.activeNodes.join("、")}</p>}
+          <WorkflowViewLinks workspaceId={session.workspaceId} runId={task.runId} />
+          {task.observation && <TaskObservation value={task.observation} />}
+          {task.activeNodes.length > 0 && <p className="mt-1 text-xs text-muted">当前步骤：{task.activeNodes.map(id => String((task.observation as {nodeLabels?:Record<string,string>} | undefined)?.nodeLabels?.[id] ?? id)).join("、")}</p>}
           {task.reason && <details className="mt-1 text-xs"><summary className="cursor-pointer truncate">{task.reason.split("\n")[0]}</summary><p className="mt-2 whitespace-pre-wrap break-words">{task.reason}</p></details>}
           {task.waiting?.map(waiting => {
             const owner = activity.sessions?.find(item => item.id === waiting.sessionId);
@@ -144,4 +151,23 @@ export function TaskProgress({ session, onReportSession }: { session: SessionSum
       {summary.more > 0 && <p className="mt-2 text-xs text-muted">另有 {summary.more} 项任务未在此展开；可向 PM 查询。</p>}
     </WorkspaceDetailsDialog>}
   </section>;
+}
+
+function TaskObservation({value}: {value: unknown}) {
+  const o = workflowObservation(value);
+  if (!o) return null;
+  const budget = o.requestBudget;
+  return <div className="my-2 grid grid-cols-3 gap-2 rounded-lg bg-raised p-2 text-xs">
+    <div>平均并行 {(o.parallelism ?? 0).toFixed(1)} 人<p className="mt-1 text-muted">峰值 {o.peakWorkers ?? 0} 人 · 含助手等待时间</p></div>
+    <div>迭代<p className="mt-1 text-muted">{o.iterations?.length ? o.iterations.map(loop => `${loop.rounds} 轮`).join(" / ") : "尚无循环迭代"}</p><p className="mt-1 text-muted">各循环实例分别计轮 · 执行 {Math.round((o.executionMs ?? 0) / 60000)} 分钟</p></div>
+    <div>预算
+      {budget ? <>
+        <p className={`mt-1 ${(o.callBudgetPercent ?? 0) >= 80 ? "text-danger" : "text-muted"}`}>调用 {budget.observedLlmRounds}/{budget.budget.maxLlmRounds} · {Math.round(o.callBudgetPercent ?? 0)}%</p>
+        <p className={`mt-1 ${(o.timeBudgetPercent ?? 0) >= 80 ? "text-danger" : "text-muted"}`}>时间 {Math.round(budget.executionMs / 60000)}/{Math.round(budget.budget.deadlineMs / 60000)} 分钟 · {Math.round(o.timeBudgetPercent ?? 0)}%</p>
+        <p className="mt-1 text-muted">剩余 Run {budget.remainingRuns} 次</p>
+      </> : <p className="mt-1 text-muted">{Math.round(o.budgetPercent ?? 0)}%</p>}
+      <p className="mt-1 text-muted">估算 ¥{((o.estimatedMilliCny ?? 0) / 1000).toFixed(2)}</p>
+    </div>
+    {!!o.recovering && <p className="col-span-3 text-muted">恢复中 · {o.recovering} 个恢复 Run；人工决定仍在原问题卡处理</p>}
+  </div>;
 }

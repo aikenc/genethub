@@ -93,6 +93,7 @@ export function normalizeAgentPreferences(
   });
   return {
     runtimes: { ...(stored?.runtimes ?? {}) },
+    ...(stored?.costRates ? {costRates: stored.costRates} : {}),
     modelProfiles: discovered,
     ...(disabledAgentIds.length > 0 ? { disabledAgentIds } : {}),
     tagGroups: groups,

@@ -147,9 +147,27 @@ pub struct HumanContinuation {
     pub completed: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionCostSegment {
+    pub rate: serde_json::Value,
+    pub calls: u64,
+    pub milli_cny: u64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecutionActivity {
+    /// Assignment-time rate and accumulated estimate. Unknown legacy calls
+    /// remain unpriced rather than being repriced from today's preferences.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_rate: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cost_segments: Vec<ExecutionCostSegment>,
+    #[serde(default)]
+    pub estimated_milli_cny: u64,
+    #[serde(default)]
+    pub priced_llm_rounds: u64,
     pub last_at_ms: i64,
     pub llm_rounds: u64,
     pub tokens: Option<u64>,

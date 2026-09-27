@@ -27,7 +27,9 @@ pub const BUILTIN_TAGS: [&str; 5] = [TAG_MAX, TAG_PRO, TAG_FLASH, TAG_VIDEO, TAG
 pub(crate) struct RouteUnavailable(pub String);
 
 impl fmt::Display for RouteUnavailable {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str(&self.0) }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 impl std::error::Error for RouteUnavailable {}
@@ -299,6 +301,51 @@ pub(crate) async fn resolve_live_route(
     evidence_only: bool,
 ) -> Result<(ResolvedAgentRoute, ProviderMap)> {
     resolve_live_route_excluding(state, required_tags, evidence_only, &BTreeSet::new()).await
+}
+
+/// A Human's exact workflow destination overrides portable role routing
+/// defaults for this request only. Do not edit machine preferences or silently
+/// fall back to another destination. Evidence-scope enforcement still applies.
+pub(crate) async fn resolve_exact_workflow_route(
+    state: &Shared,
+    target: &genehub_proto::WorkflowAgentTarget,
+    evidence_only: bool,
+) -> Result<(ResolvedAgentRoute, ProviderMap)> {
+    let providers = state.providers().await;
+    let agents = state.registry.list(&providers).await;
+    let agent = agents
+        .iter()
+        .find(|a| a.id == target.agent_id && matches!(a.probe, ProbeState::Ready))
+        .ok_or_else(|| {
+            anyhow!(RouteUnavailable(format!(
+                "workflowAgentTargetUnavailable: requested Agent {} is not ready",
+                target.agent_id
+            )))
+        })?;
+    let model = agent.catalog.models.iter().find(|m| m.id == target.model_id && !is_auto_model(m))
+        .ok_or_else(|| anyhow!(RouteUnavailable(format!("workflowAgentTargetUnavailable: requested model {}/{} is absent from the live catalog", target.agent_id, target.model_id))))?;
+    if evidence_only
+        && state
+            .registry
+            .get(&agent.id)
+            .is_none_or(|a| !a.supports_evidence_scope())
+    {
+        return Err(anyhow!(RouteUnavailable(format!(
+            "workflowAgentTargetUnavailable: {} cannot enforce reviewer evidence scope",
+            agent.id
+        ))));
+    }
+    let preferences = state
+        .config
+        .read()
+        .await
+        .agent_preferences
+        .clone()
+        .unwrap_or_default();
+    Ok((
+        candidate_for(&preferences, agent, Some(model)).route,
+        providers,
+    ))
 }
 
 pub(crate) async fn resolve_live_route_excluding(
@@ -784,7 +831,10 @@ mod tests {
         );
         assert!(validate_selected_tags(Vec::new()).is_err());
         assert!(validate_selected_tags(vec!["Flash".into(), "flash".into()]).is_err());
-        assert_eq!(normalize_tags(["Flush".into(), "flash".into()]), vec!["Flash".to_string()]);
+        assert_eq!(
+            normalize_tags(["Flush".into(), "flash".into()]),
+            vec!["Flash".to_string()]
+        );
         assert!(is_builtin_tag("Flush"));
         assert!(validate_selected_tags(vec!["x".repeat(41)]).is_err());
         assert_eq!(

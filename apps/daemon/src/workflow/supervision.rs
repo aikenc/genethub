@@ -249,11 +249,7 @@ pub(super) async fn deliver_notice(
                 "workflow",
             )
             .await?;
-        let handled = state
-            .sessions
-            .input_handled(&recipient, &notice.id)
-            .await?
-            == Some(true);
+        let handled = state.sessions.input_handled(&recipient, &notice.id).await? == Some(true);
         if let Some(current_notice) = run
             .supervision
             .notices

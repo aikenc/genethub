@@ -615,6 +615,20 @@ impl AppState {
 }
 
 fn validate_agent_preferences(preferences: &AgentSelectionPreferences) -> Result<()> {
+    if let Some(rates) = &preferences.cost_rates {
+        if [
+            rates.very_high,
+            rates.high,
+            rates.medium,
+            rates.low,
+            rates.very_low,
+        ]
+        .iter()
+        .any(|rate| *rate > 1_000_000)
+        {
+            anyhow::bail!("每次 LLM 请求的估算成本不能超过 1000 元");
+        }
+    }
     if preferences.runtimes.len() > 64 {
         anyhow::bail!("最多记住 64 个 Agent 的运行设置");
     }

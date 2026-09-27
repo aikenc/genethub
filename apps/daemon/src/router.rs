@@ -376,9 +376,14 @@ async fn authorize_project_workflow_mutation(
                 .await
                 .map_err(|error| format!("无法确认入口会话：{error:#}"))?;
             if let Some(managed) = &summary.managed {
-                let project = state.workspaces.project_root(&summary.workspace_id).await
+                let project = state
+                    .workspaces
+                    .project_root(&summary.workspace_id)
+                    .await
                     .map_err(|error| format!("无法确认受管 WM 的项目边界：{error:#}"))?;
-                if project == workspace_id && matches!(managed.role.as_str(), "wm" | "recovery-manager") {
+                if project == workspace_id
+                    && matches!(managed.role.as_str(), "wm" | "recovery-manager")
+                {
                     return Ok(());
                 }
                 return Err("只有本项目的 WM 受管会话可以修改 Workflow 配置".into());
@@ -855,6 +860,7 @@ async fn dispatch(
                 "service.preview.v1".to_string(),
                 "process.services.v1".to_string(),
                 "workflow.control.v1".to_string(),
+                "workflow.observability.v1".to_string(),
                 "agentSpace.builderPlans.v1".to_string(),
                 "session.input.v1".to_string(),
                 "session.switch-agent.v1".to_string(),
@@ -1199,29 +1205,57 @@ async fn dispatch(
                 Ok(runtime) => runtime,
                 Err(error) => return failed(error),
             };
-            let (approved_digest, recovery_change) = match crate::workflow::recovery_activation_change(
-                &workspace.root, &runtime, candidate_digest.as_deref(), expected_revision,
-            ) {
-                Ok(change) => change,
-                Err(error) => return failed(error),
-            };
+            let (approved_digest, recovery_change) =
+                match crate::workflow::recovery_activation_change(
+                    &workspace.root,
+                    &runtime,
+                    candidate_digest.as_deref(),
+                    expected_revision,
+                ) {
+                    Ok(change) => change,
+                    Err(error) => return failed(error),
+                };
             if let Some((request_id, detail)) = recovery_change {
                 if let Some(session_id) = caller.session_controller_id() {
-                    match state.sessions.workflow_question_outcome(session_id, &request_id).await {
-                        Ok(Some(genehub_proto::PermissionOutcome::Selected { option_id })) if option_id == "approve" => {}
-                        Ok(Some(_)) => return Handled::err(ErrorCode::Forbidden, "Human rejected the recovery flow change"),
+                    match state
+                        .sessions
+                        .workflow_question_outcome(session_id, &request_id)
+                        .await
+                    {
+                        Ok(Some(genehub_proto::PermissionOutcome::Selected { option_id }))
+                            if option_id == "approve" => {}
+                        Ok(Some(_)) => {
+                            return Handled::err(
+                                ErrorCode::Forbidden,
+                                "Human rejected the recovery flow change",
+                            )
+                        }
                         Ok(None) => {
                             let request = genehub_proto::PermissionRequest {
                                 id: request_id,
                                 kind: genehub_proto::PermissionRequestKind::Question,
                                 title: "授权激活恢复流程变更".into(),
-                                detail: Some(detail), tool_call_id: None,
+                                detail: Some(detail),
+                                tool_call_id: None,
                                 options: vec![
-                                    genehub_proto::PermissionOption { id: "approve".into(), label: "批准这次恢复流程变更".into(), kind: genehub_proto::PermissionOptionKind::AllowOnce },
-                                    genehub_proto::PermissionOption { id: "reject".into(), label: "拒绝".into(), kind: genehub_proto::PermissionOptionKind::AllowOnce },
-                                ], questions: None,
+                                    genehub_proto::PermissionOption {
+                                        id: "approve".into(),
+                                        label: "批准这次恢复流程变更".into(),
+                                        kind: genehub_proto::PermissionOptionKind::AllowOnce,
+                                    },
+                                    genehub_proto::PermissionOption {
+                                        id: "reject".into(),
+                                        label: "拒绝".into(),
+                                        kind: genehub_proto::PermissionOptionKind::AllowOnce,
+                                    },
+                                ],
+                                questions: None,
                             };
-                            if let Err(error) = state.sessions.request_workflow_question(session_id, request).await {
+                            if let Err(error) = state
+                                .sessions
+                                .request_workflow_question(session_id, request)
+                                .await
+                            {
                                 return failed(error);
                             }
                             return Handled::err(ErrorCode::BadRequest, "recoveryActivationPending: Human approval is required before retrying this Candidate");
@@ -1247,6 +1281,7 @@ async fn dispatch(
         }
 
         Request::WorkflowDispatch {
+            agent_target,
             retry_of,
             resume_cancelled,
             candidate_digest,
@@ -1309,6 +1344,7 @@ async fn dispatch(
                 &task_id,
                 &prompt,
                 crate::workflow::DispatchOptions {
+                    agent_target: agent_target.as_ref(),
                     candidate_digest: candidate_digest.as_deref(),
                     execution_root: execution_root.as_deref(),
                     retry_of: retry_of.as_deref(),
@@ -1376,19 +1412,69 @@ async fn dispatch(
             }
         }
 
-        Request::WorkflowJournal { workspace_id, run_id, since, limit } => {
+        Request::WorkflowJournal {
+            workspace_id,
+            run_id,
+            since,
+            limit,
+        } => {
             let workspace = match state.workspaces.get(&workspace_id).await {
                 Ok(workspace) => workspace,
                 Err(error) => return failed(error),
             };
             let runtime = match crate::workflow::RuntimeStore::new(
-                &state.paths.root, &workspace_id, &workspace.root,
+                &state.paths.root,
+                &workspace_id,
+                &workspace.root,
             ) {
                 Ok(runtime) => runtime,
                 Err(error) => return failed(error),
             };
             match crate::workflow::journal(&runtime, &run_id, since, limit) {
                 Ok(events) => Handled::ok(Reply::WorkflowJournal(events)),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::WorkflowProfile {
+            workspace_id,
+            run_id,
+            offset,
+            limit,
+        } => {
+            let result = async {
+                let workspace = state.workspaces.get(&workspace_id).await?;
+                let runtime = crate::workflow::RuntimeStore::new(
+                    &state.paths.root,
+                    &workspace_id,
+                    &workspace.root,
+                )?;
+                crate::workflow::observability::profile(state, &runtime, &run_id, offset, limit)
+                    .await
+            }
+            .await;
+            match result {
+                Ok(value) => Handled::ok(Reply::WorkflowProfile(value)),
+                Err(error) => failed(error),
+            }
+        }
+        Request::WorkflowView {
+            workspace_id,
+            run_id,
+            path,
+        } => {
+            let result = async {
+                let workspace = state.workspaces.get(&workspace_id).await?;
+                let runtime = crate::workflow::RuntimeStore::new(
+                    &state.paths.root,
+                    &workspace_id,
+                    &workspace.root,
+                )?;
+                crate::workflow::observability::view(&runtime, &run_id, path.as_deref())
+            }
+            .await;
+            match result {
+                Ok(value) => Handled::ok(Reply::WorkflowView(value)),
                 Err(error) => failed(error),
             }
         }
@@ -1507,52 +1593,105 @@ async fn dispatch(
             }
         }
 
-        Request::WorkflowRecoveryStart { workspace_id, run_id, reason } => {
-            if let Err(error) = authorize_project_workflow_mutation(state, caller, &workspace_id).await {
+        Request::WorkflowRecoveryStart {
+            workspace_id,
+            run_id,
+            reason,
+        } => {
+            if let Err(error) =
+                authorize_project_workflow_mutation(state, caller, &workspace_id).await
+            {
                 return Handled::err(ErrorCode::Forbidden, error);
             }
             let Some(parent_session_id) = caller.session_controller_id() else {
-                return Handled::err(ErrorCode::Unauthorized, "workflow.recovery.start requires an ordinary PM Session");
+                return Handled::err(
+                    ErrorCode::Unauthorized,
+                    "workflow.recovery.start requires an ordinary PM Session",
+                );
             };
-            let transition = match crate::workflow::start_recovery(state, &workspace_id, parent_session_id, &run_id, &reason, "pm").await {
+            let transition = match crate::workflow::start_recovery(
+                state,
+                &workspace_id,
+                parent_session_id,
+                &run_id,
+                &reason,
+                "pm",
+            )
+            .await
+            {
                 Ok(transition) => transition,
                 Err(error) => return failed(error),
             };
-            if let Err(error) = start_workflow_sessions(state, &workspace_id, &transition.status.id, transition.sessions).await {
+            if let Err(error) = start_workflow_sessions(
+                state,
+                &workspace_id,
+                &transition.status.id,
+                transition.sessions,
+            )
+            .await
+            {
                 return failed(error);
             }
             Handled::ok(Reply::WorkflowRun(transition.status))
         }
 
-        Request::WorkflowHuman { workspace_id, run_id, expected_revision, kind, reason } => {
-            if let Err(error) = authorize_project_workflow_mutation(state, caller, &workspace_id).await {
+        Request::WorkflowHuman {
+            workspace_id,
+            run_id,
+            expected_revision,
+            kind,
+            reason,
+        } => {
+            if let Err(error) =
+                authorize_project_workflow_mutation(state, caller, &workspace_id).await
+            {
                 return Handled::err(ErrorCode::Forbidden, error);
             }
             if caller.session_controller_id().is_none() {
-                return Handled::err(ErrorCode::Unauthorized, "workflow.human requires an ordinary PM Session");
+                return Handled::err(
+                    ErrorCode::Unauthorized,
+                    "workflow.human requires an ordinary PM Session",
+                );
             }
             match crate::workflow::request_human_exit(
-                state, &workspace_id, &run_id, expected_revision, &kind, &reason,
-            ).await {
+                state,
+                &workspace_id,
+                &run_id,
+                expected_revision,
+                &kind,
+                &reason,
+            )
+            .await
+            {
                 Ok(run) => Handled::ok(Reply::WorkflowRun(run)),
                 Err(error) => failed(error),
             }
         }
 
-        Request::WorkflowRecoveryReset { workspace_id, package_id, expected_revision } => {
-            if let Err(error) = authorize_project_workflow_mutation(state, caller, &workspace_id).await {
+        Request::WorkflowRecoveryReset {
+            workspace_id,
+            package_id,
+            expected_revision,
+        } => {
+            if let Err(error) =
+                authorize_project_workflow_mutation(state, caller, &workspace_id).await
+            {
                 return Handled::err(ErrorCode::Forbidden, error);
             }
             let workspace = match state.workspaces.project_entry(&workspace_id).await {
                 Ok(workspace) => workspace,
                 Err(error) => return failed(error),
             };
-            let package_id = match crate::workflow::resolve_package_id(&workspace.root, package_id.as_deref()) {
-                Ok(id) => id,
-                Err(error) => return failed(error),
-            };
+            let package_id =
+                match crate::workflow::resolve_package_id(&workspace.root, package_id.as_deref()) {
+                    Ok(id) => id,
+                    Err(error) => return failed(error),
+                };
             let runtime = match crate::workflow::RuntimeStore::for_package(
-                &state.paths.root, &workspace_id, &workspace.root, &package_id,
+                &state.paths.root,
+                &workspace_id,
+                &workspace.root,
+                &package_id,
             ) {
                 Ok(runtime) => runtime,
                 Err(error) => return failed(error),
@@ -2436,16 +2575,9 @@ async fn dispatch(
             }
         }
 
-        Request::SessionSetFast {
-            session_id,
-            fast,
-        } => {
+        Request::SessionSetFast { session_id, fast } => {
             let providers = state.providers().await;
-            match state
-                .sessions
-                .set_fast(&session_id, fast, &providers)
-                .await
-            {
+            match state.sessions.set_fast(&session_id, fast, &providers).await {
                 Ok(()) => Handled::ok(Reply::Ack),
                 Err(error) => failed(error),
             }
@@ -2485,7 +2617,10 @@ async fn dispatch(
                     && request_id.starts_with("workflow-human-")))
                 && matches!(caller, crate::authz::Principal::SessionController { .. })
             {
-                return Handled::err(ErrorCode::Forbidden, "Agent/CLI 不能替用户响应 Workflow 人工出口或计划确认");
+                return Handled::err(
+                    ErrorCode::Forbidden,
+                    "Agent/CLI 不能替用户响应 Workflow 人工出口或计划确认",
+                );
             }
             let providers = state.providers().await;
             match state

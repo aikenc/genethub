@@ -11,8 +11,8 @@ Workflow 是被创建、验证和采用的执行方案。Executor 是使这个�
 | Workflow 包 | 一个含 `workflow.md` 的普通目录，靠 `git clone` 获得；身份即它相对 `.genethub/workflows/` 的路径 | `<project>/.genethub/workflows/<id>/` 下的 `flows/`、`roles/`、`prompts/`、`skills/` 与 `spaces/` 源 |
 | Workflow（流程） | 步骤、角色协作、条件、验收与异常处理的定义 | 包内 `flows/<id>.yaml`；文件名即 id，没有登记表 |
 | Executor | Workflow 的运行载体，调度自己直接拥有的 Worker | 挂载 executor Component 的 AgentSpace |
-| Candidate | 一份可固定身份的候选配置 | 包含从包目录推导的事实（包 id、executor 载体、诊断载体）、各条流程及相关源文件 |
-| Run | 使用固定候选、载体与输入执行一次任务 | daemon 创建，Executor 会话保存权威运行快照 |
+| 工作流构建（内部 Candidate） | 一份可固定身份的执行配置 | 包含从包目录推导的事实（包 id、executor 载体、诊断载体）、各条流程及相关源文件 |
+| Run | 使用固定候选、载体与输入执行一次任务 | daemon 创建，项目 PM 请求目录保存权威运行快照 |
 | 测试项目 | 验证 Workflow 的材料 | 普通任务目录；按案例需要包含零个、一个或多个 Git 仓库 |
 
 产品中选择某个 Executor 可以表示选择一套可运行的 Workflow 方案。实现中仍应保留定义、载体和运行身份：一个包可以包含多条流程，同一个 Executor 承载该包的全部流程。一个项目可以同时安装多个包，各自绑定自己的 Executor，因此派发时包与流程都要能被点名。
@@ -62,3 +62,15 @@ Workflow 是被创建、验证和采用的执行方案。Executor 是使这个�
 采用的是通过验证的 Workflow 与执行配置。可以保留候选 Executor 承担正式任务；若迁回旧 Executor，应核对 Skill、提示词、模型和角色等配置的一致性并补足验证。更改测试目录为正式任务目录会改变当前 Candidate 的执行绑定及 digest，应重新校验后激活。旧 Run 保留快照，回滚需核对旧完整配置。清理测试材料不等于删除 Workflow，采用 Workflow 也不依赖将测试项目合入正式项目。
 
 本模型说明产品语义与当前源码事实。目录准入、PM 的 Builder 管理入口和自动准备旅程的交付状态以对应实现及测试记录为准；不能由上述方法约定推断所有路径已经可用。现有旅程入口见 [PM 与 Workflow 旅程](../testing/journeys/workflow/pm-game-delivery.journey.ts)，运行控制见 [PM input and workflow control](./pm-workflow-control.md)。
+
+## 可观测与优化
+
+Workflow Builder 校验控制流、内联规范并冻结视图文件；内置视图无需 Node 构建工具。
+`workflow profile --run <id>` 按请求读取 Run、Worker 活动与成本快照，返回基础事实和缺失来源，
+不在 daemon 维护关键路径或质量结论。`--compare <id>` 提供两份请求事实供 WM 比较。
+模型成本统一按 LLM 调用次数和五档人民币单价估算，执行时固定单价；未计价调用明确显示。
+
+包可以用脚本记录依赖、排队、工具内部步骤，并在自己的 UI 中计算关键路径与余量。
+需求项、产品规范和工程规范的适用范围、验收出口和交付门禁完全由包定义。
+WM 同时维护流程、提示词和视图，比较等价材料上的质量、时间与成本；WR 负责运行健康下限，
+PM 传递目标与质量底线，不把平台接口缺口变成要求用户放宽目标的选择。

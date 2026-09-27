@@ -165,6 +165,10 @@ pub enum Request {
     /// from the authenticated session-bound CLI identity, never this payload.
     #[serde(rename = "workflow.dispatch", rename_all = "camelCase")]
     WorkflowDispatch {
+        /// Explicit caller constraint; retained across request retries/recovery.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        agent_target: Option<crate::WorkflowAgentTarget>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         retry_of: Option<String>,
@@ -216,6 +220,26 @@ pub enum Request {
         run_id: String,
         since: u64,
         limit: u32,
+    },
+    /// Read-only request-wide clocks, calls and frozen cost estimates.
+    #[serde(rename = "workflow.profile", rename_all = "camelCase")]
+    WorkflowProfile {
+        workspace_id: String,
+        run_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        offset: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        limit: Option<u32>,
+    },
+    /// Discovers views, or reads a file from the Run's immutable build.
+    #[serde(rename = "workflow.view", rename_all = "camelCase")]
+    WorkflowView {
+        workspace_id: String,
+        run_id: String,
+        #[serde(default)]
+        path: Option<String>,
     },
     /// Lists recent Runs for project-side Workflow analysis. This is a
     /// read-only projection; detailed structured messages remain Session-owned.
@@ -660,10 +684,7 @@ pub enum Request {
         effort_id: String,
     },
     #[serde(rename = "session.setFast", rename_all = "camelCase")]
-    SessionSetFast {
-        session_id: String,
-        fast: bool,
-    },
+    SessionSetFast { session_id: String, fast: bool },
     #[serde(rename = "session.setRuntimeAxis", rename_all = "camelCase")]
     SessionSetRuntimeAxis {
         session_id: String,
@@ -1110,6 +1131,8 @@ pub enum Reply {
     WorkflowBuild(WorkflowBuildReport),
     WorkflowRun(WorkflowRunStatus),
     WorkflowJournal(Vec<serde_json::Value>),
+    WorkflowProfile(serde_json::Value),
+    WorkflowView(serde_json::Value),
     WorkflowCheck(WorkflowCheckReport),
     WorkflowRuns(Vec<WorkflowRunStatus>),
     AgentSpaceBuilder(AgentSpaceBuilderReport),
