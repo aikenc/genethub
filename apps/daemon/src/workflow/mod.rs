@@ -928,6 +928,10 @@ struct RunRecord {
     workflow_id: String,
     #[serde(default)]
     dcg_digest: String,
+    /// The pinned build's project-relative file, derived from its frozen
+    /// executor binding. Reading old views must not consult editable sources.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    build_relative: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     activation_revision: Option<u64>,
     bundle_digest: String,
@@ -2309,6 +2313,12 @@ pub(crate) async fn dispatch(
     }
     // A later node may create a repository, or a conditional branch may never
     // use one. Validate its real Git boundary when acquiring that node's lease.
+    let build_relative = if builtin_recovery && candidate.source_files.is_empty() {
+        // The emergency recovery is synthesized, with no archived view files.
+        None
+    } else {
+        Some(candidate_snapshot_relative(&candidate)?)
+    };
     let now = now_ms();
     let executor_session = match executor_workspace.as_ref() {
         Some(executor) => Some(
@@ -2379,6 +2389,7 @@ pub(crate) async fn dispatch(
         parent_session_id: parent_session_id.to_string(),
         workflow_id: workflow_id.to_string(),
         dcg_digest: candidate.digest,
+        build_relative,
         activation_revision: if candidate_digest.is_some() {
             None
         } else {
@@ -4393,6 +4404,17 @@ fn persist_candidate(
 }
 
 fn load_run_candidate(runtime: &RuntimeStore, run: &RunRecord) -> Result<DcgCandidateRecord> {
+    if let Some(relative) = &run.build_relative {
+        let path = runtime.project_file(relative)?;
+        let candidate = load_candidate_file(&path, &run.dcg_digest)?;
+        if candidate.package.id != run.package_id
+            || candidate_snapshot_relative(&candidate)? != *relative
+        {
+            bail!("Workflow Run 构建路径与冻结的包身份不匹配");
+        }
+        return Ok(candidate);
+    }
+    // Runs written before the locator was added retain their legacy lookup.
     if run.package_id.is_empty() {
         return load_candidate(runtime, &run.dcg_digest);
     }
@@ -4407,15 +4429,20 @@ fn load_run_candidate(runtime: &RuntimeStore, run: &RunRecord) -> Result<DcgCand
 
 fn load_candidate(runtime: &RuntimeStore, digest: &str) -> Result<DcgCandidateRecord> {
     let path = candidate_path(runtime, digest, false)?;
-    let metadata = crate::config::sensitive_metadata(&path)
+    load_candidate_file(&path, digest)
+}
+
+fn load_candidate_file(path: &Path, digest: &str) -> Result<DcgCandidateRecord> {
+    candidate_hex(digest)?;
+    let metadata = crate::config::sensitive_metadata(path)
         .with_context(|| format!("DCG Candidate 不存在：{digest}"))?;
-    crate::config::reject_link_or_reparse(&path, &metadata)?;
+    crate::config::reject_link_or_reparse(path, &metadata)?;
     if !metadata.is_file() {
         bail!("DCG Candidate 不是普通文件：{}", path.display());
     }
     ensure_record_size("DCG Candidate", metadata.len(), MAX_CANDIDATE_RECORD_BYTES)?;
     let candidate: DcgCandidateRecord = serde_json::from_slice(
-        &fs::read(&path).with_context(|| format!("DCG Candidate 不存在：{digest}"))?,
+        &fs::read(path).with_context(|| format!("DCG Candidate 不存在：{digest}"))?,
     )
     .with_context(|| format!("读取 DCG Candidate：{}", path.display()))?;
     validate_candidate(&candidate)?;
@@ -4514,8 +4541,27 @@ fn dispatch_candidate(
             load_candidate(runtime, &activation.active_digest)?,
             Some(activation.revision),
         )),
-        None => Ok((compile_package(root, runtime.require_package()?)?, None)),
+        None => Ok((
+            persist_candidate(runtime, compile_package(root, runtime.require_package()?)?)?,
+            None,
+        )),
     }
+}
+
+fn candidate_snapshot_relative(candidate: &DcgCandidateRecord) -> Result<String> {
+    let path = Path::new(candidate.package.executor_path.as_deref().unwrap_or(""))
+        .join(".genethub/components/executor/candidates")
+        .join(format!("{}.json", candidate_hex(&candidate.digest)?));
+    path.components()
+        .map(|component| match component {
+            Component::Normal(part) => part
+                .to_str()
+                .map(str::to_owned)
+                .ok_or_else(|| anyhow!("Workflow 构建路径必须是 UTF-8")),
+            _ => Err(anyhow!("Workflow 构建路径必须是普通项目相对路径")),
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(|parts| parts.join("/"))
 }
 
 fn candidate_path(runtime: &RuntimeStore, digest: &str, create_parent: bool) -> Result<PathBuf> {
@@ -7997,6 +8043,7 @@ mod tests {
             parent_session_id: "s_root".into(),
             workflow_id: definition.id.clone(),
             dcg_digest: "sha256:dcg".into(),
+            build_relative: None,
             activation_revision: Some(1),
             bundle_digest: "sha256:test".into(),
             task_id: "task".into(),
@@ -8071,6 +8118,7 @@ mod tests {
             parent_session_id: "s_root".into(),
             workflow_id: "direct".into(),
             dcg_digest: "sha256:dcg".into(),
+            build_relative: None,
             activation_revision: Some(1),
             bundle_digest: "sha256:test".into(),
             task_id: "task".into(),
