@@ -10,7 +10,7 @@ import type {
   WorkspaceInfo,
 } from "@genehub/proto";
 
-import { defineJourney, type CaseContext } from "../../framework/public.ts";
+import { defineJourney, runGenetAsync, type CaseContext } from "../../framework/public.ts";
 
 const FIFTEEN_MINUTES_MS = 15 * 60 * 1_000;
 const TEN_MINUTES_MS = 10 * 60 * 1_000;
@@ -965,8 +965,14 @@ async function assertDelivery(
 
 async function dispose(fixture: ProjectFixture): Promise<void> {
   fixture.opened.client.close();
-  fixture.opened.daemon.stop();
-  await fixture.opened.mock.stop();
+  try {
+    // Keep the model endpoint responsive while the verified daemon drains.
+    const stopped = await runGenetAsync(fixture.opened.daemon.genet,
+      ["daemon", "stop"], fixture.opened.daemon.env);
+    if (stopped.code !== 0) throw new Error(`daemon stop failed: ${stopped.stderr || stopped.stdout}`);
+  } finally {
+    await fixture.opened.mock.stop();
+  }
 }
 
 defineJourney(

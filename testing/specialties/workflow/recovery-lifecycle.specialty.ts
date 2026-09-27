@@ -355,7 +355,15 @@ defineSpecialty({
       event.eventType === "pause.answered" && event.messageId === questionId).length === 1,
     "PM answer was missing or repeated in the committed journal");
 
-    await t.flows.main.sendPrompt(opened.client, pm, "CONTINUE_RECOVERY_LIFECYCLE");
+    // The workbench admits Human messages durably even while a workflow notice
+    // is being delivered. A legacy direct turn cannot provide that contract.
+    stage = "send business successor request";
+    const accepted = await opened.client.call({ type: "session.send", payload: {
+      sessionId: pm, messageId: `u_recovery_successor_${pm}`,
+      text: "CONTINUE_RECOVERY_LIFECYCLE", attachments: [],
+      artifactPreviewBaseUrl: null, continuesRound: null,
+    } });
+    t.assertions.assert(accepted?.type === "ack", "PM successor request was not durably accepted");
     stage = "wait for business successor";
     await t.tools.waitUntil(async () => {
       const runs = await history();
