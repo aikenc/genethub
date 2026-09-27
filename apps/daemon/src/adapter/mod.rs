@@ -509,7 +509,10 @@ pub async fn close_child(child: &Mutex<Option<crate::os_process::Child>>) -> Res
 async fn kill_tree_checked(child: &mut crate::os_process::Child) -> Result<()> {
     #[cfg(unix)]
     if let Some(pid) = child.id() {
-        crate::process::stop_tree(pid);
+        crate::process::end_own_tree(pid, || {
+            let _ = child.try_wait();
+        })
+        .await;
     }
     #[cfg(windows)]
     if let Some(pid) = child.id() {
@@ -613,6 +616,44 @@ mod tests {
         let message = stopped(crate::channel::AGENT_LABEL, &child, &said).await;
         assert!(message.contains("退出码 7"), "{message}");
         assert!(message.contains("日志"), "nowhere to look next: {message}");
+    }
+
+    /// An agent that honours `SIGTERM` is gone at once, but stays a zombie of
+    /// ours until reaped. Closing it must not wait out the grace for that.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn closing_an_agent_that_honours_sigterm_does_not_wait_out_the_grace() {
+        let mut command = crate::os_process::Command::new("sleep");
+        command.arg("30");
+        owned_child(&mut command);
+        let child = Mutex::new(Some(command.spawn().expect("sleep runs")));
+
+        let began = std::time::Instant::now();
+        close_child(&child).await.expect("the agent is closed");
+        assert!(
+            began.elapsed() < crate::process::GRACE,
+            "closing took {:?}",
+            began.elapsed()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn closing_an_agent_that_ignores_sigterm_still_ends_its_group() {
+        let mut command = crate::os_process::Command::new("sh");
+        command.arg("-c").arg("trap '' TERM; sleep 30 & wait");
+        owned_child(&mut command);
+        let spawned = command.spawn().expect("sh runs");
+        let group = spawned.id().expect("a live pid") as libc::pid_t;
+        let child = Mutex::new(Some(spawned));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        close_child(&child).await.expect("the agent is closed");
+        assert_ne!(
+            unsafe { libc::killpg(group, 0) },
+            0,
+            "the group outlived its close"
+        );
     }
 
     /// Guarded at the source level because half of what is being guarded

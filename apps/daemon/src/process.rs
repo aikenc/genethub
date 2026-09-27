@@ -184,6 +184,43 @@ pub async fn end_tree(pid: u32) {
     wait_for_tree_exit(pid, tokio::time::Instant::now() + GRACE).await;
 }
 
+/// [`end_tree`] for a group leader this daemon started and still holds.
+///
+/// A leader that answers `SIGTERM` becomes our zombie, and a zombie still
+/// counts as a member of its group. `reap` collects it on every look, or each
+/// clean stop would wait out the whole grace and then the kill after it. The
+/// group number stays the leader's pid while any member lives, so it is the
+/// only thing looked at once the leader is reaped.
+#[cfg(unix)]
+pub async fn end_own_tree(pid: u32, mut reap: impl FnMut()) {
+    let group_exists = || unsafe { libc::killpg(pid as libc::pid_t, 0) == 0 };
+    signal_group(pid, libc::SIGTERM);
+    let deadline = tokio::time::Instant::now() + GRACE;
+    loop {
+        reap();
+        if !group_exists() {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(GRACE_POLL).await;
+    }
+    tracing::debug!(
+        pid,
+        "a process ignored the request to finish and was stopped"
+    );
+    signal_group(pid, libc::SIGKILL);
+    let deadline = tokio::time::Instant::now() + GRACE;
+    while tokio::time::Instant::now() < deadline {
+        reap();
+        if !group_exists() {
+            return;
+        }
+        tokio::time::sleep(GRACE_POLL).await;
+    }
+}
+
 async fn wait_for_tree_exit(pid: u32, deadline: tokio::time::Instant) {
     while tokio::time::Instant::now() < deadline && tree_exists(pid) {
         tokio::time::sleep(GRACE_POLL).await;
