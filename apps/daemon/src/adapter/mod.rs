@@ -509,7 +509,7 @@ pub async fn close_child(child: &Mutex<Option<crate::os_process::Child>>) -> Res
 async fn kill_tree_checked(child: &mut crate::os_process::Child) -> Result<()> {
     #[cfg(unix)]
     if let Some(pid) = child.id() {
-        crate::process::stop_tree(pid);
+        crate::process::end_tree(pid).await;
     }
     #[cfg(windows)]
     if let Some(pid) = child.id() {
