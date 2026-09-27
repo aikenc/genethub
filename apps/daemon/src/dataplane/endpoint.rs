@@ -853,7 +853,12 @@ fn dispatch(
             genehub_proto::INITIAL_STREAM_WINDOW_BYTES as usize,
         ));
         let credit = Credit::new(frame.value)?;
-        let pace = (head.method == "asset.preview").then(|| {
+        // Only the Fabric uplink is one socket shared by every relayed client.
+        // Direct and RTC peers each have their own carrier, so pacing them
+        // only cuts a high-BDP preview to the start window.
+        let paced = head.method == "asset.preview"
+            && matches!(services.carrier_kind, CarrierKind::Fabric);
+        let pace = paced.then(|| {
             Arc::new(super::uplink_pace::PaceShare::new(
                 services.state.uplink_pace.clone(),
                 genehub_proto::INITIAL_STREAM_WINDOW_BYTES as u64,

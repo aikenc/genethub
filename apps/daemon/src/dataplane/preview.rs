@@ -110,7 +110,6 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
         write_actor_send_us = stats.write_timings.actor_send_us,
         write_wake_us = stats.write_timings.wake_us,
         write_frames = stats.write_timings.frames,
-        yield_us = stats.yield_us,
         finish_us = stats.finish_us,
         chunks = stats.chunks,
         "preview completed"
@@ -125,7 +124,6 @@ struct PreviewSendStats {
     read_us: u64,
     hash_us: u64,
     write_us: u64,
-    yield_us: u64,
     finish_us: u64,
     chunks: u64,
     write_timings: WriteTimings,
@@ -182,9 +180,10 @@ async fn send_file(stream: &mut ServerStream, file: PreviewFile) -> Result<Previ
             stream.write(&step[..read]).await?;
         }
         stats.write_us += began.elapsed().as_micros() as u64;
-        let began = Instant::now();
-        crate::blocking::breathe().await;
-        stats.yield_us += began.elapsed().as_micros() as u64;
+        // `write` already waits on the socket, so another yield here only
+        // inserts a scheduler hop between every 64KiB. On a 200ms high-BDP
+        // link those hops dominate the transfer and the protocol window never
+        // reaches the shaped rate.
     }
     let streamed_digest: [u8; 32] = hasher.finalize().into();
     if sent != expected_bytes || (!snapshot && streamed_digest != expected_digest) {
