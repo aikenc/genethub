@@ -2216,10 +2216,29 @@ async fn handle_control_request(
             .map(|(item_id, ..)| item_id.clone()),
         None => None,
     };
+    let response = json!({
+        "type": "control_response",
+        "response": {
+            "request_id": request_id,
+            "subtype": "success",
+            "response": { "behavior": "deny", "message": "paused for Human", "interrupt": true },
+        },
+    });
+    {
+        let mut stdin = control.stdin.lock().await;
+        if let Err(error) = write_json_line(&mut stdin, &response).await {
+            tracing::warn!("failed to pause a claude tool call for Human: {error}");
+        }
+    }
+    let kind = if tool_name == "ExitPlanMode" {
+        PermissionRequestKind::PlanApproval
+    } else {
+        PermissionRequestKind::Permission
+    };
     let _ = events.send(SessionEvent::PermissionRequested {
         request: PermissionRequest {
             id: request_id.to_string(),
-            kind: PermissionRequestKind::Permission,
+            kind,
             title: format!("Allow {tool_name}?"),
             detail: request
                 .get("description")
@@ -3088,6 +3107,33 @@ mod tests {
             option.id == "allow_always" && option.kind == PermissionOptionKind::AllowAlways
         }));
 
+        let _ = child.start_kill();
+    }
+
+    #[tokio::test]
+    async fn a_tool_prompt_denies_the_cli_while_the_card_is_shown() {
+        let mut child = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawning `cat` as a fake stdin sink");
+        let stdin = Arc::new(Mutex::new(child.stdin.take().expect("stdin was piped")));
+        let mut stdout = BufReader::new(child.stdout.take().expect("stdout was piped"));
+        let control = ControlState {
+            mode: Arc::new(Mutex::new(MODE_DEFAULT.to_string())),
+            stdin,
+        };
+        let turn = Arc::new(Mutex::new(state()));
+        let (tx, mut rx) = crate::adapter::EventTx::channel(8);
+        handle_control_request(&can_use_tool("req1", "Bash"), &turn, &tx, &control).await;
+        let mut line = String::new();
+        stdout.read_line(&mut line).await.expect("the deny reply");
+        let reply: Value = serde_json::from_str(line.trim()).expect("json reply");
+        assert_eq!(reply["response"]["response"]["behavior"], "deny");
+        assert_eq!(reply["response"]["response"]["interrupt"], true);
+        assert!(drain(&mut rx).iter().any(|event| {
+            matches!(event, SessionEvent::PermissionRequested { .. })
+        }));
         let _ = child.start_kill();
     }
 

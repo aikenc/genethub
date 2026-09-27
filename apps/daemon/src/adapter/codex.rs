@@ -1686,10 +1686,20 @@ async fn translate_ask(asked: Asked<'_>) {
             } else {
                 format!("Run `{command}`?")
             });
+            answer(
+                stdin,
+                json!({ "jsonrpc": "2.0", "id": id, "result": { "decision": "cancel" } }),
+            )
+            .await;
         }
         "item/fileChange/requestApproval" => {
             asks.lock().await.insert(request_id.clone());
             ask("Apply file changes?".to_string());
+            answer(
+                stdin,
+                json!({ "jsonrpc": "2.0", "id": id, "result": { "decision": "cancel" } }),
+            )
+            .await;
         }
         // Both names: the second is what builds before 0.143 called it.
         "item/tool/requestUserInput" | "tool/requestUserInput" => {
@@ -1713,6 +1723,11 @@ async fn translate_ask(asked: Asked<'_>) {
                             questions: Some(parsed.iter().map(Question::interaction).collect()),
                         },
                     });
+                    answer(
+                        stdin,
+                        json!({ "jsonrpc": "2.0", "id": id, "result": { "answers": {} } }),
+                    )
+                    .await;
                 }
                 false => {
                     answer(

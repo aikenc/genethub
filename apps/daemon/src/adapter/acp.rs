@@ -1542,6 +1542,15 @@ async fn read_loop(
             };
             interactions.lock().await.push(id.clone());
             translate_permission(&id, &params, &events);
+            let response = json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": { "outcome": { "outcome": "cancelled" } },
+            });
+            let mut input = stdin.lock().await;
+            if let Err(error) = write_json_line(&mut input, &response).await {
+                tracing::warn!("could not cancel an ACP permission request: {error}");
+            }
             continue;
         }
         let mut state = turn.lock().await;
