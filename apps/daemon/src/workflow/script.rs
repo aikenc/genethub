@@ -145,6 +145,22 @@ pub(crate) fn resolve_script(package_root: &Path, declared: &str) -> Result<Path
     }
 }
 
+/// Native interpreters need host paths. In particular, Git Bash and Node's
+/// module loader do not consistently accept Windows canonicalize prefixes.
+fn interpreter_script_path(script: &Path) -> String {
+    let host = crate::guest_paths::host_form(&script.to_string_lossy()).into_owned();
+    if crate::guest_paths::windows_host() {
+        let path = if let Some(unc) = host.strip_prefix(r"\\?\UNC\") {
+            format!("//{unc}")
+        } else {
+            host.strip_prefix(r"\\?\").unwrap_or(&host).to_string()
+        };
+        path.replace('\\', "/")
+    } else {
+        host
+    }
+}
+
 /// Runs one script and returns its parsed result.
 ///
 /// `task_cwd` is the Run's own working directory. Nothing here confines the
@@ -167,7 +183,7 @@ pub(crate) async fn run(
     let (program, mut arguments) = match definition.interpreter.as_deref() {
         Some(interpreter) => (
             PathBuf::from(interpreter),
-            vec![script.display().to_string()],
+            vec![interpreter_script_path(script)],
         ),
         None => (script.to_path_buf(), Vec::new()),
     };

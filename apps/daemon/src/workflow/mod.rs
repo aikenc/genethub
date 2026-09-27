@@ -811,11 +811,26 @@ impl RuntimeStore {
     fn executor_directory(&self, relative: &Path, create: bool) -> Result<PathBuf> {
         let executor_root = match self.package_id.as_deref() {
             Some(id) => {
-                let package = package::load(&self.project_root, id)?;
-                package
-                    .executor_relative()?
-                    .map(|path| self.project_root.join(path))
-                    .unwrap_or_else(|| self.project_root.clone())
+                match package::load(&self.project_root, id) {
+                    Ok(package) => package
+                        .executor_relative()?
+                        .map(|path| self.project_root.join(path))
+                        .unwrap_or_else(|| self.project_root.clone()),
+                    // A definition-only package stores its frozen activation at
+                    // the project executor. Removing its editable source must
+                    // not disable that already validated build.
+                    Err(_)
+                        if self
+                            .project_root
+                            .join(".genethub/components/executor")
+                            .join(self.activation_scope()?)
+                            .join("activation.json")
+                            .is_file() =>
+                    {
+                        self.project_root.clone()
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             None => self.project_root.clone(),
         };
@@ -1804,8 +1819,10 @@ fn pm_snapshot_relative(runtime: &RuntimeStore, request_id: &str, run_id: &str) 
     Ok(snapshot
         .strip_prefix(&runtime.project_root)
         .expect("PM request is below the project root")
-        .to_string_lossy()
-        .to_string())
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/"))
 }
 
 fn capture_candidate(

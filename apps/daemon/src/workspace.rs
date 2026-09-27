@@ -680,6 +680,10 @@ impl Workspaces {
         // Workspace mutations consistently acquire entries before config.
         // Preserve that order here so an open/remove cannot deadlock against
         // a concurrent Workflow dispatch.
+        let selected_root = selected_root
+            .map(Path::canonicalize)
+            .transpose()
+            .context("读取选定的 Workflow executor 目录")?;
         let entries = self.entries.read().await;
         let config = self.config.read().await;
         let project = match config
@@ -698,7 +702,7 @@ impl Workspaces {
                 space.parent_workspace_id.as_deref() == Some(project_workspace_id)
                     && crate::agent_space::has_enabled_component(space, component_id)
                     && space.lifecycle != "ephemeral"
-                    && selected_root.is_none_or(|root| {
+                    && selected_root.as_deref().is_none_or(|root| {
                         entries.get(&space.workspace_id).is_some_and(|entry| {
                             entry.root.canonicalize().ok().as_deref() == Some(root)
                         })
@@ -712,7 +716,7 @@ impl Workspaces {
             // package has named the product directory it expects.
             anyhow::bail!(
                 "{}; found {}",
-                match selected_root {
+                match selected_root.as_deref() {
                     Some(root) => format!(
                         "no single reusable {component_id} AgentSpace at {}",
                         root.display()

@@ -655,16 +655,23 @@ pub(crate) fn resolve_reference(
     let target = target
         .canonicalize()
         .with_context(|| format!("读取 Skill Provider 目录：{}", target.display()))?;
+    // The future Space may not exist yet. Keep its relative location before
+    // canonicalizing the existing project, then compare both paths in the
+    // same namespace (macOS /var aliases and Windows verbatim prefixes).
+    let space_relative = space_directory
+        .strip_prefix(project_root)
+        .context("Skill Provider 的 Space 必须位于项目根目录下")?;
     let project_root = project_root
         .canonicalize()
         .with_context(|| format!("读取项目根目录：{}", project_root.display()))?;
+    let space_directory = project_root.join(space_relative);
     if !target.starts_with(&project_root) {
         bail!(
             "Workflow 包 {} 的 Skill Provider 越出项目根目录：{path}",
             package.id
         );
     }
-    relative_from(space_directory, &target)
+    relative_from(&space_directory, &target)
 }
 
 /// `../..`-style path from the product Space directory to a provider root.
