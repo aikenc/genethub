@@ -39,6 +39,7 @@ defineSpecialty({
   const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
   let stage = "setup";
   let reviewerId = "";
+  let pmId = "";
   let questionId = "";
   try {
     await t.flows.main.configureMockProvider(opened.client, opened.mock);
@@ -156,6 +157,7 @@ defineSpecialty({
     opened.mock.script(...Array.from({ length: 80 }, () => ({ respond })));
 
     const pm = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
+    pmId = pm;
     const history = async (): Promise<WorkflowRunStatus[]> => {
       const reply = await opened.client.call({ type: "workflow.history", payload: { workspaceId: opened.workspaceId, limit: 20 } });
       if (reply?.type !== "workflowRuns") throw new Error("Workflow history unavailable");
@@ -290,7 +292,8 @@ defineSpecialty({
       const runs = await history();
       const pending = await snapshot(reviewer);
       return runs.length === 2 && runs.some(run => run.id === recovery!.id)
-        && pending.pendingPermissions.some(request => request.id === questionId);
+        && pending.pendingPermissions.some(request => request.id === questionId)
+        && (await snapshot(pm)).summary.status === "idle";
     }, 30_000);
     await t.flows.main.sendPrompt(opened.client, pm, "APPROVE_RECOVERY_REPAIR");
     stage = "wait for WM and acceptance";
@@ -394,12 +397,15 @@ defineSpecialty({
   } catch (error) {
     const reply = await opened.client.call({ type: "workflow.history", payload: { workspaceId: opened.workspaceId, limit: 20 } }).catch(() => null);
     const reviewerReply = reviewerId ? await opened.client.call({ type: "session.get", payload: { sessionId: reviewerId } }).catch(() => null) : null;
+    const pmReply = pmId ? await opened.client.call({ type: "session.get", payload: { sessionId: pmId } }).catch(() => null) : null;
+    const pmState = pmReply?.type === "snapshot" ? { status: pmReply.data.summary.status,
+      pending: pmReply.data.pendingPermissions } : pmReply;
     const runs = reply?.type === "workflowRuns" ? reply.data.map(run => ({ id: run.id, taskId: run.taskId, status: run.status,
       reason: run.reason, nodes: run.nodes.map(node => ({ id: node.id, status: node.status, sessionId: node.sessionId })) })) : reply;
     const reviewerState = reviewerReply?.type === "snapshot" ? { status: reviewerReply.data.summary.status,
       pending: reviewerReply.data.pendingPermissions, items: reviewerReply.data.items.slice(-15) } : reviewerReply;
     const roleCalls = opened.mock.requests.filter(request => JSON.stringify(request).includes("只读复查被处理的 Run")).length;
-    throw new Error(`${stage}: ${error}; runs=${JSON.stringify(runs).slice(0, 3500)}; reviewer=${JSON.stringify(reviewerState).slice(0, 6500)}; roleCalls=${roleCalls}`);
+    throw new Error(`${stage}: ${error}; runs=${JSON.stringify(runs).slice(0, 3500)}; pm=${JSON.stringify(pmState).slice(0, 2000)}; reviewer=${JSON.stringify(reviewerState).slice(0, 6500)}; roleCalls=${roleCalls}`);
   } finally {
     opened.client.close();
     opened.daemon.stop();
