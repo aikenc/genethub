@@ -361,6 +361,8 @@ struct TurnState {
     calls: HashMap<String, (String, Value)>,
     failure: Option<TurnError>,
     canceled: bool,
+    /// Command id written to the agent and not yet accepted or rejected.
+    pending_id: Option<String>,
 }
 
 impl TurnState {
@@ -404,13 +406,7 @@ impl AgentSession for GenetSession {
 
     async fn send(&self, input: PromptInput) -> Result<String> {
         let turn_id = format!("turn_{}", uuid::Uuid::new_v4().simple());
-        {
-            let mut turn = self.turn.lock().await;
-            *turn = TurnState {
-                id: Some(turn_id.clone()),
-                ..TurnState::default()
-            };
-        }
+        self.turn.lock().await.pending_id = Some(turn_id.clone());
         // A pipe that is already closed fails with "Broken pipe", which says
         // nothing about why the agent is gone. What it said on the way out does.
         let command = if input.text.trim() == "/compact" && input.attachments.is_empty() {
@@ -429,7 +425,7 @@ impl AgentSession for GenetSession {
         if let Err(broken) = self.command(command).await {
             let why = super::stopped(crate::channel::AGENT_LABEL, &self.child, &self.said).await;
             tracing::warn!("{why} (writing the prompt failed: {broken})");
-            self.turn.lock().await.id = None;
+            self.turn.lock().await.pending_id = None;
             anyhow::bail!(why);
         }
         Ok(turn_id)
@@ -447,14 +443,16 @@ impl AgentSession for GenetSession {
         // Tools own separate process groups. Killing only the Agent's group
         // first can orphan them; its abort protocol drops those tool futures
         // before agent_end. Keep ownership if that acknowledgement is missing.
-        if self.turn.lock().await.id.is_some() {
+        if self.turn.lock().await.id.is_some() || self.turn.lock().await.pending_id.is_some() {
             tokio::time::timeout(std::time::Duration::from_secs(2), async {
                 self.interrupt().await?;
                 loop {
                     let notified = self.turn_ended.notified();
                     tokio::pin!(notified);
                     notified.as_mut().enable();
-                    if self.turn.lock().await.id.is_none() {
+                    if self.turn.lock().await.id.is_none()
+                        && self.turn.lock().await.pending_id.is_none()
+                    {
                         return Ok::<(), anyhow::Error>(());
                     }
                     notified.await;
@@ -547,13 +545,16 @@ async fn translate_stream(
     let why = super::stopped(crate::channel::AGENT_LABEL, &child, &said).await;
     tracing::warn!("{why}");
     let mut state = turn.lock().await;
-    if let Some(turn_id) = state.id.take() {
+    let failed = [state.id.take(), state.pending_id.take()];
+    if failed.iter().any(Option::is_some) {
         turn_ended.notify_waiters();
+    }
+    for turn_id in failed.into_iter().flatten() {
         let _ = events.send(SessionEvent::TurnFailed {
             turn_id,
             error: TurnError {
                 code: TurnErrorCode::AgentCrashed,
-                message: why,
+                message: why.clone(),
             },
         });
     }
@@ -626,6 +627,11 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &crate::adapter
         if let Some(inner) = frame.get("assistantMessageEvent") {
             translate_frame(inner, state, events);
         }
+        return;
+    }
+
+    if kind == "response" {
+        apply_command_response(frame, state, events);
         return;
     }
 
@@ -908,13 +914,61 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &crate::adapter
     }
 }
 
+fn apply_command_response(frame: &Value, state: &mut TurnState, events: &crate::adapter::EventTx) {
+    let response_id = frame.get("id").and_then(Value::as_str);
+    if response_id.is_none() || response_id != state.pending_id.as_deref() {
+        return;
+    }
+    let Some(pending) = state.pending_id.take() else {
+        return;
+    };
+    let success = frame.get("success").and_then(Value::as_bool).unwrap_or(false);
+    if success {
+        if state.id.is_none() {
+            state.id = Some(pending);
+        } else {
+            let _ = events.send(SessionEvent::TurnFailed {
+                turn_id: pending,
+                error: TurnError {
+                    code: TurnErrorCode::Internal,
+                    message: "agent accepted a command while a turn is still open".into(),
+                },
+            });
+        }
+        return;
+    }
+    let message = frame
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or("agent rejected the command");
+    let _ = events.send(SessionEvent::TurnFailed {
+        turn_id: pending,
+        error: classify_failure_frame(frame, message),
+    });
+}
+
 /// Turns an agent-side failure message into a code the frontend can act on.
 ///
-/// The message is matched rather than a status code because the agent reports
-/// provider failures as prose; misclassifying only costs a less specific icon,
-/// whereas dropping the distinction entirely would leave "no API key" looking
-/// like a server outage.
+/// A structured `errorKind` wins. Older agents still send prose, and matching
+/// that text only chooses a less specific icon when the phrase is unfamiliar.
 fn classify_failure(message: &str) -> TurnError {
+    classify_failure_frame(&Value::Null, message)
+}
+
+fn classify_failure_frame(frame: &Value, message: &str) -> TurnError {
+    if let Some(kind) = frame.get("errorKind").and_then(Value::as_str) {
+        let code = match kind {
+            "credentials" => TurnErrorCode::MissingCredentials,
+            "rate_limit" => TurnErrorCode::RateLimited,
+            "timeout" => TurnErrorCode::Timeout,
+            "canceled" => TurnErrorCode::Canceled,
+            _ => TurnErrorCode::Upstream,
+        };
+        return TurnError {
+            code,
+            message: message.to_string(),
+        };
+    }
     let lower = message.to_lowercase();
     let code = if lower.contains("no model configured")
         || lower.contains("api key")
@@ -1021,7 +1075,11 @@ fn detail_from_result(
         "bash" => ToolCallDetail::Shell {
             command: arg_str(arguments, "command"),
             output: text.clone(),
-            exit_code: exit_code_from(&text, is_error),
+            exit_code: details
+                .get("exitCode")
+                .and_then(Value::as_i64)
+                .and_then(|code| i32::try_from(code).ok())
+                .or_else(|| exit_code_from(&text, is_error)),
         },
         "read" => ToolCallDetail::Read {
             path: arg_str(arguments, "path"),
@@ -1302,6 +1360,69 @@ mod tests {
     }
 
     #[test]
+    fn a_rejected_command_leaves_the_open_turn_in_place() {
+        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
+        let mut state = state_with_turn();
+        state.pending_id = Some("turn_b".into());
+        translate_frame(
+            &json!({
+                "type": "response",
+                "id": "turn_b",
+                "command": "prompt",
+                "success": false,
+                "error": "agent is streaming; queueing is not supported",
+                "errorKind": "busy",
+                "status": 409,
+                "retryable": true
+            }),
+            &mut state,
+            &tx,
+        );
+        assert_eq!(state.id.as_deref(), Some("t1"));
+        assert!(state.pending_id.is_none());
+        match drain(&mut rx).as_slice() {
+            [SessionEvent::TurnFailed { turn_id, error }] => {
+                assert_eq!(turn_id, "turn_b");
+                assert_eq!(error.code, TurnErrorCode::Upstream);
+            }
+            other => panic!("unexpected events: {other:?}"),
+        }
+        translate_frame(&json!({ "type": "agent_end" }), &mut state, &tx);
+        match drain(&mut rx).as_slice() {
+            [SessionEvent::TurnCompleted { turn_id, .. }] => assert_eq!(turn_id, "t1"),
+            other => panic!("unexpected events: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_prompt_turn_opens_only_after_the_agent_accepts() {
+        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
+        let mut state = TurnState {
+            pending_id: Some("turn_a".into()),
+            ..TurnState::default()
+        };
+        translate_frame(&json!({ "type": "agent_start" }), &mut state, &tx);
+        assert!(drain(&mut rx).is_empty());
+        assert!(state.id.is_none());
+        translate_frame(
+            &json!({
+                "type": "response",
+                "id": "turn_a",
+                "command": "prompt",
+                "success": true
+            }),
+            &mut state,
+            &tx,
+        );
+        assert_eq!(state.id.as_deref(), Some("turn_a"));
+        translate_frame(&json!({ "type": "agent_start" }), &mut state, &tx);
+        match drain(&mut rx).as_slice() {
+            [SessionEvent::TurnStarted { turn_id, .. }] => assert_eq!(turn_id, "turn_a"),
+            other => panic!("unexpected events: {other:?}"),
+        }
+    }
+
+    #[test]
     fn built_in_user_input_becomes_a_structured_stopped_interaction() {
         let (tx, mut rx) = crate::adapter::EventTx::channel(64);
         let mut state = state_with_turn();
@@ -1528,6 +1649,37 @@ mod tests {
                     other => panic!("unexpected detail {other:?}"),
                 }
             }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_command_exit_code_on_the_result_wins_over_the_prose() {
+        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
+        let mut state = state_with_turn();
+        translate_frame(
+            &update(json!({"type": "toolcall_end", "toolCall": {
+                "id": "c", "name": "bash", "arguments": {"command": "false"}
+            }})),
+            &mut state,
+            &tx,
+        );
+        translate_frame(
+            &json!({"type": "tool_execution_end", "toolCallId": "c", "isError": true,
+                    "result": {"content": [{"type": "text", "text": "Command exited with code 9"}],
+                               "details": {"exitCode": 3}}}),
+            &mut state,
+            &tx,
+        );
+        let events = drain(&mut rx);
+        match events.last().unwrap() {
+            SessionEvent::Item {
+                item: TimelineItem::ToolCall { detail, .. },
+                ..
+            } => match detail {
+                ToolCallDetail::Shell { exit_code, .. } => assert_eq!(*exit_code, Some(3)),
+                other => panic!("unexpected detail {other:?}"),
+            },
             other => panic!("unexpected {other:?}"),
         }
     }

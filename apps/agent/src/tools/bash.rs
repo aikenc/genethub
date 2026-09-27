@@ -69,10 +69,14 @@ pub async fn run(args: &Value, cwd: &Path) -> ToolResult {
 
     match output.status.code() {
         Some(0) => finish(text, &truncation, full_output_path),
-        Some(code) => ToolResult::error(append_status(
-            &text,
-            &format!("Command exited with code {code}"),
-        )),
+        Some(code) => {
+            let mut result = ToolResult::error(append_status(
+                &text,
+                &format!("Command exited with code {code}"),
+            ));
+            result.details = Some(json!({ "exitCode": code }));
+            result
+        }
         // Killed by a signal: no exit code to report.
         None => ToolResult::error(append_status(&text, "Command terminated by signal")),
     }

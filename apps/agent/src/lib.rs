@@ -29,7 +29,7 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
-use protocol::{error_response, response, Command, Message, Usage, THINKING_LEVELS};
+use protocol::{error_response, error_response_with, response, Command, Message, Usage, THINKING_LEVELS};
 use session::Session;
 use state::State;
 
@@ -145,11 +145,14 @@ async fn handle(state: &Arc<Mutex<State>>, command: Command) {
 
             let busy = { state.lock().await.streaming };
             if busy {
-                emitter.send(error_response(
-                    id,
-                    kind,
-                    "agent is streaming; queueing is not supported",
-                ));
+            emitter.send(error_response_with(
+                id,
+                kind,
+                "agent is streaming; queueing is not supported",
+                "busy",
+                Some(409),
+                true,
+            ));
                 return;
             }
 
@@ -270,7 +273,14 @@ async fn handle(state: &Arc<Mutex<State>>, command: Command) {
         "compact" => {
             let busy = { state.lock().await.streaming };
             if busy {
-                emitter.send(error_response(id, kind, "agent is already running"));
+                emitter.send(error_response_with(
+                    id,
+                    kind,
+                    "agent is already running",
+                    "busy",
+                    Some(409),
+                    true,
+                ));
                 return;
             }
             {

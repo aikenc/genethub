@@ -277,6 +277,23 @@ pub fn error_response(id: Option<&str>, command: &str, error: impl Into<String>)
     frame
 }
 
+pub fn error_response_with(
+    id: Option<&str>,
+    command: &str,
+    error: impl Into<String>,
+    kind: &str,
+    status: Option<u16>,
+    retryable: bool,
+) -> Value {
+    let mut frame = error_response(id, command, error);
+    frame["errorKind"] = json!(kind);
+    if let Some(status) = status {
+        frame["status"] = json!(status);
+    }
+    frame["retryable"] = json!(retryable);
+    frame
+}
+
 /// `AgentToolResult`: what rides on `tool_execution_end.result`. `details` is
 /// omitted rather than nulled when a tool has nothing to report.
 pub fn tool_result_value(text: &str, details: Option<&Value>) -> Value {
