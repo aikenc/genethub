@@ -464,13 +464,12 @@ pub(super) fn builtin_bundle() -> Result<super::Bundle> {
     super::validate_definition(&definition)?;
     validate_contract(&definition)?;
     let mut roles = std::collections::BTreeMap::new();
-    for (id, prompt, evidence_only) in [
-        ("recovery-reviewer", "只读复查这条用户需求及其 Run，包括执行已 completed 但 PM 尚无交付决定的情形。先用 workflow get 读取 requirement、requestBudget 和结果；按 requestRunId 读取根 Run，再用 parentSessionId、originalMessageId 核对原始用户需求与后续约束，不能只检查最新子任务提示词；原目标缺失时保留未结束并报告不确定；currentRunAdmitted/currentRunCanExecute 与 remainingRuns 的含义不同，remainingRuns=0 不会撤回当前 Run 的准入。用 workflow journal 读取事件，再核对 Session 历史和最近的恢复总结。完成报告后，必须向控制者 PM 提出带 repair、resume、successor、human、cancel 五个选项的暂停点并等待答复；按答复用同名 outcome 提交。repair 需写明修复标准；被处理 Run 仍为 recoverable 时可用 workflow recover 原 Session 续办，执行已结束或 blocked 时，先交 PM 判断是否交付；仅需进一步执行时 resume 应由 PM 用 workflow dispatch --retry-of <被处理 Run ID> 以当前定义建立同目标后继；successor 可在激活新定义后使用同一后继命令。human/cancel 必须带具体原因，不得自行宣告用户需求完成，也不得把反馈卡答完或 PM 输入 handled 当作交付。PM 必须明确决定 workflow deliver、继续执行或真实人工待办；业务追加额度用 workflow human --kind a，恢复追加额度用 c，缩减目标用 b，安装/登录用 e，反馈 d 不能代替预算授权。", true),
-        ("recovery-manager", "依据 PM 对复查建议的决定修复 Workflow。记录修复前后 Candidate digest，执行相关验证；缺少授权时提出暂停点，不能自行激活恢复流程变更。", false),
-        ("recovery-acceptor", "只读验收 WM 的修复。读取执行日志、变更和测试证据；通过时给 PM 明确的 successor 建议并提交 verdict；不通过时用 changesRequested 和原因提出返工。", true),
+    for (id, prompt) in [
+        ("recovery-reviewer", "只读复查这条用户需求及其 Run，包括执行已 completed 但 PM 尚无交付决定的情形。先用 workflow get 读取 requirement、requestBudget 和结果；按 requestRunId 读取根 Run，再用 parentSessionId、originalMessageId 核对原始用户需求与后续约束，不能只检查最新子任务提示词；原目标缺失时保留未结束并报告不确定；currentRunAdmitted/currentRunCanExecute 与 remainingRuns 的含义不同，remainingRuns=0 不会撤回当前 Run 的准入。用 workflow journal 读取事件，再核对 Session 历史和最近的恢复总结。完成报告后，必须向控制者 PM 提出带 repair、resume、successor、human、cancel 五个选项的暂停点并等待答复；按答复用同名 outcome 提交。repair 需写明修复标准；被处理 Run 仍为 recoverable 时可用 workflow recover 原 Session 续办，执行已结束或 blocked 时，先交 PM 判断是否交付；仅需进一步执行时 resume 应由 PM 用 workflow dispatch --retry-of <被处理 Run ID> 以当前定义建立同目标后继；successor 可在激活新定义后使用同一后继命令。human/cancel 必须带具体原因，不得自行宣告用户需求完成，也不得把反馈卡答完或 PM 输入 handled 当作交付。PM 必须明确决定 workflow deliver、继续执行或真实人工待办；业务追加额度用 workflow human --kind a，恢复追加额度用 c，缩减目标用 b，安装/登录用 e，反馈 d 不能代替预算授权。"),
+        ("recovery-manager", "依据 PM 对复查建议的决定修复 Workflow。记录修复前后 Candidate digest，执行相关验证；缺少授权时提出暂停点，不能自行激活恢复流程变更。"),
+        ("recovery-acceptor", "只读验收 WM 的修复。读取执行日志、变更和测试证据；通过时给 PM 明确的 successor 建议并提交 verdict；不通过时用 changesRequested 和原因提出返工。"),
     ] {
         roles.insert(id.to_string(), super::RoleSnapshot {
-            evidence_only,
             schema: super::ROLE_SCHEMA.into(), id: id.into(), capability: None,
             tags: vec![crate::agent_routing::TAG_PRO.into()], agent_id: None,
             model_id: None, mode_id: None, runtime_values: Default::default(),

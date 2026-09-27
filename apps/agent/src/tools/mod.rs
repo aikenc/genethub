@@ -4,7 +4,6 @@
 
 mod bash;
 mod diff;
-pub(crate) mod evidence;
 mod fs_tools;
 mod media;
 mod search;
@@ -248,11 +247,6 @@ pub fn definitions() -> Vec<Value> {
             }
         }),
     ];
-    if evidence::enabled() {
-        definitions
-            .retain(|tool| matches!(tool["name"].as_str(), Some("read" | "ls" | "read_media" | "request_user_input")));
-        definitions.push(evidence::definition());
-    }
     definitions
 }
 
@@ -263,17 +257,6 @@ pub(crate) fn media_attachment_detail_key() -> &'static str {
 }
 
 pub async fn execute(name: &str, args: &Value, cwd: &Path) -> ToolResult {
-    if evidence::enabled() {
-        match name {
-            "genet" => return evidence::run(args, cwd).await,
-            "read" | "ls" | "read_media" => {
-                if let Err(error) = evidence::check_path(args, cwd) {
-                    return ToolResult::error(error);
-                }
-            }
-            _ => return ToolResult::error("tool is unavailable to evidence-only analysis"),
-        }
-    }
     match name {
         "read" => fs_tools::read(args, cwd),
         "read_media" => media::read(args, cwd),

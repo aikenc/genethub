@@ -441,22 +441,20 @@ if(result.status===0)throw Error('stale Builder plan applied');`;
     }
     if (managerPromptPath && body.includes("You are the workflow-reviewer specialist")) {
       const stage = qualityStage++;
-      if (stage === 0) return { tool: { name: "bash", arguments: { command: `touch ${shellArg(path.join(projectRoot, "review-shell-escape"))}` } } };
-      if (stage === 1) return { tool: { name: "write", arguments: { path: path.join(projectRoot, "review-write-escape"), content: "unauthorized" } } };
-      if (stage === 2) return { tool: { name: "genet", arguments: { args: ["session", "context", "s_outside_scope"] } } };
+      const cli = (args: string[]) => ({ tool: { name: "bash", arguments: { command: ["\"$GENEHUB_CLI\"", ...args.map(shellArg)].join(" ") } } });
       const source = body.match(/来源 PM Session：(s_[A-Za-z0-9]+)/)?.[1];
+      if (stage === 0) return cli(["session", "context", source ?? "s_missing"]);
       if (!source) throw new Error("managed review omitted its real source PM Session");
-      if (stage === 3) return { tool: { name: "genet", arguments: { args: ["session", "context", source, "--budget-tokens", "6000"] } } };
-      if (stage === 4) return { tool: { name: "read", arguments: { path: path.join(projectRoot, "index.html") } } };
-      if (stage === 5) {
+      if (stage === 1) return { tool: { name: "read", arguments: { path: path.join(projectRoot, "index.html") } } };
+      if (stage === 2) {
         const refs = [...new Set(body.match(/ghref:[A-Za-z0-9_:.-]+/g) ?? [])];
         if (!refs.length) throw new Error("review did not obtain a real ghref from source context");
-        return { tool: { name: "genet", arguments: { args: ["workflow", "complete", "--evidence", `report=${JSON.stringify({
+        return cli(["workflow", "complete", "--evidence", `report=${JSON.stringify({
           schema: "genehub.workflow-review.v1", target: { sourceSessionId: source },
           coverage: "partial", missingEvidence: ["interactive playability has not been independently exercised"],
           findings: [{ criterion: "playable result", verdict: "unverifiable", critical: true, evidenceRefs: refs, observedOutcome: "HTML artifact exists; interactive behavior needs verification" }],
           recommendation: "inconclusive",
-        })}`] } } };
+        })}`]);
       }
       return { text: "评审已返回 PM；证据不完整，不能判定通过。" };
     }
@@ -1408,7 +1406,7 @@ defineJourney(
       t.assertions.assert(!existsSync(path.join(fixture.projectRoot, "review-shell-escape")) && !existsSync(path.join(fixture.projectRoot, "review-write-escape")), "reviewer changed the evaluated project");
       t.assertions.assert(readFileSync(path.join(fixture.projectRoot, "index.html"), "utf8") === artifactBeforeReview, "reviewer modified the delivery artifact");
       const reviewRequests = fixture.opened.mock.requests.filter((request) => JSON.stringify(request).includes("You are the workflow-reviewer specialist"));
-      t.assertions.assert(reviewRequests.some((request) => JSON.stringify(request).includes("Session is outside the granted evidence set")), "review did not enforce the source Session scope");
+      t.assertions.assert(reviewRequests.length > 0 && reviewRequests.every((request) => !JSON.stringify(request).includes("Tool genet not found")), "reviewer still depended on the removed evidence-only genet tool");
       t.assertions.assert((await inspectProject(fixture)).activeDigest === before.activeDigest, "independent review changed active workflow");
       const trialRoot = path.join(fixture.projectRoot, "spaces", `${PACKAGE_ID}-v2--executor`, ".genethub", "temp", "exp", "j3", "project");
       t.assertions.assert(!existsSync(path.join(fixture.projectRoot, "spaces", `${PACKAGE_ID}-v2--executor`)), "test fixture prebuilt the experimental carrier");

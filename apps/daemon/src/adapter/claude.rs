@@ -2919,7 +2919,6 @@ mod tests {
         let adapter = ClaudeAdapter::with_program(fake);
         let session = adapter
             .start(SessionConfig {
-                evidence_scope: None,
                 effort_id: None,
                 fast: None,
                 additional_system_prompt: None,

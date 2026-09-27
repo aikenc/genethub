@@ -378,7 +378,11 @@ async fn authorize_project_workflow_mutation(
             if let Some(managed) = &summary.managed {
                 let project = state.workspaces.project_root(&summary.workspace_id).await
                     .map_err(|error| format!("无法确认受管 WM 的项目边界：{error:#}"))?;
-                if project == workspace_id && matches!(managed.role.as_str(), "wm" | "recovery-manager") {
+                // Use the shipped maintenance role; keep `wm` for existing
+                // project definitions. A role never grants cross-project access.
+                if project == workspace_id
+                    && matches!(managed.role.as_str(), "workflow-manager" | "wm" | "recovery-manager")
+                {
                     return Ok(());
                 }
                 return Err("只有本项目的 WM 受管会话可以修改 Workflow 配置".into());
@@ -1708,7 +1712,7 @@ async fn dispatch(
                 routing_tags.iter().chain(media_tags.iter()).cloned(),
             );
             let (route, _) =
-                match crate::agent_routing::resolve_live_route(state, &required, false).await {
+                match crate::agent_routing::resolve_live_route(state, &required).await {
                     Ok(route) => route,
                     Err(error) => return failed(error),
                 };
@@ -2111,7 +2115,7 @@ async fn dispatch(
                 routing_tags.iter().chain(media_tags.iter()).cloned(),
             );
             let (route, providers) =
-                match crate::agent_routing::resolve_live_route(state, &required, false).await {
+                match crate::agent_routing::resolve_live_route(state, &required).await {
                     Ok(route) => route,
                     Err(error) => return failed(error),
                 };
@@ -2216,7 +2220,7 @@ async fn dispatch(
                 routing_tags.iter().chain(media_tags.iter()).cloned(),
             );
             let (route, providers) =
-                match crate::agent_routing::resolve_live_route(state, &required, false).await {
+                match crate::agent_routing::resolve_live_route(state, &required).await {
                     Ok(route) => route,
                     Err(error) => return failed(error),
                 };

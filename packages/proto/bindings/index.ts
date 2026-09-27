@@ -778,7 +778,7 @@ export type ManagedSessionInfo = { parentSessionId: string, workflowRunId: strin
  * Project-defined label such as `worker`, `reviewer` or a domain role.
  * The kernel never derives behavior from this value.
  */
-role: string, userInteraction: SessionUserInteraction, evidenceScope?: SessionEvidenceScope, };
+role: string, userInteraction: SessionUserInteraction, };
 
 export type ModeInfo = { id: string, label: string, description?: string, };
 
@@ -1274,11 +1274,6 @@ export type SessionEvent = { "type": "turnStarted", turnId: string,
  * with its own wall clock before the event reaches a client.
  */
 startedAtMs: number, } | { "type": "item", turnId: string, item: TimelineItem, } | { "type": "itemDelta", turnId: string, itemId: string, delta: ItemDelta, } | { "type": "turnProgress", turnId: string, usage: Usage, } | { "type": "turnCompleted", turnId: string, usage: Usage, forkCheckpoint?: string, } | { "type": "turnFailed", turnId: string, error: TurnError, } | { "type": "turnCanceled", turnId: string, } | { "type": "permissionRequested", request: PermissionRequest, } | { "type": "permissionResolved", requestId: string, outcome: PermissionOutcome, } | { "type": "modelChanged", modelId: string, } | { "type": "agentChanged", agentId: string, modelId?: string, modeId?: string, effortId?: string, fast?: boolean, runtimeValues: { [key in string]?: string }, routingTags?: Array<string>, mediaTags?: Array<string>, } | { "type": "modeChanged", modeId: string, } | { "type": "effortChanged", effortId: string, } | { "type": "fastChanged", fast: boolean, } | { "type": "runtimeAxisChanged", axisId: string, valueId: string, } | { "type": "draftsChanged", count: number, } | { "type": "titleChanged", title: string, } | { "type": "sessionStatusChanged", status: SessionStatus, };
-
-/**
- * Immutable evidence access granted to a managed analysis session.
- */
-export type SessionEvidenceScope = { root: string, sessions: { [key in string]?: string | null }, };
 
 /**
  * One lightweight external conversation returned by the discovery pass.

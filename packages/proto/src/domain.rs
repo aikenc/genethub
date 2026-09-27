@@ -1071,18 +1071,6 @@ pub struct ManagedSessionInfo {
     /// The kernel never derives behavior from this value.
     pub role: String,
     pub user_interaction: SessionUserInteraction,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub evidence_scope: Option<SessionEvidenceScope>,
-}
-
-/// Immutable evidence access granted to a managed analysis session.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "index.ts")]
-pub struct SessionEvidenceScope {
-    pub root: String,
-    pub sessions: std::collections::BTreeMap<String, Option<String>>,
 }
 
 /// Whether human-facing clients may mutate a managed Session directly.

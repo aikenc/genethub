@@ -337,8 +337,6 @@ struct EvidenceRequirement {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RoleSnapshot {
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    evidence_only: bool,
     schema: String,
     id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -475,12 +473,7 @@ async fn resolve_role_route_excluding(
         ));
     }
     let tags = role_tags(role)?;
-    crate::agent_routing::resolve_live_route_excluding(
-        state,
-        &tags,
-        role.evidence_only,
-        excluded,
-    )
+    crate::agent_routing::resolve_live_route_excluding(state, &tags, excluded)
         .await
         .map_err(|error| {
             if error.downcast_ref::<crate::agent_routing::RouteUnavailable>().is_none() {
@@ -1360,7 +1353,7 @@ pub(crate) fn inspect_selected(
 
 /// Compiles one package's flows into a Candidate.
 ///
-/// The derived facts — id, executor carrier, diagnostic carrier — are captured
+/// The derived facts — id, executor carrier and recovery selection — are captured
 /// alongside the flows so a pinned Run keeps resolving the same carrier even
 /// after the package directory changes underneath it.
 fn compile_package(project_root: &Path, package_id: &str) -> Result<DcgCandidateRecord> {
@@ -3078,32 +3071,6 @@ async fn activate(
                         .await?;
                         run.leases.insert(node.id.clone(), lease);
                     }
-                    let evidence_scope = if role.evidence_only {
-                        let mut ids = BTreeSet::from([run.parent_session_id.clone()]);
-                        for previous in history(runtime, 100)? {
-                            ids.insert(previous.parent_session_id);
-                            if let Some(id) = previous.executor_session_id {
-                                ids.insert(id);
-                            }
-                            for node in previous.nodes {
-                                if let Some(id) = node.session_id {
-                                    ids.insert(id);
-                                }
-                            }
-                        }
-                        let mut boundaries = BTreeMap::new();
-                        for id in ids {
-                            if let Ok(inspection) = state.sessions.inspect(&id, None).await {
-                                boundaries.insert(id, inspection.latest_round_id);
-                            }
-                        }
-                        Some(genehub_proto::SessionEvidenceScope {
-                            root: project_root.canonicalize()?.display().to_string(),
-                            sessions: boundaries,
-                        })
-                    } else {
-                        None
-                    };
                     let managed = ManagedSessionInfo {
                         parent_session_id: run
                             .executor_session_id
@@ -3114,7 +3081,6 @@ async fn activate(
                         node_id: node.id.clone(),
                         role: role.id.clone(),
                         user_interaction: role.user_interaction,
-                        evidence_scope,
                     };
                     let system_prompt = managed_prompt(run, &node, &role, &execution.task_cwd);
                     let summary = state
@@ -5956,7 +5922,6 @@ mod tests {
 
     #[test]
     fn tag_routes_use_live_cost_and_and_matching() {
-        let registry = crate::adapter::registry::Registry::new(&BTreeMap::new());
         let agents = vec![
             ready_agent("claude", &[("opus-max", &["low", "medium", "high"])], &[]),
             ready_agent(
@@ -5989,8 +5954,6 @@ mod tests {
             &preferences,
             &["Max".into(), "视频理解".into()],
             &agents,
-            &registry,
-            false,
         )
         .unwrap();
         assert_eq!(selected.agent_id, "codex");
@@ -6001,13 +5964,10 @@ mod tests {
 
     #[test]
     fn tag_route_failure_hands_to_pm() {
-        let registry = crate::adapter::registry::Registry::new(&BTreeMap::new());
         let error = crate::agent_routing::select_tag_route(
             &AgentSelectionPreferences::default(),
             &["视频理解".into()],
             &[],
-            &registry,
-            false,
         )
         .unwrap_err();
         let message = format!("{error:#}");
@@ -6216,11 +6176,7 @@ mod tests {
             &source.join("flows/direct-change.yaml"),
             "schema: genehub.workflow.definition.v2\nid: direct-change\nversion: 2\nnodes:\n  - id: deliver\n    uses: agent.session\n    with:\n      role: worker\nstructure:\n  body:\n    id: gate\n    type: if\n    condition:\n      op: literal\n      value: \"true\"\n    then:\n      id: deliver-step\n      type: task\n      activity: deliver\n",
         );
-        let report = authoring::check_draft(
-            root.path(),
-            Some(TEST_PACKAGE),
-            &crate::adapter::registry::Registry::new(&BTreeMap::new()),
-        );
+        let report = authoring::check_draft(root.path(), Some(TEST_PACKAGE));
         let first = report.diagnostics.first().expect("a diagnostic");
         assert_eq!(first.code, "WF_EXPRESSION_TYPE", "{report:?}");
         assert_eq!(first.path, "/structure/body/condition", "{report:?}");

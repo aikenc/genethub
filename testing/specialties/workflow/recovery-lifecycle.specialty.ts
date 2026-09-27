@@ -75,6 +75,7 @@ defineSpecialty({
     let started = false, successorRequested = false, initialSubmitted = false, secondSubmitted = false, successorSubmitted = false;
     let decisionSent = false, reviewerCalls = 0, managerCalls = 0, acceptorCalls = 0;
     const bodyOf = (request: unknown) => JSON.stringify(request);
+    const cli = (args: string[]) => ({ tool: { name: "bash", arguments: { command: ["\"$GENEHUB_CLI\"", ...args.map(arg => `'${arg.replaceAll("'", `'\\''`)}'`)].join(" ") } } });
     const respond = (request: unknown) => {
       const body = bodyOf(request);
       if (body.includes("RECOVERY_LIFECYCLE_BUSINESS")) {
@@ -100,9 +101,9 @@ defineSpecialty({
         if (reviewerCalls === 1) {
           const handled = body.match(/被处理 Run：(wr_[a-f0-9]+)/)?.[1];
           if (!handled) throw new Error("reviewer prompt omitted handled Run reference");
-          return { tool: { name: "genet", arguments: { args: ["workflow", "journal", "--run", handled] } } };
+          return cli(["workflow", "journal", "--run", handled]);
         }
-        if (reviewerCalls === 2 && bypass) return { tool: { name: "genet", arguments: { args: ["workflow", "complete", "--outcome", "repair", "--evidence", "report=claimed-without-PM"] } } };
+        if (reviewerCalls === 2 && bypass) return cli(["workflow", "complete", "--outcome", "repair", "--evidence", "report=claimed-without-PM"]);
         if (reviewerCalls === 2) return { tool: { name: "request_user_input", arguments: { questions: [{
           id: "decision", header: "恢复", question: "选择受控恢复动作", options: [
             { label: "repair", description: "修复流程" }, { label: "resume", description: "续办" },
@@ -110,7 +111,7 @@ defineSpecialty({
             { label: "cancel", description: "取消" },
           ],
         }] } } };
-        if (reviewerCalls === 3) return { tool: { name: "genet", arguments: { args: ["workflow", "complete", "--outcome", humanB ? "human" : cancelExit ? "cancel" : resume ? "resume" : "repair", ...((humanB || cancelExit) ? ["--reason", humanB ? "The scope needs a Human decision" : "PM should cancel the request"] : []), "--evidence", "report=repair-approved"] } } };
+        if (reviewerCalls === 3) return cli(["workflow", "complete", "--outcome", humanB ? "human" : cancelExit ? "cancel" : resume ? "resume" : "repair", ...((humanB || cancelExit) ? ["--reason", humanB ? "The scope needs a Human decision" : "PM should cancel the request"] : []), "--evidence", "report=repair-approved"]);
         return { text: "PM decision was applied." };
       }
       if (body.includes("依据 PM 对复查建议的决定修复 Workflow")) {
@@ -122,7 +123,7 @@ defineSpecialty({
       }
       if (body.includes("只读验收 WM 的修复")) {
         acceptorCalls++;
-        if (acceptorCalls === 1) return { tool: { name: "genet", arguments: { args: ["workflow", "complete", ...(humanF ? ["--outcome", "human", "--reason", "Preview needs Human acceptance"] : []), "--evidence", "verdict=accepted"] } } };
+        if (acceptorCalls === 1) return cli(["workflow", "complete", ...(humanF ? ["--outcome", "human", "--reason", "Preview needs Human acceptance"] : []), "--evidence", "verdict=accepted"]);
         return { text: "Repair accepted." };
       }
       if (!decisionSent && body.includes("APPROVE_RECOVERY_REPAIR")) {

@@ -667,9 +667,6 @@ impl SessionManager {
         managed_system_prompt: String,
         stable_id: Option<String>,
     ) -> Result<SessionSummary> {
-        if managed.evidence_scope.is_some() {
-            self.registry.require_evidence_scope(agent_id)?;
-        }
         if let Some(id) = &stable_id {
             if let Ok(existing) = self.summary(id).await {
                 if existing.workspace_id != workspace_id
@@ -3045,15 +3042,7 @@ impl SessionManager {
             return Ok(());
         }
         let mut meta = live.meta.lock().await.clone();
-        let adapter = if meta
-            .managed
-            .as_ref()
-            .is_some_and(|managed| managed.evidence_scope.is_some())
-        {
-            self.registry.require_evidence_scope(&meta.agent_id)?
-        } else {
-            self.registry.require(&meta.agent_id)?
-        };
+        let adapter = self.registry.require(&meta.agent_id)?;
         let offered = adapter.catalog(providers).await;
         if normalize_runtime_selection(&mut meta, &offered) {
             tracing::warn!(
@@ -3129,10 +3118,6 @@ impl SessionManager {
                     Some(guidance)
                 });
         let config = |resume: Option<PersistHandle>| SessionConfig {
-            evidence_scope: meta
-                .managed
-                .as_ref()
-                .and_then(|managed| managed.evidence_scope.clone()),
             session_id: meta.id.clone(),
             cwd: meta.cwd.clone(),
             model_id: meta.model_id.clone(),

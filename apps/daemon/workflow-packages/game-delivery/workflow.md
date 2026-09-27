@@ -22,8 +22,11 @@ description: 项目自有的单 Run 开发、有限重规划与证据驱动的 P
 ## 载体
 
 `spaces/` 声明五个 Space：`executor` 承担派发，`coder` 与 `reviewer` 是实现与评审
-Worker，`workflow-manager` 分析并改进流程本身，`workflow-reviewer` 兼任平台自动诊断的
-载体。`workflow build` 会把它们物化到 `spaces/game-delivery--<name>/` 并请求人类授权。
+Worker，`workflow-manager` 维护流程本身，`workflow-reviewer` 独立审查流程。
+WR Space 上的 `diagnostic` 是保留的旧组件标记，不启动自动诊断。巡查由 daemon 执行；
+本包使用默认的内置恢复 Workflow，其恢复专家由 daemon 在项目 Workspace 中创建。
+`workflow build` 会把这些 Space 源物化到 `spaces/game-delivery--<name>/`，
+按项目当前管理授权及具体计划校验后应用。
 
 ## 怎么算验收
 

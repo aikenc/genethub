@@ -45,6 +45,7 @@ defineSpecialty({
     let bootstrapStage = 0, command: string | undefined, workerCalls = 0;
     let phase = "bootstrap", commandTaken = false;
     const assessed = new Set<string>();
+    const cli = (args: string[]) => ({ tool: { name: "bash", arguments: { command: ["\"$GENEHUB_CLI\"", ...args.map(arg => `'${arg.replaceAll("'", `'\\''`)}'`)].join(" ") } } });
     const respond = (request: unknown) => {
       const body = JSON.stringify(request);
       const messages = (request as { messages?: Array<{ role: string; content?: unknown }> }).messages ?? [];
@@ -58,7 +59,7 @@ defineSpecialty({
           { label: "successor", description: "Activate a successor" }, { label: "human", description: "Request a Human decision" },
           { label: "cancel", description: "Stop execution" },
         ] }] } } };
-        return { tool: { name: "genet", arguments: { args: ["workflow", "complete", "--outcome", "resume", "--evidence", "report=controlled-recovery-assessment"] } } };
+        return cli(["workflow", "complete", "--outcome", "resume", "--evidence", "report=controlled-recovery-assessment"]);
       }
       if (body.includes("<genehub_managed_session>") && body.includes("角色标签为 `reviewer`")) {
         const assessment = body.includes("`game-assessment`") ? "assessment" : "review";
@@ -72,7 +73,7 @@ defineSpecialty({
       if (body.includes("EXCEPTION_TEST_WORKER")) {
         workerCalls++;
         if (workerCalls === 1) return { text: "Unable to finish; no node result submitted." };
-        if (workerCalls % 2 === 0) return { emptyToolIdDeltas: true, tool: { name: "genet", arguments: { args: ["workflow", "complete", "--evidence", "review=approved"] } } };
+        if (workerCalls % 2 === 0) return { emptyToolIdDeltas: true, ...cli(["workflow", "complete", "--evidence", "review=approved"]) };
         return { text: "Recovered result submitted." };
       }
       if (phase === "bootstrap") {
@@ -107,7 +108,7 @@ defineSpecialty({
     const schema = "genehub.workflow.definition.v1"; // This permission fixture intentionally exercises legacy compatibility.
     const roleFile = path.join(source, "roles/coder.yaml");
     const roleSchema = "genehub.workflow.role.v1";
-    writeFileSync(roleFile, JSON.stringify({ schema: roleSchema, id: "coder", agentId: "genet", modelId: "deepseek/deepseek-v4-flash", evidenceOnly: true, userInteraction: "readOnly", prompt: "prompts/exception-worker.md" }));
+    writeFileSync(roleFile, JSON.stringify({ schema: roleSchema, id: "coder", agentId: "genet", modelId: "deepseek/deepseek-v4-flash", userInteraction: "readOnly", prompt: "prompts/exception-worker.md" }));
     writeFileSync(path.join(source, "prompts/exception-worker.md"), "EXCEPTION_TEST_WORKER: complete assigned node only.");
     writeFileSync(workflowFile, JSON.stringify({ schema, id: "game-dev", version: 1, entry: "check", nodes: [
       { id: "check", uses: "agent.session", with: { role: "coder", workspace: "." }, completion: { all: [{ key: "review", verify: "value.equals", expected: "approved" }] }, on: { completed: ["publish"] } },

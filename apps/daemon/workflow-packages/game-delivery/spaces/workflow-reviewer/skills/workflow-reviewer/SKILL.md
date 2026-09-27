@@ -15,12 +15,12 @@ Report the fixed baseline/Run/candidate, observed process facts, missing evidenc
 
 The subject of a trial is the new Workflow and its Executor configuration; repositories and data directories are test material. Compare coverage against the original intent, requirement/checklist versions, artifact revisions, rework and failures, elapsed time, measured model/tool cost and human effort. Separate observed facts from hypotheses. A structurally complete report does not prove its referenced tools actually ran. Assess evidence quality and missing access explicitly. Recommend retaining, revising or rejecting the tested carrier; PM owns adoption and the final task-directory binding.
 
-Do not edit implementation, workflow definitions or acceptance; do not dispatch, cancel, upgrade or recursively diagnose. The built-in Agent exposes evidence-only read, ls and genet tools. Invoke genet with an args array, e.g. ["workflow", "check", "--run", "<assigned-run>"]. Respect the granted source boundary and report inaccessible evidence.
+Do not edit implementation, workflow definitions or acceptance; do not dispatch, cancel, upgrade or recursively diagnose. This is the review assignment's responsibility boundary. Agent tools follow the selected Agent and environment; `userInteraction: readOnly` prevents direct user mutation of the managed Session and does not restrict file tools. Use the ordinary CLI, for example `"$GENEHUB_CLI" workflow check --run <assigned-run>`. Report inaccessible evidence without claiming it was inspected.
 
 For a normal managed workflow-review node, read its revision with workflow get, then submit workflow complete --revision <revision> --evidence report=<actual-report>. PM decides the next action. Complete the node even if your conclusion is negative; do not leave it running after writing only a chat answer.
 
-## Bounded stall diagnosis
+## Recovery review
 
-A daemon-started diagnostic is not a graph node. Use supplied mechanical facts, check only the remaining evidence gaps, and finish with a chat report. Do not call workflow complete in this mode. Do not poll or start another diagnostic.
+Patrol is programmatic. It can start the package's recovery Workflow when mechanical checks require intervention. A recovery Worker is a managed graph node and must submit its declared outcome through `workflow complete`; writing only a chat report leaves it unfinished. The built-in fallback uses separate `recovery-reviewer`, `recovery-manager` and `recovery-acceptor` roles in the project Workspace, not this package's WR Space. Follow the assigned recovery contract and its durable PM decision before returning a decision outcome. Do not launch another recovery from a review node.
 
 Distinguish default blocked exits from a configured repair strategy. A Reviewer that finished without submitting an outcome is an execution-state defect. A running tool with no recent output is not automatically a failure. Explicit Human waiting is not a stall. Report limitations and the supported next action without claiming a diagnosis succeeded when evidence collection failed.

@@ -114,10 +114,6 @@ impl AgentAdapter for GenetAdapter {
         true
     }
 
-    fn supports_evidence_scope(&self) -> bool {
-        true
-    }
-
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             interrupt: true,
@@ -261,10 +257,6 @@ impl AgentAdapter for GenetAdapter {
             .env(crate::channel::ENV_AGENT_HOME, &home)
             .env("GENET_WORKSPACE_ROOT", workspace_root);
         super::apply_session_environment(&mut command, &config);
-        command.env_remove("GENEHUB_EVIDENCE_SCOPE");
-        if let Some(scope) = &config.evidence_scope {
-            command.env("GENEHUB_EVIDENCE_SCOPE", serde_json::to_string(scope)?);
-        }
 
         if let Some(dir) = &config.skills_dir {
             command.env("GENEHUB_SKILLS_DIR", dir);

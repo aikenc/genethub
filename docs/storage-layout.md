@@ -67,7 +67,7 @@ agent CLI 自己的线程库（`~/.codex/` 之类）不归我们管，只在会�
 | Run 快照（按用户需求归档） | 项目 PM Space 级 `components/pm/requests/<用户需求 id>/runs/<Run id>/run.json` |
 | Run ID 定位记录、用户需求写锁与引用租约 | 项目 PM Space 级 `components/pm/`；定位记录可从用户需求目录重建 |
 
-`requests/` 保留现有磁盘名称，业务概念称“用户需求”，定义见 [Workflow 与 Executor 模型](./workflow-executor-model.md)。写锁只是避免多个执行者同时改写同一份需求记录的文件互斥；它不承担完成判断。
+`requests/` 保留现有磁盘名称，业务概念称“用户需求”，定义见 [Workflow 与 Executor 模型](./workflow/model.md)。写锁只是避免多个执行者同时改写同一份需求记录的文件互斥；它不承担完成判断。
 
 旧版 `<data>/workflow-runtime/` 与 Executor 会话快照不自动导入，新版不从那里读取。
 
