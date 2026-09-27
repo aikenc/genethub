@@ -296,7 +296,7 @@ defineSpecialty({
     stage = "wait for WM and acceptance";
     await t.tools.waitUntil(async () => {
       recovery = (await history()).find(run => run.id === recovery!.id);
-      return recovery?.status === "blocked" && (humanB || humanF || cancelExit || recovery.reason?.includes("controlled exit"));
+      return recovery?.status === "blocked" && (humanB || humanF || cancelExit || !!recovery.reason?.includes("controlled exit"));
     }, 75_000);
     if (cancelExit) {
       t.assertions.assert(!recovery!.humanExit, "PM cancellation recommendation was incorrectly classified as Human exit d");

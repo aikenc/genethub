@@ -54,7 +54,7 @@ defineSpecialty({
     await t.tools.waitUntil(async () => {
       const reply = await opened.client.call({ type: "workflow.history", payload: { workspaceId: opened.workspaceId, limit: 10 } });
       original = reply?.type === "workflowRuns" ? reply.data.find(run => run.taskId === "shared-request") : undefined;
-      return original?.status === "blocked" && original.reason?.includes("RouteUnavailable");
+      return original?.status === "blocked" && !!original.reason?.includes("RouteUnavailable");
     }, 30_000);
 
     const started = await runGenetAsync(opened.daemon.genet, ["daemon", "start"], secondEnv);
