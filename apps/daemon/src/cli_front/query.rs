@@ -194,6 +194,7 @@ enum Query {
         session_id: String,
         through_round_id: Option<String>,
         token_budget: Option<u64>,
+        exclude_open_round: bool,
     },
 }
 
@@ -400,11 +401,17 @@ fn parse_session(args: &[String]) -> Result<Query, CliFailure> {
         }
         "context" => {
             let (session_id, flags) = session_id_and_flags(args, "context")?;
-            reject_unknown_flags(&flags, &["--through-round", "--budget-tokens"])?;
+            reject_unknown_flags(
+                &flags,
+                &["--through-round", "--budget-tokens", "--exclude-open-round"],
+            )?;
             Ok(Query::SessionContext {
                 session_id,
                 through_round_id: optional_string_flag(&flags, "--through-round")?,
                 token_budget: optional_u64_flag(&flags, "--budget-tokens")?,
+                exclude_open_round: flags
+                    .iter()
+                    .any(|(flag, _)| flag == "--exclude-open-round"),
             })
         }
         _ => Err(CliFailure::invalid_args(format!(
@@ -422,16 +429,26 @@ fn session_id_and_flags(
         .filter(|value| !value.trim().is_empty() && !value.starts_with("--"))
         .cloned()
         .ok_or_else(|| CliFailure::invalid_args(format!("session {verb} needs a session id")))?;
-    let mut flags = Vec::new();
-    let mut index = 2;
-    while index < args.len() {
-        let name = args[index].clone();
-        if !name.starts_with("--") {
-            return Err(CliFailure::invalid_args(format!(
-                "unexpected session {verb} argument: {name}"
-            )));
-        }
-        let value = args
+        let mut flags = Vec::new();
+        let mut index = 2;
+        while index < args.len() {
+            let name = args[index].clone();
+            if !name.starts_with("--") {
+                return Err(CliFailure::invalid_args(format!(
+                    "unexpected session {verb} argument: {name}"
+                )));
+            }
+            if verb == "context" && name == "--exclude-open-round" {
+                if flags.iter().any(|(seen, _)| seen == &name) {
+                    return Err(CliFailure::invalid_args(format!(
+                        "{name} may be supplied only once"
+                    )));
+                }
+                flags.push((name, "true".into()));
+                index += 1;
+                continue;
+            }
+            let value = args
             .get(index + 1)
             .ok_or_else(|| CliFailure::invalid_args(format!("{name} needs a value")))?;
         if value.trim().is_empty() || value.starts_with("--") {
@@ -710,6 +727,7 @@ async fn execute(
             session_id,
             through_round_id,
             token_budget,
+            exclude_open_round,
         } => {
             let rpc = connect_selected(selection).await?;
             let context = session_context(
@@ -717,6 +735,7 @@ async fn execute(
                     session_id,
                     through_round_id,
                     token_budget,
+                    exclude_open_round,
                 })
                 .await
                 .map_err(rpc_error)?,
@@ -1476,10 +1495,11 @@ fn command_schema(name: &str) -> Value {
             &["sessionId", "ref"],
         ),
         "session.context" => session_schema(
-            "genet session context <id> [--through-round <round-id>] [--budget-tokens <n>]",
+            "genet session context <id> [--through-round <round-id>] [--budget-tokens <n>] [--exclude-open-round]",
             json!({
                 "throughRoundId": nullable_string(),
                 "tokenBudget": nullable_integer(),
+                "excludeOpenRound": {"type": "boolean", "default": false},
             }),
         ),
         _ => unreachable!("schema names are validated before lookup"),
@@ -1974,6 +1994,24 @@ mod tests {
                 session_id: "s_1".into(),
                 through_round_id: None,
                 token_budget: Some(12_000),
+                exclude_open_round: false,
+            }
+        );
+        assert_eq!(
+            parse(&words(&[
+                "session",
+                "context",
+                "s_1",
+                "--exclude-open-round",
+                "--budget-tokens",
+                "12000"
+            ]))
+            .unwrap(),
+            Query::SessionContext {
+                session_id: "s_1".into(),
+                through_round_id: None,
+                token_budget: Some(12_000),
+                exclude_open_round: true,
             }
         );
     }

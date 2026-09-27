@@ -439,6 +439,10 @@ pub enum Request {
         #[serde(default)]
         #[ts(type = "number")]
         token_budget: Option<u64>,
+        /// Drop the running round. The caller appends that round itself, so the
+        /// capsule must not repeat its user and assistant text.
+        #[serde(default)]
+        exclude_open_round: bool,
     },
     #[serde(rename = "round.trunk.list", rename_all = "camelCase")]
     RoundTrunkList {

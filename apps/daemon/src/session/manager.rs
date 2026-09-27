@@ -2147,14 +2147,92 @@ impl SessionManager {
             next_cursor: (start > 0).then(|| format!("before:{start}")),
         })
     }
+}
 
+#[derive(Debug)]
+enum ClosedBoundary {
+    Through(String),
+    Unchanged(Option<String>),
+    Empty,
+}
+
+/// Step the context boundary back when it lands on the running round. A closed
+/// round stays. No earlier round means the capsule is empty.
+fn closed_round_before_open(
+    views: &[RoundView],
+    through_round_id: Option<&str>,
+) -> Result<ClosedBoundary> {
+    let index = match through_round_id {
+        Some(round_id) => Some(
+            views
+                .iter()
+                .position(|view| view.round_id == round_id)
+                .ok_or_else(|| anyhow!("no such round: {round_id}"))?,
+        ),
+        None => views.len().checked_sub(1),
+    };
+    let Some(index) = index else {
+        return Ok(ClosedBoundary::Unchanged(None));
+    };
+    if views[index].outcome != RoundLayerOutcome::Running {
+        return Ok(ClosedBoundary::Unchanged(
+            through_round_id.map(str::to_string),
+        ));
+    }
+    match index.checked_sub(1) {
+        Some(previous) => Ok(ClosedBoundary::Through(views[previous].round_id.clone())),
+        None => Ok(ClosedBoundary::Empty),
+    }
+}
+
+impl SessionManager {
     pub async fn session_context(
         &self,
         session_id: &str,
         through_round_id: Option<&str>,
         token_budget: Option<u64>,
+        exclude_open_round: bool,
     ) -> Result<SessionContext> {
-        let view = self.read_view(session_id, through_round_id).await?;
+        let through_round_id = if exclude_open_round {
+            let live = self.live(session_id).await?;
+            let views = self.round_views(&live).await;
+            match closed_round_before_open(&views, through_round_id)? {
+                ClosedBoundary::Through(round_id) => Some(round_id),
+                ClosedBoundary::Unchanged(round_id) => round_id,
+                ClosedBoundary::Empty => {
+                    let meta = live.meta.lock().await.clone();
+                    let budget = token_budget
+                        .unwrap_or(super::context_seed::DEFAULT_SEED_TOKEN_BUDGET)
+                        .clamp(2_048, 64_000);
+                    let coverage = meta
+                        .imported
+                        .as_ref()
+                        .and_then(|imported| imported.coverage.clone())
+                        .unwrap_or_else(|| HistoryCoverage {
+                            source_item_count: Some(0),
+                            retained_item_count: 0,
+                            omitted_item_count: 0,
+                            retrieval: RetrievalCapability::Genehub,
+                            reason: None,
+                        });
+                    return Ok(build_context_seed(
+                        session_id,
+                        "none",
+                        None,
+                        &meta.agent_id,
+                        &[],
+                        budget,
+                        coverage,
+                    )
+                    .context);
+                }
+            }
+        } else {
+            through_round_id.map(str::to_string)
+        };
+        let view = self
+            .read_view(session_id, through_round_id.as_deref())
+            .await?;
         let boundary = view
             .source
             .through_round_id
@@ -7352,6 +7430,43 @@ mod tests {
     use super::*;
     use genehub_proto::{ToolCallDetail, TurnError, TurnErrorCode, Usage};
 
+    fn boundary_view(id: &str, running: bool) -> RoundView {
+        RoundView {
+            source: None,
+            round_id: id.into(),
+            ord: 0,
+            user_item_id: None,
+            started_at_ms: 0,
+            ended_at_ms: 0,
+            outcome: if running {
+                RoundLayerOutcome::Running
+            } else {
+                RoundLayerOutcome::Completed
+            },
+            trunk_count: 0,
+        }
+    }
+
+    #[test]
+    fn an_open_round_is_left_out_of_the_capsule_boundary() {
+        let views = vec![
+            boundary_view("closed", false),
+            boundary_view("open", true),
+        ];
+        match closed_round_before_open(&views, None).unwrap() {
+            ClosedBoundary::Through(id) => assert_eq!(id, "closed"),
+            other => panic!("expected the closed round, got {other:?}"),
+        }
+        assert!(matches!(
+            closed_round_before_open(&[boundary_view("open", true)], None).unwrap(),
+            ClosedBoundary::Empty
+        ));
+        match closed_round_before_open(&views, Some("closed")).unwrap() {
+            ClosedBoundary::Unchanged(Some(id)) => assert_eq!(id, "closed"),
+            other => panic!("expected the named closed round, got {other:?}"),
+        }
+    }
+
     fn meta() -> SessionMeta {
         SessionMeta {
             inbox: Default::default(),
@@ -8470,7 +8585,7 @@ mod tests {
             .unwrap();
         assert_eq!(exact.items.len(), 1);
         let context = sessions
-            .session_context(&source.id, None, Some(2_048))
+            .session_context(&source.id, None, Some(2_048), false)
             .await
             .unwrap();
         assert!(context.text.contains("ghref:item"));

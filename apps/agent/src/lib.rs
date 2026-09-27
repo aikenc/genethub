@@ -551,6 +551,7 @@ async fn fetch_context_material(session_id: &str, budget: u64) -> Result<Context
             session_id,
             "--budget-tokens",
             &budget.to_string(),
+            "--exclude-open-round",
         ])
         .output()
         .await

@@ -1793,9 +1793,15 @@ async fn dispatch(
             session_id,
             through_round_id,
             token_budget,
+            exclude_open_round,
         } => match state
             .sessions
-            .session_context(&session_id, through_round_id.as_deref(), token_budget)
+            .session_context(
+                &session_id,
+                through_round_id.as_deref(),
+                token_budget,
+                exclude_open_round,
+            )
             .await
         {
             Ok(context) => Handled::ok(Reply::SessionContext(context)),
