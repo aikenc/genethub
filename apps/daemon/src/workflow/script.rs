@@ -308,6 +308,27 @@ mod tests {
         }
     }
 
+    // On Windows `bash` may name the WSL launcher rather than a POSIX
+    // interpreter for native host files. These fixtures declare Git's actual
+    // shell; they are testing a package-selected interpreter, not WSL setup.
+    fn shell_interpreter() -> String {
+        #[cfg(windows)]
+        {
+            let git = crate::adapter::find_executable("git").expect("Git is installed");
+            git.ancestors()
+                .skip(1)
+                .map(|directory| directory.join("bin/bash.exe"))
+                .find(|shell| shell.is_file())
+                .expect("Git Bash is installed beside Git")
+                .to_string_lossy()
+                .into_owned()
+        }
+        #[cfg(not(windows))]
+        {
+            "bash".into()
+        }
+    }
+
     /// Resolution prefers what the package ships, and passes anything else
     /// through for the OS to find. Reaching outside the package is not an
     /// escape to be refused here: the point of this capability is to run the
@@ -355,7 +376,7 @@ mod tests {
             &ScriptDefinition {
                 script: "scripts/publish.sh".into(),
                 args: vec!["ran".into()],
-                interpreter: Some("bash".into()),
+                interpreter: Some(shell_interpreter()),
                 env: BTreeMap::new(),
                 cwd: None,
                 input: Some(serde_json::Value::Null),
@@ -398,8 +419,11 @@ mod tests {
             &ScriptDefinition {
                 script: "scripts/probe.sh".into(),
                 args: Vec::new(),
-                interpreter: Some("bash".into()),
-                env: BTreeMap::from([("DEPOT".into(), elsewhere.display().to_string())]),
+                interpreter: Some(shell_interpreter()),
+                env: BTreeMap::from([(
+                    "DEPOT".into(),
+                    elsewhere.to_string_lossy().replace('\\', "/"),
+                )]),
                 cwd: Some("work".into()),
                 input: Some(serde_json::Value::Null),
                 timeout_seconds: Some(30),
@@ -426,6 +450,7 @@ mod tests {
         std::fs::write(
             package.join("scripts/echo.mjs"),
             r#"
+import { basename } from "node:path";
 let raw = "";
 process.stdin.on("data", (chunk) => { raw += chunk; });
 process.stdin.on("end", () => {
@@ -435,7 +460,7 @@ process.stdin.on("end", () => {
   process.stdout.write(JSON.stringify({
     ok: true,
     evidence: { review: input.verdict },
-    revision: "opaque/" + process.cwd().split("/").pop(),
+    revision: "opaque/" + basename(process.cwd()),
   }));
 });
 "#,
