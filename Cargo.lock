@@ -1295,6 +1295,7 @@ dependencies = [
  "genet-native",
  "http",
  "http-body-util",
+ "image",
  "libc",
  "portable-pty",
  "reqwest",
