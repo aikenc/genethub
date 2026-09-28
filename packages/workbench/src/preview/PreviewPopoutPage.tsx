@@ -158,6 +158,7 @@ export function PreviewPopoutPage({
         host={host}
         client={sharedClient ?? portableClient}
         runtimeSessionId={effectiveContext?.sessionId ?? null}
+        annotationWrite={sharedClient != null}
         onRuntimeArtifactSaved={effectiveContext?.sessionId ? reportSaved : undefined}
         onRuntimeReady={effectiveContext ? reportReady : undefined}
       />

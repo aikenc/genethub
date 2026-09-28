@@ -412,6 +412,9 @@ pub fn required(request: &Request) -> Capability {
         | Request::SessionRename { .. }
         | Request::SessionDrafts { .. }
         | Request::SessionDraftsReplace { .. }
+        | Request::SessionPreviewAnnotationsGet { .. }
+        | Request::SessionPreviewAnnotationUpsert { .. }
+        | Request::SessionPreviewAnnotationRemove { .. }
         | Request::SessionDelete { .. }
         | Request::SessionSetModel { .. }
         | Request::SessionSwitchAgent { .. }

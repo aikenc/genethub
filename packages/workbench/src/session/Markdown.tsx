@@ -54,6 +54,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type MouseEvent,
   type ReactNode,
 } from "react";
 import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markdown";
@@ -285,27 +286,80 @@ const MarkdownRenderContext = createContext<MarkdownRender>({
 });
 
 type MarkdownChildren = { children?: ReactNode; className?: string };
+type PositionedNode = { position?: { start: { line: number }; end: { line: number } } };
 
-function MarkdownParagraph({ children }: MarkdownChildren) {
-  return <p>{children}</p>;
+export type MarkdownBlockPick = { startLine: number; endLine: number; excerpt: string };
+
+/** Set only while a preview is in annotation mode. Chat markdown leaves this null. */
+export const MarkdownAnnotationContext = createContext<((pick: MarkdownBlockPick) => void) | null>(null);
+
+function AnnotationBlock({
+  tag,
+  node,
+  className,
+  children,
+}: {
+  tag: "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "li" | "blockquote" | "pre" | "table";
+  node?: PositionedNode;
+  className?: string;
+  children?: ReactNode;
+}) {
+  const pick = useContext(MarkdownAnnotationContext);
+  const start = node?.position?.start.line;
+  const end = node?.position?.end.line;
+  const clickable = Boolean(pick && start && end);
+  const onClick = clickable
+    ? (event: MouseEvent<HTMLElement>) => {
+        if (event.target instanceof Element && event.target.closest("a, button, input, textarea, select")) return;
+        event.preventDefault();
+        event.stopPropagation();
+        pick?.({
+          startLine: start!,
+          endLine: end!,
+          excerpt: event.currentTarget.innerText.replace(/\s+/g, " ").trim().slice(0, 256),
+        });
+      }
+    : undefined;
+  const classNames = [className, clickable ? "cursor-pointer rounded-sm hover:bg-accent/10" : ""].filter(Boolean).join(" ") || undefined;
+  const shared = {
+    className: classNames,
+    "data-md-start": clickable ? start : undefined,
+    "data-md-end": clickable ? end : undefined,
+    onClick,
+  };
+  if (tag === "h1") return <h1 {...shared}>{children}</h1>;
+  if (tag === "h2") return <h2 {...shared}>{children}</h2>;
+  if (tag === "h3") return <h3 {...shared}>{children}</h3>;
+  if (tag === "h4") return <h4 {...shared}>{children}</h4>;
+  if (tag === "h5") return <h5 {...shared}>{children}</h5>;
+  if (tag === "h6") return <h6 {...shared}>{children}</h6>;
+  if (tag === "li") return <li {...shared}>{children}</li>;
+  if (tag === "blockquote") return <blockquote {...shared}>{children}</blockquote>;
+  if (tag === "pre") return <div {...shared}>{children}</div>;
+  if (tag === "table") return <table {...shared}>{children}</table>;
+  return <p {...shared}>{children}</p>;
 }
-function MarkdownH1({ children }: MarkdownChildren) {
-  return <h1>{children}</h1>;
+
+function MarkdownParagraph({ children, node }: MarkdownChildren & { node?: PositionedNode }) {
+  return <AnnotationBlock tag="p" node={node}>{children}</AnnotationBlock>;
 }
-function MarkdownH2({ children }: MarkdownChildren) {
-  return <h2>{children}</h2>;
+function MarkdownH1({ children, node }: MarkdownChildren & { node?: PositionedNode }) {
+  return <AnnotationBlock tag="h1" node={node}>{children}</AnnotationBlock>;
 }
-function MarkdownH3({ children }: MarkdownChildren) {
-  return <h3>{children}</h3>;
+function MarkdownH2({ children, node }: MarkdownChildren & { node?: PositionedNode }) {
+  return <AnnotationBlock tag="h2" node={node}>{children}</AnnotationBlock>;
 }
-function MarkdownH4({ children }: MarkdownChildren) {
-  return <h4>{children}</h4>;
+function MarkdownH3({ children, node }: MarkdownChildren & { node?: PositionedNode }) {
+  return <AnnotationBlock tag="h3" node={node}>{children}</AnnotationBlock>;
 }
-function MarkdownH5({ children }: MarkdownChildren) {
-  return <h5>{children}</h5>;
+function MarkdownH4({ children, node }: MarkdownChildren & { node?: PositionedNode }) {
+  return <AnnotationBlock tag="h4" node={node}>{children}</AnnotationBlock>;
 }
-function MarkdownH6({ children }: MarkdownChildren) {
-  return <h6>{children}</h6>;
+function MarkdownH5({ children, node }: MarkdownChildren & { node?: PositionedNode }) {
+  return <AnnotationBlock tag="h5" node={node}>{children}</AnnotationBlock>;
+}
+function MarkdownH6({ children, node }: MarkdownChildren & { node?: PositionedNode }) {
+  return <AnnotationBlock tag="h6" node={node}>{children}</AnnotationBlock>;
 }
 function MarkdownUl({ children, className }: MarkdownChildren) {
   return <ul className={className}>{children}</ul>;
@@ -313,11 +367,11 @@ function MarkdownUl({ children, className }: MarkdownChildren) {
 function MarkdownOl({ children, className }: MarkdownChildren) {
   return <ol className={className}>{children}</ol>;
 }
-function MarkdownLi({ children, className }: MarkdownChildren) {
-  return <li className={className}>{children}</li>;
+function MarkdownLi({ children, className, node }: MarkdownChildren & { node?: PositionedNode }) {
+  return <AnnotationBlock tag="li" node={node} className={className}>{children}</AnnotationBlock>;
 }
-function MarkdownBlockquote({ children }: MarkdownChildren) {
-  return <blockquote>{children}</blockquote>;
+function MarkdownBlockquote({ children, node }: MarkdownChildren & { node?: PositionedNode }) {
+  return <AnnotationBlock tag="blockquote" node={node}>{children}</AnnotationBlock>;
 }
 function MarkdownHr() {
   return <hr />;
@@ -331,13 +385,15 @@ function MarkdownEm({ children }: MarkdownChildren) {
 function MarkdownDel({ children }: MarkdownChildren) {
   return <del>{children}</del>;
 }
-function MarkdownPre({ children }: MarkdownChildren) {
-  return <>{children}</>;
+function MarkdownPre({ children, node }: MarkdownChildren & { node?: PositionedNode }) {
+  const pick = useContext(MarkdownAnnotationContext);
+  if (!pick) return <>{children}</>;
+  return <AnnotationBlock tag="pre" node={node}>{children}</AnnotationBlock>;
 }
-function MarkdownTable({ children }: MarkdownChildren) {
+function MarkdownTable({ children, node }: MarkdownChildren & { node?: PositionedNode }) {
   return (
     <div className="gh-table-wrap">
-      <table>{children}</table>
+      <AnnotationBlock tag="table" node={node}>{children}</AnnotationBlock>
     </div>
   );
 }

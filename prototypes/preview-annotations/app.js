@@ -1,8 +1,7 @@
 function bootPreviewAnnotationPrototype() {
   "use strict";
 
-  const STORE_KEY = "genehub-preview-annotations-prototype-v3";
-  const AGENT_MESSAGE = "msg_agent_1";
+  const STORE_KEY = "genehub-preview-annotations-prototype-v4";
   const files = {
     markdown: { kind: "markdown", name: "experience.md", path: "docs/experience.md", version: "a1f6c29b" },
     html: { kind: "html", name: "landing.html", path: "site/landing.html", version: "e24a921d" },
@@ -31,7 +30,7 @@ function bootPreviewAnnotationPrototype() {
     protoStatus: $("protoStatus"), receiptText: $("receiptText"), connectionToggle: $("connectionToggle"),
     reviewCheckbox: $("reviewCheckbox"), reviewSummary: $("reviewSummary"),
     composerInput: $("composerInput"), composerSendButton: $("composerSendButton"),
-    sessionTitle: $("sessionTitle"), agentAnnotate: $("agentAnnotate"), agentBody: $("agentBody"),
+    sessionTitle: $("sessionTitle"),
     toast: $("toast"), modal: $("modalBackdrop"), modalTitle: $("modalTitle"), modalDescription: $("modalDescription"),
     messagePreview: $("messagePreview"),
   };
@@ -50,7 +49,11 @@ function bootPreviewAnnotationPrototype() {
   function load() {
     try {
       const value = JSON.parse(localStorage.getItem(STORE_KEY) || "null");
-      return value && Array.isArray(value.product) && Array.isArray(value.landing) ? value : seeds();
+      if (!value || !Array.isArray(value.product) || !Array.isArray(value.landing)) return seeds();
+      for (const session of ["product", "landing"]) {
+        value[session] = value[session].filter((item) => item && item.fileKey && item.target && item.target.kind !== "transcript");
+      }
+      return value;
     } catch { return seeds(); }
   }
   let saved = load();
@@ -120,7 +123,6 @@ function bootPreviewAnnotationPrototype() {
     if (next === "external") { externalOnline = true; lastReceipt = ""; }
     surface = next;
     if (next !== "preview" && mode === "file") setMode("off");
-    if (next !== "workbench" && mode === "agent") setMode("off");
     renderSurface();
     renderDraft();
     requestAnimationFrame(renderMarkers);
@@ -141,7 +143,6 @@ function bootPreviewAnnotationPrototype() {
     return item;
   }
   function currentNotes() { return draft().filter((item) => item.fileKey === currentFile); }
-  function agentNotes() { return draft().filter((item) => item.source === "transcript" && item.messageId === AGENT_MESSAGE); }
   function nextImageNumber(fileKey) {
     const key = fileKey + ":" + files[fileKey].version;
     const existing = 1 + Math.max(0, ...draft().filter((item) => item.fileKey === fileKey).map((item) => Number(item.markerNo) || 0));
@@ -204,14 +205,11 @@ function bootPreviewAnnotationPrototype() {
     el.htmlStage.classList.toggle("inspect-mode", fileMode && kind === "html");
     el.imageOverlay.classList.toggle("drawing", fileMode && kind === "image");
     el.markdownView.classList.toggle("annotating", fileMode && kind === "markdown");
-    el.agentBody.classList.toggle("annotating", mode === "agent");
   }
   function syncModeChrome() {
     el.modeButton.textContent = mode === "file" ? "完成批注" : "进入批注";
     el.modeButton.classList.toggle("active", mode === "file");
     el.modeButton.setAttribute("aria-pressed", String(mode === "file"));
-    el.agentAnnotate.textContent = mode === "agent" ? "完成批注" : "批注这条回复";
-    el.agentAnnotate.setAttribute("aria-pressed", String(mode === "agent"));
   }
   function setMode(next) {
     if (mode === next) return;
@@ -280,14 +278,12 @@ function bootPreviewAnnotationPrototype() {
     const target = item.target;
     if (target.kind === "markdown") return "第 " + target.start + (target.start === target.end ? "" : "–" + target.end) + " 行";
     if (target.kind === "html") return target.label;
-    if (target.kind === "transcript") return "回复块 " + target.block;
     return "#" + item.markerNo + " 标记区域";
   }
   function mdBlockFor(line) {
     return [...el.markdownView.querySelectorAll("[data-md-start]")].find((block) =>
       Number(block.dataset.mdStart) <= line && Number(block.dataset.mdEnd) >= line);
   }
-  function agentBlock(index) { return el.agentBody.querySelector('[data-agent-block="' + index + '"]'); }
   function updateLineChoices() {
     const multiLine = selection?.kind === "markdown" && mdRangeBase && mdRangeBase.end > mdRangeBase.start;
     el.lineAdjust.classList.toggle("hidden", !multiLine);
@@ -314,7 +310,7 @@ function bootPreviewAnnotationPrototype() {
     if (target.kind === "image") selection.markerNo = markerNo || nextImageNumber(currentFile);
     el.composeTarget.textContent = target.kind === "image"
       ? "区域 #" + selection.markerNo + " · " + files[currentFile].name
-      : target.kind === "transcript" ? "Agent 回复 · 块 " + target.block : anchorText({ target });
+      : anchorText({ target });
     el.compose.classList.remove("hidden");
     el.commentInput.value = "";
     el.commentCount.textContent = "0 / 1000";
@@ -325,7 +321,6 @@ function bootPreviewAnnotationPrototype() {
   function renderSelection() {
     document.querySelectorAll(".selected-target").forEach((item) => item.classList.remove("selected-target"));
     if (selection?.kind === "markdown" && files[currentFile].kind === "markdown") mdBlockFor(selection.start)?.classList.add("selected-target");
-    if (selection?.kind === "transcript") agentBlock(selection.block)?.classList.add("selected-target");
     if (selection?.kind !== "html") el.inspectOutline.classList.add("hidden");
     const showRect = selection?.kind === "image" && files[currentFile].kind === "image";
     el.imageRect.classList.toggle("hidden", !showRect);
@@ -359,13 +354,6 @@ function bootPreviewAnnotationPrototype() {
         el.imageOverlay.append(region);
       }
     }
-    for (const item of agentNotes()) {
-      const block = agentBlock(item.target.block);
-      if (!block) continue;
-      const pin = action("●", () => showDraft(item.id), "note-pin");
-      pin.setAttribute("aria-label", "查看这条回复批注");
-      block.append(pin);
-    }
     renderSelection();
   }
   function saveComment() {
@@ -378,20 +366,12 @@ function bootPreviewAnnotationPrototype() {
     }
     const before = clone(saved);
     const items = draft();
-    let candidate;
-    if (selection.kind === "transcript") {
-      candidate = {
-        id: editingId || makeId(), source: "transcript", messageId: AGENT_MESSAGE,
-        target: { kind: "transcript", block: selection.block, excerpt: selection.excerpt }, comment,
-      };
-    } else {
-      const file = files[currentFile];
-      const markerNo = selection.kind === "image" ? selection.markerNo : undefined;
-      const target = clone(selection);
-      delete target.markerNo;
-      candidate = { id: editingId || makeId(), fileKey: currentFile, version: file.version, target, ...(markerNo ? { markerNo } : {}), comment };
-      if (!editingId && markerNo) saved.nextMarker[currentSession][currentFile + ":" + file.version] = markerNo + 1;
-    }
+    const file = files[currentFile];
+    const markerNo = selection.kind === "image" ? selection.markerNo : undefined;
+    const target = clone(selection);
+    delete target.markerNo;
+    const candidate = { id: editingId || makeId(), fileKey: currentFile, version: file.version, target, ...(markerNo ? { markerNo } : {}), comment };
+    if (!editingId && markerNo) saved.nextMarker[currentSession][currentFile + ":" + file.version] = markerNo + 1;
     if (editingId) {
       const index = items.findIndex((item) => item.id === editingId);
       if (index < 0) { notify("这条批注已经不在草稿里"); closeCompose(); return; }
@@ -408,7 +388,7 @@ function bootPreviewAnnotationPrototype() {
   async function copyPending() {
     const comment = el.commentInput.value.trim();
     if (!selection || !comment) { notify("先写一条还没保存的批注"); return; }
-    const where = selection.kind === "transcript" ? "Agent 回复" : files[currentFile].path;
+    const where = files[currentFile].path;
     const text = sessions[currentSession] + " · " + where + " · " + anchorText({ target: selection, markerNo: selection.markerNo }) + "\n批注：" + comment + "\n（尚未进入会话）";
     try {
       if (!navigator.clipboard?.writeText) throw new Error("clipboard unavailable");
@@ -453,13 +433,6 @@ function bootPreviewAnnotationPrototype() {
   }
   function reveal(item) {
     hideDraft();
-    if (item.source === "transcript") {
-      surface = "workbench";
-      setMode("off");
-      renderSurface();
-      agentBlock(item.target.block)?.scrollIntoView({ block: "center" });
-      return;
-    }
     surface = "preview";
     renderSurface();
     selectFile(item.fileKey);
@@ -475,14 +448,9 @@ function bootPreviewAnnotationPrototype() {
   }
   function edit(item) {
     hideDraft();
-    if (item.source === "transcript") {
-      surface = "workbench";
-      mode = "agent";
-    } else {
-      surface = "preview";
-      selectFile(item.fileKey);
-      mode = "file";
-    }
+    surface = "preview";
+    selectFile(item.fileKey);
+    mode = "file";
     renderSurface();
     syncModeChrome();
     updateModeHint();
@@ -517,12 +485,12 @@ function bootPreviewAnnotationPrototype() {
     el.composerSendButton.disabled = surface !== "workbench" || !items.length || !el.reviewCheckbox.checked;
     el.draftItems.replaceChildren();
     if (!items.length) {
-      el.draftItems.append(node("p", "empty-draft", "还没有批注。在 Preview 里点文件内容，或在工作台里批注已完成的 Agent 回复。"));
+      el.draftItems.append(node("p", "empty-draft", "还没有批注。打开 Preview，在文件内容上加入。"));
       return;
     }
     const groups = new Map();
     for (const item of items) {
-      const key = item.source === "transcript" ? "transcript:" + item.messageId : item.fileKey + ":" + item.version;
+      const key = item.fileKey + ":" + item.version;
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(item);
     }
@@ -530,16 +498,11 @@ function bootPreviewAnnotationPrototype() {
       const first = groupItems[0];
       const group = node("section", "draft-group");
       const header = node("div", "draft-group-head");
-      if (first.source === "transcript") {
-        header.append(node("strong", "", "Agent 回复"), node("small", "", first.messageId + " · 已完成，不是文件版本"));
-      } else {
-        const file = files[first.fileKey];
-        if (!file) continue;
-        header.append(node("strong", "", file.name), node("small", "", file.path + " · " + first.version.slice(0, 7)));
-        group.append(header);
-        if (file.kind === "image") group.append(imageGroup(file, groupItems));
-      }
-      if (first.source === "transcript") group.append(header);
+      const file = files[first.fileKey];
+      if (!file) continue;
+      header.append(node("strong", "", file.name), node("small", "", file.path + " · " + first.version.slice(0, 7)));
+      group.append(header);
+      if (file.kind === "image") group.append(imageGroup(file, groupItems));
       for (const item of groupItems) {
         const card = node("article", "draft-item");
         card.id = "draft-" + item.id;
@@ -557,21 +520,16 @@ function bootPreviewAnnotationPrototype() {
     const lines = ["请按这份会话批注继续（" + sessions[currentSession] + "）：", ""];
     const groups = new Map();
     for (const item of draft()) {
-      const key = item.source === "transcript" ? "transcript:" + item.messageId : item.fileKey + ":" + item.version;
+      const key = item.fileKey + ":" + item.version;
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(item);
     }
     for (const items of groups.values()) {
       const first = items[0];
-      if (first.source === "transcript") {
-        lines.push("【Agent 回复 " + first.messageId + " · 已完成】");
-        for (const item of items) lines.push("- 回复块 " + item.target.block + "：" + item.comment);
-      } else {
-        const file = files[first.fileKey];
-        lines.push("【" + file.path + " · " + first.version + "】");
-        if (file.kind === "image") lines.push("原图 + 带编号标注图（原型只展示关系）：");
-        for (const item of items) lines.push("- " + anchorText(item) + "：" + item.comment);
-      }
+      const file = files[first.fileKey];
+      lines.push("【" + file.path + " · " + first.version + "】");
+      if (file.kind === "image") lines.push("原图 + 带编号区域（原型只展示关系）：");
+      for (const item of items) lines.push("- " + anchorText(item) + "：" + item.comment);
       lines.push("");
     }
     const extra = el.composerInput.value.trim();
@@ -584,7 +542,7 @@ function bootPreviewAnnotationPrototype() {
     modalMode = "send";
     $("confirmSendButton").classList.remove("hidden");
     el.modalTitle.textContent = "检查一条消息";
-    el.modalDescription.textContent = "已勾选当前会话的 " + draft().length + " 条批注。文件和 Agent 回复在同一份草稿里。这是模拟发送。";
+    el.modalDescription.textContent = "已勾选当前会话的 " + draft().length + " 条文件批注。这是模拟发送。";
     el.messagePreview.textContent = messageText();
     el.modal.classList.remove("hidden");
   }
@@ -618,10 +576,6 @@ function bootPreviewAnnotationPrototype() {
   $("reviewOpenButton").addEventListener("click", () => showDraft());
   el.composerSendButton.addEventListener("click", showMessage);
   el.modeButton.addEventListener("click", () => setMode(mode === "file" ? "off" : "file"));
-  el.agentAnnotate.addEventListener("click", () => {
-    if (surface !== "workbench") return;
-    setMode(mode === "agent" ? "off" : "agent");
-  });
   el.draftButton.addEventListener("click", () => document.body.classList.contains("draft-open") ? hideDraft() : showDraft());
   $("draftCloseButton").addEventListener("click", hideDraft);
   el.returnButton.addEventListener("click", () => {
@@ -638,14 +592,6 @@ function bootPreviewAnnotationPrototype() {
     const block = event.target.closest("[data-md-start]");
     if (!block) return;
     openSelection({ kind: "markdown", start: Number(block.dataset.mdStart), end: Number(block.dataset.mdEnd) });
-  });
-  el.agentBody.addEventListener("click", (event) => {
-    if (event.target.closest(".note-pin")) return;
-    if (mode !== "agent") return;
-    const block = event.target.closest("[data-agent-block]");
-    if (!block) return;
-    const excerpt = block.textContent.replace(/\s+/g, " ").trim().slice(0, 80);
-    openSelection({ kind: "transcript", block: Number(block.dataset.agentBlock), excerpt });
   });
   el.htmlStage.addEventListener("pointermove", (event) => {
     if (mode !== "file" || files[currentFile].kind !== "html") return;
@@ -715,7 +661,7 @@ function bootPreviewAnnotationPrototype() {
     $("confirmSendButton").classList.add("hidden");
     el.modalTitle.textContent = "三个界面";
     el.modalDescription.textContent = "工作台有会话列表、对话和输入框。Preview 只有当前文件。外部浏览器也只有 Preview。";
-    el.messagePreview.textContent = "工作台：左侧换会话，点文件打开 Preview；在已完成的 Agent 回复上批注。\nPreview：头部进入批注，点内容写批注。关闭或最小化回到工作台。\n外部浏览器：保存后出现回执。断线时文字留在原地。发送必须回到原来的 PWA，在输入区勾选草稿。\n本页不能验证真实跨浏览器同步。";
+    el.messagePreview.textContent = "工作台：左侧换会话，点文件打开 Preview。对话回复本身不批注。\nPreview：头部进入批注，点文件内容写批注。关闭或最小化回到工作台。\n外部浏览器：保存后出现回执。断线时文字留在原地。发送必须回到原来的 PWA，在输入区勾选草稿。\n本页不能验证真实跨浏览器同步。";
     el.modal.classList.remove("hidden");
   });
   $("runtimeLogButton").addEventListener("click", () => el.runtimeLogPanel.classList.toggle("hidden"));

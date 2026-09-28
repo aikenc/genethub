@@ -331,6 +331,7 @@ export function PreviewFloat({
       onMetaChange={setMeta}
       onRuntimeArtifact={submitRuntimeArtifact}
       runtimeSessionId={source.sessionId}
+      annotationWrite={expanded}
     />
   ) : (
     <p role="status" className="m-auto p-6 text-center text-sm text-muted">

@@ -3430,6 +3430,120 @@ impl SessionManager {
         Ok(drafts)
     }
 
+    pub async fn preview_annotations(
+        &self,
+        session_id: &str,
+    ) -> Result<genehub_proto::PreviewReviewDraft> {
+        let live = self.live(session_id).await?;
+        let meta = live.meta.lock().await;
+        let dir = self.store.session_dir(&meta.workspace_id, &meta.id)?;
+        super::preview_review::read_draft(&dir)
+    }
+
+    /// Checks the source file version, then writes one note into `preview-review.json`.
+    ///
+    /// The metadata lock is held across the image-byte copy so a marker cannot
+    /// be published without the snapshot that explains it.
+    pub async fn upsert_preview_annotation(
+        &self,
+        session_id: &str,
+        annotation: genehub_proto::PreviewAnnotation,
+        expected_revision: u64,
+    ) -> Result<genehub_proto::PreviewReviewDraft> {
+        super::preview_review::validate_shape(&annotation)?;
+        let live = self.live(session_id).await?;
+        let (workspace_id, owned_id, root) = {
+            let meta = live.meta.lock().await;
+            (
+                meta.workspace_id.clone(),
+                meta.id.clone(),
+                self.store.workspace_root(&meta.workspace_id)?,
+            )
+        };
+        let preview = crate::files::preview(&root, &annotation.source.relative_path)
+            .await
+            .map_err(|error| anyhow!("无法核对预览源文件：{error}"))?;
+        if preview.metadata.version != annotation.source.content_version {
+            anyhow::bail!("源文件版本已变化，请重新打开预览后再批注");
+        }
+        super::preview_review::ensure_kind(&annotation, preview.metadata.kind)?;
+        let mut meta = live.meta.lock().await;
+        let dir = self.store.session_dir(&workspace_id, &owned_id)?;
+        let mut stored = super::preview_review::load(&dir)?;
+        let (_metadata, mut source, _) = preview.into_parts();
+        let evidence = super::preview_review::ensure_image_snapshot(
+            &dir,
+            &owned_id,
+            &annotation,
+            &mut source,
+            &mut stored,
+        )?;
+        let changed = super::preview_review::apply_upsert(
+            &mut stored,
+            annotation,
+            expected_revision,
+            now_ms(),
+            evidence,
+        )?;
+        let draft = if changed {
+            super::preview_review::commit(&dir, &stored)?
+        } else {
+            stored.draft()
+        };
+        drop(meta);
+        if changed {
+            live.publish(SessionEvent::PreviewAnnotationsChanged {
+                revision: draft.revision,
+                count: draft.annotations.len() as u32,
+            })
+            .await;
+        }
+        Ok(draft)
+    }
+
+    pub async fn remove_preview_annotations(
+        &self,
+        session_id: &str,
+        ids: Vec<String>,
+        expected_revision: Option<u64>,
+    ) -> Result<genehub_proto::PreviewReviewDraft> {
+        let live = self.live(session_id).await?;
+        let mut meta = live.meta.lock().await;
+        let dir = self.store.session_dir(&meta.workspace_id, &meta.id)?;
+        let mut stored = super::preview_review::load(&dir)?;
+        let (changed, released) = super::preview_review::apply_remove(
+            &mut stored,
+            &ids,
+            expected_revision,
+            now_ms(),
+        )?;
+        let draft = if changed {
+            let draft = super::preview_review::commit(&dir, &stored)?;
+            for relative in released {
+                let path = dir.join(relative);
+                if let Err(error) = std::fs::remove_file(&path) {
+                    tracing::warn!(
+                        %error,
+                        path = %path.display(),
+                        "could not remove an unused preview annotation image"
+                    );
+                }
+            }
+            draft
+        } else {
+            stored.draft()
+        };
+        drop(meta);
+        if changed {
+            live.publish(SessionEvent::PreviewAnnotationsChanged {
+                revision: draft.revision,
+                count: draft.annotations.len() as u32,
+            })
+            .await;
+        }
+        Ok(draft)
+    }
+
     /// Rebinds one durable GeneHub Session to a different Agent-native
     /// context. The visible timeline and Session id remain unchanged; the next
     /// user message carries a bounded reconstruction of all completed history.
@@ -7083,7 +7197,7 @@ async fn apply(live: &Live, event: &SessionEvent) {
         }
         // The mutation writes metadata before publishing. Subscribers use this
         // event as invalidation; replay must not try to reconstruct payloads.
-        SessionEvent::DraftsChanged { .. } => {}
+        SessionEvent::DraftsChanged { .. } | SessionEvent::PreviewAnnotationsChanged { .. } => {}
         SessionEvent::SessionStatusChanged { status } => {
             *live.status.lock().await = *status;
         }
@@ -7520,6 +7634,126 @@ mod tests {
             })
             .collect();
         assert!(restarted.replace_drafts("s1", too_many).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn preview_annotations_check_the_file_version_and_survive_restart() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir(workspace.path().join("docs")).unwrap();
+        std::fs::write(workspace.path().join("docs/note.md"), b"alpha\nbeta\n").unwrap();
+        std::fs::create_dir(workspace.path().join("design")).unwrap();
+        std::fs::write(
+            workspace.path().join("design/dot.png"),
+            [
+                0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+                0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+                0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78,
+                0x9c, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00,
+                0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+            ],
+        )
+        .unwrap();
+        let sessions = manager(workspace.path());
+        sessions.store.save_meta(&meta()).unwrap();
+        let markdown = crate::files::preview(workspace.path(), "docs/note.md")
+            .await
+            .unwrap();
+        let image = crate::files::preview(workspace.path(), "design/dot.png")
+            .await
+            .unwrap();
+        let mut stale = preview_note("ann-md", "docs/note.md", &markdown.metadata.version, "行");
+        stale.source.content_version = "a".repeat(32);
+        assert!(sessions
+            .upsert_preview_annotation("s1", stale, 0)
+            .await
+            .is_err());
+
+        let saved = sessions
+            .upsert_preview_annotation(
+                "s1",
+                preview_note("ann-md", "docs/note.md", &markdown.metadata.version, "行"),
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(saved.revision, 1);
+        let with_image = sessions
+            .upsert_preview_annotation(
+                "s1",
+                preview_image("ann-img", "design/dot.png", &image.metadata.version),
+                1,
+            )
+            .await
+            .unwrap();
+        assert_eq!(with_image.annotations[1].marker_no, Some(1));
+        assert!(with_image.annotations[1]
+            .evidence_path
+            .as_deref()
+            .unwrap()
+            .contains("preview-review-images"));
+        assert!(workspace
+            .path()
+            .join(".genethub/sessions/s1/preview-review.json")
+            .is_file());
+
+        let restarted = manager(workspace.path());
+        let loaded = restarted.preview_annotations("s1").await.unwrap();
+        assert_eq!(loaded, with_image);
+        assert_eq!(restarted.drafts("s1").await.unwrap(), Vec::new());
+        let kept = restarted
+            .remove_preview_annotations("s1", vec!["ann-md".into()], None)
+            .await
+            .unwrap();
+        assert_eq!(kept.annotations.len(), 1);
+        assert_eq!(kept.annotations[0].id, "ann-img");
+    }
+
+    fn preview_note(
+        id: &str,
+        path: &str,
+        version: &str,
+        comment: &str,
+    ) -> genehub_proto::PreviewAnnotation {
+        genehub_proto::PreviewAnnotation {
+            id: id.into(),
+            source: genehub_proto::PreviewAnnotationSource {
+                root: genehub_proto::PreviewAnnotationRoot::Primary,
+                relative_path: path.into(),
+                content_version: version.into(),
+            },
+            target: genehub_proto::PreviewAnnotationTarget::MarkdownLines {
+                start_line: 1,
+                end_line: 2,
+                excerpt: "alpha".into(),
+            },
+            marker_no: None,
+            evidence_path: None,
+            comment: comment.into(),
+            created_at_ms: 1,
+        }
+    }
+
+    fn preview_image(id: &str, path: &str, version: &str) -> genehub_proto::PreviewAnnotation {
+        genehub_proto::PreviewAnnotation {
+            id: id.into(),
+            source: genehub_proto::PreviewAnnotationSource {
+                root: genehub_proto::PreviewAnnotationRoot::Primary,
+                relative_path: path.into(),
+                content_version: version.into(),
+            },
+            target: genehub_proto::PreviewAnnotationTarget::ImageRect {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+                natural_width: 1,
+                natural_height: 1,
+            },
+            marker_no: None,
+            evidence_path: None,
+            comment: "这个点".into(),
+            created_at_ms: 2,
+        }
     }
 
     #[tokio::test]

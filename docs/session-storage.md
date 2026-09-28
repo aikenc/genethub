@@ -60,6 +60,8 @@
   state/                           adapter 私有 scratch
   images/<id>.<ext>                会话内的图片附件
   artifacts/YYMMDD-hhmmss-<hash4>/ 浏览器运行产物；manifest + 图片/视频/文本
+  preview-review.json              预览批注草稿；不进入 meta.json，只由批注 RPC 整份替换
+  preview-review-images/           批注引用的原图字节副本，按内容版本命名
   components/<组件>/               组件实例的会话级存储（storage-layout.md §3）
 <workspace>/.genethub/tombstones/<session-id>.json  持锁写入的逻辑删除标记
 ```

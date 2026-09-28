@@ -365,6 +365,16 @@ pub enum SessionEvent {
     RuntimeAxisChanged { axis_id: String, value_id: String },
     #[serde(rename_all = "camelCase")]
     DraftsChanged { count: u32 },
+    /// Invalidation for the session's preview-annotation draft. The payload
+    /// stays a count: clients re-read `preview-review.json` rather than
+    /// trusting an event body that old subscribers never stored.
+    #[serde(rename_all = "camelCase")]
+    PreviewAnnotationsChanged {
+        #[ts(type = "number")]
+        revision: u64,
+        #[ts(type = "number")]
+        count: u32,
+    },
     /// The session picked up a name — today only the first message's first
     /// line, set once when a session had none (`SessionManager::send`).
     /// Clients that show a session list must repaint it on this event rather

@@ -298,6 +298,9 @@ async fn authorize_session_request(
         | Request::SessionRename { session_id, .. }
         | Request::SessionDrafts { session_id }
         | Request::SessionDraftsReplace { session_id, .. }
+        | Request::SessionPreviewAnnotationsGet { session_id }
+        | Request::SessionPreviewAnnotationUpsert { session_id, .. }
+        | Request::SessionPreviewAnnotationRemove { session_id, .. }
         | Request::SessionDelete { session_id }
         | Request::SessionSetModel { session_id, .. }
         | Request::SessionSwitchAgent { session_id, .. }
@@ -873,6 +876,7 @@ async fn dispatch(
                     "workflow.control.v1".to_string(),
                     "agentSpace.builderPlans.v1".to_string(),
                     "session.input.v1".to_string(),
+                    "session.previewAnnotations.v1".to_string(),
                     "session.switch-agent.v1".to_string(),
                     "agent-tag-routing.v1".to_string(),
                     genehub_proto::SPEECH_FEATURE_TRANSCRIBE.to_string(),
@@ -883,7 +887,6 @@ async fn dispatch(
                 isolation: Some(crate::isolation::report()),
             }))
         }).await,
-
         Request::Subscribe {
             session_id,
             since_seq,
@@ -1888,6 +1891,43 @@ async fn dispatch(
         Request::SessionDraftsReplace { session_id, drafts } => Box::pin(async move {
             match state.sessions.replace_drafts(&session_id, drafts).await {
                 Ok(drafts) => Handled::ok(Reply::SessionDrafts(drafts)),
+                Err(error) => failed(error),
+            }
+        }).await,
+
+        Request::SessionPreviewAnnotationsGet { session_id } => Box::pin(async move {
+            match state.sessions.preview_annotations(&session_id).await {
+                Ok(draft) => Handled::ok(Reply::PreviewAnnotations(draft)),
+                Err(error) => failed(error),
+            }
+        }).await,
+
+        Request::SessionPreviewAnnotationUpsert {
+            session_id,
+            annotation,
+            expected_revision,
+        } => Box::pin(async move {
+            match state
+                .sessions
+                .upsert_preview_annotation(&session_id, annotation, expected_revision)
+                .await
+            {
+                Ok(draft) => Handled::ok(Reply::PreviewAnnotations(draft)),
+                Err(error) => failed(error),
+            }
+        }).await,
+
+        Request::SessionPreviewAnnotationRemove {
+            session_id,
+            ids,
+            expected_revision,
+        } => Box::pin(async move {
+            match state
+                .sessions
+                .remove_preview_annotations(&session_id, ids, expected_revision)
+                .await
+            {
+                Ok(draft) => Handled::ok(Reply::PreviewAnnotations(draft)),
                 Err(error) => failed(error),
             }
         }).await,
@@ -3853,6 +3893,8 @@ fn diagnostic_operation(request: &Request) -> Option<&'static str> {
         Request::ProjectApprovalRequest { .. } => Some("project.approval.request"),
         Request::SessionSend { .. } => Some("session.send"),
         Request::SessionDraftsReplace { .. } => Some("session.drafts.replace"),
+        Request::SessionPreviewAnnotationUpsert { .. } => Some("session.previewAnnotations.upsert"),
+        Request::SessionPreviewAnnotationRemove { .. } => Some("session.previewAnnotations.remove"),
         Request::SessionArtifactBegin { .. } => Some("session.artifact.begin"),
         Request::SessionArtifactChunk { .. } => Some("session.artifact.chunk"),
         Request::SessionArtifactFinish { .. } => Some("session.artifact.finish"),
