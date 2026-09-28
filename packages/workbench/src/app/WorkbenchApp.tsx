@@ -1061,9 +1061,11 @@ export function App({
                             : null
                         }
                         drafts={workbench.sessionDrafts}
+                        previewReview={workbench.previewReview}
                         onClearForwardDraft={() => void workbench.setForwardDraft(null)}
                         onSaveDraft={workbench.saveComposerDraft}
                         onReplaceDrafts={workbench.replaceSessionDrafts}
+                        onConsumePreviewReview={workbench.consumePreviewAnnotations}
                         onUpdateDraft={workbench.updateSessionDraft}
                         speech={
                           workbench.client &&

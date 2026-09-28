@@ -3,6 +3,7 @@ import type {
   AgentSelectionPreferences,
   Attachment,
   CommandInfo,
+  PreviewReviewDraft,
   SessionDraft,
   SessionAgentTarget,
   SessionStatus,
@@ -25,6 +26,7 @@ import {
   type ActiveSpan,
   type SpeechTextRange,
 } from "../speech/SpeechComposer";
+import { PREVIEW_REVIEW_MESSAGE_LIMIT, previewReviewMessage } from "../preview/reviewDraft";
 import {
   attachmentPreviewUrl,
   classifyAttachmentFiles,
@@ -161,11 +163,13 @@ export function Composer({
   insertDraft,
   forwardDraft,
   drafts,
+  previewReview = null,
   speech,
   lastActivityAtMs,
   onSend,
   onSaveDraft,
   onReplaceDrafts,
+  onConsumePreviewReview,
   onUpdateDraft,
   onInterrupt,
   onPickTarget,
@@ -205,6 +209,8 @@ export function Composer({
   /** A forward capsule parked here, sent ahead of the user's own text. */
   forwardDraft?: ForwardDraft | null;
   drafts?: SessionDraft[];
+  /** The session's preview annotations, shown as one checkbox. Editing stays in Preview. */
+  previewReview?: PreviewReviewDraft | null;
   /** Available only when the connected daemon advertises Speech Protocol v2. */
   speech?: SpeechInputTarget;
   /**
@@ -219,6 +225,8 @@ export function Composer({
   onSend(text: string, attachments: Attachment[], videoFiles?: File[]): void | Promise<void>;
   onSaveDraft?(text: string, attachments: Attachment[], videoFiles?: File[]): Promise<boolean>;
   onReplaceDrafts?(drafts: SessionDraft[]): Promise<boolean>;
+  /** Removes the notes that were snapshotted into the message just sent. */
+  onConsumePreviewReview?(ids: string[]): Promise<boolean>;
   onUpdateDraft?(draft: SessionDraft, videoFiles?: File[]): Promise<boolean>;
   onInterrupt(): void;
   onPickTarget?(target: SessionAgentTarget, filterTags: string[]): Promise<void> | void;
@@ -262,6 +270,18 @@ export function Composer({
   );
   const seenDraftIds = useRef<Set<string>>(new Set((drafts ?? []).map((item) => item.id)));
   const [hidingDraftIds, setHidingDraftIds] = useState<Set<string>>(() => new Set());
+  const [includePreviewReview, setIncludePreviewReview] = useState(false);
+  const [previewReviewOpen, setPreviewReviewOpen] = useState(false);
+  const [previewReviewNotice, setPreviewReviewNotice] = useState<string | null>(null);
+  const previewReviewKey = previewReview?.annotations.map((item) => item.id).join("\n") ?? "";
+  const previewReviewKeySeen = useRef(previewReviewKey);
+  useEffect(() => {
+    if (previewReviewKeySeen.current === previewReviewKey) return;
+    previewReviewKeySeen.current = previewReviewKey;
+    setIncludePreviewReview(false);
+    setPreviewReviewOpen(false);
+    setPreviewReviewNotice(null);
+  }, [previewReviewKey]);
   const [expandedDraftId, setExpandedDraftId] = useState<string | null>(null);
   const draftPicker = useRef<HTMLInputElement>(null);
   const activeDraftFile = useRef<string | null>(null);
@@ -420,7 +440,13 @@ export function Composer({
     if (phase === "sending" || (!durableInput && phase !== "idle") || disabled || speechInput.busy || draftSaveState === "saving") return;
     const text = draft.trim();
     const selectedDrafts = (drafts ?? []).filter((item) => selectedDraftIds.has(item.id));
-    if (!text && attachments.length === 0 && videoFiles.length === 0 && !forwardDraft && selectedDrafts.length === 0) return;
+    const previewNotes = includePreviewReview ? (previewReview?.annotations ?? []) : [];
+    const previewText = previewNotes.length > 0 && previewReview ? previewReviewMessage(previewReview) : "";
+    if (previewText.length > PREVIEW_REVIEW_MESSAGE_LIMIT) {
+      setPreviewReviewNotice("批注内容超过单条消息上限，请先在预览里删掉一部分。");
+      return;
+    }
+    if (!text && attachments.length === 0 && videoFiles.length === 0 && !forwardDraft && selectedDrafts.length === 0 && !previewText) return;
     // The parked capsule travels ahead of the user's own words, inside the
     // same message, so the receiver sees history first and the ask second.
     const currentPayload = forwardDraft
@@ -428,7 +454,7 @@ export function Composer({
         ? `${forwardDraft.capsule}\n\n${text}`
         : forwardDraft.capsule
       : text;
-    const payload = [...selectedDrafts.map((item) => item.text), currentPayload].filter(Boolean).join("\n\n");
+    const payload = [previewText, ...selectedDrafts.map((item) => item.text), currentPayload].filter(Boolean).join("\n\n");
     const outgoing = [...selectedDrafts.flatMap((item) => item.attachments ?? []), ...(forwardDraft?.attachments ?? []), ...attachments];
     try {
       validateInlineAttachmentBudget(outgoing);
@@ -465,6 +491,13 @@ export function Composer({
           for (const id of removing) next.delete(id);
           return next;
         });
+      }
+    }
+    if (previewNotes.length > 0) {
+      const consumed = await onConsumePreviewReview?.(previewNotes.map((item) => item.id));
+      setIncludePreviewReview(false);
+      if (consumed === false) {
+        setPreviewReviewNotice("消息已发送，但这份批注还在会话里。请核对后再发，避免重复。");
       }
     }
     if (forwardDraft) onClearForwardDraft?.();
@@ -707,6 +740,35 @@ export function Composer({
           focused ? "border-muted/50" : "border-line-strong"
         }`}
       >
+        {(previewReview?.annotations.length ?? 0) > 0 ? (
+          <div className="px-4 pt-3" data-testid="preview-review-draft">
+            <div className="rounded-xl border border-line bg-raised/40">
+              <div className="flex min-h-9 items-center gap-2 px-2.5">
+                <input
+                  type="checkbox"
+                  aria-label="发送预览批注"
+                  checked={includePreviewReview}
+                  onChange={() => setIncludePreviewReview((value) => !value)}
+                  className="h-4 w-4 shrink-0 accent-[rgb(var(--accent))]"
+                />
+                <button
+                  type="button"
+                  aria-expanded={previewReviewOpen}
+                  className="min-w-0 flex-1 truncate py-2 text-left text-xs text-muted hover:text-fg"
+                  onClick={() => setPreviewReviewOpen((value) => !value)}
+                >
+                  预览批注 · {previewReview!.annotations.length}
+                </button>
+              </div>
+              {previewReviewOpen ? (
+                <pre className="max-h-48 overflow-auto whitespace-pre-wrap border-t border-line px-2.5 py-2 text-xs text-fg">{previewReviewMessage(previewReview!)}</pre>
+              ) : null}
+            </div>
+            {previewReviewNotice ? <p role="alert" className="mt-1 text-xs text-danger">{previewReviewNotice}</p> : null}
+          </div>
+        ) : previewReviewNotice ? (
+          <p role="alert" className="px-4 pt-3 text-xs text-danger">{previewReviewNotice}</p>
+        ) : null}
         {visibleDrafts.length > 0 ? (
           <div className="space-y-1 px-4 pt-3" data-testid="session-drafts">
             {visibleDrafts.map((item) => {
@@ -1195,7 +1257,7 @@ export function Composer({
               </button>
             ) : phase === "running" ? (
               <div className="flex shrink-0 items-center gap-1.5">
-                {durableInput && (draft.trim() || attachments.length || forwardDraft || selectedDraftIds.size > 0) ? <button
+                {durableInput && (draft.trim() || attachments.length || forwardDraft || selectedDraftIds.size > 0 || includePreviewReview) ? <button
                   type="button" aria-label="发送补充消息" title="发送提问或新要求，由当前 Agent 接续处理"
                   disabled={disabled || speechInput.busy} onMouseDown={event => event.preventDefault()}
                   onClick={() => send()} className="min-h-9 rounded-full px-3 text-xs text-accent disabled:opacity-30">发送补充</button> : null}
@@ -1226,7 +1288,7 @@ export function Composer({
                   disabled ||
                   speechInput.busy ||
                   draftSaveState === "saving" ||
-                  (draft.trim().length === 0 && attachments.length === 0 && videoFiles.length === 0 && !forwardDraft && selectedDraftIds.size === 0)
+                  (draft.trim().length === 0 && attachments.length === 0 && videoFiles.length === 0 && !forwardDraft && selectedDraftIds.size === 0 && !includePreviewReview)
                 }
                 className="flex h-9 w-9 !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full bg-accent text-white focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 disabled:opacity-30 md:h-6 md:w-6"
               >

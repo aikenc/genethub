@@ -107,6 +107,11 @@ fn main() -> Result<(), ts_rs::ExportError> {
     ItemDelta::export_all_to(dir)?;
     TurnError::export_all_to(dir)?;
     TurnErrorCode::export_all_to(dir)?;
+    PreviewAnnotationRoot::export_all_to(dir)?;
+    PreviewAnnotationSource::export_all_to(dir)?;
+    PreviewAnnotationTarget::export_all_to(dir)?;
+    PreviewAnnotation::export_all_to(dir)?;
+    PreviewReviewDraft::export_all_to(dir)?;
     SessionEvent::export_all_to(dir)?;
     SessionStatus::export_all_to(dir)?;
     SequencedEvent::export_all_to(dir)?;

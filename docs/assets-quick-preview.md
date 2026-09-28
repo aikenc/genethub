@@ -270,7 +270,11 @@ Agent 不必输出部署相关的 Preview prefix。聊天与文档 Preview 共�
 
 HTML 预览在 Viewer 内对入口文件做静态依赖重映射（`link`/`script`/`img` 等相对或站点根路径引用、`type=module`、CSS `url()`）；CSP 允许 `wasm-unsafe-eval` 与 `blob:` worker。运行时相对 `fetch`/import 经 iframe 桥转发到 `asset.preview`。真 WebRoot HTTP origin 仍不在本版本内。
 
-## 11. 验收
+## 11. 预览批注
+
+文件读取仍只读。人在已打开会话的全屏 Preview 里确认的批注，写入该会话目录的 `preview-review.json`，不改源文件，也不进入 `meta.json` 或最多五条 `SessionDraft`。HTML 页面脚本不能发起这次写入。外部浏览器的 portable 链接在票据收窄之前不能保存批注。对话里的 Agent 回复不是批注面。契约见 [批注提案](asset-preview-annotations-proposal.md)。
+
+## 12. 验收
 
 - URL 可 round-trip Unicode、空格和部署子路径；拒绝 traversal、encoded slash、反斜杠和非 canonical encoding。
 - FilesPanel 用当前 daemon identity + workspace id + 相对 path 生成独立 Viewer URL。

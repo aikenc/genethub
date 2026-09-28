@@ -34,24 +34,13 @@
       <div><small>工作台</small><h1 id="sessionTitle">产品体验讨论</h1></div>
     </header>
     <div class="thread" id="transcript">
-      <article class="msg user"><p>Preview 里需要输入框和会话列表吗？Agent 的回复能不能也批注？</p></article>
-      <article class="msg agent" id="agentMessage">
-        <header>
-          <span>Agent · 已完成</span>
-          <button type="button" id="agentAnnotate" aria-pressed="false">批注这条回复</button>
-        </header>
-        <div class="agent-body" id="agentBody">
-          <p data-agent-block="1">Preview 是盖在工作台上的文件容器，里面没有会话列表，也没有输入框。</p>
-          <p data-agent-block="2">文件批注和这段回复的批注，都可以进当前会话的同一份草稿。</p>
-          <ul>
-            <li data-agent-block="3">会话列表在工作台左侧，输入框在这段对话下面。</li>
-            <li data-agent-block="4">进行中的回复不能批注；这条回复已经完成。</li>
-          </ul>
+      <article class="msg user"><p>Preview 里需要输入框和会话列表吗？</p></article>
+      <article class="msg agent">
+        <header><span>Agent · 已完成</span></header>
+        <div class="agent-body">
+          <p>Preview 是盖在工作台上的文件容器，里面没有会话列表，也没有输入框。</p>
+          <p>批注只发生在文件上。这段回复本身不用逐条圈选。</p>
         </div>
-      </article>
-      <article class="msg agent pending">
-        <header><span>Agent · 正在回复</span><button type="button" disabled>批注这条回复</button></header>
-        <p>仍在生成，不能选块。</p>
       </article>
     </div>
     <section class="composer" id="composerDock" aria-label="会话输入区">
@@ -121,7 +110,7 @@
 
 <aside class="draft-panel" id="draftPanel" aria-label="当前会话批注草稿">
   <header><div><small id="draftSessionLabel">当前会话 · 一份草稿</small><h2>预览批注</h2></div><button type="button" id="draftCloseButton" aria-label="关闭草稿">×</button></header>
-  <div class="draft-scroll"><p class="draft-intro" id="draftIntro">文件按路径分组，Agent 回复按消息分组。发送只发生在工作台输入区。</p><div id="draftItems"></div></div>
+  <div class="draft-scroll"><p class="draft-intro" id="draftIntro">文件按路径和版本分组。发送只发生在工作台输入区。</p><div id="draftItems"></div></div>
   <footer>
     <span id="draftFooterCount">0 条批注</span>
     <button type="button" id="returnWorkbenchButton">回到工作台</button>

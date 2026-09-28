@@ -1836,6 +1836,7 @@ pub fn reply_kind(reply: &Reply) -> &'static str {
         Reply::ForkTransfer(_) => "forkTransfer",
         Reply::Sessions(_) => "sessions",
         Reply::SessionDrafts(_) => "session drafts",
+        Reply::PreviewAnnotations(_) => "preview annotations",
         Reply::SessionComponents(_) => "session components",
         Reply::SessionFlow(_) => "session flow",
         Reply::SessionImports(_) => "session imports",

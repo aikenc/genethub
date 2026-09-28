@@ -787,6 +787,100 @@ pub struct SessionDraftForward {
     pub estimated_tokens: u64,
 }
 
+/// Workspace root a preview annotation is anchored to.
+///
+/// The first landing only accepts `primary`. Other roots stay in the schema so
+/// a later multi-root resolver does not invent a second annotation type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum PreviewAnnotationRoot {
+    Primary,
+    #[serde(rename_all = "camelCase")]
+    WorkspaceFolder {
+        path: String,
+    },
+}
+
+/// File identity checked against `asset.preview` before a note is stored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct PreviewAnnotationSource {
+    pub root: PreviewAnnotationRoot,
+    pub relative_path: String,
+    pub content_version: String,
+}
+
+/// Where on a preview the person pointed. Coordinates are original-image pixels.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum PreviewAnnotationTarget {
+    #[serde(rename_all = "camelCase")]
+    MarkdownLines {
+        #[ts(type = "number")]
+        start_line: u32,
+        #[ts(type = "number")]
+        end_line: u32,
+        excerpt: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    HtmlElement {
+        selector: String,
+        tag: String,
+        excerpt: String,
+        dom_fingerprint: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    ImageRect {
+        #[ts(type = "number")]
+        x: u32,
+        #[ts(type = "number")]
+        y: u32,
+        #[ts(type = "number")]
+        width: u32,
+        #[ts(type = "number")]
+        height: u32,
+        #[ts(type = "number")]
+        natural_width: u32,
+        #[ts(type = "number")]
+        natural_height: u32,
+    },
+}
+
+/// One confirmed note inside the session's single preview-annotation draft.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct PreviewAnnotation {
+    pub id: String,
+    pub source: PreviewAnnotationSource,
+    pub target: PreviewAnnotationTarget,
+    /// Assigned by the daemon for image regions. Stable inside one file version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    #[ts(type = "number")]
+    pub marker_no: Option<u32>,
+    /// Workspace-relative copy of the original image bytes, when this note is a region.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub evidence_path: Option<String>,
+    pub comment: String,
+    #[ts(type = "number")]
+    pub created_at_ms: i64,
+}
+
+/// The one preview-annotation draft owned by a session. Not a `SessionDraft`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct PreviewReviewDraft {
+    #[ts(type = "number")]
+    pub revision: u64,
+    pub annotations: Vec<PreviewAnnotation>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]

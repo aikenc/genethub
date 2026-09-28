@@ -412,6 +412,26 @@ pub enum Request {
         session_id: String,
         drafts: Vec<crate::SessionDraft>,
     },
+    #[serde(rename = "session.previewAnnotations.get", rename_all = "camelCase")]
+    SessionPreviewAnnotationsGet { session_id: String },
+    #[serde(rename = "session.previewAnnotations.upsert", rename_all = "camelCase")]
+    SessionPreviewAnnotationUpsert {
+        session_id: String,
+        annotation: crate::PreviewAnnotation,
+        #[ts(type = "number")]
+        expected_revision: u64,
+    },
+    #[serde(rename = "session.previewAnnotations.remove", rename_all = "camelCase")]
+    SessionPreviewAnnotationRemove {
+        session_id: String,
+        ids: Vec<String>,
+        /// Present for an explicit delete. Omitted after a confirmed send so a
+        /// note added during send is not rejected as a stale revision.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        #[ts(type = "number")]
+        expected_revision: Option<u64>,
+    },
     /// Which responsibilities are live in this Session, and where each may
     /// write. Read-only: composition is changed on the Space, not here.
     #[serde(rename = "session.components", rename_all = "camelCase")]
@@ -1087,6 +1107,7 @@ pub enum Reply {
     ForkTransfer(ForkTransfer),
     Sessions(Vec<SessionSummary>),
     SessionDrafts(Vec<crate::SessionDraft>),
+    PreviewAnnotations(crate::PreviewReviewDraft),
     SessionComponents(Vec<ComponentInstanceInfo>),
     SessionFlow(ExecutorFlowStatus),
     SessionImports(SessionImportListing),

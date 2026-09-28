@@ -16,6 +16,7 @@ import {
 } from "../protocol/client";
 import { HighlightedCode, languageForPath, Markdown } from "../session/Markdown";
 import { loadSessionImage } from "../session/imagePreviewRequests";
+import { HtmlAnnotationOverlay, ImageAnnotationLayer, PreviewReviewChrome } from "./PreviewAnnotation";
 import { readRtcEnabled } from "../settings/rtc";
 import { remapHtmlSite, resolveRuntimeAssetPath } from "./htmlSite";
 import {
@@ -66,6 +67,7 @@ export function AssetPreviewPage({
   runtimeSessionId = null,
   onRuntimeArtifactSaved,
   onRuntimeReady,
+  annotationWrite = false,
 }: {
   source: AssetPreviewLocation;
   host?: Host;
@@ -86,6 +88,8 @@ export function AssetPreviewPage({
   onRuntimeArtifactSaved?: (bundle: SessionArtifactBundle) => void;
   /** Fires when the HTML diagnostic bridge can collect logs and DOM state. */
   onRuntimeReady?: () => void;
+  /** Fullscreen workbench preview and same-origin popout may write. Portable links stay read-only. */
+  annotationWrite?: boolean;
 }) {
   const [state, setState] = useState<ViewState>({ kind: "loading" });
   const [pageInfoOpen, setPageInfoOpen] = useState(false);
@@ -282,6 +286,7 @@ export function AssetPreviewPage({
           onRuntimeArtifact={runtimeArtifactSubmit}
           runtimeSessionId={runtimeSessionId}
           onRuntimeReady={onRuntimeReady}
+          annotationWrite={annotationWrite}
         />
       )}
       {chrome === "page" && pageInfoOpen ? (
@@ -308,6 +313,7 @@ function PreviewDocument({
   onRuntimeArtifact,
   runtimeSessionId,
   onRuntimeReady,
+  annotationWrite = false,
 }: {
   result: AssetPreviewResult;
   path: string;
@@ -318,6 +324,7 @@ function PreviewDocument({
   onRuntimeArtifact?: RuntimeArtifactSubmit;
   runtimeSessionId?: string | null;
   onRuntimeReady?: () => void;
+  annotationWrite?: boolean;
 }) {
   const { metadata, bytes, transfer } = result;
   const rootHandle = path.split("/")[0] ?? "";
@@ -368,45 +375,48 @@ function PreviewDocument({
     });
   }, [metadata, onMetaChange, transfer]);
 
-  if (metadata.kind === "markdown") {
-    return (
-      <article className="min-h-0 w-full flex-1 overflow-y-auto overscroll-contain touch-pan-y">
-        <div className="mx-auto max-w-4xl px-5 py-6 sm:px-8 sm:py-10">
-          <Markdown text={text} variant="document" artifact={artifact} />
-        </div>
-      </article>
-    );
-  }
-  if (metadata.kind === "text") {
-    return (
-      <HighlightedCode text={text} language={languageForPath(path)} document />
-    );
-  }
-  if (metadata.kind === "html") {
-    return (
-      <ServiceHtmlDocument
-        client={client}
-        workspaceHandle={workspaceHandle}
-        bytes={bytes}
-        metadata={metadata}
-        transfer={transfer}
-        entryPath={path}
-        storageScope={{ deviceHandle, workspaceHandle }}
-        fetchAsset={loadPreview}
-        onMetaChange={onMetaChange}
-        onRuntimeArtifact={onRuntimeArtifact}
-        onRuntimeReady={onRuntimeReady}
-      />
-    );
-  }
-  if (metadata.kind === "wasm" || metadata.kind === "binary") {
-    return (
-      <p className="m-auto max-w-lg px-6 text-center text-sm text-muted">
-        二进制资源（{metadata.mediaType}，{metadata.sourceBytes} bytes）。请从入口 HTML 打开以运行游戏或站点。
-      </p>
-    );
-  }
-  return <BlobDocument bytes={bytes} metadata={metadata} client={client} workspaceHandle={workspaceHandle} path={path} />;
+  const body = metadata.kind === "markdown" ? (
+    <article className="min-h-0 w-full flex-1 overflow-y-auto overscroll-contain touch-pan-y">
+      <div className="mx-auto max-w-4xl px-5 py-6 sm:px-8 sm:py-10">
+        <Markdown text={text} variant="document" artifact={artifact} />
+      </div>
+    </article>
+  ) : metadata.kind === "text" ? (
+    <HighlightedCode text={text} language={languageForPath(path)} document />
+  ) : metadata.kind === "html" ? (
+    <ServiceHtmlDocument
+      client={client}
+      workspaceHandle={workspaceHandle}
+      bytes={bytes}
+      metadata={metadata}
+      transfer={transfer}
+      entryPath={path}
+      storageScope={{ deviceHandle, workspaceHandle }}
+      fetchAsset={loadPreview}
+      onMetaChange={onMetaChange}
+      onRuntimeArtifact={onRuntimeArtifact}
+      onRuntimeReady={onRuntimeReady}
+    />
+  ) : metadata.kind === "wasm" || metadata.kind === "binary" ? (
+    <p className="m-auto max-w-lg px-6 text-center text-sm text-muted">
+      二进制资源（{metadata.mediaType}，{metadata.sourceBytes} bytes）。请从入口 HTML 打开以运行游戏或站点。
+    </p>
+  ) : (
+    <BlobDocument bytes={bytes} metadata={metadata} client={client} workspaceHandle={workspaceHandle} path={path} />
+  );
+  return (
+    <PreviewReviewChrome
+      client={client}
+      sessionId={runtimeSessionId ?? null}
+      enabled={annotationWrite}
+      path={path}
+      version={metadata.version}
+      kind={metadata.kind}
+      sourceText={text}
+    >
+      {body}
+    </PreviewReviewChrome>
+  );
 }
 
 function BlobDocument({
@@ -444,6 +454,7 @@ function BlobDocument({
       ),
     [shown, mediaType],
   );
+  const [image, setImage] = useState<HTMLImageElement | null>(null);
   useEffect(() => () => URL.revokeObjectURL(url), [url]);
   return metadata.kind === "image" ? (
     <div className="flex min-h-0 flex-1 flex-col bg-black/5">
@@ -471,7 +482,16 @@ function BlobDocument({
         </div>
       ) : null}
       <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-4">
-        <img src={url} alt="预览" className="max-h-full max-w-full object-contain" />
+        <div className="relative max-h-full max-w-full">
+          <img
+            ref={setImage}
+            src={url}
+            alt="预览"
+            draggable={false}
+            className="max-h-full max-w-full object-contain"
+          />
+          <ImageAnnotationLayer image={image} />
+        </div>
       </div>
     </div>
   ) : (
@@ -890,6 +910,7 @@ export function HtmlDocument({
               onLoad={() => setFrameReady(true)}
               className="absolute inset-0 h-full w-full border-0 bg-white [isolation:isolate]"
             />
+            <HtmlAnnotationOverlay frameRef={frameRef} />
           </div>
         </>
       ) : (
@@ -1398,6 +1419,33 @@ const PREVIEW_DIAG_BRIDGE = `(function(){
       sandboxHost.remove();
     });
   }
+  function previewSelector(element) {
+    if (element.id && /^[A-Za-z][\\w-]*$/.test(element.id)) return element.tagName.toLowerCase() + "#" + element.id;
+    var testid = element.getAttribute && element.getAttribute("data-testid");
+    if (testid && testid.length < 80 && testid.indexOf("\\"") < 0) return element.tagName.toLowerCase() + "[data-testid=\\"" + testid + "\\"]";
+    var parts = [];
+    var current = element;
+    var depth = 0;
+    while (current && current.nodeType === 1 && current !== document.body && depth < 6) {
+      var tag = current.tagName.toLowerCase();
+      var parentNode = current.parentElement;
+      if (parentNode) {
+        var same = 0;
+        var index = 1;
+        for (var i = 0; i < parentNode.children.length; i++) {
+          if (parentNode.children[i].tagName === current.tagName) {
+            same++;
+            if (parentNode.children[i] === current) index = same;
+          }
+        }
+        if (same > 1) tag += ":nth-of-type(" + index + ")";
+      }
+      parts.unshift(tag);
+      current = parentNode;
+      depth++;
+    }
+    return parts.join(" > ");
+  }
   window.addEventListener("message", function(event){
     if (event.source !== parent) return;
     var data = event.data;
@@ -1405,6 +1453,26 @@ const PREVIEW_DIAG_BRIDGE = `(function(){
     var requestId = String(data.requestId || "");
     if (data.command === "snapshot-render") {
       captureRenderedFrame(requestId);
+      return;
+    }
+    if (data.command === "scroll-by") {
+      window.scrollBy(Number(data.dx) || 0, Number(data.dy) || 0);
+      return;
+    }
+    if (data.command === "hit-test") {
+      var target = document.elementFromPoint(Number(data.x), Number(data.y));
+      if (!target || target === document.documentElement || target === document.body) {
+        sendRuntime("hit-test", requestId, { error: "empty" });
+        return;
+      }
+      var excerpt = String(target.innerText || target.getAttribute("alt") || "").replace(/\s+/g, " ").trim().slice(0, 256);
+      var fingerprint = target.tagName.toLowerCase() + ":" + excerpt.slice(0, 80);
+      sendRuntime("hit-test", requestId, {
+        selector: previewSelector(target).slice(0, 512),
+        tag: target.tagName.toLowerCase().slice(0, 32),
+        excerpt: excerpt,
+        domFingerprint: fingerprint.slice(0, 128)
+      });
       return;
     }
     if (data.command !== "snapshot-dom") return;

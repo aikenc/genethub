@@ -322,6 +322,7 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
         runtimeValues: { ...state.runtimeValues, [event.axisId]: event.valueId },
       };
     case "draftsChanged":
+    case "previewAnnotationsChanged":
       return state;
 
     // Not part of the timeline itself; the session list and its tab title

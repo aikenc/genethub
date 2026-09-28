@@ -1,18 +1,18 @@
 # Asset Preview 选取与会话批注提案
 
-状态：提案，尚未实现。日期：2026-09-28。基线：`genethub` `de362309`、`genethub-cloud` `4fc16e9`（当日已与各自 `origin/main` 一致）；入口、草稿和外部打开复核至 `genethub` `a1514ad9`。本文中的 RPC、字段和限额均为建议契约；验收通过前不应写成现有能力。
+状态：工作台 Preview 已把 Markdown、HTML 和图片批注写入当前会话的一份草稿，并在 Composer 勾选后发送。外部浏览器写入、编号标注图附件和多根路径仍未完成。日期：2026-09-28。基线：`genethub` `de362309`、`genethub-cloud` `4fc16e9`；入口复核至 `a1514ad9`。对话时间线只负责阅读和发送。
 
 交互参考：[可直接打开的 H5 原型](../prototypes/preview-annotations/index.html)。原型用顶部导航切换三个界面，这条导航本身不是产品：
 
-- **工作台**有会话列表、对话和底部输入区。文件从这里打开 Preview。已完成的 Agent 回复可以按块批注。输入区里的「预览批注」卡片被勾选后才发送。
+- **工作台**有会话列表、对话和底部输入区。文件从这里打开 Preview。输入区里的「预览批注」卡片被勾选后才发送。对话只负责阅读和发送，不在每条 Agent 回复上做块批注。
 - **Preview** 是盖住工作台的文件容器，对应 `PreviewFloat` 里的 `AssetPreviewPage`。它只有当前文件、批注入口和草稿查看。没有会话列表，也没有会话输入框。
-- **外部浏览器**同样只有独立 Preview，对应 `PreviewPopoutPage`。保存后显示回执；发送仍要回到原来的工作台。
+- **外部浏览器**同样只有独立 Preview，对应 `PreviewPopoutPage`。在 portable 票据收窄之前，它只能浏览，不能保存批注。同源新窗口可以写入打开时的会话。发送仍要回到原来的工作台。
 
 Markdown 直接点渲染内容，HTML 直接点元素，图片轻点或拖动区域。选中后出现的是这一条批注的输入卡，不是会话 Composer。HTML 运行诊断工具栏保留。原型用**当前浏览器的** localStorage 模拟 daemon；日志、截图、录制、运行产物、外部回收和发送都只模拟界面，不能验证真实 PWA 或跨浏览器同步。Asset Preview 禁止嵌套 iframe，示例 HTML 直接渲染于 DOM；正式实现仍使用现有 sandbox iframe 和受限桥接。
 
 ## 1. 目标与决策
 
-人在 Preview 或已完成的 Agent 回复上指出具体位置、写下批注，之后在**打开时所在会话的一份草稿**中检查，并一次发送给 Agent。文件侧支持 Markdown 渲染内容对应的源行、运行中的 HTML 元素和图片矩形区域。回复侧支持已完成消息里的渲染块；回复中的图片附件沿用编号区域。一个草稿可混合多个文件、回复批注和三种文件锚点。多张图片按文件和版本分组，各有自己的编号。批注是用户输入，不因选取、保存或关闭 Preview 自动发送。
+人在 Preview 上指出具体位置、写下批注，之后在**打开时所在会话的一份草稿**中检查，并一次发送给 Agent。支持 Markdown 渲染内容对应的源行、运行中的 HTML 元素和图片矩形区域。一个草稿可混合多个文件和三种锚点。多张图片按文件和版本分组，各有自己的编号。批注是用户输入，不因选取、保存或关闭 Preview 自动发送。已完成或进行中的 Agent 回复、工具过程和转发选择都不进入这份草稿。
 
 Preview 不变成第二个工作台。会话列表和 Composer 留在 [Workbench](../packages/workbench/src/app/WorkbenchApp.tsx)；Preview 只提供当前文件的画面和有界候选。保存由打开 Preview 的那个会话决定，不在 Preview 里改选对话。源文件保持只读，批注随会话保存在其 Space 中；Hub 与 Relay 不增加明文批注仓库。
 
@@ -37,7 +37,7 @@ Preview 不变成第二个工作台。会话列表和 Composer 留在 [Workbench
 
 1. 在工作台点文件，全屏 Preview 盖上来。头部按“进入批注”。会话就是打开它的那个会话，Preview 里不提供会话列表。没有 `sessionId`、离线或无权限时，批注按钮不可用并说明原因。退出批注后 Markdown 和 HTML 恢复普通浏览与点击。HTML 日志、截图、录制、运行产物按钮保持原有用途。
 2. 直接点渲染后的 Markdown 块或 HTML 元素；图片轻点得到可调整的默认矩形，拖动得到精确矩形。选中后立即出现一张小输入卡，手机从底部升起；写完按“加入草稿”。这张卡只写这一条批注，不是会话输入框。只有这个确认动作写入。失败保留文字和选区，以同一操作 ID 重试。
-3. 头部“草稿 N”与内容上的已保存标记打开同一份草稿；手机用底部抽屉。草稿按文件和版本归组，图片组展示原图、带编号区域和 `#编号 → 批注` 清单。Agent 回复另按消息分组。点击标记能查看对应批注。编辑、删除和回跳在抽屉中完成。关闭 Preview 后，工作台 Composer 里出现一张“预览批注 · N 条”卡片，可像普通草稿一样显式勾选；它不覆盖当前输入，也不住在 Preview 里。
+3. 头部“草稿 N”与内容上的已保存标记打开同一份草稿；手机用底部抽屉。草稿按文件和版本归组，图片组展示原图、带编号区域和 `#编号 → 批注` 清单。点击标记能查看对应批注。编辑、删除和回跳在抽屉中完成。关闭 Preview 后，工作台 Composer 里出现一张“预览批注 · N 条”卡片，可像普通草稿一样显式勾选；它不覆盖当前输入，也不住在 Preview 里。
 4. 用户在工作台 Composer 中勾选这张卡片，检查单条消息和随消息提供的图片证据，再确认发送。发送只由 Workbench/PWA 的会话客户端发起。独立 Preview 只保存批注。确认前保留草稿。若发送期间又加入批注，只清除已确认发送的快照，新条目留在同一张草稿卡片。
 
 未发送的新会话没有 `sessionId`。从这种会话里打开 Preview 时，第一次“加入草稿”沿用现有行为：先创建真实 Session，并在按钮旁说明这一点；创建失败则选区和文字留在原地。从项目文件浏览打开、调用方明确传入 `sessionId: null` 的 Preview 不在文件层创建会话，回到工作台选定或新建会话后再批注。切换机器、Workspace 或会话后，异步保存结果只更新原来的精确目标。独立 Preview URL 中的 `sessionId` 只是导航提示；保存前仍由 daemon 验证票据所绑定的会话属于目标 Workspace 且可写。
@@ -58,13 +58,7 @@ Preview 不变成第二个工作台。会话列表和 Composer 留在 [Workbench
 
 外部浏览器断线、票据过期或设备离线时，已确认的批注保留在 daemon；尚未确认的选区与文字仅留在外部页作待重试状态，界面不得报“已保存”。重新从 PWA 复制有效链接后，外部页以原操作 ID 重试并让 daemon 去重；无法重新连接时提供复制可读批注文本的人工回退，说明它尚未进入会话。外部页本地恢复仅是防丢输入，不是跨浏览器同步。票据绑定的会话被删除或失去写入权限时拒绝写入。人在 PWA 里另开了一场对话，不会把外部页正在写的批注改投到新对话。
 
-### 3.2 Agent 回复上的同类批注
-
-可以，而且应该进同一份会话草稿。对话里的 Agent 输出已经由 [Timeline](../packages/workbench/src/session/TimelineView.tsx) 用同一个 [Markdown 渲染器](../packages/workbench/src/session/Markdown.tsx) 显示，图片附件也在这条时间线上。手势与 Preview 相同：在**已完成**的回复上进入批注，点一个渲染块，或在回复里的图片上标编号区域，写完加入当前会话草稿。
-
-这不是 Preview 的能力，入口在工作台对话里，不在文件容器里。它也不是现有的“选择整个 Turn”：那条手势用来转发整条消息，批注是对块或区域写一句人的判断。
-
-锚点用已经落盘的消息 ID，加上块序号和短摘录；图片用该附件 ID 加矩形和组内编号。进行中的回复、工具过程、思考行和系统行不能批注。消息后来被压缩或摘录替换、摘录对不上时，标成失效，不自动改挂到新文本上。发送时和文件批注排在同一条消息里，并标明这是对哪一条 Agent 回复的哪一块，避免和文件路径混成同一种锚点。
+对话时间线继续只负责阅读、转发整条消息和从 Composer 发送。不在单条 Agent 回复上增加块批注或附件圈选。
 
 ## 4. 三种选取器
 
@@ -88,7 +82,7 @@ Preview 不变成第二个工作台。会话列表和 Composer 留在 [Workbench
 
 ## 5. 数据、身份和一致性契约
 
-建议在 [统一协议](../packages/proto/src/domain.rs) 定义带判别字段的批注，由协议生成 TypeScript 类型。文件锚点与回复锚点是同一份草稿里的两类条目。文件条目示意：
+在 [统一协议](../packages/proto/src/domain.rs) 定义带判别字段的批注，由协议生成 TypeScript 类型。一份草稿里只有文件锚点。文件条目：
 
 ```ts
 type PreviewAnnotation = {
@@ -117,31 +111,13 @@ type PreviewImageEvidence = {
 };
 ```
 
-回复条目不使用文件路径或内容版本：
+准确的写入目标由已认证连接、Workspace 和 Session 决定，浏览器不能用请求字段改投别的机器。`rootHandle` 是设备本地映射，只用于本次 Preview 寻址，不写进会话持久数据；daemon 在保存时把它核验并转换为稳定的 Workspace 根描述。普通 folder 项目使用 `primary`。本轮只接受 `primary`；`.code-workspace` 多根仍拒绝写入，避免用显示名称或可变索引当成路径。不要以用户给的 URL 字符串作为持久身份或授权凭证。
 
-```ts
-type TranscriptAnnotation = {
-  id: string;
-  anchor: {
-    messageId: string;
-    target:
-      | { kind: "markdownBlock"; index: number; excerpt: string }
-      | { kind: "imageRect"; attachmentId: string; markerNo: number; x: number; y: number; width: number; height: number; naturalWidth: number; naturalHeight: number };
-  };
-  comment: string;
-  createdAtMs: number;
-};
-```
+每个真实 Session 拥有零或一份 `previewReviewDraft`，由 daemon 保存在该 Session 的 `.genethub/sessions/<session>/preview-review.json`；不在浏览器 `localStorage`、Hub 或 daemon `<data>` 目录放业务副本，也不写入 `meta.json`。**这是新的会话草稿类型，不是今天的 `SessionDraft[]` 条目。** 独立文件是因为旧 `session.drafts.replace` 会整组覆盖，旧客户端会反序列化并重写 `meta.json`。这份文件只由新的批注 RPC 在会话锁内整份替换，并用 `expectedRevision` 拒绝过期写入，所以不需要追加日志。图片证据和批注属于同一份草稿：首次保存时核验源版本、把该版本原图字节复制到 `preview-review-images/`，再写入批注；失败不得留下“有编号但无原图”的草稿。再次批注同一版本时复用原图，按组内 `nextMarkerNo` 分配编号，编辑和删除不改变剩余编号，删除后也不重用编号。会话删除时目录一并清理。布局见 [会话存储](session-storage.md)。
 
-回复里的图片仍按“该附件的原图 + 带编号标注图 + 编号清单”交给 Agent。编号只在这一条消息的这一张附件内稳定，避免和另一张文件图的 `#1` 混淆。
+Workbench 在现有 Composer 草稿区域**投影一张**“预览批注”卡片，提供勾选和只读展开。改批注正文、删除和回跳在 Preview 的草稿抽屉里完成，避免在 Composer 里改坏编号和路径。后台 `SessionDraft[]` 最多五条的限制仍只约束普通草稿。卡片来自单独的 `previewAnnotationsChanged` 事件，打开会话时也会读取。用户勾选该卡片并发送时，Workbench 用当时的条目生成一条文本快照，合并当前 Composer 文字及其他被选普通草稿。若产品最终要求它在协议层也严格属于五条 `SessionDraft` 之一，就必须先把旧版整组 `replace` 升为带版本的逐条更新并解决旧客户端覆盖问题。
 
-准确的写入目标由已认证连接、Workspace 和 Session 决定，浏览器不能用请求字段改投别的机器。`rootHandle` 是设备本地映射，只用于本次 Preview 寻址，不写进会话持久数据；daemon 在保存时把它核验并转换为稳定的 Workspace 根描述。普通 folder 项目使用 `primary`；`.code-workspace` 多根使用规范化的 `folders[].path`，不用显示名称或可变索引。跨设备无法解析绝对路径根时，批注仍可读，但回跳显示“源文件在此设备不可用”。不要以用户给的 URL 字符串作为持久身份或授权凭证。
-
-每个真实 Session 拥有零或一份 `previewReviewDraft`，由 daemon 保存在该 Session 的 `.genethub/sessions/<session>/` 内；不在浏览器 `localStorage`、Hub 或 daemon `<data>` 目录放业务副本。**这是拟议的新会话草稿类型，不是今天的 `SessionDraft[]` 条目。** 选择独立存储是因为旧 `session.drafts.replace` 会整组覆盖、旧客户端会反序列化并重写 `meta.json`，无法可靠地把跨浏览器并发批注塞进现有字段。建议使用会话级追加日志 `preview-review.jsonl`，实现前须确定有界恢复及必要的快照/压缩规则，并更新 [会话布局](session-storage.md)。图片证据组和批注属于同一份草稿：首次保存时核验源版本、复制原图并持久化证据引用，再原子追加批注；失败不得留下“有编号但无原图”的草稿。再次批注同一版本时复用原图，按组内 `nextMarkerNo` 分配编号，编辑和删除不改变剩余编号。渲染用标注图是原图与区域清单的确定性派生物，发送快照固定后生成，避免编辑、删除后附件与清单不一致。会话删除时一同清理证据；草稿版本用单调 `revision`，每条批注用稳定 `id`。
-
-Workbench 在现有 Composer 草稿区域**投影一张**“预览批注”卡片，提供选择、展开、编辑、移除和查看证据；与普通草稿一起计入界面的草稿提示数，但后台 `SessionDraft[]` 最多五条的限制仍只约束普通草稿。卡片是单独的数据来源，需有明确的订阅事件、打开会话时的读取和离开后重入读取；不能只复用当前仅含数量的 `DraftsChanged` 事件。用户勾选该卡片并发送时，Workbench 从指定 revision 生成一条结构化快照，合并当前 Composer 文字及其他被选普通草稿；生成的证据清单可检查，不能把它压成一行链接或让自由文本编辑悄悄改坏图片编号与附件映射。若产品最终要求它在协议层也严格属于五条 `SessionDraft` 之一，就必须先把旧版整组 `replace` 升为带版本的逐条更新并解决旧客户端覆盖问题；不能同时宣称沿用现有结构和支持跨浏览器无丢项。
-
-新增按**单个草稿**操作的受限 RPC：`get`、`upsertAnnotation`、`removeAnnotation`、`reorder`，写入在会话锁内完成并返回新 revision；`upsert` 对同一 `id` 幂等，编辑和删除带预期 revision，冲突时回读、提示并保留人的未提交文字。RPC 的身份和权限检查看 §3.1，外部浏览器不能调用普通会话发送接口。不能通过现有整组 `session.drafts.replace` 隐式覆盖它。新客户端只在 daemon 明确声明该会话支持批注草稿时展示保存按钮；旧 daemon 明确显示不可用，旧客户端继续使用普通草稿，不会擦掉新字段。协议兼容先由 daemon 接受新字段/RPC，再由 Web 开启入口。
+RPC 是 `session.previewAnnotations.get`、`upsert` 和 `remove`。写入在会话锁内完成并返回新 revision；同一 `id` 且正文与锚点未变时幂等，改正文和删除带预期 revision，冲突时回读并保留人的未提交文字。发送确认后按当时的 id 列表移除，不要求 revision 仍等于发送前，这样发送期间新增的条目会留下。不能通过 `session.drafts.replace` 覆盖它。daemon 用 `session.previewAnnotations.v1` 宣告能力；旧 daemon 不显示保存按钮。外部 portable 预览在票据收窄前不调用这些 RPC。
 
 发送时从 revision 固定一份快照，序列化成一条可预览的用户消息；人可以编辑批注正文和 Composer 的补充文字，修改后重建快照，不能直接改坏证据引用：Markdown/HTML 每项包含工作区相对文件引用、锚点、版本和人的批注；每张图片另有可读取的原图与标注图附件，以及编号到矩形/批注的结构化清单。文件摘录与 HTML 文本用明确的“不可信预览内容”边界引用，不把其中的句子当 Agent 指令。例如一张草稿可以显示为：
 
@@ -154,7 +130,6 @@ Workbench 在现有 Composer 草稿区域**投影一张**“预览批注”卡�
   #2：标题和趋势图之间留白偏多。
 图 B：design/mobile.png @9c816e42；原图 [会话附件 B-original]，标注图 [会话附件 B-marked]
   #1：手机上的按钮太靠近底部。
-Agent 回复 msg_agent_1，块 2；批注：这里把 Preview 说成了带输入框的页面。
 ```
 
 实际发送还应包含可解析的根描述、图片组 ID 和区域像素元数据；示例只展示人看到的摘要。标注图、原图和清单要在同一发送快照中校验引用可读，任一缺失则阻止发送并保留草稿。`session.send` 复用同一个 `messageId` 处理未知结果；只有拿到持久接收证明才按快照 revision 清除已发送项。若清除失败，卡片显示“已发送，待核对”，查询原消息收据后恢复，不用新 ID 再投递。
@@ -173,8 +148,7 @@ Agent 回复 msg_agent_1，块 2；批注：这里把 Preview 说成了带输入
 | A. 边界与草稿 | 更新 [Preview v4](assets-quick-preview.md)、必要的 [架构边界](architecture.md)、[会话布局](session-storage.md)及 Cloud 产品说明；协议、daemon 原子草稿、Composer 卡片和会话变更刷新 | 两个浏览器窗口并发追加无丢项；断线重试同 ID 不重复；重进同一会话能恢复；旧端不破坏普通草稿；卡片不误称现有 `SessionDraft` |
 | B. Markdown 与图片 | 渲染块上的源行锚点、按需“调整行”、轻点/拖动图片区域、每图编号证据 | CRLF、代码块、表格和软换行映射准确；触屏轻点/拖拽及缩放坐标一致；多图各自 `#1` 不串；原图快照与批注原子保存，文件改变显示失效 |
 | C. HTML | 头部批注开关、受限 hit-test 桥、受信标记和重定位 | 浏览/批注模式切换可恢复页面操作；静态与动态元素可选；运行日志与截图仍可用；伪造桥接回复不能绕过父页用户动作；元素变化有明确失效状态 |
-| D. 外部浏览器与发送 | portable Preview 的会话绑定受限能力、写入回执、PWA 重读、单条消息预览、每图原图/标注图/清单、持久发送与条件清理 | iOS PWA 复制链接到独立浏览器后，保存即落票据绑定的 daemon 会话；外部页没有会话列表和 Composer；关闭外部页再回 PWA，卡片出现在工作台输入区并由人勾选发送；票据过期、断线、无会话的文件预览均不假报成功；外部 Preview 无 `session.send`；混合文件与回复批注仍只有一张卡片，发送中新增项保留，未知接收结果不重复发送 |
-| E. Agent 回复批注 | 已完成回复上的块锚点，以及回复附件图的编号区域；与文件批注共用草稿和发送快照 | 进行中的 Turn、工具过程和转发选择不能写入；消息被压缩后旧锚点失效而不是改挂；同一条发送里能区分文件路径和回复消息 ID |
+| D. 外部浏览器与发送 | portable Preview 的会话绑定受限能力、写入回执、PWA 重读、单条消息预览、每图原图/标注图/清单、持久发送与条件清理 | iOS PWA 复制链接到独立浏览器后，保存即落票据绑定的 daemon 会话；外部页没有会话列表和 Composer；关闭外部页再回 PWA，卡片出现在工作台输入区并由人勾选发送；票据过期、断线、无会话的文件预览均不假报成功；外部 Preview 无 `session.send`；混合文件仍只有一张卡片，发送中新增项保留，未知接收结果不重复发送 |
 
 测试以真实 Workbench、协议和 daemon 会话存储为 oracle，覆盖本机与经现有认证通道的远端浏览器；**PWA 与外部浏览器分别建独立存储上下文**，不能用同源双标签页冒充。单元层只验证坐标换算、行号、schema 和幂等函数。HTML 安全用真实 sandbox iframe；并发和重启用真实会话写入与回读，不能仅以 mock store 证明。按受影响范围经 `testctl` 选择 gate，协议变化验证新旧组合；不把文档编写或 H5 原型当作这些产品测试已经通过。
 
@@ -193,7 +167,7 @@ Agent 回复 msg_agent_1，块 2；批注：这里把 Preview 说成了带输入
 | G07 | 适用；先声明会话批注能力，再显示可写按钮；旧 daemon 显式不可用 |
 | G08 | 适用；预览摘录标不可信，锚点用枚举 schema，预算与超限行为见 §6 |
 | G09 | 适用；保存、冲突、失效、收据四类无正文诊断见 §6 |
-| G10 | 适用；不做完整 DevTools、HTML 源码行映射、单区域裁图上传、视频/WASM 批注、自动发送、Hub 明文同步、在 Preview 内嵌会话列表或 Composer，或跨浏览器直接操纵 Composer。现有 Turn 转发选择保持原用途。图片批注必须保存原图证据并在发送快照中生成编号标注图 |
+| G10 | 适用；不做完整 DevTools、HTML 源码行映射、单区域裁图上传、视频/WASM 批注、自动发送、Hub 明文同步、在 Preview 内嵌会话列表或 Composer、跨浏览器直接操纵 Composer，或对 Agent 回复逐条批注。现有 Turn 转发选择保持原用途。图片批注必须保存原图证据；编号标注图附件仍是后续发送快照，本轮发送文本带编号、矩形和原图快照路径 |
 | G11 | 适用；真实组件边界、oracle 与用例形状见 §7 |
 | G12 | 适用；批注归当前 Session，放其 Space 的会话目录，生命周期与会话一致 |
 

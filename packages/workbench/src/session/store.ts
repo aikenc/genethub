@@ -26,6 +26,7 @@ import type {
   SequencedEvent,
   SessionSnapshot,
   SessionImportListing,
+  PreviewReviewDraft,
   SessionDraft,
   SessionAgentTarget,
   SessionSummary,
@@ -46,6 +47,7 @@ import {
 } from "../location/locator";
 import type { AddressScope } from "../location/workbench";
 import type { Client, ConnectionState } from "../protocol/client";
+import { PREVIEW_ANNOTATIONS_FEATURE } from "../preview/reviewDraft";
 import { uploadSessionArtifact } from "../preview/sessionArtifactUpload";
 import { ClientRequestTimeoutError, ConnectionOutcomeUnknownError, ProtocolError_ } from "../protocol/client";
 import { canStartAgent } from "../presentation/catalog/resolve";
@@ -281,6 +283,8 @@ interface WorkbenchState {
   forwardDraft: ForwardDraft | null;
   /** Persisted unsent messages for the open session. */
   sessionDrafts: SessionDraft[];
+  /** One preview-annotation draft for the open session. Null until the daemon answers. */
+  previewReview: PreviewReviewDraft | null;
   /** A completed cross-machine outcome offering a follow-up action. */
   completionNotice: CompletionNotice | null;
   hub: HubStatus | null;
@@ -461,6 +465,8 @@ interface WorkbenchState {
   saveComposerDraft(text: string, attachments: Attachment[], videoFiles?: File[]): Promise<boolean>;
   replaceSessionDrafts(drafts: SessionDraft[]): Promise<boolean>;
   updateSessionDraft(draft: SessionDraft, videoFiles?: File[]): Promise<boolean>;
+  /** Drops sent preview notes without a revision, so notes added during send stay. */
+  consumePreviewAnnotations(ids: string[]): Promise<boolean>;
   /** Shows (or clears, with `null`) the completed-work banner. */
   setCompletionNotice(notice: CompletionNotice | null): void;
   /**
@@ -553,6 +559,21 @@ function refreshSessionDrafts(client: Client, sessionId: string, get: () => Work
     .then((reply) => {
       if (reply?.type === "sessionDrafts" && get().client === client && get().activeSessionId === sessionId) {
         set({ sessionDrafts: normalizeSessionDrafts(reply.data) });
+      }
+    })
+    .catch((error) => reportError(set, error));
+}
+
+function refreshPreviewReview(client: Client, sessionId: string, get: () => WorkbenchState, set: Setter): void {
+  if (typeof client.call !== "function") return;
+  if (!client.identity?.features?.includes(PREVIEW_ANNOTATIONS_FEATURE)) {
+    if (get().client === client && get().activeSessionId === sessionId) set({ previewReview: null });
+    return;
+  }
+  void client.call({ type: "session.previewAnnotations.get", payload: { sessionId } })
+    .then((reply) => {
+      if (reply?.type === "previewAnnotations" && get().client === client && get().activeSessionId === sessionId) {
+        set({ previewReview: reply.data });
       }
     })
     .catch((error) => reportError(set, error));
@@ -760,6 +781,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   composerDraftInserts: [],
   forwardDraft: null,
   sessionDrafts: [],
+  previewReview: null,
   completionNotice: null,
   hub: null,
   claim: null,
@@ -888,6 +910,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       activeWorkspaceId: reply.data.id,
       activeSessionId: null,
       sessionDrafts: [],
+      previewReview: null,
       timeline: emptyTimeline(),
     }));
     await loadSessions(client, set);
@@ -1098,6 +1121,8 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       },
       activeWorkspaceId: target,
       activeSessionId: null,
+      sessionDrafts: [],
+      previewReview: null,
       forwardDraft: recalledForward(forwardKey(state, localId)),
       addressScope:
         options?.addressScope ?? (state.addressScope === "machine" ? "machine" : "workspace"),
@@ -1151,6 +1176,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       return {
         activeSessionId: sessionId,
         sessionDrafts: [],
+        previewReview: null,
         forwardDraft: recalledForward(forwardKey(state, sessionId)),
         draft: null,
         // The project follows the conversation. Every workspace's sessions are
@@ -1170,6 +1196,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
 
     discardSubscriptions(client, evicted);
     refreshSessionDrafts(client, sessionId, get, set);
+    refreshPreviewReview(client, sessionId, get, set);
     // A tab stays warm until it is explicitly closed or LRU-evicted.
     if (warm) {
       // Narrative events keep a background tab current, but its daemon-owned
@@ -1192,6 +1219,9 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
           if (get().activeSessionId === sessionId) {
             refreshSessionDrafts(client, sessionId, get, set);
           }
+        }
+        if (event.event.type === "previewAnnotationsChanged" && get().activeSessionId === sessionId) {
+          refreshPreviewReview(client, sessionId, get, set);
         }
         applySessionStatus(sessionId, event.event, set);
         if (endsATurn(event.event.type) && get().agents.some((agent) => !canStartAgent(agent))) {
@@ -1884,6 +1914,23 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     }
   },
 
+  async consumePreviewAnnotations(ids) {
+    const sessionId = get().activeSessionId;
+    if (!sessionId || ids.length === 0) return false;
+    try {
+      const reply = await require_(get().client).call({
+        type: "session.previewAnnotations.remove",
+        payload: { sessionId, ids },
+      });
+      if (reply?.type !== "previewAnnotations") throw new Error("移除已发送的预览批注失败");
+      if (get().activeSessionId === sessionId) set({ previewReview: reply.data });
+      return true;
+    } catch (error) {
+      reportError(set, error);
+      return false;
+    }
+  },
+
   async updateSessionDraft(draft, videoFiles = []) {
     const sessionId = get().activeSessionId;
     if (!sessionId) return false;
@@ -2279,7 +2326,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       sessionTimelines: omit(state.sessionTimelines, sessionId),
       subscribedSessionIds: state.subscribedSessionIds.filter((id) => id !== sessionId),
       activeTabId: state.activeTabId === tabId ? null : state.activeTabId,
-      ...(wasOpen ? { activeSessionId: null, timeline: emptyTimeline() } : {}),
+      ...(wasOpen ? { activeSessionId: null, sessionDrafts: [], previewReview: null, timeline: emptyTimeline() } : {}),
     }));
     void get().client?.unsubscribe(sessionId);
     // Deleting what you were reading leaves a blank pane otherwise. `land`

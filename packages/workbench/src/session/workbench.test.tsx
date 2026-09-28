@@ -2864,6 +2864,63 @@ describe("the controls offered to the user", () => {
     await sending;
   });
 
+  it("sends checked preview annotations ahead of the message and consumes those ids", async () => {
+    const onSend = vi.fn(async () => {});
+    const onConsumePreviewReview = vi.fn(async () => true);
+    render(<Composer {...composerProps({
+      onSend,
+      onConsumePreviewReview,
+      previewReview: {
+        revision: 2,
+        annotations: [{
+          id: "ann-1",
+          source: { root: { kind: "primary" }, relativePath: "docs/spec.md", contentVersion: "a".repeat(32) },
+          target: { kind: "markdownLines", startLine: 2, endLine: 2, excerpt: "标题" },
+          comment: "改清楚",
+          createdAtMs: 1,
+        }],
+      },
+    })} />);
+
+    expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
+    await userEvent.click(screen.getByRole("checkbox", { name: "发送预览批注" }));
+    await userEvent.click(screen.getByRole("button", { name: "预览批注 · 1" }));
+    expect(screen.getByText(/docs\/spec\.md/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "发送" }));
+
+    const sent = String(onSend.mock.calls[0]?.[0]);
+    expect(sent).toContain("docs/spec.md");
+    expect(sent).toContain("改清楚");
+    expect(sent).not.toContain("回复");
+    expect(onConsumePreviewReview).toHaveBeenCalledWith(["ann-1"]);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("warns when a sent preview annotation draft could not be removed", async () => {
+    const onSend = vi.fn(async () => {});
+    const onConsumePreviewReview = vi.fn(async () => false);
+    render(<Composer {...composerProps({
+      onSend,
+      onConsumePreviewReview,
+      previewReview: {
+        revision: 1,
+        annotations: [{
+          id: "ann-9",
+          source: { root: { kind: "primary" }, relativePath: "design/a.png", contentVersion: "b".repeat(32) },
+          target: { kind: "imageRect", x: 1, y: 2, width: 3, height: 4, naturalWidth: 20, naturalHeight: 10 },
+          markerNo: 1,
+          comment: "对比度",
+          createdAtMs: 1,
+        }],
+      },
+    })} />);
+
+    await userEvent.click(screen.getByRole("checkbox", { name: "发送预览批注" }));
+    await userEvent.click(screen.getByRole("button", { name: "发送" }));
+    expect(onSend).toHaveBeenCalled();
+    expect(await screen.findByRole("alert")).toHaveTextContent("消息已发送，但这份批注还在会话里");
+  });
+
   it("keeps text-only drafts from older peers usable when attachments are absent", async () => {
     const onSend = vi.fn(async () => {});
     const legacyDraft = { id: "legacy", text: "旧草稿仍可继续" } as unknown as
