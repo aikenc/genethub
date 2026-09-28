@@ -1,7 +1,8 @@
 function bootPreviewAnnotationPrototype() {
   "use strict";
 
-  const STORE_KEY = "genehub-preview-annotations-prototype-v2";
+  const STORE_KEY = "genehub-preview-annotations-prototype-v3";
+  const AGENT_MESSAGE = "msg_agent_1";
   const files = {
     markdown: { kind: "markdown", name: "experience.md", path: "docs/experience.md", version: "a1f6c29b" },
     html: { kind: "html", name: "landing.html", path: "site/landing.html", version: "e24a921d" },
@@ -15,8 +16,8 @@ function bootPreviewAnnotationPrototype() {
   };
   const $ = (id) => document.getElementById(id);
   const el = {
-    layout: $("demoLayout"), preview: $("previewCard"), name: $("previewFileName"), path: $("previewFilePath"),
-    modeButton: $("annotationToggle"), draftButton: $("draftToggle"), draftCount: $("draftCount"), draftPanel: $("draftPanel"),
+    name: $("previewFileName"), path: $("previewFilePath"), modeButton: $("annotationToggle"),
+    draftButton: $("draftToggle"), draftCount: $("draftCount"), draftPanel: $("draftPanel"),
     runtimeToolbar: $("runtimeToolbar"), runtimeStatus: $("runtimeStatus"), runtimeLogCount: $("runtimeLogCount"),
     runtimeFrameCount: $("runtimeFrameCount"), runtimeLogList: $("runtimeLogList"), runtimeLogPanel: $("runtimeLogPanel"),
     modeHint: $("modeHint"), markdownView: $("markdownView"), htmlView: $("htmlView"), htmlStage: $("htmlStage"),
@@ -25,10 +26,12 @@ function bootPreviewAnnotationPrototype() {
     rectLabel: $("rectLabel"), compose: $("composeSheet"), composeTarget: $("composeTarget"), commentInput: $("commentInput"),
     commentCount: $("commentCount"), lineAdjust: $("lineAdjustButton"), lineChoices: $("lineChoices"),
     saveButton: $("saveCommentButton"), copyPending: $("copyPendingButton"), draftItems: $("draftItems"),
-    draftFooterCount: $("draftFooterCount"), sessionSelect: $("sessionSelect"), sendButton: $("sendButton"),
-    flowTitle: $("flowTitle"), flowStatus: $("flowStatus"), flowSwitch: $("flowSwitch"), connectionToggle: $("connectionToggle"),
-    reviewCheckbox: $("reviewCheckbox"), reviewSummary: $("reviewSummary"), reviewOpenButton: $("reviewOpenButton"),
-    composerInput: $("composerInput"), composerSendButton: $("composerSendButton"), composerDock: $("composerDock"),
+    draftFooterCount: $("draftFooterCount"), draftSessionLabel: $("draftSessionLabel"),
+    returnButton: $("returnWorkbenchButton"), externalDraftNote: $("externalDraftNote"),
+    protoStatus: $("protoStatus"), receiptText: $("receiptText"), connectionToggle: $("connectionToggle"),
+    reviewCheckbox: $("reviewCheckbox"), reviewSummary: $("reviewSummary"),
+    composerInput: $("composerInput"), composerSendButton: $("composerSendButton"),
+    sessionTitle: $("sessionTitle"), agentAnnotate: $("agentAnnotate"), agentBody: $("agentBody"),
     toast: $("toast"), modal: $("modalBackdrop"), modalTitle: $("modalTitle"), modalDescription: $("modalDescription"),
     messagePreview: $("messagePreview"),
   };
@@ -41,10 +44,7 @@ function bootPreviewAnnotationPrototype() {
         { id: "example-mobile", fileKey: "mobile", version: files.mobile.version, target: { kind: "image", x: 40, y: 55, width: 275, height: 260, naturalWidth: 800, naturalHeight: 560 }, markerNo: 1, comment: "手机首页标题和第一张卡片之间留白太多。" },
       ],
       landing: [],
-      nextMarker: {
-        product: { "dashboard:f10c7e82": 2, "mobile:9c816e42": 2 },
-        landing: {},
-      },
+      nextMarker: { product: { "dashboard:f10c7e82": 2, "mobile:9c816e42": 2 }, landing: {} },
     };
   }
   function load() {
@@ -55,12 +55,10 @@ function bootPreviewAnnotationPrototype() {
   }
   let saved = load();
   if (!saved.nextMarker) saved.nextMarker = { product: {}, landing: {} };
-  for (const session of Object.keys(sessions)) {
-    if (!saved.nextMarker[session]) saved.nextMarker[session] = {};
-  }
+  for (const session of Object.keys(sessions)) if (!saved.nextMarker[session]) saved.nextMarker[session] = {};
   let currentSession = "product";
   let currentFile = "markdown";
-  let annotate = false;
+  let mode = "off";
   let selection = null;
   let mdRangeBase = null;
   let editingId = null;
@@ -68,7 +66,7 @@ function bootPreviewAnnotationPrototype() {
   let recording = false;
   let modalMode = "send";
   let runtimeFrames = 0;
-  let viewMode = "workbench";
+  let surface = "workbench";
   let externalOnline = true;
   let lastReceipt = "";
   const runtimeEvents = [];
@@ -76,53 +74,58 @@ function bootPreviewAnnotationPrototype() {
 
   function persist() {
     try { localStorage.setItem(STORE_KEY, JSON.stringify(saved)); return true; }
-    catch { notify("模拟会话存储失败，批注仍在输入框中"); return false; }
+    catch { notify("模拟会话存储失败，批注仍留在输入卡里"); return false; }
   }
   function notify(message) {
     el.toast.textContent = message;
     el.toast.classList.add("show");
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => el.toast.classList.remove("show"), 2600);
+    toastTimer = setTimeout(() => el.toast.classList.remove("show"), 2800);
   }
   function draft() { return saved[currentSession]; }
   function clone(value) { return JSON.parse(JSON.stringify(value)); }
-  function renderFlow() {
-    const external = viewMode === "external";
-    const unsaved = !el.compose.classList.contains("hidden") && el.commentInput.value.trim().length > 0;
-    el.layout.classList.toggle("external-mode", external);
-    el.flowTitle.textContent = (external ? "外部浏览器 Preview · " : "Workbench 会话 · ") + sessions[currentSession];
-    el.flowStatus.textContent = external
-      ? externalOnline
-        ? unsaved ? "当前批注未保存；请按“加入当前会话草稿”" : lastReceipt ? "模拟回执：已存入目标会话 · " + lastReceipt : "已连接；每条批注保存后才进入目标会话（模拟）"
-        : "连接中断；未确认的批注尚未进入会话"
-      : "会话草稿 · " + draft().length + " 条批注（本页模拟）";
-    el.flowSwitch.textContent = external ? "回到 PWA 会话 · 模拟" : "PWA 外部浏览器打开 · 模拟";
-    el.connectionToggle.classList.toggle("hidden", !external);
+  function unsavedText() {
+    return !el.compose.classList.contains("hidden") && el.commentInput.value.trim().length > 0;
+  }
+  function renderSurface() {
+    document.body.dataset.surface = surface;
+    const name = sessions[currentSession];
+    el.sessionTitle.textContent = name;
+    el.draftSessionLabel.textContent = name + " · 一份草稿";
+    el.protoStatus.textContent = surface === "external"
+      ? (externalOnline ? (lastReceipt ? "模拟回执 " + lastReceipt : "外部 Preview 已连接") : "外部 Preview 连接中断")
+      : surface === "preview" ? "Preview · " + name : "工作台 · " + name;
+    document.querySelectorAll("[data-surface-nav]").forEach((button) => {
+      button.classList.toggle("active", button.dataset.surfaceNav === surface);
+    });
+    document.querySelectorAll("[data-session]").forEach((button) => {
+      button.classList.toggle("active", button.dataset.session === currentSession);
+    });
     el.connectionToggle.classList.toggle("offline", !externalOnline);
     el.connectionToggle.textContent = externalOnline ? "模拟连接中断" : "模拟重新连接";
-    el.copyPending.classList.toggle("hidden", !external);
-    el.sessionSelect.disabled = external;
-    el.sendButton.textContent = external ? "回到会话检查" : "在输入区检查";
+    el.receiptText.textContent = !externalOnline
+      ? "连接已中断。已经确认的批注仍在「" + name + "」；这一条还没保存。"
+      : lastReceipt
+        ? "已保存到「" + name + "」。请切回原来的 PWA 再发送。这个页面没有输入框。"
+        : "独立 Preview，绑定打开时的会话「" + name + "」。这里不能改选对话，也不能发送。";
+    el.copyPending.classList.toggle("hidden", surface !== "external");
   }
-  function setViewMode(next) {
-    if (next === viewMode) return;
-    if (next === "external") {
-      hideDraft(); closeCompose();
-      viewMode = "external"; externalOnline = true; lastReceipt = "";
-      el.reviewCheckbox.checked = false;
-      renderFlow(); renderDraft();
-      notify("模拟：独立 Preview 已打开；这里没有发送 Agent 消息入口");
-      return;
-    }
-    if (!el.compose.classList.contains("hidden") && el.commentInput.value.trim()) {
-      notify("这条批注尚未保存；请重试或复制文字后取消");
-      return;
-    }
-    hideDraft(); closeCompose();
-    saved = load(); // Simulates the PWA fetching the session after an external browser save.
-    viewMode = "workbench"; externalOnline = true;
-    renderFlow(); renderDraft(); renderMarkers();
-    notify("模拟：PWA 已重新读取当前会话草稿；请在输入区选择并检查");
+  function setSurface(next) {
+    if (next === surface) return;
+    if (unsavedText()) { notify("这条批注还没保存"); return; }
+    const previous = surface;
+    if (previous === "external" && next === "workbench") saved = load();
+    closeCompose();
+    hideDraft();
+    if (next === "external") { externalOnline = true; lastReceipt = ""; }
+    surface = next;
+    if (next !== "preview" && mode === "file") setMode("off");
+    if (next !== "workbench" && mode === "agent") setMode("off");
+    renderSurface();
+    renderDraft();
+    requestAnimationFrame(renderMarkers);
+    if (next === "external") notify("模拟：外部浏览器只打开 Preview，发送仍回到原来的 PWA");
+    if (previous === "external" && next === "workbench") notify("模拟：PWA 重新读取了同一份会话草稿");
   }
   function makeId() { return "note-" + (globalThis.crypto?.randomUUID?.() || String(Date.now()) + Math.random().toString(36).slice(2)); }
   function node(tag, className, textValue) {
@@ -138,6 +141,7 @@ function bootPreviewAnnotationPrototype() {
     return item;
   }
   function currentNotes() { return draft().filter((item) => item.fileKey === currentFile); }
+  function agentNotes() { return draft().filter((item) => item.source === "transcript" && item.messageId === AGENT_MESSAGE); }
   function nextImageNumber(fileKey) {
     const key = fileKey + ":" + files[fileKey].version;
     const existing = 1 + Math.max(0, ...draft().filter((item) => item.fileKey === fileKey).map((item) => Number(item.markerNo) || 0));
@@ -148,8 +152,7 @@ function bootPreviewAnnotationPrototype() {
     runtimeEvents.push(entry);
     if (runtimeEvents.length > 100) runtimeEvents.shift();
     el.runtimeLogCount.textContent = String(runtimeEvents.length);
-    const row = node("li", "", entry);
-    el.runtimeLogList.prepend(row);
+    el.runtimeLogList.prepend(node("li", "", entry));
     while (el.runtimeLogList.children.length > 100) el.runtimeLogList.lastElementChild.remove();
   }
   function closeCompose() {
@@ -161,11 +164,9 @@ function bootPreviewAnnotationPrototype() {
     editingId = null;
     el.lineChoices.classList.add("hidden");
     renderSelection();
-    renderFlow();
   }
   function selectFile(key) {
     if (!files[key]) return;
-    closeCompose();
     currentFile = key;
     const file = files[key];
     el.name.textContent = file.name;
@@ -179,30 +180,44 @@ function bootPreviewAnnotationPrototype() {
     if (file.kind === "image") {
       el.sampleImage.src = file.src;
       el.sampleImage.alt = file.name + " 原图";
-      el.imageFrame.style.aspectRatio = String(file.width) + " / " + String(file.height);
     }
     document.querySelectorAll("[data-file]").forEach((button) => button.classList.toggle("active", button.dataset.file === key));
     updateModeHint();
     renderMarkers();
   }
+  function openFile(key) {
+    if (unsavedText()) { notify("这条批注还没保存"); return; }
+    closeCompose();
+    selectFile(key);
+    surface = "preview";
+    setMode("off");
+    renderSurface();
+    requestAnimationFrame(renderMarkers);
+  }
   function updateModeHint() {
     const kind = files[currentFile].kind;
-    el.modeHint.classList.toggle("hidden", !annotate);
+    const fileMode = mode === "file";
+    el.modeHint.classList.toggle("hidden", !fileMode);
     el.modeHint.textContent = kind === "markdown"
-      ? "点渲染后的段落或列表项，直接写批注"
-      : kind === "html"
-        ? "点页面元素，直接写批注；退出后恢复页面操作"
-        : "轻点生成默认区域，或拖动框选；放手后直接写批注";
-    el.htmlStage.classList.toggle("inspect-mode", annotate && kind === "html");
-    el.imageOverlay.classList.toggle("drawing", annotate && kind === "image");
-    el.markdownView.classList.toggle("annotating", annotate && kind === "markdown");
+      ? "点渲染后的段落或列表项"
+      : kind === "html" ? "点页面元素；退出后恢复页面点击" : "轻点得到默认区域，拖动得到精确区域";
+    el.htmlStage.classList.toggle("inspect-mode", fileMode && kind === "html");
+    el.imageOverlay.classList.toggle("drawing", fileMode && kind === "image");
+    el.markdownView.classList.toggle("annotating", fileMode && kind === "markdown");
+    el.agentBody.classList.toggle("annotating", mode === "agent");
   }
-  function setAnnotate(next) {
-    annotate = next;
-    el.modeButton.textContent = annotate ? "完成批注" : "进入批注";
-    el.modeButton.classList.toggle("active", annotate);
-    el.modeButton.setAttribute("aria-pressed", String(annotate));
-    if (!annotate) closeCompose();
+  function syncModeChrome() {
+    el.modeButton.textContent = mode === "file" ? "完成批注" : "进入批注";
+    el.modeButton.classList.toggle("active", mode === "file");
+    el.modeButton.setAttribute("aria-pressed", String(mode === "file"));
+    el.agentAnnotate.textContent = mode === "agent" ? "完成批注" : "批注这条回复";
+    el.agentAnnotate.setAttribute("aria-pressed", String(mode === "agent"));
+  }
+  function setMode(next) {
+    if (mode === next) return;
+    mode = next;
+    syncModeChrome();
+    closeCompose();
     updateModeHint();
   }
   function imageGeometry(target) {
@@ -230,10 +245,8 @@ function bootPreviewAnnotationPrototype() {
     return { kind: "image", x, y, width: right - x, height: bottom - y, naturalWidth: file.width, naturalHeight: file.height };
   }
   function defaultImageTarget(point) {
-    const halfW = .12;
-    const halfH = .14;
-    const a = { x: Math.max(0, point.x - halfW), y: Math.max(0, point.y - halfH) };
-    const b = { x: Math.min(1, point.x + halfW), y: Math.min(1, point.y + halfH) };
+    const a = { x: Math.max(0, point.x - 0.12), y: Math.max(0, point.y - 0.14) };
+    const b = { x: Math.min(1, point.x + 0.12), y: Math.min(1, point.y + 0.14) };
     return targetFromPoints(a, b);
   }
   function selectorFor(element) {
@@ -250,7 +263,7 @@ function bootPreviewAnnotationPrototype() {
     return element.tagName.toLowerCase() + (value ? " · " + value : "");
   }
   function showOutline(element) {
-    if (!element || !annotate || files[currentFile].kind !== "html") {
+    if (!element || mode !== "file" || files[currentFile].kind !== "html") {
       el.inspectOutline.classList.add("hidden");
       return;
     }
@@ -267,33 +280,31 @@ function bootPreviewAnnotationPrototype() {
     const target = item.target;
     if (target.kind === "markdown") return "第 " + target.start + (target.start === target.end ? "" : "–" + target.end) + " 行";
     if (target.kind === "html") return target.label;
+    if (target.kind === "transcript") return "回复块 " + target.block;
     return "#" + item.markerNo + " 标记区域";
   }
   function mdBlockFor(line) {
     return [...el.markdownView.querySelectorAll("[data-md-start]")].find((block) =>
       Number(block.dataset.mdStart) <= line && Number(block.dataset.mdEnd) >= line);
   }
+  function agentBlock(index) { return el.agentBody.querySelector('[data-agent-block="' + index + '"]'); }
   function updateLineChoices() {
     const multiLine = selection?.kind === "markdown" && mdRangeBase && mdRangeBase.end > mdRangeBase.start;
     el.lineAdjust.classList.toggle("hidden", !multiLine);
     el.lineChoices.replaceChildren();
     if (!multiLine) { el.lineChoices.classList.add("hidden"); return; }
-    const choices = [{
-      start: mdRangeBase.start, end: mdRangeBase.end,
-      label: "整段 · 第 " + mdRangeBase.start + "–" + mdRangeBase.end + " 行",
-    }];
+    const choices = [{ start: mdRangeBase.start, end: mdRangeBase.end, label: "整段 · 第 " + mdRangeBase.start + "–" + mdRangeBase.end + " 行" }];
     for (let line = mdRangeBase.start; line <= mdRangeBase.end; line += 1) {
       choices.push({ start: line, end: line, label: "第 " + line + " 行 · " + (sourceLineText[line] || "源文件这一行") });
     }
     for (const choice of choices) {
-      const choiceButton = action(choice.label, () => {
+      el.lineChoices.append(action(choice.label, () => {
         selection.start = choice.start;
         selection.end = choice.end;
         el.composeTarget.textContent = anchorText({ target: selection });
         renderSelection();
         el.lineChoices.classList.add("hidden");
-      });
-      el.lineChoices.append(choiceButton);
+      }));
     }
   }
   function openSelection(target, markerNo) {
@@ -301,7 +312,9 @@ function bootPreviewAnnotationPrototype() {
     mdRangeBase = target.kind === "markdown" ? { start: target.start, end: target.end } : null;
     editingId = null;
     if (target.kind === "image") selection.markerNo = markerNo || nextImageNumber(currentFile);
-    el.composeTarget.textContent = target.kind === "image" ? "区域 #" + selection.markerNo + " · " + files[currentFile].name : anchorText({ target });
+    el.composeTarget.textContent = target.kind === "image"
+      ? "区域 #" + selection.markerNo + " · " + files[currentFile].name
+      : target.kind === "transcript" ? "Agent 回复 · 块 " + target.block : anchorText({ target });
     el.compose.classList.remove("hidden");
     el.commentInput.value = "";
     el.commentCount.textContent = "0 / 1000";
@@ -310,17 +323,13 @@ function bootPreviewAnnotationPrototype() {
     el.commentInput.focus({ preventScroll: true });
   }
   function renderSelection() {
-    el.markdownView.querySelectorAll(".selected-target").forEach((item) => item.classList.remove("selected-target"));
-    if (selection?.kind === "markdown" && files[currentFile].kind === "markdown") {
-      mdBlockFor(selection.start)?.classList.add("selected-target");
-    }
+    document.querySelectorAll(".selected-target").forEach((item) => item.classList.remove("selected-target"));
+    if (selection?.kind === "markdown" && files[currentFile].kind === "markdown") mdBlockFor(selection.start)?.classList.add("selected-target");
+    if (selection?.kind === "transcript") agentBlock(selection.block)?.classList.add("selected-target");
     if (selection?.kind !== "html") el.inspectOutline.classList.add("hidden");
     const showRect = selection?.kind === "image" && files[currentFile].kind === "image";
     el.imageRect.classList.toggle("hidden", !showRect);
-    if (showRect) {
-      applyGeometry(el.imageRect, selection);
-      el.rectLabel.textContent = "#" + selection.markerNo;
-    }
+    if (showRect) { applyGeometry(el.imageRect, selection); el.rectLabel.textContent = "#" + selection.markerNo; }
   }
   function renderMarkers() {
     document.querySelectorAll(".note-pin,.html-marker,.saved-image-region").forEach((item) => item.remove());
@@ -333,88 +342,99 @@ function bootPreviewAnnotationPrototype() {
         block.append(pin);
       } else if (item.target.kind === "html" && files[currentFile].kind === "html") {
         let target = null;
-        try { target = el.htmlStage.querySelector(item.target.selector); } catch { /* changed DOM */ }
+        try { target = el.htmlStage.querySelector(item.target.selector); } catch { /* stale */ }
         if (!target) continue;
         const stage = el.htmlStage.getBoundingClientRect();
         const box = target.getBoundingClientRect();
         const pin = action("●", (event) => { event.stopPropagation(); showDraft(item.id); }, "html-marker");
-        pin.style.left = Math.max(0, box.right - stage.left - 10) + "px";
-        pin.style.top = Math.max(0, box.top - stage.top - 10) + "px";
+        pin.style.left = Math.max(0, box.right - stage.left - 12) + "px";
+        pin.style.top = Math.max(0, box.top - stage.top - 8) + "px";
         pin.setAttribute("aria-label", "查看这条 HTML 批注");
         el.htmlStage.append(pin);
       } else if (item.target.kind === "image" && files[currentFile].kind === "image") {
-        const region = action("#" + item.markerNo, (event) => { event.stopPropagation(); showDraft(item.id); }, "saved-image-region");
+        const region = action("", (event) => { event.stopPropagation(); showDraft(item.id); }, "saved-image-region");
         applyGeometry(region, item.target);
         region.dataset.number = "#" + item.markerNo;
-        region.setAttribute("aria-label", "查看区域 #" + item.markerNo + " 的批注");
+        region.setAttribute("aria-label", "查看区域 #" + item.markerNo);
         el.imageOverlay.append(region);
       }
+    }
+    for (const item of agentNotes()) {
+      const block = agentBlock(item.target.block);
+      if (!block) continue;
+      const pin = action("●", () => showDraft(item.id), "note-pin");
+      pin.setAttribute("aria-label", "查看这条回复批注");
+      block.append(pin);
     }
     renderSelection();
   }
   function saveComment() {
     const comment = el.commentInput.value.trim();
-    if (!selection || !comment) { notify("请填写批注内容"); return; }
-    if (viewMode === "external" && !externalOnline) {
-      notify("连接中断：未保存到会话，文字和选区仍留在这里");
-      renderFlow();
+    if (!selection || !comment) { notify("请填写批注"); return; }
+    if (surface === "external" && !externalOnline) {
+      notify("连接中断：还没进入会话，文字仍留在这里");
+      renderSurface();
       return;
     }
     const before = clone(saved);
-    const file = files[currentFile];
     const items = draft();
-    const markerNo = selection.kind === "image" ? selection.markerNo : undefined;
-    const target = clone(selection);
-    delete target.markerNo;
-    const candidate = {
-      id: editingId || makeId(), fileKey: currentFile, version: file.version,
-      target, ...(markerNo ? { markerNo } : {}), comment,
-    };
+    let candidate;
+    if (selection.kind === "transcript") {
+      candidate = {
+        id: editingId || makeId(), source: "transcript", messageId: AGENT_MESSAGE,
+        target: { kind: "transcript", block: selection.block, excerpt: selection.excerpt }, comment,
+      };
+    } else {
+      const file = files[currentFile];
+      const markerNo = selection.kind === "image" ? selection.markerNo : undefined;
+      const target = clone(selection);
+      delete target.markerNo;
+      candidate = { id: editingId || makeId(), fileKey: currentFile, version: file.version, target, ...(markerNo ? { markerNo } : {}), comment };
+      if (!editingId && markerNo) saved.nextMarker[currentSession][currentFile + ":" + file.version] = markerNo + 1;
+    }
     if (editingId) {
       const index = items.findIndex((item) => item.id === editingId);
-      if (index < 0) { notify("这条批注已移除"); closeCompose(); return; }
+      if (index < 0) { notify("这条批注已经不在草稿里"); closeCompose(); return; }
       items[index] = candidate;
-    } else {
-      items.push(candidate);
-      if (markerNo) saved.nextMarker[currentSession][currentFile + ":" + file.version] = markerNo + 1;
-    }
+    } else items.push(candidate);
     if (!persist()) { saved = before; return; }
-    if (viewMode === "external") lastReceipt = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+    if (surface === "external") lastReceipt = new Date().toLocaleTimeString("zh-CN", { hour12: false });
     closeCompose();
     renderMarkers();
     renderDraft();
-    renderFlow();
-    notify(viewMode === "external" ? "模拟回执：已保存到目标会话；回到 PWA 后重新读取" : "已加入当前会话的同一份草稿");
+    renderSurface();
+    notify(surface === "external" ? "模拟回执：已写入绑定的会话。回到 PWA 后重新读取。" : "已加入当前会话的同一份草稿");
   }
   async function copyPending() {
     const comment = el.commentInput.value.trim();
-    if (!selection || !comment) { notify("先写一条待保存批注"); return; }
-    const text = sessions[currentSession] + " · " + files[currentFile].path + " · " + anchorText({ target: selection, markerNo: selection.markerNo }) + "\n批注：" + comment + "\n（尚未保存到会话）";
+    if (!selection || !comment) { notify("先写一条还没保存的批注"); return; }
+    const where = selection.kind === "transcript" ? "Agent 回复" : files[currentFile].path;
+    const text = sessions[currentSession] + " · " + where + " · " + anchorText({ target: selection, markerNo: selection.markerNo }) + "\n批注：" + comment + "\n（尚未进入会话）";
     try {
       if (!navigator.clipboard?.writeText) throw new Error("clipboard unavailable");
       await navigator.clipboard.writeText(text);
-      notify("已复制待存内容；这不是会话保存回执");
+      notify("已复制待存文字。这不是保存回执。");
     } catch {
       modalMode = "copy";
       $("confirmSendButton").classList.add("hidden");
-      el.modalTitle.textContent = "手动复制待存批注";
-      el.modalDescription.textContent = "复制下面的文字后回到会话手动粘贴；这条批注尚未进入会话草稿。";
+      el.modalTitle.textContent = "复制还没保存的批注";
+      el.modalDescription.textContent = "这条文字还没有进入会话。";
       el.messagePreview.textContent = text;
       el.modal.classList.remove("hidden");
     }
   }
   function showDraft(focusId) {
-    el.layout.classList.add("draft-open");
+    document.body.classList.add("draft-open");
     el.draftButton.setAttribute("aria-expanded", "true");
     renderDraft();
     if (focusId) {
       const card = $("draft-" + focusId);
       card?.classList.add("focused");
-      card?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      card?.scrollIntoView({ block: "nearest" });
     }
   }
   function hideDraft() {
-    el.layout.classList.remove("draft-open");
+    document.body.classList.remove("draft-open");
     el.draftButton.setAttribute("aria-expanded", "false");
   }
   function imageGroup(file, items) {
@@ -424,23 +444,54 @@ function bootPreviewAnnotationPrototype() {
     image.alt = file.name + " 原图和编号区域";
     panel.append(image);
     for (const item of items) {
-      const region = node("span", "draft-proof-region", "#" + item.markerNo);
+      const region = node("span", "draft-proof-region");
       applyGeometry(region, item.target);
       region.dataset.number = "#" + item.markerNo;
       panel.append(region);
     }
     return panel;
   }
+  function reveal(item) {
+    hideDraft();
+    if (item.source === "transcript") {
+      surface = "workbench";
+      setMode("off");
+      renderSurface();
+      agentBlock(item.target.block)?.scrollIntoView({ block: "center" });
+      return;
+    }
+    surface = "preview";
+    renderSurface();
+    selectFile(item.fileKey);
+    setMode("off");
+    requestAnimationFrame(() => {
+      if (item.target.kind === "markdown") mdBlockFor(item.target.start)?.scrollIntoView({ block: "center" });
+      if (item.target.kind === "html") {
+        let target = null;
+        try { target = el.htmlStage.querySelector(item.target.selector); } catch { /* stale */ }
+        target?.scrollIntoView({ block: "center" });
+      }
+    });
+  }
   function edit(item) {
     hideDraft();
-    selectFile(item.fileKey);
-    setAnnotate(true);
+    if (item.source === "transcript") {
+      surface = "workbench";
+      mode = "agent";
+    } else {
+      surface = "preview";
+      selectFile(item.fileKey);
+      mode = "file";
+    }
+    renderSurface();
+    syncModeChrome();
+    updateModeHint();
     selection = clone(item.target);
+    if (item.markerNo) selection.markerNo = item.markerNo;
     const block = item.target.kind === "markdown" ? mdBlockFor(item.target.start) : null;
     mdRangeBase = block ? { start: Number(block.dataset.mdStart), end: Number(block.dataset.mdEnd) } : null;
-    if (item.markerNo) selection.markerNo = item.markerNo;
     editingId = item.id;
-    el.composeTarget.textContent = anchorText(item) + " · " + files[item.fileKey].name;
+    el.composeTarget.textContent = anchorText(item);
     el.compose.classList.remove("hidden");
     el.commentInput.value = item.comment;
     el.commentCount.textContent = String(item.comment.length) + " / 1000";
@@ -449,75 +500,78 @@ function bootPreviewAnnotationPrototype() {
     el.commentInput.focus({ preventScroll: true });
   }
   function remove(item) {
-    if (viewMode === "external" && !externalOnline) { notify("连接中断，无法移除会话批注"); return; }
+    if (surface === "external" && !externalOnline) { notify("连接中断，不能从会话里移除"); return; }
     const before = clone(saved);
     saved[currentSession] = draft().filter((other) => other.id !== item.id);
     if (!persist()) { saved = before; return; }
-    renderDraft(); renderMarkers(); renderFlow(); notify("已移除批注");
+    renderDraft(); renderMarkers(); renderSurface();
+    notify("已从这份草稿移除");
   }
   function renderDraft() {
     const items = draft();
     el.draftCount.textContent = String(items.length);
     el.draftFooterCount.textContent = items.length + " 条批注";
-    el.sendButton.disabled = viewMode !== "external" && items.length === 0;
     el.reviewSummary.textContent = sessions[currentSession] + " · " + items.length + " 条批注";
     el.reviewCheckbox.disabled = items.length === 0;
     if (!items.length) el.reviewCheckbox.checked = false;
-    el.composerSendButton.disabled = viewMode !== "workbench" || !items.length || !el.reviewCheckbox.checked;
+    el.composerSendButton.disabled = surface !== "workbench" || !items.length || !el.reviewCheckbox.checked;
     el.draftItems.replaceChildren();
     if (!items.length) {
-      el.draftItems.append(node("p", "empty-draft", "还没有批注。进入批注模式后，直接点内容即可添加。"));
+      el.draftItems.append(node("p", "empty-draft", "还没有批注。在 Preview 里点文件内容，或在工作台里批注已完成的 Agent 回复。"));
       return;
     }
     const groups = new Map();
     for (const item of items) {
-      const key = item.fileKey + ":" + item.version;
+      const key = item.source === "transcript" ? "transcript:" + item.messageId : item.fileKey + ":" + item.version;
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(item);
     }
     for (const groupItems of groups.values()) {
       const first = groupItems[0];
-      const file = files[first.fileKey];
-      if (!file) continue;
       const group = node("section", "draft-group");
       const header = node("div", "draft-group-head");
-      header.append(node("strong", "", file.name), node("small", "", file.path + " · " + first.version.slice(0, 6)));
-      group.append(header);
-      if (file.kind === "image") group.append(imageGroup(file, groupItems));
+      if (first.source === "transcript") {
+        header.append(node("strong", "", "Agent 回复"), node("small", "", first.messageId + " · 已完成，不是文件版本"));
+      } else {
+        const file = files[first.fileKey];
+        if (!file) continue;
+        header.append(node("strong", "", file.name), node("small", "", file.path + " · " + first.version.slice(0, 7)));
+        group.append(header);
+        if (file.kind === "image") group.append(imageGroup(file, groupItems));
+      }
+      if (first.source === "transcript") group.append(header);
       for (const item of groupItems) {
         const card = node("article", "draft-item");
         card.id = "draft-" + item.id;
         const lead = node("div", "draft-item-lead");
-        lead.append(node("b", "", anchorText(item)), action("↗", () => {
-          hideDraft(); selectFile(item.fileKey); setAnnotate(false);
-          if (item.target.kind === "markdown") mdBlockFor(item.target.start)?.scrollIntoView({ block: "center" });
-          if (item.target.kind === "html") {
-            let target = null; try { target = el.htmlStage.querySelector(item.target.selector); } catch { /* stale */ }
-            target?.scrollIntoView({ block: "center" });
-          }
-        }, "jump-button"));
-        card.append(lead, node("p", "", item.comment));
+        lead.append(node("b", "", anchorText(item)), action("↗", () => reveal(item), "jump-button"));
         const foot = node("div", "draft-item-actions");
         foot.append(action("编辑", () => edit(item)), action("移除", () => remove(item)));
-        card.append(foot);
+        card.append(lead, node("p", "", item.comment), foot);
         group.append(card);
       }
       el.draftItems.append(group);
     }
   }
   function messageText() {
+    const lines = ["请按这份会话批注继续（" + sessions[currentSession] + "）：", ""];
     const groups = new Map();
     for (const item of draft()) {
-      const key = item.fileKey + ":" + item.version;
+      const key = item.source === "transcript" ? "transcript:" + item.messageId : item.fileKey + ":" + item.version;
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(item);
     }
-    const lines = ["请按以下预览批注继续处理（" + sessions[currentSession] + "）：", ""];
     for (const items of groups.values()) {
-      const file = files[items[0].fileKey];
-      lines.push("【" + file.path + " · 版本 " + items[0].version + "】");
-      if (file.kind === "image") lines.push("原图快照 + 带编号的标注图 + 以下编号批注（原型仅展示，正式版作为会话附件保存）：");
-      for (const item of items) lines.push("- " + anchorText(item) + "：" + item.comment);
+      const first = items[0];
+      if (first.source === "transcript") {
+        lines.push("【Agent 回复 " + first.messageId + " · 已完成】");
+        for (const item of items) lines.push("- 回复块 " + item.target.block + "：" + item.comment);
+      } else {
+        const file = files[first.fileKey];
+        lines.push("【" + file.path + " · " + first.version + "】");
+        if (file.kind === "image") lines.push("原图 + 带编号标注图（原型只展示关系）：");
+        for (const item of items) lines.push("- " + anchorText(item) + "：" + item.comment);
+      }
       lines.push("");
     }
     const extra = el.composerInput.value.trim();
@@ -525,60 +579,94 @@ function bootPreviewAnnotationPrototype() {
     return lines.join("\n");
   }
   function showMessage() {
-    if (viewMode !== "workbench") { notify("请先回到 PWA 会话，再由会话输入区发送"); return; }
-    if (!draft().length || !el.reviewCheckbox.checked) { notify("请在会话输入区选择预览批注草稿"); return; }
+    if (surface !== "workbench") { notify("发送只在工作台输入区"); return; }
+    if (!draft().length || !el.reviewCheckbox.checked) { notify("先勾选输入区里的预览批注"); return; }
     modalMode = "send";
     $("confirmSendButton").classList.remove("hidden");
     el.modalTitle.textContent = "检查一条消息";
-    el.modalDescription.textContent = "已选择当前会话的 " + draft().length + " 条批注，与输入区文字合成一条消息；图片按文件分别附原图和编号标注图（模拟）。";
+    el.modalDescription.textContent = "已勾选当前会话的 " + draft().length + " 条批注。文件和 Agent 回复在同一份草稿里。这是模拟发送。";
     el.messagePreview.textContent = messageText();
     el.modal.classList.remove("hidden");
   }
 
-  document.querySelectorAll("[data-file]").forEach((button) => button.addEventListener("click", () => selectFile(button.dataset.file)));
-  document.querySelectorAll("[data-shell-action]").forEach((button) => button.addEventListener("click", () => {
-    if (button.dataset.shellAction === "新窗口打开") setViewMode("external");
-    else notify("这里是 Preview 外壳示意；点击文件可继续体验");
+  document.querySelectorAll("[data-surface-nav]").forEach((button) => {
+    button.addEventListener("click", () => setSurface(button.dataset.surfaceNav));
+  });
+  document.querySelectorAll("[data-file]").forEach((button) => button.addEventListener("click", () => openFile(button.dataset.file)));
+  document.querySelectorAll("[data-session]").forEach((button) => button.addEventListener("click", () => {
+    if (unsavedText()) { notify("这条批注还没保存"); return; }
+    currentSession = button.dataset.session;
+    el.reviewCheckbox.checked = false;
+    closeCompose();
+    renderSurface();
+    renderDraft();
+    renderMarkers();
+    notify("已切换到「" + sessions[currentSession] + "」。每份会话各有一份草稿。");
   }));
-  el.flowSwitch.addEventListener("click", () => setViewMode(viewMode === "external" ? "workbench" : "external"));
   el.connectionToggle.addEventListener("click", () => {
     externalOnline = !externalOnline;
-    renderFlow();
-    notify(externalOnline ? "模拟连接恢复：可用原批注继续保存" : "模拟连接中断：未确认内容不会进入会话");
+    renderSurface();
+    notify(externalOnline ? "模拟连接恢复，可以按原选区重试" : "模拟连接中断，未确认内容不会进入会话");
   });
+  $("minimizeButton").addEventListener("click", () => {
+    notify("真实 Preview 会缩成浮窗，工作台仍在下面");
+    setSurface("workbench");
+  });
+  $("closePreviewButton").addEventListener("click", () => setSurface("workbench"));
+  $("popoutButton").addEventListener("click", () => setSurface("external"));
   el.reviewCheckbox.addEventListener("change", renderDraft);
-  el.reviewOpenButton.addEventListener("click", () => showDraft());
+  $("reviewOpenButton").addEventListener("click", () => showDraft());
   el.composerSendButton.addEventListener("click", showMessage);
-  el.modeButton.addEventListener("click", () => setAnnotate(!annotate));
-  el.draftButton.addEventListener("click", () => el.layout.classList.contains("draft-open") ? hideDraft() : showDraft());
+  el.modeButton.addEventListener("click", () => setMode(mode === "file" ? "off" : "file"));
+  el.agentAnnotate.addEventListener("click", () => {
+    if (surface !== "workbench") return;
+    setMode(mode === "agent" ? "off" : "agent");
+  });
+  el.draftButton.addEventListener("click", () => document.body.classList.contains("draft-open") ? hideDraft() : showDraft());
   $("draftCloseButton").addEventListener("click", hideDraft);
+  el.returnButton.addEventListener("click", () => {
+    const previous = surface;
+    setSurface("workbench");
+    if (previous === "preview" && surface === "workbench") {
+      el.composerInput.focus({ preventScroll: true });
+      notify("回到工作台后，勾选输入区的预览批注再发送");
+    }
+  });
   el.markdownView.addEventListener("click", (event) => {
     if (event.target.closest(".note-pin")) return;
-    if (!annotate || files[currentFile].kind !== "markdown") return;
+    if (mode !== "file" || files[currentFile].kind !== "markdown") return;
     const block = event.target.closest("[data-md-start]");
     if (!block) return;
     openSelection({ kind: "markdown", start: Number(block.dataset.mdStart), end: Number(block.dataset.mdEnd) });
   });
+  el.agentBody.addEventListener("click", (event) => {
+    if (event.target.closest(".note-pin")) return;
+    if (mode !== "agent") return;
+    const block = event.target.closest("[data-agent-block]");
+    if (!block) return;
+    const excerpt = block.textContent.replace(/\s+/g, " ").trim().slice(0, 80);
+    openSelection({ kind: "transcript", block: Number(block.dataset.agentBlock), excerpt });
+  });
   el.htmlStage.addEventListener("pointermove", (event) => {
-    if (!annotate || files[currentFile].kind !== "html") return;
+    if (mode !== "file" || files[currentFile].kind !== "html") return;
     showOutline(event.target.closest("[data-inspect]"));
   });
   el.htmlStage.addEventListener("pointerleave", () => el.inspectOutline.classList.add("hidden"));
   el.htmlStage.addEventListener("click", (event) => {
     if (event.target.closest(".html-marker")) return;
     logRuntime("interaction", "点击 " + event.target.tagName.toLowerCase());
-    if (!annotate || files[currentFile].kind !== "html") return;
+    if (mode !== "file" || files[currentFile].kind !== "html") return;
     const target = event.target.closest("[data-inspect]");
     if (!target) return;
-    event.preventDefault(); event.stopPropagation();
-    const descriptor = { kind: "html", selector: selectorFor(target), label: labelFor(target) };
+    event.preventDefault();
+    event.stopPropagation();
     showOutline(target);
-    openSelection(descriptor);
+    openSelection({ kind: "html", selector: selectorFor(target), label: labelFor(target) });
   }, true);
-  $("demoSiteCta").addEventListener("click", () => notify("示例站点按钮已点击"));
+  $("demoSiteCta").addEventListener("click", () => { if (mode !== "file") notify("示例页面按钮已点击"); });
   el.imageOverlay.addEventListener("pointerdown", (event) => {
-    if (event.target.closest(".saved-image-region")) return;
-    if (!annotate || files[currentFile].kind !== "image") return;
+    if (!mode || mode !== "file" || files[currentFile].kind !== "image") return;
+    if (event.target.closest(".saved-image-region") && !el.imageOverlay.classList.contains("drawing")) return;
     event.preventDefault();
     el.imageOverlay.setPointerCapture(event.pointerId);
     imageDrag = { pointerId: event.pointerId, origin: imagePoint(event), x: event.clientX, y: event.clientY };
@@ -595,33 +683,18 @@ function bootPreviewAnnotationPrototype() {
   function finishImageDrag(event) {
     if (!imageDrag || imageDrag.pointerId !== event.pointerId) return;
     const moved = Math.hypot(event.clientX - imageDrag.x, event.clientY - imageDrag.y);
-    const target = moved < 5 ? defaultImageTarget(imageDrag.origin) : targetFromPoints(imageDrag.origin, imagePoint(event));
+    const target = moved < 6 ? defaultImageTarget(imageDrag.origin) : targetFromPoints(imageDrag.origin, imagePoint(event));
     imageDrag = null;
-    if (target.width < 8 || target.height < 8) { closeCompose(); notify("区域太小，请重试"); return; }
+    if (target.width < 8 || target.height < 8) { closeCompose(); notify("区域太小"); return; }
     openSelection(target);
   }
   el.imageOverlay.addEventListener("pointerup", finishImageDrag);
   el.imageOverlay.addEventListener("pointercancel", () => { imageDrag = null; closeCompose(); });
   $("composeCloseButton").addEventListener("click", closeCompose);
   el.lineAdjust.addEventListener("click", () => el.lineChoices.classList.toggle("hidden"));
-  el.commentInput.addEventListener("input", () => { el.commentCount.textContent = el.commentInput.value.length + " / 1000"; renderFlow(); });
+  el.commentInput.addEventListener("input", () => { el.commentCount.textContent = el.commentInput.value.length + " / 1000"; });
   el.saveButton.addEventListener("click", saveComment);
   el.copyPending.addEventListener("click", () => void copyPending());
-  el.sessionSelect.addEventListener("change", () => {
-    currentSession = el.sessionSelect.value;
-    el.reviewCheckbox.checked = false;
-    closeCompose(); renderDraft(); renderMarkers(); renderFlow();
-    notify("已切换至 " + sessions[currentSession] + " 的草稿");
-  });
-  el.sendButton.addEventListener("click", () => {
-    if (viewMode === "external") { setViewMode("workbench"); return; }
-    hideDraft();
-    el.reviewCheckbox.checked = true;
-    renderDraft();
-    el.composerDock.scrollIntoView({ block: "nearest", behavior: "smooth" });
-    el.composerInput.focus({ preventScroll: true });
-    notify("已选择预览批注草稿；检查后由会话输入区发送");
-  });
   $("modalCloseButton").addEventListener("click", () => el.modal.classList.add("hidden"));
   el.modal.addEventListener("click", (event) => { if (event.target === el.modal) el.modal.classList.add("hidden"); });
   $("confirmSendButton").addEventListener("click", () => {
@@ -632,46 +705,47 @@ function bootPreviewAnnotationPrototype() {
     if (!persist()) { saved = before; return; }
     el.reviewCheckbox.checked = false;
     el.composerInput.value = "";
-    renderDraft(); renderMarkers(); renderFlow();
+    renderDraft();
+    renderMarkers();
     el.modal.classList.add("hidden");
-    notify("演示完成：" + count + " 条批注合为一条模拟消息");
+    notify("演示完成：" + count + " 条批注合成一条模拟消息");
   });
   $("infoButton").addEventListener("click", () => {
     modalMode = "help";
     $("confirmSendButton").classList.add("hidden");
-    el.modalTitle.textContent = "最短路径";
-    el.modalDescription.textContent = "头部进入批注，直接点内容写批注；头部草稿查看全部。外部浏览器只保存，回到会话后选择草稿再发送。";
-    el.messagePreview.textContent = "Markdown：点渲染后的段落或列表项。\nH5：点页面元素。退出批注后页面恢复正常交互。\n图片：轻点生成默认区域，拖动可精确框选。每张图独立编号。\nPWA：点顶部“外部浏览器打开”，保存一条批注，再点“回到 PWA 会话”，勾选输入区的草稿并检查消息。\n离线：在外部模式模拟连接中断；保存失败时文字留在输入框。\n本页 localStorage 仅模拟 daemon，不能验证真实跨浏览器同步。";
+    el.modalTitle.textContent = "三个界面";
+    el.modalDescription.textContent = "工作台有会话列表、对话和输入框。Preview 只有当前文件。外部浏览器也只有 Preview。";
+    el.messagePreview.textContent = "工作台：左侧换会话，点文件打开 Preview；在已完成的 Agent 回复上批注。\nPreview：头部进入批注，点内容写批注。关闭或最小化回到工作台。\n外部浏览器：保存后出现回执。断线时文字留在原地。发送必须回到原来的 PWA，在输入区勾选草稿。\n本页不能验证真实跨浏览器同步。";
     el.modal.classList.remove("hidden");
   });
   $("runtimeLogButton").addEventListener("click", () => el.runtimeLogPanel.classList.toggle("hidden"));
   $("runtimeLogCloseButton").addEventListener("click", () => el.runtimeLogPanel.classList.add("hidden"));
   $("runtimeShotButton").addEventListener("click", () => {
-    runtimeFrames += 1; el.runtimeFrameCount.textContent = String(runtimeFrames);
-    logRuntime("snapshot", "现场 " + runtimeFrames + " 已采集（演示）");
+    runtimeFrames += 1;
+    el.runtimeFrameCount.textContent = String(runtimeFrames);
+    logRuntime("snapshot", "现场 " + runtimeFrames + "（演示）");
   });
   $("runtimeRecordButton").addEventListener("click", () => {
     recording = !recording;
     $("runtimeRecordButton").textContent = recording ? "停止" : "录制";
-    el.runtimeStatus.textContent = recording ? "● 正在录制；日志继续记录" : "日志已开始记录";
-    logRuntime("recording", recording ? "开始录制（演示）" : "停止录制（演示）");
+    el.runtimeStatus.textContent = recording ? "正在录制" : "日志已开始记录";
+    logRuntime("recording", recording ? "开始" : "停止");
   });
   $("runtimeSaveButton").addEventListener("click", () => {
     logRuntime("artifact", "保存运行产物（演示）");
-    notify("演示：真实 Preview 会把诊断 Bundle 保存到会话");
+    notify("演示：运行产物仍是诊断 Bundle，不是这条批注草稿");
   });
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") { el.modal.classList.add("hidden"); closeCompose(); }
+    if (event.key !== "Escape") return;
+    el.modal.classList.add("hidden");
+    closeCompose();
   });
-  window.addEventListener("resize", () => { if (files[currentFile].kind === "html") renderMarkers(); });
+  window.addEventListener("resize", renderMarkers);
 
   selectFile("markdown");
   renderDraft();
-  renderFlow();
+  renderSurface();
 }
 
-if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", bootPreviewAnnotationPrototype, { once: true });
-} else {
-  bootPreviewAnnotationPrototype();
-}
+if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", bootPreviewAnnotationPrototype, { once: true });
+else bootPreviewAnnotationPrototype();
