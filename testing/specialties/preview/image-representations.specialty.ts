@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { deflateSync } from "node:zlib";
@@ -111,6 +111,11 @@ defineSpecialty(
       t.assertions.assert(medium.metadata.representation === "image-1024", "1024 representation missing");
       t.assertions.assert(pngDimensions(medium.bytes).join("x") === "1024x512", "1024 pixels are wrong");
       t.assertions.assert(medium.metadata.version === small.metadata.version, "one source has two versions");
+      const diskCache = join(t.env.data, "cache", "image-preview-v1");
+      const cached = readdirSync(diskCache).filter((name) => /^[a-f0-9]{64}\.bin$/.test(name));
+      t.assertions.assert(cached.length >= 2, `native disk cache did not retain both image tiers: ${cached.length}`);
+      const cacheBytes = cached.reduce((sum, name) => sum + statSync(join(diskCache, name)).size, 0);
+      t.assertions.assert(cacheBytes <= 1024 * 1024 * 1024, `native image cache exceeded 1 GiB: ${cacheBytes}`);
 
       phase = "large fixture";
       const largeSource = sourcePng(23, 7680, 4320);

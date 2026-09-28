@@ -2,7 +2,8 @@
 //! the decoder; dropping a job releases its result, while the worker finishes
 //! under the same global two-job limit.
 
-use std::io::Cursor;
+use std::io::{Cursor, Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
@@ -40,7 +41,7 @@ fn reserve() -> Result<JobPermit, String> {
 }
 
 fn resize(bytes: &[u8], edge: u16) -> Result<wit::ImageResult, String> {
-    if bytes.is_empty() || bytes.len() > MAX_INPUT_BYTES || !matches!(edge, 128 | 1024) {
+    if bytes.is_empty() || bytes.len() > MAX_INPUT_BYTES || !(1..=4096).contains(&edge) {
         return Err("image input exceeds the preview budget".into());
     }
     let reader = ImageReader::new(Cursor::new(bytes))
@@ -127,13 +128,83 @@ impl wit::Host for crate::load::Host {
             .name("genehub-image-preview".into())
             .spawn(move || {
                 let _permit = permit;
-                let _ = sender.send(resize(&bytes, edge));
+                let _ = sender.send(crate::image_cache::get_or_resize(&bytes, edge, || {
+                    resize(&bytes, edge)
+                }));
             })
             .map_err(|error| error.to_string())?;
         self.table
             .push(Job { receiver })
             .map_err(|error| error.to_string())
     }
+}
+
+/// The same native codec is available for file-oriented batch work. Runtime
+/// previews call it in a worker instead of starting a process per cache miss.
+pub fn thumbnail_cli(mut args: impl Iterator<Item = String>) -> Result<(), String> {
+    let mut input = None;
+    let mut output = None;
+    let mut edge = None;
+    while let Some(flag) = args.next() {
+        let value = args
+            .next()
+            .ok_or_else(|| format!("missing value for {flag}"))?;
+        match flag.as_str() {
+            "--input" if input.is_none() => input = Some(PathBuf::from(value)),
+            "--output" if output.is_none() => output = Some(PathBuf::from(value)),
+            "--max-edge" if edge.is_none() => {
+                edge = Some(
+                    value
+                        .parse::<u16>()
+                        .map_err(|_| "invalid max edge".to_string())?,
+                )
+            }
+            _ => return Err(format!("unexpected thumbnail argument {flag}")),
+        }
+    }
+    let input = input.ok_or("--input is required")?;
+    let output = output.ok_or("--output is required")?;
+    let edge = edge.ok_or("--max-edge is required")?;
+    if !(1..=4096).contains(&edge) {
+        return Err("--max-edge must be between 1 and 4096".into());
+    }
+    let file =
+        std::fs::File::open(&input).map_err(|error| format!("cannot open input: {error}"))?;
+    if !file
+        .metadata()
+        .map_err(|error| error.to_string())?
+        .is_file()
+    {
+        return Err("input is not a regular file".into());
+    }
+    let mut bytes = Vec::new();
+    file.take((MAX_INPUT_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("cannot read input: {error}"))?;
+    let result = resize(&bytes, edge)?;
+    let parent = output
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|error| format!("cannot stage output: {error}"))?;
+    temporary
+        .write_all(&result.bytes)
+        .map_err(|error| error.to_string())?;
+    temporary
+        .persist_noclobber(&output)
+        .map_err(|error| format!("cannot publish output: {}", error.error))?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "path": output,
+            "mediaType": result.media_type,
+            "width": result.width,
+            "height": result.height,
+            "bytes": result.bytes.len(),
+        })
+    );
+    Ok(())
 }
 
 #[cfg(test)]
