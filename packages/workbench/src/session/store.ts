@@ -1164,10 +1164,13 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
 
     discardSubscriptions(client, evicted);
     refreshSessionDrafts(client, sessionId, get, set);
-    // A tab stays warm until it is explicitly closed or LRU-evicted. Its
-    // current snapshot and event subscription are already live, so selecting
-    // it is a synchronous state change rather than a network round trip.
-    if (warm) return;
+    // A tab stays warm until it is explicitly closed or LRU-evicted.
+    if (warm) {
+      // Narrative events keep a background tab current, but its daemon-owned
+      // trunk layer is only refreshed while that tab is on screen.
+      scheduleRoundRefresh(get);
+      return;
+    }
 
     const { snapshot, replayed } = await client.subscribe(
       sessionId,
@@ -1317,13 +1320,22 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         const existingFirst = existing?.trunks[0]?.index;
         const keptOlder =
           existingFirst !== undefined && existingFirst < (layer.trunks[0]?.index ?? 0);
+        const refreshed = new Map(layer.trunks.map((trunk) => [trunk.index, trunk]));
+        const settled = existing?.round.outcome === "running" && layer.round.outcome !== "running";
+        const retainedDetails = Object.fromEntries(
+          Object.entries(timeline.roundTrunks).filter(([key, detail]) => {
+            if (!key.startsWith(`${layer.round.roundId}:`)) return true;
+            const summary = refreshed.get(detail.summary.index);
+            return !summary || (!settled && JSON.stringify(summary) === JSON.stringify(detail.summary));
+          }),
+        );
         const expanded = layer.expandedTrunk;
         const nextRoundTrunks = expanded
           ? {
-              ...timeline.roundTrunks,
+              ...retainedDetails,
               [`${layer.round.roundId}:${expanded.summary.index}`]: expanded,
             }
-          : timeline.roundTrunks;
+          : retainedDetails;
         return {
           rounds: [
             ...timeline.rounds.filter((round) => round.roundId !== layer.round.roundId),

@@ -178,7 +178,7 @@ pub struct ClosedBatch {
 }
 
 impl ClosedBatch {
-    fn marker(item_id: &str, reason: &str) -> Self {
+    fn marker(item_id: &str, reason: &str, llm_rounds: u32) -> Self {
         Self {
             first_item_id: item_id.to_string(),
             blob_count: 0,
@@ -186,7 +186,7 @@ impl ClosedBatch {
             first_reasoning_item_id: None,
             tool_count: 0,
             marker: Some(reason.to_string()),
-            llm_rounds: 0,
+            llm_rounds,
             started_at_ms: None,
             duration_ms: None,
             tool_duration_ms: 0,
@@ -311,7 +311,8 @@ impl TrunkBuilder {
                 self.first_item_id = Some(item_id.to_string());
             }
             self.closed_batches
-                .push(ClosedBatch::marker(item_id, reason));
+                .push(ClosedBatch::marker(item_id, reason, llm_round_delta));
+            self.llm_rounds = self.llm_rounds.saturating_add(llm_round_delta);
             return self.close_finished();
         }
         let new_rounds = llm_round_delta;

@@ -19,7 +19,7 @@ defineSpecialty({
   id: "specialty.agent.process-history",
   title: "Codex turn usage, compaction history and fork process boundaries survive public reads",
   oracle: "scripted public app-server frames yield turn-local usage, all tool blobs on both sides of compaction, and identical inherited history after restart",
-  catches: ["thread totals shown as turn usage", "duplicate usage inflates rounds", "started and completed compaction split twice", "thread and item compaction split twice", "compaction closing marker strands later tools", "terminal usage absent from trunks", "fork loses process access", "fork can read later parent blobs"],
+  catches: ["thread totals shown as turn usage", "duplicate usage inflates rounds", "started and completed compaction split twice", "thread and item compaction split twice", "compaction closing marker strands later tools", "compaction marker loses a pending model round", "terminal usage absent from trunks", "fork loses process access", "fork can read later parent blobs"],
   tags: ["core", "session", "process-history"],
   llm: { default: "none" },
   expectedDurationMs: 30_000, timeoutMs: 120_000,
@@ -28,19 +28,19 @@ defineSpecialty({
   productInterfaces: ["@genehub/workbench/client", "codex-app-server-v2"],
 }, async (t) => {
   const journal = registerScriptedCodex(t.env, [
-    [...message("before"), usage(1), tool("before-tool"),
+    [...message("before"), usage(1), tool("before-tool"), usage(2),
       frame("item/started", { item: { id: "compact-item", type: "contextCompaction" } }),
       frame("item/completed", { item: { id: "compact-item", type: "contextCompaction" } }),
-      ...message("middle"), usage(2), tool("middle-tool"),
+      ...message("middle"), usage(3), tool("middle-tool"),
       frame("item/started", { item: { id: "compact-thread-first", type: "contextCompaction" } }),
       frame("thread/compacted", {}),
       frame("item/completed", { item: { id: "compact-thread-first", type: "contextCompaction" } }),
-      ...message("after"), usage(3), usage(3), tool("after-tool"), ...message("final"), usage(4)],
-    [...message("second-final"), usage(5)],
-    [...message("later"), usage(6), tool("later-tool"),
+      ...message("after"), usage(4), usage(4), tool("after-tool"), ...message("final"), usage(5)],
+    [...message("second-final"), usage(6)],
+    [...message("later"), usage(7), tool("later-tool"),
       frame("item/started", { item: { id: "compact-item-first", type: "contextCompaction" } }),
       frame("item/completed", { item: { id: "compact-item-first", type: "contextCompaction" } }),
-      frame("thread/compacted", {}), ...message("later-final"), usage(7)],
+      frame("thread/compacted", {}), ...message("later-final"), usage(8)],
   ]);
   const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
   let client = opened.client;
@@ -64,7 +64,7 @@ defineSpecialty({
       return summary.stats;
     };
     const first = await send("First request");
-    t.assertions.assert(first.usage.inputTokens === 400 && first.usage.llmRounds === 4 && first.usage.compactionCount === 2,
+    t.assertions.assert(first.usage.inputTokens === 500 && first.usage.llmRounds === 5 && first.usage.compactionCount === 2,
       `first usage or duplicate counting: ${JSON.stringify(first.usage)}`);
     const rounds = await client.call({ type: "session.rounds", payload: { sessionId, limit: 100, throughRoundId: null, cursor: null } });
     if (rounds?.type !== "sessionRounds" || !rounds.data.rounds[0]) throw new Error("missing first round");
@@ -79,7 +79,7 @@ defineSpecialty({
         rows.push(...trunk.data.batches.flatMap((batch) => batch.blobs));
       }
       t.assertions.assert(layer.data.trunks.length === 3, `two compactions did not close exactly two trunks: ${JSON.stringify(layer.data.trunks)}`);
-      t.assertions.assert(layer.data.trunks.reduce((sum, trunk) => sum + (trunk.llmRounds ?? 0), 0) === 4,
+      t.assertions.assert(layer.data.trunks.reduce((sum, trunk) => sum + (trunk.llmRounds ?? 0), 0) === 5,
         "trunk request counts do not reconcile with turn usage");
       t.assertions.assert(rows.length === 3 && rows.some((row) => row.itemId === "before-tool") && rows.some((row) => row.itemId === "middle-tool") && rows.some((row) => row.itemId === "after-tool"),
         "lost tool before or after compaction");
