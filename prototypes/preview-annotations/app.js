@@ -1,4 +1,4 @@
-(() => {
+function bootPreviewAnnotationPrototype() {
   "use strict";
 
   const STORE_KEY = "genehub-preview-annotations-prototype-v1";
@@ -76,6 +76,20 @@
   let editingId = null;
   let modalMode = "send";
   let mobileRendered = false;
+  let runtimeRecording = false;
+  let runtimeFrames = 0;
+  const runtimeEvents = [];
+
+  function logRuntime(kind, detail) {
+    const entry = { at: new Date().toLocaleTimeString("zh-CN", { hour12: false }), kind, detail };
+    runtimeEvents.push(entry);
+    if (runtimeEvents.length > 100) runtimeEvents.shift();
+    $("runtimeLogCount").textContent = String(runtimeEvents.length);
+    const row = document.createElement("li");
+    row.textContent = `${entry.at}  ${entry.kind}  ${entry.detail}`;
+    $("runtimeLogList").prepend(row);
+    while ($("runtimeLogList").children.length > 100) $("runtimeLogList").lastElementChild.remove();
+  }
 
   function load() {
     try {
@@ -112,6 +126,10 @@
     els.markdownView.classList.toggle("hidden", kind !== "markdown");
     els.htmlView.classList.toggle("hidden", kind !== "html");
     els.imageView.classList.toggle("hidden", kind !== "image");
+    $("runtimeToolbar").classList.toggle("hidden", kind !== "html");
+    $("runtimeLogPanel").classList.add("hidden");
+    $("annotationModeHint").textContent = kind === "markdown" ? "Markdown · 按原文行选取" : kind === "html" ? "HTML · 检查页面元素" : "图片 · 框选原图区域";
+    if (kind === "html" && runtimeEvents.length === 0) logRuntime("log", "HTML 预览诊断已就绪");
     els.htmlStage.classList.remove("inspect-mode");
     els.inspectOutline.classList.add("hidden");
     els.markdownView.classList.remove("show-render");
@@ -149,6 +167,7 @@
       button.setAttribute("aria-pressed", String(inspectMode));
       button.addEventListener("click", () => {
         inspectMode = !inspectMode;
+        logRuntime("interaction", inspectMode ? "开启检查元素" : "退出检查元素");
         els.htmlStage.classList.toggle("inspect-mode", inspectMode);
         els.htmlHint.textContent = inspectMode ? "检查模式：悬停预览元素并点击选中；退出后可正常操作页面。" : "浏览模式：试试点击页面里的按钮，或开启“检查元素”。";
         if (!inspectMode) els.inspectOutline.classList.add("hidden");
@@ -262,6 +281,7 @@
     if (inspectMode) els.inspectOutline.classList.add("hidden");
   });
   els.htmlStage.addEventListener("click", (event) => {
+    logRuntime("interaction", `点击 ${event.target.tagName.toLowerCase()}`);
     if (!inspectMode) return;
     event.preventDefault();
     event.stopPropagation();
@@ -544,8 +564,39 @@
     toast(versions[currentFile] === initial ? "已恢复示例文件版本" : "已模拟文件变化：旧批注会提示重新核对");
   });
 
+  $("runtimeLogButton").addEventListener("click", () => $("runtimeLogPanel").classList.toggle("hidden"));
+  $("runtimeLogCloseButton").addEventListener("click", () => $("runtimeLogPanel").classList.add("hidden"));
+  $("runtimeShotButton").addEventListener("click", () => {
+    runtimeFrames += 1;
+    $("runtimeFrameCount").textContent = String(runtimeFrames);
+    logRuntime("snapshot", `现场 ${runtimeFrames} 已采集（演示）`);
+    toast("演示：已记录当前 HTML 现场");
+  });
+  $("runtimeRecordButton").addEventListener("click", () => {
+    runtimeRecording = !runtimeRecording;
+    $("runtimeRecordButton").textContent = runtimeRecording ? "停止" : "录制";
+    $("runtimeStatus").textContent = runtimeRecording ? "● 正在录制；日志继续记录" : "日志已开始记录";
+    logRuntime("recording", runtimeRecording ? "开始体验录制（演示）" : "停止体验录制（演示）");
+  });
+  $("runtimeSaveButton").addEventListener("click", () => {
+    logRuntime("artifact", "保存运行产物（演示）");
+    toast("演示：真实 Preview 会把日志、DOM 和截图写入当前会话的运行产物");
+  });
+  for (const id of ["mockMinimizeButton", "mockPopoutButton", "mockCloseButton"]) {
+    $(id).addEventListener("click", () => toast("这是 Preview 外壳示意；原型内请从左侧文件列表切换文件"));
+  }
+
+  selectFile("markdown");
   renderLines();
   renderModeAction();
   renderSelection();
   renderDraft();
-})();
+}
+
+// GeneHub 的 HTML remapper 可能把相对脚本提前内联到 srcdoc 的 head。
+// 等待 DOM 完整后再绑定控件，避免初始化时 getElementById 返回 null。
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", bootPreviewAnnotationPrototype, { once: true });
+} else {
+  bootPreviewAnnotationPrototype();
+}
