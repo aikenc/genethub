@@ -555,20 +555,17 @@ impl SessionManager {
         } else {
             text
         };
-        let continues_round = live
-            .active_round
-            .lock()
-            .await
-            .as_ref()
-            .filter(|round| round.outcome.is_none())
-            .map(|round| round.round_id.clone());
+        // Each delivered inbox turn has a new user-visible message as its
+        // anchor. Continuing the previous round would put work from both
+        // sides of an interruption under the first message's trunk. A formal
+        // permission consultation still continues its round in start_turn.
         self.send_prepared(
             &meta.id,
             text,
             attachments,
             &state.providers().await,
             None,
-            continues_round,
+            None,
             Some((anchor, ids)),
         )
         .await?;
