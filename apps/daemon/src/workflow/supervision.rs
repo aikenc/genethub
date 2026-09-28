@@ -66,14 +66,6 @@ pub(super) async fn observe(
                 let summary = state.sessions.summary(session_id).await;
                 if summary.as_ref().is_ok_and(|summary| summary.status == SessionStatus::Waiting) {
                     waiting_count += 1;
-                    if !run.handles.is_empty() {
-                        let answer_ms = run.definition.pm_answer_seconds
-                            .unwrap_or(recovery::DEFAULT_PM_ANSWER_SECONDS)
-                            .saturating_mul(1000).min(i64::MAX as u64) as i64;
-                        if summary.as_ref().is_ok_and(|summary| now.saturating_sub(summary.updated_at_ms) >= answer_ms) {
-                            stalled.push(format!("{id}: PM 作答超过 {} 秒期限", answer_ms / 1000));
-                        }
-                    }
                     for request in state
                         .sessions
                         .pending_questions(session_id)

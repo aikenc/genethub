@@ -279,7 +279,7 @@ id: string, bytes: number,
  */
 at: string, };
 
-export type BootstrapApprovalChallenge = { challengeId: string, title: string, detail: string, expiresAtMs: number, };
+export type BootstrapApprovalChallenge = { challengeId: string, title: string, detail: string, };
 
 /**
  * What an agent can do, declared up front.

@@ -118,15 +118,18 @@ pub(super) fn classify_human_exit(run: &super::RunRecord) -> Option<&'static str
     }
     if run.status() != "blocked" { return None; }
     let cause = run.stop.as_ref().map(|stop| stop.cause_code.as_str()).unwrap_or("");
+    // Exhausted allowance needs a concrete PM budget proposal, at any time.
+    // Elapsed Human/PM wait cannot turn that decision into platform feedback.
+    if matches!(cause, "requestBudget" | "recoveryBudget") { return None; }
     if run.handles.is_empty() {
-        if matches!(cause, "requestBudget" | "routeUnavailable") {
+        if cause == "routeUnavailable" {
             let answer_ms = DEFAULT_PM_ANSWER_SECONDS.saturating_mul(1000).min(i64::MAX as u64) as i64;
             return (super::now_ms().saturating_sub(run.updated_at_ms) >= answer_ms).then_some("d");
         }
         return None;
     }
     if cause == "humanAcceptance" { return Some("f"); }
-    if matches!(cause, "routeUnavailable" | "requestBudget") {
+    if cause == "routeUnavailable" {
         let answer_ms = run.definition.pm_answer_seconds.unwrap_or(DEFAULT_PM_ANSWER_SECONDS)
             .saturating_mul(1000).min(i64::MAX as u64) as i64;
         return (super::now_ms().saturating_sub(run.updated_at_ms) >= answer_ms).then_some("d");
@@ -541,16 +544,16 @@ mod tests {
             "stop": {"target": "blocked", "reason": "budget display may change", "causeCode": "requestBudget"}
         })).unwrap();
         run.updated_at_ms = super::super::now_ms();
-        assert_eq!(classify_human_exit(&run), None); // PM has the first 30 minutes.
+        assert_eq!(classify_human_exit(&run), None);
         run.updated_at_ms -= (DEFAULT_PM_ANSWER_SECONDS as i64 * 1000) + 1;
-        assert_eq!(classify_human_exit(&run), Some("d"));
+        assert_eq!(classify_human_exit(&run), None); // Budget decisions have no reply deadline.
         run.stop.as_mut().unwrap().reason = "new route message".into();
         run.stop.as_mut().unwrap().cause_code = "routeUnavailable".into();
         assert_eq!(classify_human_exit(&run), Some("d"));
         run.handles.push(Handle { run_id: "wr_business".into(), trigger_seq: 1, reason: "failed".into() });
         run.stop.as_mut().unwrap().reason = "new recovery message".into();
         run.stop.as_mut().unwrap().cause_code = "recoveryBudget".into();
-        assert_eq!(classify_human_exit(&run), Some("d"));
+        assert_eq!(classify_human_exit(&run), None);
         run.stop.as_mut().unwrap().reason = "execution failed".into();
         run.stop.as_mut().unwrap().cause_code = "executionException".into();
         assert_eq!(classify_human_exit(&run), Some("d"));

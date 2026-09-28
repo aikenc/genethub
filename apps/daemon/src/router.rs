@@ -3313,7 +3313,7 @@ async fn dispatch(
                     "只有生成该计划的 Agent Session 可以请求用户确认",
                 );
             };
-            let (request, expires_at_ms) = match state
+            let request = match state
                 .project_control
                 .request_permission(session_id, &challenge_id)
                 .await
@@ -3325,7 +3325,7 @@ async fn dispatch(
             };
             match state
                 .sessions
-                .request_project_approval(session_id, request, expires_at_ms)
+                .request_project_approval(session_id, request)
                 .await
             {
                 Ok(()) => Handled::ok(Reply::Ack),

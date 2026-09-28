@@ -5,9 +5,9 @@ import { defineSpecialty } from "../../framework/public.ts";
 
 defineSpecialty({
   id: "specialty.contracts.project-approval-recovery",
-  title: "Expired project approval cards recover without granting stale authority",
-  oracle: "The daemon retires an expired challenge, never spends it, and resumes the PM only to prepare a fresh Human-confirmed plan",
-  catches: ["expired confirmation card retries forever", "expired plan gains mutation authority", "PM reuses an expired action id"],
+  title: "Durable project approval has no answer deadline and retains current fact checks",
+  oracle: "The current plan contains no answer deadline, remains approvable after restart, and rejection, fact drift or a different action cannot obtain mutation authority",
+  catches: ["elapsed waiting invalidates an unchanged plan", "changed project facts gain mutation authority", "replayed approval repeats a mutation"],
   tags: ["contract", "core", "durable-approval", "approval-recovery"],
   llm: { default: "none" },
   expectedDurationMs: 30_000,
@@ -18,8 +18,10 @@ defineSpecialty({
 }, async (t) => {
   const run = promisify(execFile);
   for (const filter of [
-    "project_control::tests::an_expired_challenge_is_retired_without_becoming_approved",
-    "session::manager::tests::an_expired_plan_approval_resumes_only_to_request_a_fresh_plan",
+    "project_control::tests::an_unanswered_plan_retains_its_authority_after_restart",
+    "project_control::tests::rejection_and_fact_drift_never_create_a_spendable_grant",
+    "project_control::tests::approval_is_single_session_single_plan_and_single_action",
+    "workflow::recovery::tests::human_exit_classifier_covers_budget_route_failure_and_acceptance",
   ]) {
     const { stdout } = await run("cargo", [
       "test", "--profile", "iterate", "-p", "genet-daemon", "--lib", filter, "--", "--exact", "--nocapture",
