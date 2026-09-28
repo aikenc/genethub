@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-label="Northstar 运营数据看板示例">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#f8f9fd"/><stop offset="1" stop-color="#eef2f7"/></linearGradient>
+    <linearGradient id="area" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#a89bea" stop-opacity=".45"/><stop offset="1" stop-color="#a89bea" stop-opacity="0"/></linearGradient>
+    <linearGradient id="donut" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#b9a9f0"/><stop offset="1" stop-color="#7468d0"/></linearGradient>
+    <filter id="shadow" x="-20%" y="-30%" width="140%" height="180%"><feDropShadow dx="0" dy="7" stdDeviation="11" flood-color="#334568" flood-opacity=".07"/></filter>
+    <style>text{font-family:Inter,Arial,"PingFang SC",sans-serif} .muted{fill:#9caabe}.label{font-size:15px;font-weight:650;fill:#7787a0}.number{font-size:31px;font-weight:760;fill:#253854;letter-spacing:-1px}.tiny{font-size:11px;fill:#9aabc0}.white{fill:#fff}</style>
+  </defs>
+  <rect width="1200" height="760" fill="url(#bg)"/>
+  <rect width="200" height="760" fill="#20324b"/>
+  <rect x="22" y="23" width="32" height="32" rx="9" fill="#847ce3"/><text x="30" y="47" fill="white" font-size="21" font-weight="800">N</text><text x="67" y="46" fill="#f4f6fd" font-size="21" font-weight="740">northstar</text>
+  <text x="27" y="109" fill="#7f91ad" font-size="11" font-weight="700" letter-spacing="2">WORKSPACE</text>
+  <rect x="14" y="129" width="172" height="40" rx="9" fill="#374b6c"/><rect x="28" y="143" width="13" height="13" rx="3" fill="#b6a8f1"/><text x="55" y="155" fill="white" font-size="13" font-weight="660">总览</text>
+  <rect x="28" y="194" width="13" height="13" rx="3" fill="#6f86a2"/><text x="55" y="206" fill="#aab9d0" font-size="13">分析报告</text>
+  <rect x="28" y="241" width="13" height="13" rx="3" fill="#6f86a2"/><text x="55" y="253" fill="#aab9d0" font-size="13">受众洞察</text>
+  <rect x="28" y="288" width="13" height="13" rx="3" fill="#6f86a2"/><text x="55" y="300" fill="#aab9d0" font-size="13">项目计划</text>
+  <text x="27" y="372" fill="#7f91ad" font-size="11" font-weight="700" letter-spacing="2">SETTINGS</text>
+  <rect x="28" y="396" width="13" height="13" rx="3" fill="#6f86a2"/><text x="55" y="408" fill="#aab9d0" font-size="13">团队管理</text>
+  <rect x="28" y="443" width="13" height="13" rx="3" fill="#6f86a2"/><text x="55" y="455" fill="#aab9d0" font-size="13">偏好设置</text>
+  <circle cx="37" cy="707" r="18" fill="#d9b6a6"/><text x="32" y="713" fill="#604650" font-size="16" font-weight="700">L</text><text x="66" y="706" fill="#f0f5fc" font-size="12" font-weight="700">Lin</text><text x="66" y="721" fill="#8499b6" font-size="10">项目管理员</text>
+  <rect x="200" y="0" width="1000" height="76" fill="#fff"/><line x1="200" y1="76" x2="1200" y2="76" stroke="#e7ebf2"/>
+  <text x="239" y="47" fill="#263854" font-size="19" font-weight="740">数据总览</text><text x="992" y="45" fill="#8b9db1" font-size="12">最近 30 天</text><path d="M1091 35l5 5 5-5" fill="none" stroke="#8b9db1" stroke-width="2"/>
+  <circle cx="1147" cy="38" r="17" fill="#e9e4f9"/><text x="1142" y="44" fill="#7669a9" font-size="14" font-weight="700">L</text>
+  <text x="239" y="120" fill="#8290a7" font-size="13">欢迎回来，Lin。看看本周的增长情况。</text>
+  <g filter="url(#shadow)">
+    <rect x="239" y="148" width="216" height="132" rx="15" fill="#fff"/><rect x="470" y="148" width="216" height="132" rx="15" fill="#fff"/><rect x="701" y="148" width="216" height="132" rx="15" fill="#fff"/><rect x="932" y="148" width="228" height="132" rx="15" fill="#fff"/>
+  </g>
+  <text x="260" y="181" class="label">总访问量</text><text x="260" y="228" class="number">84,392</text><rect x="260" y="245" width="59" height="18" rx="5" fill="#e1f4ea"/><text x="266" y="258" fill="#379a70" font-size="11" font-weight="700">↗ 12.8%</text><text x="328" y="258" class="tiny">较上期</text>
+  <text x="491" y="181" class="label">活跃用户</text><text x="491" y="228" class="number">12,684</text><rect x="491" y="245" width="59" height="18" rx="5" fill="#e1f4ea"/><text x="497" y="258" fill="#379a70" font-size="11" font-weight="700">↗ 8.2%</text><text x="559" y="258" class="tiny">较上期</text>
+  <text x="722" y="181" class="label">转化率</text><text x="722" y="228" class="number">4.86%</text><rect x="722" y="245" width="59" height="18" rx="5" fill="#e1f4ea"/><text x="728" y="258" fill="#379a70" font-size="11" font-weight="700">↗ 2.4%</text><text x="790" y="258" class="tiny">较上期</text>
+  <text x="953" y="181" class="label">平均停留</text><text x="953" y="228" class="number">3m 42s</text><rect x="953" y="245" width="56" height="18" rx="5" fill="#fff0ea"/><text x="959" y="258" fill="#cc815f" font-size="11" font-weight="700">↘ 1.3%</text><text x="1019" y="258" class="tiny">较上期</text>
+  <g filter="url(#shadow)"><rect x="239" y="298" width="603" height="405" rx="15" fill="#fff"/><rect x="860" y="298" width="300" height="405" rx="15" fill="#fff"/></g>
+  <text x="264" y="339" fill="#31425c" font-size="17" font-weight="720">访问趋势</text><text x="264" y="361" class="tiny">近 30 天的访问和互动变化</text>
+  <circle cx="689" cy="337" r="4" fill="#8c7bdd"/><text x="700" y="341" class="tiny">访问量</text><circle cx="765" cy="337" r="4" fill="#64b8b0"/><text x="776" y="341" class="tiny">互动</text>
+  <path d="M282 402H811 M282 462H811 M282 522H811 M282 582H811 M282 642H811" fill="none" stroke="#edf0f5" stroke-width="1"/>
+  <text x="259" y="405" class="tiny">20k</text><text x="259" y="465" class="tiny">15k</text><text x="259" y="525" class="tiny">10k</text><text x="265" y="585" class="tiny">5k</text><text x="265" y="645" class="tiny">0</text>
+  <path d="M282 584 C315 565 335 575 364 549 S427 532 455 540 S511 502 544 506 S604 478 633 464 S687 483 719 443 S772 438 811 407 L811 642 L282 642Z" fill="url(#area)"/>
+  <path d="M282 584 C315 565 335 575 364 549 S427 532 455 540 S511 502 544 506 S604 478 633 464 S687 483 719 443 S772 438 811 407" fill="none" stroke="#8778d6" stroke-width="4" stroke-linecap="round"/>
+  <path d="M282 609 C319 597 342 611 374 586 S432 601 461 580 S513 573 544 561 S599 564 633 536 S683 551 719 526 S770 522 811 488" fill="none" stroke="#6cb9b2" stroke-width="3" stroke-linecap="round" stroke-dasharray="6 5"/>
+  <circle cx="633" cy="464" r="8" fill="#fff" stroke="#8778d6" stroke-width="4"/><rect x="597" y="394" width="80" height="50" rx="7" fill="#2c3a59"/><text x="611" y="413" fill="#c1c7dc" font-size="10">Sep 18</text><text x="608" y="432" fill="white" font-size="14" font-weight="700">16,480</text>
+  <text x="282" y="669" class="tiny">1 SEP</text><text x="382" y="669" class="tiny">6 SEP</text><text x="482" y="669" class="tiny">11 SEP</text><text x="586" y="669" class="tiny">16 SEP</text><text x="688" y="669" class="tiny">21 SEP</text><text x="784" y="669" class="tiny">26 SEP</text>
+  <text x="884" y="339" fill="#31425c" font-size="17" font-weight="720">流量来源</text><text x="884" y="361" class="tiny">按渠道划分</text>
+  <circle cx="1010" cy="482" r="82" fill="none" stroke="#e8edf5" stroke-width="27"/><circle cx="1010" cy="482" r="82" fill="none" stroke="url(#donut)" stroke-width="27" stroke-dasharray="252 515" transform="rotate(-90 1010 482)"/><circle cx="1010" cy="482" r="82" fill="none" stroke="#65b9b5" stroke-width="27" stroke-dasharray="145 515" stroke-dashoffset="-260" transform="rotate(-90 1010 482)"/><circle cx="1010" cy="482" r="82" fill="none" stroke="#f4bd94" stroke-width="27" stroke-dasharray="90 515" stroke-dashoffset="-414" transform="rotate(-90 1010 482)"/>
+  <text x="984" y="479" fill="#324661" font-size="25" font-weight="750">84k</text><text x="976" y="500" class="tiny">总访问次数</text>
+  <circle cx="893" cy="605" r="5" fill="#8878d5"/><text x="906" y="609" fill="#687b94" font-size="12">自然搜索</text><text x="1122" y="609" fill="#334660" font-size="12" font-weight="700">49%</text>
+  <circle cx="893" cy="635" r="5" fill="#65b9b5"/><text x="906" y="639" fill="#687b94" font-size="12">直接访问</text><text x="1122" y="639" fill="#334660" font-size="12" font-weight="700">28%</text>
+  <circle cx="893" cy="665" r="5" fill="#f4bd94"/><text x="906" y="669" fill="#687b94" font-size="12">社交媒体</text><text x="1122" y="669" fill="#334660" font-size="12" font-weight="700">17%</text>
+</svg>

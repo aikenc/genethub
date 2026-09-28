@@ -2,6 +2,8 @@
 
 状态：提案，尚未实现。日期：2026-09-28。基线：`genethub` `de362309`、`genethub-cloud` `4fc16e9`（当日已与各自 `origin/main` 一致）。本文中的 RPC、字段和限额均为建议契约；验收通过前不应写成现有能力。
 
+交互参考：[可直接打开的 H5 原型](../prototypes/preview-annotations/index.html)。它用示例文件和浏览器本地存储演示选取、批注、会话切换与发送预览；不连接实际 Preview、daemon 或 Agent。
+
 ## 1. 目标与决策
 
 人在 Preview 中指出具体位置、写下批注，之后在**当前会话的一份草稿**中检查并一次发送给 Agent。支持 Markdown 原文行、运行中的 HTML 元素和图片矩形区域。一个草稿可混合多个文件和三种锚点；批注是用户输入，不因选取、保存或关闭 Preview 自动发送。
