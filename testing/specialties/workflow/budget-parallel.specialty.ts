@@ -144,13 +144,14 @@ for (const scenario of ["observation", "retry", "budget-expiry", "entries", "ent
       writeFileSync(goalPath, JSON.stringify(goal));
       await cli(["daemon", "start"]);
       opened.client = await connectProductClient(daemonEndpoint(opened.daemon));
-      let expired: WorkflowRunStatus | undefined;
-      await t.tools.waitUntil(async () => {
-        expired = (await history()).find(item => item.id === original);
-        return expired?.humanExit?.kind === "d" && !expired.humanExit.answer;
-      }, 30_000);
+      // Let the real patrol observe the old stopping clock. No user decision
+      // may be invented or changed solely because half an hour elapsed.
+      await new Promise(resolve => setTimeout(resolve, 6500));
+      const waiting = (await history()).find(item => item.id === original);
+      t.assertions.assert(waiting?.status === "blocked" && !waiting.humanExit,
+        "elapsed budget wait was converted into an unrelated Human feedback card");
       t.assertions.assert(!(await history()).some(item => item.handles.some(handle => handle.runId === original)),
-        "exhausted shared budget started a recovery Run instead of the PM-window feedback card");
+        "exhausted shared budget started a recovery Run");
       t.assertions.assert((await history()).find(item => item.id === original)?.requirement?.state !== "completed",
         "Business deadline expiry silently settled the undelivered requirement");
       return;
