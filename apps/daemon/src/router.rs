@@ -1435,6 +1435,8 @@ async fn dispatch(
             run_id,
             node_id,
             expected_revision,
+            expected_attempt,
+            submission_id,
             evidence,
             output,
             outcome,
@@ -1454,6 +1456,7 @@ async fn dispatch(
                 &node_id,
                 expected_revision,
                 crate::workflow::Completion {
+                    expected_attempt, submission_id,
                     evidence,
                     output,
                     outcome: outcome.unwrap_or_default(),
@@ -1539,7 +1542,7 @@ async fn dispatch(
             Handled::ok(Reply::WorkflowRun(transition.status))
         }
 
-        Request::WorkflowHuman { workspace_id, run_id, expected_revision, kind, reason } => {
+        Request::WorkflowHuman { workspace_id, run_id, expected_revision, kind, reason, budget, scope } => {
             if let Err(error) = authorize_project_workflow_mutation(state, caller, &workspace_id).await {
                 return Handled::err(ErrorCode::Forbidden, error);
             }
@@ -1547,7 +1550,7 @@ async fn dispatch(
                 return Handled::err(ErrorCode::Unauthorized, "workflow.human requires an ordinary PM Session");
             }
             match crate::workflow::request_human_exit(
-                state, &workspace_id, &run_id, expected_revision, &kind, &reason,
+                state, &workspace_id, &run_id, expected_revision, &kind, &reason, budget, scope,
             ).await {
                 Ok(run) => Handled::ok(Reply::WorkflowRun(run)),
                 Err(error) => failed(error),
@@ -1594,7 +1597,6 @@ async fn dispatch(
             workspace_id,
             run_id,
             expected_revision,
-            max_runs,
             deadline_seconds,
             max_llm_rounds,
         } => {
@@ -1609,7 +1611,6 @@ async fn dispatch(
                 caller.session_controller_id(),
                 &run_id,
                 expected_revision,
-                max_runs,
                 deadline_seconds,
                 max_llm_rounds,
             )

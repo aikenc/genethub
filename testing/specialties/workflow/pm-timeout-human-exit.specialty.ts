@@ -44,7 +44,7 @@ for (const exit of ["d", "a", "e"] as const) defineSpecialty({
     opened.mock.script(...Array.from({ length: 24 }, () => ({ respond: (request: unknown) => {
       if (exit !== "d" && JSON.stringify(request).includes("ASK_BUSINESS_HUMAN")) {
         return { tool: { name: "bash", arguments: { command:
-          `"$GENEHUB_CLI" workflow human --run ${original!.id} --revision ${original!.revision} --kind ${exit} --reason "PM requests 100 rounds and 30 minutes; verify the fixed grant before approval"`,
+          `"$GENEHUB_CLI" workflow human --run ${original!.id} --revision ${original!.revision} --kind ${exit} --reason "Finish remaining work using the proposed total allowance" ${exit === "a" ? `--budget-revision ${original!.requestBudget.revision} --max-llm-rounds 600 --deadline-seconds 14400` : ""}`,
         } } };
       }
       if (dispatched) { pmReplies++; return { text: "The route remains unavailable." }; }
@@ -86,9 +86,9 @@ for (const exit of ["d", "a", "e"] as const) defineSpecialty({
       t.assertions.assert(card.options?.map(option => option.id).join(",") === (exit === "a" ? "approve,reject" : "handled,abandon"),
         `Human exit ${exit} has the wrong options`);
       const beforeBudget = (await history()).find(item => item.id === original!.id)!.requestBudget;
-      if (exit === "a") t.assertions.assert(card.options?.find(option => option.id === "approve")?.label
-        .includes("1 次业务 Run、128 轮 LLM 和 60 分钟") && card.detail?.includes("本卡审批固定额度")
-        && card.detail.includes("申请原因中的其他数字不改变此额度"), "business approval omits its effective fixed quota");
+      if (exit === "a") t.assertions.assert(card.detail?.includes("600") && card.detail.includes("4 小时")
+        && !card.detail.includes("Run") && !card.detail.includes("固定额度"),
+        `budget card does not show the exact proposed totals: ${card.detail ?? ""}`);
       const choice = exit === "a" ? "approve" : "abandon";
       const answered = await opened.client.call({ type: "session.respondPermission", payload: {
         sessionId: pm, requestId: cardId, outcome: { outcome: "selected", optionId: choice },
@@ -97,9 +97,8 @@ for (const exit of ["d", "a", "e"] as const) defineSpecialty({
       await t.tools.waitUntil(async () => {
         const run = (await history()).find(item => item.id === original!.id);
         return run?.humanExit?.answer === choice && (exit === "a"
-          ? run.requestBudget.maxRuns === beforeBudget.maxRuns + 1
-            && run.requestBudget.maxLlmRounds === beforeBudget.maxLlmRounds + 128
-            && run.requestBudget.deadlineMs === beforeBudget.deadlineMs + 3_600_000
+          ? run.requestBudget.maxLlmRounds === 600
+            && run.requestBudget.deadlineMs === 14_400_000
             && run.requestBudget.revision === beforeBudget.revision + 1
           : run.status === "cancelled");
       }, 25_000);

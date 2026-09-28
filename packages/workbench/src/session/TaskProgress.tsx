@@ -1,3 +1,4 @@
+import { HumanDecisionSummary } from "./HumanDecisionSummary";
 import { WorkspaceDetailsDialog } from "../workspace/WorkspaceDetailsDialog";
 import type { SessionSummary } from "@genehub/proto";
 import { useEffect, useState } from "react";
@@ -70,7 +71,7 @@ export function TaskProgress({ session, onReportSession }: { session: SessionSum
   const stateLabel = summary.stopping ? "停止中" : summary.blocked ? "受阻"
     : summary.tasks.some(task => task.humanExit && !task.humanExit.answer) ? "等待人工决定"
     : summary.tasks.some(task => task.waiting?.length) ? "等待处理"
-    : summary.tasks.some(task => task.runStatus === "awaitingPm") ? "等待 PM 落实"
+    : summary.tasks.some(task => task.requirement?.state === "completing") ? "等待 PM 落实"
     : summary.tasks.some(task => task.recovery && task.executing) ? "恢复审查中"
     : summary.tasks.some(task => task.executing) ? "小队执行中"
     : summary.running ? "等待推进"
@@ -116,11 +117,9 @@ export function TaskProgress({ session, onReportSession }: { session: SessionSum
           {task.requirement?.conclusion && <p className="mt-1 text-xs text-muted">交付结论：{task.requirement.conclusion}</p>}
           {task.reportPending && <p className="mt-1 text-xs text-muted">{task.status === "running" ? "任务有新情况，待 PM 处理。" : "执行结果待 PM 核对新消息并汇报。"}</p>}
           {task.humanExit && <div role="status" className="mt-2 rounded-lg border border-line px-2 py-2 text-xs">
-            <p className="font-medium">人工决定 · 出口 {task.humanExit.kind}{task.humanExit.answer ? ` · 已选择 ${task.humanExit.answer}` : " · 待答复"}</p>
-            <p className="mt-1 break-words">{task.humanExit.reason}</p>
+            <HumanDecisionSummary decision={task.humanExit} />
             {!task.humanExit.answer && <button type="button" className="mt-1 min-h-9 text-accent" onClick={() => void selectSession(task.humanExit!.pmSessionId)}>前往问题卡</button>}
-            {((task.humanExit.kind === "d" && task.humanExit.answer === "confirmFeedback")
-              || (task.humanExit.kind === "c" && task.humanExit.answer === "reject")) && onReportSession &&
+            {task.humanExit.kind === "d" && task.humanExit.answer === "confirmFeedback" && onReportSession &&
               <button type="button" className="mt-1 min-h-9 text-accent" onClick={() => onReportSession(
                 task.humanExit!.pmSessionId,
                 `Workflow 恢复失败\nRun: ${task.runId}\n用户需求: ${task.requestRunId ?? task.runId}\n原因: ${task.humanExit!.reason}\n日志引用: workflow journal --run ${task.runId}`,
@@ -144,6 +143,7 @@ export function TaskProgress({ session, onReportSession }: { session: SessionSum
               </div>}
             </div>;
           })}
+          {task.conditions?.map(condition => <p key={`${condition.nodeId}:${condition.code}:${condition.occurrence}`} className="mt-1 text-xs">{condition.nodeId ? `${condition.nodeId}：` : ""}{condition.reason}</p>)}
           {task.cleanupError && <p className="mt-1 text-xs text-danger">收尾待处理：{task.cleanupError}</p>}
           <WorkflowStructureDetails workspaceId={session.workspaceId} runId={task.runId} revision={task.revision} />
           {task.executorSessionId && <button type="button" className="min-h-9 text-xs text-accent"

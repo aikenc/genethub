@@ -1001,7 +1001,11 @@ packageId?: string,
 /**
  * Validate current source without creating a Candidate, Run or Worker.
  */
-draft?: boolean, } } | { "type": "workflow.get", "payload": { workspaceId: string, runId: string, } } | { "type": "workflow.journal", "payload": { workspaceId: string, runId: string, since: bigint, limit: number, } } | { "type": "workflow.history", "payload": { workspaceId: string, limit: number | null, } } | { "type": "workflow.consult", "payload": { workspaceId: string, runId: string, nodeId: string, expectedRevision: number, report: string, } } | { "type": "workflow.complete", "payload": { workspaceId: string, runId: string, nodeId: string, expectedRevision: number, evidence: { [key in string]?: string }, 
+draft?: boolean, } } | { "type": "workflow.get", "payload": { workspaceId: string, runId: string, } } | { "type": "workflow.journal", "payload": { workspaceId: string, runId: string, since: bigint, limit: number, } } | { "type": "workflow.history", "payload": { workspaceId: string, limit: number | null, } } | { "type": "workflow.consult", "payload": { workspaceId: string, runId: string, nodeId: string, expectedRevision: number, report: string, } } | { "type": "workflow.complete", "payload": { workspaceId: string, runId: string, nodeId: string, expectedRevision: number, 
+/**
+ * Node-bound submission; unrelated sibling revisions do not invalidate it.
+ */
+expectedAttempt?: number, submissionId?: string, evidence: { [key in string]?: string }, 
 /**
  * Bounded business data, checked against the node's declared output shape.
  */
@@ -1009,7 +1013,7 @@ output?: unknown,
 /**
  * Absent retains the existing successful-completion contract.
  */
-outcome?: WorkflowNodeOutcome, reason?: string, } } | { "type": "workflow.cancel", "payload": { workspaceId: string, runId: string, expectedRevision: number, } } | { "type": "workflow.recover", "payload": { workspaceId: string, runId: string, expectedRevision: number, } } | { "type": "workflow.recovery.start", "payload": { workspaceId: string, runId: string, reason: string, } } | { "type": "workflow.human", "payload": { workspaceId: string, runId: string, expectedRevision: number, kind: string, reason: string, } } | { "type": "workflow.recovery.reset", "payload": { workspaceId: string, packageId?: string, expectedRevision: number, } } | { "type": "workflow.budget", "payload": { workspaceId: string, runId: string, expectedRevision: number, maxRuns?: number, deadlineSeconds?: number, maxLlmRounds?: number, } } | { "type": "workflow.requirement.complete", "payload": { workspaceId: string, runId: string, expectedRevision: number, conclusion: string, deliveryReferences: Array<string>, } } | { "type": "agentSpace.configure", "payload": { workspaceId: string, expectedRevision: number, operation: AgentSpaceOperation, 
+outcome?: WorkflowNodeOutcome, reason?: string, } } | { "type": "workflow.cancel", "payload": { workspaceId: string, runId: string, expectedRevision: number, } } | { "type": "workflow.recover", "payload": { workspaceId: string, runId: string, expectedRevision: number, } } | { "type": "workflow.recovery.start", "payload": { workspaceId: string, runId: string, reason: string, } } | { "type": "workflow.human", "payload": { workspaceId: string, runId: string, expectedRevision: number, kind: string, reason: string, budget?: WorkflowBudgetProposal, scope?: WorkflowScopeProposal, } } | { "type": "workflow.recovery.reset", "payload": { workspaceId: string, packageId?: string, expectedRevision: number, } } | { "type": "workflow.budget", "payload": { workspaceId: string, runId: string, expectedRevision: number, deadlineSeconds?: number, maxLlmRounds?: number, } } | { "type": "workflow.requirement.complete", "payload": { workspaceId: string, runId: string, expectedRevision: number, conclusion: string, deliveryReferences: Array<string>, } } | { "type": "agentSpace.configure", "payload": { workspaceId: string, expectedRevision: number, operation: AgentSpaceOperation, 
 /**
  * Required when the caller is a SessionController; omitted for a
  * direct authenticated Human UI action.
@@ -1308,7 +1312,7 @@ coverage?: HistoryCoverage, };
  */
 export type SessionImportSource = { agentId: string, label: string, supported: boolean, candidates: Array<SessionImportCandidate>, error?: string, };
 
-export type SessionInputSummary = { pendingMessageIds: Array<string>, paused: boolean, error?: string, };
+export type SessionInputSummary = { pauseReason?: string, controlRevision?: number, pendingMessageIds: Array<string>, paused: boolean, error?: string, };
 
 /**
  * A small structural entry point. It deliberately contains no free-form
@@ -1966,6 +1970,12 @@ outputRateEstimated: boolean, costUsd?: number, };
 export type WorkflowActivationStatus = { revision: number, digest: string, previousDigest?: string, activatedAtMs: number, };
 
 /**
+ * Exact total limits offered for one Human approval. The budget revision
+ * fences later changes; prose cannot authorize additional usage.
+ */
+export type WorkflowBudgetProposal = { expectedRevision: number, maxLlmRounds: number, deadlineSeconds: number, };
+
+/**
  * Plan or result of `workflow build`.
  */
 export type WorkflowBuildReport = { schema: string, 
@@ -1998,6 +2008,8 @@ export type WorkflowCatalogEntryStatus = { id: string, path: string, digest: str
 
 export type WorkflowCheckReport = { checkedAtMs: number, findings: Array<WorkflowFinding>, runs: Array<WorkflowRunStatus>, draft?: WorkflowDraftReport, };
 
+export type WorkflowCondition = { code: string, nodeId: string | null, occurrence: number, sinceMs: number, reason: string, };
+
 export type WorkflowDiagnostic = { phase: string, code: string, severity: string, 
 /**
  * Relative to Workflow source root; path is an RFC 6901 pointer in this file.
@@ -2025,7 +2037,7 @@ executorPath?: string, workflows: Array<WorkflowDraftEntry>, };
 
 export type WorkflowFinding = { runId: string, nodeId: string | null, code: string, severity: string, detail: string, };
 
-export type WorkflowHumanExitStatus = { kind: string, requestId: string, pmSessionId: string, reason: string, createdAtMs: number, answer?: string, };
+export type WorkflowHumanExitStatus = { effectError?: string, budget?: WorkflowBudgetProposal, scope?: WorkflowScopeProposal, kind: string, requestId: string, pmSessionId: string, reason: string, createdAtMs: number, answer?: string, };
 
 export type WorkflowHumanWait = { nodeId: string, sessionId: string, requestId: string, title: string, };
 
@@ -2039,7 +2051,7 @@ export type WorkflowHumanWait = { nodeId: string, sessionId: string, requestId: 
  */
 export type WorkflowNodeOutcome = string;
 
-export type WorkflowNodeRunStatus = { output?: unknown, 
+export type WorkflowNodeRunStatus = { phase?: string, resultAcceptedAtMs?: number, output?: unknown, 
 /**
  * First time this node instance existed, retained across attempts. The
  * daemon records transition times only; every rate, ranking and critical
@@ -2206,30 +2218,38 @@ export type WorkflowRecoveryHandleStatus = { runId: string, triggerSeq: number, 
  */
 export type WorkflowRequestBudgetSnapshot = { 
 /**
- * Admission of this Run is independent of admission of a future Run.
+ * This execution has been admitted; remaining shared calls/time still apply.
  */
-currentRunAdmitted: boolean, currentRunCanExecute: boolean, requestRunId: string, observedAtMs: number, budget: WorkflowRequestBudgetStatus, usedRuns: number, observedLlmRounds: number, executionMs: number, remainingRuns: number, remainingLlmRounds: number, remainingExecutionMs: number, };
+currentRunAdmitted: boolean, currentRunCanExecute: boolean, requestRunId: string, observedAtMs: number, budget: WorkflowRequestBudgetStatus, observedLlmRounds: number, executionMs: number, remainingLlmRounds: number, remainingExecutionMs: number, };
 
 /**
  * Mutable limits shared by one Human request and all Workflow retry Runs.
  * Its revision is separate from the graph revision so a PM can adjust a
  * running request without racing a Worker node completion.
  */
-export type WorkflowRequestBudgetStatus = { revision: number, maxRuns: number, deadlineMs: number, maxLlmRounds: number, };
+export type WorkflowRequestBudgetStatus = { revision: number, deadlineMs: number, maxLlmRounds: number, };
 
 /**
  * PM-owned goal state, independent of Workflow execution and inbox receipts.
  */
 export type WorkflowRequirementState = "in_progress" | "completing" | "completed" | "cancelled";
 
-export type WorkflowRequirementStatus = { state: WorkflowRequirementState, revision: number, pendingSinceMs: number, pmSessionId: string | null, completedAtMs: number | null, conclusion: string | null, deliveryReferences: Array<string>, patrolError: string | null, };
+export type WorkflowRequirementStatus = { 
+/**
+ * Human-approved replacement goal; original request history stays intact.
+ */
+scope?: WorkflowScopeProposal, state: WorkflowRequirementState, revision: number, pendingSinceMs: number, pmSessionId: string | null, completedAtMs: number | null, conclusion: string | null, deliveryReferences: Array<string>, patrolError: string | null, };
 
 /**
  * Durable status of one project Workflow run. Node meaning comes entirely
  * from the pinned project definition; the daemon reports only generic graph
  * and evidence facts here.
  */
-export type WorkflowRunStatus = { requirement?: WorkflowRequirementStatus, humanExit?: WorkflowHumanExitStatus, 
+export type WorkflowRunStatus = { 
+/**
+ * Derived from program and confirmed resource retirement.
+ */
+phase?: string, programResult?: string, conditions: Array<WorkflowCondition>, requirement?: WorkflowRequirementStatus, humanExit?: WorkflowHumanExitStatus, 
 /**
  * Immutable business Run references owned by a recovery Run.
  */
@@ -2271,6 +2291,8 @@ activationRevision?: number, bundleDigest: string, taskId: string, status: strin
  */
 executorTurns: number, activeNodes: Array<string>, nodes: Array<WorkflowNodeRunStatus>, createdAtMs: number, updatedAtMs: number, };
 
+export type WorkflowScopeProposal = { goal: string, changes: string, };
+
 /**
  * Raw non-LLM observation facts for one Run. Health is a reader's judgment:
  * the daemon publishes the clock it already keeps and its fixed silence
@@ -2278,16 +2300,12 @@ executorTurns: number, activeNodes: Array<string>, nodes: Array<WorkflowNodeRunS
  */
 export type WorkflowSupervisionStatus = { lastCheckedAtMs: number, 
 /**
- * Elapsed time excluded from execution charging because the whole Run was
- * waiting for a Human.
+ * Effective processing time of this Run: the union of its execution
+ * intervals, excluding stopped, recoverable and whole-Run Human waits.
  */
-humanWaitMs: number, 
-/**
- * Elapsed time the Run spent recoverable, awaiting a PM continue decision.
- */
-recoveryWaitMs: number, waiting: boolean, nodeWallMs: number, };
+executionMs: number, waiting: boolean, nodeWallMs: number, };
 
-export type WorkflowTaskSummary = { 
+export type WorkflowTaskSummary = { phase?: string, conditions: Array<WorkflowCondition>, 
 /**
  * Execution is independent from the user requirement's delivery state.
  */

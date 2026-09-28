@@ -207,7 +207,7 @@ impl SessionManager {
                 .expect("reserved input");
             entry.state = "queued".into();
             if source == "user" {
-                next.inbox.paused = false;
+                next.inbox.set_pause(None);
                 next.inbox.error = None;
             }
             next.message_preview = visible_message_preview(std::slice::from_ref(&item));
@@ -316,7 +316,7 @@ impl SessionManager {
                     let mut next = meta.clone();
                     let message = format!("消息已保存，Agent 续接待处理：{error:#}");
                     next.inbox.error = Some(message.chars().take(2048).collect());
-                    next.inbox.paused = true;
+                    next.inbox.set_pause(Some("executionFailure"));
                     if let Err(error) = state.sessions.store.save_meta(&next) {
                         tracing::error!(%error, "persisting input delivery failure");
                     }
@@ -598,7 +598,7 @@ pub(super) async fn settle_inputs(
             }
         }
     } else {
-        next.inbox.paused = true;
+        next.inbox.set_pause(Some("executionFailure"));
         next.inbox.error = Some("本轮失败，已接收消息保留；发送新消息后核对并继续。".into());
     }
     live.store.save_meta(&next)?;
@@ -697,6 +697,7 @@ mod tests {
             paused: true,
             has_delivered: true,
             error: Some("failed".into()),
+            ..Default::default()
         };
 
         retire_failed_human_inputs(&mut inbox);

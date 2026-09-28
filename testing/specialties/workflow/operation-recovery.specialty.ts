@@ -107,11 +107,11 @@ for (const takeover of [false, true]) defineSpecialty({
     let recoverable: WorkflowRunStatus | undefined;
     await t.tools.waitUntil(async () => {
       recoverable = (await history())[0];
-      return recoverable?.status === "recoverable";
+      return recoverable?.conditions.some(condition => condition.code === "nodeInterrupted") === true;
     }, 45_000);
     t.assertions.assert(recoverable!.nodes.find(n => n.sessionId === firstId)?.status === "completed", "accepted predecessor changed during restart");
-    t.assertions.assert(recoverable!.nodes.find(n => n.sessionId === interruptedId)?.status === "interrupted", "unfinished Worker was not marked for continuation");
-    t.assertions.assert(recoverable!.reason?.includes("原 Session") && recoverable!.handles.length === 0,
+    t.assertions.assert(recoverable!.nodes.find(n => n.sessionId === interruptedId)?.phase === "active", "unfinished Worker was not marked for continuation");
+    t.assertions.assert(recoverable!.conditions.some(condition => condition.reason.includes("原 Session")) && recoverable!.handles.length === 0,
       "interrupted Worker lost its same-Session recovery reference");
     const check = await opened.client.call({ type: "workflow.check", payload: { workspaceId: activeWorkspaceId, runId: recoverable!.id } });
     t.assertions.assert(check?.type === "workflowCheck" && check.data.findings.some(f => f.code === "recoverableOperation" && f.detail.includes("仍保留")), "PM did not receive a same-session recovery finding");

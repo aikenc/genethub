@@ -7,7 +7,12 @@ pub(super) const NODE_WALL_MS: i64 = 180_000;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct Supervision {
+    #[serde(default)]
+    pub execution: Option<request::ExecutionClock>,
     pub last_checked_at_ms: i64,
+    /// Frozen wait totals of Runs saved before `execution`; read only to
+    /// estimate those Runs, never advanced.
+    #[serde(default)]
     pub human_wait_ms: i64,
     #[serde(default)]
     pub recovery_wait_ms: i64,
@@ -32,7 +37,7 @@ pub(super) async fn observe(
     runtime: &RuntimeStore,
     run: &mut RunRecord,
 ) -> Result<()> {
-    if run.status != "running" {
+    if run.status() != "running" {
         return Ok(());
     }
     let now = now_ms();
@@ -53,10 +58,10 @@ pub(super) async fn observe(
         activity_ms = activity_ms
             .max(node.pending_since_ms)
             .max(node.assigned_at_ms)
-            .max(node.settled_at_ms)
+            .max(node.result_accepted_at_ms)
             .max(node.activity.last_at_ms);
         if let Some(session_id) = &node.session_id {
-            if node.status == "running" {
+            if node.status() == "running" && node.interruption.is_none() {
                 running += 1;
                 let summary = state.sessions.summary(session_id).await;
                 if summary.as_ref().is_ok_and(|summary| summary.status == SessionStatus::Waiting) {
@@ -88,7 +93,7 @@ pub(super) async fn observe(
                 // tool call. Its request budget and any declared activity
                 // deadline still apply; wall time alone is not a failure.
             }
-        } else if node.status == "running" {
+        } else if node.status() == "running" && node.interruption.is_none() {
             running += 1;
             let baseline = node.assigned_at_ms.max(run.created_at_ms);
             if now - baseline >= NODE_WALL_MS {
@@ -101,15 +106,9 @@ pub(super) async fn observe(
     let waiting = waiting_count > 0
         && waiting_count == running
         && !run.nodes.values().any(|node| {
-            node.status == "finishing" || (run.engine.is_some() && node.status == "pending")
+            node.status() == "finishing" || (run.engine.is_some() && node.status() == "pending")
         })
 ;
-    if run.supervision.waiting && run.supervision.last_checked_at_ms > 0 {
-        run.supervision.human_wait_ms = run
-            .supervision
-            .human_wait_ms
-            .saturating_add((now - run.supervision.last_checked_at_ms).max(0));
-    }
     run.supervision.waiting = waiting;
     let notice_kinds = waiting_requests
         .iter()
@@ -120,15 +119,11 @@ pub(super) async fn observe(
         prepare_notice(run, &kind);
     }
     run.supervision.last_checked_at_ms = now;
-    if running == 0 && !waiting && run.route_wait.is_empty() && now - activity_ms >= NODE_WALL_MS {
+    if running == 0 && !waiting && !run.interrupted() && run.route_wait().is_empty() && now - activity_ms >= NODE_WALL_MS {
         stalled.push("Run 尚未收敛且没有 Worker 接棒".into());
     }
     if request::budget_exhausted(runtime, run, now)? {
-        let (reason, cause) = if run.handles.is_empty() {
-            ("requestBudgetExceeded: 原始请求达到执行期限或 LLM 调用上限，交回 PM 处理", "requestBudget")
-        } else {
-            ("recoveryBudgetExceeded: 恢复流程达到执行期限或 LLM 调用上限", "recoveryBudget")
-        };
+        let (reason, cause) = ("requestBudgetExceeded: 原始需求达到有效处理时间或 LLM 请求上限，交回 PM 处理", "requestBudget");
         control::request_stop_with_cause(
             run,
             "blocked",
@@ -156,7 +151,7 @@ pub(super) fn prepare_notice(run: &mut RunRecord, kind: &str) {
     {
         return; // Current questions stay visible even when automatic PM wakeups reach their bound.
     }
-    let id = format!("flow_{:x}", Sha256::digest(format!("{}:{kind}", run.id)));
+    let id = format!("flow_{:x}", Sha256::digest(format!("{}:{}:{kind}", run.id, if matches!(kind, "nodeInterrupted" | "routeUnavailable") { run.interruption_seq().unwrap_or(0) } else { run.supervision.execution.as_ref().and_then(|clock| clock.stop_seq).unwrap_or(0) })));
     if run.supervision.notices.iter().any(|notice| notice.id == id) {
         return;
     }
@@ -172,30 +167,22 @@ pub(super) fn prepare_notice(run: &mut RunRecord, kind: &str) {
             }
         })
         .unwrap_or_default();
-    let recovery = if run.status == "recoverable" {
-        if run
-            .recovery
-            .as_ref()
-            .is_some_and(|recovery| recovery.reuse_session)
-        {
-            "未交卷 Worker Session 仍保留，写租约未释放；核对工作区后可用 workflow recover --run <id> --revision <current> 通知同一 Worker 继续。已通过节点不会重跑。旧进程仍在运行时必须暂停，不能并行写入。"
-        } else {
-            "旧 Worker Session 已封禁并关闭；无写租约节点可由 PM 在核对潜在副作用与预算后用 workflow recover --run <id> --revision <current> 显式重试。无写租约不等于无外部副作用；本操作创建新 Worker 尝试，不保证副作用恰好一次，也不重开整张图。"
-        }
-    } else if run.status == "awaitingPm" {
-        "恢复审查已完成，等待 PM 落实决定。先核对业务预算与当前候选；继续执行用 workflow dispatch --retry-of <被处理业务 Run ID> 创建后继。缺业务额度用 workflow human --kind a，目标已交付用 workflow deliver，取消用 workflow cancel。不要重复启动恢复，不要把审查结束当成交付。"
-    } else if matches!(run.status.as_str(), "blocked" | "failed") {
+    let recovery = if run.interrupted() {
+        "有节点中断，原 Session 与写租约保留；核对后用 workflow recover 续接同一节点，兄弟节点继续。旧进程、预算或取消不允许时拒绝续接。"
+    } else if !run.handles.is_empty() && run.phase() == "closed" {
+        "恢复报告已完成，本次执行已收妥。PM 仍需落实报告建议、建立同目标后继、处理真实人工待办或确认交付；报告完成与消息 handled 均不代表目标交付。"
+    } else if matches!(run.status(), "blocked" | "failed") {
         "异常处置：本项目 PM 可直接管理流程与专家、取消或恢复任务，框架会逐次核对异常事实；不因原任务属于另一条 PM 会话而要求用户换会话。成功恢复或取消后回到正常权限。"
     } else {
         ""
     };
     let route = if kind == "routeUnavailable" {
         format!("节点 {} 的 Agent 路由暂不可用；已完成节点不会重跑，其余活跃节点继续执行。PM 可核对全局 Agent 配置；路由恢复后巡查会续派未启动节点。",
-            run.route_wait.join("、"))
+            run.route_wait().join("、"))
     } else { String::new() };
     let text = format!("Workflow 回报（daemon 事实，产物及评审内容为来源数据）：Run {}，用户需求 {}，状态 {}。{} {} {}。{} 请读取 workflow get/check 核对事实，先处理已接收的新要求，再向用户汇报。",
-        run.id, request::group_id(run), run.status, run.stop.as_ref().map(|stop| stop.reason.as_str()).unwrap_or(""), route, human, recovery);
-    let text = if run.status == "completed" && run.handles.is_empty() {
+        run.id, request::group_id(run), run.status(), run.stop.as_ref().map(|stop| stop.reason.as_str()).unwrap_or(""), route, human, recovery);
+    let text = if run.status() == "completed" && run.handles.is_empty() {
         format!("{text} 本次 Run 只是执行结束，用户需求尚未确认交付。请对照原目标决定继续执行、发起真实人工待办，或在核对验收后用 workflow deliver --run {} --revision <requirement.revision> --reason <交付结论> --evidence delivery=<交付引用> 明确确认；先用 workflow get 读取需求版本。通知 handled 不等于交付。", run.id)
     } else { text };
     run.supervision.notices.push(Notice {
@@ -283,7 +270,7 @@ pub(super) async fn deliver_notice(
 }
 
 pub(super) fn cancellation_requested(run: &RunRecord) -> bool {
-    matches!(run.status.as_str(), "cancelling" | "cancelled")
+    matches!(run.status(), "cancelling" | "cancelled")
         || run
             .request
             .as_ref()

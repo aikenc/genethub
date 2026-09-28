@@ -237,7 +237,7 @@ pub enum Request {
         report: String,
     },
     /// Supplies explicit evidence for the node owned by this managed Session.
-    /// `expectedRevision` is a project-run CAS, not a best-effort hint.
+    /// Legacy clients use Run CAS. New clients bind expectedAttempt plus the managed Session; submissions are idempotent.
     #[serde(rename = "workflow.complete", rename_all = "camelCase")]
     WorkflowComplete {
         workspace_id: String,
@@ -245,6 +245,13 @@ pub enum Request {
         node_id: String,
         #[ts(type = "number")]
         expected_revision: u64,
+        /// Node-bound submission; unrelated sibling revisions do not invalidate it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        expected_attempt: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        submission_id: Option<String>,
         evidence: std::collections::BTreeMap<String, String>,
         /// Bounded business data, checked against the node's declared output shape.
         #[serde(
@@ -298,6 +305,12 @@ pub enum Request {
         expected_revision: u64,
         kind: String,
         reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        budget: Option<crate::WorkflowBudgetProposal>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        scope: Option<crate::WorkflowScopeProposal>,
     },
     /// Override only future recovery Runs to use the built-in flow.
     #[serde(rename = "workflow.recovery.reset", rename_all = "camelCase")]
@@ -318,9 +331,6 @@ pub enum Request {
         run_id: String,
         #[ts(type = "number")]
         expected_revision: u64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
-        max_runs: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional, type = "number")]
         deadline_seconds: Option<u64>,

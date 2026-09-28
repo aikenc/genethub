@@ -92,14 +92,14 @@ defineSpecialty({
       try {
         const reply = await secondClient!.call({ type: "workflow.budget", payload: {
           workspaceId: secondWorkspaceId, runId: original!.id, expectedRevision: 0,
-          maxRuns: 4,
+          maxLlmRounds: 512,
         } });
-        return reply?.type === "workflowRun" && reply.data.requestBudget.maxRuns === 4;
+        return reply?.type === "workflowRun" && reply.data.requestBudget.maxLlmRounds === 512;
       } catch { return false; }
     }, 30_000);
     const after = await history();
     t.assertions.assert(after.length === 1 && after[0]!.id === original!.id
-      && after[0]!.requestBudget.revision === 1 && after[0]!.requestBudget.maxRuns === 4,
+      && after[0]!.requestBudget.revision === 1 && after[0]!.requestBudget.maxLlmRounds === 512,
     "takeover lost the original request or repeated the budget mutation");
   } finally {
     secondClient?.close();

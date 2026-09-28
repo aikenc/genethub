@@ -71,5 +71,5 @@ promotion needs evidence of reuse value and the ordinary method-change process.
 
 Budget observations distinguish admission from execution. `currentRunAdmitted`
 means this attempt is already approved; `currentRunCanExecute` describes its
-remaining observed execution bounds. `remainingRuns=0` only prevents a later
-Run and is never sufficient to return `needsAuthorization` for this one.
+remaining observed LLM request and effective processing-time bounds. Business
+execution, acceptance and recovery share these limits; Run count is not a budget.

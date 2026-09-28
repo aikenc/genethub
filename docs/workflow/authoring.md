@@ -13,7 +13,7 @@ bounded JSON data and deterministic execution; it does not implement a game pipe
 ```
 
 `schema` returns `data.definition`, a Draft 2020-12 JSON Schema generated from the Rust deserialization
-types, plus `x-genehub` capabilities and boundaries. It describes our v1/v2 syntax, **not** OWS/ASL
+types, plus `x-genehub` capabilities and boundaries. New Runs require v2 (v1 is retained only for historical and in-flight compatibility), **not** OWS/ASL
 compatibility. No jq, JSONata, remote `$ref`, script runtime or standard-DSL migration is added.
 The schema helps authoring; the production compiler remains authoritative for control flow and bounds.
 
@@ -73,8 +73,8 @@ same serialization when both are omitted; old Runs are not rewritten.
 
 `request.budget` is a host capability with no `with` or `completion` fields.
 An ordinary task returns a persisted `output` containing `requestRunId`,
-`observedAtMs`, `budget` (revision/maxRuns/deadlineMs/maxLlmRounds), `usedRuns`,
-`observedLlmRounds`, `executionMs` and remainingRuns/remainingLlmRounds/remainingExecutionMs.
+`observedAtMs`, `budget` (revision/deadlineMs/maxLlmRounds),
+`observedLlmRounds`, `executionMs` and remainingLlmRounds/remainingExecutionMs.
 It reads only its own shared user requirement using the same accounting as admission and
 `workflow check`. The observation is neither a reservation nor authority to raise
 limits. It survives restart unchanged; query again to observe a budget amendment

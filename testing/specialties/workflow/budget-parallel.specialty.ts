@@ -144,13 +144,13 @@ for (const scenario of ["observation", "retry", "budget-expiry", "entries", "ent
       writeFileSync(goalPath, JSON.stringify(goal));
       await cli(["daemon", "start"]);
       opened.client = await connectProductClient(daemonEndpoint(opened.daemon));
-      let recovery: WorkflowRunStatus | undefined;
+      let expired: WorkflowRunStatus | undefined;
       await t.tools.waitUntil(async () => {
-        recovery = (await history()).find(item => item.handles.some(handle => handle.runId === original));
-        return recovery?.status === "running" && recovery.nodes.some(node => node.status === "running");
+        expired = (await history()).find(item => item.id === original);
+        return expired?.humanExit?.kind === "d" && !expired.humanExit.answer;
       }, 30_000);
-      t.assertions.assert(recovery!.requestRunId === original && (await history()).length === 2,
-        "PM timeout lost the goal or duplicated its independent recovery");
+      t.assertions.assert(!(await history()).some(item => item.handles.some(handle => handle.runId === original)),
+        "exhausted shared budget started a recovery Run instead of the PM-window feedback card");
       t.assertions.assert((await history()).find(item => item.id === original)?.requirement?.state !== "completed",
         "Business deadline expiry silently settled the undelivered requirement");
       return;
@@ -246,7 +246,7 @@ for (const scenario of ["observation", "retry", "budget-expiry", "entries", "ent
     const value = () => (run!.structure as { outcome?: { value?: unknown } })?.outcome?.value;
     if (budgetCase) {
       const result = value() as { before: WorkflowRequestBudgetSnapshot; after: WorkflowRequestBudgetSnapshot };
-      t.assertions.assert(result.before.usedRuns === 1 && result.before.remainingRuns === 2 && result.after.observedLlmRounds >= 1, "budget usage differs from actual request work");
+      t.assertions.assert(!("usedRuns" in result.before) && !("remainingRuns" in result.before) && result.after.observedLlmRounds >= 1, "budget usage differs from actual request work");
       if (before) t.assertions.assert(JSON.stringify(result.before) === JSON.stringify(before) && result.after.budget.revision === 1 && result.after.budget.maxLlmRounds === 512
         && result.after.remainingLlmRounds === 512 - result.after.observedLlmRounds, "amendment/restart changed a committed observation or lost the fresh one");
       if (scenario === "retry") {
@@ -255,43 +255,45 @@ for (const scenario of ["observation", "retry", "budget-expiry", "entries", "ent
         await send("Retry the same original request.");
         await t.tools.waitUntil(async () => { await current(); return run?.id !== original && run?.status === "completed"; }, 40000);
         const retry = value() as typeof result;
-        t.assertions.assert(retry.before.requestRunId === original && retry.before.usedRuns === 2 && retry.before.remainingRuns === 1
+        t.assertions.assert(retry.before.requestRunId === original
           && retry.before.observedLlmRounds >= result.after.observedLlmRounds, "retry reset request usage");
         seen.clear();
-        nextCommand = `"$GENEHUB_CLI" workflow dispatch --workflow direct-change --task observed-3 --retry-of ${q(original)} --no-wait --message "Use the final authorized business Run"`;
-        await send("Use the final authorized business Run.");
+        nextCommand = `"$GENEHUB_CLI" workflow dispatch --workflow direct-change --task observed-3 --retry-of ${q(original)} --no-wait --message "Continue with the same request allowance"`;
+        await send("Continue with the same request allowance.");
         await t.tools.waitUntil(async () => { await current(); return run?.taskId === "observed-3" && run.status === "completed"; }, 40_000);
         const lastAuthorized = value() as typeof result;
-        t.assertions.assert(lastAuthorized.before.requestRunId === original && lastAuthorized.before.usedRuns === 3
-          && lastAuthorized.before.remainingRuns === 0
+        t.assertions.assert(lastAuthorized.before.requestRunId === original
           && lastAuthorized.before.currentRunAdmitted && lastAuthorized.before.currentRunCanExecute,
-          "last admitted Run lost execution authority when future admission capacity reached zero");
+          "successive execution lost its shared request allowance");
 
-        nextCommand = `"$GENEHUB_CLI" workflow dispatch --workflow direct-change --task forbidden-4 --retry-of ${q(original)} --no-wait --message "Attempt beyond shared limit"`;
-        await send("Attempt one more Run with the old budget.");
+        // Exhaust actual request allowance explicitly; a fourth Run is not a limit.
+        nextCommand = `"$GENEHUB_CLI" workflow budget --run ${q(original)} --revision 0 --max-llm-rounds 1`;
+        await send("Apply this explicit request cap.");
+        await t.tools.waitUntil(async () => (await history()).find(item => item.id === original)?.requestBudget.revision === 1, 30_000);
+        nextCommand = `"$GENEHUB_CLI" workflow dispatch --workflow direct-change --task forbidden-4 --retry-of ${q(original)} --no-wait --message "Attempt beyond request allowance"`;
+        await send("Attempt work with an exhausted LLM request budget.");
         await t.tools.waitUntil(async () => {
           const reply = await opened.client.call({ type: "session.get", payload: { sessionId: pm } });
           return reply?.type === "snapshot" && reply.data.summary.status === "idle"
             && !reply.data.summary.inputSummary?.pendingMessageIds.includes(`u_budget_${inputSeq}`);
         }, 30_000);
         t.assertions.assert((await history()).length === 3
-          && JSON.stringify(opened.mock.requests).includes("requestBudgetExceeded"),
-        "fourth business Run bypassed the budget or PM could not see the refusal");
+          && JSON.stringify(opened.mock.requests).includes("requestBudgetExceeded"), "exhausted LLM request budget admitted new work");
 
         const usageMs = (await history()).reduce((sum, item) => sum + item.updatedAtMs - item.createdAtMs, 0);
         const amendedDeadlineSeconds = Math.ceil(usageMs / 1000) + 120;
         seen.clear();
-        nextCommand = `"$GENEHUB_CLI" workflow budget --run ${q(original)} --revision 0 --max-runs 4 --deadline-seconds ${amendedDeadlineSeconds} --max-llm-rounds 512`;
+        nextCommand = `"$GENEHUB_CLI" workflow budget --run ${q(original)} --revision 1 --deadline-seconds ${amendedDeadlineSeconds} --max-llm-rounds 512`;
         await send("Raise this request budget within the existing authorization.");
-        await t.tools.waitUntil(async () => (await history()).find(item => item.id === original)?.requestBudget.revision === 1, 30_000);
+        await t.tools.waitUntil(async () => (await history()).find(item => item.id === original)?.requestBudget.revision === 2, 30_000);
         nextCommand = `"$GENEHUB_CLI" workflow dispatch --workflow direct-change --task observed-4 --retry-of ${q(original)} --no-wait --message "PM approved more budget"`;
         await send("Continue the same task using the newly approved budget.");
         await t.tools.waitUntil(async () => { await current(); return run?.taskId === "observed-4" && run.status === "completed"; }, 40_000);
-        t.assertions.assert(run!.requestRunId === original && run!.requestBudget.revision === 1
-          && run!.requestBudget.maxRuns === 4 && run!.requestBudget.deadlineMs === amendedDeadlineSeconds * 1000
+        t.assertions.assert(run!.requestRunId === original && run!.requestBudget.revision === 2
+          && run!.requestBudget.deadlineMs === amendedDeadlineSeconds * 1000
           && run!.requestBudget.maxLlmRounds === 512, "PM budget amendment did not carry into the successor");
         const stale = await runGenetAsync(opened.daemon.genet,
-          ["workflow", "budget", "--run", original, "--revision", "0", "--max-runs", "5"],
+          ["workflow", "budget", "--run", original, "--revision", "0", "--max-llm-rounds", "700"],
           opened.daemon.env, { cwd: opened.workspaceRoot });
         t.assertions.assert(stale.code !== 0 && `${stale.stdout}${stale.stderr}`.includes("预算 revision 冲突"),
           "stale budget update overwrote the PM decision");

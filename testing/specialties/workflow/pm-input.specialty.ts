@@ -43,7 +43,7 @@ for (const scenario of ["busy", "restart", "manual-stop", "human", "human-contin
         t.assertions.assert(cancel.outputSchema.properties.type.const === "workflow.cancelling",
           "cancellation discovery claimed confirmed cleanup at admission");
         t.assertions.assert(budget.outputSchema.properties.type.const === "workflow.budgetUpdated"
-          && budget.inputSchema.properties.maxRuns && budget.inputSchema.properties.maxLlmRounds,
+          && !budget.inputSchema.properties.maxRuns && budget.inputSchema.properties.maxLlmRounds,
           "workflow discovery omitted PM budget controls or their durable result");
       }
       const respond = () => {
@@ -135,6 +135,9 @@ for (const scenario of ["busy", "restart", "manual-stop", "human", "human-contin
           t.assertions.assert(stopped.summary.inputSummary?.paused && stopped.summary.inputSummary.pendingMessageIds.includes("u_first"), "explicit stop did not retain and pause pending delivery");
           await new Promise(resolve => setTimeout(resolve, 750));
           t.assertions.assert(calls === 1, "automatic continuation overrode manual stop");
+          const retained = (await snapshot()).summary.inputSummary;
+          t.assertions.assert(retained?.pauseReason === "userStop" && (retained.controlRevision ?? 0) > 0,
+            "a late failure callback weakened the explicit pause or lost its control identity");
           await send("u_continue", "现在继续，并先核对原执行结果。");
           await handled(["u_first", "u_continue"]);
         } else {

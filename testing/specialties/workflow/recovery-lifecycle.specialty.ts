@@ -24,7 +24,7 @@ defineSpecialty({
     : proactive
       ? "PM stops an unhealthy running business Run, then the patrol enters the same recovery path with a PM-attributed journal event"
       : humanB || humanF
-        ? "The built-in recovery graph creates the correct Human card, records its answer, and only Human acceptance may complete the business Run"
+        ? "Generic human hands off to PM; only an explicit scope proposal creates a scope card, while Human acceptance may complete the business Run"
         : cancelExit
           ? "WR's cancel verdict remains with PM until PM cancels the original request; it is not immediately misclassified as platform failure d"
         : queue
@@ -45,6 +45,7 @@ defineSpecialty({
   let stage = "setup";
   let reviewerId = "";
   let questionId = "";
+  let scopeDecisionSent = false;
   try {
     await t.flows.main.configureMockProvider(opened.client, opened.mock);
     const source = t.flows.main.seedWorkflowPackage({ projectRoot: opened.workspaceRoot });
@@ -144,6 +145,12 @@ defineSpecialty({
         return { tool: { name: "bash", arguments: {
           command: `"$GENEHUB_CLI" session respond ${reviewerId} --request ${questionId} --choose ${humanB ? "human" : cancelExit ? "cancel" : resume ? "resume" : "repair"}`,
         } } };
+      }
+      if (humanB && !scopeDecisionSent && body.includes("PROPOSE_CONCRETE_SCOPE")) {
+        scopeDecisionSent = true;
+        return cli(["workflow", "human", "--run", recovery!.id, "--revision", String(recovery!.revision),
+          "--kind", "b", "--reason", "Review found a concrete scope alternative", "--goal", "Deliver the playable prototype",
+          "--scope-changes", "Defer polish, retain movement and shooting acceptance"]);
       }
       if (proactive && body.includes("START_PROACTIVE_RECOVERY")) {
         return { tool: { name: "bash", arguments: {
@@ -330,7 +337,7 @@ defineSpecialty({
     stage = "wait for WM and acceptance";
     await t.tools.waitUntil(async () => {
       recovery = (await history()).find(run => run.id === recovery!.id);
-      return recovery?.status === ((humanB || humanF || cancelExit) ? "blocked" : "awaitingPm");
+      return recovery?.status === ((humanF || cancelExit) ? "blocked" : "awaitingPm");
     }, 75_000);
     if (cancelExit) {
       t.assertions.assert(!recovery!.humanExit, "PM cancellation recommendation was incorrectly classified as Human exit d");
@@ -349,8 +356,12 @@ defineSpecialty({
       return;
     }
     if (humanB || humanF) {
+      if (humanB) {
+        t.assertions.assert(!recovery!.humanExit, "Generic human verdict invented a scope decision");
+        await send(pm, "PROPOSE_CONCRETE_SCOPE");
+      }
       const kind = humanB ? "b" : "f";
-      const optionIds = humanB ? "acceptScope,cancel" : "pass,fail";
+      const optionIds = humanB ? "acceptScope,keepScope,cancel" : "pass,fail";
       const answer = humanB ? "acceptScope" : "pass";
       await t.tools.waitUntil(async () => {
         recovery = (await history()).find(run => run.id === recovery!.id);
@@ -369,7 +380,7 @@ defineSpecialty({
         const current = runs.find(run => run.id === recovery!.id);
         const business = runs.find(run => run.id === originalId);
         return current?.humanExit?.answer === answer && (humanB
-          ? business?.status === "blocked"
+          ? business?.status === "blocked" && business.requirement?.scope?.goal === "Deliver the playable prototype"
           : business?.status === "completed" && current.status === "completed");
       }, 25_000);
       t.assertions.assert(humanB ? managerCalls === 0 : managerCalls >= 1 && acceptorCalls >= 1,

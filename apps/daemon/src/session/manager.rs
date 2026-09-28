@@ -1681,6 +1681,14 @@ impl SessionManager {
         }
     }
 
+    /// A committed send intent may already have reached an Agent even when no
+    /// round was saved. Workflow must not replay that original prompt blindly.
+    pub(crate) async fn workflow_prompt_delivered(&self, session_id: &str) -> Result<bool> {
+        let live = self.live(session_id).await?;
+        let delivered = live.meta.lock().await.inbox.has_delivered;
+        Ok(delivered)
+    }
+
     /// Whether a persisted Worker Session can receive a continue turn after the
     /// daemon has lost its in-memory execution. A live OS process must pause
     /// continuation so two writers cannot share the project.
@@ -3241,7 +3249,7 @@ impl SessionManager {
         {
             let mut meta = live.meta.lock().await;
             let mut next = meta.clone();
-            next.inbox.paused = true;
+            next.inbox.set_pause(Some("userStop"));
             self.store.save_meta(&next)?;
             *meta = next;
         }
@@ -3847,7 +3855,7 @@ impl SessionManager {
                 if !previous.completed && *live.status.lock().await == SessionStatus::Failed {
                     let mut meta = live.meta.lock().await;
                     let mut next = meta.clone();
-                    next.inbox.paused = false;
+                    next.inbox.set_pause(None);
                     next.inbox.error = None;
                     self.store.save_meta(&next)?;
                     *meta = next;
@@ -3898,7 +3906,7 @@ impl SessionManager {
             // Persist this once with the answer; replaying a receipt must not
             // undo a later user stop. Cancelling a question is not a resume.
             if continuation_for(&request, &outcome)?.is_some() {
-                next.inbox.paused = false;
+                next.inbox.set_pause(None);
                 next.inbox.error = None;
             }
             self.store.save_meta(&next)?;
@@ -4138,28 +4146,6 @@ impl SessionManager {
 
     /// The built-in recovery reviewer may only submit the choice recorded by
     /// its controller through the durable Session question path.
-    pub(crate) async fn workflow_recovery_choice(&self, session_id: &str) -> Result<Option<String>> {
-        let live = self.live(session_id).await?;
-        let meta = live.meta.lock().await;
-        let Some(decision) = &meta.human_continuation else { return Ok(None); };
-        if decision.request.kind != PermissionRequestKind::Question { return Ok(None); }
-        let Some([question]) = decision.request.questions.as_deref() else { return Ok(None); };
-        let expected = ["repair", "resume", "successor", "human", "cancel"];
-        if question.options.iter().map(|option| option.label.as_str()).collect::<Vec<_>>() != expected {
-            return Ok(None);
-        }
-        let selected = match &decision.outcome {
-            PermissionOutcome::Selected { option_id } => Some(option_id.as_str()),
-            PermissionOutcome::Answered { answers } => answers.iter()
-                .find(|answer| answer.question_id == question.id)
-                .and_then(|answer| answer.selected_option_ids.as_slice().first())
-                .map(String::as_str),
-            _ => None,
-        };
-        Ok(selected.and_then(|id| question.options.iter().find(|option| option.id == id || option.label == id))
-            .map(|option| option.label.clone()))
-    }
-
     pub(crate) async fn cancel_workflow_question(&self, session_id: &str, request_id: &str) -> Result<()> {
         let live = match self.live(session_id).await {
             Ok(live) => live,
@@ -4891,7 +4877,7 @@ impl Live {
                 if matches!(event, SessionEvent::TurnFailed { .. }) {
                     let mut meta = self.meta.lock().await;
                     let mut next = meta.clone();
-                    next.inbox.paused = true;
+                    next.inbox.set_pause(Some("executionFailure"));
                     next.inbox.error =
                         Some("Human 决定已保存，PM 继续执行失败；发送新消息后核对并继续。".into());
                     self.store.save_meta(&next)?;

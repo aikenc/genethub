@@ -105,6 +105,8 @@ enum Command {
         revision: u64,
         kind: String,
         reason: String,
+        budget: Option<genehub_proto::WorkflowBudgetProposal>,
+        scope: Option<genehub_proto::WorkflowScopeProposal>,
     },
     RecoveryStatus {
         workspace_id: Option<String>,
@@ -119,7 +121,6 @@ enum Command {
         workspace_id: Option<String>,
         run_id: String,
         revision: u64,
-        max_runs: Option<u32>,
         deadline_seconds: Option<u64>,
         max_llm_rounds: Option<u64>,
     },
@@ -440,8 +441,8 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
             // definite pre-commit refusals, never transport/unknown-result failures.
             let mut attempt = 0;
             let run = loop {
-                let expected_revision = match revision {
-                    Some(revision) => revision,
+                let (expected_revision, expected_attempt) = match revision {
+                    Some(revision) => (revision, None),
                     None => {
                         let Reply::WorkflowRun(current) = rpc
                             .call(Request::WorkflowGet {
@@ -455,7 +456,7 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
                                 "the daemon answered workflow.get with the wrong reply",
                             ));
                         };
-                        current.revision
+                        (current.revision, current.nodes.iter().find(|node| node.id == node_id).and_then(|node| node.attempt))
                     }
                 };
                 match rpc
@@ -464,6 +465,8 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
                         run_id: run_id.clone(),
                         node_id: node_id.clone(),
                         expected_revision,
+                        expected_attempt,
+                        submission_id: None,
                         evidence: evidence.clone(),
                         output: output.clone(),
                         outcome: outcome.clone(),
@@ -556,10 +559,10 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
             output::succeed("workflow.recovery.started", serde_json::to_value(run).unwrap());
             Ok(EXIT_OK)
         }
-        Command::Human { workspace_id, run_id, revision, kind, reason } => {
+        Command::Human { workspace_id, run_id, revision, kind, reason, budget, scope } => {
             let workspace_id = resolve_workspace(rpc, workspace_id).await?;
             let Reply::WorkflowRun(run) = rpc.call(Request::WorkflowHuman {
-                workspace_id, run_id, expected_revision: revision, kind, reason,
+                workspace_id, run_id, expected_revision: revision, kind, reason, budget, scope,
             }).await.map_err(query::rpc_error)? else {
                 return Err(CliFailure::protocol("the daemon answered workflow.human with the wrong reply"));
             };
@@ -590,7 +593,6 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
             workspace_id,
             run_id,
             revision,
-            max_runs,
             deadline_seconds,
             max_llm_rounds,
         } => {
@@ -600,7 +602,6 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
                     workspace_id,
                     run_id,
                     expected_revision: revision,
-                    max_runs,
                     deadline_seconds,
                     max_llm_rounds,
                 })
@@ -797,9 +798,9 @@ async fn wait_for_run(
     let mut current = started;
     // A Worker turn may finish before its Run commits cleanup or dispatches
     // the next node. Only the Run can decide its terminal outcome.
-    while matches!(
-        current.status.as_str(),
-        "running" | "stopping" | "cancelling"
+    while current.phase.as_deref().map_or_else(
+        || matches!(current.status.as_str(), "running" | "stopping" | "cancelling" | "recoverable"),
+        |phase| phase != "closed",
     ) {
         remaining_timeout(deadline)?;
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -1006,14 +1007,28 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
             run_id: values.run.take().ok_or_else(|| CliFailure::invalid_args("workflow recover 需要 --run <id>"))?,
             revision: values.revision.ok_or_else(|| CliFailure::invalid_args("workflow recover 需要 --revision <current>"))?,
         }),
-        "human" => Ok(Command::Human {
-            workspace_id: values.workspace.take(),
-            run_id: values.run.take().ok_or_else(|| CliFailure::invalid_args("workflow human 需要 --run <id>"))?,
-            revision: values.revision.ok_or_else(|| CliFailure::invalid_args("workflow human 需要 --revision <current>"))?,
-            kind: values.kind.take().ok_or_else(|| CliFailure::invalid_args("workflow human 需要 --kind <a|b|c|d|e|f>"))?,
-            reason: values.reason.take().filter(|reason| !reason.trim().is_empty())
-                .ok_or_else(|| CliFailure::invalid_args("workflow human 需要 --reason <text>"))?,
-        }),
+        "human" => {
+            let budget = match (values.budget_revision, values.max_llm_rounds, values.deadline_seconds) {
+                (None, None, None) => None,
+                (Some(expected_revision), Some(max_llm_rounds), Some(deadline_seconds)) =>
+                    Some(genehub_proto::WorkflowBudgetProposal { expected_revision, max_llm_rounds, deadline_seconds }),
+                _ => return Err(CliFailure::invalid_args("预算方案需要 --budget-revision、--max-llm-rounds 和 --deadline-seconds 三项总上限参数")),
+            };
+            let scope = match (values.goal.take(), values.scope_changes.take()) {
+                (None, None) => None,
+                (Some(goal), Some(changes)) => Some(genehub_proto::WorkflowScopeProposal { goal, changes }),
+                _ => return Err(CliFailure::invalid_args("目标调整需要 --goal 和 --scope-changes")),
+            };
+            Ok(Command::Human {
+                budget, scope,
+                workspace_id: values.workspace.take(),
+                run_id: values.run.take().ok_or_else(|| CliFailure::invalid_args("workflow human 需要 --run <id>"))?,
+                revision: values.revision.ok_or_else(|| CliFailure::invalid_args("workflow human 需要 --revision <current>"))?,
+                kind: values.kind.take().ok_or_else(|| CliFailure::invalid_args("workflow human 需要 --kind <a|b|d|e|f>"))?,
+                reason: values.reason.take().filter(|reason| !reason.trim().is_empty())
+                    .ok_or_else(|| CliFailure::invalid_args("workflow human 需要 --reason <text>"))?,
+            })
+        }
         "recovery" => match args.get(1).map(String::as_str) {
             Some("start") => Ok(Command::RecoveryStart {
                 workspace_id: values.workspace.take(),
@@ -1045,19 +1060,17 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
             _ => Err(CliFailure::invalid_args("usage: workflow recovery start|status|check|activate|reset ...")),
         },
         "budget" => {
-            if values.max_runs.is_none()
-                && values.deadline_seconds.is_none()
+            if values.deadline_seconds.is_none()
                 && values.max_llm_rounds.is_none()
             {
                 return Err(CliFailure::invalid_args(
-                    "workflow budget 至少需要 --max-runs、--deadline-seconds 或 --max-llm-rounds",
+                    "workflow budget 至少需要 --deadline-seconds 或 --max-llm-rounds",
                 ));
             }
             Ok(Command::Budget {
                 workspace_id: values.workspace.take(),
                 run_id: values.run.take().ok_or_else(|| CliFailure::invalid_args("workflow budget 需要 --run <id>"))?,
                 revision: values.revision.ok_or_else(|| CliFailure::invalid_args("workflow budget 需要 --revision <requestBudget.revision>"))?,
-                max_runs: values.max_runs,
                 deadline_seconds: values.deadline_seconds,
                 max_llm_rounds: values.max_llm_rounds,
             })
@@ -1090,10 +1103,12 @@ struct Values {
     run: Option<String>,
     node: Option<String>,
     revision: Option<u64>,
+    budget_revision: Option<u64>,
+    goal: Option<String>,
+    scope_changes: Option<String>,
     timeout: Option<u64>,
     limit: Option<u32>,
     since: Option<u64>,
-    max_runs: Option<u32>,
     deadline_seconds: Option<u64>,
     max_llm_rounds: Option<u64>,
     wait: Option<bool>,
@@ -1148,6 +1163,10 @@ impl Values {
                             .map_err(|_| CliFailure::invalid_args("--revision 需要非负整数"))?,
                     );
                 }
+                "--budget-revision" => values.budget_revision = Some(next(&mut index)?.parse()
+                    .map_err(|_| CliFailure::invalid_args("--budget-revision 需要非负整数"))?),
+                "--goal" => values.goal = Some(next(&mut index)?),
+                "--scope-changes" => values.scope_changes = Some(next(&mut index)?),
                 "--timeout" => {
                     let value = next(&mut index)?;
                     values.timeout = Some(
@@ -1171,14 +1190,6 @@ impl Values {
                     values.since = Some(next(&mut index)?.parse::<u64>().map_err(|_| {
                         CliFailure::invalid_args("--since 需要非负日志序号")
                     })?);
-                }
-                "--max-runs" => {
-                    let value = next(&mut index)?;
-                    values.max_runs = Some(
-                        value
-                            .parse::<u32>()
-                            .map_err(|_| CliFailure::invalid_args("--max-runs 需要正整数"))?,
-                    );
                 }
                 "--deadline-seconds" => {
                     let value = next(&mut index)?;

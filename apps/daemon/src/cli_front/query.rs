@@ -1361,15 +1361,24 @@ fn command_schema(name: &str) -> Value {
             json!({"packageId": {"type": "string"}, "revision": {"type": "integer", "minimum": 0}}), &["revision"],
         ),
         "workflow.human" => workflow_schema(
-            "genet workflow human --run <id> --revision <current> --kind <a|b|c|d|e|f> --reason <text>",
-            json!({"runId": {"type": "string", "minLength": 1}, "revision": {"type": "integer", "minimum": 0}, "kind": {"enum": ["a", "b", "c", "d", "e", "f"]}, "reason": {"type": "string", "minLength": 1, "maxLength": 4096}}), &["runId", "revision", "kind", "reason"],
+            "genet workflow human --run <id> --revision <current> --kind <a|b|d|e|f> --reason <remaining work and plan>; a requires --budget-revision <n> --max-llm-rounds <total> --deadline-seconds <total>; b requires --goal <new goal> --scope-changes <changes>",
+            json!({
+                "runId": {"type": "string", "minLength": 1},
+                "revision": {"type": "integer", "minimum": 0},
+                "kind": {"enum": ["a", "b", "d", "e", "f"]},
+                "reason": {"type": "string", "minLength": 1, "maxLength": 4096},
+                "budgetRevision": {"type": "integer", "minimum": 0, "description": "--budget-revision; required for a, binds current requestBudget.revision"},
+                "maxLlmRounds": {"type": "integer", "minimum": 1, "maximum": 8192, "description": "--max-llm-rounds; total LLM request allowance, required for a"},
+                "deadlineSeconds": {"type": "integer", "minimum": 1, "maximum": 604800, "description": "--deadline-seconds; total effective processing time, required for a"},
+                "goal": {"type": "string", "minLength": 1, "description": "--goal; required for b"},
+                "scopeChanges": {"type": "string", "minLength": 1, "description": "--scope-changes; explicit changes, required for b"}
+            }), &["runId", "revision", "kind", "reason"],
         ),
         "workflow.budget" => workflow_schema(
-            "genet workflow budget [--workspace <id>] --run <id> --revision <requestBudget.revision> [--max-runs <n>] [--deadline-seconds <n>] [--max-llm-rounds <n>]",
+            "genet workflow budget [--workspace <id>] --run <id> --revision <requestBudget.revision> [--deadline-seconds <n>] [--max-llm-rounds <n>]",
             json!({
                 "runId": {"type": "string", "minLength": 1},
                 "revision": {"type": "integer", "minimum": 0, "description": "current requestBudget.revision from workflow get; PM authorization only. For readonly graph observations use a request.budget task (schema workflow.definition), not this mutation command."},
-                "maxRuns": {"type": "integer", "minimum": 1, "maximum": 64, "description": "--max-runs"},
                 "deadlineSeconds": {"type": "integer", "minimum": 1, "maximum": 604800, "description": "--deadline-seconds"},
                 "maxLlmRounds": {"type": "integer", "minimum": 1, "maximum": 8192, "description": "--max-llm-rounds"}
             }),

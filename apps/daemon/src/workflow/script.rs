@@ -56,6 +56,12 @@ use serde::{Deserialize, Serialize};
 const MAX_OUTPUT_BYTES: usize = 256 * 1024;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
 
+/// Returned only when a started process could not be confirmed retired.
+/// Other errors either precede spawn or follow a confirmed process exit.
+#[derive(Debug, thiserror::Error)]
+#[error("pack.script 执行退休未确认：{0}")]
+pub(super) struct RetirementUnconfirmed(pub String);
+
 /// What a node declares in `with`.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -211,10 +217,17 @@ pub(crate) async fn run(
         Err(_) => {
             // The whole process group goes, so a script that spawned helpers
             // does not leave them holding the task directory.
-            child.end().await;
+            if child.end().await.is_none() {
+                return Err(RetirementUnconfirmed(format!("超过 {timeout}s，进程收尾无回执")).into());
+            }
             bail!("pack.script 超过 {timeout}s 未结束：{}", script.display());
         }
     };
+    // Retire helpers as well as the leader before treating any parse/exit
+    // error as a durable failed result. Unknown retirement stays active.
+    if child.end().await.is_none() {
+        return Err(RetirementUnconfirmed("进程收尾无回执".into()).into());
+    }
     let status = status.context("等待 pack.script 结束")?;
     let stdout = stdout?;
     let stderr = stderr?;
