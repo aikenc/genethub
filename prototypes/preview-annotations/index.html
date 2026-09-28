@@ -10,6 +10,11 @@
 <body>
 <div class="demo-shell">
   <header class="demo-heading"><strong>GeneHub Preview</strong><span>一个容器，直接点内容批注</span><small>静态交互原型</small></header>
+  <div class="flow-bar" aria-label="会话与外部浏览器流程">
+    <div><strong id="flowTitle">Workbench · 产品体验讨论</strong><small id="flowStatus" role="status">草稿在当前会话中展示（本页模拟）</small></div>
+    <button type="button" id="connectionToggle" class="flow-secondary hidden">模拟连接中断</button>
+    <button type="button" id="flowSwitch" class="flow-primary">PWA 外部浏览器打开 · 模拟</button>
+  </div>
   <div class="demo-layout" id="demoLayout">
     <nav class="file-panel" aria-label="演示文件">
       <h2>文件</h2><p>点击文件，在同一个 Preview 中打开</p>
@@ -66,17 +71,26 @@
         <div class="compose-head"><strong id="composeTarget">已选中内容</strong><div><button type="button" class="line-adjust hidden" id="lineAdjustButton">调整行</button><button type="button" id="composeCloseButton" aria-label="取消这条批注">×</button></div></div>
         <div class="line-choices hidden" id="lineChoices" aria-label="选择源文件行范围"></div>
         <textarea id="commentInput" rows="3" maxlength="1000" placeholder="这里需要怎样调整？"></textarea>
-        <div class="compose-foot"><span id="commentCount">0 / 1000</span><button type="button" id="saveCommentButton">加入当前会话草稿</button></div>
+        <div class="compose-foot"><span id="commentCount">0 / 1000</span><div><button type="button" id="copyPendingButton" class="copy-pending hidden">复制待存内容</button><button type="button" id="saveCommentButton">加入当前会话草稿</button></div></div>
       </section>
     </main>
     <aside class="draft-panel" id="draftPanel" aria-label="当前会话草稿">
       <header><div><small>当前会话 · 一份草稿</small><h2>预览批注</h2></div><button type="button" id="draftCloseButton" aria-label="关闭草稿">×</button></header>
       <div class="session-row"><span>归属</span><select id="sessionSelect" aria-label="选择当前会话"><option value="product">产品体验讨论</option><option value="landing">官网视觉迭代</option></select></div>
       <div class="draft-scroll"><p class="draft-intro">图片按文件分组：每组显示原图、编号区域和对应批注。Markdown 与 H5 也在这份草稿里。</p><div id="draftItems"></div></div>
-      <footer><span id="draftFooterCount">0 条批注</span><button type="button" id="sendButton">检查消息</button></footer>
+      <footer><span id="draftFooterCount">0 条批注</span><button type="button" id="sendButton">到会话中检查</button></footer>
     </aside>
+    <section class="composer-dock" id="composerDock" aria-label="会话输入区">
+      <header><strong>会话输入区</strong><span>已保存草稿 · 普通草稿仍最多 5 条</span></header>
+      <div class="composer-review" id="composerReview">
+        <label><input type="checkbox" id="reviewCheckbox" aria-label="选择预览批注草稿"><span><b>预览批注</b><small id="reviewSummary">当前会话 · 0 条批注</small></span></label>
+        <button type="button" id="reviewOpenButton">查看</button>
+      </div>
+      <div class="composer-entry"><textarea id="composerInput" rows="2" aria-label="会话补充说明" placeholder="可以补充一句给 Agent 的说明…"></textarea><button type="button" id="composerSendButton">检查并发送</button></div>
+      <p>勾选“预览批注”后，才会与当前输入合成一条消息；保存批注不会自动发给 Agent。</p>
+    </section>
   </div>
-  <footer class="demo-footnote">静态原型：批注存于此浏览器；运行产物和发送仅演示交互，不写入真实 GeneHub 会话。</footer>
+  <footer class="demo-footnote">静态原型：用此浏览器的 localStorage 模拟 daemon 会话存储；“外部浏览器”和离线回收只是流程演示，不会跨真实浏览器同步或向 Agent 发消息。</footer>
 </div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <div class="modal-backdrop hidden" id="modalBackdrop"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle"><header><h2 id="modalTitle">作为一条消息发送</h2><button type="button" id="modalCloseButton" aria-label="关闭消息预览">×</button></header><p id="modalDescription"></p><pre id="messagePreview"></pre><footer><button type="button" id="confirmSendButton">模拟确认发送</button></footer></section></div>
