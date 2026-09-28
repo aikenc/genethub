@@ -2,7 +2,7 @@
 
 状态：提案，尚未实现。日期：2026-09-28。基线：`genethub` `de362309`、`genethub-cloud` `4fc16e9`（当日已与各自 `origin/main` 一致）；草稿和外部浏览器路径复核至 `genethub` `cc7fa33d`。本文中的 RPC、字段和限额均为建议契约；验收通过前不应写成现有能力。
 
-交互参考：[可直接打开的 H5 原型](../prototypes/preview-annotations/index.html)。它沿用 `FilesPanel → PreviewFloat → AssetPreviewPage`：文件从列表进入同一个 Preview 容器；头部一个按钮进入/退出批注，另一个按钮打开当前会话草稿。Markdown 直接点渲染内容、HTML 直接点元素、图片轻点或拖动区域，选完即弹出输入；手机用底部输入和草稿抽屉。HTML 原有运行诊断工具栏保留。原型用示例文件和**当前浏览器的**本地存储演示；日志、截图、录制、运行产物和发送仅模拟界面状态，不连接 daemon 或 Agent，尤其**不能验证外部浏览器回收或 PWA 发送**。Asset Preview 禁止嵌套 iframe，因此原型中的示例 HTML 直接渲染于 DOM；正式实现仍使用现有 sandbox iframe 和受限桥接。
+交互参考：[可直接打开的 H5 原型](../prototypes/preview-annotations/index.html)。它沿用 `FilesPanel → PreviewFloat → AssetPreviewPage`：文件从列表进入同一个 Preview 容器；头部一个按钮进入/退出批注，另一个按钮打开当前会话草稿。Markdown 直接点渲染内容、HTML 直接点元素、图片轻点或拖动区域，选完即弹出输入；手机用底部输入和草稿抽屉。HTML 原有运行诊断工具栏保留。原型另演示现有 Composer 的显式草稿选择、外部页保存回执、断线留稿和回到 PWA 后重读。它用示例文件和**当前浏览器的**本地存储模拟 daemon 会话存储；日志、截图、录制、运行产物和发送仅模拟界面状态，不连接 daemon 或 Agent，尤其**不能验证真实外部浏览器回收或 PWA 发送**。Asset Preview 禁止嵌套 iframe，因此原型中的示例 HTML 直接渲染于 DOM；正式实现仍使用现有 sandbox iframe 和受限桥接。
 
 ## 1. 目标与决策
 

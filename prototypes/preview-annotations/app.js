@@ -24,8 +24,11 @@ function bootPreviewAnnotationPrototype() {
     imageFrame: $("imageFrame"), sampleImage: $("sampleImage"), imageOverlay: $("imageOverlay"), imageRect: $("imageRect"),
     rectLabel: $("rectLabel"), compose: $("composeSheet"), composeTarget: $("composeTarget"), commentInput: $("commentInput"),
     commentCount: $("commentCount"), lineAdjust: $("lineAdjustButton"), lineChoices: $("lineChoices"),
-    saveButton: $("saveCommentButton"), draftItems: $("draftItems"),
+    saveButton: $("saveCommentButton"), copyPending: $("copyPendingButton"), draftItems: $("draftItems"),
     draftFooterCount: $("draftFooterCount"), sessionSelect: $("sessionSelect"), sendButton: $("sendButton"),
+    flowTitle: $("flowTitle"), flowStatus: $("flowStatus"), flowSwitch: $("flowSwitch"), connectionToggle: $("connectionToggle"),
+    reviewCheckbox: $("reviewCheckbox"), reviewSummary: $("reviewSummary"), reviewOpenButton: $("reviewOpenButton"),
+    composerInput: $("composerInput"), composerSendButton: $("composerSendButton"), composerDock: $("composerDock"),
     toast: $("toast"), modal: $("modalBackdrop"), modalTitle: $("modalTitle"), modalDescription: $("modalDescription"),
     messagePreview: $("messagePreview"),
   };
@@ -65,12 +68,15 @@ function bootPreviewAnnotationPrototype() {
   let recording = false;
   let modalMode = "send";
   let runtimeFrames = 0;
+  let viewMode = "workbench";
+  let externalOnline = true;
+  let lastReceipt = "";
   const runtimeEvents = [];
   let toastTimer;
 
   function persist() {
-    try { localStorage.setItem(STORE_KEY, JSON.stringify(saved)); }
-    catch { notify("本地存储已满；本次编辑只保留在页面中"); }
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(saved)); return true; }
+    catch { notify("模拟会话存储失败，批注仍在输入框中"); return false; }
   }
   function notify(message) {
     el.toast.textContent = message;
@@ -80,6 +86,44 @@ function bootPreviewAnnotationPrototype() {
   }
   function draft() { return saved[currentSession]; }
   function clone(value) { return JSON.parse(JSON.stringify(value)); }
+  function renderFlow() {
+    const external = viewMode === "external";
+    const unsaved = !el.compose.classList.contains("hidden") && el.commentInput.value.trim().length > 0;
+    el.layout.classList.toggle("external-mode", external);
+    el.flowTitle.textContent = (external ? "外部浏览器 Preview · " : "Workbench 会话 · ") + sessions[currentSession];
+    el.flowStatus.textContent = external
+      ? externalOnline
+        ? unsaved ? "当前批注未保存；请按“加入当前会话草稿”" : lastReceipt ? "模拟回执：已存入目标会话 · " + lastReceipt : "已连接；每条批注保存后才进入目标会话（模拟）"
+        : "连接中断；未确认的批注尚未进入会话"
+      : "会话草稿 · " + draft().length + " 条批注（本页模拟）";
+    el.flowSwitch.textContent = external ? "回到 PWA 会话 · 模拟" : "PWA 外部浏览器打开 · 模拟";
+    el.connectionToggle.classList.toggle("hidden", !external);
+    el.connectionToggle.classList.toggle("offline", !externalOnline);
+    el.connectionToggle.textContent = externalOnline ? "模拟连接中断" : "模拟重新连接";
+    el.copyPending.classList.toggle("hidden", !external);
+    el.sessionSelect.disabled = external;
+    el.sendButton.textContent = external ? "回到会话检查" : "在输入区检查";
+  }
+  function setViewMode(next) {
+    if (next === viewMode) return;
+    if (next === "external") {
+      hideDraft(); closeCompose();
+      viewMode = "external"; externalOnline = true; lastReceipt = "";
+      el.reviewCheckbox.checked = false;
+      renderFlow(); renderDraft();
+      notify("模拟：独立 Preview 已打开；这里没有发送 Agent 消息入口");
+      return;
+    }
+    if (!el.compose.classList.contains("hidden") && el.commentInput.value.trim()) {
+      notify("这条批注尚未保存；请重试或复制文字后取消");
+      return;
+    }
+    hideDraft(); closeCompose();
+    saved = load(); // Simulates the PWA fetching the session after an external browser save.
+    viewMode = "workbench"; externalOnline = true;
+    renderFlow(); renderDraft(); renderMarkers();
+    notify("模拟：PWA 已重新读取当前会话草稿；请在输入区选择并检查");
+  }
   function makeId() { return "note-" + (globalThis.crypto?.randomUUID?.() || String(Date.now()) + Math.random().toString(36).slice(2)); }
   function node(tag, className, textValue) {
     const item = document.createElement(tag);
@@ -117,6 +161,7 @@ function bootPreviewAnnotationPrototype() {
     editingId = null;
     el.lineChoices.classList.add("hidden");
     renderSelection();
+    renderFlow();
   }
   function selectFile(key) {
     if (!files[key]) return;
@@ -310,6 +355,12 @@ function bootPreviewAnnotationPrototype() {
   function saveComment() {
     const comment = el.commentInput.value.trim();
     if (!selection || !comment) { notify("请填写批注内容"); return; }
+    if (viewMode === "external" && !externalOnline) {
+      notify("连接中断：未保存到会话，文字和选区仍留在这里");
+      renderFlow();
+      return;
+    }
+    const before = clone(saved);
     const file = files[currentFile];
     const items = draft();
     const markerNo = selection.kind === "image" ? selection.markerNo : undefined;
@@ -327,11 +378,30 @@ function bootPreviewAnnotationPrototype() {
       items.push(candidate);
       if (markerNo) saved.nextMarker[currentSession][currentFile + ":" + file.version] = markerNo + 1;
     }
-    persist();
+    if (!persist()) { saved = before; return; }
+    if (viewMode === "external") lastReceipt = new Date().toLocaleTimeString("zh-CN", { hour12: false });
     closeCompose();
     renderMarkers();
     renderDraft();
-    notify("已加入当前会话的同一份草稿");
+    renderFlow();
+    notify(viewMode === "external" ? "模拟回执：已保存到目标会话；回到 PWA 后重新读取" : "已加入当前会话的同一份草稿");
+  }
+  async function copyPending() {
+    const comment = el.commentInput.value.trim();
+    if (!selection || !comment) { notify("先写一条待保存批注"); return; }
+    const text = sessions[currentSession] + " · " + files[currentFile].path + " · " + anchorText({ target: selection, markerNo: selection.markerNo }) + "\n批注：" + comment + "\n（尚未保存到会话）";
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("clipboard unavailable");
+      await navigator.clipboard.writeText(text);
+      notify("已复制待存内容；这不是会话保存回执");
+    } catch {
+      modalMode = "copy";
+      $("confirmSendButton").classList.add("hidden");
+      el.modalTitle.textContent = "手动复制待存批注";
+      el.modalDescription.textContent = "复制下面的文字后回到会话手动粘贴；这条批注尚未进入会话草稿。";
+      el.messagePreview.textContent = text;
+      el.modal.classList.remove("hidden");
+    }
   }
   function showDraft(focusId) {
     el.layout.classList.add("draft-open");
@@ -379,14 +449,21 @@ function bootPreviewAnnotationPrototype() {
     el.commentInput.focus({ preventScroll: true });
   }
   function remove(item) {
+    if (viewMode === "external" && !externalOnline) { notify("连接中断，无法移除会话批注"); return; }
+    const before = clone(saved);
     saved[currentSession] = draft().filter((other) => other.id !== item.id);
-    persist(); renderDraft(); renderMarkers(); notify("已移除批注");
+    if (!persist()) { saved = before; return; }
+    renderDraft(); renderMarkers(); renderFlow(); notify("已移除批注");
   }
   function renderDraft() {
     const items = draft();
     el.draftCount.textContent = String(items.length);
     el.draftFooterCount.textContent = items.length + " 条批注";
-    el.sendButton.disabled = items.length === 0;
+    el.sendButton.disabled = viewMode !== "external" && items.length === 0;
+    el.reviewSummary.textContent = sessions[currentSession] + " · " + items.length + " 条批注";
+    el.reviewCheckbox.disabled = items.length === 0;
+    if (!items.length) el.reviewCheckbox.checked = false;
+    el.composerSendButton.disabled = viewMode !== "workbench" || !items.length || !el.reviewCheckbox.checked;
     el.draftItems.replaceChildren();
     if (!items.length) {
       el.draftItems.append(node("p", "empty-draft", "还没有批注。进入批注模式后，直接点内容即可添加。"));
@@ -443,20 +520,35 @@ function bootPreviewAnnotationPrototype() {
       for (const item of items) lines.push("- " + anchorText(item) + "：" + item.comment);
       lines.push("");
     }
+    const extra = el.composerInput.value.trim();
+    if (extra) lines.push("补充说明：" + extra);
     return lines.join("\n");
   }
   function showMessage() {
-    if (!draft().length) return;
+    if (viewMode !== "workbench") { notify("请先回到 PWA 会话，再由会话输入区发送"); return; }
+    if (!draft().length || !el.reviewCheckbox.checked) { notify("请在会话输入区选择预览批注草稿"); return; }
     modalMode = "send";
     $("confirmSendButton").classList.remove("hidden");
     el.modalTitle.textContent = "检查一条消息";
-    el.modalDescription.textContent = "当前会话的 " + draft().length + " 条批注汇成一条消息；图片按文件分别附原图和编号标注图。";
+    el.modalDescription.textContent = "已选择当前会话的 " + draft().length + " 条批注，与输入区文字合成一条消息；图片按文件分别附原图和编号标注图（模拟）。";
     el.messagePreview.textContent = messageText();
     el.modal.classList.remove("hidden");
   }
 
   document.querySelectorAll("[data-file]").forEach((button) => button.addEventListener("click", () => selectFile(button.dataset.file)));
-  document.querySelectorAll("[data-shell-action]").forEach((button) => button.addEventListener("click", () => notify("这里是外壳示意；点击左侧文件可继续体验")));
+  document.querySelectorAll("[data-shell-action]").forEach((button) => button.addEventListener("click", () => {
+    if (button.dataset.shellAction === "新窗口打开") setViewMode("external");
+    else notify("这里是 Preview 外壳示意；点击文件可继续体验");
+  }));
+  el.flowSwitch.addEventListener("click", () => setViewMode(viewMode === "external" ? "workbench" : "external"));
+  el.connectionToggle.addEventListener("click", () => {
+    externalOnline = !externalOnline;
+    renderFlow();
+    notify(externalOnline ? "模拟连接恢复：可用原批注继续保存" : "模拟连接中断：未确认内容不会进入会话");
+  });
+  el.reviewCheckbox.addEventListener("change", renderDraft);
+  el.reviewOpenButton.addEventListener("click", () => showDraft());
+  el.composerSendButton.addEventListener("click", showMessage);
   el.modeButton.addEventListener("click", () => setAnnotate(!annotate));
   el.draftButton.addEventListener("click", () => el.layout.classList.contains("draft-open") ? hideDraft() : showDraft());
   $("draftCloseButton").addEventListener("click", hideDraft);
@@ -512,20 +604,35 @@ function bootPreviewAnnotationPrototype() {
   el.imageOverlay.addEventListener("pointercancel", () => { imageDrag = null; closeCompose(); });
   $("composeCloseButton").addEventListener("click", closeCompose);
   el.lineAdjust.addEventListener("click", () => el.lineChoices.classList.toggle("hidden"));
-  el.commentInput.addEventListener("input", () => { el.commentCount.textContent = el.commentInput.value.length + " / 1000"; });
+  el.commentInput.addEventListener("input", () => { el.commentCount.textContent = el.commentInput.value.length + " / 1000"; renderFlow(); });
   el.saveButton.addEventListener("click", saveComment);
+  el.copyPending.addEventListener("click", () => void copyPending());
   el.sessionSelect.addEventListener("change", () => {
     currentSession = el.sessionSelect.value;
-    closeCompose(); renderDraft(); renderMarkers();
+    el.reviewCheckbox.checked = false;
+    closeCompose(); renderDraft(); renderMarkers(); renderFlow();
     notify("已切换至 " + sessions[currentSession] + " 的草稿");
   });
-  el.sendButton.addEventListener("click", showMessage);
+  el.sendButton.addEventListener("click", () => {
+    if (viewMode === "external") { setViewMode("workbench"); return; }
+    hideDraft();
+    el.reviewCheckbox.checked = true;
+    renderDraft();
+    el.composerDock.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    el.composerInput.focus({ preventScroll: true });
+    notify("已选择预览批注草稿；检查后由会话输入区发送");
+  });
   $("modalCloseButton").addEventListener("click", () => el.modal.classList.add("hidden"));
   el.modal.addEventListener("click", (event) => { if (event.target === el.modal) el.modal.classList.add("hidden"); });
   $("confirmSendButton").addEventListener("click", () => {
     if (modalMode !== "send") return;
     const count = draft().length;
-    saved[currentSession] = []; persist(); renderDraft(); renderMarkers();
+    const before = clone(saved);
+    saved[currentSession] = [];
+    if (!persist()) { saved = before; return; }
+    el.reviewCheckbox.checked = false;
+    el.composerInput.value = "";
+    renderDraft(); renderMarkers(); renderFlow();
     el.modal.classList.add("hidden");
     notify("演示完成：" + count + " 条批注合为一条模拟消息");
   });
@@ -533,8 +640,8 @@ function bootPreviewAnnotationPrototype() {
     modalMode = "help";
     $("confirmSendButton").classList.add("hidden");
     el.modalTitle.textContent = "最短路径";
-    el.modalDescription.textContent = "头部进入批注，直接点内容写批注；头部草稿查看全部，点击标记也可定位批注。";
-    el.messagePreview.textContent = "Markdown：点渲染后的段落或列表项。\nH5：点页面元素。退出批注后页面恢复正常交互。\n图片：轻点生成默认区域，拖动可精确框选。每张图独立编号。\n手机：草稿从底部打开。";
+    el.modalDescription.textContent = "头部进入批注，直接点内容写批注；头部草稿查看全部。外部浏览器只保存，回到会话后选择草稿再发送。";
+    el.messagePreview.textContent = "Markdown：点渲染后的段落或列表项。\nH5：点页面元素。退出批注后页面恢复正常交互。\n图片：轻点生成默认区域，拖动可精确框选。每张图独立编号。\nPWA：点顶部“外部浏览器打开”，保存一条批注，再点“回到 PWA 会话”，勾选输入区的草稿并检查消息。\n离线：在外部模式模拟连接中断；保存失败时文字留在输入框。\n本页 localStorage 仅模拟 daemon，不能验证真实跨浏览器同步。";
     el.modal.classList.remove("hidden");
   });
   $("runtimeLogButton").addEventListener("click", () => el.runtimeLogPanel.classList.toggle("hidden"));
@@ -560,6 +667,7 @@ function bootPreviewAnnotationPrototype() {
 
   selectFile("markdown");
   renderDraft();
+  renderFlow();
 }
 
 if (document.readyState === "loading") {
