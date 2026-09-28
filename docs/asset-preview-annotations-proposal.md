@@ -1,8 +1,8 @@
 # Asset Preview 选取与会话批注提案
 
-状态：提案，尚未实现。日期：2026-09-28。基线：`genethub` `de362309`、`genethub-cloud` `4fc16e9`（当日已与各自 `origin/main` 一致）。本文中的 RPC、字段和限额均为建议契约；验收通过前不应写成现有能力。
+状态：提案，尚未实现。日期：2026-09-28。基线：`genethub` `de362309`、`genethub-cloud` `4fc16e9`（当日已与各自 `origin/main` 一致）；草稿和外部浏览器路径复核至 `genethub` `cc7fa33d`。本文中的 RPC、字段和限额均为建议契约；验收通过前不应写成现有能力。
 
-交互参考：[可直接打开的 H5 原型](../prototypes/preview-annotations/index.html)。它沿用 `FilesPanel → PreviewFloat → AssetPreviewPage`：文件从列表进入同一个 Preview 容器；头部一个按钮进入/退出批注，另一个按钮打开当前会话草稿。Markdown 直接点渲染内容、HTML 直接点元素、图片轻点或拖动区域，选完即弹出输入；手机用底部输入和草稿抽屉。HTML 原有运行诊断工具栏保留。原型用示例文件和浏览器本地存储演示；日志、截图、录制、运行产物和发送仅模拟界面状态，不连接 daemon 或 Agent。Asset Preview 禁止嵌套 iframe，因此原型中的示例 HTML 直接渲染于 DOM；正式实现仍使用现有 sandbox iframe 和受限桥接。
+交互参考：[可直接打开的 H5 原型](../prototypes/preview-annotations/index.html)。它沿用 `FilesPanel → PreviewFloat → AssetPreviewPage`：文件从列表进入同一个 Preview 容器；头部一个按钮进入/退出批注，另一个按钮打开当前会话草稿。Markdown 直接点渲染内容、HTML 直接点元素、图片轻点或拖动区域，选完即弹出输入；手机用底部输入和草稿抽屉。HTML 原有运行诊断工具栏保留。原型用示例文件和**当前浏览器的**本地存储演示；日志、截图、录制、运行产物和发送仅模拟界面状态，不连接 daemon 或 Agent，尤其**不能验证外部浏览器回收或 PWA 发送**。Asset Preview 禁止嵌套 iframe，因此原型中的示例 HTML 直接渲染于 DOM；正式实现仍使用现有 sandbox iframe 和受限桥接。
 
 ## 1. 目标与决策
 
@@ -21,7 +21,9 @@
 | HTML 在 `sandbox="allow-scripts"` 且无同源权限的 `srcdoc` 中运行；现有桥接只服务诊断、快照、资源与存储 | [预览页](../packages/workbench/src/preview/AssetPreviewPage.tsx)、[Preview v4](assets-quick-preview.md) | 元素命中测试应在 iframe 内进行；父页不能读其 DOM，也不能把桥接消息当做人点击证明 |
 | HTML 的 `PreviewRuntimeControls` 位于 iframe 上方，显示日志/现场计数，提供截图、录制和“保存运行产物”；保存后由当前会话接收 Bundle 引用 | [运行诊断控件](../packages/workbench/src/preview/PreviewRuntimeControls.tsx)、[预览页](../packages/workbench/src/preview/AssetPreviewPage.tsx) | 检查元素与批注工具必须和这些控件并存；运行产物 Bundle 与预览批注草稿分别保存，不能互相覆盖或把前者当作批注 |
 | 图片以 Blob URL 放入 `object-contain` 的 `<img>` | [预览页](../packages/workbench/src/preview/AssetPreviewPage.tsx) | 需要把显示矩形映射回解码后图片的原始尺寸，剔除留白 |
-| `SessionDraft` 是文本和附件；`session.drafts.replace` 一次替换最多五条，缺少逐条原子追加；运行产物只向 Composer 追加引用行 | [草稿类型](../packages/proto/src/domain.rs)、[daemon 草稿](../apps/daemon/src/session/manager.rs)、[运行产物引用](../packages/workbench/src/preview/sessionArtifactUpload.ts) | 不能在多个窗口上用整组 `replace` 拼批注；也不能把 Composer 中几行文字称为一份持久草稿 |
+| Composer 的当前输入是页面状态并在本浏览器保存；“存为草稿”会先创建 Session，再把一条完整待发送消息存为 `SessionDraft`。界面可勾选最多五条已保存草稿，与当前输入合成一条消息发送，确认后移除选中草稿 | [Composer](../packages/workbench/src/session/Composer.tsx)、[Workbench store](../packages/workbench/src/session/store.ts)、[本地输入](../packages/workbench/src/session/localConversation.ts) | 必须区分当前输入、已保存的普通草稿和拟议的结构化批注草稿；Preview 不能声称往输入框插一行就是保存会话草稿 |
+| `SessionDraft` 只有 `id/text/attachments/forward`；daemon 把最多五条存进 `meta.json`，`session.drafts.replace` 整组覆盖，没有逐条原子追加或版本检查 | [草稿类型](../packages/proto/src/domain.rs)、[daemon 草稿](../apps/daemon/src/session/manager.rs)、[会话布局](session-storage.md) | 两个浏览器直接读改写会丢批注；不能在旧客户端也会读写的 `meta.json` 中仅添加字段便认为结构化批注安全 |
+| 同源新窗口的运行产物经继承的 Client 上传，然后用 `BroadcastChannel`/`storage` 通知原页把引用行插入 Composer；它不是 `SessionDraft`。iOS PWA 复制的 portable 链接只带一次性 Hub 连接票据及会话提示，没有 popout 上下文；独立页无法走这条回传 | [新窗口桥](../packages/workbench/src/preview/popout.ts)、[独立页](../packages/workbench/src/preview/PreviewPopoutPage.tsx)、[入口分流](../packages/workbench/src/main.tsx)、[浮窗](../packages/workbench/src/preview/PreviewFloat.tsx) | 跨浏览器/PWA 必须以 daemon 会话存储和重新读取为准；同源消息只能作即时刷新提示，不能作交付证明 |
 
 [Preview v4](assets-quick-preview.md) 的文件只读边界与 [Cloud 产品方向](../../genethub-cloud/docs/product.md) §5.1 对“严格单向”的描述需要协调：当前代码已有用户主动保存 HTML 运行产物并给 Composer 追加引用的回路，但尚无结构化选区批注。文件读取仍只读；本提案新增的是用户明确触发的**会话草稿写入**，不是任意 HTML 页面获得 daemon RPC。先更新边界文档和协议设计，再写桥接实现。
 
@@ -29,10 +31,24 @@
 
 1. 在 Preview 头部按“进入批注”。标题栏关联当前会话；目标不明时先选可写会话，离线或无权限时显示原因。退出批注后 Markdown 和 HTML 恢复普通浏览与点击。HTML 日志、截图、录制、运行产物按钮始终保持原有用途。
 2. 直接点渲染后的 Markdown 块或 HTML 元素；图片轻点得到可调整的默认矩形，拖动得到精确矩形。选中后立即出现一张小输入卡，手机从底部升起；写完按“加入草稿”。只有这个确认动作写入。失败保留文字和选区，以同一操作 ID 重试。
-3. 头部“草稿 N”与内容上的已保存标记均可打开同一份草稿；手机用底部抽屉。草稿按文件和版本归组，图片组展示原图、带编号区域和 `#编号 → 批注` 清单；点击标记能查看对应批注。编辑、删除和回跳在抽屉中完成。Composer 仍只有一张专用草稿卡片，不覆盖普通输入。
-4. 用户检查单条消息和随消息提供的图片证据后确认发送。发送使用原有持久消息 ID 和确认语义；确认前保留草稿。若发送期间又加入批注，只清除已确认发送的快照，新条目留在同一张草稿卡片。
+3. 头部“草稿 N”与内容上的已保存标记均可打开同一份草稿；手机用底部抽屉。草稿按文件和版本归组，图片组展示原图、带编号区域和 `#编号 → 批注` 清单；点击标记能查看对应批注。编辑、删除和回跳在抽屉中完成。Workbench 的现有已保存草稿区域增加一张“预览批注 · N 条”卡片，可像普通草稿一样显式选择，但其结构化内容另由会话存储维护；不覆盖当前输入。
+4. 用户回到原会话，在 Composer 中选择这张卡片，检查单条消息和随消息提供的图片证据，再确认发送。发送仍由当前 Workbench/PWA 的会话客户端发起，使用原有持久消息 ID 和确认语义；独立 Preview 只保存批注，不直接发送 Agent 消息。确认前保留草稿。若发送期间又加入批注，只清除已确认发送的快照，新条目留在同一张草稿卡片。
 
 未发送的新会话没有 `sessionId`。建议沿用当前“保存普通草稿会先创建 Session”的实际行为：用户第一次按“加入草稿”时创建真实会话，并在按钮旁说明此动作会创建会话；创建失败则选区和文字仍留在当前页面。切换机器、Workspace 或会话后，异步保存结果只更新原来的精确目标，不抢回当前页面。独立 Preview URL 中的 `sessionId` 只是导航提示；保存前仍需用已认证连接验证该会话属于目标 Workspace 且可写。
+
+### 3.1 外部浏览器与 PWA 的实际边界
+
+| 打开方式 | 当前已经能做的事 | 当前无法保证的事 | 本提案完成后的回收路径 |
+| --- | --- | --- | --- |
+| Workbench 内 Preview | 复用已连接的 Client；运行产物引用可插入当前 Composer | 尚无结构化批注草稿 | 用户确认后写入 daemon 的当前 Session；Composer 订阅并读取同一份批注 |
+| 同源新窗口 | 通过 opener 继承 Client，运行产物经同源通知回原页输入框 | 原页关闭/会话切换后通知不等于持久草稿 | 新窗口直接写 daemon；通知只促使原页刷新，重开会话仍能读取 |
+| PWA 复制链接后在外部浏览器打开 | 一次性 Hub 票据可让独立 Preview 连接目标设备并看文件；已有会话时 URL 带 `genehubPreviewSession` 提示 | 链接没有 `genehubPreviewPopout` 上下文，独立页的 `runtimeSessionId` 为 `null`；当前既不会写 `SessionDraft`，也不会跨浏览器通知 PWA。票据花掉后断线无法用同一链接重连 | 先建立受限、绑定目标 Session 的批注写入能力；外部页每次明确保存都写 daemon 并等确认。回到 PWA 后按 Session 重读草稿；PWA 自己确认发送 |
+
+`BroadcastChannel`、`localStorage` 事件和 `window.opener` 都不是 PWA 与外部浏览器的可靠回程。外部页应显示“已保存到会话 · N 条”，仅在 daemon 返回持久写入回执后出现；PWA 恢复、切回会话或收到会话变更事件时重新读取，显示同一张卡片。外部页的“返回会话”可提供可复制的会话定位信息，但不能作为写入或发送的证明，也不能依赖浏览器深链一定能唤醒 PWA。
+
+现有 portable 票据只是连接凭证，不是按会话授权；目前 hosted `Channel` 在 daemon 仍有完整能力。不能因为 URL 写了 `sessionId` 就允许浏览器选择写入目标，也不能把“页面没有发送按钮”当权限边界。启用外部批注写入前，需要把 portable Preview 的凭证收窄到指定设备、Workspace、源文件和 Session 的预览读取/批注写入，明确禁止 `session.send`，并由 daemon 在每次写入时核验关联与有效期；未具备该能力时该入口只能浏览，不能显示“加入会话草稿”按钮。普通已配对 Workbench 的会话权限按现有认证处理。这个门禁需要与链接签发、daemon 授权和协议一起实现，不属于 H5 原型已证明的能力。
+
+外部浏览器断线、票据过期或设备离线时，已确认的批注保留在 daemon；尚未确认的选区与文字仅留在外部页作待重试状态，界面不得报“已保存”。重新从 PWA 复制有效链接后，外部页以原操作 ID 重试并让 daemon 去重；无法重新连接时提供复制可读批注文本的人工回退，说明它尚未进入会话。外部页本地恢复仅是防丢输入，不是跨浏览器同步。会话已删除、切换或权限变化时拒绝写入并明确提示目标变化。
 
 ## 4. 三种选取器
 
@@ -87,11 +103,13 @@ type PreviewImageEvidence = {
 
 准确的写入目标由已认证连接、Workspace 和 Session 决定，浏览器不能用请求字段改投别的机器。`rootHandle` 是设备本地映射，只用于本次 Preview 寻址，不写进会话持久数据；daemon 在保存时把它核验并转换为稳定的 Workspace 根描述。普通 folder 项目使用 `primary`；`.code-workspace` 多根使用规范化的 `folders[].path`，不用显示名称或可变索引。跨设备无法解析绝对路径根时，批注仍可读，但回跳显示“源文件在此设备不可用”。不要以用户给的 URL 字符串作为持久身份或授权凭证。
 
-每个真实 Session 拥有零或一份 `previewReviewDraft`，由 daemon 保存在该 Session 的 `.genethub/sessions/<session>/` 内；不在浏览器 `localStorage`、Hub 或 daemon `<data>` 目录放业务副本。建议独立于旧版会反序列化和重写的 `meta.json`，例如使用会话级追加日志 `preview-review.jsonl`，避免旧 daemon 打开会话时抹掉新字段。实现前须确定有界恢复及必要的快照/压缩规则，并更新 [会话布局](session-storage.md)。图片证据组和批注属于同一份草稿：首次保存时核验源版本、复制原图并持久化证据引用，再原子追加批注；失败不得留下“有编号但无原图”的草稿。再次批注同一版本时复用原图，按组内 `nextMarkerNo` 分配编号，编辑和删除不改变剩余编号。渲染用标注图是原图与区域清单的确定性派生物，发送快照固定后生成，避免编辑、删除后附件与清单不一致。草稿在 Composer 中算一张专用卡片，不占普通最多五条草稿的额度。会话删除时一同清理证据；草稿版本用单调 `revision`，每条批注用稳定 `id`。
+每个真实 Session 拥有零或一份 `previewReviewDraft`，由 daemon 保存在该 Session 的 `.genethub/sessions/<session>/` 内；不在浏览器 `localStorage`、Hub 或 daemon `<data>` 目录放业务副本。**这是拟议的新会话草稿类型，不是今天的 `SessionDraft[]` 条目。** 选择独立存储是因为旧 `session.drafts.replace` 会整组覆盖、旧客户端会反序列化并重写 `meta.json`，无法可靠地把跨浏览器并发批注塞进现有字段。建议使用会话级追加日志 `preview-review.jsonl`，实现前须确定有界恢复及必要的快照/压缩规则，并更新 [会话布局](session-storage.md)。图片证据组和批注属于同一份草稿：首次保存时核验源版本、复制原图并持久化证据引用，再原子追加批注；失败不得留下“有编号但无原图”的草稿。再次批注同一版本时复用原图，按组内 `nextMarkerNo` 分配编号，编辑和删除不改变剩余编号。渲染用标注图是原图与区域清单的确定性派生物，发送快照固定后生成，避免编辑、删除后附件与清单不一致。会话删除时一同清理证据；草稿版本用单调 `revision`，每条批注用稳定 `id`。
 
-新增按**单个草稿**操作的受限 RPC：`get`、`upsertAnnotation`、`removeAnnotation`、`reorder`，写入在会话锁内完成并返回新 revision；`upsert` 对同一 `id` 幂等，编辑和删除带预期 revision，冲突时回读、提示并保留人的未提交文字。不能通过现有整组 `session.drafts.replace` 隐式覆盖它。新客户端只在 daemon 明确声明该会话支持批注草稿时展示保存按钮；旧 daemon 明确显示不可用，旧客户端继续使用普通草稿，不会擦掉新字段。协议兼容先由 daemon 接受新字段/RPC，再由 Web 开启入口。
+Workbench 在现有 Composer 草稿区域**投影一张**“预览批注”卡片，提供选择、展开、编辑、移除和查看证据；与普通草稿一起计入界面的草稿提示数，但后台 `SessionDraft[]` 最多五条的限制仍只约束普通草稿。卡片是单独的数据来源，需有明确的订阅事件、打开会话时的读取和离开后重入读取；不能只复用当前仅含数量的 `DraftsChanged` 事件。用户勾选该卡片并发送时，Workbench 从指定 revision 生成一条结构化快照，合并当前 Composer 文字及其他被选普通草稿；生成的证据清单可检查，不能把它压成一行链接或让自由文本编辑悄悄改坏图片编号与附件映射。若产品最终要求它在协议层也严格属于五条 `SessionDraft` 之一，就必须先把旧版整组 `replace` 升为带版本的逐条更新并解决旧客户端覆盖问题；不能同时宣称沿用现有结构和支持跨浏览器无丢项。
 
-发送时从 revision 固定一份快照，序列化成一条可编辑、可预览的用户消息：Markdown/HTML 每项包含工作区相对文件引用、锚点、版本和人的批注；每张图片另有可读取的原图与标注图附件，以及编号到矩形/批注的结构化清单。文件摘录与 HTML 文本用明确的“不可信预览内容”边界引用，不把其中的句子当 Agent 指令。例如一张草稿可以显示为：
+新增按**单个草稿**操作的受限 RPC：`get`、`upsertAnnotation`、`removeAnnotation`、`reorder`，写入在会话锁内完成并返回新 revision；`upsert` 对同一 `id` 幂等，编辑和删除带预期 revision，冲突时回读、提示并保留人的未提交文字。RPC 的身份和权限检查看 §3.1，外部浏览器不能调用普通会话发送接口。不能通过现有整组 `session.drafts.replace` 隐式覆盖它。新客户端只在 daemon 明确声明该会话支持批注草稿时展示保存按钮；旧 daemon 明确显示不可用，旧客户端继续使用普通草稿，不会擦掉新字段。协议兼容先由 daemon 接受新字段/RPC，再由 Web 开启入口。
+
+发送时从 revision 固定一份快照，序列化成一条可预览的用户消息；人可以编辑批注正文和 Composer 的补充文字，修改后重建快照，不能直接改坏证据引用：Markdown/HTML 每项包含工作区相对文件引用、锚点、版本和人的批注；每张图片另有可读取的原图与标注图附件，以及编号到矩形/批注的结构化清单。文件摘录与 HTML 文本用明确的“不可信预览内容”边界引用，不把其中的句子当 Agent 指令。例如一张草稿可以显示为：
 
 ```text
 请按以下批注检查预览：
@@ -117,12 +135,12 @@ type PreviewImageEvidence = {
 
 | 阶段 | 产物 | 必须通过的观察 |
 | --- | --- | --- |
-| A. 边界与草稿 | 更新 [Preview v4](assets-quick-preview.md)、必要的 [架构边界](architecture.md)、[会话布局](session-storage.md)及 Cloud 产品说明；协议、daemon 原子草稿及 Composer 卡片 | 两个浏览器窗口并发追加无丢项；断线重试同 ID 不重复；换设备打开同一会话能恢复；旧端不破坏普通草稿 |
+| A. 边界与草稿 | 更新 [Preview v4](assets-quick-preview.md)、必要的 [架构边界](architecture.md)、[会话布局](session-storage.md)及 Cloud 产品说明；协议、daemon 原子草稿、Composer 卡片和会话变更刷新 | 两个浏览器窗口并发追加无丢项；断线重试同 ID 不重复；重进同一会话能恢复；旧端不破坏普通草稿；卡片不误称现有 `SessionDraft` |
 | B. Markdown 与图片 | 渲染块上的源行锚点、按需“调整行”、轻点/拖动图片区域、每图编号证据 | CRLF、代码块、表格和软换行映射准确；触屏轻点/拖拽及缩放坐标一致；多图各自 `#1` 不串；原图快照与批注原子保存，文件改变显示失效 |
 | C. HTML | 头部批注开关、受限 hit-test 桥、受信标记和重定位 | 浏览/批注模式切换可恢复页面操作；静态与动态元素可选；运行日志与截图仍可用；伪造桥接回复不能绕过父页用户动作；元素变化有明确失效状态 |
-| D. 发送与回归 | 单条消息预览、每图原图/标注图/清单、持久发送与条件清理 | 混合三类、多个文件仍只有一张草稿卡片；每个图片组附件及编号清单一致；发送中新增项保留；未知接收结果不重复发送；会话切换不误投 |
+| D. 外部浏览器与发送 | portable Preview 的会话绑定受限能力、写入回执、PWA 重读、单条消息预览、每图原图/标注图/清单、持久发送与条件清理 | iOS PWA 复制链接到独立浏览器后，保存即落同一 daemon 会话；关闭外部页再回 PWA 可看到同一张卡片且由 PWA 确认发送；票据过期、断线、换会话均不假报成功；外部 Preview 无 `session.send`；混合三类、多个文件仍只有一张卡片，发送中新增项保留，未知接收结果不重复发送 |
 
-测试以真实 Workbench、协议和 daemon 会话存储为 oracle，覆盖本机与经现有认证通道的远端浏览器；单元层只验证坐标换算、行号、schema 和幂等函数。HTML 安全用真实 sandbox iframe；并发和重启用真实会话写入与回读，不能仅以 mock store 证明。按受影响范围经 `testctl` 选择 gate，协议变化验证新旧组合；不把文档编写当作这些产品测试已经通过。
+测试以真实 Workbench、协议和 daemon 会话存储为 oracle，覆盖本机与经现有认证通道的远端浏览器；**PWA 与外部浏览器分别建独立存储上下文**，不能用同源双标签页冒充。单元层只验证坐标换算、行号、schema 和幂等函数。HTML 安全用真实 sandbox iframe；并发和重启用真实会话写入与回读，不能仅以 mock store 证明。按受影响范围经 `testctl` 选择 gate，协议变化验证新旧组合；不把文档编写或 H5 原型当作这些产品测试已经通过。
 
 ## 8. 方案门声明与明确不做
 
@@ -134,12 +152,12 @@ type PreviewImageEvidence = {
 | G02 | 适用；统一锚点的第二、第三种形状是图片矩形与 HTML 元素，不围绕 Markdown 单形状造接口 |
 | G03 | 适用；新字段和 RPC 只定义于 `packages/proto`，Web/daemon 生成类型并验证混合版本 |
 | G04 | 适用；预计 `guest-only`，只改 Web、协议和 WASM guest；若触及 WIT/host 改报 `full` |
-| G05 | 适用；会话所在 Space 的 daemon 是事实来源，远端离线不能假装保存成功 |
+| G05 | 适用；会话所在 Space 的 daemon 是事实来源，远端离线不能假装保存成功；PWA 通过重读收回 |
 | G06 | 适用；一条批注替代手写文件路径、行号或屏幕位置，多个批注一次发送 |
 | G07 | 适用；先声明会话批注能力，再显示可写按钮；旧 daemon 显式不可用 |
 | G08 | 适用；预览摘录标不可信，锚点用枚举 schema，预算与超限行为见 §6 |
 | G09 | 适用；保存、冲突、失效、收据四类无正文诊断见 §6 |
-| G10 | 适用；不做完整 DevTools、HTML 源码行映射、单区域裁图上传、视频/WASM 批注、自动发送、Hub 明文同步；图片批注必须保存原图证据并在发送快照中生成编号标注图 |
+| G10 | 适用；不做完整 DevTools、HTML 源码行映射、单区域裁图上传、视频/WASM 批注、自动发送、Hub 明文同步或跨浏览器直接操纵 Composer；图片批注必须保存原图证据并在发送快照中生成编号标注图 |
 | G11 | 适用；真实组件边界、oracle 与用例形状见 §7 |
 | G12 | 适用；批注归当前 Session，放其 Space 的会话目录，生命周期与会话一致 |
 
