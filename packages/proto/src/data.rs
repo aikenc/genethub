@@ -179,11 +179,26 @@ pub enum WorkspaceFileSourceKind {
 #[ts(export, export_to = "index.ts")]
 pub struct AssetPreviewRequest {
     pub source: WorkspaceFileSource,
+    /// Omitted by old clients; the original file remains the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub representation: Option<AssetPreviewRepresentation>,
     /// Opaque per-operation id used only to correlate the browser and daemon's
     /// bounded diagnostic rings. It carries no account, workspace or path data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub diagnostic_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "index.ts")]
+pub enum AssetPreviewRepresentation {
+    #[serde(rename = "image-128")]
+    Image128,
+    #[serde(rename = "image-1024")]
+    Image1024,
+    #[serde(rename = "original")]
+    Original,
 }
 
 /// What to run on a machine, and where.
@@ -313,6 +328,15 @@ pub struct AssetPreviewMetadata {
     /// Stable enough to make a stale viewer response detectable without
     /// exposing an operating-system path.
     pub version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub representation: Option<AssetPreviewRepresentation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub height: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -324,6 +348,7 @@ pub enum AssetPreviewError {
     Unsupported,
     TooLarge,
     SourceChanged,
+    Busy,
 }
 
 #[cfg(test)]
@@ -339,6 +364,7 @@ mod tests {
                 path: "docs/readme.md".into(),
             },
             diagnostic_id: None,
+            representation: None,
         })
         .unwrap();
         assert_eq!(value["source"]["kind"], "workspaceFile");

@@ -179,7 +179,7 @@ export type AgentSpaceOperation = { "kind": "setComponent", componentId: string,
  */
 export type AgentTagGroup = { id: string, label: string, tags: Array<string>, };
 
-export type AssetPreviewError = "notFound" | "forbidden" | "unsupported" | "tooLarge" | "sourceChanged";
+export type AssetPreviewError = "notFound" | "forbidden" | "unsupported" | "tooLarge" | "sourceChanged" | "busy";
 
 export type AssetPreviewKind = "image" | "markdown" | "text" | "html" | "video" | "wasm" | "binary";
 
@@ -188,9 +188,15 @@ export type AssetPreviewMetadata = { kind: AssetPreviewKind, mediaType: string, 
  * Stable enough to make a stale viewer response detectable without
  * exposing an operating-system path.
  */
-version: string, };
+version: string, representation?: AssetPreviewRepresentation, width?: number, height?: number, };
+
+export type AssetPreviewRepresentation = "image-128" | "image-1024" | "original";
 
 export type AssetPreviewRequest = { source: WorkspaceFileSource, 
+/**
+ * Omitted by old clients; the original file remains the default.
+ */
+representation?: AssetPreviewRepresentation, 
 /**
  * Opaque per-operation id used only to correlate the browser and daemon's
  * bounded diagnostic rings. It carries no account, workspace or path data.

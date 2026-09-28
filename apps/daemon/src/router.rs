@@ -852,6 +852,7 @@ async fn dispatch(
             machine_name: crate::link::default_display_name(),
             rtc_supported: crate::dataplane::rtc::SUPPORTED,
             features: Some(vec![
+                "asset.preview.image.v1".to_string(),
                 "service.preview.v1".to_string(),
                 "process.services.v1".to_string(),
                 "workflow.control.v1".to_string(),

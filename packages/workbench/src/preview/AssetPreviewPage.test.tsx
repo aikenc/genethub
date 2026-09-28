@@ -379,13 +379,16 @@ describe("image Preview", () => {
     });
     Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: () => {} });
     const client = {
-      identity: { machineId: "m_device" },
-      preview: vi.fn(async () => ({
+      identity: { machineId: "m_device", features: ["asset.preview.image.v1"] },
+      preview: vi.fn(async (_workspace: string, _path: string, representation: string) => ({
         metadata: {
           kind: "image" as const,
           mediaType: "image/png",
           sourceBytes: png.byteLength,
           version: "a".repeat(32),
+          ...(representation === "image-1024"
+            ? { representation: "image-1024" as const, width: 1, height: 1 }
+            : {}),
         },
         bytes: png,
         transfer: {
@@ -418,6 +421,36 @@ describe("image Preview", () => {
     expect(client.preview).toHaveBeenCalledWith(
       "ws_1",
       "r_root/.genethub/sessions/s1/images/abc.png",
+      "image-1024",
+      expect.any(AbortSignal),
     );
+    expect(client.preview).toHaveBeenCalledTimes(1);
+    await userEvent.click(screen.getByRole("button", { name: "查看原图" }));
+    await waitFor(() => expect(client.preview).toHaveBeenCalledWith(
+      "ws_1",
+      "r_root/.genethub/sessions/s1/images/abc.png",
+      "original",
+      expect.any(AbortSignal),
+    ));
+  });
+
+  it("asks before fetching an original from a daemon without image representations", async () => {
+    Object.defineProperty(URL, "createObjectURL", { configurable: true, value: () => "blob:legacy" });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: () => {} });
+    const client = {
+      identity: { machineId: "m_device", features: [] },
+      preview: vi.fn(async () => ({
+        metadata: { kind: "image", mediaType: "image/png", sourceBytes: 1, version: "a".repeat(32) },
+        bytes: new Uint8Array([1]),
+        transfer: { transport: "fabric", responseBytes: 1, elapsedMs: 1, firstByteMs: 1, transferMs: 1,
+          averageBytesPerSecond: 1000, chunkCount: 1, largestChunkBytes: 1 },
+      })),
+    };
+    render(<AssetPreviewPage source={{ deviceHandle: "m_device", workspaceHandle: "ws_1", path: "r_root/picture.png" }} chrome="embedded" client={client as unknown as Client} />);
+    expect(await screen.findByText("当前设备不支持图片缩略图预览。")).toBeInTheDocument();
+    expect(client.preview).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "查看原图" }));
+    expect(await screen.findByRole("img", { name: "预览" })).toBeInTheDocument();
+    expect(client.preview).toHaveBeenCalledWith("ws_1", "r_root/picture.png", "original", expect.any(AbortSignal));
   });
 });

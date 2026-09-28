@@ -15,6 +15,7 @@ import {
   type ProtocolDial,
 } from "../protocol/client";
 import { HighlightedCode, languageForPath, Markdown } from "../session/Markdown";
+import { loadSessionImage } from "../session/imagePreviewRequests";
 import { readRtcEnabled } from "../settings/rtc";
 import { remapHtmlSite, resolveRuntimeAssetPath } from "./htmlSite";
 import {
@@ -40,6 +41,7 @@ import { uploadSessionArtifact } from "./sessionArtifactUpload";
 type ViewState =
   | { kind: "loading" }
   | { kind: "ready"; result: AssetPreviewResult; client: Client }
+  | { kind: "legacy-image"; client: Client }
   | { kind: "error"; message: string };
 
 export type PreviewMeta = {
@@ -88,6 +90,7 @@ export function AssetPreviewPage({
   const [state, setState] = useState<ViewState>({ kind: "loading" });
   const [pageInfoOpen, setPageInfoOpen] = useState(false);
   const [meta, setMeta] = useState<PreviewMeta | null>(null);
+  const legacyAbort = useRef<AbortController | null>(null);
 
   const reportMeta = useCallback(
     (next: PreviewMeta | null) => {
@@ -98,12 +101,15 @@ export function AssetPreviewPage({
   );
 
   useEffect(() => {
+    legacyAbort.current?.abort();
+    legacyAbort.current = null;
     reportMeta(null);
     setPageInfoOpen(false);
   }, [source.path, source.workspaceHandle, source.deviceHandle, reportMeta]);
 
   useEffect(() => {
     let cancelled = false;
+    const abort = new AbortController();
     let owned: Client | null = null;
     let unregisterDiagnosticClient: (() => void) | null = null;
     setState({ kind: "loading" });
@@ -136,7 +142,17 @@ export function AssetPreviewPage({
           }
           active = owned;
         }
-        const result = await active.preview(source.workspaceHandle, source.path);
+        const imageFile = /\.(?:png|jpe?g|gif|webp)$/i.test(source.path);
+        if (imageFile && !active.identity?.features?.includes("asset.preview.image.v1")) {
+          setState({ kind: "legacy-image", client: active });
+          return;
+        }
+        const result = await active.preview(
+          source.workspaceHandle,
+          source.path,
+          imageFile ? "image-1024" : "original",
+          abort.signal,
+        );
         if (cancelled) {
           owned?.close();
           return;
@@ -180,6 +196,9 @@ export function AssetPreviewPage({
     })();
     return () => {
       cancelled = true;
+      abort.abort();
+      legacyAbort.current?.abort();
+      legacyAbort.current = null;
       unregisterDiagnosticClient?.();
       owned?.close();
     };
@@ -230,6 +249,23 @@ export function AssetPreviewPage({
       ) : null}
       {state.kind === "loading" ? (
         <p role="status" className="m-auto text-sm text-muted">正在安全读取文件…</p>
+      ) : state.kind === "legacy-image" ? (
+        <section className="m-auto max-w-lg px-6 text-center text-sm">
+          <p>当前设备不支持图片缩略图预览。</p>
+          <button type="button" className="mt-3 rounded border border-line px-3 py-2" onClick={() => {
+            const active = state.client;
+            const abort = new AbortController();
+            legacyAbort.current = abort;
+            setState({ kind: "loading" });
+            void active.preview(source.workspaceHandle, source.path, "original", abort.signal)
+              .then((result) => {
+                if (!abort.signal.aborted) setState({ kind: "ready", result, client: active });
+              })
+              .catch((error) => {
+                if (!abort.signal.aborted) setState({ kind: "error", message: error instanceof Error ? error.message : "无法读取原图" });
+              });
+          }}>查看原图</button>
+        </section>
       ) : state.kind === "error" ? (
         <section role="alert" className="m-auto max-w-lg px-6 text-center">
           <p className="text-sm">无法预览</p>
@@ -296,6 +332,11 @@ function PreviewDocument({
     },
     [client, workspaceHandle],
   );
+  const loadInlineImage = useCallback(
+    (assetPath: string, signal?: AbortSignal) =>
+      loadSessionImage(client, workspaceHandle, assetPath, signal),
+    [client, workspaceHandle],
+  );
   // Only markdown/text are UTF-8. Decoding a PNG here crashed the workbench.
   const text = useMemo(() => {
     if (metadata.kind !== "markdown" && metadata.kind !== "text") return "";
@@ -308,9 +349,9 @@ function PreviewDocument({
       folders: [{ root: "", rootHandle }],
       documentPath: path,
       ...(runtimeSessionId ? { sessionId: runtimeSessionId } : {}),
-      loadPreview,
+      loadPreview: loadInlineImage,
     }),
-    [deviceHandle, workspaceHandle, rootHandle, path, runtimeSessionId, loadPreview],
+    [deviceHandle, workspaceHandle, rootHandle, path, runtimeSessionId, loadInlineImage],
   );
 
   useEffect(() => {
@@ -365,27 +406,73 @@ function PreviewDocument({
       </p>
     );
   }
-  return <BlobDocument bytes={bytes} metadata={metadata} />;
+  return <BlobDocument bytes={bytes} metadata={metadata} client={client} workspaceHandle={workspaceHandle} path={path} />;
 }
 
 function BlobDocument({
   bytes,
   metadata,
+  client,
+  workspaceHandle,
+  path,
 }: {
   bytes: Uint8Array;
   metadata: AssetPreviewMetadata;
+  client: Client;
+  workspaceHandle: string;
+  path: string;
 }) {
+  const [original, setOriginal] = useState<AssetPreviewResult | null>(null);
+  const [originalLoading, setOriginalLoading] = useState(false);
+  const [originalError, setOriginalError] = useState<string | null>(null);
+  const originalAbort = useRef<AbortController | null>(null);
+  useEffect(() => {
+    setOriginal(null);
+    setOriginalError(null);
+    setOriginalLoading(false);
+    return () => {
+      originalAbort.current?.abort();
+      originalAbort.current = null;
+    };
+  }, [path, metadata.version]);
+  const shown = original?.bytes ?? bytes;
+  const mediaType = original?.metadata.mediaType ?? metadata.mediaType;
   const url = useMemo(
     () =>
       URL.createObjectURL(
-        new Blob([bytes.slice().buffer as ArrayBuffer], { type: metadata.mediaType }),
+        new Blob([shown.slice().buffer as ArrayBuffer], { type: mediaType }),
       ),
-    [bytes, metadata.mediaType],
+    [shown, mediaType],
   );
   useEffect(() => () => URL.revokeObjectURL(url), [url]);
   return metadata.kind === "image" ? (
-    <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto bg-black/5 p-4">
-      <img src={url} alt="预览" className="max-h-full max-w-full object-contain" />
+    <div className="flex min-h-0 flex-1 flex-col bg-black/5">
+      {metadata.representation === "image-1024" && !original ? (
+        <div className="shrink-0 p-2 text-center text-xs">
+          <button type="button" disabled={originalLoading} onClick={() => {
+            const abort = new AbortController();
+            originalAbort.current = abort;
+            setOriginalLoading(true);
+            setOriginalError(null);
+            void client.preview(workspaceHandle, path, "original", abort.signal)
+              .then((result) => {
+                if (!abort.signal.aborted && result.metadata.kind === "image") setOriginal(result);
+              })
+              .catch((error) => {
+                if (!abort.signal.aborted) setOriginalError(error instanceof Error ? error.message : "原图读取失败");
+              })
+              .finally(() => {
+                if (!abort.signal.aborted) setOriginalLoading(false);
+              });
+          }}>
+            {originalLoading ? "正在读取原图…" : "查看原图"}
+          </button>
+          {originalError ? <span role="alert" className="ml-3">{originalError}</span> : null}
+        </div>
+      ) : null}
+      <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-4">
+        <img src={url} alt="预览" className="max-h-full max-w-full object-contain" />
+      </div>
     </div>
   ) : (
     <div className="flex min-h-0 flex-1 items-center justify-center bg-black p-4">

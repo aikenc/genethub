@@ -1,10 +1,12 @@
+use std::collections::VecDeque;
 use std::io::Read;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
-    AssetPreviewError, AssetPreviewRequest, ExchangeResponseHead, WorkspaceFileSourceKind,
+    AssetPreviewError, AssetPreviewKind, AssetPreviewMetadata, AssetPreviewRepresentation,
+    AssetPreviewRequest, ExchangeResponseHead, WorkspaceFileSourceKind,
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
@@ -13,7 +15,11 @@ use super::endpoint::{PeerServices, ServerStream, WriteTimings};
 use crate::files::{PreviewFailure, PreviewFile};
 
 static PREVIEW_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+static IMAGE_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+static IMAGE_QUEUE_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+static IMAGE_CACHE: OnceLock<std::sync::Mutex<VecDeque<CachedImage>>> = OnceLock::new();
 const PREVIEW_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const IMAGE_CACHE_BYTES: usize = 24 * 1024 * 1024;
 /// On-demand preview loading fetches many small sub-resources in parallel;
 /// two slots serialized whole sites behind each other.
 const PREVIEW_WORKERS: usize = 8;
@@ -84,6 +90,14 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
         Err(_) => return preview_error(stream, 408, AssetPreviewError::SourceChanged, None).await,
     };
     let scan_us = scan_started.elapsed().as_micros() as u64;
+    if let Some(
+        representation @ (AssetPreviewRepresentation::Image128
+        | AssetPreviewRepresentation::Image1024),
+    ) = request.representation
+    {
+        drop(slot);
+        return send_image_representation(stream, file, representation).await;
+    }
     // The bounded worker permit covers both the metadata scan and the actual
     // source read; streaming must not turn one retained Vec into hundreds of
     // concurrent disk readers.
@@ -113,6 +127,196 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
         finish_us = stats.finish_us,
         chunks = stats.chunks,
         "preview completed"
+    );
+    Ok(())
+}
+
+struct CachedImage {
+    version: String,
+    representation: AssetPreviewRepresentation,
+    result: Arc<crate::image_preview::ImageResult>,
+}
+
+fn cached_image(
+    version: &str,
+    representation: AssetPreviewRepresentation,
+) -> Option<Arc<crate::image_preview::ImageResult>> {
+    IMAGE_CACHE
+        .get_or_init(|| std::sync::Mutex::new(VecDeque::new()))
+        .lock()
+        .ok()?
+        .iter()
+        .find(|item| item.version == version && item.representation == representation)
+        .map(|item| item.result.clone())
+}
+
+fn remember_image(
+    version: String,
+    representation: AssetPreviewRepresentation,
+    result: Arc<crate::image_preview::ImageResult>,
+) {
+    let Ok(mut cache) = IMAGE_CACHE
+        .get_or_init(|| std::sync::Mutex::new(VecDeque::new()))
+        .lock()
+    else {
+        return;
+    };
+    cache.retain(|item| !(item.version == version && item.representation == representation));
+    cache.push_back(CachedImage {
+        version,
+        representation,
+        result,
+    });
+    while cache
+        .iter()
+        .map(|item| item.result.bytes.len())
+        .sum::<usize>()
+        > IMAGE_CACHE_BYTES
+    {
+        cache.pop_front();
+    }
+}
+
+async fn send_image_representation(
+    stream: &mut ServerStream,
+    file: PreviewFile,
+    representation: AssetPreviewRepresentation,
+) -> Result<()> {
+    if file.metadata.kind != AssetPreviewKind::Image {
+        return preview_error(stream, 415, AssetPreviewError::Unsupported, None).await;
+    }
+    let edge = match representation {
+        AssetPreviewRepresentation::Image128 => 128,
+        AssetPreviewRepresentation::Image1024 => 1024,
+        AssetPreviewRepresentation::Original => unreachable!(),
+    };
+    let (mut metadata, mut source, expected_digest) = file.into_parts();
+    if let Some(result) = cached_image(&metadata.version, representation) {
+        tracing::debug!(
+            event = "preview_image_cache_hit",
+            edge,
+            source_bytes = metadata.source_bytes,
+            output_bytes = result.bytes.len()
+        );
+        metadata.media_type = result.media_type.clone();
+        metadata.representation = Some(representation);
+        metadata.width = Some(result.width);
+        metadata.height = Some(result.height);
+        return send_image_bytes(stream, metadata, &result.bytes).await;
+    }
+    let _queue_slot = match IMAGE_QUEUE_SLOTS
+        .get_or_init(|| Arc::new(Semaphore::new(8)))
+        .clone()
+        .try_acquire_owned()
+    {
+        Ok(slot) => slot,
+        Err(_) => return preview_error(stream, 429, AssetPreviewError::Busy, None).await,
+    };
+    let image_slot = match tokio::select! {
+        result = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            IMAGE_SLOTS
+        .get_or_init(|| Arc::new(Semaphore::new(1)))
+        .clone()
+                .acquire_owned(),
+        ) => result,
+        _ = stream.next_input() => return Ok(()),
+    } {
+        Ok(Ok(slot)) => slot,
+        _ => return preview_error(stream, 429, AssetPreviewError::Busy, None).await,
+    };
+    // The source was authenticated and its digest computed before the cache
+    // lookup. A cache hit never bypasses path validation or version checking.
+    let result = if let Some(result) = cached_image(&metadata.version, representation) {
+        tracing::debug!(
+            event = "preview_image_cache_hit_after_wait",
+            edge,
+            source_bytes = metadata.source_bytes,
+            output_bytes = result.bytes.len()
+        );
+        result
+    } else {
+        let mut bytes = Vec::with_capacity(metadata.source_bytes as usize);
+        let mut hasher = Sha256::new();
+        let mut step = vec![0u8; crate::files::PREVIEW_STEP_BYTES];
+        loop {
+            let read = source
+                .read(&mut step)
+                .map_err(|error| anyhow!("preview source read failed: {error}"))?;
+            if read == 0 {
+                break;
+            }
+            if bytes.len() + read > metadata.source_bytes as usize {
+                return preview_error(stream, 409, AssetPreviewError::SourceChanged, None).await;
+            }
+            hasher.update(&step[..read]);
+            bytes.extend_from_slice(&step[..read]);
+            crate::blocking::breathe().await;
+        }
+        if bytes.len() != metadata.source_bytes as usize
+            || <[u8; 32]>::from(hasher.finalize()) != expected_digest
+        {
+            return preview_error(stream, 409, AssetPreviewError::SourceChanged, None).await;
+        }
+        let started = Instant::now();
+        let resized = match tokio::select! {
+            result = crate::image_preview::resize(bytes, edge) => result,
+            _ = stream.next_input() => return Ok(()),
+        } {
+            Ok(result)
+                if result.width > 0
+                    && result.height > 0
+                    && result.width.max(result.height) <= u32::from(edge)
+                    && result.bytes.len() <= 12 * 1024 * 1024
+                    && matches!(result.media_type.as_str(), "image/png" | "image/jpeg") =>
+            {
+                Arc::new(result)
+            }
+            _ => return preview_error(stream, 415, AssetPreviewError::Unsupported, None).await,
+        };
+        tracing::debug!(
+            event = "preview_image_resize",
+            source_bytes = metadata.source_bytes,
+            output_bytes = resized.bytes.len(),
+            edge,
+            elapsed_us = started.elapsed().as_micros() as u64
+        );
+        remember_image(metadata.version.clone(), representation, resized.clone());
+        resized
+    };
+    drop(image_slot);
+    drop(source);
+    metadata.media_type = result.media_type.clone();
+    metadata.representation = Some(representation);
+    metadata.width = Some(result.width);
+    metadata.height = Some(result.height);
+    send_image_bytes(stream, metadata, &result.bytes).await
+}
+
+async fn send_image_bytes(
+    stream: &mut ServerStream,
+    metadata: AssetPreviewMetadata,
+    bytes: &[u8],
+) -> Result<()> {
+    let started = Instant::now();
+    let source_bytes = metadata.source_bytes;
+    stream
+        .respond(&ExchangeResponseHead {
+            status: 200,
+            metadata: serde_json::to_value(&metadata)?,
+            body_length: Some(bytes.len() as u64),
+            error: None,
+        })
+        .await?;
+    for chunk in bytes.chunks(PREVIEW_SEND_STEP_BYTES) {
+        stream.write(chunk).await?;
+    }
+    stream.finish().await?;
+    tracing::debug!(
+        event = "preview_image_send",
+        source_bytes,
+        output_bytes = bytes.len(),
+        elapsed_us = started.elapsed().as_micros() as u64
     );
     Ok(())
 }

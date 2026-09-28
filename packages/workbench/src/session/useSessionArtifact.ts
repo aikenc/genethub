@@ -2,6 +2,7 @@ import { useCallback, useMemo } from "react";
 
 import type { MarkdownArtifactProps } from "./Markdown";
 import { inlineImagesFromTrunks } from "./roundGallery";
+import { loadSessionImage } from "./imagePreviewRequests";
 import { useWorkbench } from "./store";
 
 /** Stable empty snapshot so zustand selectors do not infinite-loop on miss. */
@@ -29,14 +30,9 @@ export function useSessionArtifact(): MarkdownArtifactProps | null {
   );
 
   const loadPreview = useCallback(
-    async (path: string) => {
+    async (path: string, signal?: AbortSignal) => {
       if (!client || !workspaceHandle) return null;
-      try {
-        const result = await client.preview(workspaceHandle, path);
-        return { bytes: result.bytes, mediaType: result.metadata.mediaType };
-      } catch {
-        return null;
-      }
+      return loadSessionImage(client, workspaceHandle, path, signal);
     },
     [client, workspaceHandle],
   );

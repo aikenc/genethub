@@ -1,6 +1,7 @@
 import type {
   AssetPreviewError,
   AssetPreviewMetadata,
+  AssetPreviewRepresentation,
   BackgroundProcess,
   HelloResult,
   PeerWelcome,
@@ -548,10 +549,14 @@ export class Client {
     });
   }
 
-  async preview(workspaceHandle: string, path: string): Promise<AssetPreviewResult> {
+  async preview(workspaceHandle: string, path: string, representation: AssetPreviewRepresentation = "original", signal?: AbortSignal): Promise<AssetPreviewResult> {
+    if (signal?.aborted) throw new DOMException("Preview cancelled", "AbortError");
+    if (representation !== "original" && !this.identity?.features?.includes("asset.preview.image.v1")) {
+      throw new DataPlaneError("当前设备不支持图片缩略图预览");
+    }
     const deadline = this.now() + PREVIEW_HEAD_TIMEOUT_MS;
     try {
-      return await this.previewAttempt(workspaceHandle, path, deadline);
+      return await this.previewAttempt(workspaceHandle, path, representation, deadline, signal);
     } catch (error) {
       // Resume replays records without reinvoking the handler. Only an explicit
       // loss of that logical session permits one fresh read. Discard the whole
@@ -559,31 +564,47 @@ export class Client {
       // and retain their outcome-unknown contract.
       if (this.stopped || !(error instanceof Error) ||
           (error.message !== "SessionLost" && error.message !== "ResumeExpired")) throw error;
-      await this.waitForPreviewRecovery(deadline);
-      return this.previewAttempt(workspaceHandle, path, deadline);
+      if (signal?.aborted) throw new DOMException("Preview cancelled", "AbortError");
+      await this.waitForPreviewRecovery(deadline, signal);
+      return this.previewAttempt(workspaceHandle, path, representation, deadline, signal);
     }
   }
 
-  private waitForPreviewRecovery(deadline: number): Promise<void> {
+  private waitForPreviewRecovery(deadline: number, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.reject(new DOMException("Preview cancelled", "AbortError"));
     return new Promise((resolve, reject) => {
       const remaining = deadline - this.now();
       if (remaining <= 0) { reject(new ClientRequestTimeoutError("asset preview recovery timed out")); return; }
+      const finish = (error?: Error) => {
+        clearTimeout(timer);
+        stop();
+        signal?.removeEventListener("abort", onAbort);
+        if (error) reject(error);
+        else resolve();
+      };
+      const onAbort = () => finish(new DOMException("Preview cancelled", "AbortError"));
       const timer = setTimeout(() => {
-        stop(); reject(new ClientRequestTimeoutError("asset preview recovery timed out"));
+        finish(new ClientRequestTimeoutError("asset preview recovery timed out"));
       }, remaining);
       const check = () => {
         if (this.stopped) {
-          clearTimeout(timer); stop(); reject(new DataPlaneError("client closed"));
+          finish(new DataPlaneError("client closed"));
         } else if (this.state === "ready" && this.endpoint?.state === "open") {
-          clearTimeout(timer); stop(); resolve();
+          finish();
         }
       };
       const stop = this.onStateChange(check);
-      check();
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted) onAbort();
+      else check();
     });
   }
 
-  private async previewAttempt(workspaceHandle: string, path: string, deadline: number): Promise<AssetPreviewResult> {
+  private async previewAttempt(workspaceHandle: string, path: string, representation: AssetPreviewRepresentation, deadline: number, signal?: AbortSignal): Promise<AssetPreviewResult> {
+    if (signal?.aborted) throw new DOMException("Preview cancelled", "AbortError");
+    if (representation !== "original" && !this.identity?.features?.includes("asset.preview.image.v1")) {
+      throw new DataPlaneError("当前设备不支持图片缩略图预览");
+    }
     const remaining = deadline - this.now();
     if (remaining <= 0) throw new ClientRequestTimeoutError("asset preview response head timed out");
     const endpoint = this.requireReadyEndpoint();
@@ -602,10 +623,14 @@ export class Client {
       method: "asset.preview",
       metadata: {
         source: { kind: "workspaceFile", workspaceHandle, path },
+        ...(representation !== "original" ? { representation } : {}),
         diagnosticId: requestId,
       },
       bodyLength: 0,
     });
+    const cancel = () => stream.reset(DataReset.Cancelled);
+    signal?.addEventListener("abort", cancel, { once: true });
+    if (signal?.aborted) cancel();
     const operation = (async () => {
       const observed = {
         firstByteAt: null as number | null,
@@ -639,6 +664,14 @@ export class Client {
         throw new AssetPreviewError_("tooLarge", 413, head.bodyLength);
       }
       const metadata = previewMetadata(head.metadata);
+      if (representation !== "original" &&
+          (metadata.kind !== "image" || metadata.representation !== representation ||
+           !metadata.width || !metadata.height ||
+           Math.max(metadata.width, metadata.height) > (representation === "image-128" ? 128 : 1024) ||
+           head.bodyLength > 12 * 1024 * 1024)) {
+        stream.reset(DataReset.ProtocolViolation);
+        throw new DataPlaneError("the daemon did not return the requested image representation");
+      }
       const bodyStarted = this.now();
       const now = () => this.now();
       const measuredBody = (async function* () {
@@ -662,7 +695,7 @@ export class Client {
       });
       if (
         bytes.byteLength !== head.bodyLength ||
-        metadata.sourceBytes !== bytes.byteLength
+        (representation === "original" && metadata.sourceBytes !== bytes.byteLength)
       ) {
         throw new DataPlaneError("the preview body does not match its exact metadata");
       }
@@ -722,6 +755,8 @@ export class Client {
         durationMs: Math.round(this.now() - started),
       });
       throw error;
+    } finally {
+      signal?.removeEventListener("abort", cancel);
     }
   }
 
@@ -2351,7 +2386,8 @@ function previewError(value: unknown): AssetPreviewError {
     value === "forbidden" ||
     value === "unsupported" ||
     value === "tooLarge" ||
-    value === "sourceChanged"
+    value === "sourceChanged" ||
+    value === "busy"
     ? value
     : "sourceChanged";
 }
@@ -2414,6 +2450,8 @@ function previewErrorMessage(error: AssetPreviewError, sourceBytes?: number): st
       return `文件超过 64 MiB，暂不支持预览${sourceBytes ? `（${sourceBytes} bytes）` : ""}`;
     case "sourceChanged":
       return "读取时文件发生了变化，请重试";
+    case "busy":
+      return "图片处理繁忙，请稍后重试";
   }
 }
 

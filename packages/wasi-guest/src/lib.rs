@@ -27,6 +27,9 @@ pub mod pty;
 pub mod rtc;
 
 #[cfg(target_family = "wasm")]
+pub mod image_preview;
+
+#[cfg(target_family = "wasm")]
 pub mod stdio;
 
 #[cfg(target_family = "wasm")]

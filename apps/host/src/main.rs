@@ -14,6 +14,7 @@ mod file_lock;
 mod fs_perms;
 mod guest_paths;
 mod http_hooks;
+mod image_preview;
 mod isolation;
 mod keys;
 mod load;
