@@ -2,7 +2,7 @@
 
 状态：提案，尚未实现。日期：2026-09-28。基线：`genethub` `de362309`、`genethub-cloud` `4fc16e9`（当日已与各自 `origin/main` 一致）。本文中的 RPC、字段和限额均为建议契约；验收通过前不应写成现有能力。
 
-交互参考：[可直接打开的 H5 原型](../prototypes/preview-annotations/index.html)。它用示例文件和浏览器本地存储演示选取、批注、会话切换与发送预览；不连接实际 Preview、daemon 或 Agent。
+交互参考：[可直接打开的 H5 原型](../prototypes/preview-annotations/index.html)。它按当前 `FilesPanel → PreviewFloat → AssetPreviewPage` 的入口和容器层次组织界面：从文件列表打开同一个 Preview 容器，由文件类型切换 Markdown、HTML、图片内容；只有 HTML 显示现有运行诊断工具栏。批注工具与会话草稿是待实现的叠加层。原型用示例文件和浏览器本地存储演示选取、批注、会话切换与单条消息预览；日志、截图、录制和运行产物按钮只模拟界面状态，不连接实际 Preview、daemon 或 Agent。为兼容 Asset Preview 禁止嵌套 iframe 的限制，示例 HTML 页面直接渲染于原型 DOM；正式实现仍须使用现有 sandbox iframe 和受限桥接。
 
 ## 1. 目标与决策
 
@@ -19,6 +19,7 @@
 | `asset.preview` 返回完整文件、类型和源内容版本；`version` 来自首遍文件 SHA-256 的前 16 字节 | [文件读取](../apps/daemon/src/files.rs)、[协议类型](../packages/proto/src/data.rs) | 使用现有内容版本做失效检测，无需让 Preview URL 承载批注 |
 | Markdown 文档经 `react-markdown` 渲染；渲染 DOM 不保证一行对应一个元素 | [Markdown 渲染器](../packages/workbench/src/session/Markdown.tsx)、[预览页](../packages/workbench/src/preview/AssetPreviewPage.tsx) | 精确的“按行”要以原文行为准，不能从换行后的像素或段落序号反推 |
 | HTML 在 `sandbox="allow-scripts"` 且无同源权限的 `srcdoc` 中运行；现有桥接只服务诊断、快照、资源与存储 | [预览页](../packages/workbench/src/preview/AssetPreviewPage.tsx)、[Preview v4](assets-quick-preview.md) | 元素命中测试应在 iframe 内进行；父页不能读其 DOM，也不能把桥接消息当做人点击证明 |
+| HTML 的 `PreviewRuntimeControls` 位于 iframe 上方，显示日志/现场计数，提供截图、录制和“保存运行产物”；保存后由当前会话接收 Bundle 引用 | [运行诊断控件](../packages/workbench/src/preview/PreviewRuntimeControls.tsx)、[预览页](../packages/workbench/src/preview/AssetPreviewPage.tsx) | 检查元素与批注工具必须和这些控件并存；运行产物 Bundle 与预览批注草稿分别保存，不能互相覆盖或把前者当作批注 |
 | 图片以 Blob URL 放入 `object-contain` 的 `<img>` | [预览页](../packages/workbench/src/preview/AssetPreviewPage.tsx) | 需要把显示矩形映射回解码后图片的原始尺寸，剔除留白 |
 | `SessionDraft` 是文本和附件；`session.drafts.replace` 一次替换最多五条，缺少逐条原子追加；运行产物只向 Composer 追加引用行 | [草稿类型](../packages/proto/src/domain.rs)、[daemon 草稿](../apps/daemon/src/session/manager.rs)、[运行产物引用](../packages/workbench/src/preview/sessionArtifactUpload.ts) | 不能在多个窗口上用整组 `replace` 拼批注；也不能把 Composer 中几行文字称为一份持久草稿 |
 
