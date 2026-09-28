@@ -19,7 +19,7 @@ static IMAGE_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
 static IMAGE_QUEUE_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
 static IMAGE_CACHE: OnceLock<std::sync::Mutex<VecDeque<CachedImage>>> = OnceLock::new();
 const PREVIEW_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-const IMAGE_CACHE_BYTES: usize = 24 * 1024 * 1024;
+const IMAGE_CACHE_BYTES: usize = 128 * 1024 * 1024;
 /// On-demand preview loading fetches many small sub-resources in parallel;
 /// two slots serialized whole sites behind each other.
 const PREVIEW_WORKERS: usize = 8;
