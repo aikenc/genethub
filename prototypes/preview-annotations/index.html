@@ -3,67 +3,83 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#f5f6f8">
-  <title>GeneHub Preview · 会话批注交互原型</title>
+  <meta name="theme-color" content="#f4f6f9">
+  <title>GeneHub Preview · 一键批注原型</title>
   <link rel="stylesheet" href="./style.css">
 </head>
 <body>
 <div class="demo-shell">
-  <header class="demo-heading"><div><strong>GeneHub Preview</strong><span>文件选取与会话批注 · 交互原型</span></div><span class="prototype-tag">本地演示</span></header>
-  <div class="demo-layout">
-    <nav class="file-panel" aria-label="从文件列表打开 Preview">
-      <div class="file-panel-title">文件 <small>点击文件，打开同一个 Preview 容器</small></div>
-      <button type="button" class="file-link active" data-file="markdown"><span class="file-icon md">MD</span><span class="file-copy"><strong>experience.md</strong><small>docs/experience.md</small></span></button>
-      <button type="button" class="file-link" data-file="html"><span class="file-icon html">H5</span><span class="file-copy"><strong>landing.html</strong><small>site/landing.html</small></span></button>
-      <button type="button" class="file-link" data-file="image"><span class="file-icon image">IMG</span><span class="file-copy"><strong>dashboard.png</strong><small>design/dashboard.png</small></span></button>
-      <p class="file-panel-note">实际入口沿用工作台文件列表的 Preview 动作。</p>
+  <header class="demo-heading"><strong>GeneHub Preview</strong><span>一个容器，直接点内容批注</span><small>静态交互原型</small></header>
+  <div class="demo-layout" id="demoLayout">
+    <nav class="file-panel" aria-label="演示文件">
+      <h2>文件</h2><p>点击文件，在同一个 Preview 中打开</p>
+      <button type="button" class="file-link active" data-file="markdown"><span class="file-icon md">MD</span><span><strong>experience.md</strong><small>docs/experience.md</small></span></button>
+      <button type="button" class="file-link" data-file="html"><span class="file-icon html">H5</span><span><strong>landing.html</strong><small>site/landing.html</small></span></button>
+      <button type="button" class="file-link" data-file="dashboard"><span class="file-icon image">IMG</span><span><strong>dashboard.png</strong><small>design/dashboard.png</small></span></button>
+      <button type="button" class="file-link" data-file="mobile"><span class="file-icon image">IMG</span><span><strong>mobile.png</strong><small>design/mobile.png</small></span></button>
     </nav>
-    <main class="preview-card" aria-label="Asset Preview 容器">
+    <main class="preview-card" id="previewCard" aria-label="Asset Preview 容器">
       <header class="preview-header">
-        <button type="button" class="preview-icon-button" id="helpButton" aria-label="查看预览信息">ⓘ</button>
-        <div class="preview-file"><span class="preview-file-icon md" id="previewFileIcon">MD</span><div><strong id="previewFileName">experience.md</strong><small id="previewFilePath">docs/experience.md</small></div></div>
-        <span class="preview-header-label">Preview</span>
-        <button type="button" class="preview-icon-button" id="mockMinimizeButton" aria-label="最小化预览">−</button>
-        <button type="button" class="preview-icon-button" id="mockPopoutButton" aria-label="新窗口打开">↗</button>
-        <button type="button" class="preview-icon-button" id="mockCloseButton" aria-label="关闭预览">×</button>
+        <button type="button" class="icon-button" id="infoButton" aria-label="查看操作说明">ⓘ</button>
+        <div class="preview-title"><strong id="previewFileName">experience.md</strong><small id="previewFilePath">docs/experience.md</small></div>
+        <button type="button" class="mode-toggle" id="annotationToggle" aria-pressed="false">进入批注</button>
+        <button type="button" class="draft-toggle" id="draftToggle" aria-expanded="false">草稿 <b id="draftCount">0</b></button>
+        <span class="header-divider"></span>
+        <button type="button" class="icon-button shell-control" data-shell-action="最小化" aria-label="最小化预览">−</button>
+        <button type="button" class="icon-button shell-control" data-shell-action="新窗口打开" aria-label="新窗口打开">↗</button>
+        <button type="button" class="icon-button shell-control" data-shell-action="关闭" aria-label="关闭预览">×</button>
       </header>
       <section class="runtime-toolbar hidden" id="runtimeToolbar" aria-label="HTML Preview 运行诊断">
-        <span class="runtime-status" id="runtimeStatus" role="status">日志已开始记录</span>
-        <button type="button" class="runtime-count" id="runtimeLogButton" aria-label="查看运行日志">日志 <b id="runtimeLogCount">1</b> · 现场 <b id="runtimeFrameCount">0</b></button>
-        <button type="button" class="runtime-button" id="runtimeShotButton">截图</button>
-        <button type="button" class="runtime-button" id="runtimeRecordButton">录制</button>
-        <button type="button" class="runtime-button primary" id="runtimeSaveButton">保存运行产物</button>
+        <span id="runtimeStatus">日志已开始记录</span>
+        <button type="button" id="runtimeLogButton">日志 <b id="runtimeLogCount">0</b> · 现场 <b id="runtimeFrameCount">0</b></button>
+        <button type="button" id="runtimeShotButton">截图</button>
+        <button type="button" id="runtimeRecordButton">录制</button>
+        <button type="button" class="runtime-primary" id="runtimeSaveButton">保存运行产物</button>
       </section>
-      <div class="runtime-log hidden" id="runtimeLogPanel"><div><strong>运行日志</strong><button type="button" id="runtimeLogCloseButton" aria-label="关闭运行日志">×</button></div><ol id="runtimeLogList"></ol></div>
-      <section class="annotation-toolbar" aria-label="选取与批注工具">
-        <div><strong>批注</strong><span id="annotationModeHint">Markdown · 按原文行选取</span></div>
-        <span class="version-pill" id="versionPill">版本 a1f6…</span>
-        <button type="button" class="subtle-button" id="changeVersionButton">模拟文件更新</button>
-        <div class="mode-action" id="modeAction"></div>
-      </section>
+      <div class="runtime-log hidden" id="runtimeLogPanel"><div><strong>运行日志</strong><button type="button" id="runtimeLogCloseButton" aria-label="关闭日志">×</button></div><ol id="runtimeLogList"></ol></div>
+      <div class="mode-hint hidden" id="modeHint" role="status">点内容即可批注</div>
       <div class="preview-body" id="previewBody">
-        <div class="markdown-view" id="markdownView">
-          <div class="markdown-source"><div class="pane-heading"><span>原文行</span><small>点击 · Shift 连选 · 拖动</small></div><div class="line-list" id="lineList" tabindex="0" aria-label="Markdown 原文行"></div></div>
-          <div class="markdown-render"><div class="pane-heading"><span>渲染预览</span><small>现有阅读内容</small></div><article class="rendered-doc"><h2>让预览成为对话的一部分</h2><p class="doc-lead">把“这里不对”变成清晰、可定位的反馈。</p><div class="doc-rule"></div><h3>目标</h3><p>用户可以在作品上直接圈选，并将反馈集中整理到当前会话。Agent 收到的是位置、上下文和人的判断，而不是模糊的描述。</p><h3>交互原则</h3><ul><li>选区必须回到原始文件。</li><li>保存批注不等于立即发送。</li><li>文件变化后应明确提示锚点失效。</li></ul><blockquote>好的反馈，应该让人和 Agent 看向同一处。</blockquote><h3>验收</h3><p>在多文件之间来回批注，最终仍然只形成一份可检查的会话草稿。</p></article></div>
-        </div>
+        <article class="markdown-view" id="markdownView" aria-label="Markdown 渲染预览">
+          <div class="md-page">
+            <h1 data-md-start="1" data-md-end="1">让预览成为对话的一部分</h1>
+            <blockquote data-md-start="3" data-md-end="3">把“这里不对”变成清晰、可定位的反馈。</blockquote>
+            <h2 data-md-start="5" data-md-end="5">目标</h2>
+            <p data-md-start="7" data-md-end="8">用户可以在作品上直接圈选，并将反馈集中整理到当前会话。Agent 收到的是位置、上下文和人的判断，而不是模糊的描述。</p>
+            <h2 data-md-start="10" data-md-end="10">交互原则</h2>
+            <ul><li data-md-start="12" data-md-end="12">选区必须回到原始文件。</li><li data-md-start="13" data-md-end="13">保存批注不等于立即发送。</li><li data-md-start="14" data-md-end="14">文件变化后应明确提示锚点失效。</li></ul>
+            <pre data-md-start="16" data-md-end="18"><code>type Annotation = { target: SourceAnchor; comment: string };</code></pre>
+            <h2 data-md-start="20" data-md-end="20">验收</h2>
+            <p data-md-start="22" data-md-end="22">在多文件之间来回批注，最终仍然只形成一份可检查的会话草稿。</p>
+          </div>
+        </article>
         <div class="html-view hidden" id="htmlView">
           <div class="html-stage" id="htmlStage">
             <div class="site-top" data-inspect="nav"><div class="site-logo" data-inspect="logo"><span>✳</span> northstar</div><div class="site-links"><span data-inspect="nav-link">产品</span><span data-inspect="nav-link">案例</span><span data-inspect="nav-link">关于</span></div><button type="button" class="site-contact" data-inspect="contact">联系我们 ↗</button></div>
             <div class="site-hero"><div class="site-hero-copy"><span class="site-kicker" data-inspect="eyebrow">DESIGN THAT MOVES YOU FORWARD</span><h2 data-inspect="heading">把下一步，<br><em>做得更好。</em></h2><p data-inspect="paragraph">从战略到交付，让每一个数字体验都更清晰、更动人。</p><button type="button" class="site-cta" data-inspect="cta" id="demoSiteCta">探索我们的工作 <span>↗</span></button><div class="site-proof" data-inspect="proof"><div class="proof-avatars">A<span>B</span><span>C</span></div><small>被 120+ 创新团队信赖</small></div></div><div class="site-visual" data-inspect="visual"><div class="visual-orbit orbit-one"></div><div class="visual-orbit orbit-two"></div><div class="visual-disc"><div class="disc-core">N<span>✳</span></div></div><div class="visual-label">MAKE IT MATTER <span>↗</span></div></div></div>
             <div class="site-stats"><div data-inspect="stat"><strong>12<span>+</span></strong><small>年设计经验</small></div><div data-inspect="stat"><strong>120<span>+</span></strong><small>合作团队</small></div><div data-inspect="stat"><strong>28</strong><small>国际奖项</small></div></div>
             <div class="inspect-outline hidden" id="inspectOutline"><span id="inspectLabel">div</span></div>
-          </div><div class="canvas-hint" id="htmlHint">浏览模式：页面按钮可正常点击。开启“检查元素”后点击元素选取。</div>
+          </div>
         </div>
-        <div class="image-view hidden" id="imageView"><div class="image-stage"><div class="image-frame" id="imageFrame"><img id="sampleImage" src="./sample-dashboard.png" alt="Northstar 数据看板示例截图" draggable="false"><div class="image-overlay" id="imageOverlay" aria-label="拖动以框选图片区域"><div class="image-rect hidden" id="imageRect"><span class="rect-size" id="rectSize">0 × 0</span><i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i></div></div></div></div><div class="canvas-hint">在图片内容上拖出矩形；锚点记录原图像素坐标。</div></div>
+        <div class="image-view hidden" id="imageView"><div class="image-stage"><div class="image-frame" id="imageFrame"><img id="sampleImage" alt="当前图片原图" draggable="false"><div class="image-overlay" id="imageOverlay"><div class="image-rect hidden" id="imageRect"><span id="rectLabel">#1</span></div></div></div></div></div>
       </div>
-      <div class="selection-bar" id="selectionBar"><div class="selection-icon">⌖</div><div><strong id="selectionTitle">等待选取内容</strong><small id="selectionDetail">点击原文行</small></div><button type="button" class="text-button" id="clearSelectionButton">取消</button><button type="button" class="primary-button" id="annotateButton">添加批注</button></div>
+      <section class="compose-sheet hidden" id="composeSheet" aria-label="选区批注">
+        <div class="compose-head"><strong id="composeTarget">已选中内容</strong><div><button type="button" class="line-adjust hidden" id="lineAdjustButton">调整行</button><button type="button" id="composeCloseButton" aria-label="取消这条批注">×</button></div></div>
+        <div class="line-choices hidden" id="lineChoices" aria-label="选择源文件行范围"></div>
+        <textarea id="commentInput" rows="3" maxlength="1000" placeholder="这里需要怎样调整？"></textarea>
+        <div class="compose-foot"><span id="commentCount">0 / 1000</span><button type="button" id="saveCommentButton">加入当前会话草稿</button></div>
+      </section>
     </main>
-    <aside class="draft-panel" aria-label="当前会话批注草稿"><div class="draft-panel-top"><div><small>当前会话 · 一份草稿</small><h2>预览批注 <span id="draftCount">0</span></h2></div><button type="button" class="panel-more" id="draftInfoButton" title="查看原型操作说明">···</button></div><div class="session-picker"><div class="session-avatar" id="sessionAvatar">P</div><div><small>草稿归属</small><select id="sessionSelect" aria-label="选择当前会话"><option value="product">产品体验讨论</option><option value="landing">官网视觉迭代</option><option value="mobile">移动端走查</option></select></div><span class="session-live"></span></div><div class="draft-scroll"><div class="draft-intro"><span class="intro-icon">✦</span><div><strong>Markdown、HTML 和图片汇入同一张卡片</strong><p>保存批注后留在当前会话；检查消息后才发送。</p></div></div><div class="draft-items" id="draftItems"></div></div><div class="draft-compose" id="draftCompose"><div class="compose-head"><span>给选区添加批注</span><button type="button" class="close-compose" id="closeCompose" aria-label="关闭批注输入">×</button></div><div class="compose-target" id="composeTarget">尚未选择位置</div><textarea id="commentInput" placeholder="写下要修改或讨论的内容…" rows="3" maxlength="1000"></textarea><div class="compose-actions"><span id="commentCounter">0 / 1000</span><button type="button" class="primary-button" id="saveCommentButton">加入草稿</button></div></div><div class="draft-footer"><div><strong id="draftFooterCount">0 条批注</strong><small>仅演示单条消息预览</small></div><button type="button" class="send-button" id="sendButton">检查消息 ↗</button></div></aside>
+    <aside class="draft-panel" id="draftPanel" aria-label="当前会话草稿">
+      <header><div><small>当前会话 · 一份草稿</small><h2>预览批注</h2></div><button type="button" id="draftCloseButton" aria-label="关闭草稿">×</button></header>
+      <div class="session-row"><span>归属</span><select id="sessionSelect" aria-label="选择当前会话"><option value="product">产品体验讨论</option><option value="landing">官网视觉迭代</option></select></div>
+      <div class="draft-scroll"><p class="draft-intro">图片按文件分组：每组显示原图、编号区域和对应批注。Markdown 与 H5 也在这份草稿里。</p><div id="draftItems"></div></div>
+      <footer><span id="draftFooterCount">0 条批注</span><button type="button" id="sendButton">检查消息</button></footer>
+    </aside>
   </div>
-  <footer class="demo-footnote">静态交互原型：批注仅存浏览器本地；运行日志与“发送”是演示数据，实际能力需按提案接入。</footer>
+  <footer class="demo-footnote">静态原型：批注存于此浏览器；运行产物和发送仅演示交互，不写入真实 GeneHub 会话。</footer>
 </div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
-<div class="modal-backdrop hidden" id="modalBackdrop"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle"><div class="modal-icon">↗</div><h2 id="modalTitle">作为一条消息发送</h2><p id="modalDescription"></p><pre id="messagePreview"></pre><div class="modal-actions"><button type="button" class="subtle-button" id="cancelSendButton">继续编辑</button><button type="button" class="primary-button" id="confirmSendButton">模拟确认发送</button></div></div></div>
+<div class="modal-backdrop hidden" id="modalBackdrop"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle"><header><h2 id="modalTitle">作为一条消息发送</h2><button type="button" id="modalCloseButton" aria-label="关闭消息预览">×</button></header><p id="modalDescription"></p><pre id="messagePreview"></pre><footer><button type="button" id="confirmSendButton">模拟确认发送</button></footer></section></div>
 <script src="./app.js"></script>
 </body>
 </html>

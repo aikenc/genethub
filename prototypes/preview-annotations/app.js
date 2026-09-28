@@ -1,600 +1,567 @@
 function bootPreviewAnnotationPrototype() {
   "use strict";
 
-  const STORE_KEY = "genehub-preview-annotations-prototype-v1";
+  const STORE_KEY = "genehub-preview-annotations-prototype-v2";
   const files = {
-    markdown: { name: "experience.md", path: "docs/experience.md", icon: "MD", version: "a1f6c29b", label: "Markdown" },
-    html: { name: "landing.html", path: "site/landing.html", icon: "⌘", version: "e24a921d", label: "HTML" },
-    image: { name: "dashboard.png", path: "design/dashboard.png", icon: "▧", version: "f10c7e82", label: "Image" },
+    markdown: { kind: "markdown", name: "experience.md", path: "docs/experience.md", version: "a1f6c29b" },
+    html: { kind: "html", name: "landing.html", path: "site/landing.html", version: "e24a921d" },
+    dashboard: { kind: "image", name: "dashboard.png", path: "design/dashboard.png", version: "f10c7e82", src: "./sample-dashboard.png", width: 1200, height: 760 },
+    mobile: { kind: "image", name: "mobile.png", path: "design/mobile.png", version: "9c816e42", src: "./sample-mobile.png", width: 800, height: 560 },
   };
-  const sessions = {
-    product: { name: "产品体验讨论", avatar: "P" },
-    landing: { name: "官网视觉迭代", avatar: "L" },
-    mobile: { name: "移动端走查", avatar: "M" },
+  const sessions = { product: "产品体验讨论", landing: "官网视觉迭代" };
+  const sourceLineText = {
+    7: "用户可以在作品上直接圈选…", 8: "Agent 收到的是位置…",
+    16: "```ts", 17: "type Annotation = …", 18: "```",
   };
-  const markdownLines = [
-    "# 让预览成为对话的一部分",
-    "",
-    "> 把“这里不对”变成清晰、可定位的反馈。",
-    "",
-    "## 目标",
-    "",
-    "用户可以在作品上直接圈选，并将反馈集中整理到当前会话。",
-    "Agent 收到的是位置、上下文和人的判断，而不是模糊的描述。",
-    "",
-    "## 交互原则",
-    "",
-    "- 选区必须回到原始文件。",
-    "- 保存批注不等于立即发送。",
-    "- 文件变化后应明确提示锚点失效。",
-    "",
-    "```ts",
-    "type Annotation = { target: SourceAnchor; comment: string };",
-    "```",
-    "",
-    "## 验收",
-    "",
-    "在多文件之间来回批注，最终仍然只形成一份可检查的会话草稿。",
-  ];
   const $ = (id) => document.getElementById(id);
-  const els = {
-    previewFileIcon: $("previewFileIcon"), previewFileName: $("previewFileName"), previewFilePath: $("previewFilePath"),
-    versionPill: $("versionPill"), changeVersionButton: $("changeVersionButton"), modeAction: $("modeAction"),
-    markdownView: $("markdownView"), htmlView: $("htmlView"), imageView: $("imageView"),
-    lineList: $("lineList"), htmlStage: $("htmlStage"), inspectOutline: $("inspectOutline"), inspectLabel: $("inspectLabel"),
-    htmlHint: $("htmlHint"), imageFrame: $("imageFrame"), sampleImage: $("sampleImage"), imageOverlay: $("imageOverlay"), imageRect: $("imageRect"), rectSize: $("rectSize"),
-    selectionTitle: $("selectionTitle"), selectionDetail: $("selectionDetail"), annotateButton: $("annotateButton"),
-    draftCount: $("draftCount"), draftFooterCount: $("draftFooterCount"), draftItems: $("draftItems"),
-    sessionSelect: $("sessionSelect"), sessionAvatar: $("sessionAvatar"), draftCompose: $("draftCompose"),
-    composeTarget: $("composeTarget"), commentInput: $("commentInput"), commentCounter: $("commentCounter"),
-    saveCommentButton: $("saveCommentButton"), sendButton: $("sendButton"), toast: $("toast"),
-    modalBackdrop: $("modalBackdrop"), modalTitle: $("modalTitle"), modalDescription: $("modalDescription"),
-    messagePreview: $("messagePreview"), confirmSendButton: $("confirmSendButton"), cancelSendButton: $("cancelSendButton"),
+  const el = {
+    layout: $("demoLayout"), preview: $("previewCard"), name: $("previewFileName"), path: $("previewFilePath"),
+    modeButton: $("annotationToggle"), draftButton: $("draftToggle"), draftCount: $("draftCount"), draftPanel: $("draftPanel"),
+    runtimeToolbar: $("runtimeToolbar"), runtimeStatus: $("runtimeStatus"), runtimeLogCount: $("runtimeLogCount"),
+    runtimeFrameCount: $("runtimeFrameCount"), runtimeLogList: $("runtimeLogList"), runtimeLogPanel: $("runtimeLogPanel"),
+    modeHint: $("modeHint"), markdownView: $("markdownView"), htmlView: $("htmlView"), htmlStage: $("htmlStage"),
+    inspectOutline: $("inspectOutline"), inspectLabel: $("inspectLabel"), imageView: $("imageView"),
+    imageFrame: $("imageFrame"), sampleImage: $("sampleImage"), imageOverlay: $("imageOverlay"), imageRect: $("imageRect"),
+    rectLabel: $("rectLabel"), compose: $("composeSheet"), composeTarget: $("composeTarget"), commentInput: $("commentInput"),
+    commentCount: $("commentCount"), lineAdjust: $("lineAdjustButton"), lineChoices: $("lineChoices"),
+    saveButton: $("saveCommentButton"), draftItems: $("draftItems"),
+    draftFooterCount: $("draftFooterCount"), sessionSelect: $("sessionSelect"), sendButton: $("sendButton"),
+    toast: $("toast"), modal: $("modalBackdrop"), modalTitle: $("modalTitle"), modalDescription: $("modalDescription"),
+    messagePreview: $("messagePreview"),
   };
-  const versions = Object.fromEntries(Object.entries(files).map(([kind, file]) => [kind, file.version]));
-  let toastTimer = null;
-  let saved = load();
-  if (!saved) {
-    saved = {
+
+  function seeds() {
+    return {
       product: [
-        { id: "seed-1", kind: "markdown", file: files.markdown.path, version: files.markdown.version, target: { start: 7, end: 8 }, comment: "这里建议补充一个断线后继续批注的例子。" },
-        { id: "seed-2", kind: "html", file: files.html.path, version: files.html.version, target: { selector: "h2", label: "h2 · 主视觉标题" }, comment: "主标题的第二行在小屏幕上需要更多留白。" },
+        { id: "example-md", fileKey: "markdown", version: files.markdown.version, target: { kind: "markdown", start: 7, end: 8 }, comment: "这里加一个中断后继续批注的例子。" },
+        { id: "example-dashboard", fileKey: "dashboard", version: files.dashboard.version, target: { kind: "image", x: 170, y: 150, width: 490, height: 245, naturalWidth: 1200, naturalHeight: 760 }, markerNo: 1, comment: "这块指标的层级再拉开一些。" },
+        { id: "example-mobile", fileKey: "mobile", version: files.mobile.version, target: { kind: "image", x: 40, y: 55, width: 275, height: 260, naturalWidth: 800, naturalHeight: 560 }, markerNo: 1, comment: "手机首页标题和第一张卡片之间留白太多。" },
       ],
-      landing: [], mobile: [],
+      landing: [],
+      nextMarker: {
+        product: { "dashboard:f10c7e82": 2, "mobile:9c816e42": 2 },
+        landing: {},
+      },
     };
-    persist();
   }
-  for (const key of Object.keys(sessions)) if (!Array.isArray(saved[key])) saved[key] = [];
-
-  let currentFile = "markdown";
-  let currentSession = "product";
-  let selection = { kind: "markdown", start: 7, end: 8 };
-  let lineDrag = null;
-  let imageDrag = null;
-  let inspectMode = false;
-  let hoveredElement = null;
-  let editingId = null;
-  let modalMode = "send";
-  let mobileRendered = false;
-  let runtimeRecording = false;
-  let runtimeFrames = 0;
-  const runtimeEvents = [];
-
-  function logRuntime(kind, detail) {
-    const entry = { at: new Date().toLocaleTimeString("zh-CN", { hour12: false }), kind, detail };
-    runtimeEvents.push(entry);
-    if (runtimeEvents.length > 100) runtimeEvents.shift();
-    $("runtimeLogCount").textContent = String(runtimeEvents.length);
-    const row = document.createElement("li");
-    row.textContent = `${entry.at}  ${entry.kind}  ${entry.detail}`;
-    $("runtimeLogList").prepend(row);
-    while ($("runtimeLogList").children.length > 100) $("runtimeLogList").lastElementChild.remove();
-  }
-
   function load() {
     try {
-      const raw = localStorage.getItem(STORE_KEY);
-      const value = raw ? JSON.parse(raw) : null;
-      return value && typeof value === "object" ? value : null;
-    } catch { return null; }
+      const value = JSON.parse(localStorage.getItem(STORE_KEY) || "null");
+      return value && Array.isArray(value.product) && Array.isArray(value.landing) ? value : seeds();
+    } catch { return seeds(); }
   }
+  let saved = load();
+  if (!saved.nextMarker) saved.nextMarker = { product: {}, landing: {} };
+  for (const session of Object.keys(sessions)) {
+    if (!saved.nextMarker[session]) saved.nextMarker[session] = {};
+  }
+  let currentSession = "product";
+  let currentFile = "markdown";
+  let annotate = false;
+  let selection = null;
+  let mdRangeBase = null;
+  let editingId = null;
+  let imageDrag = null;
+  let recording = false;
+  let modalMode = "send";
+  let runtimeFrames = 0;
+  const runtimeEvents = [];
+  let toastTimer;
+
   function persist() {
     try { localStorage.setItem(STORE_KEY, JSON.stringify(saved)); }
-    catch { toast("本地存储不可用，本次批注只保留在页面中"); }
+    catch { notify("本地存储已满；本次编辑只保留在页面中"); }
   }
-  function id() {
-    return "note-" + (globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`);
-  }
-  function toast(message) {
-    els.toast.textContent = message;
-    els.toast.classList.add("show");
+  function notify(message) {
+    el.toast.textContent = message;
+    el.toast.classList.add("show");
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => els.toast.classList.remove("show"), 3600);
+    toastTimer = setTimeout(() => el.toast.classList.remove("show"), 2600);
   }
   function draft() { return saved[currentSession]; }
   function clone(value) { return JSON.parse(JSON.stringify(value)); }
-
-  function selectFile(kind) {
-    if (!files[kind]) return;
-    currentFile = kind;
+  function makeId() { return "note-" + (globalThis.crypto?.randomUUID?.() || String(Date.now()) + Math.random().toString(36).slice(2)); }
+  function node(tag, className, textValue) {
+    const item = document.createElement(tag);
+    if (className) item.className = className;
+    if (textValue !== undefined) item.textContent = textValue;
+    return item;
+  }
+  function action(label, handler, className) {
+    const item = node("button", className, label);
+    item.type = "button";
+    item.addEventListener("click", handler);
+    return item;
+  }
+  function currentNotes() { return draft().filter((item) => item.fileKey === currentFile); }
+  function nextImageNumber(fileKey) {
+    const key = fileKey + ":" + files[fileKey].version;
+    const existing = 1 + Math.max(0, ...draft().filter((item) => item.fileKey === fileKey).map((item) => Number(item.markerNo) || 0));
+    return Math.max(existing, saved.nextMarker[currentSession][key] || 1);
+  }
+  function logRuntime(kind, detail) {
+    const entry = new Date().toLocaleTimeString("zh-CN", { hour12: false }) + "  " + kind + "  " + detail;
+    runtimeEvents.push(entry);
+    if (runtimeEvents.length > 100) runtimeEvents.shift();
+    el.runtimeLogCount.textContent = String(runtimeEvents.length);
+    const row = node("li", "", entry);
+    el.runtimeLogList.prepend(row);
+    while (el.runtimeLogList.children.length > 100) el.runtimeLogList.lastElementChild.remove();
+  }
+  function closeCompose() {
+    el.compose.classList.add("hidden");
+    el.commentInput.value = "";
+    el.commentCount.textContent = "0 / 1000";
     selection = null;
+    mdRangeBase = null;
     editingId = null;
+    el.lineChoices.classList.add("hidden");
+    renderSelection();
+  }
+  function selectFile(key) {
+    if (!files[key]) return;
     closeCompose();
-    inspectMode = false;
-    hoveredElement = null;
-    mobileRendered = false;
-    els.markdownView.classList.toggle("hidden", kind !== "markdown");
-    els.htmlView.classList.toggle("hidden", kind !== "html");
-    els.imageView.classList.toggle("hidden", kind !== "image");
-    $("runtimeToolbar").classList.toggle("hidden", kind !== "html");
-    $("runtimeLogPanel").classList.add("hidden");
-    $("annotationModeHint").textContent = kind === "markdown" ? "Markdown · 按原文行选取" : kind === "html" ? "HTML · 检查页面元素" : "图片 · 框选原图区域";
-    if (kind === "html" && runtimeEvents.length === 0) logRuntime("log", "HTML 预览诊断已就绪");
-    els.htmlStage.classList.remove("inspect-mode");
-    els.inspectOutline.classList.add("hidden");
-    els.markdownView.classList.remove("show-render");
-    for (const button of document.querySelectorAll("[data-file]")) button.classList.toggle("active", button.dataset.file === kind);
-    for (const button of document.querySelectorAll("[data-tab]")) {
-      const active = button.dataset.tab === kind;
-      button.classList.toggle("active", active);
-      button.setAttribute("aria-selected", String(active));
+    currentFile = key;
+    const file = files[key];
+    el.name.textContent = file.name;
+    el.path.textContent = file.path;
+    el.markdownView.classList.toggle("hidden", file.kind !== "markdown");
+    el.htmlView.classList.toggle("hidden", file.kind !== "html");
+    el.imageView.classList.toggle("hidden", file.kind !== "image");
+    el.runtimeToolbar.classList.toggle("hidden", file.kind !== "html");
+    el.runtimeLogPanel.classList.add("hidden");
+    if (file.kind === "html" && runtimeEvents.length === 0) logRuntime("log", "HTML 预览诊断已就绪");
+    if (file.kind === "image") {
+      el.sampleImage.src = file.src;
+      el.sampleImage.alt = file.name + " 原图";
+      el.imageFrame.style.aspectRatio = String(file.width) + " / " + String(file.height);
     }
-    const file = files[kind];
-    els.previewFileIcon.textContent = file.icon;
-    els.previewFileIcon.className = "preview-file-icon " + kind;
-    els.previewFileName.textContent = file.name;
-    els.previewFilePath.textContent = file.path;
-    els.versionPill.textContent = `版本 ${versions[kind].slice(0, 4)}…`;
-    renderModeAction();
-    renderSelection();
-    renderImageRect();
+    document.querySelectorAll("[data-file]").forEach((button) => button.classList.toggle("active", button.dataset.file === key));
+    updateModeHint();
+    renderMarkers();
   }
-
-  function renderModeAction() {
-    els.modeAction.replaceChildren();
-    const button = document.createElement("button");
-    button.type = "button";
-    if (currentFile === "markdown") {
-      button.textContent = mobileRendered ? "↔ 原文行" : "↔ 阅读视图";
-      button.addEventListener("click", () => {
-        mobileRendered = !mobileRendered;
-        els.markdownView.classList.toggle("show-render", mobileRendered);
-        renderModeAction();
-      });
-    } else if (currentFile === "html") {
-      button.textContent = inspectMode ? "✓ 退出检查" : "⌖ 检查元素";
-      button.classList.toggle("active", inspectMode);
-      button.setAttribute("aria-pressed", String(inspectMode));
-      button.addEventListener("click", () => {
-        inspectMode = !inspectMode;
-        logRuntime("interaction", inspectMode ? "开启检查元素" : "退出检查元素");
-        els.htmlStage.classList.toggle("inspect-mode", inspectMode);
-        els.htmlHint.textContent = inspectMode ? "检查模式：悬停预览元素并点击选中；退出后可正常操作页面。" : "浏览模式：试试点击页面里的按钮，或开启“检查元素”。";
-        if (!inspectMode) els.inspectOutline.classList.add("hidden");
-        renderModeAction();
-        toast(inspectMode ? "检查模式已开启：点击页面元素以选取" : "已返回浏览模式");
-      });
-    } else {
-      button.textContent = "↺ 重新框选";
-      button.addEventListener("click", () => {
-        selection = null;
-        renderImageRect();
-        renderSelection();
-        toast("在图片上拖动以绘制新选区");
-      });
-    }
-    els.modeAction.append(button);
+  function updateModeHint() {
+    const kind = files[currentFile].kind;
+    el.modeHint.classList.toggle("hidden", !annotate);
+    el.modeHint.textContent = kind === "markdown"
+      ? "点渲染后的段落或列表项，直接写批注"
+      : kind === "html"
+        ? "点页面元素，直接写批注；退出后恢复页面操作"
+        : "轻点生成默认区域，或拖动框选；放手后直接写批注";
+    el.htmlStage.classList.toggle("inspect-mode", annotate && kind === "html");
+    el.imageOverlay.classList.toggle("drawing", annotate && kind === "image");
+    el.markdownView.classList.toggle("annotating", annotate && kind === "markdown");
   }
-
-  function renderLines() {
-    const fragment = document.createDocumentFragment();
-    markdownLines.forEach((line, index) => {
-      const number = index + 1;
-      const row = document.createElement("button");
-      row.type = "button";
-      row.className = "source-line";
-      row.dataset.line = String(number);
-      row.setAttribute("aria-label", `第 ${number} 行：${line || "空行"}`);
-      const gutter = document.createElement("span");
-      gutter.className = "line-number";
-      gutter.textContent = String(number).padStart(2, "0");
-      const content = document.createElement("span");
-      content.className = "line-text";
-      if (line.startsWith("#")) content.classList.add("heading");
-      if (line.startsWith("```")) content.classList.add("code");
-      if (line.startsWith(">")) content.classList.add("quote");
-      content.textContent = line || "\u00a0";
-      row.append(gutter, content);
-      fragment.append(row);
-    });
-    els.lineList.replaceChildren(fragment);
-    renderLineSelection();
+  function setAnnotate(next) {
+    annotate = next;
+    el.modeButton.textContent = annotate ? "完成批注" : "进入批注";
+    el.modeButton.classList.toggle("active", annotate);
+    el.modeButton.setAttribute("aria-pressed", String(annotate));
+    if (!annotate) closeCompose();
+    updateModeHint();
   }
-  function renderLineSelection() {
-    for (const row of els.lineList.querySelectorAll(".source-line")) {
-      const line = Number(row.dataset.line);
-      const selected = selection?.kind === "markdown" && line >= selection.start && line <= selection.end;
-      row.classList.toggle("selected", selected);
-      row.setAttribute("aria-pressed", String(selected));
-    }
+  function imageGeometry(target) {
+    return {
+      left: target.x / target.naturalWidth * 100 + "%",
+      top: target.y / target.naturalHeight * 100 + "%",
+      width: target.width / target.naturalWidth * 100 + "%",
+      height: target.height / target.naturalHeight * 100 + "%",
+    };
   }
-  function lineFromEvent(event) { return Number(event.target.closest("[data-line]")?.dataset.line || 0); }
-  els.lineList.addEventListener("pointerdown", (event) => {
-    if (currentFile !== "markdown") return;
-    const line = lineFromEvent(event);
-    if (!line) return;
-    event.preventDefault();
-    const anchor = event.shiftKey && selection?.kind === "markdown" ? selection.start : line;
-    lineDrag = { anchor };
-    selection = { kind: "markdown", start: Math.min(anchor, line), end: Math.max(anchor, line) };
-    renderSelection();
-  });
-  els.lineList.addEventListener("pointerover", (event) => {
-    if (!lineDrag) return;
-    const line = lineFromEvent(event);
-    if (!line) return;
-    selection = { kind: "markdown", start: Math.min(lineDrag.anchor, line), end: Math.max(lineDrag.anchor, line) };
-    renderSelection();
-  });
-  window.addEventListener("pointerup", () => { lineDrag = null; });
-  els.lineList.addEventListener("keydown", (event) => {
-    const line = Number(event.target.closest("[data-line]")?.dataset.line || 1);
-    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-    event.preventDefault();
-    const next = Math.max(1, Math.min(markdownLines.length, line + (event.key === "ArrowDown" ? 1 : -1)));
-    if (event.shiftKey && selection?.kind === "markdown") selection = { kind: "markdown", start: Math.min(selection.start, next), end: Math.max(selection.end, next) };
-    else selection = { kind: "markdown", start: next, end: next };
-    els.lineList.querySelector(`[data-line="${next}"]`)?.focus();
-    renderSelection();
-  });
-
-  function htmlTarget(event) { return event.target.closest("[data-inspect]"); }
-  function selectorFor(element) {
-    if (element.id && element.id !== "htmlStage") return `${element.tagName.toLowerCase()}#${element.id}`;
-    const tag = element.tagName.toLowerCase();
-    const name = element.dataset.inspect;
-    const siblings = [...element.parentElement.children].filter((node) => node.dataset?.inspect === name);
-    return siblings.length > 1 ? `${tag}[data-inspect="${name}"]:nth-of-type(${[...element.parentElement.children].indexOf(element) + 1})` : `${tag}[data-inspect="${name}"]`;
-  }
-  function labelFor(element) {
-    const text = element.textContent.replace(/\s+/g, " ").trim().slice(0, 35);
-    return `${element.tagName.toLowerCase()}${text ? " · " + text : ""}`;
-  }
-  function showOutline(element) {
-    if (!element || currentFile !== "html" || !inspectMode) { els.inspectOutline.classList.add("hidden"); return; }
-    const stage = els.htmlStage.getBoundingClientRect();
-    const box = element.getBoundingClientRect();
-    els.inspectOutline.style.left = `${box.left - stage.left}px`;
-    els.inspectOutline.style.top = `${box.top - stage.top}px`;
-    els.inspectOutline.style.width = `${box.width}px`;
-    els.inspectOutline.style.height = `${box.height}px`;
-    els.inspectLabel.textContent = element.tagName.toLowerCase();
-    els.inspectOutline.classList.remove("hidden");
-  }
-  els.htmlStage.addEventListener("pointermove", (event) => {
-    if (!inspectMode) return;
-    hoveredElement = htmlTarget(event);
-    showOutline(hoveredElement);
-  });
-  els.htmlStage.addEventListener("pointerleave", () => {
-    hoveredElement = null;
-    if (inspectMode) els.inspectOutline.classList.add("hidden");
-  });
-  els.htmlStage.addEventListener("click", (event) => {
-    logRuntime("interaction", `点击 ${event.target.tagName.toLowerCase()}`);
-    if (!inspectMode) return;
-    event.preventDefault();
-    event.stopPropagation();
-    const target = htmlTarget(event);
-    if (!target) return;
-    selection = { kind: "html", selector: selectorFor(target), label: labelFor(target) };
-    showOutline(target);
-    renderSelection();
-    toast(`已选中 ${target.tagName.toLowerCase()} 元素`);
-  }, true);
-  $("demoSiteCta").addEventListener("click", () => toast("示例页面按钮已点击。开启“检查元素”可选中它。"));
-  document.querySelector(".site-contact").addEventListener("click", () => toast("示例页面：联系我们"));
-
+  function applyGeometry(element, target) { Object.assign(element.style, imageGeometry(target)); }
   function imagePoint(event) {
-    const box = els.imageOverlay.getBoundingClientRect();
+    const box = el.imageOverlay.getBoundingClientRect();
     return {
       x: Math.max(0, Math.min(1, (event.clientX - box.left) / box.width)),
       y: Math.max(0, Math.min(1, (event.clientY - box.top) / box.height)),
     };
   }
-  function imageDimensions() {
-    return { width: els.sampleImage?.naturalWidth || 1200, height: els.sampleImage?.naturalHeight || 760 };
+  function targetFromPoints(first, last) {
+    const file = files[currentFile];
+    const x = Math.round(Math.min(first.x, last.x) * file.width);
+    const y = Math.round(Math.min(first.y, last.y) * file.height);
+    const right = Math.round(Math.max(first.x, last.x) * file.width);
+    const bottom = Math.round(Math.max(first.y, last.y) * file.height);
+    return { kind: "image", x, y, width: right - x, height: bottom - y, naturalWidth: file.width, naturalHeight: file.height };
   }
-  function imageSelection(start, end) {
-    const size = imageDimensions();
-    const x = Math.round(Math.min(start.x, end.x) * size.width);
-    const y = Math.round(Math.min(start.y, end.y) * size.height);
-    const right = Math.round(Math.max(start.x, end.x) * size.width);
-    const bottom = Math.round(Math.max(start.y, end.y) * size.height);
-    return { kind: "image", x, y, width: right - x, height: bottom - y, naturalWidth: size.width, naturalHeight: size.height };
+  function defaultImageTarget(point) {
+    const halfW = .12;
+    const halfH = .14;
+    const a = { x: Math.max(0, point.x - halfW), y: Math.max(0, point.y - halfH) };
+    const b = { x: Math.min(1, point.x + halfW), y: Math.min(1, point.y + halfH) };
+    return targetFromPoints(a, b);
   }
-  els.imageOverlay.addEventListener("pointerdown", (event) => {
-    if (currentFile !== "image") return;
+  function selectorFor(element) {
+    if (element.id && element.id !== "htmlStage") return element.tagName.toLowerCase() + "#" + element.id;
+    const name = element.dataset.inspect;
+    const siblings = [...element.parentElement.children].filter((other) => other.dataset?.inspect === name);
+    const tag = element.tagName.toLowerCase();
+    if (siblings.length < 2) return tag + '[data-inspect="' + name + '"]';
+    const sameTag = [...element.parentElement.children].filter((other) => other.tagName === element.tagName);
+    return tag + '[data-inspect="' + name + '"]:nth-of-type(' + (sameTag.indexOf(element) + 1) + ')';
+  }
+  function labelFor(element) {
+    const value = element.textContent.replace(/\s+/g, " ").trim().slice(0, 40);
+    return element.tagName.toLowerCase() + (value ? " · " + value : "");
+  }
+  function showOutline(element) {
+    if (!element || !annotate || files[currentFile].kind !== "html") {
+      el.inspectOutline.classList.add("hidden");
+      return;
+    }
+    const stage = el.htmlStage.getBoundingClientRect();
+    const box = element.getBoundingClientRect();
+    Object.assign(el.inspectOutline.style, {
+      left: box.left - stage.left + "px", top: box.top - stage.top + "px",
+      width: box.width + "px", height: box.height + "px",
+    });
+    el.inspectLabel.textContent = element.tagName.toLowerCase();
+    el.inspectOutline.classList.remove("hidden");
+  }
+  function anchorText(item) {
+    const target = item.target;
+    if (target.kind === "markdown") return "第 " + target.start + (target.start === target.end ? "" : "–" + target.end) + " 行";
+    if (target.kind === "html") return target.label;
+    return "#" + item.markerNo + " 标记区域";
+  }
+  function mdBlockFor(line) {
+    return [...el.markdownView.querySelectorAll("[data-md-start]")].find((block) =>
+      Number(block.dataset.mdStart) <= line && Number(block.dataset.mdEnd) >= line);
+  }
+  function updateLineChoices() {
+    const multiLine = selection?.kind === "markdown" && mdRangeBase && mdRangeBase.end > mdRangeBase.start;
+    el.lineAdjust.classList.toggle("hidden", !multiLine);
+    el.lineChoices.replaceChildren();
+    if (!multiLine) { el.lineChoices.classList.add("hidden"); return; }
+    const choices = [{
+      start: mdRangeBase.start, end: mdRangeBase.end,
+      label: "整段 · 第 " + mdRangeBase.start + "–" + mdRangeBase.end + " 行",
+    }];
+    for (let line = mdRangeBase.start; line <= mdRangeBase.end; line += 1) {
+      choices.push({ start: line, end: line, label: "第 " + line + " 行 · " + (sourceLineText[line] || "源文件这一行") });
+    }
+    for (const choice of choices) {
+      const choiceButton = action(choice.label, () => {
+        selection.start = choice.start;
+        selection.end = choice.end;
+        el.composeTarget.textContent = anchorText({ target: selection });
+        renderSelection();
+        el.lineChoices.classList.add("hidden");
+      });
+      el.lineChoices.append(choiceButton);
+    }
+  }
+  function openSelection(target, markerNo) {
+    selection = clone(target);
+    mdRangeBase = target.kind === "markdown" ? { start: target.start, end: target.end } : null;
+    editingId = null;
+    if (target.kind === "image") selection.markerNo = markerNo || nextImageNumber(currentFile);
+    el.composeTarget.textContent = target.kind === "image" ? "区域 #" + selection.markerNo + " · " + files[currentFile].name : anchorText({ target });
+    el.compose.classList.remove("hidden");
+    el.commentInput.value = "";
+    el.commentCount.textContent = "0 / 1000";
+    updateLineChoices();
+    renderSelection();
+    el.commentInput.focus({ preventScroll: true });
+  }
+  function renderSelection() {
+    el.markdownView.querySelectorAll(".selected-target").forEach((item) => item.classList.remove("selected-target"));
+    if (selection?.kind === "markdown" && files[currentFile].kind === "markdown") {
+      mdBlockFor(selection.start)?.classList.add("selected-target");
+    }
+    if (selection?.kind !== "html") el.inspectOutline.classList.add("hidden");
+    const showRect = selection?.kind === "image" && files[currentFile].kind === "image";
+    el.imageRect.classList.toggle("hidden", !showRect);
+    if (showRect) {
+      applyGeometry(el.imageRect, selection);
+      el.rectLabel.textContent = "#" + selection.markerNo;
+    }
+  }
+  function renderMarkers() {
+    document.querySelectorAll(".note-pin,.html-marker,.saved-image-region").forEach((item) => item.remove());
+    for (const item of currentNotes()) {
+      if (item.target.kind === "markdown" && files[currentFile].kind === "markdown") {
+        const block = mdBlockFor(item.target.start);
+        if (!block) continue;
+        const pin = action("●", () => showDraft(item.id), "note-pin");
+        pin.setAttribute("aria-label", "查看这条 Markdown 批注");
+        block.append(pin);
+      } else if (item.target.kind === "html" && files[currentFile].kind === "html") {
+        let target = null;
+        try { target = el.htmlStage.querySelector(item.target.selector); } catch { /* changed DOM */ }
+        if (!target) continue;
+        const stage = el.htmlStage.getBoundingClientRect();
+        const box = target.getBoundingClientRect();
+        const pin = action("●", (event) => { event.stopPropagation(); showDraft(item.id); }, "html-marker");
+        pin.style.left = Math.max(0, box.right - stage.left - 10) + "px";
+        pin.style.top = Math.max(0, box.top - stage.top - 10) + "px";
+        pin.setAttribute("aria-label", "查看这条 HTML 批注");
+        el.htmlStage.append(pin);
+      } else if (item.target.kind === "image" && files[currentFile].kind === "image") {
+        const region = action("#" + item.markerNo, (event) => { event.stopPropagation(); showDraft(item.id); }, "saved-image-region");
+        applyGeometry(region, item.target);
+        region.dataset.number = "#" + item.markerNo;
+        region.setAttribute("aria-label", "查看区域 #" + item.markerNo + " 的批注");
+        el.imageOverlay.append(region);
+      }
+    }
+    renderSelection();
+  }
+  function saveComment() {
+    const comment = el.commentInput.value.trim();
+    if (!selection || !comment) { notify("请填写批注内容"); return; }
+    const file = files[currentFile];
+    const items = draft();
+    const markerNo = selection.kind === "image" ? selection.markerNo : undefined;
+    const target = clone(selection);
+    delete target.markerNo;
+    const candidate = {
+      id: editingId || makeId(), fileKey: currentFile, version: file.version,
+      target, ...(markerNo ? { markerNo } : {}), comment,
+    };
+    if (editingId) {
+      const index = items.findIndex((item) => item.id === editingId);
+      if (index < 0) { notify("这条批注已移除"); closeCompose(); return; }
+      items[index] = candidate;
+    } else {
+      items.push(candidate);
+      if (markerNo) saved.nextMarker[currentSession][currentFile + ":" + file.version] = markerNo + 1;
+    }
+    persist();
+    closeCompose();
+    renderMarkers();
+    renderDraft();
+    notify("已加入当前会话的同一份草稿");
+  }
+  function showDraft(focusId) {
+    el.layout.classList.add("draft-open");
+    el.draftButton.setAttribute("aria-expanded", "true");
+    renderDraft();
+    if (focusId) {
+      const card = $("draft-" + focusId);
+      card?.classList.add("focused");
+      card?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+  }
+  function hideDraft() {
+    el.layout.classList.remove("draft-open");
+    el.draftButton.setAttribute("aria-expanded", "false");
+  }
+  function imageGroup(file, items) {
+    const panel = node("div", "draft-image-proof");
+    const image = node("img");
+    image.src = file.src;
+    image.alt = file.name + " 原图和编号区域";
+    panel.append(image);
+    for (const item of items) {
+      const region = node("span", "draft-proof-region", "#" + item.markerNo);
+      applyGeometry(region, item.target);
+      region.dataset.number = "#" + item.markerNo;
+      panel.append(region);
+    }
+    return panel;
+  }
+  function edit(item) {
+    hideDraft();
+    selectFile(item.fileKey);
+    setAnnotate(true);
+    selection = clone(item.target);
+    const block = item.target.kind === "markdown" ? mdBlockFor(item.target.start) : null;
+    mdRangeBase = block ? { start: Number(block.dataset.mdStart), end: Number(block.dataset.mdEnd) } : null;
+    if (item.markerNo) selection.markerNo = item.markerNo;
+    editingId = item.id;
+    el.composeTarget.textContent = anchorText(item) + " · " + files[item.fileKey].name;
+    el.compose.classList.remove("hidden");
+    el.commentInput.value = item.comment;
+    el.commentCount.textContent = String(item.comment.length) + " / 1000";
+    updateLineChoices();
+    renderSelection();
+    el.commentInput.focus({ preventScroll: true });
+  }
+  function remove(item) {
+    saved[currentSession] = draft().filter((other) => other.id !== item.id);
+    persist(); renderDraft(); renderMarkers(); notify("已移除批注");
+  }
+  function renderDraft() {
+    const items = draft();
+    el.draftCount.textContent = String(items.length);
+    el.draftFooterCount.textContent = items.length + " 条批注";
+    el.sendButton.disabled = items.length === 0;
+    el.draftItems.replaceChildren();
+    if (!items.length) {
+      el.draftItems.append(node("p", "empty-draft", "还没有批注。进入批注模式后，直接点内容即可添加。"));
+      return;
+    }
+    const groups = new Map();
+    for (const item of items) {
+      const key = item.fileKey + ":" + item.version;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(item);
+    }
+    for (const groupItems of groups.values()) {
+      const first = groupItems[0];
+      const file = files[first.fileKey];
+      if (!file) continue;
+      const group = node("section", "draft-group");
+      const header = node("div", "draft-group-head");
+      header.append(node("strong", "", file.name), node("small", "", file.path + " · " + first.version.slice(0, 6)));
+      group.append(header);
+      if (file.kind === "image") group.append(imageGroup(file, groupItems));
+      for (const item of groupItems) {
+        const card = node("article", "draft-item");
+        card.id = "draft-" + item.id;
+        const lead = node("div", "draft-item-lead");
+        lead.append(node("b", "", anchorText(item)), action("↗", () => {
+          hideDraft(); selectFile(item.fileKey); setAnnotate(false);
+          if (item.target.kind === "markdown") mdBlockFor(item.target.start)?.scrollIntoView({ block: "center" });
+          if (item.target.kind === "html") {
+            let target = null; try { target = el.htmlStage.querySelector(item.target.selector); } catch { /* stale */ }
+            target?.scrollIntoView({ block: "center" });
+          }
+        }, "jump-button"));
+        card.append(lead, node("p", "", item.comment));
+        const foot = node("div", "draft-item-actions");
+        foot.append(action("编辑", () => edit(item)), action("移除", () => remove(item)));
+        card.append(foot);
+        group.append(card);
+      }
+      el.draftItems.append(group);
+    }
+  }
+  function messageText() {
+    const groups = new Map();
+    for (const item of draft()) {
+      const key = item.fileKey + ":" + item.version;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(item);
+    }
+    const lines = ["请按以下预览批注继续处理（" + sessions[currentSession] + "）：", ""];
+    for (const items of groups.values()) {
+      const file = files[items[0].fileKey];
+      lines.push("【" + file.path + " · 版本 " + items[0].version + "】");
+      if (file.kind === "image") lines.push("原图快照 + 带编号的标注图 + 以下编号批注（原型仅展示，正式版作为会话附件保存）：");
+      for (const item of items) lines.push("- " + anchorText(item) + "：" + item.comment);
+      lines.push("");
+    }
+    return lines.join("\n");
+  }
+  function showMessage() {
+    if (!draft().length) return;
+    modalMode = "send";
+    $("confirmSendButton").classList.remove("hidden");
+    el.modalTitle.textContent = "检查一条消息";
+    el.modalDescription.textContent = "当前会话的 " + draft().length + " 条批注汇成一条消息；图片按文件分别附原图和编号标注图。";
+    el.messagePreview.textContent = messageText();
+    el.modal.classList.remove("hidden");
+  }
+
+  document.querySelectorAll("[data-file]").forEach((button) => button.addEventListener("click", () => selectFile(button.dataset.file)));
+  document.querySelectorAll("[data-shell-action]").forEach((button) => button.addEventListener("click", () => notify("这里是外壳示意；点击左侧文件可继续体验")));
+  el.modeButton.addEventListener("click", () => setAnnotate(!annotate));
+  el.draftButton.addEventListener("click", () => el.layout.classList.contains("draft-open") ? hideDraft() : showDraft());
+  $("draftCloseButton").addEventListener("click", hideDraft);
+  el.markdownView.addEventListener("click", (event) => {
+    if (event.target.closest(".note-pin")) return;
+    if (!annotate || files[currentFile].kind !== "markdown") return;
+    const block = event.target.closest("[data-md-start]");
+    if (!block) return;
+    openSelection({ kind: "markdown", start: Number(block.dataset.mdStart), end: Number(block.dataset.mdEnd) });
+  });
+  el.htmlStage.addEventListener("pointermove", (event) => {
+    if (!annotate || files[currentFile].kind !== "html") return;
+    showOutline(event.target.closest("[data-inspect]"));
+  });
+  el.htmlStage.addEventListener("pointerleave", () => el.inspectOutline.classList.add("hidden"));
+  el.htmlStage.addEventListener("click", (event) => {
+    if (event.target.closest(".html-marker")) return;
+    logRuntime("interaction", "点击 " + event.target.tagName.toLowerCase());
+    if (!annotate || files[currentFile].kind !== "html") return;
+    const target = event.target.closest("[data-inspect]");
+    if (!target) return;
+    event.preventDefault(); event.stopPropagation();
+    const descriptor = { kind: "html", selector: selectorFor(target), label: labelFor(target) };
+    showOutline(target);
+    openSelection(descriptor);
+  }, true);
+  $("demoSiteCta").addEventListener("click", () => notify("示例站点按钮已点击"));
+  el.imageOverlay.addEventListener("pointerdown", (event) => {
+    if (event.target.closest(".saved-image-region")) return;
+    if (!annotate || files[currentFile].kind !== "image") return;
     event.preventDefault();
-    els.imageOverlay.setPointerCapture(event.pointerId);
-    const point = imagePoint(event);
-    imageDrag = { start: point, pointerId: event.pointerId };
-    selection = imageSelection(point, point);
-    renderImageRect();
+    el.imageOverlay.setPointerCapture(event.pointerId);
+    imageDrag = { pointerId: event.pointerId, origin: imagePoint(event), x: event.clientX, y: event.clientY };
+    selection = targetFromPoints(imageDrag.origin, imageDrag.origin);
+    selection.markerNo = nextImageNumber(currentFile);
     renderSelection();
   });
-  els.imageOverlay.addEventListener("pointermove", (event) => {
+  el.imageOverlay.addEventListener("pointermove", (event) => {
     if (!imageDrag || imageDrag.pointerId !== event.pointerId) return;
-    selection = imageSelection(imageDrag.start, imagePoint(event));
-    renderImageRect();
+    selection = targetFromPoints(imageDrag.origin, imagePoint(event));
+    selection.markerNo = nextImageNumber(currentFile);
     renderSelection();
   });
   function finishImageDrag(event) {
     if (!imageDrag || imageDrag.pointerId !== event.pointerId) return;
-    selection = imageSelection(imageDrag.start, imagePoint(event));
+    const moved = Math.hypot(event.clientX - imageDrag.x, event.clientY - imageDrag.y);
+    const target = moved < 5 ? defaultImageTarget(imageDrag.origin) : targetFromPoints(imageDrag.origin, imagePoint(event));
     imageDrag = null;
-    if (selection.width < 8 || selection.height < 8) { selection = null; toast("请拖出稍大一些的矩形区域"); }
-    renderImageRect();
-    renderSelection();
+    if (target.width < 8 || target.height < 8) { closeCompose(); notify("区域太小，请重试"); return; }
+    openSelection(target);
   }
-  els.imageOverlay.addEventListener("pointerup", finishImageDrag);
-  els.imageOverlay.addEventListener("pointercancel", finishImageDrag);
-  function renderImageRect() {
-    const shown = currentFile === "image" && selection?.kind === "image" && selection.width > 0 && selection.height > 0;
-    els.imageRect.classList.toggle("hidden", !shown);
-    if (!shown) return;
-    const { x, y, width, height, naturalWidth, naturalHeight } = selection;
-    els.imageRect.style.left = `${x / naturalWidth * 100}%`;
-    els.imageRect.style.top = `${y / naturalHeight * 100}%`;
-    els.imageRect.style.width = `${width / naturalWidth * 100}%`;
-    els.imageRect.style.height = `${height / naturalHeight * 100}%`;
-    els.rectSize.textContent = `${width} × ${height}`;
-  }
-
-  function anchorText(item) {
-    const target = item.target || item;
-    if (item.kind === "markdown") return `第 ${target.start}${target.start === target.end ? "" : "–" + target.end} 行`;
-    if (item.kind === "html") return target.label || target.selector;
-    return `(${target.x}, ${target.y}) · ${target.width} × ${target.height} px`;
-  }
-  function renderSelection() {
-    renderLineSelection();
-    renderImageRect();
-    if (!selection) {
-      els.selectionTitle.textContent = "等待选取内容";
-      els.selectionDetail.textContent = currentFile === "markdown" ? "点击左侧原文行" : currentFile === "html" ? "开启检查元素，然后点击页面" : "在图片上拖出矩形区域";
-      els.annotateButton.disabled = true;
-      return;
-    }
-    els.selectionTitle.textContent = selection.kind === "markdown" ? "已选中 Markdown 原文" : selection.kind === "html" ? "已选中 HTML 元素" : "已框选图片区域";
-    els.selectionDetail.textContent = `${anchorText({ kind: selection.kind, target: selection })} · ${files[currentFile].path}`;
-    els.annotateButton.disabled = false;
-    if (els.draftCompose.classList.contains("open") && !editingId) els.composeTarget.textContent = els.selectionDetail.textContent;
-  }
-
-  function openCompose() {
-    if (!selection) { toast("请先在预览中选取位置"); return; }
-    els.draftCompose.classList.add("open");
-    els.composeTarget.textContent = els.selectionDetail.textContent;
-    els.saveCommentButton.textContent = editingId ? "保存修改" : "加入草稿";
-    els.commentInput.focus();
-  }
-  function closeCompose() {
-    els.draftCompose.classList.remove("open");
-    els.commentInput.value = "";
-    editingId = null;
-    renderCounter();
-  }
-  function renderCounter() { els.commentCounter.textContent = `${els.commentInput.value.length} / 1000`; }
-  function saveComment() {
-    const comment = els.commentInput.value.trim();
-    if (!selection || !comment) { toast("请先选中位置并写下批注"); return; }
-    const items = draft();
-    const candidate = { id: editingId || id(), kind: currentFile, file: files[currentFile].path, version: versions[currentFile], target: clone(selection), comment };
-    if (editingId) {
-      const index = items.findIndex((item) => item.id === editingId);
-      if (index < 0) { toast("这条批注已被移除"); closeCompose(); return; }
-      items[index] = candidate;
-    } else items.push(candidate);
-    persist();
-    toast(editingId ? "批注已更新" : `已加入“${sessions[currentSession].name}”的同一份草稿`);
-    closeCompose();
-    renderDraft();
-  }
-
-  function button(label, title, callback, className) {
-    const item = document.createElement("button");
-    item.type = "button";
-    item.textContent = label;
-    item.title = title;
-    if (className) item.className = className;
-    item.addEventListener("click", callback);
-    return item;
-  }
-  function renderDraft() {
-    const items = draft();
-    const count = items.length;
-    els.draftCount.textContent = String(count);
-    els.draftFooterCount.textContent = `${count} 条批注`;
-    els.sendButton.disabled = count === 0;
-    els.draftItems.replaceChildren();
-    if (count === 0) {
-      const empty = document.createElement("div");
-      empty.className = "empty-draft";
-      const title = document.createElement("strong");
-      title.textContent = "还没有批注";
-      const text = document.createElement("p");
-      text.textContent = "打开任意预览，选中行、元素或图片区域，写下第一条想法。";
-      empty.append(title, text);
-      els.draftItems.append(empty);
-      return;
-    }
-    items.forEach((item, index) => {
-      const card = document.createElement("article");
-      card.className = "draft-item";
-      const stale = item.version !== versions[item.kind];
-      card.classList.toggle("stale", stale);
-      const top = document.createElement("div");
-      top.className = "draft-item-top";
-      const number = document.createElement("span");
-      number.className = "item-number";
-      number.textContent = String(index + 1);
-      const kind = document.createElement("span");
-      kind.className = "item-kind";
-      kind.textContent = files[item.kind]?.label || item.kind;
-      const path = document.createElement("span");
-      path.className = "item-path";
-      path.textContent = item.file;
-      top.append(number, kind, path);
-      const comment = document.createElement("p");
-      comment.textContent = item.comment;
-      const anchor = document.createElement("span");
-      anchor.className = "item-anchor";
-      anchor.textContent = stale ? `⚠ 文件已变化 · ${anchorText(item)}` : anchorText(item);
-      const actions = document.createElement("div");
-      actions.className = "item-actions";
-      actions.append(
-        button("↗ 跳转", "回到预览位置", () => locate(item)),
-        button("编辑", "修改这条批注", () => edit(item)),
-        button("↑", "向上移动", () => move(index, -1)),
-        button("↓", "向下移动", () => move(index, 1)),
-        button("移除", "从草稿中移除", () => { items.splice(index, 1); persist(); renderDraft(); toast("批注已移除"); }, "danger"),
-      );
-      card.append(top, comment, anchor, actions);
-      els.draftItems.append(card);
-    });
-  }
-  function move(index, delta) {
-    const items = draft();
-    const other = index + delta;
-    if (other < 0 || other >= items.length) return;
-    [items[index], items[other]] = [items[other], items[index]];
-    persist();
-    renderDraft();
-  }
-  function fileKindFor(item) { return files[item.kind] ? item.kind : Object.keys(files).find((key) => files[key].path === item.file); }
-  function locate(item) {
-    const kind = fileKindFor(item);
-    if (!kind) return;
-    selectFile(kind);
-    selection = clone({ kind, ...item.target });
-    renderSelection();
-    if (kind === "markdown") els.lineList.querySelector(`[data-line="${selection.start}"]`)?.scrollIntoView({ block: "center" });
-    if (kind === "html") {
-      inspectMode = true;
-      els.htmlStage.classList.add("inspect-mode");
-      renderModeAction();
-      let element = null;
-      try { element = els.htmlStage.querySelector(selection.selector); } catch { /* stale selector */ }
-      if (element) showOutline(element);
-    }
-    document.querySelector(".preview-card")?.scrollIntoView({ behavior: "smooth", block: "start" });
-    if (item.version !== versions[kind]) toast("源文件版本已变化，请重新核对选区");
-    else toast("已跳转到批注位置");
-  }
-  function edit(item) {
-    locate(item);
-    editingId = item.id;
-    els.commentInput.value = item.comment;
-    renderCounter();
-    openCompose();
-  }
-  function switchSession(id) {
-    if (!sessions[id]) return;
-    currentSession = id;
-    els.sessionSelect.value = id;
-    els.sessionAvatar.textContent = sessions[id].avatar;
-    closeCompose();
-    renderDraft();
-    toast(`当前会话：${sessions[id].name}`);
-  }
-  function messageText() {
-    return `请根据以下预览批注继续处理（${sessions[currentSession].name}）：\n\n` + draft().map((item, index) =>
-      `${index + 1}. ${item.file} · ${anchorText(item)}${item.version !== versions[item.kind] ? " [源文件已变化，请核对]" : ""}\n   ${item.comment}`
-    ).join("\n\n");
-  }
-  function showModal(mode) {
-    modalMode = mode;
-    if (mode === "send") {
-      if (!draft().length) return;
-      els.modalTitle.textContent = "作为一条消息发送";
-      els.modalDescription.textContent = `“${sessions[currentSession].name}”中的 ${draft().length} 条批注会合并为一条消息。`;
-      els.messagePreview.textContent = messageText();
-      els.confirmSendButton.classList.remove("hidden");
-      els.cancelSendButton.textContent = "继续编辑";
-    } else {
-      els.modalTitle.textContent = "这个原型可以这样玩";
-      els.modalDescription.textContent = "用三个文件试一遍完整的选取、批注和汇总流程。";
-      els.messagePreview.textContent = "01  在 Markdown 中点击或拖动原文行。\n02  在 HTML 中开启“检查元素”，再点页面元素。\n03  在图片上拖出一个矩形。\n04  给每个选区写批注，观察右侧同一份会话草稿。\n05  切换会话、模拟文件更新，最后检查发送预览。";
-      els.confirmSendButton.classList.add("hidden");
-      els.cancelSendButton.textContent = "明白了";
-    }
-    els.modalBackdrop.classList.remove("hidden");
-  }
-  function hideModal() { els.modalBackdrop.classList.add("hidden"); }
-
-  document.querySelectorAll("[data-file]").forEach((item) => item.addEventListener("click", () => selectFile(item.dataset.file)));
-  document.querySelectorAll("[data-tab]").forEach((item) => item.addEventListener("click", () => selectFile(item.dataset.tab)));
-  els.sessionSelect.addEventListener("change", () => switchSession(els.sessionSelect.value));
-  $("clearSelectionButton").addEventListener("click", () => { selection = null; renderSelection(); closeCompose(); els.inspectOutline.classList.add("hidden"); });
-  els.annotateButton.addEventListener("click", openCompose);
-  $("closeCompose").addEventListener("click", closeCompose);
-  els.commentInput.addEventListener("input", renderCounter);
-  els.saveCommentButton.addEventListener("click", saveComment);
-  els.sendButton.addEventListener("click", () => showModal("send"));
-  $("helpButton").addEventListener("click", () => showModal("help"));
-  $("draftInfoButton").addEventListener("click", () => showModal("help"));
-  els.cancelSendButton.addEventListener("click", hideModal);
-  els.confirmSendButton.addEventListener("click", () => {
+  el.imageOverlay.addEventListener("pointerup", finishImageDrag);
+  el.imageOverlay.addEventListener("pointercancel", () => { imageDrag = null; closeCompose(); });
+  $("composeCloseButton").addEventListener("click", closeCompose);
+  el.lineAdjust.addEventListener("click", () => el.lineChoices.classList.toggle("hidden"));
+  el.commentInput.addEventListener("input", () => { el.commentCount.textContent = el.commentInput.value.length + " / 1000"; });
+  el.saveButton.addEventListener("click", saveComment);
+  el.sessionSelect.addEventListener("change", () => {
+    currentSession = el.sessionSelect.value;
+    closeCompose(); renderDraft(); renderMarkers();
+    notify("已切换至 " + sessions[currentSession] + " 的草稿");
+  });
+  el.sendButton.addEventListener("click", showMessage);
+  $("modalCloseButton").addEventListener("click", () => el.modal.classList.add("hidden"));
+  el.modal.addEventListener("click", (event) => { if (event.target === el.modal) el.modal.classList.add("hidden"); });
+  $("confirmSendButton").addEventListener("click", () => {
     if (modalMode !== "send") return;
     const count = draft().length;
-    saved[currentSession] = [];
-    persist();
-    renderDraft();
-    hideModal();
-    toast(`演示完成：${count} 条批注已合并为一条模拟消息`);
+    saved[currentSession] = []; persist(); renderDraft(); renderMarkers();
+    el.modal.classList.add("hidden");
+    notify("演示完成：" + count + " 条批注合为一条模拟消息");
   });
-  els.modalBackdrop.addEventListener("click", (event) => { if (event.target === els.modalBackdrop) hideModal(); });
-  document.addEventListener("keydown", (event) => { if (event.key === "Escape") { hideModal(); closeCompose(); } });
-  els.changeVersionButton.addEventListener("click", () => {
-    const initial = files[currentFile].version;
-    versions[currentFile] = versions[currentFile] === initial ? initial + "-rev2" : initial;
-    els.versionPill.textContent = versions[currentFile] === initial ? `版本 ${initial.slice(0, 4)}…` : "版本已更新";
-    renderDraft();
-    toast(versions[currentFile] === initial ? "已恢复示例文件版本" : "已模拟文件变化：旧批注会提示重新核对");
+  $("infoButton").addEventListener("click", () => {
+    modalMode = "help";
+    $("confirmSendButton").classList.add("hidden");
+    el.modalTitle.textContent = "最短路径";
+    el.modalDescription.textContent = "头部进入批注，直接点内容写批注；头部草稿查看全部，点击标记也可定位批注。";
+    el.messagePreview.textContent = "Markdown：点渲染后的段落或列表项。\nH5：点页面元素。退出批注后页面恢复正常交互。\n图片：轻点生成默认区域，拖动可精确框选。每张图独立编号。\n手机：草稿从底部打开。";
+    el.modal.classList.remove("hidden");
   });
-
-  $("runtimeLogButton").addEventListener("click", () => $("runtimeLogPanel").classList.toggle("hidden"));
-  $("runtimeLogCloseButton").addEventListener("click", () => $("runtimeLogPanel").classList.add("hidden"));
+  $("runtimeLogButton").addEventListener("click", () => el.runtimeLogPanel.classList.toggle("hidden"));
+  $("runtimeLogCloseButton").addEventListener("click", () => el.runtimeLogPanel.classList.add("hidden"));
   $("runtimeShotButton").addEventListener("click", () => {
-    runtimeFrames += 1;
-    $("runtimeFrameCount").textContent = String(runtimeFrames);
-    logRuntime("snapshot", `现场 ${runtimeFrames} 已采集（演示）`);
-    toast("演示：已记录当前 HTML 现场");
+    runtimeFrames += 1; el.runtimeFrameCount.textContent = String(runtimeFrames);
+    logRuntime("snapshot", "现场 " + runtimeFrames + " 已采集（演示）");
   });
   $("runtimeRecordButton").addEventListener("click", () => {
-    runtimeRecording = !runtimeRecording;
-    $("runtimeRecordButton").textContent = runtimeRecording ? "停止" : "录制";
-    $("runtimeStatus").textContent = runtimeRecording ? "● 正在录制；日志继续记录" : "日志已开始记录";
-    logRuntime("recording", runtimeRecording ? "开始体验录制（演示）" : "停止体验录制（演示）");
+    recording = !recording;
+    $("runtimeRecordButton").textContent = recording ? "停止" : "录制";
+    el.runtimeStatus.textContent = recording ? "● 正在录制；日志继续记录" : "日志已开始记录";
+    logRuntime("recording", recording ? "开始录制（演示）" : "停止录制（演示）");
   });
   $("runtimeSaveButton").addEventListener("click", () => {
     logRuntime("artifact", "保存运行产物（演示）");
-    toast("演示：真实 Preview 会把日志、DOM 和截图写入当前会话的运行产物");
+    notify("演示：真实 Preview 会把诊断 Bundle 保存到会话");
   });
-  for (const id of ["mockMinimizeButton", "mockPopoutButton", "mockCloseButton"]) {
-    $(id).addEventListener("click", () => toast("这是 Preview 外壳示意；原型内请从左侧文件列表切换文件"));
-  }
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") { el.modal.classList.add("hidden"); closeCompose(); }
+  });
+  window.addEventListener("resize", () => { if (files[currentFile].kind === "html") renderMarkers(); });
 
   selectFile("markdown");
-  renderLines();
-  renderModeAction();
-  renderSelection();
   renderDraft();
 }
 
-// GeneHub 的 HTML remapper 可能把相对脚本提前内联到 srcdoc 的 head。
-// 等待 DOM 完整后再绑定控件，避免初始化时 getElementById 返回 null。
 if (document.readyState === "loading") {
   document.addEventListener("DOMContentLoaded", bootPreviewAnnotationPrototype, { once: true });
 } else {
