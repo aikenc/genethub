@@ -98,6 +98,8 @@ defineSpecialty({
     t.assertions.assert(root?.status === "blocked" && recovery!.reason?.includes("recoveryBudgetExceeded"),
       "recovery budget did not stop the recovery Worker while preserving the business request");
     t.assertions.assert(card?.options?.map(option => option.id).join(",") === "approve,reject", "exit c options are incorrect");
+    t.assertions.assert(card?.options?.find(option => option.id === "approve")?.label.includes("1 次恢复、100 轮 LLM 和 30 分钟")
+      && card.detail?.includes("本卡审批固定额度"), "recovery grant was confused with the business quota");
     const answered = await opened.client.call({ type: "session.respondPermission", payload: {
       sessionId: pm, requestId: card!.id, outcome: { outcome: "selected", optionId: "approve" },
     } });

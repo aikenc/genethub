@@ -15,6 +15,7 @@ const labels: Record<string, string> = {
   "run.failed": "任务失败",
 };
 const statuses: Record<string, string> = {
+  awaitingPm: "等待 PM 落实",
   pending: "待执行", ready: "就绪", running: "执行中", waiting: "等待中",
   completed: "已完成", failed: "失败", blocked: "受阻", cancelled: "已取消",
   finishing: "节点收尾中", unreached: "未选择的分支", stopping: "正在收尾", cancelling: "取消中", changesRequested: "需要修改",

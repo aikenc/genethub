@@ -193,7 +193,7 @@ defineSpecialty({
       `"$GENEHUB_CLI" session respond ${recoveryReviewer} --request ${recoveryQuestion.id} --choose resume`, original.id);
     t.assertions.assert(!chosen.includes('"error"'), `Owning PM cannot answer recovery: ${chosen}`);
     await t.tools.waitUntil(async () => (await history()).some(run =>
-      run.handles.some(handle => handle.runId === original.id) && run.status === "blocked" && run.reason?.includes("controlled exit")), 40_000);
+      run.handles.some(handle => handle.runId === original.id) && run.status === "awaitingPm" && !run.reason), 40_000);
     const recovered = await runCommand(other, "u_exception_recover", `${dispatch("recovered")} --retry-of ${original.id}`, original.id);
     t.assertions.assert(!recovered.includes("retry target belongs to another PM"), "exception did not cross the original PM ownership boundary");
     await t.tools.waitUntil(async () => (await history()).some(run => run.taskId === "recovered" && run.status === "completed"), 40_000)

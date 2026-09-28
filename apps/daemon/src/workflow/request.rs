@@ -194,6 +194,45 @@ pub(super) fn recovery_extra(runtime: &RuntimeStore, root_run_id: &str) -> Resul
     Ok(read_record(runtime, root_run_id)?.recovery_extra)
 }
 
+/// Fixed Human grant contract, shared by the decision card and accounting.
+/// Free-text reasons never select or change these amounts.
+pub(super) struct HumanBudgetGrant {
+    pub runs: u32,
+    pub llm_rounds: u64,
+    pub seconds: u64,
+    pub scope: &'static str,
+}
+
+impl HumanBudgetGrant {
+    pub fn description(&self) -> String {
+        format!(
+            "最多增加 {} 次{}、{} 轮 LLM 和 {} 分钟",
+            self.runs,
+            self.scope,
+            self.llm_rounds,
+            self.seconds / 60
+        )
+    }
+}
+
+pub(super) fn human_budget_grant(kind: &str) -> Option<HumanBudgetGrant> {
+    match kind {
+        "a" => Some(HumanBudgetGrant {
+            runs: 1,
+            llm_rounds: 128,
+            seconds: 3600,
+            scope: "业务 Run",
+        }),
+        "c" => Some(HumanBudgetGrant {
+            runs: 1,
+            llm_rounds: 100,
+            seconds: 1800,
+            scope: "恢复",
+        }),
+        _ => None,
+    }
+}
+
 /// Called only after a daemon-authored Human question receives its answer.
 /// The request ID is the idempotency key, so a crash between this write and
 /// the Human exit receipt cannot spend approval twice.
@@ -214,22 +253,24 @@ pub(super) fn apply_human_budget(
     if record.approved_human_exits.len() >= 64 {
         bail!("Workflow Human approval history is full");
     }
+    let grant = human_budget_grant(kind)
+        .ok_or_else(|| anyhow!("Human exit {kind} does not adjust a budget"))?;
     match kind {
         "a" => {
             record.budget.max_runs = record
                 .budget
                 .max_runs
-                .saturating_add(1)
+                .saturating_add(grant.runs)
                 .min(MAX_CONFIGURED_REQUEST_RUNS);
             record.budget.max_llm_rounds = record
                 .budget
                 .max_llm_rounds
-                .saturating_add(128)
+                .saturating_add(grant.llm_rounds)
                 .min(MAX_CONFIGURED_LLM_ROUNDS);
             record.budget.deadline_ms = record
                 .budget
                 .deadline_ms
-                .saturating_add(3_600_000)
+                .saturating_add(grant.seconds.saturating_mul(1000))
                 .min(MAX_CONFIGURED_REQUEST_DEADLINE_SECONDS.saturating_mul(1000));
             record.budget.revision = record.budget.revision.saturating_add(1);
         }
@@ -237,17 +278,17 @@ pub(super) fn apply_human_budget(
             record.recovery_extra.max_runs = record
                 .recovery_extra
                 .max_runs
-                .saturating_add(1)
+                .saturating_add(grant.runs)
                 .min(recovery::MAX_RECOVERY_RUNS);
             record.recovery_extra.max_llm_rounds = record
                 .recovery_extra
                 .max_llm_rounds
-                .saturating_add(100)
+                .saturating_add(grant.llm_rounds)
                 .min(recovery::MAX_RECOVERY_LLM_ROUNDS);
             record.recovery_extra.deadline_seconds = record
                 .recovery_extra
                 .deadline_seconds
-                .saturating_add(1800)
+                .saturating_add(grant.seconds)
                 .min(recovery::MAX_RECOVERY_DEADLINE_SECONDS);
         }
         _ => bail!("Human exit {kind} does not adjust a budget"),

@@ -165,7 +165,7 @@ pub(crate) async fn complete_requirement(
     }
     for r in &group {
         if !(r.handles.is_empty()
-            || matches!(r.status.as_str(), "completed" | "cancelled")
+            || matches!(r.status.as_str(), "completed" | "cancelled" | "awaitingPm")
             || (r.status == "blocked"
                 && r.stop
                     .as_ref()
@@ -190,7 +190,7 @@ pub(crate) async fn complete_requirement(
     // Commit cleanup first so a failed write cannot create a false goal terminal.
     for recovery in group
         .iter()
-        .filter(|r| !r.handles.is_empty() && r.status == "blocked")
+        .filter(|r| !r.handles.is_empty() && matches!(r.status.as_str(), "blocked" | "awaitingPm"))
     {
         let _recovery = lock_run(&runtime, &recovery.id)?;
         let mut recovery = load_run(&runtime, &recovery.id)?;
