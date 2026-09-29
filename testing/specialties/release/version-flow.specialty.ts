@@ -76,9 +76,12 @@ interface ComponentSpec {
   /** Overrides the manifest's artifact digest, letting it disagree with the
    * bytes actually served. */
   sha256?: string;
+  declaredSize?: number;
+  streamUntilDisconnect?: boolean;
 }
 
 interface ReleaseService {
+  downloads(): number;
   origin: string;
   close(): Promise<void>;
   setAppManifest(version: string): void;
@@ -93,6 +96,7 @@ async function startReleaseService(): Promise<ReleaseService> {
   let appManifest: string | null = null;
   let component: ComponentSpec | null = null;
   let componentRaw: string | null = null;
+  let artifactDownloads = 0;
   const server: Server = createServer((req, res) => {
     if (req.url === "/app/latest.json" && appManifest) {
       res.writeHead(200, { "content-type": "application/json" });
@@ -117,7 +121,7 @@ async function startReleaseService(): Promise<ReleaseService> {
           artifact: {
             sources: [{ url: `${origin}/component/genehub_guest.wasm` }],
             sha256,
-            size: component.bytes.length,
+            size: component.declaredSize ?? component.bytes.length,
           },
           source: { kind: "test" },
           activation: component.activation?.enabled === false
@@ -128,8 +132,10 @@ async function startReleaseService(): Promise<ReleaseService> {
       return;
     }
     if (req.url === "/component/genehub_guest.wasm" && component) {
+      artifactDownloads++;
       res.writeHead(200, { "content-type": "application/wasm" });
-      res.end(component.bytes);
+      if (component.streamUntilDisconnect) res.write(component.bytes);
+      else res.end(component.bytes);
       return;
     }
     res.writeHead(404);
@@ -141,6 +147,7 @@ async function startReleaseService(): Promise<ReleaseService> {
   const origin = `http://127.0.0.1:${address.port}`;
   return {
     origin,
+    downloads: () => artifactDownloads,
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
     setAppManifest(version: string) {
       appManifest = JSON.stringify({
@@ -1545,3 +1552,43 @@ async function waitForDaemonVersion(client: Client, version: string): Promise<vo
     `daemon never came back on ${version}; identity is ${JSON.stringify(client.identity?.daemonVersion)}`,
   );
 }
+
+
+for (const boundary of ["manifest", "stream"] as const) defineSpecialty(
+  meta(
+    `specialty.release.component-size-${boundary}`,
+    `A component exceeding 64 MiB is rejected at the ${boundary} boundary`,
+    "An oversized manifest starts no payload download; a lying source is bounded while streaming, and neither replaces the running signed component",
+    ["component growth removes a finite download cap", "untrusted declared size bypasses the stream limit", "oversized input activates a candidate"],
+    25_000, 120_000,
+  ),
+  async t => {
+    const { host, guest } = requireArtifacts(t.openRoot);
+    const dir = path.join(t.env.root, "release-size");
+    mkdirSync(dir, { recursive: true });
+    const service = await startReleaseService();
+    const transportLimit = 64 * 1024 * 1024 + 16 * 1024;
+    try {
+      const signed = packComponent(host, guest, COMPONENT_VERSION, dir);
+      const identity = readComponentIdentity(host, signed);
+      service.setComponent({ version: NEXT_COMPONENT_VERSION, identity,
+        bytes: boundary === "stream" ? Buffer.alloc(transportLimit + 1) : Buffer.from("not downloaded"),
+        declaredSize: boundary === "manifest" ? transportLimit + 1 : 1,
+        streamUntilDisconnect: boundary === "stream" });
+      const handle = await startReleaseDaemon(t, {
+        wasm: signed, env: { GENEHUB_COMPONENT_MANIFEST_URL: `${service.origin}/component/latest.json` },
+      });
+      try {
+        let refused: unknown;
+        try { await handle.client.call({ type: "update.download" }); } catch (error) { refused = error; }
+        t.assertions.assert(String(refused).includes(`${transportLimit} byte limit`),
+          `oversized ${boundary} failed for the wrong reason: ${String(refused).slice(0, 300)}`);
+        t.assertions.assert(service.downloads() === (boundary === "manifest" ? 0 : 1),
+          `size refusal did not occur at the ${boundary} boundary`);
+        const check = await handle.client.call({ type: "update.check" });
+        t.assertions.assert(check?.type === "update" && handle.client.identity?.daemonVersion === COMPONENT_VERSION,
+          "oversized input replaced or killed the running component");
+      } finally { await stopReleaseDaemon(handle); }
+    } finally { await service.close(); rmSync(dir, { recursive: true, force: true }); }
+  },
+);

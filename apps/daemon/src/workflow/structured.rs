@@ -168,9 +168,33 @@ pub(super) fn settled(run: &mut RunRecord, id: &str) -> Result<()> {
 }
 
 pub(super) async fn drive(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Result<()> {
+    // A known route outage is already durable. Probe its external capabilities
+    // without holding the Run lock: a cold probe must not block a PM proposal,
+    // withdrawal or Worker completion. Recheck the snapshot before committing.
+    let observed = load_run(runtime, run_id)?;
+    if observed.engine.is_none() || observed.status() != "running"
+        || recovery::read_human_exit(runtime, &observed)?.is_some_and(|exit| exit.answer.is_none()) {
+        return Ok(());
+    }
+    let mut unavailable_routes = BTreeSet::new();
+    let routes_to_probe = if request::budget_exhausted(runtime, &observed, now_ms())? {
+        Vec::new()
+    } else { observed.route_wait() };
+    for id in routes_to_probe {
+        let node = runtime_node(&observed, &id)?;
+        if node.uses != "agent.session" { continue; }
+        let role = observed.roles.get(node.inputs.role.as_deref().unwrap_or_default())
+            .ok_or_else(|| anyhow!("Workflow route-wait role is missing"))?;
+        match resolve_role_route(state, role, observed.agent_target.as_ref()).await {
+            Ok(_) => {},
+            Err(error) if is_route_unavailable(&error) => { unavailable_routes.insert(id); },
+            Err(error) => return Err(error),
+        }
+    }
     let sessions = {
         let _guard = lock_run(runtime, run_id)?;
         let mut run = load_run(runtime, run_id)?;
+        if run.revision != observed.revision { return Ok(()); }
         if run.engine.is_none() || run.status() != "running" {
             return Ok(());
         }
@@ -247,6 +271,9 @@ pub(super) async fn drive(state: &Shared, runtime: &RuntimeStore, run_id: &str) 
                 continue;
             }
             let id = node_id(op.frame);
+            // Still advance engine deadlines and budgets above, but do not
+            // repeat an unsuccessful capability probe inside the commit lock.
+            if unavailable_routes.contains(&id) { break; }
             // A host observation may have been committed just before a crash.
             // Settle its stored value, never resample a completed query.
             if run.nodes.get(&id).is_some_and(|record| {
