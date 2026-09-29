@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import {
@@ -82,6 +82,7 @@ for (const window of ["waiting", "approved", "applied", "rejected", "canceled"] 
       if (!plan) {
         const challenge = field(request, "challengeId"), digest = field(request, "planDigest"), revision = field(request, "expectedRevision");
         if (typeof challenge !== "string" || typeof digest !== "string" || typeof revision !== "number") { mockFailure = JSON.stringify((request as { messages?: unknown }).messages).slice(-5000); throw new Error("plan omitted approval facts"); }
+        t.assertions.assert(field(request, "expiresAtMs") === undefined, "project plan imposes a Human answer deadline");
         plan = { challenge, digest, revision };
         return bash(`"$GENEHUB_CLI" space approval request --challenge ${quote(challenge)}`);
       }
@@ -139,6 +140,14 @@ for (const window of ["waiting", "approved", "applied", "rejected", "canceled"] 
       client.close();
       process.kill(pid, "SIGKILL");
       await t.tools.waitUntil(() => cli(["daemon", "status"]).running === false, 15_000);
+      if (window === "waiting" || window === "approved") {
+        // Simulate an offline user returning two days later, with the real
+        // daemon stopped before changing the Session's persisted clock.
+        const metaPath = path.join(projectRoot, ".genethub/sessions", sessionId, "meta.json");
+        const meta = JSON.parse(readFileSync(metaPath, "utf8"));
+        meta.updatedAtMs = Date.now() - 48 * 60 * 60 * 1000;
+        writeFileSync(metaPath, JSON.stringify(meta));
+      }
       restarted = true;
       cli(["daemon", "start"]);
       client = await connectProductClient(daemonEndpoint(opened.daemon));

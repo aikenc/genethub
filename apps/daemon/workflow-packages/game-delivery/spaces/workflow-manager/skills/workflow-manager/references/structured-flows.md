@@ -57,8 +57,8 @@ isolate scratch outputs/ports and serialize checks needing shared mutable state.
 
 Declare `{id: budget, uses: request.budget}` with no `with` or `completion`.
 A task referencing it returns `/results/<step>/output`: `requestRunId`,
-`observedAtMs`, `budget` (`revision`, `maxRuns`, `deadlineMs`, `maxLlmRounds`),
-`usedRuns`, `observedLlmRounds`, `executionMs`, `remainingRuns`,
+`observedAtMs`, `budget` (`revision`, `deadlineMs`, `maxLlmRounds`),
+`observedLlmRounds`, `executionMs`,
 `remainingLlmRounds`, `remainingExecutionMs`. Numbers are nonnegative except
 the wall-clock timestamp. The host persists this current-request observation
 before downstream control runs; a completed query is not refreshed on restart.

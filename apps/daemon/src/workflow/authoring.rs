@@ -33,8 +33,8 @@ pub(crate) fn schema() -> Value {
         },
         "requestBudget": {
             "inputs": "none; current Run's shared request only",
-            "output": ["requestRunId", "observedAtMs", "budget", "usedRuns", "observedLlmRounds", "executionMs", "remainingRuns", "remainingLlmRounds", "remainingExecutionMs"],
-            "budget": ["revision", "maxRuns", "deadlineMs", "maxLlmRounds"],
+            "output": ["requestRunId", "observedAtMs", "budget", "observedLlmRounds", "executionMs", "remainingLlmRounds", "remainingExecutionMs"],
+            "budget": ["revision", "deadlineMs", "maxLlmRounds"],
             "semantics": "Immutable observation, not reservation or permission. Query again to observe changes. Only PM control can adjust limits."
         },
         "include": {

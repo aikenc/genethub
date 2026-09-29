@@ -36,11 +36,11 @@ for (const scenario of ["pending", "deliver", "cancel", "recover", "recover-busy
       writeFileSync(path.join(source, "workflow.md"), "---\ndescription: requirement review and delivery\nrecovery: flows/recovery.yaml\n---\n");
       writeFileSync(path.join(source, "roles/requirement-reviewer.yaml"), JSON.stringify({ schema: "genehub.workflow.role.v1", id: "requirement-reviewer", agentId: "genet", modelId: "deepseek/deepseek-v4-flash", userInteraction: "readOnly", prompt: "prompts/requirement-reviewer.md" }));
       writeFileSync(path.join(source, "prompts/requirement-reviewer.md"), "REQUIREMENT_RECOVERY_REVIEW: the assessment exists; return the disposition to PM.\n");
-      writeFileSync(path.join(source, "flows/recovery.yaml"), JSON.stringify({ schema: "genehub.workflow.definition.v1", id: "recovery", version: 1, entry: "review", budget: { maxRuns: 3, maxLlmRounds: 200, deadlineSeconds: 3600 }, outcomes: { resume: { success: true }, human: { success: false } }, nodes: [{ id: "review", uses: "agent.session", with: { role: "requirement-reviewer", writeLease: { ttlSeconds: 900 } }, completion: { all: [{ key: "report", verify: "value.nonEmpty" }] }, on: { resume: ["publish"], human: [] } }, { id: "publish", uses: "result.publish" }] }));
+      writeFileSync(path.join(source, "flows/recovery.yaml"), JSON.stringify({ schema: "genehub.workflow.definition.v2", id: "recovery", version: 2,  outcomes: { resume: { success: true }, human: { success: false } }, nodes: [{ id: "review", uses: "agent.session", with: { role: "requirement-reviewer", writeLease: { ttlSeconds: 900 } }, completion: { all: [{ key: "report", verify: "value.nonEmpty" }] } }, { id: "publish", uses: "result.publish" }] , structure: {"body":{"id":"sequence","type":"sequence","steps":[{"id":"step-review","type":"task","activity":"review","accept":["resume"]},{"id":"step-publish","type":"task","activity":"publish"}]}}}));
       const activation = await runGenetAsync(opened.daemon.genet, ["workflow", "activate", "--revision", "0"], opened.daemon.env, { cwd: opened.workspaceRoot });
       t.assertions.assert(activation.code === 0, "Custom recovery activation failed");
     }
-    let dispatched = false, assessed = false, decisionIssued = false, busyIssued = false, reviewed = false, renewed = false, secondAssessed = false, successorIssued = false;
+    let dispatched = false, assessed = false, decisionIssued = false, busyIssued = false, reviewed = false, renewed = false, secondAssessed = false, successorIssued = false, scopeIssued = false;
     let recoveryId: string | undefined;
     let run: WorkflowRunStatus | undefined;
     opened.mock.script(...Array.from({ length: 80 }, () => ({ respond: (request: unknown) => {
@@ -71,7 +71,11 @@ for (const scenario of ["pending", "deliver", "cancel", "recover", "recover-busy
       }
       if (run && !renewed && body.includes("RENEW_RECOVERY_AUTHORIZATION")) {
         renewed = true;
-        return { tool: { name: "bash", arguments: { command: `"$GENEHUB_CLI" workflow human --run ${run.id} --revision ${run.revision} --kind c --reason "New recovery allowance after the earlier feedback decision"` } } };
+        return { tool: { name: "bash", arguments: { command: `"$GENEHUB_CLI" workflow human --run ${run.id} --revision ${run.revision} --kind a --reason "Finish remaining work after the feedback decision" --budget-revision ${run.requestBudget.revision} --max-llm-rounds 600 --deadline-seconds 14400` } } };
+      }
+      if (run && !scopeIssued && body.includes("PROPOSE_SCOPE_ADJUSTMENT")) {
+        scopeIssued = true;
+        return { tool: { name: "bash", arguments: { command: `"$GENEHUB_CLI" workflow human --run ${run.id} --revision ${run.revision} --kind b --reason "Agree the remaining deliverable before execution" --goal "Deliver the assessment only" --scope-changes "Remove implementation; retain the written assessment and its evidence"` } } };
       }
       if (run && body.includes("STOP_EXECUTION_ONLY")) {
         return { tool: { name: "bash", arguments: { command: `"$GENEHUB_CLI" workflow cancel --run ${run.id} --revision ${run.revision}` } } };
@@ -147,7 +151,7 @@ for (const scenario of ["pending", "deliver", "cancel", "recover", "recover-busy
         writeFileSync(recordFile, JSON.stringify(record));
         const file = path.join(root, "runs", run!.id, "run.json");
         const recordRun = JSON.parse(readFileSync(file, "utf8"));
-        Object.values(recordRun.run.nodes).forEach(node => { (node as { status: string }).status = "finishing"; });
+        Object.values(recordRun.run.nodes).forEach(node => { (node as { phase: string }).phase = "finishing"; });
         writeFileSync(file, JSON.stringify(recordRun));
       }
       const started = await runGenetAsync(opened.daemon.genet, ["daemon", "start"], opened.daemon.env);
@@ -166,7 +170,7 @@ for (const scenario of ["pending", "deliver", "cancel", "recover", "recover-busy
       if (scenario === "deliver-contradiction") await restart(false);
       if (scenario === "recover-deliver" || scenario === "recover-successor") {
         await restart(true);
-        await t.tools.waitUntil(async () => (await history()).some(item => item.handles.length > 0 && item.status === "awaitingPm"), 30_000);
+        await t.tools.waitUntil(async () => (await history()).some(item => item.handles.length > 0 && item.status === "completed" && item.phase === "closed"), 30_000);
         const leases = path.join(opened.workspaceRoot, ".genethub/components/pm/ref-leases");
         t.assertions.assert(existsSync(leases) && readdirSync(leases).some(file => file.endsWith(".guard"))
           && !readdirSync(leases).some(file => file.endsWith(".json")),
@@ -243,7 +247,7 @@ for (const scenario of ["pending", "deliver", "cancel", "recover", "recover-busy
         await t.tools.waitUntil(async () => {
           const goal = await get();
           const snapshot = await opened.client.call({ type: "session.get", payload: { sessionId: pm } });
-          return goal.humanExit?.kind === "c" && snapshot?.type === "snapshot"
+          return goal.humanExit?.kind === "a" && snapshot?.type === "snapshot"
             && snapshot.data.pendingPermissions.some(card => card.id === goal.humanExit!.requestId);
         }, 20_000);
         const card = (await get()).humanExit!;
@@ -251,7 +255,21 @@ for (const scenario of ["pending", "deliver", "cancel", "recover", "recover-busy
         await opened.client.call({ type: "session.respondPermission", payload: { sessionId: pm, requestId: card.requestId, outcome: { outcome: "selected", optionId: "approve" } } });
         await t.tools.waitUntil(async () => (await get()).humanExit?.answer === "approve", 20_000);
         const record = JSON.parse(readFileSync(path.join(root, "request.json"), "utf8"));
-        t.assertions.assert(record.recoveryExtra.maxRuns === 1 && record.approvedHumanExits.length === 1, "Recovery approval was lost or applied more than once");
+        t.assertions.assert(record.budget.maxLlmRounds === 600 && record.budget.deadlineMs === 14_400_000 && !record.recoveryExtra && record.approvedHumanExits.length === 1, "Recovery approval was lost or applied more than once");
+        run = await get();
+        await send("PROPOSE_SCOPE_ADJUSTMENT");
+        await t.tools.waitUntil(async () => (await get()).humanExit?.kind === "b", 20_000);
+        const scopeCard = (await get()).humanExit!;
+        t.assertions.assert(scopeCard.scope?.goal === "Deliver the assessment only" && scopeCard.scope.changes.includes("Remove implementation"), "Scope card omitted its concrete change");
+        await opened.client.call({ type: "session.respondPermission", payload: { sessionId: pm, requestId: scopeCard.requestId, outcome: { outcome: "selected", optionId: "acceptScope" } } });
+        await t.tools.waitUntil(async () => (await get()).humanExit?.answer === "acceptScope", 20_000);
+        const scoped = await get();
+        t.assertions.assert(scoped.requirement?.scope?.goal === "Deliver the assessment only"
+          && scoped.requirement.state !== "completed" && scoped.requestBudget.maxLlmRounds === 600,
+          "Scope acceptance failed to update the goal or falsely claimed delivery/changed budget");
+        const scopedRecord = JSON.parse(readFileSync(path.join(root, "request.json"), "utf8"));
+        t.assertions.assert(scopedRecord.goal === record.goal && scopedRecord.approvedHumanExits.length === 2,
+          "Scope update erased original goal history or lost its receipt");
       }
     }
     t.assertions.assert(readFileSync(path.join(opened.workspaceRoot, "effects.txt"), "utf8").trim() === "effect", "Accepted Worker side effect was replayed");

@@ -1293,7 +1293,7 @@ defineJourney(
       const elapsedMs = improvementTiming.activeMs;
       const improvement = await completedRun(fixture, "workflow-improvement-j3");
       t.assertions.assert(improvement?.parentSessionId === pmSessionId, "improvement did not return to originating PM");
-      const managerSessionId = improvement?.nodes.find((node) => node.id === "specialist")?.sessionId;
+      const managerSessionId = improvement?.nodes.find((node) => node.uses === "agent.session")?.sessionId;
       if (!managerSessionId) throw new Error("PM did not delegate a real WorkflowManager Session");
       const managerReply = await fixture.opened.client.call({ type: "session.get", payload: { sessionId: managerSessionId } });
       t.assertions.assert(managerReply?.type === "snapshot" && managerReply.data.summary.workspaceId === managerSpace.id, "improvement used the wrong expert Space");
@@ -1407,7 +1407,7 @@ defineJourney(
       await runPmDelivery(t, fixture, pmSessionId, "独立评审 J3，检查交付是否满足要求，缺失证据不判通过。", "workflow-review-j3", false, pmEvents);
       const reviewed = await completedRun(fixture, "workflow-review-j3");
       t.assertions.assert(reviewed?.parentSessionId === pmSessionId, "review returned to another Session");
-      const reviewNode = reviewed?.nodes.find((node) => node.id === "specialist");
+      const reviewNode = reviewed?.nodes.find((node) => node.uses === "agent.session");
       const qualityReport = JSON.parse(reviewNode?.evidence.report ?? "null");
       t.assertions.assert(qualityReport?.recommendation === "inconclusive" && qualityReport?.coverage === "partial", "missing evidence was converted to approval");
       t.assertions.assert(qualityReport?.findings[0]?.evidenceRefs?.length > 0, "review omitted source references");

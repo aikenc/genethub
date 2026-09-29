@@ -21,15 +21,23 @@ for(const scenario of ['repair','reject','preview','regression'] as const)define
   await t.flows.main.configureMockProvider(opened.client,opened.mock);
   const features=['a','b'].map(id=>({id,goal:`Write independent ${id} file`,branch:`feature-${id}`,criteria:[{id:'content',requirement:`${id}.txt contains approved`,method:'read the pinned Git blob'}]}));
   let stage=0;const seen=new Set<string>(),attempts=new Map<string,number>(),reviews:any[]=[];
+    const reported = new Set<string>();
   opened.mock.script(...Array.from({length:160},()=>({respond:(request:any)=>{
    const body=JSON.stringify(request),input=inputOf(request);
+      if (body.includes("角色标签为 `recovery-reviewer`")) {
+        const reportOperation = body.match(/当前节点：(operation-\d+)/)?.[1];
+        const reportKey = "report:" + (body.match(/被处理 Run：(wr_[a-f0-9]+)/)?.[1] ?? "run") + ":" + reportOperation;
+        if (reported.has(reportKey)) return { text: "Diagnostic report submitted." };
+        reported.add(reportKey);
+        return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" workflow complete --evidence report="Observed failed program and retained the original goal"' } } };
+      }
    const command=(text:string)=>({tool:{name:'bash',arguments:{command:`cd ${q(path.resolve(root,body.includes('<genehub_managed_session>')?input?.workspace||'.':'.'))} && ${text}`}}});
    if(body.includes('<genehub_managed_session>')&&input){
     const operation=body.match(/当前节点：(operation-\d+)/)?.[1];if(!operation)throw Error('no operation');
     if(seen.has(operation))return {text:'Result already submitted.'};seen.add(operation);
     const complete=(output:any)=>command(`"$GENEHUB_CLI" workflow complete --output ${q(JSON.stringify(output))}`);
     if(input.phase==='quality-planning')return complete({decision:'go',rationale:'Two independent immutable contracts',features});
-    const feature=input.feature;if(!feature?.id)throw Error('feature lost');
+    const feature=input.feature;if(!feature?.id)throw Error('feature lost: '+JSON.stringify(input));
     if(input.phase==='branch-preparation')return command(`git worktree add -b ${q(feature.branch)} ${q('.genethub/temp/branches/'+feature.id)} HEAD && "$GENEHUB_CLI" workflow complete --evidence worktree=created --output ${q(JSON.stringify({workspace:'.genethub/temp/branches/'+feature.id,branch:feature.branch,baseCommit:git(['rev-parse','HEAD'])}))}`);
     if(input.phase==='branch-implementation'){
      const count=(attempts.get(feature.id)||0)+1;attempts.set(feature.id,count);
@@ -61,8 +69,8 @@ for(const scenario of ['repair','reject','preview','regression'] as const)define
   await t.tools.waitUntil(async()=>{const r=await opened.client.call({type:'session.get',payload:{sessionId:pm}});if(r?.type!=='snapshot')return false;permission=r.data.pendingPermissions[0];return !!permission;},40000);
   await opened.client.call({type:'session.respondPermission',payload:{sessionId:pm,requestId:permission.id,outcome:{outcome:'selected',optionId:'approve-once'}}});
   let run:any;
-  await t.tools.waitUntil(async()=>{const r=await opened.client.call({type:'workflow.history',payload:{workspaceId:project.data.id,limit:10}});if(r?.type!=='workflowRuns')return false;run=r.data[0];return run&&['completed','blocked','failed'].includes(run.status);},180000).catch(async error=>{const snapshot=await opened.client.call({type:'session.get',payload:{sessionId:pm}});throw new Error(String(error)+'; stage='+stage+'; attempts='+JSON.stringify([...attempts])+'; reviews='+JSON.stringify(reviews.map(r=>[r.group,r.workspace,r.commit]))+'; run='+JSON.stringify(run)+'; pm='+JSON.stringify(snapshot).slice(-12000));});
-  t.assertions.assert(run.status==='completed',`${run.status}: ${run.reason}; ${JSON.stringify(run.nodes.filter((n:any)=>n.status!=='completed').map((n:any)=>({id:n.id,status:n.status})))}`);
+  await t.tools.waitUntil(async()=>{const r=await opened.client.call({type:'workflow.history',payload:{workspaceId:project.data.id,limit:10}});if(r?.type!=='workflowRuns')return false;run=r.data.find(item=>item.taskId==='quality-fixture');return run&&['completed','blocked','failed'].includes(run.status);},180000).catch(async error=>{const snapshot=await opened.client.call({type:'session.get',payload:{sessionId:pm}});throw new Error(String(error)+'; stage='+stage+'; attempts='+JSON.stringify([...attempts])+'; reviews='+JSON.stringify(reviews.map(r=>[r.group,r.workspace,r.commit]))+'; run='+JSON.stringify(run)+'; pm='+JSON.stringify(snapshot).slice(-12000));});
+  t.assertions.assert(run.status==='completed',`${run.status}: ${run.reason}; ${JSON.stringify(run.nodes.map((n:any)=>({id:n.id,uses:n.uses,status:n.status,outcome:n.outcome,reason:n.reason,output:n.uses==='pack.script'?n.output:{commit:n.output?.commit},evidence:n.evidence})))}; attempts=${JSON.stringify([...attempts])}; reviews=${JSON.stringify(reviews.map(r=>[r.feature.id,r.group,r.workspace,r.commit]))}; mock=${JSON.stringify(opened.mock.requests.slice(-8).map((r:any)=>r.messages?.filter((m:any)=>m.role==='tool'))).slice(-12000)}`);
   const outcome=run.structure?.outcome?.value;
   t.assertions.assert(outcome?.done===(!['reject','regression'].includes(scenario)),JSON.stringify(outcome));
   t.assertions.assert(run.nodes.filter((n:any)=>n.uses==='result.publish').length===(!['reject','regression'].includes(scenario)?1:0),'rejection bypassed publishing gate');

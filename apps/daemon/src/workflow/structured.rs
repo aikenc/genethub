@@ -85,17 +85,7 @@ fn sync_status(run: &mut RunRecord) {
         return;
     };
     match snapshot.status {
-        engine::Status::Completed => {
-            if run.handles.is_empty() {
-                run.status = "completed".into();
-            } else {
-                control::request_stop(
-                    run,
-                    "blocked",
-                    "recovery flow ended without a controlled exit".into(),
-                );
-            }
-        }
+        engine::Status::Completed => {},
         engine::Status::Blocked | engine::Status::Stopping => {
             let reason = snapshot
                 .outcome
@@ -181,18 +171,26 @@ pub(super) async fn drive(state: &Shared, runtime: &RuntimeStore, run_id: &str) 
     let sessions = {
         let _guard = lock_run(runtime, run_id)?;
         let mut run = load_run(runtime, run_id)?;
-        if run.engine.is_none() || run.status != "running" {
+        if run.engine.is_none() || run.status() != "running" {
             return Ok(());
         }
         let _request = request::request_lock(runtime, request::group_id(&run))?;
         request::ensure_open(runtime, &run)?;
+        if recovery::read_human_exit(runtime, &run)?.is_some_and(|exit| exit.answer.is_none()) {
+            return Ok(()); // Routing changes cannot bypass an unanswered decision.
+        }
         if request::budget_exhausted(runtime, &run, now_ms())? {
             let (reason, cause) = if run.handles.is_empty() {
                 ("原始请求达到执行期限或 LLM 调用上限", "requestBudget")
             } else {
                 ("恢复流程达到执行期限或 LLM 调用上限", "recoveryBudget")
             };
-            control::request_stop_with_cause(&mut run, "blocked", reason.into(), cause);
+            control::request_stop_with_cause(
+                &mut run,
+                "blocked",
+                reason.into(),
+                cause,
+            );
             run.revision += 1;
             save_run(runtime, &run)?;
             return Ok(());
@@ -236,13 +234,13 @@ pub(super) async fn drive(state: &Shared, runtime: &RuntimeStore, run_id: &str) 
         }
         // Commit all new operation identities before creating any host execution.
         save_run(runtime, &run)?;
-        if run.status != "running" {
+        if run.status() != "running" {
             return Ok(());
         }
         let operations = engine::pending(run.engine.as_ref().unwrap()).operations;
         let mut sessions = Vec::new();
         for op in operations {
-            if run.status != "running" {
+            if run.status() != "running" {
                 break;
             }
             if op.phase == engine::OperationPhase::Cancelling {
@@ -252,11 +250,8 @@ pub(super) async fn drive(state: &Shared, runtime: &RuntimeStore, run_id: &str) 
             // A host observation may have been committed just before a crash.
             // Settle its stored value, never resample a completed query.
             if run.nodes.get(&id).is_some_and(|record| {
-                matches!(record.status.as_str(), "completed" | "failed")
-                    && matches!(
-                        record.uses.as_str(),
-                        "result.publish" | "request.budget" | "pack.script"
-                    )
+                record.status() == "completed"
+                    && matches!(record.uses.as_str(), "result.publish" | "request.budget" | "pack.script")
             }) {
                 settled(&mut run, &id)?;
                 finalize(runtime, &mut run).await;
@@ -265,12 +260,14 @@ pub(super) async fn drive(state: &Shared, runtime: &RuntimeStore, run_id: &str) 
                 continue;
             }
             if let Some(record) = run.nodes.get(&id) {
-                if record.status == "running" {
+                if record.status() == "running" {
+                    if record.interruption.is_some() { continue; }
                     if let Some(sid) = &record.session_id {
                         match state.sessions.inspect(sid, None).await {
                             Ok(inspection) => {
                                 if inspection.round_count == 0
                                     && !state.sessions.has_execution(sid).await
+                                    && !state.sessions.workflow_prompt_delivered(sid).await?
                                 {
                                     sessions.push((
                                         inspection.summary,
@@ -282,14 +279,14 @@ pub(super) async fn drive(state: &Shared, runtime: &RuntimeStore, run_id: &str) 
                             // receive its turn. Reconciliation decides that one
                             // node; failing here would stall every later pass
                             // and freeze the whole Run.
-                            Err(error) if error.is::<crate::session::manager::SessionMissing>() => {
-                            }
+                            Err(error)
+                                if error.is::<crate::session::manager::SessionMissing>() => {}
                             Err(error) => return Err(error),
                         }
                     }
                     continue;
                 }
-                if record.status != "pending" {
+                if record.status() != "pending" {
                     continue;
                 }
             }
@@ -303,7 +300,9 @@ pub(super) async fn drive(state: &Shared, runtime: &RuntimeStore, run_id: &str) 
                 run.nodes.insert(
                     id.clone(),
                     NodeRecord {
-                        input: Some(op.input.clone()),
+                        route_wait: None,
+                        interruption: None,
+                        submission_id: None,
                         output: None,
                         scope: engine::ancestry(&p, run.engine.as_ref().unwrap(), op.frame)?,
                         definition_id: Some(op.activity.clone()),
@@ -314,10 +313,10 @@ pub(super) async fn drive(state: &Shared, runtime: &RuntimeStore, run_id: &str) 
                         reason: None,
                         pending_since_ms: now_ms(),
                         assigned_at_ms: 0,
-                        settled_at_ms: 0,
+                        result_accepted_at_ms: 0,
                         workspace: resolved_workspace(activity, &op.input)?,
                         uses: activity.uses.clone(),
-                        status: "pending".into(),
+                        phase: facts::NodePhase::Pending,
                         session_id: None,
                         evidence: BTreeMap::new(),
                     },
@@ -355,12 +354,15 @@ pub(super) async fn drive(state: &Shared, runtime: &RuntimeStore, run_id: &str) 
                         && run
                             .nodes
                             .get(&lease.node_id)
-                            .is_some_and(|r| matches!(r.status.as_str(), "running" | "finishing"))
+                            .is_some_and(|r| matches!(r.status(), "running" | "finishing"))
                 });
                 if blocked {
                     continue;
                 }
             }
+            // Activation also marks missing routes during rollback. Capture the
+            // prior fact now so its first observation is durably saved once.
+            let was_waiting_for_route = run.route_wait().contains(&id);
             match activate(
                 state,
                 &runtime.project_root,
@@ -371,18 +373,17 @@ pub(super) async fn drive(state: &Shared, runtime: &RuntimeStore, run_id: &str) 
             .await
             {
                 Ok(created) => {
-                    run.route_wait.retain(|waiting| waiting != &id);
-                    if let Some(node) = run.nodes.get_mut(&id) {
-                        node.reason = None;
-                    }
+                    if was_waiting_for_route { run.journal_actor = "patrol".into(); }
+                    run.retain_routes(|waiting| waiting != &id);
+                    if let Some(node) = run.nodes.get_mut(&id) { node.reason = None; }
                     sessions.extend(created);
                 }
                 Err(error) => {
                     let reason = format!("活动 {id} 启动待核对：{error:#}");
                     if is_route_unavailable(&error) {
-                        let first_wait = !run.route_wait.contains(&id);
+                        let first_wait = !was_waiting_for_route;
                         control::defer_unavailable_route(&mut run, &[id], reason);
-                        if first_wait && run.status == "running" {
+                        if first_wait && run.status() == "running" {
                             run.revision += 1;
                             run.updated_at_ms = now_ms();
                             save_run(runtime, &run)?;
@@ -398,7 +399,7 @@ pub(super) async fn drive(state: &Shared, runtime: &RuntimeStore, run_id: &str) 
                 "result.publish" | "request.budget" | "pack.script"
             ) {
                 // Persist the observation before allowing dependent control flow.
-                // Script results, too, settle the engine after their durable host observation.
+                // No external side effect or Worker participates in these capabilities.
                 save_run(runtime, &run)?;
                 settled(&mut run, &id)?;
                 finalize(runtime, &mut run).await;
@@ -406,12 +407,12 @@ pub(super) async fn drive(state: &Shared, runtime: &RuntimeStore, run_id: &str) 
             run.revision += 1;
             save_run(runtime, &run)?;
         }
-        if !sessions.is_empty() || run.status != "running" {
+        if !sessions.is_empty() || run.status() != "running" {
             record_assigned_messages(&mut run, &sessions)?;
             run.revision += 1;
             save_run(runtime, &run)?;
         }
-        if run.status == "completed" {
+        if run.status() == "completed" {
             release_leases(runtime, &run).await?;
         }
         sessions
@@ -512,13 +513,10 @@ pub(super) fn projection(run: &RunRecord) -> Option<serde_json::Value> {
 }
 
 pub(super) async fn finalize(runtime: &RuntimeStore, run: &mut RunRecord) {
-    if run.status == "completed" {
-        if let Err(error) = release_leases(runtime, run).await {
-            control::request_stop(
-                run,
-                "blocked",
-                format!("流程活动完成，但资源收尾失败：{error:#}"),
-            );
+    if run.status() == "completed" && !run.nodes.values().any(|node| matches!(node.status(), "running" | "finishing")) {
+        match release_leases(runtime, run).await {
+            Ok(()) => { run.retired_at_ms = Some(now_ms()); },
+            Err(error) => control::request_stop(run, "blocked", format!("流程活动完成，但资源收尾失败：{error:#}")),
         }
     }
 }

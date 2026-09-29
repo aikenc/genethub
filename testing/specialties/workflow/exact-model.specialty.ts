@@ -38,13 +38,12 @@ for (const runtime of ["mock", "codex-luna"] as const) defineSpecialty({
       userInteraction: "readOnly", prompt: "prompts/worker.md",
     }));
     writeFileSync(path.join(source, "flows/exact.yaml"), JSON.stringify({
-      schema: "genehub.workflow.definition.v1", id: "exact", version: 1, entry: "work",
+      schema: "genehub.workflow.definition.v2", id: "exact", version: 2,
       nodes: [
         { id: "work", uses: "agent.session", with: { role: "worker", workspace: "." },
-          completion: { all: [{ key: "result", verify: "value.nonEmpty" }] }, on: { completed: ["publish"] } },
+          completion: { all: [{ key: "result", verify: "value.nonEmpty" }] } },
         { id: "publish", uses: "result.publish" },
-      ],
-    }));
+      ], structure: {"body":{"id":"sequence","type":"sequence","steps":[{"id":"step-work","type":"task","activity":"work"},{"id":"step-publish","type":"task","activity":"publish"}]}}}));
     let firstDispatched = false, successorDispatched = false, originalRun = "";
     opened.mock.script(...Array.from({ length: 40 }, () => ({ respond: (request: unknown) => {
       const body = JSON.stringify(request);
@@ -101,7 +100,7 @@ for (const runtime of ["mock", "codex-luna"] as const) defineSpecialty({
     const sessions = await opened.client.call({ type: "session.list", payload: { workspaceId: opened.workspaceId, includeArchived: false } });
     t.assertions.assert(sessions?.type === "sessions", "sessions unavailable");
     if (sessions?.type === "sessions") {
-      const workers = sessions.data.filter(s => s.managed?.nodeId === "work");
+      const workers = sessions.data.filter(s => s.managed?.role === "worker" && runs.some(run => run.id === s.managed?.workflowRunId));
       t.assertions.assert(workers.length === 2 && workers.every(s => s.agentId === target.agentId && s.modelId === target.modelId), "native Worker destination differs from request");
     }
     const settings = await opened.client.call({ type: "settings.get" });

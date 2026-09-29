@@ -1688,6 +1688,14 @@ impl SessionManager {
         }
     }
 
+    /// A committed send intent may already have reached an Agent even when no
+    /// round was saved. Workflow must not replay that original prompt blindly.
+    pub(crate) async fn workflow_prompt_delivered(&self, session_id: &str) -> Result<bool> {
+        let live = self.live(session_id).await?;
+        let delivered = live.meta.lock().await.inbox.has_delivered;
+        Ok(delivered)
+    }
+
     /// Whether a persisted Worker Session can receive a continue turn after the
     /// daemon has lost its in-memory execution. A live OS process must pause
     /// continuation so two writers cannot share the project.
@@ -3248,7 +3256,7 @@ impl SessionManager {
         {
             let mut meta = live.meta.lock().await;
             let mut next = meta.clone();
-            next.inbox.paused = true;
+            next.inbox.set_pause(Some("userStop"));
             self.store.save_meta(&next)?;
             *meta = next;
         }
@@ -3839,22 +3847,18 @@ impl SessionManager {
         outcome: PermissionOutcome,
         providers: &ProviderMap,
     ) -> Result<()> {
-        let mut outcome = outcome;
         let live = self.live(session_id).await?;
         let _interaction = live.interaction_lock.lock().await;
         let previous = live.meta.lock().await.human_continuation.clone();
         if let Some(previous) = previous {
             if previous.request.id == request_id {
-                if previous.outcome != outcome
-                    && !(is_expired_plan_refresh(&previous.outcome)
-                        && is_plan_approval_selection(&previous.request, &outcome))
-                {
+                if previous.outcome != outcome {
                     bail!("this interaction already has a different Human decision");
                 }
                 if !previous.completed && *live.status.lock().await == SessionStatus::Failed {
                     let mut meta = live.meta.lock().await;
                     let mut next = meta.clone();
-                    next.inbox.paused = false;
+                    next.inbox.set_pause(None);
                     next.inbox.error = None;
                     self.store.save_meta(&next)?;
                     *meta = next;
@@ -3883,10 +3887,7 @@ impl SessionManager {
             if let Some(broker) = &self.project_control {
                 if project_approval || broker.is_plan_request(session_id, request_id).await {
                     project_approval = true;
-                    let validation = broker
-                        .validate_human_response(session_id, request_id, &outcome)
-                        .await?;
-                    outcome = validated_project_approval_outcome(outcome, validation);
+                    broker.validate_human_response(session_id, request_id, &outcome).await?;
                 }
             }
             let mut meta = live.meta.lock().await;
@@ -3907,7 +3908,7 @@ impl SessionManager {
             // Persist this once with the answer; replaying a receipt must not
             // undo a later user stop. Cancelling a question is not a resume.
             if continuation_for(&request, &outcome)?.is_some() {
-                next.inbox.paused = false;
+                next.inbox.set_pause(None);
                 next.inbox.error = None;
             }
             self.store.save_meta(&next)?;
@@ -4052,13 +4053,9 @@ impl SessionManager {
         &self,
         session_id: &str,
         request: PermissionRequest,
-        expires_at_ms: i64,
     ) -> Result<()> {
         if request.kind != PermissionRequestKind::PlanApproval {
             bail!("expected a daemon-authored plan approval");
-        }
-        if expires_at_ms <= now_ms() {
-            bail!("approvalStale: create a new plan");
         }
         let live = self.live(session_id).await?;
         let _interaction = live.interaction_lock.lock().await;
@@ -4164,57 +4161,7 @@ impl SessionManager {
         Ok(outcome)
     }
 
-    /// The built-in recovery reviewer may only submit the choice recorded by
-    /// its controller through the durable Session question path.
-    pub(crate) async fn workflow_recovery_choice(
-        &self,
-        session_id: &str,
-    ) -> Result<Option<String>> {
-        let live = self.live(session_id).await?;
-        let meta = live.meta.lock().await;
-        let Some(decision) = &meta.human_continuation else {
-            return Ok(None);
-        };
-        if decision.request.kind != PermissionRequestKind::Question {
-            return Ok(None);
-        }
-        let Some([question]) = decision.request.questions.as_deref() else {
-            return Ok(None);
-        };
-        let expected = ["repair", "resume", "successor", "human", "cancel"];
-        if question
-            .options
-            .iter()
-            .map(|option| option.label.as_str())
-            .collect::<Vec<_>>()
-            != expected
-        {
-            return Ok(None);
-        }
-        let selected = match &decision.outcome {
-            PermissionOutcome::Selected { option_id } => Some(option_id.as_str()),
-            PermissionOutcome::Answered { answers } => answers
-                .iter()
-                .find(|answer| answer.question_id == question.id)
-                .and_then(|answer| answer.selected_option_ids.as_slice().first())
-                .map(String::as_str),
-            _ => None,
-        };
-        Ok(selected
-            .and_then(|id| {
-                question
-                    .options
-                    .iter()
-                    .find(|option| option.id == id || option.label == id)
-            })
-            .map(|option| option.label.clone()))
-    }
-
-    pub(crate) async fn cancel_workflow_question(
-        &self,
-        session_id: &str,
-        request_id: &str,
-    ) -> Result<()> {
+    pub(crate) async fn cancel_workflow_question(&self, session_id: &str, request_id: &str) -> Result<()> {
         let live = match self.live(session_id).await {
             Ok(live) => live,
             Err(error) if error.is::<SessionMissing>() => return Ok(()),
@@ -4259,11 +4206,10 @@ impl SessionManager {
                     .as_ref()
                     .ok_or_else(|| anyhow!("project approval authority unavailable"))?;
                 broker
-                    .record_human_response_at(
+                    .record_human_response(
                         &session,
                         &decision.request.id,
                         &decision.outcome,
-                        decision.decided_at_ms,
                     )
                     .await?;
             }
@@ -4275,7 +4221,7 @@ impl SessionManager {
             *meta = next;
         }
         if let Some(mut continuation) = continuation_for(&decision.request, &decision.outcome)? {
-            if decision.project_approval && !is_expired_plan_refresh(&decision.outcome) {
+            if decision.project_approval {
                 continuation.prompt.push_str(&format!(
                 "\nDurable GeneHub interaction {}. Plan details:\n{}\nOnly if approved, use action ID {} for the mutation and any retry. Inspect existing results before acting; completed mutations must not be repeated.",
                 decision.request.id, decision.request.detail.as_deref().unwrap_or(""), decision.request.id));
@@ -4950,7 +4896,7 @@ impl Live {
                 if matches!(event, SessionEvent::TurnFailed { .. }) {
                     let mut meta = self.meta.lock().await;
                     let mut next = meta.clone();
-                    next.inbox.paused = true;
+                    next.inbox.set_pause(Some("executionFailure"));
                     next.inbox.error =
                         Some("Human 决定已保存，PM 继续执行失败；发送新消息后核对并继续。".into());
                     self.store.save_meta(&next)?;
@@ -5626,7 +5572,6 @@ const START_GATE_BUDGET: Duration = Duration::from_secs(40);
 /// wrong in here, the answer and the withdrawal have to arrive while someone is
 /// still listening.
 const HANDOVER_BUDGET: Duration = Duration::from_secs(55);
-const REFRESH_EXPIRED_PLAN: &str = "refreshPlan";
 
 struct Continuation {
     elevated: bool,
@@ -5655,15 +5600,6 @@ fn continuation_for(
             }))
         }
         PermissionRequestKind::PlanApproval => {
-            if is_expired_plan_refresh(outcome) {
-                return Ok(Some(Continuation {
-                    elevated: false,
-                    prompt: format!(
-                        "The user tried to approve the plan '{}' after its daemon challenge expired. Do not apply the expired plan or reuse its action ID. Re-read the current project facts, prepare a fresh plan for the same goal, and present a new PlanApproval for Human confirmation.",
-                        request.title
-                    ),
-                }));
-            }
             let Some(option) = selected_option(request, outcome)? else {
                 return Ok(None);
             };
@@ -5699,36 +5635,6 @@ fn continuation_for(
             }))
         }
     }
-}
-
-fn is_expired_plan_refresh(outcome: &PermissionOutcome) -> bool {
-    matches!(
-        outcome,
-        PermissionOutcome::TimedOut { applied_default }
-            if applied_default == REFRESH_EXPIRED_PLAN
-    )
-}
-
-fn validated_project_approval_outcome(
-    outcome: PermissionOutcome,
-    validation: crate::project_control::HumanResponseValidation,
-) -> PermissionOutcome {
-    match validation {
-        crate::project_control::HumanResponseValidation::Accepted => outcome,
-        crate::project_control::HumanResponseValidation::ApprovalExpired => {
-            PermissionOutcome::TimedOut {
-                applied_default: REFRESH_EXPIRED_PLAN.into(),
-            }
-        }
-    }
-}
-
-fn is_plan_approval_selection(request: &PermissionRequest, outcome: &PermissionOutcome) -> bool {
-    request.kind == PermissionRequestKind::PlanApproval
-        && matches!(outcome, PermissionOutcome::Selected { option_id } if request
-            .options
-            .iter()
-            .any(|option| option.id == *option_id && option.kind != PermissionOptionKind::Reject))
 }
 
 fn selected_option<'a>(
@@ -10027,7 +9933,7 @@ mod tests {
         live.begin_round(None, "t-original", "u-original").await;
         let request = interaction(PermissionRequestKind::PlanApproval);
         sessions
-            .request_project_approval("s1", request.clone(), now_ms() + 60_000)
+            .request_project_approval("s1", request.clone())
             .await
             .unwrap();
         assert!(interrupted.load(Ordering::SeqCst));
@@ -10496,33 +10402,6 @@ mod tests {
         .expect("approval resumes");
         assert!(!approved.elevated);
         assert!(approved.prompt.contains("Continue?"));
-    }
-
-    #[test]
-    fn an_expired_plan_approval_resumes_only_to_request_a_fresh_plan() {
-        let request = interaction(PermissionRequestKind::PlanApproval);
-        let expired = validated_project_approval_outcome(
-            PermissionOutcome::Selected {
-                option_id: "yes".into(),
-            },
-            crate::project_control::HumanResponseValidation::ApprovalExpired,
-        );
-        let continuation = continuation_for(&request, &expired)
-            .unwrap()
-            .expect("an expired card resumes the PM to prepare a replacement");
-
-        assert!(!continuation.elevated);
-        assert!(continuation
-            .prompt
-            .contains("Do not apply the expired plan"));
-        assert!(continuation.prompt.contains("fresh plan"));
-        assert!(is_expired_plan_refresh(&expired));
-        assert!(is_plan_approval_selection(
-            &request,
-            &PermissionOutcome::Selected {
-                option_id: "yes".into(),
-            },
-        ));
     }
 
     #[tokio::test]

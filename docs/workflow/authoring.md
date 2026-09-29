@@ -11,7 +11,7 @@ bounded JSON data and deterministic execution; it does not implement a game pipe
 ```
 
 `schema` returns `data.definition`, a Draft 2020-12 JSON Schema generated from the Rust deserialization
-types, plus `x-genehub` capabilities and boundaries. It describes our v1/v2 syntax, **not** OWS/ASL
+types, plus `x-genehub` capabilities and boundaries. New Runs require v2 (v1 is retained only for historical and in-flight compatibility), **not** OWS/ASL
 compatibility. No jq, JSONata, remote `$ref`, script runtime or standard-DSL migration is added.
 The schema helps authoring; the production compiler remains authoritative for control flow and bounds.
 
@@ -71,9 +71,9 @@ same serialization when both are omitted; old Runs are not rewritten.
 
 `request.budget` is a host capability with no `with` or `completion` fields.
 An ordinary task returns a persisted `output` containing `requestRunId`,
-`observedAtMs`, `budget` (revision/maxRuns/deadlineMs/maxLlmRounds), `usedRuns`,
-`observedLlmRounds`, `executionMs` and remainingRuns/remainingLlmRounds/remainingExecutionMs.
-It reads only its own shared request using the same accounting as admission and
+`observedAtMs`, `budget` (revision/deadlineMs/maxLlmRounds),
+`observedLlmRounds`, `executionMs` and remainingLlmRounds/remainingExecutionMs.
+It reads only its own shared user requirement using the same accounting as admission and
 `workflow check`. The observation is neither a reservation nor authority to raise
 limits. It survives restart unchanged; query again to observe a budget amendment
 or subsequent usage. Thresholds and business exits belong to YAML; PM retains
@@ -119,6 +119,11 @@ leases stay keyed by (directory, target ref), which is what makes separate
 directories on separate branches genuinely concurrent while one target ref stays
 serialized. A pack that wants parallel branches creates those directories with an
 ordinary node and returns the project-relative path in its `completion.output`.
+
+For `pack.script`, a structured task's frozen `input` is sent as JSON on stdin
+when `with.input` is omitted. An explicitly declared `with.input` remains the
+literal script input for compatibility. The operation input is persisted before
+invoking the script; a missing result never permits automatic replay.
 
 Every node instance records when its state changed: `pendingSinceMs` (the instance
 first existed, retained across attempts), `assignedAtMs` (the current attempt

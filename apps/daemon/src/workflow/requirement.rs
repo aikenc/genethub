@@ -60,12 +60,12 @@ pub(super) fn sync(runtime: &RuntimeStore, run: &RunRecord) -> Result<()> {
     if request::cancelled(root) && !root.request.as_ref().is_some_and(|l| l.cancelled_by_agent) {
         record.requirement.state = Phase::Cancelled;
     } else if matches!(
-        latest.status.as_str(),
+        latest.status(),
         "running" | "stopping" | "cancelling" | "recoverable"
     ) {
         if record.latest_business_run != latest.id || record.requirement.state != Phase::Completed {
             record.requirement.state = Phase::InProgress;
-            record.requirement.pending_since_ms = 0;
+            record.requirement.pending_since_ms = latest.disposition_since().unwrap_or(0);
             record.requirement.completed_at_ms = None;
             record.requirement.conclusion = None;
             record.requirement.delivery_references.clear();
@@ -73,13 +73,13 @@ pub(super) fn sync(runtime: &RuntimeStore, run: &RunRecord) -> Result<()> {
     } else if record.requirement.state != Phase::Completed
         && group.iter().any(|r| {
             matches!(
-                r.status.as_str(),
+                r.status(),
                 "running" | "stopping" | "cancelling" | "recoverable"
             )
         })
     {
         record.requirement.state = Phase::InProgress;
-        record.requirement.pending_since_ms = 0;
+        record.requirement.pending_since_ms = latest.disposition_since().unwrap_or(0);
     } else if record.requirement.state != Phase::Completed {
         record.requirement.state = Phase::Completing;
         if record.requirement.pending_since_ms == 0 || record.latest_business_run != latest.id {
@@ -164,15 +164,6 @@ pub(crate) async fn complete_requirement(
         bail!("requirementStillExecuting: finish execution and cleanup before confirming delivery");
     }
     for r in &group {
-        if !(r.handles.is_empty()
-            || matches!(r.status.as_str(), "completed" | "cancelled" | "awaitingPm")
-            || (r.status == "blocked"
-                && r.stop
-                    .as_ref()
-                    .is_some_and(|stop| stop.cause_code == "recoveryNoExit")))
-        {
-            bail!("requirementRecoveryPending: resolve the blocked recovery before confirming delivery");
-        }
         if recovery::read_human_exit(&runtime, r)?.is_some_and(|e| e.answer.is_none()) {
             bail!("requirementAwaitingHuman: resolve the outstanding decision before delivery");
         }
@@ -181,25 +172,11 @@ pub(crate) async fn complete_requirement(
     if group
         .iter()
         .filter(|r| r.handles.is_empty() && !predecessors.contains(r.id.as_str()))
-        .any(|r| r.status != "completed")
+        .any(|r| r.status() != "completed" && !group.iter().any(|review|
+            review.handles.iter().any(|h| h.run_id == r.id) && recovery::read_human_exit(&runtime, review)
+                .ok().flatten().is_some_and(|exit| exit.kind == "f" && exit.answer.as_deref() == Some("pass"))))
     {
         bail!("requirementStillBlocked: unresolved execution must be addressed before delivery");
-    }
-    // PM's explicit delivery decision is also a controlled exit for a
-    // recovery that has finished its review and is awaiting PM disposition.
-    // Commit cleanup first so a failed write cannot create a false goal terminal.
-    for recovery in group
-        .iter()
-        .filter(|r| !r.handles.is_empty() && matches!(r.status.as_str(), "blocked" | "awaitingPm"))
-    {
-        let _recovery = lock_run(&runtime, &recovery.id)?;
-        let mut recovery = load_run(&runtime, &recovery.id)?;
-        recovery.status = "completed".into();
-        recovery.stop = None;
-        recovery.journal_actor = "pm".into();
-        recovery.revision = recovery.revision.saturating_add(1);
-        recovery.updated_at_ms = now_ms();
-        save_run(&runtime, &recovery)?;
     }
     record = request::read_record(&runtime, id)?;
     record.requirement.state = Phase::Completed;
@@ -268,7 +245,7 @@ pub(super) async fn observe_wait(
     let group = request_runs(runtime, request::group_id(run))?;
     if group.iter().any(|r| {
         matches!(
-            r.status.as_str(),
+            r.status(),
             "running" | "stopping" | "cancelling" | "recoverable"
         )
     }) {

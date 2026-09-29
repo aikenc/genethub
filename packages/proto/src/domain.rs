@@ -407,8 +407,6 @@ pub struct BootstrapApprovalChallenge {
     pub challenge_id: String,
     pub title: String,
     pub detail: String,
-    #[ts(type = "number")]
-    pub expires_at_ms: i64,
 }
 
 /// Immutable, Human-reviewable plan for one Component/Parent/lifecycle CAS.
@@ -954,6 +952,12 @@ pub struct SessionWorkSummary {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct SessionInputSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pause_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub control_revision: Option<u64>,
     pub pending_message_ids: Vec<String>,
     pub paused: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -969,6 +973,11 @@ pub struct WorkflowTaskSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub observation: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub phase: Option<String>,
+    #[serde(default)]
+    pub conditions: Vec<WorkflowCondition>,
     /// Execution is independent from the user requirement's delivery state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -1034,7 +1043,6 @@ pub struct WorkflowHumanWait {
 pub struct WorkflowRequestBudgetStatus {
     #[ts(type = "number")]
     pub revision: u64,
-    pub max_runs: u32,
     #[ts(type = "number")]
     pub deadline_ms: u64,
     #[ts(type = "number")]
@@ -1048,7 +1056,7 @@ pub struct WorkflowRequestBudgetStatus {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct WorkflowRequestBudgetSnapshot {
-    /// Admission of this Run is independent of admission of a future Run.
+    /// This execution has been admitted; remaining shared calls/time still apply.
     #[serde(default)]
     pub current_run_admitted: bool,
     #[serde(default)]
@@ -1057,12 +1065,10 @@ pub struct WorkflowRequestBudgetSnapshot {
     #[ts(type = "number")]
     pub observed_at_ms: i64,
     pub budget: WorkflowRequestBudgetStatus,
-    pub used_runs: u32,
     #[ts(type = "number")]
     pub observed_llm_rounds: u64,
     #[ts(type = "number")]
     pub execution_ms: u64,
-    pub remaining_runs: u32,
     #[ts(type = "number")]
     pub remaining_llm_rounds: u64,
     #[ts(type = "number")]
@@ -1353,6 +1359,15 @@ pub struct WorkflowRunStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub agent_target: Option<WorkflowAgentTarget>,
+    /// Derived from program and confirmed resource retirement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub phase: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub program_result: Option<String>,
+    #[serde(default)]
+    pub conditions: Vec<WorkflowCondition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub requirement: Option<WorkflowRequirementStatus>,
@@ -1430,10 +1445,41 @@ pub struct WorkflowRunStatus {
     pub updated_at_ms: i64,
 }
 
+/// Exact total limits offered for one Human approval. The budget revision
+/// fences later changes; prose cannot authorize additional usage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export, export_to = "index.ts")]
+pub struct WorkflowBudgetProposal {
+    #[ts(type = "number")]
+    pub expected_revision: u64,
+    #[ts(type = "number")]
+    pub max_llm_rounds: u64,
+    #[ts(type = "number")]
+    pub deadline_seconds: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export, export_to = "index.ts")]
+pub struct WorkflowScopeProposal {
+    pub goal: String,
+    pub changes: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct WorkflowHumanExitStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub effect_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub budget: Option<WorkflowBudgetProposal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub scope: Option<WorkflowScopeProposal>,
     pub kind: String,
     pub request_id: String,
     pub pm_session_id: String,
@@ -1503,6 +1549,12 @@ pub struct ExecutorFlowStatus {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct WorkflowNodeRunStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub phase: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub result_accepted_at_ms: Option<i64>,
     #[serde(
         default,
         deserialize_with = "crate::deserialize_present_json",
@@ -1565,13 +1617,10 @@ pub struct WorkflowNodeRunStatus {
 pub struct WorkflowSupervisionStatus {
     #[ts(type = "number")]
     pub last_checked_at_ms: i64,
-    /// Elapsed time excluded from execution charging because the whole Run was
-    /// waiting for a Human.
+    /// Effective processing time of this Run: the union of its execution
+    /// intervals, excluding stopped, recoverable and whole-Run Human waits.
     #[ts(type = "number")]
-    pub human_wait_ms: i64,
-    /// Elapsed time the Run spent recoverable, awaiting a PM continue decision.
-    #[ts(type = "number")]
-    pub recovery_wait_ms: i64,
+    pub execution_ms: u64,
     pub waiting: bool,
     #[ts(type = "number")]
     pub node_wall_ms: i64,
@@ -2681,6 +2730,10 @@ pub enum WorkflowRequirementState {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct WorkflowRequirementStatus {
+    /// Human-approved replacement goal; original request history stays intact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub scope: Option<WorkflowScopeProposal>,
     pub state: WorkflowRequirementState,
     #[ts(type = "number")]
     pub revision: u64,
@@ -2692,4 +2745,17 @@ pub struct WorkflowRequirementStatus {
     pub conclusion: Option<String>,
     pub delivery_references: Vec<String>,
     pub patrol_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct WorkflowCondition {
+    pub code: String,
+    pub node_id: Option<String>,
+    #[ts(type = "number")]
+    pub occurrence: u64,
+    #[ts(type = "number")]
+    pub since_ms: i64,
+    pub reason: String,
 }

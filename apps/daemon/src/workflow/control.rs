@@ -7,10 +7,6 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 static LAST_JOURNAL_PRUNE_DAYS: LazyLock<Mutex<BTreeMap<PathBuf, i64>>> =
     LazyLock::new(|| Mutex::new(BTreeMap::new()));
-/// Projects whose runtime store failed on the last patrol. A broken project
-/// fails every tick; the log should say when it breaks, not every few seconds.
-static UNAVAILABLE_RUNTIMES: LazyLock<Mutex<BTreeMap<PathBuf, String>>> =
-    LazyLock::new(|| Mutex::new(BTreeMap::new()));
 static LAST_PATROL_FINISHED_MS: AtomicI64 = AtomicI64::new(0);
 
 pub(crate) fn patrol_lag_ms() -> Option<u64> {
@@ -54,10 +50,7 @@ pub(crate) async fn summarize_sessions(state: &Shared, sessions: &mut [SessionSu
                         .filter_map(|group| {
                             group.iter().copied().max_by_key(|run| {
                                 (
-                                    matches!(
-                                        run.status.as_str(),
-                                        "running" | "stopping" | "cancelling" | "recoverable"
-                                    ),
+                                    run.unfinished(),
                                     run.created_at_ms,
                                 )
                             })
@@ -73,14 +66,9 @@ pub(crate) async fn summarize_sessions(state: &Shared, sessions: &mut [SessionSu
                             .count() as u32,
                     );
                     for run in &owned {
-                        if requirement::status(runtime, run).is_ok_and(|s| {
-                            s.state == genehub_proto::WorkflowRequirementState::Completing
-                        }) {
-                            summary.running += 1;
-                            continue;
-                        }
-                        match run.status.as_str() {
-                            "running" | "awaitingPm" => summary.running += 1,
+                        match run.status() {
+                            "running" if run.interrupted() || !run.route_wait().is_empty() => summary.blocked += 1,
+                            "running" => summary.running += 1,
                             "stopping" | "cancelling" => summary.stopping += 1,
                             "blocked" | "failed" | "recoverable" => summary.blocked += 1,
                             _ => {}
@@ -98,31 +86,22 @@ pub(crate) async fn summarize_sessions(state: &Shared, sessions: &mut [SessionSu
                         .into_iter()
                         .take(16)
                         .map(|run| genehub_proto::WorkflowTaskSummary {
-                            run_status: Some(run.status.clone()),
+                            observation: observability::summary(runtime, runs, run).ok(),
+                            phase: Some(run.phase().into()), conditions: run.conditions(),
+                            run_status: Some(run.status().to_string()),
                             recovery: Some(!run.handles.is_empty()),
-                            human_exit: grouped
-                                .get(request::group_id(run))
-                                .and_then(|group| {
-                                    group
-                                        .iter()
-                                        .filter_map(|item| {
-                                            recovery::read_human_exit(runtime, item).ok().flatten()
-                                        })
-                                        .max_by_key(|exit| {
-                                            (exit.answer.is_none(), exit.created_at_ms)
-                                        })
-                                })
+                            human_exit: grouped.get(request::group_id(run)).and_then(|group| {
+                                group.iter().filter_map(|item| recovery::read_human_exit(runtime, item).ok().flatten())
+                                    .max_by_key(|exit| (exit.answer.is_none(), exit.created_at_ms))
+                            })
                                 .map(|exit| genehub_proto::WorkflowHumanExitStatus {
-                                    kind: exit.kind,
-                                    request_id: exit.request_id,
-                                    pm_session_id: exit.pm_session_id,
-                                    reason: exit.reason,
-                                    created_at_ms: exit.created_at_ms,
-                                    answer: exit.answer,
+                                    kind: exit.kind, request_id: exit.request_id,
+                                    pm_session_id: exit.pm_session_id, reason: exit.reason,
+                                    created_at_ms: exit.created_at_ms, answer: exit.answer,
+                                    budget: exit.budget, scope: exit.scope, effect_error: exit.effect_error,
                                 }),
-                            observation: observability::summary(runs, run).ok(),
                             executing: Some(executing_runs.contains(&run.id)),
-                            waiting: (run.status == "running"
+                            waiting: (run.status() == "running"
                                 && !run.supervision.waiting_requests.is_empty())
                             .then(|| {
                                 run.supervision
@@ -140,26 +119,13 @@ pub(crate) async fn summarize_sessions(state: &Shared, sessions: &mut [SessionSu
                             task_id: run.task_id.clone(),
                             workflow_id: run.workflow_id.clone(),
                             status: match requirement::status(runtime, run) {
-                                Ok(_)
-                                    if matches!(run.status.as_str(), "stopping" | "cancelling") =>
-                                {
-                                    run.status.clone()
-                                }
+                                Ok(_) if matches!(run.status(), "stopping" | "cancelling") => run.status().to_string(),
                                 Ok(req) => match req.state {
-                                    genehub_proto::WorkflowRequirementState::InProgress => {
-                                        "running"
-                                    }
-                                    genehub_proto::WorkflowRequirementState::Completing => {
-                                        "completing"
-                                    }
-                                    genehub_proto::WorkflowRequirementState::Completed => {
-                                        "completed"
-                                    }
-                                    genehub_proto::WorkflowRequirementState::Cancelled => {
-                                        "cancelled"
-                                    }
-                                }
-                                .into(),
+                                    genehub_proto::WorkflowRequirementState::InProgress => "running",
+                                    genehub_proto::WorkflowRequirementState::Completing => "completing",
+                                    genehub_proto::WorkflowRequirementState::Completed => "completed",
+                                    genehub_proto::WorkflowRequirementState::Cancelled => "cancelled",
+                                }.into(),
                                 Err(_) => "blocked".into(),
                             },
                             requirement: requirement::status(runtime, run).ok(),
@@ -168,7 +134,7 @@ pub(crate) async fn summarize_sessions(state: &Shared, sessions: &mut [SessionSu
                                 .nodes
                                 .iter()
                                 .filter(|(_, node)| {
-                                    matches!(node.status.as_str(), "running" | "finishing")
+                                    matches!(node.status(), "running" | "finishing")
                                 })
                                 .map(|(id, _)| id.clone())
                                 .collect(),
@@ -178,7 +144,7 @@ pub(crate) async fn summarize_sessions(state: &Shared, sessions: &mut [SessionSu
                                 .as_ref()
                                 .map(|stop| stop.reason.chars().take(512).collect())
                                 .or_else(|| {
-                                    (run.status == "running" && run.supervision.waiting)
+                                    (run.status() == "running" && run.supervision.waiting)
                                         .then(|| "工作节点正在等待用户或上级 Agent 处理。".into())
                                 }),
                             cleanup_error: run.stop.as_ref().and_then(|stop| {
@@ -241,7 +207,7 @@ pub(super) struct RecoveryNode {
     pub session_id: String,
 }
 
-fn recovery_targets(recovery: &Recovery) -> Vec<(String, String)> {
+pub(super) fn recovery_targets(recovery: &Recovery) -> Vec<(String, String)> {
     if recovery.nodes.is_empty() {
         vec![(
             recovery.node_id.clone(),
@@ -305,12 +271,9 @@ pub(super) fn request_stop_with_cause(
     reason: String,
     cause_code: &str,
 ) {
-    run.status = if target == "cancelled" {
-        "cancelling"
-    } else {
-        "stopping"
-    }
-    .into();
+    // Cancellation is monotonic; a later observation cannot downgrade it.
+    if run.stop.as_ref().is_some_and(|stop| stop.target == "cancelled") { return; }
+    run.retired_at_ms = None;
     run.stop = Some(StopRequest {
         target: target.into(),
         reason,
@@ -325,36 +288,16 @@ pub(super) fn request_stop_with_cause(
 /// active Worker, expose the wait as a blocked Run without aborting its graph.
 pub(super) fn defer_unavailable_route(run: &mut RunRecord, targets: &[String], reason: String) {
     for id in targets {
-        if let Some(node) = run
-            .nodes
-            .get_mut(id)
-            .filter(|node| node.status == "pending")
-        {
+        if let Some(node) = run.nodes.get_mut(id).filter(|node| node.status() == "pending") {
             node.reason = Some(reason.clone());
-            if !run.route_wait.contains(id) {
-                run.route_wait.push(id.clone());
-            }
+            node.route_wait.get_or_insert(facts::RouteWait { occurrence: 0, since_ms: now_ms(), reason: reason.clone() });
         }
     }
-    if run.route_wait.is_empty() {
+    if run.route_wait().is_empty() {
         request_stop_with_cause(run, "blocked", reason, "routeUnavailable");
         return;
     }
-    if !run
-        .nodes
-        .values()
-        .any(|node| matches!(node.status.as_str(), "running" | "finishing"))
-    {
-        run.status = "blocked".into();
-        run.stop = Some(StopRequest {
-            target: "blocked".into(),
-            reason,
-            cause_code: "routeUnavailable".into(),
-            actor: String::new(),
-            cleanup_error: None,
-        });
-    }
-    supervision::prepare_notice(run, "routeUnavailable");
+
 }
 
 /// Starting a saved assignment and recording cancellation share the Run lock.
@@ -372,7 +315,7 @@ pub(crate) async fn start_assigned(
     let mut run = load_run(&runtime, run_id)?;
     let _request = request::request_lock(&runtime, request::group_id(&run))?;
     request::ensure_open(&runtime, &run)?;
-    if run.status != "running" {
+    if run.status() != "running" {
         return Ok(());
     }
     let deadline_reached = run
@@ -390,13 +333,18 @@ pub(crate) async fn start_assigned(
         } else {
             ("结构化流程活动达到期限", "activityDeadline")
         };
-        request_stop_with_cause(&mut run, "blocked", reason.into(), cause);
+        request_stop_with_cause(
+            &mut run,
+            "blocked",
+            reason.into(),
+            cause,
+        );
         run.revision += 1;
         save_run(&runtime, &run)?;
         return Ok(());
     }
     if !run.nodes.values().any(|node| {
-        node.status == "running" && node.session_id.as_deref() == Some(session.id.as_str())
+        node.status() == "running" && node.session_id.as_deref() == Some(session.id.as_str())
     }) {
         bail!("Worker assignment no longer belongs to an active node");
     }
@@ -411,7 +359,7 @@ pub(crate) async fn start_assigned(
             run.revision += 1;
             save_run(&runtime, &run)?;
         }
-        if run.status != "running" {
+        if run.status() != "running" {
             return Ok(());
         }
     }
@@ -457,11 +405,7 @@ pub(crate) async fn cancel(
         bail!("Workflow revision 冲突：先重新读取 workflow get");
     }
     let group = request_runs(&runtime, &root.id)?;
-    if by_agent
-        && group
-            .iter()
-            .all(|r| matches!(r.status.as_str(), "completed" | "cancelled"))
-    {
+    if by_agent && group.iter().all(|r| matches!(r.status(), "completed" | "cancelled")) {
         return run_status(&runtime, &run);
     }
     if requirement::terminal(&runtime, &run)? {
@@ -481,10 +425,7 @@ pub(crate) async fn cancel(
     for previous in group {
         let mut current = load_run(&runtime, &previous.id)?;
         if let Some(exit) = recovery::read_human_exit(&runtime, &previous)? {
-            state
-                .sessions
-                .cancel_workflow_question(&exit.pm_session_id, &exit.request_id)
-                .await?;
+            state.sessions.cancel_workflow_question(&exit.pm_session_id, &exit.request_id).await?;
         }
         let retired = recovery::retire_human_exit(&runtime, &mut current, by_agent)?;
         // Retire the notices where they were actually delivered, which is not
@@ -495,11 +436,8 @@ pub(crate) async fn cancel(
             .discard_workflow_inputs(&recipient, &previous.id)
             .await?;
         let pending = current.supervision.notices.iter().any(|n| !n.handled);
-        for notice in &mut current.supervision.notices {
-            notice.accepted = true;
-            notice.handled = true;
-        }
-        if matches!(current.status.as_str(), "completed" | "cancelled") {
+        for notice in &mut current.supervision.notices { notice.accepted = true; notice.handled = true; }
+        if matches!(current.status(), "completed" | "cancelled") {
             if retired || pending {
                 current.journal_actor = if by_agent { "pm" } else { "human" }.into();
                 save_run(&runtime, &current)?;
@@ -549,156 +487,52 @@ pub(crate) async fn recover(
                 expected_revision
             );
         }
-        if run.status != "recoverable" {
-            bail!(
-                "Run 当前为 {}，没有可恢复的未交卷操作；--retry-of 会从流程入口新建 Run",
-                run.status
-            );
-        }
-        let recovery = run
-            .recovery
-            .clone()
-            .ok_or_else(|| anyhow!("recoverable Run 缺少恢复记录"))?;
-        if run
-            .stop
-            .as_ref()
-            .is_some_and(|stop| stop.cleanup_error.is_some())
-        {
-            bail!("旧执行尚未清理干净，不可恢复");
+        if !run.program_open() || !run.interrupted() {
+            bail!("Run 没有可续接的未交卷节点；已关闭程序需要新建后继");
         }
         if request::budget_exhausted(&runtime, &run, now_ms())? {
             bail!("原始请求预算已耗尽；先核对并调整共享预算");
         }
-        if recovery.reuse_session {
-            let mut assignments = Vec::new();
-            for (node_id, session_id) in recovery_targets(&recovery) {
-                let node = run
-                    .nodes
-                    .get(&node_id)
-                    .ok_or_else(|| anyhow!("恢复节点不存在"))?;
-                if node.status != "interrupted"
-                    || node.session_id.as_deref() != Some(session_id.as_str())
-                {
-                    bail!("恢复节点状态不匹配；请先 workflow get/check 核对");
+        let targets = run.nodes.iter().filter_map(|(id, node)|
+            node.interruption.as_ref().map(|fault| (id.clone(), fault.clone()))).collect::<Vec<_>>();
+        // Validate the entire set before persisting any continuation intent.
+        let mut assignments = Vec::new();
+        for (id, fault) in &targets {
+            let node = &run.nodes[id];
+            if node.status() != "running" || node.session_id.as_deref() != Some(&fault.session_id)
+                || node.attempt != fault.attempt { bail!("恢复节点身份已改变"); }
+            if let Some(lease) = run.leases.get(id) {
+                let key = hex_digest(lease.resource.as_bytes());
+                let directory = runtime.directory(Path::new("ref-leases"), false)?;
+                let reservation = load_lease_if_present(&directory.join(format!("{key}.json")))?;
+                if !reservation.is_some_and(|owner| owner.run_id == run.id && owner.resource == lease.resource) {
+                    bail!("恢复节点 {id} 的写租约归属已改变，拒绝续接");
                 }
-                match state.sessions.worker_continuation(&session_id).await {
-                    crate::session::manager::WorkerContinuation::Ready => {}
-                    crate::session::manager::WorkerContinuation::ProcessAlive { pid } => {
-                        bail!(
-                            "旧 Worker 仍在运行，暂停续接{}",
-                            pid.map(|pid| format!("（pid {pid}）")).unwrap_or_default()
-                        );
-                    }
-                    crate::session::manager::WorkerContinuation::Unavailable { reason } => {
-                        bail!("{reason}");
-                    }
-                }
-                let definition = runtime_node(&run, &node_id)?;
-                let summary = state.sessions.summary(&session_id).await?;
-                let message = continue_message(&run, &definition);
-                let record = run.nodes.get_mut(&node_id).expect("validated node");
-                record.status = "running".into();
-                record.assigned_at_ms = now_ms();
-                assignments.push((summary, message));
             }
-            run.supervision.recovery_wait_ms = run
-                .supervision
-                .recovery_wait_ms
-                .saturating_add(now_ms().saturating_sub(recovery.waiting_since_ms));
-            run.recovery = None;
-            run.stop = None;
-            run.status = "running".into();
-            run.revision = run.revision.saturating_add(1);
-            run.updated_at_ms = now_ms();
-            if let Some(executor) = run.executor_session_id.clone() {
-                let message = flow_message(
-                    &run,
-                    "node.continued",
-                    Some(&recovery.node_id),
-                    &executor,
-                    &run.parent_session_id,
-                    Some(run.revision),
-                    serde_json::json!({
-                        "previousSessionId": recovery.previous_session_id,
-                        "reusedSession": true
-                    }),
-                )?;
-                push_flow_message(&mut run, message);
+            match state.sessions.worker_continuation(&fault.session_id).await {
+                crate::session::manager::WorkerContinuation::Ready => {},
+                crate::session::manager::WorkerContinuation::ProcessAlive { .. } => bail!("旧 Worker 仍在运行，暂停续接"),
+                crate::session::manager::WorkerContinuation::Unavailable { reason } => bail!("{reason}"),
             }
-            save_run(&runtime, &run)?;
-            Some(assignments)
-        } else {
-            let node = run
-                .nodes
-                .get(&recovery.node_id)
-                .ok_or_else(|| anyhow!("恢复节点不存在"))?;
-            if node.status != "interrupted"
-                || node.session_id.as_deref() != Some(&recovery.previous_session_id)
-                || node.attempt != 0
-            {
-                bail!("恢复节点状态不匹配；请先 workflow get/check 核对");
-            }
-            if !run.leases.is_empty()
-                || runtime_node(&run, &recovery.node_id)?
-                    .inputs
-                    .write_lease
-                    .is_some()
-            {
-                bail!("带写租约的操作不可自动重派；交回 PM 核对副作用");
-            }
-            let old = run
-                .nodes
-                .get_mut(&recovery.node_id)
-                .expect("validated node");
-            old.prior_activity.push(std::mem::take(&mut old.activity));
-            // The attempt counter is the node's real retry depth. Its first
-            // pending time is never rewritten, so a reader can still see how
-            // long the node has existed rather than only the current attempt.
-            old.attempt = old.attempt.saturating_add(1);
-            let attempt = old.attempt;
-            old.status = "pending".into();
-            old.session_id = None;
-            old.assigned_at_ms = 0;
-            old.settled_at_ms = 0;
-            run.supervision.recovery_wait_ms = run
-                .supervision
-                .recovery_wait_ms
-                .saturating_add(now_ms().saturating_sub(recovery.waiting_since_ms));
-            run.recovery = None;
-            run.stop = None;
-            run.status = "running".into();
-            run.revision = run.revision.saturating_add(1);
-            run.updated_at_ms = now_ms();
-            if let Some(executor) = run.executor_session_id.clone() {
-                let message = flow_message(
-                    &run,
-                    "node.recovered",
-                    Some(&recovery.node_id),
-                    &executor,
-                    &run.parent_session_id,
-                    Some(run.revision),
-                    serde_json::json!({"previousSessionId": recovery.previous_session_id, "attempt": attempt}),
-                )?;
-                push_flow_message(&mut run, message);
-            }
-            save_run(&runtime, &run)?;
-            None
+            let summary = state.sessions.summary(&fault.session_id).await?;
+            assignments.push((summary, continue_message(&run, &runtime_node(&run, id)?)));
         }
+        for (id, _) in &targets {
+            let node = run.nodes.get_mut(id).expect("validated node");
+            node.interruption = None;
+            node.assigned_at_ms = now_ms();
+        }
+        run.recovery = None;
+        run.revision = run.revision.saturating_add(1);
+        run.updated_at_ms = now_ms();
+        record_assigned_messages(&mut run, &assignments)?;
+        save_run(&runtime, &run)?;
+        assignments
     };
-    if let Some(assignments) = assignments {
-        for (session, message) in assignments {
-            start_assigned(state, workspace_id, run_id, &session, message).await?;
-        }
-    } else {
-        structured::drive(state, &runtime, run_id).await?;
+    for (session, message) in assignments {
+        start_assigned(state, workspace_id, run_id, &session, message).await?;
     }
     run_status(&runtime, &load_run(&runtime, run_id)?)
-}
-
-pub(crate) struct BudgetUpdate {
-    pub max_runs: Option<u32>,
-    pub deadline_seconds: Option<u64>,
-    pub max_llm_rounds: Option<u64>,
 }
 
 pub(crate) async fn budget(
@@ -707,22 +541,12 @@ pub(crate) async fn budget(
     actor_session_id: Option<&str>,
     run_id: &str,
     expected_revision: u64,
-    update: BudgetUpdate,
+    deadline_seconds: Option<u64>,
+    max_llm_rounds: Option<u64>,
 ) -> Result<WorkflowRunStatus> {
-    let BudgetUpdate {
-        max_runs,
-        deadline_seconds,
-        max_llm_rounds,
-    } = update;
     validate_id(run_id, "runId")?;
-    if max_runs.is_none() && deadline_seconds.is_none() && max_llm_rounds.is_none() {
+    if deadline_seconds.is_none() && max_llm_rounds.is_none() {
         bail!("workflow.budget 至少需要一个预算上限");
-    }
-    if max_runs.is_some_and(|value| value == 0 || value > request::MAX_CONFIGURED_REQUEST_RUNS) {
-        bail!(
-            "maxRuns 必须在 1..={} 之间",
-            request::MAX_CONFIGURED_REQUEST_RUNS
-        );
     }
     if deadline_seconds
         .is_some_and(|value| value == 0 || value > request::MAX_CONFIGURED_REQUEST_DEADLINE_SECONDS)
@@ -767,9 +591,6 @@ pub(crate) async fn budget(
         bail!("Workflow 预算 revision 冲突：先重新读取 workflow get");
     }
     let previous = link.budget.status();
-    if let Some(value) = max_runs {
-        link.budget.max_runs = value;
-    }
     if let Some(value) = deadline_seconds {
         link.budget.deadline_ms = value
             .checked_mul(1000)
@@ -787,7 +608,7 @@ pub(crate) async fn budget(
     record_budget_update(&mut root, &sender, &previous, &current)?;
     // Terminal updated_at is the execution cutoff, not the time of later
     // budget decisions. The control message carries its own audit timestamp.
-    if matches!(root.status.as_str(), "running" | "stopping" | "cancelling") {
+    if matches!(root.status(), "running" | "stopping" | "cancelling") {
         root.updated_at_ms = now_ms();
     }
     save_run(&runtime, &root)?;
@@ -799,14 +620,10 @@ static RECONCILING: LazyLock<Mutex<BTreeMap<PathBuf, i64>>> =
 
 /// Includes jobs waiting for a semaphore as well as jobs inside the patrol.
 pub(crate) fn patrol_jobs() -> (u32, Option<u64>) {
-    let Ok(jobs) = RECONCILING.lock() else {
-        return (0, None);
-    };
+    let Ok(jobs) = RECONCILING.lock() else { return (0, None); };
     let oldest = jobs.values().min().copied();
-    (
-        jobs.len().min(u32::MAX as usize) as u32,
-        oldest.map(|started| now_ms().saturating_sub(started).max(0) as u64),
-    )
+    (jobs.len().min(u32::MAX as usize) as u32,
+        oldest.map(|started| now_ms().saturating_sub(started).max(0) as u64))
 }
 // Bound simultaneous reconciliation work without discarding requests beyond
 // the old global 64-job cutoff. Every request remains queued for a patrol.
@@ -833,28 +650,9 @@ pub(crate) async fn maintain(state: &Shared) {
             continue;
         };
         let runtime = match RuntimeStore::new(&state.paths.root, &workspace.id, &workspace.root) {
-            Ok(runtime) => {
-                if let Ok(mut unavailable) = UNAVAILABLE_RUNTIMES.lock() {
-                    if unavailable.remove(&workspace.root).is_some() {
-                        tracing::info!("workflow runtime available again");
-                    }
-                }
-                runtime
-            }
+            Ok(runtime) => runtime,
             Err(error) => {
-                let message = error.to_string();
-                let changed = UNAVAILABLE_RUNTIMES
-                    .lock()
-                    .map(|mut unavailable| {
-                        unavailable
-                            .insert(workspace.root.clone(), message.clone())
-                            .as_ref()
-                            != Some(&message)
-                    })
-                    .unwrap_or(true);
-                if changed {
-                    tracing::warn!(%error, "workflow runtime unavailable");
-                }
+                tracing::warn!(%error, "workflow runtime unavailable");
                 continue;
             }
         };
@@ -883,15 +681,12 @@ pub(crate) async fn maintain(state: &Shared) {
         let mut latest = BTreeMap::<&str, &RunRecord>::new();
         for run in &runs {
             let id = request::group_id(run);
-            if latest
-                .get(id)
-                .is_none_or(|previous| previous.created_at_ms <= run.created_at_ms)
-            {
+            if latest.get(id).is_none_or(|previous| previous.created_at_ms <= run.created_at_ms) {
                 latest.insert(id, run);
             }
         }
         for run in latest.values() {
-            if matches!(run.status.as_str(), "completed" | "cancelled") {
+            if matches!(run.status(), "completed" | "cancelled") {
                 if let Err(error) = release_request_writer_if_resolved(&runtime, run) {
                     tracing::warn!(run = %run.id, %error, "workflow request writer release remains pending");
                 }
@@ -899,19 +694,14 @@ pub(crate) async fn maintain(state: &Shared) {
         }
         let cancelled = runs
             .iter()
-            .filter(|run| request::cancelled(run))
+            .filter(|run| {
+                request::cancelled(run)
+            })
             .map(|run| run.id.clone())
             .collect::<BTreeSet<_>>();
         for run in runs {
-            let unfinished = (cancelled.contains(request::group_id(&run))
-                && !matches!(run.status.as_str(), "completed" | "cancelled"))
-                || matches!(
-                    run.status.as_str(),
-                    "running" | "stopping" | "cancelling" | "recoverable"
-                )
-                || matches!(run.status.as_str(), "blocked" | "awaitingPm")
-                || (!cancelled.contains(request::group_id(&run))
-                    && supervision::report_pending(&run));
+            let unfinished = run.unfinished()
+                || (!cancelled.contains(request::group_id(&run)) && supervision::report_pending(&run));
             match claim_request_writer(&runtime, &run) {
                 Ok(true) => {}
                 Ok(false) => continue,
@@ -977,10 +767,6 @@ pub(crate) async fn maintain(state: &Shared) {
                         tracing::warn!(run = %run.id, %error, "workflow execution reconciliation remains pending");
                         requirement::record_failure(&runtime, &run, &error);
                     }
-                    if let Err(error) = maybe_resolve_recovery_successor(&runtime, &run.id) {
-                        tracing::warn!(run = %run.id, %error, "workflow recovery successor remains pending");
-                        requirement::record_failure(&runtime, &run, &error);
-                    }
                     if let Err(error) = maybe_resume_route(&owner, &runtime, &run.id).await {
                         tracing::warn!(run = %run.id, %error, "workflow route resumption remains pending");
                         requirement::record_failure(&runtime, &run, &error);
@@ -989,20 +775,8 @@ pub(crate) async fn maintain(state: &Shared) {
                         Ok(true) => return,
                         Ok(false) => {}
                         Err(error) => {
-                            let mut handed_to_human = false;
-                            if error.downcast_ref::<recovery::RecoveryBudgetExceeded>().is_some() {
-                                if let Ok(current) = load_run(&runtime, &run.id) {
-                                    let reason = error.to_string();
-                                    match recovery::ensure_human_exit(&owner, &runtime, &current, "c", Some(&reason)).await {
-                                        Ok(exit) => handed_to_human = exit.answer.is_none(),
-                                        Err(handoff) => requirement::record_failure(&runtime, &run, &handoff),
-                                    }
-                                }
-                            }
-                            if !handed_to_human {
-                                tracing::warn!(run = %run.id, %error, "workflow recovery start remains pending");
-                                requirement::record_failure(&runtime, &run, &error);
-                            }
+                            tracing::warn!(run = %run.id, %error, "workflow recovery start remains pending");
+                            requirement::record_failure(&runtime, &run, &error);
                         }
                     }
                     if let Ok(current) = load_run(&runtime, &run.id) {
@@ -1049,106 +823,35 @@ pub(crate) async fn maintain(state: &Shared) {
     LAST_PATROL_FINISHED_MS.store(now_ms(), Ordering::Relaxed);
 }
 
-pub(super) fn maybe_resolve_recovery_successor(
-    runtime: &RuntimeStore,
-    run_id: &str,
-) -> Result<bool> {
-    let _guard = lock_run(runtime, run_id)?;
-    let mut run = load_run(runtime, run_id)?;
-    if run.handles.is_empty()
-        || !(run.status == "awaitingPm"
-            || (run.status == "blocked"
-                && run
-                    .stop
-                    .as_ref()
-                    .is_some_and(|stop| stop.cause_code == "recoveryNoExit")))
-    {
-        return Ok(false);
-    }
-    let _request = request::request_lock(runtime, request::group_id(&run))?;
-    let group = request_runs(runtime, request::group_id(&run))?;
-    if group
-        .iter()
-        .find(|item| item.id == request::group_id(&run))
-        .is_some_and(request::cancelled)
-    {
-        return Ok(false);
-    }
-    let handled = run
-        .handles
-        .iter()
-        .map(|handle| handle.run_id.as_str())
-        .collect::<BTreeSet<_>>();
-    let successor = group.iter().any(|other| {
-        other.handles.is_empty()
-            && other.created_at_ms >= run.created_at_ms
-            && other
-                .request
-                .as_ref()
-                .and_then(|link| link.retry_of.as_deref())
-                .is_some_and(|previous| previous == run.id || handled.contains(previous))
-            && other.status != "cancelled"
-    });
-    if !successor {
-        return Ok(false);
-    }
-    run.status = "completed".into();
-    run.stop = None;
-    run.journal_actor = "pm".into();
-    run.revision = run.revision.saturating_add(1);
-    run.updated_at_ms = now_ms();
-    save_run(runtime, &run)?;
-    Ok(true)
-}
-
 /// Retry only assignments that never started. In particular, a completed
 /// predecessor or an active sibling is never replayed after a route outage.
 async fn maybe_resume_route(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Result<bool> {
     let (workspace_id, sessions) = {
         let _guard = lock_run(runtime, run_id)?;
         let mut run = load_run(runtime, run_id)?;
-        if !matches!(run.status.as_str(), "running" | "blocked")
-            || run.route_wait.is_empty()
-            || (run.status == "blocked"
-                && run
-                    .stop
-                    .as_ref()
-                    .is_none_or(|stop| stop.cause_code != "routeUnavailable"))
-            || recovery::read_human_exit(runtime, &run)?.is_some()
-        {
+        if !matches!(run.status(), "running" | "blocked") || run.route_wait().is_empty()
+            || (run.status() == "blocked" && !run.stop.as_ref().is_some_and(|stop| stop.cause_code == "routeUnavailable"))
+            || recovery::read_human_exit(runtime, &run)?.is_some() {
             return Ok(false);
         }
         let _request = request::request_lock(runtime, request::group_id(&run))?;
         request::ensure_open(runtime, &run)?;
-        if request::budget_exhausted(runtime, &run, now_ms())? {
-            return Ok(false);
-        }
-        let targets = run.route_wait.clone();
+        if request::budget_exhausted(runtime, &run, now_ms())? { return Ok(false); }
+        let targets = run.route_wait();
         if run.engine.is_some() {
-            if run.status != "blocked" {
-                return Ok(false);
-            } // structured::drive retries a live graph
+            if run.status() != "blocked" { return Ok(false); } // structured::drive retries a live graph
             structured::validate_snapshot(&run)?;
             for id in &targets {
                 let node = runtime_node(&run, id)?;
-                let role = run
-                    .roles
-                    .get(node.inputs.role.as_deref().unwrap_or_default())
+                let role = run.roles.get(node.inputs.role.as_deref().unwrap_or_default())
                     .ok_or_else(|| anyhow!("Workflow route-wait role is missing"))?;
-                if resolve_role_route(state, role, run.agent_target.as_ref())
-                    .await
-                    .is_err()
-                {
-                    return Ok(false);
-                }
+                if resolve_role_route(state, role, run.agent_target.as_ref()).await.is_err() { return Ok(false); }
             }
-            run.status = "running".into();
+            run.legacy_program_status = run.engine.is_none().then(|| "running".into());
             run.stop = None;
-            run.route_wait.clear();
+            run.retain_routes(|_| false);
             for id in &targets {
-                if let Some(node) = run.nodes.get_mut(id) {
-                    node.reason = None;
-                }
+                if let Some(node) = run.nodes.get_mut(id) { node.reason = None; }
             }
             run.revision = run.revision.saturating_add(1);
             run.updated_at_ms = now_ms();
@@ -1156,45 +859,24 @@ async fn maybe_resume_route(state: &Shared, runtime: &RuntimeStore, run_id: &str
             save_run(runtime, &run)?;
             return Ok(true);
         }
-        if targets.iter().any(|id| {
-            run.nodes
-                .get(id)
-                .is_none_or(|node| node.status != "pending")
-        }) {
+        if targets.iter().any(|id| run.nodes.get(id).is_none_or(|node| node.status() != "pending")) {
             bail!("Workflow route-wait target is no longer pending");
         }
-        let was_blocked = run.status == "blocked";
-        let statuses_before = run
-            .nodes
-            .iter()
-            .map(|(id, node)| (id.clone(), node.status.clone()))
+        let was_blocked = run.status() == "blocked";
+        let statuses_before = run.nodes.iter().map(|(id, node)| (id.clone(), node.status().to_string()))
             .collect::<BTreeMap<_, _>>();
-        run.status = "running".into();
+        run.legacy_program_status = run.engine.is_none().then(|| "running".into());
         run.stop = None;
         let leases_before = run.leases.clone();
-        let sessions = match activate(
-            state,
-            &runtime.project_root,
-            runtime,
-            &mut run,
-            targets.clone(),
-        )
-        .await
-        {
+        let sessions = match activate(state, &runtime.project_root, runtime, &mut run, targets.clone()).await {
             Ok(sessions) => sessions,
             Err(error) if is_route_unavailable(&error) => {
-                let progressed = run.route_wait != targets
-                    || run
-                        .nodes
-                        .iter()
-                        .any(|(id, node)| statuses_before.get(id) != Some(&node.status));
-                if !progressed
-                    && (was_blocked
-                        || run
-                            .nodes
-                            .values()
-                            .any(|node| matches!(node.status.as_str(), "running" | "finishing")))
-                {
+                let progressed = run.route_wait() != targets || run.nodes.iter().any(|(id, node)| {
+                    statuses_before.get(id).map(String::as_str) != Some(node.status())
+                });
+                if !progressed && (was_blocked || run.nodes.values().any(|node| {
+                    matches!(node.status(), "running" | "finishing")
+                })) {
                     return Ok(false);
                 }
                 // A sibling may have finished after the route was first lost.
@@ -1208,11 +890,9 @@ async fn maybe_resume_route(state: &Shared, runtime: &RuntimeStore, run_id: &str
             }
             Err(error) => return Err(error),
         };
-        run.route_wait.retain(|id| !targets.contains(id));
+        run.retain_routes(|id| !targets.contains(id));
         for id in &targets {
-            if let Some(node) = run.nodes.get_mut(id) {
-                node.reason = None;
-            }
+            if let Some(node) = run.nodes.get_mut(id) { node.reason = None; }
         }
         settle_if_terminal(&mut run);
         release_recovery_handoff_leases(runtime, &mut run).await;
@@ -1224,12 +904,8 @@ async fn maybe_resume_route(state: &Shared, runtime: &RuntimeStore, run_id: &str
             save_run(runtime, &run)
         })();
         if let Err(error) = persisted {
-            let leases = run
-                .leases
-                .iter()
-                .filter(|(id, _)| !leases_before.contains_key(*id))
-                .map(|(_, lease)| lease.clone())
-                .collect::<Vec<_>>();
+            let leases = run.leases.iter().filter(|(id, _)| !leases_before.contains_key(*id))
+                .map(|(_, lease)| lease.clone()).collect::<Vec<_>>();
             return Err(with_activation_cleanup(state, runtime, &sessions, &leases, error).await);
         }
         (run.workspace_id.clone(), sessions)
@@ -1243,208 +919,117 @@ async fn maybe_resume_route(state: &Shared, runtime: &RuntimeStore, run_id: &str
     Ok(true)
 }
 
-/// A Human's explicit acceptance can settle a blocked business Run whose
-/// machine-only acceptance gate could not run. Keep the recovery writer until
-/// both snapshots are committed; retrying after either save is idempotent.
+/// Acceptance is a request-level fact held by the formal Human exit.
+/// This compatibility entry validates the target; it never rewrites history.
 pub(super) fn complete_human_acceptance(runtime: &RuntimeStore, recovery_id: &str) -> Result<()> {
-    let recovery = load_run(runtime, recovery_id)?;
-    let target_id = recovery
-        .handles
-        .first()
-        .ok_or_else(|| anyhow!("not a recovery Run"))?
-        .run_id
-        .clone();
-    let mut ids = [recovery_id, target_id.as_str()];
-    ids.sort();
-    let _first = lock_run(runtime, ids[0])?;
-    let _second = lock_run(runtime, ids[1])?;
-    let _request = request::request_lock(runtime, request::group_id(&recovery))?;
-    let mut target = load_run(runtime, &target_id)?;
-    let mut recovery = load_run(runtime, recovery_id)?;
-    request::ensure_open(runtime, &target)?;
-    if target.status != "completed" {
-        if target.status != "blocked" {
-            bail!("Human acceptance target is no longer blocked");
-        }
-        target.status = "completed".into();
-        target.stop = None;
-        target.journal_actor = "human".into();
-        target.revision = target.revision.saturating_add(1);
-        target.updated_at_ms = now_ms();
-        save_run(runtime, &target)?;
-    }
-    if recovery.status != "completed" {
-        if recovery.status != "blocked" {
-            bail!("Human acceptance recovery is no longer blocked");
-        }
-        recovery.status = "completed".into();
-        recovery.stop = None;
-        recovery.journal_actor = "human".into();
-        recovery.revision = recovery.revision.saturating_add(1);
-        recovery.updated_at_ms = now_ms();
-        save_run(runtime, &recovery)?;
-    }
-    Ok(())
+    let run = load_run(runtime, recovery_id)?;
+    let target = run.handles.first().ok_or_else(|| anyhow!("not a recovery Run"))?;
+    let business = load_run(runtime, &target.run_id)?;
+    if business.unfinished() || run.unfinished() { bail!("Human acceptance requires completed cleanup"); }
+    request::ensure_open(runtime, &business)
 }
 
-async fn maybe_start_recovery(
-    state: &Shared,
-    runtime: &RuntimeStore,
-    run_id: &str,
-) -> Result<bool> {
-    let run = load_run(runtime, run_id)?;
-    if !matches!(
-        run.status.as_str(),
-        "blocked" | "completed" | "failed" | "cancelled"
-    ) || !run.handles.is_empty()
-        || requirement::terminal(runtime, &run)?
-    {
-        return Ok(false);
+/// The patrol and read-only diagnostics consume the same current admission
+/// facts. Suppression is derived, never persisted as another lifecycle.
+pub(super) async fn recovery_suppression(
+    state: &Shared, runtime: &RuntimeStore, run: &RunRecord,
+) -> Result<Option<(&'static str, String)>> {
+    if !run.handles.is_empty() { return Ok(Some(("recoveryReport", "恢复报告的处置由 PM 接手".into()))); }
+    if requirement::terminal(runtime, run)? { return Ok(Some(("goalTerminal", "原需求已结束".into()))); }
+    if run.phase() == "closing" { return Ok(Some(("cleanupPending", "等待原执行确认退休后才能复查".into()))); }
+    if run.program_open() && !run.interrupted() && run.route_wait().is_empty() {
+        return Ok(Some(("noDisposition", "当前没有待处理的执行异常".into())));
     }
     let group = request_runs(runtime, request::group_id(&run))?;
-    if group
-        .iter()
-        .find(|item| item.id == request::group_id(&run))
-        .is_some_and(request::cancelled)
-    {
-        return Ok(false);
+    if group.iter().find(|item| item.id == request::group_id(&run)).is_some_and(request::cancelled) {
+        return Ok(Some(("requestCancelled", "原需求取消屏障已生效".into())));
     }
-    if group
-        .iter()
-        .filter(|item| item.handles.is_empty())
-        .max_by_key(|item| (item.created_at_ms, &item.id))
-        .is_none_or(|latest| latest.id != run.id)
-        || group.iter().any(|r| {
-            matches!(
-                r.status.as_str(),
-                "running" | "stopping" | "cancelling" | "recoverable"
-            )
-        })
-    {
-        return Ok(false);
+    if group.iter().filter(|item| item.handles.is_empty())
+        .max_by_key(|item| (item.created_at_ms, &item.id)).is_none_or(|latest| latest.id != run.id)
+        || group.iter().any(|r| r.id != run.id && r.unfinished()) {
+        return Ok(Some(("executionPending", "请求已有更新的业务执行或仍有未收妥的其他执行".into())));
     }
     for item in &group {
         if let Some(exit) = recovery::read_human_exit(runtime, item)? {
-            if exit.answer.is_none() {
-                return Ok(false);
-            }
+            if exit.answer.is_none() { return Ok(Some(("humanWait", format!("等待当前需求的正式决定 {}", exit.request_id)))); }
         }
     }
     let parent = super::notice_recipient(state, &run).await?;
     // A valid PM Human wait belongs to this requirement only when the
     // current input is bound to it; an unrelated question cannot hide it.
-    let (message, task_run, _) = state
-        .sessions
-        .current_request(&parent)
-        .await
-        .unwrap_or_default();
-    let current_group = task_run
-        .as_deref()
-        .and_then(|id| load_run(runtime, id).ok())
+    let (message, task_run, _) = state.sessions.current_request(&parent).await.unwrap_or_default();
+    let current_group = task_run.as_deref().and_then(|id| load_run(runtime, id).ok())
         .map(|current| request::group_id(&current).to_string());
     let summary = state.sessions.summary(&parent).await;
+    if summary.as_ref().is_ok_and(|s| s.input_summary.as_ref().is_some_and(|input| input.paused && input.pause_reason.as_deref() != Some("executionFailure"))) {
+        return Ok(Some(("pmPaused", "PM 被用户暂停或暂停来源未知；自动巡查不能解除暂停".into())));
+    }
     let belongs_here = current_group.as_deref() == Some(request::group_id(&run))
-        || message.as_deref().is_some_and(|id| {
-            run.request
-                .as_ref()
-                .is_some_and(|r| r.original_message_id == id)
-        });
+        || message.as_deref().is_some_and(|id| run.request.as_ref().is_some_and(|r| r.original_message_id == id));
     // Only the requirement-scoped Human exits above suppress its patrol.
     // A Session-wide question can belong to another input in the same batch.
     let goal = requirement::status(runtime, &run)?;
-    let elapsed = now_ms().saturating_sub(if goal.pending_since_ms > 0 {
-        goal.pending_since_ms
-    } else {
-        run.updated_at_ms
-    });
-    let needs_pm_window = run.status != "blocked"
-        || run
-            .stop
-            .as_ref()
-            .is_some_and(|s| matches!(s.cause_code.as_str(), "requestBudget" | "routeUnavailable"));
+    let pending_since = run.disposition_since().unwrap_or(if goal.pending_since_ms > 0 { goal.pending_since_ms } else { run.updated_at_ms });
+    let elapsed = now_ms().saturating_sub(pending_since);
+    let needs_pm_window = run.status() != "blocked" || run.stop.as_ref()
+        .is_some_and(|s| matches!(s.cause_code.as_str(), "requestBudget" | "routeUnavailable"));
     if needs_pm_window {
         let activity = state.sessions.execution_activity(&parent).await.ok();
         let active_here = belongs_here
-            && summary
-                .as_ref()
-                .is_ok_and(|s| s.status == SessionStatus::Running)
-            && activity.is_some_and(|a| a.last_at_ms >= goal.pending_since_ms);
-        let limit = if active_here {
-            requirement::PM_DECISION_MS
-        } else {
-            requirement::PM_LAUNCH_MS
-        };
-        if elapsed < limit {
-            return Ok(false);
-        }
+            && summary.as_ref().is_ok_and(|s| s.status == SessionStatus::Running)
+            && activity.is_some_and(|a| a.last_at_ms >= pending_since);
+        let limit = if active_here { requirement::PM_DECISION_MS } else { requirement::PM_LAUNCH_MS };
+        if elapsed < limit { return Ok(Some(("pmWindow", format!("等待 PM 处理，剩余 {} 毫秒", limit - elapsed)))); }
     }
-    let previous = group
-        .iter()
-        .filter(|item| item.handles.iter().any(|handle| handle.run_id == run.id))
-        .max_by_key(|item| (item.created_at_ms, &item.id));
-    if let Some(previous) = previous {
-        if matches!(
-            previous.status.as_str(),
-            "running" | "stopping" | "cancelling" | "recoverable" | "awaitingPm"
-        ) {
-            return Ok(true);
-        }
-        if let Some(exit) = recovery::read_human_exit(runtime, previous)? {
-            // Rejecting additional recovery budget cannot authorize spending.
-            // Feedback/keepOpen do not dispose of the user's delivery goal.
-            if exit.kind == "c" && exit.answer.as_deref() != Some("approve") {
-                return Ok(true);
-            }
-        } else if previous.status == "blocked" {
-            // A recovery failure is handed to a Human by the patrol of that
-            // recovery Run. A second attempt needs an explicit budget grant
-            // or PM action; blindly launching another Run hides the failure.
-            return Ok(true);
-        }
-    }
-    let reason = run
-        .stop
-        .as_ref()
-        .map(|stop| stop.reason.as_str())
-        .unwrap_or("执行已结束，但用户需求仍未交付；PM 未在处理期限内作出决定");
+    // Admission is tied to an execution boundary, never to a Human answer,
+    // budget edit, feedback receipt, or the current journal tail.
+    let reviewed = |trigger: u64| group.iter().any(|attempt| attempt.handles.iter()
+        .any(|handle| handle.run_id == run.id && handle.trigger_seq >= trigger));
+    let trigger = match recovery::trigger_seq(&run) {
+        Some(trigger) => trigger,
+        // A stop committed before boundaries were recorded gets at most one
+        // automatic review; later journal growth cannot re-arm it.
+        None if request::stopped(&run) && !reviewed(0) => run.journal_seq,
+        None => return Ok(Some(("noBoundary", "尚无已提交的异常边界".into()))),
+    };
+    if reviewed(trigger) { return Ok(Some(("alreadyReviewed", format!("异常 {trigger} 已发起过自动复查；报告后等待 PM 处置")))); }
+    // Recovery spends the same allowance as business execution. At exhaustion
+    // PM must propose a useful concrete budget; patrol must not invent a grant.
+    if request::budget_exhausted(runtime, &run, now_ms())? { return Ok(Some(("requestBudget", "原需求共享预算已耗尽".into()))); }
+    if package_has_active_recovery(runtime, &run.package_id)? { return Ok(Some(("recoveryBusy", "当前包已有活动恢复执行".into()))); }
+    Ok(None)
+}
 
-    if !state
-        .sessions
-        .summary(&parent)
-        .await
-        .is_ok_and(|session| !session.archived)
-    {
-        recovery::ensure_human_exit(
-            state,
-            runtime,
-            &run,
-            "d",
-            Some("没有活着的 PM 会话可以接管恢复；请在项目中新建 PM 会话后处理并提交平台反馈。"),
-        )
-        .await?;
+async fn maybe_start_recovery(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Result<bool> {
+    let run = load_run(runtime, run_id)?;
+    if recovery_suppression(state, runtime, &run).await?.is_some() { return Ok(false); }
+    let parent = super::notice_recipient(state, &run).await?;
+    if run.program_open() {
+        let _guard = lock_run(runtime, &run.id)?;
+        let mut current = load_run(runtime, &run.id)?;
+        let _request = request::request_lock(runtime, request::group_id(&current))?;
+        request::ensure_open(runtime, &current)?;
+        if !current.interrupted() && current.route_wait().is_empty() { return Ok(false); }
+        if request::budget_exhausted(runtime, &current, now_ms())? { return Ok(false); }
+        request_stop_with_cause(&mut current, "blocked", "节点异常超过 PM 处理期限；关闭原图后复查".into(), "unresolvedInterruption");
+        current.revision = current.revision.saturating_add(1);
+        current.updated_at_ms = now_ms();
+        current.journal_actor = "patrol".into();
+        save_run(runtime, &current)?;
         return Ok(true);
     }
-    let actor = if run
-        .stop
-        .as_ref()
-        .is_some_and(|stop| stop.cause_code == "pmRecovery")
-    {
-        "pm"
-    } else {
-        "patrol"
-    };
-    let transition =
-        super::start_recovery(state, &run.workspace_id, &parent, &run.id, reason, actor).await?;
+    let reason = run.stop.as_ref().map(|stop| stop.reason.as_str()).unwrap_or("执行已结束，但用户需求仍未交付；PM 未在处理期限内作出决定");
+
+    if !state.sessions.summary(&parent).await.is_ok_and(|session| !session.archived) {
+        recovery::ensure_human_exit(state, runtime, &run, "d",
+            Some("没有活着的 PM 会话可以接管恢复；请在项目中新建 PM 会话后处理并提交平台反馈。")
+        ).await?;
+        return Ok(true);
+    }
+    let actor = if run.stop.as_ref().is_some_and(|stop| stop.cause_code == "pmRecovery") { "pm" } else { "patrol" };
+    let transition = super::start_recovery(state, &run.workspace_id, &parent, &run.id, reason, actor).await?;
     for (session, message) in transition.sessions {
-        if let Err(error) = start_assigned(
-            state,
-            &run.workspace_id,
-            &transition.status.id,
-            &session,
-            message,
-        )
-        .await
-        {
+        if let Err(error) = start_assigned(state, &run.workspace_id, &transition.status.id, &session, message).await {
             super::abort_launch(state, &run.workspace_id, &transition.status.id).await?;
             return Err(error);
         }
@@ -1455,32 +1040,20 @@ async fn maybe_start_recovery(
 /// A newly acquired request writer never inherits an old Worker implicitly.
 /// Fence every recorded Session before allowing writes, then persist a
 /// stop decision for each unfinished Run. The next patrol performs cleanup.
-pub(super) async fn verify_request_takeover(
-    state: &Shared,
-    runtime: &RuntimeStore,
-    seed: &RunRecord,
-) -> Result<()> {
+pub(super) async fn verify_request_takeover(state: &Shared, runtime: &RuntimeStore, seed: &RunRecord) -> Result<()> {
     let group_id = request::group_id(seed).to_string();
     // A corrupt request snapshot may hide an executing sibling; takeover must
     // fail closed instead of declaring the visible subset safe.
     let group = request_runs(runtime, &group_id)?;
-    if group.is_empty() {
-        bail!("请求接管时未找到 Run");
-    }
+    if group.is_empty() { bail!("请求接管时未找到 Run"); }
     let mut sessions = BTreeSet::new();
     let mut preserved_runs = BTreeSet::new();
     let mut preserved_sessions = BTreeSet::new();
     let mut invalid_snapshots = BTreeMap::new();
     for run in &group {
-        if matches!(run.status.as_str(), "completed" | "cancelled") {
-            continue;
-        }
+        if !run.unfinished() { continue; }
         sessions.extend(run.executor_session_id.iter().cloned());
-        sessions.extend(
-            run.nodes
-                .values()
-                .filter_map(|node| node.session_id.clone()),
-        );
+        sessions.extend(run.nodes.values().filter_map(|node| node.session_id.clone()));
         if let Err(error) = structured::validate_snapshot(run) {
             invalid_snapshots.insert(run.id.clone(), format!("结构化执行快照无法恢复：{error:#}"));
             continue;
@@ -1490,53 +1063,46 @@ pub(super) async fn verify_request_takeover(
         // either retain a pending question or mark its Worker recoverable for
         // an explicit same-Session continue. A live process, unavailable
         // Session, or partially missing assignment still gets fenced below.
-        if run.status == "running" {
-            let running_nodes = run
-                .nodes
-                .values()
-                .filter(|node| node.status == "running")
-                .collect::<Vec<_>>();
+        if run.status() == "running" {
+            // A route wait before any Session assignment has no old process
+            // or submitted side effect to fence. Preserve the validated open
+            // graph and its decision clock across writer ownership changes.
+            if run.human_decision_ready() && run.executor_session_id.is_none()
+                && run.nodes.values().all(|node| node.session_id.is_none())
+            {
+                preserved_runs.insert(run.id.clone());
+                continue;
+            }
+            let running_nodes = run.nodes.values().filter(|node| node.status() == "running").collect::<Vec<_>>();
             // A submitted result is durable before its Worker is retired.
             // Fence the old process, then finish_nodes settles that saved
             // outcome without replaying the operation.
-            if running_nodes.is_empty() && run.nodes.values().any(|node| node.status == "finishing")
-            {
+            if running_nodes.is_empty() && run.nodes.values().any(|node| node.status() == "finishing") {
                 preserved_runs.insert(run.id.clone());
                 if let Some(executor) = &run.executor_session_id {
-                    if matches!(
-                        state.sessions.worker_continuation(executor).await,
-                        crate::session::manager::WorkerContinuation::Ready
-                    ) {
+                    if matches!(state.sessions.worker_continuation(executor).await,
+                            crate::session::manager::WorkerContinuation::Ready) {
                         preserved_sessions.insert(executor.clone());
                     }
                 }
                 continue;
             }
-            let active = running_nodes
-                .iter()
-                .filter_map(|node| node.session_id.as_deref())
-                .collect::<Vec<_>>();
+            let active = running_nodes.iter().filter_map(|node| node.session_id.as_deref()).collect::<Vec<_>>();
             if !active.is_empty() && active.len() == running_nodes.len() {
                 let mut continuable = true;
                 for id in &active {
-                    if !matches!(
-                        state.sessions.worker_continuation(id).await,
-                        crate::session::manager::WorkerContinuation::Ready
-                    ) {
+                    if !matches!(state.sessions.worker_continuation(id).await,
+                            crate::session::manager::WorkerContinuation::Ready)
+                    {
                         continuable = false;
                         break;
                     }
                 }
                 if continuable {
-                    let mut owned = active
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect::<BTreeSet<_>>();
+                    let mut owned = active.into_iter().map(str::to_string).collect::<BTreeSet<_>>();
                     if let Some(executor) = &run.executor_session_id {
-                        if !matches!(
-                            state.sessions.worker_continuation(executor).await,
-                            crate::session::manager::WorkerContinuation::Ready
-                        ) {
+                        if !matches!(state.sessions.worker_continuation(executor).await,
+                            crate::session::manager::WorkerContinuation::Ready) {
                             continuable = false;
                         } else {
                             owned.insert(executor.clone());
@@ -1551,35 +1117,23 @@ pub(super) async fn verify_request_takeover(
         }
     }
     for session_id in sessions {
-        if preserved_sessions.contains(&session_id) {
-            continue;
-        }
+        if preserved_sessions.contains(&session_id) { continue; }
         match state.sessions.fence_execution(&session_id).await {
             Ok(()) => {}
             Err(error) if error.is::<crate::session::manager::SessionMissing>() => {}
-            Err(error) => {
-                return Err(error).with_context(|| format!("请求接管无法冻结 Session {session_id}"))
-            }
+            Err(error) => return Err(error).with_context(|| format!("请求接管无法冻结 Session {session_id}")),
         }
     }
     set_request_writer_verified(runtime, seed, true)?;
     let persist = (|| -> Result<()> {
         for original in &group {
-            if !matches!(original.status.as_str(), "running" | "recoverable") {
-                continue;
-            }
-            if preserved_runs.contains(&original.id) {
-                continue;
-            }
+            if !original.program_open() { continue; }
+            if preserved_runs.contains(&original.id) { continue; }
             let _guard = lock_run(runtime, &original.id)?;
             let mut run = load_run(runtime, &original.id)?;
-            if !matches!(run.status.as_str(), "running" | "recoverable") {
-                continue;
-            }
-            let reason = invalid_snapshots
-                .get(&original.id)
-                .cloned()
-                .unwrap_or_else(|| "请求锁接管：旧执行已冻结，等待核对副作用后恢复".into());
+            if !run.program_open() { continue; }
+            let reason = invalid_snapshots.get(&original.id).cloned().unwrap_or_else(||
+                "请求锁接管：旧执行已冻结，等待核对副作用后恢复".into());
             request_stop(&mut run, "blocked", reason);
             run.journal_actor = "patrol".into();
             run.revision = run.revision.saturating_add(1);
@@ -1598,11 +1152,11 @@ pub(super) async fn verify_request_takeover(
 /// hold a Run lock while shutting down the Worker that just called complete.
 async fn finish_nodes(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Result<()> {
     let snapshot = load_run(runtime, run_id)?;
-    if snapshot.status != "running" {
+    if snapshot.status() != "running" {
         return Ok(());
     }
     for (node_id, node) in &snapshot.nodes {
-        if node.status != "finishing" {
+        if node.status() != "finishing" {
             continue;
         }
         let activity = if let Some(id) = &node.session_id {
@@ -1622,10 +1176,10 @@ async fn finish_nodes(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> R
             let _guard = lock_run(runtime, run_id)?;
             let mut run = load_run(runtime, run_id)?;
             let _request = request::request_lock(runtime, request::group_id(&run))?;
-            if run.status != "running" || request::ensure_open(runtime, &run).is_err() {
+            if run.status() != "running" || request::ensure_open(runtime, &run).is_err() {
                 return Ok(());
             }
-            if run.nodes[node_id].status != "finishing" {
+            if run.nodes[node_id].status() != "finishing" {
                 continue;
             }
             if let Err(error) = cleanup {
@@ -1642,7 +1196,7 @@ async fn finish_nodes(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> R
                 run.nodes.get_mut(node_id).expect("node").activity = activity;
             }
             let outcome = run.nodes[node_id].outcome.clone().unwrap_or_default();
-            run.nodes.get_mut(node_id).expect("node").status = "completed".into();
+            run.nodes.get_mut(node_id).expect("node").phase = facts::NodePhase::Settled;
             if run.engine.is_some() {
                 structured::settled(&mut run, node_id)?;
                 structured::finalize(runtime, &mut run).await;
@@ -1658,32 +1212,25 @@ async fn finish_nodes(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> R
                 .cloned()
                 .unwrap_or_default();
             let leases_before = run.leases.clone();
-            let sessions = match activate(
-                state,
-                &runtime.project_root,
-                runtime,
-                &mut run,
-                targets.clone(),
-            )
-            .await
-            {
-                Ok(sessions) => sessions,
-                Err(error) => {
-                    let reason = format!("节点 {node_id} 后续派发失败：{error:#}");
-                    if is_route_unavailable(&error) {
-                        defer_unavailable_route(&mut run, &targets, reason);
-                    } else {
-                        request_stop(&mut run, "blocked", reason);
+            let sessions =
+                match activate(state, &runtime.project_root, runtime, &mut run, targets.clone()).await {
+                    Ok(sessions) => sessions,
+                    Err(error) => {
+                        let reason = format!("节点 {node_id} 后续派发失败：{error:#}");
+                        if is_route_unavailable(&error) {
+                            defer_unavailable_route(&mut run, &targets, reason);
+                        } else {
+                            request_stop(&mut run, "blocked", reason);
+                        }
+                        Vec::new()
                     }
-                    Vec::new()
-                }
-            };
+                };
             settle_if_terminal(&mut run);
             release_recovery_handoff_leases(runtime, &mut run).await;
             run.revision += 1;
             run.updated_at_ms = now_ms();
             record_assigned_messages(&mut run, &sessions)?;
-            if run.status == "completed" {
+            if run.status() == "completed" {
                 if let Some(executor) = run.executor_session_id.clone() {
                     let event = flow_message(
                         &run,
@@ -1692,7 +1239,7 @@ async fn finish_nodes(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> R
                         &executor,
                         &run.parent_session_id,
                         Some(run.revision),
-                        serde_json::json!({"status": run.status}),
+                        serde_json::json!({"status": run.status()}),
                     )?;
                     push_flow_message(&mut run, event);
                 }
@@ -1708,7 +1255,7 @@ async fn finish_nodes(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> R
                     with_activation_cleanup(state, runtime, &sessions, &leases, error).await,
                 );
             }
-            if run.status == "completed" {
+            if run.status() == "completed" {
                 release_leases(runtime, &run).await?;
             }
             sessions
@@ -1733,39 +1280,30 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
         let root = load_run(runtime, request::group_id(&run))?;
         if request::cancelled(&root)
             && !matches!(
-                run.status.as_str(),
+                run.status(),
                 "completed" | "cancelled" | "cancelling"
             )
         {
             request_stop(&mut run, "cancelled", "恢复原请求的已持久化取消决定".into());
         }
-        let previous_status = run.status.clone();
-        if run.status == "recoverable"
-            && run.recovery.as_ref().is_some_and(|recovery| {
-                now_ms().saturating_sub(recovery.waiting_since_ms)
-                    >= recovery::DEFAULT_PM_ANSWER_SECONDS as i64 * 1000
-            })
-        {
-            request_stop(
-                &mut run,
-                "blocked",
-                "PM 未在期限内续接受阻 Worker，进入恢复流程".into(),
-            );
-        }
-        if run.status == "running" {
+        let previous_status = run.status().to_string();
+        if run.status() == "running" {
             supervision::observe(state, runtime, &mut run).await?;
-            let mut waiting = false;
+
             let mut lost = Vec::new();
             let mut failed = Vec::new();
             let mut alive: Option<Option<u32>> = None;
             let mut unavailable: Option<String> = None;
             for (node_id, node) in &run.nodes {
-                if node.status != "running"
+                if node.status() != "running" || node.interruption.is_some()
                     || now_ms() - node.assigned_at_ms.max(run.created_at_ms) < 5_000
                 {
                     continue;
                 }
                 let Some(session_id) = &node.session_id else {
+                    if node.uses == "pack.script" && node.outcome.is_none() {
+                        unavailable = Some(format!("脚本 {node_id} 已启动但结果未知；核对副作用与进程，不自动重放"));
+                    }
                     continue;
                 };
                 let summary = state.sessions.summary(session_id).await;
@@ -1773,7 +1311,6 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
                     .as_ref()
                     .is_ok_and(|session| session.status == SessionStatus::Waiting)
                 {
-                    waiting = true;
                     continue;
                 }
                 if !state.sessions.has_execution(session_id).await {
@@ -1845,10 +1382,7 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
                 let selected = loop {
                     let excluded = run.route_exclusions();
                     let (route, providers) = match resolve_role_route_excluding(
-                        state,
-                        &role,
-                        &excluded,
-                        run.agent_target.as_ref(),
+                        state, &role, &excluded, run.agent_target.as_ref(),
                     )
                     .await
                     {
@@ -1950,84 +1484,28 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
                     .send(&session_id, message, Vec::new(), &providers, None, None)
                     .await?;
             }
-            let continuable = run.status == "running" && !waiting && !lost.is_empty();
-            if run.status != "running" {
-                // A tag role exhausted every matching route above. The normal
-                // stopping path closes Sessions and releases leases before the
-                // actionable blocked result becomes terminal.
-            } else if continuable && run.engine.is_none() {
-                request_stop(
-                    &mut run,
-                    "blocked",
-                    format!(
-                        "节点 {} 的 Worker 已停止，尚未提交节点结果；交回 PM 核对后处理",
-                        lost.iter()
-                            .map(|(id, _)| id.as_str())
-                            .collect::<Vec<_>>()
-                            .join("、")
-                    ),
-                );
-            } else if !continuable {
+            if run.program_open() {
                 if let Some(pid) = alive {
-                    request_stop(
-                        &mut run,
-                        "blocked",
-                        format!(
-                            "旧 Worker 仍在运行，暂停续接{}",
-                            pid.map(|pid| format!("（pid {pid}）")).unwrap_or_default()
-                        ),
-                    );
+                    request_stop(&mut run, "blocked", format!("旧 Worker 仍在运行，暂停续接（pid {pid:?}）"));
                 } else if let Some(reason) = unavailable {
                     request_stop(&mut run, "blocked", reason);
-                }
-            } else {
-                let (node_id, session_id) = lost[0].clone();
-                let reason = format!(
-                    "节点 {} 的 Worker 已与 daemon 失联，尚未提交结果；原 Session 与写租约仍保留，交回 PM 核对后续接",
-                    lost.iter()
-                        .map(|(id, _)| id.as_str())
-                        .collect::<Vec<_>>()
-                        .join("、")
-                );
-                for (id, _) in &lost {
-                    run.nodes.get_mut(id).expect("lost node").status = "interrupted".into();
-                }
-                run.recovery = Some(Recovery {
-                    node_id,
-                    previous_session_id: session_id,
-                    waiting_since_ms: now_ms(),
-                    reuse_session: true,
-                    nodes: lost
-                        .into_iter()
-                        .map(|(node_id, session_id)| RecoveryNode {
-                            node_id,
-                            session_id,
-                        })
-                        .collect(),
-                });
-                run.status = "recoverable".into();
-                run.stop = Some(StopRequest {
-                    target: "recoverable".into(),
-                    reason,
-                    cause_code: "workerLost".into(),
-                    actor: "patrol".into(),
-                    cleanup_error: None,
-                });
-                if let Some(executor) = run.executor_session_id.clone() {
-                    let message = flow_message(
-                        &run,
-                        "run.recoverable",
-                        None,
-                        &executor,
-                        &run.parent_session_id,
-                        Some(run.revision.saturating_add(1)),
-                        serde_json::json!({"reuseSession": true, "status": "recoverable"}),
-                    )?;
-                    push_flow_message(&mut run, message);
+                } else if !lost.is_empty() && run.engine.is_none() {
+                    request_stop(&mut run, "blocked", "旧版流程的 Worker 已停止；请核对后建立 v2 后继".into());
+                } else if !lost.is_empty() {
+                    for (id, session_id) in lost {
+                        let node = run.nodes.get_mut(&id).expect("observed node");
+                        node.interruption = Some(facts::Interruption {
+                            occurrence: 0, session_id, attempt: node.attempt, observed_at_ms: now_ms(),
+                            reason: "Worker 与 daemon 失联；原 Session 与租约保留，待核验续接".into(),
+                        });
+                    }
+                    run.journal_actor = "patrol".into();
+                    run.revision = run.revision.saturating_add(1);
+                    run.updated_at_ms = now_ms();
                 }
             }
         }
-        if previous_status != run.status {
+        if previous_status != run.status() {
             run.revision += 1;
             run.updated_at_ms = now_ms();
             run.journal_actor = "patrol".into();
@@ -2035,7 +1513,7 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
         save_run(runtime, &run)?;
         run
     };
-    if !matches!(run.status.as_str(), "stopping" | "cancelling") {
+    if !matches!(run.status(), "stopping" | "cancelling") {
         return Ok(());
     }
     let mut session_ids = run
@@ -2044,7 +1522,10 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
         .filter_map(|node| node.session_id.clone())
         .collect::<BTreeSet<_>>();
     session_ids.extend(run.executor_session_id.clone());
-    let mut errors = Vec::new();
+    let mut errors = run.nodes.iter().filter(|(_, node)| node.uses == "pack.script"
+        && node.status() == "running" && node.outcome.is_none())
+        .map(|(id, _)| format!("脚本 {id} 结果及进程退休未确认；保留关闭义务"))
+        .collect::<Vec<_>>();
     // The durable Session fence closes the late-send/reopen race. Keep the
     // request and Run locks free while adapters and processes are being stopped.
     for session_id in session_ids {
@@ -2077,7 +1558,7 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
     let _guard = lock_run(runtime, run_id)?;
     let _request = request::request_lock(runtime, request::group_id(&run))?;
     let mut current = load_run(runtime, run_id)?;
-    if !matches!(current.status.as_str(), "stopping" | "cancelling") {
+    if !matches!(current.status(), "stopping" | "cancelling") {
         return Ok(());
     }
     let stop = current
@@ -2085,51 +1566,34 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
         .clone()
         .ok_or_else(|| anyhow!("stopping Run has no durable stop decision"))?;
     if errors.is_empty() {
-        for (id, node) in &mut current.nodes {
-            match node.status.as_str() {
-                "running" | "finishing" => {
-                    node.status = if stop.target == "recoverable"
-                        && current
-                            .recovery
-                            .as_ref()
-                            .is_some_and(|recovery| recovery.node_id == *id)
-                    {
-                        "interrupted"
-                    } else if stop.target == "cancelled" {
-                        "cancelled"
-                    } else {
-                        "blocked"
-                    }
-                    .into()
+        for node in current.nodes.values_mut() {
+            match node.status() {
+                "running" | "finishing" | "interrupted" => {
+                    // An accepted result survives cancellation and cleanup.
+                    if node.outcome.is_none() { node.reason = Some(stop.reason.clone()); }
+                    node.phase = facts::NodePhase::Settled;
+                    node.interruption = None;
+                    node.route_wait = None;
                 }
-                "pending" if stop.target != "recoverable" => node.status = "unreached".into(),
+                "pending" => node.phase = facts::NodePhase::Unreached,
                 _ => {}
             }
         }
-        if stop.target != "recoverable" {
-            structured::retired(&mut current)?;
-        }
-        current.status = stop.target.clone();
-        if stop.target == "recoverable" {
-            current
-                .recovery
-                .as_mut()
-                .expect("recoverable operation")
-                .waiting_since_ms = now_ms();
-        } else {
-            current.recovery = None;
-        }
+        structured::retired(&mut current)?;
+        current.legacy_program_status = current.engine.is_none().then(|| stop.target.clone());
+        current.retired_at_ms = Some(now_ms());
+        current.recovery = None;
         current.leases.clear();
         current.stop.as_mut().expect("stop decision").cleanup_error = None;
         if let Some(executor) = current.executor_session_id.clone() {
             let message = flow_message(
                 &current,
-                &format!("run.{}", current.status),
+                &format!("run.{}", current.status()),
                 None,
                 &executor,
                 &current.parent_session_id,
                 Some(current.revision),
-                serde_json::json!({"status": current.status, "reason": stop.reason}),
+                serde_json::json!({"status": current.status(), "reason": stop.reason}),
             )?;
             push_flow_message(&mut current, message);
         }

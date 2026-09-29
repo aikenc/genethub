@@ -54,12 +54,7 @@ defineSpecialty({
         // Derive submission from this conversation, rather than consuming a
         // shared flag during a separate model request or another Session.
         if (body.includes("controlled-recovery-assessment")) return { text: "Recovery report submitted." };
-        if (!body.includes("exception-recovery-choice")) return { tool: { name: "request_user_input", arguments: { questions: [{ id: "exception-recovery-choice", header: "Recovery", question: "Choose the controlled recovery action", options: [
-          { label: "repair", description: "Repair the workflow" }, { label: "resume", description: "Continue the same goal" },
-          { label: "successor", description: "Activate a successor" }, { label: "human", description: "Request a Human decision" },
-          { label: "cancel", description: "Stop execution" },
-        ] }] } } };
-        return cli(["workflow", "complete", "--outcome", "resume", "--evidence", "report=controlled-recovery-assessment"]);
+        return cli(["workflow", "complete", "--evidence", "report=controlled-recovery-assessment"]);
       }
       if (body.includes("<genehub_managed_session>") && body.includes("角色标签为 `reviewer`")) {
         const assessment = body.includes("`game-assessment`") ? "assessment" : "review";
@@ -72,7 +67,7 @@ defineSpecialty({
       }
       if (body.includes("EXCEPTION_TEST_WORKER")) {
         workerCalls++;
-        if (workerCalls === 1) return { text: "Unable to finish; no node result submitted." };
+        if (workerCalls === 1) return cli(["workflow", "complete", "--outcome", "failed", "--reason", "Injected execution failure for authority verification"]);
         if (workerCalls % 2 === 0) return { emptyToolIdDeltas: true, ...cli(["workflow", "complete", "--evidence", "review=approved"]) };
         return { text: "Recovered result submitted." };
       }
@@ -105,15 +100,14 @@ defineSpecialty({
     t.assertions.assert(installed?.type === "workspaces" && installed.data.find(space => space.id === opened.workspaceId)?.agentSpace?.components.some(component => component.componentId === "pm" && component.enabled), `bootstrap did not install PM: ${JSON.stringify(installed)}`);
     const source = path.join(opened.workspaceRoot, ".genethub/workflows/game-delivery");
     const workflowFile = path.join(source, "flows/game-dev.yaml");
-    const schema = "genehub.workflow.definition.v1"; // This permission fixture intentionally exercises legacy compatibility.
     const roleFile = path.join(source, "roles/coder.yaml");
     const roleSchema = "genehub.workflow.role.v1";
     writeFileSync(roleFile, JSON.stringify({ schema: roleSchema, id: "coder", agentId: "genet", modelId: "deepseek/deepseek-v4-flash", userInteraction: "readOnly", prompt: "prompts/exception-worker.md" }));
     writeFileSync(path.join(source, "prompts/exception-worker.md"), "EXCEPTION_TEST_WORKER: complete assigned node only.");
-    writeFileSync(workflowFile, JSON.stringify({ schema, id: "game-dev", version: 1, entry: "check", nodes: [
-      { id: "check", uses: "agent.session", with: { role: "coder", workspace: "." }, completion: { all: [{ key: "review", verify: "value.equals", expected: "approved" }] }, on: { completed: ["publish"] } },
+    writeFileSync(workflowFile, JSON.stringify({ schema: "genehub.workflow.definition.v2", id: "game-dev", version: 2,  nodes: [
+      { id: "check", uses: "agent.session", with: { role: "coder", workspace: "." }, completion: { all: [{ key: "review", verify: "value.equals", expected: "approved" }] } },
       { id: "publish", uses: "result.publish" },
-    ] }));
+    ] , structure: {"body":{"id":"sequence","type":"sequence","steps":[{"id":"step-check","type":"task","activity":"check"},{"id":"step-publish","type":"task","activity":"publish"}]}}}));
     const history = async (): Promise<WorkflowRunStatus[]> => {
       const reply = await opened.client.call({ type: "workflow.history", payload: { workspaceId: opened.workspaceId, limit: 50 } });
       if (reply?.type !== "workflowRuns") throw new Error("missing history");
@@ -149,13 +143,13 @@ defineSpecialty({
     const status = await opened.client.call({ type: "workflow.inspect", payload: { workspaceId: opened.workspaceId } });
     if (status?.type !== "workflowProject") throw new Error("candidate did not compile");
     const initial = await runCommand(owner, "u_owner_start", `"$GENEHUB_CLI" workflow activate --revision ${status.data.activationRevision} && ${dispatch("original")}`);
-    t.assertions.assert(!initial.includes('"error"'), `owner could not start the candidate: ${initial}`);
+    t.assertions.assert(initial.includes('workflow.started'), `owner could not start the candidate: ${initial}`);
     await t.tools.waitUntil(async () => (await history()).some(run => run.status === "blocked"), 35_000)
       .catch(async error => { throw new Error(`${error}; initial=${initial}; runs=${JSON.stringify(await history())}; workerCalls=${workerCalls}`); });
-    const original = (await history())[0]!;
+    const original = (await history()).find(run => run.taskId === "original" && !run.handles.length)!;
     const worker = original.nodes.find(node => node.sessionId)?.sessionId!;
     const stopped = await runCommand(other, "u_exception_worker", `"$GENEHUB_CLI" session interrupt ${worker}`);
-    t.assertions.assert(!stopped.includes("forbidden"), "exception PM cannot control project-managed execution");
+    t.assertions.assert(!stopped.includes("forbidden"), `exception PM cannot control project-managed execution: ${stopped}; original=${JSON.stringify(original)}`);
     const unrelatedRoot = path.join(t.env.root, "unrelated-project");
     mkdirSync(unrelatedRoot);
     const unrelated = await opened.client.call({ type: "workspace.open", payload: { root: unrelatedRoot } });
@@ -180,20 +174,8 @@ defineSpecialty({
     t.assertions.assert(updatedSpaces?.type === "workspaces" && updatedSpaces.data.find(space => space.id === coder.id)?.agentSpace?.revision === coder.agentSpace!.revision + 1, "exception management did not change the real expert");
     // The failed business Run automatically starts recovery. A second
     // business Run may only begin after that recovery execution settles.
-    let recoveryReviewer: string | undefined;
-    await t.tools.waitUntil(async () => {
-      const recovery = (await history()).find(run => run.handles.some(handle => handle.runId === original.id));
-      recoveryReviewer = recovery?.nodes.find(node => node.id === "review")?.sessionId ?? undefined;
-      return !!recoveryReviewer && (await snapshot(recoveryReviewer)).pendingPermissions.length > 0;
-    }, 40_000);
-    const recoveryQuestion = (await snapshot(recoveryReviewer!)).pendingPermissions[0]!;
-    // The durable reviewer question belongs to its delegating PM. Project
-    // repair authority does not transfer that question to another conversation.
-    const chosen = await runCommand(owner, "u_exception_recovery_choice",
-      `"$GENEHUB_CLI" session respond ${recoveryReviewer} --request ${recoveryQuestion.id} --choose resume`, original.id);
-    t.assertions.assert(!chosen.includes('"error"'), `Owning PM cannot answer recovery: ${chosen}`);
     await t.tools.waitUntil(async () => (await history()).some(run =>
-      run.handles.some(handle => handle.runId === original.id) && run.status === "awaitingPm" && !run.reason), 40_000);
+      run.handles.some(handle => handle.runId === original.id) && run.status === "completed" && run.phase === "closed"), 40_000);
     const recovered = await runCommand(other, "u_exception_recover", `${dispatch("recovered")} --retry-of ${original.id}`, original.id);
     t.assertions.assert(!recovered.includes("retry target belongs to another PM"), "exception did not cross the original PM ownership boundary");
     await t.tools.waitUntil(async () => (await history()).some(run => run.taskId === "recovered" && run.status === "completed"), 40_000)
@@ -222,7 +204,7 @@ defineSpecialty({
       const goal = (await history()).find(run => run.taskId === taskId)!;
       const decided = await runCommand(other, `u_delivery_${taskId}`,
         `"$GENEHUB_CLI" workflow deliver --run ${goal.id} --revision ${goal.requirement!.revision} --reason "Requested report accepted" --evidence delivery=${goal.id}`);
-      if (decided.includes('"error"')) {
+      if (field(decided, "type") !== "workflow.requirement.completed") {
         const recovery = (await history()).find(run => run.handles.length > 0)!;
         const reviewer = recovery.nodes.find(node => node.sessionId)?.sessionId;
         const inspection = reviewer ? await opened.client.call({ type: "session.inspect", payload: { sessionId: reviewer, throughRoundId: null } }) : null;

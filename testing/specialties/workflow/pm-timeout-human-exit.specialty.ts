@@ -29,22 +29,22 @@ for (const exit of ["d", "a", "e"] as const) defineSpecialty({
       userInteraction: "readOnly", prompt: "prompts/worker.md",
     }));
     writeFileSync(path.join(source, "flows/pm-timeout.yaml"), JSON.stringify({
-      schema: "genehub.workflow.definition.v1", id: "pm-timeout", version: 1, entry: "work",
+      schema: "genehub.workflow.definition.v2", id: "pm-timeout", version: 2,
       nodes: [{ id: "work", uses: "agent.session", with: { role: "worker", workspace: "." },
-        completion: { all: [{ key: "result", verify: "value.nonEmpty" }] }, on: { completed: ["publish"] } },
-        { id: "publish", uses: "result.publish" }],
-    }));
+        completion: { all: [{ key: "result", verify: "value.nonEmpty" }] } },
+        { id: "publish", uses: "result.publish" }], structure: {"body":{"id":"sequence","type":"sequence","steps":[{"id":"step-work","type":"task","activity":"work"},{"id":"step-publish","type":"task","activity":"publish"}]}}}));
     await opened.client.call({ type: "settings.setAgentPreferences", payload: { preferences: {
       runtimes: {}, selectedTags: ["Max"], modelProfiles: [{ agentId: "genet",
         modelId: "deepseek/deepseek-v4-flash", tags: ["Flash"], cost: "low" }],
     } } });
-    let dispatched = false;
+    let dispatched = false, humanRequested = false;
     let pmReplies = 0;
     let original: WorkflowRunStatus | undefined;
     opened.mock.script(...Array.from({ length: 24 }, () => ({ respond: (request: unknown) => {
-      if (exit !== "d" && JSON.stringify(request).includes("ASK_BUSINESS_HUMAN")) {
+      if (exit !== "d" && !humanRequested && JSON.stringify(request).includes("ASK_BUSINESS_HUMAN")) {
+        humanRequested = true;
         return { tool: { name: "bash", arguments: { command:
-          `"$GENEHUB_CLI" workflow human --run ${original!.id} --revision ${original!.revision} --kind ${exit} --reason "PM requests 100 rounds and 30 minutes; verify the fixed grant before approval"`,
+          `"$GENEHUB_CLI" workflow human --run ${original!.id} --revision ${original!.revision} --kind ${exit} --reason "Finish remaining work using the proposed total allowance" ${exit === "a" ? `--budget-revision ${original!.requestBudget.revision} --max-llm-rounds 600 --deadline-seconds 14400` : ""}`,
         } } };
       }
       if (dispatched) { pmReplies++; return { text: "The route remains unavailable." }; }
@@ -62,7 +62,7 @@ for (const exit of ["d", "a", "e"] as const) defineSpecialty({
     };
     await t.tools.waitUntil(async () => {
       original = (await history()).find(run => run.taskId === "overdue-route");
-      return original?.status === "blocked" && original.reason?.includes("RouteUnavailable") === true;
+      return original?.status === "running" && original.phase === "open" && !original.programResult && original.conditions.some(condition => condition.code === "routeUnavailable");
     }, 30_000);
     t.assertions.assert((await history()).length === 1 && !original!.humanExit,
       "normal route block skipped PM and entered recovery or Human exit immediately");
@@ -72,7 +72,11 @@ for (const exit of ["d", "a", "e"] as const) defineSpecialty({
         const reply = await opened.client.call({ type: "session.get", payload: { sessionId: pm } });
         return reply?.type === "snapshot" && reply.data.summary.status === "idle";
       }, 15_000);
-      await t.flows.main.sendPrompt(opened.client, pm, "ASK_BUSINESS_HUMAN");
+      const queued = await opened.client.call({ type: "session.send", payload: {
+        sessionId: pm, messageId: `u_ask_business_human_${exit}`, text: "ASK_BUSINESS_HUMAN",
+        attachments: [], continuesRound: null, artifactPreviewBaseUrl: null,
+      } });
+      t.assertions.assert(queued?.type === "ack", "Human proposal input was not queued");
       const cardId = `workflow-human-${original!.id}`;
       await t.tools.waitUntil(async () => {
         const run = (await history()).find(item => item.id === original!.id);
@@ -86,9 +90,9 @@ for (const exit of ["d", "a", "e"] as const) defineSpecialty({
       t.assertions.assert(card.options?.map(option => option.id).join(",") === (exit === "a" ? "approve,reject" : "handled,abandon"),
         `Human exit ${exit} has the wrong options`);
       const beforeBudget = (await history()).find(item => item.id === original!.id)!.requestBudget;
-      if (exit === "a") t.assertions.assert(card.options?.find(option => option.id === "approve")?.label
-        .includes("1 次业务 Run、128 轮 LLM 和 60 分钟") && card.detail?.includes("本卡审批固定额度")
-        && card.detail.includes("申请原因中的其他数字不改变此额度"), "business approval omits its effective fixed quota");
+      if (exit === "a") t.assertions.assert(card.detail?.includes("600") && card.detail.includes("4 小时")
+        && !card.detail.includes("Run") && !card.detail.includes("固定额度"),
+        `budget card does not show the exact proposed totals: ${card.detail ?? ""}`);
       const choice = exit === "a" ? "approve" : "abandon";
       const answered = await opened.client.call({ type: "session.respondPermission", payload: {
         sessionId: pm, requestId: cardId, outcome: { outcome: "selected", optionId: choice },
@@ -97,9 +101,8 @@ for (const exit of ["d", "a", "e"] as const) defineSpecialty({
       await t.tools.waitUntil(async () => {
         const run = (await history()).find(item => item.id === original!.id);
         return run?.humanExit?.answer === choice && (exit === "a"
-          ? run.requestBudget.maxRuns === beforeBudget.maxRuns + 1
-            && run.requestBudget.maxLlmRounds === beforeBudget.maxLlmRounds + 128
-            && run.requestBudget.deadlineMs === beforeBudget.deadlineMs + 3_600_000
+          ? run.requestBudget.maxLlmRounds === 600
+            && run.requestBudget.deadlineMs === 14_400_000
             && run.requestBudget.revision === beforeBudget.revision + 1
           : run.status === "cancelled");
       }, 25_000);
@@ -144,12 +147,13 @@ for (const exit of ["d", "a", "e"] as const) defineSpecialty({
     // would add no coverage of the patrol transition or durable card.
     const snapshotPath = path.join(opened.workspaceRoot, ".genethub/components/pm/requests",
       original!.id, "runs", original!.id, "run.json");
-    const snapshot = JSON.parse(readFileSync(snapshotPath, "utf8")) as { run: { updatedAtMs: number } };
-    snapshot.run.updatedAtMs = Date.now() - 1_805_000;
+    const snapshot = JSON.parse(readFileSync(snapshotPath, "utf8")) as { run: { updatedAtMs: number; nodes: Record<string, { routeWait?: { sinceMs: number } }> } };
+    const overdueSinceMs = Date.now() - 1_805_000;
+    for (const node of Object.values(snapshot.run.nodes)) if (node.routeWait) node.routeWait.sinceMs = overdueSinceMs;
     writeFileSync(snapshotPath, JSON.stringify(snapshot));
     const requirementPath = path.join(opened.workspaceRoot, ".genethub/components/pm/requests", original!.id, "request.json");
     const requirement = JSON.parse(readFileSync(requirementPath, "utf8"));
-    requirement.requirement.pendingSinceMs = snapshot.run.updatedAtMs;
+    requirement.requirement.pendingSinceMs = overdueSinceMs;
     writeFileSync(requirementPath, JSON.stringify(requirement));
     const start = async () => {
       const result = await runGenetAsync(opened.daemon.genet, ["daemon", "start"], opened.daemon.env);
@@ -162,7 +166,7 @@ for (const exit of ["d", "a", "e"] as const) defineSpecialty({
       if (reply?.type !== "snapshot") throw new Error("PM Session unavailable");
       return reply.data.pendingPermissions.filter(card => card.id === `workflow-human-${original!.id}`);
     };
-    await t.tools.waitUntil(async () => (await history())[0]?.humanExit?.kind === "d" && (await pmCard()).length === 1, 25_000);
+    await t.tools.waitUntil(async () => (await history())[0]?.humanExit?.kind === "d" && (await pmCard()).length === 1, 25_000).catch(async error => { const snapshot = await opened.client.call({ type: "session.get", payload: { sessionId: pm } }); throw new Error(`PM route reminder: ${error}; runs=${JSON.stringify(await history())}; pm=${JSON.stringify(snapshot?.type === "snapshot" ? {summary:snapshot.data.summary,cards:snapshot.data.pendingPermissions} : snapshot)}`); });
     const card = (await pmCard())[0]!;
     t.assertions.assert(card.options?.map(option => option.id).join(",") === "confirmFeedback,keepOpen",
       "Human feedback card has the wrong options");

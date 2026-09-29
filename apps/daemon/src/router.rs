@@ -1345,14 +1345,12 @@ async fn dispatch(
             };
             let transition = match crate::workflow::dispatch(
                 state,
-                crate::workflow::DispatchRequest {
-                    root_workspace_id: &workspace_id,
-                    parent_session_id,
-                    package_id: &package_id,
-                    workflow_id: &workflow_id,
-                    task_id: &task_id,
-                    task_prompt: &prompt,
-                },
+                &workspace_id,
+                parent_session_id,
+                &package_id,
+                &workflow_id,
+                &task_id,
+                &prompt,
                 crate::workflow::DispatchOptions {
                     agent_target: agent_target.as_ref(),
                     candidate_digest: candidate_digest.as_deref(),
@@ -1544,6 +1542,8 @@ async fn dispatch(
             run_id,
             node_id,
             expected_revision,
+            expected_attempt,
+            submission_id,
             evidence,
             output,
             outcome,
@@ -1563,6 +1563,7 @@ async fn dispatch(
                 &node_id,
                 expected_revision,
                 crate::workflow::Completion {
+                    expected_attempt, submission_id,
                     evidence,
                     output,
                     outcome: outcome.unwrap_or_default(),
@@ -1673,16 +1674,8 @@ async fn dispatch(
             Handled::ok(Reply::WorkflowRun(transition.status))
         }
 
-        Request::WorkflowHuman {
-            workspace_id,
-            run_id,
-            expected_revision,
-            kind,
-            reason,
-        } => {
-            if let Err(error) =
-                authorize_project_workflow_mutation(state, caller, &workspace_id).await
-            {
+        Request::WorkflowHuman { workspace_id, run_id, expected_revision, kind, reason, budget, scope } => {
+            if let Err(error) = authorize_project_workflow_mutation(state, caller, &workspace_id).await {
                 return Handled::err(ErrorCode::Forbidden, error);
             }
             if caller.session_controller_id().is_none() {
@@ -1692,15 +1685,8 @@ async fn dispatch(
                 );
             }
             match crate::workflow::request_human_exit(
-                state,
-                &workspace_id,
-                &run_id,
-                expected_revision,
-                &kind,
-                &reason,
-            )
-            .await
-            {
+                state, &workspace_id, &run_id, expected_revision, &kind, &reason, budget, scope,
+            ).await {
                 Ok(run) => Handled::ok(Reply::WorkflowRun(run)),
                 Err(error) => failed(error),
             }
@@ -1777,7 +1763,6 @@ async fn dispatch(
             workspace_id,
             run_id,
             expected_revision,
-            max_runs,
             deadline_seconds,
             max_llm_rounds,
         } => {
@@ -1792,11 +1777,8 @@ async fn dispatch(
                 caller.session_controller_id(),
                 &run_id,
                 expected_revision,
-                crate::workflow::BudgetUpdate {
-                    max_runs,
-                    deadline_seconds,
-                    max_llm_rounds,
-                },
+                deadline_seconds,
+                max_llm_rounds,
             )
             .await
             {
@@ -3501,7 +3483,7 @@ async fn dispatch(
                     "只有生成该计划的 Agent Session 可以请求用户确认",
                 );
             };
-            let (request, expires_at_ms) = match state
+            let request = match state
                 .project_control
                 .request_permission(session_id, &challenge_id)
                 .await
@@ -3513,7 +3495,7 @@ async fn dispatch(
             };
             match state
                 .sessions
-                .request_project_approval(session_id, request, expires_at_ms)
+                .request_project_approval(session_id, request)
                 .await
             {
                 Ok(()) => Handled::ok(Reply::Ack),

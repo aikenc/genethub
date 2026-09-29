@@ -61,21 +61,20 @@ defineSpecialty({
       prompt: "prompts/worker.md",
     }));
     writeFileSync(path.join(source, "flows/runtime-failover.yaml"), JSON.stringify({
-      schema: "genehub.workflow.definition.v1",
+      schema: "genehub.workflow.definition.v2",
       id: "runtime-failover",
-      version: 1,
-      entry: "work",
+      version: 2,
+
       nodes: [
         {
           id: "work",
           uses: "agent.session",
           with: { role: "worker", workspace: ".", writeLease: { ttlSeconds: 3600 } },
           completion: { all: [{ key: "done", verify: "value.nonEmpty" }] },
-          on: { completed: ["publish"] },
+
         },
         { id: "publish", uses: "result.publish" },
-      ],
-    }));
+      ], structure: {"body":{"id":"sequence","type":"sequence","steps":[{"id":"step-work","type":"task","activity":"work"},{"id":"step-publish","type":"task","activity":"publish"}]}}}));
 
     let dispatched = false;
     let flashWorkerRequests = 0;

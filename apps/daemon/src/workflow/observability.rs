@@ -61,9 +61,9 @@ fn node_labels(run: &RunRecord) -> BTreeMap<String, String> {
         .unwrap_or_default()
 }
 
-pub(super) fn summary(runs: &[RunRecord], selected: &RunRecord) -> Result<Value> {
+pub(super) fn summary(runtime: &RuntimeStore, runs: &[RunRecord], selected: &RunRecord) -> Result<Value> {
     let now = now_ms();
-    let budget = request::observation(runs, selected, now)?;
+    let budget = request::observation(runtime, runs, selected, now)?;
     let group = runs
         .iter()
         .filter(|r| request::group_id(r) == request::group_id(selected));
@@ -76,12 +76,12 @@ pub(super) fn summary(runs: &[RunRecord], selected: &RunRecord) -> Result<Value>
         for activity in request::activities(run) {
             cost = cost.saturating_add(activity.estimated_milli_cny);
         }
-        recoveries += usize::from(!run.handles.is_empty() && run.status == "running");
+        recoveries += usize::from(!run.handles.is_empty() && run.status() == "running");
         for node in run.nodes.values() {
             if node.assigned_at_ms > 0 && node.uses == "agent.session" {
-                let end = if node.settled_at_ms > 0 {
-                    node.settled_at_ms
-                } else if matches!(node.status.as_str(), "running" | "finishing") {
+                let end = if node.result_accepted_at_ms > 0 {
+                    node.result_accepted_at_ms
+                } else if matches!(node.status(), "running" | "finishing") {
                     now
                 } else {
                     run.updated_at_ms
@@ -274,7 +274,7 @@ pub(super) fn collect_sources(
 pub(crate) fn view(runtime: &RuntimeStore, run_id: &str, path: Option<&str>) -> Result<Value> {
     validate_id(run_id, "runId")?;
     let run = load_run(runtime, run_id)?;
-    let build = load_run_candidate(runtime, &run)?;
+    let build = load_candidate(runtime, &run.dcg_digest)?;
     if let Some(path) = path {
         // Membership in the immutable snapshot is the only source of bytes;
         // never fall back to the package's currently edited source tree.
@@ -435,7 +435,7 @@ pub(crate) async fn profile(
         // workflow.get remains the full detailed execution interface.
         let status = json!({"id":run.id,"workspaceId":run.workspace_id,"parentSessionId":run.parent_session_id,
             "executorSessionId":run.executor_session_id,"taskId":run.task_id,"workflowId":run.definition.id,
-            "status":run.status,"revision":run.revision,"dcgDigest":run.dcg_digest,
+            "status":run.status(),"revision":run.revision,"dcgDigest":run.dcg_digest,
             "structure":{"definition":run.definition.structure}});
         let messages = run.delivery_queue.iter().map(|m| json!({"kind": m.kind, "nodeId": m.node_id, "attempt": m.attempt, "createdAtMs": m.created_at_ms, "senderSessionId": m.sender_session_id, "recipientSessionId": m.recipient_session_id})).collect::<Vec<_>>();
         rows.push(json!({"run": status, "nodes": nodes,
@@ -447,7 +447,7 @@ pub(crate) async fn profile(
         .iter()
         .find(|r| r.id == selected.id)
         .unwrap_or(&selected);
-    let budget = request::observation(&runs, live, now)?;
+    let budget = request::observation(runtime, &runs, live, now)?;
     let result = json!({"schema": "genehub.workflow.profile.v1", "runId": run_id,
         "requestRunId": request::group_id(live), "atMs": now, "budget": budget,
         "cost": {"currency": "CNY", "source": "estimatedCalls", "milliCny": estimated,

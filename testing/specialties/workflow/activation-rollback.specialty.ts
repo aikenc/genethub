@@ -103,15 +103,28 @@ defineSpecialty(
         "editing project source hot-switched or rewrote the active DCG",
       );
 
-      opened.mock.script(
-        {
-          tool: {
-            name: "bash",
-            arguments: { command: '"$GENEHUB_CLI" workflow activate --revision 1' },
-          },
-        },
-        { text: "候选 DCG 已按 revision 1 晋级。" },
-      );
+
+      const sent = new Set<string>();
+      let workerStage = 0;
+      opened.mock.script(...Array.from({ length: 64 }, () => ({ respond: (request: unknown) => {
+        const body = JSON.stringify(request);
+        const bash = (command: string) => ({ tool: { name: "bash", arguments: { command } } });
+        if (body.includes("角色标签为 `recovery-reviewer`")) return { text: "Waiting on the PM's explicit route repair." };
+        if (body.includes("<genehub_managed_session>")) {
+          if (workerStage++ === 0) return { tool: { name: "write", arguments: { path: "recovered.txt", content: "recovered\n" } } };
+          if (workerStage === 2) return bash('git add recovered.txt && git commit -m "complete recovered task" && commit=$(git rev-parse HEAD) && "$GENEHUB_CLI" workflow complete --evidence commit="$commit" --evidence checks=rollback-specialty');
+          return { text: "Recovered Worker submitted its actual commit." };
+        }
+        const commands: Array<[string, string]> = [
+          ["请激活当前 DCG 候选。", '"$GENEHUB_CLI" workflow activate --revision 1'],
+          ["请按项目工作流派发一次任务，并如实报告配置错误。", 'if "$GENEHUB_CLI" workflow dispatch --task must-fail --message "不得创建 Worker" --wait --timeout 10; then echo "unexpected success"; exit 9; fi'],
+          ["请回滚到上一个可运行的 DCG。", '"$GENEHUB_CLI" workflow activate --candidate ' + initialDigest + ' --revision 2'],
+          ["DCG 已回滚，请重新派发任务。", '"$GENEHUB_CLI" workflow dispatch --task succeeds-after-rollback --message "在 recovered.txt 写入 recovered 并提交。" --wait --timeout 60'],
+        ];
+        for (const [marker, command] of commands) if (body.includes(marker) && !sent.has(marker)) { sent.add(marker); return bash(command); }
+        return { text: "Read the actual activation or dispatch receipt." };
+      } })));
+
       const activationRoot = await t.flows.main.createBuiltinSession(
         opened.client,
         opened.workspaceId,
@@ -153,18 +166,7 @@ defineSpecialty(
         "stale activation did not return an explicit CAS conflict",
       );
 
-      opened.mock.script(
-        {
-          tool: {
-            name: "bash",
-            arguments: {
-              command:
-                'if "$GENEHUB_CLI" workflow dispatch --task must-fail --message "不得创建 Worker" --wait --timeout 10; then echo "unexpected success"; exit 9; fi',
-            },
-          },
-        },
-        { text: "项目配置中的 Agent 不可用，未启动任何受管会话。" },
-      );
+
       const failedRoot = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
       const failedEvents = await t.flows.main.attachEventLog(opened.client, failedRoot);
       await t.flows.main.sendPrompt(
@@ -193,17 +195,7 @@ defineSpecialty(
         "failed activation left a managed Session",
       );
 
-      opened.mock.script(
-        {
-          tool: {
-            name: "bash",
-            arguments: {
-              command: `"$GENEHUB_CLI" workflow activate --candidate ${initialDigest} --revision 2`,
-            },
-          },
-        },
-        { text: "已经回滚到上一个可运行的 DCG Candidate。" },
-      );
+
       const rollbackRoot = await t.flows.main.createBuiltinSession(
         opened.client,
         opened.workspaceId,
@@ -236,29 +228,7 @@ defineSpecialty(
         `rollback did not restore immutable history: ${JSON.stringify(rolledBack)}`,
       );
 
-      opened.mock.script(
-        {
-          tool: {
-            name: "bash",
-            arguments: {
-              command:
-                '"$GENEHUB_CLI" workflow dispatch --task succeeds-after-rollback --message "在 recovered.txt 写入 recovered 并提交。" --wait --timeout 60',
-            },
-          },
-        },
-        { tool: { name: "write", arguments: { path: "recovered.txt", content: "recovered\n" } } },
-        {
-          tool: {
-            name: "bash",
-            arguments: {
-              command:
-                'git add recovered.txt && git commit -m "complete recovered task" && commit=$(git rev-parse HEAD) && "$GENEHUB_CLI" workflow complete --evidence commit="$commit" --evidence checks=rollback-specialty',
-            },
-          },
-        },
-        { text: "恢复后的 Worker 已提交并上报证据。" },
-        { text: "回滚后，任务已通过恢复的项目流程完成。" },
-      );
+
       const recoveredRoot = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
       const recoveredEvents = await t.flows.main.attachEventLog(opened.client, recoveredRoot);
       await t.flows.main.sendPrompt(opened.client, recoveredRoot, "DCG 已回滚，请重新派发任务。");

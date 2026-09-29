@@ -100,7 +100,7 @@ const MAX_BLOB_BYTES: u64 = 512 * 1024 * 1024;
 ///     acknowledged continuation when rewriting metadata.
 /// 9 — durable input, execution fences and cleanup receipts. Older writers
 ///     would discard acknowledged messages or unfinished cancellation.
-pub const SESSION_FORMAT: u32 = 9;
+pub const SESSION_FORMAT: u32 = 10;
 
 /// What a `meta.json` from before versioning is: the layout numbered 4, which
 /// is the only one that has ever been written into a workspace.
@@ -182,6 +182,10 @@ pub struct ExecutionActivity {
 #[serde(rename_all = "camelCase")]
 pub struct SessionInbox {
     #[serde(default)]
+    pub pause_reason: Option<String>,
+    #[serde(default)]
+    pub control_revision: u64,
+    #[serde(default)]
     pub entries: Vec<InboxEntry>,
     #[serde(default)]
     pub paused: bool,
@@ -189,6 +193,23 @@ pub struct SessionInbox {
     pub has_delivered: bool,
     #[serde(default)]
     pub error: Option<String>,
+}
+
+impl SessionInbox {
+    pub fn set_pause(&mut self, reason: Option<&str>) {
+        // A late failure callback cannot weaken an explicit stop (or an old
+        // pause whose origin is unknown). Only fresh authorized input clears it.
+        if reason == Some("executionFailure") && self.paused
+            && self.pause_reason.as_deref() != Some("executionFailure") {
+            return;
+        }
+        if self.paused == reason.is_some() && self.pause_reason.as_deref() == reason {
+            return;
+        }
+        self.paused = reason.is_some();
+        self.pause_reason = reason.map(str::to_string);
+        self.control_revision = self.control_revision.saturating_add(1);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -444,6 +465,8 @@ impl SessionMeta {
                         .map(|entry| entry.message_id.clone())
                         .collect(),
                     paused: self.inbox.paused,
+                    pause_reason: self.inbox.pause_reason.clone(),
+                    control_revision: Some(self.inbox.control_revision),
                     error: self.inbox.error.clone(),
                 }
             }),

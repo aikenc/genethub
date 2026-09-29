@@ -82,6 +82,8 @@ defineSpecialty({
     t.assertions.assert(after?.type==='workflowProfile',"profile disappeared after rate edit");
     equal((after as any).data.cost.milliCny,before.cost.milliCny,"history was repriced");
     equal(before.runs.length,1,"request group fabricated Runs");
+    const agentsCatalog = await opened.client.call({ type: "agent.list" });
+    t.assertions.assert(agentsCatalog?.type === "agents", "native agent catalog did not finish before opening the view");
     const browser=await openBrowser();
     let consumer: Awaited<ReturnType<typeof openPreviewBrowser>>|undefined;
     try {
