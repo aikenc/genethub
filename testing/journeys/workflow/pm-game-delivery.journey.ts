@@ -577,7 +577,9 @@ if(result.status===0)throw Error('stale Builder plan applied');`;
     // Inbox consultation turns can run while the approval is still pending.
     // They do not consume the approved mutation stage of this deterministic PM.
     const approvalText = typeof latestContent === "string" ? latestContent : "";
-    const approvalAction = /^(?:Recorded Human response:\n)?The user approved the interrupted plan /.test(approvalText)
+    // The daemon delivers a recorded Human answer as an input inside the
+    // session envelope, so the approval text is not the message prefix.
+    const approvalAction = approvalText.includes("The user approved the interrupted plan ")
       ? approvalText.match(/Durable GeneHub interaction ([^\s.]+)/)?.[1]
       : undefined;
     if (delivery.bootstrap && stage === 4 && !approvalAction) {

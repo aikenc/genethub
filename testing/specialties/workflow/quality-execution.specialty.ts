@@ -55,7 +55,7 @@ for(const scenario of ['repair','reject','preview','regression'] as const)define
    }
    switch(stage++){
     case 0:return command('"$GENEHUB_CLI" workflow build --package game-delivery');
-    case 1:return {tool:{name:'request_user_input',arguments:{questions:[{id:field(request,'challengeId'),header:'接管',question:'批准隔离质量流程测试',options:[{label:'yes',description:'接管'},{label:'no',description:'拒绝'}]}]}}};
+    case 1:return {tool:{name:'request_user_input',arguments:{title:'批准隔离质量流程测试',summary:'共 1 个待回答问题。',description:'请使用下方选项回答问题；提交后继续当前任务。',questions:[{id:field(request,'challengeId'),header:'接管',question:'批准隔离质量流程测试',options:[{label:'yes',description:'接管'},{label:'no',description:'拒绝'}]}]}}};
     case 2:return command(`"$GENEHUB_CLI" workflow build --package game-delivery --apply --plan-digest ${field(request,'planDigest')} --revision ${field(request,'expectedRevision')} --action-id quality-install`);
     case 3:return command('git add -A && git commit -m "install team" && "$GENEHUB_CLI" workflow inspect');
     case 4:return command(`"$GENEHUB_CLI" workflow activate --revision ${field(request,'activationRevision')}`);

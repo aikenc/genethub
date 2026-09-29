@@ -43,14 +43,17 @@ for (const scenario of ["busy", "restart", "manual-stop", "human", "human-contin
         t.assertions.assert(cancel.outputSchema.properties.type.const === "workflow.cancelling",
           "cancellation discovery claimed confirmed cleanup at admission");
         t.assertions.assert(budget.outputSchema.properties.type.const === "workflow.budgetUpdated"
-          && !budget.inputSchema.properties.maxRuns && budget.inputSchema.properties.maxLlmRounds,
+          && budget.inputSchema.properties.maxRuns && budget.inputSchema.properties.maxLlmRounds
+          && !budget.inputSchema.properties.deadlineSeconds,
           "workflow discovery omitted PM budget controls or their durable result");
       }
       const respond = () => {
         const call = calls++;
         if (scenario.startsWith("human") && call === 0) return { tool: { name: "request_user_input", arguments: { title: "选择颜色", summary: "共 1 个待回答问题。", description: "请使用下方选项回答问题；提交后继续当前任务。", questions: [{ id: "color", header: "颜色", question: "选择颜色", options: [{ label: "蓝色", description: "使用蓝色" }, { label: "绿色", description: "使用绿色" }] }] } } };
-        if ((scenario === "human" && call === 1) || (scenario === "manual-stop" && call === 0)) return { hang: true as const };
-        if ((scenario === "busy" && call === 0) || (scenario === "human-continuation" && call === 2)) return { text: "The current operation completed without being interrupted.", delayMs: 3_000 };
+        if (scenario === "manual-stop" && call === 0) return { hang: true as const };
+        // A Human answer never interrupts a running turn; only an explicit Stop
+        // does. The consultation therefore has to be able to finish by itself.
+        if ((scenario === "busy" && call === 0) || (scenario === "human" && call === 1) || (scenario === "human-continuation" && call === 2)) return { text: "The current operation completed without being interrupted.", delayMs: 3_000 };
         return { text: "PM_INPUT_ANSWER: 已核对当前问题和已有执行结果。" };
       };
       opened.mock.script(...Array.from({ length: 12 }, () => ({ respond })));

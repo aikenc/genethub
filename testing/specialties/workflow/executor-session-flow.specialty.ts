@@ -310,7 +310,9 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
           const snapshotPath = path.join(projectRoot,".genethub","components","pm","requests",accepted!.id,"runs",accepted!.id,"run.json");
           const saved = JSON.parse(readFileSync(snapshotPath,"utf8"));
           t.assertions.assert(!!saved.run.engine,"fault fixture lacks a structured snapshot");
-          t.assertions.assert(saved.run.status === "running", "fault fixture must damage an unfinished execution");
+          // The public status is a projection and is never saved; the engine
+          // status is the persisted fact that the execution is unfinished.
+          t.assertions.assert(saved.run.engine.status === "running", `fault fixture must damage an unfinished execution: ${saved.run.engine.status}`);
           workersBeforeFault = Object.entries(saved.run.nodes as Record<string, {sessionId?: string}>)
             .filter((entry): entry is [string, {sessionId: string}] => typeof entry[1].sessionId === "string")
             .map(([id, node]): [string, string] => [id, node.sessionId]).sort(([a], [b]) => a.localeCompare(b));

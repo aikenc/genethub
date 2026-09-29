@@ -80,8 +80,12 @@ defineSpecialty(
 
       const rolePath = path.join(opened.workspaceRoot, ".genethub/workflows/local/roles/worker.yaml");
       const validRole = readFileSync(rolePath, "utf8");
-      t.assertions.assert(validRole.includes('"agentId": "genet"'), "fixture role does not use genet");
-      writeFileSync(rolePath, validRole.replace('"agentId": "genet"', '"agentId": "unavailable-agent"'));
+      // Role v3 selects a route by built-in tag, so an unavailable Worker is
+      // one that asks for a built-in tag no configured model carries (the
+      // fixture models are profiled Flash/Pro only).
+      const role = JSON.parse(validRole) as { tags?: string[] };
+      t.assertions.assert(role.tags?.includes("Flash") === true, "fixture role does not select the Flash route");
+      writeFileSync(rolePath, `${JSON.stringify({ ...role, tags: ["Max"] }, null, 2)}\n`);
       git(opened.workspaceRoot, ["add", rolePath]);
       git(opened.workspaceRoot, ["commit", "-m", "configure unavailable worker"]);
 
