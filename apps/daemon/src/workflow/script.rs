@@ -162,7 +162,10 @@ pub(crate) async fn run(
     // `args` follow.
     let (program, mut arguments) = match definition.interpreter.as_deref() {
         Some(interpreter) => (
-            PathBuf::from(interpreter),
+            // Windows CreateProcess searches System32 before PATH, so a bare
+            // `bash` runs the WSL stub and never Git Bash. PATH order is what
+            // the package named.
+            resolve_interpreter(interpreter),
             // `canonicalize` on Windows yields `\\?\C:\...`. Node and bash
             // then try to lstat the bare drive (`C:`) and fail with EISDIR.
             vec![path_for_interpreter(script)],
@@ -226,16 +229,33 @@ pub(crate) async fn run(
     })
 }
 
-/// A path an external interpreter can open. Rust's canonical form on Windows
-/// is a verbatim `\\?\` path, which Node and bash do not treat as a file.
+/// A path an external interpreter can open.
+///
+/// Rust's canonical form on Windows is a verbatim `\\?\` path, which Node
+/// and bash do not treat as a file. Forward slashes stay: Win32 accepts
+/// them, and Git Bash does not translate backslashes that arrive in the
+/// environment rather than on the command line.
 fn path_for_interpreter(path: &Path) -> String {
     let text = path.to_string_lossy();
-    let Some(rest) = text.strip_prefix(r"\\?\") else {
-        return text.into_owned();
+    let plain = match text.strip_prefix(r"\\?\") {
+        Some(rest) => rest
+            .strip_prefix(r"UNC\")
+            .map(|share| format!(r"\\{share}"))
+            .unwrap_or_else(|| rest.to_string()),
+        None => text.into_owned(),
     };
-    rest.strip_prefix(r"UNC\")
-        .map(|share| format!(r"\\{share}"))
-        .unwrap_or_else(|| rest.to_string())
+    #[cfg(windows)]
+    {
+        plain.replace('\\', "/")
+    }
+    #[cfg(not(windows))]
+    {
+        plain
+    }
+}
+
+fn resolve_interpreter(interpreter: &str) -> PathBuf {
+    crate::adapter::find_executable(interpreter).unwrap_or_else(|| PathBuf::from(interpreter))
 }
 
 fn parse(stdout: &[u8]) -> Result<ScriptResult> {
@@ -393,7 +413,7 @@ mod tests {
                 script: "scripts/probe.sh".into(),
                 args: Vec::new(),
                 interpreter: Some("bash".into()),
-                env: BTreeMap::from([("DEPOT".into(), elsewhere.display().to_string())]),
+                env: BTreeMap::from([("DEPOT".into(), path_for_interpreter(&elsewhere))]),
                 cwd: Some("work".into()),
                 input: serde_json::Value::Null,
                 timeout_seconds: Some(30),
