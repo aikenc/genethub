@@ -20,6 +20,10 @@ const RATE_TARGET: Duration = Duration::from_millis(200);
 /// A full start window on a 5Mbps uplink takes about a second. Anything slower
 /// than this stays at the start so the first RPC is not stuck behind a megabyte.
 const OPEN_DRAIN_MAX: Duration = Duration::from_millis(900);
+// Every admitted physical peer may keep at most one record in flight even
+// when another peer owns the shared window. The Fabric admission limit bounds
+// the extra occupancy; a stalled downstream cannot take this progress share.
+const PEER_PROGRESS_BYTES: u64 = genehub_proto::MAX_DATA_FRAME_BYTES as u64;
 
 pub struct UplinkPace {
     ceiling: u64,
@@ -61,6 +65,14 @@ impl UplinkPace {
         self.cap.load(Ordering::Relaxed)
     }
 
+    pub(crate) fn peer(self: &Arc<Self>) -> Arc<PeerPace> {
+        Arc::new(PeerPace {
+            shared: self.clone(),
+            outstanding: Mutex::new(0),
+        })
+    }
+
+    #[cfg(test)]
     pub async fn reserve(&self, bytes: u64) {
         let mut changes = self.changes();
         loop {
@@ -75,10 +87,19 @@ impl UplinkPace {
 
     pub(crate) fn can_reserve(&self, bytes: u64) -> bool {
         let outstanding = *self.outstanding.lock().unwrap();
-        outstanding.saturating_add(bytes) <= self.cap()
+        let available = outstanding.saturating_add(bytes) <= self.cap();
+        if !available {
+            self.note_filled(outstanding, outstanding);
+        }
+        available
     }
 
+    #[cfg(test)]
     fn try_reserve(&self, bytes: u64) -> bool {
+        self.try_reserve_progress(bytes, false)
+    }
+
+    fn try_reserve_progress(&self, bytes: u64, progress: bool) -> bool {
         let mut outstanding = self.outstanding.lock().unwrap();
         if *outstanding == 0 {
             let mut control = self.control.lock().unwrap();
@@ -92,7 +113,7 @@ impl UplinkPace {
             }
         }
         let cap = self.cap.load(Ordering::Relaxed);
-        if bytes > cap || outstanding.saturating_add(bytes) <= cap {
+        if progress || bytes > cap || outstanding.saturating_add(bytes) <= cap {
             *outstanding = outstanding.saturating_add(bytes);
             self.note_filled(*outstanding, cap);
             return true;
@@ -105,9 +126,11 @@ impl UplinkPace {
         self.changes.subscribe()
     }
 
+    #[cfg(test)]
     pub(crate) fn try_acquire(self: &Arc<Self>, bytes: u64) -> Option<Charge> {
         self.try_reserve(bytes).then(|| Charge {
             pace: self.clone(),
+            peer: None,
             bytes,
         })
     }
@@ -258,28 +281,83 @@ impl UplinkPace {
 /// its active logical epoch is delivery; replacing a channel abandons its debit.
 pub(crate) struct Charge {
     pace: Arc<UplinkPace>,
+    peer: Option<Arc<PeerPace>>,
     bytes: u64,
 }
 impl Charge {
     pub(crate) fn acknowledge(mut self) {
+        if let Some(peer) = &self.peer {
+            peer.relinquish(self.bytes);
+        }
         self.pace.release(self.bytes, self.pace.ceiling);
         self.bytes = 0;
     }
 }
 impl Drop for Charge {
     fn drop(&mut self) {
+        if let Some(peer) = &self.peer {
+            peer.relinquish(self.bytes);
+        }
         self.pace.discard(self.bytes);
+    }
+}
+
+/// Custody belongs to a physical peer, including while it is retained as a
+/// standby. Reattaching or cancelling drops charges without manufacturing ACKs.
+pub(crate) struct PeerPace {
+    shared: Arc<UplinkPace>,
+    outstanding: Mutex<u64>,
+}
+
+impl PeerPace {
+    pub(crate) fn changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.shared.changes()
+    }
+
+    pub(crate) fn can_reserve(&self, bytes: u64) -> bool {
+        self.outstanding.lock().unwrap().saturating_add(bytes) <= PEER_PROGRESS_BYTES
+            || self.shared.can_reserve(bytes)
+    }
+
+    fn try_reserve(&self, bytes: u64) -> bool {
+        let mut outstanding = self.outstanding.lock().unwrap();
+        let progress = outstanding.saturating_add(bytes) <= PEER_PROGRESS_BYTES;
+        if !self.shared.try_reserve_progress(bytes, progress) {
+            return false;
+        }
+        *outstanding = outstanding.saturating_add(bytes);
+        true
+    }
+
+    fn relinquish(&self, bytes: u64) {
+        let mut outstanding = self.outstanding.lock().unwrap();
+        *outstanding = outstanding.saturating_sub(bytes);
+    }
+
+    async fn reserve(&self, bytes: u64) {
+        let mut changes = self.changes();
+        while !self.try_reserve(bytes) {
+            let _ = changes.changed().await;
+        }
+    }
+
+    pub(crate) fn try_acquire(self: &Arc<Self>, bytes: u64) -> Option<Charge> {
+        self.try_reserve(bytes).then(|| Charge {
+            pace: self.shared.clone(),
+            peer: Some(self.clone()),
+            bytes,
+        })
     }
 }
 
 /// Fixed-owner bootstrap streams do not have a replay journal.
 pub struct PaceShare {
-    pace: Arc<UplinkPace>,
+    pace: Arc<PeerPace>,
     ceiling: u64,
     outstanding: AtomicU64,
 }
 impl PaceShare {
-    pub fn new(pace: Arc<UplinkPace>, ceiling: u64) -> Self {
+    pub(crate) fn new(pace: Arc<PeerPace>, ceiling: u64) -> Self {
         Self {
             pace,
             ceiling,
@@ -297,12 +375,16 @@ impl PaceShare {
                 Some(n.saturating_sub(bytes))
             })
             .unwrap();
-        self.pace.release(bytes.min(previous), self.ceiling);
+        let released = bytes.min(previous);
+        self.pace.relinquish(released);
+        self.pace.shared.release(released, self.ceiling);
     }
 }
 impl Drop for PaceShare {
     fn drop(&mut self) {
-        self.pace.discard(self.outstanding.load(Ordering::Relaxed));
+        let abandoned = self.outstanding.load(Ordering::Relaxed);
+        self.pace.relinquish(abandoned);
+        self.pace.shared.discard(abandoned);
     }
 }
 
@@ -310,10 +392,37 @@ impl Drop for PaceShare {
 mod tests {
     use super::*;
 
+    #[test]
+    fn progress_is_bounded_per_peer_and_cancellation_returns_both_debits() {
+        let pace = Arc::new(UplinkPace::new(START_BYTES));
+        let stalled = pace.peer();
+        let occupied = stalled.try_acquire(START_BYTES).unwrap();
+        let peers: Vec<_> = (0..32).map(|_| pace.peer()).collect();
+        let mut charges = Vec::new();
+        for peer in &peers {
+            charges.push(peer.try_acquire(PEER_PROGRESS_BYTES).unwrap());
+            assert!(!peer.can_reserve(1));
+            assert!(peer.try_acquire(1).is_none());
+        }
+        assert_eq!(
+            *pace.outstanding.lock().unwrap(),
+            START_BYTES + 32 * PEER_PROGRESS_BYTES
+        );
+        drop(charges);
+        assert_eq!(*pace.outstanding.lock().unwrap(), START_BYTES);
+        for peer in &peers {
+            assert_eq!(*peer.outstanding.lock().unwrap(), 0);
+            peer.try_acquire(PEER_PROGRESS_BYTES).unwrap().acknowledge();
+            assert_eq!(*peer.outstanding.lock().unwrap(), 0);
+        }
+        drop(occupied);
+        assert_eq!(*pace.outstanding.lock().unwrap(), 0);
+    }
+
     #[tokio::test]
     async fn bulk_waits_once_the_floor_is_full_and_resumes_on_ack() {
         let pace = Arc::new(UplinkPace::new(3 * 1024 * 1024));
-        let share = PaceShare::new(pace.clone(), 3 * 1024 * 1024);
+        let share = PaceShare::new(pace.peer(), 3 * 1024 * 1024);
         share.reserve(500 * 1024).await;
         let second = share.reserve(500 * 1024);
         tokio::pin!(second);
@@ -358,7 +467,7 @@ mod tests {
     async fn a_delay_bound_window_opens_to_the_ceiling() {
         let ceiling = 3 * 1024 * 1024;
         let pace = Arc::new(UplinkPace::new(ceiling));
-        let share = PaceShare::new(pace.clone(), ceiling);
+        let share = PaceShare::new(pace.peer(), ceiling);
         share.reserve(START_BYTES).await;
         tokio::time::sleep(Duration::from_millis(220)).await;
         share.release(START_BYTES);
@@ -368,7 +477,7 @@ mod tests {
     #[tokio::test]
     async fn a_slow_full_window_stays_at_the_floor() {
         let pace = Arc::new(UplinkPace::new(3 * 1024 * 1024));
-        let share = PaceShare::new(pace.clone(), 3 * 1024 * 1024);
+        let share = PaceShare::new(pace.peer(), 3 * 1024 * 1024);
         share.reserve(START_BYTES).await;
         tokio::time::sleep(Duration::from_millis(1_100)).await;
         share.release(START_BYTES);
@@ -379,7 +488,7 @@ mod tests {
     async fn a_very_fast_full_window_still_opens_to_the_ceiling() {
         let ceiling = 3 * 1024 * 1024;
         let pace = Arc::new(UplinkPace::new(ceiling));
-        let share = PaceShare::new(pace.clone(), ceiling);
+        let share = PaceShare::new(pace.peer(), ceiling);
         share.reserve(START_BYTES).await;
         tokio::time::sleep(Duration::from_millis(10)).await;
         share.release(START_BYTES);
@@ -390,7 +499,7 @@ mod tests {
     async fn an_opened_window_stays_for_the_next_transfer() {
         let ceiling = 3 * 1024 * 1024;
         let pace = Arc::new(UplinkPace::new(ceiling));
-        let share = PaceShare::new(pace.clone(), ceiling);
+        let share = PaceShare::new(pace.peer(), ceiling);
         share.reserve(START_BYTES).await;
         tokio::time::sleep(Duration::from_millis(10)).await;
         share.release(START_BYTES);
@@ -409,7 +518,7 @@ mod tests {
     async fn an_opened_window_shrinks_when_the_uplink_slows_down() {
         let ceiling = 3 * 1024 * 1024;
         let pace = Arc::new(UplinkPace::new(ceiling));
-        let share = PaceShare::new(pace.clone(), ceiling);
+        let share = PaceShare::new(pace.peer(), ceiling);
         share.reserve(START_BYTES).await;
         share.release(START_BYTES);
         assert_eq!(pace.cap(), ceiling);
@@ -431,7 +540,7 @@ mod tests {
     async fn a_slow_uplink_shrinks_no_further_than_the_start() {
         let ceiling = 3 * 1024 * 1024;
         let pace = Arc::new(UplinkPace::new(ceiling));
-        let share = PaceShare::new(pace.clone(), ceiling);
+        let share = PaceShare::new(pace.peer(), ceiling);
         share.reserve(START_BYTES).await;
         share.release(START_BYTES);
         share.reserve(ceiling).await;
@@ -444,7 +553,7 @@ mod tests {
     async fn cancellation_frees_budget_without_training_the_path() {
         let pace = Arc::new(UplinkPace::new(3 * 1024 * 1024));
         {
-            let share = PaceShare::new(pace.clone(), 3 * 1024 * 1024);
+            let share = PaceShare::new(pace.peer(), 3 * 1024 * 1024);
             share.reserve(START_BYTES).await;
         }
         assert_eq!(pace.cap(), START_BYTES);

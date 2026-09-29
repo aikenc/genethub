@@ -13,7 +13,7 @@ const CARRIER_QUEUE: usize = 16;
 pub struct Carrier {
     pub inbound: mpsc::Receiver<Vec<u8>>,
     pub outbound: mpsc::Sender<Vec<u8>>,
-    pub(crate) uplink_pace: Option<std::sync::Arc<super::uplink_pace::UplinkPace>>,
+    pub(crate) uplink_pace: Option<std::sync::Arc<super::uplink_pace::PeerPace>>,
 }
 
 pub fn carrier_channels() -> (mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>, Carrier) {
@@ -44,7 +44,7 @@ pub(crate) struct AuthenticatedReader {
 }
 
 pub(crate) struct AuthenticatedWriter {
-    pub(crate) uplink_pace: Option<std::sync::Arc<super::uplink_pace::UplinkPace>>,
+    pub(crate) uplink_pace: Option<std::sync::Arc<super::uplink_pace::PeerPace>>,
     outbound: mpsc::Sender<Vec<u8>>,
     key: SessionKey,
     direction: Direction,

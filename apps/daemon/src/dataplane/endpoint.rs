@@ -520,7 +520,7 @@ pub(crate) struct PeerServices {
     event_receiver: tokio::sync::Mutex<Option<mpsc::Receiver<ServerFrame>>>,
     subscriptions: Mutex<SubscriptionTasks>,
     pub(crate) carrier_kind: CarrierKind,
-    physical_pace: Option<Arc<super::uplink_pace::UplinkPace>>,
+    physical_pace: Option<Arc<super::uplink_pace::PeerPace>>,
 }
 
 /// Logical peer state has one lifetime owner, independent of record crypto.

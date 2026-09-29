@@ -271,6 +271,10 @@ struct TurnState {
     counter: u64,
     text_item: Option<String>,
     reasoning_item: Option<String>,
+    /// Text already stored on the open assistant item. Print mode then sends
+    /// that same segment again, still with `timestamp_ms`, before a tool,
+    /// retry, or question. The end-of-run copy omits `timestamp_ms`.
+    text_segment: String,
     usage: Usage,
     /// The user's words for this turn and what Cursor had answered so far,
     /// kept for the next prompt if this run is canceled.
@@ -784,7 +788,7 @@ fn translate_event(
                 None => {
                     let id = state.next_item_id();
                     state.reasoning_item = Some(id.clone());
-                    state.text_item = None;
+                    close_text_segment(state);
                     emit(SessionEvent::Item {
                         turn_id,
                         item: TimelineItem::Reasoning {
@@ -797,13 +801,15 @@ fn translate_event(
             }
         }
         (Some("assistant"), _) => {
-            // Without `timestamp_ms` this is the recap of the last segment,
-            // already streamed as deltas.
-            if event.get("timestamp_ms").is_none() {
-                return chat_id;
-            }
+            // Deltas carry `timestamp_ms`. The same segment is written again
+            // before a tool, retry, or question, and that copy is timestamped
+            // too. The end-of-run copy is not. Both repeat text already stored.
             let delta = message_text(event);
             if delta.is_empty() {
+                return chat_id;
+            }
+            let repeats_segment = !state.text_segment.is_empty() && delta == state.text_segment;
+            if event.get("timestamp_ms").is_none() || repeats_segment {
                 return chat_id;
             }
             open_round(state);
@@ -811,6 +817,7 @@ fn translate_event(
             usage::record_visible_output(&mut state.usage, &delta);
             usage::emit_progress(events, &turn_id, &state.usage);
             state.partial.push_str(&delta);
+            state.text_segment.push_str(&delta);
             match state.text_item.clone() {
                 Some(id) => emit(SessionEvent::ItemDelta {
                     turn_id,
@@ -833,7 +840,7 @@ fn translate_event(
             }
         }
         (Some("tool_call"), Some(phase @ ("started" | "completed"))) => {
-            state.text_item = None;
+            close_text_segment(state);
             state.reasoning_item = None;
             if let Some(item) = tool_item(event, phase == "completed", state) {
                 emit(SessionEvent::Item { turn_id, item });
@@ -858,6 +865,11 @@ fn translate_event(
         _ => {}
     }
     chat_id
+}
+
+fn close_text_segment(state: &mut TurnState) {
+    state.text_item = None;
+    state.text_segment.clear();
 }
 
 fn open_round(state: &mut TurnState) {
@@ -1792,6 +1804,29 @@ mod tests {
         assert_eq!(default.as_deref(), Some("auto"));
     }
 
+    fn assistant_texts(events: &[SessionEvent]) -> Vec<String> {
+        let mut texts: Vec<(String, String)> = Vec::new();
+        for event in events {
+            match event {
+                SessionEvent::Item {
+                    item: TimelineItem::AssistantMessage { id, text, .. },
+                    ..
+                } => texts.push((id.clone(), text.clone())),
+                SessionEvent::ItemDelta {
+                    item_id,
+                    delta: ItemDelta::Text { delta },
+                    ..
+                } => {
+                    if let Some((_, text)) = texts.iter_mut().rev().find(|(id, _)| id == item_id) {
+                        text.push_str(delta);
+                    }
+                }
+                _ => {}
+            }
+        }
+        texts.into_iter().map(|(_, text)| text).collect()
+    }
+
     fn drain(rx: &mut broadcast::Receiver<SessionEvent>) -> Vec<SessionEvent> {
         let mut out = Vec::new();
         while let Ok(event) = rx.try_recv() {
@@ -1827,16 +1862,40 @@ mod tests {
         assert_eq!(chat.as_deref(), Some("chat-9"));
         assert_eq!(state.partial, "Hello");
         assert!(matches!(state.outcome, Some(Outcome::Success(Some(_)))));
-        let items: Vec<_> = drain(&mut rx)
-            .into_iter()
+        let events = drain(&mut rx);
+        let items: Vec<_> = events
+            .iter()
             .filter_map(|event| match event {
                 SessionEvent::Item { item, .. } => Some(item),
                 _ => None,
             })
             .collect();
         assert_eq!(items.len(), 2, "one reasoning item and one message item");
-        assert!(matches!(&items[0], TimelineItem::Reasoning { text, .. } if text == "plan"));
-        assert!(matches!(&items[1], TimelineItem::AssistantMessage { text, .. } if text == "Hel"));
+        assert!(matches!(items[0], TimelineItem::Reasoning { text, .. } if text == "plan"));
+        assert!(matches!(items[1], TimelineItem::AssistantMessage { text, .. } if text == "Hel"));
+        assert_eq!(assistant_texts(&events), ["Hello"]);
+    }
+
+    #[test]
+    fn timestamped_segment_flush_is_not_appended_again() {
+        let (tx, mut rx) = broadcast::channel(64);
+        let mut state = running_turn();
+        let lines = [
+            json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Hel"}]},"session_id":"chat-9","timestamp_ms":1}),
+            json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"lo"}]},"session_id":"chat-9","timestamp_ms":2}),
+            json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Hello"}]},"session_id":"chat-9","timestamp_ms":3,"model_call_id":"call-1"}),
+            json!({"type":"tool_call","subtype":"started","tool_call":{},"timestamp_ms":4}),
+            json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Wor"}]},"session_id":"chat-9","timestamp_ms":5}),
+            json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ld"}]},"session_id":"chat-9","timestamp_ms":6}),
+            json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"World"}]},"session_id":"chat-9","timestamp_ms":7}),
+            json!({"type":"tool_call","subtype":"started","tool_call":{},"timestamp_ms":8}),
+            json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done"}]},"session_id":"chat-9","timestamp_ms":9}),
+        ];
+        for line in &lines {
+            translate_event(line, &mut state, &tx);
+        }
+        assert_eq!(state.partial, "HelloWorldDone");
+        assert_eq!(assistant_texts(&drain(&mut rx)), ["Hello", "World", "Done"]);
     }
 
     #[test]

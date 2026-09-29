@@ -14,13 +14,11 @@ import { binaryMessage } from "./websocket";
 
 const SIGNAL_LIMIT = 64 * 1024;
 const CONNECT_TIMEOUT_MS = 20_000;
-/**
- * Phone peers need server-reflexive candidates in this non-trickle offer.
- * Host candidates appear immediately; STUN usually finishes in 1–2s. Cap the
- * wait so a hung STUN server cannot stall the upgrade for 20s.
+/** Non-trickle SDP must include every candidate gathered within this deadline.
+ * Keep the Fabric path usable while waiting; the first srflx is not necessarily
+ * the usable route on a multi-interface peer.
  */
-/** Stop waiting for ICE once a server-reflexive candidate exists, or after this. */
-export const GATHER_WAIT_MS = 2_000;
+export const GATHER_WAIT_MS = 12_000;
 export const ICE_SERVERS: RTCIceServer[] = [];
 const BUFFERED_HIGH = 256 * 1024;
 const BUFFERED_LOW = 64 * 1024;
@@ -486,20 +484,14 @@ export function iceGathered(peer: RTCPeerConnection, waitMs: number): Promise<vo
   return new Promise((resolve) => {
     const finish = () => {
       peer.removeEventListener("icegatheringstatechange", changed);
-      peer.removeEventListener("icecandidate", onCandidate);
       clearTimeout(timer);
       resolve();
     };
     const changed = () => {
       if (peer.iceGatheringState === "complete") finish();
     };
-    const onCandidate = (event: Event) => {
-      const text = (event as RTCPeerConnectionIceEvent).candidate?.candidate ?? "";
-      if (/ typ srflx(?: |$)/.test(text)) finish();
-    };
     const timer = setTimeout(finish, waitMs);
     peer.addEventListener("icegatheringstatechange", changed);
-    peer.addEventListener("icecandidate", onCandidate);
   });
 }
 

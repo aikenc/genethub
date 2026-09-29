@@ -105,7 +105,7 @@ pub(crate) struct Handle {
 struct Channel {
     sent_paced: std::collections::BTreeMap<u64, super::uplink_pace::Charge>,
     pace_blocked: bool,
-    pace: Option<Arc<super::uplink_pace::UplinkPace>>,
+    pace: Option<Arc<super::uplink_pace::PeerPace>>,
     path: resume::Path,
     admission: Option<(SessionKey, PeerAccess, CarrierKind)>,
     attempt: Option<String>,
@@ -416,10 +416,27 @@ async fn run(
             journal.release(seq).map_err(error)?;
             budget = true;
         }
+        let mut pace_blocked = false;
         let mut blocked_streams = std::collections::HashSet::new();
         for _ in 0..pending.len() {
             let write = pending.pop_front().unwrap();
             if blocked_streams.contains(&write.frame.stream_id) {
+                pending.push_back(write);
+                continue;
+            }
+            // Do not assign a replay sequence to bulk work waiting for its
+            // physical budget. Other streams can then enter the journal and
+            // make progress without violating the journal's ordered replay.
+            if write.bulk
+                && write.frame.kind == Kind::Data
+                && channel.as_ref().filter(|c| c.synced).is_some_and(|c| {
+                    c.pace
+                        .as_ref()
+                        .is_some_and(|pace| !pace.can_reserve(write.frame.payload.len() as u64))
+                })
+            {
+                pace_blocked = true;
+                blocked_streams.insert(write.frame.stream_id);
                 pending.push_back(write);
                 continue;
             }
@@ -461,7 +478,6 @@ async fn run(
             }
         }
         let mut pump_blocked = false;
-        let mut pace_blocked = false;
         let mut pace_changes = channel
             .as_ref()
             .and_then(|c| c.pace.as_ref().map(|p| p.changes()));

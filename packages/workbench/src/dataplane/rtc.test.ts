@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { iceGathered, RtcUpgradeError, watchPeer, type RtcDiagnostic } from "./rtc";
+import { GATHER_WAIT_MS, iceGathered, RtcUpgradeError, watchPeer, type RtcDiagnostic } from "./rtc";
 
 /** Minimal RTCPeerConnection stand-in: addEventListener plus settable state. */
 function fakePeer() {
@@ -118,15 +118,27 @@ describe("iceGathered", () => {
     await expect(waited).resolves.toBeUndefined();
   });
 
-  it("resolves when the first server-reflexive candidate arrives", async () => {
+  it("keeps gathering after an early srflx and beyond the old two-second cutoff", async () => {
     vi.useFakeTimers();
-    const peer = fakePeer();
-    const waited = iceGathered(peer as unknown as RTCPeerConnection, 2_000);
-    peer.fire("icecandidate", {
-      candidate: { candidate: "candidate:2 1 udp 1 203.0.113.7 9 typ srflx" },
-    });
-    await expect(waited).resolves.toBeUndefined();
-    vi.useRealTimers();
+    try {
+      const peer = fakePeer();
+      let settled = false;
+      const waited = iceGathered(peer as unknown as RTCPeerConnection, GATHER_WAIT_MS)
+        .then(() => { settled = true; });
+      peer.fire("icecandidate", {
+        candidate: { candidate: "candidate:2 1 udp 1 203.0.113.7 9 typ srflx" },
+      });
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(settled).toBe(false);
+      peer.fire("icecandidate", {
+        candidate: { candidate: "candidate:3 1 udp 1 203.0.113.8 9 typ srflx" },
+      });
+      peer.iceGatheringState = "complete";
+      peer.fire("icegatheringstatechange");
+      await waited;
+      expect(settled).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
   });
 
   it("waits out a hung STUN gather instead of sending a host-only offer", async () => {

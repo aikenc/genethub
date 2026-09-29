@@ -636,7 +636,7 @@ async fn serve_peer_inner(
         });
     }
     let (inbound, mut outbound, mut carrier) = endpoint::carrier_channels();
-    carrier.uplink_pace = Some(writer.pace.clone());
+    carrier.uplink_pace = Some(writer.pace.peer());
     let flow = StreamFlow::from_wire(frame.value)?;
     peers.lock().await.insert(
         frame.stream_id,
@@ -1020,7 +1020,7 @@ pub async fn dial(
         messages: messages_tx,
     };
     let (inbound, mut outbound, mut carrier) = endpoint::carrier_channels();
-    carrier.uplink_pace = Some(writer.pace.clone());
+    carrier.uplink_pace = Some(writer.pace.peer());
 
     let reader_writer = writer.clone();
     let reader_flow = flow.clone();

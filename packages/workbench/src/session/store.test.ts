@@ -1984,6 +1984,104 @@ describe("asking the machine about rounds", () => {
     expect(useWorkbench.getState().timeline.roundLayers.r1?.nextCursor).toBeUndefined();
   });
 
+  it("keeps the open trunk body when a live summary changes", async () => {
+    const round = {
+      roundId: "r1",
+      userItemId: "u1",
+      startedAtMs: 1,
+      endedAtMs: 0,
+      outcome: "running" as const,
+      trunkCount: 1,
+    };
+    const summary = {
+      index: 0,
+      firstItemId: "t0",
+      blobCount: 1,
+      title: "先看",
+      batches: [{ index: 0, firstItemId: "b0", blobCount: 1, text: "先看一下。" }],
+      llmRounds: 1,
+      startedAtMs: 1,
+      durationMs: 10,
+    };
+    const nextSummary = { ...summary, blobCount: 2, llmRounds: 2, durationMs: 40 };
+    const detail = {
+      summary,
+      batches: [
+        {
+          summary: summary.batches[0]!,
+          monologue: "先看一下。",
+          blobs: [],
+        },
+      ],
+    };
+    const timeline = {
+      ...emptyTimeline(),
+      rounds: [round],
+      roundLayers: { r1: { round, trunks: [summary] } },
+      roundTrunks: { "r1:0": detail },
+    };
+    const client = {
+      call: async () => ({
+        type: "roundLayer",
+        data: { round, trunks: [nextSummary] },
+      }),
+    } as unknown as Client;
+    useWorkbench.setState({
+      client,
+      activeSessionId: "s1",
+      timeline,
+      sessionTimelines: { s1: timeline },
+    });
+
+    await useWorkbench.getState().loadRound("latest");
+
+    expect(useWorkbench.getState().timeline.roundLayers.r1?.trunks[0]).toEqual(nextSummary);
+    expect(useWorkbench.getState().timeline.roundTrunks["r1:0"]).toEqual(detail);
+  });
+
+  it("keeps the open trunk body when a running round settles", async () => {
+    const running = {
+      roundId: "r1",
+      userItemId: "u1",
+      startedAtMs: 1,
+      endedAtMs: 0,
+      outcome: "running" as const,
+      trunkCount: 1,
+    };
+    const settled = { ...running, outcome: "completed" as const, endedAtMs: 9 };
+    const summary = {
+      index: 0,
+      firstItemId: "t0",
+      blobCount: 1,
+      title: "先看",
+      batches: [],
+    };
+    const detail = { summary, batches: [] };
+    const timeline = {
+      ...emptyTimeline(),
+      rounds: [running],
+      roundLayers: { r1: { round: running, trunks: [summary] } },
+      roundTrunks: { "r1:0": detail },
+    };
+    const client = {
+      call: async () => ({
+        type: "roundLayer",
+        data: { round: settled, trunks: [{ ...summary, durationMs: 8 }] },
+      }),
+    } as unknown as Client;
+    useWorkbench.setState({
+      client,
+      activeSessionId: "s1",
+      timeline,
+      sessionTimelines: { s1: timeline },
+    });
+
+    await useWorkbench.getState().loadRound("latest");
+
+    expect(useWorkbench.getState().timeline.roundLayers.r1?.round.outcome).toBe("completed");
+    expect(useWorkbench.getState().timeline.roundTrunks["r1:0"]).toEqual(detail);
+  });
+
   it("seeds the expanded trunk into roundTrunks so the last gallery can hoist", async () => {
     const round = {
       roundId: "r1",

@@ -679,18 +679,23 @@ async function refreshRound(get: () => WorkbenchState): Promise<void> {
   if (!sessionId) return;
   await get().loadRound("latest");
   if (get().activeSessionId !== sessionId) return;
-  const round = Object.values(get().timeline.roundLayers)
-    .reverse()
-    .find((layer) => layer.round.outcome === "running")?.round;
+  const layers = Object.values(get().timeline.roundLayers);
+  const round =
+    [...layers].reverse().find((layer) => layer.round.outcome === "running")?.round ??
+    layers.at(-1)?.round;
   if (!round) return;
-  const last = get().timeline.roundLayers[round.roundId]?.trunks.at(-1);
-  if (!last) return;
-  const loaded = get().timeline.roundTrunks[`${round.roundId}:${last.index}`];
-  // A layer refresh often reports the exact same live tail. Keep the detail
-  // object already on screen in that case, so an expanded card neither flashes
-  // through loading nor churns its measured height on every stream event.
-  if (!loaded || JSON.stringify(loaded.summary) !== JSON.stringify(last)) {
-    await get().loadTrunk(round.roundId, last.index);
+  const trunks = get().timeline.roundLayers[round.roundId]?.trunks ?? [];
+  const tail = trunks.at(-1);
+  if (!tail) return;
+  for (const summary of trunks) {
+    if (get().activeSessionId !== sessionId) return;
+    const loaded = get().timeline.roundTrunks[`${round.roundId}:${summary.index}`];
+    const isTail = summary.index === tail.index;
+    // Unopened history stays unread. The live tail, and any trunk already on
+    // screen whose summary moved, is replaced without first clearing it.
+    if (!isTail && !loaded) continue;
+    if (loaded && JSON.stringify(loaded.summary) === JSON.stringify(summary)) continue;
+    await get().loadTrunk(round.roundId, summary.index);
   }
 }
 
@@ -1320,22 +1325,18 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         const existingFirst = existing?.trunks[0]?.index;
         const keptOlder =
           existingFirst !== undefined && existingFirst < (layer.trunks[0]?.index ?? 0);
-        const refreshed = new Map(layer.trunks.map((trunk) => [trunk.index, trunk]));
-        const settled = existing?.round.outcome === "running" && layer.round.outcome !== "running";
-        const retainedDetails = Object.fromEntries(
-          Object.entries(timeline.roundTrunks).filter(([key, detail]) => {
-            if (!key.startsWith(`${layer.round.roundId}:`)) return true;
-            const summary = refreshed.get(detail.summary.index);
-            return !summary || (!settled && JSON.stringify(summary) === JSON.stringify(detail.summary));
-          }),
-        );
+        // The list reply carries summaries only. Clearing a body whose summary
+        // just moved unmounts the open batches until the follow-up read
+        // returns, so the card jumps every few seconds and again when a round
+        // settles. Keep the body; the refresh replaces it when the summary
+        // actually changed.
         const expanded = layer.expandedTrunk;
         const nextRoundTrunks = expanded
           ? {
-              ...retainedDetails,
+              ...timeline.roundTrunks,
               [`${layer.round.roundId}:${expanded.summary.index}`]: expanded,
             }
-          : retainedDetails;
+          : timeline.roundTrunks;
         return {
           rounds: [
             ...timeline.rounds.filter((round) => round.roundId !== layer.round.roundId),
