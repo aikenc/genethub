@@ -280,12 +280,15 @@ async fn authorize_session_request(
         // gone: killing one process then remains `notFound`, while `kill all`
         // remains an idempotent desired-state cleanup. Session-bound Agents
         // still take the normal path so a made-up id cannot bypass their child
-        // boundary.
+        // boundary. Deleting a Session that is already gone is the same kind of
+        // desired-state request: two clients deleting one row must both succeed.
         Err(error) => {
             if caller.session_controller_id().is_none()
                 && matches!(
                     request,
-                    Request::ProcessKill { .. } | Request::ProcessKillAll { .. }
+                    Request::ProcessKill { .. }
+                        | Request::ProcessKillAll { .. }
+                        | Request::SessionDelete { .. }
                 )
                 && error.is::<crate::session::manager::SessionMissing>()
             {

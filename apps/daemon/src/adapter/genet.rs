@@ -384,6 +384,12 @@ impl AgentSession for GenetSession {
         providers: &ProviderMap,
     ) -> Result<()> {
         let models = configured_models(providers);
+        // Nothing is configured at all: this is a credentials problem, and the
+        // Agent already reports it as one. Do not pre-empt it with a generic
+        // failure that hides the cause.
+        if models.is_empty() {
+            return Ok(());
+        }
         let selected = match model_id {
             Some(id) => Some(
                 models
