@@ -4161,6 +4161,37 @@ impl SessionManager {
         Ok(outcome)
     }
 
+    /// Withdrawal and Human response share the same interaction lock. A
+    /// cancelled receipt is durable before the Workflow reference is retired.
+    pub(crate) async fn withdraw_workflow_question(&self, session_id: &str, request_id: &str) -> Result<()> {
+        let live = self.live(session_id).await?;
+        let _interaction = live.interaction_lock.lock().await;
+        let mut meta = live.meta.lock().await;
+        if let Some(previous) = meta.human_continuation.as_ref().filter(|c| c.request.id == request_id) {
+            if previous.outcome == PermissionOutcome::Canceled { return Ok(()); }
+            bail!("Human decision already recorded; cannot withdraw an answered proposal");
+        }
+        let request = meta.pending_permission.as_ref().filter(|r| r.id == request_id).cloned()
+            .ok_or_else(|| anyhow!("pending Workflow question changed; read the current card"))?;
+        if !request.id.starts_with("workflow-human-") || meta.pending_project_approval {
+            bail!("only an unanswered Workflow proposal may be withdrawn");
+        }
+        let mut next = meta.clone();
+        next.pending_permission = None;
+        next.human_continuation = Some(HumanContinuation {
+            request, outcome: PermissionOutcome::Canceled, decided_at_ms: now_ms(),
+            project_approval: false, grant_recorded: true, completed: true,
+        });
+        self.store.save_meta(&next)?;
+        *meta = next;
+        drop(meta);
+        live.continuation_dispatched.store(true, Ordering::SeqCst);
+        let event = SessionEvent::PermissionResolved { request_id: request_id.into(), outcome: PermissionOutcome::Canceled };
+        apply(&live, &event).await;
+        live.publish(event).await;
+        Ok(())
+    }
+
     pub(crate) async fn cancel_workflow_question(&self, session_id: &str, request_id: &str) -> Result<()> {
         let live = match self.live(session_id).await {
             Ok(live) => live,

@@ -6,7 +6,7 @@ const kinds: Record<string, string> = {
 const answers: Record<string, string> = {
   approve: "已批准", reject: "暂不追加", acceptScope: "已接受目标调整", keepScope: "保留当前目标", cancel: "已取消",
   confirmFeedback: "已确认反馈", keepOpen: "保留受阻需求", handled: "已处理",
-  abandon: "已放弃", pass: "验收通过", fail: "验收未通过", cancelled: "已取消", interrupted: "已中止",
+  abandon: "已放弃", pass: "验收通过", fail: "验收未通过", cancelled: "已取消", interrupted: "已中止", withdrawn: "方案已撤回",
 };
 
 function duration(total: number) {

@@ -329,6 +329,10 @@ pub enum Request {
         expected_revision: u64,
         kind: String,
         reason: String,
+        // Required for withdrawal: exact pending native card identity.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        request_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         budget: Option<crate::WorkflowBudgetProposal>,

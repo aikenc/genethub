@@ -111,6 +111,7 @@ enum Command {
         revision: u64,
         kind: String,
         reason: String,
+        request_id: Option<String>,
         budget: Option<genehub_proto::WorkflowBudgetProposal>,
         scope: Option<genehub_proto::WorkflowScopeProposal>,
     },
@@ -649,10 +650,10 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
             output::succeed("workflow.recovery.started", serde_json::to_value(run).unwrap());
             Ok(EXIT_OK)
         }
-        Command::Human { workspace_id, run_id, revision, kind, reason, budget, scope } => {
+        Command::Human { workspace_id, run_id, revision, kind, reason, request_id, budget, scope } => {
             let workspace_id = resolve_workspace(rpc, workspace_id).await?;
             let Reply::WorkflowRun(run) = rpc.call(Request::WorkflowHuman {
-                workspace_id, run_id, expected_revision: revision, kind, reason, budget, scope,
+                workspace_id, run_id, expected_revision: revision, kind, reason, request_id, budget, scope,
             }).await.map_err(query::rpc_error)? else {
                 return Err(CliFailure::protocol("the daemon answered workflow.human with the wrong reply"));
             };
@@ -1127,11 +1128,11 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
                 _ => return Err(CliFailure::invalid_args("目标调整需要 --goal 和 --scope-changes")),
             };
             Ok(Command::Human {
-                budget, scope,
+                budget, scope, request_id: values.human_request.take(),
                 workspace_id: values.workspace.take(),
                 run_id: values.run.take().ok_or_else(|| CliFailure::invalid_args("workflow human 需要 --run <id>"))?,
                 revision: values.revision.ok_or_else(|| CliFailure::invalid_args("workflow human 需要 --revision <current>"))?,
-                kind: values.kind.take().ok_or_else(|| CliFailure::invalid_args("workflow human 需要 --kind <a|b|d|e|f>"))?,
+                kind: values.kind.take().ok_or_else(|| CliFailure::invalid_args("workflow human 需要 --kind <a|b|d|e|f|withdraw>"))?,
                 reason: values.reason.take().filter(|reason| !reason.trim().is_empty())
                     .ok_or_else(|| CliFailure::invalid_args("workflow human 需要 --reason <text>"))?,
             })
@@ -1199,6 +1200,7 @@ struct Values {
     outcome: Option<genehub_proto::WorkflowNodeOutcome>,
     reason: Option<String>,
     kind: Option<String>,
+    human_request: Option<String>,
     positionals: Vec<String>,
     workspace: Option<String>,
     package: Option<String>,
@@ -1254,6 +1256,7 @@ impl Values {
                 }
                 "--reason" => values.reason = Some(next(&mut index)?),
                 "--kind" => values.kind = Some(next(&mut index)?),
+                "--request" if verb == "human" => values.human_request = Some(next(&mut index)?),
 
                 "--workspace" => values.workspace = Some(next(&mut index)?),
                 "--workflow" => values.workflow = Some(next(&mut index)?),

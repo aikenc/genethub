@@ -141,3 +141,9 @@ v5 Run 显式转读既有节点、路由与停止事实；未知绑定拒绝迁�
 还会把预算耗尽后的三十分钟等待转为反馈卡。这些计时预设人会及时在线，已撤销。
 删除 `BootstrapApprovalChallenge.expiresAtMs` 与审批过期后重建计划的续跑分支，不为旧行为建立兼容路径。
 真实取消、方案替换和项目事实变化仍使原批准不可用；重复回答与执行不能重放副作用。
+
+## Revising unanswered Human proposals
+
+`workflow human --kind withdraw --run <id> --revision <run.revision> --request <humanExit.requestId> --reason <explanation>` retires only the exact unanswered Workflow card. It requires ordinary PM authorization, records a durable native cancellation receipt and Workflow withdrawal history, and has no budget, scope, cancellation or acceptance effect. Use the normal `workflow human` command afterward to issue a replacement with a new request ID. Withdrawal and answering are serialized by the native interaction lock; an already accepted answer cannot be withdrawn. A stale request ID cannot withdraw the replacement, and a late answer to a retired card cannot grant permission. Restart reconciles a native cancellation before card re-delivery. Ordinary discussion does not grant authority.
+
+The default game delivery pack checks 64 remaining requests before each implementation or repair attempt, preserving its independent 32-request acceptance minimum. These are tunable pack estimates rather than engine reservations. The requirements owner probes required verification capabilities before implementation and reports a missing capability as unavailable verification, not a business rejection.

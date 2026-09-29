@@ -219,7 +219,7 @@ pub fn usage() -> i32 {
                                     inspect one recovery Run
   genet workflow recovery check|activate|reset ...
                                     validate, authorize or reset recovery configuration
-  genet workflow human --run <id> --revision <n> --kind <a|b|d|e|f> --reason <text>
+  genet workflow human --run <id> --revision <n> --kind <a|b|d|e|f|withdraw> --reason <text> [--request <pending-card-id>]
     a: --budget-revision <n> --max-llm-rounds <total> --deadline-seconds <total>
     b: --goal <new goal> --scope-changes <changes>
                                     PM asks for a classified Human decision

@@ -136,7 +136,7 @@ for (const scenario of ["milestones", "replan", "exhausted", "no-go", "budget-ga
     const plans = events.filter(e => e.phase === "requirements"), writes = events.filter(e => e.phase === "implementation").map(e => e.contract!.id);
     const reviews = events.filter(e => e.phase === "acceptance-item");
     const noWork = ["no-go", "budget-gate", "empty-plan"].includes(scenario);
-    const expected = noWork ? [] : scenario === "budget-query-gate" ? ["m1"] : scenario === "exhausted" ? ["m1", ...Array.from({ length: 6 }, () => "m2")] : scenario === "replan" ? ["m1", "m2", "m2", "m2", "m3", "m4"] : ["m1", "m2", "m3", "m4"];
+    const expected = noWork ? [] : scenario === "budget-query-gate" ? [] : scenario === "exhausted" ? ["m1", ...Array.from({ length: 6 }, () => "m2")] : scenario === "replan" ? ["m1", "m2", "m2", "m2", "m3", "m4"] : ["m1", "m2", "m3", "m4"];
     t.assertions.assert(JSON.stringify(writes) === JSON.stringify(expected), `unexpected milestone execution order: ${writes}`);
     t.assertions.assert(reviews.length === (scenario === "budget-query-gate" ? 0 : writes.length * 2), "a declared criterion was omitted or replayed, or started without admission");
     for (let i = 0; i < reviews.length; i += 2) t.assertions.assert(JSON.stringify(reviews.slice(i, i + 2).map(r => r.criterion!.id).sort()) === '["correct","exists"]', "criterion identities drifted across parallel repairs");
@@ -148,8 +148,8 @@ for (const scenario of ["milestones", "replan", "exhausted", "no-go", "budget-ga
     const outcome = (run!.structure as { outcome?: { value?: { done: boolean; accepted: Contract[]; delivered: unknown[] } } })?.outcome?.value;
     const noDelivery = noWork || scenario === "budget-query-gate";
     if (scenario !== "exhausted") t.assertions.assert(outcome?.done === !noDelivery && outcome.accepted.length === (noDelivery ? 0 : 4) && outcome.delivered.length === (noDelivery ? 0 : 4), "execution completion was confused with accepted delivery");
-    if (scenario === "budget-query-gate") t.assertions.assert(JSON.stringify(outcome).includes('"needsAuthorization":true') && existsSync(path.join(opened.workspaceRoot, "m1.txt"))
-      && !existsSync(path.join(opened.workspaceRoot, "m2.txt")) && !run!.nodes.some(n => n.uses === "result.publish"), "budget gap lost the artifact, started later work or published");
+    if (scenario === "budget-query-gate") t.assertions.assert(JSON.stringify(outcome).includes('"needsAuthorization":true') && !existsSync(path.join(opened.workspaceRoot, "m1.txt"))
+      && !existsSync(path.join(opened.workspaceRoot, "m2.txt")) && !run!.nodes.some(n => n.uses === "result.publish"), "budget gap started implementation, later work or published");
     if (noWork || scenario === "exhausted") t.assertions.assert(!existsSync(path.join(opened.workspaceRoot, "m3.txt")), "later work started after refusal");
     // PM methods are a product built-in now, not something a package installs:
     // the root AgentSpace is single and its capability surface must not drift

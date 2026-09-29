@@ -12,7 +12,7 @@ for (const exit of ["d", "a", "e"] as const) defineSpecialty({
     : "An explicit PM Human exit creates the correct durable options; approval a amends only this request budget and abandonment e cancels the request",
   catches: ["route block incorrectly starts recovery", "deleting PM hides an unfinished project request", "overdue PM has no Human owner", "restart duplicates Human cards", "feedback option is missing"],
   tags: ["core", "workflow", "workflow-recovery", "session-attention"],
-  llm: { default: "mock" }, expectedDurationMs: 35_000, timeoutMs: 110_000,
+  llm: { default: "mock" }, expectedDurationMs: 35_000, timeoutMs: 180_000,
   resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
   surfaces: ["daemon", "agent", "genet-cli", "workbench-client", "filesystem"],
@@ -38,9 +38,11 @@ for (const exit of ["d", "a", "e"] as const) defineSpecialty({
         modelId: "deepseek/deepseek-v4-flash", tags: ["Flash"], cost: "low" }],
     } } });
     let dispatched = false, humanRequested = false;
+    let nextCommand: string | undefined;
     let pmReplies = 0;
     let original: WorkflowRunStatus | undefined;
     opened.mock.script(...Array.from({ length: 24 }, () => ({ respond: (request: unknown) => {
+      if (nextCommand) { const command = nextCommand; nextCommand = undefined; return { tool: { name: "bash", arguments: { command } } }; }
       if (exit !== "d" && !humanRequested && JSON.stringify(request).includes("ASK_BUSINESS_HUMAN")) {
         humanRequested = true;
         return { tool: { name: "bash", arguments: { command:
@@ -77,7 +79,7 @@ for (const exit of ["d", "a", "e"] as const) defineSpecialty({
         attachments: [], continuesRound: null, artifactPreviewBaseUrl: null,
       } });
       t.assertions.assert(queued?.type === "ack", "Human proposal input was not queued");
-      const cardId = `workflow-human-${original!.id}`;
+      let cardId = `workflow-human-${original!.id}`;
       await t.tools.waitUntil(async () => {
         const run = (await history()).find(item => item.id === original!.id);
         const reply = await opened.client.call({ type: "session.get", payload: { sessionId: pm } });
@@ -86,13 +88,67 @@ for (const exit of ["d", "a", "e"] as const) defineSpecialty({
       }, 20_000);
       const reply = await opened.client.call({ type: "session.get", payload: { sessionId: pm } });
       if (reply?.type !== "snapshot") throw new Error("business Human card unavailable");
-      const card = reply.data.pendingPermissions.find(item => item.id === cardId)!;
+      let card = reply.data.pendingPermissions.find(item => item.id === cardId)!;
       t.assertions.assert(card.options?.map(option => option.id).join(",") === (exit === "a" ? "approve,reject" : "handled,abandon"),
         `Human exit ${exit} has the wrong options`);
       const beforeBudget = (await history()).find(item => item.id === original!.id)!.requestBudget;
       if (exit === "a") t.assertions.assert(card.detail?.includes("600") && card.detail.includes("4 小时")
         && !card.detail.includes("Run") && !card.detail.includes("固定额度"),
         `budget card does not show the exact proposed totals: ${card.detail ?? ""}`);
+      if (exit === "a") {
+        const snapshot = async () => {
+          const result = await opened.client.call({ type: "session.get", payload: { sessionId: pm } });
+          if (result?.type !== "snapshot") throw new Error("PM snapshot missing");
+          return result.data;
+        };
+        const command = async (id: string, text: string) => {
+          nextCommand = text;
+          await opened.client.call({ type: "session.send", payload: {
+            sessionId: pm, messageId: id, text: "Revise the pending proposal using the stated conditions.",
+            attachments: [], continuesRound: null, artifactPreviewBaseUrl: null,
+          } });
+        };
+        original = (await history()).find(item => item.id === original!.id)!;
+        const retiredId = cardId;
+        await command("u_withdraw_proposal", `"$GENEHUB_CLI" workflow human --run ${original.id} --revision ${original.revision} --kind withdraw --request ${retiredId} --reason "Revise remaining-work estimate before approval"`);
+        await t.tools.waitUntil(async () => {
+          const current = (await history()).find(item => item.id === original!.id)!;
+          return current.humanExit?.answer === "withdrawn" && !(await snapshot()).pendingPermissions.some(item => item.id === retiredId);
+        }, 20_000);
+        const withdrawn = (await history()).find(item => item.id === original!.id)!;
+        t.assertions.assert(withdrawn.requestBudget.maxLlmRounds === beforeBudget.maxLlmRounds
+          && withdrawn.requestBudget.revision === beforeBudget.revision && withdrawn.requirement?.state !== "cancelled",
+          "withdrawing a proposal changed the budget or cancelled the goal");
+        await t.tools.waitUntil(async () => (await snapshot()).summary.status === "idle", 15_000);
+        opened.client.close();
+        const stop = await runGenetAsync(opened.daemon.genet, ["daemon", "stop"], opened.daemon.env);
+        t.assertions.assert(stop.code === 0, "stop after withdrawal failed");
+        const start = await runGenetAsync(opened.daemon.genet, ["daemon", "start"], opened.daemon.env);
+        t.assertions.assert(start.code === 0, "restart after withdrawal failed");
+        opened.client = await connectProductClient(daemonEndpoint(opened.daemon));
+        t.assertions.assert(!(await snapshot()).pendingPermissions.some(item => item.id === retiredId), "restart revived a withdrawn proposal");
+        original = (await history()).find(item => item.id === original!.id)!;
+        await command("u_replace_proposal", `"$GENEHUB_CLI" workflow human --run ${original.id} --revision ${original.revision} --kind a --reason "Directed acceptance with revised total allowance" --budget-revision ${beforeBudget.revision} --max-llm-rounds 512 --deadline-seconds 14400`);
+        await t.tools.waitUntil(async () => {
+          const current = (await history()).find(item => item.id === original!.id)!;
+          cardId = current.humanExit?.requestId ?? "";
+          return cardId !== "" && cardId !== retiredId && (await snapshot()).pendingPermissions.some(item => item.id === cardId);
+        }, 20_000);
+        card = (await snapshot()).pendingPermissions.find(item => item.id === cardId)!;
+        t.assertions.assert(card.options.map(option => option.id).join(",") === "approve,reject" && card.detail?.includes("512"), "replacement has incorrect budget semantics");
+        let refused = false;
+        try { const late = await opened.client.call({ type: "session.respondPermission", payload: {
+          sessionId: pm, requestId: retiredId, outcome: { outcome: "selected", optionId: "approve" },
+        } }); refused = late?.type !== "ack"; } catch { refused = true; }
+        t.assertions.assert(refused && (await snapshot()).pendingPermissions.some(item => item.id === cardId)
+          && (await history()).find(item => item.id === original!.id)!.requestBudget.revision === beforeBudget.revision,
+          "late answer to retired card affected the replacement or budget");
+        original = (await history()).find(item => item.id === original!.id)!;
+        const receipt = path.join(t.env.root, "stale-withdraw-status");
+        await command("u_stale_withdraw", `"$GENEHUB_CLI" workflow human --run ${original.id} --revision ${original.revision} --kind withdraw --request ${retiredId} --reason "stale request must be refused"; printf '%s' "$?" > '${receipt}'`);
+        await t.tools.waitUntil(async () => { try { return readFileSync(receipt, "utf8").length > 0; } catch { return false; } }, 20_000);
+        t.assertions.assert(readFileSync(receipt, "utf8") !== "0" && (await snapshot()).pendingPermissions.some(item => item.id === cardId), "stale withdrawal retired the current proposal");
+      }
       const choice = exit === "a" ? "approve" : "abandon";
       const answered = await opened.client.call({ type: "session.respondPermission", payload: {
         sessionId: pm, requestId: cardId, outcome: { outcome: "selected", optionId: choice },
@@ -101,11 +157,24 @@ for (const exit of ["d", "a", "e"] as const) defineSpecialty({
       await t.tools.waitUntil(async () => {
         const run = (await history()).find(item => item.id === original!.id);
         return run?.humanExit?.answer === choice && (exit === "a"
-          ? run.requestBudget.maxLlmRounds === 600
+          ? run.requestBudget.maxLlmRounds === 512
             && run.requestBudget.deadlineMs === 14_400_000
             && run.requestBudget.revision === beforeBudget.revision + 1
           : run.status === "cancelled");
       }, 25_000);
+      if (exit === "a") {
+        const repeated = await opened.client.call({ type: "session.respondPermission", payload: {
+          sessionId: pm, requestId: cardId, outcome: { outcome: "selected", optionId: "approve" },
+        } });
+        t.assertions.assert(repeated?.type === "ack" && (await history()).find(item => item.id === original!.id)!.requestBudget.revision === beforeBudget.revision + 1,
+          "duplicate approval changed the budget twice");
+        original = (await history()).find(item => item.id === original!.id)!;
+        const receipt = path.join(t.env.root, "answered-withdraw-status");
+        nextCommand = `"$GENEHUB_CLI" workflow human --run ${original.id} --revision ${original.revision} --kind withdraw --request ${cardId} --reason "answered proposal must remain applied"; printf '%s' "$?" > '${receipt}'`;
+        await opened.client.call({ type: "session.send", payload: { sessionId: pm, messageId: "u_answered_withdraw", text: "Inspect the already applied decision.", attachments: [], continuesRound: null, artifactPreviewBaseUrl: null } });
+        await t.tools.waitUntil(async () => { try { return readFileSync(receipt, "utf8").length > 0; } catch { return false; } }, 20_000);
+        t.assertions.assert(readFileSync(receipt, "utf8") !== "0" && (await history()).find(item => item.id === original!.id)!.humanExit?.answer === "approve", "withdrawal undid an answered proposal");
+      }
       t.assertions.assert((await history()).length === 1, `Human exit ${exit} changed request lineage`);
       await t.tools.waitUntil(async () => {
         const result = await runGenetAsync(opened.daemon.genet,

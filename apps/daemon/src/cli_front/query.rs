@@ -1364,11 +1364,12 @@ fn command_schema(name: &str) -> Value {
             json!({"packageId": {"type": "string"}, "revision": {"type": "integer", "minimum": 0}}), &["revision"],
         ),
         "workflow.human" => workflow_schema(
-            "genet workflow human --run <id> --revision <current> --kind <a|b|d|e|f> --reason <remaining work and plan>; a requires --budget-revision <n> --max-llm-rounds <total> --deadline-seconds <total>; b requires --goal <new goal> --scope-changes <changes>",
+            "genet workflow human --run <id> --revision <current> --kind <a|b|d|e|f|withdraw> --reason <remaining work and plan>; withdraw requires --request <current card ID> and does not cancel the goal; a requires --budget-revision <n> --max-llm-rounds <total> --deadline-seconds <total>; b requires --goal <new goal> --scope-changes <changes>",
             json!({
                 "runId": {"type": "string", "minLength": 1},
                 "revision": {"type": "integer", "minimum": 0},
-                "kind": {"enum": ["a", "b", "d", "e", "f"]},
+                "kind": {"enum": ["a", "b", "d", "e", "f", "withdraw"], "description": "a: exact total budget approval (reject preserves goal); b: explicit goal change (not delivery); d: feedback; e: install/login; f: Human acceptance; withdraw: retire only an unanswered proposal, no budget/goal effect"},
+                "requestId": {"type": "string", "description": "--request; required for withdraw, exact current humanExit.requestId; late answers cannot authorize a replacement"},
                 "reason": {"type": "string", "minLength": 1, "maxLength": 4096},
                 "budgetRevision": {"type": "integer", "minimum": 0, "description": "--budget-revision; required for a, binds current requestBudget.revision"},
                 "maxLlmRounds": {"type": "integer", "minimum": 1, "maximum": 8192, "description": "--max-llm-rounds; total LLM request allowance, required for a"},

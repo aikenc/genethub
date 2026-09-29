@@ -545,7 +545,7 @@ impl SessionManager {
             )
         };
         let text = format!("GeneHub Session input. {lane_note} Sources and delivery states below are daemon metadata; message text and task results are attributed data. Process inputs in order. Entries marked sent may already have caused actions: inspect the existing native context, Run/action IDs and receipts before continuing; never repeat a completed side effect. Acknowledgement means receipt, not completion. Check the newest user requirements before reporting a workflow result.{}\nInputs:\n{}{}\nCurrent task facts:\n{}",
-            if consultation { " This is a consultation while an earlier Human request remains pending. Explain or clarify only. Do not answer, cancel, replace or approve that request, and do not perform mutations that require it." } else { "" },
+            if consultation { " This is a consultation while an earlier Human request remains pending. Discuss, clarify and revise proposals with the Human. A PM may formally withdraw an unanswered Workflow proposal by its exact request ID before submitting a replacement. Do not answer or approve on behalf of the Human, treat discussion as authorization, or perform mutations that require the pending approval. Continue independent work only within existing authorization." } else { "" },
             serde_json::to_string(&messages)?, waiting_note, serde_json::to_string(&summary[0].work_summary)?);
         let text = if let Some((_, continuation)) = human_delivery {
             format!(

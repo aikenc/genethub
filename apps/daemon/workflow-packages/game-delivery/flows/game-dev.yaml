@@ -219,6 +219,32 @@ structure:
         id: implement-and-check
         type: sequence
         steps:
+          - {id: implementation-budget, type: task, activity: budget}
+          - id: implementation-admission
+            type: if
+            # Pack policy: retain 32 requests for independent acceptance plus
+            # 32 for implementation/necessary repair. This observation reserves
+            # no engine capacity; WM may tune measured costs, not lower quality.
+            condition:
+              op: lt
+              left: {op: ref, path: /results/implementation-budget/output/remainingLlmRounds}
+              right: {op: literal, value: 64}
+            then:
+              id: implementation-budget-gap
+              type: break
+              value:
+                op: object
+                fields:
+                  attempt: {op: ref, path: /vars/attempt}
+                  approved: {op: literal, value: false}
+                  needsAuthorization: {op: literal, value: true}
+                  artifact: {op: ref, path: /vars/artifact}
+                  feedback:
+                    op: object
+                    fields:
+                      phase: {op: literal, value: implementation-admission}
+                      budget: {op: ref, path: /results/implementation-budget/output}
+                      requiredLlmRounds: {op: literal, value: 64}
           - id: implementation
             type: task
             activity: implement

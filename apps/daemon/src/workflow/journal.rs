@@ -325,8 +325,8 @@ pub(super) fn append_at_with_limit(runtime: &RuntimeStore, run: &RunRecord, prev
             add_human_event("pause.requested", "event", "human-exit");
         }
         if human.answer.is_some() && (new_question || previous_human.as_ref().is_none_or(|previous| previous.answer.is_none())) {
-            if matches!(human.answer.as_deref(), Some("cancelled" | "interrupted")) {
-                add_human_event("pause.resolved", if human.answer.as_deref() == Some("interrupted") { "pm" } else { "human" }, "human-exit");
+            if matches!(human.answer.as_deref(), Some("cancelled" | "interrupted" | "withdrawn")) {
+                add_human_event("pause.resolved", if matches!(human.answer.as_deref(), Some("interrupted" | "withdrawn")) { "pm" } else { "human" }, "human-exit");
             } else { add_human_event("pause.answered", "human", "human-exit"); }
             if human.effect_applied && human.answer.as_deref() == Some("approve") {
                 if human.kind == "a" { add_human_event("run.budgetUpdated", "human", "human-budget-approved"); }

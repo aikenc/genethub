@@ -22,6 +22,8 @@ pub(super) struct HumanExit {
     pub scope: Option<genehub_proto::WorkflowScopeProposal>,
     #[serde(default)]
     pub effect_error: Option<String>,
+    #[serde(default)]
+    pub withdrawal_reason: Option<String>,
 }
 
 fn exit_path(runtime: &super::RuntimeStore, run: &super::RunRecord, create: bool) -> Result<std::path::PathBuf> {
@@ -58,6 +60,50 @@ pub(super) fn retire_human_exit(runtime: &super::RuntimeStore, run: &mut super::
     Ok(true)
 }
 
+fn archive_proposal(runtime: &super::RuntimeStore, run: &super::RunRecord, exit: &HumanExit) -> Result<()> {
+    let relative = Path::new("requests").join(super::request::group_id(run)).join("human-exits/history");
+    let file = format!("{:x}.json", sha2::Sha256::digest(exit.request_id.as_bytes()));
+    crate::config::save_private(&runtime.directory(&relative, true)?.join(file), &serde_json::to_vec(exit)?)?;
+    Ok(())
+}
+
+/// A proposal competes with brief patrol writes after restart. Wait only for
+/// admission to the existing locks; never retry an effect or ignore a revision.
+async fn lock_decision(runtime: &super::RuntimeStore, run: &super::RunRecord)
+    -> Result<(super::ExclusiveFileLock, super::ExclusiveFileLock)> {
+    let directory = runtime.directory(Path::new("locks"), true)?;
+    let run_lock = super::wait_for_exclusive_file_lock(&directory.join(format!("{}.lock", run.id)),
+        "Workflow Human decision is busy; reread current Run revision").await?;
+    let request_lock = super::wait_for_exclusive_file_lock(&directory.join(format!("request-{}.lock", super::request::group_id(run))),
+        "Workflow request decision is busy; reread current facts").await?;
+    Ok((run_lock, request_lock))
+}
+
+pub(super) async fn withdraw_human_decision(state: &super::Shared, runtime: &super::RuntimeStore,
+    run: &super::RunRecord, request_id: &str, reason: &str) -> Result<()> {
+    let (_run, _request) = lock_decision(runtime, run).await?;
+    super::require_request_writer(runtime, run)?;
+    let current = super::load_run(runtime, &run.id)?;
+    if current.revision != run.revision { bail!("Workflow revision 冲突：先重新读取 workflow get"); }
+    let mut exit = read_human_exit(runtime, &current)?.ok_or_else(|| anyhow::anyhow!("没有待答方案"))?;
+    if exit.request_id != request_id { bail!("待答方案已变化：先读取当前 requestId"); }
+    if exit.answer.as_deref() != Some("withdrawn") {
+        if exit.answer.is_some() { bail!("已答复的方案不能撤回"); }
+        state.sessions.withdraw_workflow_question(&exit.pm_session_id, request_id).await?;
+        exit.answer = Some("withdrawn".into());
+        exit.withdrawal_reason = Some(reason.into());
+    }
+    crate::config::save_private(&exit_path(runtime, run, true)?, &serde_json::to_vec(&exit)?)?;
+    archive_proposal(runtime, run, &exit)?;
+    let mut current = current;
+    current.human_exit_journal = Some(super::HumanExitJournal {
+        request_id: exit.request_id, pm_session_id: exit.pm_session_id, kind: exit.kind,
+        answer: exit.answer, effect_applied: false,
+    });
+    current.journal_actor = "pm".into();
+    super::save_run(runtime, &current)
+}
+
 /// Reconcile the Human card's compact journal marker after its own file is
 /// durable. Retrying after a crash commits each reference at most once.
 fn sync_human_exit_journal(runtime: &super::RuntimeStore, run: &super::RunRecord,
@@ -74,6 +120,7 @@ fn sync_human_exit_journal(runtime: &super::RuntimeStore, run: &super::RunRecord
     let _run = super::lock_run(runtime, &run.id)?;
     let _request = super::request::request_lock(runtime, super::request::group_id(run))?;
     let mut current = super::load_run(runtime, &run.id)?;
+    if read_human_exit(runtime, &current)?.is_none_or(|now| now.request_id != exit.request_id || now.answer != exit.answer) { return Ok(()); }
     if current.human_exit_journal.as_ref() == Some(&marker) { return Ok(()); }
     current.human_exit_journal = Some(marker);
     super::save_run(runtime, &current)
@@ -171,8 +218,7 @@ pub(super) async fn ensure_human_decision(
     scope: Option<genehub_proto::WorkflowScopeProposal>,
 ) -> Result<HumanExit> {
     let (mut exit, created) = {
-        let _run = super::lock_run(runtime, &run.id)?;
-        let _request = super::request::request_lock(runtime, super::request::group_id(run))?;
+        let (_run, _request) = lock_decision(runtime, run).await?;
         let existing = read_human_exit(runtime, run)?;
         // One pending Human decision for the whole request. Reuse the existing
         // native question and per-Run receipts; do not add another queue/store.
@@ -187,7 +233,8 @@ pub(super) async fn ensure_human_decision(
             }
         }
         if let Some(existing) = existing.as_ref().filter(|exit| exit.answer.is_none()
-            || (exit.kind == kind && proposed_reason.is_none_or(|reason| reason.trim() == exit.reason.trim())
+            || (!(proposed_reason.is_some() && exit.answer.as_deref() == Some("withdrawn"))
+                && exit.kind == kind && proposed_reason.is_none_or(|reason| reason.trim() == exit.reason.trim())
                 && (proposed_reason.is_none() || (exit.budget == budget && exit.scope == scope)))) {
             if proposed_reason.is_some() && (existing.kind != kind || existing.budget != budget || existing.scope != scope) {
                 bail!("requirementAwaitingHuman: 不能替换未答复的方案");
@@ -221,6 +268,19 @@ pub(super) async fn ensure_human_decision(
                 .unwrap_or(if !run.handles.is_empty() && run.phase() == "closed" && run.status() == "completed" {
                     "恢复审查已完成，但 PM 未在期限内落实后继执行、交付决定或人工待办；请核对 PM 会话与原需求"
                 } else { "execution blocked" });
+            if let Some(previous) = existing.as_ref() {
+                if previous.answer.as_deref() == Some("withdrawn")
+                    && current.human_exit_journal.as_ref().is_some_and(|marker| marker.request_id == previous.request_id && marker.answer.is_none()) {
+                    let mut repaired = current.clone();
+                    repaired.human_exit_journal = Some(super::HumanExitJournal {
+                        request_id: previous.request_id.clone(), pm_session_id: previous.pm_session_id.clone(),
+                        kind: previous.kind.clone(), answer: previous.answer.clone(), effect_applied: false,
+                    });
+                    repaired.journal_actor = "pm".into();
+                    super::save_run(runtime, &repaired)?;
+                }
+                archive_proposal(runtime, run, previous)?;
+            }
             let created_at_ms = super::now_ms().max(existing.as_ref().map(|e| e.created_at_ms.saturating_add(1)).unwrap_or(0));
             let exit = HumanExit {
                 run_id: run.id.clone(), request_id: if existing.is_some() {
@@ -228,7 +288,7 @@ pub(super) async fn ensure_human_decision(
                 } else { format!("workflow-human-{}", run.id) },
                 pm_session_id: session_id, kind: kind.into(),
                 reason: reason.chars().take(4096).collect(), created_at_ms,
-                answer: None, budget: budget.clone(), scope: scope.clone(), effect_error: None,
+                answer: None, budget: budget.clone(), scope: scope.clone(), effect_error: None, withdrawal_reason: None,
             };
             crate::config::save_private(&exit_path(runtime, run, true)?, &serde_json::to_vec(&exit)?)?;
             (exit, true)
@@ -261,6 +321,7 @@ pub(super) async fn ensure_human_decision(
         }
     }
     if let Some(answer) = state.sessions.workflow_question_outcome(&exit.pm_session_id, &exit.request_id).await? {
+        let cancelled = answer == genehub_proto::PermissionOutcome::Canceled;
         let selected = match answer {
             genehub_proto::PermissionOutcome::Selected { option_id } => Some(option_id),
             _ => None,
@@ -272,6 +333,8 @@ pub(super) async fn ensure_human_decision(
             {
                 let _run = super::lock_run(runtime, &run.id)?;
                 let _request = super::request::request_lock(runtime, super::request::group_id(run))?;
+                let current = read_human_exit(runtime, run)?.ok_or_else(|| anyhow::anyhow!("Human proposal disappeared"))?;
+                if current.request_id != exit.request_id || current.answer.is_some() { return Ok(current); }
                 // The reply is durable even if its effect is now stale. Never
                 // keep retrying an invalid approved proposal on every patrol.
                 exit.effect_error = super::request::apply_human_decision(runtime, run, &exit, &selected)
@@ -282,6 +345,23 @@ pub(super) async fn ensure_human_decision(
             sync_human_exit_journal(runtime, run, &exit)?;
             apply_answer_action(state, runtime, run, &exit).await?;
             archive_human_resolution(runtime, run, &exit)?;
+        }
+        if cancelled {
+            let _run = super::lock_run(runtime, &run.id)?;
+            let _request = super::request::request_lock(runtime, super::request::group_id(run))?;
+            let mut current = read_human_exit(runtime, run)?.ok_or_else(|| anyhow::anyhow!("Human proposal disappeared"))?;
+            if current.request_id != exit.request_id || current.answer.is_some() { return Ok(current); }
+            current.answer = Some("withdrawn".into());
+            crate::config::save_private(&exit_path(runtime, run, true)?, &serde_json::to_vec(&current)?)?;
+            archive_proposal(runtime, run, &current)?;
+            let mut record = super::load_run(runtime, &run.id)?;
+            record.human_exit_journal = Some(super::HumanExitJournal {
+                request_id: current.request_id.clone(), pm_session_id: current.pm_session_id.clone(),
+                kind: current.kind.clone(), answer: current.answer.clone(), effect_applied: false,
+            });
+            record.journal_actor = "pm".into();
+            super::save_run(runtime, &record)?;
+            return Ok(current);
         }
         return Ok(exit);
     }
@@ -315,6 +395,10 @@ pub(super) async fn ensure_human_decision(
         detail: Some(format!("{budget_contract}申请原因与剩余工作：{}\n答复后由项目经理落实下一步。", exit.reason)),
         tool_call_id: None, options, questions: None,
     };
+    let _run = super::lock_run(runtime, &run.id)?;
+    let _request = super::request::request_lock(runtime, super::request::group_id(run))?;
+    let current = read_human_exit(runtime, run)?.ok_or_else(|| anyhow::anyhow!("Human proposal disappeared"))?;
+    if current.request_id != exit.request_id || current.answer.is_some() { return Ok(current); }
     if let Err(error) = state.sessions.request_workflow_question(&exit.pm_session_id, request).await {
         if created { tracing::warn!(run = %run.id, %error, "Workflow Human exit persisted but question delivery will retry"); }
         return Err(error);
@@ -346,7 +430,7 @@ async fn apply_answer_action(state: &super::Shared, runtime: &super::RuntimeStor
         super::control::complete_human_acceptance(runtime, &run.id)?;
     }
     if let Some(answer) = exit.answer.as_deref() {
-        if !matches!(answer, "cancel" | "abandon" | "pass" | "cancelled" | "interrupted") {
+        if !matches!(answer, "cancel" | "abandon" | "pass" | "cancelled" | "interrupted" | "withdrawn") {
             let _run = super::lock_run(runtime, &run.id)?;
             let _request = super::request::request_lock(runtime, super::request::group_id(run))?;
             let mut current = super::load_run(runtime, &run.id)?;

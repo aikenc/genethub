@@ -1947,6 +1947,7 @@ pub(crate) async fn request_human_exit(
     expected_revision: u64,
     kind: &str,
     reason: &str,
+    request_id: Option<&str>,
     budget: Option<genehub_proto::WorkflowBudgetProposal>,
     scope: Option<genehub_proto::WorkflowScopeProposal>,
 ) -> Result<WorkflowRunStatus> {
@@ -1963,6 +1964,13 @@ pub(crate) async fn request_human_exit(
         bail!("Workflow Human exit needs the current blocked Run revision");
     }
     request::ensure_open(&runtime, &run)?;
+    if kind == "withdraw" {
+        if budget.is_some() || scope.is_some() { bail!("撤回不接受预算或目标方案"); }
+        recovery::withdraw_human_decision(state, &runtime, &run,
+            request_id.ok_or_else(|| anyhow::anyhow!("撤回需要 --request <当前待答卡片ID>"))?, reason).await?;
+        return run_status(&runtime, &load_run(&runtime, run_id)?);
+    }
+    if request_id.is_some() { bail!("--request 仅用于撤回当前待答方案"); }
     match (kind, run.handles.is_empty()) {
         ("a" | "b" | "d" | "e", _) | ("f", false) => {}
         _ => bail!("Workflow Human exit kind does not match this Run"),
@@ -6864,7 +6872,7 @@ mod tests {
             run_id: run.id.clone(), request_id: "human-a".into(), pm_session_id: "s_pm".into(),
             kind: "a".into(), reason: "finish remaining work".into(), created_at_ms: now_ms(), answer: None,
             budget: Some(genehub_proto::WorkflowBudgetProposal { expected_revision: 2, max_llm_rounds: 650, deadline_seconds: 10800 }),
-            scope: None, effect_error: None,
+            scope: None, effect_error: None, withdrawal_reason: None,
         };
         request::apply_human_decision(&runtime, &run, &exit, "approve").unwrap();
         request::apply_human_decision(&runtime, &run, &exit, "approve").unwrap();

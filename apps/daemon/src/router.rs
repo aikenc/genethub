@@ -364,10 +364,21 @@ async fn authorize_project_workflow_mutation(
     caller: &crate::authz::Principal,
     workspace_id: &str,
 ) -> Result<(), String> {
+    authorize_project_workflow_access(state, caller, workspace_id, false).await
+}
+
+/// Proposals can be discussed/withdrawn during consultation. Their handlers
+/// still bind exact pending card identity and cannot supply Human approval.
+async fn authorize_project_workflow_access(
+    state: &Shared,
+    caller: &crate::authz::Principal,
+    workspace_id: &str,
+    proposal_only: bool,
+) -> Result<(), String> {
     match caller {
         crate::authz::Principal::LocalUser => Ok(()),
         crate::authz::Principal::SessionController { session_id } => {
-            if state.sessions.consulting(session_id).await {
+            if !proposal_only && state.sessions.consulting(session_id).await {
                 return Err(
                     "PM 正在咨询未决 Human 请求；不能以项目管理权替代该请求的正式决定".into(),
                 );
@@ -1674,8 +1685,8 @@ async fn dispatch(
             Handled::ok(Reply::WorkflowRun(transition.status))
         }
 
-        Request::WorkflowHuman { workspace_id, run_id, expected_revision, kind, reason, budget, scope } => {
-            if let Err(error) = authorize_project_workflow_mutation(state, caller, &workspace_id).await {
+        Request::WorkflowHuman { workspace_id, run_id, expected_revision, kind, reason, request_id, budget, scope } => {
+            if let Err(error) = authorize_project_workflow_access(state, caller, &workspace_id, true).await {
                 return Handled::err(ErrorCode::Forbidden, error);
             }
             if caller.session_controller_id().is_none() {
@@ -1685,7 +1696,7 @@ async fn dispatch(
                 );
             }
             match crate::workflow::request_human_exit(
-                state, &workspace_id, &run_id, expected_revision, &kind, &reason, budget, scope,
+                state, &workspace_id, &run_id, expected_revision, &kind, &reason, request_id.as_deref(), budget, scope,
             ).await {
                 Ok(run) => Handled::ok(Reply::WorkflowRun(run)),
                 Err(error) => failed(error),
