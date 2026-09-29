@@ -4293,6 +4293,13 @@ fn load_candidate(runtime: &RuntimeStore, digest: &str) -> Result<DcgCandidateRe
     if candidate.digest != digest {
         bail!("DCG Candidate 文件名与内容摘要不匹配");
     }
+    if candidate.package.id != runtime.require_package()? {
+        bail!(
+            "Candidate 属于 Workflow 包 {}，不能在包 {} 上读取",
+            candidate.package.id,
+            runtime.require_package()?
+        );
+    }
     Ok(candidate)
 }
 
