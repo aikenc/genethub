@@ -420,16 +420,13 @@ impl Workspaces {
     /// `workflow list` reports "built but not authorized" and "authorized but
     /// drifted" as distinct facts, which needs both the registration and a
     /// fresh Builder verification of the directory as it stands now.
-    pub async fn registration_at(
-        &self,
-        project_root: &Path,
-        space_root: &Path,
-    ) -> (bool, bool) {
+    pub async fn registration_at(&self, project_root: &Path, space_root: &Path) -> (bool, bool) {
         let entries = self.entries.read().await;
         let config = self.config.read().await;
         let Some(entry) = entries.values().find(|entry| {
             !entry.removed
-                && entry.root.canonicalize().ok().as_deref() == space_root.canonicalize().ok().as_deref()
+                && entry.root.canonicalize().ok().as_deref()
+                    == space_root.canonicalize().ok().as_deref()
         }) else {
             return (false, false);
         };
@@ -694,6 +691,15 @@ impl Workspaces {
             Some(space) if space.parent_workspace_id.is_none() => space,
             Some(_) => anyhow::bail!("Workflow dispatch requires a project-root AgentSpace"),
         };
+        // Compare canonical paths. macOS temp dirs are reached through `/var`,
+        // which is a symlink to `/private/var`; the registered root and the
+        // caller-supplied root must still name the same directory.
+        let selected_canonical = selected_root
+            .map(|root| {
+                root.canonicalize()
+                    .with_context(|| format!("读取 Executor 目录：{}", root.display()))
+            })
+            .transpose()?;
         let matches = config
             .agent_spaces
             .iter()
@@ -701,9 +707,9 @@ impl Workspaces {
                 space.parent_workspace_id.as_deref() == Some(project_workspace_id)
                     && crate::agent_space::has_enabled_component(space, component_id)
                     && space.lifecycle != "ephemeral"
-                    && selected_root.is_none_or(|root| {
+                    && selected_canonical.as_ref().is_none_or(|root| {
                         entries.get(&space.workspace_id).is_some_and(|entry| {
-                            entry.root.canonicalize().ok().as_deref() == Some(root)
+                            entry.root.canonicalize().ok().as_deref() == Some(root.as_path())
                         })
                     })
             })
@@ -2866,8 +2872,12 @@ mod tests {
             &["project", "pkg--executor", "pkg--coder", "pkg--wm"],
         )
         .await;
-        let (project, executor, coder, manager) =
-            (ids[0].clone(), ids[1].clone(), ids[2].clone(), ids[3].clone());
+        let (project, executor, coder, manager) = (
+            ids[0].clone(),
+            ids[1].clone(),
+            ids[2].clone(),
+            ids[3].clone(),
+        );
 
         let plan = vec![
             BootstrapSpaceRegistration {
@@ -2916,7 +2926,10 @@ mod tests {
             .expect("one plan registers the whole package team");
 
         let registered = spaces.agent_space(&executor).await.unwrap();
-        assert_eq!(registered.parent_workspace_id.as_deref(), Some(project.as_str()));
+        assert_eq!(
+            registered.parent_workspace_id.as_deref(),
+            Some(project.as_str())
+        );
         assert_eq!(
             spaces
                 .reusable_component_space_at(
@@ -2930,7 +2943,11 @@ mod tests {
             Some(executor.clone()),
         );
         assert_eq!(
-            spaces.worker_space_for_role(&executor, "coder").await.unwrap().id,
+            spaces
+                .worker_space_for_role(&executor, "coder")
+                .await
+                .unwrap()
+                .id,
             coder
         );
     }

@@ -181,11 +181,7 @@ pub(crate) async fn run(
         None => task_cwd.to_path_buf(),
     };
 
-    let mut command = crate::process::command(
-        std::slice::from_ref(&program),
-        &arguments,
-        &cwd,
-    );
+    let mut command = crate::process::command(std::slice::from_ref(&program), &arguments, &cwd);
     command
         .envs(&definition.env)
         .stdin(std::process::Stdio::piped())
@@ -201,10 +197,9 @@ pub(crate) async fn run(
     }
     let stdout = read_bounded(child.stdout());
     let stderr = read_bounded(child.stderr());
-    let waited = tokio::time::timeout(
-        std::time::Duration::from_secs(timeout),
-        async { tokio::join!(stdout, stderr, child.wait()) },
-    )
+    let waited = tokio::time::timeout(std::time::Duration::from_secs(timeout), async {
+        tokio::join!(stdout, stderr, child.wait())
+    })
     .await;
     let (stdout, stderr, status) = match waited {
         Ok(joined) => joined,
@@ -219,11 +214,7 @@ pub(crate) async fn run(
     let stdout = stdout?;
     let stderr = stderr?;
     if !status.success() {
-        bail!(
-            "pack.script 退出码 {:?}：{}",
-            status.code(),
-            tail(&stderr)
-        );
+        bail!("pack.script 退出码 {:?}：{}", status.code(), tail(&stderr));
     }
     parse(&stdout).with_context(|| {
         format!(
@@ -312,8 +303,14 @@ mod tests {
             package.join("scripts/ok.mjs").canonicalize().unwrap(),
         );
         // A program name stays a program name, for `PATH` to resolve.
-        assert_eq!(resolve_script(&package, "blender").unwrap(), PathBuf::from("blender"));
-        assert_eq!(resolve_script(&package, "/usr/bin/env").unwrap(), PathBuf::from("/usr/bin/env"));
+        assert_eq!(
+            resolve_script(&package, "blender").unwrap(),
+            PathBuf::from("blender")
+        );
+        assert_eq!(
+            resolve_script(&package, "/usr/bin/env").unwrap(),
+            PathBuf::from("/usr/bin/env")
+        );
         assert!(resolve_script(&package, "").is_err());
     }
 
@@ -349,7 +346,10 @@ mod tests {
         .unwrap();
 
         assert!(result.ok);
-        assert_eq!(result.evidence.get("shell").map(String::as_str), Some("ran"));
+        assert_eq!(
+            result.evidence.get("shell").map(String::as_str),
+            Some("ran")
+        );
     }
 
     /// Environment and working directory come from the node, and the
@@ -432,7 +432,10 @@ process.stdin.on("end", () => {
         let result = run(&script, &task, &definition).await.unwrap();
 
         assert!(result.ok);
-        assert_eq!(result.evidence.get("review").map(String::as_str), Some("approved"));
+        assert_eq!(
+            result.evidence.get("review").map(String::as_str),
+            Some("approved")
+        );
         assert_eq!(result.revision.as_deref(), Some("opaque/task-dir"));
     }
 
@@ -468,14 +471,22 @@ process.stdin.on("end", () => {
         let result = run(&script, &task, &definition).await.unwrap();
 
         assert!(result.ok);
-        assert_eq!(result.evidence.get("published").map(String::as_str), Some("2"));
         assert_eq!(
-            result.evidence.get("matchedExpectation").map(String::as_str),
+            result.evidence.get("published").map(String::as_str),
+            Some("2")
+        );
+        assert_eq!(
+            result
+                .evidence
+                .get("matchedExpectation")
+                .map(String::as_str),
             Some("true")
         );
         assert!(task.join("public/nested/app.js").is_file());
         // An opaque receipt: the platform stores it and never parses it.
-        assert!(result.revision.is_some_and(|revision| revision.starts_with("dir:")));
+        assert!(result
+            .revision
+            .is_some_and(|revision| revision.starts_with("dir:")));
         assert!(
             !task.join(".git").exists(),
             "the fixture must stay a plain directory for this test to mean anything"
@@ -537,7 +548,10 @@ process.stdin.on("end", () => {
         let parsed = parse(br#"{"ok":true,"evidence":{"review":"approved"},"revision":"r1"}"#)
             .expect("a well formed result");
         assert!(parsed.ok);
-        assert_eq!(parsed.evidence.get("review").map(String::as_str), Some("approved"));
+        assert_eq!(
+            parsed.evidence.get("review").map(String::as_str),
+            Some("approved")
+        );
         assert_eq!(parsed.revision.as_deref(), Some("r1"));
 
         assert!(parse(b"").is_err());

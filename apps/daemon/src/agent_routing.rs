@@ -27,7 +27,9 @@ pub const BUILTIN_TAGS: [&str; 5] = [TAG_MAX, TAG_PRO, TAG_FLASH, TAG_VIDEO, TAG
 pub(crate) struct RouteUnavailable(pub String);
 
 impl fmt::Display for RouteUnavailable {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str(&self.0) }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 impl std::error::Error for RouteUnavailable {}
@@ -165,6 +167,7 @@ pub(crate) fn media_tags_for_timeline(items: &[TimelineItem]) -> Vec<String> {
 /// Selects the cheapest live Agent/model whose tags contain every requirement.
 /// Cost ties use opaque ids only to make the result deterministic; this is not
 /// a Human-editable priority order.
+#[cfg(test)]
 pub(crate) fn select_tag_route(
     preferences: &AgentSelectionPreferences,
     required_tags: &[String],
@@ -784,7 +787,10 @@ mod tests {
         );
         assert!(validate_selected_tags(Vec::new()).is_err());
         assert!(validate_selected_tags(vec!["Flash".into(), "flash".into()]).is_err());
-        assert_eq!(normalize_tags(["Flush".into(), "flash".into()]), vec!["Flash".to_string()]);
+        assert_eq!(
+            normalize_tags(["Flush".into(), "flash".into()]),
+            vec!["Flash".to_string()]
+        );
         assert!(is_builtin_tag("Flush"));
         assert!(validate_selected_tags(vec!["x".repeat(41)]).is_err());
         assert_eq!(

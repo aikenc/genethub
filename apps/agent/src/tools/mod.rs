@@ -249,8 +249,12 @@ pub fn definitions() -> Vec<Value> {
         }),
     ];
     if evidence::enabled() {
-        definitions
-            .retain(|tool| matches!(tool["name"].as_str(), Some("read" | "ls" | "read_media" | "request_user_input")));
+        definitions.retain(|tool| {
+            matches!(
+                tool["name"].as_str(),
+                Some("read" | "ls" | "read_media" | "request_user_input")
+            )
+        });
         definitions.push(evidence::definition());
     }
     definitions

@@ -489,6 +489,7 @@ impl AppState {
     /// An empty key clears the entry rather than storing a blank one: a stored
     /// empty string would read as "configured" everywhere and fail only at the
     /// moment the user runs a task.
+    #[allow(clippy::too_many_arguments)]
     pub async fn set_provider(
         &self,
         provider_id: &str,
@@ -694,7 +695,11 @@ fn validate_tag_groups(preferences: &AgentSelectionPreferences) -> Result<()> {
         validate_tags(&group.tags, false)?;
         for tag in &group.tags {
             let key = tag.trim().to_lowercase();
-            let key = if key == "flush" { "flash".to_string() } else { key };
+            let key = if key == "flush" {
+                "flash".to_string()
+            } else {
+                key
+            };
             if builtins.contains(&key.as_str()) {
                 anyhow::bail!("内置标签不能加入自定义标签组");
             }
@@ -713,7 +718,11 @@ fn validate_tag_group_selection(
     let mut claimed = std::collections::BTreeSet::new();
     for tag in tags {
         let key = tag.trim().to_lowercase();
-        let key = if key == "flush" { "flash" } else { key.as_str() };
+        let key = if key == "flush" {
+            "flash"
+        } else {
+            key.as_str()
+        };
         let group = if ["max", "pro", "flash"].contains(&key) {
             Some("builtin-intelligence")
         } else {
@@ -776,12 +785,14 @@ mod machine_state_tests {
                 tags: tags.into_iter().map(str::to_string).collect(),
                 cost: Some(genehub_proto::AgentCostLevel::Medium),
             };
-        let mut preferences = AgentSelectionPreferences::default();
-        preferences.model_profiles = vec![profile(
-            "codex",
-            "model",
-            vec!["Max", "图片理解", "视频理解", "私有"],
-        )];
+        let mut preferences = AgentSelectionPreferences {
+            model_profiles: vec![profile(
+                "codex",
+                "model",
+                vec!["Max", "图片理解", "视频理解", "私有"],
+            )],
+            ..AgentSelectionPreferences::default()
+        };
         validate_agent_preferences(&preferences).expect("four distinct tags are valid");
 
         preferences.model_profiles[0].tags.push("第五个".into());

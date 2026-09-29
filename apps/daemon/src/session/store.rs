@@ -475,6 +475,7 @@ pub struct ChatLog {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "camelCase")]
+#[allow(clippy::large_enum_variant)]
 enum ChatRow {
     Item { item: TimelineItem },
     Round { round: RoundRecord },

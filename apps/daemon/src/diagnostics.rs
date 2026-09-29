@@ -89,7 +89,8 @@ impl Diagnostics {
             .record
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let (workflow_patrol_active_jobs, workflow_patrol_oldest_job_ms) = crate::workflow::patrol_jobs();
+        let (workflow_patrol_active_jobs, workflow_patrol_oldest_job_ms) =
+            crate::workflow::patrol_jobs();
         SupportDiagnostics {
             version: 1,
             captured_at: now(),

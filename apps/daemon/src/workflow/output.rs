@@ -88,17 +88,16 @@ impl Shape {
                     }
                     walk(items, depth + 1, remaining)?;
                 }
-                Shape::String { values, min_length } => {
+                Shape::String { values, min_length }
                     if *min_length > 16384
                         || values.as_ref().is_some_and(|v| {
                             v.is_empty()
                                 || v.len() > 64
                                 || v.iter()
                                     .any(|s| s.len() > 16384 || s.chars().count() < *min_length)
-                        })
-                    {
-                        bail!("output string enum/minLength exceeds bounds");
-                    }
+                        }) =>
+                {
+                    bail!("output string enum/minLength exceeds bounds");
                 }
                 _ => {}
             }

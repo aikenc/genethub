@@ -42,65 +42,9 @@ fn get_or_resize_in(
     }
     let result = resize()?;
     if let Some(directory) = cache {
-        let _ = store_entry(&directory, &key, edge, &result, DISK_CACHE_BYTES);
+        let _ = store_entry(directory, &key, edge, &result, DISK_CACHE_BYTES);
     }
     Ok(result)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Cursor;
-
-    fn small_png() -> ImageResult {
-        let mut output = Cursor::new(Vec::new());
-        image::DynamicImage::new_rgba8(4, 2)
-            .write_to(&mut output, image::ImageFormat::Png)
-            .unwrap();
-        ImageResult {
-            bytes: output.into_inner(),
-            media_type: "image/png".into(),
-            width: 4,
-            height: 2,
-        }
-    }
-
-    #[test]
-    fn disk_hit_survives_result_drop_and_corruption_regenerates() {
-        let directory = tempfile::tempdir().unwrap();
-        let source = b"source-v1";
-        let first =
-            get_or_resize_in(Some(directory.path()), source, 128, || Ok(small_png())).unwrap();
-        drop(first);
-        let hit = get_or_resize_in(Some(directory.path()), source, 128, || {
-            panic!("a disk hit must not decode again")
-        })
-        .unwrap();
-        assert_eq!((hit.width, hit.height), (4, 2));
-        fs::write(directory.path().join(cache_key(source, 128)), b"truncated").unwrap();
-        let repaired =
-            get_or_resize_in(Some(directory.path()), source, 128, || Ok(small_png())).unwrap();
-        assert_eq!(hit.bytes, repaired.bytes);
-        assert!(read_entry(&directory.path().join(cache_key(source, 128)), 128).is_some());
-    }
-
-    #[test]
-    fn disk_budget_evicts_old_content_versions() {
-        let directory = tempfile::tempdir().unwrap();
-        fs::write(
-            directory.path().join(format!("{}ébin", "a".repeat(63))),
-            b"unrelated",
-        )
-        .unwrap();
-        let result = small_png();
-        let budget = (HEADER_BYTES + result.bytes.len()) as u64;
-        let first = cache_key(b"before", 128);
-        let second = cache_key(b"after", 128);
-        store_entry(directory.path(), &first, 128, &result, budget).unwrap();
-        store_entry(directory.path(), &second, 128, &result, budget).unwrap();
-        assert!(read_entry(&directory.path().join(&first), 128).is_none());
-        assert!(read_entry(&directory.path().join(&second), 128).is_some());
-    }
 }
 
 fn cache_directory() -> Option<PathBuf> {
@@ -247,6 +191,7 @@ fn lock_cache(directory: &Path) -> std::io::Result<File> {
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(&path)?;
     genet_frontdoor::perms::restrict_to_owner(&path).map_err(std::io::Error::other)?;
     lock.lock_exclusive()?;
@@ -300,4 +245,60 @@ fn prune_to_fit(directory: &Path, target_bytes: u64) -> std::io::Result<()> {
         return Err(std::io::Error::other("image cache could not be pruned"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn small_png() -> ImageResult {
+        let mut output = Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(4, 2)
+            .write_to(&mut output, image::ImageFormat::Png)
+            .unwrap();
+        ImageResult {
+            bytes: output.into_inner(),
+            media_type: "image/png".into(),
+            width: 4,
+            height: 2,
+        }
+    }
+
+    #[test]
+    fn disk_hit_survives_result_drop_and_corruption_regenerates() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = b"source-v1";
+        let first =
+            get_or_resize_in(Some(directory.path()), source, 128, || Ok(small_png())).unwrap();
+        drop(first);
+        let hit = get_or_resize_in(Some(directory.path()), source, 128, || {
+            panic!("a disk hit must not decode again")
+        })
+        .unwrap();
+        assert_eq!((hit.width, hit.height), (4, 2));
+        fs::write(directory.path().join(cache_key(source, 128)), b"truncated").unwrap();
+        let repaired =
+            get_or_resize_in(Some(directory.path()), source, 128, || Ok(small_png())).unwrap();
+        assert_eq!(hit.bytes, repaired.bytes);
+        assert!(read_entry(&directory.path().join(cache_key(source, 128)), 128).is_some());
+    }
+
+    #[test]
+    fn disk_budget_evicts_old_content_versions() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(
+            directory.path().join(format!("{}ébin", "a".repeat(63))),
+            b"unrelated",
+        )
+        .unwrap();
+        let result = small_png();
+        let budget = (HEADER_BYTES + result.bytes.len()) as u64;
+        let first = cache_key(b"before", 128);
+        let second = cache_key(b"after", 128);
+        store_entry(directory.path(), &first, 128, &result, budget).unwrap();
+        store_entry(directory.path(), &second, 128, &result, budget).unwrap();
+        assert!(read_entry(&directory.path().join(&first), 128).is_none());
+        assert!(read_entry(&directory.path().join(&second), 128).is_some());
+    }
 }

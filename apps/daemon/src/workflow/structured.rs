@@ -89,7 +89,11 @@ fn sync_status(run: &mut RunRecord) {
             if run.handles.is_empty() {
                 run.status = "completed".into();
             } else {
-                control::request_stop(run, "blocked", "recovery flow ended without a controlled exit".into());
+                control::request_stop(
+                    run,
+                    "blocked",
+                    "recovery flow ended without a controlled exit".into(),
+                );
             }
         }
         engine::Status::Blocked | engine::Status::Stopping => {
@@ -188,12 +192,7 @@ pub(super) async fn drive(state: &Shared, runtime: &RuntimeStore, run_id: &str) 
             } else {
                 ("恢复流程达到执行期限或 LLM 调用上限", "recoveryBudget")
             };
-            control::request_stop_with_cause(
-                &mut run,
-                "blocked",
-                reason.into(),
-                cause,
-            );
+            control::request_stop_with_cause(&mut run, "blocked", reason.into(), cause);
             run.revision += 1;
             save_run(runtime, &run)?;
             return Ok(());
@@ -280,8 +279,8 @@ pub(super) async fn drive(state: &Shared, runtime: &RuntimeStore, run_id: &str) 
                             // receive its turn. Reconciliation decides that one
                             // node; failing here would stall every later pass
                             // and freeze the whole Run.
-                            Err(error)
-                                if error.is::<crate::session::manager::SessionMissing>() => {}
+                            Err(error) if error.is::<crate::session::manager::SessionMissing>() => {
+                            }
                             Err(error) => return Err(error),
                         }
                     }
@@ -369,7 +368,9 @@ pub(super) async fn drive(state: &Shared, runtime: &RuntimeStore, run_id: &str) 
             {
                 Ok(created) => {
                     run.route_wait.retain(|waiting| waiting != &id);
-                    if let Some(node) = run.nodes.get_mut(&id) { node.reason = None; }
+                    if let Some(node) = run.nodes.get_mut(&id) {
+                        node.reason = None;
+                    }
                     sessions.extend(created);
                 }
                 Err(error) => {
