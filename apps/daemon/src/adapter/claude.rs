@@ -1,8 +1,10 @@
-//! Adapter for Claude Code (and Tencent's `tclaude` wrapper), spoken natively
-//! over Claude's own `stream-json` stdio protocol instead of through the
-//! `claude-agent-acp` wrapper. TClaude forwards every launch flag to upstream
-//! Claude Code; this file is instantiated twice (`claude` / `tclaude`) so the
-//! two CLIs keep separate ids, help probing and history directories.
+//! Adapter for Claude Code and the Claude-protocol CLIs that share its
+//! `stream-json` stdio protocol (`tclaude`, CodeBuddy's `cbc`), spoken
+//! natively instead of through an ACP wrapper. TClaude forwards every launch
+//! flag to upstream Claude Code. CodeBuddy is a separate build: same control
+//! frames, different flag names, model-catalog keys and project-directory
+//! encoding. This file is instantiated once per CLI so resume and import
+//! cannot cross installs.
 //!
 //! We still never manage how this CLI reaches a model: env vars and its own
 //! config file are Claude Code's documented surface for that, not ours
@@ -92,35 +94,81 @@ const EVENT_CAPACITY: usize = 1024;
 
 /// Which Claude-protocol CLI this adapter instance talks to.
 ///
-/// Official Claude Code and Tencent's `tclaude` wrapper speak the same
-/// `stream-json` stdio protocol; the wrapper only changes the binary name,
-/// how `--help` is reached, and where it stores history. Identity stays on
-/// the adapter so resume and import cannot cross the two installs.
+/// Official Claude Code, Tencent's `tclaude` wrapper, and CodeBuddy Code
+/// (`cbc`) speak the same `stream-json` control protocol. The differences
+/// that are not protocol — binary, help argv, history directory, the bypass
+/// flag, and how a workspace path is encoded — stay on this struct so resume
+/// and import cannot cross installs.
+#[derive(Clone, Copy)]
+enum ProjectEncoding {
+    Claude,
+    CodeBuddy,
+}
+
 #[derive(Clone, Copy)]
 struct ClaudeFlavor {
     id: &'static str,
     label: &'static str,
     binary: &'static str,
+    /// Second name from the same install, tried only when `binary` is absent.
+    /// CodeBuddy's package ships both `cbc` and `codebuddy`.
+    binary_fallback: Option<&'static str>,
     /// Args that reach the upstream `--help`. `tclaude --help` is wrapper
     /// help and does not list permission modes; those live behind `--`.
     help_args: &'static [&'static str],
     config_dir_name: &'static str,
+    /// The CLI's own "do not ask" switch. Claude and TClaude spell it
+    /// `--allow-dangerously-skip-permissions`. CodeBuddy rejects that and
+    /// accepts `--dangerously-skip-permissions` (`-y`).
+    skip_permissions_flag: &'static str,
+    /// `--permission-prompt-tool stdio`. CodeBuddy's parser rejects the
+    /// option and still emits `can_use_tool` without it.
+    permission_prompt_tool: bool,
+    /// Env that makes the bypass flag a full pass. Claude exits as uid 0
+    /// unless `IS_SANDBOX=1`. CodeBuddy's `-y` still asks about HIGH/CRITICAL
+    /// unless `CODEBUDDY_IS_SANDBOX=1`.
+    sandbox_env: Option<(&'static str, &'static str)>,
+    /// Each CLI owns its project key normalization and long-path hash.
+    project_encoding: ProjectEncoding,
 }
 
 const CLAUDE: ClaudeFlavor = ClaudeFlavor {
     id: "claude",
     label: "Claude Code",
     binary: "claude",
+    binary_fallback: None,
     help_args: &["--help"],
     config_dir_name: ".claude",
+    skip_permissions_flag: "--allow-dangerously-skip-permissions",
+    permission_prompt_tool: true,
+    sandbox_env: Some(CLAUDE_SANDBOX_COMPAT_ENV),
+    project_encoding: ProjectEncoding::Claude,
 };
 
 const TCLAUDE: ClaudeFlavor = ClaudeFlavor {
     id: "tclaude",
     label: "TClaude",
     binary: "tclaude",
+    binary_fallback: None,
     help_args: &["--", "--help"],
     config_dir_name: ".tclaude",
+    skip_permissions_flag: "--allow-dangerously-skip-permissions",
+    permission_prompt_tool: true,
+    sandbox_env: Some(CLAUDE_SANDBOX_COMPAT_ENV),
+    project_encoding: ProjectEncoding::Claude,
+};
+
+const CODEBUDDY: ClaudeFlavor = ClaudeFlavor {
+    id: "codebuddy",
+    label: "CodeBuddy",
+    binary: "cbc",
+    binary_fallback: Some("codebuddy"),
+    help_args: &["--help"],
+    config_dir_name: ".codebuddy",
+    skip_permissions_flag: "--dangerously-skip-permissions",
+    permission_prompt_tool: false,
+    sandbox_env: Some(CODEBUDDY_SANDBOX_COMPAT_ENV),
+    project_encoding: ProjectEncoding::CodeBuddy,
 };
 
 fn tclaude_install_dirs() -> Vec<PathBuf> {
@@ -128,6 +176,22 @@ fn tclaude_install_dirs() -> Vec<PathBuf> {
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
     if let Some(home) = home {
         dirs.push(PathBuf::from(home).join(".local").join("bin"));
+    }
+    dirs
+}
+
+/// `npm install -g` puts `cbc` next to `node` when the prefix is not already
+/// on the daemon's PATH (nvm, a user prefix). `~/.local/bin` covers the same
+/// extra place TClaude uses.
+fn codebuddy_install_dirs() -> Vec<PathBuf> {
+    let mut dirs = tclaude_install_dirs();
+    if let Some(node) = super::find_executable("node") {
+        if let Some(dir) = node.parent() {
+            let dir = dir.to_path_buf();
+            if !dirs.iter().any(|existing| existing == &dir) {
+                dirs.push(dir);
+            }
+        }
     }
     dirs
 }
@@ -150,6 +214,7 @@ const UNRESTRICTED_SETTINGS: &str = r#"{"sandbox":{"enabled":false}}"#;
 /// guest (`#[cfg(not(unix))]`) and cannot read the host euid, which is how a
 /// uid-0-only gate shipped as a no-op on the Linux root host.
 const CLAUDE_SANDBOX_COMPAT_ENV: (&str, &str) = ("IS_SANDBOX", "1");
+const CODEBUDDY_SANDBOX_COMPAT_ENV: (&str, &str) = ("CODEBUDDY_IS_SANDBOX", "1");
 
 /// The modes we offer, of the ones this CLI accepts.
 ///
@@ -180,8 +245,10 @@ const MODES: [(&str, &str, &str); 3] = [
 /// rather wait than be told a lie about what the CLI supports.
 const CONTROL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-fn apply_claude_sandbox_compat(command: &mut Command) {
-    command.env(CLAUDE_SANDBOX_COMPAT_ENV.0, CLAUDE_SANDBOX_COMPAT_ENV.1);
+fn apply_sandbox_compat(flavor: &ClaudeFlavor, command: &mut Command) {
+    if let Some((key, value)) = flavor.sandbox_env {
+        command.env(key, value);
+    }
 }
 
 pub struct ClaudeAdapter {
@@ -216,6 +283,10 @@ impl ClaudeAdapter {
         Self::with_flavor(TCLAUDE, tclaude_install_dirs())
     }
 
+    pub fn codebuddy() -> Self {
+        Self::with_flavor(CODEBUDDY, codebuddy_install_dirs())
+    }
+
     fn with_flavor(flavor: ClaudeFlavor, extra_dirs: Vec<PathBuf>) -> Self {
         ClaudeAdapter {
             flavor,
@@ -243,11 +314,24 @@ impl ClaudeAdapter {
         }
     }
 
-    fn program(&self) -> Option<PathBuf> {
-        match &self.program {
-            Some(explicit) => Some(explicit.clone()),
-            None => find_executable_in(self.flavor.binary, &self.extra_dirs),
+    #[cfg(all(test, unix))]
+    fn codebuddy_with_program(program: PathBuf) -> Self {
+        ClaudeAdapter {
+            program: Some(program),
+            extra_dirs: Vec::new(),
+            ..ClaudeAdapter::codebuddy()
         }
+    }
+
+    fn program(&self) -> Option<PathBuf> {
+        if let Some(explicit) = &self.program {
+            return Some(explicit.clone());
+        }
+        find_executable_in(self.flavor.binary, &self.extra_dirs).or_else(|| {
+            self.flavor
+                .binary_fallback
+                .and_then(|name| find_executable_in(name, &self.extra_dirs))
+        })
     }
 
     /// This build's own help text, remembered until `invalidate_catalog`.
@@ -336,7 +420,7 @@ impl ClaudeAdapter {
         if let Some(cached) = self.hello.read().await.clone() {
             return Some(cached);
         }
-        let found = initialize(program).await;
+        let found = initialize(program, &self.flavor).await;
         if let Some(hello) = found.clone() {
             *self.hello.write().await = Some(hello);
         }
@@ -345,9 +429,9 @@ impl ClaudeAdapter {
 }
 
 /// Runs one `initialize` control request and takes the answer away with it.
-async fn initialize(program: &std::path::Path) -> Option<Value> {
+async fn initialize(program: &std::path::Path, flavor: &ClaudeFlavor) -> Option<Value> {
     let mut command = Command::new(program);
-    apply_claude_sandbox_compat(&mut command);
+    apply_sandbox_compat(flavor, &mut command);
     command
         .args([
             "--print",
@@ -356,7 +440,7 @@ async fn initialize(program: &std::path::Path) -> Option<Value> {
             "--output-format",
             "stream-json",
             "--verbose",
-            "--allow-dangerously-skip-permissions",
+            flavor.skip_permissions_flag,
             "--settings",
             UNRESTRICTED_SETTINGS,
         ])
@@ -442,13 +526,15 @@ fn models_in(hello: &Value) -> Vec<ModelInfo> {
     models
         .iter()
         .filter_map(|model| {
-            let id = model.get("value").and_then(Value::as_str)?;
+            // Claude names an alias `value` / `displayName`. CodeBuddy names
+            // the same thing `id` / `name`. Either is a value `set_model` can
+            // send back; a row with neither is not.
+            let id = model_text(model, "value").or_else(|| model_text(model, "id"))?;
             let flag = |name: &str| model.get(name).and_then(Value::as_bool).unwrap_or(false);
             Some(ModelInfo {
                 id: id.to_string(),
-                label: model
-                    .get("displayName")
-                    .and_then(Value::as_str)
+                label: model_text(model, "displayName")
+                    .or_else(|| model_text(model, "name"))
                     .unwrap_or(id)
                     .to_string(),
                 context_window: None,
@@ -475,6 +561,28 @@ fn models_in(hello: &Value) -> Vec<ModelInfo> {
             })
         })
         .collect()
+}
+
+fn model_text<'a>(model: &'a Value, key: &str) -> Option<&'a str> {
+    model
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+/// Which model the CLI says is current. Claude reports `model`; CodeBuddy
+/// reports `currentModelId`. Absent means the caller falls back to the first
+/// listed alias — still the CLI's own list, not one we invented.
+fn reported_model(hello: &Value) -> Option<String> {
+    ["model", "currentModelId"].into_iter().find_map(|key| {
+        hello
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    })
 }
 
 /// The slash commands this install has, as it listed them.
@@ -663,9 +771,7 @@ impl AgentAdapter for ClaudeAdapter {
             commands,
             default_model: hello
                 .as_ref()
-                .and_then(|hello| hello.get("model"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
+                .and_then(reported_model)
                 // Which model is current is the CLI's to decide; when it does not
                 // say, the first entry it listed is its own recommendation.
                 .or_else(|| models.first().map(|model| model.id.clone())),
@@ -681,19 +787,22 @@ impl AgentAdapter for ClaudeAdapter {
             .ok_or_else(|| anyhow!("{} is not installed", self.flavor.binary))?;
 
         let mut command = Command::new(&program);
-        apply_claude_sandbox_compat(&mut command);
+        apply_sandbox_compat(&self.flavor, &mut command);
+        command.args([
+            "--print",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--include-partial-messages",
+            "--verbose",
+        ]);
+        if self.flavor.permission_prompt_tool {
+            command.args(["--permission-prompt-tool", "stdio"]);
+        }
         command
             .args([
-                "--print",
-                "--input-format",
-                "stream-json",
-                "--output-format",
-                "stream-json",
-                "--include-partial-messages",
-                "--verbose",
-                "--permission-prompt-tool",
-                "stdio",
-                "--allow-dangerously-skip-permissions",
+                self.flavor.skip_permissions_flag,
                 "--settings",
                 UNRESTRICTED_SETTINGS,
             ])
@@ -882,6 +991,13 @@ fn claude_config_dir(flavor: &ClaudeFlavor) -> Result<PathBuf> {
             return Ok(PathBuf::from(path));
         }
     }
+    if flavor.id == CODEBUDDY.id {
+        if let Some(path) = std::env::var_os("CODEBUDDY_CONFIG_DIR")
+            .filter(|value| !value.to_string_lossy().trim().is_empty())
+        {
+            return Ok(PathBuf::from(path));
+        }
+    }
     crate::config::home_dir()
         .map(|home| home.join(flavor.config_dir_name))
         .ok_or_else(|| anyhow!("cannot find the {} config directory", flavor.label))
@@ -892,6 +1008,11 @@ fn claude_config_dir(flavor: &ClaudeFlavor) -> Result<PathBuf> {
 fn claude_project_dir(cwd: &Path, flavor: &ClaudeFlavor) -> Result<PathBuf> {
     let canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
     let text = canonical.to_string_lossy();
+    if matches!(flavor.project_encoding, ProjectEncoding::CodeBuddy) {
+        return Ok(claude_config_dir(flavor)?
+            .join("projects")
+            .join(codebuddy_project_key(&text)));
+    }
     let replaced: String = text
         .chars()
         .map(|character| {
@@ -916,6 +1037,35 @@ fn claude_project_dir(cwd: &Path, flavor: &ClaudeFlavor) -> Result<PathBuf> {
         )
     };
     Ok(claude_config_dir(flavor)?.join("projects").join(encoded))
+}
+
+/// CodeBuddy 2.159's `compressWorkspacePathName`: preserve ordinary filename
+/// characters, normalize separators, and bound UTF-8 bytes (not JS UTF-16).
+/// The installed CLI is the oracle in the public history-import specialty.
+fn codebuddy_project_key(text: &str) -> String {
+    let mut replaced = String::new();
+    for character in text.chars() {
+        let character = if matches!(character, '/' | '\\' | ':') {
+            '-'
+        } else {
+            character
+        };
+        if character != '-' || !replaced.ends_with('-') {
+            replaced.push(character);
+        }
+    }
+    let normalized = replaced.trim_matches('-');
+    if normalized.len() <= 255 {
+        return normalized.to_string();
+    }
+    let mut end = 180;
+    while !normalized.is_char_boundary(end) {
+        end -= 1;
+    }
+    let hash = normalized.as_bytes().iter().fold(5381_u32, |hash, byte| {
+        hash.wrapping_mul(33) ^ u32::from(*byte)
+    });
+    format!("{}-{}", &normalized[..end], radix36(hash))
 }
 
 fn radix36(mut value: u32) -> String {
@@ -1006,8 +1156,10 @@ fn claude_descriptor(path: &Path) -> Result<Option<(String, String, String)>> {
                 .and_then(Value::as_str)
                 .map(str::to_string)
         });
-        if title.is_none() && entry.get("type").and_then(Value::as_str) == Some("user") {
-            title = claude_message_text(entry.get("message").unwrap_or(&Value::Null));
+        if title.is_none() {
+            if let Some(("user", message)) = history_message(&entry) {
+                title = claude_message_text(message);
+            }
         }
         if session_id.is_some() && title.is_some() {
             break;
@@ -1069,12 +1221,15 @@ async fn claude_history(
             created_at_ms = created_at_ms.min(timestamp);
             updated_at_ms = updated_at_ms.max(timestamp);
         }
-        let Some(text) = claude_message_text(entry.get("message").unwrap_or(&Value::Null)) else {
+        let Some((role, message)) = history_message(&entry) else {
+            continue;
+        };
+        let Some(text) = claude_message_text(message) else {
             continue;
         };
         let id = format!("import-{}", uuid::Uuid::new_v4().simple());
-        match entry.get("type").and_then(Value::as_str) {
-            Some("user") => {
+        match role {
+            "user" => {
                 title.get_or_insert_with(|| clip_import_text(&text, 120));
                 items.push(TimelineItem::UserMessage {
                     id,
@@ -1082,7 +1237,7 @@ async fn claude_history(
                     attachments: Vec::new(),
                 });
             }
-            Some("assistant") => items.push(TimelineItem::AssistantMessage {
+            "assistant" => items.push(TimelineItem::AssistantMessage {
                 id,
                 text,
                 received_at_ms: None,
@@ -1116,12 +1271,30 @@ async fn claude_history(
     })
 }
 
+/// Claude wraps user/assistant content in `message`; CodeBuddy's persisted
+/// records use `type: message` with a top-level role and content.
+fn history_message(entry: &Value) -> Option<(&str, &Value)> {
+    match entry.get("type").and_then(Value::as_str)? {
+        role @ ("user" | "assistant") => entry.get("message").map(|message| (role, message)),
+        "message" => match entry.get("role").and_then(Value::as_str)? {
+            role @ ("user" | "assistant") => Some((role, entry)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn claude_message_text(message: &Value) -> Option<String> {
     let text = match message.get("content") {
         Some(Value::String(text)) => text.clone(),
         Some(Value::Array(blocks)) => blocks
             .iter()
-            .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+            .filter(|block| {
+                matches!(
+                    block.get("type").and_then(Value::as_str),
+                    Some("text" | "input_text" | "output_text")
+                )
+            })
             .filter_map(|block| block.get("text").and_then(Value::as_str))
             .collect::<Vec<_>>()
             .join("\n"),
