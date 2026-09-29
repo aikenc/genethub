@@ -1786,11 +1786,18 @@ fn pm_snapshot_relative(runtime: &RuntimeStore, request_id: &str, run_id: &str) 
         true,
     )?;
     let snapshot = directory.join("run.json");
+    // Stored relatives use `/` so a project written on Windows still opens
+    // on every other machine. `Path` accepts those separators when reading.
     Ok(snapshot
         .strip_prefix(&runtime.project_root)
         .expect("PM request is below the project root")
-        .to_string_lossy()
-        .to_string())
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/"))
 }
 
 fn capture_candidate(
@@ -6274,10 +6281,11 @@ mod tests {
         for (name, source) in sources {
             // Stop at each file's own test module: fixtures and this scanner
             // are not the kernel's execution paths.
-            let production = source
+            let normalized = source.replace("\r\n", "\n");
+            let production = normalized
                 .split_once("\n#[cfg(test)]\n")
                 .map(|(before, _)| before)
-                .unwrap_or(source);
+                .unwrap_or(normalized.as_str());
             for (index, line) in production.lines().enumerate() {
                 let code = line.split("//").next().unwrap_or("");
                 if !code.contains("crate::git::") {
