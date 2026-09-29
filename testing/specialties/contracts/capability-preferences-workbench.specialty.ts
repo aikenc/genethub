@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { defineSpecialty } from "../../framework/public.ts";
 
 const FILES = [
+  "src/presentation/catalog/resolve.test.ts",
   "src/session/capability-preferences.test.ts",
   "src/session/ComposerControls.test.tsx",
   "src/session/Composer.commands.test.tsx",

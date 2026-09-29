@@ -3,7 +3,7 @@ import { BlockedError, defineSpecialty } from "../../framework/public.ts";
 
 // No model call: compare this installed CLI's published choices with the
 // catalog exposed by the actual guest through the normal workbench client.
-for (const cli of ["claude", "tclaude"] as const) defineSpecialty({
+for (const cli of ["claude", "tclaude", "codebuddy"] as const) defineSpecialty({
   id: `specialty.agent.${cli}-catalog-installed-cli`,
   title: `${cli} permission picker matches the installed CLI's launch options`,
   oracle: "The public guest catalog contains exactly the supported user-facing permission modes from real CLI help",
@@ -11,17 +11,19 @@ for (const cli of ["claude", "tclaude"] as const) defineSpecialty({
   tags: ["network-audit-fix", "claude-catalog", cli], llm: { default: "none" },
   expectedDurationMs: 15000, timeoutMs: 90000,
   surfaces: ["daemon", "agent-adapter", "workbench-client"],
+  requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
 }, async (t) => {
   let help: string;
-  try { help = execFileSync(cli, cli === "tclaude" ? ["--", "--help"] : ["--help"], { encoding: "utf8", timeout: 15000 }); }
+  try { help = execFileSync(cli === "codebuddy" ? "cbc" : cli, cli === "tclaude" ? ["--", "--help"] : ["--help"], { encoding: "utf8", timeout: 15000 }); }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new BlockedError(`${cli} CLI is not installed`);
     throw error;
   }
   const choices = help.split("--permission-mode")[1]?.split(/\n\s+--/)[0] ?? "";
-  t.assertions.assert(choices.includes("choices:"), "Installed CLI did not provide a complete permission-mode listing");
+  t.assertions.assert(/choices:/i.test(choices), "Installed CLI did not provide a complete permission-mode listing");
+  const listedModes = choices.split(/choices:/i)[1]?.split(/[).]/)[0] ?? "";
   const expected = ["manual", "default", "acceptEdits", "plan", "bypassPermissions"]
-    .filter((mode) => choices.includes(`"${mode}"`) || choices.includes(`'${mode}'`)).sort();
+    .filter((mode) => new RegExp(`\\b${mode}\\b`).test(listedModes)).sort();
   t.assertions.assert(expected.includes("bypassPermissions") && expected.length > 1, "Empty CLI permission oracle");
   const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
   try {
@@ -32,5 +34,10 @@ for (const cli of ["claude", "tclaude"] as const) defineSpecialty({
     const actual = (claude?.catalog.modes ?? []).map((mode) => mode.id).sort();
     t.assertions.assert(JSON.stringify(actual) === JSON.stringify(expected), `Permission catalog differs: actual=${actual}, CLI=${expected}`);
     t.assertions.assert(claude?.catalog.defaultMode === "bypassPermissions", "Product highest-permission default was lost");
+    if (cli === "codebuddy") {
+      const models = claude?.catalog.models ?? [];
+      t.assertions.assert(models.length > 0 && models.every(model => model.id.trim() && model.label.trim()), "CodeBuddy's installed model catalog was lost");
+      t.assertions.assert(models.some(model => model.id === claude?.catalog.defaultModel), "CodeBuddy default model is missing from its catalog");
+    }
   } finally { opened.client.close(); opened.daemon.stop(); await opened.mock.stop(); }
 });

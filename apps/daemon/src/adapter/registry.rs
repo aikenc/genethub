@@ -400,8 +400,10 @@ mod tests {
         let registry = Registry::new(&BTreeMap::new());
         let claude = registry.get("claude").expect("official Claude Code");
         let tclaude = registry.get("tclaude").expect("TClaude");
+        let codebuddy = registry.get("codebuddy").expect("CodeBuddy");
         assert_eq!(claude.label(), "Claude Code");
         assert_eq!(tclaude.label(), "TClaude");
+        assert_eq!(codebuddy.label(), "CodeBuddy");
     }
 
     #[tokio::test]
