@@ -167,6 +167,10 @@ fn interpreter_script_path(script: &Path) -> String {
     }
 }
 
+fn resolve_interpreter(interpreter: &str) -> PathBuf {
+    crate::adapter::find_executable(interpreter).unwrap_or_else(|| PathBuf::from(interpreter))
+}
+
 /// Runs one script and returns its parsed result.
 ///
 /// `task_cwd` is the Run's own working directory. Nothing here confines the
@@ -188,7 +192,10 @@ pub(crate) async fn run(
     // `args` follow.
     let (program, mut arguments) = match definition.interpreter.as_deref() {
         Some(interpreter) => (
-            PathBuf::from(interpreter),
+            // Windows CreateProcess searches System32 before PATH, so a bare
+            // `bash` runs the WSL stub and never Git Bash. PATH order is what
+            // the package named.
+            resolve_interpreter(interpreter),
             vec![interpreter_script_path(script)],
         ),
         None => (script.to_path_buf(), Vec::new()),

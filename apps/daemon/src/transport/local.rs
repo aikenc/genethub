@@ -907,89 +907,106 @@ mod tests {
         listener.handle.abort();
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn cli_forwards_schema_without_opening_a_websocket() {
-        let dir = tempfile::tempdir().unwrap();
-        let (state, pty_rx) = crate::AppState::build(crate::config::Paths::new(dir.path()))
-            .await
-            .unwrap();
-        let listener = serve(state.clone(), pty_fanout(pty_rx)).await.unwrap();
-        let url = cli_url(
-            listener.port,
-            &state.token,
-            crate::host_pid::current(),
-            &state.machine.machine_id,
-            &state.machine.fingerprint(),
-        );
-        let response = crate::http::Client::new()
-            .post(&url)
-            .json(&serde_json::json!({
-                "argv": ["schema"],
-                "cwd": dir.path().to_string_lossy(),
-            }))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert!(!url.contains(&state.token));
-        let body = response.text().await.unwrap();
-        let mut exit = None;
-        let mut saw_schema = false;
-        for line in body.lines() {
-            let value: serde_json::Value = serde_json::from_str(line).unwrap();
-            if let Some(code) = value.get("exit").and_then(|value| value.as_i64()) {
-                exit = Some(code);
+    #[test]
+    fn cli_forwards_schema_without_opening_a_websocket() {
+        // Debug `AppState::build` overflows the 2 MiB Windows tokio worker.
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_stack_size(16 * 1024 * 1024)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let (state, pty_rx) = crate::AppState::build(crate::config::Paths::new(dir.path()))
+                .await
+                .unwrap();
+            let listener = serve(state.clone(), pty_fanout(pty_rx)).await.unwrap();
+            let url = cli_url(
+                listener.port,
+                &state.token,
+                crate::host_pid::current(),
+                &state.machine.machine_id,
+                &state.machine.fingerprint(),
+            );
+            let response = crate::http::Client::new()
+                .post(&url)
+                .json(&serde_json::json!({
+                    "argv": ["schema"],
+                    "cwd": dir.path().to_string_lossy(),
+                }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(!url.contains(&state.token));
+            let body = response.text().await.unwrap();
+            let mut exit = None;
+            let mut saw_schema = false;
+            for line in body.lines() {
+                let value: serde_json::Value = serde_json::from_str(line).unwrap();
+                if let Some(code) = value.get("exit").and_then(|value| value.as_i64()) {
+                    exit = Some(code);
+                }
+                if value["stream"] == "stdout" {
+                    let printed = value["line"].as_str().unwrap();
+                    assert!(
+                        printed.contains("genet.cli/v1") || printed.contains("\"schema\""),
+                        "{printed}"
+                    );
+                    saw_schema = true;
+                }
             }
-            if value["stream"] == "stdout" {
-                let printed = value["line"].as_str().unwrap();
-                assert!(
-                    printed.contains("genet.cli/v1") || printed.contains("\"schema\""),
-                    "{printed}"
-                );
-                saw_schema = true;
-            }
-        }
-        assert_eq!(exit, Some(0));
-        assert!(saw_schema);
-        listener.handle.abort();
+            assert_eq!(exit, Some(0));
+            assert!(saw_schema);
+            listener.handle.abort();
+        });
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn cli_machine_selector_does_not_run_the_command_locally() {
-        let dir = tempfile::tempdir().unwrap();
-        let (state, pty_rx) = crate::AppState::build(crate::config::Paths::new(dir.path()))
-            .await
-            .unwrap();
-        let listener = serve(state.clone(), pty_fanout(pty_rx)).await.unwrap();
-        let url = cli_url(
-            listener.port,
-            &state.token,
-            crate::host_pid::current(),
-            &state.machine.machine_id,
-            &state.machine.fingerprint(),
-        );
-        let response = crate::http::Client::new()
-            .post(&url)
-            .json(&serde_json::json!({
-                "argv": ["--machine", "m_not_paired", "session", "list"],
-                "cwd": dir.path().to_string_lossy(),
-            }))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = response.text().await.unwrap();
-        assert!(
-            !body.contains("\"sessions\""),
-            "a missing --machine must not fall back to this daemon's session list: {body}"
-        );
-        assert!(
-            body.contains("fabric")
-                || body.contains("machineNotPaired")
-                || body.contains("not a machine"),
-            "must fail honestly rather than run locally: {body}"
-        );
-        listener.handle.abort();
+    #[test]
+    fn cli_machine_selector_does_not_run_the_command_locally() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_stack_size(16 * 1024 * 1024)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let (state, pty_rx) = crate::AppState::build(crate::config::Paths::new(dir.path()))
+                .await
+                .unwrap();
+            let listener = serve(state.clone(), pty_fanout(pty_rx)).await.unwrap();
+            let url = cli_url(
+                listener.port,
+                &state.token,
+                crate::host_pid::current(),
+                &state.machine.machine_id,
+                &state.machine.fingerprint(),
+            );
+            let response = crate::http::Client::new()
+                .post(&url)
+                .json(&serde_json::json!({
+                    "argv": ["--machine", "m_not_paired", "session", "list"],
+                    "cwd": dir.path().to_string_lossy(),
+                }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response.text().await.unwrap();
+            assert!(
+                !body.contains("\"sessions\""),
+                "a missing --machine must not fall back to this daemon's session list: {body}"
+            );
+            assert!(
+                body.contains("fabric")
+                    || body.contains("machineNotPaired")
+                    || body.contains("not a machine"),
+                "must fail honestly rather than run locally: {body}"
+            );
+            listener.handle.abort();
+        });
     }
 
     #[tokio::test]
