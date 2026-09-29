@@ -127,6 +127,7 @@ pub const GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// How often to look during the grace period. Short enough that the common
 /// case — gone almost at once — is not rounded up into a visible pause.
+#[cfg(any(unix, target_family = "wasm"))]
 const GRACE_POLL: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// Stops a process and everything it started, immediately.
@@ -184,6 +185,7 @@ pub async fn end_tree(pid: u32) {
     wait_for_tree_exit(pid, tokio::time::Instant::now() + GRACE).await;
 }
 
+#[cfg(unix)]
 async fn wait_for_tree_exit(pid: u32, deadline: tokio::time::Instant) {
     while tokio::time::Instant::now() < deadline && tree_exists(pid) {
         tokio::time::sleep(GRACE_POLL).await;
@@ -316,18 +318,37 @@ pub fn exists(_pid: u32) -> bool {
 const TERM: libc::c_int = libc::SIGTERM;
 #[cfg(unix)]
 const KILL: libc::c_int = libc::SIGKILL;
-#[cfg(not(unix))]
-const TERM: i32 = 15;
-#[cfg(not(unix))]
-const KILL: i32 = 9;
-
-#[cfg(not(unix))]
-fn signal_group(_group: u32, _signal: i32) {}
-
-#[cfg(not(unix))]
-fn tree_exists(_pid: u32) -> bool {
-    false
+/// Bounded tree cleanup shared by command and agent owners.
+/// A failure to reap remains an error so the owner can report or retry it.
+pub(crate) async fn kill_child_tree(child: &mut crate::os_process::Child) -> Result<()> {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        end_tree(pid).await;
+    }
+    #[cfg(windows)]
+    if let Some(pid) = child.id() {
+        let mut command = crate::os_process::Command::new("taskkill");
+        command
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), command.status()).await;
+    }
+    if child.try_wait()?.is_some() {
+        return Ok(());
+    }
+    child.start_kill()?;
+    tokio::time::timeout(REAP_BUDGET, child.wait())
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!("the killed agent has not exited; cleanup can be retried")
+        })??;
+    Ok(())
 }
+
+/// How long a killed child gets to be reaped before the caller moves on.
+const REAP_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// A command configured so that it can later be stopped completely.
 ///
@@ -430,7 +451,7 @@ impl Group {
     ///
     /// The exit status comes back where there is one. A command stopped this
     /// way still finished, and what it finished with is the caller's answer.
-    #[cfg(not(target_family = "wasm"))]
+    #[cfg(unix)]
     pub async fn end(&mut self) -> Option<crate::os_process::ExitStatus> {
         let Some(pid) = self.pid else {
             return self.status;
@@ -458,6 +479,21 @@ impl Group {
         // not observe a process tree that is already dead but still pending
         // adoption and reaping by the operating system.
         wait_for_tree_exit(pid, tokio::time::Instant::now() + GRACE).await;
+        self.status
+    }
+
+    /// Windows has no Unix process-group signals. Use the same bounded
+    /// tree cleanup as the agent adapters, then remember the reaped status.
+    #[cfg(windows)]
+    pub async fn end(&mut self) -> Option<crate::os_process::ExitStatus> {
+        if let Err(error) = kill_child_tree(&mut self.child).await {
+            tracing::warn!(%error, "could not confirm command cleanup");
+        }
+        match self.child.try_wait() {
+            Ok(Some(status)) => self.status = Some(status),
+            Ok(None) => {}
+            Err(error) => tracing::warn!(%error, "could not read command exit status"),
+        }
         self.status
     }
 

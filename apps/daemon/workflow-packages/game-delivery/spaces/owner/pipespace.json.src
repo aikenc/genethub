@@ -1,0 +1,20 @@
+{
+  "schema": "pipespace.v1",
+  "name": "owner",
+  "description": "Package-defined requirement owner.",
+  "agents": [
+    "codex",
+    "cursor",
+    "codebuddy",
+    "claude-code"
+  ],
+  "skills": [],
+  "tags": [
+    "worker",
+    "owner"
+  ],
+  "skillProviders": [],
+  "children": {
+    "scanDepth": 0
+  }
+}

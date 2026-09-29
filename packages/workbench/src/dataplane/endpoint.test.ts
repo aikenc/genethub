@@ -163,7 +163,11 @@ describe("the E2EE data endpoint", () => {
     source.forEach((_, index) => (source[index] = index % 251));
     const response = await exchange(stack.client, head("echo", source.byteLength), source);
     expect(response.head).toMatchObject({ status: 200, metadata: { method: "echo" } });
-    expect(await collectBody(response.body, source.byteLength)).toEqual(source);
+    const received = await collectBody(response.body, source.byteLength);
+    expect(received.byteLength).toBe(source.byteLength);
+    // Compare every byte without constructing millions of object properties;
+    // the encrypted terminal ACK still needs this event loop to make progress.
+    expect(received.every((byte, index) => byte === source[index])).toBe(true);
     await response.stream.done;
     expect(stack.client.activeStreamCount).toBe(0);
     await waitFor(() => stack.server.activeStreamCount === 0);

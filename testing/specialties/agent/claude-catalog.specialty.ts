@@ -13,7 +13,12 @@ for (const cli of ["claude", "tclaude"] as const) defineSpecialty({
   surfaces: ["daemon", "agent-adapter", "workbench-client"],
 }, async (t) => {
   let help: string;
-  try { help = execFileSync(cli, cli === "tclaude" ? ["--", "--help"] : ["--help"], { encoding: "utf8", timeout: 15000 }); }
+  try { help = execFileSync(cli, cli === "tclaude" ? ["--", "--help"] : ["--help"], {
+    encoding: "utf8", timeout: 15000,
+    // This independent oracle needs only help text, not a persistent wrapper
+    // gateway. Keep its actual CLI invocation inside the isolated lease.
+    env: cli === "tclaude" ? { ...process.env, TCLAUDE_DISABLE_DAEMON: "1" } : process.env,
+  }); }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new BlockedError(`${cli} CLI is not installed`);
     throw error;

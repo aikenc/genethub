@@ -462,6 +462,9 @@ export class DataEndpoint {
     if (!(this.channel instanceof LogicalConnection)) throw new DataPlaneError("bootstrap cannot resume");
     await this.channel.attach(carrier, key, path);
   }
+  promoteStandby(path: ResumePath): Promise<boolean> {
+    return this.channel instanceof LogicalConnection ? this.channel.promoteStandby(path) : Promise.resolve(false);
+  }
 
   get state(): DataEndpointState {
     return this.state_;

@@ -10,12 +10,12 @@ import type {
   WorkspaceInfo,
 } from "@genehub/proto";
 
-import { defineJourney, type CaseContext } from "../../framework/public.ts";
+import { defineJourney, runGenetAsync, type CaseContext } from "../../framework/public.ts";
 
 const FIFTEEN_MINUTES_MS = 15 * 60 * 1_000;
 const TEN_MINUTES_MS = 10 * 60 * 1_000;
 const PACKAGE_ID = "game-delivery";
-const TEAM_NAMES = ["workflow-manager", "workflow-reviewer", "executor", "coder", "reviewer"] as const;
+const TEAM_NAMES = ["owner", "workflow-manager", "workflow-reviewer", "executor", "coder", "reviewer"] as const;
 
 type Opened = Awaited<ReturnType<CaseContext["flows"]["main"]["openWorkspace"]>>;
 type JourneyMock = Opened["mock"];
@@ -375,7 +375,7 @@ const contract={schema:'genehub.review-contract.v1',requirementRevision:'user-j4
 const contractFile=p.join(dir,operation+'-contract.json'),reportFile=p.join(dir,operation+'-report.json'),first=p.join(dir,'initial-contract.json');
 fs.writeFileSync(contractFile,JSON.stringify(contract));if(!fs.existsSync(first))fs.copyFileSync(contractFile,first);
 fs.writeFileSync(reportFile,JSON.stringify({schema:'genehub.review-report.v1',requirementRevision:contract.requirementRevision,checklistVersion:contract.checklistVersion,artifactRevision:revision,contractDigest:hash(fs.readFileSync(contractFile)),items:[{id:'entry',status:met?'met':'unmet',reason:met?'':'Required marker is absent',evidence:[{ref:entry,observation:'sha256='+hash(bytes)+'; contains marker='+met}]}]}));
-const checked=JSON.parse(cp.execFileSync(process.execPath,[p.join(root,'spaces/game-delivery--reviewer/skills/game-reviewer/scripts/check-review.mjs'),contractFile,reportFile,first],{encoding:'utf8'}));
+const checked=JSON.parse(cp.execFileSync('python3',[p.join(root,'spaces/game-delivery--reviewer/skills/game-reviewer/scripts/check-review.py'),contractFile,reportFile,first],{encoding:'utf8'}));
 fs.writeFileSync(p.join(dir,operation+'-coverage.json'),JSON.stringify(checked));
 const args=['workflow','complete','--evidence','checks='+entry,'--evidence','report='+reportFile];
 if(checked.verdict==='approved')args.push('--evidence','review=approved');else args.push('--outcome','changesRequested','--reason','Required marker is absent');
@@ -396,7 +396,7 @@ process.stdout.write(cp.execFileSync(process.env.GENEHUB_CLI,args,{encoding:'utf
         if (trialCoderStage === 2) return { tool: { name: "bash", arguments: { command: `cd ${shellArg(trialRoot)} && git add index.html && git commit -m "experiment result" && commit=$(git rev-parse HEAD) && "$GENEHUB_CLI" workflow complete --evidence commit="$commit" --evidence checks=experimental-artifact-check` } } };
         return { text: "实验实现完成。" };
       }
-      if (body.includes("你是小游戏项目的 Reviewer")) {
+      if (body.includes("你是小游戏项目的 Reviewer") || body.includes("你是工作流包定义的需求负责人")) {
         const operation = body.match(/当前节点：(operation-\d+)/)?.[1];
         if (!operation) throw new Error("trial review omitted its operation");
         if (dataReviewOperations.has(operation)) return { text: "Review submitted." };
@@ -500,7 +500,7 @@ if(result.status===0)throw Error('stale Builder plan applied');`;
         return {
           tool: {
             name: "bash",
-            arguments: { command: "node skills/workflow-manager/scripts/evaluate.mjs" },
+            arguments: { command: "python3 skills/workflow-manager/scripts/evaluate.py" },
           },
         };
       }
@@ -552,7 +552,7 @@ if(result.status===0)throw Error('stale Builder plan applied');`;
       return { text: "实现节点已完成并提交。" };
     }
 
-    if (body.includes("你是小游戏项目的 Reviewer")) {
+    if (body.includes("你是小游戏项目的 Reviewer") || body.includes("你是工作流包定义的需求负责人")) {
       const operation = body.match(/当前节点：(operation-\d+)/)?.[1];
       if (!operation) throw new Error("development review omitted its operation");
       const identity = `${delivery.task}:${operation}`;
@@ -1006,16 +1006,18 @@ async function assertDelivery(
   const workers = sessions.filter((session) => session.managed?.workflowRunId === completed.id);
   const coder = workers.find((session) => session.managed?.role === "coder");
   const reviewers = workers.filter((session) => session.managed?.role === "reviewer");
-  t.assertions.assert(workers.length === 3 && Boolean(coder) && reviewers.length === 2, "Run did not use requirement review, Coder and item review");
+  const owner = workers.find(session => session.managed?.role === "owner");
+  t.assertions.assert(workers.length === 3 && Boolean(coder) && Boolean(owner) && reviewers.length === 1, "Run did not separate requirement owner, Coder and independent Reviewer");
   t.assertions.assert((completed.structure as { outcome?: { value?: { done?: boolean } } })?.outcome?.value?.done === true && completed.workflowId === "game-dev", "assessment completion was mistaken for delivered work");
   t.assertions.assert(
     coder?.managed?.parentSessionId === completed.executorSessionId &&
-      reviewers.every(session => session.managed?.parentSessionId === completed.executorSessionId),
+      reviewers.every(session => session.managed?.parentSessionId === completed.executorSessionId) && owner?.managed?.parentSessionId === completed.executorSessionId,
     "Worker Sessions are not managed by the Executor Session",
   );
 
   const spaces = await listSpaces(fixture);
   const team = assertTeam(t, fixture, spaces);
+  t.assertions.assert(owner?.workspaceId === team.get("owner")?.id, "Owner ran outside its package-owned AgentSpace");
   t.assertions.assert(coder?.workspaceId === team.get("coder")?.id, "Coder ran outside Coder AgentSpace");
   t.assertions.assert(
     reviewers.every(session => session.workspaceId === team.get("reviewer")?.id),
@@ -1042,8 +1044,14 @@ async function assertDelivery(
 
 async function dispose(fixture: ProjectFixture): Promise<void> {
   fixture.opened.client.close();
-  fixture.opened.daemon.stop();
-  await fixture.opened.mock.stop();
+  try {
+    // Keep the model endpoint responsive while the verified daemon drains.
+    const stopped = await runGenetAsync(fixture.opened.daemon.genet,
+      ["daemon", "stop"], fixture.opened.daemon.env);
+    if (stopped.code !== 0) throw new Error(`daemon stop failed: ${stopped.stderr || stopped.stdout}`);
+  } finally {
+    await fixture.opened.mock.stop();
+  }
 }
 
 defineJourney(
@@ -1285,7 +1293,7 @@ defineJourney(
       const elapsedMs = improvementTiming.activeMs;
       const improvement = await completedRun(fixture, "workflow-improvement-j3");
       t.assertions.assert(improvement?.parentSessionId === pmSessionId, "improvement did not return to originating PM");
-      const managerSessionId = improvement?.nodes.find((node) => node.id === "specialist")?.sessionId;
+      const managerSessionId = improvement?.nodes.find((node) => node.uses === "agent.session")?.sessionId;
       if (!managerSessionId) throw new Error("PM did not delegate a real WorkflowManager Session");
       const managerReply = await fixture.opened.client.call({ type: "session.get", payload: { sessionId: managerSessionId } });
       t.assertions.assert(managerReply?.type === "snapshot" && managerReply.data.summary.workspaceId === managerSpace.id, "improvement used the wrong expert Space");
@@ -1399,7 +1407,7 @@ defineJourney(
       await runPmDelivery(t, fixture, pmSessionId, "独立评审 J3，检查交付是否满足要求，缺失证据不判通过。", "workflow-review-j3", false, pmEvents);
       const reviewed = await completedRun(fixture, "workflow-review-j3");
       t.assertions.assert(reviewed?.parentSessionId === pmSessionId, "review returned to another Session");
-      const reviewNode = reviewed?.nodes.find((node) => node.id === "specialist");
+      const reviewNode = reviewed?.nodes.find((node) => node.uses === "agent.session");
       const qualityReport = JSON.parse(reviewNode?.evidence.report ?? "null");
       t.assertions.assert(qualityReport?.recommendation === "inconclusive" && qualityReport?.coverage === "partial", "missing evidence was converted to approval");
       t.assertions.assert(qualityReport?.findings[0]?.evidenceRefs?.length > 0, "review omitted source references");
@@ -1417,7 +1425,7 @@ defineJourney(
       await runPmDelivery(t, fixture, pmSessionId, "实验运行 J3，仅操作独立实验目录，验证最小产物。", "workflow-trial-j3", false, pmEvents);
       const receipt = JSON.parse(readFileSync(path.join(trialRoot, "..", "..", ".j3.prepare.json"), "utf8"));
       const experiment = { root: trialRoot, executorId: receipt.executorWorkspaceId };
-      t.assertions.assert(receipt.prepared && receipt.members.length === 5, "PM did not prepare a complete carrier through the product");
+      t.assertions.assert(receipt.prepared && receipt.members.length === TEAM_NAMES.length, "PM did not prepare a complete carrier through the product");
       const stale = JSON.parse(readFileSync(path.join(fixture.projectRoot, ".genethub/temp/stale-builder.json"), "utf8"));
       t.assertions.assert(stale.code !== 0 && stale.error.includes("planStale") && stale.unchanged, "a changed Builder source was applied through its old plan");
       t.assertions.assert(stale.outsideOpenCode !== 0 && stale.outsideOpenError.includes("unauthenticated"), `PM gained machine-wide workspace registration authority: ${JSON.stringify(stale)}`);
@@ -1427,7 +1435,7 @@ defineJourney(
       const trialSpaces = (await listSpaces(fixture)).filter((space) =>
         space.root.includes(`${path.sep}spaces${path.sep}${PACKAGE_ID}-v2--`),
       );
-      t.assertions.assert(trialSpaces.length === 5, `repeated preparation duplicated the team: ${trialSpaces.map((space) => space.root).join(",")}`);
+      t.assertions.assert(trialSpaces.length === TEAM_NAMES.length, `repeated preparation duplicated the team: ${trialSpaces.map((space) => space.root).join(",")}`);
       t.assertions.assert(git(trialRoot, ["rev-parse", "trial-feature-base"]) === formalHead && git(trialRoot, ["rev-parse", "trial-baseline"]) === formalHead, "independent clone lost branch/tag baseline");
       t.assertions.assert(git(trialRoot, ["remote"]) === "", "trial clone retained a push destination to the formal repository");
       const trial = await completedRun(fixture, "workflow-trial-j3");
@@ -1478,7 +1486,7 @@ for (const scenario of ["approved", "repair", "limit"] as const) defineJourney({
   expectedDurationMs: 45_000, timeoutMs: 240_000,
   resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
   surfaces: ["daemon", "agent", "git", "genet-cli", "workbench-client"],
-  productInterfaces: ["genet workflow", "session.send", "game-reviewer/scripts/check-review.mjs"],
+  productInterfaces: ["genet workflow", "session.send", "game-reviewer/scripts/check-review.py"],
 }, async t => {
   const fixture = await createProject(t, `review-first-${scenario}`);
   try {

@@ -928,7 +928,7 @@ fn tool_item(event: &Value, completed: bool, state: &mut TurnState) -> Option<Ti
     let failure = || {
         result
             .filter(|_| success.is_none())
-            .map(|result| compact_json(result))
+            .map(compact_json)
             .unwrap_or_default()
     };
     let empty = Value::Null;
@@ -1653,7 +1653,9 @@ mod tests {
     fn print_args_pin_model_resume_and_read_only_modes() {
         let args = print_args(Some("grok-4.7-low-fast"), Some("chat-1"), Some("plan"));
         let joined = args.join(" ");
-        assert!(joined.starts_with("--print --single-turn --output-format stream-json --stream-partial-output"));
+        assert!(joined.starts_with(
+            "--print --single-turn --output-format stream-json --stream-partial-output"
+        ));
         assert!(joined.contains("--model grok-4.7-low-fast"));
         assert!(joined.contains("--resume chat-1"));
         assert!(joined.ends_with("--mode plan"));

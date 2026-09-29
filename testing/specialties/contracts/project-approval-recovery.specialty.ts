@@ -2,6 +2,14 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { join } from "node:path";
 import { defineSpecialty } from "../../framework/public.ts";
+const runNative = async (file: string, args: string[], options: { cwd: string; timeout: number; maxBuffer: number; env?: NodeJS.ProcessEnv }) => {
+  try { return await promisify(execFile)(file, args, { ...options, encoding: "utf8" }); }
+  catch (error) {
+    const failure = error as Error & { code?: string | number; signal?: string; killed?: boolean; stderr?: string; stdout?: string };
+    throw new Error(`native execution failed: code=${failure.code} signal=${failure.signal} killed=${failure.killed}; ${failure.stderr?.slice(-12000) ?? failure.message}; ${failure.stdout?.slice(-2000) ?? ""}`);
+  }
+};
+
 
 defineSpecialty({
   id: "specialty.contracts.project-approval-recovery",
@@ -16,7 +24,7 @@ defineSpecialty({
   surfaces: ["daemon-project-control", "session-human-continuation"],
   productInterfaces: ["session.respondPermission", "project-control-plan"],
 }, async (t) => {
-  const run = promisify(execFile);
+  const run = runNative;
   for (const filter of [
     "project_control::tests::an_unanswered_plan_retains_its_authority_after_restart",
     "project_control::tests::rejection_and_fact_drift_never_create_a_spendable_grant",

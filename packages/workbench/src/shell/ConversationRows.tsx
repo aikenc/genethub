@@ -1,3 +1,4 @@
+import { WorkflowViewLinks } from "../session/WorkflowViewLinks";
 import { EntityAvatar, EntityText } from "../ui/EntityIdentity";
 import type {
   SessionSummary,
@@ -390,6 +391,7 @@ function SessionRow({
 
       {menu === "shut" || selection ? null : (
         <Menu
+          workflowViews={project ? (session.managed ? <WorkflowViewLinks workspaceId={project.id} runId={session.managed.workflowRunId} nodeId={session.managed.nodeId} compact /> : <>{session.workSummary?.tasks.slice(0,1).map(task => <WorkflowViewLinks key={task.runId} workspaceId={project.id} runId={task.runId} compact />)}</>) : undefined}
           onMarkRead={session.latestReply ? () => {
             markContentRead(useWorkbench.getState().client?.identity?.machineId ?? "", session.id, session.latestReply!);
             setMenu("shut");
@@ -438,6 +440,7 @@ function SessionRow({
  * an app that otherwise never shows one.
  */
 function Menu({
+  workflowViews,
   onMarkRead,
   archived,
   onArchive,
@@ -449,6 +452,7 @@ function Menu({
   onDelete,
   onDismiss,
 }: {
+  workflowViews?: React.ReactNode;
   onMarkRead?(): void;
   archived: boolean;
   onArchive(): void;
@@ -506,6 +510,7 @@ function Menu({
                 {archived ? "恢复会话" : "归档会话"}
               </button>
             )}
+            {workflowViews}
             {onMarkRead && <button type="button" role="menuitem" className="flex min-h-10 w-full items-center px-3 text-left text-sm text-fg hover:bg-raised" onClick={onMarkRead}>标为已读</button>}
             {!readOnly ? (
               <button

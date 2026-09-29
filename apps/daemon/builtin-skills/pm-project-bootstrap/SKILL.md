@@ -29,7 +29,7 @@ git clone <package-set repo>    .genethub/workflows/<name>   # ids = <name>/<eac
 
 `workflow list` is read-only and executes nothing inside any package. For each one it reports the id, its git remote and commit, whether the checkout is dirty, whether it compiles, which product Spaces it owns, and whether those are built, authorized or drifted. Read those facts before proposing anything.
 
-If a package is already built, undrifted and compiles, do not build it again — continue the user's original goal. This build ships with `game-delivery` for small games and game features; clone it or another package the user names.
+If a package is already built, undrifted and compiles, do not build it again — continue the user's original goal. Retain explicit user constraints such as an exact Agent/model and forward them to PM's dispatch (`--agent` and `--model` together); do not ask the user to approve the same team again or choose between dropping that constraint and pausing. This build ships with `game-delivery` for small games and game features; clone it or another package the user names.
 
 ## Judge the fit yourself, from the project side
 

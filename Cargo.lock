@@ -1421,6 +1421,7 @@ dependencies = [
  "json5",
  "libc",
  "portable-pty",
+ "regex",
  "reqwest",
  "schemars",
  "serde",

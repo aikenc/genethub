@@ -40,14 +40,13 @@ for (const shape of ["graph", "structured"] as const) defineSpecialty({
       completion: { all: [{ key: "result", verify: "value.nonEmpty" }] },
     });
     const definition = shape === "graph" ? {
-      schema: "genehub.workflow.definition.v1", id: "route-after-progress", version: 1, entry: "first",
+      schema: "genehub.workflow.definition.v2", id: "route-after-progress", version: 2,
       nodes: [
-        { ...worker("first"), on: { completed: ["budget"] } },
-        { id: "budget", uses: "request.budget", on: { completed: ["second"] } },
-        { ...worker("second"), on: { completed: ["publish"] } },
+        { ...worker("first") },
+        { id: "budget", uses: "request.budget" },
+        { ...worker("second") },
         { id: "publish", uses: "result.publish" },
-      ],
-    } : {
+      ], structure: {"body":{"id":"sequence","type":"sequence","steps":[{"id":"step-first","type":"task","activity":"first"},{"id":"step-budget","type":"task","activity":"budget"},{"id":"step-second","type":"task","activity":"second"},{"id":"step-publish","type":"task","activity":"publish"}]}}} : {
       schema: "genehub.workflow.definition.v2", id: "route-after-progress", version: 2,
       nodes: [worker("first"), worker("second"), { id: "publish", uses: "result.publish" }],
       structure: { input: {}, body: { id: "root", type: "sequence", steps: [
@@ -89,7 +88,7 @@ for (const shape of ["graph", "structured"] as const) defineSpecialty({
     let blocked: WorkflowRunStatus | undefined;
     await t.tools.waitUntil(async () => {
       blocked = (await history()).find(run => run.taskId === "route-after-progress");
-      return blocked?.status === "blocked" && blocked.reason?.includes("RouteUnavailable") === true;
+      return blocked?.status === "running" && blocked.phase === "open" && !blocked.programResult && blocked.conditions.some(condition => condition.code === "routeUnavailable");
     }, 50_000);
     t.assertions.assert(firstSubmitted && !secondSubmitted && blocked!.nodes.some(node => node.status === "completed" && node.uses === "agent.session"),
       "the first Worker did not settle before the route block");

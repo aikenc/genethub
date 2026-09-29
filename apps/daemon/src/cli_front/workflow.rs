@@ -37,6 +37,7 @@ enum Command {
         candidate_digest: Option<String>,
     },
     Dispatch {
+        agent_target: Option<genehub_proto::WorkflowAgentTarget>,
         retry_of: Option<String>,
         resume_cancelled: bool,
         candidate_digest: Option<String>,
@@ -58,6 +59,11 @@ enum Command {
     Get {
         workspace_id: Option<String>,
         run_id: Option<String>,
+    },
+    Profile {
+        workspace_id: Option<String>,
+        run_id: Option<String>,
+        compare: Option<String>,
     },
     History {
         workspace_id: Option<String>,
@@ -144,6 +150,65 @@ pub async fn workflow(args: &[String], selection: &Selection) -> i32 {
         Ok(code) => code,
         Err(error) => output::fail(error),
     }
+}
+
+async fn read_profile(
+    rpc: &Rpc,
+    workspace_id: &str,
+    run_id: &str,
+) -> Result<serde_json::Value, CliFailure> {
+    let mut offset = None;
+    let mut result: Option<serde_json::Value> = None;
+    for _ in 0..128 {
+        let Reply::WorkflowProfile(mut page) = rpc
+            .call(Request::WorkflowProfile {
+                workspace_id: workspace_id.into(),
+                run_id: run_id.into(),
+                offset,
+                limit: None,
+            })
+            .await
+            .map_err(query::rpc_error)?
+        else {
+            return Err(CliFailure::protocol("workflow.profile reply mismatch"));
+        };
+        let next = page["nextOffset"].as_u64().map(|n| n as u32);
+        if let Some(full) = &mut result {
+            let rows = page["runs"]
+                .as_array_mut()
+                .ok_or_else(|| CliFailure::protocol("profile runs missing"))?;
+            let targets = full["runs"]
+                .as_array_mut()
+                .ok_or_else(|| CliFailure::protocol("profile runs missing"))?;
+            if rows.len() != targets.len() {
+                return Err(CliFailure::protocol(
+                    "Run changed during profile paging; read again",
+                ));
+            }
+            for (row, target) in rows.iter_mut().zip(targets.iter_mut()) {
+                if row["run"]["id"] != target["run"]["id"]
+                    || row["run"]["revision"] != target["run"]["revision"]
+                {
+                    return Err(CliFailure::protocol(
+                        "Run changed during profile paging; read again",
+                    ));
+                }
+                if let (Some(source), Some(dest)) =
+                    (row["nodes"].as_object(), target["nodes"].as_object_mut())
+                {
+                    dest.extend(source.clone());
+                }
+            }
+            full["nextOffset"] = page["nextOffset"].clone();
+        } else {
+            result = Some(page);
+        }
+        if next.is_none() {
+            return result.ok_or_else(|| CliFailure::protocol("profile missing"));
+        }
+        offset = next;
+    }
+    Err(CliFailure::protocol("profile exceeded 128 pages"))
 }
 
 async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
@@ -248,6 +313,7 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
             Ok(EXIT_OK)
         }
         Command::Dispatch {
+            agent_target,
             retry_of,
             resume_cancelled,
             candidate_digest,
@@ -265,6 +331,7 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
             // the directory facts; the CLI stays a thin forwarder.
             let Reply::WorkflowRun(started) = rpc
                 .call(Request::WorkflowDispatch {
+                    agent_target,
                     retry_of,
                     resume_cancelled: Some(resume_cancelled),
                     candidate_digest,
@@ -358,6 +425,29 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
                 ));
             };
             output::succeed("workflow.get", serde_json::to_value(run).unwrap());
+            Ok(EXIT_OK)
+        }
+        Command::Profile {
+            workspace_id,
+            run_id,
+            compare,
+        } => {
+            let binding = binding_for_missing(workspace_id.is_none() || run_id.is_none()).await?;
+            let workspace_id = resolve_workspace(
+                rpc,
+                workspace_id.or_else(|| binding.as_ref().map(|b| b.workspace_id.clone())),
+            )
+            .await?;
+            let run_id = run_id
+                .or_else(|| binding.map(|b| b.run_id))
+                .ok_or_else(|| CliFailure::invalid_args("workflow profile 需要 --run <id>"))?;
+            let value = read_profile(rpc, &workspace_id, &run_id).await?;
+            let result = if let Some(other) = compare {
+                json!({"baseline": read_profile(rpc, &workspace_id, &other).await?, "current": value})
+            } else {
+                value
+            };
+            output::succeed("workflow.profile", result);
             Ok(EXIT_OK)
         }
         Command::History {
@@ -904,7 +994,7 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
     let Some(verb) = args.first().map(String::as_str) else {
         return Err(CliFailure::invalid_args(USAGE));
     };
-    let mut values = Values::parse(if verb == "recovery" { args.get(2..).unwrap_or(&[]) } else { &args[1..] })?;
+    let mut values = Values::parse(if verb == "recovery" { args.get(2..).unwrap_or(&[]) } else { &args[1..] }, verb)?;
     if values.draft && (verb != "check" || values.run.is_some()) {
         return Err(CliFailure::invalid_args(
             "--draft 只用于 workflow check，不能与 --run 同用",
@@ -942,7 +1032,19 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
                     "workflow dispatch 需要任务内容，可使用 --message <text>",
                 ));
             }
+            let agent_target = match (values.agent.take(), values.model.take()) {
+                (None, None) => None,
+                (Some(agent_id), Some(model_id)) => {
+                    Some(genehub_proto::WorkflowAgentTarget { agent_id, model_id })
+                }
+                _ => {
+                    return Err(CliFailure::invalid_args(
+                        "workflow dispatch requires --agent and --model together",
+                    ))
+                }
+            };
             Ok(Command::Dispatch {
+                agent_target,
                 retry_of: values.retry_of.take(),
                 resume_cancelled: values.resume_cancelled,
                 candidate_digest: values.candidate.take(),
@@ -960,6 +1062,11 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
             })
         }
         "check" => Ok(Command::Check { workspace_id: values.workspace.take(), run_id: values.run.take(), package_id: values.package.take(), draft: values.draft }),
+        "profile" => Ok(Command::Profile {
+            workspace_id: values.workspace.take(),
+            run_id: values.run.take(),
+            compare: values.compare.take(),
+        }),
         "get" => Ok(Command::Get {
             workspace_id: values.workspace.take(),
             run_id: values.run.take(),
@@ -1080,10 +1187,12 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
 }
 
 const USAGE: &str =
-    "usage: genet workflow list|build|inspect|activate|dispatch|get|history|journal|check|consult|complete|deliver|cancel|recover|continue|recovery|human|budget ...";
+    "usage: genet workflow list|build|inspect|activate|dispatch|get|profile|history|journal|check|consult|complete|deliver|cancel|recover|continue|recovery|human|budget ...";
 
 #[derive(Default)]
 struct Values {
+    agent: Option<String>,
+    model: Option<String>,
     draft: bool,
     retry_of: Option<String>,
     resume_cancelled: bool,
@@ -1101,6 +1210,7 @@ struct Values {
     action_id: Option<String>,
     task: Option<String>,
     run: Option<String>,
+    compare: Option<String>,
     node: Option<String>,
     revision: Option<u64>,
     budget_revision: Option<u64>,
@@ -1117,7 +1227,7 @@ struct Values {
 }
 
 impl Values {
-    fn parse(args: &[String]) -> Result<Self, CliFailure> {
+    fn parse(args: &[String], verb: &str) -> Result<Self, CliFailure> {
         let mut values = Self::default();
         let mut index = 0;
         while index < args.len() {
@@ -1130,6 +1240,8 @@ impl Values {
                     .ok_or_else(|| CliFailure::invalid_args(format!("{flag} 需要非空值")))
             };
             match flag {
+                "--agent" if verb == "dispatch" => values.agent = Some(next(&mut index)?),
+                "--model" if verb == "dispatch" => values.model = Some(next(&mut index)?),
                 "--draft" => values.draft = true,
                 "--retry-of" => values.retry_of = Some(next(&mut index)?),
                 "--resume-cancelled" => values.resume_cancelled = true,
@@ -1153,6 +1265,7 @@ impl Values {
                 "--candidate" => values.candidate = Some(next(&mut index)?),
                 "--task" => values.task = Some(next(&mut index)?),
                 "--run" => values.run = Some(next(&mut index)?),
+                "--compare" if verb == "profile" => values.compare = Some(next(&mut index)?),
                 "--node" => values.node = Some(next(&mut index)?),
                 "--message" => values.positionals.push(next(&mut index)?),
                 "--revision" => {

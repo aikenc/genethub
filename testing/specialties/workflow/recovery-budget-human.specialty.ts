@@ -29,17 +29,15 @@ defineSpecialty({
       writeFileSync(path.join(source, `prompts/${role}.md`), `${marker}: inspect the original defect.\n`);
     }
     writeFileSync(path.join(source, "flows/business.yaml"), JSON.stringify({
-      schema: "genehub.workflow.definition.v1", id: "business", version: 1, entry: "work",
+      schema: "genehub.workflow.definition.v2", id: "business", version: 2,
       nodes: [{ id: "work", uses: "agent.session", with: { role: "worker" },
-        completion: { all: [{ key: "result", verify: "value.nonEmpty" }] }, on: { completed: ["publish"] } },
-      { id: "publish", uses: "result.publish" }],
-    }));
+        completion: { all: [{ key: "result", verify: "value.nonEmpty" }] } },
+      { id: "publish", uses: "result.publish" }], structure: {"body":{"id":"sequence","type":"sequence","steps":[{"id":"step-work","type":"task","activity":"work"},{"id":"step-publish","type":"task","activity":"publish"}]}}}));
     writeFileSync(path.join(source, "flows/recovery.yaml"), JSON.stringify({
-      schema: "genehub.workflow.definition.v1", id: "recovery", version: 1, entry: "review",
+      schema: "genehub.workflow.definition.v2", id: "recovery", version: 2,
       outcomes: { resume: { success: true }, human: { success: false } },
-      nodes: [{ id: "review", uses: "agent.session", with: { role: "recovery-worker" }, on: { resume: ["publish"], human: [] } },
-      { id: "publish", uses: "result.publish" }],
-    }));
+      nodes: [{ id: "review", uses: "agent.session", with: { role: "recovery-worker" } },
+      { id: "publish", uses: "result.publish" }], structure: {"body":{"id":"sequence","type":"sequence","steps":[{"id":"step-review","type":"task","activity":"review","accept":["resume"]},{"id":"step-publish","type":"task","activity":"publish"}]}}}));
     const activation = await runGenetAsync(opened.daemon.genet, ["workflow", "activate", "--revision", "0"],
       opened.daemon.env, { cwd: opened.workspaceRoot });
     t.assertions.assert(activation.code === 0, `custom recovery activation failed: ${activation.stderr || activation.stdout}`);
@@ -85,7 +83,7 @@ defineSpecialty({
     stage = "shared allowance stops recovery";
     await t.tools.waitUntil(async () => {
       recovery = (await history()).find(run => run.id === recovery!.id);
-      return recovery?.status === "blocked" && recovery.reason?.includes("requestBudgetExceeded") === true;
+      return recovery?.status === "blocked" && recovery.conditions.some(condition => ["requestBudget", "recoveryBudget"].includes(condition.code));
     }, 25_000);
     t.assertions.assert(!recovery!.humanExit, "exhaustion invented a separate recovery budget card");
     root = (await history()).find(run => run.id === root!.id)!;

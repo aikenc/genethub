@@ -57,10 +57,14 @@ export async function runRustLegacyUnit(
       blockedReason: "required frozen suite missing", message: "Required frozen suite is absent: " + suite };
   }
   const lease = createLease("genehub-legacy-");
+  const inherited = { ...process.env };
+  // Only identities created by the isolated fixture may reach its daemon.
+  delete inherited.GENEHUB_SESSION_ID;
+  delete inherited.GENEHUB_CONTROLLER_TOKEN;
   const child = spawnGroup("cargo", ["test", "--manifest-path", manifest, "--test", suite, "--", testName, "--exact", "--include-ignored", "--show-output"], {
     cwd: openRoot,
     env: {
-      ...process.env,
+      ...inherited,
       ...lease.env,
       TESTCTL_RESOURCE_OWNER: lease.id,
       TESTCTL_HOST_HOME: userInfo().homedir,

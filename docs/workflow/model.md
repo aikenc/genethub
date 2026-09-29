@@ -80,3 +80,15 @@ PM 的管理能力来自已授权项目及调用者身份；异常兜底额外�
 WR 的只读是角色职责约定。`userInteraction: readOnly` 限制人直接改写受管会话，不限制 Agent 文件工具。当前角色按标签路由 Agent，`evidenceOnly` 不再参与工具收窄或路由准入。保留的 `diagnostic` 组件标记只为兼容已安装的 Space；它不再驱动独立自动诊断。
 
 实现入口：[组件与归属](../../apps/daemon/src/agent_space.rs)、[会话组件实例](../../apps/daemon/src/session/components.rs)、[宿主](../../apps/daemon/src/workflow/mod.rs)、[权限](../../apps/daemon/src/router.rs)。
+
+## 可观测与优化
+
+Workflow Builder 校验控制流、内联规范并冻结视图文件；内置视图无需 Node 构建工具。
+`workflow profile --run <id>` 按请求读取 Run、Worker 活动与成本快照，返回基础事实和缺失来源，
+不在 daemon 维护关键路径或质量结论。`--compare <id>` 提供两份请求事实供 WM 比较。
+模型成本统一按 LLM 调用次数和五档人民币单价估算，执行时固定单价；未计价调用明确显示。
+
+包可以用脚本记录依赖、排队、工具内部步骤，并在自己的 UI 中计算关键路径与余量。
+需求项、产品规范和工程规范的适用范围、验收出口和交付门禁完全由包定义。
+WM 同时维护流程、提示词和视图，比较等价材料上的质量、时间与成本；WR 负责运行健康下限，
+PM 传递目标与质量底线，不把平台接口缺口变成要求用户放宽目标的选择。

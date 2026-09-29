@@ -78,7 +78,7 @@ export function trackResources(owner: string, rootPid: number) {
       const leakedProcesses = (before.processes ?? 0) > 0 ? scan().slice(0, 16).map(p => {
         let executable = "unavailable";
         try { executable = readlinkSync(`/proc/${p.pid}/exe`).split("/").at(-1) ?? "unavailable"; } catch { /* raced exit */ }
-        return { pid: p.pid, parent: p.parent, state: p.state, executable };
+        return { pid: p.pid, birth: p.birth, parent: p.parent, state: p.state, executable };
       }) : undefined;
       for (const signal of ["SIGTERM", "SIGKILL"] as const) {
         for (const p of scan()) {

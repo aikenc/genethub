@@ -167,7 +167,7 @@ for (const scenario of ["milestones", "replan", "exhausted", "no-go", "budget-ga
       await t.tools.waitUntil(async () => {
         const current = await opened.client.call({ type: "workflow.history", payload: { workspaceId: opened.workspaceId, limit: 10 } });
         return current?.type === "workflowRuns" && current.data.every(item =>
-          ["completed", "cancelled"].includes(item.status));
+          item.phase === "closed" && item.requirement?.state === "cancelled");
       }, 30_000);
     }
   } finally { opened.client.close(); opened.daemon.stop(); await opened.mock.stop(); }

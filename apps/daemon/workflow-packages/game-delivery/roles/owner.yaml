@@ -1,0 +1,5 @@
+schema: genehub.workflow.role.v3
+id: owner
+tags: [Pro]
+userInteraction: readOnly
+prompt: prompts/owner.md

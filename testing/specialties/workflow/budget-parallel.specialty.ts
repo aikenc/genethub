@@ -71,9 +71,17 @@ for (const scenario of ["observation", "retry", "budget-expiry", "entries", "ent
     const waitFile = (file: string) => `for i in $(seq 1 400); do test -f ${q(file)} && break; sleep 0.05; done; test -f ${q(file)}`;
     let nextCommand: string | undefined = '"$GENEHUB_CLI" workflow activate --revision 0 && "$GENEHUB_CLI" workflow dispatch --workflow direct-change --task observed-1 --no-wait --message "Process the bounded record batch within the existing request budget"';
     const seen = new Set<string>();
+    const reported = new Set<string>();
     opened.mock.script(...Array.from({ length: 90 }, () => ({ respond: (request: unknown) => {
       const text = JSON.stringify(request);
       if (["parallel-double-failure", "budget-expiry"].includes(scenario) && text.includes("只读复查这条用户需求及其 Run")) return { hang: true as const };
+      if (text.includes("角色标签为 `recovery-reviewer`")) {
+        const reportOperation = text.match(/当前节点：(operation-\d+)/)?.[1];
+        const reportKey = "report:" + (text.match(/被处理 Run：(wr_[a-f0-9]+)/)?.[1] ?? "run") + ":" + reportOperation;
+        if (reported.has(reportKey)) return { text: "Diagnostic report submitted." };
+        reported.add(reportKey);
+        return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" workflow complete --evidence report="Observed failed program and retained the original goal"' } } };
+      }
       if (!text.includes("BUDGET_PARALLEL_WORKER")) {
         if (!nextCommand) return { text: "Observed execution facts." };
         const command = nextCommand; nextCommand = undefined; return { tool: { name: "bash", arguments: { command } } };
@@ -94,6 +102,7 @@ for (const scenario of ["observation", "retry", "budget-expiry", "entries", "ent
         : `--output ${q(JSON.stringify({ passed: scenario !== "entries" || data.key !== "z" }))}`;
       const barrier = scenario === "observation" || scenario === "budget-expiry" || scenario === "parallel-human-wait" ? waitFile(release)
         : pure || budgetCase ? "true" : waitFile(effect(data.key === "a" ? "z" : "a"));
+      // Both real Workers must start before either can submit.
       const pause = scenario === "parallel-sibling-lost" ? "sleep 45 && "
         : scenario === "parallel-failure" && data.key === "z" ? "sleep 30 && " : data.key === "z" ? "sleep 0.3 && " : "";
       const after = scenario === "observation" ? " && sleep 5" : "";
@@ -112,8 +121,7 @@ for (const scenario of ["observation", "retry", "budget-expiry", "entries", "ent
       if (reply?.type !== "workflowRuns") throw new Error("missing history"); return reply.data;
     };
     let run: WorkflowRunStatus | undefined;
-    const current = async () => { const runs = await history(); run = scenario === "parallel-sibling-lost"
-      ? runs.find(item => item.taskId === "observed-1") : runs[0]; return run; };
+    const current = async () => { const runs = await history(); run = runs.filter(item => item.handles.length === 0)[0]; return run; };
     const restart = async () => { opened.client.close(); await cli(["daemon", "stop"]); await cli(["daemon", "start"]); opened.client = await connectProductClient(daemonEndpoint(opened.daemon)); };
     await send("Execute the configured Workflow and retain its facts.");
     let before: WorkflowRequestBudgetSnapshot | undefined;
@@ -166,23 +174,24 @@ for (const scenario of ["observation", "retry", "budget-expiry", "entries", "ent
       await t.tools.waitUntil(async () => (await current())?.nodes.some(n => n.uses === "agent.session" && n.status === "finishing") === true, 25_000);
       await restart();
     } else if (scenario === "parallel-restart") {
+      let acceptedCheckpoint: string | undefined;
+      let snapshotPath = "";
       await t.tools.waitUntil(async () => {
-        await current(); return run?.status === "completed" &&
-          run.nodes.filter(n => n.uses === "agent.session" && n.status === "completed").length === 2;
+        await current();
+        if (!run) return false;
+        snapshotPath = path.join(opened.workspaceRoot, ".genethub/components/pm/requests", run.id, "runs", run.id, "run.json");
+        const raw = readFileSync(snapshotPath, "utf8"), saved = JSON.parse(raw);
+        const workers = Object.values(saved.run.nodes).filter((node: any) => node.uses === "agent.session") as Array<{ phase: string; resultAcceptedAtMs: number }>;
+        if (workers.length === 2 && workers.every(node => node.resultAcceptedAtMs > 0)
+          && workers.some(node => node.phase === "finishing") && saved.run.engine?.status === "running") acceptedCheckpoint = raw;
+        return run.status === "completed" && run.nodes.filter(n => n.uses === "agent.session" && n.status === "completed").length === 2;
       }, 40_000).catch(async error => { throw new Error(`${error}; beforeRestart=${JSON.stringify(run)}; requests=${opened.mock.requests.length}`); });
+      t.assertions.assert(!!acceptedCheckpoint, "did not observe a genuine accepted-result/unfinished-cleanup checkpoint");
       opened.client.close();
       await cli(["daemon", "stop"]);
-      // Restore the durable accepted-result/unfinished-cleanup checkpoint with
-      // the daemon stopped. Fast retirement must not make this coverage depend
-      // on observing a transient finishing window under parallel gate load.
-      const snapshotPath = path.join(opened.workspaceRoot, ".genethub/components/pm/requests", run!.id, "runs", run!.id, "run.json");
-      const saved = JSON.parse(readFileSync(snapshotPath, "utf8"));
-      const node = run!.nodes.find(n => n.uses === "agent.session")!;
-      t.assertions.assert(saved.run.nodes[node.id].status === "completed", "accepted cleanup checkpoint was not durable");
-      saved.run.nodes[node.id].status = "finishing";
-      saved.run.status = "running";
-      saved.run.revision += 1;
-      writeFileSync(snapshotPath, JSON.stringify(saved));
+      // Replay an actual durable pre-cleanup snapshot, including its pure engine
+      // state. Changing only a completed node label would manufacture an invalid checkpoint.
+      writeFileSync(snapshotPath, acceptedCheckpoint!);
       await cli(["daemon", "start"]);
       opened.client = await connectProductClient(daemonEndpoint(opened.daemon));
     } else if (scenario === "parallel-sibling-lost") {
@@ -241,9 +250,9 @@ for (const scenario of ["observation", "retry", "budget-expiry", "entries", "ent
       await opened.client.call({ type: "workflow.cancel", payload: { workspaceId: opened.workspaceId, runId: run!.id, expectedRevision: run!.revision } });
     }
     await t.tools.waitUntil(async () => { await current(); return !!run && ["completed", "blocked", "cancelled"].includes(run.status); }, 70000);
-    const expected = ["parallel-human-wait", "parallel-sibling-lost"].includes(scenario) ? "cancelled"
+    const expected = scenario === "parallel-human-wait" ? "cancelled" : scenario === "parallel-sibling-lost" ? "blocked"
       : ["entries-type", "entries-limit", "parallel-failure", "parallel-double-failure"].includes(scenario) ? "blocked" : "completed";
-    t.assertions.assert(run!.status === expected && !run!.activeNodes.length && !run!.cleanupError, `unexpected terminal facts: ${JSON.stringify(run)}`);
+    t.assertions.assert(run!.status === expected && (scenario !== "parallel-sibling-lost" || run!.requirement?.state === "cancelled") && !run!.activeNodes.length && !run!.cleanupError, `unexpected terminal facts: ${JSON.stringify(run)}`);
     const value = () => (run!.structure as { outcome?: { value?: unknown } })?.outcome?.value;
     if (budgetCase) {
       const result = value() as { before: WorkflowRequestBudgetSnapshot; after: WorkflowRequestBudgetSnapshot };

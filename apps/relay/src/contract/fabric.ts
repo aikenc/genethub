@@ -36,6 +36,7 @@ export interface FabricAuthority {
     endpointHandle: string,
     connectionGeneration: number,
     state: FabricPresenceState,
+    detail?: { reasonCode: string; strikes: number },
   ): Promise<void>;
   onFabricRevoked(handler: (revocation: FabricRevocation) => void): void;
 }

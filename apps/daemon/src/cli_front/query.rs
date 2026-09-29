@@ -932,7 +932,8 @@ fn context_data(hello: &HelloResult, machine: Option<&str>) -> Value {
         Some(id) => (id.to_string(), String::new()),
         None => (hello.machine_id.clone(), hello.machine_name.clone()),
     };
-    let (workflow_patrol_active_jobs, workflow_patrol_oldest_job_ms) = crate::workflow::patrol_jobs();
+    let (workflow_patrol_active_jobs, workflow_patrol_oldest_job_ms) =
+        crate::workflow::patrol_jobs();
     json!({
         "source": if machine.is_some() { "remoteDaemon" } else { "localDaemon" },
         "principal": {"type": if machine.is_some() { "pairedDevice" } else { "localUser" }},
@@ -1271,18 +1272,20 @@ fn command_schema(name: &str) -> Value {
                 "expectedRevision": {"type": "integer", "minimum": 0, "description": "--revision"}
             }), &["packageId"],
         ),
-        "workflow.inspect" => workflow_schema("genet workflow inspect [--workspace <id>] [--candidate <digest>]", json!({"candidateDigest":{"type":"string","description":"Inspect this immutable candidate catalog; does not activate it"}}), &[]),
+        "workflow.profile" => workflow_schema("genet workflow profile [--workspace <id>] --run <id> [--compare <baseline-run>]", json!({"runId":{"type":"string"},"compare":{"type":"string","description":"Read a second request baseline; no policy conclusion is calculated"}}), &["runId"]),
+        "workflow.inspect" => workflow_schema("genet workflow inspect [--workspace <id>] [--build <digest>]", json!({"candidateDigest":{"type":"string","description":"Inspect this immutable workflow build; does not activate it"}}), &[]),
         "workflow.activate" => workflow_schema(
-            "genet workflow activate [--workspace <id>] [--candidate <digest>] --revision <n>",
+            "genet workflow activate [--workspace <id>] [--build <digest>] --revision <n>",
             json!({"candidateDigest": {"type": "string"}, "revision": {"type": "integer", "minimum": 0}}), &["revision"],
         ),
         "workflow.dispatch" => workflow_schema(
-            "genet workflow dispatch [--workspace <id>] [--workflow <id> | --kind <kind> --complexity <level>] [--task <id>] --message <text> [--candidate <digest>] [--retry-of <run>] [--resume-cancelled] [--wait|--no-wait] [--timeout <s>]",
+            "genet workflow dispatch [--workspace <id>] [--workflow <id> | --kind <kind> --complexity <level>] [--task <id>] --message <text> [--build <digest>] [--agent <id> --model <id>] [--retry-of <run>] [--resume-cancelled] [--wait|--no-wait] [--timeout <s>]",
             json!({
                 "workflowId": {"type": "string"}, "kind": {"type": "string"}, "complexity": {"type": "string"},
                 "taskId": {"type": "string", "description": "--task; dispatch idempotency key, generated if omitted"},
                 "prompt": {"type": "string", "minLength": 1, "description": "--message or positional text"},
-                "candidateDigest": {"type": "string", "description": "--candidate"},
+                "candidateDigest": {"type": "string", "description": "--build; --candidate remains an alias"},
+                "agentTarget": {"type": "object", "description": "--agent and --model together; request-only exact destination, inherited by retries and recovery, no global routing change", "properties": {"agentId": {"type":"string", "minLength":1}, "modelId": {"type":"string", "minLength":1}}, "required":["agentId","modelId"], "additionalProperties":false},
                 "retryOf": {"type": "string", "description": "--retry-of; NEW Run from the workflow entry, sharing original request limits; does not resume an unfinished operation"},
                 "resumeCancelled": {"type": "boolean", "default": false, "description": "--resume-cancelled; requires new user input"},
                 "wait": {"type": "boolean", "default": true}, "timeout": {"type": "integer", "minimum": 0}
@@ -1882,6 +1885,8 @@ pub fn reply_kind(reply: &Reply) -> &'static str {
         Reply::SessionArtifact(_) => "session artifact",
         Reply::WorkflowCheck(_) => "workflow check",
         Reply::WorkflowProject(_) => "workflow project",
+        Reply::WorkflowProfile(_) => "workflow profile",
+        Reply::WorkflowView(_) => "workflow view",
         Reply::WorkflowRun(_) => "workflow run",
         Reply::WorkflowJournal(_) => "workflow journal",
         Reply::WorkflowRuns(_) => "workflow runs",

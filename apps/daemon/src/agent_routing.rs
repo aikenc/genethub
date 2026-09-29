@@ -27,7 +27,9 @@ pub const BUILTIN_TAGS: [&str; 5] = [TAG_MAX, TAG_PRO, TAG_FLASH, TAG_VIDEO, TAG
 pub(crate) struct RouteUnavailable(pub String);
 
 impl fmt::Display for RouteUnavailable {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str(&self.0) }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 impl std::error::Error for RouteUnavailable {}
@@ -165,6 +167,7 @@ pub(crate) fn media_tags_for_timeline(items: &[TimelineItem]) -> Vec<String> {
 /// Selects the cheapest live Agent/model whose tags contain every requirement.
 /// Cost ties use opaque ids only to make the result deterministic; this is not
 /// a Human-editable priority order.
+#[cfg(test)]
 pub(crate) fn select_tag_route(
     preferences: &AgentSelectionPreferences,
     required_tags: &[String],
@@ -173,7 +176,7 @@ pub(crate) fn select_tag_route(
     select_tag_route_excluding(preferences, required_tags, agents, &BTreeSet::new())
 }
 
-/// Same live tag/cost selection as [`select_tag_route`], excluding exact
+/// Selects a live Agent/model by tag and cost, excluding exact
 /// Agent/model routes that have already failed during the current operation.
 /// Exclusions are deliberately supplied by the caller instead of entering the
 /// machine-global preferences: a transient provider failure must not rewrite
@@ -280,6 +283,39 @@ pub(crate) async fn resolve_live_route(
     required_tags: &[String],
 ) -> Result<(ResolvedAgentRoute, ProviderMap)> {
     resolve_live_route_excluding(state, required_tags, &BTreeSet::new()).await
+}
+
+/// A Human's exact workflow destination overrides portable role routing
+/// defaults for this request only. Do not edit machine preferences or silently
+/// fall back to another destination. Role instructions remain package-owned.
+pub(crate) async fn resolve_exact_workflow_route(
+    state: &Shared,
+    target: &genehub_proto::WorkflowAgentTarget,
+) -> Result<(ResolvedAgentRoute, ProviderMap)> {
+    let providers = state.providers().await;
+    let agents = state.registry.list(&providers).await;
+    let agent = agents
+        .iter()
+        .find(|a| a.id == target.agent_id && matches!(a.probe, ProbeState::Ready))
+        .ok_or_else(|| {
+            anyhow!(RouteUnavailable(format!(
+                "workflowAgentTargetUnavailable: requested Agent {} is not ready",
+                target.agent_id
+            )))
+        })?;
+    let model = agent.catalog.models.iter().find(|m| m.id == target.model_id && !is_auto_model(m))
+        .ok_or_else(|| anyhow!(RouteUnavailable(format!("workflowAgentTargetUnavailable: requested model {}/{} is absent from the live catalog", target.agent_id, target.model_id))))?;
+    let preferences = state
+        .config
+        .read()
+        .await
+        .agent_preferences
+        .clone()
+        .unwrap_or_default();
+    Ok((
+        candidate_for(&preferences, agent, Some(model)).route,
+        providers,
+    ))
 }
 
 pub(crate) async fn resolve_live_route_excluding(
@@ -663,13 +699,9 @@ mod tests {
             ..Default::default()
         };
         let excluded = BTreeSet::from([("genet".to_string(), Some("provider/cheap".to_string()))]);
-        let route = select_tag_route_excluding(
-            &preferences,
-            &[TAG_FLASH.into()],
-            &[candidate],
-            &excluded,
-        )
-        .expect("the higher-cost matching route remains eligible");
+        let route =
+            select_tag_route_excluding(&preferences, &[TAG_FLASH.into()], &[candidate], &excluded)
+                .expect("the higher-cost matching route remains eligible");
         assert_eq!(route.agent_id, "genet");
         assert_eq!(route.model_id.as_deref(), Some("provider/backup"));
     }
@@ -724,12 +756,7 @@ mod tests {
             .models
             .retain(|model| model.id != "m4-max");
         assert!(
-            select_tag_route(
-                &preferences,
-                &[TAG_FLASH.into()],
-                &[candidate],
-            )
-            .is_err(),
+            select_tag_route(&preferences, &[TAG_FLASH.into()], &[candidate],).is_err(),
             "a stale configured row must not enable unconfigured defaults"
         );
     }
@@ -742,7 +769,10 @@ mod tests {
         );
         assert!(validate_selected_tags(Vec::new()).is_err());
         assert!(validate_selected_tags(vec!["Flash".into(), "flash".into()]).is_err());
-        assert_eq!(normalize_tags(["Flush".into(), "flash".into()]), vec!["Flash".to_string()]);
+        assert_eq!(
+            normalize_tags(["Flush".into(), "flash".into()]),
+            vec!["Flash".to_string()]
+        );
         assert!(is_builtin_tag("Flush"));
         assert!(validate_selected_tags(vec!["x".repeat(41)]).is_err());
         assert_eq!(

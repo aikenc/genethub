@@ -116,6 +116,11 @@ pub(super) fn classify_human_exit(run: &super::RunRecord) -> Option<&'static str
             .saturating_mul(1000).min(i64::MAX as u64) as i64;
         return (super::now_ms().saturating_sub(run.updated_at_ms) >= answer_ms).then_some("d");
     }
+    if run.program_open() && run.human_decision_ready() {
+        let answer_ms = run.definition.pm_answer_seconds.unwrap_or(DEFAULT_PM_ANSWER_SECONDS)
+            .saturating_mul(1000).min(i64::MAX as u64) as i64;
+        return run.disposition_since().filter(|since| super::now_ms().saturating_sub(*since) >= answer_ms).map(|_| "d");
+    }
     if run.status() != "blocked" { return None; }
     let cause = run.stop.as_ref().map(|stop| stop.cause_code.as_str()).unwrap_or("");
     // Exhausted allowance needs a concrete PM budget proposal, at any time.
@@ -207,7 +212,7 @@ pub(super) async fn ensure_human_decision(
             }
             super::require_request_writer(runtime, run)?;
             let current = super::load_run(runtime, &run.id)?;
-            if current.unfinished()
+            if !current.human_decision_ready()
                 || super::requirement::terminal(runtime, &current)? || current.revision != run.revision {
                 bail!("Workflow Human exit target changed before question creation");
             }

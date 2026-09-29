@@ -19,7 +19,8 @@ const CONNECT_TIMEOUT_MS = 20_000;
  * Host candidates appear immediately; STUN usually finishes in 1–2s. Cap the
  * wait so a hung STUN server cannot stall the upgrade for 20s.
  */
-export const GATHER_WAIT_MS = 12_000;
+/** Stop waiting for ICE once a server-reflexive candidate exists, or after this. */
+export const GATHER_WAIT_MS = 2_000;
 export const ICE_SERVERS: RTCIceServer[] = [];
 const BUFFERED_HIGH = 256 * 1024;
 const BUFFERED_LOW = 64 * 1024;
@@ -53,7 +54,12 @@ export interface RtcDataLink {
   close(): void;
 }
 
-export interface RtcLinkOptions { endpoint?: DataEndpoint; policy?: ResumePolicy }
+export interface RtcLinkOptions {
+  endpoint?: DataEndpoint;
+  policy?: ResumePolicy;
+  /** Finish ICE and the E2EE handshake, but wait to activate an existing owner. */
+  attachWhen?: Promise<void>;
+}
 
 /** Negotiates one reliable ordered DataChannel through the base E2EE link. */
 export async function openRtcDataLink(
@@ -65,6 +71,14 @@ export async function openRtcDataLink(
   if (typeof RTCPeerConnection !== "function") {
     throw new Error("this browser does not support WebRTC");
   }
+  const startedAt = performance.now();
+  let stageStartedAt = startedAt;
+  const timing: Record<string, number> = {};
+  const finishStage = (name: string) => {
+    const now = performance.now();
+    timing[`${name}Ms`] = Math.round(now - stageStartedAt);
+    stageStartedAt = now;
+  };
   let iceServers: RTCIceServer[] = [];
   const configStream=base.open({version:DATA_PLANE_VERSION,method:"rtc.config",metadata:null,bodyLength:0,timeoutMs:5000});
   try {
@@ -76,6 +90,7 @@ export async function openRtcDataLink(
     }
   } catch { /* Old daemons have no rtc.config: host candidates remain usable. */ }
   finally {configStream.reset(DataReset.Cancelled);}
+  finishStage("config");
   const peer = new RTCPeerConnection({ iceServers });
   if (onDiagnostic) watchPeer(peer, diagnosticId ?? null, onDiagnostic);
   const channel = peer.createDataChannel("genehub-data-v4", { ordered: true });
@@ -93,6 +108,7 @@ export async function openRtcDataLink(
     const offer = await peer.createOffer();
     await peer.setLocalDescription(offer);
     await iceGathered(peer, GATHER_WAIT_MS);
+    finishStage("gather");
     const offerSdp = peer.localDescription?.sdp;
     if (!offerSdp) {
       throw new RtcUpgradeError(
@@ -130,6 +146,19 @@ export async function openRtcDataLink(
         if (response.status !== 200) {
           throw new Error(`RTC negotiation failed (${response.status})`);
         }
+        const serverTiming = response.metadata && typeof response.metadata === "object" &&
+          !Array.isArray(response.metadata) ? response.metadata.rtcTiming : null;
+        if (serverTiming && typeof serverTiming === "object" && !Array.isArray(serverTiming)) {
+          const bounded = (value: unknown) => typeof value === "number" &&
+            Number.isInteger(value) && value >= 0 && value <= 120_000 ? value : null;
+          onDiagnostic?.({
+            diagnosticId: diagnosticId ?? null,
+            milestone: "serverTiming",
+            serverConfigMs: bounded(serverTiming.configMs),
+            serverGatherMs: bounded(serverTiming.gatherMs),
+            serverAnswerMs: bounded(serverTiming.answerMs),
+          });
+        }
         return JSON.parse(
           new TextDecoder("utf-8", { fatal: true }).decode(
             await collectBody(stream.body(), SIGNAL_LIMIT),
@@ -140,6 +169,7 @@ export async function openRtcDataLink(
       "RTC signaling timed out",
       () => stream.reset(DataReset.Timeout),
     ).catch(fail);
+    finishStage("signal");
     if (
       !answer.sdp ||
       !answer.capabilityId ||
@@ -149,8 +179,14 @@ export async function openRtcDataLink(
       fail("the daemon returned an invalid RTC answer");
     }
     await peer.setRemoteDescription({ type: "answer", sdp: answer.sdp }).catch(fail);
+    onDiagnostic?.({
+      diagnosticId: diagnosticId ?? null,
+      milestone: "remoteCandidates",
+      ...remoteCandidateCounts(peer),
+    });
     phase = "channel";
     await withDeadline(opened, CONNECT_TIMEOUT_MS, "RTC DataChannel did not open").catch(fail);
+    finishStage("channel");
 
     phase = "handshake";
     const prepared = await preparePeerHandshake({
@@ -166,6 +202,13 @@ export async function openRtcDataLink(
       ),
     ) as PeerWelcome;
     const handshake = await prepared.complete(welcomeValue);
+    finishStage("handshake");
+    onDiagnostic?.({
+      diagnosticId: diagnosticId ?? null,
+      milestone: "transportReady",
+      ...timing,
+      totalMs: Math.round(performance.now() - startedAt),
+    });
     const carrier = new RtcRecordCarrier(peer, channel);
     const endpoint = options.endpoint ?? new DataEndpoint({
       path: "rtc",
@@ -176,7 +219,11 @@ export async function openRtcDataLink(
       maxBulkStreamWindowBytes: handshake.maxBulkStreamWindowBytes,
       maxReceiveBytesPerStream: 64 * 1024 * 1024,
     });
-    if (options.endpoint) await endpoint.attach(carrier, handshake.key, "rtc");
+    if (options.endpoint) {
+      await options.attachWhen;
+      if (channel.readyState !== "open") fail("RTC DataChannel closed before activation");
+      await endpoint.attach(carrier, handshake.key, "rtc");
+    }
     else await endpoint.ready();
     return {
       endpoint,
@@ -313,9 +360,22 @@ export function watchPeer(
   peer.addEventListener("iceconnectionstatechange", () =>
     emit({ iceConnectionState: peer.iceConnectionState }),
   );
-  peer.addEventListener("connectionstatechange", () =>
-    emit({ connectionState: peer.connectionState }),
-  );
+  let summaries = 0;
+  peer.addEventListener("connectionstatechange", () => {
+    const state = peer.connectionState;
+    emit({ connectionState: state });
+    // One bounded summary per meaningful transition. Never retain the raw
+    // stats report: candidate reports also contain addresses and ports.
+    if ((state === "connected" || state === "failed" || state === "disconnected") &&
+      summaries < 6) {
+      summaries += 1;
+      void candidatePairSummary(peer).then((summary) => emit({
+        milestone: "candidatePair",
+        connectionState: state,
+        ...summary,
+      }));
+    }
+  });
   peer.addEventListener("signalingstatechange", () =>
     emit({ signalingState: peer.signalingState }),
   );
@@ -339,6 +399,55 @@ export function watchPeer(
       });
     }
   });
+}
+
+/** A fixed allowlist from getStats; no candidate IDs, addresses, ports or SDP. */
+async function candidatePairSummary(peer: RTCPeerConnection): Promise<RtcDiagnostic> {
+  try {
+    const report = await peer.getStats();
+    const pairs: RTCIceCandidatePairStats[] = [];
+    let selectedId: string | undefined;
+    report.forEach((entry) => {
+      if (entry.type === "transport" && "selectedCandidatePairId" in entry &&
+        typeof entry.selectedCandidatePairId === "string") selectedId = entry.selectedCandidatePairId;
+      if (entry.type === "candidate-pair") pairs.push(entry as RTCIceCandidatePairStats);
+    });
+    const selected = pairs.find((pair) => pair.id === selectedId) ??
+      pairs.find((pair) => pair.nominated && pair.state === "succeeded");
+    const local = selected && report.get(selected.localCandidateId);
+    const remote = selected && report.get(selected.remoteCandidateId);
+    const candidateType = (entry: RTCStats | undefined): string | null => {
+      if (!entry || !("candidateType" in entry)) return null;
+      const value = entry.candidateType;
+      return value === "host" || value === "srflx" || value === "prflx" || value === "relay"
+        ? value : null;
+    };
+    const protocol = (entry: RTCStats | undefined): string | null => {
+      if (!entry || !("protocol" in entry)) return null;
+      const value = entry.protocol;
+      return value === "udp" || value === "tcp" ? value : null;
+    };
+    const bounded = (value: unknown, scale = 1): number | null =>
+      typeof value === "number" && Number.isFinite(value) && value >= 0
+        ? Math.min(1_000_000_000, Math.round(value * scale)) : null;
+    return {
+      statsAvailable: true,
+      pairWaiting: pairs.filter((pair) => pair.state === "waiting").length,
+      pairInProgress: pairs.filter((pair) => pair.state === "in-progress").length,
+      pairSucceeded: pairs.filter((pair) => pair.state === "succeeded").length,
+      pairFailed: pairs.filter((pair) => pair.state === "failed").length,
+      selectedPair: Boolean(selected),
+      selectedLocalType: candidateType(local),
+      selectedRemoteType: candidateType(remote),
+      selectedProtocol: protocol(local) ?? protocol(remote),
+      pairRttMs: bounded(selected?.currentRoundTripTime, 1000),
+      pairRequestsSent: bounded(selected?.requestsSent),
+      pairResponsesReceived: bounded(selected?.responsesReceived),
+      pairConsentRequestsSent: bounded(selected?.consentRequestsSent),
+    };
+  } catch {
+    return { statsAvailable: false };
+  }
 }
 
 function dataChannelOpened(  channel: RTCDataChannel,
@@ -377,14 +486,20 @@ export function iceGathered(peer: RTCPeerConnection, waitMs: number): Promise<vo
   return new Promise((resolve) => {
     const finish = () => {
       peer.removeEventListener("icegatheringstatechange", changed);
+      peer.removeEventListener("icecandidate", onCandidate);
       clearTimeout(timer);
       resolve();
     };
     const changed = () => {
       if (peer.iceGatheringState === "complete") finish();
     };
+    const onCandidate = (event: Event) => {
+      const text = (event as RTCPeerConnectionIceEvent).candidate?.candidate ?? "";
+      if (/ typ srflx(?: |$)/.test(text)) finish();
+    };
     const timer = setTimeout(finish, waitMs);
     peer.addEventListener("icegatheringstatechange", changed);
+    peer.addEventListener("icecandidate", onCandidate);
   });
 }
 
@@ -395,7 +510,25 @@ function snapshotPeer(peer: RTCPeerConnection, diagnosticId?: string): RtcDiagno
     iceConnectionState: peer.iceConnectionState,
     connectionState: peer.connectionState,
     signalingState: peer.signalingState,
+    ...remoteCandidateCounts(peer),
   };
+}
+
+/** Only candidate types are retained. SDP addresses and ports must not enter diagnostics. */
+function remoteCandidateCounts(peer: RTCPeerConnection): RtcDiagnostic {
+  const counts = { remoteCandidateHost: 0, remoteCandidateSrflx: 0,
+    remoteCandidatePrflx: 0, remoteCandidateRelay: 0 };
+  const sdp = peer.remoteDescription?.sdp;
+  if (!sdp) return counts;
+  for (const line of sdp.split(/\r?\n/)) {
+    if (!line.startsWith("a=candidate:")) continue;
+    const type = / typ (host|srflx|prflx|relay)(?: |$)/.exec(line)?.[1];
+    if (type === "host") counts.remoteCandidateHost++;
+    else if (type === "srflx") counts.remoteCandidateSrflx++;
+    else if (type === "prflx") counts.remoteCandidatePrflx++;
+    else if (type === "relay") counts.remoteCandidateRelay++;
+  }
+  return counts;
 }
 
 function withDeadline<T>(

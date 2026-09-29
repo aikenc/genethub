@@ -1,0 +1,18 @@
+# Time, cost and workflow views
+
+Use the exact `$GENEHUB_CLI`. `workflow profile --run <id>` returns the original request's retry group, raw node inputs/outputs/clocks, calls and assignment-time CNY rate snapshots. `session inspect`, `session narrative`, `session rounds`, trunk and blob commands let you inspect actual commands, tool times and model turns. Legacy calls without a rate remain explicitly unpriced. The machine's cost tiers default to ¥2 / ¥0.5 / ¥0.1 / ¥0.02 / ¥0.005 per actual LLM call. Do not mix reported dollar/token pricing into that estimate.
+
+Freeze the baseline Run, inputs, source commits, requirements and all standards before optimizing. Compare actual trials using the same material and unchanged quality floor. Inspect bottlenecks on the actual critical path, useful branch concurrency, mainline lease contention, repeated rework, tool commands that hang and repeated context. Change concurrency, task size, model tags or prompt duplication only with measurable evidence. Faster branches off the critical path do not necessarily shorten delivery. Cheap calls that increase rework may increase the total estimate. Keep a rollback build; compilation and report shape do not prove quality.
+
+`views/<id>/index.html` is part of the workflow build. Use plain HTML/JS/CSS with relative resources. All view and checklist files are frozen together with the workflow. The default progress entry is `views/progress/index.html`; its title supplies the platform's entry label. If you change the workflow shape or report schema, change its view in that same build. No built-in fallback promises compatibility with a modified workflow.
+
+The host injects `window.GenetHub`:
+
+- `context`: workspaceId, runId, build, packageId, viewId, optional nodeId.
+- `rpc(method, payload)`: normal platform RPC authority, Promise of reply data. Control calls remain enabled; respect their CAS/receipt contracts and never blindly retry a timeout.
+- `fs.readFile/readdir/writeFile/mkdir/remove`: existing workspace file/Preview transport. Pass the workspace ID as the last argument when reading a different registered workspace. No second message bus or backend.
+- `intent.openSession({sessionId})`, `openRun({workspaceId?,runId?})`, `openFile({workspaceId?,path})`, `openView({workspaceId?,runId?,viewId?,nodeId?})`, `draftToPM({text})`: use platform navigation. Drafting fills the existing PM composer.
+
+Platform clocks and structure identify native operations. Rich internal substeps, dependency edges and queue causes are package facts. `scripts/observe.py` writes one JSON file per event under the task's `.genethub/temp/observations/` using a UTC+8 timestamp and content hash. Include `runId`, `nodeId`, `id`, `startMs`, `endMs`, `dependsOn`, and optional `waits[{startMs,endMs,reason,blockedBy}]`. Write concrete wait owners when known; do not fabricate causes from temporal overlap alone. WM may extend or replace this schema and analysis. Structural data plus these records supports expanded DAGs, critical paths, float and time attribution without business policy in the daemon.
+
+The package's `quality-parallel` example has owner-generated requirement criteria and WM-authored product/engineering standards. Independent Reviewers check the same immutable commit in parallel. `quality-gate.py` validates complete coverage and baseline identity; failed or unverified rows cause rework, na is excluded, disputed is visible feedback to PM/WM. The script is package policy and can be strengthened by WM. Lack of tools is unverified, never na. Do not relax gates or shorten checklists to manufacture a speed/cost improvement.

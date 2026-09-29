@@ -214,6 +214,19 @@ export function RuntimeSettings({
 
   return (
     <div className="flex min-w-0 flex-col gap-3">
+      <details className="rounded-xl border border-line px-3 py-2">
+        <summary className="cursor-pointer text-xs font-medium">成本估算 · 元 / LLM 请求</summary>
+        <p className="mt-2 text-xs text-muted">全局五档估算，模型使用其已有成本档位；新执行记录固定当时单价。</p>
+        <div className="mt-2 grid grid-cols-2 gap-2">
+          {COST_LEVELS.map(level => <label key={level.id} className="text-xs">{level.label}
+            <input aria-label={`${level.label}成本估算`} type="number" min="0" max="1000" step="0.001" className="ml-2 w-20 rounded border border-line bg-surface px-2 py-1"
+              value={(draft.costRates ?? {veryHigh: 2000, high: 500, medium: 100, low: 20, veryLow: 5})[level.id] / 1000}
+              onChange={event => { const value = Number(event.target.value); if (!Number.isFinite(value) || value < 0 || value > 1000) return;
+                setDraft({...draft, costRates: {...(draft.costRates ?? {veryHigh: 2000, high: 500, medium: 100, low: 20, veryLow: 5}), [level.id]: Math.round(value * 1000)}});
+              }} />
+          </label>)}
+        </div>
+      </details>
       <details className="rounded-xl border border-line bg-raised/25 px-3 py-2">
         <summary className="cursor-pointer text-xs font-medium text-fg">标签组</summary>
         <div className="mt-3 space-y-3">

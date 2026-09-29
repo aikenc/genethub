@@ -86,6 +86,7 @@ pub(crate) async fn summarize_sessions(state: &Shared, sessions: &mut [SessionSu
                         .into_iter()
                         .take(16)
                         .map(|run| genehub_proto::WorkflowTaskSummary {
+                            observation: observability::summary(runtime, runs, run).ok(),
                             phase: Some(run.phase().into()), conditions: run.conditions(),
                             run_status: Some(run.status().to_string()),
                             recovery: Some(!run.handles.is_empty()),
@@ -844,7 +845,7 @@ async fn maybe_resume_route(state: &Shared, runtime: &RuntimeStore, run_id: &str
                 let node = runtime_node(&run, id)?;
                 let role = run.roles.get(node.inputs.role.as_deref().unwrap_or_default())
                     .ok_or_else(|| anyhow!("Workflow route-wait role is missing"))?;
-                if resolve_role_route(state, role).await.is_err() { return Ok(false); }
+                if resolve_role_route(state, role, run.agent_target.as_ref()).await.is_err() { return Ok(false); }
             }
             run.legacy_program_status = run.engine.is_none().then(|| "running".into());
             run.stop = None;
@@ -1063,6 +1064,15 @@ pub(super) async fn verify_request_takeover(state: &Shared, runtime: &RuntimeSto
         // an explicit same-Session continue. A live process, unavailable
         // Session, or partially missing assignment still gets fenced below.
         if run.status() == "running" {
+            // A route wait before any Session assignment has no old process
+            // or submitted side effect to fence. Preserve the validated open
+            // graph and its decision clock across writer ownership changes.
+            if run.human_decision_ready() && run.executor_session_id.is_none()
+                && run.nodes.values().all(|node| node.session_id.is_none())
+            {
+                preserved_runs.insert(run.id.clone());
+                continue;
+            }
             let running_nodes = run.nodes.values().filter(|node| node.status() == "running").collect::<Vec<_>>();
             // A submitted result is durable before its Worker is retired.
             // Fence the old process, then finish_nodes settles that saved
@@ -1363,7 +1373,7 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
                 // A legacy role deliberately pins an exact destination. It
                 // keeps the existing explicit recovery path; tag roles are
                 // the contracts that authorize automatic route replacement.
-                if role.schema == LEGACY_ROLE_SCHEMA {
+                if role.schema == LEGACY_ROLE_SCHEMA || run.agent_target.is_some() {
                     lost.push((node_id, session_id));
                     continue;
                 }
@@ -1372,7 +1382,7 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
                 let selected = loop {
                     let excluded = run.route_exclusions();
                     let (route, providers) = match resolve_role_route_excluding(
-                        state, &role, &excluded,
+                        state, &role, &excluded, run.agent_target.as_ref(),
                     )
                     .await
                     {
@@ -1408,7 +1418,10 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
                         .switch_managed_agent(&session_id, target, &providers)
                         .await
                     {
-                        Ok(_) => break Some((route, providers)),
+                        Ok(summary) => {
+                            observability::stamp_rate(state, &summary).await?;
+                            break Some((route, providers));
+                        }
                         Err(error) => {
                             let detail = format!(
                                 "{}/{}: {error:#}",
@@ -1486,6 +1499,7 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
                             reason: "Worker 与 daemon 失联；原 Session 与租约保留，待核验续接".into(),
                         });
                     }
+                    run.journal_actor = "patrol".into();
                     run.revision = run.revision.saturating_add(1);
                     run.updated_at_ms = now_ms();
                 }

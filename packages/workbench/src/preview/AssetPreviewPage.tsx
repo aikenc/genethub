@@ -430,8 +430,10 @@ export function HtmlDocument({
   onRuntimeArtifact,
   onRuntimeReady,
   service = null,
+  workflowBridge,
 }: {
   service?: ServicePreviewClient | null;
+  workflowBridge?: { instanceId: string; script: string; handle(kind: string, payload: unknown): Promise<unknown> };
   bytes: Uint8Array;
   metadata: AssetPreviewMetadata;
   transfer?: AssetPreviewTransferStats;
@@ -448,6 +450,24 @@ export function HtmlDocument({
   const [collectorReady, setCollectorReady] = useState(false);
   const [eventCount, setEventCount] = useState(0);
   const frameRef = useRef<HTMLIFrameElement>(null);
+  const workflowHandler = useRef(workflowBridge);
+  workflowHandler.current = workflowBridge;
+  useEffect(() => {
+    if (!workflowBridge) return;
+    const receive = (event: MessageEvent) => {
+      const message = event.data;
+      if (event.source !== frameRef.current?.contentWindow || message?.source !== "genehub.workflow.view.v1"
+          || message.instanceId !== workflowHandler.current?.instanceId || typeof message.requestId !== "string" || !["rpc", "readFile", "file", "intent"].includes(message.kind)) return;
+      const frame = event.source as Window;
+      const handler = workflowHandler.current?.handle;
+      void Promise.resolve().then(() => handler?.(message.kind, message.payload)).then(
+        value => frame.postMessage({source: message.source, instanceId: message.instanceId, requestId: message.requestId, kind: "result", ok: true, value}, "*"),
+        error => frame.postMessage({source: message.source, instanceId: message.instanceId, requestId: message.requestId, kind: "result", ok: false, error: String(error instanceof Error ? error.message : error)}, "*"),
+      );
+    };
+    window.addEventListener("message", receive);
+    return () => window.removeEventListener("message", receive);
+  }, [workflowBridge?.script]);
   useServiceBridge(frameRef, service, srcDoc);
   const eventsRef = useRef<PreviewRuntimeEvent[]>([]);
   const collectorReadyRef = useRef(false);
@@ -714,6 +734,7 @@ export function HtmlDocument({
           fetchAsset,
         });
         blobUrls.push(...remapped.blobUrls);
+        if (workflowBridge && remapped.warnings.length) throw new Error(`工作流视图资源加载失败：${remapped.warnings.join("；")}`);
         if (cancelled) {
           for (const url of blobUrls) URL.revokeObjectURL(url);
           return;
@@ -730,7 +751,7 @@ export function HtmlDocument({
             : "未加载资源：0",
           ...remapped.warnings.slice(0, 40).map((warning) => `· ${warning}`),
         ];
-        setSrcDoc(isolatedHtml(remapped.html, storageSnapshot, Boolean(service)));
+        setSrcDoc(isolatedHtml(remapped.html, storageSnapshot, Boolean(service), workflowBridge?.script));
         setBaseMeta({ documentTitle, infoLines });
         emitPreviewDiagnostic("log", {
           topic: "html-site",
@@ -749,7 +770,7 @@ export function HtmlDocument({
       } catch (error) {
         if (!cancelled) {
           const message = error instanceof Error ? error.message : "资源解析失败";
-          setSrcDoc(isolatedHtml(sourceHtml, storageSnapshot, Boolean(service)));
+          setSrcDoc(workflowBridge ? isolatedHtml(`<p role="alert">${message.replace(/[&<>]/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[char]!))}</p>`, null, false) : isolatedHtml(sourceHtml, storageSnapshot, Boolean(service)));
           setBaseMeta({
             documentTitle,
             infoLines: [
@@ -772,7 +793,7 @@ export function HtmlDocument({
       cancelled = true;
       for (const url of blobUrls) URL.revokeObjectURL(url);
     };
-  }, [bytes, entryPath, fetchAsset, metadata.sourceBytes, storageNamespace, service]);
+  }, [bytes, entryPath, fetchAsset, metadata.sourceBytes, storageNamespace, service, workflowBridge?.script]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -1023,6 +1044,7 @@ export function isolatedHtml(
   source: string,
   storageSnapshot?: Record<string, string> | null,
   serviceEnabled = false,
+  workflowScript?: string,
 ): string {
   const document_ = new DOMParser().parseFromString(source, "text/html");
   document_.querySelectorAll("base, meta[http-equiv]").forEach((node) => {
@@ -1048,7 +1070,6 @@ export function isolatedHtml(
     "worker-src blob: data:",
     "form-action 'none'",
     "base-uri https://preview.invalid",
-    "navigate-to 'none'",
   ].join("; ");
   const base = document_.createElement("base");
   base.href = "https://preview.invalid/";
@@ -1060,6 +1081,7 @@ export function isolatedHtml(
   const renderer = document_.createElement("script");
   renderer.textContent = modernScreenshotSource;
   const injected = [policy, base, renderer, bridge];
+  if (workflowScript) { const script = document_.createElement("script"); script.textContent = workflowScript; injected.push(script); }
   if (serviceEnabled) { const serviceScript = document_.createElement("script"); serviceScript.textContent = serviceBridgeScript(); injected.push(serviceScript); }
   if (storageSnapshot) {
     // Sandboxed frames have no storage of their own: the shim backed by a

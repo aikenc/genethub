@@ -116,11 +116,15 @@ async fn accept_edits_mode_lets_a_real_tool_call_through_without_a_prompt() {
 /// `--permission-mode manual` already cost one user a working Claude Code.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_model_and_mode_pickers_offer_what_this_cli_actually_accepts() {
+    // Configure the backend before this fixture launches any CLI subprocess.
+    configure_claude_backend();
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("genet_daemon::adapter::claude=warn")
+        .with_test_writer()
+        .try_init();
     let journey = Journey::start().await.expect("journey starts");
     real_only!(journey);
     needs_claude!(journey);
-    configure_claude_backend();
-
     let Reply::Agents(agents) = journey
         .client
         .call(Request::AgentList)
@@ -140,7 +144,8 @@ async fn the_model_and_mode_pickers_offer_what_this_cli_actually_accepts() {
     );
     assert!(
         !claude.catalog.models.is_empty(),
-        "the handshake should have brought back this install's model list"
+        "the handshake should have brought back this install's model list; commands={} modes={} default_model={:?}",
+        claude.catalog.commands.len(), claude.catalog.modes.len(), claude.catalog.default_model
     );
     assert!(
         claude
@@ -634,7 +639,6 @@ fn configure_claude_backend() {
                             }
                         }
                     }
-                    return;
                 }
             }
         }

@@ -603,22 +603,21 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &broadcast::Sen
             started_at_ms: 0,
         }),
 
-        "message_start" => {
+        "message_start"
             if frame
                 .get("message")
                 .and_then(|message| message.get("role"))
                 .and_then(Value::as_str)
                 == Some("assistant")
-                && !state.assistant_in_flight
-            {
-                // The built-in Agent emits this before any reasoning/text/tool
-                // item. Attribute the LLM call to that item and show the round
-                // while it is still running, not only after message_end.
-                state.assistant_in_flight = true;
-                state.usage.llm_rounds += 1;
-                usage::record_round_start(&mut state.usage);
-                usage::emit_progress(events, &turn_id, &state.usage);
-            }
+                && !state.assistant_in_flight =>
+        {
+            // The built-in Agent emits this before any reasoning/text/tool
+            // item. Attribute the LLM call to that item and show the round
+            // while it is still running, not only after message_end.
+            state.assistant_in_flight = true;
+            state.usage.llm_rounds += 1;
+            usage::record_round_start(&mut state.usage);
+            usage::emit_progress(events, &turn_id, &state.usage);
         }
 
         "user_input_requested" => {
@@ -1551,7 +1550,9 @@ mod tests {
             &tx,
         );
         translate_frame(&update(json!({"type": "thinking_start"})), &mut state, &tx);
-        let events = drain(&mut rx);
+        // This assertion needs progress as well as process items; the shared
+        // drain helper intentionally removes progress for item-only tests.
+        let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         assert!(matches!(
             &events[0],
             SessionEvent::TurnProgress { usage, .. } if usage.llm_rounds == 1

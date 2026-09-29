@@ -1,6 +1,4 @@
-# Workflow 编写与验证
-
-[文档入口](README.md) · [角色模型](model.md) · [包与候选](packages.md)
+# Workflow authoring validation
 
 The authored business method belongs to project/Pack YAML. The platform supplies one parser/compiler,
 bounded JSON data and deterministic execution; it does not implement a game pipeline or ask an LLM to validate YAML.
@@ -122,13 +120,22 @@ directories on separate branches genuinely concurrent while one target ref stays
 serialized. A pack that wants parallel branches creates those directories with an
 ordinary node and returns the project-relative path in its `completion.output`.
 
+For `pack.script`, a structured task's frozen `input` is sent as JSON on stdin
+when `with.input` is omitted. An explicitly declared `with.input` remains the
+literal script input for compatibility. The operation input is persisted before
+invoking the script; a missing result never permits automatic replay.
+
 Every node instance records when its state changed: `pendingSinceMs` (the instance
 first existed, retained across attempts), `assignedAtMs` (the current attempt
 started), `settledAtMs` (its result was accepted) and `lastActivityAtMs`, beside
 `attempt`, `llmRounds`, `tokens` and `priorLlmRounds`. The Run additionally exposes
 its `supervision` snapshot. These are transitions the host already performs. The
-daemon computes no duration, ranking, critical path or utilization from them: a
-reader that wants those derives them, so that what counts as healthy stays policy.
+Run records store these transition facts rather than derived durations or efficiency
+judgments. Read-time request summaries expose elapsed time, occupied Worker time,
+peak concurrency and budget use. Package readers derive rankings, critical paths and
+quality conclusions; what counts as healthy stays policy. Parallelism averages simultaneous Worker occupancy
+over the union of assigned intervals, including waiting Workers and excluding empty
+gaps; it is independent of the budget clock that pauses during whole-Run Human waits.
 
 ## Shared procedure libraries
 
@@ -154,7 +161,7 @@ the definition schema.
 
 WM uses schema → edit → draft check → bounded correction → evaluation. The built-in Skill stops after
 three unsuccessful repair passes and returns remaining evidence to PM; the platform runs no LLM or
-repair loop. `evaluate.mjs` consumes compiled roles/execution and checks the digest again before evaluation.
+repair loop. Use `workflow check --draft`, then compare real request facts with `workflow profile --run <current> --compare <baseline>`; WM owns the quality/time/cost judgment.
 Quoted values, inline mappings and unreferenced scratch files cannot falsify its role inventory: a role is
 loaded because a compiled flow names it, never because it sits in `roles/`.
 
@@ -165,3 +172,23 @@ not prove improvement. Real trials and independent WR evidence remain necessary 
 
 Pack upgrades remain explicit and protect customizations. New installations get the updated instructions;
 restarting a service does not overwrite an existing project's Pack assets.
+
+## Workflow views and observation
+
+A workflow build contains its executable definitions, `views/<id>/index.html` and referenced files, and `checklists/` data. Run views always read that build, even after WM edits the package. `<title>` supplies the auto-discovered entry label; `progress` is the default. Built-in views are plain HTML/JS/CSS. No Node bundling is required. `--build` names the immutable digest; `--candidate` remains compatible.
+
+A block can carry optional `title`. An expression `{op: include, path: checklists/product.yaml}` loads package-relative YAML/JSON data as a compiled literal. The engine retains its normal strict expressions; the builder hashes both source data and the compiled result.
+
+`workflow profile --run <id>` reads the original request, retries and diagnostics, raw node inputs/outputs/scopes/clocks and actual LLM call counters. Cost is a CNY estimate using five configurable milliCNY rates (2000, 500, 100, 20, 5) and each execution assignment's snapshotted model tier. Legacy unpriced calls remain explicitly unpriced. It does not infer package business rules or future performance. Structured node inputs are captured at host admission so settled operations remain inspectable after engine compaction. RPC pages use `offset`, `limit` and `nextOffset`; consumers merge pages only while Run revisions agree, otherwise restart the read. CLI handles paging automatically.
+
+The host injects `window.GenetHub`: `context`, ordinary `rpc(method,payload)`, `fs.readFile/readdir/writeFile/mkdir/remove`, and `intent.openSession/openRun/openFile/openView/draftToPM`. `fs.readdir` returns the existing file.tree node with children. Package-relative paths are mapped to the workspace root handle; fully qualified root-handle paths retain their meaning. These use the same existing file/RPC transport and client authority, including control operations. Timeouts are not a receipt: check actual state before retrying a mutation. The bridge binds its iframe and logs package/build identity.
+
+WM maintains package-owned dependency/wait/substep records and reads them through fileAPI; the platform does not restrict such workflow policies. PM knows this optimization capability and hands objectives/quality limits to WM. WR owns health-floor diagnosis rather than product review or optimization.
+
+Package observation/review records use one file per entity. Name accumulated events as `<YYMMDD-HHMMSS>_<hash>[_<slug>].json`, using UTC+8; choose 4/8/16 hash digits for the expected concurrency. A natural entity ID remains its filename. Preserve the original name on replay, compare complete content when deduplicating and never replace a different entity. Built-in `scripts/records.py` publishes a fully written temporary file by atomic create; current-value pointers and locks are not accumulated entity lists.
+
+## 请求级 Agent / 模型约束
+
+人类已明确指定全员 Agent 与模型时，PM 使用 `workflow dispatch --agent <id> --model <id>`。两项必须一起传；daemon 校验运行中目录，固定到 Run 并通过原请求传给后继和恢复流程。它覆盖包角色的默认选型，不修改机器全局配置；Reviewer 继续遵守角色提示词约定；evidenceOnly 不再作为工具或路由准入条件。失败后恢复同一会话，不能自动改用其他模型。`workflow get` 的 `agentTarget` 可核对约束。未指定时沿用包标签与机器全局路由。
+
+已批准且可运行的团队直接继续派发。工具版本缺少约束能力属于平台修复事项，不应向用户再询问是否放弃已明确的要求。真实安装或登录故障必须给出具体事实。

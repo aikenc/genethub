@@ -29,20 +29,18 @@ for (const role of ["workflow-manager", "wm", "workflow-reviewer"] as const) def
       .replace("id: workflow-manager", `id: ${role}`)
       .replace("prompts/workflow-manager.md", "prompts/maintenance.md"));
     writeFileSync(path.join(source, "flows/direct-change.yaml"), JSON.stringify({
-      schema: "genehub.workflow.definition.v1", id: "direct-change", version: 1, entry: "maintain",
+      schema: "genehub.workflow.definition.v2", id: "direct-change", version: 2,
       nodes: [
         { id: "maintain", uses: "agent.session", with: { role },
-          completion: { all: [{ key: "report", verify: "value.nonEmpty" }] }, on: { completed: ["publish"] } },
+          completion: { all: [{ key: "report", verify: "value.nonEmpty" }] } },
         { id: "publish", uses: "result.publish" },
-      ],
-    }));
+      ], structure: {"body":{"id":"sequence","type":"sequence","steps":[{"id":"step-maintain","type":"task","activity":"maintain"},{"id":"step-publish","type":"task","activity":"publish"}]}}}));
     const foreignRoot = path.join(t.env.root, "foreign-project");
     mkdirSync(foreignRoot);
     const foreignSource = t.flows.main.seedWorkflowPackage({ projectRoot: foreignRoot });
     writeFileSync(path.join(foreignSource, "flows/publish.yaml"), JSON.stringify({
-      schema: "genehub.workflow.definition.v1", id: "publish", version: 1,
-      entry: "publish", nodes: [{ id: "publish", uses: "result.publish" }],
-    }));
+      schema: "genehub.workflow.definition.v2", id: "publish", version: 2,
+       nodes: [{ id: "publish", uses: "result.publish" }], structure: {"body":{"id":"sequence","type":"sequence","steps":[{"id":"step-publish","type":"task","activity":"publish"}]}}}));
     const foreign = await opened.client.call({ type: "workspace.open", payload: { root: foreignRoot } });
     if (foreign?.type !== "workspace") throw new Error("foreign fixture did not open");
     for (const cwd of [opened.workspaceRoot, foreignRoot]) {
@@ -105,7 +103,7 @@ for (const role of ["workflow-manager", "wm", "workflow-reviewer"] as const) def
     t.assertions.assert(allowed ? after.activeDigest !== before.activeDigest : after.activeDigest === before.activeDigest, "activation did not preserve role authority");
     t.assertions.assert(foreignAfter.activeDigest === foreignBefore.activeDigest && foreignAfter.activationRevision === foreignBefore.activationRevision, "foreign activation changed");
     t.assertions.assert(run!.dcgDigest === before.activeDigest, "activation rewrote the in-flight Run");
-    const worker = run!.nodes.find(node => node.id === "maintain")!.sessionId!;
+    const worker = run!.nodes.find(node => node.uses === "agent.session")!.sessionId!;
     const session = await opened.client.call({ type: "session.get", payload: { sessionId: worker } });
     t.assertions.assert(session?.type === "snapshot" && session.data.summary.managed?.role === role, "test did not run as the assigned managed role");
     t.note(`${role}: authenticated CLI result, activation revision/digest, project isolation and immutable Run verified`);

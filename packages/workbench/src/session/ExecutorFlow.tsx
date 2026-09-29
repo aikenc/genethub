@@ -3,6 +3,7 @@ import type { ExecutorFlowStatus, FlowMessageStatus } from "@genehub/proto";
 import { useEffect, useState } from "react";
 
 import { useWorkbench } from "./store";
+import { WorkflowViewLinks } from "./WorkflowViewLinks";
 import { StructuredWorkflow } from "./StructuredWorkflow";
 
 const labels: Record<string, string> = {
@@ -83,6 +84,7 @@ export function ExecutorFlow({ sessionId }: { sessionId: string }) {
             className="min-h-11 text-xs text-accent md:min-h-0">刷新执行记录</button>
         </div>
         {flow ? <>
+          <WorkflowViewLinks workspaceId={flow.run.workspaceId} runId={flow.run.id} />
           <p className="mt-1 text-sm">{flow.run.workflowId} · {flow.run.phase === "closing" ? "收尾中" : flow.run.phase === "closed" ? "执行已结束" : "执行未结束"} · {labelStatus(flow.run.programResult ?? flow.run.status)}</p>
           {flow.run.conditions?.map(condition => <p key={`${condition.nodeId}:${condition.code}:${condition.occurrence}`} className="mt-1 text-sm">{condition.nodeId ? `${condition.nodeId}：` : ""}{condition.reason}</p>)}
           {flow.run.handles.length > 0 && flow.run.phase === "closed" && <p className="mt-1 text-sm">恢复报告已结束；原目标仍以 PM 的交付决定为准。</p>}
@@ -137,6 +139,7 @@ function FlowMessage({ message }: { message: FlowMessageStatus }) {
     <h3 className="mt-2 break-words text-sm font-medium">{labels[message.kind] ?? message.kind}{message.nodeId ? ` · ${message.nodeId}` : ""}</h3>
     {text(payload.prompt) ? <p className="mt-2 whitespace-pre-wrap break-words text-sm">{text(payload.prompt)}</p> : null}
     {text(payload.role) ? <p className="mt-1 text-xs text-muted">执行者：{text(payload.role)}</p> : null}
+    {message.kind.startsWith("run.") && <WorkflowViewLinks workspaceId={message.projectWorkspaceId} runId={message.runId} compact />}
     {workerId ? <button type="button" className="mt-2 min-h-11 text-xs text-accent md:min-h-0"
       onClick={() => void selectSession(workerId)}>查看工作会话</button> : null}
     {!labels[message.kind] ? <details className="mt-2 text-xs text-muted"><summary className="cursor-pointer">消息详情</summary>

@@ -347,6 +347,8 @@ pub fn required(request: &Request) -> Capability {
         | Request::WorkflowCheck { .. }
         | Request::WorkflowGet { .. }
         | Request::WorkflowJournal { .. }
+        | Request::WorkflowProfile { .. }
+        | Request::WorkflowView { .. }
         | Request::WorkflowHistory { .. }
         | Request::SessionImportList { .. }
         | Request::RoundTrunkList { .. }

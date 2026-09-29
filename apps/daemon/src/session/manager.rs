@@ -54,6 +54,12 @@ const IMPORT_CANDIDATE_TTL_MS: i64 = 10 * 60 * 1000;
 /// boundary: keeps a single request from turning into an unbounded scan.
 const MAX_BATCH_GET: usize = 64;
 
+pub(crate) struct ForkImportContext<'a> {
+    pub workspace_id: &'a str,
+    pub cwd: PathBuf,
+    pub source_accessible: bool,
+}
+
 /// A session id that matches nothing in memory or on disk. The router maps
 /// this typed error to `notFound`; the Display text is user-facing and free
 /// to change without touching the wire classification.
@@ -1073,12 +1079,14 @@ impl SessionManager {
         source_accessible: bool,
     ) -> Result<SessionSummary> {
         self.fork_import_with_routing(
-            workspace_id,
-            cwd,
+            ForkImportContext {
+                workspace_id,
+                cwd,
+                source_accessible,
+            },
             transfer,
             target,
             providers,
-            source_accessible,
             None,
         )
         .await
@@ -1086,22 +1094,18 @@ impl SessionManager {
 
     pub(crate) async fn fork_import_routed(
         &self,
-        workspace_id: &str,
-        cwd: PathBuf,
+        context: ForkImportContext<'_>,
         transfer: ForkTransfer,
         target: ForkTarget,
         providers: &ProviderMap,
-        source_accessible: bool,
         routing_tags: Vec<String>,
         media_tags: Vec<String>,
     ) -> Result<SessionSummary> {
         self.fork_import_with_routing(
-            workspace_id,
-            cwd,
+            context,
             transfer,
             target,
             providers,
-            source_accessible,
             Some((routing_tags, media_tags)),
         )
         .await
@@ -1109,14 +1113,17 @@ impl SessionManager {
 
     async fn fork_import_with_routing(
         &self,
-        workspace_id: &str,
-        cwd: PathBuf,
+        context: ForkImportContext<'_>,
         mut transfer: ForkTransfer,
         target: ForkTarget,
         providers: &ProviderMap,
-        source_accessible: bool,
         routing: Option<(Vec<String>, Vec<String>)>,
     ) -> Result<SessionSummary> {
+        let ForkImportContext {
+            workspace_id,
+            cwd,
+            source_accessible,
+        } = context;
         let blob_appendix = std::mem::take(&mut transfer.blob_appendix);
         if target.workspace_id.as_deref() != Some(workspace_id) {
             anyhow::bail!("the fork target workspace does not match the validated workspace");
@@ -3870,8 +3877,10 @@ impl SessionManager {
             .cloned()
             .ok_or_else(|| anyhow!("no pending interaction called '{request_id}'"))?;
 
-        if matches!(request.kind, PermissionRequestKind::PlanApproval | PermissionRequestKind::Question)
-            || request.id.starts_with("workflow-human-")
+        if matches!(
+            request.kind,
+            PermissionRequestKind::PlanApproval | PermissionRequestKind::Question
+        ) || request.id.starts_with("workflow-human-")
             || !live.meta.lock().await.inbox.entries.is_empty()
         {
             let mut project_approval = live.meta.lock().await.pending_project_approval;
@@ -4103,8 +4112,14 @@ impl SessionManager {
                 bail!("answer the current Human interaction before this Workflow question");
             }
         }
-        if live.meta.lock().await.human_continuation.as_ref()
-            .is_some_and(|decision| decision.request.id == request.id) {
+        if live
+            .meta
+            .lock()
+            .await
+            .human_continuation
+            .as_ref()
+            .is_some_and(|decision| decision.request.id == request.id)
+        {
             return Ok(());
         }
         if let Err(error) = stop_agent_for_interaction(&live, &self.store, &request, false).await {
@@ -4114,10 +4129,18 @@ impl SessionManager {
         }
         live.stop_pump().await?;
         let mut owner = live.execution.lock().await;
-        if let Some(turn_id) = owner.as_ref().and_then(|execution| execution.turn_id.clone()) {
+        if let Some(turn_id) = owner
+            .as_ref()
+            .and_then(|execution| execution.turn_id.clone())
+        {
             live.publish(SessionEvent::TurnCanceled { turn_id }).await;
         }
-        live.finish_execution(&mut owner, SessionEvent::PermissionRequested { request }, false).await?;
+        live.finish_execution(
+            &mut owner,
+            SessionEvent::PermissionRequested { request },
+            false,
+        )
+        .await?;
         Ok(())
     }
 
@@ -4127,14 +4150,17 @@ impl SessionManager {
         request_id: &str,
     ) -> Result<Option<PermissionOutcome>> {
         let live = self.live(session_id).await?;
-        let outcome = live.meta.lock().await.human_continuation.as_ref()
+        let outcome = live
+            .meta
+            .lock()
+            .await
+            .human_continuation
+            .as_ref()
             .filter(|decision| decision.request.id == request_id)
             .map(|decision| decision.outcome.clone());
         Ok(outcome)
     }
 
-    /// The built-in recovery reviewer may only submit the choice recorded by
-    /// its controller through the durable Session question path.
     pub(crate) async fn cancel_workflow_question(&self, session_id: &str, request_id: &str) -> Result<()> {
         let live = match self.live(session_id).await {
             Ok(live) => live,
@@ -4142,7 +4168,12 @@ impl SessionManager {
             Err(error) => return Err(error),
         };
         let _interaction = live.interaction_lock.lock().await;
-        if live.meta.lock().await.pending_permission.as_ref()
+        if live
+            .meta
+            .lock()
+            .await
+            .pending_permission
+            .as_ref()
             .is_some_and(|pending| pending.id == request_id)
         {
             cancel_human_continuation(&live, &self.store).await?;
@@ -5629,7 +5660,9 @@ fn question_answer(
         if request.options.is_empty() {
             let questions = request.questions.as_deref().unwrap_or_default();
             if let [question] = questions {
-                let matches = question.options.iter()
+                let matches = question
+                    .options
+                    .iter()
                     .filter(|option| option.id == *option_id || option.label == *option_id)
                     .collect::<Vec<_>>();
                 if let [option] = matches.as_slice() {
@@ -8046,12 +8079,13 @@ mod tests {
             vec![None],
             "the ACP handle is not passed on"
         );
-        let sent = prompts.lock().unwrap();
-        assert_eq!(sent.len(), 1);
-        assert!(sent[0].text.contains("Investigate the failing deploy"));
-        assert!(sent[0].text.contains("The health check path is stale"));
-        assert!(sent[0].text.contains("Continue the investigation"));
-        drop(sent);
+        {
+            let sent = prompts.lock().unwrap();
+            assert_eq!(sent.len(), 1);
+            assert!(sent[0].text.contains("Investigate the failing deploy"));
+            assert!(sent[0].text.contains("The health check path is stale"));
+            assert!(sent[0].text.contains("Continue the investigation"));
+        }
         let live = sessions.live(&created.id).await.unwrap();
         assert!(live.meta.lock().await.persist.is_none());
         assert_eq!(
@@ -9936,16 +9970,50 @@ mod tests {
         sessions.store.save_meta(&meta()).unwrap();
         let mut request = interaction(PermissionRequestKind::Question);
         request.id = "workflow-human-s1".into();
-        sessions.request_workflow_question("s1", request.clone()).await.unwrap();
-        sessions.request_workflow_question("s1", request.clone()).await.unwrap();
+        sessions
+            .request_workflow_question("s1", request.clone())
+            .await
+            .unwrap();
+        sessions
+            .request_workflow_question("s1", request.clone())
+            .await
+            .unwrap();
         let live = sessions.live("s1").await.unwrap();
         assert_eq!(live.snapshot().await.unwrap().pending_permissions.len(), 1);
-        assert_eq!(sessions.store.load_meta("w1", "s1").unwrap().pending_permission.unwrap().id, request.id);
-        let outcome = PermissionOutcome::Selected { option_id: "yes".into() };
-        sessions.respond_permission("s1", &request.id, outcome.clone(), &ProviderMap::new()).await.unwrap();
-        assert_eq!(sessions.workflow_question_outcome("s1", &request.id).await.unwrap(), Some(outcome));
-        sessions.request_workflow_question("s1", request).await.unwrap();
-        assert!(live.snapshot().await.unwrap().pending_permissions.is_empty());
+        assert_eq!(
+            sessions
+                .store
+                .load_meta("w1", "s1")
+                .unwrap()
+                .pending_permission
+                .unwrap()
+                .id,
+            request.id
+        );
+        let outcome = PermissionOutcome::Selected {
+            option_id: "yes".into(),
+        };
+        sessions
+            .respond_permission("s1", &request.id, outcome.clone(), &ProviderMap::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            sessions
+                .workflow_question_outcome("s1", &request.id)
+                .await
+                .unwrap(),
+            Some(outcome)
+        );
+        sessions
+            .request_workflow_question("s1", request)
+            .await
+            .unwrap();
+        assert!(live
+            .snapshot()
+            .await
+            .unwrap()
+            .pending_permissions
+            .is_empty());
     }
 
     /// Regression for the detached CLI: delivery is driven by the persisted

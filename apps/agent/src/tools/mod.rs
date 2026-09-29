@@ -106,7 +106,7 @@ impl ToolResult {
 /// JSON Schema definitions handed to the model. Anthropic and OpenAI both
 /// accept plain JSON Schema, so one description serves both.
 pub fn definitions() -> Vec<Value> {
-    let mut definitions = vec![
+    let definitions = vec![
         json!({
             "name": "read",
             "description": format!("Read the contents of a file. Output is truncated to {DEFAULT_MAX_LINES} lines or {}KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.", DEFAULT_MAX_BYTES / 1024),

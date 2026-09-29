@@ -112,8 +112,16 @@ for (const scenario of ["zero", "repair", "limit", "zero-limit", "if-true", "if-
     let frontAttempts = 0;
     const concurrencyTrace = path.join(opened.workspaceRoot,"concurrency.txt");
     const artifact = path.join(opened.workspaceRoot,"attempts.txt");
+    const reported = new Set<string>();
     const respond = (request: unknown) => {
       const text = JSON.stringify(request);
+      if (text.includes("角色标签为 `recovery-reviewer`")) {
+        const reportOperation = text.match(/当前节点：(operation-\d+)/)?.[1];
+        const reportKey = "report:" + (text.match(/被处理 Run：(wr_[a-f0-9]+)/)?.[1] ?? "run") + ":" + reportOperation;
+        if (reported.has(reportKey)) return { text: "Diagnostic report submitted." };
+        reported.add(reportKey);
+        return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" workflow complete --evidence report="Observed failed program and retained the original goal"' } } };
+      }
       if (text.includes("STRUCTURED_WORKER")) {
         const operation = text.match(/当前节点：(operation-\d+)/)?.[1];
         if (!operation) throw new Error("Worker request omitted current operation identity");
@@ -170,8 +178,10 @@ for (const scenario of ["zero", "repair", "limit", "zero-limit", "if-true", "if-
     await t.tools.waitUntil(async()=>{
       const reply = await opened.client.call({type:"workflow.history",payload:{workspaceId:opened.workspaceId,limit:10}});
       if (reply?.type !== "workflowRuns") return false;
-      t.assertions.assert(reply.data.length <= 1,"loop created another Run");
-      run = reply.data[0];
+      const business = reply.data.filter(item => item.handles.length === 0);
+      const reports = reply.data.filter(item => item.handles.length > 0);
+      t.assertions.assert(business.length <= 1 && reports.length <= 1 && reports.every(item => item.handles.some(handle => handle.runId === business[0]?.id)),"loop duplicated business work or its diagnostic");
+      run = business[0];
       return !!run && ["completed","blocked","failed","cancelled"].includes(run.status);
     },90_000);
     t.assertions.assert(run?.status === (scenario === "cancel" ? "cancelled" : blocked ? "blocked" : "completed"),`unexpected terminal state: ${JSON.stringify(run)}`);

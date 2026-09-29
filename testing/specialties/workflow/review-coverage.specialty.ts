@@ -12,9 +12,9 @@ defineSpecialty({
   tags: ["core", "workflow", "workflow-trials"], llm: { default: "none" },
   expectedDurationMs: 2000, timeoutMs: 15000,
   resources: { environments: 1, cpu: 1, memoryMb: 128, io: 1, browser: 0, pool: "standard" },
-  surfaces: ["bootstrap-pack", "filesystem"], productInterfaces: ["game-reviewer/scripts/check-review.mjs"],
+  surfaces: ["bootstrap-pack", "filesystem"], productInterfaces: ["game-reviewer/scripts/check-review.py"],
 }, async t => {
-  const script = path.join(t.openRoot, "apps/daemon/workflow-packages/game-delivery/spaces/reviewer/skills/game-reviewer/scripts/check-review.mjs");
+  const script = path.join(t.openRoot, "apps/daemon/workflow-packages/game-delivery/spaces/reviewer/skills/game-reviewer/scripts/check-review.py");
   const digest = (bytes: string | Buffer) => `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
   const contractFile = path.join(t.env.workspace, "contract.json"), reportFile = path.join(t.env.workspace, "report.json");
   const previousFile = path.join(t.env.workspace, "previous.json");
@@ -39,7 +39,7 @@ defineSpecialty({
     if (scenario === "no-evidence") report.items[0]!.evidence = [];
     if (scenario === "no-reason") report.items[0]!.status = "notApplicable";
     writeFileSync(reportFile, JSON.stringify(report));
-    const result = spawnSync(process.execPath, [script, contractFile, reportFile, previousFile], { cwd: t.env.workspace, encoding: "utf8", timeout: 5000 });
+    const result = spawnSync("python3", [script, contractFile, reportFile, previousFile], { cwd: t.env.workspace, encoding: "utf8", timeout: 5000 });
     const checked = JSON.parse(result.stdout) as { valid: boolean; verdict: string; errors: string[]; evidenceExecutionVerified: boolean };
     const valid = ["approved", "unverifiable", "repaired-artifact"].includes(scenario);
     t.assertions.assert((result.status === 0) === valid && checked.valid === valid, `${scenario}: ${result.stderr || result.stdout}`);

@@ -27,7 +27,6 @@ for (const structured of [false,true]) for (const scenario of ["negative", "orph
       stage = "seed Workflow package";
       const source = t.flows.main.seedWorkflowPackage({ projectRoot: opened.workspaceRoot });
       const workflowFile = path.join(source, "flows/direct-change.yaml");
-      const definitionSchema = "genehub.workflow.definition.v1";
       writeFileSync(path.join(source, "prompts/direct-worker.md"), "WORKFLOW_CONTROL_WORKER: only execute your assigned node.\n");
       writeFileSync(path.join(source, "roles/worker.yaml"), JSON.stringify({ schema: "genehub.workflow.role.v1", id: "worker", agentId: "genet", modelId: "deepseek/deepseek-v4-flash", userInteraction: "readOnly", prompt: "prompts/direct-worker.md" }));
       const node = (id: string, role = "worker") => ({
@@ -40,16 +39,23 @@ for (const structured of [false,true]) for (const scenario of ["negative", "orph
         nodes:[activity,{id:"publish",uses:"result.publish"}],
         structure:{body:{id:"delivery",type:"sequence",steps:[{id:"check",type:"task",activity:"review"},{id:"deliver",type:"task",activity:"publish"}]}},
       } : {
-        schema: definitionSchema, id: "direct-change", version: 1, entry: "review",
-        nodes: [node("review"), { id: "publish", uses: "result.publish" }],
-      }));
+        schema: "genehub.workflow.definition.v2", id: "direct-change", version: 2,
+        nodes: [activity, { id: "publish", uses: "result.publish" }], structure: {"body":{"id":"sequence","type":"sequence","steps":[{"id":"step-review","type":"task","activity":"review"},{"id":"step-publish","type":"task","activity":"publish"}]}}}));
       let nextCommand: string | undefined = '"$GENEHUB_CLI" workflow activate --revision 0 && "$GENEHUB_CLI" workflow dispatch --workflow direct-change --task control-1 --message "检查启动循环" --no-wait';
       let nextInputId = "u_initial";
       let workerCalls = 0, pmCalls = 0;
       let staleResponseAt = 0;
-      const respond = (request: unknown) => {
+      const reported = new Set<string>();
+    const respond = (request: unknown) => {
         const body = JSON.stringify(request);
-        if (body.includes("WORKFLOW_CONTROL_WORKER")) {
+        if (body.includes("角色标签为 `recovery-reviewer`")) {
+        const reportOperation = body.match(/当前节点：(operation-\d+)/)?.[1];
+        const reportKey = "report:" + (body.match(/被处理 Run：(wr_[a-f0-9]+)/)?.[1] ?? "run") + ":" + reportOperation;
+        if (reported.has(reportKey)) return { text: "Diagnostic report submitted." };
+        reported.add(reportKey);
+        return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" workflow complete --evidence report="Observed failed program and retained the original goal"' } } };
+      }
+      if (body.includes("WORKFLOW_CONTROL_WORKER")) {
           workerCalls++;
           if (scenario === "self-cancel-report" && workerCalls > 1) return workerCalls === 2
             ? { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" workflow complete --outcome blocked --reason "缺少交付证据，交回 PM" --evidence checks=missing' } } }
@@ -105,8 +111,8 @@ for (const structured of [false,true]) for (const scenario of ["negative", "orph
       let run = (await history())[0]!;
       const original = run.id;
       const waitTerminal = async () => {
-        await t.tools.waitUntil(async () => { run = await get(run.id); return run.status === "blocked"; }, 35_000);
-        t.assertions.assert(!run.activeNodes.length && !run.cleanupError, "blocked Run still owns active nodes or incomplete cleanup");
+        await t.tools.waitUntil(async () => { run = await get(run.id); return scenario === "negative" ? run.status === "blocked" : run.status === "running" && run.conditions.some(condition => condition.code === "nodeInterrupted"); }, 35_000);
+        t.assertions.assert(!run.cleanupError && (scenario === "negative" ? !run.activeNodes.length : run.phase === "open" && !run.programResult && run.nodes.some(node => !!node.sessionId)), "program result and retained interrupted activity disagree");
       };
       if (scenario === "negative" || scenario === "orphan" || scenario === "patrol-missed-event") {
         let idleAt = 0;
@@ -129,14 +135,18 @@ for (const structured of [false,true]) for (const scenario of ["negative", "orph
             opened.daemon.env, { cwd: opened.workspaceRoot });
           t.assertions.assert(result.code === 0, `workflow journal failed: ${result.stderr || result.stdout}`);
           const events = (JSON.parse(result.stdout) as { data: { events: Array<{ eventType: string; actor: string }> } }).data.events;
-          t.assertions.assert(events.some(event => event.eventType === "run.blocked" && event.actor === "patrol"),
+          t.assertions.assert(events.some(event => event.eventType === "run.running" && event.actor === "patrol"),
             `patrol state turn omitted its origin from the committed journal: ${JSON.stringify(events)}`);
         }
         stage = "check blocked Workflow Run";
         const findings = (await check(run.id)).findings;
-        t.assertions.assert(findings.some(f => f.code === "defaultBlockedExit"), "checker omitted the default exit");
+        t.assertions.assert(findings.some(f => scenario === "negative" ? f.code === "programResult" || f.code === "nodeOutcome" : f.code === "recoverableOperation"), "checker omitted the default exit");
+        if (scenario !== "negative") {
+          await opened.client.call({ type: "workflow.cancel", payload: { workspaceId: opened.workspaceId, runId: run.id, expectedRevision: run.revision } });
+          await t.tools.waitUntil(async () => (await get(run.id)).status === "cancelled", 30_000);
+        }
         if (scenario === "negative") t.assertions.assert(run.nodes.find(node => node.uses === "agent.session")?.outcome === "changesRequested", "negative review was discarded or treated as success");
-        t.assertions.assert(run.nodes.find(node => node.id === "publish")?.status === "unreached", "failed review published a successful result");
+        t.assertions.assert(!run.nodes.some(node => node.uses === "result.publish" && node.status === "completed"), "failed review published a successful result");
 
       } else {
         await t.tools.waitUntil(() => workerCalls > 0, 30_000);

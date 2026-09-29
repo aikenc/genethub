@@ -969,6 +969,10 @@ pub struct SessionInputSummary {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct WorkflowTaskSummary {
+    /// Request-wide derived counters; no package quality semantics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub observation: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub phase: Option<String>,
@@ -1335,6 +1339,16 @@ pub struct WorkflowCatalogEntryStatus {
     pub digest: String,
 }
 
+/// Optional Human-selected exact destination for all Workers of one request.
+/// Package role tags remain defaults when no destination is supplied.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct WorkflowAgentTarget {
+    pub agent_id: String,
+    pub model_id: String,
+}
+
 /// Durable status of one project Workflow run. Node meaning comes entirely
 /// from the pinned project definition; the daemon reports only generic graph
 /// and evidence facts here.
@@ -1342,6 +1356,9 @@ pub struct WorkflowCatalogEntryStatus {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct WorkflowRunStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub agent_target: Option<WorkflowAgentTarget>,
     /// Derived from program and confirmed resource retirement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -2237,6 +2254,11 @@ pub struct AgentRuntimePreference {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct AgentSelectionPreferences {
+    /// Global estimated CNY per LLM call, expressed in thousandths of a yuan.
+    /// Absent keeps the built-in five-tier defaults. Not provider billing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cost_rates: Option<AgentCostRates>,
     #[serde(default)]
     pub runtimes: std::collections::BTreeMap<String, AgentRuntimePreference>,
     /// Exact models enabled on this machine. New configurations start with the
@@ -2262,6 +2284,41 @@ pub struct AgentSelectionPreferences {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[ts(optional, as = "Option<_>")]
     pub selected_tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct AgentCostRates {
+    pub very_high: u32,
+    pub high: u32,
+    pub medium: u32,
+    pub low: u32,
+    pub very_low: u32,
+}
+
+impl Default for AgentCostRates {
+    fn default() -> Self {
+        Self {
+            very_high: 2000,
+            high: 500,
+            medium: 100,
+            low: 20,
+            very_low: 5,
+        }
+    }
+}
+
+impl AgentCostRates {
+    pub fn rate(&self, level: &AgentCostLevel) -> u32 {
+        match level {
+            AgentCostLevel::VeryHigh => self.very_high,
+            AgentCostLevel::High => self.high,
+            AgentCostLevel::Medium => self.medium,
+            AgentCostLevel::Low => self.low,
+            AgentCostLevel::VeryLow => self.very_low,
+        }
+    }
 }
 
 /// The machine-level settings a client may see and change.

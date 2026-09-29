@@ -212,6 +212,12 @@ impl RunRecord {
     pub(super) fn unfinished(&self) -> bool {
         self.phase() != "closed"
     }
+    // Route absence can leave an open graph with no live effects. Human
+    // decisions may wait there without closing or replaying the program.
+    pub(super) fn human_decision_ready(&self) -> bool {
+        !self.unfinished() || (self.program_open() && !self.route_wait().is_empty()
+            && !self.nodes.values().any(|node| matches!(node.status(), "running" | "finishing")))
+    }
     pub(super) fn interrupted(&self) -> bool {
         self.nodes.values().any(|node| node.interruption.is_some())
     }
