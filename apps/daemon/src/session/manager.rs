@@ -6150,7 +6150,7 @@ struct TrackedTurn {
 
 async fn pump_events(
     live: Arc<Live>,
-    mut receiver: mpsc::Receiver<SessionEvent>,
+    mut receiver: crate::adapter::EventRx,
     store: Store,
     replay_window: usize,
     processes: Arc<crate::processes::Processes>,
@@ -7198,6 +7198,7 @@ async fn finalize_after_channel_closed(live: &Arc<Live>, _store: &Store) {
         execution.terminal.send_replace(true);
         return;
     }
+    let execution_id = execution.id;
     let event = SessionEvent::TurnFailed {
         turn_id: execution.turn_id.clone().unwrap_or_default(),
         error: genehub_proto::TurnError {
@@ -7205,6 +7206,21 @@ async fn finalize_after_channel_closed(live: &Arc<Live>, _store: &Store) {
             message: "the agent event channel closed".into(),
         },
     };
+    if let Some(execution) = owner.as_mut() {
+        execution.phase = ExecutionPhase::Stopping;
+        execution.cancel.send_replace(true);
+        execution.ready.send_replace(true);
+    }
+    drop(owner);
+    let _retirement = live.retirement.lock().await;
+    if let Err(error) = close_current_agent(live).await {
+        tracing::error!(%error, "could not close Agent after event stream failure");
+        return;
+    }
+    let mut owner = live.execution.lock().await;
+    if owner.as_ref().is_none_or(|e| e.id != execution_id) {
+        return;
+    }
     if let Err(error) = live.finish_execution(&mut owner, event, false).await {
         tracing::error!(%error, "could not commit closed event channel");
     }
@@ -7825,8 +7841,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl AgentSession for Blank {
-        fn events(&self) -> mpsc::Receiver<SessionEvent> {
-            mpsc::channel(1).1
+        fn events(&self) -> crate::adapter::EventRx {
+            crate::adapter::EventTx::channel().1
         }
 
         async fn send(&self, _input: PromptInput) -> Result<String> {
@@ -7906,8 +7922,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl AgentSession for ForkHarnessSession {
-        fn events(&self) -> mpsc::Receiver<SessionEvent> {
-            mpsc::channel(1).1
+        fn events(&self) -> crate::adapter::EventRx {
+            crate::adapter::EventTx::channel().1
         }
 
         async fn send(&self, input: PromptInput) -> Result<String> {
@@ -10277,8 +10293,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl AgentSession for StoppingSession {
-        fn events(&self) -> mpsc::Receiver<SessionEvent> {
-            mpsc::channel(1).1
+        fn events(&self) -> crate::adapter::EventRx {
+            crate::adapter::EventTx::channel().1
         }
 
         async fn send(&self, _input: PromptInput) -> Result<String> {
@@ -10314,8 +10330,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl AgentSession for RecordingSession {
-        fn events(&self) -> mpsc::Receiver<SessionEvent> {
-            mpsc::channel(1).1
+        fn events(&self) -> crate::adapter::EventRx {
+            crate::adapter::EventTx::channel().1
         }
 
         async fn send(&self, input: PromptInput) -> Result<String> {
@@ -10666,7 +10682,7 @@ mod tests {
         execution.phase = ExecutionPhase::Running;
         execution.ready.send_replace(true);
         *live.execution.lock().await = Some(execution);
-        let (agent_events, agent_rx) = crate::adapter::EventTx::channel(64);
+        let (agent_events, agent_rx) = crate::adapter::EventTx::channel();
         let mut seen = live.events.subscribe();
         let pump = tokio::spawn(pump_events(
             live.clone(),
@@ -11241,9 +11257,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl AgentSession for FakeSession {
-        fn events(&self) -> mpsc::Receiver<SessionEvent> {
+        fn events(&self) -> crate::adapter::EventRx {
             let _held = &self.events;
-            mpsc::channel(1).1
+            crate::adapter::EventTx::channel().1
         }
 
         async fn send(&self, _input: PromptInput) -> Result<String> {
@@ -11287,7 +11303,7 @@ mod tests {
         let live = sessions.live("s1").await.unwrap();
         // Match the production adapter buffer: pagination tests deliberately
         // send more than 64 events and are not overflow tests.
-        let (events, events_rx) = crate::adapter::EventTx::channel(BROADCAST_CAPACITY);
+        let (events, events_rx) = crate::adapter::EventTx::channel();
         let turn_ids = Arc::new(AtomicU64::new(0));
         *live.agent.lock().await = Some(Arc::new(FakeSession::sharing(
             events.clone(),
@@ -12989,7 +13005,7 @@ mod tests {
         execution.phase = ExecutionPhase::Running;
         execution.ready.send_replace(true);
         *live.execution.lock().await = Some(execution);
-        let (agent_events, agent_rx) = crate::adapter::EventTx::channel(64);
+        let (agent_events, agent_rx) = crate::adapter::EventTx::channel();
         let mut seen = live.events.subscribe();
         let diagnostics = Arc::new(Diagnostics::new());
         let pump = tokio::spawn(pump_events(
@@ -13061,7 +13077,7 @@ mod tests {
         execution.ready.send_replace(true);
         *live.execution.lock().await = Some(execution);
 
-        let (agent_events, agent_rx) = crate::adapter::EventTx::channel(64);
+        let (agent_events, agent_rx) = crate::adapter::EventTx::channel();
         let mut seen = live.events.subscribe();
         let diagnostics = Arc::new(Diagnostics::new());
 

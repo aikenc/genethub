@@ -78,8 +78,8 @@ const AGENTS: AgentInfo[] = [
     catalog: {
       models: [],
       modes: [
-        { id: "default", label: "Default", description: "Ask first" },
-        { id: "bypassPermissions", label: "Bypass", description: "Run freely" },
+        { id: "default", label: "Default", description: "Ask first", unattended: false },
+        { id: "bypassPermissions", label: "Bypass", description: "Run freely", unattended: true },
       ],
       commands: [],
       defaultModel: undefined,

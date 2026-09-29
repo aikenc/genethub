@@ -203,49 +203,107 @@ pub trait AgentAdapter: Send + Sync {
 
 pub type ProviderMap = std::collections::BTreeMap<String, ProviderConfig>;
 
-/// The agent-to-daemon event pipe. One consumer, so a slow pump applies
-/// backpressure to the reader instead of dropping a turn boundary.
+// Text notifications emit progress and content separately. Allow 4000 such
+// pairs plus terminal metadata; the independent byte cap still bounds payloads.
+const EVENT_QUEUE_CAPACITY: usize = 8192;
+
+/// Single-consumer delivery without waiting while protocol locks are held.
+/// A stalled consumer fails the stream explicitly at the budget, rather than
+/// growing without bound or silently losing a terminal event.
+
 #[derive(Clone)]
 pub struct EventTx {
-    inner: Arc<std::sync::Mutex<mpsc::Sender<SessionEvent>>>,
-    capacity: usize,
+    inner: Arc<std::sync::Mutex<EventSender>>,
 }
-
-impl EventTx {
-    pub fn channel(capacity: usize) -> (Self, mpsc::Receiver<SessionEvent>) {
-        let (tx, rx) = mpsc::channel(capacity);
+struct EventSender {
+    tx: Option<mpsc::Sender<(SessionEvent, usize)>>,
+    bytes: Arc<std::sync::atomic::AtomicUsize>,
+}
+pub struct EventRx {
+    rx: mpsc::Receiver<(SessionEvent, usize)>,
+    bytes: Arc<std::sync::atomic::AtomicUsize>,
+}
+impl EventRx {
+    fn take(&self, (event, bytes): (SessionEvent, usize)) -> SessionEvent {
+        self.bytes
+            .fetch_sub(bytes, std::sync::atomic::Ordering::Relaxed);
+        event
+    }
+    pub async fn recv(&mut self) -> Option<SessionEvent> {
+        self.rx.recv().await.map(|entry| self.take(entry))
+    }
+    pub fn try_recv(&mut self) -> Result<SessionEvent, mpsc::error::TryRecvError> {
+        self.rx.try_recv().map(|entry| self.take(entry))
+    }
+}
+impl EventSender {
+    fn channel() -> (Self, EventRx) {
+        let (tx, rx) = mpsc::channel(EVENT_QUEUE_CAPACITY);
+        let bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         (
             Self {
-                inner: Arc::new(std::sync::Mutex::new(tx)),
-                capacity,
+                tx: Some(tx),
+                bytes: bytes.clone(),
+            },
+            EventRx { rx, bytes },
+        )
+    }
+}
+impl EventTx {
+    pub fn channel() -> (Self, EventRx) {
+        let (sender, rx) = EventSender::channel();
+        (
+            Self {
+                inner: Arc::new(std::sync::Mutex::new(sender)),
             },
             rx,
         )
     }
-
+    #[allow(clippy::result_large_err)]
     pub fn send(&self, event: SessionEvent) -> Result<(), mpsc::error::SendError<SessionEvent>> {
-        let tx = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .clone();
-        match tx.try_send(event) {
+        use std::sync::atomic::Ordering::Relaxed;
+        // Count the encoded payload without allocating a second payload buffer.
+        struct Size(usize);
+        impl std::io::Write for Size {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0 = self.0.saturating_add(bytes.len());
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut size = Size(0);
+        let encoded = serde_json::to_writer(&mut size, &event).is_ok();
+        let mut sender = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(tx) = sender.tx.as_ref() else {
+            return Err(mpsc::error::SendError(event));
+        };
+        if !encoded
+            || tx.capacity() == 0
+            || sender.bytes.load(Relaxed).saturating_add(size.0) > 32 * 1024 * 1024
+        {
+            tracing::error!(
+                queued_bytes = sender.bytes.load(Relaxed),
+                "adapter event backlog exceeded budget; failing the stream"
+            );
+            sender.tx.take(); // Drain accepted events, then pump handles EOF as failure.
+            return Err(mpsc::error::SendError(event));
+        }
+        sender.bytes.fetch_add(size.0, Relaxed);
+        match tx.try_send((event, size.0)) {
             Ok(()) => Ok(()),
-            Err(mpsc::error::TrySendError::Closed(event)) => Err(mpsc::error::SendError(event)),
-            Err(mpsc::error::TrySendError::Full(event)) => tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(tx.send(event))
-            }),
+            Err(error) => {
+                let (event, bytes) = error.into_inner();
+                sender.bytes.fetch_sub(bytes, Relaxed);
+                sender.tx.take();
+                Err(mpsc::error::SendError(event))
+            }
         }
     }
-
-    /// Points later sends at a fresh receiver. The previous consumer keeps
-    /// only what was already queued for it.
-    pub fn reseat(&self) -> mpsc::Receiver<SessionEvent> {
-        let (tx, rx) = mpsc::channel(self.capacity);
-        *self
-            .inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = tx;
+    pub fn reseat(&self) -> EventRx {
+        let (sender, rx) = EventSender::channel();
+        *self.inner.lock().unwrap_or_else(|p| p.into_inner()) = sender;
         rx
     }
 }
@@ -253,7 +311,7 @@ impl EventTx {
 #[async_trait]
 pub trait AgentSession: Send + Sync {
     /// The one and only output: already-normalized events.
-    fn events(&self) -> mpsc::Receiver<SessionEvent>;
+    fn events(&self) -> crate::adapter::EventRx;
 
     async fn send(&self, input: PromptInput) -> Result<String>;
     async fn interrupt(&self) -> Result<()>;
@@ -634,7 +692,10 @@ pub async fn close_child(child: &Mutex<Option<crate::os_process::Child>>) -> Res
 async fn kill_tree_checked(child: &mut crate::os_process::Child) -> Result<()> {
     #[cfg(unix)]
     if let Some(pid) = child.id() {
-        crate::process::stop_tree(pid);
+        crate::process::end_own_tree(pid, || {
+            let _ = child.try_wait();
+        })
+        .await;
     }
     #[cfg(windows)]
     if let Some(pid) = child.id() {
@@ -738,6 +799,44 @@ mod tests {
         let message = stopped(crate::channel::AGENT_LABEL, &child, &said).await;
         assert!(message.contains("退出码 7"), "{message}");
         assert!(message.contains("日志"), "nowhere to look next: {message}");
+    }
+
+    /// An agent that honours `SIGTERM` is gone at once, but stays a zombie of
+    /// ours until reaped. Closing it must not wait out the grace for that.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn closing_an_agent_that_honours_sigterm_does_not_wait_out_the_grace() {
+        let mut command = crate::os_process::Command::new("sleep");
+        command.arg("30");
+        owned_child(&mut command);
+        let child = Mutex::new(Some(command.spawn().expect("sleep runs")));
+
+        let began = std::time::Instant::now();
+        close_child(&child).await.expect("the agent is closed");
+        assert!(
+            began.elapsed() < crate::process::GRACE,
+            "closing took {:?}",
+            began.elapsed()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn closing_an_agent_that_ignores_sigterm_still_ends_its_group() {
+        let mut command = crate::os_process::Command::new("sh");
+        command.arg("-c").arg("trap '' TERM; sleep 30 & wait");
+        owned_child(&mut command);
+        let spawned = command.spawn().expect("sh runs");
+        let group = spawned.id().expect("a live pid") as libc::pid_t;
+        let child = Mutex::new(Some(spawned));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        close_child(&child).await.expect("the agent is closed");
+        assert_ne!(
+            unsafe { libc::killpg(group, 0) },
+            0,
+            "the group outlived its close"
+        );
     }
 
     /// Guarded at the source level because half of what is being guarded

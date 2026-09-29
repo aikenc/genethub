@@ -79,6 +79,9 @@ export class FakeSocket implements WebSocketLike {
   /** End the logical owner, as distinct from losing one physical carrier. */
   endSession(): void { this.endpoint?.close("fake peer session ended"); }
 
+  /** Forget the logical owner without telling the client, like an expired daemon registry entry. */
+  forgetSession(): void { this.peer.endpoint = undefined; }
+
   /** Stops answering RPCs without closing, the way a frozen carrier does. */
   silence(): void {
     this.silent = true;

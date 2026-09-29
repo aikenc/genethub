@@ -10,12 +10,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use futures_util::{SinkExt, StreamExt};
 use genehub_proto::{PeerAuth, PeerHello, TransportKind};
-use tokio::sync::{mpsc, Notify};
-use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+use tokio::sync::{Notify, mpsc};
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 use crate::config::Enrollment;
 use crate::dataplane::{endpoint, handshake};
@@ -42,6 +42,7 @@ const READ_IDLE: Duration = Duration::from_secs(75);
 const STABLE_FOR_RESET: Duration = Duration::from_secs(30);
 
 struct UplinkAttempt {
+    close_reason: Option<&'static str>,
     connected_for: Duration,
     result: Result<()>,
 }
@@ -104,6 +105,7 @@ struct Frame {
 
 #[derive(Clone)]
 struct Writer {
+    pace: Arc<crate::dataplane::uplink_pace::UplinkPace>,
     messages: mpsc::Sender<Message>,
 }
 
@@ -281,9 +283,7 @@ fn spawn_uplink(state: Shared, spec: UplinkSpec) -> FabricUplink {
     let task_online = online.clone();
     let task = tokio::spawn(async move {
         let hosted = match &spec {
-            UplinkSpec::Hosted(enrollment) => {
-                Some(crate::hub::Client::new(&enrollment.hub_url))
-            }
+            UplinkSpec::Hosted(enrollment) => Some(crate::hub::Client::new(&enrollment.hub_url)),
             UplinkSpec::Rendezvous(_) => None,
         };
         let mut attempt = 0usize;
@@ -308,6 +308,7 @@ fn spawn_uplink(state: Shared, spec: UplinkSpec) -> FabricUplink {
                         }
                         Err(error) => UplinkAttempt {
                             connected_for: Duration::ZERO,
+                            close_reason: None,
                             result: Err(error),
                         },
                     }
@@ -328,11 +329,11 @@ fn spawn_uplink(state: Shared, spec: UplinkSpec) -> FabricUplink {
                 "fabric",
                 spec.operation(),
                 "offline",
-                Some(if run.result.is_err() {
+                Some(run.close_reason.unwrap_or(if run.result.is_err() {
                     "connection"
                 } else {
                     "closed"
-                }),
+                })),
             );
             if let Err(error) = &run.result {
                 match &spec {
@@ -361,6 +362,7 @@ async fn run_once(
     diagnostic_operation: &'static str,
 ) -> UplinkAttempt {
     let mut connected_at = None;
+    let mut close_reason = None;
     let result = async {
         let endpoint_url = transport_flow_url(url)?;
         validate_fabric_url(&endpoint_url)?;
@@ -379,6 +381,9 @@ async fn run_once(
         let (mut sink, mut source) = socket.split();
         let (messages_tx, mut messages_rx) = mpsc::channel::<Message>(WRITER_QUEUE);
         let writer = Writer {
+            pace: Arc::new(crate::dataplane::uplink_pace::UplinkPace::new(
+                genehub_proto::INITIAL_STREAM_WINDOW_BYTES as u64,
+            )),
             messages: messages_tx.clone(),
         };
         let mut socket_writer = tokio::spawn(async move {
@@ -432,7 +437,10 @@ async fn run_once(
                                 break Err(anyhow!("Fabric writer stopped"));
                             }
                         }
-                        Ok(Message::Close(_)) => break Ok(()),
+                        Ok(Message::Close(frame)) => {
+                            close_reason = Some(uplink_close_code(frame.as_ref()));
+                            break Ok(());
+                        }
                         Ok(Message::Text(_)) => {
                             break Err(anyhow!("Fabric sent a text WebSocket message"));
                         }
@@ -454,6 +462,7 @@ async fn run_once(
     }
     .await;
     UplinkAttempt {
+        close_reason,
         connected_for: connected_at
             .map(|at| at.elapsed())
             .unwrap_or(Duration::ZERO),
@@ -683,7 +692,8 @@ async fn serve_peer_inner(
             }
         });
     }
-    let (inbound, mut outbound, carrier) = endpoint::carrier_channels();
+    let (inbound, mut outbound, mut carrier) = endpoint::carrier_channels();
+    carrier.uplink_pace = Some(writer.pace.peer());
     let flow = StreamFlow::from_wire(frame.value)?;
     peers.lock().await.insert(
         frame.stream_id,
@@ -1061,9 +1071,13 @@ pub async fn dial(
         }
     });
     let writer = Writer {
+        pace: Arc::new(crate::dataplane::uplink_pace::UplinkPace::new(
+            genehub_proto::INITIAL_STREAM_WINDOW_BYTES as u64,
+        )),
         messages: messages_tx,
     };
-    let (inbound, mut outbound, carrier) = endpoint::carrier_channels();
+    let (inbound, mut outbound, mut carrier) = endpoint::carrier_channels();
+    carrier.uplink_pace = Some(writer.pace.peer());
 
     let reader_writer = writer.clone();
     let reader_flow = flow.clone();
@@ -1273,6 +1287,44 @@ where
     }
 }
 
+/// Close codes the feedback snapshot is allowed to carry. Anything else,
+/// including a free-form close reason, collapses to a fixed label.
+fn uplink_close_code(
+    frame: Option<&tokio_tungstenite::tungstenite::protocol::CloseFrame>,
+) -> &'static str {
+    let Some(frame) = frame else {
+        return "dropped";
+    };
+    let code = u16::from(frame.code);
+    if code == 4400 {
+        return match frame.reason.as_ref() {
+            "lateFrameOverflow" => "lateFrameOverflow",
+            "unknownStream" => "unknownStream",
+            "openRace" => "openRace",
+            "duplicateStream" => "duplicateStream",
+            "malformedOpen" => "malformedOpen",
+            "openLimit" => "openLimit",
+            "routeConflict" => "routeConflict",
+            "accept" => "accept",
+            "data" => "data",
+            "windowUpdate" => "windowUpdate",
+            "fin" => "fin",
+            "reset" => "reset",
+            "controlPayload" => "controlPayload",
+            _ => "relay-strike",
+        };
+    }
+    match code {
+        1000 => "normal",
+        1001 => "relay-shutdown",
+        1006 => "dropped",
+        1012 => "presence-lost",
+        4403 => "revoked",
+        4408 => "expired",
+        _ => "closed",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1347,6 +1399,43 @@ mod tests {
         assert_eq!(scale_backoff(60, 1000), Duration::from_secs(60));
         assert_eq!(scale_backoff(2, 0), Duration::from_millis(1500));
         assert_eq!(scale_backoff(2, 9_000), Duration::from_millis(2500));
+    }
+
+    #[test]
+    fn uplink_close_code_names_a_relay_strike_and_stays_low_cardinality() {
+        use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+        use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+
+        let strike = CloseFrame {
+            code: CloseCode::from(4400),
+            reason: "lateFrameOverflow".into(),
+        };
+        assert_eq!(uplink_close_code(Some(&strike)), "lateFrameOverflow");
+        let unnamed = CloseFrame {
+            code: CloseCode::from(4400),
+            reason: "freeform".into(),
+        };
+        assert_eq!(uplink_close_code(Some(&unnamed)), "relay-strike");
+        assert_eq!(uplink_close_code(None), "dropped");
+    }
+
+    #[test]
+    fn uplink_backoff_restarts_after_a_stable_connection() {
+        let mut attempt = 0;
+        let mut next = |lifetime: Option<Duration>| {
+            let (following, base) = plan_retry(
+                attempt,
+                lifetime.is_some_and(|elapsed| elapsed >= STABLE_FOR_RESET),
+            );
+            attempt = following;
+            Duration::from_secs(base)
+        };
+        let flapping: Vec<u64> = (0..7)
+            .map(|_| next(Some(Duration::from_secs(1))).as_secs())
+            .collect();
+        assert_eq!(flapping, [1, 2, 5, 10, 30, 60, 60]);
+        assert_eq!(next(Some(STABLE_FOR_RESET)).as_secs(), 1);
+        assert_eq!(next(None).as_secs(), 2);
     }
 
     fn hex(bytes: &[u8]) -> String {

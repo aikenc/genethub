@@ -30,7 +30,6 @@ use super::{
 };
 
 const BINARY: &str = "opencode";
-const EVENT_CAPACITY: usize = 1024;
 const OPENCODE_ALLOW_ALL: &str = r#"{"*":"allow","read":"allow","edit":"allow","glob":"allow","grep":"allow","bash":"allow","task":"allow","skill":"allow","lsp":"allow","question":"allow","webfetch":"allow","websearch":"allow","external_directory":"allow","doom_loop":"allow"}"#;
 
 pub struct OpenCodeAdapter;
@@ -132,7 +131,7 @@ impl AgentAdapter for OpenCodeAdapter {
         // conversation on every first prompt after a restart.
         let remote_session = open_session(&http, &base, &config.cwd, &config.resume).await?;
 
-        let (events, events_rx) = crate::adapter::EventTx::channel(EVENT_CAPACITY);
+        let (events, events_rx) = crate::adapter::EventTx::channel();
         let turn = Arc::new(Mutex::new(TurnState::default()));
 
         let tasks = super::SessionTasks::default();
@@ -387,14 +386,14 @@ struct OpenCodeSession {
     model: Mutex<Option<String>>,
     additional_system_prompt: Option<String>,
     events: crate::adapter::EventTx,
-    events_rx: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<SessionEvent>>>,
+    events_rx: std::sync::Mutex<Option<crate::adapter::EventRx>>,
     turn: Arc<Mutex<TurnState>>,
     child: Mutex<Option<Child>>,
 }
 
 #[async_trait]
 impl AgentSession for OpenCodeSession {
-    fn events(&self) -> tokio::sync::mpsc::Receiver<SessionEvent> {
+    fn events(&self) -> crate::adapter::EventRx {
         self.events_rx
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
@@ -1219,7 +1218,7 @@ mod tests {
         }
     }
 
-    fn drain(rx: &mut tokio::sync::mpsc::Receiver<SessionEvent>) -> Vec<SessionEvent> {
+    fn drain(rx: &mut crate::adapter::EventRx) -> Vec<SessionEvent> {
         let mut out = Vec::new();
         while let Ok(event) = rx.try_recv() {
             if matches!(event, SessionEvent::TurnProgress { .. }) {
@@ -1304,7 +1303,7 @@ mod tests {
     /// duplicate the text, so the same part id must produce a replacing item.
     #[test]
     fn a_resent_text_part_replaces_rather_than_appends() {
-        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
+        let (tx, mut rx) = crate::adapter::EventTx::channel();
         let mut turn = state();
         for text in ["he", "hello"] {
             translate_event(
@@ -1345,7 +1344,7 @@ mod tests {
 
     #[test]
     fn parts_belonging_to_another_session_are_ignored() {
-        let (tx, mut rx) = crate::adapter::EventTx::channel(8);
+        let (tx, mut rx) = crate::adapter::EventTx::channel();
         let mut turn = state();
         translate_event(
             &json!({"type": "message.part.updated", "properties": {"part": {
@@ -1363,7 +1362,7 @@ mod tests {
     /// by repeating the question.
     #[test]
     fn the_users_own_message_is_not_replayed_as_the_answer() {
-        let (tx, mut rx) = crate::adapter::EventTx::channel(16);
+        let (tx, mut rx) = crate::adapter::EventTx::channel();
         let mut turn = TurnState {
             id: Some("t1".into()),
             ..TurnState::default()
@@ -1435,7 +1434,7 @@ mod tests {
 
     #[test]
     fn session_errors_end_the_turn_with_a_classified_failure() {
-        let (tx, mut rx) = crate::adapter::EventTx::channel(8);
+        let (tx, mut rx) = crate::adapter::EventTx::channel();
         let mut turn = state();
         translate_event(
             &json!({"type": "session.error", "properties": {"error": {"data": {

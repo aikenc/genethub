@@ -66,10 +66,13 @@ async fn negotiate(stream: &mut ServerStream, services: &PeerServices) -> Result
         expires_at: Instant::now() + RTC_ADMISSION_LIFETIME,
     };
 
+    let config_started = Instant::now();
+    let ice_servers = super::stun_urls(&super::ice_config(&services.state).await);
+    let config_ms = config_started.elapsed().as_millis() as u64;
     let session = Session::accept(
         &request.sdp,
         &Config {
-            ice_servers: super::stun_urls(&super::ice_config(&services.state).await),
+            ice_servers,
             channel_label: DATA_CHANNEL_LABEL.to_string(),
             gather_timeout: RTC_GATHER_TIMEOUT,
             max_message_bytes: genehub_proto::MAX_DATA_FRAME_BYTES,
@@ -78,9 +81,11 @@ async fn negotiate(stream: &mut ServerStream, services: &PeerServices) -> Result
     )?;
     // A little longer than the shell's own gathering timeout, so the answer
     // that timeout produces is still collected rather than raced away.
+    let answer_started = Instant::now();
     let sdp = session
         .answer(RTC_GATHER_TIMEOUT + RTC_HELLO_TIMEOUT)
         .await?;
+    let answer_ms = answer_started.elapsed().as_millis() as u64;
 
     let state = services.state.clone();
     let inherited = match services.access.logical_id.as_deref() {
@@ -101,7 +106,7 @@ async fn negotiate(stream: &mut ServerStream, services: &PeerServices) -> Result
     stream
         .respond(&ExchangeResponseHead {
             status: 200,
-            metadata: serde_json::Value::Null,
+            metadata: serde_json::json!({"rtcTiming": {"configMs": config_ms, "answerMs": answer_ms}}),
             body_length: Some(response.len() as u64),
             error: None,
         })

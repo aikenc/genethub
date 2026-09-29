@@ -64,8 +64,8 @@ function agent(overrides: Partial<AgentInfo> = {}): AgentInfo {
         },
       ],
       modes: [
-        { id: "read-only", label: "Read only" },
-        { id: "full-access", label: "Full access" },
+        { id: "read-only", label: "Read only", unattended: false },
+        { id: "full-access", label: "Full access", unattended: true },
       ],
       commands: [],
       defaultModel: "text",

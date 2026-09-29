@@ -40,7 +40,7 @@ function sse(response: ServerResponse, lines: string[]): void {
   response.end();
 }
 
-function openaiChat(turn: ScriptedTurn): string[] {
+function openaiChat(turn: ScriptedTurn, responseIndex: number): string[] {
   const frames: string[] = [];
   const send = (delta: unknown, finish: string | null = null) => {
     frames.push(
@@ -57,7 +57,7 @@ function openaiChat(turn: ScriptedTurn): string[] {
     send({
       tool_calls: tools.map((tool, index) => ({
         index,
-        id: `call_${index + 1}`,
+        id: `call_${responseIndex}_${index + 1}`,
         type: "function",
         function: { name: tool.name, arguments: turn.emptyToolIdDeltas ? "" : JSON.stringify(tool.arguments) },
       })),
@@ -134,6 +134,7 @@ export async function startMockLlm(): Promise<MockLlmHandle> {
   const queue: ScriptedTurn[] = [];
   const requests: unknown[] = [];
   const inboundHeaders: Array<Record<string, string>> = [];
+  let responseIndex = 0;
   const server: Server = createServer(async (request, response) => {
     const url = request.url ?? "";
     const headers: Record<string, string> = {};
@@ -195,7 +196,7 @@ export async function startMockLlm(): Promise<MockLlmHandle> {
       return;
     }
     if (url.includes("/chat/completions") || url.endsWith("/completions")) {
-      sse(response, openaiChat(turn));
+      sse(response, openaiChat(turn, ++responseIndex));
       return;
     }
     response.writeHead(404).end();

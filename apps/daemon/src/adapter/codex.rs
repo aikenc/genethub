@@ -97,7 +97,6 @@ use super::{
 };
 
 const BINARY: &str = "codex";
-const EVENT_CAPACITY: usize = 1024;
 
 /// The reserved, non-originating client name (see the module doc).
 const CLIENT_NAME: &str = "codex_app_server_daemon";
@@ -356,7 +355,7 @@ impl AgentAdapter for CodexAdapter {
 
         let stdin = Arc::new(Mutex::new(stdin));
         let child = Arc::new(Mutex::new(Some(child)));
-        let (events, events_rx) = crate::adapter::EventTx::channel(EVENT_CAPACITY);
+        let (events, events_rx) = crate::adapter::EventTx::channel();
         let pending: PendingMap = Arc::default();
         let asks: AskMap = Arc::default();
         let turn = Arc::new(Mutex::new(TurnState::default()));
@@ -909,7 +908,7 @@ struct CodexSession {
     tasks: super::SessionTasks,
     stdin: Arc<Mutex<ChildStdin>>,
     events: crate::adapter::EventTx,
-    events_rx: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<SessionEvent>>>,
+    events_rx: std::sync::Mutex<Option<crate::adapter::EventRx>>,
     pending: PendingMap,
     turn: Arc<Mutex<TurnState>>,
     next_id: AtomicI64,
@@ -1070,7 +1069,7 @@ fn active_turn_named_in(message: &str) -> Option<String> {
 
 #[async_trait]
 impl AgentSession for CodexSession {
-    fn events(&self) -> tokio::sync::mpsc::Receiver<SessionEvent> {
+    fn events(&self) -> crate::adapter::EventRx {
         self.events_rx
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
@@ -2702,7 +2701,7 @@ mod tests {
     async fn server_resolution_clears_only_the_root_threads_pending_request() {
         let asks: AskMap = Arc::default();
         asks.lock().await.insert("7".into());
-        let (events, mut seen) = crate::adapter::EventTx::channel(4);
+        let (events, mut seen) = crate::adapter::EventTx::channel();
 
         resolve_ask(
             &json!({ "threadId": "child-thread", "requestId": 7 }),
@@ -2747,7 +2746,7 @@ mod tests {
     /// timeline or consume the root GeneHub turn.
     #[tokio::test]
     async fn a_child_thread_cannot_write_to_or_complete_the_root_turn() {
-        let (events, mut seen) = crate::adapter::EventTx::channel(16);
+        let (events, mut seen) = crate::adapter::EventTx::channel();
         let turn = Mutex::new(state());
 
         translate(
@@ -3037,7 +3036,7 @@ mod tests {
     /// is ever removed while turn filtering remains.
     #[tokio::test]
     async fn a_foreign_thread_is_rejected_even_if_its_turn_id_matches() {
-        let (events, mut seen) = crate::adapter::EventTx::channel(8);
+        let (events, mut seen) = crate::adapter::EventTx::channel();
         let turn = Mutex::new(state());
         translate(
             "turn/started",
@@ -3099,7 +3098,7 @@ mod tests {
     /// the root turn learned from `turn/started` before touching shared state.
     #[tokio::test]
     async fn a_stale_turn_on_the_root_thread_cannot_mutate_the_current_turn() {
-        let (events, mut seen) = crate::adapter::EventTx::channel(8);
+        let (events, mut seen) = crate::adapter::EventTx::channel();
         let turn = Mutex::new(state());
         translate(
             "turn/started",
@@ -3174,7 +3173,7 @@ mod tests {
     /// It must not become usage for a later empty turn.
     #[tokio::test]
     async fn idle_root_usage_does_not_count_toward_the_next_turn() {
-        let (events, mut seen) = crate::adapter::EventTx::channel(4);
+        let (events, mut seen) = crate::adapter::EventTx::channel();
         let turn = Mutex::new(TurnState::default());
         translate(
             "thread/tokenUsage/updated",
@@ -3245,7 +3244,7 @@ mod tests {
     /// those are content, not notification provenance, and remain visible.
     #[tokio::test]
     async fn root_thread_sub_agent_activity_remains_visible() {
-        let (events, mut seen) = crate::adapter::EventTx::channel(4);
+        let (events, mut seen) = crate::adapter::EventTx::channel();
         let turn = Mutex::new(state());
         translate(
             "turn/started",
@@ -3384,7 +3383,7 @@ mod tests {
 
     #[test]
     fn a_streamed_reply_opens_one_item_and_then_extends_it() {
-        let (events, mut seen) = crate::adapter::EventTx::channel(8);
+        let (events, mut seen) = crate::adapter::EventTx::channel();
         let mut state = state();
         let delta = |text: &str| json!({ "itemId": "item-1", "delta": text });
 
@@ -3423,7 +3422,7 @@ mod tests {
     /// this CLI hands the command over as argv rather than a line of shell.
     #[test]
     fn a_command_item_becomes_a_shell_card_with_its_output_and_code() {
-        let (events, mut seen) = crate::adapter::EventTx::channel(8);
+        let (events, mut seen) = crate::adapter::EventTx::channel();
         let mut state = state();
         let item = json!({
             "type": "commandExecution",
@@ -3461,7 +3460,7 @@ mod tests {
     /// spinner after the turn has ended (fb_hih4FD8UDpiw).
     #[test]
     fn a_completed_item_cannot_leave_a_tool_card_running() {
-        let (events, mut seen) = crate::adapter::EventTx::channel(4);
+        let (events, mut seen) = crate::adapter::EventTx::channel();
         let mut state = state();
         item_frame(
             &json!({
@@ -3493,7 +3492,7 @@ mod tests {
     /// renderer is not a licence to drop the event.
     #[test]
     fn an_unknown_item_type_is_still_shown() {
-        let (events, mut seen) = crate::adapter::EventTx::channel(8);
+        let (events, mut seen) = crate::adapter::EventTx::channel();
         let mut state = state();
 
         item_frame(
@@ -3519,7 +3518,7 @@ mod tests {
     /// the CLI's own label for it says.
     #[test]
     fn a_turn_we_interrupted_ends_as_canceled() {
-        let (events, mut seen) = crate::adapter::EventTx::channel(8);
+        let (events, mut seen) = crate::adapter::EventTx::channel();
         let mut state = state();
         state.interrupt_requested = true;
 
@@ -3537,7 +3536,7 @@ mod tests {
 
     #[test]
     fn a_failed_turn_carries_the_reason_it_gave() {
-        let (events, mut seen) = crate::adapter::EventTx::channel(8);
+        let (events, mut seen) = crate::adapter::EventTx::channel();
         let mut state = state();
 
         finish(
@@ -3558,7 +3557,7 @@ mod tests {
     /// so they have to be held until there is a completed turn to report.
     #[test]
     fn token_counts_ride_along_with_the_completed_turn() {
-        let (events, mut seen) = crate::adapter::EventTx::channel(8);
+        let (events, mut seen) = crate::adapter::EventTx::channel();
         let mut state = state();
         state.codex_turn = Some("turn-7".into());
         state.usage = usage_in(&json!({ "tokenUsage": { "last": {
@@ -3591,7 +3590,7 @@ mod tests {
 
     #[test]
     fn a_plan_becomes_one_todo_list_that_is_updated_in_place() {
-        let (events, mut seen) = crate::adapter::EventTx::channel(8);
+        let (events, mut seen) = crate::adapter::EventTx::channel();
         let mut state = state();
         let frame = |second: &str| {
             json!({ "plan": [
@@ -3804,7 +3803,7 @@ mod tests {
     /// unknown-tool payload.
     #[test]
     fn image_generation_result_becomes_a_produced_tool_image() {
-        let (events, mut seen) = crate::adapter::EventTx::channel(8);
+        let (events, mut seen) = crate::adapter::EventTx::channel();
         let mut state = state();
         let item = json!({
             "type": "imageGeneration",

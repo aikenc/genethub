@@ -26,25 +26,24 @@ use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use crate::os_process::{Child, Command};
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use genehub_proto::{
-    Capabilities, Catalog, ItemDelta, ModeInfo, ModelInfo, ProbeState,
-    SearchMatch, SessionEvent, TimelineItem, TodoEntry, TodoStatus, ToolCallDetail, ToolKind,
-    ToolStatus, TurnError, TurnErrorCode, Usage,
+    Capabilities, Catalog, ItemDelta, ModeInfo, ModelInfo, ProbeState, SearchMatch, SessionEvent,
+    TimelineItem, TodoEntry, TodoStatus, ToolCallDetail, ToolKind, ToolStatus, TurnError,
+    TurnErrorCode, Usage,
 };
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{Mutex, RwLock};
 
 use super::acp::AcpAdapter;
 use super::usage;
 use super::{
-    find_executable_in, AgentAdapter, AgentSession, Chatter, ImportCandidate, ImportedHistory,
-    PersistHandle, PromptInput, ProviderMap, SessionConfig,
+    AgentAdapter, AgentSession, Chatter, ImportCandidate, ImportedHistory, PersistHandle,
+    PromptInput, ProviderMap, SessionConfig, find_executable_in,
 };
 
-const EVENT_CAPACITY: usize = 1024;
 const LIST_MODELS_TIMEOUT: Duration = Duration::from_secs(15);
 /// Keys every print run writes into `cli-config.json`.
 const GLOBAL_MODEL_KEYS: &[&str] = &["model", "selectedModel"];
@@ -235,7 +234,7 @@ impl AgentAdapter for CursorAdapter {
             fast: config.fast.unwrap_or(false),
             mode_id: config.mode_id.clone(),
         };
-        let (events, events_rx) = crate::adapter::EventTx::channel(EVENT_CAPACITY);
+        let (events, events_rx) = crate::adapter::EventTx::channel();
         Ok(Box::new(CursorSession {
             program,
             agent_id: self.id.clone(),
@@ -283,6 +282,10 @@ struct TurnState {
     counter: u64,
     text_item: Option<String>,
     reasoning_item: Option<String>,
+    /// Text already stored on the open assistant item. Print mode then sends
+    /// that same segment again, still with `timestamp_ms`, before a tool,
+    /// retry, or question. The end-of-run copy omits `timestamp_ms`.
+    text_segment: String,
     usage: Usage,
     /// The user's words for this turn and what Cursor had answered so far,
     /// kept for the next prompt if this run is canceled.
@@ -318,7 +321,7 @@ struct CursorSession {
     child: Arc<Mutex<Option<Child>>>,
     canceled: Arc<AtomicBool>,
     events: crate::adapter::EventTx,
-    events_rx: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<SessionEvent>>>,
+    events_rx: std::sync::Mutex<Option<crate::adapter::EventRx>>,
     tasks: super::SessionTasks,
 }
 
@@ -377,7 +380,7 @@ impl CursorSession {
 
 #[async_trait]
 impl AgentSession for CursorSession {
-    fn events(&self) -> tokio::sync::mpsc::Receiver<SessionEvent> {
+    fn events(&self) -> crate::adapter::EventRx {
         self.events_rx
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
@@ -784,7 +787,7 @@ fn translate_event(
                 None => {
                     let id = state.next_item_id();
                     state.reasoning_item = Some(id.clone());
-                    state.text_item = None;
+                    close_text_segment(state);
                     emit(SessionEvent::Item {
                         turn_id,
                         item: TimelineItem::Reasoning {
@@ -797,13 +800,15 @@ fn translate_event(
             }
         }
         (Some("assistant"), _) => {
-            // Without `timestamp_ms` this is the recap of the last segment,
-            // already streamed as deltas.
-            if event.get("timestamp_ms").is_none() {
-                return chat_id;
-            }
+            // Deltas carry `timestamp_ms`. The same segment is written again
+            // before a tool, retry, or question, and that copy is timestamped
+            // too. The end-of-run copy is not. Both repeat text already stored.
             let delta = message_text(event);
             if delta.is_empty() {
+                return chat_id;
+            }
+            let repeats_segment = !state.text_segment.is_empty() && delta == state.text_segment;
+            if event.get("timestamp_ms").is_none() || repeats_segment {
                 return chat_id;
             }
             open_round(state);
@@ -811,6 +816,7 @@ fn translate_event(
             usage::record_visible_output(&mut state.usage, &delta);
             usage::emit_progress(events, &turn_id, &state.usage);
             state.partial.push_str(&delta);
+            state.text_segment.push_str(&delta);
             match state.text_item.clone() {
                 Some(id) => emit(SessionEvent::ItemDelta {
                     turn_id,
@@ -833,7 +839,7 @@ fn translate_event(
             }
         }
         (Some("tool_call"), Some(phase @ ("started" | "completed"))) => {
-            state.text_item = None;
+            close_text_segment(state);
             state.reasoning_item = None;
             if let Some(item) = tool_item(event, phase == "completed", state) {
                 emit(SessionEvent::Item { turn_id, item });
@@ -858,6 +864,11 @@ fn translate_event(
         _ => {}
     }
     chat_id
+}
+
+fn close_text_segment(state: &mut TurnState) {
+    state.text_item = None;
+    state.text_segment.clear();
 }
 
 fn open_round(state: &mut TurnState) {
@@ -1650,7 +1661,9 @@ mod tests {
     fn print_args_pin_model_resume_and_read_only_modes() {
         let args = print_args(Some("grok-4.7-low-fast"), Some("chat-1"), Some("plan"));
         let joined = args.join(" ");
-        assert!(joined.starts_with("--print --single-turn --output-format stream-json --stream-partial-output"));
+        assert!(joined.starts_with(
+            "--print --single-turn --output-format stream-json --stream-partial-output"
+        ));
         assert!(joined.contains("--model grok-4.7-low-fast"));
         assert!(joined.contains("--resume chat-1"));
         assert!(joined.ends_with("--mode plan"));
@@ -1792,7 +1805,30 @@ mod tests {
         assert_eq!(default.as_deref(), Some("auto"));
     }
 
-    fn drain(rx: &mut tokio::sync::mpsc::Receiver<SessionEvent>) -> Vec<SessionEvent> {
+    fn assistant_texts(events: &[SessionEvent]) -> Vec<String> {
+        let mut texts: Vec<(String, String)> = Vec::new();
+        for event in events {
+            match event {
+                SessionEvent::Item {
+                    item: TimelineItem::AssistantMessage { id, text, .. },
+                    ..
+                } => texts.push((id.clone(), text.clone())),
+                SessionEvent::ItemDelta {
+                    item_id,
+                    delta: ItemDelta::Text { delta },
+                    ..
+                } => {
+                    if let Some((_, text)) = texts.iter_mut().rev().find(|(id, _)| id == item_id) {
+                        text.push_str(delta);
+                    }
+                }
+                _ => {}
+            }
+        }
+        texts.into_iter().map(|(_, text)| text).collect()
+    }
+
+    fn drain(rx: &mut crate::adapter::EventRx) -> Vec<SessionEvent> {
         let mut out = Vec::new();
         while let Ok(event) = rx.try_recv() {
             out.push(event);
@@ -1809,7 +1845,7 @@ mod tests {
 
     #[test]
     fn stream_json_deltas_become_one_item_each_and_the_recap_is_skipped() {
-        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
+        let (tx, mut rx) = crate::adapter::EventTx::channel();
         let mut state = running_turn();
         let lines = [
             json!({"type":"system","subtype":"init","session_id":"chat-9","model":"Grok 4.7 Low Fast"}),
@@ -1827,21 +1863,45 @@ mod tests {
         assert_eq!(chat.as_deref(), Some("chat-9"));
         assert_eq!(state.partial, "Hello");
         assert!(matches!(state.outcome, Some(Outcome::Success(Some(_)))));
-        let items: Vec<_> = drain(&mut rx)
-            .into_iter()
+        let events = drain(&mut rx);
+        let items: Vec<_> = events
+            .iter()
             .filter_map(|event| match event {
                 SessionEvent::Item { item, .. } => Some(item),
                 _ => None,
             })
             .collect();
         assert_eq!(items.len(), 2, "one reasoning item and one message item");
-        assert!(matches!(&items[0], TimelineItem::Reasoning { text, .. } if text == "plan"));
-        assert!(matches!(&items[1], TimelineItem::AssistantMessage { text, .. } if text == "Hel"));
+        assert!(matches!(items[0], TimelineItem::Reasoning { text, .. } if text == "plan"));
+        assert!(matches!(items[1], TimelineItem::AssistantMessage { text, .. } if text == "Hel"));
+        assert_eq!(assistant_texts(&events), ["Hello"]);
+    }
+
+    #[test]
+    fn timestamped_segment_flush_is_not_appended_again() {
+        let (tx, mut rx) = crate::adapter::EventTx::channel();
+        let mut state = running_turn();
+        let lines = [
+            json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Hel"}]},"session_id":"chat-9","timestamp_ms":1}),
+            json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"lo"}]},"session_id":"chat-9","timestamp_ms":2}),
+            json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Hello"}]},"session_id":"chat-9","timestamp_ms":3,"model_call_id":"call-1"}),
+            json!({"type":"tool_call","subtype":"started","tool_call":{},"timestamp_ms":4}),
+            json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Wor"}]},"session_id":"chat-9","timestamp_ms":5}),
+            json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ld"}]},"session_id":"chat-9","timestamp_ms":6}),
+            json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"World"}]},"session_id":"chat-9","timestamp_ms":7}),
+            json!({"type":"tool_call","subtype":"started","tool_call":{},"timestamp_ms":8}),
+            json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done"}]},"session_id":"chat-9","timestamp_ms":9}),
+        ];
+        for line in &lines {
+            translate_event(line, &mut state, &tx);
+        }
+        assert_eq!(state.partial, "HelloWorldDone");
+        assert_eq!(assistant_texts(&drain(&mut rx)), ["Hello", "World", "Done"]);
     }
 
     #[test]
     fn tool_calls_map_to_typed_details_and_todos() {
-        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
+        let (tx, mut rx) = crate::adapter::EventTx::channel();
         let mut state = running_turn();
         let shell_done = json!({"type":"tool_call","subtype":"completed","call_id":"call-1\nfc_1",
             "tool_call":{"shellToolCall":{"args":{"command":"ls"},
@@ -1912,7 +1972,7 @@ mod tests {
 
     #[test]
     fn an_error_result_fails_the_turn_with_cursors_message() {
-        let (tx, _rx) = crate::adapter::EventTx::channel(8);
+        let (tx, _rx) = crate::adapter::EventTx::channel();
         let mut state = running_turn();
         translate_event(
             &json!({"type":"result","subtype":"error","is_error":true,"result":"model unavailable"}),

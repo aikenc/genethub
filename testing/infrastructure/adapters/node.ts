@@ -86,6 +86,7 @@ export async function runNodeUnit(unit: WorkUnit, extraEnv: Record<string, strin
       if ((cleanup.before.processes ?? 0) > 0 || (cleanup.before.ports ?? 0) > 0) {
         if (result.status === "passed") result.status = "failed";
         result.message = (result.message ?? "") + "; leaked resources before forced cleanup: " + JSON.stringify(cleanup.before);
+        result.diagnostic ??= collectFailureDiagnostic(lease);
       }
     }
     if (child.pid) killProcessGroup(child.pid);

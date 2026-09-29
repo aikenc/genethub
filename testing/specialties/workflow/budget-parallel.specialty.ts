@@ -96,13 +96,17 @@ for (const scenario of ["observation", "retry", "budget-expiry", "entries", "ent
         : pure || budgetCase ? "true" : waitFile(effect(data.key === "a" ? "z" : "a"));
       const pause = scenario === "parallel-sibling-lost" ? "sleep 45 && "
         : scenario === "parallel-failure" && data.key === "z" ? "sleep 30 && " : data.key === "z" ? "sleep 0.3 && " : "";
-      // Hold the submitted branch in `finishing` until the daemon restarts.
-      // A five-second window can close before the gate observes both branches.
+      // Retirement actively terminates a submitted tool: sleep alone does not
+      // keep `finishing` observable. This owned fixture resists TERM only until
+      // the product's bounded KILL grace, and submits z after a is completed.
       const after = scenario === "observation" ? " && sleep 5"
         : scenario === "parallel-restart" && data.key === "z"
-          ? ` && for i in $(seq 1 2400); do test -f ${q(release)} && break; sleep 0.05; done`
+          ? " && sleep 120"
           : "";
-      return { tool: { name: "bash", arguments: { command: `printf '%s\\n' ${q(identity)} >> ${q(effect(data.key))} && ${barrier} && ${pause}"$GENEHUB_CLI" workflow complete ${finish}${after}` } } };
+      const retirementBoundary = scenario === "parallel-restart" && data.key === "z";
+      const before = retirementBoundary ? "trap '' TERM; " : "";
+      const submitBarrier = retirementBoundary ? `${waitFile(release)} && ` : "";
+      return { tool: { name: "bash", arguments: { command: `${before}printf '%s\\n' ${q(identity)} >> ${q(effect(data.key))} && ${barrier} && ${submitBarrier}${pause}"$GENEHUB_CLI" workflow complete ${finish}${after}` } } };
     } })));
     const pm = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
     let inputSeq = 0;
@@ -159,10 +163,23 @@ for (const scenario of ["observation", "retry", "budget-expiry", "entries", "ent
       await t.tools.waitUntil(async () => (await current())?.nodes.some(n => n.uses === "agent.session" && n.status === "finishing") === true, 25_000);
       await restart();
     } else if (scenario === "parallel-restart") {
+      // z has already recorded its side effect but cannot submit until a has
+      // settled. Thus the mixed frontier cannot be skipped by close timing.
       await t.tools.waitUntil(async () => {
-        await current(); return run?.nodes.some(n => n.status === "completed" && n.uses === "agent.session") === true
-          && run.nodes.some(n => n.status === "finishing");
-      }, 40_000);
+        await current();
+        return existsSync(effect("z"))
+          && run?.nodes.some(n => n.status === "completed" && n.uses === "agent.session") === true
+          && run.nodes.some(n => n.status === "running" && n.uses === "agent.session");
+      }, 35_000);
+      writeFileSync(release, "submit z");
+      try {
+        await t.tools.waitUntil(async () => {
+          await current(); return run?.nodes.some(n => n.status === "completed" && n.uses === "agent.session") === true
+            && run.nodes.some(n => n.status === "finishing");
+        }, 40_000);
+      } catch (error) {
+        throw new Error(`parallel restart precondition: ${error}; public Run: ${JSON.stringify(run)}`);
+      }
       await restart();
     } else if (scenario === "parallel-sibling-lost") {
       await t.tools.waitUntil(async () => {

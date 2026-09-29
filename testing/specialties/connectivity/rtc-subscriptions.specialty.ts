@@ -21,7 +21,7 @@ defineSpecialty(
     tags: ["network-risk-v2", "multichannel","page-experience", "rtc-subscriptions", "connectivity"],
     runner: "playwright",
     llm: { default: "mock" },
-    expectedDurationMs: 30000,
+    expectedDurationMs: 60000,
     timeoutMs: 150000,
     resources: { environments: 1, cpu: 2, memoryMb: 1024, io: 1, browser: 1, pool: "browser" },
     surfaces: ["browser", "relay", "daemon", "workbench-client"],
@@ -80,17 +80,22 @@ defineSpecialty(
       await writeFile(join(root, "consumer.ts"), `
 import { Client } from '@genehub/workbench/client';
 const input = await window.connectionInput();
-const operations = [], events = [], repairs = [], states = [], errors = [];
+const operations = [], events = [], repairs = [], states = [], errors = [], rtcCandidates = [], rtcPairs = [];
 const client = new Client({...input, rtcEnabled:false, heartbeatMs:1000, heartbeatTimeoutMs:1500, onDiagnostic(e) {
   if(e.kind==='error') { errors.push(e.detail.message); if(errors.length>8) errors.shift(); }
   if(e.kind==='operation' && e.detail.phase==='finish') operations.push({operation:e.detail.operation,transport:e.detail.transport,outcome:e.detail.outcome});
+  if(e.kind==='rtc' && e.detail.milestone==='remoteCandidates') rtcCandidates.push({
+    host:e.detail.remoteCandidateHost, srflx:e.detail.remoteCandidateSrflx,
+    prflx:e.detail.remoteCandidatePrflx, relay:e.detail.remoteCandidateRelay,
+  });
+  if(e.kind==='rtc' && e.detail.milestone==='candidatePair') rtcPairs.push(e.detail);
 }});
 const handlers = {
   onEvent(e) { events.push(e); document.querySelector('#events').textContent=events.map(e=>e.event.type).join(' '); },
   onResync(snapshot,replayed,reset) { repairs.push({snapshot,replayed,reset}); }
 };
 client.onStateChange(state => states.push(state));
-window.probe = { client, events, repairs, operations, states, errors, attach: id=>client.subscribe(id,handlers) };
+window.probe = { client, events, repairs, operations, states, errors, rtcCandidates, rtcPairs, attach: id=>client.subscribe(id,handlers) };
 client.connect();
 `);
       await page.exposeFunction("connectionInput", () => ({ url, credential }));
@@ -128,6 +133,45 @@ client.connect();
       t.assertions.assert(initial.snapshot.items.length === 0, "new session was not empty");
       await page.evaluate(() => (window as any).probe.client.setRtcEnabled(true));
       await page.waitForFunction(() => (window as any).probe.client.rtcState === "connected", null, { timeout: 30000 }).catch(diagnosticFailure);
+      const remoteCandidates = await page.evaluate(() => (window as any).probe.rtcCandidates);
+      t.assertions.assert(
+        remoteCandidates.length >= 1 && remoteCandidates.every((counts: any) =>
+          [counts.host, counts.srflx, counts.prflx, counts.relay].every((value) =>
+            Number.isInteger(value) && value >= 0) &&
+          counts.host + counts.srflx + counts.prflx + counts.relay > 0),
+        "RTC answer candidate type diagnostics were missing or invalid",
+      );
+      await page.waitForFunction(() => (window as any).probe.rtcPairs.some((pair: any) =>
+        pair.connectionState === "connected"), null, { timeout: 5_000 }).catch(diagnosticFailure);
+      const pairEvidence = await page.evaluate(() => (window as any).probe.rtcPairs);
+      t.assertions.assert(pairEvidence.some((pair: any) => pair.statsAvailable &&
+        pair.selectedPair && ["host", "srflx", "prflx", "relay"].includes(pair.selectedLocalType) &&
+        ["host", "srflx", "prflx", "relay"].includes(pair.selectedRemoteType) &&
+        Number.isInteger(pair.pairSucceeded) && pair.pairSucceeded > 0),
+      "native RTC connected without a usable selected candidate-pair diagnostic");
+      t.assertions.assert(!/(?:\d{1,3}\.){3}\d{1,3}|candidate:|\.local/.test(JSON.stringify(pairEvidence)),
+        "candidate-pair diagnostic included an address-bearing value");
+
+      // Feedback described an upgrade that appears connected briefly and then
+      // cycles. Keep using the native RTC path long enough to expose that case.
+      for (let sample = 0; sample < 4; sample++) {
+        await page.waitForTimeout(5_000);
+        const held = await page.evaluate(async () => {
+          const p = (window as any).probe;
+          const reply = await p.client.call({ type: "workspace.list" });
+          return {
+            reply: reply?.type,
+            state: p.client.connectionState,
+            rtc: p.client.rtcState,
+            logicalId: p.client.logicalConnectionId,
+          };
+        }).catch(diagnosticFailure);
+        t.assertions.assert(
+          held.reply === "workspaces" && held.state === "ready" &&
+          held.rtc === "connected" && held.logicalId === logicalId,
+          `RTC did not stay usable for 20 seconds (sample ${sample + 1}): ${JSON.stringify(held)}`,
+        );
+      }
 
       // Subscribe after the upgrade (the blank pane failure), then send an
       // actual mock-backed Agent turn and observe it independently on loopback.
@@ -206,7 +250,7 @@ client.connect();
       t.assertions.assert(evidence.operations.some((e: any) => e.operation === "subscribe" && e.transport === "rtc" && e.outcome === "ok"), "subscription still used the temporary baseline selector");
       await page.evaluate(() => (window as any).probe.client.close());
       await page.close();
-      t.note("Actual Chromium: one logical identity for RPC/subscription/events; empty session, Agent completion, reopen, configured fallback, live events during relay pause, native RTC failure without resubscription, and cancellation verified.");
+      t.note("Actual Chromium: native RTC stayed usable for 20 seconds with periodic RPCs; one logical identity for RPC/subscription/events; empty session, Agent completion, reopen, configured fallback, live events during relay pause, native RTC failure without resubscription, and cancellation verified.");
       } catch (error) { await diagnosticFailure(error); }
     } finally {
       await server?.close();

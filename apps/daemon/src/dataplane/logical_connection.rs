@@ -49,6 +49,7 @@ impl Reader {
     }
 }
 struct Write {
+    bulk: bool,
     frame: Frame,
     complete: oneshot::Sender<Result<()>>,
     _permit: OwnedSemaphorePermit,
@@ -61,6 +62,9 @@ pub(crate) struct Writer {
 }
 impl Writer {
     pub async fn send(&mut self, frame: Frame) -> Result<()> {
+        self.send_classified(frame, false).await
+    }
+    pub(crate) async fn send_classified(&mut self, frame: Frame, bulk: bool) -> Result<()> {
         let size = frame.payload.len() + resume::HEADER_BYTES;
         if size > 16 * 1024 {
             bail!("logical write too large");
@@ -74,6 +78,7 @@ impl Writer {
         let (complete, done) = oneshot::channel();
         self.outgoing
             .send(Write {
+                bulk,
                 frame,
                 complete,
                 _permit: permit,
@@ -98,6 +103,9 @@ pub(crate) struct Handle {
     attach: mpsc::Sender<Attachment>,
 }
 struct Channel {
+    sent_paced: std::collections::BTreeMap<u64, super::uplink_pace::Charge>,
+    pace_blocked: bool,
+    pace: Option<Arc<super::uplink_pace::PeerPace>>,
     path: resume::Path,
     admission: Option<(SessionKey, PeerAccess, CarrierKind)>,
     attempt: Option<String>,
@@ -123,11 +131,24 @@ pub(crate) type Redial = Arc<
         + Sync,
 >;
 struct Lifetime {
+    diagnostics: Option<Arc<crate::diagnostics::Diagnostics>>,
     registry: Option<Arc<Registry>>,
     id: String,
     business: Option<tokio::task::JoinHandle<Result<()>>>,
     recovery: Option<tokio::task::JoinHandle<()>>,
     position: Option<Arc<Mutex<Watermark>>>,
+}
+impl Lifetime {
+    fn path_event(&self, path: resume::Path, outcome: &'static str) {
+        if let Some(diagnostics) = &self.diagnostics {
+            let code = match path {
+                resume::Path::Fabric => "fabric",
+                resume::Path::Rtc => "rtc",
+                resume::Path::Loopback => "websocket",
+            };
+            diagnostics.record("stream", "data.endpoint", outcome, Some(code));
+        }
+    }
 }
 impl Drop for Lifetime {
     fn drop(&mut self) {
@@ -255,6 +276,9 @@ pub(crate) async fn serve(
             } else {
                 "AdmissionRejected"
             };
+            // The browser only sees the code; this is what explains a reconnect
+            // that had to start a fresh logical peer.
+            tracing::info!(code, ?path, "logical attach refused");
             let _ = writer
                 .send(&Message::Error { code: code.into() }.encode()?)
                 .await;
@@ -305,6 +329,7 @@ fn start(
         progress: Arc::new(Semaphore::new(PROGRESS_BYTES)),
     };
     let registry = state.logical_connections.clone();
+    let diagnostics = state.diagnostics.clone();
     let mut access = access;
     access.direct_only = policy == Policy::DirectOnly;
     access.logical_id = Some(id.clone());
@@ -317,6 +342,7 @@ fn start(
             kind,
         ));
         let lifetime = Lifetime {
+            diagnostics: Some(diagnostics),
             registry: Some(registry),
             id,
             business: Some(business),
@@ -359,6 +385,9 @@ async fn run(
     // Keep one bounded reply outside the data queue; a full carrier is backpressure, not a protocol failure.
     let mut pending_pong: Option<String> = None;
     let mut terminals = std::collections::BTreeMap::<u64, oneshot::Sender<Result<()>>>::new();
+    let mut bulk_completions =
+        std::collections::BTreeMap::<u64, oneshot::Sender<Result<()>>>::new();
+    let mut bulk_sequences = std::collections::BTreeSet::<u64>::new();
     let mut budget = false;
     let mut last_ping = Instant::now();
     let mut pending = std::collections::VecDeque::<Write>::new();
@@ -387,10 +416,27 @@ async fn run(
             journal.release(seq).map_err(error)?;
             budget = true;
         }
+        let mut pace_blocked = false;
         let mut blocked_streams = std::collections::HashSet::new();
         for _ in 0..pending.len() {
             let write = pending.pop_front().unwrap();
             if blocked_streams.contains(&write.frame.stream_id) {
+                pending.push_back(write);
+                continue;
+            }
+            // Do not assign a replay sequence to bulk work waiting for its
+            // physical budget. Other streams can then enter the journal and
+            // make progress without violating the journal's ordered replay.
+            if write.bulk
+                && write.frame.kind == Kind::Data
+                && channel.as_ref().filter(|c| c.synced).is_some_and(|c| {
+                    c.pace
+                        .as_ref()
+                        .is_some_and(|pace| !pace.can_reserve(write.frame.payload.len() as u64))
+                })
+            {
+                pace_blocked = true;
+                blocked_streams.insert(write.frame.stream_id);
                 pending.push_back(write);
                 continue;
             }
@@ -402,8 +448,21 @@ async fn run(
             };
             match journal.enqueue(frame) {
                 Ok(seq) => {
+                    if write.bulk && write.frame.kind == Kind::Data {
+                        bulk_sequences.insert(seq);
+                    }
                     if matches!(write.frame.kind, Kind::Fin | Kind::Reset) {
                         terminals.insert(seq, write.complete);
+                    } else if write.bulk
+                        && write.frame.kind == Kind::Data
+                        && channel.as_ref().is_none_or(|c| {
+                            c.pace_blocked
+                                || c.pace.as_ref().is_some_and(|pace| {
+                                    !pace.can_reserve(write.frame.payload.len() as u64)
+                                })
+                        })
+                    {
+                        bulk_completions.insert(seq, write.complete);
                     } else {
                         let _ = write.complete.send(Ok(()));
                     }
@@ -419,7 +478,10 @@ async fn run(
             }
         }
         let mut pump_blocked = false;
-        if let Some(active) = channel.as_ref().filter(|c| c.synced) {
+        let mut pace_changes = channel
+            .as_ref()
+            .and_then(|c| c.pace.as_ref().map(|p| p.changes()));
+        if let Some(active) = channel.as_mut().filter(|c| c.synced) {
             // Try-reserve before consuming a replay cursor. Control traffic has
             // priority and is coalesced, so a full DATA log cannot starve ACKs.
             loop {
@@ -431,6 +493,7 @@ async fn run(
                     }
                 };
                 let watermark = journal.watermark().map_err(error)?;
+                let mut sent_bulk = None;
                 let bytes = if let Some(nonce) = pending_pong.take() {
                     Some(Message::Pong { nonce }.encode()?)
                 } else if ack {
@@ -455,12 +518,34 @@ async fn run(
                         .map_err(error)?,
                     )
                 } else {
+                    active.pace_blocked = false;
+                    if let Some((seq, frame)) = journal.next_frame().map_err(error)? {
+                        if bulk_sequences.contains(&seq) {
+                            sent_bulk = Some(seq);
+                            if let Some(pace) = &active.pace {
+                                let Some(charge) = pace.try_acquire(frame.payload.len() as u64)
+                                else {
+                                    active.pace_blocked = true;
+                                    pace_blocked = true;
+                                    break;
+                                };
+                                active.sent_paced.insert(seq, charge);
+                            }
+                        }
+                    }
+                    // Only commit the replay cursor after physical-path quota
+                    // and outgoing queue admission have both succeeded.
                     journal.next_record().map_err(error)?
                 };
                 let Some(bytes) = bytes else {
                     break;
                 };
                 permit.send(bytes);
+                if let Some(seq) = sent_bulk {
+                    if let Some(complete) = bulk_completions.remove(&seq) {
+                        let _ = complete.send(Ok(()));
+                    }
+                }
             }
         }
         if let Some(position) = &lifetime.position {
@@ -479,8 +564,11 @@ async fn run(
                 if (lifetime.registry.is_some() && attachment.expected != epoch) || attachment.expected < epoch { continue; }
                 if journal.activate(attachment.path, next, attachment.position, now()).is_err() { continue; }
                 acknowledge_terminals(&mut terminals, attachment.position.received);
+                acknowledge_terminals(&mut bulk_completions, attachment.position.received);
+                bulk_sequences.retain(|seq| *seq > attachment.position.received);
                 epoch = if let Some(registry) = &lifetime.registry { registry.activate(&lifetime.id, &attachment.attempt, attachment.expected, Instant::now())? } else { next };
                 if let Some(mut previous) = channel.take() {
+                    previous.sent_paced.clear(); previous.pace_blocked = false;
                     if previous.path != attachment.path && lifetime.registry.is_some() {
                         previous.synced = false; previous.attempt = None;
                         standby = Some(previous);
@@ -492,16 +580,17 @@ async fn run(
                     if let Some(registry) = &lifetime.registry { registry.suspend(&lifetime.id, epoch, Instant::now()); }
                     continue;
                 }
+                let pace = attachment.writer.uplink_pace.clone();
                 let (outgoing, mut records) = mpsc::channel::<Vec<u8>>(16);
                 let task = tokio::spawn(async move { while let Some(bytes) = records.recv().await { if attachment.writer.send(&bytes).await.is_err() { break; } } });
-                channel = Some(Channel { path: attachment.path, admission: attachment.admission, attempt: None, reader: attachment.reader, outgoing, task, _closed: attachment.closed, synced: lifetime.registry.is_none(), last_receive: Instant::now() });
+                channel = Some(Channel { sent_paced: Default::default(), pace_blocked: false, pace, path: attachment.path, admission: attachment.admission, attempt: None, reader: attachment.reader, outgoing, task, _closed: attachment.closed, synced: lifetime.registry.is_none(), last_receive: Instant::now() });
                 pending_pong = None;
                 ack = true; budget = true;
             }
             incoming = async { match channel.as_mut() { Some(c) => c.reader.receive().await, None => std::future::pending().await } } => {
                 let bytes = match incoming {
                     Ok(Some(bytes)) => bytes,
-                    Ok(None) => { channel.take(); journal.suspend(now()).map_err(error)?; if let Some(registry) = &lifetime.registry { registry.suspend(&lifetime.id, epoch, Instant::now()); } continue; }
+                    Ok(None) => { if let Some(active) = &channel { lifetime.path_event(active.path, "offline"); } channel.take(); journal.suspend(now()).map_err(error)?; if let Some(registry) = &lifetime.registry { registry.suspend(&lifetime.id, epoch, Instant::now()); } continue; }
                     // Authentication/protocol failures are terminal; an attacker
                     // cannot turn a malformed record into endless recovery.
                     Err(e) => return Err(e),
@@ -514,6 +603,7 @@ async fn run(
                             active.outgoing.try_send(Message::Synced { epoch: epoch.to_string() }.encode()?).map_err(|_| anyhow!("logical control queue full"))?;
                             if let Some(registry) = &lifetime.registry { registry.synced(&lifetime.id, epoch)?; }
                             active.synced = true;
+                            lifetime.path_event(active.path, "online");
                         }
                         Message::Close => return Ok(()),
                         Message::Ping { nonce } if nonce.len() <= 32 => { pending_pong = Some(nonce); }
@@ -531,7 +621,14 @@ async fn run(
                     } else {
                         journal.receive_control(&bytes).map_err(error)?;
                         if let Control::Ack { epoch: received_epoch, received } = Control::decode(&bytes).map_err(error)? {
-                            if received_epoch == epoch { acknowledge_terminals(&mut terminals, received); }
+                            if received_epoch == epoch {
+                                acknowledge_terminals(&mut terminals, received);
+                                acknowledge_terminals(&mut bulk_completions, received);
+                                bulk_sequences.retain(|seq| *seq > received);
+                                while active.sent_paced.first_key_value().is_some_and(|(seq, _)| *seq <= received) {
+                                    active.sent_paced.pop_first().unwrap().1.acknowledge();
+                                }
+                            }
                         }
                     }
                 }
@@ -559,7 +656,7 @@ async fn run(
                         let Some(registry) = &lifetime.registry else { standby.take(); continue; };
                         let Some((key, access, kind)) = &idle.admission else { standby.take(); continue; };
                         if id != lifetime.id { standby.take(); continue; }
-                        match registry.attach(&id, &incarnation, key, access, *kind, &attempt, &proof, Instant::now()) {
+                        match registry.reattach_retained(&id, &incarnation, key, access, *kind, &attempt, &proof, Instant::now()) {
                             Ok((attached_epoch, proof)) => {
                                 idle.attempt = Some(attempt);
                                 if idle.outgoing.try_send(Message::Attached { epoch: attached_epoch.to_string(), proof }.encode()?).is_err() { standby.take(); }
@@ -575,9 +672,12 @@ async fn run(
                         let registry = lifetime.registry.as_ref().ok_or_else(|| anyhow!("missing admission owner"))?;
                         epoch = registry.activate(&lifetime.id, &attempt, epoch, Instant::now())?;
                         acknowledge_terminals(&mut terminals, peer.received);
+                        acknowledge_terminals(&mut bulk_completions, peer.received);
+                        bulk_sequences.retain(|seq| *seq > peer.received);
                         let mut promoted = standby.take().unwrap();
                         promoted.synced = false; promoted.attempt = None;
                         if let Some(mut previous) = channel.take() {
+                            previous.sent_paced.clear(); previous.pace_blocked = false;
                             previous.synced = false; previous.attempt = None;
                             standby = Some(previous);
                         }
@@ -599,6 +699,10 @@ async fn run(
                     let _ = writable.reserve().await;
                 } else { std::future::pending::<()>().await; }
             } => {}
+            _ = async {
+                if let Some(changes) = &mut pace_changes { let _ = changes.changed().await; }
+                else { std::future::pending::<()>().await; }
+            }, if pace_blocked => {}
             _ = releases.notify.notified() => {}
             _ = clock.tick() => {
                 if last_ping.elapsed() >= std::time::Duration::from_secs(5) {
@@ -777,6 +881,7 @@ pub(crate) async fn client(
     let task = tokio::spawn(async move {
         let _keep_attachments = attach;
         let lifetime = Lifetime {
+            diagnostics: None,
             registry: None,
             id: String::new(),
             business: None,

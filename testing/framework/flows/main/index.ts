@@ -681,13 +681,7 @@ export async function completeVerifiableTask(input: {
     { text: "Created." },
   );
   const sessionId = await createBuiltinSession(client, opened.workspaceId);
-  const events: Array<{ type?: string }> = [];
-  await client.subscribe(sessionId, {
-    onEvent: (event) => {
-      events.push({ type: (event as { type?: string }).type });
-    },
-    onResync: () => {},
-  });
+  const events = await attachEventLog(client, sessionId);
   await sendPrompt(client, sessionId, input.task.prompt);
   await waitUntil(() => {
     try {
@@ -697,6 +691,9 @@ export async function completeVerifiableTask(input: {
       return false;
     }
   }, 45_000);
+  // The write is visible before the agent receives its tool result and finishes
+  // the round. Keep the mock endpoint live until that public completion event.
+  await waitUntil(() => events.some(event => event.type === "turnCompleted"), 45_000);
   assertions.fileEquals(input.lease.workspace, input.task.relative, input.task.contents);
   return { ...opened, events, sessionId };
 }

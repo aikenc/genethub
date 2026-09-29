@@ -22,6 +22,7 @@ pub(crate) const RTC_SIGNAL_BYTES: usize = 64 * 1024;
 /// connection may exist at all.
 pub(crate) const RTC_ADMISSION_LIFETIME: Duration = Duration::from_secs(30);
 /// How long to gather candidates before answering with what there is.
+/// Non-trickle SDP waits for completion, not the first server-reflexive candidate.
 pub(crate) const RTC_GATHER_TIMEOUT: Duration = Duration::from_secs(12);
 /// Records held for the endpoint in either direction. Small: this is a
 /// backpressure point, not a buffer.

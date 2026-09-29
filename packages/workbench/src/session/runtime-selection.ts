@@ -56,7 +56,7 @@ export function resolveRuntimeSelection({
     current?.catalog.modes.find((candidate) => candidate.id === current.catalog.defaultMode) ??
     current?.catalog.modes[0];
   const missingMode =
-    modeId && !catalogMode ? { id: modeId, label: modeId, description: undefined } : undefined;
+    modeId && !catalogMode ? { id: modeId, label: modeId, description: undefined, unattended: false } : undefined;
   const resolvedRuntimeValues = Object.fromEntries(
     (current?.catalog.runtimeAxes ?? []).flatMap((axis) => {
       const selectedValue = runtimeValues?.[axis.id];

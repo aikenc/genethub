@@ -52,6 +52,14 @@ const decoder = new TextDecoder("utf-8", { fatal: true });
 /** A carrier that dies before this point is flapping, not a healthy recovery. */
 const STABLE_AFTER_MS = 30_000;
 /**
+ * The daemon forgets a suspended logical peer 60s after it notices the loss,
+ * and the Relay needs up to two 30s heartbeats to notice. Past this much
+ * silence an ATTACH can only be refused.
+ */
+const RESUME_STALE_MS = 180_000;
+/** A carrier lost this soon after the page returns ended with the suspension. */
+const REVIVE_GRACE_MS = 10_000;
+/**
  * How often an idle ready connection is asked to prove it is still alive.
  * Mobile browsers — iOS Safari above all — suspend the page and let the
  * carrier die without ever firing close, so without this the workbench only
@@ -60,6 +68,19 @@ const STABLE_AFTER_MS = 30_000;
 const HEARTBEAT_MS = 25_000;
 /** A heartbeat that takes this long is a dead carrier, not a slow peer. */
 const HEARTBEAT_TIMEOUT_MS = 10_000;
+/** Renewal must still finish on the old grant, including a redial on a slow network. */
+const RENEW_BEFORE_EXPIRY_MS = 15_000;
+
+/**
+ * Every renewal replaces the fabric carrier and renegotiates RTC, so it runs
+ * once half the remaining grant has elapsed instead of on a fixed cadence:
+ * a 60s grant renews every 30s, a 24h grant after 12h.
+ */
+export function authorizationRenewalDelay(expiresAt: string | undefined, now = Date.now()): number {
+  const remaining = Date.parse(expiresAt ?? "") - now;
+  if (!Number.isFinite(remaining)) return 30_000;
+  return Math.max(1000, Math.min(remaining / 2, remaining - RENEW_BEFORE_EXPIRY_MS));
+}
 
 export interface HostedChannelCredential {
   capabilityId: string;
@@ -287,7 +308,11 @@ export class Client {
   private attempt = 0;
   private connectTimer: ReturnType<typeof setTimeout> | null = null;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
-  private stableTimer: ReturnType<typeof setTimeout> | null = null;
+  private readyAt: number | null = null;
+  private lastHeardAt: number | null = null;
+  private revivedAt: number | null = null;
+  private sessionLost = false;
+  private sessionLostRedialSpent = false;
   private authorizationExpiresAt: string | undefined;
   private authorizationTimer: ReturnType<typeof setTimeout> | null = null;
   private renewalAbort: AbortController | null = null;
@@ -306,6 +331,9 @@ export class Client {
   private dataRtcLink: RtcDataLink | null = null;
   private rtcRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private rtcRetryDelay = 1000;
+  private rtcFailures = 0;
+  private rtcPaused = false;
+  private reconnectCause: "resume-rejected" | "heartbeat-timeout" | "page-resume" | "session-lost" | null = null;
   private rtcLifecycleCleanup: (() => void) | null = null;
   private rtcGeneration = 0;
   private rtcNegotiating = false;
@@ -364,6 +392,9 @@ export class Client {
       this.setRtcState("disabled");
       return;
     }
+    this.rtcPaused = false;
+    this.rtcFailures = 0;
+    this.rtcRetryDelay = 1000;
     this.setRtcState("standby");
     if (this.endpoint && this.epoch && this.identity && this.state === "ready") {
       void this.startRtc(this.endpoint, this.epoch);
@@ -518,6 +549,43 @@ export class Client {
   }
 
   async preview(workspaceHandle: string, path: string): Promise<AssetPreviewResult> {
+    const deadline = this.now() + PREVIEW_HEAD_TIMEOUT_MS;
+    try {
+      return await this.previewAttempt(workspaceHandle, path, deadline);
+    } catch (error) {
+      // Resume replays records without reinvoking the handler. Only an explicit
+      // loss of that logical session permits one fresh read. Discard the whole
+      // old body: never splice bytes from two file versions. Writes use rpc()
+      // and retain their outcome-unknown contract.
+      if (this.stopped || !(error instanceof Error) ||
+          (error.message !== "SessionLost" && error.message !== "ResumeExpired")) throw error;
+      await this.waitForPreviewRecovery(deadline);
+      return this.previewAttempt(workspaceHandle, path, deadline);
+    }
+  }
+
+  private waitForPreviewRecovery(deadline: number): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const remaining = deadline - this.now();
+      if (remaining <= 0) { reject(new ClientRequestTimeoutError("asset preview recovery timed out")); return; }
+      const timer = setTimeout(() => {
+        stop(); reject(new ClientRequestTimeoutError("asset preview recovery timed out"));
+      }, remaining);
+      const check = () => {
+        if (this.stopped) {
+          clearTimeout(timer); stop(); reject(new DataPlaneError("client closed"));
+        } else if (this.state === "ready" && this.endpoint?.state === "open") {
+          clearTimeout(timer); stop(); resolve();
+        }
+      };
+      const stop = this.onStateChange(check);
+      check();
+    });
+  }
+
+  private async previewAttempt(workspaceHandle: string, path: string, deadline: number): Promise<AssetPreviewResult> {
+    const remaining = deadline - this.now();
+    if (remaining <= 0) throw new ClientRequestTimeoutError("asset preview response head timed out");
     const endpoint = this.requireReadyEndpoint();
     const requestId = diagnosticId("preview");
     const started = this.now();
@@ -549,7 +617,7 @@ export class Client {
           await stream.finish();
           return stream.responseHead;
         })(),
-        PREVIEW_HEAD_TIMEOUT_MS,
+        remaining,
         "asset preview response head timed out",
         () => stream.reset(DataReset.Timeout),
       );
@@ -760,6 +828,20 @@ export class Client {
   }
 
   private dial(dial: ProtocolDial): void {
+    if (
+      this.endpoint?.state === "open" &&
+      this.endpoint.logicalId !== null &&
+      this.lastHeardAt !== null &&
+      this.now() - this.lastHeardAt > RESUME_STALE_MS
+    ) {
+      this.diagnostic("connection", {
+        state: this.state,
+        phase: "resume-skipped",
+        cause: "stale",
+        silentMs: Math.round(this.now() - this.lastHeardAt),
+      });
+      this.discardLogicalPeer("the logical peer outlived its resume window");
+    }
     // Sequence numbers are scoped to a daemon lifetime. A reconnect cannot
     // infer that lifetime from numeric ordering, even if the ranges overlap.
     const resuming = this.endpoint?.state === "open" && this.endpoint.logicalId !== null;
@@ -960,6 +1042,12 @@ export class Client {
     });
     const stopClose = endpoint.onClose((reason) => {
       if (this.endpoint !== endpoint || this.epoch !== epoch) return;
+      // The daemon answered an ATTACH, so its carrier works; only the old
+      // logical peer is gone.
+      if (reason instanceof Error && reason.message === "SessionLost") {
+        this.sessionLost = true;
+        this.reconnectCause = "session-lost";
+      }
       this.report(reason);
       this.droppedTransport(epoch, closeReasonFromUnknown(reason) ?? this.lastClose);
     });
@@ -976,11 +1064,11 @@ export class Client {
   }
 
   private markStableAfterGrace(): void {
-    this.clearStableTimer();
-    this.stableTimer = setTimeout(() => {
-      this.stableTimer = null;
-      this.attempt = 0;
-    }, STABLE_AFTER_MS);
+    // Suspended pages run no timers, so the grace period is judged from the
+    // wall clock when the next loss is scheduled.
+    this.readyAt = this.now();
+    this.lastHeardAt = this.readyAt;
+    this.sessionLostRedialSpent = false;
   }
 
   private resumedEndpoint(endpoint: DataEndpoint, epoch: symbol): void {
@@ -1148,6 +1236,7 @@ export class Client {
       if (body.byteLength > 0) await stream.write(body);
       await stream.finish();
       const head = await stream.responseHead;
+      this.lastHeardAt = this.now();
       if (head.error) throw new ProtocolError_(head.error);
       if (head.status !== 200) {
         throw new ProtocolError_({ code: "internal", message: `RPC failed (${head.status})` });
@@ -1234,6 +1323,7 @@ export class Client {
     let buffered = new Uint8Array();
     for await (const chunk of stream.body()) {
       if (this.endpoint !== endpoint || this.epoch !== epoch) return;
+      this.lastHeardAt = this.now();
       const joined = new Uint8Array(buffered.byteLength + chunk.byteLength);
       joined.set(buffered);
       joined.set(chunk, buffered.byteLength);
@@ -1386,6 +1476,7 @@ export class Client {
 
   private droppedTransport(epoch: symbol, close?: CloseReason, abandonLogical = false): void {
     if (!this.isCurrentEpoch(epoch)) return;
+    if (abandonLogical) this.reconnectCause = "resume-rejected";
     // A physical base socket can close while the logical peer is served by RTC.
     // Keep its streams and subscriptions; refresh the missing base in the background.
     if (this.endpoint?.state === "open" && !this.endpoint.recovering && this.endpoint.activePath === "rtc") {
@@ -1410,7 +1501,6 @@ export class Client {
       return;
     }
     this.clearConnectTimer();
-    this.clearStableTimer();
     this.clearHeartbeat();
     const resumable = !abandonLogical && this.endpoint?.state === "open" && this.endpoint.logicalId !== null;
     const socket = this.socket, fabric = this.fabricLink?.fabric;
@@ -1419,16 +1509,18 @@ export class Client {
     this.fabricLink = null;
     socket?.close();
     fabric?.close();
-    if (!resumable) {
-      this.endpointLifecycleCleanup?.(); this.endpointLifecycleCleanup = null;
-      this.endpoint?.close("logical admission or session ended");
-      this.endpoint = null;
-      this.epoch = null;
-      this.closeRtc();
-      if (this.rtcEnabled) this.setRtcState("standby");
-    }
+    if (!resumable) this.discardLogicalPeer("logical admission or session ended");
     this.setState("reconnecting");
     this.scheduleReconnect();
+  }
+
+  private discardLogicalPeer(reason: string): void {
+    this.endpointLifecycleCleanup?.(); this.endpointLifecycleCleanup = null;
+    this.endpoint?.close(reason);
+    this.endpoint = null;
+    this.epoch = null;
+    this.closeRtc();
+    if (this.rtcEnabled) this.setRtcState("standby");
   }
 
   private dropSocket(socket: WebSocketLike, epoch: symbol, abandonLogical = false): void {
@@ -1499,6 +1591,35 @@ export class Client {
       this.redialing
     ) return;
     if (!this.endpoint || this.endpoint.recovering) this.setState("reconnecting");
+    const now = this.now();
+    if (
+      (this.readyAt !== null && now - this.readyAt >= STABLE_AFTER_MS) ||
+      (this.revivedAt !== null && now - this.revivedAt <= REVIVE_GRACE_MS)
+    ) {
+      this.attempt = 0;
+    }
+    this.readyAt = null;
+    this.revivedAt = null;
+    if (this.sessionLost) {
+      this.sessionLost = false;
+      // Once per healthy connection, so a daemon that keeps refusing cannot
+      // turn this into a loop without backoff.
+      if (!this.sessionLostRedialSpent) {
+        this.sessionLostRedialSpent = true;
+        this.diagnostic("connection", {
+          state: "reconnecting",
+          phase: "retry-scheduled",
+          delayMs: 0,
+          attempt: this.attempt,
+          cause: "session-lost",
+        });
+        this.retryTimer = setTimeout(() => {
+          this.retryTimer = null;
+          this.connect();
+        }, 0);
+        return;
+      }
+    }
     const backoff =
       this.options.backoffMs ?? ((attempt: number) => Math.min(1000 * 2 ** attempt, 15_000));
     const base = backoff(this.attempt++);
@@ -1559,6 +1680,7 @@ export class Client {
       }
     } catch (error) {
       if (this.epoch !== epoch || this.stopped) return;
+      if (error instanceof ClientRequestTimeoutError) this.reconnectCause = "heartbeat-timeout";
       this.report(error);
       // Fail only the probed physical path. The logical owner authenticates
       // and synchronizes its standby before attempting an external redial.
@@ -1588,7 +1710,11 @@ export class Client {
     if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
       const onOnline = () => this.revive();
       window.addEventListener("online", onOnline);
-      cleanups.push(() => window.removeEventListener("online", onOnline));
+      window.addEventListener("pageshow", onOnline);
+      cleanups.push(() => {
+        window.removeEventListener("online", onOnline);
+        window.removeEventListener("pageshow", onOnline);
+      });
     }
     this.lifecycleCleanup = () => {
       for (const cleanup of cleanups) cleanup();
@@ -1602,7 +1728,18 @@ export class Client {
 
   private revive(): void {
     if (this.stopped) return;
+    this.reconnectCause = "page-resume";
+    this.revivedAt = this.now();
+    if (this.rtcPaused) {
+      this.rtcPaused = false;
+      this.rtcFailures = 0;
+      this.rtcRetryDelay = 1000;
+      if (this.state === "ready" && this.endpoint && this.epoch && !this.rtcNegotiating) {
+        this.scheduleRtcRetry();
+      }
+    }
     if (this.state === "reconnecting") {
+      this.attempt = 0;
       this.clearRetryTimer();
       this.connect();
       return;
@@ -1626,7 +1763,7 @@ export class Client {
   }
 
   private async startRtc(base: DataEndpoint, epoch: symbol): Promise<void> {
-    if (this.rtcNegotiating) return;
+    if (this.rtcNegotiating || this.rtcPaused || this.stopped) return;
     if (!this.rtcEnabled) {
       this.rtcFailure_ = null;
       this.setRtcState("disabled");
@@ -1658,13 +1795,33 @@ export class Client {
       phase: "start",
       transport: this.carrier,
     });
+    const factory = this.options.rtcFactory ?? openRtcDataLink;
+    let allowBusiness!: () => void;
+    let rejectBusiness!: (reason: unknown) => void;
+    const attachWhen = new Promise<void>((resolve, reject) => {
+      allowBusiness = resolve;
+      rejectBusiness = reject;
+    });
+    // The business carrier may finish before the restricted carrier. Keep its
+    // rejection observed until both negotiations have been joined below.
+    void attachWhen.catch(() => {});
+    const directTask = Promise.resolve().then(() => factory(
+      base, requestId,
+      (detail) => this.diagnostic("rtc", { channelRole: "restricted", ...detail }),
+      previousDirect ? { endpoint: previousDirect, policy: "direct-only" } : { policy: "direct-only" },
+    ));
+    const businessTask = Promise.resolve().then(() => factory(
+      base, requestId,
+      (detail) => this.diagnostic("rtc", { channelRole: "business", ...detail }),
+      { endpoint: base, attachWhen },
+    ));
+    void businessTask.catch(() => {});
+    const discardBusiness = (reason: unknown) => {
+      rejectBusiness(reason);
+      void businessTask.then((link) => link.close(), () => {});
+    };
     try {
-      const link = await (this.options.rtcFactory ?? openRtcDataLink)(
-        base,
-        requestId,
-        (detail) => this.diagnostic("rtc", detail),
-        previousDirect ? { endpoint: previousDirect, policy: "direct-only" } : { policy: "direct-only" },
-      );
+      const link = await directTask;
       if (
         generation !== this.rtcGeneration ||
         this.stopped ||
@@ -1672,6 +1829,7 @@ export class Client {
         this.epoch !== epoch
       ) {
         link.close();
+        discardBusiness(new Error("RTC upgrade was superseded"));
         return;
       }
       const identity = await this.rpc(link.endpoint, { type: "connection.identity" });
@@ -1687,6 +1845,7 @@ export class Client {
       }
       if (generation !== this.rtcGeneration || this.endpoint !== base || this.epoch !== epoch) {
         link.close();
+        discardBusiness(new Error("RTC upgrade was superseded"));
         return;
       }
       this.rtcFailure_ = null;
@@ -1715,9 +1874,8 @@ export class Client {
       this.rtcLifecycleCleanup = () => { stopRecovering(); stopClose(); };
       // Restricted service bytes have their own immutable direct-only journal.
       // The second channel activates the existing ordinary logical peer, including events.
-      const dataLink = await (this.options.rtcFactory ?? openRtcDataLink)(
-        base, requestId, (detail) => this.diagnostic("rtc", detail), { endpoint: base },
-      );
+      allowBusiness();
+      const dataLink = await businessTask;
       if (dataLink.endpoint !== base) {
         dataLink.close();
         throw new DataPlaneError("RTC provider did not retain the logical endpoint");
@@ -1728,6 +1886,8 @@ export class Client {
       }
       this.dataRtcLink = dataLink;
       previousData?.close();
+      this.rtcFailures = 0;
+      this.rtcPaused = false;
       this.rtcRetryDelay = 1000;
       this.setRtcState("connected");
       this.diagnostic("operation", {
@@ -1739,6 +1899,7 @@ export class Client {
         durationMs: Math.round(this.now() - started),
       });
     } catch (error) {
+      discardBusiness(error);
       if (generation !== this.rtcGeneration || this.stopped || this.endpoint !== base) return;
       if (!this.rtcLink && previousDirect?.state === "open") this.rtcLink = previousDirectLink;
       this.report(error);
@@ -1748,7 +1909,13 @@ export class Client {
         durationMs: Math.round(this.now() - started),
       };
       this.setRtcState(base.activePath === "rtc" ? "connected" : "failed");
-      this.scheduleRtcRetry();
+      this.rtcFailures += 1;
+      if (this.rtcFailures >= 3) {
+        this.rtcPaused = true;
+        this.diagnostic("rtc", { phase: "paused", outcome: "failed" });
+      } else {
+        this.scheduleRtcRetry();
+      }
       this.diagnostic("operation", {
         operation: "rtc.negotiate",
         requestId,
@@ -1764,7 +1931,7 @@ export class Client {
   }
 
   private scheduleRtcRetry(): void {
-    if (this.rtcRetryTimer !== null || !this.rtcEnabled || this.stopped) return;
+    if (this.rtcPaused || this.rtcRetryTimer !== null || !this.rtcEnabled || this.stopped) return;
     const delay = this.rtcRetryDelay;
     this.rtcRetryDelay = Math.min(30_000, delay * 2);
     this.rtcRetryTimer = setTimeout(() => {
@@ -1821,9 +1988,7 @@ export class Client {
     if (this.authorizationTimer !== null) clearTimeout(this.authorizationTimer);
     this.authorizationTimer = null;
     if (this.stopped || this.state !== "ready" || !this.activeChannelCredential || !this.options.redial) return;
-    const expiry = Date.parse(this.authorizationExpiresAt ?? "");
-    const delay = retryMs ?? (Number.isFinite(expiry)
-      ? Math.max(1000, Math.min(30_000, expiry - Date.now() - 15_000)) : 30_000);
+    const delay = retryMs ?? authorizationRenewalDelay(this.authorizationExpiresAt);
     this.authorizationTimer = setTimeout(() => {
       this.authorizationTimer = null;
       void this.renewAuthorization();
@@ -1873,7 +2038,12 @@ export class Client {
       this.authorizationExpiresAt = dial.fabricAuthorizationExpiresAt;
       previous?.fabric.close();
       this.scheduleAuthorizationRenewal();
-      if (this.rtcEnabled) void this.startRtc(endpoint, epoch);
+      if (this.rtcEnabled) {
+        const retainedRtc = this.dataRtcLink && this.rtcLink?.endpoint.state === "open"
+          ? await endpoint.promoteStandby("rtc").catch((error: unknown) => { this.report(error); return false; })
+          : false;
+        if (!retainedRtc && current()) void this.startRtc(endpoint, epoch);
+      }
     } catch (error) {
       if (this.stopped || this.endpoint !== endpoint || this.epoch !== epoch) return;
       const status = error && typeof error === "object" && "status" in error ? error.status : undefined;
@@ -1898,7 +2068,7 @@ export class Client {
     this.diagnostic("connection", {
       state,
       closeCode: this.lastClose?.code ?? null,
-      closeReason: this.lastClose?.reason ?? null,
+      closeReason: this.reconnectCause,
     });
     for (const listener of this.stateListeners) this.callListener(() => listener(state));
   }
@@ -1967,15 +2137,10 @@ export class Client {
     this.retryTimer = null;
   }
 
-  private clearStableTimer(): void {
-    if (this.stableTimer !== null) clearTimeout(this.stableTimer);
-    this.stableTimer = null;
-  }
-
   private clearTimers(): void {
     this.clearConnectTimer();
     this.clearRetryTimer();
-    this.clearStableTimer();
+    this.readyAt = null;
     if (this.redialTimer !== null) clearTimeout(this.redialTimer);
     this.redialTimer = null;
   }

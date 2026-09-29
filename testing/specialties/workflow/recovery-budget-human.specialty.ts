@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import type { WorkflowRunStatus } from "@genehub/proto";
+import type { PermissionRequest, WorkflowRunStatus } from "@genehub/proto";
 
 import { defineSpecialty, runGenetAsync } from "../../framework/public.ts";
 
@@ -88,10 +88,18 @@ defineSpecialty({
     }, 55_000);
     t.assertions.assert(root?.status === "blocked" && recovery!.reason?.includes("recoveryBudgetExceeded"),
       "recovery budget did not stop the recovery Worker while preserving the business request");
-    const cardReply = await opened.client.call({ type: "session.get", payload: { sessionId: pm } });
-    if (cardReply?.type !== "snapshot") throw new Error("PM card unavailable");
-    const card = cardReply.data.pendingPermissions.find(item => item.id === recovery!.humanExit!.requestId);
-    t.assertions.assert(card?.options?.map(option => option.id).join(",") === "approve,reject", "exit c options are incorrect");
+    // The durable Human exit is saved before its question is delivered to the
+    // Session. Wait for that public delivery, then validate its exact options.
+    stage = "wait for persisted Human exit to reach PM Session";
+    let card: PermissionRequest | undefined;
+    await t.tools.waitUntil(async () => {
+      const reply = await opened.client.call({ type: "session.get", payload: { sessionId: pm } });
+      if (reply?.type !== "snapshot") throw new Error("PM card unavailable");
+      card = reply.data.pendingPermissions.find(item => item.id === recovery!.humanExit!.requestId);
+      return card !== undefined;
+    }, 20_000);
+    t.assertions.assert(card!.options?.map(option => option.id).join(",") === "approve,reject",
+      `exit c options are incorrect: ${JSON.stringify(card!.options)}`);
     const answered = await opened.client.call({ type: "session.respondPermission", payload: {
       sessionId: pm, requestId: card!.id, outcome: { outcome: "selected", optionId: "approve" },
     } });

@@ -61,7 +61,7 @@ for (const exit of ["d", "a", "e"] as const) defineSpecialty({
     };
     await t.tools.waitUntil(async () => {
       original = (await history()).find(run => run.taskId === "overdue-route");
-      return original?.status === "blocked" && original.reason?.includes("RouteUnavailable");
+      return original?.status === "blocked" && original.reason?.includes("RouteUnavailable") === true;
     }, 30_000);
     t.assertions.assert((await history()).length === 1 && !original!.humanExit,
       "normal route block skipped PM and entered recovery or Human exit immediately");

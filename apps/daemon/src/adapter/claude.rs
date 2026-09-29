@@ -84,7 +84,6 @@ use super::{
     PersistHandle, PromptInput, ProviderMap, SessionConfig,
 };
 
-const EVENT_CAPACITY: usize = 1024;
 
 /// Which Claude-protocol CLI this adapter instance talks to.
 ///
@@ -805,7 +804,7 @@ impl AgentAdapter for ClaudeAdapter {
         said.watch(self.flavor.id, Some(stderr)).await;
 
         let child = Arc::new(Mutex::new(Some(child)));
-        let (events, events_rx) = crate::adapter::EventTx::channel(EVENT_CAPACITY);
+        let (events, events_rx) = crate::adapter::EventTx::channel();
         let turn = Arc::new(Mutex::new(TurnState::default()));
         // A plain `std::sync::Mutex`, not `tokio::sync::Mutex`: `persistence()`
         // in the `AgentSession` trait is synchronous, and this value only ever
@@ -1182,7 +1181,7 @@ struct ClaudeSession {
     tasks: super::SessionTasks,
     stdin: Arc<Mutex<ChildStdin>>,
     events: crate::adapter::EventTx,
-    events_rx: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<SessionEvent>>>,
+    events_rx: std::sync::Mutex<Option<crate::adapter::EventRx>>,
     turn: Arc<Mutex<TurnState>>,
     /// Shared with `read_loop`, which needs the exit code to explain a crash.
     child: Arc<Mutex<Option<Child>>>,
@@ -1296,7 +1295,7 @@ async fn settle_control_response(frame: &Value, awaiting: &Awaiting) {
 
 #[async_trait]
 impl AgentSession for ClaudeSession {
-    fn events(&self) -> tokio::sync::mpsc::Receiver<SessionEvent> {
+    fn events(&self) -> crate::adapter::EventRx {
         self.events_rx
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
@@ -2576,7 +2575,7 @@ mod tests {
     /// conversation looks like an agent that has lost the thread.
     #[test]
     fn compaction_leaves_a_mark_in_the_timeline() {
-        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
+        let (tx, mut rx) = crate::adapter::EventTx::channel();
         let mut turn = state();
         let session_id = std::sync::Mutex::new(None);
 
@@ -2604,7 +2603,7 @@ mod tests {
     /// silently starts a new conversation with the same name.
     #[test]
     fn the_init_frame_is_where_a_resumable_session_id_comes_from() {
-        let (tx, _rx) = crate::adapter::EventTx::channel(64);
+        let (tx, _rx) = crate::adapter::EventTx::channel();
         let session_id = std::sync::Mutex::new(None);
         translate_system_frame(
             &json!({ "type": "system", "subtype": "init", "session_id": "sess_abc" }),
@@ -2641,7 +2640,7 @@ mod tests {
     /// it — with no way to tell that it was something else's doing.
     #[test]
     fn a_sub_agents_steps_land_inside_its_own_card_and_not_in_the_conversation() {
-        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
+        let (tx, mut rx) = crate::adapter::EventTx::channel();
         let mut turn = state();
 
         // The dispatching call.
@@ -2729,7 +2728,7 @@ mod tests {
     /// disappears at exactly the moment someone would go back to read it.
     #[test]
     fn closing_the_dispatching_call_keeps_what_the_sub_agent_did() {
-        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
+        let (tx, mut rx) = crate::adapter::EventTx::channel();
         let mut turn = state();
         for frame in [
             json!({"message": {"content": [{
@@ -2988,7 +2987,7 @@ mod tests {
         assert!(message.contains("退出码 1"), "no exit code in: {message}");
     }
 
-    fn drain(rx: &mut tokio::sync::mpsc::Receiver<SessionEvent>) -> Vec<SessionEvent> {
+    fn drain(rx: &mut crate::adapter::EventRx) -> Vec<SessionEvent> {
         let mut out = Vec::new();
         while let Ok(event) = rx.try_recv() {
             if matches!(event, SessionEvent::TurnProgress { .. }) {
@@ -3073,7 +3072,7 @@ mod tests {
             stdin,
         };
         let turn = Arc::new(Mutex::new(state()));
-        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
+        let (tx, mut rx) = crate::adapter::EventTx::channel();
 
         handle_control_request(&can_use_tool("req1", "Bash"), &turn, &tx, &control).await;
         let request = drain(&mut rx)
@@ -3105,7 +3104,7 @@ mod tests {
             stdin,
         };
         let turn = Arc::new(Mutex::new(state()));
-        let (tx, mut rx) = crate::adapter::EventTx::channel(8);
+        let (tx, mut rx) = crate::adapter::EventTx::channel();
         handle_control_request(&can_use_tool("req1", "Bash"), &turn, &tx, &control).await;
         let mut line = String::new();
         stdout.read_line(&mut line).await.expect("the deny reply");
@@ -3132,7 +3131,7 @@ mod tests {
             stdin,
         };
         let turn = Arc::new(Mutex::new(state()));
-        let (tx, _rx) = crate::adapter::EventTx::channel(8);
+        let (tx, _rx) = crate::adapter::EventTx::channel();
         handle_control_request(
             &json!({
                 "type": "control_request",
@@ -3161,7 +3160,7 @@ mod tests {
             stdin,
         };
         let turn = Arc::new(Mutex::new(state()));
-        let (tx, mut rx) = crate::adapter::EventTx::channel(8);
+        let (tx, mut rx) = crate::adapter::EventTx::channel();
 
         handle_control_request(&can_use_tool("req1", "Bash"), &turn, &tx, &control).await;
         assert!(drain(&mut rx).is_empty());
@@ -3170,7 +3169,7 @@ mod tests {
 
     #[test]
     fn a_text_block_opens_then_streams_by_delta() {
-        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
+        let (tx, mut rx) = crate::adapter::EventTx::channel();
         let mut turn = state();
         translate_stream_event(
             &json!({"type": "content_block_start", "index": 0,
@@ -3202,7 +3201,7 @@ mod tests {
         // so an `AssistantMessage` item only ever existed with empty text —
         // `EventsExt::assistant_text` (which folds `Item`s, not `ItemDelta`s)
         // then saw every third-party Claude reply as blank.
-        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
+        let (tx, mut rx) = crate::adapter::EventTx::channel();
         let mut turn = state();
         translate_stream_event(
             &json!({"type": "content_block_start", "index": 0,
@@ -3239,7 +3238,7 @@ mod tests {
 
     #[test]
     fn thinking_blocks_land_on_reasoning_not_the_message() {
-        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
+        let (tx, mut rx) = crate::adapter::EventTx::channel();
         let mut turn = state();
         translate_stream_event(
             &json!({"type": "content_block_start", "index": 0,
@@ -3258,7 +3257,7 @@ mod tests {
 
     #[test]
     fn a_tool_use_snapshot_opens_a_running_tool_card_exactly_once() {
-        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
+        let (tx, mut rx) = crate::adapter::EventTx::channel();
         let mut turn = state();
         let frame = json!({
             "type": "assistant",
@@ -3299,7 +3298,7 @@ mod tests {
         // stuck at `Running`, and `accept_edits_mode_lets_a_real_tool_call_
         // through_without_a_prompt` failed even though the tool genuinely
         // ran and the permission auto-approval genuinely worked.
-        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
+        let (tx, mut rx) = crate::adapter::EventTx::channel();
         let mut turn = state();
         translate_assistant_snapshot(
             &json!({"type": "assistant", "message": {"content": [
@@ -3338,7 +3337,7 @@ mod tests {
 
     #[test]
     fn the_interrupt_sentinel_is_recognised_and_never_shown_as_a_message() {
-        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
+        let (tx, mut rx) = crate::adapter::EventTx::channel();
         let mut turn = state();
         translate_user_frame(
             &json!({"type": "user", "message": {"content": [
@@ -3356,7 +3355,7 @@ mod tests {
 
     #[test]
     fn a_failed_result_after_our_own_interrupt_is_reported_as_canceled_not_failed() {
-        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
+        let (tx, mut rx) = crate::adapter::EventTx::channel();
         let mut turn = state();
         turn.interrupt_requested = true;
         translate_result(
@@ -3372,7 +3371,7 @@ mod tests {
 
     #[test]
     fn a_failed_result_we_never_asked_to_cancel_is_a_real_failure() {
-        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
+        let (tx, mut rx) = crate::adapter::EventTx::channel();
         let mut turn = state();
         translate_result(
             &json!({"is_error": true, "errors": ["Error: 401 invalid api key"]}),
@@ -3390,7 +3389,7 @@ mod tests {
 
     #[test]
     fn a_clean_result_reports_usage() {
-        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
+        let (tx, mut rx) = crate::adapter::EventTx::channel();
         let mut turn = state();
         translate_result(
             &json!({"is_error": false, "total_cost_usd": 0.01,

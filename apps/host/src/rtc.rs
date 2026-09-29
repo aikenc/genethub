@@ -150,6 +150,7 @@ impl RtcSession {
         let gathering_connection = connection.clone();
         let patience = std::time::Duration::from_millis(config.gather_timeout_ms.max(1) as u64);
         tokio::spawn(async move {
+            // The answer is sent once, so retain later STUN/interface candidates.
             let _ = tokio::time::timeout(patience, gathered.recv()).await;
             match gathering_connection.local_description().await {
                 // Whatever was gathered by now is what the peer gets; a

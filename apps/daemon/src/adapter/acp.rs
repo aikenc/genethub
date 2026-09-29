@@ -39,7 +39,6 @@ use super::{
     PersistHandle, PromptInput, ProviderMap, SessionConfig,
 };
 
-const EVENT_CAPACITY: usize = 1024;
 const PROTOCOL_VERSION: i64 = 1;
 /// How long a throwaway handshake may take. Cursor's first answer can be slow.
 ///
@@ -209,7 +208,7 @@ impl AgentAdapter for AcpAdapter {
         let stdin = child.stdin.take().expect("stdin was piped");
 
         let child = Arc::new(Mutex::new(Some(child)));
-        let (events, events_rx) = crate::adapter::EventTx::channel(EVENT_CAPACITY);
+        let (events, events_rx) = crate::adapter::EventTx::channel();
         let (settled, _) = watch::channel(false);
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let turn = Arc::new(Mutex::new(TurnState::default()));
@@ -554,7 +553,7 @@ struct AcpSession {
     tasks: super::SessionTasks,
     stdin: Arc<Mutex<ChildStdin>>,
     events: crate::adapter::EventTx,
-    events_rx: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<SessionEvent>>>,
+    events_rx: std::sync::Mutex<Option<crate::adapter::EventRx>>,
     settled: watch::Sender<bool>,
     pending: PendingMap,
     interactions: Arc<Mutex<Vec<Value>>>,
@@ -715,7 +714,7 @@ impl AcpSession {
 
 #[async_trait]
 impl AgentSession for AcpSession {
-    fn events(&self) -> tokio::sync::mpsc::Receiver<SessionEvent> {
+    fn events(&self) -> crate::adapter::EventRx {
         self.events_rx
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
@@ -2161,7 +2160,7 @@ mod tests {
         }
     }
 
-    fn drain(rx: &mut tokio::sync::mpsc::Receiver<SessionEvent>) -> Vec<SessionEvent> {
+    fn drain(rx: &mut crate::adapter::EventRx) -> Vec<SessionEvent> {
         let mut out = Vec::new();
         while let Ok(event) = rx.try_recv() {
             if matches!(event, SessionEvent::TurnProgress { .. }) {
@@ -2277,7 +2276,7 @@ mod tests {
     /// must land on the same event shape, which is the point of the layer.
     #[test]
     fn the_first_chunk_opens_an_item_and_later_chunks_are_deltas() {
-        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
+        let (tx, mut rx) = crate::adapter::EventTx::channel();
         let mut turn = state();
         for text in ["he", "llo"] {
             translate_update(
@@ -2306,7 +2305,7 @@ mod tests {
 
     #[test]
     fn a_tool_call_closes_the_open_text_run() {
-        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
+        let (tx, mut rx) = crate::adapter::EventTx::channel();
         let mut turn = state();
         translate_update(
             &json!({"update": {"sessionUpdate": "agent_message_chunk",
@@ -2411,7 +2410,7 @@ mod tests {
 
     #[test]
     fn permission_requests_carry_their_options_and_reply_id() {
-        let (tx, mut rx) = crate::adapter::EventTx::channel(8);
+        let (tx, mut rx) = crate::adapter::EventTx::channel();
         translate_permission(
             &json!(42),
             &json!({
@@ -2440,7 +2439,7 @@ mod tests {
         assert_eq!(jsonrpc_id(&json!({"id": "perm-1"})), Some(json!("perm-1")));
         assert_eq!(jsonrpc_id(&json!({"id": 7})), Some(json!(7)));
         assert_eq!(jsonrpc_id(&json!({"id": ""})), None);
-        let (tx, mut rx) = crate::adapter::EventTx::channel(8);
+        let (tx, mut rx) = crate::adapter::EventTx::channel();
         translate_permission(&json!("perm-1"), &json!({}), &tx);
         match &drain(&mut rx)[0] {
             SessionEvent::PermissionRequested { request } => {
@@ -2608,7 +2607,7 @@ mod tests {
 
     #[test]
     fn plan_updates_become_todo_items() {
-        let (tx, mut rx) = crate::adapter::EventTx::channel(8);
+        let (tx, mut rx) = crate::adapter::EventTx::channel();
         let mut turn = state();
         translate_update(
             &json!({"update": {"sessionUpdate": "plan", "entries": [
@@ -2632,7 +2631,7 @@ mod tests {
 
     #[test]
     fn a_session_info_update_becomes_a_title_change() {
-        let (tx, mut rx) = crate::adapter::EventTx::channel(8);
+        let (tx, mut rx) = crate::adapter::EventTx::channel();
         let mut turn = state();
         translate_update(
             &json!({"update": {
@@ -2650,7 +2649,7 @@ mod tests {
 
     #[test]
     fn a_session_info_update_reaches_us_before_a_turn() {
-        let (tx, mut rx) = crate::adapter::EventTx::channel(8);
+        let (tx, mut rx) = crate::adapter::EventTx::channel();
         let mut turn = TurnState::default();
         translate_update(
             &json!({"update": {
@@ -2668,7 +2667,7 @@ mod tests {
 
     #[test]
     fn an_empty_session_info_title_is_ignored() {
-        let (tx, mut rx) = crate::adapter::EventTx::channel(8);
+        let (tx, mut rx) = crate::adapter::EventTx::channel();
         let mut turn = state();
         translate_update(
             &json!({"update": {"sessionUpdate": "session_info_update", "title": "   "}}),
@@ -2685,7 +2684,7 @@ mod tests {
 
     #[test]
     fn a_skill_catalog_title_is_not_a_session_name() {
-        let (tx, mut rx) = crate::adapter::EventTx::channel(8);
+        let (tx, mut rx) = crate::adapter::EventTx::channel();
         let mut turn = state();
         translate_update(
             &json!({"update": {
@@ -2714,7 +2713,7 @@ mod tests {
 
     #[test]
     fn updates_outside_a_turn_are_ignored() {
-        let (tx, mut rx) = crate::adapter::EventTx::channel(8);
+        let (tx, mut rx) = crate::adapter::EventTx::channel();
         let mut turn = TurnState::default();
         translate_update(
             &json!({"update": {"sessionUpdate": "agent_message_chunk",

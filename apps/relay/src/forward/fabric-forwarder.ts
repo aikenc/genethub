@@ -40,6 +40,8 @@ interface SocketPeer {
 interface PresenceUpdate {
   readonly connectionGeneration: number;
   readonly state: "online" | "offline";
+  readonly reasonCode?: string;
+  readonly strikes?: number;
 }
 
 interface PresenceQueue {
@@ -122,6 +124,14 @@ export class FabricForwarder {
       maxPendingGlobal: config.limits.maxFabricPendingOpens,
       maxStreamsPerEndpoint: config.limits.maxFabricStreamsPerEndpoint,
       maxStreamsGlobal: config.limits.maxFabricStreams,
+      onStrike: (connection, reason) => {
+        log.warn("fabric: endpoint strike", {
+          ...this.diagnosticFields(connection.socketIdentity as WebSocket),
+          reasonCode: reason,
+          strikes: connection.strikes,
+          maxStrikes: config.limits.maxFabricStrikes,
+        });
+      },
     });
     this.authorityReady = options.authorityReady ?? true;
     this.outboundBudget =
@@ -356,7 +366,7 @@ export class FabricForwarder {
       strikes: 0,
       send: (frame) => this.deliver(socket, encodeFabricFrame(frame)),
       sendFlow: (frame) => this.deliverFlow(socket, encodeFabricFrame(frame)),
-      close: (code) => this.closeSocket(socket, code),
+      close: (code, reason) => this.closeSocket(socket, code, reason ?? ""),
     };
     const peer: SocketPeer = {
       socket,
@@ -463,6 +473,7 @@ export class FabricForwarder {
           context.endpointHandle,
           context.connectionGeneration,
           "offline",
+          strikeCloseDetail(code, reason, connection.strikes),
         );
       }
       log.info("fabric: endpoint disconnected", {
@@ -597,8 +608,13 @@ export class FabricForwarder {
     endpointHandle: string,
     connectionGeneration: number,
     state: "online" | "offline",
+    detail?: { reasonCode: string; strikes: number },
   ): void {
-    const update = { connectionGeneration, state } as const;
+    const update: PresenceUpdate = {
+      connectionGeneration,
+      state,
+      ...(detail ? { reasonCode: detail.reasonCode, strikes: detail.strikes } : {}),
+    };
     const existing = this.presenceReports.get(endpointHandle);
     if (existing) {
       existing.desired = update;
@@ -633,6 +649,9 @@ export class FabricForwarder {
             endpointHandle,
             desired.connectionGeneration,
             desired.state,
+            desired.reasonCode
+              ? { reasonCode: desired.reasonCode, strikes: desired.strikes ?? 0 }
+              : undefined,
           );
           const peer = this.currentPeer(endpointHandle, desired.connectionGeneration);
           if (
@@ -802,6 +821,35 @@ function diagnosticErrorType(error: unknown): string {
   ]).has(candidate)
     ? candidate
     : "Error";
+}
+
+const STRIKE_REASONS = new Set([
+  "accept",
+  "controlPayload",
+  "data",
+  "duplicateStream",
+  "fin",
+  "lateFrameOverflow",
+  "malformedOpen",
+  "openLimit",
+  "openRace",
+  "reset",
+  "routeConflict",
+  "unknownStream",
+  "windowUpdate",
+]);
+
+function strikeCloseDetail(
+  code: number,
+  reason: Buffer,
+  strikes: number,
+): { reasonCode: string; strikes: number } | undefined {
+  if (code !== 4400) return undefined;
+  const text = reason.toString("utf8");
+  return {
+    reasonCode: STRIKE_REASONS.has(text) ? text : "relay-strike",
+    strikes,
+  };
 }
 
 function diagnosticSocketReason(reason: string): string {

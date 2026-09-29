@@ -2,11 +2,13 @@
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result};
 use genehub_proto::FileNode;
 use genehub_proto::{AssetPreviewKind, AssetPreviewMetadata};
 use sha2::{Digest, Sha256};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::fs_cap::Dir;
 
@@ -151,13 +153,41 @@ fn is_noise(path: &Path) -> bool {
 #[derive(Debug)]
 pub struct PreviewFile {
     pub metadata: AssetPreviewMetadata,
-    source: std::fs::File,
+    source: PreviewSource,
     expected_digest: [u8; 32],
 }
 
 impl PreviewFile {
-    pub(crate) fn into_parts(self) -> (AssetPreviewMetadata, std::fs::File, [u8; 32]) {
+    pub(crate) fn into_parts(self) -> (AssetPreviewMetadata, PreviewSource, [u8; 32]) {
         (self.metadata, self.source, self.expected_digest)
+    }
+}
+
+const PREVIEW_SNAPSHOT_BUDGET_BYTES: usize = 64 * 1024 * 1024;
+const PREVIEW_SNAPSHOT_FILE_BYTES: usize = 32 * 1024 * 1024;
+static PREVIEW_SNAPSHOT_BUDGET: OnceLock<Arc<Semaphore>> = OnceLock::new();
+
+#[derive(Debug)]
+pub(crate) enum PreviewSource {
+    File(std::fs::File),
+    Snapshot {
+        bytes: std::io::Cursor<Vec<u8>>,
+        _budget: OwnedSemaphorePermit,
+    },
+}
+
+impl PreviewSource {
+    pub(crate) fn is_snapshot(&self) -> bool {
+        matches!(self, Self::Snapshot { .. })
+    }
+}
+
+impl Read for PreviewSource {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::File(file) => file.read(buf),
+            Self::Snapshot { bytes, .. } => bytes.read(buf),
+        }
     }
 }
 
@@ -197,11 +227,10 @@ pub(crate) const PREVIEW_STEP_BYTES: usize = 256 * 1024;
 /// preview failure. It never truncates, summarizes, transforms, or follows a
 /// stream-like special file.
 ///
-/// The first pass establishes exact length, type and version without retaining
-/// the payload. The same capability-opened file handle is then rewound for the
-/// response path to stream in bounded steps. Keeping that handle, rather than
-/// reopening an ambient path, also prevents a rename between both passes from
-/// changing which file is authorized.
+/// The first pass establishes exact length, type and version. When a bounded
+/// shared memory budget is available it also retains those verified bytes for
+/// the response. Otherwise the same capability-opened handle is rewound for a
+/// second, checked streaming pass; an ambient path is never reopened.
 pub async fn preview(
     root: &Path,
     relative_path: &str,
@@ -220,6 +249,18 @@ pub async fn preview(
         });
     }
     let mut source = file.into_std();
+    let snapshot_budget = if before.len() <= PREVIEW_SNAPSHOT_FILE_BYTES as u64 {
+        PREVIEW_SNAPSHOT_BUDGET
+            .get_or_init(|| Arc::new(Semaphore::new(PREVIEW_SNAPSHOT_BUDGET_BYTES)))
+            .clone()
+            .try_acquire_many_owned(before.len().max(1) as u32)
+            .ok()
+    } else {
+        None
+    };
+    let mut snapshot = snapshot_budget
+        .as_ref()
+        .map(|_| Vec::with_capacity(before.len() as usize));
     let mut hasher = Sha256::new();
     let mut probe = PreviewProbe::default();
     let mut step = vec![0u8; PREVIEW_STEP_BYTES];
@@ -233,8 +274,14 @@ pub async fn preview(
         if read == 0 {
             break;
         }
+        if snapshot.is_some() && source_bytes + read > before.len() as usize {
+            return Err(PreviewFailure::SourceChanged);
+        }
         hasher.update(&step[..read]);
         probe.update(&step[..read]);
+        if let Some(bytes) = snapshot.as_mut() {
+            bytes.extend_from_slice(&step[..read]);
+        }
         source_bytes += read;
         crate::blocking::breathe().await;
     }
@@ -256,7 +303,15 @@ pub async fn preview(
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    source.seek(SeekFrom::Start(0)).map_err(map_preview_io)?;
+    let source = if let (Some(bytes), Some(budget)) = (snapshot, snapshot_budget) {
+        PreviewSource::Snapshot {
+            bytes: std::io::Cursor::new(bytes),
+            _budget: budget,
+        }
+    } else {
+        source.seek(SeekFrom::Start(0)).map_err(map_preview_io)?;
+        PreviewSource::File(source)
+    };
     Ok(PreviewFile {
         metadata: AssetPreviewMetadata {
             kind,

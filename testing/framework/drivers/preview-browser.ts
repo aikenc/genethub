@@ -123,9 +123,13 @@ if(input.surface==='client-debug'){
     await input.page.waitForFunction(() => (window as any).previewAppReady === true, null, { timeout: 30000 });
     const menu = input.page.getByRole("button", { name: "此电脑的后台进程", exact: true });
     if (!(await menu.isVisible())) {
-      const phoneTools = input.page.getByRole("button", { name: "工具", exact: true });
-      if (await phoneTools.isVisible()) await phoneTools.click();
-      else await input.page.getByRole("button", { name: "打开右侧工具", exact: true }).click();
+      // Global tools now live in the workbench navigation's Settings page.
+      // A phone detail page hides that navigation until the user goes back.
+      const navigation = input.page.getByRole("navigation", { name: "工作台导航", exact: true });
+      if (!(await navigation.isVisible())) {
+        await input.page.getByRole("button", { name: /^(会话列表|返回)$/ }).first().click();
+      }
+      await navigation.getByRole("button", { name: "设置", exact: true }).click();
     }
     await menu.click();
   }

@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { readdir } from "node:fs/promises";
+import { readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { defineSpecialty, BlockedError } from "../../framework/public.ts";
@@ -38,7 +38,9 @@ for (const component of ["relay", "cloud-server"] as const) {
         }
       } catch (error) {
         const e = error as Error & { stdout?: string; stderr?: string };
-        throw new Error(`${component} baseline failed: ${(e.stdout ?? "").slice(-5000)}\n${(e.stderr ?? e.message).slice(-3000)}`);
+        await writeFile(join(t.env.root, `${component}-failure.tap`), (e.stdout ?? "") + "\n" + (e.stderr ?? e.message));
+        const failures = (e.stdout ?? "").split("\n").flatMap((line, i, lines) => /not ok/.test(line) ? lines.slice(i, i + 26) : []).join("\n");
+        throw new Error(`${component} baseline failed: ${failures.slice(0, 16000)}\n${(e.stdout ?? "").slice(-1000)}\n${(e.stderr ?? e.message).slice(-3000)}`);
       }
     }
   });

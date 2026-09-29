@@ -15,11 +15,11 @@
 //! `https: wss:` into the shipping CSP — the tree's loopback-only CSP is the
 //! dev column).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use futures_util::StreamExt;
 use genehub_proto::{ServerFrame, UpdateDownload, UpdateStatus};
 use serde::Deserialize;
@@ -252,6 +252,7 @@ fn publish(state: &Shared, download: UpdateDownload) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     async fn serve_http_once(response: Vec<u8>) -> String {
@@ -384,7 +385,6 @@ mod tests {
     /// The manifest names the address, but the manifest is a file on the
     /// internet: everything about it that decides where bytes land on someone's
     /// disk gets checked here rather than trusted.
-    #[test]
     #[test]
     fn update_manifests_require_tls_except_on_exact_ip_loopback() {
         validate_manifest_url("https://releases.example/latest.json").unwrap();

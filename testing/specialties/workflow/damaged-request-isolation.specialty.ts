@@ -92,7 +92,7 @@ defineSpecialty({
     const snapshot = path.join(requests, first!.id, "runs", first!.id, "run.json");
     writeFileSync(snapshot, "damaged snapshot\n");
     t.assertions.assert(!(await history()).some(run => run.id === first!.id), "corrupt Run was reported as healthy");
-    const report = await opened.client.call({ type: "workflow.check", payload: { workspaceId: opened.workspaceId } });
+    const report = await opened.client.call({ type: "workflow.check", payload: { workspaceId: opened.workspaceId, runId: null } });
     t.assertions.assert(report?.type === "workflowCheck"
       && report.data.findings.some(f => f.runId === first!.id && f.code === "runUnreadable")
       && report.data.runs.some(run => run.taskId === "isolation-two"),

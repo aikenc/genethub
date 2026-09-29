@@ -1,5 +1,3 @@
-import { spawnSync } from "node:child_process";
-
 import { BlockedError } from "../../infrastructure/public.ts";
 import type { EnvironmentLease } from "../../infrastructure/public.ts";
 import { parseJson, runGenet } from "./cli.ts";
@@ -49,7 +47,10 @@ export function startDaemon(input: {
     genet: input.genet,
     env,
     stop() {
-      spawnSync(input.genet, ["daemon", "stop"], { env, encoding: "utf8" });
+      const stopped = runGenet(input.genet, ["daemon", "stop"], env);
+      if (stopped.code !== 0) {
+        throw new Error(`genet daemon stop failed (${stopped.code}): ${stopped.stderr || stopped.stdout}`);
+      }
     },
   };
 }

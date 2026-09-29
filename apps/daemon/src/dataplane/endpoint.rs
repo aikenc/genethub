@@ -39,7 +39,7 @@ pub enum CarrierKind {
 }
 
 impl CarrierKind {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::WebSocket => "websocket",
             Self::Fabric => "fabric",
@@ -87,6 +87,7 @@ struct StreamState {
     expected_remote_bytes: Option<u64>,
     remote_finished: bool,
     outbound_credit: Credit,
+    pace: Option<Arc<super::uplink_pace::PaceShare>>,
 }
 
 #[derive(Clone)]
@@ -148,11 +149,20 @@ impl Credit {
 }
 
 struct WriterCommand {
+    bulk: bool,
     stream_id: u32,
     frame: Frame,
-    complete: oneshot::Sender<Result<()>>,
+    complete: oneshot::Sender<Result<WriterCompletion>>,
+    measured_enqueued_at: Option<Instant>,
     _budget: OwnedSemaphorePermit,
     _count: OwnedSemaphorePermit,
+}
+
+#[derive(Default)]
+struct WriterCompletion {
+    actor_queue_us: u64,
+    actor_send_us: u64,
+    acknowledged_at: Option<Instant>,
 }
 
 #[derive(Clone)]
@@ -163,8 +173,31 @@ struct Writer {
     count: Arc<Semaphore>,
 }
 
+/// Optional per-request timings. Only callers investigating a slow transfer
+/// pay for per-frame clocks; ordinary business streams use `write` unchanged.
+#[derive(Default)]
+pub(crate) struct WriteTimings {
+    pub(crate) credit_us: u64,
+    pub(crate) budget_us: u64,
+    pub(crate) enqueue_us: u64,
+    pub(crate) completion_us: u64,
+    pub(crate) actor_queue_us: u64,
+    pub(crate) actor_send_us: u64,
+    pub(crate) wake_us: u64,
+    pub(crate) frames: u64,
+}
+
 impl Writer {
     async fn send(&self, frame: Frame) -> Result<()> {
+        self.send_inner(frame, None, false).await
+    }
+
+    async fn send_inner(
+        &self,
+        frame: Frame,
+        mut timings: Option<&mut WriteTimings>,
+        bulk: bool,
+    ) -> Result<()> {
         let stream_id = frame.stream_id;
         let (complete, answer) = oneshot::channel();
         let budget = if frame.kind as u8 >= 4 {
@@ -172,24 +205,43 @@ impl Writer {
         } else {
             &self.budget
         };
+        let began = timings.as_ref().map(|_| Instant::now());
         let budget = budget
             .clone()
             .acquire_many_owned((frame.payload.len() + 36) as u32)
             .await?;
+        if let (Some(timings), Some(began)) = (timings.as_deref_mut(), began) {
+            timings.budget_us += began.elapsed().as_micros() as u64;
+        }
+        let began = timings.as_ref().map(|_| Instant::now());
         let count = self.count.clone().acquire_owned().await?;
         self.commands
             .send(WriterCommand {
+                bulk,
                 stream_id,
                 frame,
                 complete,
+                measured_enqueued_at: timings.as_ref().map(|_| Instant::now()),
                 _budget: budget,
                 _count: count,
             })
             .await
             .map_err(|_| anyhow!("the data-plane writer stopped"))?;
-        answer
+        if let (Some(timings), Some(began)) = (timings.as_deref_mut(), began) {
+            timings.enqueue_us += began.elapsed().as_micros() as u64;
+        }
+        let began = timings.as_ref().map(|_| Instant::now());
+        let completion = answer
             .await
             .map_err(|_| anyhow!("the data-plane writer dropped a frame"))??;
+        if let (Some(timings), Some(began)) = (timings.as_deref_mut(), began) {
+            timings.completion_us += began.elapsed().as_micros() as u64;
+            timings.actor_queue_us += completion.actor_queue_us;
+            timings.actor_send_us += completion.actor_send_us;
+            if let Some(acknowledged_at) = completion.acknowledged_at {
+                timings.wake_us += acknowledged_at.elapsed().as_micros() as u64;
+            }
+        }
         Ok(())
     }
 
@@ -207,9 +259,11 @@ impl Writer {
         let count = self.count.clone().try_acquire_owned()?;
         self.commands
             .try_send(WriterCommand {
+                bulk: false,
                 stream_id,
                 frame,
                 complete,
+                measured_enqueued_at: None,
                 _budget: budget,
                 _count: count,
             })
@@ -235,6 +289,7 @@ pub(crate) struct ServerStream {
     diagnostic_operation: Option<String>,
     local_head_sent: bool,
     local_finished: bool,
+    pace: Option<Arc<super::uplink_pace::PaceShare>>,
 }
 
 pub(crate) enum StreamInput {
@@ -335,12 +390,35 @@ impl ServerStream {
     }
 
     pub(crate) async fn write(&mut self, bytes: &[u8]) -> Result<()> {
+        self.write_inner(bytes, None).await
+    }
+
+    pub(crate) async fn write_measured(
+        &mut self,
+        bytes: &[u8],
+        timings: &mut WriteTimings,
+    ) -> Result<()> {
+        self.write_inner(bytes, Some(timings)).await
+    }
+
+    async fn write_inner(
+        &mut self,
+        bytes: &[u8],
+        mut timings: Option<&mut WriteTimings>,
+    ) -> Result<()> {
         if !self.local_head_sent || self.local_finished {
             anyhow::bail!("response body cannot be written in this stream state");
         }
         let mut offset = 0;
         while offset < bytes.len() {
+            let began = timings.as_ref().map(|_| Instant::now());
             let length = self.credit.take(bytes.len() - offset).await?;
+            if let Some(pace) = &self.pace {
+                pace.reserve(length as u64).await;
+            }
+            if let (Some(timings), Some(began)) = (timings.as_deref_mut(), began) {
+                timings.credit_us += began.elapsed().as_micros() as u64;
+            }
             let next = self
                 .local_bytes
                 .checked_add(length as u64)
@@ -356,13 +434,20 @@ impl ServerStream {
                 .checked_add(1)
                 .ok_or_else(|| anyhow!("stream sequence exhausted"))?;
             self.writer
-                .send(Frame {
-                    kind: Kind::Data,
-                    stream_id: self.id,
-                    value: self.local_sequence,
-                    payload: bytes[offset..offset + length].to_vec(),
-                })
+                .send_inner(
+                    Frame {
+                        kind: Kind::Data,
+                        stream_id: self.id,
+                        value: self.local_sequence,
+                        payload: bytes[offset..offset + length].to_vec(),
+                    },
+                    timings.as_deref_mut(),
+                    self.head.method == "asset.preview",
+                )
                 .await?;
+            if let Some(timings) = timings.as_deref_mut() {
+                timings.frames += 1;
+            }
             self.local_bytes = next;
             offset += length;
         }
@@ -435,6 +520,7 @@ pub(crate) struct PeerServices {
     event_receiver: tokio::sync::Mutex<Option<mpsc::Receiver<ServerFrame>>>,
     subscriptions: Mutex<SubscriptionTasks>,
     pub(crate) carrier_kind: CarrierKind,
+    physical_pace: Option<Arc<super::uplink_pace::PeerPace>>,
 }
 
 /// Logical peer state has one lifetime owner, independent of record crypto.
@@ -571,6 +657,10 @@ async fn serve_streams(
         count: Arc::new(Semaphore::new(256)),
     };
     let (writer_failed_tx, mut writer_failed) = oneshot::channel();
+    let physical_pace = match &channel_writer {
+        PeerWriter::Logical(_) => None,
+        PeerWriter::Physical(writer) => writer.uplink_pace.clone(),
+    };
     let writer_task = tokio::spawn(run_writer(channel_writer, writer_rx, writer_failed_tx));
     let (commands_tx, mut commands) = mpsc::channel::<EndpointCommand>(WRITER_COMMAND_QUEUE);
     let (event_sender, event_receiver) = mpsc::channel(EVENT_QUEUE);
@@ -581,6 +671,7 @@ async fn serve_streams(
         event_receiver: tokio::sync::Mutex::new(Some(event_receiver)),
         subscriptions: Mutex::new(SubscriptionTasks::default()),
         carrier_kind,
+        physical_pace,
     });
 
     // A terminal is shared across a user's own devices on purpose, but this
@@ -777,6 +868,17 @@ fn dispatch(
             genehub_proto::INITIAL_STREAM_WINDOW_BYTES as usize,
         ));
         let credit = Credit::new(frame.value)?;
+        // Logical DATA (including replay) is paced at the active carrier's
+        // send pump. Bootstrap physical streams retain their fixed owner.
+        let pace = (head.method == "asset.preview")
+            .then(|| services.physical_pace.as_ref())
+            .flatten()
+            .map(|pace| {
+                Arc::new(super::uplink_pace::PaceShare::new(
+                    pace.clone(),
+                    genehub_proto::INITIAL_STREAM_WINDOW_BYTES as u64,
+                ))
+            });
         streams.insert(
             frame.stream_id,
             StreamState {
@@ -788,6 +890,7 @@ fn dispatch(
                 expected_remote_bytes: head.body_length,
                 remote_finished: false,
                 outbound_credit: credit.clone(),
+                pace: pace.clone(),
             },
         );
         let stream = ServerStream {
@@ -804,6 +907,7 @@ fn dispatch(
             diagnostic_operation: None,
             local_head_sent: false,
             local_finished: false,
+            pace,
         };
         let services = services.clone();
         let handler = handlers.spawn(async move {
@@ -868,6 +972,9 @@ fn dispatch(
         Kind::WindowUpdate => {
             if !frame.payload.is_empty() || !stream.outbound_credit.add(frame.value) {
                 anyhow::bail!("invalid stream window update");
+            }
+            if let Some(pace) = &stream.pace {
+                pace.release(frame.value as u64);
             }
         }
         Kind::Fin => {
@@ -1243,7 +1350,7 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
     }
 }
 
-fn diagnostic_id(metadata: &serde_json::Value) -> Option<String> {
+pub(super) fn diagnostic_id(metadata: &serde_json::Value) -> Option<String> {
     metadata
         .get("diagnosticId")
         .and_then(serde_json::Value::as_str)
@@ -1504,9 +1611,21 @@ async fn run_writer(
             } else {
                 queues.remove(&stream_id);
             }
+            let actor_started = command.measured_enqueued_at.map(|_| Instant::now());
+            let actor_queue_us = command
+                .measured_enqueued_at
+                .zip(actor_started)
+                .map(|(queued, started)| started.duration_since(queued).as_micros() as u64)
+                .unwrap_or_default();
             match channel.send(command.frame).await {
                 Ok(()) => {
-                    let _ = command.complete.send(Ok(()));
+                    let _ = command.complete.send(Ok(WriterCompletion {
+                        actor_queue_us,
+                        actor_send_us: actor_started
+                            .map(|started| started.elapsed().as_micros() as u64)
+                            .unwrap_or_default(),
+                        acknowledged_at: actor_started.map(|_| Instant::now()),
+                    }));
                 }
                 Err(_) => {
                     let error = anyhow!("the peer carrier writer stopped");
@@ -1565,10 +1684,22 @@ async fn run_logical_writer(
                 active.insert(id);
                 let mut writer = writer.clone();
                 tasks.spawn(async move {
-                    let result = writer.send(command.frame).await;
+                    let actor_started = command.measured_enqueued_at.map(|_| Instant::now());
+                    let actor_queue_us = command
+                        .measured_enqueued_at
+                        .zip(actor_started)
+                        .map(|(queued, started)| started.duration_since(queued).as_micros() as u64)
+                        .unwrap_or_default();
+                    let result = writer.send_classified(command.frame, command.bulk).await;
                     let report = result
                         .as_ref()
-                        .map(|_| ())
+                        .map(|_| WriterCompletion {
+                            actor_queue_us,
+                            actor_send_us: actor_started
+                                .map(|started| started.elapsed().as_micros() as u64)
+                                .unwrap_or_default(),
+                            acknowledged_at: actor_started.map(|_| Instant::now()),
+                        })
                         .map_err(|e| anyhow!(e.to_string()));
                     let _ = command.complete.send(report);
                     drop(command._budget);
@@ -1616,6 +1747,7 @@ mod tests {
     #[test]
     fn writer_queue_rotates_streams_without_business_priorities() {
         let command = |stream_id| WriterCommand {
+            bulk: false,
             stream_id,
             frame: Frame {
                 kind: Kind::Data,
@@ -1624,6 +1756,7 @@ mod tests {
                 payload: vec![1],
             },
             complete: oneshot::channel().0,
+            measured_enqueued_at: None,
             _budget: Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap(),
             _count: Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap(),
         };
