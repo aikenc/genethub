@@ -163,7 +163,9 @@ pub(crate) async fn run(
     let (program, mut arguments) = match definition.interpreter.as_deref() {
         Some(interpreter) => (
             PathBuf::from(interpreter),
-            vec![script.display().to_string()],
+            // `canonicalize` on Windows yields `\\?\C:\...`. Node and bash
+            // then try to lstat the bare drive (`C:`) and fail with EISDIR.
+            vec![path_for_interpreter(script)],
         ),
         None => (script.to_path_buf(), Vec::new()),
     };
@@ -222,6 +224,18 @@ pub(crate) async fn run(
             tail(&stderr)
         )
     })
+}
+
+/// A path an external interpreter can open. Rust's canonical form on Windows
+/// is a verbatim `\\?\` path, which Node and bash do not treat as a file.
+fn path_for_interpreter(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    let Some(rest) = text.strip_prefix(r"\\?\") else {
+        return text.into_owned();
+    };
+    rest.strip_prefix(r"UNC\")
+        .map(|share| format!(r"\\{share}"))
+        .unwrap_or_else(|| rest.to_string())
 }
 
 fn parse(stdout: &[u8]) -> Result<ScriptResult> {
@@ -415,7 +429,7 @@ process.stdin.on("end", () => {
   process.stdout.write(JSON.stringify({
     ok: true,
     evidence: { review: input.verdict },
-    revision: "opaque/" + process.cwd().split("/").pop(),
+    revision: "opaque/" + process.cwd().split(/[/\\\\]/).pop(),
   }));
 });
 "#,
