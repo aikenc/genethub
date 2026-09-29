@@ -75,6 +75,10 @@ impl Registry {
             // is shared; the binary, help passthrough and `~/.tclaude`
             // history are not.
             Arc::new(ClaudeAdapter::tclaude()),
+            // CodeBuddy Code (`cbc`) speaks the same stream-json control
+            // protocol. Flag spelling, catalog keys and project-dir encoding
+            // differ; those live on `ClaudeFlavor`, not a second parser.
+            Arc::new(ClaudeAdapter::codebuddy()),
             // Codex likewise (`adapter::codex`): its own `app-server`
             // JSON-RPC, not `codex-acp`. Which also removes an install step
             // nobody could guess at — this entry used to report "not

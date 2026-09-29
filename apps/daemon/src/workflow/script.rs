@@ -237,19 +237,19 @@ pub(crate) async fn run(
 /// environment rather than on the command line.
 fn path_for_interpreter(path: &Path) -> String {
     let text = path.to_string_lossy();
-    let plain = match text.strip_prefix(r"\\?\") {
+    // The WASM guest's Windows volumes must also become native argv paths;
+    // the process bridge translates the program and cwd, not argv payloads.
+    let host = crate::guest_paths::host_form(&text);
+    let plain = match host.strip_prefix(r"\\?\") {
         Some(rest) => rest
             .strip_prefix(r"UNC\")
             .map(|share| format!(r"\\{share}"))
             .unwrap_or_else(|| rest.to_string()),
-        None => text.into_owned(),
+        None => host.into_owned(),
     };
-    #[cfg(windows)]
-    {
+    if crate::guest_paths::windows_host() {
         plain.replace('\\', "/")
-    }
-    #[cfg(not(windows))]
-    {
+    } else {
         plain
     }
 }

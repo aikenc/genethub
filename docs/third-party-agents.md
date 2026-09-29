@@ -29,6 +29,7 @@ daemon **不会**帮任何第三方 agent 写配置文件、注入密钥、或�
 | `opencode` | 本地 HTTP + SSE | 探测 `opencode` 二进制；模型/密钥全在它自己的 `opencode.json` |
 | `claude` | 子进程 + 原生 `stream-json` stdio | 探测 `claude` 二进制本身（`@anthropic-ai/claude-code`），daemon 直接说它的原生协议，见 §3 |
 | `tclaude` | 子进程 + 原生 `stream-json` stdio | 探测 `tclaude`（腾讯内部 Claude Code 包装器）。协议与 `claude` 相同，历史在 `~/.tclaude`，见 §3.2 |
+| `codebuddy` | 子进程 + 原生 `stream-json` stdio | 探测 `cbc`（没有则 `codebuddy`）。CodeBuddy Code 说同一套控制帧，旗标、模型字段和项目目录编码不同，历史在 `~/.codebuddy`，见 §3.3 |
 | `codex` | 子进程 + 原生 `app-server` JSON-RPC | 探测 `codex` 二进制本身，daemon 直接说它的 `app-server` 协议，见 §4 |
 | `cursor` | 子进程 + ACP over stdio | 探测 PATH 与官方安装目录上的 `cursor-agent`（Windows 走 `PATHEXT`，不写死后缀），再用 `cursor-agent status` 看登录；说它自己发布的 ACP（`cursor-agent acp`），见 §5 |
 | `acp` | 子进程 + ACP over stdio | 兜底条目，探测一个叫 `acp-agent` 的二进制；真正常用的是下面的自定义声明 |
@@ -43,6 +44,7 @@ daemon **不会**帮任何第三方 agent 写配置文件、注入密钥、或�
 | OpenCode | `OPENCODE_PERMISSION` 注入全工具、外部目录与网络全允许策略 |
 | Claude Code | `bypassPermissions` + `--allow-dangerously-skip-permissions`，并关闭 CLI sandbox。子进程始终带 `IS_SANDBOX=1`（Claude CLI 的容器/CI 开关）：线上 daemon 是 WASI guest，看不到宿主 uid，uid-0 才注入会在 Linux root 上变成空操作，CLI 会因该 flag 直接 exit 1 |
 | TClaude | 与 Claude Code 相同的启动旗标和 `IS_SANDBOX=1`；包装器把它们原样转给上游 CLI |
+| CodeBuddy | `bypassPermissions` + `--dangerously-skip-permissions`，并关闭 CLI sandbox。子进程带 `CODEBUDDY_IS_SANDBOX=1`（否则 `-y` 仍会询问 HIGH/CRITICAL）。不传 `--permission-prompt-tool`：这个构建的 parser 不认该旗标，但照样发 `can_use_tool` |
 | Codex | `approval_policy="never"` + `sandbox_mode="danger-full-access"`，新会话默认 `full-access` |
 | Cursor | `--force --sandbox disabled --trust --approve-mcps acp` |
 | 自定义 ACP | command 原样启动；GeneHub 不能猜某个未知 CLI 的私有放权参数，接入声明应自行带上 |
@@ -69,7 +71,7 @@ daemon **不会**帮任何第三方 agent 写配置文件、注入密钥、或�
 | Agent | adapter 映射 |
 |---|---|
 | Genet | CLI `--add-system-prompt` |
-| Claude Code / TClaude | CLI `--append-system-prompt` |
+| Claude Code / TClaude / CodeBuddy | CLI `--append-system-prompt` |
 | Codex | app-server `thread/start` / `thread/resume` 的 `developerInstructions` |
 | OpenCode | message API 的 `system` |
 | Cursor / 自定义 ACP | 标准 ACP 没有 system 字段。Cursor 把 guidance 放进 embedded `resource`（`genehub://system-guidance`）并在 `session/new` 带 `_meta.systemPrompt.append`，避免其自动起名吃到 Skill 目录；其他 ACP CLI 仍用每个 `session/prompt` 的首个 text block。用户请求始终是单独的 text block |
@@ -147,6 +149,26 @@ TClaude 是腾讯内部对 Claude Code 的包装器（OA 登录 + 内部网关�
 - 登录是这个 CLI 自己的事：`tclaude login`。probe 只看二进制在不在——包装器没有只读的 `login status`，乱跑 `login` 可能打开 OA 流程。
 
 官方 Claude Code 和 TClaude 可以同时装、同时出现在选择器里；resume 句柄按 agent id 分开，不会把一边的 session id 喂给另一边。选择器芯片上的短名由工作台表现层目录处理，不改 CLI 报上来的 id。
+
+### 3.3 CodeBuddy Code：同一套控制帧，四处表面差异
+
+CodeBuddy Code（`@tencent-ai/codebuddy-code`，命令 `cbc`）是另一份 Claude Code 系 CLI。`initialize`、`set_permission_mode`、`can_use_tool` 和 `stream-json` 回合帧与 Claude 同构，所以 daemon 复用 `adapter::claude`，不新写协议，也不走它另外提供的 `--acp`。
+
+```bash
+npm install -g @tencent-ai/codebuddy-code
+```
+
+和官方 `claude` 的差别都在启动与目录，不在线格式：
+
+- 探测 `cbc`，没有再找同包的 `codebuddy`。额外目录是 `~/.local/bin`，以及 `node` 所在目录（`npm install -g` 的 bin 经常不在 daemon 的 PATH 里）。未安装就不出现。
+- 放权旗标是 `--dangerously-skip-permissions`，不是 `--allow-dangerously-skip-permissions`。子进程带 `CODEBUDDY_IS_SANDBOX=1`：不带的话 `-y` 仍会询问 HIGH/CRITICAL。
+- 不传 `--permission-prompt-tool stdio`。这个构建会拒绝该选项而起不来；不传时它自己仍会发 `can_use_tool`。
+- 模型目录读 `id` / `name`（Claude 是 `value` / `displayName`），当前模型读 `currentModelId`（Claude 是 `model`）。条目没有 `supportsEffort` 时不编造档位表。
+- 会话导入读 `~/.codebuddy/projects`，尊重它自己的 `CODEBUDDY_CONFIG_DIR`，不吃 `CLAUDE_CONFIG_DIR`。项目目录编码只替换分隔符和冒号，保留中文、空格和点号，压缩连续横杠并去掉首尾横杠。超过 255 UTF-8 字节时保留最多 180 字节的完整字符前缀，再追加它自己的 djb2/base36 摘要；不复用 Claude 的长路径算法。真实安装 CBC 写历史再经公开 `session.importList` / `session.import` 读取的专项覆盖这些路径。
+- 历史消息是 `type: "message"` 加顶层 `role` / `content`，文本块为 `input_text` / `output_text`，与 Claude 的 `type: "user" | "assistant"` 加嵌套 `message` 和 `text` 块不同。导入显式识别这些形状，保留用户和助手的文本。
+- 登录是这个 CLI 自己的事。`cbc status` 在未登录时仍以退出码 0 打印 “Authentication required”，没有可靠的只读探测，所以 probe 只看二进制在不在。未登录时第一条消息会以执行错误回来，而不是选择器里的「不可用」。
+
+后端默认走它自己的网关。模型表里出现哪些供应商是它的事，GeneHub 只显示不决定（边界 B1）。代码会经由那个网关外发。
 
 粘贴图片现在会作为附件随消息一起发：`claude`（Anthropic 内容块）、`codex`（先落到 scratch 再发 `localImage` 路径）、`opencode`（`file` part + data URL）、经 `acp` 声明的 agent（ACP `image` 内容块）都会转发。内置 `genet` 也会按所选模型配置发送原生图片内容块；支持视频的 OpenAI 兼容模型还可接收原生 `video_url` 内容块。
 

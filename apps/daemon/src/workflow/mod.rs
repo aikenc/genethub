@@ -33,6 +33,7 @@ mod package;
 mod recovery;
 mod request;
 mod script;
+mod storage;
 mod structured;
 mod supervision;
 pub(crate) use authoring::procedures_schema as authoring_procedures_schema;
@@ -731,6 +732,9 @@ impl RuntimeStore {
         if let Some(package_id) = package_id {
             for segment in package_id.split('/') {
                 validate_id(segment, "Workflow 包 id 片段")?;
+                if matches!(segment, "." | "..") {
+                    bail!("Workflow 包 id 不能含路径导航片段");
+                }
             }
         }
         let project_root = project_root
@@ -793,22 +797,7 @@ impl RuntimeStore {
     }
 
     fn executor_directory(&self, relative: &Path, create: bool) -> Result<PathBuf> {
-        let executor_root = match self.package_id.as_deref() {
-            Some(id) => {
-                // A package with no executor Space, or whose source tree has
-                // been removed, keeps its control files on the project root.
-                // That is the only directory still nameable without the source,
-                // and it is where those records were written in the first place.
-                match package::find(&self.project_root, id)? {
-                    Some(package) => package
-                        .executor_relative()?
-                        .map(|path| self.project_root.join(path))
-                        .unwrap_or_else(|| self.project_root.clone()),
-                    None => self.project_root.clone(),
-                }
-            }
-            None => self.project_root.clone(),
-        };
+        let executor_root = self.executor_root(create)?;
         if create && executor_root != self.project_root {
             let home = executor_root.join(".genethub");
             crate::config::ensure_real_directory(&home)?;
@@ -1231,25 +1220,30 @@ pub(crate) fn activate_package_source(
 /// because "which pipeline is this" is a question the platform cannot answer
 /// for a project that deliberately runs several.
 pub(crate) fn resolve_package_id(project_root: &Path, requested: Option<&str>) -> Result<String> {
-    let packages = package::discover(project_root)?;
     if let Some(requested) = requested {
-        return packages
-            .into_iter()
-            .find(|entry| entry.id == requested)
-            .map(|entry| entry.id)
-            .ok_or_else(|| anyhow!("Workflow 包不存在：{requested}；用 `workflow list` 查看候选"));
+        let runtime =
+            RuntimeStore::for_package(project_root, "inspection", project_root, requested)?;
+        if load_activation(&runtime)?.is_some() {
+            return Ok(requested.to_string());
+        }
+        return package::load(project_root, requested).map(|entry| entry.id);
     }
+    let mut packages = package::discover(project_root)?
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect::<BTreeSet<_>>();
+    packages.extend(storage::active_package_ids(project_root)?);
     match packages.len() {
         0 => bail!(
             "项目尚未 clone 任何 Workflow 包；把包 clone 到 {} 下再重试",
             package::PACKAGES_DIR
         ),
-        1 => Ok(packages.into_iter().next().expect("checked above").id),
+        1 => Ok(packages.into_iter().next().expect("checked above")),
         _ => bail!(
             "项目有多个 Workflow 包，请点名其中一个：{}",
             packages
                 .iter()
-                .map(|entry| entry.id.as_str())
+                .map(String::as_str)
                 .collect::<Vec<_>>()
                 .join("、")
         ),
@@ -1262,21 +1256,34 @@ pub(crate) fn resolve_flow_id(
     package_id: &str,
     requested: Option<&str>,
 ) -> Result<String> {
-    let package = package::load(project_root, package_id)?;
+    let flow_ids = match package::load(project_root, package_id) {
+        Ok(package) => package.flow_ids,
+        Err(source_error) => {
+            let runtime =
+                RuntimeStore::for_package(project_root, "inspection", project_root, package_id)?;
+            let Some(activation) = load_activation(&runtime)? else {
+                return Err(source_error);
+            };
+            load_candidate(&runtime, &activation.active_digest)?
+                .workflows
+                .into_keys()
+                .collect::<Vec<_>>()
+        }
+    };
     if let Some(requested) = requested {
-        if !package.flow_ids.iter().any(|id| id == requested) {
+        if !flow_ids.iter().any(|id| id == requested) {
             bail!(
                 "Workflow 包 {package_id} 中不存在流程 {requested}；候选：{}",
-                package.flow_ids.join("、")
+                flow_ids.join("、")
             );
         }
         return Ok(requested.to_string());
     }
-    match package.flow_ids.len() {
-        1 => Ok(package.flow_ids.into_iter().next().expect("checked above")),
+    match flow_ids.len() {
+        1 => Ok(flow_ids.into_iter().next().expect("checked above")),
         _ => bail!(
             "Workflow 包 {package_id} 有多条流程，请用 --workflow 点名：{}",
-            package.flow_ids.join("、")
+            flow_ids.join("、")
         ),
     }
 }

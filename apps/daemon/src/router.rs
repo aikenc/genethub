@@ -841,89 +841,97 @@ async fn dispatch(
     request: Request,
 ) -> Handled {
     match request {
-        Request::ClientDebug(request) => match state.client_debug.handle(request).await {
-            Ok(reply) => Handled::ok(Reply::ClientDebug(reply)),
-            Err(error) => Handled {
-                reply: Err(error),
-                effect: SideEffect::None,
-            },
-        },
-        Request::ConnectionIdentity => Handled::ok(Reply::Hello(HelloResult {
-            daemon_version: state.version.clone(),
-            web_protocol: WEB_PROTOCOL_VERSION,
-            machine_id: state.machine.machine_id.clone(),
-            fingerprint: state.machine.fingerprint(),
-            transport,
-            machine_name: crate::link::default_display_name(),
-            rtc_supported: crate::dataplane::rtc::SUPPORTED,
-            features: Some(vec![
-                "asset.preview.image.v1".to_string(),
-                "service.preview.v1".to_string(),
-                "process.services.v1".to_string(),
-                "workflow.control.v1".to_string(),
-                "agentSpace.builderPlans.v1".to_string(),
-                "session.input.v1".to_string(),
-                "session.switch-agent.v1".to_string(),
-                "agent-tag-routing.v1".to_string(),
-                genehub_proto::SPEECH_FEATURE_TRANSCRIBE.to_string(),
-                genehub_proto::SPEECH_FEATURE_PARTIAL.to_string(),
-                genehub_proto::SPEECH_FEATURE_CONTEXT_PREVIEW.to_string(),
-                genehub_proto::SPEECH_FEATURE_FEEDBACK.to_string(),
-            ]),
-            isolation: Some(crate::isolation::report()),
-        })),
+        Request::ClientDebug(request) => Box::pin(async move {
+            match state.client_debug.handle(request).await {
+                Ok(reply) => Handled::ok(Reply::ClientDebug(reply)),
+                Err(error) => Handled {
+                    reply: Err(error),
+                    effect: SideEffect::None,
+                },
+            }
+        }).await,
+        Request::ConnectionIdentity => Box::pin(async move {
+            Handled::ok(Reply::Hello(HelloResult {
+                daemon_version: state.version.clone(),
+                web_protocol: WEB_PROTOCOL_VERSION,
+                machine_id: state.machine.machine_id.clone(),
+                fingerprint: state.machine.fingerprint(),
+                transport,
+                machine_name: crate::link::default_display_name(),
+                rtc_supported: crate::dataplane::rtc::SUPPORTED,
+                features: Some(vec![
+                    "asset.preview.image.v1".to_string(),
+                    "service.preview.v1".to_string(),
+                    "process.services.v1".to_string(),
+                    "workflow.control.v1".to_string(),
+                    "agentSpace.builderPlans.v1".to_string(),
+                    "session.input.v1".to_string(),
+                    "session.switch-agent.v1".to_string(),
+                    "agent-tag-routing.v1".to_string(),
+                    genehub_proto::SPEECH_FEATURE_TRANSCRIBE.to_string(),
+                    genehub_proto::SPEECH_FEATURE_PARTIAL.to_string(),
+                    genehub_proto::SPEECH_FEATURE_CONTEXT_PREVIEW.to_string(),
+                    genehub_proto::SPEECH_FEATURE_FEEDBACK.to_string(),
+                ]),
+                isolation: Some(crate::isolation::report()),
+            }))
+        }).await,
 
         Request::Subscribe {
             session_id,
             since_seq,
             expand_last_round,
             recent_rounds,
-        } => match state
-            .sessions
-            .subscribe_window(&session_id, since_seq, expand_last_round, recent_rounds)
-            .await
-        {
-            Ok((mut snapshot, replayed, reset, receiver)) => {
-                crate::workflow::summarize_sessions(
-                    state,
-                    std::slice::from_mut(&mut snapshot.summary),
-                )
-                .await;
-                Handled {
-                    reply: Ok(Reply::Subscribed {
-                        snapshot,
-                        replayed,
-                        reset,
-                    }),
-                    effect: SideEffect::Subscribe {
-                        session_id,
-                        receiver,
-                    },
+        } => Box::pin(async move {
+            match state
+                .sessions
+                .subscribe_window(&session_id, since_seq, expand_last_round, recent_rounds)
+                .await
+            {
+                Ok((mut snapshot, replayed, reset, receiver)) => {
+                    crate::workflow::summarize_sessions(
+                        state,
+                        std::slice::from_mut(&mut snapshot.summary),
+                    )
+                    .await;
+                    Handled {
+                        reply: Ok(Reply::Subscribed {
+                            snapshot,
+                            replayed,
+                            reset,
+                        }),
+                        effect: SideEffect::Subscribe {
+                            session_id,
+                            receiver,
+                        },
+                    }
                 }
+                Err(error) => failed(error),
             }
-            Err(error) => failed(error),
-        },
+        }).await,
 
-        Request::Unsubscribe { session_id } => Handled {
-            reply: Ok(Reply::Ack),
-            effect: SideEffect::Unsubscribe { session_id },
-        },
+        Request::Unsubscribe { session_id } => Box::pin(async move {
+            Handled {
+                reply: Ok(Reply::Ack),
+                effect: SideEffect::Unsubscribe { session_id },
+            }
+        }).await,
 
-        Request::AgentList => {
+        Request::AgentList => Box::pin(async move {
             let providers = state.providers().await;
             Handled::ok(Reply::Agents(state.registry.list(&providers).await))
-        }
+        }).await,
 
-        Request::AgentRefresh => {
+        Request::AgentRefresh => Box::pin(async move {
             let providers = state.providers().await;
             Handled::ok(Reply::Agents(state.registry.refresh(&providers).await))
-        }
+        }).await,
 
         Request::WorkflowInspect {
             workspace_id,
             package_id,
             candidate_digest,
-        } => {
+        } => Box::pin(async move {
             let workspace = match state.workspaces.project_entry(&workspace_id).await {
                 Ok(workspace) => workspace,
                 Err(error) => {
@@ -952,9 +960,9 @@ async fn dispatch(
                 Ok(status) => Handled::ok(Reply::WorkflowProject(status)),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
-        Request::WorkflowList { workspace_id } => {
+        Request::WorkflowList { workspace_id } => Box::pin(async move {
             let workspace = match state.workspaces.project_entry(&workspace_id).await {
                 Ok(workspace) => workspace,
                 Err(error) => {
@@ -965,7 +973,7 @@ async fn dispatch(
                 Ok(list) => Handled::ok(Reply::WorkflowPackages(list)),
                 Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
             }
-        }
+        }).await,
 
         Request::WorkflowBuild {
             workspace_id,
@@ -974,7 +982,7 @@ async fn dispatch(
             plan_digest,
             action_id,
             expected_revision,
-        } => {
+        } => Box::pin(async move {
             if let Err(message) =
                 authorize_project_workflow_mutation(state, caller, &workspace_id).await
             {
@@ -1172,14 +1180,14 @@ async fn dispatch(
                     Handled::err(ErrorCode::BadRequest, format!("{error:#}"))
                 }
             }
-        }
+        }).await,
 
         Request::WorkflowActivate {
             workspace_id,
             package_id,
             candidate_digest,
             expected_revision,
-        } => {
+        } => Box::pin(async move {
             if let Err(message) =
                 authorize_project_workflow_mutation(state, caller, &workspace_id).await
             {
@@ -1278,7 +1286,7 @@ async fn dispatch(
                 Ok(status) => Handled::ok(Reply::WorkflowProject(status)),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
         Request::WorkflowDispatch {
             retry_of,
@@ -1290,7 +1298,7 @@ async fn dispatch(
             execution_root,
             task_id,
             prompt,
-        } => {
+        } => Box::pin(async move {
             let Some(parent_session_id) = caller.session_controller_id() else {
                 return Handled::err(
                     ErrorCode::Unauthorized,
@@ -1368,30 +1376,32 @@ async fn dispatch(
                 return failed(error);
             }
             Handled::ok(Reply::WorkflowRun(transition.status))
-        }
+        }).await,
 
         Request::WorkflowCheck {
             workspace_id,
             run_id,
             package_id,
             draft,
-        } => match crate::workflow::check(
-            state,
-            &workspace_id,
-            run_id.as_deref(),
-            package_id.as_deref(),
-            draft.unwrap_or(false),
-        )
-        .await
-        {
-            Ok(report) => Handled::ok(Reply::WorkflowCheck(report)),
-            Err(error) => failed(error),
-        },
+        } => Box::pin(async move {
+            match crate::workflow::check(
+                state,
+                &workspace_id,
+                run_id.as_deref(),
+                package_id.as_deref(),
+                draft.unwrap_or(false),
+            )
+            .await
+            {
+                Ok(report) => Handled::ok(Reply::WorkflowCheck(report)),
+                Err(error) => failed(error),
+            }
+        }).await,
 
         Request::WorkflowGet {
             workspace_id,
             run_id,
-        } => {
+        } => Box::pin(async move {
             let workspace = match state.workspaces.get(&workspace_id).await {
                 Ok(workspace) => workspace,
                 Err(error) => return failed(error),
@@ -1408,14 +1418,14 @@ async fn dispatch(
                 Ok(status) => Handled::ok(Reply::WorkflowRun(status)),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
         Request::WorkflowJournal {
             workspace_id,
             run_id,
             since,
             limit,
-        } => {
+        } => Box::pin(async move {
             let workspace = match state.workspaces.get(&workspace_id).await {
                 Ok(workspace) => workspace,
                 Err(error) => return failed(error),
@@ -1432,12 +1442,12 @@ async fn dispatch(
                 Ok(events) => Handled::ok(Reply::WorkflowJournal(events)),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
         Request::WorkflowHistory {
             workspace_id,
             limit,
-        } => {
+        } => Box::pin(async move {
             let workspace = match state.workspaces.get(&workspace_id).await {
                 Ok(workspace) => workspace,
                 Err(error) => return failed(error),
@@ -1454,7 +1464,7 @@ async fn dispatch(
                 Ok(runs) => Handled::ok(Reply::WorkflowRuns(runs)),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
         Request::WorkflowComplete {
             workspace_id,
@@ -1465,7 +1475,7 @@ async fn dispatch(
             output,
             outcome,
             reason,
-        } => {
+        } => Box::pin(async move {
             let Some(caller_session_id) = caller.session_controller_id() else {
                 return Handled::err(
                     ErrorCode::Unauthorized,
@@ -1502,13 +1512,13 @@ async fn dispatch(
                 return failed(error);
             }
             Handled::ok(Reply::WorkflowRun(transition.status))
-        }
+        }).await,
 
         Request::WorkflowCancel {
             workspace_id,
             run_id,
             expected_revision,
-        } => {
+        } => Box::pin(async move {
             // Device/channel Session grants were checked by the common entry.
             // Agent-bound callers additionally prove project ownership.
             if caller.session_controller_id().is_some() {
@@ -1530,13 +1540,13 @@ async fn dispatch(
                 Ok(run) => Handled::ok(Reply::WorkflowRun(run)),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
         Request::WorkflowRecover {
             workspace_id,
             run_id,
             expected_revision,
-        } => {
+        } => Box::pin(async move {
             if let Err(error) =
                 authorize_project_workflow_mutation(state, caller, &workspace_id).await
             {
@@ -1546,13 +1556,13 @@ async fn dispatch(
                 Ok(run) => Handled::ok(Reply::WorkflowRun(run)),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
         Request::WorkflowRecoveryStart {
             workspace_id,
             run_id,
             reason,
-        } => {
+        } => Box::pin(async move {
             if let Err(error) =
                 authorize_project_workflow_mutation(state, caller, &workspace_id).await
             {
@@ -1588,7 +1598,7 @@ async fn dispatch(
                 return failed(error);
             }
             Handled::ok(Reply::WorkflowRun(transition.status))
-        }
+        }).await,
 
         Request::WorkflowHuman {
             workspace_id,
@@ -1596,7 +1606,7 @@ async fn dispatch(
             expected_revision,
             kind,
             reason,
-        } => {
+        } => Box::pin(async move {
             if let Err(error) =
                 authorize_project_workflow_mutation(state, caller, &workspace_id).await
             {
@@ -1621,13 +1631,13 @@ async fn dispatch(
                 Ok(run) => Handled::ok(Reply::WorkflowRun(run)),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
         Request::WorkflowRecoveryReset {
             workspace_id,
             package_id,
             expected_revision,
-        } => {
+        } => Box::pin(async move {
             if let Err(error) =
                 authorize_project_workflow_mutation(state, caller, &workspace_id).await
             {
@@ -1655,7 +1665,7 @@ async fn dispatch(
                 Ok(status) => Handled::ok(Reply::WorkflowProject(status)),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
         Request::WorkflowBudget {
             workspace_id,
@@ -1664,7 +1674,7 @@ async fn dispatch(
             max_runs,
             deadline_seconds,
             max_llm_rounds,
-        } => {
+        } => Box::pin(async move {
             if let Err(error) =
                 authorize_project_workflow_mutation(state, caller, &workspace_id).await
             {
@@ -1685,7 +1695,7 @@ async fn dispatch(
                 Ok(run) => Handled::ok(Reply::WorkflowRun(run)),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
         Request::SessionCreate {
             workspace_id,
@@ -1697,7 +1707,7 @@ async fn dispatch(
             runtime_values,
             title,
             cwd,
-        } => {
+        } => Box::pin(async move {
             let workspace = match state.workspaces.get(&workspace_id).await {
                 Ok(workspace) => workspace,
                 Err(error) => return failed(error),
@@ -1746,7 +1756,7 @@ async fn dispatch(
                 },
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
         Request::SessionCreateRouted {
             workspace_id,
@@ -1754,7 +1764,7 @@ async fn dispatch(
             media_tags,
             title,
             cwd,
-        } => {
+        } => Box::pin(async move {
             let workspace = match state.workspaces.get(&workspace_id).await {
                 Ok(workspace) => workspace,
                 Err(error) => return failed(error),
@@ -1816,84 +1826,92 @@ async fn dispatch(
                 },
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
         Request::SessionList {
             workspace_id,
             include_archived,
-        } => match state
-            .sessions
-            .list(workspace_id.as_deref(), include_archived)
-            .await
-        {
-            Ok(mut sessions) => {
-                crate::workflow::summarize_sessions(state, &mut sessions).await;
-                Handled::ok(Reply::Sessions(sessions))
+        } => Box::pin(async move {
+            match state
+                .sessions
+                .list(workspace_id.as_deref(), include_archived)
+                .await
+            {
+                Ok(mut sessions) => {
+                    crate::workflow::summarize_sessions(state, &mut sessions).await;
+                    Handled::ok(Reply::Sessions(sessions))
+                }
+                Err(error) => failed(error),
             }
-            Err(error) => failed(error),
-        },
+        }).await,
 
         Request::SessionGet {
             session_id,
             recent_rounds,
             before_item_id,
-        } => match match recent_rounds {
-            Some(limit) => {
-                state
-                    .sessions
-                    .history_snapshot(&session_id, limit, before_item_id.as_deref())
-                    .await
+        } => Box::pin(async move {
+            match match recent_rounds {
+                Some(limit) => {
+                    state
+                        .sessions
+                        .history_snapshot(&session_id, limit, before_item_id.as_deref())
+                        .await
+                }
+                None => state.sessions.snapshot(&session_id).await,
+            } {
+                Ok(mut snapshot) => {
+                    crate::workflow::summarize_sessions(
+                        state,
+                        std::slice::from_mut(&mut snapshot.summary),
+                    )
+                    .await;
+                    Handled::ok(Reply::Snapshot(snapshot))
+                }
+                Err(error) => failed(error),
             }
-            None => state.sessions.snapshot(&session_id).await,
-        } {
-            Ok(mut snapshot) => {
-                crate::workflow::summarize_sessions(
-                    state,
-                    std::slice::from_mut(&mut snapshot.summary),
-                )
-                .await;
-                Handled::ok(Reply::Snapshot(snapshot))
+        }).await,
+
+        Request::SessionDrafts { session_id } => Box::pin(async move {
+            match state.sessions.drafts(&session_id).await {
+                Ok(drafts) => Handled::ok(Reply::SessionDrafts(drafts)),
+                Err(error) => failed(error),
             }
-            Err(error) => failed(error),
-        },
+        }).await,
 
-        Request::SessionDrafts { session_id } => match state.sessions.drafts(&session_id).await {
-            Ok(drafts) => Handled::ok(Reply::SessionDrafts(drafts)),
-            Err(error) => failed(error),
-        },
-
-        Request::SessionDraftsReplace { session_id, drafts } => {
+        Request::SessionDraftsReplace { session_id, drafts } => Box::pin(async move {
             match state.sessions.replace_drafts(&session_id, drafts).await {
                 Ok(drafts) => Handled::ok(Reply::SessionDrafts(drafts)),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
-        Request::SessionComponents { session_id } => {
+        Request::SessionComponents { session_id } => Box::pin(async move {
             match session_components(state, &session_id).await {
                 Ok(instances) => Handled::ok(Reply::SessionComponents(instances)),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
-        Request::SessionFlow { session_id } => {
+        Request::SessionFlow { session_id } => Box::pin(async move {
             match crate::workflow::executor_flow(state, &session_id).await {
                 Ok(flow) => Handled::ok(Reply::SessionFlow(flow)),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
         Request::SessionInspect {
             session_id,
             through_round_id,
-        } => match state
-            .sessions
-            .inspect(&session_id, through_round_id.as_deref())
-            .await
-        {
-            Ok(inspection) => Handled::ok(Reply::SessionInspection(inspection)),
-            Err(error) => failed(error),
-        },
+        } => Box::pin(async move {
+            match state
+                .sessions
+                .inspect(&session_id, through_round_id.as_deref())
+                .await
+            {
+                Ok(inspection) => Handled::ok(Reply::SessionInspection(inspection)),
+                Err(error) => failed(error),
+            }
+        }).await,
 
         Request::SessionNarrative {
             session_id,
@@ -1901,100 +1919,110 @@ async fn dispatch(
             item_id,
             cursor,
             limit,
-        } => match state
-            .sessions
-            .narrative_page(
-                &session_id,
-                through_round_id.as_deref(),
-                item_id.as_deref(),
-                cursor.as_deref(),
-                limit,
-            )
-            .await
-        {
-            Ok(page) => Handled::ok(Reply::SessionNarrative(page)),
-            Err(error) => failed(error),
-        },
+        } => Box::pin(async move {
+            match state
+                .sessions
+                .narrative_page(
+                    &session_id,
+                    through_round_id.as_deref(),
+                    item_id.as_deref(),
+                    cursor.as_deref(),
+                    limit,
+                )
+                .await
+            {
+                Ok(page) => Handled::ok(Reply::SessionNarrative(page)),
+                Err(error) => failed(error),
+            }
+        }).await,
 
         Request::SessionRounds {
             session_id,
             through_round_id,
             cursor,
             limit,
-        } => match state
-            .sessions
-            .round_page(
-                &session_id,
-                through_round_id.as_deref(),
-                cursor.as_deref(),
-                limit,
-            )
-            .await
-        {
-            Ok(page) => Handled::ok(Reply::SessionRounds(page)),
-            Err(error) => failed(error),
-        },
+        } => Box::pin(async move {
+            match state
+                .sessions
+                .round_page(
+                    &session_id,
+                    through_round_id.as_deref(),
+                    cursor.as_deref(),
+                    limit,
+                )
+                .await
+            {
+                Ok(page) => Handled::ok(Reply::SessionRounds(page)),
+                Err(error) => failed(error),
+            }
+        }).await,
 
         Request::SessionContext {
             session_id,
             through_round_id,
             token_budget,
-        } => match state
-            .sessions
-            .session_context(&session_id, through_round_id.as_deref(), token_budget)
-            .await
-        {
-            Ok(context) => Handled::ok(Reply::SessionContext(context)),
-            Err(error) => failed(error),
-        },
+        } => Box::pin(async move {
+            match state
+                .sessions
+                .session_context(&session_id, through_round_id.as_deref(), token_budget)
+                .await
+            {
+                Ok(context) => Handled::ok(Reply::SessionContext(context)),
+                Err(error) => failed(error),
+            }
+        }).await,
 
         Request::RoundTrunkList {
             session_id,
             round_id,
             cursor,
             limit,
-        } => match state
-            .sessions
-            .round_layer(&session_id, &round_id, cursor.as_deref(), limit)
-            .await
-        {
-            Ok(layer) => Handled::ok(Reply::RoundLayer(layer)),
-            Err(error) => failed(error),
-        },
+        } => Box::pin(async move {
+            match state
+                .sessions
+                .round_layer(&session_id, &round_id, cursor.as_deref(), limit)
+                .await
+            {
+                Ok(layer) => Handled::ok(Reply::RoundLayer(layer)),
+                Err(error) => failed(error),
+            }
+        }).await,
 
         Request::RoundTrunkGet {
             session_id,
             round_id,
             trunk_index,
-        } => match state
-            .sessions
-            .round_trunk(&session_id, &round_id, trunk_index)
-            .await
-        {
-            Ok(trunk) => Handled::ok(Reply::RoundTrunk(trunk)),
-            Err(error) => failed(error),
-        },
+        } => Box::pin(async move {
+            match state
+                .sessions
+                .round_trunk(&session_id, &round_id, trunk_index)
+                .await
+            {
+                Ok(trunk) => Handled::ok(Reply::RoundTrunk(trunk)),
+                Err(error) => failed(error),
+            }
+        }).await,
 
-        Request::BlobGet { session_id, blob } => {
+        Request::BlobGet { session_id, blob } => Box::pin(async move {
             match state.sessions.blob(&session_id, &blob).await {
                 Ok(blob) => Handled::ok(Reply::Blob(blob)),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
-        Request::RoundTrunkBatchGet { session_id, refs } => {
+        Request::RoundTrunkBatchGet { session_id, refs } => Box::pin(async move {
             match state.sessions.round_trunks(&session_id, &refs).await {
                 Ok(trunks) => Handled::ok(Reply::RoundTrunks(trunks)),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
-        Request::BlobBatchGet { session_id, blobs } => {
+        Request::BlobBatchGet { session_id, blobs } => Box::pin(async move {
             match state.sessions.blobs(&session_id, &blobs).await {
                 Ok(blobs) => Handled::ok(Reply::Blobs(blobs)),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
         Request::SessionSend {
             message_id,
@@ -2004,7 +2032,7 @@ async fn dispatch(
             attachments,
             artifact_preview_base_url,
             continues_round,
-        } => {
+        } => Box::pin(async move {
             if text.trim().is_empty() && attachments.is_empty() {
                 return Handled::err(ErrorCode::BadRequest, "there is nothing to send");
             }
@@ -2064,20 +2092,22 @@ async fn dispatch(
                 Ok(_) => Handled::ok(Reply::Ack),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
         Request::SessionArtifactBegin {
             session_id,
             files,
             metadata,
-        } => match state
-            .sessions
-            .begin_artifact(&session_id, files, metadata)
-            .await
-        {
-            Ok(upload) => Handled::ok(Reply::SessionArtifactUpload(upload)),
-            Err(error) => failed(error),
-        },
+        } => Box::pin(async move {
+            match state
+                .sessions
+                .begin_artifact(&session_id, files, metadata)
+                .await
+            {
+                Ok(upload) => Handled::ok(Reply::SessionArtifactUpload(upload)),
+                Err(error) => failed(error),
+            }
+        }).await,
 
         Request::SessionArtifactChunk {
             session_id,
@@ -2085,40 +2115,46 @@ async fn dispatch(
             file_index,
             offset,
             data_base64,
-        } => match state
-            .sessions
-            .write_artifact_chunk(&session_id, &upload_id, file_index, offset, &data_base64)
-            .await
-        {
-            Ok(()) => Handled::ok(Reply::Ack),
-            Err(error) => failed(error),
-        },
+        } => Box::pin(async move {
+            match state
+                .sessions
+                .write_artifact_chunk(&session_id, &upload_id, file_index, offset, &data_base64)
+                .await
+            {
+                Ok(()) => Handled::ok(Reply::Ack),
+                Err(error) => failed(error),
+            }
+        }).await,
 
         Request::SessionArtifactFinish {
             session_id,
             upload_id,
-        } => match state
-            .sessions
-            .finish_artifact(&session_id, &upload_id)
-            .await
-        {
-            Ok(bundle) => Handled::ok(Reply::SessionArtifact(bundle)),
-            Err(error) => failed(error),
-        },
+        } => Box::pin(async move {
+            match state
+                .sessions
+                .finish_artifact(&session_id, &upload_id)
+                .await
+            {
+                Ok(bundle) => Handled::ok(Reply::SessionArtifact(bundle)),
+                Err(error) => failed(error),
+            }
+        }).await,
 
         Request::SessionArtifactAbort {
             session_id,
             upload_id,
-        } => match state.sessions.abort_artifact(&session_id, &upload_id).await {
-            Ok(()) => Handled::ok(Reply::Ack),
-            Err(error) => failed(error),
-        },
+        } => Box::pin(async move {
+            match state.sessions.abort_artifact(&session_id, &upload_id).await {
+                Ok(()) => Handled::ok(Reply::Ack),
+                Err(error) => failed(error),
+            }
+        }).await,
 
         Request::SessionFork {
             session_id,
             turn_id,
             target,
-        } => {
+        } => Box::pin(async move {
             let providers = state.providers().await;
             if let Some(target) = target
                 .as_ref()
@@ -2163,14 +2199,14 @@ async fn dispatch(
                 },
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
         Request::SessionForkRouted {
             session_id,
             turn_id,
             workspace_id,
             tags,
-        } => {
+        } => Box::pin(async move {
             let workspace = match state.workspaces.get(&workspace_id).await {
                 Ok(workspace) => workspace,
                 Err(error) => return failed(error),
@@ -2240,17 +2276,19 @@ async fn dispatch(
                 },
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
         Request::SessionForkExport {
             session_id,
             turn_id,
-        } => match state.sessions.fork_export(&session_id, &turn_id).await {
-            Ok(transfer) => Handled::ok(Reply::ForkTransfer(transfer)),
-            Err(error) => failed(error),
-        },
+        } => Box::pin(async move {
+            match state.sessions.fork_export(&session_id, &turn_id).await {
+                Ok(transfer) => Handled::ok(Reply::ForkTransfer(transfer)),
+                Err(error) => failed(error),
+            }
+        }).await,
 
-        Request::SessionForkImport { transfer, target } => {
+        Request::SessionForkImport { transfer, target } => Box::pin(async move {
             let Some(workspace_id) = target.workspace_id.clone() else {
                 return Handled::err(ErrorCode::BadRequest, "directed fork requires workspaceId");
             };
@@ -2277,13 +2315,13 @@ async fn dispatch(
                 },
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
         Request::SessionForkImportRouted {
             transfer,
             workspace_id,
             tags,
-        } => {
+        } => Box::pin(async move {
             let workspace = match state.workspaces.get(&workspace_id).await {
                 Ok(workspace) => workspace,
                 Err(error) => return failed(error),
@@ -2330,12 +2368,12 @@ async fn dispatch(
                 },
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
         Request::SessionImportList {
             workspace_id,
             limit,
-        } => {
+        } => Box::pin(async move {
             let workspace = match state.workspaces.get(&workspace_id).await {
                 Ok(workspace) => workspace,
                 Err(error) => return failed(error),
@@ -2348,12 +2386,12 @@ async fn dispatch(
                 Ok(listing) => Handled::ok(Reply::SessionImports(listing)),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
         Request::SessionImport {
             workspace_id,
             candidate_id,
-        } => {
+        } => Box::pin(async move {
             let workspace = match state.workspaces.get(&workspace_id).await {
                 Ok(workspace) => workspace,
                 Err(error) => return failed(error),
@@ -2366,16 +2404,16 @@ async fn dispatch(
                 Ok(summary) => Handled::ok(Reply::Session(summary)),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
-        Request::SessionInterrupt { session_id } => {
+        Request::SessionInterrupt { session_id } => Box::pin(async move {
             match state.sessions.interrupt(&session_id).await {
                 Ok(()) => Handled::ok(Reply::Ack),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
-        Request::SessionClose { session_id } => {
+        Request::SessionClose { session_id } => Box::pin(async move {
             if let Err(error) = state.project_control.revoke_session(&session_id).await {
                 return failed(error);
             }
@@ -2383,40 +2421,42 @@ async fn dispatch(
                 Ok(()) => Handled::ok(Reply::Ack),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
         Request::SessionArchive {
             session_id,
             archived,
-        } => match state.sessions.archive(&session_id, archived).await {
-            Ok(summary) => {
-                // Archiving retires a conversation, so a binding still naming
-                // it would record the takeover against a Session nobody
-                // reads. The binding is moved rather than dropped: deleting
-                // it would make `has_binding` report the project as never
-                // taken over and close every gate for the Sessions that are
-                // still live.
-                if archived {
-                    if let Err(error) =
-                        move_binding_off_archived_session(state, &summary.workspace_id, &session_id)
-                            .await
-                    {
-                        return failed(error);
+        } => Box::pin(async move {
+            match state.sessions.archive(&session_id, archived).await {
+                Ok(summary) => {
+                    // Archiving retires a conversation, so a binding still naming
+                    // it would record the takeover against a Session nobody
+                    // reads. The binding is moved rather than dropped: deleting
+                    // it would make `has_binding` report the project as never
+                    // taken over and close every gate for the Sessions that are
+                    // still live.
+                    if archived {
+                        if let Err(error) =
+                            move_binding_off_archived_session(state, &summary.workspace_id, &session_id)
+                                .await
+                        {
+                            return failed(error);
+                        }
                     }
+                    Handled::ok(Reply::Session(summary))
                 }
-                Handled::ok(Reply::Session(summary))
+                Err(error) => failed(error),
             }
-            Err(error) => failed(error),
-        },
+        }).await,
 
-        Request::SessionRename { session_id, title } => {
+        Request::SessionRename { session_id, title } => Box::pin(async move {
             match state.sessions.rename(&session_id, &title).await {
                 Ok(summary) => Handled::ok(Reply::Session(summary)),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
-        Request::SessionDelete { session_id } => {
+        Request::SessionDelete { session_id } => Box::pin(async move {
             if let Err(error) = state.project_control.revoke_session(&session_id).await {
                 return failed(error);
             }
@@ -2450,12 +2490,12 @@ async fn dispatch(
                     failed(error)
                 }
             }
-        }
+        }).await,
 
         Request::SessionSetModel {
             session_id,
             model_id,
-        } => {
+        } => Box::pin(async move {
             let providers = state.providers().await;
             match state
                 .sessions
@@ -2465,9 +2505,9 @@ async fn dispatch(
                 Ok(()) => Handled::ok(Reply::Ack),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
-        Request::SessionSwitchAgent { session_id, target } => {
+        Request::SessionSwitchAgent { session_id, target } => Box::pin(async move {
             let providers = state.providers().await;
             match state
                 .sessions
@@ -2477,13 +2517,13 @@ async fn dispatch(
                 Ok(summary) => Handled::ok(Reply::Session(summary)),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
         Request::SessionRoute {
             session_id,
             tags,
             media_tags,
-        } => {
+        } => Box::pin(async move {
             let tags = match crate::agent_routing::validate_selected_tags(tags) {
                 Ok(tags) => tags,
                 Err(error) => return failed(error),
@@ -2498,12 +2538,12 @@ async fn dispatch(
                 Ok(summary) => Handled::ok(Reply::Session(summary)),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
         Request::SessionSetMode {
             session_id,
             mode_id,
-        } => {
+        } => Box::pin(async move {
             let providers = state.providers().await;
             match state
                 .sessions
@@ -2513,12 +2553,12 @@ async fn dispatch(
                 Ok(()) => Handled::ok(Reply::Ack),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
         Request::SessionSetEffort {
             session_id,
             effort_id,
-        } => {
+        } => Box::pin(async move {
             let providers = state.providers().await;
             match state
                 .sessions
@@ -2528,21 +2568,21 @@ async fn dispatch(
                 Ok(()) => Handled::ok(Reply::Ack),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
-        Request::SessionSetFast { session_id, fast } => {
+        Request::SessionSetFast { session_id, fast } => Box::pin(async move {
             let providers = state.providers().await;
             match state.sessions.set_fast(&session_id, fast, &providers).await {
                 Ok(()) => Handled::ok(Reply::Ack),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
         Request::SessionSetRuntimeAxis {
             session_id,
             axis_id,
             value_id,
-        } => {
+        } => Box::pin(async move {
             let providers = state.providers().await;
             match state
                 .sessions
@@ -2552,13 +2592,13 @@ async fn dispatch(
                 Ok(()) => Handled::ok(Reply::Ack),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
         Request::SessionRespondPermission {
             session_id,
             request_id,
             outcome,
-        } => {
+        } => Box::pin(async move {
             let kind = match state
                 .sessions
                 .pending_permission_kind(&session_id, &request_id)
@@ -2586,20 +2626,22 @@ async fn dispatch(
                 Ok(()) => Handled::ok(Reply::Ack),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
-        Request::SettingsGet => Handled::ok(Reply::Settings(state.settings().await)),
+        Request::SettingsGet => Box::pin(async move {
+            Handled::ok(Reply::Settings(state.settings().await))
+        }).await,
 
-        Request::SettingsSetAgentPreferences { preferences } => {
+        Request::SettingsSetAgentPreferences { preferences } => Box::pin(async move {
             match state.set_agent_preferences(preferences).await {
                 Ok(settings) => Handled::ok(Reply::Settings(settings)),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
-        Request::SpeechCapabilities => {
+        Request::SpeechCapabilities => Box::pin(async move {
             Handled::ok(Reply::SpeechCapabilities(state.speech_capabilities().await))
-        }
+        }).await,
 
         Request::SpeechSettingsSetQwen3 {
             stub_enabled,
@@ -2608,26 +2650,30 @@ async fn dispatch(
             language_hints,
             collect_corrections,
             workspace_id,
-        } => match state
-            .set_qwen3_speech(
-                stub_enabled,
-                context_enabled,
-                pinned_terms,
-                language_hints,
-                collect_corrections,
-                workspace_id,
-            )
-            .await
-        {
-            Ok(settings) => Handled::ok(Reply::Settings(settings)),
-            Err(error) => failed(error),
-        },
+        } => Box::pin(async move {
+            match state
+                .set_qwen3_speech(
+                    stub_enabled,
+                    context_enabled,
+                    pinned_terms,
+                    language_hints,
+                    collect_corrections,
+                    workspace_id,
+                )
+                .await
+            {
+                Ok(settings) => Handled::ok(Reply::Settings(settings)),
+                Err(error) => failed(error),
+            }
+        }).await,
 
-        Request::SpeechRuntimeProbe => Handled::ok(Reply::SpeechRuntimeStatus(
-            state.probe_speech_runtime().await,
-        )),
+        Request::SpeechRuntimeProbe => Box::pin(async move {
+            Handled::ok(Reply::SpeechRuntimeStatus(
+                state.probe_speech_runtime().await,
+            ))
+        }).await,
 
-        Request::SpeechRuntimeConfigure { command, args } => {
+        Request::SpeechRuntimeConfigure { command, args } => Box::pin(async move {
             if transport != TransportKind::Loopback {
                 Handled::err(
                     ErrorCode::Forbidden,
@@ -2639,23 +2685,25 @@ async fn dispatch(
                     Err(error) => failed(error),
                 }
             }
-        }
+        }).await,
 
         Request::SpeechContextPreview {
             workspace_id,
             session_id,
             draft,
-        } => match crate::speech::compile_context_for_state(
-            state,
-            &workspace_id,
-            session_id.as_deref(),
-            draft.as_deref(),
-        )
-        .await
-        {
-            Ok(context) => Handled::ok(Reply::SpeechContext(context)),
-            Err(error) => failed(error),
-        },
+        } => Box::pin(async move {
+            match crate::speech::compile_context_for_state(
+                state,
+                &workspace_id,
+                session_id.as_deref(),
+                draft.as_deref(),
+            )
+            .await
+            {
+                Ok(context) => Handled::ok(Reply::SpeechContext(context)),
+                Err(error) => failed(error),
+            }
+        }).await,
 
         Request::SpeechFeedbackRecord {
             workspace_id,
@@ -2666,21 +2714,23 @@ async fn dispatch(
             rejected_candidate_id,
             scope,
             score_kind: _,
-        } => match crate::speech::record_feedback_for_state(
-            state,
-            crate::speech::FeedbackSubmission {
-                workspace_id,
-                request_id,
-                selected_candidate_id,
-                rejected_candidate_id,
-                scope,
-            },
-        )
-        .await
-        {
-            Ok(receipt) => Handled::ok(Reply::SpeechFeedbackReceipt(receipt)),
-            Err(error) => failed(error),
-        },
+        } => Box::pin(async move {
+            match crate::speech::record_feedback_for_state(
+                state,
+                crate::speech::FeedbackSubmission {
+                    workspace_id,
+                    request_id,
+                    selected_candidate_id,
+                    rejected_candidate_id,
+                    scope,
+                },
+            )
+            .await
+            {
+                Ok(receipt) => Handled::ok(Reply::SpeechFeedbackReceipt(receipt)),
+                Err(error) => failed(error),
+            }
+        }).await,
 
         Request::SettingsSetProvider {
             provider_id,
@@ -2690,23 +2740,25 @@ async fn dispatch(
             dialect,
             models,
             model_inputs,
-        } => match state
-            .set_provider(
-                &provider_id,
-                api_key,
-                base_url,
-                label,
-                dialect,
-                models,
-                model_inputs,
-            )
-            .await
-        {
-            Ok(settings) => Handled::ok(Reply::Settings(settings)),
-            Err(error) => failed(error),
-        },
+        } => Box::pin(async move {
+            match state
+                .set_provider(
+                    &provider_id,
+                    api_key,
+                    base_url,
+                    label,
+                    dialect,
+                    models,
+                    model_inputs,
+                )
+                .await
+            {
+                Ok(settings) => Handled::ok(Reply::Settings(settings)),
+                Err(error) => failed(error),
+            }
+        }).await,
 
-        Request::LogTail { name } => {
+        Request::LogTail { name } => Box::pin(async move {
             let dir = state.paths.logs_dir();
             // The daemon's own log by default: nearly every error someone opens
             // this for is the daemon's or an agent's, and both land there.
@@ -2723,9 +2775,9 @@ async fn dispatch(
                 })),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
-        Request::DiagnosticsSnapshot => {
+        Request::DiagnosticsSnapshot => Box::pin(async move {
             let hub = match state.link.get() {
                 Some(link) => link.status().await,
                 None => genehub_proto::HubStatus::Unpaired,
@@ -2736,14 +2788,16 @@ async fn dispatch(
                 &hub,
                 &remote,
             )))
-        }
+        }).await,
 
-        Request::UpdateCheck => match crate::host_update::check() {
-            Ok(status) => Handled::ok(Reply::Update(status)),
-            Err(message) => Handled::err(ErrorCode::Unsupported, message),
-        },
+        Request::UpdateCheck => Box::pin(async move {
+            match crate::host_update::check() {
+                Ok(status) => Handled::ok(Reply::Update(status)),
+                Err(message) => Handled::err(ErrorCode::Unsupported, message),
+            }
+        }).await,
 
-        Request::UpdateAppCheck => {
+        Request::UpdateAppCheck => Box::pin(async move {
             let manifest_url = state.config.read().await.update_manifest_url.clone();
             // The App check compares the App's own build version, not the
             // component's: a Live release moves the component past the App
@@ -2753,36 +2807,44 @@ async fn dispatch(
             Handled::ok(Reply::Update(
                 crate::updates::check(&manifest_url, &app_version).await,
             ))
-        }
+        }).await,
 
-        Request::UpdateDownload => match crate::host_update::apply("web") {
-            Ok(()) => {
-                state.reload.notify_waiters();
-                Handled::ok(Reply::UpdateDownload(state.updates.state()))
+        Request::UpdateDownload => Box::pin(async move {
+            match crate::host_update::apply("web") {
+                Ok(()) => {
+                    state.reload.notify_waiters();
+                    Handled::ok(Reply::UpdateDownload(state.updates.state()))
+                }
+                Err(message) => Handled::err(ErrorCode::Unsupported, message),
             }
-            Err(message) => Handled::err(ErrorCode::Unsupported, message),
-        },
+        }).await,
 
-        Request::UpdateDownloadState => Handled::ok(Reply::UpdateDownload(state.updates.state())),
+        Request::UpdateDownloadState => Box::pin(async move {
+            Handled::ok(Reply::UpdateDownload(state.updates.state()))
+        }).await,
 
-        Request::UpdateDismiss => Handled::ok(Reply::UpdateDownload(state.updates.dismiss(state))),
+        Request::UpdateDismiss => Box::pin(async move {
+            Handled::ok(Reply::UpdateDownload(state.updates.dismiss(state)))
+        }).await,
 
-        Request::SettingsForgetProvider { provider_id } => {
+        Request::SettingsForgetProvider { provider_id } => Box::pin(async move {
             match state.forget_provider(&provider_id).await {
                 Ok(settings) => Handled::ok(Reply::Settings(settings)),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
-        Request::HubStatus => match state.link.get() {
-            Some(link) => Handled::ok(Reply::HubStatus(link.status().await)),
-            None => Handled::ok(Reply::HubStatus(genehub_proto::HubStatus::Unpaired)),
-        },
+        Request::HubStatus => Box::pin(async move {
+            match state.link.get() {
+                Some(link) => Handled::ok(Reply::HubStatus(link.status().await)),
+                None => Handled::ok(Reply::HubStatus(genehub_proto::HubStatus::Unpaired)),
+            }
+        }).await,
 
         Request::HubPair {
             hub_url,
             display_name,
-        } => {
+        } => Box::pin(async move {
             let Some(link) = state.link.get() else {
                 return Handled::err(ErrorCode::Internal, "the daemon is still starting up");
             };
@@ -2800,12 +2862,12 @@ async fn dispatch(
                     Handled::err(code, message)
                 }
             }
-        }
+        }).await,
 
         Request::HubTrial {
             hub_url,
             display_name,
-        } => {
+        } => Box::pin(async move {
             let Some(link) = state.link.get() else {
                 return Handled::err(ErrorCode::Internal, "the daemon is still starting up");
             };
@@ -2824,9 +2886,9 @@ async fn dispatch(
                     Handled::err(code, message)
                 }
             }
-        }
+        }).await,
 
-        Request::HubClaimLink => {
+        Request::HubClaimLink => Box::pin(async move {
             let Some(link) = state.link.get() else {
                 return Handled::err(ErrorCode::Internal, "the daemon is still starting up");
             };
@@ -2837,20 +2899,22 @@ async fn dispatch(
                 }),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
-        Request::HubMachines => match state.link.get() {
-            Some(link) => match link.machines().await {
-                Ok(machines) => Handled::ok(Reply::HubMachines(machines)),
-                Err(error) => failed(error),
-            },
-            // Still starting up is not "you have no machines", but a switcher
-            // showing an error for the second it takes would be worse than one
-            // that fills in a moment later.
-            None => Handled::ok(Reply::HubMachines(Vec::new())),
-        },
+        Request::HubMachines => Box::pin(async move {
+            match state.link.get() {
+                Some(link) => match link.machines().await {
+                    Ok(machines) => Handled::ok(Reply::HubMachines(machines)),
+                    Err(error) => failed(error),
+                },
+                // Still starting up is not "you have no machines", but a switcher
+                // showing an error for the second it takes would be worse than one
+                // that fills in a moment later.
+                None => Handled::ok(Reply::HubMachines(Vec::new())),
+            }
+        }).await,
 
-        Request::HubConnect { machine_id } => {
+        Request::HubConnect { machine_id } => Box::pin(async move {
             let Some(link) = state.link.get() else {
                 return Handled::err(ErrorCode::Internal, "the daemon is still starting up");
             };
@@ -2858,22 +2922,26 @@ async fn dispatch(
                 Ok(ticket) => Handled::ok(Reply::HubTicket(ticket)),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
-        Request::HubUnpair => match state.link.get() {
-            Some(link) => match link.unpair().await {
-                Ok(()) => Handled::ok(Reply::HubStatus(genehub_proto::HubStatus::Unpaired)),
-                Err(error) => failed(error),
-            },
-            None => Handled::ok(Reply::HubStatus(genehub_proto::HubStatus::Unpaired)),
-        },
+        Request::HubUnpair => Box::pin(async move {
+            match state.link.get() {
+                Some(link) => match link.unpair().await {
+                    Ok(()) => Handled::ok(Reply::HubStatus(genehub_proto::HubStatus::Unpaired)),
+                    Err(error) => failed(error),
+                },
+                None => Handled::ok(Reply::HubStatus(genehub_proto::HubStatus::Unpaired)),
+            }
+        }).await,
 
-        Request::DeviceList => Handled::ok(Reply::Devices {
-            devices: state.devices.list(),
-            remote: remote_status(state).await,
-        }),
+        Request::DeviceList => Box::pin(async move {
+            Handled::ok(Reply::Devices {
+                devices: state.devices.list(),
+                remote: remote_status(state).await,
+            })
+        }).await,
 
-        Request::DeviceInvite(scope) => {
+        Request::DeviceInvite(scope) => Box::pin(async move {
             let grants = match scope {
                 None => crate::authz::GrantSet::full(),
                 Some(scope) => {
@@ -2898,28 +2966,32 @@ async fn dispatch(
             let mut invite = state.devices.invite_with(grants);
             invite.rendezvous_url = remote_status(state).await.rendezvous_url;
             Handled::ok(Reply::Invite(invite))
-        }
+        }).await,
 
         // The protocol-v3 peer handshake authenticates an invitation before
         // this RPC exists. `handle_rpc` consumes the invitation on that narrow
         // bootstrap endpoint; an ordinary authenticated peer cannot claim one.
-        Request::DeviceClaim { .. } => Handled::err(
-            ErrorCode::Unauthorized,
-            "配对邀请只能在对应的加密引导连接中兑换",
-        ),
+        Request::DeviceClaim { .. } => Box::pin(async move {
+            Handled::err(
+                ErrorCode::Unauthorized,
+                "配对邀请只能在对应的加密引导连接中兑换",
+            )
+        }).await,
 
-        Request::DeviceRevoke { device_id } => match state.devices.revoke(&device_id) {
-            Ok(_) => Handled::ok(Reply::Devices {
-                devices: state.devices.list(),
-                remote: remote_status(state).await,
-            }),
-            Err(error) => failed(error),
-        },
+        Request::DeviceRevoke { device_id } => Box::pin(async move {
+            match state.devices.revoke(&device_id) {
+                Ok(_) => Handled::ok(Reply::Devices {
+                    devices: state.devices.list(),
+                    remote: remote_status(state).await,
+                }),
+                Err(error) => failed(error),
+            }
+        }).await,
 
         Request::DeviceRemoteAttach {
             relay_url,
             join_token,
-        } => {
+        } => Box::pin(async move {
             let Some(remote) = state.remote.get() else {
                 return Handled::err(ErrorCode::Internal, "the daemon is still starting up");
             };
@@ -2927,30 +2999,34 @@ async fn dispatch(
                 Ok(status) => Handled::ok(Reply::RemoteAccess(status)),
                 Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
             }
-        }
+        }).await,
 
-        Request::DeviceRemoteDetach => match state.remote.get() {
-            Some(remote) => match remote.clear().await {
-                Ok(status) => Handled::ok(Reply::RemoteAccess(status)),
-                Err(error) => failed(error),
-            },
-            None => Handled::ok(Reply::RemoteAccess(genehub_proto::RemoteAccess {
-                relay_url: None,
-                rendezvous_url: None,
-                online: false,
-            })),
-        },
+        Request::DeviceRemoteDetach => Box::pin(async move {
+            match state.remote.get() {
+                Some(remote) => match remote.clear().await {
+                    Ok(status) => Handled::ok(Reply::RemoteAccess(status)),
+                    Err(error) => failed(error),
+                },
+                None => Handled::ok(Reply::RemoteAccess(genehub_proto::RemoteAccess {
+                    relay_url: None,
+                    rendezvous_url: None,
+                    online: false,
+                })),
+            }
+        }).await,
 
-        Request::WorkspaceList => Handled::ok(Reply::Workspaces(state.workspaces.list().await)),
+        Request::WorkspaceList => Box::pin(async move {
+            Handled::ok(Reply::Workspaces(state.workspaces.list().await))
+        }).await,
 
-        Request::WorkspaceOpen { root } => {
+        Request::WorkspaceOpen { root } => Box::pin(async move {
             match state.workspaces.open(Path::new(&root), None).await {
                 Ok(workspace) => Handled::ok(Reply::Workspace(workspace)),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
-        Request::WorkspaceAddRoot { workspace_id, root } => {
+        Request::WorkspaceAddRoot { workspace_id, root } => Box::pin(async move {
             match state
                 .workspaces
                 .add_root(&workspace_id, Path::new(&root))
@@ -2959,9 +3035,9 @@ async fn dispatch(
                 Ok(workspace) => Handled::ok(Reply::Workspace(workspace)),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
-        Request::WorkspaceCreate { root, name } => {
+        Request::WorkspaceCreate { root, name } => Box::pin(async move {
             let path = crate::guest_paths::guest_path(Path::new(&root));
             if let Err(error) = std::fs::create_dir_all(&path) {
                 return Handled::err(
@@ -2973,13 +3049,13 @@ async fn dispatch(
                 Ok(workspace) => Handled::ok(Reply::Workspace(workspace)),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
         Request::AgentSpaceChangePlan {
             workspace_id,
             expected_revision,
             operation,
-        } => {
+        } => Box::pin(async move {
             let project_id = match agent_space_management_project(
                 state,
                 caller,
@@ -3035,7 +3111,7 @@ async fn dispatch(
                     approval,
                 },
             ))
-        }
+        }).await,
 
         Request::AgentSpaceConfigure {
             workspace_id,
@@ -3043,7 +3119,7 @@ async fn dispatch(
             operation,
             plan_digest,
             action_id,
-        } => {
+        } => Box::pin(async move {
             let project_id = match agent_space_management_project(
                 state,
                 caller,
@@ -3222,7 +3298,7 @@ async fn dispatch(
                     Handled::err(ErrorCode::BadRequest, format!("{error:#}"))
                 }
             }
-        }
+        }).await,
 
         Request::AgentSpaceBuilder {
             workspace_id,
@@ -3233,7 +3309,7 @@ async fn dispatch(
             plan_digest,
             action_id,
             expected_revision,
-        } => {
+        } => Box::pin(async move {
             let plan = plan.unwrap_or(false);
             let managed_build = plan || plan_digest.is_some() || action_id.is_some();
             let read_only = matches!(
@@ -3361,9 +3437,9 @@ async fn dispatch(
                 Ok(report) => Handled::ok(Reply::AgentSpaceBuilder(report.into())),
                 Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error}")),
             }
-        }
+        }).await,
 
-        Request::ProjectApprovalRequest { challenge_id } => {
+        Request::ProjectApprovalRequest { challenge_id } => Box::pin(async move {
             let Some(session_id) = caller.session_controller_id() else {
                 return Handled::err(
                     ErrorCode::Forbidden,
@@ -3391,23 +3467,23 @@ async fn dispatch(
                 // presenting a challenge never grants authority.
                 Err(error) => Handled::err(ErrorCode::Conflict, format!("{error:#}")),
             }
-        }
+        }).await,
 
-        Request::AgentSpaceChildren { workspace_id } => {
+        Request::AgentSpaceChildren { workspace_id } => Box::pin(async move {
             match state.workspaces.schedulable_children(&workspace_id).await {
                 Ok(children) => Handled::ok(Reply::Workspaces(children)),
                 Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
             }
-        }
+        }).await,
 
-        Request::WorkspaceRename { workspace_id, name } => {
+        Request::WorkspaceRename { workspace_id, name } => Box::pin(async move {
             match state.workspaces.rename(&workspace_id, &name).await {
                 Ok(workspace) => Handled::ok(Reply::Workspace(workspace)),
                 Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
             }
-        }
+        }).await,
 
-        Request::WorkspaceRemove { workspace_id } => {
+        Request::WorkspaceRemove { workspace_id } => Box::pin(async move {
             let sessions = match state.sessions.list(Some(&workspace_id), true).await {
                 Ok(sessions) => sessions,
                 Err(error) => return failed(error),
@@ -3450,16 +3526,16 @@ async fn dispatch(
                     Handled::err(ErrorCode::BadRequest, format!("{error:#}"))
                 }
             }
-        }
+        }).await,
 
-        Request::DirectoryList { path } => {
+        Request::DirectoryList { path } => Box::pin(async move {
             match crate::workspace::list_directory(path.as_deref().map(Path::new)) {
                 Ok(listing) => Handled::ok(Reply::Directory(listing)),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
-        Request::DirectoryMkdir { parent, name } => {
+        Request::DirectoryMkdir { parent, name } => Box::pin(async move {
             match crate::workspace::mkdir_directory(Path::new(&parent), &name) {
                 Ok(listing) => {
                     tracing::info!(%parent, %name, "directory.mkdir");
@@ -3467,13 +3543,13 @@ async fn dispatch(
                 }
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
         Request::FileTree {
             workspace_id,
             path,
             depth,
-        } => {
+        } => Box::pin(async move {
             match state
                 .workspaces
                 .tree(&workspace_id, path.as_deref(), depth.unwrap_or(2).min(8))
@@ -3482,13 +3558,13 @@ async fn dispatch(
                 Ok(tree) => Handled::ok(Reply::FileTree(tree)),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
         Request::FileWrite {
             workspace_id,
             path,
             content,
-        } => {
+        } => Box::pin(async move {
             let target = match state.workspaces.resolve(&workspace_id, &path).await {
                 Ok(target) => target,
                 Err(error) => return failed(error),
@@ -3497,9 +3573,9 @@ async fn dispatch(
                 Ok(()) => Handled::ok(Reply::Ack),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
-        Request::FileMkdir { workspace_id, path } => {
+        Request::FileMkdir { workspace_id, path } => Box::pin(async move {
             let target = match state.workspaces.resolve(&workspace_id, &path).await {
                 Ok(target) => target,
                 Err(error) => return failed(error),
@@ -3511,13 +3587,13 @@ async fn dispatch(
                 }
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
         Request::FileCopy {
             workspace_id,
             from,
             to,
-        } => {
+        } => Box::pin(async move {
             let source = match state.workspaces.resolve(&workspace_id, &from).await {
                 Ok(source) => source,
                 Err(error) => return failed(error),
@@ -3545,13 +3621,13 @@ async fn dispatch(
                 }
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
         Request::FileMove {
             workspace_id,
             from,
             to,
-        } => {
+        } => Box::pin(async move {
             let source = match state.workspaces.resolve(&workspace_id, &from).await {
                 Ok(source) => source,
                 Err(error) => return failed(error),
@@ -3579,12 +3655,12 @@ async fn dispatch(
                 }
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
         Request::FileDelete {
             workspace_id,
             paths,
-        } => {
+        } => Box::pin(async move {
             for path in &paths {
                 let target = match state.workspaces.resolve(&workspace_id, path).await {
                     Ok(target) => target,
@@ -3596,9 +3672,9 @@ async fn dispatch(
             }
             tracing::info!(%workspace_id, count = paths.len(), "file.delete");
             Handled::ok(Reply::Ack)
-        }
+        }).await,
 
-        Request::GitStatus { workspace_id } => {
+        Request::GitStatus { workspace_id } => Box::pin(async move {
             let workspace = match state.workspaces.get(&workspace_id).await {
                 Ok(workspace) => workspace,
                 Err(error) => return failed(error),
@@ -3607,9 +3683,9 @@ async fn dispatch(
                 Ok(status) => Handled::ok(Reply::GitStatus(status)),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
-        Request::GitDiff { workspace_id, path } => {
+        Request::GitDiff { workspace_id, path } => Box::pin(async move {
             let workspace = match state.workspaces.get(&workspace_id).await {
                 Ok(workspace) => workspace,
                 Err(error) => return failed(error),
@@ -3618,13 +3694,13 @@ async fn dispatch(
                 Ok(diff) => Handled::ok(Reply::GitDiff { diff }),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
         Request::GitCommit {
             workspace_id,
             message,
             paths,
-        } => {
+        } => Box::pin(async move {
             let workspace = match state.workspaces.get(&workspace_id).await {
                 Ok(workspace) => workspace,
                 Err(error) => return failed(error),
@@ -3633,13 +3709,13 @@ async fn dispatch(
                 Ok(commit) => Handled::ok(Reply::GitCommit { commit }),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
         Request::PtyOpen {
             workspace_id,
             cols,
             rows,
-        } => {
+        } => Box::pin(async move {
             let workspace = match state.workspaces.get(&workspace_id).await {
                 Ok(workspace) => workspace,
                 Err(error) => return failed(error),
@@ -3661,32 +3737,36 @@ async fn dispatch(
                 Ok(pty_id) => Handled::ok(Reply::Pty { pty_id }),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
-        Request::PtyWrite { pty_id, data } => match state.terminals.write(&pty_id, &data).await {
-            Ok(()) => Handled::ok(Reply::Ack),
-            Err(error) => failed(error),
-        },
+        Request::PtyWrite { pty_id, data } => Box::pin(async move {
+            match state.terminals.write(&pty_id, &data).await {
+                Ok(()) => Handled::ok(Reply::Ack),
+                Err(error) => failed(error),
+            }
+        }).await,
 
-        Request::PtyResize { pty_id, cols, rows } => {
+        Request::PtyResize { pty_id, cols, rows } => Box::pin(async move {
             match state.terminals.resize(&pty_id, cols, rows).await {
                 Ok(()) => Handled::ok(Reply::Ack),
                 Err(error) => failed(error),
             }
-        }
+        }).await,
 
-        Request::PtyClose { pty_id } => match state.terminals.close(&pty_id).await {
-            Ok(()) => Handled::ok(Reply::Ack),
-            Err(error) => failed(error),
-        },
+        Request::PtyClose { pty_id } => Box::pin(async move {
+            match state.terminals.close(&pty_id).await {
+                Ok(()) => Handled::ok(Reply::Ack),
+                Err(error) => failed(error),
+            }
+        }).await,
 
-        Request::ProcessList => {
+        Request::ProcessList => Box::pin(async move {
             match crate::dataplane::service_preview::process_snapshot(state, caller, None).await {
                 Ok(rows) => Handled::ok(Reply::Processes(rows)),
                 Err(e) => failed(e),
             }
-        }
-        Request::ProcessWorkspaceList { workspace_id } => {
+        }).await,
+        Request::ProcessWorkspaceList { workspace_id } => Box::pin(async move {
             match crate::dataplane::service_preview::process_snapshot(
                 state,
                 caller,
@@ -3697,12 +3777,12 @@ async fn dispatch(
                 Ok(rows) => Handled::ok(Reply::Processes(rows)),
                 Err(e) => failed(e),
             }
-        }
+        }).await,
         Request::ProcessServiceStop {
             workspace_id,
             entry_path,
             run_id,
-        } => {
+        } => Box::pin(async move {
             if !caller.allows(crate::authz::Capability::Services) {
                 return Handled::err(ErrorCode::Forbidden, "需要 services 授权");
             }
@@ -3717,8 +3797,8 @@ async fn dispatch(
                 Ok(()) => Handled::ok(Reply::Ack),
                 Err(e) => failed(e),
             }
-        }
-        Request::ProcessKill { session_id, pid } => {
+        }).await,
+        Request::ProcessKill { session_id, pid } => Box::pin(async move {
             match state.processes.stop(&session_id, pid).await {
                 crate::processes::Stopped::Yes => Handled::ok(Reply::Ack),
                 // One answer for "no such session" and for "not that
@@ -3733,11 +3813,12 @@ async fn dispatch(
                     "this machine could not be asked what is running",
                 ),
             }
-        }
-        Request::ProcessKillAll { session_id } => {
+        }).await,
+        Request::ProcessKillAll { session_id } => Box::pin(async move {
             state.processes.stop_all(&session_id).await;
             Handled::ok(Reply::Ack)
-        }
+        }).await,
+
     }
 }
 

@@ -662,20 +662,33 @@ pub(crate) fn resolve_reference(
     let target = target
         .canonicalize()
         .with_context(|| format!("读取 Skill Provider 目录：{}", target.display()))?;
-    let project_root = project_root
+    let canonical_project = project_root
         .canonicalize()
         .with_context(|| format!("读取项目根目录：{}", project_root.display()))?;
-    // The product Space and the provider must be the same kind of path.
-    // On macOS `/var` is a symlink to `/private/var`; mixing the two makes
-    // `relative_from` walk out to the canonical prefix instead of `../..`.
-    let space_directory = space_directory
-        .canonicalize()
-        .with_context(|| format!("读取 Space 目录：{}", space_directory.display()))?;
-    if !target.starts_with(&project_root) {
+    if !target.starts_with(&canonical_project) {
         bail!(
             "Workflow 包 {} 的 Skill Provider 越出项目根目录：{path}",
             package.id
         );
+    }
+    // A planned Space need not exist yet. Resolve its project-relative suffix
+    // against the same canonical root as the provider, including macOS aliases.
+    let space_directory = match space_directory.strip_prefix(project_root) {
+        Ok(relative) => {
+            if relative
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+            {
+                bail!("Skill Provider Space 路径必须是普通项目相对路径");
+            }
+            canonical_project.join(relative)
+        }
+        Err(_) => space_directory
+            .canonicalize()
+            .with_context(|| format!("读取 Skill Provider Space：{}", space_directory.display()))?,
+    };
+    if !space_directory.starts_with(&canonical_project) {
+        bail!("Skill Provider Space 越出项目根目录");
     }
     relative_from(&space_directory, &target)
 }
