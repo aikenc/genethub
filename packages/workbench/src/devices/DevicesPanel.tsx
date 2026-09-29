@@ -231,7 +231,7 @@ function ThisMachine({
               >
                 {link}
               </code>
-              <p className="text-xs text-faint">一次有效，15 分钟内用掉。</p>
+              <p className="text-xs text-faint">一次有效，24 小时内用掉。</p>
             </div>
           </div>
         ) : null}
