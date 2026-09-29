@@ -7,15 +7,15 @@ import { defineSpecialty, runGenetAsync } from "../../framework/public.ts";
 
 defineSpecialty({
   id: "specialty.workflow.recovery-budget-human",
-  title: "Human recovery budget approval extends only one request",
-  oracle: "A one-round recovery budget stops the recovery Worker, produces exit c, persists one approval in the PM request, and admits exactly one further recovery attempt",
-  catches: ["recovery runs spend the business budget", "recovery budget exhaustion silently stalls", "exit c approval is lost or spent twice", "a second recovery attempt ignores the approved allowance"],
+  title: "Human recovery budget approval is one grant, not an automatic retry",
+  oracle: "A one-round recovery budget stops the recovery Worker and persists exit c; approving it records one allowance without starting another Run, and one explicit PM recovery start is then admitted",
+  catches: ["recovery runs spend the business budget", "recovery budget exhaustion silently stalls", "exit c approval is lost or spent twice", "approval restarts recovery by itself", "an explicit PM start ignores the approved allowance"],
   tags: ["core", "workflow", "workflow-recovery", "session-attention"],
   llm: { default: "mock" }, expectedDurationMs: 45_000, timeoutMs: 115_000,
   resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
   surfaces: ["daemon", "agent", "genet-cli", "workbench-client", "filesystem"],
-  productInterfaces: ["workflow.history", "workflow.activate", "session.respondPermission", "Workflow request.json"],
+  productInterfaces: ["workflow.history", "workflow.activate", "session.respondPermission", "session.send", "genet workflow recovery start", "Workflow request.json"],
 }, async t => {
   t.data.git.init(t.env.workspace);
   const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
@@ -86,7 +86,7 @@ structure: {
       opened.daemon.env, { cwd: opened.workspaceRoot });
     t.assertions.assert(activation.code === 0, `custom recovery activation failed: ${activation.stderr || activation.stdout}`);
 
-    let sent = false, businessSubmitted = false;
+    let sent = false, businessSubmitted = false, command: string | undefined;
     const respond = (request: unknown) => {
       const body = JSON.stringify(request);
       if (body.includes("BUDGET_BUSINESS_WORKER")) {
@@ -97,6 +97,11 @@ structure: {
         } } };
       }
       if (body.includes("BUDGET_RECOVERY_WORKER")) return { text: "Reviewed one round without a controlled exit." };
+      if (body.includes("START_APPROVED_RECOVERY") && command) {
+        const next = command;
+        command = undefined;
+        return { tool: { name: "bash", arguments: { command: next } } };
+      }
       if (!sent) {
         sent = true;
         return { tool: { name: "bash", arguments: {
@@ -122,7 +127,7 @@ structure: {
       recovery = runs.find(run => run.handles.some(handle => handle.runId === root?.id));
       return recovery?.status === "blocked" && recovery.humanExit?.kind === "c";
     }, 55_000);
-    t.assertions.assert(root?.status === "blocked" && recovery!.reason?.includes("recoveryBudgetExceeded"),
+    t.assertions.assert(root?.status === "blocked" && recovery!.conditions.some(condition => condition.code === "recoveryBudget"),
       "recovery budget did not stop the recovery Worker while preserving the business request");
     // The durable Human exit is saved before its question is delivered to the
     // Session. Wait for that public delivery, then validate its exact options.
@@ -142,16 +147,29 @@ structure: {
       sessionId: pm, requestId: card!.id, outcome: { outcome: "selected", optionId: "approve" },
     } });
     t.assertions.assert(answered?.type === "ack", "Human approval was not accepted");
-    stage = "wait for second recovery attempt";
-    await t.tools.waitUntil(async () => {
-      const runs = await history();
-      return runs.filter(run => run.handles.some(handle => handle.runId === root!.id)).length === 2
-        && runs.some(run => run.id === recovery!.id && run.humanExit?.answer === "approve");
-    }, 35_000);
+    await t.tools.waitUntil(async () => (await history()).some(run => run.id === recovery!.id && run.humanExit?.answer === "approve"), 20_000);
+    // Patrol admits recovery from an execution boundary, not from this answer.
+    stage = "approval does not start recovery by itself";
+    const observeUntil = Date.now() + 6_000;
+    while (Date.now() < observeUntil) {
+      const observed = await history();
+      t.assertions.assert(observed.filter(run => run.handles.some(handle => handle.runId === root!.id)).length === 1,
+        "approval by itself started another recovery");
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    stage = "explicit PM recovery start spends the grant once";
+    let inputSeq = 0;
+    command = `"$GENEHUB_CLI" workflow recovery start --run ${root!.id} --reason "Use the approved recovery allowance once"`;
+    const queued = await opened.client.call({ type: "session.send", payload: {
+      sessionId: pm, messageId: `u_budget_${++inputSeq}`, text: "START_APPROVED_RECOVERY",
+      attachments: [], continuesRound: null,
+    } });
+    t.assertions.assert(queued?.type === "ack", "PM recovery start was not accepted");
+    await t.tools.waitUntil(async () => (await history()).filter(run => run.handles.some(handle => handle.runId === root!.id)).length === 2, 35_000);
     const runs = await history();
     const attempts = runs.filter(run => run.handles.some(handle => handle.runId === root!.id));
     t.assertions.assert(attempts.length === 2 && attempts[0]!.id !== attempts[1]!.id,
-      "Human c approval did not admit exactly one new recovery Run");
+      "the approved allowance did not admit exactly one explicit recovery Run");
     const request = JSON.parse(readFileSync(path.join(opened.workspaceRoot,
       ".genethub/components/pm/requests", root!.id, "request.json"), "utf8")) as {
       recoveryExtra: { maxRuns: number; maxLlmRounds: number };

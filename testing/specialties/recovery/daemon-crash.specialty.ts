@@ -203,6 +203,16 @@ recoveryCase(
 
       second = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
       await t.flows.main.configureMockProvider(second.client, second.mock);
+      // The dispatcher redelivers the crashed turn on its own tick. That
+      // continuation is not the fresh turn; settle it against the new mock,
+      // or let it fail closed, before accepting another prompt.
+      second.mock.script({ text: "settled the crashed turn" });
+      await t.tools.waitUntil(async () => {
+        const reply = await second!.client.call({ type: "session.get", payload: { sessionId } });
+        if (reply?.type !== "snapshot") return false;
+        const status = reply.data.summary.status;
+        return status === "idle" || status === "failed";
+      }, 30_000);
       second.mock.script({ text: "recovered after crash" });
       const events = await t.flows.main.attachEventLog(second.client, sessionId);
       await t.flows.main.sendPrompt(second.client, sessionId, "A fresh turn after recovery.");
