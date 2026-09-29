@@ -1,0 +1,66 @@
+- id: size-1
+  category: 代码规模
+  requirement: 单文件 ≤ 5000 行
+- id: size-2
+  category: 代码规模
+  requirement: 单函数 ≤ 200 行
+- id: size-3
+  category: 代码规模
+  requirement: 无 30 行以上的重复代码
+- id: size-4
+  category: 代码规模
+  requirement: 单个资源 ≤ 2MB
+- id: size-5
+  category: 代码规模
+  requirement: 首屏包体 ≤ 500KB
+- id: cplx-1
+  category: 复杂度
+  requirement: 单函数圈复杂度 ≤ 50
+- id: cplx-2
+  category: 复杂度
+  requirement: 嵌套深度 ≤ 5
+- id: cplx-3
+  category: 复杂度
+  requirement: 模块间无循环依赖
+- id: cplx-4
+  category: 复杂度
+  requirement: 公共模块不含玩法逻辑
+- id: cplx-5
+  category: 复杂度
+  requirement: 状态机状态 ≤ 12
+- id: perf-1
+  category: 运行性能
+  requirement: tick 中不创建需 GC 的对象
+- id: perf-2
+  category: 运行性能
+  requirement: 60 FPS 下单帧 ≤ 8ms
+- id: perf-3
+  category: 运行性能
+  requirement: 10 分钟对局内存增长 ≤ 5MB
+- id: perf-4
+  category: 运行性能
+  requirement: tick 中无同步存储写入
+- id: perf-5
+  category: 运行性能
+  requirement: 页面隐藏时暂停渲染
+- id: perf-6
+  category: 运行性能
+  requirement: 手机 CPU 占用 ≤ 30%
+- id: test-1
+  category: 测试
+  requirement: 核心规则单测覆盖 ≥ 80%
+- id: test-2
+  category: 测试
+  requirement: 核心规则有边界用例
+- id: test-3
+  category: 测试
+  requirement: 随机种子可复现对局
+- id: test-4
+  category: 测试
+  requirement: 端到端脚本覆盖开局到结算
+- id: test-5
+  category: 测试
+  requirement: CI 全部通过
+- id: test-6
+  category: 测试
+  requirement: 没有不稳定的测试

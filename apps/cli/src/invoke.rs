@@ -108,8 +108,11 @@ mod version_tests {
             record(serde_json::json!({"stream":"stdout", "line":
             r#"{"data":{"daemon":{"version":"0.14.1-beta.2"}}}"#}))
         };
-        assert_eq!(running_context(vec![response(), record(serde_json::json!({"exit":0}))])
-            .unwrap()["version"], "0.14.1-beta.2");
+        assert_eq!(
+            running_context(vec![response(), record(serde_json::json!({"exit":0}))]).unwrap()
+                ["version"],
+            "0.14.1-beta.2"
+        );
         assert_eq!(running_context(vec![response()]), None);
         assert_eq!(
             running_context(vec![response(), record(serde_json::json!({"exit":1}))]),

@@ -10,7 +10,6 @@ import { startFaultLink } from "./fault-link.ts";
 import { startHub } from "./hub.ts";
 import { connectProductClient } from "./client.ts";
 import { allocatePort } from "../../infrastructure/public.ts";
-import { parseJson, runGenetAsync } from "./cli.ts";
 
 /** Public package browser consumer plus real rendezvous/Hosted services.
  * The page uses the same Client as the workbench; the only browser fault seam
@@ -45,16 +44,13 @@ export async function openMultichannelBrowser(t: CaseContext, mode: "rendezvous"
       t.env.env.GENEHUB_LOCAL_HUB_URL = hub.origin;
       opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
       const owner = hub.browser(); await hub.signInOwner(owner);
-      const route = async () => {
-        const r = await runGenetAsync(opened!.daemon.genet, ["desktop", "route"], opened!.daemon.env);
-        if (r.code !== 0) throw new Error("desktop pairing route failed");
-        return parseJson(r.stdout).data as { navigate: string; complete: boolean };
-      };
-      const first = await route();
-      const code = new URL(first.navigate).searchParams.get("code");
-      if (!code) throw new Error("desktop route omitted pairing code");
-      await hub.approvePairing(owner, code);
-      await t.tools.waitUntil(async () => (await route()).complete, 45000);
+      const pairing = await opened.client.call({ type: "hub.pair", payload: { hubUrl: hub.origin, displayName: null } });
+      if (pairing?.type !== "hubStatus" || pairing.data.state !== "pairing") throw new Error("public hub.pair did not begin pairing");
+      await hub.approvePairing(owner, pairing.data.userCode);
+      await t.tools.waitUntil(async () => {
+        const status = await opened!.client.call({ type: "hub.status" });
+        return status?.type === "hubStatus" && status.data.state === "paired";
+      }, 45000);
       let machineId = "";
       await t.tools.waitUntil(async () => {
         const me = await owner.json<{ machines: Array<{ id: string; online: boolean }> }>("/app/me");
@@ -106,8 +102,8 @@ export async function openMultichannelBrowser(t: CaseContext, mode: "rendezvous"
 import { Client, ServicePreviewClient } from '@genehub/workbench/client';
 async function connectionInput(){const result=await window.connectionInput();if(result.admissionError)throw Object.assign(new Error(result.admissionError.message),{status:result.admissionError.status});return result;}
 const endpoint=await connectionInput();
-const client=new Client({...endpoint,rtcEnabled:false,requestTimeoutMs:3000,onDiagnostic(e){if(['error','connection','rtc'].includes(e.kind)){mc.diagnostics.push(e);if(mc.diagnostics.length>64)mc.diagnostics.shift()}if(e.kind==='operation' && e.detail.phase==='finish'){mc.operations.push(e.detail);if(mc.operations.length>128)mc.operations.shift()}},redial:()=>connectionInput()});
-const mc={client,ServicePreviewClient,loadWorkbench:()=>import('@genehub/workbench'),events:[],repairs:0,states:[],operations:[],diagnostics:[]};
+const client=new Client({...endpoint,rtcEnabled:false,requestTimeoutMs:3000,onDiagnostic(e){if(['error','connection','rtc'].includes(e.kind)){mc.diagnostics.push(e);if(mc.diagnostics.length>64)mc.diagnostics.shift()}if(e.kind==='operation' && e.detail.phase==='finish'){mc.operations.push(e.detail);if(mc.operations.length>128)mc.operations.shift()}if(e.kind==='operation' && e.detail.operation==='rtc.negotiate'){mc.rtcUpgrades.push({phase:e.detail.phase,outcome:e.detail.outcome,durationMs:e.detail.durationMs});if(mc.rtcUpgrades.length>32)mc.rtcUpgrades.shift()}},redial:()=>connectionInput()});
+const mc={client,ServicePreviewClient,loadWorkbench:()=>import('@genehub/workbench'),events:[],repairs:0,states:[],operations:[],diagnostics:[],rtcUpgrades:[]};
 client.onStateChange(s=>{mc.states.push(s);if(mc.states.length>128)mc.states.shift();document.querySelector('#status').textContent=s});
 window.mc=mc;client.connect();
 `);
@@ -131,7 +127,7 @@ window.mc=mc;client.connect();
     const vite = await import(pathToFileURL(require.resolve("vite")).href);
     const server = await vite.createServer({ configFile: false, root, logLevel: "error",
       resolve: { alias: [{ find: "@genehub/workbench/client", replacement: testRequire.resolve("@genehub/workbench/client") }, { find: /^@genehub\/workbench$/, replacement: testRequire.resolve("@genehub/workbench") }] },
-      server: { host: "127.0.0.1", port: 0, fs: { allow: [root, t.openRoot] } } });
+      server: { host: "127.0.0.1", port: 0, watch: null, fs: { allow: [root, t.openRoot] } } });
     app = server; await server.listen();
     await page.goto(server.resolvedUrls.local[0]);
     await page.waitForFunction(() => (window as any).mc?.client.connectionState === "ready", null, { timeout: 30000 });

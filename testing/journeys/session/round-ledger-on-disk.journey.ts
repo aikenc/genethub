@@ -64,7 +64,7 @@ defineJourney(
   },
 );
 
-function foldRounds(contents: string): Array<{ outcome?: string }> {
+function foldRounds(contents: string): Array<{ roundId?: string; outcome?: string }> {
   const rounds: Array<{ roundId?: string; outcome?: string }> = [];
   for (const line of contents.split("\n").filter((item) => item.trim())) {
     let row: { t?: string; round?: { roundId?: string; outcome?: string } };

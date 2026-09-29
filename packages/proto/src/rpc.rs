@@ -165,6 +165,10 @@ pub enum Request {
     /// from the authenticated session-bound CLI identity, never this payload.
     #[serde(rename = "workflow.dispatch", rename_all = "camelCase")]
     WorkflowDispatch {
+        /// Explicit caller constraint; retained across request retries/recovery.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        agent_target: Option<crate::WorkflowAgentTarget>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         retry_of: Option<String>,
@@ -217,6 +221,26 @@ pub enum Request {
         since: u64,
         limit: u32,
     },
+    /// Read-only request-wide clocks, calls and frozen cost estimates.
+    #[serde(rename = "workflow.profile", rename_all = "camelCase")]
+    WorkflowProfile {
+        workspace_id: String,
+        run_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        offset: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        limit: Option<u32>,
+    },
+    /// Discovers views, or reads a file from the Run's immutable build.
+    #[serde(rename = "workflow.view", rename_all = "camelCase")]
+    WorkflowView {
+        workspace_id: String,
+        run_id: String,
+        #[serde(default)]
+        path: Option<String>,
+    },
     /// Lists recent Runs for project-side Workflow analysis. This is a
     /// read-only projection; detailed structured messages remain Session-owned.
     #[serde(rename = "workflow.history", rename_all = "camelCase")]
@@ -225,8 +249,19 @@ pub enum Request {
         #[serde(default)]
         limit: Option<u32>,
     },
+    /// Ask the controller to decide a built-in recovery review. The daemon
+    /// owns the durable question so this does not require native Agent tools.
+    #[serde(rename = "workflow.consult", rename_all = "camelCase")]
+    WorkflowConsult {
+        workspace_id: String,
+        run_id: String,
+        node_id: String,
+        #[ts(type = "number")]
+        expected_revision: u64,
+        report: String,
+    },
     /// Supplies explicit evidence for the node owned by this managed Session.
-    /// `expectedRevision` is a project-run CAS, not a best-effort hint.
+    /// Legacy clients use Run CAS. New clients bind expectedAttempt plus the managed Session; submissions are idempotent.
     #[serde(rename = "workflow.complete", rename_all = "camelCase")]
     WorkflowComplete {
         workspace_id: String,
@@ -234,6 +269,13 @@ pub enum Request {
         node_id: String,
         #[ts(type = "number")]
         expected_revision: u64,
+        /// Node-bound submission; unrelated sibling revisions do not invalidate it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        expected_attempt: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        submission_id: Option<String>,
         evidence: std::collections::BTreeMap<String, String>,
         /// Bounded business data, checked against the node's declared output shape.
         #[serde(
@@ -287,6 +329,16 @@ pub enum Request {
         expected_revision: u64,
         kind: String,
         reason: String,
+        // Required for withdrawal: exact pending native card identity.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        request_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        budget: Option<crate::WorkflowBudgetProposal>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        scope: Option<crate::WorkflowScopeProposal>,
     },
     /// Override only future recovery Runs to use the built-in flow.
     #[serde(rename = "workflow.recovery.reset", rename_all = "camelCase")]
@@ -308,14 +360,21 @@ pub enum Request {
         #[ts(type = "number")]
         expected_revision: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
-        max_runs: Option<u32>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional, type = "number")]
         deadline_seconds: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional, type = "number")]
         max_llm_rounds: Option<u64>,
+    },
+    /// An authenticated ordinary PM records its goal delivery decision.
+    #[serde(rename = "workflow.requirement.complete", rename_all = "camelCase")]
+    WorkflowRequirementComplete {
+        workspace_id: String,
+        run_id: String,
+        #[ts(type = "number")]
+        expected_revision: u64,
+        conclusion: String,
+        delivery_references: Vec<String>,
     },
     /// Mounts, configures or removes one responsibility on an already-open,
     /// PipeBuilder-verified AgentSpace, or moves it in the ownership tree.
@@ -660,10 +719,7 @@ pub enum Request {
         effort_id: String,
     },
     #[serde(rename = "session.setFast", rename_all = "camelCase")]
-    SessionSetFast {
-        session_id: String,
-        fast: bool,
-    },
+    SessionSetFast { session_id: String, fast: bool },
     #[serde(rename = "session.setRuntimeAxis", rename_all = "camelCase")]
     SessionSetRuntimeAxis {
         session_id: String,
@@ -1110,6 +1166,8 @@ pub enum Reply {
     WorkflowBuild(WorkflowBuildReport),
     WorkflowRun(WorkflowRunStatus),
     WorkflowJournal(Vec<serde_json::Value>),
+    WorkflowProfile(serde_json::Value),
+    WorkflowView(serde_json::Value),
     WorkflowCheck(WorkflowCheckReport),
     WorkflowRuns(Vec<WorkflowRunStatus>),
     AgentSpaceBuilder(AgentSpaceBuilderReport),

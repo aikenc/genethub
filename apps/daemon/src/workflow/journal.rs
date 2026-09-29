@@ -190,31 +190,40 @@ fn append_line(directory: &Path, name: &str, committed_bytes: u64, line: &[u8]) 
 
 /// The Run snapshot commits the current segment and its byte high-water mark.
 /// Any newer segment or trailing bytes left by a crash are discarded on retry.
-pub(super) fn append_at_with_limit(runtime: &RuntimeStore, run: &RunRecord, at_ms: i64, maximum: u64) -> Result<AppendOutcome> {
+/// The committed Run snapshot beside its journal, read once per save.
+pub(super) fn committed_snapshot(runtime: &RuntimeStore, run: &RunRecord) -> Result<Option<RunRecord>> {
+    let Some(directory) = directory(runtime, run)? else { return Ok(None); };
+    let snapshot = directory.join("run.json");
+    match crate::config::sensitive_metadata(&snapshot) {
+        Ok(metadata) => {
+            crate::config::reject_link_or_reparse(&snapshot, &metadata)?;
+            if !metadata.is_file() {
+                bail!("Workflow Run snapshot 不是普通文件");
+            }
+            ensure_record_size("Workflow Run", metadata.len(), MAX_RUN_RECORD_BYTES)?;
+            Ok(Some(decode_run_record(&fs::read(&snapshot)?)?))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub(super) fn append_at_with_limit(runtime: &RuntimeStore, run: &RunRecord, previous: Option<&RunRecord>, at_ms: i64, maximum: u64) -> Result<AppendOutcome> {
     let Some(directory) = directory(runtime, run)? else {
         return Ok(AppendOutcome { seq: 0, bytes: 0, segment: String::new() });
     };
-    let snapshot = directory.join("run.json");
     let (mut seq, mut bytes, mut current, revision, status, previous_delivery_total, previous_waiting, previous_human) =
-        match crate::config::sensitive_metadata(&snapshot) {
-            Ok(metadata) => {
-                crate::config::reject_link_or_reparse(&snapshot, &metadata)?;
-                if !metadata.is_file() {
-                    bail!("Workflow Run snapshot 不是普通文件");
-                }
-                ensure_record_size("Workflow Run", metadata.len(), MAX_RUN_RECORD_BYTES)?;
-                let previous = decode_run_record(&fs::read(&snapshot)?)?;
+        match previous {
+            Some(previous) => {
                 if previous.handles != run.handles {
                     bail!("Workflow recovery handles 创建后不可改变");
                 }
-                (previous.journal_seq, previous.journal_bytes, previous.journal_segment,
-                    previous.revision, Some(previous.status),
-                    previous.delivery_total, previous.supervision.waiting_requests,
-                    previous.human_exit_journal)
+                (previous.journal_seq, previous.journal_bytes, previous.journal_segment.clone(),
+                    previous.revision, Some(previous.status().to_string()),
+                    previous.delivery_total, previous.supervision.waiting_requests.clone(),
+                    previous.human_exit_journal.clone())
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound =>
-                (0, 0, String::new(), 0, None, 0, Vec::new(), None),
-            Err(error) => return Err(error.into()),
+            None => (0, 0, String::new(), 0, None, 0, Vec::new(), None),
         };
     if run.revision < revision {
         bail!("Workflow Run revision 不得回退");
@@ -274,8 +283,8 @@ pub(super) fn append_at_with_limit(runtime: &RuntimeStore, run: &RunRecord, at_m
     for waiting in &previous_waiting {
         if run.supervision.waiting_requests.iter().any(|current| current.session_id == waiting.session_id
             && current.request_id == waiting.request_id) { continue; }
-        let answered = run.status == "running" && run.nodes.get(&waiting.node_id)
-            .is_some_and(|node| node.status == "running" || node.status == "finishing");
+        let answered = run.status() == "running" && run.nodes.get(&waiting.node_id)
+            .is_some_and(|node| node.status() == "running" || node.status() == "finishing");
         events.push(JournalEvent {
             seq: 0, revision: run.revision, at_ms,
             event_type: if answered { "pause.answered" } else { "pause.resolved" }.into(),
@@ -288,13 +297,18 @@ pub(super) fn append_at_with_limit(runtime: &RuntimeStore, run: &RunRecord, at_m
     if let Some(previous) = &previous_human {
         let current = run.human_exit_journal.as_ref()
             .ok_or_else(|| anyhow!("Workflow Human journal marker cannot disappear"))?;
-        if current.request_id != previous.request_id || current.kind != previous.kind
-            || previous.answer.is_some() && current.answer != previous.answer {
+        if (current.request_id == previous.request_id && (current.kind != previous.kind
+            || previous.answer.is_some() && current.answer != previous.answer))
+            || (current.request_id != previous.request_id && previous.answer.is_none()) {
             bail!("Workflow Human journal marker cannot change its decision");
         }
     }
     if let Some(human) = &run.human_exit_journal {
-        if human.request_id != format!("workflow-human-{}", run.id)
+        let base = format!("workflow-human-{}", run.id);
+        let identity_valid = human.request_id == base || human.request_id
+            .strip_prefix(&format!("{base}-decision-"))
+            .is_some_and(|suffix| suffix.parse::<i64>().is_ok_and(|at| at > 0));
+        if !identity_valid
             || !matches!(human.kind.as_str(), "a" | "b" | "c" | "d" | "e" | "f") {
             bail!("Workflow Human journal marker has invalid identity");
         }
@@ -306,14 +320,19 @@ pub(super) fn append_at_with_limit(runtime: &RuntimeStore, run: &RunRecord, at_m
                 node_id: None, message_id: Some(human.request_id.clone()), handled_run_id: None,
             });
         };
-        if previous_human.is_none() {
+        let new_question = previous_human.as_ref().is_none_or(|previous| previous.request_id != human.request_id);
+        if new_question {
             add_human_event("pause.requested", "event", "human-exit");
         }
-        if human.answer.is_some() && previous_human.as_ref().is_none_or(|previous| previous.answer.is_none()) {
-            add_human_event("pause.answered", "human", "human-exit");
-            if human.answer.as_deref() == Some("approve") {
+        if human.answer.is_some() && (new_question || previous_human.as_ref().is_none_or(|previous| previous.answer.is_none())) {
+            if matches!(human.answer.as_deref(), Some("cancelled" | "interrupted" | "withdrawn")) {
+                add_human_event("pause.resolved", if matches!(human.answer.as_deref(), Some("interrupted" | "withdrawn")) { "pm" } else { "human" }, "human-exit");
+            } else { add_human_event("pause.answered", "human", "human-exit"); }
+            if human.effect_applied && human.answer.as_deref() == Some("approve") {
                 if human.kind == "a" { add_human_event("run.budgetUpdated", "human", "human-budget-approved"); }
-                if human.kind == "c" { add_human_event("recovery.budgetUpdated", "human", "human-budget-approved"); }
+            }
+            if human.effect_applied && human.answer.as_deref() == Some("acceptScope") {
+                add_human_event("requirement.scopeUpdated", "human", "human-scope-approved");
             }
         }
     }
@@ -339,10 +358,10 @@ pub(super) fn append_at_with_limit(runtime: &RuntimeStore, run: &RunRecord, at_m
             });
         }
     }
-    if run.revision != revision || status.as_deref() != Some(run.status.as_str()) {
+    if run.revision != revision || status.as_deref() != Some(run.status()) {
         events.push(JournalEvent {
             seq: 0, revision: run.revision, at_ms,
-            event_type: format!("run.{}", run.status),
+            event_type: format!("run.{}", run.status()),
             actor: if run.journal_actor.is_empty() { "event".into() } else { run.journal_actor.clone() },
             rule: "save-run".into(), run_id: run.id.clone(),
             session_id: run.executor_session_id.clone(), node_id: None, message_id: None,
@@ -458,7 +477,7 @@ mod tests {
         let journal = directory(&runtime, &first).unwrap().unwrap().join(&first.journal_segment);
         OpenOptions::new().append(true).open(&journal).unwrap().write_all(b"orphan\n").unwrap();
         run.revision = 2;
-        run.status = "completed".into();
+        run.legacy_program_status = Some("completed".into());
         run.journal_actor = "patrol".into();
         save_run(&runtime, &run).unwrap();
         let second = load_run(&runtime, &run.id).unwrap();
@@ -490,7 +509,7 @@ mod tests {
         assert_eq!(events[0].actor, "patrol");
         let mut next = stored.clone();
         next.revision += 1;
-        next.status = "blocked".into();
+        next.legacy_program_status = Some("blocked".into());
         save_run(&runtime, &next).unwrap();
         let later = read(&runtime, &load_run(&runtime, &run.id).unwrap(), 0, 10).unwrap();
         assert_eq!(later[2].actor, "event");
@@ -502,14 +521,15 @@ mod tests {
         let data = tempfile::tempdir().unwrap();
         let runtime = RuntimeStore::new(data.path(), "w_project", project.path()).unwrap();
         let mut run = run(&runtime, "wr_no_executor");
-        run.status = "blocked".into();
+        run.legacy_program_status = Some("blocked".into());
         save_run(&runtime, &run).unwrap();
         run.human_exit_journal = Some(HumanExitJournal {
             request_id: format!("workflow-human-{}", run.id),
-            pm_session_id: "s_pm".into(), kind: "a".into(), answer: None,
+            pm_session_id: "s_pm".into(), kind: "a".into(), answer: None, effect_applied: false,
         });
         save_run(&runtime, &run).unwrap();
         run.human_exit_journal.as_mut().unwrap().answer = Some("approve".into());
+        run.human_exit_journal.as_mut().unwrap().effect_applied = true;
         save_run(&runtime, &run).unwrap();
         let committed = load_run(&runtime, &run.id).unwrap();
         let events = read(&runtime, &committed, 0, 20).unwrap();
@@ -557,8 +577,12 @@ mod tests {
             cancelled_by_agent: false,
             resume_message_id: None,
         });
-        run.status = "cancelled".into();
+        run.legacy_program_status = Some("cancelled".into());
         let first_day = chrono::DateTime::parse_from_rfc3339("2026-09-01T12:00:00Z").unwrap().timestamp_millis();
+        save_run_with_journal_time(&runtime, &run, first_day).unwrap();
+        assert!(!settled_marker_valid(&runtime, &run.id), "a cancellation label is not retirement proof");
+        run.retired_at_ms = Some(first_day);
+        run.revision += 1;
         save_run_with_journal_time(&runtime, &run, first_day).unwrap();
         assert!(settled_marker_valid(&runtime, &run.id));
         let stored = load_run(&runtime, &run.id).unwrap();
@@ -585,7 +609,7 @@ mod tests {
         save_run_with_journal_options(&runtime, &run, at, first.journal_bytes + 1).unwrap();
         let second = load_run(&runtime, &run.id).unwrap();
         assert_ne!(first.journal_segment, second.journal_segment);
-        assert_eq!(second.status, "running");
+        assert_eq!(second.status(), "running");
         assert_eq!(read_at(&runtime, &second, 0, 10, at).unwrap().len(), 2);
     }
 

@@ -27,13 +27,12 @@ defineSpecialty({
       modelId: "deepseek/deepseek-v4-flash", userInteraction: "readOnly", prompt: "prompts/worker.md",
     }));
     writeFileSync(path.join(source, "flows/long-worker.yaml"), JSON.stringify({
-      schema: "genehub.workflow.definition.v1", id: "long-worker", version: 1, entry: "work",
+      schema: "genehub.workflow.definition.v2", id: "long-worker", version: 2,
       nodes: [
         { id: "work", uses: "agent.session", with: { role: "worker" },
-          completion: { all: [{ key: "result", verify: "value.nonEmpty" }] }, on: { completed: ["publish"] } },
+          completion: { all: [{ key: "result", verify: "value.nonEmpty" }] } },
         { id: "publish", uses: "result.publish" },
-      ],
-    }));
+      ], structure: {"body":{"id":"sequence","type":"sequence","steps":[{"id":"step-work","type":"task","activity":"work"},{"id":"step-publish","type":"task","activity":"publish"}]}}}));
     let dispatched = false, toolStarted = false;
     opened.mock.script(...Array.from({ length: 24 }, () => ({ respond: (request: unknown) => {
       const body = JSON.stringify(request);
@@ -62,13 +61,13 @@ defineSpecialty({
     let original: WorkflowRunStatus | undefined;
     await t.tools.waitUntil(async () => {
       original = (await history()).find(run => run.taskId === "live-tool");
-      return toolStarted && original?.status === "running" && !!original.nodes.find(node => node.id === "work")?.sessionId;
+      return toolStarted && original?.status === "running" && !!original.nodes.find(node => node.uses === "agent.session")?.sessionId;
     }, 30_000);
     const startedAt = Date.now();
     await t.tools.waitUntil(async () => Date.now() - startedAt >= 182_000, 190_000);
     const afterCutoff = await history();
     const current = afterCutoff.find(run => run.id === original!.id);
-    t.assertions.assert(current?.status === "running" && current.nodes.find(node => node.id === "work")?.status === "running"
+    t.assertions.assert(current?.status === "running" && current.nodes.find(node => node.uses === "agent.session")?.status === "running"
       && !afterCutoff.some(run => run.handles.some(handle => handle.runId === original!.id)),
     "patrol froze a live Worker at the old 180 second wall cutoff");
     await t.tools.waitUntil(async () => (await history()).find(run => run.id === original!.id)?.status === "completed", 35_000);

@@ -255,6 +255,9 @@ pub(crate) async fn serve(
             } else {
                 "AdmissionRejected"
             };
+            // The browser only sees the code; this is what explains a reconnect
+            // that had to start a fresh logical peer.
+            tracing::info!(code, ?path, "logical attach refused");
             let _ = writer
                 .send(&Message::Error { code: code.into() }.encode()?)
                 .await;
@@ -559,7 +562,7 @@ async fn run(
                         let Some(registry) = &lifetime.registry else { standby.take(); continue; };
                         let Some((key, access, kind)) = &idle.admission else { standby.take(); continue; };
                         if id != lifetime.id { standby.take(); continue; }
-                        match registry.attach(&id, &incarnation, key, access, *kind, &attempt, &proof, Instant::now()) {
+                        match registry.reattach_retained(&id, &incarnation, key, access, *kind, &attempt, &proof, Instant::now()) {
                             Ok((attached_epoch, proof)) => {
                                 idle.attempt = Some(attempt);
                                 if idle.outgoing.try_send(Message::Attached { epoch: attached_epoch.to_string(), proof }.encode()?).is_err() { standby.take(); }

@@ -399,11 +399,10 @@ pub fn compile(mut definition: Definition) -> Result<Program> {
                 check(initial, "/initial", None)?;
                 check(update, "/update", None)?;
             }
-            BlockKind::Parallel { complete_when, .. } => {
-                if let Some(complete_when) = complete_when {
-                    check(complete_when, "/completeWhen", Some("boolean"))?;
-                }
-            }
+            BlockKind::Parallel {
+                complete_when: Some(complete_when),
+                ..
+            } => check(complete_when, "/completeWhen", Some("boolean"))?,
             BlockKind::ForEach {
                 items,
                 key,

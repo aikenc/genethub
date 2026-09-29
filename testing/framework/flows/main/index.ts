@@ -429,10 +429,10 @@ export function seedDirectChangePackage(input: {
   writeFileSync(
     path.join(root, "flows/direct-change.yaml"),
     `${JSON.stringify({
-      schema: "genehub.workflow.definition.v1",
+      schema: "genehub.workflow.definition.v2",
       id: "direct-change",
-      version: 1,
-      entry: "implement",
+      version: 2,
+
       nodes: [
         {
           id: "implement",
@@ -448,11 +448,10 @@ export function seedDirectChangePackage(input: {
               { key: "checks", verify: "value.nonEmpty" },
             ],
           },
-          on: { completed: ["publish"] },
+
         },
         { id: "publish", uses: "result.publish" },
-      ],
-    }, null, 2)}\n`,
+      ], structure: {"body":{"id":"sequence","type":"sequence","steps":[{"id":"step-implement","type":"task","activity":"implement"},{"id":"step-publish","type":"task","activity":"publish"}]}}}, null, 2)}\n`,
   );
   writeFileSync(
     path.join(root, "roles/worker.yaml"),

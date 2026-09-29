@@ -227,8 +227,8 @@ defineSpecialty(
       }, 30_000);
       t.assertions.assert(run?.status === "completed", `Workflow status is ${run?.status}`);
       t.assertions.assert(
-        run?.nodes.map((node) => `${node.id}:${node.status}`).join(",") ===
-          "implement:completed,publish:completed",
+        run?.nodes.map((node) => `${node.uses}:${node.status}`).join(",") ===
+          "agent.session:completed,result.publish:completed",
         `unexpected direct graph: ${JSON.stringify(run?.nodes)}`,
       );
       const projectReply = await opened.client.call({

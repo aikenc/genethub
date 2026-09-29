@@ -62,14 +62,14 @@ defineSpecialty(
     id: "specialty.agent-space.workflow-package-build",
     title: "A Human-approved workflow build turns a cloned package into an authorized team",
     oracle:
-      "cloning a Workflow package grants no authority: a normal Agent Session can materialize its Spaces only after the Human approves the daemon-issued build plan; rejection and direct CLI replay leave zero mutation, approval creates exactly five Builder-verified AgentSpaces under the package's own executor, and rebuilding the unchanged source is an identity-preserving no-op",
+      "cloning a Workflow package grants no authority: a normal Agent Session can materialize its Spaces only after the Human approves the daemon-issued build plan; rejection and direct CLI replay leave zero mutation, approval creates exactly six Builder-verified AgentSpaces under the package's own executor, and rebuilding the unchanged source is an identity-preserving no-op",
     catches: [
       "a cloned package directory is treated as authority to schedule Workers",
       "the specialty bypasses the Human and calls build apply as LocalUser",
       "ordinary chat or a copied CLI command is accepted as project-mutation authority",
       "rejecting the plan still leaves a partial AgentSpace tree",
       "the package is a daemon business constant rather than a directory the user cloned",
-      "the five AgentSpaces are written but never Builder-verified or registered",
+      "the six AgentSpaces are written but never Builder-verified or registered",
       "a repeated build creates duplicate Spaces or increments revisions",
       "a Worker Space that also mounts executor is mistaken for the package carrier",
     ],
@@ -367,16 +367,16 @@ defineSpecialty(
       const allSpaces = listed?.type === "workspaces" ? listed.data : [];
       // Product Space names carry the package prefix, which is exactly what
       // lets two packages own a Space of the same local name in one project.
-      const names = ["executor", "coder", "reviewer", "workflow-manager", "workflow-reviewer"];
+      const names = ["executor", "owner", "coder", "reviewer", "workflow-manager", "workflow-reviewer"];
       const spaces = allSpaces.filter((space) =>
         names.some((name) => space.name === `game-delivery--${name}` || space.name === name),
       );
-      t.assertions.assert(spaces.length === 5, `build did not create exactly five team Spaces: ${allSpaces.map((s) => s.name).join(",")}`);
+      t.assertions.assert(spaces.length === names.length, `build did not create the complete package team: ${allSpaces.map((s) => s.name).join(",")}`);
       const byName = new Map(spaces.map((space) => [space.name.replace("game-delivery--", ""), space]));
       const executor = byName.get("executor")!;
       // Product directories carry the package prefix, which is what lets two
       // packages own a Space of the same name in one project.
-      for (const name of ["executor", "coder", "reviewer", "workflow-manager", "workflow-reviewer"]) {
+      for (const name of ["executor", "owner", "coder", "reviewer", "workflow-manager", "workflow-reviewer"]) {
         t.assertions.assert(
           existsSync(path.join(approved.root, "spaces", `game-delivery--${name}`, ".pipebuilder", "lock.json")),
           `${name} was not Builder-verified`,
@@ -387,7 +387,7 @@ defineSpecialty(
           executor.agentSpace.components.some((component) => component.componentId === "executor"),
         "Executor is not the project scheduling boundary",
       );
-      for (const name of ["coder", "reviewer", "workflow-manager", "workflow-reviewer"]) {
+      for (const name of ["owner", "coder", "reviewer", "workflow-manager", "workflow-reviewer"]) {
         t.assertions.assert(
           byName.get(name)?.agentSpace?.parentWorkspaceId === executor.id,
           `${name} is not a direct Executor child`,
@@ -502,7 +502,8 @@ defineSpecialty(
       // direct cancellation request; only that CAS conflict or the brief
       // mechanical-reconciler lock retries.
       let cancelled: Awaited<ReturnType<typeof opened.client.call>> | undefined;
-      for (let attempt = 0; attempt < 3; attempt += 1) {
+      const cancelDeadline = Date.now() + 5_000;
+      for (;;) {
         const latestConflict = await opened.client.call({type:"workflow.get",payload:{workspaceId:approveProject.id,runId:conflictingRun!.id}});
         t.assertions.assert(latestConflict?.type === "workflowRun","cannot refresh conflicting Run");
         try {
@@ -510,7 +511,7 @@ defineSpecialty(
           break;
         } catch (cause) {
           const retryable = cause instanceof Error && (cause.message.includes("Workflow revision 冲突") || cause.message === "Workflow Run 正由另一个请求修改");
-          if (!retryable || attempt === 2) throw cause;
+          if (!retryable || Date.now() >= cancelDeadline) throw cause;
           await new Promise(resolve => setTimeout(resolve, 50));
         }
       }

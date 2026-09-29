@@ -121,7 +121,11 @@ pub(crate) fn plan(project_root: &Path, package: &Package) -> Result<Plan> {
         ];
         let mut skill_sources = Vec::new();
         if source.has_local_skills {
-            let from = package.root.join("spaces").join(&source.name).join("skills");
+            let from = package
+                .root
+                .join("spaces")
+                .join(&source.name)
+                .join("skills");
             collect_skill_files(&from, &from, &root.join("skills"), &mut skill_sources)?;
         }
         total_files += files.len() + skill_sources.len();
@@ -132,10 +136,16 @@ pub(crate) fn plan(project_root: &Path, package: &Package) -> Result<Plan> {
             total_bytes = total_bytes.saturating_add(fs::metadata(from)?.len());
         }
         if total_files > MAX_BUILD_FILES {
-            bail!("Workflow 包 {} 的构建产物文件数超过 {MAX_BUILD_FILES} 上限", package.id);
+            bail!(
+                "Workflow 包 {} 的构建产物文件数超过 {MAX_BUILD_FILES} 上限",
+                package.id
+            );
         }
         if total_bytes > MAX_BUILD_BYTES {
-            bail!("Workflow 包 {} 的构建产物字节数超过 {MAX_BUILD_BYTES} 上限", package.id);
+            bail!(
+                "Workflow 包 {} 的构建产物字节数超过 {MAX_BUILD_BYTES} 上限",
+                package.id
+            );
         }
         files.sort_by(|left, right| left.0.cmp(&right.0));
         spaces.push(PlannedSpace {
@@ -171,12 +181,13 @@ fn render_manifest(
     space_root: &Path,
     source: &SpaceSource,
 ) -> Result<Vec<u8>> {
-    let mut manifest: Value = serde_json::from_slice(&source.manifest_source).with_context(|| {
-        format!(
-            "解析 Workflow 包 {} 的 {}/pipespace.json.src",
-            package.id, source.name
-        )
-    })?;
+    let mut manifest: Value =
+        serde_json::from_slice(&source.manifest_source).with_context(|| {
+            format!(
+                "解析 Workflow 包 {} 的 {}/pipespace.json.src",
+                package.id, source.name
+            )
+        })?;
     let object = manifest
         .as_object_mut()
         .ok_or_else(|| anyhow!("pipespace.json.src 必须是 JSON 对象"))?;
@@ -197,8 +208,7 @@ fn render_manifest(
                 .as_object_mut()
                 .ok_or_else(|| anyhow!("skillProvider 必须是对象"))?;
             if let Some(path) = entry.get("path").and_then(Value::as_str) {
-                let resolved =
-                    package::resolve_reference(package, project_root, space_root, path)?;
+                let resolved = package::resolve_reference(package, project_root, space_root, path)?;
                 entry.insert("path".into(), json!(resolved));
             }
             providers.push(provider);
@@ -343,17 +353,13 @@ pub(crate) async fn apply(
         let parent_workspace_id = if is_executor {
             Some(project_workspace_id.to_string())
         } else {
-            Some(
-                executor_workspace_id
-                    .clone()
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "Workflow 包 {} 的 Space {} 需要挂在 executor 下，但包未声明 executor 载体",
-                            plan.package_id,
-                            space.name
-                        )
-                    })?,
-            )
+            Some(executor_workspace_id.clone().ok_or_else(|| {
+                anyhow!(
+                    "Workflow 包 {} 的 Space {} 需要挂在 executor 下，但包未声明 executor 载体",
+                    plan.package_id,
+                    space.name
+                )
+            })?)
         };
         registrations.push(crate::workspace::BootstrapSpaceRegistration {
             workspace_id: workspace.id.clone(),
@@ -366,11 +372,13 @@ pub(crate) async fn apply(
     // Ordered parent-before-child, because the registry validates each entry
     // against the tree built so far: the project root, then the carrier that
     // hangs off it, then the Workers that hang off the carrier.
-    registrations.sort_by_key(|registration| match registration.parent_workspace_id.as_deref() {
-        None => 0u8,
-        Some(parent) if parent == project_workspace_id => 1,
-        Some(_) => 2,
-    });
+    registrations.sort_by_key(
+        |registration| match registration.parent_workspace_id.as_deref() {
+            None => 0u8,
+            Some(parent) if parent == project_workspace_id => 1,
+            Some(_) => 2,
+        },
+    );
 
     let configured = state
         .workspaces
@@ -508,8 +516,8 @@ pub(crate) fn orphan_product_directories(
         })
         .collect::<BTreeSet<_>>();
     let mut orphans = Vec::new();
-    for entry in fs::read_dir(&spaces)
-        .with_context(|| format!("读取产物目录：{}", spaces.display()))?
+    for entry in
+        fs::read_dir(&spaces).with_context(|| format!("读取产物目录：{}", spaces.display()))?
     {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
@@ -620,7 +628,12 @@ mod tests {
             .find(|space| space.name.contains("executor") && !space.name.contains("manager"))
             .expect("the carrier is among the registered Spaces");
         assert_eq!(
-            executor.agent_space.as_ref().unwrap().parent_workspace_id.as_deref(),
+            executor
+                .agent_space
+                .as_ref()
+                .unwrap()
+                .parent_workspace_id
+                .as_deref(),
             Some(workspace.id.as_str()),
             "the carrier must hang off the project root",
         );

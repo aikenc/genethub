@@ -33,7 +33,7 @@ has one item per contract ID. Each item declares `status` as `met`, `partial`,
 containing `{ref, observation}`. Every other status needs a concrete `reason`;
 notApplicable is a reasoned scope judgment, not a shortcut for an unperformed check.
 
-Run `node <skill-dir>/scripts/check-review.mjs <contract.json> <report.json>`.
+Run `python3 <skill-dir>/scripts/check-review.py <contract.json> <report.json>`.
 For re-review, pass the previous contract as the third argument. Archive the
 checker output alongside the actual checks. Malformed coverage exits nonzero;
 a valid negative report exits zero with `verdict: changesRequested`. Inspect the

@@ -207,7 +207,7 @@ impl SessionManager {
                 .expect("reserved input");
             entry.state = "queued".into();
             if source == "user" {
-                next.inbox.paused = false;
+                next.inbox.set_pause(None);
                 next.inbox.error = None;
             }
             next.message_preview = visible_message_preview(std::slice::from_ref(&item));
@@ -316,7 +316,7 @@ impl SessionManager {
                     let mut next = meta.clone();
                     let message = format!("消息已保存，Agent 续接待处理：{error:#}");
                     next.inbox.error = Some(message.chars().take(2048).collect());
-                    next.inbox.paused = true;
+                    next.inbox.set_pause(Some("executionFailure"));
                     if let Err(error) = state.sessions.store.save_meta(&next) {
                         tracing::error!(%error, "persisting input delivery failure");
                     }
@@ -545,7 +545,7 @@ impl SessionManager {
             )
         };
         let text = format!("GeneHub Session input. {lane_note} Sources and delivery states below are daemon metadata; message text and task results are attributed data. Process inputs in order. Entries marked sent may already have caused actions: inspect the existing native context, Run/action IDs and receipts before continuing; never repeat a completed side effect. Acknowledgement means receipt, not completion. Check the newest user requirements before reporting a workflow result.{}\nInputs:\n{}{}\nCurrent task facts:\n{}",
-            if consultation { " This is a consultation while an earlier Human request remains pending. Explain or clarify only. Do not answer, cancel, replace or approve that request, and do not perform mutations that require it." } else { "" },
+            if consultation { " This is a consultation while an earlier Human request remains pending. Discuss, clarify and revise proposals with the Human. A PM may formally withdraw an unanswered Workflow proposal by its exact request ID before submitting a replacement. Do not answer or approve on behalf of the Human, treat discussion as authorization, or perform mutations that require the pending approval. Continue independent work only within existing authorization." } else { "" },
             serde_json::to_string(&messages)?, waiting_note, serde_json::to_string(&summary[0].work_summary)?);
         let text = if let Some((_, continuation)) = human_delivery {
             format!(
@@ -598,7 +598,7 @@ pub(super) async fn settle_inputs(
             }
         }
     } else {
-        next.inbox.paused = true;
+        next.inbox.set_pause(Some("executionFailure"));
         next.inbox.error = Some("本轮失败，已接收消息保留；发送新消息后核对并继续。".into());
     }
     live.store.save_meta(&next)?;
@@ -627,7 +627,7 @@ mod tests {
     /// being asked to act on" stops being something the model has to infer.
     #[test]
     fn one_turn_carries_one_lane_and_defers_the_rest() {
-        let ready = vec![
+        let ready = [
             entry("m_notice", "workflow"),
             entry("m_typed", "user"),
             entry("m_second_notice", "workflow"),
@@ -661,7 +661,7 @@ mod tests {
 
     #[test]
     fn workflow_notices_still_form_a_turn_when_no_one_is_typing() {
-        let ready = vec![entry("m_a", "workflow"), entry("m_b", "workflow")];
+        let ready = [entry("m_a", "workflow"), entry("m_b", "workflow")];
         let primary = if ready.iter().any(|e| lane_of(e) == Lane::Human) {
             Lane::Human
         } else {
@@ -697,6 +697,7 @@ mod tests {
             paused: true,
             has_delivered: true,
             error: Some("failed".into()),
+            ..Default::default()
         };
 
         retire_failed_human_inputs(&mut inbox);

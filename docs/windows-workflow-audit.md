@@ -1,5 +1,7 @@
 # Windows Workflow / WR audit (2026-09-16)
 
+> 历史设计/审计记录：以下实现描述与验收只对应写作时的版本。当前角色、存储、恢复和包操作以 [Workflow 文档](workflow/README.md) 为准；旧独立自动诊断与 `evidenceOnly` 不再是当前机制。保留正文用于追溯，不作为操作指南。
+
 Scope: the WR startup fix, Workflow carrier/material resolution, project setup,
 restricted evidence tools, and the native process boundary. This is **not a
 Windows release qualification**. The available test host is Linux; no Windows

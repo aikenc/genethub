@@ -100,7 +100,7 @@ const MAX_BLOB_BYTES: u64 = 512 * 1024 * 1024;
 ///     acknowledged continuation when rewriting metadata.
 /// 9 — durable input, execution fences and cleanup receipts. Older writers
 ///     would discard acknowledged messages or unfinished cancellation.
-pub const SESSION_FORMAT: u32 = 9;
+pub const SESSION_FORMAT: u32 = 10;
 
 /// What a `meta.json` from before versioning is: the layout numbered 4, which
 /// is the only one that has ever been written into a workspace.
@@ -147,9 +147,27 @@ pub struct HumanContinuation {
     pub completed: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionCostSegment {
+    pub rate: serde_json::Value,
+    pub calls: u64,
+    pub milli_cny: u64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecutionActivity {
+    /// Assignment-time rate and accumulated estimate. Unknown legacy calls
+    /// remain unpriced rather than being repriced from today's preferences.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_rate: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cost_segments: Vec<ExecutionCostSegment>,
+    #[serde(default)]
+    pub estimated_milli_cny: u64,
+    #[serde(default)]
+    pub priced_llm_rounds: u64,
     pub last_at_ms: i64,
     pub llm_rounds: u64,
     pub tokens: Option<u64>,
@@ -164,6 +182,10 @@ pub struct ExecutionActivity {
 #[serde(rename_all = "camelCase")]
 pub struct SessionInbox {
     #[serde(default)]
+    pub pause_reason: Option<String>,
+    #[serde(default)]
+    pub control_revision: u64,
+    #[serde(default)]
     pub entries: Vec<InboxEntry>,
     #[serde(default)]
     pub paused: bool,
@@ -171,6 +193,23 @@ pub struct SessionInbox {
     pub has_delivered: bool,
     #[serde(default)]
     pub error: Option<String>,
+}
+
+impl SessionInbox {
+    pub fn set_pause(&mut self, reason: Option<&str>) {
+        // A late failure callback cannot weaken an explicit stop (or an old
+        // pause whose origin is unknown). Only fresh authorized input clears it.
+        if reason == Some("executionFailure") && self.paused
+            && self.pause_reason.as_deref() != Some("executionFailure") {
+            return;
+        }
+        if self.paused == reason.is_some() && self.pause_reason.as_deref() == reason {
+            return;
+        }
+        self.paused = reason.is_some();
+        self.pause_reason = reason.map(str::to_string);
+        self.control_revision = self.control_revision.saturating_add(1);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -426,6 +465,8 @@ impl SessionMeta {
                         .map(|entry| entry.message_id.clone())
                         .collect(),
                     paused: self.inbox.paused,
+                    pause_reason: self.inbox.pause_reason.clone(),
+                    control_revision: Some(self.inbox.control_revision),
                     error: self.inbox.error.clone(),
                 }
             }),
@@ -476,7 +517,7 @@ pub struct ChatLog {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "camelCase")]
 enum ChatRow {
-    Item { item: TimelineItem },
+    Item { item: Box<TimelineItem> },
     Round { round: RoundRecord },
 }
 
@@ -1328,7 +1369,9 @@ impl Store {
         let rows: Vec<ChatRow> = items
             .iter()
             .filter(|item| !is_work_item(item))
-            .map(|item| ChatRow::Item { item: item.clone() })
+            .map(|item| ChatRow::Item {
+                item: Box::new(item.clone()),
+            })
             .collect();
         self.append_chat_rows(workspace_id, session_id, &rows)
     }
@@ -1404,6 +1447,7 @@ impl Store {
             }
             match serde_json::from_str::<ChatRow>(&line) {
                 Ok(ChatRow::Item { item }) => {
+                    let item = *item;
                     // A failed append may have written complete rows before
                     // returning an error. Retrying preserves one item per id.
                     match item_positions.get(item.id()) {
@@ -1472,7 +1516,9 @@ impl Store {
             writeln!(
                 body,
                 "{}",
-                serde_json::to_string(&ChatRow::Item { item: item.clone() })?
+                serde_json::to_string(&ChatRow::Item {
+                    item: Box::new(item.clone())
+                })?
             )?;
         }
         crate::config::save_private(&path, &body)
@@ -1498,7 +1544,7 @@ impl Store {
             .lines()
             .filter(|line| !line.trim().is_empty())
             .map(|line| match serde_json::from_str::<ChatRow>(line)? {
-                ChatRow::Item { item } => Ok(item),
+                ChatRow::Item { item } => Ok(*item),
                 _ => anyhow::bail!("unexpected row in the interrupted answer"),
             })
             .collect()

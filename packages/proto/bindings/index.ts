@@ -33,6 +33,8 @@ role?: string, };
  */
 export type AgentCostLevel = "veryLow" | "low" | "medium" | "high" | "veryHigh";
 
+export type AgentCostRates = { veryHigh: number, high: number, medium: number, low: number, veryLow: number, };
+
 export type AgentInfo = { id: string, label: string, probe: ProbeState, capabilities: Capabilities, catalog: Catalog, 
 /**
  * True for the agent shipped in the installer, which is preselected on
@@ -62,7 +64,12 @@ export type AgentRuntimePreference = { effortId?: string, fast?: boolean, modeId
  * defaults. Automatic dispatch never caches its resolved route: every run
  * re-evaluates the requested tags against these current costs.
  */
-export type AgentSelectionPreferences = { runtimes: { [key in string]?: AgentRuntimePreference }, 
+export type AgentSelectionPreferences = { 
+/**
+ * Global estimated CNY per LLM call, expressed in thousandths of a yuan.
+ * Absent keeps the built-in five-tier defaults. Not provider billing.
+ */
+costRates?: AgentCostRates, runtimes: { [key in string]?: AgentRuntimePreference }, 
 /**
  * Exact models enabled on this machine. New configurations start with the
  * first three non-auto catalog models for every Agent; models outside this
@@ -279,7 +286,7 @@ id: string, bytes: number,
  */
 at: string, };
 
-export type BootstrapApprovalChallenge = { challengeId: string, title: string, detail: string, expiresAtMs: number, };
+export type BootstrapApprovalChallenge = { challengeId: string, title: string, detail: string, };
 
 /**
  * What an agent can do, declared up front.
@@ -778,7 +785,7 @@ export type ManagedSessionInfo = { parentSessionId: string, workflowRunId: strin
  * Project-defined label such as `worker`, `reviewer` or a domain role.
  * The kernel never derives behavior from this value.
  */
-role: string, userInteraction: SessionUserInteraction, evidenceScope?: SessionEvidenceScope, };
+role: string, userInteraction: SessionUserInteraction, };
 
 export type ModeInfo = { id: string, label: string, description?: string, };
 
@@ -939,7 +946,7 @@ export type Reply = { "type": "client.debug", "data": ClientDebugResponse } | { 
  * True when the requested `sinceSeq` fell outside the retained window
  * and the snapshot is a full reset rather than a continuation.
  */
-reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "speechCapabilities", "data": SpeechCapabilities } | { "type": "speechRuntimeStatus", "data": SpeechRuntimeStatus } | { "type": "speechContext", "data": SpeechContextPack } | { "type": "speechFeedbackReceipt", "data": SpeechFeedbackReceipt } | { "type": "log", "data": LogTail } | { "type": "diagnostics", "data": SupportDiagnostics } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "forkTransfer", "data": ForkTransfer } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionDrafts", "data": Array<SessionDraft> } | { "type": "sessionComponents", "data": Array<ComponentInstanceInfo> } | { "type": "sessionFlow", "data": ExecutorFlowStatus } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "sessionInspection", "data": SessionInspection } | { "type": "sessionNarrative", "data": SessionNarrativePage } | { "type": "sessionRounds", "data": SessionRoundPage } | { "type": "sessionContext", "data": SessionContext } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "roundTrunks", "data": Array<RoundTrunk> } | { "type": "blob", "data": BlobPayload } | { "type": "blobs", "data": Array<BlobPayload> } | { "type": "sessionArtifactUpload", "data": SessionArtifactUpload } | { "type": "sessionArtifact", "data": SessionArtifactBundle } | { "type": "workflowProject", "data": WorkflowProjectStatus } | { "type": "workflowPackages", "data": WorkflowPackageList } | { "type": "workflowBuild", "data": WorkflowBuildReport } | { "type": "workflowRun", "data": WorkflowRunStatus } | { "type": "workflowJournal", "data": Array<JsonValue> } | { "type": "workflowCheck", "data": WorkflowCheckReport } | { "type": "workflowRuns", "data": Array<WorkflowRunStatus> } | { "type": "agentSpaceBuilder", "data": AgentSpaceBuilderReport } | { "type": "agentSpaceChangePlan", "data": AgentSpaceChangePlan } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "processes", "data": Array<BackgroundProcess> } | { "type": "ack" };
+reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "speechCapabilities", "data": SpeechCapabilities } | { "type": "speechRuntimeStatus", "data": SpeechRuntimeStatus } | { "type": "speechContext", "data": SpeechContextPack } | { "type": "speechFeedbackReceipt", "data": SpeechFeedbackReceipt } | { "type": "log", "data": LogTail } | { "type": "diagnostics", "data": SupportDiagnostics } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "forkTransfer", "data": ForkTransfer } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionDrafts", "data": Array<SessionDraft> } | { "type": "sessionComponents", "data": Array<ComponentInstanceInfo> } | { "type": "sessionFlow", "data": ExecutorFlowStatus } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "sessionInspection", "data": SessionInspection } | { "type": "sessionNarrative", "data": SessionNarrativePage } | { "type": "sessionRounds", "data": SessionRoundPage } | { "type": "sessionContext", "data": SessionContext } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "roundTrunks", "data": Array<RoundTrunk> } | { "type": "blob", "data": BlobPayload } | { "type": "blobs", "data": Array<BlobPayload> } | { "type": "sessionArtifactUpload", "data": SessionArtifactUpload } | { "type": "sessionArtifact", "data": SessionArtifactBundle } | { "type": "workflowProject", "data": WorkflowProjectStatus } | { "type": "workflowPackages", "data": WorkflowPackageList } | { "type": "workflowBuild", "data": WorkflowBuildReport } | { "type": "workflowRun", "data": WorkflowRunStatus } | { "type": "workflowJournal", "data": Array<JsonValue> } | { "type": "workflowProfile", "data": JsonValue } | { "type": "workflowView", "data": JsonValue } | { "type": "workflowCheck", "data": WorkflowCheckReport } | { "type": "workflowRuns", "data": Array<WorkflowRunStatus> } | { "type": "agentSpaceBuilder", "data": AgentSpaceBuilderReport } | { "type": "agentSpaceChangePlan", "data": AgentSpaceChangePlan } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "processes", "data": Array<BackgroundProcess> } | { "type": "ack" };
 
 export type Request = { "type": "client.debug", "payload": ClientDebugRequest } | { "type": "connection.identity" } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, 
 /**
@@ -979,7 +986,11 @@ expectedRevision: number | null, } } | { "type": "workflow.activate", "payload":
 /**
  * Required once a project holds more than one package.
  */
-packageId?: string, candidateDigest: string | null, expectedRevision: number, } } | { "type": "workflow.dispatch", "payload": { retryOf?: string, resumeCancelled?: boolean, candidateDigest?: string, workspaceId: string, 
+packageId?: string, candidateDigest: string | null, expectedRevision: number, } } | { "type": "workflow.dispatch", "payload": { 
+/**
+ * Explicit caller constraint; retained across request retries/recovery.
+ */
+agentTarget?: WorkflowAgentTarget, retryOf?: string, resumeCancelled?: boolean, candidateDigest?: string, workspaceId: string, 
 /**
  * Required once a project holds more than one package.
  */
@@ -1001,7 +1012,11 @@ packageId?: string,
 /**
  * Validate current source without creating a Candidate, Run or Worker.
  */
-draft?: boolean, } } | { "type": "workflow.get", "payload": { workspaceId: string, runId: string, } } | { "type": "workflow.journal", "payload": { workspaceId: string, runId: string, since: bigint, limit: number, } } | { "type": "workflow.history", "payload": { workspaceId: string, limit: number | null, } } | { "type": "workflow.complete", "payload": { workspaceId: string, runId: string, nodeId: string, expectedRevision: number, evidence: { [key in string]?: string }, 
+draft?: boolean, } } | { "type": "workflow.get", "payload": { workspaceId: string, runId: string, } } | { "type": "workflow.journal", "payload": { workspaceId: string, runId: string, since: bigint, limit: number, } } | { "type": "workflow.profile", "payload": { workspaceId: string, runId: string, offset?: number, limit?: number, } } | { "type": "workflow.view", "payload": { workspaceId: string, runId: string, path: string | null, } } | { "type": "workflow.history", "payload": { workspaceId: string, limit: number | null, } } | { "type": "workflow.consult", "payload": { workspaceId: string, runId: string, nodeId: string, expectedRevision: number, report: string, } } | { "type": "workflow.complete", "payload": { workspaceId: string, runId: string, nodeId: string, expectedRevision: number, 
+/**
+ * Node-bound submission; unrelated sibling revisions do not invalidate it.
+ */
+expectedAttempt?: number, submissionId?: string, evidence: { [key in string]?: string }, 
 /**
  * Bounded business data, checked against the node's declared output shape.
  */
@@ -1009,7 +1024,7 @@ output?: unknown,
 /**
  * Absent retains the existing successful-completion contract.
  */
-outcome?: WorkflowNodeOutcome, reason?: string, } } | { "type": "workflow.cancel", "payload": { workspaceId: string, runId: string, expectedRevision: number, } } | { "type": "workflow.recover", "payload": { workspaceId: string, runId: string, expectedRevision: number, } } | { "type": "workflow.recovery.start", "payload": { workspaceId: string, runId: string, reason: string, } } | { "type": "workflow.human", "payload": { workspaceId: string, runId: string, expectedRevision: number, kind: string, reason: string, } } | { "type": "workflow.recovery.reset", "payload": { workspaceId: string, packageId?: string, expectedRevision: number, } } | { "type": "workflow.budget", "payload": { workspaceId: string, runId: string, expectedRevision: number, maxRuns?: number, deadlineSeconds?: number, maxLlmRounds?: number, } } | { "type": "agentSpace.configure", "payload": { workspaceId: string, expectedRevision: number, operation: AgentSpaceOperation, 
+outcome?: WorkflowNodeOutcome, reason?: string, } } | { "type": "workflow.cancel", "payload": { workspaceId: string, runId: string, expectedRevision: number, } } | { "type": "workflow.recover", "payload": { workspaceId: string, runId: string, expectedRevision: number, } } | { "type": "workflow.recovery.start", "payload": { workspaceId: string, runId: string, reason: string, } } | { "type": "workflow.human", "payload": { workspaceId: string, runId: string, expectedRevision: number, kind: string, reason: string, requestId?: string, budget?: WorkflowBudgetProposal, scope?: WorkflowScopeProposal, } } | { "type": "workflow.recovery.reset", "payload": { workspaceId: string, packageId?: string, expectedRevision: number, } } | { "type": "workflow.budget", "payload": { workspaceId: string, runId: string, expectedRevision: number, deadlineSeconds?: number, maxLlmRounds?: number, } } | { "type": "workflow.requirement.complete", "payload": { workspaceId: string, runId: string, expectedRevision: number, conclusion: string, deliveryReferences: Array<string>, } } | { "type": "agentSpace.configure", "payload": { workspaceId: string, expectedRevision: number, operation: AgentSpaceOperation, 
 /**
  * Required when the caller is a SessionController; omitted for a
  * direct authenticated Human UI action.
@@ -1276,11 +1291,6 @@ export type SessionEvent = { "type": "turnStarted", turnId: string,
 startedAtMs: number, } | { "type": "item", turnId: string, item: TimelineItem, } | { "type": "itemDelta", turnId: string, itemId: string, delta: ItemDelta, } | { "type": "turnProgress", turnId: string, usage: Usage, } | { "type": "turnCompleted", turnId: string, usage: Usage, forkCheckpoint?: string, } | { "type": "turnFailed", turnId: string, error: TurnError, } | { "type": "turnCanceled", turnId: string, } | { "type": "permissionRequested", request: PermissionRequest, } | { "type": "permissionResolved", requestId: string, outcome: PermissionOutcome, } | { "type": "modelChanged", modelId: string, } | { "type": "agentChanged", agentId: string, modelId?: string, modeId?: string, effortId?: string, fast?: boolean, runtimeValues: { [key in string]?: string }, routingTags?: Array<string>, mediaTags?: Array<string>, } | { "type": "modeChanged", modeId: string, } | { "type": "effortChanged", effortId: string, } | { "type": "fastChanged", fast: boolean, } | { "type": "runtimeAxisChanged", axisId: string, valueId: string, } | { "type": "draftsChanged", count: number, } | { "type": "titleChanged", title: string, } | { "type": "sessionStatusChanged", status: SessionStatus, };
 
 /**
- * Immutable evidence access granted to a managed analysis session.
- */
-export type SessionEvidenceScope = { root: string, sessions: { [key in string]?: string | null }, };
-
-/**
  * One lightweight external conversation returned by the discovery pass.
  *
  * `candidate_id` is an expiring daemon-owned token. Provider handles, source
@@ -1313,7 +1323,7 @@ coverage?: HistoryCoverage, };
  */
 export type SessionImportSource = { agentId: string, label: string, supported: boolean, candidates: Array<SessionImportCandidate>, error?: string, };
 
-export type SessionInputSummary = { pendingMessageIds: Array<string>, paused: boolean, error?: string, };
+export type SessionInputSummary = { pauseReason?: string, controlRevision?: number, pendingMessageIds: Array<string>, paused: boolean, error?: string, };
 
 /**
  * A small structural entry point. It deliberately contains no free-form
@@ -1971,6 +1981,18 @@ outputRateEstimated: boolean, costUsd?: number, };
 export type WorkflowActivationStatus = { revision: number, digest: string, previousDigest?: string, activatedAtMs: number, };
 
 /**
+ * Optional Human-selected exact destination for all Workers of one request.
+ * Package role tags remain defaults when no destination is supplied.
+ */
+export type WorkflowAgentTarget = { agentId: string, modelId: string, };
+
+/**
+ * Exact total limits offered for one Human approval. The budget revision
+ * fences later changes; prose cannot authorize additional usage.
+ */
+export type WorkflowBudgetProposal = { expectedRevision: number, maxLlmRounds: number, deadlineSeconds: number, };
+
+/**
  * Plan or result of `workflow build`.
  */
 export type WorkflowBuildReport = { schema: string, 
@@ -2003,6 +2025,8 @@ export type WorkflowCatalogEntryStatus = { id: string, path: string, digest: str
 
 export type WorkflowCheckReport = { checkedAtMs: number, findings: Array<WorkflowFinding>, runs: Array<WorkflowRunStatus>, draft?: WorkflowDraftReport, };
 
+export type WorkflowCondition = { code: string, nodeId: string | null, occurrence: number, sinceMs: number, reason: string, };
+
 export type WorkflowDiagnostic = { phase: string, code: string, severity: string, 
 /**
  * Relative to Workflow source root; path is an RFC 6901 pointer in this file.
@@ -2030,7 +2054,7 @@ executorPath?: string, workflows: Array<WorkflowDraftEntry>, };
 
 export type WorkflowFinding = { runId: string, nodeId: string | null, code: string, severity: string, detail: string, };
 
-export type WorkflowHumanExitStatus = { kind: string, requestId: string, pmSessionId: string, reason: string, createdAtMs: number, answer?: string, };
+export type WorkflowHumanExitStatus = { effectError?: string, budget?: WorkflowBudgetProposal, scope?: WorkflowScopeProposal, kind: string, requestId: string, pmSessionId: string, reason: string, createdAtMs: number, answer?: string, };
 
 export type WorkflowHumanWait = { nodeId: string, sessionId: string, requestId: string, title: string, };
 
@@ -2044,7 +2068,7 @@ export type WorkflowHumanWait = { nodeId: string, sessionId: string, requestId: 
  */
 export type WorkflowNodeOutcome = string;
 
-export type WorkflowNodeRunStatus = { output?: unknown, 
+export type WorkflowNodeRunStatus = { phase?: string, resultAcceptedAtMs?: number, output?: unknown, 
 /**
  * First time this node instance existed, retained across attempts. The
  * daemon records transition times only; every rate, ranking and critical
@@ -2209,21 +2233,40 @@ export type WorkflowRecoveryHandleStatus = { runId: string, triggerSeq: number, 
  * Remaining calls are based on observed usage, not reservations or a promise
  * that concurrent activities will fit. A completed query never changes.
  */
-export type WorkflowRequestBudgetSnapshot = { requestRunId: string, observedAtMs: number, budget: WorkflowRequestBudgetStatus, usedRuns: number, observedLlmRounds: number, executionMs: number, remainingRuns: number, remainingLlmRounds: number, remainingExecutionMs: number, };
+export type WorkflowRequestBudgetSnapshot = { 
+/**
+ * This execution has been admitted; remaining shared calls/time still apply.
+ */
+currentRunAdmitted: boolean, currentRunCanExecute: boolean, requestRunId: string, observedAtMs: number, budget: WorkflowRequestBudgetStatus, observedLlmRounds: number, executionMs: number, remainingLlmRounds: number, remainingExecutionMs: number, };
 
 /**
  * Mutable limits shared by one Human request and all Workflow retry Runs.
  * Its revision is separate from the graph revision so a PM can adjust a
  * running request without racing a Worker node completion.
  */
-export type WorkflowRequestBudgetStatus = { revision: number, maxRuns: number, deadlineMs: number, maxLlmRounds: number, };
+export type WorkflowRequestBudgetStatus = { revision: number, deadlineMs: number, maxLlmRounds: number, };
+
+/**
+ * PM-owned goal state, independent of Workflow execution and inbox receipts.
+ */
+export type WorkflowRequirementState = "in_progress" | "completing" | "completed" | "cancelled";
+
+export type WorkflowRequirementStatus = { 
+/**
+ * Human-approved replacement goal; original request history stays intact.
+ */
+scope?: WorkflowScopeProposal, state: WorkflowRequirementState, revision: number, pendingSinceMs: number, pmSessionId: string | null, completedAtMs: number | null, conclusion: string | null, deliveryReferences: Array<string>, patrolError: string | null, };
 
 /**
  * Durable status of one project Workflow run. Node meaning comes entirely
  * from the pinned project definition; the daemon reports only generic graph
  * and evidence facts here.
  */
-export type WorkflowRunStatus = { humanExit?: WorkflowHumanExitStatus, 
+export type WorkflowRunStatus = { agentTarget?: WorkflowAgentTarget, 
+/**
+ * Derived from program and confirmed resource retirement.
+ */
+phase?: string, programResult?: string, conditions: Array<WorkflowCondition>, requirement?: WorkflowRequirementStatus, humanExit?: WorkflowHumanExitStatus, 
 /**
  * Immutable business Run references owned by a recovery Run.
  */
@@ -2265,6 +2308,8 @@ activationRevision?: number, bundleDigest: string, taskId: string, status: strin
  */
 executorTurns: number, activeNodes: Array<string>, nodes: Array<WorkflowNodeRunStatus>, createdAtMs: number, updatedAtMs: number, };
 
+export type WorkflowScopeProposal = { goal: string, changes: string, };
+
 /**
  * Raw non-LLM observation facts for one Run. Health is a reader's judgment:
  * the daemon publishes the clock it already keeps and its fixed silence
@@ -2272,16 +2317,20 @@ executorTurns: number, activeNodes: Array<string>, nodes: Array<WorkflowNodeRunS
  */
 export type WorkflowSupervisionStatus = { lastCheckedAtMs: number, 
 /**
- * Elapsed time excluded from execution charging because the whole Run was
- * waiting for a Human.
+ * Effective processing time of this Run: the union of its execution
+ * intervals, excluding stopped, recoverable and whole-Run Human waits.
  */
-humanWaitMs: number, 
-/**
- * Elapsed time the Run spent recoverable, awaiting a PM continue decision.
- */
-recoveryWaitMs: number, waiting: boolean, nodeWallMs: number, };
+executionMs: number, waiting: boolean, nodeWallMs: number, };
 
-export type WorkflowTaskSummary = { humanExit?: WorkflowHumanExitStatus, executing?: boolean, waiting?: Array<WorkflowHumanWait>, requestRunId?: string, reportPending?: boolean, runId: string, taskId: string, workflowId: string, status: string, revision: number, activeNodes: Array<string>, executorSessionId?: string, reason?: string, cleanupError?: string, updatedAtMs: number, };
+export type WorkflowTaskSummary = { 
+/**
+ * Request-wide derived counters; no package quality semantics.
+ */
+observation?: JsonValue, phase?: string, conditions: Array<WorkflowCondition>, 
+/**
+ * Execution is independent from the user requirement's delivery state.
+ */
+runStatus?: string, recovery?: boolean, requirement?: WorkflowRequirementStatus, humanExit?: WorkflowHumanExitStatus, executing?: boolean, waiting?: Array<WorkflowHumanWait>, requestRunId?: string, reportPending?: boolean, runId: string, taskId: string, workflowId: string, status: string, revision: number, activeNodes: Array<string>, executorSessionId?: string, reason?: string, cleanupError?: string, updatedAtMs: number, };
 
 export type WorkspaceFileSource = { kind: WorkspaceFileSourceKind, workspaceHandle: string, path: string, };
 

@@ -1,0 +1,149 @@
+# 运行控制与恢复
+
+[文档入口](README.md) · [角色模型](model.md) · [包与候选](packages.md)
+
+本文描述 daemon 的机械契约。PM 的业务判断、WM 的修改方法、WR 的报告要求由对应 Skill 指导；包中的流程定义业务阶段与验收。
+
+## 输入、回执与控制
+
+支持 `session.input.v1` 的客户端通过 `session.send` 提交稳定 `messageId`。daemon 在 ACK 前持久化正文、附件与接收事实。同一 Session 的相同 ID 不能换正文、来源或任务引用；`taskRunId` 需要与 PM 的任务归属匹配。CLI 的接收回执不表示 Agent 已开始或已完成工作。
+
+输入队列区分接收、排队、可能已发送与已处理。断线或执行中断后，先核对原始消息、native 上下文及 Run/action 回执，再决定后续动作。平台不保证第三方外部副作用恰好一次。
+
+会话投递器在启动时恢复已接受输入，并独立调度各 Session。能够中断并原生续接的 adapter 可接续忙碌会话；其他 adapter 等待执行边界。缺少必要的续接句柄会保留可见失败，不以新会话冒充旧执行。
+
+Human 请求保持自己的 ID、问题和明确答复，不设默认答复期限。人可以关闭浏览器，晚些回来在同一待办上答复；
+等待时长不能作废决定、判定恢复失败或把预算审批转换为反馈。答复和执行核对当前事实，事实变化才重新确认。PM 对问题的咨询不能替代正式答复，也不能借项目管理权绕过授权。Workflow 通知经同一持久队列送回 PM，处理通知前仍需先核对新的用户要求。
+
+停止 PM 当前回合会暂停其自动续接，已有小队继续执行；取消任务使用独立的 Workflow 控制入口。普通 Workflow 通知不会解除暂停。新的用户输入，或对仍待处理问题的明确答复，会恢复继续处理；重放同一答复不会覆盖后来发生的停止。前端 `workSummary` 汇总需求及 Run，PM 空闲但 Worker 仍在工作时，任务仍可显示执行中。
+
+## 派发、节点与结果
+
+普通派发由项目根普通会话调用 `workflow dispatch`。项目已有接管授权时，同项目其他普通 PM 会话也可委托；受管子会话和跨项目调用会被拒绝。正常派发以 PM Session 与 `taskId` 绑定幂等身份，相同委托返回原 Run，不同内容复用同键报冲突。
+
+Run 固定候选、定义、输入和执行目录。`agent.session` 节点在实际派发时按角色标签选择可用 Agent/model，并创建绑定 Run、节点和尝试身份的 Worker。流程内条件、并行、循环及修复由声明控制，不需要 PM 充当第二个节点调度器。
+
+`workflow complete` 只接受当前节点所属 Worker Session 提交，并校验当前 Session/attempt、取消屏障、声明的 outcome、结果形状及所需证据。新 CLI 绑定 expectedAttempt，兄弟节点的 Run revision 改变不造成无关冲突；旧客户端仍使用 Run revision。相同节点/attempt 的相同提交返回已保存结果，不同内容不能覆盖已接收结果。PM、WR 或另一个 Worker 不能代交他人的节点。结果先进入 `finishing`，宿主确认进程与资源收尾后才推进后继，取消优先于后继启动。
+
+新 Run 只接受 v2，由结构化内核决定控制流。在途 v1 保持原 `on` 图，仅用于升级期间收束或受控取消，不热转换程序。未处理的失败依相应定义与执行路径退出；宿主不通过业务节点名称猜测返工流程。结构正确、证据非空或脚本返回成功，都不自动证明业务检查真实充分。
+
+Run 快照是节点和 FlowMessages 的权威记录；`session.flow`、`workflow get` 读取同一事实。旧组件局部 manifest/inbox/outbox 文件不是恢复输入。CLI 等待 Run 的状态与收尾，不以一个 Worker 回合结束推断流程完成。
+
+## 巡查与状态补偿
+
+daemon 每五秒触发 `control::maintain`。它枚举已登记项目的未结束需求，利用有效 `settled` 标记跳过已收敛历史的 Run 快照。巡查本身不逐会话调用模型。
+
+同一维护循环承担：
+
+1. 核对需求写入所有权，接管时隔离旧执行。
+2. 完成节点收尾，驱动 v2 结构化流程并核对运行状态。
+3. 路由恢复后续派未启动节点，保留已经提交的节点结果。
+4. 核对预算、人工等待、取消和清理。
+5. 按条件启动恢复流程、交付 Human 卡或补送 PM 通知。
+6. 检查 PM 对原需求的交付决定，满足条件后标记收敛并释放写入者。
+
+运行中的节点会记录 Session 状态、实际工具/模型活动和时间。没有 Session 的待派发节点，或无人接棒且未收敛的 Run，可以触发 180 秒进度期限。活跃工具数分钟没有新输出不自动等于故障；预算和节点声明的限制仍独立生效。
+
+业务执行结束但需求未交付时，空闲或未接手 PM 有 180 秒处理窗口；实际处理该需求的 PM 有 30 分钟决定窗口。窗口属于需求，不能通过无关聊天、心跳或其他任务重置。这些窗口约束自动 PM 的接棒与处理，不约束人的答复。有效未答 Human 卡和恢复节点待答问题持续保留；
+纯等待不计执行时间，也不因默认 30 分钟等待触发节点失败，答复后继续处理。
+
+巡查错误写入需求投影；反复失败会降低重试频率。超过单次巡查看门狗期限只记录故障，不能丢弃可能已经产生外部副作用但尚未提交的执行结果并盲目重放。
+
+## 三种不同的恢复动作
+
+| 动作 | 作用 | 保留什么 |
+| --- | --- | --- |
+| `workflow recover` | 核验并续接存在中断事实的节点 | 同一 Run、已完成节点；可续接时保持原 Session 与写租约 |
+| 恢复 Workflow | 按声明产出诊断报告或已授权的修复结果 | 独立恢复 Run，通过 `handles` 引用业务 Run，归属同一需求 |
+| `workflow dispatch --retry-of` | 为同一目标建立后继执行 | 需求归属与共享预算；新 Run 从所选流程入口开始，可能重做前面的工作 |
+
+同 Run 续接读取节点 `interruption` 绑定，并实时检查预算、取消、Session 与原进程；旧进程仍在运行或缺少必要 native 续接句柄时不能强行继续。无写租约的重路由尝试也可能有外部副作用，必须检查已有回执。恢复不重建项目文件，也不保证任意并行丢失都可自动续跑。
+
+### 恢复 Workflow
+
+包的 `workflow.md` 可选择恢复流程，默认 `builtin`；新恢复流程使用普通 v2 定义。巡查或 PM 的 `workflow recovery start` 进入同一路径。进入恢复前核对共享预算与包并发名额，关闭旧图并确认清理后才能启动。每个包同时只允许一个未收妥的恢复 Run。
+
+内置 [builtin-recovery.yaml](../../apps/daemon/src/workflow/builtin-recovery.yaml) 为 `recovery-reviewer` 诊断 → 发布报告。Worker 用普通 `workflow complete --evidence report=...` 交卷；报告及资源退休完成后，本次程序 completed。`workflow consult` 固定五选项合同已退役，不再用 PM 作答作为报告交卷条件。
+
+报告中的修复、续接、后继或人工待办只是建议。PM 通过原有受控接口执行；WR 不因此获得取消、交付、预算或配置权限。自定义流程仍受原有角色权限和恢复策略授权约束。候选不可用时可以进入内置兜底，记录降级原因。
+
+PM 的目标责任记录在需求四态中，恢复报告 completed 不等于需求 completed。后继成功、Human 验收和 PM 交付都不改写历史 Run 的程序结果。
+
+## 预算与人工出口
+
+原需求默认共享 7200 秒有效处理时间和 256 次已观察 LLM 请求，业务、验收和恢复均计入；后继不能用新任务键重置预算。并行执行区间取并集，停止后的等待、Human/PM 等待不计时。Run 次数不再是预算维度。`currentRunCanExecute` 与剩余时间/请求次数表达当前准入事实。
+
+预算修订由 PM 根据用户已有授权执行。用户未为该需求指定上限时，常设授权为总计 384 次 LLM 请求、10800 秒有效处理时间，PM 可自行提高到该总量而不询问用户；用户指定过上限时以其为准，不另加常设额度；获批卡片的总上限成为新的授权上限。超出授权上限时提交一份明确的请求次数和时间方案。常设授权是 PM Skill 策略，内核只检查 revision 与平台上限。恢复不再有独立额度。预算耗尽保留原目标，由 PM 提出具体预算方案；等待满 30 分钟不再自动生成平台反馈卡。
+
+`request.budget` 是图内只读宿主能力，输出固定时点的预算事实，不预留未来额度、不授权扩容，也不把实时系统变量引入纯内核。
+
+持久人工出口由 `workflow human` 等现有入口产生：a 请求统一预算、b 目标范围、d 平台反馈、e 安装/登录依赖、f 真人验收。应先读已有卡和答案；反馈答完不代表批准预算，也不代表原目标已经交付。
+
+## 取消与需求交付
+
+取消先保存取消事实，后停止相关执行、隔离会话并确认已知子进程及租约清理。清理未确认时保持 `cancelling` 并显示原因，不能提前宣称取消完成。产物和历史保留。
+
+Agent 取消执行仍把原目标留给 PM 处置；直接 Human 取消或明确撤销选择才能取消目标。已取消需求只能由取消之后的新用户输入配合 `--resume-cancelled` 重开，旧问题的迟到答复不能重开。
+
+需求状态为 `in_progress`、`completing`、`completed`、`cancelled`。PM 对照原目标和后续要求，读取业务 Reviewer 证据后，用 `workflow deliver --run <business-run> --revision <requirement.revision> --reason <conclusion> --evidence delivery=<reference>` 记录交付。平台检查归属、版本、活跃执行、清理和未答决定，业务验收质量由 PM/Reviewer 判断。
+
+只有需求结束、执行收敛、通知处理完毕，才满足 settled 与写入者释放条件。`accepted`、`handled`、报告非空或恢复完成均不能替代这些事实。
+
+## 权限与持久化边界
+
+项目普通 PM 在已接管项目内具有常规管理能力；具体 Builder/组件操作仍校验计划、当前 revision、稳定 action ID 和目标范围。发生未结束故障时，`exception_authority` 从 Run 事实派生额外处置能力，允许项目 PM 接管相关会话；真实 Human 决定不因异常权限被代答。
+
+维护角色可通过已有 Workflow 生命周期入口操作本项目，具体范围见[角色模型](model.md)。节点交卷、需求交付、受管会话控制及 Builder 各自还有进一步检查，不能将某一层通过当成全部授权。
+
+会话、需求、Run 的格式版本及迁移接受范围以源码反序列化检查为准。不得手改私有记录，或把旧 daemon 能忽略未知字段当成迁移保证。目录与旧数据兼容范围见[存储规范](../storage-layout.md)。
+
+实现：[输入调度](../../apps/daemon/src/session/manager.rs)、[控制循环](../../apps/daemon/src/workflow/control.rs)、[监督](../../apps/daemon/src/workflow/supervision.rs)、[恢复](../../apps/daemon/src/workflow/recovery.rs)、[需求](../../apps/daemon/src/workflow/requirement.rs)。
+
+### 恢复审查后的责任交接
+
+恢复程序按普通执行完成；目标进入或保持 `completing`，由 PM 核对报告、预算与候选，建立同目标后继、确认交付或提出真实人工待办。历史 Run 不因 PM 落实而改变结果。同一异常已复查后不重复自动派发；报告长期未落实时可以提出平台反馈人工出口。
+
+人工预算审批统一使用 a，绑定预算 revision 与 LLM 请求次数、有效处理时间的明确总上限。
+申请原因说明剩余工作及调整方案；原因中的数字不代替结构化总上限。批准只应用一次，预算版本或使用事实改变导致失效的方案不覆盖新预算；等待时间本身不使方案失效。
+
+新流程不接受已退役的 `budget` 恢复额度字段；旧自定义恢复源应删除该字段，并按下述步骤重建候选。开发期 Candidate 使用当前格式。旧格式无法通过摘要校验时，先 `workflow check --draft` 核对项目源，
+再以当前激活 revision 执行 `workflow activate` 重建候选。原候选不可读时，平台无法比较恢复策略，必须由 Human 确认新候选后才能激活；不迁移旧格式。不要手工修补快照摘要；已存在 Run 的固定定义不随激活改变。
+
+### 恢复与人工决定的收束
+
+执行段结束的状态事件提交时，其日志序号写入 Run 执行时钟的 `stopSeq`；Handle.trigger_seq 引用这个边界，同一边界只允许一次自动恢复复查。准入不扫描日志，日志裁剪不影响判断；日志尾部的预算、反馈和回答不构成新故障。升级前已停止、没有边界记录的 Run 最多自动复查一次。PM 显式 recovery start 可说明新依据后复查；普通续办仍使用现有 recover/dispatch。恢复建议交回需求责任层，由 PM 落实决定，不自动生成范围卡。
+
+每条原需求只保留一个待答人工决定。a 必须包含 budget.expectedRevision、maxLlmRounds 和 deadlineSeconds 两项总上限；创建与答复时核对版本和剩余额度。批准重复送达只应用一次；因预算版本或使用事实变化而失效的方案保存回答及 effectError，不覆盖新预算。b 必须包含 scope.goal 和 scope.changes，接受后写入 requirement.scope，并不代表已交付。历史 c 及无具体方案的 a/b 卡只保留审计和关闭能力，不再扩容或缩减目标。历史 Run 内的 recovery budget 在读取时移除，新流程定义拒绝该字段。
+
+## 执行事实与格式
+
+新 Run v6 不保存独立 `status`：程序快照是控制流权威，`phase` 为只读投影：`open`（未结束）、`closing`（正在退休或清理未确认）、`closed`（程序和资源均已收妥）。先判断 closed，已完成停止意图不会把阶段卡在 closing。`programResult` 独立保留 completed/failed/cancelled；兼容 RPC 的 status 由同一事实产生。
+
+节点持久化五个技术阶段 pending/active/finishing/settled/unreached。业务 outcome 独立；`resultAcceptedAtMs` 表示结果接收时间，旧 `settledAtMs` 仅为兼容投影。节点中断和路由等待分别保存 occurrence、绑定、观察时间及原因，不成为整 Run 生命周期。一个中断节点不阻止兄弟交卷、清理或计费。
+
+异常 occurrence 使用本次已追加、随 Run 快照提交的 journal 序号；通知按 Run、异常和种类去重。保存失败不投递未提交异常；重复巡查、预算或反馈不产生新边界。原 Session 续接后的再次真实中断产生新边界。节点异常立即形成 PM 待办，沿用未接手 180 秒、正在处理本需求 30 分钟窗口；自动复查先验预算和名额，不能在准入失败时提前关闭可续接图。
+
+Session format 10 保存暂停原因与控制版本：明确 userStop 和旧未知暂停禁止自动恢复，executionFailure 可以进入故障处置。正常新输入/正式答复仍走原有版本与回执合同。接收、发送、处理和业务完成是不同事实。
+
+v5 Run 显式转读既有节点、路由与停止事实；未知绑定拒绝迁移。写入 v6 / Session 10 后旧 writer 不可继续写入。部署前盘点在途 v1 与定制恢复源；新派发拒绝 v1，需按原业务边逐条改为 v2 并 check/build/activate。历史已结束记录不为展示整齐改写成功结果。
+
+脚本先保存启动意图，再执行。已保存结果统一提交给内核；崩溃后有启动而无结果时保留不确定与清理义务，不能重新执行或凭空声明进程已退休。
+
+### 巡查诊断与能力执行边界
+
+`workflow check` 与巡查共用恢复准入判定。`recoverySuppressed` 给出具体条件：`pmWindow`（含剩余时间）、`pmPaused`、`requestBudget`、`recoveryBusy`、`cleanupPending`、`humanWait`、`executionPending` 或 `alreadyReviewed`。条件是实时投影，不另存一份状态。`executionFailure` 不能覆盖已有 `userStop` 或来源未知的暂停；新用户输入或正式答复才解除暂停。
+
+脚本调用前保存活动意图。已确认未启动或已退出的脚本错误保存为失败结果；崩溃后只剩意图、无法确认结果或退休的活动保持待核对，不能自动重跑外部副作用。纯程序快照损坏时保留原快照；宿主只有在停止意图和资源退休均已确认时才能关闭执行，不伪造程序成功。
+
+### 人工等待规则修订（2026-09-28）
+
+旧实现把项目计划审批设为十分钟有效，并把恢复节点的 Waiting 统一按三十分钟判为 PM 超时，
+还会把预算耗尽后的三十分钟等待转为反馈卡。这些计时预设人会及时在线，已撤销。
+删除 `BootstrapApprovalChallenge.expiresAtMs` 与审批过期后重建计划的续跑分支，不为旧行为建立兼容路径。
+真实取消、方案替换和项目事实变化仍使原批准不可用；重复回答与执行不能重放副作用。
+
+## Revising unanswered Human proposals
+
+`workflow human --kind withdraw --run <id> --revision <run.revision> --request <humanExit.requestId> --reason <explanation>` retires only the exact unanswered Workflow card. It requires ordinary PM authorization, records a durable native cancellation receipt and Workflow withdrawal history, and has no budget, scope, cancellation or acceptance effect. Use the normal `workflow human` command afterward to issue a replacement with a new request ID. Withdrawal and answering are serialized by the native interaction lock; an already accepted answer cannot be withdrawn. A stale request ID cannot withdraw the replacement, and a late answer to a retired card cannot grant permission. Restart reconciles a native cancellation before card re-delivery. Ordinary discussion does not grant authority.
+
+The default game delivery pack checks 64 remaining requests before each implementation or repair attempt, preserving its independent 32-request acceptance minimum. These are tunable pack estimates rather than engine reservations. The requirements owner probes required verification capabilities before implementation and reports a missing capability as unavailable verification, not a business rejection.

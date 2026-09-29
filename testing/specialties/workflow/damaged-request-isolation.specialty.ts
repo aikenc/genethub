@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmdirSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, readFileSync, rmdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { WorkflowRunStatus } from "@genehub/proto";
 
@@ -18,6 +18,8 @@ defineSpecialty({
 }, async t => {
   t.data.git.init(t.env.workspace);
   const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
+  const submitted = new Set<string>();
+  let stage = "setup";
   try {
     await t.flows.main.configureMockProvider(opened.client, opened.mock);
     const source = t.flows.main.seedWorkflowPackage({ projectRoot: opened.workspaceRoot });
@@ -27,20 +29,18 @@ defineSpecialty({
       modelId: "deepseek/deepseek-v4-flash", userInteraction: "readOnly", prompt: "prompts/worker.md",
     }));
     writeFileSync(path.join(source, "flows/damage-isolation.yaml"), JSON.stringify({
-      schema: "genehub.workflow.definition.v1", id: "damage-isolation", version: 1, entry: "work",
+      schema: "genehub.workflow.definition.v2", id: "damage-isolation", version: 2,
       nodes: [
         { id: "work", uses: "agent.session", with: { role: "worker", workspace: "." },
-          completion: { all: [{ key: "result", verify: "value.nonEmpty" }] }, on: { completed: ["publish"] } },
+          completion: { all: [{ key: "result", verify: "value.nonEmpty" }] } },
         { id: "publish", uses: "result.publish" },
-      ],
-    }));
-    const submitted = new Set<string>();
+      ], structure: {"body":{"id":"sequence","type":"sequence","steps":[{"id":"step-work","type":"task","activity":"work"},{"id":"step-publish","type":"task","activity":"publish"}]}}}));
     const dispatched = new Set<string>();
     const respond = (request: unknown) => {
       const body = JSON.stringify(request);
-      if (body.includes("只读复查被处理的 Run")) return { text: "Waiting for the PM recovery decision." };
+      if (body.includes("角色标签为 `recovery-reviewer`")) return { text: "Waiting for the PM recovery decision." };
       if (body.includes("DAMAGED_REQUEST_WORKER")) {
-        const task = ["isolation-one", "isolation-two", "isolation-three", "isolation-broken"].find(id => body.includes(id));
+        const task = body.match(/任务 ID：(isolation-(?:one|two|three|broken))/)?.[1];
         if (!task || submitted.has(task)) return { text: "Result was already submitted." };
         submitted.add(task);
         const command = task === "isolation-broken"
@@ -51,9 +51,9 @@ defineSpecialty({
       for (const task of ["isolation-one", "isolation-two", "isolation-three", "isolation-broken"]) {
         if (body.includes(`START_${task}`) && !dispatched.has(task)) {
           dispatched.add(task);
-          const activate = task === "isolation-one" ? '"$GENEHUB_CLI" workflow activate --revision 0 && ' : "";
+          const activate = task === "isolation-one" ? '"$GENEHUB_CLI" workflow activate --revision 0 && ' : task === "isolation-broken" ? '"$GENEHUB_CLI" workflow activate --package isolated-recovery --revision 0 && ' : "";
           return { tool: { name: "bash", arguments: {
-            command: `${activate}"$GENEHUB_CLI" workflow dispatch --workflow damage-isolation --task ${task} --message "${task}" --no-wait`,
+            command: `${activate}"$GENEHUB_CLI" workflow dispatch ${task === "isolation-broken" ? "--package isolated-recovery " : ""}--workflow damage-isolation --task ${task} --message "${task}" --no-wait`,
           } } };
         }
       }
@@ -92,21 +92,27 @@ defineSpecialty({
     const snapshot = path.join(requests, first!.id, "runs", first!.id, "run.json");
     writeFileSync(snapshot, "damaged snapshot\n");
     t.assertions.assert(!(await history()).some(run => run.id === first!.id), "corrupt Run was reported as healthy");
-    const report = await opened.client.call({ type: "workflow.check", payload: { workspaceId: opened.workspaceId } });
+    const report = await opened.client.call({ type: "workflow.check", payload: { workspaceId: opened.workspaceId, runId: null } });
     t.assertions.assert(report?.type === "workflowCheck"
       && report.data.findings.some(f => f.runId === first!.id && f.code === "runUnreadable")
       && report.data.runs.some(run => run.taskId === "isolation-two"),
     "project check did not isolate and identify the damaged Run");
 
+    cpSync(source, path.join(opened.workspaceRoot, ".genethub/workflows/isolated-recovery"), { recursive: true });
     await dispatch("isolation-broken");
+    stage = "observe unrelated failed business";
     let blocked: WorkflowRunStatus | undefined;
     await t.tools.waitUntil(async () => {
       blocked = (await history()).find(run => run.taskId === "isolation-broken");
       return blocked?.status === "blocked";
     }, 45_000);
+    stage = "observe isolated recovery";
     await t.tools.waitUntil(async () => (await history()).some(run => run.handles.some(handle => handle.runId === blocked!.id)), 45_000);
     t.assertions.assert((await history()).filter(run => run.handles.some(handle => handle.runId === blocked!.id)).length === 1,
       "damaged terminal history blocked recovery or created duplicate recovery Runs");
+  } catch (error) {
+    const runs = await opened.client.call({ type: "workflow.history", payload: { workspaceId: opened.workspaceId, limit: 20 } }).catch(() => null);
+    throw new Error(`${stage}: ${error}; runs=${JSON.stringify(runs)}; submitted=${JSON.stringify([...submitted])}`);
   } finally {
     opened.client.close();
     opened.daemon.stop();

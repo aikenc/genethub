@@ -12,6 +12,7 @@ GeneHub 通过工作台把机器上的工作区、Agent 会话和相关工具呈
 
 ## 按任务导航
 
+- 项目工作流、交付进度与优化：受管项目使用 project-manager；运行事实用 `workflow get/profile`，构建内的 `views/` 自动提供进度入口。质量、时间与成本优化交 WM，WR 负责健康下限。组件数据由平台管理，Agent 不直接改写；包自有记录通过现有文件 API 读取。
 - daemon 启动、停止、重启、环境生效、离线恢复：先读内置 genehub-daemon-management。
 - 现有/转发会话的历史和证据：genehub-session-history。
 - 工作台页面实时联调、DOM/交互/截图：genehub-client-debug，目标页授权和能力边界以该 Skill 为准。

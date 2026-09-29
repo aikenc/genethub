@@ -241,6 +241,7 @@ interface WorkbenchState {
   rightPanel: RightPanel;
   /** Default Preview surface; null when closed. New-tab Preview is opt-in only. */
   previewFloat: PreviewFloatTarget | null;
+  workflowView: { workspaceId: string; runId: string; viewId?: string; nodeId?: string; params?: Record<string,unknown> } | null;
   timeline: TimelineState;
   /**
    * Warm snapshots for every chat tab still in the strip. Switching back to a
@@ -439,6 +440,8 @@ interface WorkbenchState {
   setRightPanel(panel: RightPanel): void;
   openPreviewFloat(target: PreviewFloatRequest): void;
   closePreviewFloat(): void;
+  openWorkflowView(target: { workspaceId: string; runId: string; viewId?: string; nodeId?: string; params?: Record<string,unknown> }): void;
+  closeWorkflowView(): void;
   send(text: string, attachments?: Attachment[], videoFiles?: File[]): Promise<boolean>;
   /** Sends a failed message again, unchanged. */
   retryPending(messageId?: string): Promise<void>;
@@ -743,6 +746,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   activeTabId: null,
   rightPanel: null,
   previewFloat: null,
+  workflowView: null,
   timeline: emptyTimeline(),
   sessionTimelines: {},
   subscribedSessionIds: [],
@@ -1574,6 +1578,9 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       },
     });
   },
+
+  openWorkflowView(target) { set({workflowView: target}); },
+  closeWorkflowView() { set({workflowView: null}); },
 
   closePreviewFloat() {
     set({ previewFloat: null });

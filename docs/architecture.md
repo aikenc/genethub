@@ -74,7 +74,7 @@ WASM 重构的交付北星是：**不牺牲产品能力、可靠性和安全性�
 
 速度不能跳过测试或签名。客户端必须后台发现、下载、验签、预热、健康确认并在失败时自动回 known-good。切换时打断进行中的一轮是可接受的，只要用户看得见发生了什么且状态可恢复——不为 turn/PTY 的无缝续接设计额外机制，按最低成本处理。Web/Client Component 必须声明兼容窗口和同一 release set，严格版本不相容时自动升级为 App Release。
 
-当前状态是：默认 daemon/agent WASM、薄 CLI、Fabric/RTC 与 Linux 能力回归门已经完成；非 stable 的 guest 编译走 `[profile.iterate]`（`opt-level=1` + `strip`，无 fat LTO），`[profile.release]` 的 fat LTO 只留给 Stable 安装包。Windows host 的 owner-only ACL 已实现，并在 `windows-latest` 上跑过 `fs_perms::tests`；尚未用待发布三件套关闭安装后主旅程。双模式 CI、组件签名与自动回滚、官网-only 部署、desktop UI 热更新、混合版本窗口和 SLO telemetry 同样尚未完成。详细状态见 [roadmap.md](./roadmap.md) 的“WASM 持续交付”。
+当前状态是：默认 daemon/agent WASM、薄 CLI、Fabric/RTC 与 Linux 能力回归门已经完成；非 stable 的 guest 编译走 `[profile.iterate]`（`opt-level=3` + `strip`，无 fat LTO），`[profile.release]` 的 fat LTO 只留给 Stable 安装包。Windows host 的 owner-only ACL 已实现，并在 `windows-latest` 上跑过 `fs_perms::tests`；尚未用待发布三件套关闭安装后主旅程。双模式 CI、组件签名与自动回滚、官网-only 部署、desktop UI 热更新、混合版本窗口和 SLO telemetry 同样尚未完成。详细状态见 [roadmap.md](./roadmap.md) 的“WASM 持续交付”。
 
 ---
 
@@ -131,6 +131,10 @@ GeneHub 面向长期无人值守的机器，默认权限不是“先拦住再等
 仍然出现的权限请求与真正的 Agent 问题都被建模成一个持久化的“暂停点”，但二者类型分开：批准权限时用 Agent 的最高默认模式恢复，回答问题时保持原模式。daemon 在写入 session meta 和原生 session handle 后终止当前 adapter turn 并关闭 Agent 子进程；同一用户业务 round 保留为等待状态，不保留等待中的 RPC、进程、WebSocket 或浏览器连接。稍后响应时，通过原生 session handle 开启新的 adapter turn，继续同一 Session / 用户 round。状态只有 `running → waiting → running/idle`，重启 daemon 也不丢请求。
 
 项目计划的 CLI 授权入口与原生授权事件使用同一个停止流程。`space approval request` 只提交请求；返回成功不代表批准，原 CLI 也可能随 Agent 关闭而被取消。Human 的计划回答先作为 session meta 中的一条持久续跑记录保存，再返回 Ack；后台派发与浏览器连接、旧 turn 和旧 CLI 完全解耦。daemon 启动时发现未完成记录，以保存的决策时间补齐项目 grant，并恢复原生会话；原生会话恢复失败会明确报告，不静默创建失去上下文的新会话。
+
+人工决定不设默认答复期限。项目计划与未答卡在用户离线和 daemon 重启后保留；审批不再按固定十分钟作废。
+答复和执行仍核对计划摘要、项目 revision、Git 状态、调用者归属及一次性 action；事实变化会拒绝旧计划。
+项目计划没有答复期限字段，也没有按期限作废后重建计划的续跑分支。
 
 项目 challenge、决策和一次性 grant 由 daemon 的私有 `project-control/approvals.json` 原子保存。原生 Agent 计划与 GeneHub 项目计划都能暂停，但只有后者持有 daemon 签发的 challenge，才生成项目变更权限。重复 Human 回答必须相同；批准不能变成拒绝，拒绝不能被重放成批准。主动停止或关闭 Session 会取消续跑义务，daemon 正常退出则保留它。
 

@@ -36,15 +36,15 @@ defineSpecialty({
 
     writeFileSync(manifest, "---\ndescription: Human activation fixture\nrecovery: flows/recovery.yaml\n---\n");
     writeFileSync(path.join(source, "flows/recovery.yaml"), JSON.stringify({
-      schema: "genehub.workflow.definition.v1", id: "recovery", version: 1, entry: "review",
+      schema: "genehub.workflow.definition.v2", id: "recovery", version: 2,
       outcomes: { resume: { success: true }, human: { success: false } },
-      nodes: [{ id: "review", uses: "agent.session", with: { role: "worker" }, on: { resume: ["publish"], human: [] } },
-        { id: "publish", uses: "result.publish" }],
-    }));
+      nodes: [{ id: "review", uses: "agent.session", with: { role: "worker" } },
+        { id: "publish", uses: "result.publish" }], structure: {"body":{"id":"sequence","type":"sequence","steps":[{"id":"step-review","type":"task","activity":"review","accept":["resume"]},{"id":"step-publish","type":"task","activity":"publish"}]}}}));
     let attempts = 0, firstSent = false, retrySent = false, dispatched = false;
     opened.mock.script(...Array.from({ length: 40 }, () => ({ respond: (request: unknown) => {
       const body = JSON.stringify(request);
-      if (body.includes("只读复查被处理的 Run")) return { hang: true as const };
+      if (body.includes("角色标签为 `recovery-reviewer`")) return { hang: true as const };
+      if (body.includes('<genehub_managed_session>')) return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" workflow complete --outcome blocked --reason "fixture fault after reset" --evidence result=failed' } } };
       if (body.includes("START_AFTER_RESET") && !dispatched) {
         dispatched = true;
         return { tool: { name: "bash", arguments: {

@@ -149,8 +149,27 @@ impl RtcSession {
         let gathering_shared = shared.clone();
         let gathering_connection = connection.clone();
         let patience = std::time::Duration::from_millis(config.gather_timeout_ms.max(1) as u64);
+        let (srflx_tx, srflx_rx) = tokio::sync::oneshot::channel();
+        let srflx_tx = Arc::new(Mutex::new(Some(srflx_tx)));
+        connection.on_ice_candidate(Box::new(move |candidate| {
+            let srflx_tx = srflx_tx.clone();
+            Box::pin(async move {
+                if candidate.as_ref().is_some_and(|item| {
+                    item.typ
+                        == webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType::Srflx
+                }) {
+                    if let Some(tx) = srflx_tx.lock().unwrap().take() {
+                        let _ = tx.send(());
+                    }
+                }
+            })
+        }));
         tokio::spawn(async move {
-            let _ = tokio::time::timeout(patience, gathered.recv()).await;
+            tokio::select! {
+                _ = gathered.recv() => {}
+                _ = srflx_rx => {}
+                _ = tokio::time::sleep(patience) => {}
+            }
             match gathering_connection.local_description().await {
                 // Whatever was gathered by now is what the peer gets; a
                 // half-gathered answer still connects on a local network.

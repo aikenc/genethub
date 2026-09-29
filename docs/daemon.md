@@ -245,6 +245,8 @@ daemon 不发明一套目录权限系统。已知 Agent 默认以最高模式启
 
 恢复使用原生会话能力：Claude session id、Codex thread id、OpenCode session id，ACP 则优先使用标准 `session/resume`，只对明确声明旧能力的 Agent 回退到 `session/load`。这样等待时间可以是几天，状态复杂度仍与一次普通的磁盘恢复相同。
 
+持久输入队列的暂停与问题答复是两个独立状态。新的明确答复在保存时解除队列暂停，使已接受输入和决策能够继续处理；普通后台通知和重复答复不会覆盖用户后来的停止。Workflow 的恢复审查也可通过 `workflow consult` 由 daemon 建立问题，不要求 adapter 提供固定五选项原生工具。控制与权限边界见 [Workflow 运行控制](workflow/runtime.md)。
+
 **这里的"继续回合"是同一个 round，不是新的一个。** daemon 内核维护一份 `ActiveRound`（`session/manager.rs` 的 `Live::active_round`）：一个用户请求从被接受到不再需要 agent 继续为止都是同一个 round，哪怕它跨了两个 adapter turn。批准或回答问题触发的续做由 daemon 自己判定、自动缝合；用户按下停止后再打一条新消息则不能——daemon 分不清那是"接着做"还是新请求，所以 `session.send` 带一个可选的 `continuesRound`，界面上的"继续"按钮带上它，普通新消息不带。没有这个信号，或者它指向的 round 已经结束，daemon 一律当作新 round，并把之前挂着的那个结算为 `Superseded`——宁可多切一个 round，也不把两个不相干的请求错误地缝在一起。详见 `docs/agent-analysis-substrate-proposal.md` §3.2。
 
 **同一种 agent 一次只起一个进程(仅限启动那一段)。** 第三方 CLI 的"第一次运行"做的是整机范围的事:OpenCode 会在用户数据目录里建它自己的 SQLite 并跑建表迁移。两个实例同时做,有一个会输在 `CREATE TABLE workspace` 上直接退出,用户看到的是「OpenCode 还没就绪就退出了」后面挂一段 SQL。同时开两个会话各问一句是很正常的事,能不能用不该取决于谁先摸到 schema。所以 `ensure_started` 里按 agent 种类串行化**启动**:不同 agent 仍然并行起,进程起来之后就完全离开这条路径。门闩挂在进程上而不是挂在 SessionManager 上——它保护的东西不是我们的,是那台机器上属于那个 CLI 的状态。

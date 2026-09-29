@@ -23,5 +23,4 @@ fn main() {
         .join("builtin_skills.rs");
     std::fs::write(&output, generated)
         .unwrap_or_else(|error| panic!("writing {}: {error}", output.display()));
-
 }

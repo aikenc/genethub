@@ -134,6 +134,19 @@ export class LogicalConnection {
     }
     return ready;
   }
+  /** Reauthenticate an already open standby after a fresh Fabric lease takes over.
+   * The daemon accepts ATTACH on that same authenticated carrier, so no new
+   * PeerConnection or SDP exchange is needed. */
+  promoteStandby(path: ResumePath): Promise<boolean> {
+    this.live();
+    const channel = this.standby;
+    if (this.active?.phase !== "ready" || !channel || channel.path !== path || this.candidate) return Promise.resolve(false);
+    this.standby = null; this.candidate = channel;
+    channel.attempt = randomNonce(); channel.phase = "created"; channel.committed = false; channel.reused = true;
+    const ready = new Promise<void>((resolve, reject) => { channel.resolve = resolve; channel.reject = reject; });
+    void this.sendAttach(channel).catch((error: unknown) => this.lost(channel, error));
+    return ready.then(() => true);
+  }
   async send(frame: ResumeFrame): Promise<void> {
     this.live();
     const progress = frame.kind >= 4, bytes = frame.payload.length + 36;
@@ -271,6 +284,10 @@ export class LogicalConnection {
       const proof = await logicalAttachedProof(channel.key, c.secret, c.id, c.incarnation, channel.attempt, epoch);
       if (this.owns(channel)) await this.control(channel, { op: "attached", epoch: String(epoch), proof });
       return;
+    }
+    if (m.op === "attach" && channel.phase === "created" && !this.credentials) {
+      // Same answer as the daemon registry for an id it no longer holds.
+      await this.control(channel, { op: "error", code: "SessionLost" }); return;
     }
     if (m.op === "activate" && channel.phase === "activated" && m.attempt === channel.attempt && counter(m.expected) === this.epoch) {
       const epoch = this.epoch + 1n;
