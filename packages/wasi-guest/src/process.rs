@@ -115,6 +115,7 @@ pub struct Command {
     argv: Vec<String>,
     env: Vec<(String, String)>,
     cwd: Option<String>,
+    independent_session: bool,
 }
 
 impl Command {
@@ -123,6 +124,7 @@ impl Command {
             argv: vec![program.as_ref().to_string_lossy().into_owned()],
             env: Vec::new(),
             cwd: None,
+            independent_session: true,
         }
     }
 
@@ -144,6 +146,13 @@ impl Command {
 
     pub fn current_dir(&mut self, dir: impl AsRef<Path>) -> &mut Self {
         self.cwd = Some(dir.as_ref().to_string_lossy().into_owned());
+        self
+    }
+
+    /// Evidence collection and the `genet` CLI keep their own session. A shell
+    /// passes false so background children stay in the agent process group.
+    pub fn independent_session(&mut self, yes: bool) -> &mut Self {
+        self.independent_session = yes;
         self
     }
 
@@ -209,8 +218,13 @@ impl Command {
     }
 
     pub fn spawn(&mut self) -> io::Result<Child> {
-        let child = host::spawn(&self.argv, &self.env, self.cwd.as_deref())
-            .map_err(|error| io::Error::other(error.message))?;
+        let child = host::spawn(
+            &self.argv,
+            &self.env,
+            self.cwd.as_deref(),
+            self.independent_session,
+        )
+        .map_err(|error| io::Error::other(error.message))?;
         let pid = child.id();
         let id = NEXT.with(|next| {
             let value = next.get();

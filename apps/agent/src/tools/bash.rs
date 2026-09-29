@@ -28,6 +28,11 @@ pub async fn run(args: &Value, cwd: &Path) -> ToolResult {
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     own_process_group(&mut command);
+    // The shipped agent is the wasm guest. False keeps background children in
+    // the agent process group; evidence collection and the genet CLI keep the
+    // default independent session.
+    #[cfg(target_family = "wasm")]
+    command.independent_session(false);
 
     let started = output(command);
     let timeout_secs = arg_usize(args, "timeout");
