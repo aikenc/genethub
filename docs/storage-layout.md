@@ -63,8 +63,27 @@ agent CLI 自己的线程库（`~/.codex/` 之类）不归我们管，只在会�
 
 | 数据 | 位置 |
 | --- | --- |
-| Candidate、激活指针 | 包的 Executor Space 级 `components/executor/`；无独立载体的定义包使用项目根的同名目录 |
-| Run 快照（按请求归档） | 项目 PM Space 级 `components/pm/requests/<请求 id>/runs/<Run id>/run.json` |
-| Run ID 定位记录、请求写锁与引用租约 | 项目 PM Space 级 `components/pm/`；定位记录可从请求目录重建 |
+| 工作流构建（内部 Candidate）、激活指针 | 包的 Executor Space 级 `components/executor/`；无独立载体的定义包使用项目根的同名目录 |
+| Run 快照（按用户需求归档） | 项目 PM Space 级 `components/pm/requests/<用户需求 id>/runs/<Run id>/run.json` |
+| Run ID 定位记录、用户需求写锁与引用租约 | 项目 PM Space 级 `components/pm/`；定位记录可从用户需求目录重建 |
+
+`requests/` 保留现有磁盘名称，业务概念称“用户需求”，定义见 [Workflow 与 Executor 模型](./workflow/model.md)。写锁只是避免多个执行者同时改写同一份需求记录的文件互斥；它不承担完成判断。
 
 旧版 `<data>/workflow-runtime/` 与 Executor 会话快照不自动导入，新版不从那里读取。
+
+PM `request.json` uses `genehub.workflow.request.v2` and stores the user requirement state, decision revision, PM conclusion/references, pending-decision clock and patrol diagnostics. The current reader only accepts request.v2; earlier request records are not automatically migrated or rewritten. `genehub.workflow.settled.v2` is written only after explicit delivery/user cancellation and completed cleanup/notices.
+
+## 6. 工作流构建与包观测记录
+
+`workflow build` 将 `views/<id>/**` 和 `checklists/**` 纳入同一个不可变构建；
+Run 固定构建摘要，宿主从该构建读取视图，不从当前包源补文件。
+构建发现入口使用 `views/<id>/index.html` 的 `<title>`，不维护额外视图登记表。
+
+工作流自行产生的依赖、排队和子步骤记录放在任务目录的
+`.genethub/temp/observations/`，由包负责 schema 和保留周期。视图调用来源记录放在项目的
+`.genethub/temp/workflow-view-calls/<Run id>/`，通过现有文件接口写入，不包含调用参数和文件内容。
+这两类可编辑记录均不替代 daemon 管理的 Run 快照与 journal。
+
+累积条目采用 `<YYMMDD-HHMMSS>_<hash>[_<slug>].json`，时间为东八区，hash 按并发和
+碰撞风险选择 4/8/16 位；写入先完成临时文件，再原子发布完整条目。实体已有天然 id 时沿用 id；
+单个当前值的指针文件无需拆分。历史条目排序和去重由目录与内容身份完成。

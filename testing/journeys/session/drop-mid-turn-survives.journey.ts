@@ -6,7 +6,7 @@ defineJourney(
     title: "A client that drops mid-turn gets the missing events when it returns",
     oracle: "a second Client can leave after turnStarted; session.get still shows the completed turn",
     catches: ["agent stops when a watcher disconnects"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     llm: { default: "mock" },
     expectedDurationMs: 35_000,
     timeoutMs: 100_000,

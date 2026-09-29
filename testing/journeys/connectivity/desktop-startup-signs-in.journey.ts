@@ -78,16 +78,13 @@ defineJourney(
       await hub.approvePairing(owner, userCode!);
 
       // The daemon polls, enrolls, and turns paired; the route then completes.
-      const deadline = Date.now() + 45_000;
-      let paired: DesktopDirective | null = null;
-      while (Date.now() < deadline) {
+      const paired = await t.tools.waitUntil(async () => {
         const directive = await route();
-        if (directive.complete) {
-          paired = directive;
-          break;
-        }
-        await new Promise((resolve) => setTimeout(resolve, directive.retryAfterMillis ?? 1_000));
-      }
+        if (directive.complete) return directive;
+        // The production route, rather than a test poll interval, owns backoff.
+        await new Promise(resolve => setTimeout(resolve, directive.retryAfterMillis ?? 1_000));
+        return undefined;
+      }, 45_000, 0);
       t.assertions.assert(paired !== null, "the daemon never turned paired after approval");
 
       // The window that follows the startup navigation is a fresh WebView:

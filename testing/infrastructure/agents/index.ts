@@ -10,8 +10,9 @@ import type { EnvironmentLease } from "../environment/lease.ts";
 export type ControlledAgentProfile =
   /** Answers normally. The control case every fault is compared against. */
   | "normal"
-  /** Sends a native Cursor plan request, then accepts a new resumed prompt. */
-  | "native-plan"
+  /** Native permission requests with declarative and missing elevation modes. */
+  | "acp-elevation"
+  | "acp-elevation-no-mode"
   /** Emits one chunk, then exits with no terminal frame: stdout reaches EOF. */
   | "exit-without-terminal"
   /** The same exit, but a grandchild keeps stdout open, so there is no EOF. */
@@ -47,6 +48,8 @@ export interface ControlledAgentOptions {
   delayMs?: number;
   /** Events emitted by `flood-events`. */
   floods?: number;
+  permissionId?: "number" | "string";
+  unattendedModes?: string[];
 }
 
 export interface ControlledAgentHandle {
@@ -92,6 +95,7 @@ export function registerControlledAgent(
   if (options.chunks !== undefined) command.push("--chunks", String(options.chunks));
   if (options.delayMs !== undefined) command.push("--delay-ms", String(options.delayMs));
   if (options.floods !== undefined) command.push("--floods", String(options.floods));
+  if (options.permissionId) command.push("--permission-id", options.permissionId);
 
   const configPath = path.join(lease.data, "config.json");
   const config = existsSync(configPath)
@@ -99,7 +103,7 @@ export function registerControlledAgent(
     : {};
   const agents = (config.agents ?? {}) as Record<string, unknown>;
   const custom = (agents.custom ?? {}) as Record<string, unknown>;
-  custom[id] = { extends: "acp", command, label: `Controlled ${options.profile}` };
+  custom[id] = { extends: "acp", command, label: `Controlled ${options.profile}`, unattendedModes: options.unattendedModes ?? [] };
   agents.custom = custom;
   config.agents = agents;
   writeFileSync(configPath, JSON.stringify(config, null, 2));

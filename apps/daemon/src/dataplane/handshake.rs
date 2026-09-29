@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use genehub_proto::{DeviceAuth, InviteAuth, PeerAuth, PeerHello, PeerWelcome, TransportKind};
 
 use crate::channel_auth::{self, SessionKey};
@@ -152,7 +152,12 @@ pub fn accept(
             )?;
             (answer, key, None, Some(id))
         }
-        _ => return Err(anyhow!("peer authentication does not match this admission")),
+        _ => {
+            return Err(crate::rpc_error::failure(
+                genehub_proto::ErrorCode::Unsupported,
+                "peer authentication does not match this admission".to_owned(),
+            ))
+        }
     };
 
     Ok(AcceptedPeer {

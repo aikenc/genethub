@@ -6,7 +6,7 @@ defineJourney(
     title: "A terminal opens, echoes, resizes, and closes",
     oracle: "pty.write of echo is visible on Client.onPty; pty.close then refuses writes",
     catches: ["pty RPC without bytes"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
     expectedDurationMs: 25_000,
     timeoutMs: 75_000,

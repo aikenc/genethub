@@ -1,6 +1,6 @@
 # 测试规格
 
-> 状态（2026-08-22）：业务质量主干已迁到 `testing/` 的 TypeScript `testctl`、journeys、specialties 与 E2E；默认产物是 `genet-local + genehub-host-local + genehub_guest.wasm`。本页早期的 L1/J-mock/J-real 设计背景仍可读，但执行、产物与资格合同以 `testing/README.md` 及 Cloud `docs/testing/engineering-{principles,laws}.md` 为准。当前 331/331 qualified 是 Linux 本地 WASM parity 证据，既不能复用为 Windows 安装后首启证据，也不能复用为尚未存在的 stable/高频发布资格。测试工程自身的 TypeScript typecheck 目前仍有 4 个 HEAD 既有错误：`component-health.specialty.ts` 的可空值，以及 `fail-closed.specialty.ts` / `surfaces.specialty.ts` 的 3 个未使用 import；在它们清零前也不得称测试工程机械基线全绿。
+> 状态（2026-09-27）：执行与资格合同以 `testing/README.md` 和 Cloud 治理文档为准；旧 Rust integration 与平行 Workbench e2e 已退役。此页早期旅程设计与供应商实测保留作历史背景。
 > 核心原则：**一套用例，两种模式。** 全链路集成与真实模型 E2E 跑的是**同一份测试代码**，唯一区别是 LLM 后端接的是 mock 还是真实模型。  
 > 用例全部**基于用户旅程**设计，不按模块切。  
 > 上位文档：[architecture.md](./architecture.md)。
@@ -235,7 +235,7 @@ daemon 是产品，窗口只是方便，所以这一组测的都是「窗口不�
 
 真实模式的额外纪律：网络类失败重试 1 次；**断言失败不重试**（重试会掩盖真问题）。
 
-真实模式要串行跑：`cargo test -p genehub-testing --test claude -- --test-threads=1`。几条用例共用本机同一个 CLI 和同一个模型后端，并行会制造与产品无关的超时假阳性。
+真实 CLI / 供应商专项由 testctl 在独立环境中运行；旧 Rust harness 已退役。几条用例共用本机同一个 CLI 和同一个模型后端，并行会制造与产品无关的超时假阳性。
 
 ---
 
@@ -276,36 +276,23 @@ Windows/macOS **装包之后**的首启仍要每次发版手动过一遍主旅�
 
 ## 8.1 当前落地的套件
 
-`testing/tests/opencode.rs` 与 `testing/tests/claude.rs` 这一类——真实拉起某一个具体第三方 CLI、验证它接进归一化事件层之后行为对不对——统称**专项测试**：它们不是通用旅程矩阵（§5）里"随便换个 agent 都要过"的那一批，而是**只为这一个 adapter 的私有协议细节**（Claude Code 的权限控制、OpenCode 的 HTTP+SSE 事件流……）而存在，写法上也允许比通用旅程更贴合该 CLI 自己的怪癖。共享断言收在 `testing/src/provider_suite.rs`，避免每个专项测试重新发明"turn 有没有正常结束"这类判断。
+执行入口是 [`testing/README.md`](../testing/README.md) 所述的 TypeScript `testctl`。总体设计与完整资格
+合同见 Cloud `docs/testing/README.md`、`engineering-principles.md` 和 `engineering-laws.md`。
+本页前面的旅程设计与模型实测是历史背景，不能代替当前 catalog 或 run manifest。
 
-| 套件 | 位置 | 跑的是什么 | 需要什么 |
-|------|------|-----------|---------|
-| testctl 业务主干 | `testing/{journeys,specialties,e2e}` | TypeScript 经公开 Client/CLI 驱动真实 launcher、host、WASM guest、agent、relay 与磁盘；run 绑定双仓 SHA/dirty/artifact | 按 `testing/README.md` 用 `testctl` 选择 policy；required 前置缺失必须 blocked，不得用旧 run 顶替 |
-| Rust 单元与 legacy | `cargo test --workspace`、`testing/deprecated/rust` | 性质/原生内在事实与冻结 parity；不是默认业务测试层 | 原生 `cargo build -p genet-cli -p genehub-host`；需要真实默认 daemon 时另构建 `cargo build --profile iterate -p genehub-guest --target wasm32-wasip2` |
-| 专项测试（OpenCode） | `testing/tests/opencode.rs` | **真实 OpenCode 进程**接同一个模型后端，事件归一化后进同一条时间线 | PATH 上有 `opencode`，否则跳过并打印原因 |
-| 专项测试（Claude Code） | `testing/tests/claude.rs` | **真实 `claude` 进程**（原生 `stream-json`，非 ACP wrapper）接 DeepSeek 的 Anthropic 兼容端点：基本对话、默认 bypass 放行、显式低权限模式下产生可持久化暂停点、daemon 中断请求真的打断生成 | `JOURNEY_LLM=real` + PATH 上有 `claude`，否则跳过并打印原因；只在真实模式跑（mock 不实现 Anthropic 协议） |
-| 专项测试（Cursor） | `testing/tests/cursor.rs` | **真实 `cursor-agent` 进程**（ACP over stdio）跑主旅程：探测的二进制真能起、ACP 握手真有应答、一个回合经归一化事件层进同一条时间线 | `JOURNEY_LLM=real` + PATH 上有登录过的 `cursor-agent`，否则跳过并打印原因；mock 模式不跑（它没有可指向 mock 的后端配置，同 Codex 的处境） |
-| 安装脚本 | `testing/tests/install.rs` | **端到端跑 `scripts/install.sh`**：真 tar、真 sha256sum、真目录；curl shim 强制核对 HTTPS/重定向约束且只映射到本地假发布目录。装完的二进制可执行且真能跑；非 HTTPS 基址、校验和不符或缺少 `SHA256SUMS` 都拒绝 | 无（Linux arm64 上跳过并打印原因） |
-| 发布供应链 | `testing/tests/supply_chain.rs` | release workflow 的第三方 Action 全部固定完整 commit SHA；checkout 不保留凭据；只有 publish job 有 `contents: write`；发布注释不把同源摘要冒充签名 | 无 |
-| 设备准入 | `testing/tests/devices.rs` | **真实 daemon + 进程内汇合 relay**：新设备经 relay 配对、换到凭证后重连、陌生人被拒、邀请码只能用一次、握手不能重放、撤销当场断连、重启后仍然可达且仍然认得旧设备 | 无 |
-| relay | `apps/relay && npm test` | 帧转发、契约、边界检查、wire 摘要 | 无 |
-| 工作台 | `packages/workbench && npm test` | 时间线、协议客户端、面板、宿主层 | 无 |
-| **全栈旅程** | `packages/workbench/src/e2e/journey.test.ts` | **真实 launcher + host + WASM daemon/agent + 脚本化模型**，用工作台自己的客户端 | 三件套 artifact + `testctl` 环境 |
-| **自建全栈** | `packages/workbench/src/e2e/selfhosted.test.ts` | 只用开源件：**真实 relay（汇合模式）+ 真实 WASM daemon + 独立 agent host + 工作台自己的配对与客户端代码**。新设备配对进来能经转发跑完一轮流式对话，历史留在机器上，relay 重启后自动恢复，撤销当场断 | 三件套 artifact + `apps/relay` build；由 `testctl` 隔离进程和证据 |
-| 跨栈配对 | 控制面仓库的 `test/pairing.test.ts`、`test/relay.test.ts` | daemon 自己走设备码配对，浏览器经 relay 连回来 | 同上 |
-| 跨栈首启 | 控制面仓库的 `test/first-run.test.ts` | 全程没有账号、没有 cookie、没人批准任何东西：daemon 自己拿到临时身份，另一个浏览器扫链接进来，经转发层连上这台机器 | 同上 |
+Open 提供真实 CLI、Host、WASM Guest、Workbench 公共 Client、Relay 和模型协议 mock。业务场景在
+`testing/journeys`、`testing/specialties`、`testing/e2e`，独立环境由调度器租用。缺少产物、依赖或身份
+证明时保留 blocked/failed，不把缺输入当作成功。
 
-自建全栈那一条兑的是开源仓库存在的理由——**一个 relay 加一堆静态文件就够了**。这句话单元测试证不出来：三个件各自都对，凑在一起仍然可能不是个能用的产品。所以它跑的是真的 relay 进程、真的 daemon 进程、真的 agent 进程，配对用的也是浏览器自己那份代码，没有任何闭源件参与。
+退役的 Rust integration harness 不再有 workspace member、CLI dev-dependency 或 legacy runner。
+历史稳定 ID、原断言分类和成对 run 引用保存在 [`legacy-rust-parity.json`](testing/legacy-rust-parity.json)。
+唯一远程 CLI 覆盖由七项 `specialty.connectivity.remote-cli-*` 承接；原 Workbench e2e 的两项唯一事实
+由 `specialty.connectivity.relay-*` 承接。Web CI 的构建、类型检查、单测和发布前置条件继续保留，
+真实 Relay 事实通过统一 testctl 执行，不再维护第二套模型服务和 daemon 启动 harness。
 
-它一度只测到「socket 被放进来了」就收工，而那离「有人能用」还差很远：转发层要扛订阅和流式增量，不只是一问一答。现在那一轮对话用的是**界面同一份 timeline reducer**，断言的是分片数大于一——一次性返回也能「通过」，只是屏幕上没东西可看。relay 重启那一条同理：自建 relay 就是别人的一台小服务器，会被重启，而且重启时没人在那台机器旁边；要是回来得靠去桌面端点一下，远程访问就不算可靠。
-
-设备准入那一条写成的是**性质**而不是点击流程："陌生人拿不到东西"、"邀请码只值一次"、"看过一次握手不等于能再握一次"、"撤销是现在断而不是下次不让进"。错了就是别人在你的电脑上拿到一个 shell，所以它跑在真实转发路径上：进程内的汇合 relay（`testing/src/fake_relay.rs`）只做撮合，和线上那个一样不参与判断，mux 分帧也是真的。它上来就抓到一个真 bug——会话循环结束时 daemon 不往上游发 `CLOSE`，于是被撤销的设备等到的是超时而不是断开。
-
-全栈旅程这一条是分量最重的：其他前端测试都把 socket 假掉了，而"事件发到了一个没人监听的 topic"在假 socket 下和"没有事件"长得一模一样。它上线的第一天就抓到了这个 bug。
-
-两条专项测试同样不能省。OpenCode 是唯一形状不同的 adapter——HTTP 服务加独立事件流，而不是 stdio 子进程；只有让它真的跑起来，才知道归一化层是抽象而不是内置 agent 的别名。它接的模型后端与内置 agent 完全一致（mock 模式下配置文件里指向 mock 服务，真实模式下指向 DeepSeek），因此两种模式共用同一份用例。Claude Code 那条只能在真实模式跑：它说的是 Anthropic Messages 协议而不是 OpenAI 兼容协议，mock 服务没有实现那一套，硬跑只会验证出「mock 也不认识这个协议」这种没意义的失败。它连的是 DeepSeek 官方的 Anthropic 兼容端点，环境变量的配法与限制见 [third-party-agents.md](./third-party-agents.md)。Claude 的专项测试负责证明原生模式与中断控制真的生效；持久化暂停/恢复的跨 Agent 状态机由 daemon 测试覆盖。Codex 现在也是原生适配器（`adapter::codex`），但它还欠一条对称的真实专项测试：它没有可用的第三方后端可指（Codex 只认 Responses API，DeepSeek 只有 Chat Completions，见 [third-party-agents.md](./third-party-agents.md) §4.1），所以要跑在一个真登录了的 OpenAI 账号上。眼下协议翻译、最高权限启动参数、权限与问题分类、状态映射和计费统计由 `adapter::codex` 单元测试守住；端到端仍应在有登录态的机器上补齐。
-
----
+现有源码就近性质验证由 `specialty.contracts.native-properties` 按 owning suite 一次执行，并将协议
+生成写到隔离目录与已提交 bindings 比对。它不代替 TS 用户行为或真实平台测试。浏览器页面事实通过
+Playwright 专项执行；真实供应商、Windows/macOS 和安装后首启须有各自 run，Linux mock 不代证。
 
 ## 9. 工具选型
 

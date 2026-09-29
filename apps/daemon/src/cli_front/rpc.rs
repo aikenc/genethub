@@ -358,6 +358,7 @@ impl From<rpc_wire::RpcError> for RpcError {
 fn error_code_name(code: genehub_proto::ErrorCode) -> &'static str {
     use genehub_proto::ErrorCode::*;
     match code {
+        QueueFull => "queue_full",
         BadRequest => "bad_request",
         Unauthorized => "unauthorized",
         NotFound => "not_found",

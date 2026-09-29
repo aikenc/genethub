@@ -23,7 +23,7 @@ defineJourney(
     title: "The agent hands the model a system prompt and tool definitions",
     oracle: "the mock LLM request has one GeneHub built-in Skill catalog, the bound CLI, the user text, and tool definitions",
     catches: ["empty tools", "user text dropped", "project Skill leaked into product catalog", "channel CLI guessed or duplicated"],
-    tags: ["core", "session", "parity", "builtin-skills"],
+    tags: ["core", "session", "builtin-skills"],
     llm: { default: "mock" },
     expectedDurationMs: 25_000,
     timeoutMs: 75_000,

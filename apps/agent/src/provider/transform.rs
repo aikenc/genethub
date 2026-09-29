@@ -19,9 +19,10 @@ pub(crate) fn provider_history(messages: &[Message]) -> Vec<Message> {
 
     for message in messages {
         match message {
-            Message::Assistant { stop_reason, .. }
-                if matches!(stop_reason, StopReason::Error | StopReason::Aborted) =>
-            {
+            Message::Assistant {
+                stop_reason: StopReason::Error | StopReason::Aborted,
+                ..
+            } => {
                 flush_pending(&mut out, &pending, &satisfied);
                 pending.clear();
                 satisfied.clear();
@@ -55,7 +56,11 @@ pub(crate) fn provider_history(messages: &[Message]) -> Vec<Message> {
     out
 }
 
-fn flush_pending(out: &mut Vec<Message>, pending: &[(String, String)], satisfied: &HashSet<String>) {
+fn flush_pending(
+    out: &mut Vec<Message>,
+    pending: &[(String, String)],
+    satisfied: &HashSet<String>,
+) {
     for (id, name) in pending {
         if satisfied.contains(id) {
             continue;

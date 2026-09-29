@@ -37,6 +37,9 @@ impl Default for Limits {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Block {
     pub id: String,
+    /// Package-owned display text; never participates in execution identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     #[serde(flatten)]
     pub kind: BlockKind,
 }

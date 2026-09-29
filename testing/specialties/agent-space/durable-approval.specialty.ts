@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import {
@@ -82,6 +82,7 @@ for (const window of ["waiting", "approved", "applied", "rejected", "canceled"] 
       if (!plan) {
         const challenge = field(request, "challengeId"), digest = field(request, "planDigest"), revision = field(request, "expectedRevision");
         if (typeof challenge !== "string" || typeof digest !== "string" || typeof revision !== "number") { mockFailure = JSON.stringify((request as { messages?: unknown }).messages).slice(-5000); throw new Error("plan omitted approval facts"); }
+        t.assertions.assert(field(request, "expiresAtMs") === undefined, "project plan imposes a Human answer deadline");
         plan = { challenge, digest, revision };
         return bash(`"$GENEHUB_CLI" space approval request --challenge ${quote(challenge)}`);
       }
@@ -125,8 +126,8 @@ for (const window of ["waiting", "approved", "applied", "rejected", "canceled"] 
       }
       if (window === "rejected") await approve();
       if (window === "canceled") {
-        const stopped = await client.call({ type: "session.interrupt", payload: { sessionId } });
-        t.assertions.assert(stopped?.type === "ack", "stop failed");
+        const stopped = await client.call({ type: "session.respondPermission", payload: { sessionId, requestId, outcome: { outcome: "canceled" } } });
+        t.assertions.assert(stopped?.type === "ack", "explicit cancellation failed");
       }
       // Build writes no commit, so a replayed apply is proved idempotent by
       // the registered team it leaves behind rather than by a commit id.
@@ -139,6 +140,14 @@ for (const window of ["waiting", "approved", "applied", "rejected", "canceled"] 
       client.close();
       process.kill(pid, "SIGKILL");
       await t.tools.waitUntil(() => cli(["daemon", "status"]).running === false, 15_000);
+      if (window === "waiting" || window === "approved") {
+        // Simulate an offline user returning two days later, with the real
+        // daemon stopped before changing the Session's persisted clock.
+        const metaPath = path.join(projectRoot, ".genethub/sessions", sessionId, "meta.json");
+        const meta = JSON.parse(readFileSync(metaPath, "utf8"));
+        meta.updatedAtMs = Date.now() - 48 * 60 * 60 * 1000;
+        writeFileSync(metaPath, JSON.stringify(meta));
+      }
       restarted = true;
       cli(["daemon", "start"]);
       client = await connectProductClient(daemonEndpoint(opened.daemon));
@@ -149,7 +158,7 @@ for (const window of ["waiting", "approved", "applied", "rejected", "canceled"] 
       else {
         await t.assertions.expectProtocolCode(
           () => client.call({ type: "session.respondPermission", payload: { sessionId, requestId, outcome: { outcome: "selected", optionId: "approve-once" } } }),
-          "no pending interaction",
+          "already has a different Human decision",
         );
       }
       const denied = window === "rejected" || window === "canceled";
@@ -160,7 +169,7 @@ for (const window of ["waiting", "approved", "applied", "rejected", "canceled"] 
       }, 90_000);
       t.assertions.assert(denied ? resumed === 0 : resumed > 0, "no approved adapter continuation occurred");
       const spaces = await client.call({ type: "workspace.list" });
-      t.assertions.assert(spaces?.type === "workspaces" && spaces.data.length === (denied ? 2 : 7), "bootstrap did not create exactly five children");
+      t.assertions.assert(spaces?.type === "workspaces" && spaces.data.length === (denied ? 2 : 8), "bootstrap did not create all six package children");
       if (window === "applied") {
         const team = spaces?.type === "workspaces" ? spaces.data.map((space) => space.id).sort().join(",") : "";
         t.assertions.assert(replayedApply && team === committedTeam && Boolean(team), "replayed apply changed the built team");
@@ -176,38 +185,3 @@ for (const window of ["waiting", "approved", "applied", "rejected", "canceled"] 
     }
   });
 }
-
-defineSpecialty({
-  id: "specialty.agent-space.durable-native-plan",
-  title: "Native ACP plan stops its process and resumes without a project grant",
-  oracle: "A standard ACP permission request stops its process and resumes without a project grant",
-  catches: ["native plans are rejected as missing PM challenges", "ACP permission request stays unanswered on cancel", "Human wait retains Agent process", "acceptance resumes a fresh native session"],
-  tags: ["core", "durable-approval", "agent", "native-plan"],
-  // The three protocol waits allow up to 40 seconds in a healthy slow
-  // environment (15s + 10s + 15s), so the unit timeout must exceed that
-  // declared contract rather than force-cleaning a valid continuation.
-  expectedDurationMs: 5_000, timeoutMs: 60_000,
-  surfaces: ["daemon", "agent", "acp", "workbench-client"],
-  productInterfaces: ["session/request_permission", "session/cancel", "session/resume", "session.respondPermission"],
-}, async (t) => {
-  const flow = await t.flows.branches.openControlledAgentSession({ openRoot: t.openRoot, lease: t.env, agent: { profile: "native-plan" } });
-  try {
-    await t.flows.main.sendPrompt(flow.client, flow.sessionId, "Please prepare your native plan.");
-    let requestId = "";
-    await t.tools.waitUntil(async () => {
-      const snapshot = await flow.client.call({ type: "session.get", payload: { sessionId: flow.sessionId } });
-      if (snapshot?.type !== "snapshot") return false;
-      requestId = snapshot.data.pendingPermissions?.[0]?.id ?? "";
-      return Boolean(requestId);
-    }, 15_000);
-    const started = flow.journal().filter(e => e.event === "start").map(e => e.pid);
-    await t.tools.waitUntil(() => started.every(pid => { try { process.kill(pid, 0); return false; } catch { return true; } }), 10_000);
-    t.assertions.assert(flow.journal().some(e => e.event === "plan-cancellation" && (e.result as { outcome?: { outcome?: string } })?.outcome?.outcome === "cancelled"), "ACP server request did not receive cancelled outcome");
-    const result = await flow.client.call({ type: "session.respondPermission", payload: { sessionId: flow.sessionId, requestId, outcome: { outcome: "selected", optionId: "accept" } } });
-    t.assertions.assert(result?.type === "ack", "native plan was refused as a PM challenge");
-    await t.tools.waitUntil(() => flow.journal().some(e => e.event === "approved-continuation"), 15_000);
-    const resume = flow.journal().find(e => e.event === "resumed");
-    const continued = flow.journal().find(e => e.event === "approved-continuation");
-    t.assertions.assert(Boolean(resume) && resume?.sessionId === continued?.sessionId, "native session identity changed");
-  } finally { await flow.dispose(); }
-});

@@ -1,5 +1,4 @@
 //! Which agents exist on this machine, and what they can do.
-#![allow(deprecated)]
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -101,11 +100,14 @@ impl Registry {
 
         for (id, agent) in custom {
             match agent.extends.as_str() {
-                "acp" => adapters.push(Arc::new(AcpAdapter::new(
-                    format!("acp:{id}"),
-                    agent.label.clone().unwrap_or_else(|| id.clone()),
-                    agent.command.clone(),
-                ))),
+                "acp" => adapters.push(Arc::new(
+                    AcpAdapter::new(
+                        format!("acp:{id}"),
+                        agent.label.clone().unwrap_or_else(|| id.clone()),
+                        agent.command.clone(),
+                    )
+                    .with_unattended_modes(agent.unattended_modes.clone()),
+                )),
                 other => {
                     tracing::warn!("ignoring custom agent '{id}': unknown base adapter '{other}'");
                 }
@@ -138,23 +140,6 @@ impl Registry {
     pub fn require(&self, id: &str) -> Result<SharedAdapter> {
         self.get(id)
             .ok_or_else(|| anyhow!("no adapter registered for '{id}'"))
-    }
-
-    /// Used both before authoring succeeds and before a restricted Session is
-    /// created/resumed. Agent-specific support stays inside the adapter layer.
-    pub(crate) fn require_evidence_scope(&self, id: &str) -> Result<SharedAdapter> {
-        let adapter = self.require(id)?;
-        if !adapter.supports_evidence_scope() {
-            let supported = self
-                .adapters
-                .iter()
-                .filter(|adapter| adapter.supports_evidence_scope())
-                .map(|adapter| adapter.id())
-                .collect::<Vec<_>>()
-                .join(", ");
-            anyhow::bail!("evidenceOnlyUnsupported: Agent '{id}' cannot enforce a bounded read-only evidence scope. Keep evidenceOnly enabled and select a supported Agent ({supported}) with a compatible model; do not widen workspace folders or disable the evidence boundary.");
-        }
-        Ok(adapter)
     }
 
     /// Probes every adapter and caches the result.
@@ -349,6 +334,7 @@ mod tests {
         custom.insert(
             "goose".to_string(),
             CustomAgent {
+                unattended_modes: Vec::new(),
                 extends: "acp".into(),
                 command: vec!["goose".into(), "acp".into()],
                 label: Some("Goose".into()),
@@ -365,6 +351,7 @@ mod tests {
         custom.insert(
             "weird".to_string(),
             CustomAgent {
+                unattended_modes: Vec::new(),
                 extends: "telepathy".into(),
                 command: vec!["weird".into()],
                 label: None,

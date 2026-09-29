@@ -265,7 +265,10 @@ impl SingleInstance {
                 .map(|pid| format!(" (pid {pid})"))
                 .unwrap_or_default();
             if error.kind() == std::io::ErrorKind::WouldBlock {
-                anyhow::bail!("another daemon is already running{owner}; stop it first");
+                return Err(crate::rpc_error::failure(
+                    genehub_proto::ErrorCode::Conflict,
+                    format!("another daemon is already running{owner}; stop it first"),
+                ));
             }
             return Err(error).with_context(|| format!("locking {}", path.display()));
         }

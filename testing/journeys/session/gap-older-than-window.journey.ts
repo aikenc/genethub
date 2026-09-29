@@ -9,7 +9,7 @@ defineJourney(
     title: "Asking for a gap older than the window gets an honest full reset",
     oracle: "first-start config replayWindow:1 plus subscribe sinceSeq:0 after a turn returns reset and a useful snapshot",
     catches: ["overflow papered over as a continuation"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     llm: { default: "mock" },
     expectedDurationMs: 35_000,
     timeoutMs: 100_000,

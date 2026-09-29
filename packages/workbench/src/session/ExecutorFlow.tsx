@@ -1,7 +1,9 @@
+import { HumanDecisionSummary } from "./HumanDecisionSummary";
 import type { ExecutorFlowStatus, FlowMessageStatus } from "@genehub/proto";
 import { useEffect, useState } from "react";
 
 import { useWorkbench } from "./store";
+import { WorkflowViewLinks } from "./WorkflowViewLinks";
 import { StructuredWorkflow } from "./StructuredWorkflow";
 
 const labels: Record<string, string> = {
@@ -14,6 +16,7 @@ const labels: Record<string, string> = {
   "run.failed": "任务失败",
 };
 const statuses: Record<string, string> = {
+  awaitingPm: "等待 PM 落实",
   pending: "待执行", ready: "就绪", running: "执行中", waiting: "等待中",
   completed: "已完成", failed: "失败", blocked: "受阻", cancelled: "已取消",
   finishing: "节点收尾中", unreached: "未选择的分支", stopping: "正在收尾", cancelling: "取消中", changesRequested: "需要修改",
@@ -57,7 +60,7 @@ export function ExecutorFlow({ sessionId }: { sessionId: string }) {
         }
         setSnapshot({ owner: client, data: reply.data });
         setError(null);
-        completed = ["completed", "cancelled"].includes(reply.data.run.status);
+        completed = reply.data.run.phase === "closed" && ["completed", "cancelled"].includes(reply.data.run.requirement?.state ?? "");
         if (reply.data.run.humanExit && !reply.data.run.humanExit.answer) delay = 15_000;
       } catch (cause) {
         if (disposed) return;
@@ -81,12 +84,14 @@ export function ExecutorFlow({ sessionId }: { sessionId: string }) {
             className="min-h-11 text-xs text-accent md:min-h-0">刷新执行记录</button>
         </div>
         {flow ? <>
-          <p className="mt-1 text-sm">{flow.run.workflowId} · {labelStatus(flow.run.status)}</p>
+          <WorkflowViewLinks workspaceId={flow.run.workspaceId} runId={flow.run.id} />
+          <p className="mt-1 text-sm">{flow.run.workflowId} · {flow.run.phase === "closing" ? "收尾中" : flow.run.phase === "closed" ? "执行已结束" : "执行未结束"} · {labelStatus(flow.run.programResult ?? flow.run.status)}</p>
+          {flow.run.conditions?.map(condition => <p key={`${condition.nodeId}:${condition.code}:${condition.occurrence}`} className="mt-1 text-sm">{condition.nodeId ? `${condition.nodeId}：` : ""}{condition.reason}</p>)}
+          {flow.run.handles.length > 0 && flow.run.phase === "closed" && <p className="mt-1 text-sm">恢复报告已结束；原目标仍以 PM 的交付决定为准。</p>}
           {flow.run.reason ? <p className="mt-1 text-sm">{flow.run.reason}</p> : null}
           {flow.run.cleanupError ? <p role="alert" className="mt-1 text-sm text-danger">收尾待处理：{flow.run.cleanupError}</p> : null}
           {flow.run.humanExit ? <div role="status" className="mt-2 rounded-lg border border-line px-3 py-2 text-sm">
-            <p>人工决定 · 出口 {flow.run.humanExit.kind}{flow.run.humanExit.answer ? ` · 已选择 ${flow.run.humanExit.answer}` : " · 待答复"}</p>
-            <p className="mt-1 break-words">{flow.run.humanExit.reason}</p>
+            <HumanDecisionSummary decision={flow.run.humanExit} />
             {!flow.run.humanExit.answer ? <button type="button" className="mt-1 min-h-11 text-accent md:min-h-0" onClick={() => void selectSession(flow.run.humanExit!.pmSessionId)}>前往问题卡</button> : null}
           </div> : null}
           <p className="mt-1 text-xs text-muted">最后更新：{new Date(flow.run.updatedAtMs).toLocaleString()}</p>
@@ -105,10 +110,11 @@ export function ExecutorFlow({ sessionId }: { sessionId: string }) {
         <h3 className="text-sm font-medium">当前节点状态</h3>
         {(flow.run.nodes ?? []).map((node) => <div key={node.id} className="mt-3 border-t border-line pt-3 text-sm">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <span className="break-words">{node.id} · {node.uses} · {labelStatus(node.status === "finishing" ? node.status : node.outcome ?? node.status)}</span>
+            <span className="break-words">{node.id} · {node.uses} · {labelStatus(node.phase === "finishing" ? "finishing" : node.status)}</span>
             {node.sessionId ? <button type="button" className="min-h-11 text-xs text-accent md:min-h-0"
               onClick={() => void selectSession(node.sessionId!)}>查看工作会话</button> : null}
           </div>
+          {node.outcome && <p className="mt-1 text-xs text-muted">业务结果：{labelStatus(node.outcome)}</p>}
           {node.reason ? <p className="mt-1 text-sm">{node.reason}</p> : null}
           {Object.keys(node.evidence ?? {}).length ? <details className="mt-2">
             <summary className="cursor-pointer text-xs text-muted">结果与证据</summary>
@@ -133,6 +139,7 @@ function FlowMessage({ message }: { message: FlowMessageStatus }) {
     <h3 className="mt-2 break-words text-sm font-medium">{labels[message.kind] ?? message.kind}{message.nodeId ? ` · ${message.nodeId}` : ""}</h3>
     {text(payload.prompt) ? <p className="mt-2 whitespace-pre-wrap break-words text-sm">{text(payload.prompt)}</p> : null}
     {text(payload.role) ? <p className="mt-1 text-xs text-muted">执行者：{text(payload.role)}</p> : null}
+    {message.kind.startsWith("run.") && <WorkflowViewLinks workspaceId={message.projectWorkspaceId} runId={message.runId} compact />}
     {workerId ? <button type="button" className="mt-2 min-h-11 text-xs text-accent md:min-h-0"
       onClick={() => void selectSession(workerId)}>查看工作会话</button> : null}
     {!labels[message.kind] ? <details className="mt-2 text-xs text-muted"><summary className="cursor-pointer">消息详情</summary>

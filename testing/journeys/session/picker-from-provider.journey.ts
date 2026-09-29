@@ -6,7 +6,7 @@ defineJourney(
     title: "The picker is filled from what the provider says it has",
     oracle: "after settings.setProvider to the mock, genet catalog contains deepseek-v4-flash and no embedding model",
     catches: ["hardcoded picker", "embedding models offered as chat"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     llm: { default: "mock" },
     expectedDurationMs: 20_000,
     timeoutMs: 60_000,

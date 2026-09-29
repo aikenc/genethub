@@ -1,19 +1,18 @@
-# E2EE Data Plane v3
+# E2EE Data Plane
 
-> 状态：MVP 已实现并通过全量验证，作为 validated candidate 提交。Asset Preview 的产品契约见 [轻量 Asset Preview](./assets-quick-preview.md)，Relay 信任边界见 [安全模型](./security-model.md)。
+> 本文前言与版本边界已按 2026-09-28 本地候选更新；以下设计说明不代表该候选已通过测试。Asset Preview 见 [轻量 Asset Preview](./assets-quick-preview.md)，Relay 信任边界见 [安全模型](./security-model.md)。
 
-## 1. 结论
+## 1. 当前版本边界
 
-GeneHub 现在只有一套当前数据面协议：**protocol v3**。它把业务语义与物理连接分开，并在一个已认证的 peer link 内复用有界 logical streams。
+当前 carrier 是 `DATA_PLANE_VERSION = 4`，业务是 `WEB_PROTOCOL_VERSION = 4`。数值相同不代表二者绑定；这次重构没有修改 carrier、WIT 或原生握手。
 
-版本拆成两层，数字目前都是 3，但含义不同：
-
-- `DATA_PLANE_VERSION = 3`：carrier / handshake / frame。`PeerHello.version` 与 record 必须匹配。
-- `PROTOCOL_VERSION = 3`：业务 JSON（`Request` / `Reply` / `ServerFrame`），与 carrier 独立。
-- E2EE 之后、第一条业务 RPC 之前，新客户端调用精简 carrier method `protocol.identity`，得到 `{ protocolVersion }`。它不是 `Request` 变体。
-- 旧客户端可以跳过 `protocol.identity` 直接发 `connection.identity`。新客户端若收到 404，假定业务协议为 v3。
-- 邀请 / claim 路径不调用 `protocol.identity`。
-- Web 保留最多 8 代相邻适配器；当前仅 v3 直通，没有空的 v3→v4 适配器。
+- E2EE 后、业务 RPC 前，客户端调用 carrier method `protocol.identity` 取得 `{ webProtocol }`。
+- Web 当前实现 v4 直通和独立 v3→v4 adapter；最多八代是保留上限，缺少相邻链的代际仍拒绝。
+- v3 wire 类型冻结在 `packages/workbench/src/protocol/versions/v3-types.ts`，不会随当前 proto 生成物改变。
+- 旧卡片 `detail` 仅在 adapter 中转为当前 description；旧 `artifactPreviewBaseUrl` 只在降级请求时补 null。当前内核不再使用这些字段，也不再接受 `TimedOut` Human 决策。遇到旧端的自动超时决策明确要求升级，不伪造许可。
+- v3 daemon 不支持新的模型窗口设置，adapter 明确拒绝这项操作；其他请求走保留的转换。旧客户端能否访问新 daemon 由其实际 codec 决定，不能宣称任意旧客户端都兼容。
+- 兼容转换只处理协议字段，不递归修改工具参数、用户数据或 Workflow output。Carrier 的旧流控另有对端约束，不属于 JSON adapter。
+- 本候选尚未跑测试；代际矩阵通过前不能发布。
 
 ```text
 业务层             RPC / events / asset.preview / shell.run / rtc.negotiate

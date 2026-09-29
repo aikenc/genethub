@@ -16,7 +16,7 @@ use super::output::{self, CliFailure, CLI_SCHEMA};
 use super::rpc::{ConnectError, Refusal, Rpc, RpcError};
 use super::target::{self, Routing, Selection};
 
-const COMMAND_NAMES: [&str; 67] = [
+const COMMAND_NAMES: [&str; 69] = [
     "schema",
     "context",
     "capabilities",
@@ -49,10 +49,12 @@ const COMMAND_NAMES: [&str; 67] = [
     "workflow.activate",
     "workflow.dispatch",
     "workflow.get",
+    "workflow.profile",
     "workflow.history",
     "workflow.journal",
     "workflow.check",
     "workflow.complete",
+    "workflow.deliver",
     "workflow.cancel",
     "workflow.recover",
     "workflow.recovery.start",
@@ -119,6 +121,7 @@ fn mutates(name: &str) -> bool {
             | "workflow.activate"
             | "workflow.dispatch"
             | "workflow.complete"
+            | "workflow.deliver"
             | "workflow.cancel"
             | "workflow.recover"
             | "workflow.recovery.start"
@@ -403,15 +406,25 @@ fn parse_session(args: &[String]) -> Result<Query, CliFailure> {
             let (session_id, flags) = session_id_and_flags(args, "context")?;
             reject_unknown_flags(
                 &flags,
-                &["--through-round", "--budget-tokens", "--exclude-open-round"],
+                &[
+                    "--through-round",
+                    "--budget-tokens",
+                    "--context-window",
+                    "--exclude-open-round",
+                ],
             )?;
+            let context_window = optional_u64_flag(&flags, "--context-window")?;
+            let token_budget = match context_window {
+                Some(window) => Some(crate::session::context_seed::seed_token_budget(Some(
+                    window,
+                ))),
+                None => optional_u64_flag(&flags, "--budget-tokens")?,
+            };
             Ok(Query::SessionContext {
                 session_id,
                 through_round_id: optional_string_flag(&flags, "--through-round")?,
-                token_budget: optional_u64_flag(&flags, "--budget-tokens")?,
-                exclude_open_round: flags
-                    .iter()
-                    .any(|(flag, _)| flag == "--exclude-open-round"),
+                token_budget,
+                exclude_open_round: flags.iter().any(|(flag, _)| flag == "--exclude-open-round"),
             })
         }
         _ => Err(CliFailure::invalid_args(format!(
@@ -429,26 +442,26 @@ fn session_id_and_flags(
         .filter(|value| !value.trim().is_empty() && !value.starts_with("--"))
         .cloned()
         .ok_or_else(|| CliFailure::invalid_args(format!("session {verb} needs a session id")))?;
-        let mut flags = Vec::new();
-        let mut index = 2;
-        while index < args.len() {
-            let name = args[index].clone();
-            if !name.starts_with("--") {
+    let mut flags = Vec::new();
+    let mut index = 2;
+    while index < args.len() {
+        let name = args[index].clone();
+        if !name.starts_with("--") {
+            return Err(CliFailure::invalid_args(format!(
+                "unexpected session {verb} argument: {name}"
+            )));
+        }
+        if verb == "context" && name == "--exclude-open-round" {
+            if flags.iter().any(|(seen, _)| seen == &name) {
                 return Err(CliFailure::invalid_args(format!(
-                    "unexpected session {verb} argument: {name}"
+                    "{name} may be supplied only once"
                 )));
             }
-            if verb == "context" && name == "--exclude-open-round" {
-                if flags.iter().any(|(seen, _)| seen == &name) {
-                    return Err(CliFailure::invalid_args(format!(
-                        "{name} may be supplied only once"
-                    )));
-                }
-                flags.push((name, "true".into()));
-                index += 1;
-                continue;
-            }
-            let value = args
+            flags.push((name, "true".into()));
+            index += 1;
+            continue;
+        }
+        let value = args
             .get(index + 1)
             .ok_or_else(|| CliFailure::invalid_args(format!("{name} needs a value")))?;
         if value.trim().is_empty() || value.starts_with("--") {
@@ -947,7 +960,8 @@ fn context_data(hello: &HelloResult, machine: Option<&str>) -> Value {
         Some(id) => (id.to_string(), String::new()),
         None => (hello.machine_id.clone(), hello.machine_name.clone()),
     };
-    let (workflow_patrol_active_jobs, workflow_patrol_oldest_job_ms) = crate::workflow::patrol_jobs();
+    let (workflow_patrol_active_jobs, workflow_patrol_oldest_job_ms) =
+        crate::workflow::patrol_jobs();
     json!({
         "source": if machine.is_some() { "remoteDaemon" } else { "localDaemon" },
         "principal": {"type": if machine.is_some() { "pairedDevice" } else { "localUser" }},
@@ -1286,18 +1300,20 @@ fn command_schema(name: &str) -> Value {
                 "expectedRevision": {"type": "integer", "minimum": 0, "description": "--revision"}
             }), &["packageId"],
         ),
-        "workflow.inspect" => workflow_schema("genet workflow inspect [--workspace <id>] [--candidate <digest>]", json!({"candidateDigest":{"type":"string","description":"Inspect this immutable candidate catalog; does not activate it"}}), &[]),
+        "workflow.profile" => workflow_schema("genet workflow profile [--workspace <id>] --run <id> [--compare <baseline-run>]", json!({"runId":{"type":"string"},"compare":{"type":"string","description":"Read a second request baseline; no policy conclusion is calculated"}}), &["runId"]),
+        "workflow.inspect" => workflow_schema("genet workflow inspect [--workspace <id>] [--build <digest>]", json!({"candidateDigest":{"type":"string","description":"Inspect this immutable workflow build; does not activate it"}}), &[]),
         "workflow.activate" => workflow_schema(
-            "genet workflow activate [--workspace <id>] [--candidate <digest>] --revision <n>",
+            "genet workflow activate [--workspace <id>] [--build <digest>] --revision <n>",
             json!({"candidateDigest": {"type": "string"}, "revision": {"type": "integer", "minimum": 0}}), &["revision"],
         ),
         "workflow.dispatch" => workflow_schema(
-            "genet workflow dispatch [--workspace <id>] [--workflow <id> | --kind <kind> --complexity <level>] [--task <id>] --message <text> [--candidate <digest>] [--retry-of <run>] [--resume-cancelled] [--wait|--no-wait] [--timeout <s>]",
+            "genet workflow dispatch [--workspace <id>] [--workflow <id> | --kind <kind> --complexity <level>] [--task <id>] --message <text> [--build <digest>] [--agent <id> --model <id>] [--retry-of <run>] [--resume-cancelled] [--wait|--no-wait] [--timeout <s>]",
             json!({
                 "workflowId": {"type": "string"}, "kind": {"type": "string"}, "complexity": {"type": "string"},
                 "taskId": {"type": "string", "description": "--task; dispatch idempotency key, generated if omitted"},
                 "prompt": {"type": "string", "minLength": 1, "description": "--message or positional text"},
-                "candidateDigest": {"type": "string", "description": "--candidate"},
+                "candidateDigest": {"type": "string", "description": "--build; --candidate remains an alias"},
+                "agentTarget": {"type": "object", "description": "--agent and --model together; request-only exact destination, inherited by retries and recovery, no global routing change", "properties": {"agentId": {"type":"string", "minLength":1}, "modelId": {"type":"string", "minLength":1}}, "required":["agentId","modelId"], "additionalProperties":false},
                 "retryOf": {"type": "string", "description": "--retry-of; NEW Run from the workflow entry, sharing original request limits; does not resume an unfinished operation"},
                 "resumeCancelled": {"type": "boolean", "default": false, "description": "--resume-cancelled; requires new user input"},
                 "wait": {"type": "boolean", "default": true}, "timeout": {"type": "integer", "minimum": 0}
@@ -1330,6 +1346,15 @@ fn command_schema(name: &str) -> Value {
                 "reason": {"type": "string", "minLength": 1, "description": "required for a negative outcome"}
             }), &[],
         ),
+        "workflow.deliver" => workflow_schema(
+            "genet workflow deliver [--workspace <id>] --run <business-run> --revision <requirement.revision> --reason <conclusion> --evidence <key=reference>...",
+            json!({
+                "runId": {"type": "string", "minLength": 1},
+                "revision": {"type": "integer", "minimum": 0, "description": "User requirement revision from workflow get, not the Run revision"},
+                "reason": {"type": "string", "minLength": 1, "maxLength": 4096},
+                "evidence": {"type": "object", "minProperties": 1, "maxProperties": 16, "additionalProperties": {"type": "string", "minLength": 1, "maxLength": 2048}, "description": "Repeat --evidence <distinct-key=reference>; only the owning PM can confirm the user goal"}
+            }), &["runId", "revision", "reason", "evidence"],
+        ),
         "workflow.cancel" => workflow_schema(
             "genet workflow cancel [--workspace <id>] --run <id> --revision <n>",
             json!({"runId": {"type": "string", "minLength": 1}, "revision": {"type": "integer", "minimum": 0}}),
@@ -1361,8 +1386,19 @@ fn command_schema(name: &str) -> Value {
             json!({"packageId": {"type": "string"}, "revision": {"type": "integer", "minimum": 0}}), &["revision"],
         ),
         "workflow.human" => workflow_schema(
-            "genet workflow human --run <id> --revision <current> --kind <a|b|c|d|e|f> --reason <text>",
-            json!({"runId": {"type": "string", "minLength": 1}, "revision": {"type": "integer", "minimum": 0}, "kind": {"enum": ["a", "b", "c", "d", "e", "f"]}, "reason": {"type": "string", "minLength": 1, "maxLength": 4096}}), &["runId", "revision", "kind", "reason"],
+            "genet workflow human --run <id> --revision <current> --kind <a|b|c|d|e|f|withdraw> --reason <remaining work and plan>; withdraw requires --request <current card ID> and does not cancel the goal; a optionally binds an exact proposal with --budget-revision <n> --max-runs <total> --max-llm-rounds <total>; c extends the distinct recovery allowance; b optionally binds an explicit scope change with --goal <new goal> --scope-changes <changes> together",
+            json!({
+                "runId": {"type": "string", "minLength": 1},
+                "revision": {"type": "integer", "minimum": 0},
+                "kind": {"enum": ["a", "b", "c", "d", "e", "f", "withdraw"], "description": "a: exact total budget approval (reject preserves goal); b: explicit goal change (not delivery); c: recovery allowance; d: feedback; e: install/login; f: Human acceptance; withdraw: retire only an unanswered proposal, no budget/goal effect"},
+                "requestId": {"type": "string", "description": "--request; required for withdraw, exact current humanExit.requestId; late answers cannot authorize a replacement"},
+                "reason": {"type": "string", "minLength": 1, "maxLength": 4096},
+                "budgetRevision": {"type": "integer", "minimum": 0, "description": "--budget-revision; required together with exact a proposal totals, binds current requestBudget.revision"},
+                "maxLlmRounds": {"type": "integer", "minimum": 1, "maximum": 8192, "description": "--max-llm-rounds; exact a total LLM allowance, with budget revision and maxRuns"},
+                "maxRuns": {"type": "integer", "minimum": 1, "maximum": 64, "description": "--max-runs; exact a total business Run allowance, with budget revision and maxLlmRounds"},
+                "goal": {"type": "string", "minLength": 1, "description": "--goal; explicit b proposal, requires --scope-changes together"},
+                "scopeChanges": {"type": "string", "minLength": 1, "description": "--scope-changes; explicit b changes, requires --goal together"}
+            }), &["runId", "revision", "kind", "reason"],
         ),
         "workflow.budget" => workflow_schema(
             "genet workflow budget [--workspace <id>] --run <id> --revision <requestBudget.revision> [--max-runs <n>] [--max-llm-rounds <n>]",
@@ -1495,7 +1531,7 @@ fn command_schema(name: &str) -> Value {
             &["sessionId", "ref"],
         ),
         "session.context" => session_schema(
-            "genet session context <id> [--through-round <round-id>] [--budget-tokens <n>] [--exclude-open-round]",
+            "genet session context <id> [--through-round <round-id>] [--context-window <n>] [--budget-tokens <n>] [--exclude-open-round]",
             json!({
                 "throughRoundId": nullable_string(),
                 "tokenBudget": nullable_integer(),
@@ -1529,6 +1565,7 @@ fn command_schema(name: &str) -> Value {
             }),
             "workflow.activate" => single_output("workflow.activated"),
             "workflow.complete" => single_output("workflow.completed"),
+            "workflow.deliver" => single_output("workflow.requirement.completed"),
             "workflow.cancel" => single_output("workflow.cancelling"),
             "workflow.recover" => single_output("workflow.recovered"),
             "workflow.recovery.start" => single_output("workflow.recovery.started"),
@@ -1871,6 +1908,8 @@ pub fn reply_kind(reply: &Reply) -> &'static str {
         Reply::SessionArtifact(_) => "session artifact",
         Reply::WorkflowCheck(_) => "workflow check",
         Reply::WorkflowProject(_) => "workflow project",
+        Reply::WorkflowProfile(_) => "workflow profile",
+        Reply::WorkflowView(_) => "workflow view",
         Reply::WorkflowRun(_) => "workflow run",
         Reply::WorkflowJournal(_) => "workflow journal",
         Reply::WorkflowRuns(_) => "workflow runs",
@@ -1895,6 +1934,7 @@ pub fn rpc_error(error: RpcError) -> CliFailure {
     match error {
         RpcError::Transport(message) => CliFailure::daemon_unavailable(message),
         RpcError::Remote(ProtocolError { code, message }) => match code {
+            ErrorCode::QueueFull => CliFailure::business("queueFull", message, None),
             ErrorCode::BadRequest => CliFailure::business("invalidInput", message, None),
             ErrorCode::Unauthorized => CliFailure::business("unauthenticated", message, None),
             ErrorCode::NotFound => CliFailure::business("targetNotFound", message, None),
@@ -1994,6 +2034,22 @@ mod tests {
                 session_id: "s_1".into(),
                 through_round_id: None,
                 token_budget: Some(12_000),
+                exclude_open_round: false,
+            }
+        );
+        assert_eq!(
+            parse(&words(&[
+                "session",
+                "context",
+                "s_1",
+                "--context-window",
+                "1000000"
+            ]))
+            .unwrap(),
+            Query::SessionContext {
+                session_id: "s_1".into(),
+                through_round_id: None,
+                token_budget: Some(64_000),
                 exclude_open_round: false,
             }
         );

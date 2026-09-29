@@ -1162,9 +1162,9 @@ export function Composer({
             ) : phase === "running" ? (
               <div className="flex shrink-0 items-center gap-1.5">
                 {durableInput && (draft.trim() || attachments.length || forwardDraft || selectedDraftIds.size > 0) ? <button
-                  type="button" aria-label="发送补充消息" title="发送提问或新要求，由当前 Agent 接续处理"
+                  type="button" aria-label="发送补充消息" title="先排队保存，在当前回合结束后处理；不会停止正在执行的工具"
                   disabled={disabled || speechInput.busy} onMouseDown={event => event.preventDefault()}
-                  onClick={() => send()} className="min-h-9 rounded-full px-3 text-xs text-accent disabled:opacity-30">发送补充</button> : null}
+                  onClick={() => send()} className="min-h-9 rounded-full px-3 text-xs text-accent disabled:opacity-30">排队发送</button> : null}
                 {quiet ? (
                   // Next to Stop, because that is the decision it informs.
                   <span className="whitespace-nowrap text-[10px] leading-none text-muted" title="智能体已接受这一轮，但有一段时间没有新内容了。这不代表它出了问题——长任务本来就会安静很久。">

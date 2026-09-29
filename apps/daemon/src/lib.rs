@@ -47,6 +47,7 @@ pub mod provider;
 pub mod pty;
 pub mod remote;
 pub mod router;
+mod rpc_error;
 pub mod run;
 pub mod session;
 pub mod skills;

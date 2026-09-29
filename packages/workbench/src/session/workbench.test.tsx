@@ -2876,7 +2876,7 @@ describe("the controls offered to the user", () => {
           id: "p1",
           kind: "permission",
           title: "允许运行 rm -rf build？",
-          detail: "rm -rf build",
+          description: "rm -rf build",
           questions: [],
           options: [
             { id: "allow", label: "允许一次", kind: "allowOnce" },
@@ -2890,6 +2890,20 @@ describe("the controls offered to the user", () => {
     await userEvent.click(screen.getByText("允许一次"));
     expect(onAnswer).toHaveBeenCalledWith({ outcome: "selected", optionId: "allow" });
     expect(screen.getByText("等待你的授权；授权后会以最高权限从原会话继续。")).toBeInTheDocument();
+  });
+
+  it("renders an Agent card's explanation without active links, images or HTML", () => {
+    const { container } = render(<PermissionCard request={{
+      id: "untrusted-card", kind: "question", title: "选择下一步",
+      summary: "这一步需要你的决定", author: "agent",
+      description: "**背景说明**\n\n[执行](javascript:alert(1)) ![跟踪](https://invalid.example/track) <img src=x onerror=alert(1)>",
+      options: [{ id: "continue", label: "继续", kind: "allowOnce" }],
+    }} onAnswer={vi.fn()} />);
+    expect(screen.getByText("这一步需要你的决定")).toBeInTheDocument();
+    expect(screen.getByText("由 Agent 提供，作为来源数据展示")).toBeInTheDocument();
+    expect(container.querySelector("strong")?.textContent).toBe("背景说明");
+    expect(container.querySelectorAll("a, img, script")).toHaveLength(0);
+    expect(screen.getByRole("button", { name: /^继续$/ })).toBeEnabled();
   });
 
   it("distinguishes an Agent question from a permission grant", () => {
@@ -2917,7 +2931,7 @@ describe("the controls offered to the user", () => {
           id: "plan-1",
           kind: "planApproval",
           title: "实现计划",
-          detail: "先持久化，再恢复。",
+          description: "先持久化，再恢复。",
           options: [
             { id: "accept", label: "批准并继续", kind: "allowOnce" },
             { id: "reject", label: "拒绝计划", kind: "reject" },
@@ -3081,6 +3095,8 @@ describe("a whole turn as the timeline sees it", () => {
             durationMs: 5_000,
             usage: {
               inputTokens: 10,
+              inputTokensReported: true,
+              outputTokensReported: true,
               outputTokens: 5,
               cacheReadTokens: 3,
               cacheWriteTokens: 0,
@@ -3102,6 +3118,8 @@ describe("a whole turn as the timeline sees it", () => {
         turnId: "t1",
         usage: {
           inputTokens: 10,
+              inputTokensReported: true,
+              outputTokensReported: true,
           outputTokens: 5,
           cacheReadTokens: 0,
           cacheWriteTokens: 0,

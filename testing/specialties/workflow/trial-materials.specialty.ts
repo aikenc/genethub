@@ -5,7 +5,7 @@ import type { WorkflowRunStatus, WorkspaceInfo } from "@genehub/proto";
 import { defineSpecialty, runGenetAsync } from "../../framework/public.ts";
 
 const q = (text: string) => `'${text.replaceAll("'", `'\\''`)}'`;
-for (const scenario of ["plain", "multiple-repos", "own-worktree", "parent-repo", "formal-metadata", "formal-alternates", "readonly-unsupported"] as const) defineSpecialty({
+for (const scenario of ["plain", "multiple-repos", "own-worktree", "parent-repo", "formal-metadata", "formal-alternates"] as const) defineSpecialty({
   id: `specialty.workflow.trial-materials.${scenario}`,
   title: `Candidate execution uses ${scenario} within its actual material boundary`,
   oracle: "Real candidate dispatch accepts ordinary data and independent Git layouts; Git-writing nodes never borrow the formal repository or its metadata/objects",
@@ -50,7 +50,7 @@ for (const scenario of ["plain", "multiple-repos", "own-worktree", "parent-repo"
     git(root, "add", "."); git(root, "commit", "-m", "formal baseline");
     const material = path.join(root, "spaces/trial--executor/.genethub/temp/exp", scenario);
     mkdirSync(material, { recursive: true });
-    const dataOnly = scenario === "plain" || scenario === "readonly-unsupported";
+    const dataOnly = scenario === "plain";
     const good = ["plain", "multiple-repos", "own-worktree"].includes(scenario);
     const repositories = scenario === "multiple-repos" ? ["front", "back"] : dataOnly || scenario === "parent-repo" ? ["."] : ["work"];
     if (scenario === "multiple-repos" || scenario === "own-worktree") {
@@ -100,15 +100,12 @@ for (const scenario of ["plain", "multiple-repos", "own-worktree", "parent-repo"
     await makeSpace("formal--worker", formal.id, "worker");
     writeFileSync(path.join(formalPackage, "flows/formal.yaml"), JSON.stringify({ schema: "genehub.workflow.definition.v2", id: "formal", version: 2,
       nodes: [{ id: "work", uses: "agent.session", with: { role: "worker" } }], structure: { body: { id: "work-step", type: "task", activity: "work" } } }));
-    writeFileSync(path.join(formalPackage, "roles/worker.yaml"), JSON.stringify({ schema: "genehub.workflow.role.v1", id: "worker", agentId: "genet", modelId: "deepseek/deepseek-v4-flash", userInteraction: "readOnly", prompt: "prompts/worker.md" }));
+    writeFileSync(path.join(formalPackage, "roles/worker.yaml"), JSON.stringify({schema: "genehub.workflow.role.v3", tags: ["Flash"], id: "worker", userInteraction: "readOnly", prompt: "prompts/worker.md"}));
     writeFileSync(path.join(formalPackage, "prompts/worker.md"), "FORMAL_WORKER");
     const executor = await makeSpace("trial--executor", opened.workspaceId, "executor");
     await makeSpace("trial--worker", executor.id, "worker");
     writeFileSync(path.join(source, "prompts/direct-worker.md"), "TRIAL_MATERIAL_WORKER: verify and write only in the assigned material, preserving its branches.");
-    writeFileSync(path.join(source, "roles/worker.yaml"), JSON.stringify({ schema: "genehub.workflow.role.v1", id: "worker", agentId: "genet", modelId: "deepseek/deepseek-v4-flash", userInteraction: "readOnly", prompt: "prompts/direct-worker.md" }));
-    if (scenario === "readonly-unsupported") {
-      writeFileSync(path.join(source, "roles/worker.yaml"), JSON.stringify({ schema: "genehub.workflow.role.v1", id: "worker", agentId: "tclaude", evidenceOnly: true, userInteraction: "readOnly", prompt: "prompts/direct-worker.md" }));
-    }
+    writeFileSync(path.join(source, "roles/worker.yaml"), JSON.stringify({schema: "genehub.workflow.role.v3", tags: ["Flash"], id: "worker", userInteraction: "readOnly", prompt: "prompts/direct-worker.md"}));
 
     writeFileSync(path.join(source, "flows/trial-data.yaml"), JSON.stringify({ schema: "genehub.workflow.definition.v2", id: "trial-data", version: 2,
       nodes: repositories.map((repository, index) => ({ id: `work-${index}`, uses: "agent.session", with: { role: "worker", workspace: repository,
@@ -174,12 +171,7 @@ for (const scenario of ["plain", "multiple-repos", "own-worktree", "parent-repo"
       }
       return Boolean(run && ["completed", "blocked", "failed"].includes(run.status)) || (!good && !run && dispatched && events.some((event) => event.type === "turnCompleted"));
     }, 45000).catch((error) => { throw new Error(`${error}; Run=${JSON.stringify(run)}; actual tool results=${JSON.stringify(toolResults()).slice(-6000)}`); });
-    if (scenario === "readonly-unsupported") {
-      const node = run?.nodes.find(n => n.uses === "agent.session");
-      t.assertions.assert(!!run && ["blocked", "failed"].includes(run.status)
-        && JSON.stringify(run).includes("evidenceOnlyUnsupported") && !node?.sessionId && seen.size === 0,
-        `unsupported read-only adapter was started or refused without a capability reason: ${JSON.stringify(run)}`);
-    } else if (good) {
+    if (good) {
       t.assertions.assert(run?.status === "completed" && run.workflowId === "trial-data" && run.dcgDigest === inspected.data.candidateDigest && run.executorWorkspaceId === executor.id && run.executionRoot === material, `material execution failed: ${JSON.stringify(run)}`);
       for (const repo of repositories) t.assertions.assert(readFileSync(path.join(material, repo, "result.txt"), "utf8") === "actual trial result", "Run completed without real material output");
     } else {

@@ -6,7 +6,7 @@ defineJourney(
     title: "Changes made by the agent show up in git and can be committed",
     oracle: "git.status lists result.txt then git.commit leaves a clean tree",
     catches: ["status from memory", "commit without the file"],
-    tags: ["core", "session", "filesystem", "parity"],
+    tags: ["core", "session", "filesystem"],
     llm: { default: "mock", realEligible: true },
     resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
     expectedDurationMs: 30_000,

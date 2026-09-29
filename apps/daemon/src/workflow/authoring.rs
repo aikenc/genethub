@@ -13,13 +13,17 @@ pub(crate) fn schema() -> Value {
     )
     .expect("schema serializes");
     schema["$id"] = json!("urn:genehub:workflow:definition:authoring:v1");
-    schema["properties"]["schema"] =
-        json!({"enum": [DEFINITION_SCHEMA, "genehub.workflow.definition.v2"]});
+    schema["required"]
+        .as_array_mut()
+        .expect("definition required fields")
+        .push(json!("structure"));
+    schema["properties"]["structure"] = json!({"$ref":"#/$defs/Definition"});
+    schema["properties"]["schema"] = json!({"enum": [DEFINITION_SCHEMA]});
     schema["properties"]["version"]["minimum"] = json!(1);
     schema["properties"]["nodes"]["minItems"] = json!(1);
     schema["properties"]["nodes"]["maxItems"] = json!(MAX_NODES);
     schema["x-genehub"] = json!({
-        "dialect": "genehub.workflow.definition.v2", "legacyDialect": DEFINITION_SCHEMA,
+        "dialect": "genehub.workflow.definition.v2",
         "validationCommand": "workflow check --draft", "maxDiagnostics": 64,
         "capabilities": ["agent.session", "result.publish", "request.budget"],
         "role": {
@@ -28,7 +32,6 @@ pub(crate) fn schema() -> Value {
             "tags": ["Max", "Pro", "Flash", "视频理解", "图片理解"],
             "resolution": "At each dispatch, freshly read machine-global costs and choose the lowest-cost available Agent + model matching every tag; block for human action when none are usable.",
             "forbiddenExactFields": ["agentId", "modelId", "modeId", "runtimeValues"],
-            "legacyReadOnlySchema": LEGACY_ROLE_SCHEMA,
         },
         "requestBudget": {
             "inputs": "none; current Run's shared request only",
@@ -163,11 +166,7 @@ fn diagnostic(file: &str, error: &anyhow::Error) -> WorkflowDiagnostic {
 
 /// One causal diagnostic per failing flow (deduplicated), bounded at 64.
 /// Positive metadata is derived ONLY from the final consistent compiled snapshot.
-pub(super) fn check_draft(
-    root: &Path,
-    package_id: Option<&str>,
-    registry: &crate::adapter::registry::Registry,
-) -> WorkflowDraftReport {
+pub(super) fn check_draft(root: &Path, package_id: Option<&str>) -> WorkflowDraftReport {
     let mut report = WorkflowDraftReport {
         schema: "genehub.workflow.draft-check.v1".into(),
         root: package::packages_root(root).display().to_string(),
@@ -211,32 +210,6 @@ pub(super) fn check_draft(
     match compile_candidate(&package) {
         Err(error) => push(&mut report, diagnostic(package::MANIFEST_FILE, &error)),
         Ok(candidate) => {
-            for role in candidate
-                .workflows
-                .values()
-                .flat_map(|bundle| bundle.roles.values())
-            {
-                // Legacy role.v1 pins an exact adapter, so draft checking can
-                // still prove its evidence boundary. Current roles resolve a
-                // live tag route only when dispatched and filter every
-                // candidate by this same requirement then.
-                if role.evidence_only && role.schema == LEGACY_ROLE_SCHEMA {
-                    let agent_id = role.agent_id.as_deref().unwrap_or_default();
-                    if let Err(error) = registry.require_evidence_scope(agent_id) {
-                        push(&mut report, WorkflowDiagnostic {
-                            phase: "capability".into(), code: "WF_ROLE_CAPABILITY".into(), severity: "error".into(),
-                            file: format!("roles/{}.yaml", role.id), path: "/agentId".into(),
-                            message: format!("{error:#}"),
-                            hint: "Choose an Agent supporting evidenceOnly and a compatible model, then rerun `workflow check --draft`. Read-only interaction or a prompt alone cannot enforce the evidence boundary.".into(),
-                            expected: Some("adapter with bounded read-only evidence scope".into()), actual: Some(agent_id.chars().take(256).collect()),
-                            line: None, column: None,
-                        });
-                    }
-                }
-            }
-            if !report.diagnostics.is_empty() {
-                return report;
-            }
             report.valid = true;
             note_retired_fields(&mut report, &package.root);
             report.candidate_digest = Some(candidate.digest);
@@ -272,7 +245,9 @@ fn note_retired_fields(report: &mut WorkflowDraftReport, root: &Path) {
         };
         let file = format!(
             "flows/{}",
-            path.file_name().and_then(|name| name.to_str()).unwrap_or("flow.yaml")
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("flow.yaml")
         );
         for (key, child) in map {
             let Some(name) = key.as_str() else {
@@ -281,10 +256,32 @@ fn note_retired_fields(report: &mut WorkflowDraftReport, root: &Path) {
             match name {
                 "pmAnswerSeconds" => push(
                     report,
-                    retired(&file, "/pmAnswerSeconds", "info", "pmAnswerSeconds 已废弃并忽略"),
+                    retired(
+                        &file,
+                        "/pmAnswerSeconds",
+                        "info",
+                        "pmAnswerSeconds 已废弃，当前定义拒绝该字段",
+                    ),
                 ),
-                "budget" => note_mapping(report, &file, "/budget", child, &["maxRuns", "maxLlmRounds"], &[("deadlineSeconds", "deadlineSeconds 已废弃并忽略")]),
-                "structure" => note_mapping(report, &file, "/structure", child, &["body", "procedures", "input", "limits"], &[("timeoutMs", "timeoutMs 已废弃并忽略")]),
+                "budget" => note_mapping(
+                    report,
+                    &file,
+                    "/budget",
+                    child,
+                    &["maxRuns", "maxLlmRounds"],
+                    &[(
+                        "deadlineSeconds",
+                        "deadlineSeconds 已废弃，当前定义拒绝该字段",
+                    )],
+                ),
+                "structure" => note_mapping(
+                    report,
+                    &file,
+                    "/structure",
+                    child,
+                    &["body", "procedures", "input", "limits"],
+                    &[("timeoutMs", "timeoutMs 已废弃，当前定义拒绝该字段")],
+                ),
                 "schema" | "id" | "version" | "entry" | "outcomes" | "include" | "nodes" => {}
                 other => push(
                     report,
@@ -311,9 +308,20 @@ fn note_mapping(
             continue;
         };
         if let Some((_, message)) = retired_keys.iter().find(|(key, _)| *key == name) {
-            push(report, retired(file, &format!("{prefix}/{name}"), "info", message));
+            push(
+                report,
+                retired(file, &format!("{prefix}/{name}"), "info", message),
+            );
         } else if !known.contains(&name) {
-            push(report, retired(file, &format!("{prefix}/{name}"), "warning", "未知字段，已忽略"));
+            push(
+                report,
+                retired(
+                    file,
+                    &format!("{prefix}/{name}"),
+                    "warning",
+                    "未知字段，已忽略",
+                ),
+            );
         }
     }
 }

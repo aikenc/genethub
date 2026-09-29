@@ -56,7 +56,7 @@ for (const scenario of ["correction", "workflow-intent", "self-method"] as const
     opened.mock.script(...Array.from({ length: 12 }, () => ({ respond: (request: unknown) => {
       const current = stage++;
       if (current === 0) return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" workflow build --package game-delivery' } } };
-      if (current === 1) return { tool: { name: "request_user_input", arguments: { questions: [{ id: field(request, "challengeId"), header: "接管", question: "确认接管测试项目", options: [{ label: "yes", description: "接管" }, { label: "no", description: "拒绝" }] }] } } };
+      if (current === 1) return { tool: { name: "request_user_input", arguments: { title: "确认接管测试项目", summary: "共 1 个待回答问题。", description: "请使用下方选项回答问题；提交后继续当前任务。", questions: [{ id: field(request, "challengeId"), header: "接管", question: "确认接管测试项目", options: [{ label: "yes", description: "接管" }, { label: "no", description: "拒绝" }] }] } } };
       if (current === 2) return { tool: { name: "bash", arguments: { command: `"$GENEHUB_CLI" workflow build --package game-delivery --apply --plan-digest ${field(request, "planDigest")} --revision ${field(request, "expectedRevision")} --action-id install-real-pm-trial` } } };
       return { text: "项目已接管。我先前把远程攻击理解成远程联机，把工作流伪代码当成 PM 的逐项派发任务，并把灰烬包生成完成等同于正式发布完成。这些判断还没有核对。" };
     } })));

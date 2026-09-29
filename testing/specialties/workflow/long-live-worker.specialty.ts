@@ -22,18 +22,33 @@ defineSpecialty({
     await t.flows.main.configureMockProvider(opened.client, opened.mock);
     const source = t.flows.main.seedWorkflowPackage({ projectRoot: opened.workspaceRoot });
     writeFileSync(path.join(source, "prompts/worker.md"), "LONG_LIVE_WORKER: submit the result after the tool completes.\n");
-    writeFileSync(path.join(source, "roles/worker.yaml"), JSON.stringify({
-      schema: "genehub.workflow.role.v1", id: "worker", agentId: "genet",
-      modelId: "deepseek/deepseek-v4-flash", userInteraction: "readOnly", prompt: "prompts/worker.md",
-    }));
-    writeFileSync(path.join(source, "flows/long-worker.yaml"), JSON.stringify({
-      schema: "genehub.workflow.definition.v1", id: "long-worker", version: 1, entry: "work",
-      nodes: [
-        { id: "work", uses: "agent.session", with: { role: "worker" },
-          completion: { all: [{ key: "result", verify: "value.nonEmpty" }] }, on: { completed: ["publish"] } },
-        { id: "publish", uses: "result.publish" },
-      ],
-    }));
+    writeFileSync(path.join(source, "roles/worker.yaml"), JSON.stringify({schema: "genehub.workflow.role.v3", tags: ["Flash"], id: "worker", userInteraction: "readOnly", prompt: "prompts/worker.md"}));
+    writeFileSync(path.join(source, "flows/long-worker.yaml"), JSON.stringify({schema: "genehub.workflow.definition.v2",
+id: "long-worker",
+version: 1,
+nodes: [{id: "work", uses: "agent.session", with: { role: "worker" }, completion: { all: [{ key: "result", verify: "value.nonEmpty" }] }},
+{id: "publish", uses: "result.publish"}],
+structure: {
+  "body": {
+    "id": "sequence-work",
+    "type": "sequence",
+    "steps": [
+      {
+        "id": "step-work",
+        "type": "task",
+        "activity": "work",
+        "accept": [
+          "completed"
+        ]
+      },
+      {
+        "id": "step-publish",
+        "type": "task",
+        "activity": "publish"
+      }
+    ]
+  }
+}}));
     let dispatched = false, toolStarted = false;
     opened.mock.script(...Array.from({ length: 24 }, () => ({ respond: (request: unknown) => {
       const body = JSON.stringify(request);
@@ -62,13 +77,13 @@ defineSpecialty({
     let original: WorkflowRunStatus | undefined;
     await t.tools.waitUntil(async () => {
       original = (await history()).find(run => run.taskId === "live-tool");
-      return toolStarted && original?.status === "running" && !!original.nodes.find(node => node.id === "work")?.sessionId;
+      return toolStarted && original?.status === "running" && !!original.nodes.find(node => node.definitionId === "work")?.sessionId;
     }, 30_000);
     const startedAt = Date.now();
     await t.tools.waitUntil(async () => Date.now() - startedAt >= 182_000, 190_000);
     const afterCutoff = await history();
     const current = afterCutoff.find(run => run.id === original!.id);
-    t.assertions.assert(current?.status === "running" && current.nodes.find(node => node.id === "work")?.status === "running"
+    t.assertions.assert(current?.status === "running" && current.nodes.find(node => node.definitionId === "work")?.status === "running"
       && !afterCutoff.some(run => run.handles.some(handle => handle.runId === original!.id)),
     "patrol froze a live Worker at the old 180 second wall cutoff");
     await t.tools.waitUntil(async () => (await history()).find(run => run.id === original!.id)?.status === "completed", 35_000);

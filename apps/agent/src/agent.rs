@@ -10,9 +10,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::Mutex;
 
-use crate::protocol::{
-    now_ms, AssistantDraft, Content, MediaAttachment, Message, StopReason, Usage,
-};
+use crate::protocol::{now_ms, AssistantDraft, Content, MediaAttachment, Message, StopReason};
 use crate::provider::{self, ProviderEvent, Request};
 use crate::rpc::Emitter;
 use crate::state::State;
@@ -21,6 +19,7 @@ use crate::tools;
 const TRUNCATED_TOOL_CALL_MESSAGE: &str =
     "was not executed: the response hit the output token limit, so its arguments may be truncated. Re-issue the tool call with complete arguments.";
 
+#[cfg(test)]
 pub async fn run_prompt(state: Arc<Mutex<State>>, text: String) {
     run_prompt_with_attachments(state, text, Vec::new()).await;
 }
@@ -90,19 +89,6 @@ pub async fn run_prompt_with_attachments(
         {
             let mut guard = state.lock().await;
             guard.session.append_message(assistant.message.clone());
-            guard.stats.add(&assistant.usage);
-            if !matches!(
-                assistant.stop_reason,
-                StopReason::Error | StopReason::Aborted
-            ) {
-                guard.last_request = Some(crate::state::AccountedUsage {
-                    input: assistant.usage.input,
-                    output: assistant.usage.output,
-                    cache_read: assistant.usage.cache_read,
-                    cache_write: assistant.usage.cache_write,
-                    accounted_messages: guard.session.messages.len(),
-                });
-            }
             // A provider rejection before any tool call has no side effects to
             // preserve. Keep its emitted transcript and append-only audit, but
             // do not make the rejected prompt (especially large native media)
@@ -239,7 +225,6 @@ struct Snapshot {
 struct StreamedAssistant {
     message: Message,
     stop_reason: StopReason,
-    usage: Usage,
 }
 
 fn has_visible_answer_or_tool(message: &Message) -> bool {
@@ -439,7 +424,6 @@ async fn stream_assistant(
     StreamedAssistant {
         message,
         stop_reason: draft.stop_reason,
-        usage: draft.usage,
     }
 }
 
@@ -493,8 +477,7 @@ async fn execute_calls(
     let abort = { state.lock().await.abort.clone() };
     let tools_enabled = snapshot.tools_enabled;
     let interaction_is_valid = calls.len() == 1 && calls[0].1 == "request_user_input";
-    let requested_input = interaction_is_valid
-        && tools::user_input(&calls[0].2).is_ok();
+    let requested_input = interaction_is_valid && tools::user_input(&calls[0].2).is_ok();
     let mut ordered: Vec<Option<Message>> = calls.iter().map(|_| None).collect();
     for batch in mutation_batches(calls, &snapshot.cwd) {
         let mut joins = Vec::new();
@@ -532,6 +515,7 @@ async fn execute_calls(
     (results, requested_input, attachments)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_one(
     emitter: &Emitter,
     cwd: &Path,
@@ -550,14 +534,14 @@ async fn execute_one(
     } else if name == "request_user_input" {
         match tools::user_input(arguments) {
             Ok(payload) => {
-                        emitter.send(json!({
-                            "type": "user_input_requested",
-                            "toolCallId": id,
-                            "title": payload["title"],
-                            "summary": payload["summary"],
-                            "description": payload["description"],
-                            "questions": payload["questions"],
-                        }));
+                emitter.send(json!({
+                    "type": "user_input_requested",
+                    "toolCallId": id,
+                    "title": payload["title"],
+                    "summary": payload["summary"],
+                    "description": payload["description"],
+                    "questions": payload["questions"],
+                }));
                 tools::ToolResult::ok("Waiting for the user's response.")
             }
             Err(error) => tools::ToolResult::error(error),
@@ -568,18 +552,18 @@ async fn execute_one(
         tools::ToolResult::error(format!(
             "tool arguments are not valid JSON, so {name} was not run: {raw}"
         ))
-        } else if abort.requested() {
-            tools::ToolResult::error("Operation aborted")
-        } else {
-            let cancel = abort.poll();
-            tokio::select! {
-                result = tools::execute(name, arguments, cwd, cancel) => result,
-                () = abort.cancelled() => {
-                    eprintln!("event=tool_cancelled tool={name} tool_call_id={id}");
-                    tools::ToolResult::error("Operation aborted")
-                }
+    } else if abort.requested() {
+        tools::ToolResult::error("Operation aborted")
+    } else {
+        let cancel = abort.poll();
+        tokio::select! {
+            result = tools::execute(name, arguments, cwd, cancel) => result,
+            () = abort.cancelled() => {
+                eprintln!("event=tool_cancelled tool={name} tool_call_id={id}");
+                tools::ToolResult::error("Operation aborted")
             }
-        };
+        }
+    };
     let result = enforce_media_modality(result, model);
     emitter.send(json!({
         "type": "tool_execution_end",
@@ -800,8 +784,6 @@ mod tests {
             additional_system_prompts: Vec::new(),
             skills: Vec::<Skill>::new(),
             cwd,
-            stats: Usage::default(),
-            last_request: None,
             streaming: false,
             compacting: false,
             tools_enabled: true,
@@ -845,10 +827,7 @@ mod tests {
             ("3".into(), "write".into(), json!({"path": "./a.txt"})),
             ("4".into(), "edit".into(), json!({"path": "b.txt"})),
         ];
-        assert_eq!(
-            mutation_batches(&calls, &cwd),
-            vec![vec![0, 1], vec![2, 3]]
-        );
+        assert_eq!(mutation_batches(&calls, &cwd), vec![vec![0, 1], vec![2, 3]]);
     }
 
     #[tokio::test]

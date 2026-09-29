@@ -6,7 +6,7 @@ defineJourney(
     title: "An empty prompt is refused before it reaches the model",
     oracle: "session.send of whitespace is badRequest and mock LLM request count stays 0",
     catches: ["blank prompt billed", "model called anyway"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     llm: { default: "mock" },
     expectedDurationMs: 20_000,
     timeoutMs: 60_000,

@@ -428,42 +428,45 @@ export function seedDirectChangePackage(input: {
   });
   writeFileSync(
     path.join(root, "flows/direct-change.yaml"),
-    `${JSON.stringify({
-      schema: "genehub.workflow.definition.v1",
-      id: "direct-change",
-      version: 1,
-      entry: "implement",
-      nodes: [
-        {
-          id: "implement",
-          uses: "agent.session",
-          with: {
+    `${JSON.stringify({schema: "genehub.workflow.definition.v2",
+id: "direct-change",
+version: 1,
+nodes: [{id: "implement", uses: "agent.session", with: {
             role: "worker",
             workspace: ".",
             writeLease: { ttlSeconds: 3600 },
-          },
-          completion: {
+          }, completion: {
             all: [
               { key: "commit", verify: "value.nonEmpty" },
               { key: "checks", verify: "value.nonEmpty" },
             ],
-          },
-          on: { completed: ["publish"] },
-        },
-        { id: "publish", uses: "result.publish" },
-      ],
-    }, null, 2)}\n`,
+          }},
+{id: "publish", uses: "result.publish"}],
+structure: {
+  "body": {
+    "id": "sequence-implement",
+    "type": "sequence",
+    "steps": [
+      {
+        "id": "step-implement",
+        "type": "task",
+        "activity": "implement",
+        "accept": [
+          "completed"
+        ]
+      },
+      {
+        "id": "step-publish",
+        "type": "task",
+        "activity": "publish"
+      }
+    ]
+  }
+}}, null, 2)}\n`,
   );
   writeFileSync(
     path.join(root, "roles/worker.yaml"),
-    `${JSON.stringify({
-      schema: "genehub.workflow.role.v1",
-      id: "worker",
-      agentId: input.agentId ?? "genet",
-      ...(input.modelId === null ? {} : { modelId: input.modelId ?? "deepseek/deepseek-v4-flash" }),
-      userInteraction: "readOnly",
-      prompt: "prompts/direct-worker.md",
-    }, null, 2)}\n`,
+    `${JSON.stringify({schema: "genehub.workflow.role.v3", tags: ["Flash"], id: "worker", userInteraction: "readOnly", prompt: "prompts/direct-worker.md"}, null, 2)}\n`,
   );
   writeFileSync(
     path.join(root, "prompts/direct-worker.md"),
@@ -657,7 +660,6 @@ export async function sendPrompt(
       sessionId,
       text,
       attachments: [],
-      artifactPreviewBaseUrl: null,
       continuesRound,
     },
   });

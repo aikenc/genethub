@@ -121,45 +121,7 @@ pub fn reasoning_effort(level: &str) -> Option<&'static str> {
     }
 }
 
-/// Server-sent events arrive in arbitrary chunks; this reassembles `data:`
-/// payloads across chunk boundaries.
-pub struct SseBuffer {
-    buffer: String,
-}
-
-impl SseBuffer {
-    pub fn new() -> Self {
-        SseBuffer {
-            buffer: String::new(),
-        }
-    }
-
-    pub fn push(&mut self, chunk: &str) -> Vec<String> {
-        self.buffer.push_str(chunk);
-        let mut payloads = Vec::new();
-
-        while let Some(index) = self.buffer.find('\n') {
-            let line = self.buffer[..index].trim_end_matches('\r').to_string();
-            self.buffer.drain(..=index);
-            let Some(data) = line.strip_prefix("data:") else {
-                continue;
-            };
-            let data = data.trim();
-            if data.is_empty() || data == "[DONE]" {
-                continue;
-            }
-            payloads.push(data.to_string());
-        }
-
-        payloads
-    }
-}
-
-impl Default for SseBuffer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+pub use genet_http::SseDecoder as SseBuffer;
 
 #[cfg(test)]
 mod tests {
@@ -189,15 +151,8 @@ mod tests {
     #[test]
     fn sse_payloads_survive_split_chunks() {
         let mut buffer = SseBuffer::new();
-        assert!(buffer.push("data: {\"a\":").is_empty());
-        let payloads = buffer.push("1}\n\n");
+        assert!(buffer.push(b"data: {\"a\":").is_empty());
+        let payloads = buffer.push(b"1}\n\n");
         assert_eq!(payloads, vec!["{\"a\":1}".to_string()]);
-    }
-
-    #[test]
-    fn sse_skips_comments_and_done_sentinel() {
-        let mut buffer = SseBuffer::new();
-        let payloads = buffer.push(": ping\nevent: message\ndata: [DONE]\ndata: {\"b\":2}\n");
-        assert_eq!(payloads, vec!["{\"b\":2}".to_string()]);
     }
 }

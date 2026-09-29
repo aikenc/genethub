@@ -29,6 +29,8 @@ export interface PendingMessage {
   messageId?: string;
   taskRunId?: string;
   missingAttachments?: number;
+  /** Retry only transport-uncertain/offline messages, never a semantic refusal. */
+  autoRetry?: boolean;
   text: string;
   attachments: Attachment[];
   /** Browser-owned videos awaiting chunk upload; never persisted in the log. */
@@ -338,7 +340,6 @@ function permissionResolutionMessage(
   request: PermissionRequest,
   outcome: Extract<SessionEvent, { type: "permissionResolved" }>["outcome"],
 ): string {
-  if (outcome.outcome === "timedOut") return "确认已超时；任务不会继续执行。";
   if (outcome.outcome === "canceled") return "已取消；任务不会继续执行。";
   if (outcome.outcome === "answered") return "回答已提交，Agent 正在继续执行。";
 

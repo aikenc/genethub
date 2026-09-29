@@ -6,7 +6,7 @@ defineJourney(
     title: "A key entered in settings makes the very next task work",
     oracle: "settings.setProvider then a write task lands result.txt without restarting the daemon",
     catches: ["key only takes effect after relaunch"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     llm: { default: "mock" },
     expectedDurationMs: 30_000,
     timeoutMs: 90_000,

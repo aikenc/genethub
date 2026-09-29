@@ -148,30 +148,6 @@ impl GrantSet {
             .map(|capability| capability.as_str().to_string())
             .collect()
     }
-
-    /// Files written before the speech grant existed represented "full" as
-    /// every then-known capability. Migrate only that exact legacy shape;
-    /// deliberately narrowed devices keep their narrower authority.
-    pub(crate) fn add_speech_to_legacy_full(&mut self) {
-        const LEGACY_FULL: [Capability; 9] = [
-            Capability::Handshake,
-            Capability::Read,
-            Capability::Session,
-            Capability::Files,
-            Capability::Git,
-            Capability::Pty,
-            Capability::Devices,
-            Capability::Settings,
-            Capability::Update,
-        ];
-        if !self.0.contains(&Capability::Speech)
-            && LEGACY_FULL
-                .iter()
-                .all(|capability| self.0.contains(capability))
-        {
-            self.0.insert(Capability::Speech);
-        }
-    }
 }
 
 impl Default for GrantSet {
@@ -347,6 +323,8 @@ pub fn required(request: &Request) -> Capability {
         | Request::WorkflowCheck { .. }
         | Request::WorkflowGet { .. }
         | Request::WorkflowJournal { .. }
+        | Request::WorkflowProfile { .. }
+        | Request::WorkflowView { .. }
         | Request::WorkflowHistory { .. }
         | Request::SessionImportList { .. }
         | Request::RoundTrunkList { .. }
@@ -382,11 +360,13 @@ pub fn required(request: &Request) -> Capability {
         }
 
         Request::SessionCreate { .. }
+        | Request::SessionCreateRouted { .. }
         | Request::AgentSpaceBuilder { .. }
         | Request::ProjectApprovalRequest { .. }
         | Request::WorkflowBuild { .. }
         | Request::WorkflowActivate { .. }
         | Request::WorkflowDispatch { .. }
+        | Request::WorkflowConsult { .. }
         | Request::WorkflowComplete { .. }
         | Request::WorkflowCancel { .. }
         | Request::WorkflowRecover { .. }
@@ -394,6 +374,7 @@ pub fn required(request: &Request) -> Capability {
         | Request::WorkflowHuman { .. }
         | Request::WorkflowRecoveryReset { .. }
         | Request::WorkflowBudget { .. }
+        | Request::WorkflowRequirementComplete { .. }
         | Request::SessionSend { .. }
         | Request::SessionArtifactBegin { .. }
         | Request::SessionArtifactChunk { .. }
@@ -403,6 +384,7 @@ pub fn required(request: &Request) -> Capability {
         | Request::SessionForkRouted { .. }
         | Request::SessionForkExport { .. }
         | Request::SessionForkImport { .. }
+        | Request::SessionForkImportRouted { .. }
         | Request::SessionImport { .. }
         | Request::SessionInterrupt { .. }
         | Request::SessionClose { .. }
@@ -640,25 +622,5 @@ mod tests {
             }),
             Capability::Speech
         );
-    }
-
-    #[test]
-    fn only_the_exact_legacy_full_shape_gains_speech_during_migration() {
-        let mut legacy_full = GrantSet::of([
-            Capability::Read,
-            Capability::Session,
-            Capability::Files,
-            Capability::Git,
-            Capability::Pty,
-            Capability::Devices,
-            Capability::Settings,
-            Capability::Update,
-        ]);
-        legacy_full.add_speech_to_legacy_full();
-        assert!(legacy_full.allows(Capability::Speech));
-
-        let mut narrowed = GrantSet::of([Capability::Read, Capability::Session]);
-        narrowed.add_speech_to_legacy_full();
-        assert!(!narrowed.allows(Capability::Speech));
     }
 }

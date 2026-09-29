@@ -33,14 +33,32 @@ defineSpecialty({
       schema: "genehub.workflow.role.v3", id: "worker", tags: ["Max"],
       userInteraction: "readOnly", prompt: "prompts/worker.md",
     }));
-    writeFileSync(path.join(source, "flows/route-resume.yaml"), JSON.stringify({
-      schema: "genehub.workflow.definition.v1", id: "route-resume", version: 1, entry: "work",
-      nodes: [
-        { id: "work", uses: "agent.session", with: { role: "worker", workspace: "." },
-          completion: { all: [{ key: "result", verify: "value.nonEmpty" }] }, on: { completed: ["publish"] } },
-        { id: "publish", uses: "result.publish" },
-      ],
-    }));
+    writeFileSync(path.join(source, "flows/route-resume.yaml"), JSON.stringify({schema: "genehub.workflow.definition.v2",
+id: "route-resume",
+version: 1,
+nodes: [{id: "work", uses: "agent.session", with: { role: "worker", workspace: "." }, completion: { all: [{ key: "result", verify: "value.nonEmpty" }] }},
+{id: "publish", uses: "result.publish"}],
+structure: {
+  "body": {
+    "id": "sequence-work",
+    "type": "sequence",
+    "steps": [
+      {
+        "id": "step-work",
+        "type": "task",
+        "activity": "work",
+        "accept": [
+          "completed"
+        ]
+      },
+      {
+        "id": "step-publish",
+        "type": "task",
+        "activity": "publish"
+      }
+    ]
+  }
+}}));
     let started = false, workerSubmitted = false;
     const respond = (request: unknown) => {
       const body = JSON.stringify(request);
@@ -66,9 +84,9 @@ defineSpecialty({
     let blocked: WorkflowRunStatus | undefined;
     await t.tools.waitUntil(async () => {
       blocked = (await history()).find(run => run.taskId === "resume-original");
-      return blocked?.status === "blocked" && blocked.reason?.includes("RouteUnavailable") === true;
+      return blocked?.status === "running" && blocked.phase === "open" && !blocked.programResult && blocked.conditions.some(condition => condition.code === "routeUnavailable");
     }, 30_000);
-    t.assertions.assert(!workerSubmitted && blocked!.nodes.find(node => node.id === "work")?.sessionId === undefined,
+    t.assertions.assert(!workerSubmitted && blocked!.nodes.find(node => node.definitionId === "work")?.sessionId === undefined,
       "route block already started a Worker");
     await opened.client.call({ type: "settings.setAgentPreferences", payload: { preferences: profiles(true) } });
     await t.tools.waitUntil(async () => (await history()).some(run => run.id === blocked!.id && run.status === "completed"), 30_000);

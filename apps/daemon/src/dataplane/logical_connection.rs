@@ -826,6 +826,7 @@ pub(crate) async fn client(
                 let _ = disconnected.await;
                 drop(pump.take());
                 let deadline = tokio::time::Instant::now() + RESUME_TTL;
+                let mut delay = std::time::Duration::from_millis(250);
                 loop {
                     if attach.is_closed() {
                         return;
@@ -861,7 +862,9 @@ pub(crate) async fn client(
                     if tokio::time::Instant::now() >= deadline {
                         return;
                     }
-                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    tokio::time::sleep_until((tokio::time::Instant::now() + delay).min(deadline))
+                        .await;
+                    delay = (delay * 2).min(std::time::Duration::from_secs(4));
                 }
             }
         })

@@ -6,7 +6,7 @@ defineJourney(
     title: "A second client sees the same session as the first",
     oracle: "two canonical Clients both observe turnCompleted on one session",
     catches: ["per-connection timeline"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     llm: { default: "mock" },
     expectedDurationMs: 25_000,
     timeoutMs: 75_000,

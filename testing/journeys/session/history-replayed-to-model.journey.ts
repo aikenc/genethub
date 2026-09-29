@@ -6,7 +6,7 @@ defineJourney(
     title: "Conversation history is replayed to the model on the next turn",
     oracle: "the second mock LLM request contains both user turns",
     catches: ["each turn is a fresh conversation"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     llm: { default: "mock" },
     expectedDurationMs: 30_000,
     timeoutMs: 90_000,

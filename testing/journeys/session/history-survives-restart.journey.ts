@@ -6,7 +6,7 @@ defineJourney(
     title: "History survives a daemon restart and the conversation continues",
     oracle: "session.get still has items after genet daemon stop/start on the same data dir",
     catches: ["history only in memory"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     llm: { default: "mock" },
     resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
     expectedDurationMs: 40_000,

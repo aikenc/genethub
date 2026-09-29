@@ -82,7 +82,7 @@
 - Agent 的 subagents / MCP / 真压缩（见 [builtin-agent.md](./builtin-agent.md) §8）
 - 会话中途动态切换 agent：`claude`、`opencode` 各自维护一份进程私有的会话状态（CLI 自己的 `--resume` id、HTTP session），把 `TimelineItem` 转存到另一个 agent 不等于真的迁移了上下文，效果只会更糟；有对话内容后前端直接锁定 agent 选择器（`ComposerControls.tsx`），而不是假装能无缝换
 - OpenCode 的真实模型目录（当前 `catalog.models` 恒为空，选择器因此不出现）、各 adapter 的速度 / 质量档位、权限的历史面板
-- 「/」命令的其余半边：Claude Code 的命令表已经透传（`initialize` 握手拿到，composer 里输入 `/` 就是这份表），但内置 Genet Agent 的 `get_commands` / skill 展开仍然没接上，OpenCode 的命令表也还没读
+- 「/」命令的其余半边：Claude Code 的命令表已经透传（`initialize` 握手拿到，composer 里输入 `/` 就是这份表），内置 Genet 的 `/skill:` 在本地展开，不承诺 PI 查询表；OpenCode 的命令表尚未读取
 
 ### 验收清单
 

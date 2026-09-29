@@ -69,9 +69,9 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use genehub_proto::{
     Capabilities, Catalog, CommandInfo, ImportContinuation, ItemDelta, ModeInfo, ModelInfo,
-    PermissionOption, PermissionOptionKind, PermissionRequest,
-    PermissionRequestKind, ProbeState, SessionEvent, TimelineItem, ToolCallDetail, ToolImage,
-    ToolKind, ToolStatus, TurnError, TurnErrorCode, Usage,
+    PermissionOption, PermissionOptionKind, PermissionRequest, PermissionRequestKind, ProbeState,
+    SessionEvent, TimelineItem, ToolCallDetail, ToolImage, ToolKind, ToolStatus, TurnError,
+    TurnErrorCode, Usage,
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -83,7 +83,6 @@ use super::{
     find_executable_in, AgentAdapter, AgentSession, Chatter, ImportCandidate, ImportedHistory,
     PersistHandle, PromptInput, ProviderMap, SessionConfig,
 };
-
 
 /// Which Claude-protocol CLI this adapter instance talks to.
 ///
@@ -251,9 +250,10 @@ impl ClaudeAdapter {
             return cached;
         }
         let help_args = self.flavor.help_args;
-        let text = {
+        let text = tokio::time::timeout(CONTROL_TIMEOUT, async {
             let mut text = Command::new(program)
                 .args(help_args)
+                .kill_on_drop(true)
                 .output()
                 .await
                 .ok()
@@ -305,7 +305,9 @@ impl ClaudeAdapter {
                 text.push_str(&format!("\n--permission-mode choices: {}\n", json!(modes)));
             }
             text
-        };
+        })
+        .await
+        .unwrap_or_default();
         *self.help.write().await = Some(text.clone());
         text
     }
@@ -700,7 +702,6 @@ impl AgentAdapter for ClaudeAdapter {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        super::owned_child(&mut command);
 
         // A session created earlier and resumed now (or one whose mode was set
         // before its first prompt lazily started the process — see
@@ -777,7 +778,6 @@ impl AgentAdapter for ClaudeAdapter {
             "--append-system-prompt",
             config.additional_system_prompt.as_deref(),
         );
-        super::apply_session_environment(&mut command, &config);
 
         if let Some(session_id) = config
             .resume
@@ -789,21 +789,12 @@ impl AgentAdapter for ClaudeAdapter {
             command.args(["--resume", session_id]);
         }
 
-        let mut child = command
-            .spawn()
-            .with_context(|| format!("spawning {}", program.display()))?;
-        let stdout = child.stdout.take().expect("stdout was piped");
-        let stderr = child.stderr.take().expect("stderr was piped");
-        let stdin = child.stdin.take().expect("stdin was piped");
-
-        // Kept, not dropped. When this CLI exits on its own, its stderr is the
-        // only account of why — and it used to go to `tracing::debug!`, under the
-        // default filter, which is how "Claude Code stopped unexpectedly." became
-        // the entire error message.
-        let said = Arc::new(Chatter::default());
-        said.watch(self.flavor.id, Some(stderr)).await;
-
-        let child = Arc::new(Mutex::new(Some(child)));
+        let (process, mut io) =
+            super::process::AgentProcess::spawn(&mut command, self.flavor.id, &config).await?;
+        let stdout = io.stdout.take().expect("stdout was piped");
+        let stdin = io.stdin.take().expect("stdin was piped");
+        let child = process.child.clone();
+        let said = process.chatter.clone();
         let (events, events_rx) = crate::adapter::EventTx::channel();
         let turn = Arc::new(Mutex::new(TurnState::default()));
         // A plain `std::sync::Mutex`, not `tokio::sync::Mutex`: `persistence()`
@@ -813,7 +804,8 @@ impl AgentAdapter for ClaudeAdapter {
         let native_session_id: Arc<std::sync::Mutex<Option<String>>> = Arc::default();
         let mode = Arc::new(Mutex::new(initial_mode));
         let stdin = Arc::new(Mutex::new(stdin));
-        let awaiting: Awaiting = Arc::default();
+        let peer =
+            super::stdio::StdioRpcPeer::new(super::stdio::RpcCodec::ClaudeControl, stdin.clone());
 
         let session = ClaudeSession {
             tasks: super::SessionTasks::default(),
@@ -821,21 +813,17 @@ impl AgentAdapter for ClaudeAdapter {
             events: events.clone(),
             events_rx: std::sync::Mutex::new(Some(events_rx)),
             turn: turn.clone(),
-            child: child.clone(),
-            said: said.clone(),
+            process: process.clone(),
             native_session_id: native_session_id.clone(),
             mode: mode.clone(),
             next_control_id: AtomicU64::new(1),
-            awaiting: awaiting.clone(),
+            peer: peer.clone(),
             models,
             efforts,
             agent_id: self.flavor.id,
         };
 
         let control = ControlState { mode, stdin };
-        session
-            .tasks
-            .spawn(watch_for_exit(child.clone(), awaiting.clone()));
         session.tasks.spawn(read_loop(
             stdout,
             events,
@@ -844,7 +832,7 @@ impl AgentAdapter for ClaudeAdapter {
             control,
             child,
             said,
-            awaiting,
+            peer,
         ));
 
         Ok(Box::new(session))
@@ -1184,9 +1172,8 @@ struct ClaudeSession {
     events_rx: std::sync::Mutex<Option<crate::adapter::EventRx>>,
     turn: Arc<Mutex<TurnState>>,
     /// Shared with `read_loop`, which needs the exit code to explain a crash.
-    child: Arc<Mutex<Option<Child>>>,
+    process: super::process::AgentProcess,
     /// What the CLI said, for a prompt that cannot be written because it is gone.
-    said: Arc<Chatter>,
     native_session_id: Arc<std::sync::Mutex<Option<String>>>,
     mode: Arc<Mutex<String>>,
     next_control_id: AtomicU64,
@@ -1194,7 +1181,7 @@ struct ClaudeSession {
     /// kept: the CLI answers `success` to levels that do not exist.
     efforts: Vec<String>,
     /// Control requests we have sent and want the answer to.
-    awaiting: Awaiting,
+    peer: Arc<super::stdio::StdioRpcPeer>,
     /// The model ids this install offered, which are the only ones a `set_model`
     /// can be checked against.
     models: Vec<String>,
@@ -1202,13 +1189,6 @@ struct ClaudeSession {
     /// the protocol they share.
     agent_id: &'static str,
 }
-
-/// `request_id` -> whoever is waiting for that `control_response`.
-///
-/// Only for the requests whose answer changes what we tell the caller: a
-/// `set_model` the CLI rejected has to reach the user as a failed control rather
-/// than a picker that quietly moved and changed nothing.
-type Awaiting = Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<Result<(), String>>>>>;
 
 /// Everything `handle_control_request` needs to answer Claude Code's
 /// `can_use_tool` prompts, bundled so `read_loop` doesn't carry each of these
@@ -1238,59 +1218,16 @@ impl ClaudeSession {
     /// control that reports success while the CLI ignored it is worse than one
     /// that fails — the user would go on believing they had switched.
     async fn ask(&self, subtype: &str, request: Value) -> Result<(), String> {
-        let request_id = self.control_request_id();
-        let (tell, told) = tokio::sync::oneshot::channel();
-        self.awaiting.lock().await.insert(request_id.clone(), tell);
-
-        let mut body = json!({ "subtype": subtype });
-        if let (Some(body), Some(request)) = (body.as_object_mut(), request.as_object()) {
-            body.extend(request.clone());
-        }
-        let sent = self
-            .write(json!({
-                "type": "control_request",
-                "request_id": request_id,
-                "request": body,
-            }))
-            .await;
-        if let Err(error) = sent {
-            self.awaiting.lock().await.remove(&request_id);
-            return Err(super::stopped("Claude Code", &self.child, &self.said).await
-                + &format!(" ({error})"));
-        }
-
-        match tokio::time::timeout(CONTROL_TIMEOUT, told).await {
-            Ok(Ok(answer)) => answer,
-            // The read loop is gone, which means so is the CLI.
-            Ok(Err(_)) => Err(super::stopped("Claude Code", &self.child, &self.said).await),
-            Err(_) => {
-                self.awaiting.lock().await.remove(&request_id);
-                Err(format!("no answer to {subtype} in {CONTROL_TIMEOUT:?}"))
-            }
-        }
+        self.peer
+            .call(
+                json!(self.control_request_id()),
+                subtype,
+                request,
+                Some(tokio::time::Instant::now() + CONTROL_TIMEOUT),
+            )
+            .await
+            .map(|_| ())
     }
-}
-
-/// Hands a `control_response` to whoever sent the request it answers.
-async fn settle_control_response(frame: &Value, awaiting: &Awaiting) {
-    let response = frame.get("response").unwrap_or(&Value::Null);
-    let Some(request_id) = response.get("request_id").and_then(Value::as_str) else {
-        return;
-    };
-    let Some(tell) = awaiting.lock().await.remove(request_id) else {
-        // An ack nobody is waiting for — `interrupt` sends one of these, and its
-        // answer is the turn ending rather than this frame.
-        return;
-    };
-    let answer = match response.get("subtype").and_then(Value::as_str) {
-        Some("success") => Ok(()),
-        _ => Err(response
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("no reason given")
-            .to_string()),
-    };
-    let _ = tell.send(answer);
 }
 
 #[async_trait]
@@ -1332,7 +1269,8 @@ impl AgentSession for ClaudeSession {
             }))
             .await
         {
-            let why = super::stopped("Claude Code", &self.child, &self.said).await;
+            let why =
+                super::stopped("Claude Code", &self.process.child, &self.process.chatter).await;
             tracing::warn!("{why} (writing the prompt failed: {broken})");
             self.turn.lock().await.id = None;
             let _ = self.events.send(SessionEvent::TurnFailed {
@@ -1362,7 +1300,7 @@ impl AgentSession for ClaudeSession {
     }
 
     async fn close(&self) -> Result<()> {
-        super::close_child(&self.child).await?;
+        self.process.close().await?;
         self.tasks.stop().await;
         Ok(())
     }
@@ -1374,13 +1312,16 @@ impl AgentSession for ClaudeSession {
         // picking a model that does not exist would look like it worked and
         // silently change nothing.
         if !self.models.iter().any(|model| model == model_id) {
-            return Err(anyhow!(
-                "'{model_id}' is not a model this Claude Code offers ({})",
-                if self.models.is_empty() {
-                    "it listed none".to_string()
-                } else {
-                    self.models.join(", ")
-                }
+            return Err(crate::rpc_error::failure(
+                genehub_proto::ErrorCode::BadRequest,
+                format!(
+                    "'{model_id}' is not a model this Claude Code offers ({})",
+                    if self.models.is_empty() {
+                        "it listed none".to_string()
+                    } else {
+                        self.models.join(", ")
+                    }
+                ),
             ));
         }
         // Which model is in play stays the CLI's own state from here; it reports
@@ -1394,13 +1335,16 @@ impl AgentSession for ClaudeSession {
         // Checked here for the same reason models are: asked for `effort: "very"`
         // the CLI answers `success` and keeps thinking exactly as hard as before.
         if !self.efforts.iter().any(|effort| effort == effort_id) {
-            return Err(anyhow!(
-                "'{effort_id}' is not an effort level this Claude Code offers ({})",
-                if self.efforts.is_empty() {
-                    "it listed none".to_string()
-                } else {
-                    self.efforts.join(", ")
-                }
+            return Err(crate::rpc_error::failure(
+                genehub_proto::ErrorCode::BadRequest,
+                format!(
+                    "'{effort_id}' is not an effort level this Claude Code offers ({})",
+                    if self.efforts.is_empty() {
+                        "it listed none".to_string()
+                    } else {
+                        self.efforts.join(", ")
+                    }
+                ),
             ));
         }
         // No model in the request: the level applies to whichever model is in
@@ -1458,9 +1402,9 @@ async fn read_loop(
     control: ControlState,
     child: Arc<Mutex<Option<Child>>>,
     said: Arc<Chatter>,
-    awaiting: Awaiting,
+    peer: Arc<super::stdio::StdioRpcPeer>,
 ) {
-    let mut lines = BufReader::new(stdout).lines();
+    let mut lines = super::process::ProcessLines::new(stdout, child.clone());
     loop {
         let line = match lines.next_line().await {
             Ok(Some(line)) => line,
@@ -1502,7 +1446,9 @@ async fn read_loop(
             Some("control_request") => {
                 handle_control_request(&frame, &turn, &events, &control).await;
             }
-            Some("control_response") => settle_control_response(&frame, &awaiting).await,
+            Some("control_response") => {
+                peer.response(&frame);
+            }
             Some("result") => {
                 let mut state = turn.lock().await;
                 translate_result(&frame, &mut state, &events);
@@ -1525,24 +1471,7 @@ async fn read_loop(
             },
         });
     }
-    abandon_awaiting(&awaiting).await;
-}
-
-async fn abandon_awaiting(awaiting: &Awaiting) {
-    super::fail_open_requests(
-        awaiting,
-        "Claude Code went away with control requests still open",
-    )
-    .await;
-}
-
-async fn watch_for_exit(child: Arc<Mutex<Option<Child>>>, awaiting: Awaiting) {
-    super::watch_process_exit(
-        child,
-        awaiting,
-        "Claude Code went away with control requests still open",
-    )
-    .await;
+    peer.fail_open();
 }
 
 /// The CLI's out-of-band frames about itself: which session this is, and when it
@@ -1589,11 +1518,7 @@ fn translate_system_frame(
 /// Streams text and thinking deltas for the typing effect. Tool calls are
 /// deliberately not opened here: `input_json_delta` fragments are not valid
 /// JSON until the block closes (see module doc).
-fn translate_stream_event(
-    event: &Value,
-    state: &mut TurnState,
-    events: &crate::adapter::EventTx,
-) {
+fn translate_stream_event(event: &Value, state: &mut TurnState, events: &crate::adapter::EventTx) {
     let Some(turn_id) = state.id.clone() else {
         return;
     };
@@ -1881,7 +1806,7 @@ fn translate_assistant_snapshot(
         state.usage.llm_rounds += 1;
         usage::record_round_start(&mut state.usage);
         if let Some(reported) = message.get("usage").or_else(|| frame.get("usage")) {
-            usage::add_usage(&mut state.usage, reported);
+            usage::add_anthropic_usage(&mut state.usage, reported);
         }
         usage::emit_progress(events, &turn_id, &state.usage);
     }
@@ -1924,11 +1849,7 @@ fn translate_assistant_snapshot(
 /// User-role frames carry two unrelated things back to us: tool results, and
 /// the synthetic "[Request interrupted by user]" message the CLI emits after
 /// honouring our interrupt.
-fn translate_user_frame(
-    frame: &Value,
-    state: &mut TurnState,
-    events: &crate::adapter::EventTx,
-) {
+fn translate_user_frame(frame: &Value, state: &mut TurnState, events: &crate::adapter::EventTx) {
     let Some(turn_id) = state.id.clone() else {
         return;
     };
@@ -2053,11 +1974,7 @@ fn tool_result_text(block: &Value) -> Option<String> {
     }
 }
 
-fn translate_result(
-    frame: &Value,
-    state: &mut TurnState,
-    events: &crate::adapter::EventTx,
-) {
+fn translate_result(frame: &Value, state: &mut TurnState, events: &crate::adapter::EventTx) {
     let Some(turn_id) = state.id.take() else {
         return;
     };
@@ -2069,7 +1986,7 @@ fn translate_result(
         let mut usage = std::mem::take(&mut state.usage);
         state.seen_assistant.clear();
         if usage.input_tokens == 0 && usage.output_tokens == 0 {
-            usage::add_usage(&mut usage, frame.get("usage").unwrap_or(&Value::Null));
+            usage::add_anthropic_usage(&mut usage, frame.get("usage").unwrap_or(&Value::Null));
         }
         if let Some(cost) = frame.get("total_cost_usd").and_then(Value::as_f64) {
             usage.cost_usd = Some(cost);
@@ -2217,24 +2134,28 @@ async fn handle_control_request(
     };
     let _ = events.send(SessionEvent::PermissionRequested {
         request: PermissionRequest {
+            summary: request
+                .get("description")
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    request
+                        .pointer("/input/description")
+                        .and_then(Value::as_str)
+                })
+                .or_else(|| request.pointer("/input/command").and_then(Value::as_str))
+                .or_else(|| request.pointer("/input/file_path").and_then(Value::as_str))
+                .map(str::to_string),
+            description: Some(super::native_request_description("Claude", request)),
+            author: None,
             id: request_id.to_string(),
             kind,
             title: format!("Allow {tool_name}?"),
-            detail: request
-                .get("description")
-                .and_then(Value::as_str)
-                .map(str::to_string),
             tool_call_id: item_id,
             options: vec![
                 PermissionOption {
                     id: "allow".into(),
                     label: "Allow".into(),
                     kind: PermissionOptionKind::AllowOnce,
-                },
-                PermissionOption {
-                    id: "allow_always".into(),
-                    label: format!("Always Allow {tool_name}"),
-                    kind: PermissionOptionKind::AllowAlways,
                 },
                 PermissionOption {
                     id: "deny".into(),
@@ -2333,39 +2254,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn a_dead_claude_fails_an_open_control_request_without_the_timeout() {
-        let awaiting: Awaiting = Arc::default();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        awaiting.lock().await.insert("req".into(), tx);
-        abandon_awaiting(&awaiting).await;
-        assert!(rx.await.is_err());
-        assert!(awaiting.lock().await.is_empty());
-    }
-
-    #[tokio::test]
-    async fn an_exited_claude_fails_an_open_control_request_while_the_pipe_is_held() {
-        let mut child = Command::new("true")
-            .stdout(Stdio::piped())
-            .spawn()
-            .expect("spawn true");
-        let _stdout = child.stdout.take();
-        let held = Arc::new(Mutex::new(Some(child)));
-        let awaiting: Awaiting = Arc::default();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        awaiting.lock().await.insert("req".into(), tx);
-        let started = std::time::Instant::now();
-        watch_for_exit(held, awaiting).await;
-        assert!(started.elapsed() < std::time::Duration::from_secs(3));
-        assert!(rx.await.is_err());
-    }
-
-    /// The bug this file's `ask_mode` exists for, in both directions.
-    ///
-    /// One build of Claude Code accepts `manual` and rejects `default`; another
-    /// accepts `default` and rejects `manual`. Hardcoding either is a CLI that
-    /// refuses to start for half the installs — which is exactly what happened:
-    /// `option '--permission-mode <mode>' argument 'manual' is invalid`.
     #[test]
     fn the_permission_mode_is_whichever_name_this_build_knows() {
         // 2.1.220, verbatim.
@@ -2937,7 +2825,6 @@ mod tests {
         let adapter = ClaudeAdapter::with_program(fake);
         let session = adapter
             .start(SessionConfig {
-                evidence_scope: None,
                 effort_id: None,
                 fast: None,
                 additional_system_prompt: None,
@@ -3062,10 +2949,10 @@ mod tests {
         })
     }
 
-    /// Accept-edits and bypass answer without a card. A lower mode still offers
-    /// Allow, Always Allow, and Deny; the session kernel records the choice.
+    /// Accept-edits and bypass answer without a card. A lower mode offers Allow
+    /// and Deny. Elevation is the session mode, not a second "always" choice.
     #[tokio::test]
-    async fn a_tool_prompt_offers_allow_always_until_the_session_is_elevated() {
+    async fn a_tool_prompt_offers_allow_and_deny() {
         let (mut child, stdin) = fake_stdin();
         let control = ControlState {
             mode: Arc::new(Mutex::new(MODE_DEFAULT.to_string())),
@@ -3082,10 +2969,14 @@ mod tests {
                 _ => None,
             })
             .expect("a fresh tool must still ask the frontend");
-        assert_eq!(request.options.len(), 3);
+        assert_eq!(request.options.len(), 2);
         assert!(request.options.iter().any(|option| {
-            option.id == "allow_always" && option.kind == PermissionOptionKind::AllowAlways
+            option.id == "allow" && option.kind == PermissionOptionKind::AllowOnce
         }));
+        assert!(!request
+            .options
+            .iter()
+            .any(|option| option.kind == PermissionOptionKind::AllowAlways));
 
         let _ = child.start_kill();
     }
@@ -3111,9 +3002,9 @@ mod tests {
         let reply: Value = serde_json::from_str(line.trim()).expect("json reply");
         assert_eq!(reply["response"]["response"]["behavior"], "deny");
         assert_eq!(reply["response"]["response"]["interrupt"], true);
-        assert!(drain(&mut rx).iter().any(|event| {
-            matches!(event, SessionEvent::PermissionRequested { .. })
-        }));
+        assert!(drain(&mut rx)
+            .iter()
+            .any(|event| { matches!(event, SessionEvent::PermissionRequested { .. }) }));
         let _ = child.start_kill();
     }
 

@@ -19,6 +19,9 @@ pub struct Session {
     pub file: Option<PathBuf>,
     pub cwd: PathBuf,
     pub messages: Vec<Message>,
+    /// First message allowed to anchor context usage after model/compaction changes.
+    /// Reconstructed from existing journal entries; no additional persisted field.
+    pub(crate) usage_start: usize,
     leaf_id: Option<String>,
     name: Option<String>,
 }
@@ -31,6 +34,7 @@ impl Session {
             file: None,
             cwd,
             messages: Vec::new(),
+            usage_start: 0,
             leaf_id: None,
             name: None,
         }
@@ -43,6 +47,7 @@ impl Session {
             file: Some(path.clone()),
             cwd,
             messages: Vec::new(),
+            usage_start: 0,
             leaf_id: None,
             name: None,
         };
@@ -88,6 +93,7 @@ impl Session {
             return;
         }
         self.messages.truncate(retain_messages);
+        self.usage_start = self.usage_start.min(self.messages.len());
         self.append_entry(
             "failed_turn_rollback",
             json!({ "retainMessages": retain_messages }),
@@ -95,6 +101,7 @@ impl Session {
     }
 
     pub fn append_model_change(&mut self, provider: &str, model_id: &str) {
+        self.usage_start = self.messages.len();
         self.append_entry(
             "model_change",
             json!({ "provider": provider, "modelId": model_id }),
@@ -105,14 +112,14 @@ impl Session {
         self.append_entry("thinking_level_change", json!({ "thinkingLevel": level }));
     }
 
-    /// Replaces provider context with a cited summary while preserving the
-    /// append-only audit trail. Reopening the file replays the same reset at
-    /// this entry.
+    /// Replaces provider context with a cited summary and an empty open round.
+    /// Reopening the file replays the same reset at this entry.
+    #[cfg(test)]
     pub fn replace_with_compaction(&mut self, summary: String) {
         self.replace_with_capsule(summary, Vec::new());
     }
 
-    /// Same reset as [`Self::replace_with_compaction`], then restores `tail`
+    /// Replaces provider context with a cited summary, then restores `tail`
     /// (the open round) so tool calls stay paired with their results.
     pub fn replace_with_capsule(&mut self, summary: String, tail: Vec<Message>) {
         let message = Message::user(format!(
@@ -121,6 +128,7 @@ impl Session {
         self.messages.clear();
         self.messages.push(message.clone());
         self.messages.extend(tail.iter().cloned());
+        self.usage_start = self.messages.len();
         self.append_entry(
             "compaction",
             json!({
@@ -226,6 +234,10 @@ impl Session {
                             }
                         }
                     }
+                    self.usage_start = self.messages.len();
+                }
+                Some("model_change") => {
+                    self.usage_start = self.messages.len();
                 }
                 Some("failed_turn_rollback") => {
                     if let Some(retain) = entry
@@ -235,6 +247,7 @@ impl Session {
                         .filter(|retain| *retain <= self.messages.len())
                     {
                         self.messages.truncate(retain);
+                        self.usage_start = self.usage_start.min(self.messages.len());
                     }
                 }
                 Some("session_info") => {

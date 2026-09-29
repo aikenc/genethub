@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 
 export interface ScriptedTurn {
   text?: string;
+  usage?: { inputTokens: number; outputTokens?: number };
   /** OpenAI-compatible reasoning stream; omit text to end without a visible answer. */
   reasoning?: string;
   tool?: { name: string; arguments: Record<string, unknown> };
@@ -83,28 +84,103 @@ function openaiChat(turn: ScriptedTurn, responseIndex: number): string[] {
   frames.push(
     `data: ${JSON.stringify({
       choices: [],
-      usage: { prompt_tokens: 8, completion_tokens: 4, reasoning_tokens: 0 },
+      usage: { prompt_tokens: turn.usage?.inputTokens ?? 8, completion_tokens: turn.usage?.outputTokens ?? 4, reasoning_tokens: 0 },
     })}`,
   );
   frames.push("data: [DONE]");
   return frames;
 }
 
+function anthropicEvent(name: string, data: Record<string, unknown>): string {
+  return `event: ${name}\ndata: ${JSON.stringify({ type: name, ...data })}`;
+}
+
 function anthropic(turn: ScriptedTurn): string[] {
-  const text = turn.text ?? "ok";
-  return [
-    `event: message_start\ndata: ${JSON.stringify({ type: "message_start", message: { id: "msg_1", role: "assistant" } })}`,
-    `event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", delta: { type: "text_delta", text } })}`,
-    `event: message_delta\ndata: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: "end_turn" } })}`,
-    `event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}`,
+  const tools = turn.tools ?? (turn.tool ? [turn.tool] : []);
+  const frames: string[] = [
+    anthropicEvent("message_start", {
+      message: {
+        id: "msg_1",
+        role: "assistant",
+        usage: {
+          input_tokens: turn.usage?.inputTokens ?? 11,
+          cache_read_input_tokens: 3,
+          cache_creation_input_tokens: 2,
+        },
+      },
+    }),
   ];
+  let index = 0;
+  if (turn.reasoning) {
+    frames.push(
+      anthropicEvent("content_block_start", {
+        index,
+        content_block: { type: "thinking", thinking: "" },
+      }),
+      anthropicEvent("content_block_delta", {
+        index,
+        delta: { type: "thinking_delta", thinking: turn.reasoning },
+      }),
+      anthropicEvent("content_block_delta", {
+        index,
+        delta: { type: "signature_delta", signature: "sig_test" },
+      }),
+      anthropicEvent("content_block_stop", { index }),
+    );
+    index += 1;
+  }
+  if (tools.length > 0) {
+    for (const [toolIndex, tool] of tools.entries()) {
+      const block = index + toolIndex;
+      frames.push(
+        anthropicEvent("content_block_start", {
+          index: block,
+          content_block: { type: "tool_use", id: `toolu_${toolIndex + 1}`, name: tool.name, input: {} },
+        }),
+        anthropicEvent("content_block_delta", {
+          index: block,
+          delta: { type: "input_json_delta", partial_json: JSON.stringify(tool.arguments) },
+        }),
+        anthropicEvent("content_block_stop", { index: block }),
+      );
+    }
+    frames.push(
+      anthropicEvent("message_delta", {
+        delta: { stop_reason: "tool_use" },
+        usage: { output_tokens: turn.usage?.outputTokens ?? 6 },
+      }),
+    );
+  } else {
+    const text = turn.text ?? (turn.reasoning ? "" : "ok");
+    if (text) {
+      frames.push(
+        anthropicEvent("content_block_start", {
+          index,
+          content_block: { type: "text", text: "" },
+        }),
+        anthropicEvent("content_block_delta", {
+          index,
+          delta: { type: "text_delta", text },
+        }),
+        anthropicEvent("content_block_stop", { index }),
+      );
+    }
+    frames.push(
+      anthropicEvent("message_delta", {
+        delta: { stop_reason: "end_turn" },
+        usage: { output_tokens: turn.usage?.outputTokens ?? 4 },
+      }),
+    );
+  }
+  frames.push(anthropicEvent("message_stop", {}));
+  return frames;
 }
 
 function responses(turn: ScriptedTurn): string[] {
   const text = turn.text ?? "ok";
   return [
     `data: ${JSON.stringify({ type: "response.output_text.delta", delta: text })}`,
-    `data: ${JSON.stringify({ type: "response.completed", response: { id: "resp_1", usage: { input_tokens: 8, output_tokens: 4 } } })}`,
+    `data: ${JSON.stringify({ type: "response.completed", response: { id: "resp_1", usage: { input_tokens: turn.usage?.inputTokens ?? 8, output_tokens: turn.usage?.outputTokens ?? 4 } } })}`,
     "data: [DONE]",
   ];
 }

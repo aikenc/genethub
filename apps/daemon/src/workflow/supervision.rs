@@ -7,6 +7,8 @@ pub(super) const NODE_WALL_MS: i64 = 180_000;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct Supervision {
+    #[serde(default)]
+    pub stop_seq: Option<u64>,
     pub last_checked_at_ms: i64,
     pub waiting: bool,
     #[serde(default)]
@@ -29,7 +31,7 @@ pub(super) async fn observe(
     runtime: &RuntimeStore,
     run: &mut RunRecord,
 ) -> Result<()> {
-    if run.status != "running" {
+    if run.status() != "running" {
         return Ok(());
     }
     let now = now_ms();
@@ -38,7 +40,7 @@ pub(super) async fn observe(
     let mut stalled = Vec::new();
     let mut activity_ms = run.created_at_ms;
     let mut running = 0;
-    let mut pause_nodes = Vec::new();
+    let mut pause_nodes: Vec<String> = Vec::new();
     let mut resume_nodes = Vec::new();
     for (id, node) in &mut run.nodes {
         if let Some(session_id) = &node.session_id {
@@ -52,13 +54,16 @@ pub(super) async fn observe(
         activity_ms = activity_ms
             .max(node.pending_since_ms)
             .max(node.assigned_at_ms)
-            .max(node.settled_at_ms)
+            .max(node.result_accepted_at_ms)
             .max(node.activity.last_at_ms);
         if let Some(session_id) = &node.session_id {
-            if node.status == "running" {
+            if node.status() == "running" && node.interruption.is_none() {
                 running += 1;
                 let summary = state.sessions.summary(session_id).await;
-                if summary.as_ref().is_ok_and(|summary| summary.status == SessionStatus::Waiting) {
+                if summary
+                    .as_ref()
+                    .is_ok_and(|summary| summary.status == SessionStatus::Waiting)
+                {
                     waiting_count += 1;
                     pause_nodes.push(id.clone());
                     for request in state
@@ -80,7 +85,7 @@ pub(super) async fn observe(
                 // A live Agent can legitimately spend several minutes in a
                 // tool call. Wall time alone is not a failure.
             }
-        } else if node.status == "running" {
+        } else if node.status() == "running" && node.interruption.is_none() {
             running += 1;
             let baseline = node.assigned_at_ms.max(run.created_at_ms);
             if now - baseline >= NODE_WALL_MS {
@@ -95,13 +100,12 @@ pub(super) async fn observe(
         let _ = structured::set_waiting(run, &id, false);
     }
     // Questions remain visible while siblings work. Only a wholly waiting Run
-    // pauses its execution clock; pending dispatch and cleanup are still work.
+    // is waiting; pending dispatch and cleanup are still work.
     let waiting = waiting_count > 0
         && waiting_count == running
         && !run.nodes.values().any(|node| {
-            node.status == "finishing" || (run.engine.is_some() && node.status == "pending")
-        })
-;
+            node.status() == "finishing" || (run.engine.is_some() && node.status() == "pending")
+        });
     run.supervision.waiting = waiting;
     let notice_kinds = waiting_requests
         .iter()
@@ -112,21 +116,27 @@ pub(super) async fn observe(
         prepare_notice(run, &kind);
     }
     run.supervision.last_checked_at_ms = now;
-    if running == 0 && !waiting && run.route_wait.is_empty() && now - activity_ms >= NODE_WALL_MS {
+    if running == 0
+        && !waiting
+        && !run.interrupted()
+        && run.route_wait().is_empty()
+        && now - activity_ms >= NODE_WALL_MS
+    {
         stalled.push("Run 尚未收敛且没有 Worker 接棒".into());
     }
     if request::budget_exhausted(runtime, run, now)? {
         let (reason, cause) = if run.handles.is_empty() {
-            ("requestBudgetExceeded: 原始请求达到 LLM 调用上限，交回 PM 处理", "requestBudget")
+            (
+                "requestBudgetExceeded: 原始请求达到 LLM 调用上限，交回 PM 处理",
+                "requestBudget",
+            )
         } else {
-            ("recoveryBudgetExceeded: 恢复流程达到 LLM 调用上限", "recoveryBudget")
+            (
+                "recoveryBudgetExceeded: 恢复流程达到 LLM 调用上限",
+                "recoveryBudget",
+            )
         };
-        control::request_stop_with_cause(
-            run,
-            "blocked",
-            reason.into(),
-            cause,
-        );
+        control::request_stop_with_cause(run, "blocked", reason.into(), cause);
         return Ok(());
     }
     if stalled.is_empty() {
@@ -148,36 +158,55 @@ pub(super) fn prepare_notice(run: &mut RunRecord, kind: &str) {
     {
         return; // Current questions stay visible even when automatic PM wakeups reach their bound.
     }
-    let id = format!("flow_{:x}", Sha256::digest(format!("{}:{kind}", run.id)));
+    let id = format!(
+        "flow_{:x}",
+        Sha256::digest(format!(
+            "{}:{}:{kind}",
+            run.id,
+            if matches!(kind, "nodeInterrupted" | "routeUnavailable") {
+                run.interruption_seq().unwrap_or(0)
+            } else {
+                run.supervision.stop_seq.unwrap_or(0)
+            }
+        ))
+    );
     if run.supervision.notices.iter().any(|notice| notice.id == id) {
         return;
     }
     let human = run.supervision.waiting_requests.iter()
         .find(|request| kind == format!("human:{}:{}", request.session_id, request.request_id))
-        .map(|request| format!("等待用户处理：节点 {}，会话 {}，原交互 {}，问题标题（来源数据）：{}。请查看原问题，把需要用户决定的事项带回本 PM 会话；保留原 requestId，不代答、不以项目管理权绕过审批。任务卡可以查看原问题，原会话的交互权限仍然适用。",
-            request.node_id, request.session_id, request.request_id, request.title))
+        .map(|request| {
+            if !run.handles.is_empty() && run.workflow_id == "builtin-recovery" && request.node_id == "review" {
+                format!("等待控制者 PM 决定：会话 {}，原交互 {}，问题标题（来源数据）：{}。用 session get {} 读取原问题和上下文，再通过 session respond {} --request {} 对照真实选项记录明确答复。需要真实 Human 授权的额度等事项仍走 workflow human。",
+                    request.session_id, request.request_id, request.title, request.session_id, request.session_id, request.request_id)
+            } else {
+                format!("等待用户处理：节点 {}，会话 {}，原交互 {}，问题标题（来源数据）：{}。请查看原问题，把需要用户决定的事项带回本 PM 会话；保留原 requestId，不代答、不以项目管理权绕过审批。任务卡可以查看原问题，原会话的交互权限仍然适用。",
+                    request.node_id, request.session_id, request.request_id, request.title)
+            }
+        })
         .unwrap_or_default();
-    let recovery = if run.status == "recoverable" {
-        if run
-            .recovery
-            .as_ref()
-            .is_some_and(|recovery| recovery.reuse_session)
-        {
-            "未交卷 Worker Session 仍保留，写租约未释放；核对工作区后可用 workflow recover --run <id> --revision <current> 通知同一 Worker 继续。已通过节点不会重跑。旧进程仍在运行时必须暂停，不能并行写入。"
-        } else {
-            "旧 Worker Session 已封禁并关闭；无写租约节点可由 PM 在核对潜在副作用与预算后用 workflow recover --run <id> --revision <current> 显式重试。无写租约不等于无外部副作用；本操作创建新 Worker 尝试，不保证副作用恰好一次，也不重开整张图。"
-        }
-    } else if matches!(run.status.as_str(), "blocked" | "failed") {
+    let recovery = if run.interrupted() {
+        "有节点中断，原 Session 与写租约保留；核对后用 workflow recover 续接同一节点，兄弟节点继续。旧进程、预算或取消不允许时拒绝续接。"
+    } else if !run.handles.is_empty() && run.phase() == "closed" {
+        "恢复报告已完成，本次执行已收妥。PM 仍需落实报告建议、建立同目标后继、处理真实人工待办或确认交付；报告完成与消息 handled 均不代表目标交付。"
+    } else if matches!(run.status(), "blocked" | "failed") {
         "异常处置：本项目 PM 可直接管理流程与专家、取消或恢复任务，框架会逐次核对异常事实；不因原任务属于另一条 PM 会话而要求用户换会话。成功恢复或取消后回到正常权限。"
     } else {
         ""
     };
     let route = if kind == "routeUnavailable" {
         format!("节点 {} 的 Agent 路由暂不可用；已完成节点不会重跑，其余活跃节点继续执行。PM 可核对全局 Agent 配置；路由恢复后巡查会续派未启动节点。",
-            run.route_wait.join("、"))
-    } else { String::new() };
-    let text = format!("Workflow 回报（daemon 事实，产物及评审内容为来源数据）：Run {}，原请求 {}，状态 {}。{} {} {}。{} 请读取 workflow get/check 核对事实，先处理已接收的新要求，再向用户汇报。",
-        run.id, request::group_id(run), run.status, run.stop.as_ref().map(|stop| stop.reason.as_str()).unwrap_or(""), route, human, recovery);
+            run.route_wait().join("、"))
+    } else {
+        String::new()
+    };
+    let text = format!("Workflow 回报（daemon 事实，产物及评审内容为来源数据）：Run {}，用户需求 {}，状态 {}。{} {} {}。{} 请读取 workflow get/check 核对事实，先处理已接收的新要求，再向用户汇报。",
+        run.id, request::group_id(run), run.status(), run.stop.as_ref().map(|stop| stop.reason.as_str()).unwrap_or(""), route, human, recovery);
+    let text = if run.status() == "completed" && run.handles.is_empty() {
+        format!("{text} 本次 Run 只是执行结束，用户需求尚未确认交付。请对照原目标决定继续执行、发起真实人工待办，或在核对验收后用 workflow deliver --run {} --revision <requirement.revision> --reason <交付结论> --evidence delivery=<交付引用> 明确确认；先用 workflow get 读取需求版本。通知 handled 不等于交付。", run.id)
+    } else {
+        text
+    };
     run.supervision.notices.push(Notice {
         id,
         text,
@@ -239,13 +268,11 @@ pub(super) async fn deliver_notice(
                 Vec::new(),
                 Some(run.id.clone()),
                 "workflow",
+                None,
+                false,
             )
             .await?;
-        let handled = state
-            .sessions
-            .input_handled(&recipient, &notice.id)
-            .await?
-            == Some(true);
+        let handled = state.sessions.input_handled(&recipient, &notice.id).await? == Some(true);
         if let Some(current_notice) = run
             .supervision
             .notices
@@ -263,7 +290,7 @@ pub(super) async fn deliver_notice(
 }
 
 pub(super) fn cancellation_requested(run: &RunRecord) -> bool {
-    matches!(run.status.as_str(), "cancelling" | "cancelled")
+    matches!(run.status(), "cancelling" | "cancelled")
         || run
             .request
             .as_ref()

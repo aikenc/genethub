@@ -32,5 +32,4 @@ tokio.workspace = true
 # Only the tests link the daemon: they start a real one in-process to assert the
 # forwarder talks to it correctly. Nothing shipped in the binary depends on it.
 genet-daemon = { path = "../daemon" }
-genehub-testing = { path = "../../testing/deprecated/rust" }
 tempfile = "3"

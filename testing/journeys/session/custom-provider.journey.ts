@@ -6,7 +6,7 @@ defineJourney(
     title: "A provider the user adds works like the ones we ship",
     oracle: "settings.setProvider inhouse appears in agent.list labels; forgetProvider removes it but not deepseek",
     catches: ["custom provider never reaches the picker"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     llm: { default: "mock" },
     expectedDurationMs: 25_000,
     timeoutMs: 75_000,

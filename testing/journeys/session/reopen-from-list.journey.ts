@@ -6,7 +6,7 @@ defineJourney(
     title: "A session found in the list can be reopened and continued",
     oracle: "session.list finds the closed tab; subscribe snapshot has history; session.get grows after the next prompt",
     catches: ["close deletes the session"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     llm: { default: "mock" },
     expectedDurationMs: 35_000,
     timeoutMs: 100_000,

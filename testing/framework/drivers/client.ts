@@ -1,3 +1,4 @@
+import { waitUntil } from "../tools/wait.ts";
 import { WebSocket } from "ws";
 
 import {
@@ -55,16 +56,15 @@ export async function connectProductClient(input: {
   });
   let lastError = "";
   client.connect();
-  const deadline = Date.now() + 45_000;
-  while (Date.now() < deadline) {
-    if (client.connectionState === "ready") return client;
-    if (client.failure) lastError = JSON.stringify(client.failure);
-    if (client.connectionState === "closed") {
-      throw new Error(
-        `canonical Client closed: ${JSON.stringify(client.lastCloseReason ?? {})} ${lastError}; diagnostics=${JSON.stringify(diagnostics)}`,
-      );
-    }
-    await new Promise((resolve) => setTimeout(resolve, 50));
+  try {
+    return await waitUntil(() => {
+      if (client.connectionState === "ready") return client;
+      if (client.failure) lastError = JSON.stringify(client.failure);
+      if (client.connectionState === "closed") throw new Error(`canonical Client closed: ${JSON.stringify(client.lastCloseReason ?? {})} ${lastError}; diagnostics=${JSON.stringify(diagnostics)}`);
+      return undefined;
+    }, 45_000);
+  } catch (error) {
+    if (client.connectionState === "closed") { client.close(); throw error; }
   }
   const close = client.lastCloseReason;
   client.close();

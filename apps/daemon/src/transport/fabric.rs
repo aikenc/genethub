@@ -10,12 +10,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use genehub_proto::{PeerAuth, PeerHello, TransportKind};
-use tokio::sync::{Notify, mpsc};
-use tokio_tungstenite::tungstenite::Message;
+use tokio::sync::{mpsc, Notify};
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+use tokio_tungstenite::tungstenite::Message;
 
 use crate::config::Enrollment;
 use crate::dataplane::{endpoint, handshake};
@@ -157,7 +157,10 @@ impl Credit {
     async fn take(&self, bytes: usize) -> Result<()> {
         let bytes = u64::try_from(bytes)?;
         if bytes == 0 || bytes > self.inner.maximum {
-            anyhow::bail!("Fabric record does not fit its stream window");
+            return Err(crate::rpc_error::failure(
+                genehub_proto::ErrorCode::Unsupported,
+                "Fabric record does not fit its stream window".to_owned(),
+            ));
         }
         loop {
             let notified = self.inner.notify.notified();
@@ -1403,8 +1406,8 @@ mod tests {
 
     #[test]
     fn uplink_close_code_names_a_relay_strike_and_stays_low_cardinality() {
-        use tokio_tungstenite::tungstenite::protocol::CloseFrame;
         use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+        use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 
         let strike = CloseFrame {
             code: CloseCode::from(4400),

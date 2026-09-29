@@ -262,12 +262,12 @@ defineSpecialty(meta("slow-stream-cancel-fairness", "A paused consumer does not 
       // Resume consumption through the public stream until the producer moves.
       // A stalled process unrelated to backpressure cannot satisfy this control.
       const iterator = stream.body()[Symbol.asyncIterator]();
-      const drainDeadline = performance.now() + 5000;
-      while (progress() <= pausedAt && performance.now() < drainDeadline) {
+      await t.tools.waitUntil(async () => {
+        if (progress() > pausedAt) return true;
         const chunk = await iterator.next();
         t.assertions.assert(!chunk.done, "producer terminated instead of applying backpressure");
-        await new Promise(r => setTimeout(r, 1));
-      }
+        return progress() > pausedAt;
+      }, 5000, 1);
       t.assertions.assert(progress() > pausedAt, "consumption did not release producer backpressure");
       t.note(`producerPausedAt=${pausedAt} resumedAt=${progress()}`);
       for (let n = 0; n < 5; n++) {

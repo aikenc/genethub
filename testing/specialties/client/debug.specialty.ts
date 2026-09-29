@@ -22,7 +22,7 @@ defineSpecialty({
     for (const page of pages) {
       // Install before product timers are created; late installation can orphan polling intervals.
       await page.clock.install();
-      browsers.push(await openPreviewBrowser({ openRoot: t.openRoot, lease: t.env, page, endpoint: daemonEndpoint(opened.daemon), workspaceId: "", entryPath: "", surface: "client-debug" }));
+      browsers.push(await openPreviewBrowser({ openRoot: t.openRoot, lease: t.env, page, endpoint: daemonEndpoint(opened.daemon), refreshEndpoint: () => daemonEndpoint(opened.daemon), workspaceId: "", entryPath: "", surface: "client-debug" }));
       await page.getByRole("button", { name: "选择控制机器", exact: true }).click();
       await page.getByRole("button", { name: "连接", exact: true }).click();
       await page.getByText("已连接控制机器", { exact: false }).waitFor();
@@ -94,7 +94,7 @@ defineSpecialty({
     await pages[0]!.reload();
     await pages[0]!.getByRole("button", { name: "选择控制机器", exact: true }).waitFor();
     t.note("Real guest and CLI: independent clients, pending refusal, authorized eval/act, mobile DOM JPEG, cross-client refusal, revoke refusal, refresh requires reconnect. No physical iOS/WebView claim.");
-  } catch (error) { throw new Error(phase + ": " + String(error));
+  } catch (error) { throw new Error(phase + ": " + String(error) + "; browser errors=" + browsers.flatMap(browser => browser.errors).join("; ").slice(0, 4000));
   } finally {
     for (const browser of browsers) await browser.close();
     opened.client.close(); opened.daemon.stop(); await opened.mock.stop();

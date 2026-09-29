@@ -6,7 +6,7 @@ defineJourney(
     title: "An unknown tool still renders instead of disappearing",
     oracle: "a mock teleport tool call is visible in the session event stream",
     catches: ["unrecognized tool dropped from the timeline"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     llm: { default: "mock" },
     expectedDurationMs: 25_000,
     timeoutMs: 75_000,

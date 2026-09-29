@@ -672,7 +672,7 @@ defineSpecialty(
   wasmMeta(
     "specialty.wasm.cli.agent-serve-runs-the-agent-entry",
     "genet agent-serve --mode rpc answers a JSONL command through the component's agent entry",
-    "a get_commands line gets a success response with the same id, stdin close exits 0, and no --mode exits 2",
+    "a get_state line gets a success response with the same id, stdin close exits 0, and no --mode exits 2",
     [
       "agent-serve hits the client verb instead of the guest",
       "agent entry never wired into the component",
@@ -688,7 +688,7 @@ defineSpecialty(
     const answered = spawnSync(genet, ["agent-serve", "--mode", "rpc"], {
       env,
       encoding: "utf8",
-      input: '{"id":"1","type":"get_commands"}\n',
+      input: '{"id":"1","type":"get_state"}\n',
       timeout: 60_000,
     });
     t.assertions.assert(answered.status === 0, `agent-serve exited ${answered.status}: ${answered.stderr}`);
@@ -698,8 +698,8 @@ defineSpecialty(
       .map((line) => JSON.parse(line) as Record<string, unknown>);
     const response = frames.find((frame) => frame.id === "1");
     t.assertions.assert(
-      response?.type === "response" && response.command === "get_commands" && response.success === true,
-      `no success response for get_commands: ${answered.stdout.slice(0, 400)}`,
+      response?.type === "response" && response.command === "get_state" && response.success === true,
+      `no success response for get_state: ${answered.stdout.slice(0, 400)}`,
     );
     const refused = runGenet(genet, ["agent-serve"], env);
     t.assertions.assert(refused.code === 2, `agent-serve without --mode exited ${refused.code}`);
@@ -779,14 +779,10 @@ defineSpecialty(
       // equal the stamp the watcher took at start.
       const future = new Date(Date.now() + 60_000);
       utimesSync(copy, future, future);
-      const deadline = Date.now() + 40_000;
-      let log = "";
-      while (Date.now() < deadline) {
-        log = existsSync(logFile) ? readFileSync(logFile, "utf8") : "";
-        const starts = log.split("\n").filter((line) => line.includes("daemon_started")).length;
-        if (log.includes("reloading in place") && starts >= 2) break;
-        await new Promise((resolve) => setTimeout(resolve, 500));
-      }
+      const log = await t.tools.waitUntil(() => {
+        const text = existsSync(logFile) ? readFileSync(logFile, "utf8") : "";
+        return text.includes("reloading in place") && text.split("\n").filter(line => line.includes("daemon_started")).length >= 2 ? text : undefined;
+      }, 40_000, 500);
       t.assertions.assert(
         log.includes("reloading in place"),
         `the daemon never noticed the replaced component:\n${log.slice(-800)}`,
@@ -796,18 +792,11 @@ defineSpecialty(
         `the daemon did not come up again after the reload:\n${log.slice(-800)}`,
       );
       // The endpoint is republished at the end of the reload; status can race it.
-      let after: Record<string, unknown> = {};
-      const statusDeadline = Date.now() + 20_000;
-      while (Date.now() < statusDeadline) {
+      const after = await t.tools.waitUntil(() => {
         const probe = runGenet(genet, ["daemon", "status"], env);
-        try {
-          after = parseJson(probe.stdout);
-          if (after.running === true) break;
-        } catch {
-          after = {};
-        }
-        await new Promise((resolve) => setTimeout(resolve, 500));
-      }
+        try { const observed = parseJson(probe.stdout); return observed.running === true ? observed : undefined; }
+        catch { return undefined; }
+      }, 20_000, 500);
       t.assertions.assert(after.running === true, `not serving after reload: ${JSON.stringify(after)}`);
       t.assertions.assert(
         String(after.pid) === pid,

@@ -6,6 +6,7 @@ import path from "node:path";
 export function watchInputs(roots: string[], artifactFiles: string[], excludedPaths: string[] = []) {
   let changed = false, complete = true;
   const errors = new Set<string>();
+  const changes: Array<{ event: string; path: string }> = [];
   const artifacts = new Set(artifactFiles.map(p => path.resolve(p)));
   const excluded = excludedPaths.map(p => path.resolve(p));
   const watchers = new Map<string, ReturnType<typeof watch>>();
@@ -19,12 +20,13 @@ export function watchInputs(roots: string[], artifactFiles: string[], excludedPa
     if (isExcluded(directory)) return;
     if (watchers.has(directory)) return;
     try {
-      const watcher = watch(directory, (_event, name) => {
+      const watcher = watch(directory, (event, name) => {
         if (!name) { complete = false; errors.add("missing-event-name"); return; }
         const file = path.resolve(directory, String(name));
         if (isExcluded(file)) return;
         if (artifactOnly ? !artifacts.has(file) : ignored(root, file)) return;
         changed = true;
+        if (changes.length < 16) changes.push({ event, path: path.relative(root, file) });
         // New directories must also be observed; the creation already invalidated this input.
         if (!artifactOnly) {
           try { if (statSync(file).isDirectory()) walk(root, file); } catch (error) {
@@ -46,5 +48,5 @@ export function watchInputs(roots: string[], artifactFiles: string[], excludedPa
   }
   for (const root of roots) walk(path.resolve(root), path.resolve(root));
   for (const file of artifacts) add(path.dirname(file), path.dirname(file), true);
-  return { stop() { for (const watcher of watchers.values()) watcher.close(); return { changed, complete, errors: [...errors] }; } };
+  return { stop() { for (const watcher of watchers.values()) watcher.close(); return { changed, complete, errors: [...errors], changes }; } };
 }

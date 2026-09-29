@@ -43,13 +43,14 @@ for (const scenario of ["busy", "restart", "manual-stop", "human", "human-contin
         t.assertions.assert(cancel.outputSchema.properties.type.const === "workflow.cancelling",
           "cancellation discovery claimed confirmed cleanup at admission");
         t.assertions.assert(budget.outputSchema.properties.type.const === "workflow.budgetUpdated"
-          && budget.inputSchema.properties.maxRuns && budget.inputSchema.properties.maxLlmRounds,
+          && !budget.inputSchema.properties.maxRuns && budget.inputSchema.properties.maxLlmRounds,
           "workflow discovery omitted PM budget controls or their durable result");
       }
       const respond = () => {
         const call = calls++;
-        if (scenario.startsWith("human") && call === 0) return { tool: { name: "request_user_input", arguments: { questions: [{ id: "color", header: "颜色", question: "选择颜色", options: [{ label: "蓝色", description: "使用蓝色" }, { label: "绿色", description: "使用绿色" }] }] } } };
-        if ((scenario === "human" && call === 1) || (scenario === "human-continuation" && call === 2) || ((scenario === "busy" || scenario === "manual-stop") && call === 0)) return { hang: true as const };
+        if (scenario.startsWith("human") && call === 0) return { tool: { name: "request_user_input", arguments: { title: "选择颜色", summary: "共 1 个待回答问题。", description: "请使用下方选项回答问题；提交后继续当前任务。", questions: [{ id: "color", header: "颜色", question: "选择颜色", options: [{ label: "蓝色", description: "使用蓝色" }, { label: "绿色", description: "使用绿色" }] }] } } };
+        if ((scenario === "human" && call === 1) || (scenario === "manual-stop" && call === 0)) return { hang: true as const };
+        if ((scenario === "busy" && call === 0) || (scenario === "human-continuation" && call === 2)) return { text: "The current operation completed without being interrupted.", delayMs: 3_000 };
         return { text: "PM_INPUT_ANSWER: 已核对当前问题和已有执行结果。" };
       };
       opened.mock.script(...Array.from({ length: 12 }, () => ({ respond })));
@@ -59,7 +60,7 @@ for (const scenario of ["busy", "restart", "manual-stop", "human", "human-contin
         if (reply?.type !== "snapshot") throw new Error("session.get omitted the snapshot");
         return reply.data;
       };
-      const send = (messageId: string, text: string, via = client) => via.call({ type: "session.send", payload: { sessionId, messageId, text, attachments: [], artifactPreviewBaseUrl: null, continuesRound: null } });
+      const send = (messageId: string, text: string, via = client) => via.call({ type: "session.send", payload: { sessionId, messageId, text, attachments: [], continuesRound: null } });
       const handled = async (ids: string[]) => {
         await t.tools.waitUntil(async () => {
           const current = await snapshot();
@@ -99,7 +100,7 @@ for (const scenario of ["busy", "restart", "manual-stop", "human", "human-contin
           await t.tools.waitUntil(() => calls >= 3, 30_000);
           await send("u_during_decision", "继续执行前请解释刚才的选择，不要重复已有操作。");
           await handled(["u_consult", "u_during_decision"]);
-          t.assertions.assert(opened.mock.requests.slice(3).some(request => JSON.stringify(request).includes("Recorded Human response")), "interrupting the formal continuation lost the recorded decision");
+          t.assertions.assert(opened.mock.requests.slice(3).some(request => JSON.stringify(request).includes("The user answered the interrupted questions") && JSON.stringify(request).includes("蓝色")), "queued input lost the recorded decision from its completed continuation");
         } else await handled(["u_consult"]);
         t.assertions.assert((await snapshot()).pendingPermissions?.length === 0, "the explicitly answered card did not resolve");
       } else if (scenario === "restart") {
@@ -111,7 +112,7 @@ for (const scenario of ["busy", "restart", "manual-stop", "human", "human-contin
         } });
         t.assertions.assert(configured?.type === "settings", "model image input was not configured before the attachment");
         const image = { name: "pixel.png", mime: "image/png", dataBase64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jhN8AAAAASUVORK5CYII=" };
-        const ack = await client.call({ type: "session.send", payload: { sessionId, messageId: "u_recover", text: "保留这张图和这条消息。", attachments: [image], artifactPreviewBaseUrl: null, continuesRound: null } });
+        const ack = await client.call({ type: "session.send", payload: { sessionId, messageId: "u_recover", text: "保留这张图和这条消息。", attachments: [image], continuesRound: null } });
         t.assertions.assert(ack?.type === "ack", "message was not accepted before restart");
         const pid = Number(cli(["daemon", "status"]).pid);
         client.close();
@@ -119,7 +120,7 @@ for (const scenario of ["busy", "restart", "manual-stop", "human", "human-contin
         await t.tools.waitUntil(() => cli(["daemon", "status"]).running === false, 15_000);
         cli(["daemon", "start"]);
         client = await connectProductClient(daemonEndpoint(opened.daemon));
-        const retry = await client.call({ type: "session.send", payload: { sessionId, messageId: "u_recover", text: "保留这张图和这条消息。", attachments: [image], artifactPreviewBaseUrl: null, continuesRound: null } });
+        const retry = await client.call({ type: "session.send", payload: { sessionId, messageId: "u_recover", text: "保留这张图和这条消息。", attachments: [image], continuesRound: null } });
         t.assertions.assert(retry?.type === "ack", "same-ID retry did not reconcile after restart");
         await handled(["u_recover"]);
         const originals = (await snapshot()).items.filter(item => item.type === "userMessage" && item.id === "u_recover");
@@ -135,6 +136,9 @@ for (const scenario of ["busy", "restart", "manual-stop", "human", "human-contin
           t.assertions.assert(stopped.summary.inputSummary?.paused && stopped.summary.inputSummary.pendingMessageIds.includes("u_first"), "explicit stop did not retain and pause pending delivery");
           await new Promise(resolve => setTimeout(resolve, 750));
           t.assertions.assert(calls === 1, "automatic continuation overrode manual stop");
+          const retained = (await snapshot()).summary.inputSummary;
+          t.assertions.assert(retained?.pauseReason === "userStop" && (retained.controlRevision ?? 0) > 0,
+            "a late failure callback weakened the explicit pause or lost its control identity");
           await send("u_continue", "现在继续，并先核对原执行结果。");
           await handled(["u_first", "u_continue"]);
         } else {
@@ -145,7 +149,9 @@ for (const scenario of ["busy", "restart", "manual-stop", "human", "human-contin
           let conflict = false;
           try { await send("u_second", "改变原消息内容。", second); } catch (error) { conflict = String(error).includes("messageId"); }
           t.assertions.assert(conflict, "same ID accepted a different body");
+          t.assertions.assert(!events.some(envelope => t.flows.main.sessionEventOf(envelope)?.type === "turnCanceled"), "queued input interrupted the original turn");
           await handled(["u_first", "u_second", "u_third"]);
+          t.assertions.assert(!events.some(envelope => t.flows.main.sessionEventOf(envelope)?.type === "turnCanceled"), "draining queued input canceled a turn");
           const items = (await snapshot()).items;
           for (const id of ["u_first", "u_second", "u_third"]) t.assertions.assert(items.filter(item => item.type === "userMessage" && item.id === id).length === 1, `original ${id} was lost or duplicated`);
           const turns = new Set<string>();

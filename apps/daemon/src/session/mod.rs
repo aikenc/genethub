@@ -1,7 +1,7 @@
 pub mod artifact_links;
 mod artifacts;
 pub mod components;
-mod context_seed;
+pub(crate) mod context_seed;
 pub mod images;
 pub mod manager;
 pub mod overview;

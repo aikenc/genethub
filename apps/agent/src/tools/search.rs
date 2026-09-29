@@ -16,6 +16,7 @@ use super::{
 pub const GREP_DEFAULT_LIMIT: usize = 100;
 pub const FIND_DEFAULT_LIMIT: usize = 1000;
 
+#[cfg(test)]
 pub fn grep(args: &Value, cwd: &Path) -> ToolResult {
     grep_cancellable(args, cwd, &|| false)
 }
@@ -106,13 +107,14 @@ pub fn grep_cancellable(args: &Value, cwd: &Path, cancel: &dyn Fn() -> bool) -> 
     let truncation = truncate_head(&rows.join("\n"), usize::MAX, DEFAULT_MAX_BYTES);
     let mut result = ToolResult::ok(truncation.content.clone()).with_truncation(&truncation);
     if matches >= limit || truncation.truncated {
-        result.text.push_str(
-            "\n\n[More matches omitted. Narrow the pattern or raise limit.]",
-        );
+        result
+            .text
+            .push_str("\n\n[More matches omitted. Narrow the pattern or raise limit.]");
     }
     result
 }
 
+#[cfg(test)]
 pub fn find(args: &Value, cwd: &Path) -> ToolResult {
     find_cancellable(args, cwd, &|| false)
 }

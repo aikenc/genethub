@@ -6,7 +6,7 @@ defineJourney(
     title: "A log request cannot reach outside the log directory",
     oracle: "log.tail of ../ paths fails",
     catches: ["log path traversal"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     expectedDurationMs: 15_000,
     timeoutMs: 45_000,
     surfaces: ["daemon", "workbench-client"],

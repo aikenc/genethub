@@ -20,8 +20,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, MutexGuard};
 
-use crate::session::store::now_ms;
-
 const APPROVE: &str = "approve-once";
 const REJECT: &str = "reject";
 
@@ -308,8 +306,8 @@ impl Broker {
     }
 
     /// Releases a presentation that never reached a Human answer (for
-    /// example, Session persistence failed). It does not undo an approval or
-    /// rejection.
+    /// example, Session persistence failed). It does
+    /// not undo an approval or rejection.
     pub async fn abandon_request(&self, session_id: &str, request_id: &str) -> Result<()> {
         let mut guard = self.state.lock().await;
         let mut state = guard.clone();
@@ -328,16 +326,6 @@ impl Broker {
         self.save(&mut guard, state)
     }
 
-    pub async fn record_human_response(
-        &self,
-        session_id: &str,
-        request_id: &str,
-        outcome: &PermissionOutcome,
-    ) -> Result<()> {
-        self.record_human_response_at(session_id, request_id, outcome)
-            .await
-    }
-
     pub(crate) async fn validate_human_response(
         &self,
         session_id: &str,
@@ -353,7 +341,7 @@ impl Broker {
         validate_decision(challenge, outcome)
     }
 
-    pub async fn record_human_response_at(
+    pub async fn record_human_response(
         &self,
         session_id: &str,
         request_id: &str,
@@ -379,7 +367,7 @@ impl Broker {
             PermissionOutcome::Selected { option_id } if option_id == REJECT => {
                 challenge.rejected = true;
             }
-            PermissionOutcome::Canceled | PermissionOutcome::TimedOut { .. } => {
+            PermissionOutcome::Canceled => {
                 challenge.rejected = true;
             }
             _ => bail!("approvalStale: invalid answer for a project mutation plan"),
@@ -447,7 +435,10 @@ impl Broker {
                 challenge.applying = true;
             }
             Some(existing) if existing == action_id => {
-                bail!("actionInProgress: this project mutation is already running")
+                return Err(crate::rpc_error::failure(
+                    genehub_proto::ErrorCode::Conflict,
+                    "actionInProgress: this project mutation is already running".to_owned(),
+                ))
             }
             Some(_) => bail!("approvalConsumed: this approval was already used"),
         }
@@ -747,7 +738,7 @@ fn validate_decision(challenge: &Challenge, outcome: &PermissionOutcome) -> Resu
     let approved = match outcome {
         PermissionOutcome::Selected { option_id } if option_id == APPROVE => true,
         PermissionOutcome::Selected { option_id } if option_id == REJECT => false,
-        PermissionOutcome::Canceled | PermissionOutcome::TimedOut { .. } => false,
+        PermissionOutcome::Canceled => false,
         _ => bail!("approvalStale: invalid Human decision"),
     };
     if challenge.approved || challenge.rejected {
@@ -766,10 +757,12 @@ fn plan_permission_request(
     tool_call_id: Option<String>,
 ) -> PermissionRequest {
     PermissionRequest {
+        summary: None,
+        description: Some(detail),
+        author: None,
         id,
         kind: PermissionRequestKind::PlanApproval,
         title,
-        detail: Some(detail),
         tool_call_id,
         options: vec![
             PermissionOption {
@@ -816,6 +809,10 @@ fn validate_path_id(value: &str, label: &str) -> Result<()> {
     Ok(())
 }
 
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
 pub(crate) fn agent_space_plan_digest(
     workspace_id: &str,
     canonical_root: &str,
@@ -860,10 +857,12 @@ mod tests {
 
     fn question(id: &str) -> PermissionRequest {
         PermissionRequest {
+            summary: None,
+            description: None,
+            author: None,
             id: "ask_1".into(),
             kind: PermissionRequestKind::Question,
             title: "agent text".into(),
-            detail: None,
             tool_call_id: Some("tool_1".into()),
             options: Vec::new(),
             questions: Some(vec![InteractionQuestion {
@@ -919,6 +918,10 @@ mod tests {
             .await
             .unwrap();
 
+        assert!(serde_json::to_value(&issued)
+            .unwrap()
+            .get("expiresAtMs")
+            .is_none());
         assert_eq!(request.kind, PermissionRequestKind::PlanApproval);
         assert_eq!(request.title, "接管项目？");
         assert_eq!(request.options.len(), 2);
@@ -1214,32 +1217,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_retired_expiry_on_disk_does_not_block_approval() {
+    async fn an_unanswered_plan_retains_its_authority_after_restart() {
         let root = tempfile::tempdir().unwrap();
         let broker = Broker::new(root.path()).unwrap();
         let issued = broker.issue(spec()).await.unwrap();
-        broker
+        assert!(serde_json::to_value(&issued)
+            .unwrap()
+            .get("expiresAtMs")
+            .is_none());
+        let normalized = broker
             .normalize_request("s_pm", &question(&issued.challenge_id))
             .await
             .unwrap();
-        let path = root.path().join("project-control").join("approvals.json");
-        let mut saved: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        saved["challenges"][&issued.challenge_id]["expires_at_ms"] = serde_json::json!(1);
-        std::fs::write(&path, serde_json::to_vec_pretty(&saved).unwrap()).unwrap();
-
+        assert_eq!(normalized.kind, PermissionRequestKind::PlanApproval);
+        // The persisted current plan has no decision deadline or live Agent.
         let broker = Broker::new(root.path()).unwrap();
+        let answer = PermissionOutcome::Selected {
+            option_id: APPROVE.into(),
+        };
         broker
-            .record_human_response(
-                "s_pm",
-                "ask_1",
-                &PermissionOutcome::Selected {
-                    option_id: APPROVE.into(),
-                },
-            )
+            .validate_human_response("s_pm", "ask_1", &answer)
             .await
             .unwrap();
-        assert!(broker
+        broker
+            .record_human_response("s_pm", "ask_1", &answer)
+            .await
+            .unwrap();
+        broker
             .reserve(
                 "s_pm",
                 "w_project",
@@ -1251,12 +1255,12 @@ mod tests {
                 0,
                 None,
                 "sha256:clean",
-                "still_valid",
+                "late_action",
                 false,
                 false,
             )
             .await
-            .is_ok());
+            .unwrap();
     }
 
     #[tokio::test]

@@ -8,8 +8,8 @@ use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
+use tokio::sync::Mutex;
 
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -35,7 +35,7 @@ const UPLOAD_STATE: &str = ".upload.json";
 /// Artifact calls can arrive concurrently on independent data-plane streams.
 /// Serializing their short filesystem critical sections makes strict offsets
 /// and final directory publication deterministic without holding bytes in RAM.
-static ARTIFACT_IO: Mutex<()> = Mutex::new(());
+static ARTIFACT_IO: Mutex<()> = Mutex::const_new(());
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -57,14 +57,14 @@ struct CompletedReceipt {
 }
 
 impl Store {
-    pub fn begin_artifact(
+    pub async fn begin_artifact(
         &self,
         workspace_id: &str,
         session_id: &str,
         files: Vec<SessionArtifactFile>,
         metadata: Value,
     ) -> Result<SessionArtifactUpload> {
-        let _guard = artifact_guard()?;
+        let _guard = ARTIFACT_IO.lock().await;
         validate_declaration(&files, &metadata)?;
         let root = self.artifact_root(workspace_id, session_id)?;
         self.prepare_write(workspace_id, session_id, &root)?;
@@ -81,7 +81,12 @@ impl Store {
                 let published = root.join(&bundle_name);
                 (!stage.exists() && !published.exists()).then_some((upload_id, bundle_name, stage))
             })
-            .ok_or_else(|| anyhow!("artifact upload conflict: could not allocate a bundle name"))?;
+            .ok_or_else(|| {
+                crate::rpc_error::failure(
+                    genehub_proto::ErrorCode::Conflict,
+                    "artifact upload conflict: could not allocate a bundle name".to_owned(),
+                )
+            })?;
 
         fs::create_dir(&stage).with_context(|| format!("creating {}", stage.display()))?;
         crate::config::restrict_dir_to_owner(&stage)?;
@@ -109,7 +114,7 @@ impl Store {
         })
     }
 
-    pub fn write_artifact_chunk(
+    pub async fn write_artifact_chunk(
         &self,
         workspace_id: &str,
         session_id: &str,
@@ -118,34 +123,51 @@ impl Store {
         offset: u64,
         data_base64: &str,
     ) -> Result<()> {
-        let _guard = artifact_guard()?;
+        let _guard = ARTIFACT_IO.lock().await;
         let root = self.artifact_root(workspace_id, session_id)?;
         if load_receipt(&root, session_id, upload_id)?.is_some() {
             return Ok(());
         }
         let (stage, state) = load_upload(&root, session_id, upload_id)?;
-        let spec = state
-            .files
-            .get(file_index as usize)
-            .ok_or_else(|| anyhow!("invalid session artifact file index {file_index}"))?;
+        let spec = state.files.get(file_index as usize).ok_or_else(|| {
+            crate::rpc_error::failure(
+                genehub_proto::ErrorCode::BadRequest,
+                format!("invalid session artifact file index {file_index}"),
+            )
+        })?;
         let encoded_limit = (MAX_ARTIFACT_CHUNK_BYTES as usize).div_ceil(3) * 4 + 4;
         if data_base64.len() > encoded_limit {
-            anyhow::bail!("session artifact chunk exceeds {MAX_ARTIFACT_CHUNK_BYTES} bytes");
+            return Err(crate::rpc_error::failure(
+                genehub_proto::ErrorCode::BadRequest,
+                format!("session artifact chunk exceeds {MAX_ARTIFACT_CHUNK_BYTES} bytes"),
+            ));
         }
-        let data = STANDARD
-            .decode(data_base64)
-            .context("invalid session artifact base64")?;
+        let data = STANDARD.decode(data_base64).map_err(|error| {
+            crate::rpc_error::failure(
+                genehub_proto::ErrorCode::BadRequest,
+                format!("invalid session artifact base64: {error}"),
+            )
+        })?;
         if data.is_empty() || data.len() > MAX_ARTIFACT_CHUNK_BYTES as usize {
-            anyhow::bail!("invalid session artifact chunk length");
+            return Err(crate::rpc_error::failure(
+                genehub_proto::ErrorCode::BadRequest,
+                "invalid session artifact chunk length".to_owned(),
+            ));
         }
-        let end = offset
-            .checked_add(data.len() as u64)
-            .ok_or_else(|| anyhow!("invalid session artifact chunk offset"))?;
+        let end = offset.checked_add(data.len() as u64).ok_or_else(|| {
+            crate::rpc_error::failure(
+                genehub_proto::ErrorCode::BadRequest,
+                "invalid session artifact chunk offset".to_owned(),
+            )
+        })?;
         if end > spec.bytes {
-            anyhow::bail!(
-                "session artifact chunk exceeds declared size for {}",
-                spec.name
-            );
+            return Err(crate::rpc_error::failure(
+                genehub_proto::ErrorCode::BadRequest,
+                format!(
+                    "session artifact chunk exceeds declared size for {}",
+                    spec.name
+                ),
+            ));
         }
 
         let parts = stage.join("parts");
@@ -163,7 +185,10 @@ impl Store {
             .open(&path)
             .with_context(|| format!("opening {}", path.display()))?;
         if !file.metadata()?.is_file() {
-            anyhow::bail!("invalid session artifact part {}", path.display());
+            return Err(crate::rpc_error::failure(
+                genehub_proto::ErrorCode::BadRequest,
+                format!("invalid session artifact part {}", path.display()),
+            ));
         }
         crate::config::restrict_to_owner(&path)?;
         let current = file.metadata()?.len();
@@ -183,19 +208,22 @@ impl Store {
                 return Ok(());
             }
         }
-        anyhow::bail!(
-            "artifact upload conflict: expected offset {current} for {} but received {offset}",
-            spec.name
-        )
+        Err(crate::rpc_error::failure(
+            genehub_proto::ErrorCode::Conflict,
+            format!(
+                "artifact upload conflict: expected offset {current} for {} but received {offset}",
+                spec.name
+            ),
+        ))
     }
 
-    pub fn finish_artifact(
+    pub async fn finish_artifact(
         &self,
         workspace_id: &str,
         session_id: &str,
         upload_id: &str,
     ) -> Result<SessionArtifactBundle> {
-        let _guard = artifact_guard()?;
+        let _guard = ARTIFACT_IO.lock().await;
         let root = self.artifact_root(workspace_id, session_id)?;
         if let Some(bundle) = load_receipt(&root, session_id, upload_id)? {
             return Ok(bundle);
@@ -221,14 +249,17 @@ impl Store {
             let metadata = fs::metadata(candidate)
                 .with_context(|| format!("reading artifact part for {}", spec.name))?;
             if metadata.len() != spec.bytes {
-                anyhow::bail!(
-                    "artifact upload incomplete: {} has {} of {} bytes",
-                    spec.name,
-                    metadata.len(),
-                    spec.bytes
-                );
+                return Err(crate::rpc_error::failure(
+                    genehub_proto::ErrorCode::BadRequest,
+                    format!(
+                        "artifact upload incomplete: {} has {} of {} bytes",
+                        spec.name,
+                        metadata.len(),
+                        spec.bytes
+                    ),
+                ));
             }
-            let sha256 = hash_file(candidate)?;
+            let sha256 = hash_file(candidate).await?;
             stored.push(SessionArtifactStoredFile {
                 name: spec.name.clone(),
                 mime: spec.mime.clone(),
@@ -242,13 +273,19 @@ impl Store {
             let destination = stage.join(&spec.name);
             if part.exists() {
                 if destination.exists() {
-                    anyhow::bail!("artifact upload conflict: {} already exists", spec.name);
+                    return Err(crate::rpc_error::failure(
+                        genehub_proto::ErrorCode::Conflict,
+                        format!("artifact upload conflict: {} already exists", spec.name),
+                    ));
                 }
                 fs::rename(&part, &destination).with_context(|| {
                     format!("publishing artifact file {}", destination.display())
                 })?;
             } else if !destination.exists() {
-                anyhow::bail!("artifact upload incomplete: {} is missing", spec.name);
+                return Err(crate::rpc_error::failure(
+                    genehub_proto::ErrorCode::BadRequest,
+                    format!("artifact upload incomplete: {} is missing", spec.name),
+                ));
             }
         }
         fs::remove_dir(&parts).with_context(|| format!("removing {}", parts.display()))?;
@@ -273,7 +310,10 @@ impl Store {
 
         let published = root.join(&state.bundle_name);
         if published.exists() {
-            anyhow::bail!("artifact upload conflict: bundle already exists");
+            return Err(crate::rpc_error::failure(
+                genehub_proto::ErrorCode::Conflict,
+                "artifact upload conflict: bundle already exists".to_owned(),
+            ));
         }
         fs::rename(&stage, &published)
             .with_context(|| format!("publishing artifact bundle {}", published.display()))?;
@@ -309,13 +349,13 @@ impl Store {
         Ok(bundle)
     }
 
-    pub fn abort_artifact(
+    pub async fn abort_artifact(
         &self,
         workspace_id: &str,
         session_id: &str,
         upload_id: &str,
     ) -> Result<()> {
-        let _guard = artifact_guard()?;
+        let _guard = ARTIFACT_IO.lock().await;
         let root = self.artifact_root(workspace_id, session_id)?;
         if load_receipt(&root, session_id, upload_id)?.is_some() {
             return Ok(());
@@ -333,11 +373,17 @@ impl Store {
 
 fn validate_declaration(files: &[SessionArtifactFile], metadata: &Value) -> Result<()> {
     if files.is_empty() || files.len() > MAX_ARTIFACT_FILES {
-        anyhow::bail!("invalid session artifact file count");
+        return Err(crate::rpc_error::failure(
+            genehub_proto::ErrorCode::BadRequest,
+            "invalid session artifact file count".to_owned(),
+        ));
     }
     let metadata_bytes = serde_json::to_vec(metadata)?;
     if metadata_bytes.len() > MAX_ARTIFACT_METADATA_BYTES {
-        anyhow::bail!("session artifact metadata exceeds {MAX_ARTIFACT_METADATA_BYTES} bytes");
+        return Err(crate::rpc_error::failure(
+            genehub_proto::ErrorCode::BadRequest,
+            format!("session artifact metadata exceeds {MAX_ARTIFACT_METADATA_BYTES} bytes"),
+        ));
     }
     let mut names = HashSet::new();
     let mut total = 0u64;
@@ -345,14 +391,20 @@ fn validate_declaration(files: &[SessionArtifactFile], metadata: &Value) -> Resu
         validate_name(&file.name)?;
         validate_mime(&file.mime)?;
         if !names.insert(file.name.to_ascii_lowercase()) {
-            anyhow::bail!("invalid session artifact duplicate file name {}", file.name);
+            return Err(crate::rpc_error::failure(
+                genehub_proto::ErrorCode::BadRequest,
+                format!("invalid session artifact duplicate file name {}", file.name),
+            ));
         }
         total = total
             .checked_add(file.bytes)
             .ok_or_else(|| anyhow!("session artifact size overflow"))?;
     }
     if total > MAX_ARTIFACT_BYTES {
-        anyhow::bail!("session artifact exceeds {MAX_ARTIFACT_BYTES} bytes");
+        return Err(crate::rpc_error::failure(
+            genehub_proto::ErrorCode::BadRequest,
+            format!("session artifact exceeds {MAX_ARTIFACT_BYTES} bytes"),
+        ));
     }
     Ok(())
 }
@@ -372,7 +424,10 @@ fn validate_name(name: &str) -> Result<()> {
             "manifest.json" | "upload.json" | "parts"
         );
     if !valid {
-        anyhow::bail!("invalid session artifact file name {name:?}");
+        return Err(crate::rpc_error::failure(
+            genehub_proto::ErrorCode::BadRequest,
+            format!("invalid session artifact file name {name:?}"),
+        ));
     }
     Ok(())
 }
@@ -382,15 +437,12 @@ fn validate_mime(mime: &str) -> Result<()> {
         || mime.len() > MAX_ARTIFACT_MIME_BYTES
         || !mime.bytes().all(|byte| byte.is_ascii_graphic())
     {
-        anyhow::bail!("invalid session artifact media type");
+        return Err(crate::rpc_error::failure(
+            genehub_proto::ErrorCode::BadRequest,
+            "invalid session artifact media type".to_owned(),
+        ));
     }
     Ok(())
-}
-
-fn artifact_guard() -> Result<std::sync::MutexGuard<'static, ()>> {
-    ARTIFACT_IO
-        .lock()
-        .map_err(|_| anyhow!("session artifact storage lock is poisoned"))
 }
 
 fn load_upload(root: &Path, session_id: &str, upload_id: &str) -> Result<(PathBuf, UploadState)> {
@@ -406,7 +458,10 @@ fn load_upload(root: &Path, session_id: &str, upload_id: &str) -> Result<(PathBu
     let state: UploadState = serde_json::from_slice(&raw)
         .with_context(|| format!("invalid artifact upload state: {upload_id}"))?;
     if state.upload_id != upload_id || state.session_id != session_id {
-        anyhow::bail!("artifact upload does not belong to this session");
+        return Err(crate::rpc_error::failure(
+            genehub_proto::ErrorCode::Forbidden,
+            "artifact upload does not belong to this session".to_owned(),
+        ));
     }
     Ok((stage, state))
 }
@@ -431,7 +486,10 @@ fn load_receipt(
     let receipt: CompletedReceipt = serde_json::from_slice(&raw)
         .with_context(|| format!("invalid artifact completion receipt: {upload_id}"))?;
     if receipt.upload_id != upload_id || receipt.session_id != session_id {
-        anyhow::bail!("artifact upload does not belong to this session");
+        return Err(crate::rpc_error::failure(
+            genehub_proto::ErrorCode::Forbidden,
+            "artifact upload does not belong to this session".to_owned(),
+        ));
     }
     let prefix = format!(".genethub/sessions/{session_id}/artifacts/");
     if !receipt.bundle.workspace_path.starts_with(&prefix)
@@ -446,7 +504,10 @@ fn load_receipt(
 fn validate_upload_id(upload_id: &str) -> Result<()> {
     let suffix = upload_id.strip_prefix("u_").unwrap_or_default();
     if suffix.len() != 32 || !suffix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        anyhow::bail!("invalid session artifact upload id");
+        return Err(crate::rpc_error::failure(
+            genehub_proto::ErrorCode::BadRequest,
+            "invalid session artifact upload id".to_owned(),
+        ));
     }
     Ok(())
 }
@@ -456,7 +517,10 @@ fn require_real_directory(path: &Path) -> Result<()> {
         .with_context(|| format!("reading directory {}", path.display()))?;
     crate::config::reject_link_or_reparse(path, &metadata)?;
     if !metadata.is_dir() {
-        anyhow::bail!("invalid session artifact directory {}", path.display());
+        return Err(crate::rpc_error::failure(
+            genehub_proto::ErrorCode::BadRequest,
+            format!("invalid session artifact directory {}", path.display()),
+        ));
     }
     Ok(())
 }
@@ -466,7 +530,10 @@ fn reject_non_file_if_present(path: &Path) -> Result<()> {
         Ok(metadata) => {
             crate::config::reject_link_or_reparse(path, &metadata)?;
             if !metadata.is_file() {
-                anyhow::bail!("invalid session artifact file {}", path.display());
+                return Err(crate::rpc_error::failure(
+                    genehub_proto::ErrorCode::BadRequest,
+                    format!("invalid session artifact file {}", path.display()),
+                ));
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -475,7 +542,7 @@ fn reject_non_file_if_present(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn hash_file(path: &Path) -> Result<String> {
+async fn hash_file(path: &Path) -> Result<String> {
     let mut file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let mut digest = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
@@ -485,6 +552,7 @@ fn hash_file(path: &Path) -> Result<String> {
             break;
         }
         digest.update(&buffer[..read]);
+        crate::blocking::breathe().await;
     }
     Ok(format!("{:x}", digest.finalize()))
 }
@@ -558,8 +626,8 @@ mod tests {
         (temp, Store::new(homes))
     }
 
-    #[test]
-    fn finalizes_a_hashed_bundle_inside_the_session() {
+    #[tokio::test]
+    async fn finalizes_a_hashed_bundle_inside_the_session() {
         let (temp, store) = fixture();
         let upload = store
             .begin_artifact(
@@ -579,6 +647,7 @@ mod tests {
                 ],
                 json!({"source": "preview"}),
             )
+            .await
             .unwrap();
         store
             .write_artifact_chunk(
@@ -589,6 +658,7 @@ mod tests {
                 0,
                 &STANDARD.encode(b"hello"),
             )
+            .await
             .unwrap();
         // Lost acknowledgements are safe to retry.
         store
@@ -600,9 +670,11 @@ mod tests {
                 0,
                 &STANDARD.encode(b"hello"),
             )
+            .await
             .unwrap();
         let bundle = store
             .finish_artifact("w1", "s_demo", &upload.upload_id)
+            .await
             .unwrap();
 
         let name = bundle.relative_path.strip_prefix("artifacts/").unwrap();
@@ -623,17 +695,19 @@ mod tests {
         assert_eq!(
             store
                 .finish_artifact("w1", "s_demo", &upload.upload_id)
+                .await
                 .unwrap(),
             bundle
         );
         store
             .abort_artifact("w1", "s_demo", &upload.upload_id)
+            .await
             .unwrap();
         assert!(path.exists());
     }
 
-    #[test]
-    fn rejects_paths_sizes_and_wrong_offsets() {
+    #[tokio::test]
+    async fn rejects_paths_sizes_and_wrong_offsets() {
         let (_temp, store) = fixture();
         assert!(store
             .begin_artifact(
@@ -646,6 +720,7 @@ mod tests {
                 }],
                 json!({}),
             )
+            .await
             .is_err());
         let upload = store
             .begin_artifact(
@@ -658,6 +733,7 @@ mod tests {
                 }],
                 json!({}),
             )
+            .await
             .unwrap();
         assert!(store
             .write_artifact_chunk(
@@ -668,12 +744,15 @@ mod tests {
                 1,
                 &STANDARD.encode(b"x"),
             )
+            .await
             .is_err());
         assert!(store
             .finish_artifact("w1", "s_demo", &upload.upload_id)
+            .await
             .is_err());
         store
             .abort_artifact("w1", "s_demo", &upload.upload_id)
+            .await
             .unwrap();
         assert!(!store
             .session_dir("w1", "s_demo")
@@ -683,8 +762,8 @@ mod tests {
             .exists());
     }
 
-    #[test]
-    fn upload_ids_cannot_cross_sessions_and_delete_removes_the_bundle() {
+    #[tokio::test]
+    async fn upload_ids_cannot_cross_sessions_and_delete_removes_the_bundle() {
         let (temp, store) = fixture();
         let upload = store
             .begin_artifact(
@@ -697,6 +776,7 @@ mod tests {
                 }],
                 json!({}),
             )
+            .await
             .unwrap();
         assert!(store
             .write_artifact_chunk(
@@ -707,6 +787,7 @@ mod tests {
                 0,
                 &STANDARD.encode(b"x"),
             )
+            .await
             .is_err());
         store
             .write_artifact_chunk(
@@ -717,9 +798,11 @@ mod tests {
                 0,
                 &STANDARD.encode(b"x"),
             )
+            .await
             .unwrap();
         let bundle = store
             .finish_artifact("w1", "s_one", &upload.upload_id)
+            .await
             .unwrap();
         let path = temp.path().join(bundle.workspace_path);
         assert!(path.exists());
@@ -728,8 +811,8 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn a_planted_artifacts_symlink_is_rejected_without_touching_its_target() {
+    #[tokio::test]
+    async fn a_planted_artifacts_symlink_is_rejected_without_touching_its_target() {
         use std::os::unix::fs::symlink;
 
         let (temp, store) = fixture();
@@ -750,6 +833,7 @@ mod tests {
                 }],
                 json!({}),
             )
+            .await
             .is_err());
         assert_eq!(fs::read_dir(outside).unwrap().count(), 0);
     }

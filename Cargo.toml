@@ -14,10 +14,7 @@ members = [
     "packages/native",
     "packages/wasi-guest",
     "packages/proto",
-    "testing/deprecated/rust",
 ]
-# Frozen integration crate stays a member so `cargo test -p genehub-testing` still
-# works by hand. It is not a default member: ordinary `cargo test` does not run it.
 # genehub-host pulls Wasmtime; keep it off the default `cargo test` graph.
 default-members = [
     "apps/agent",

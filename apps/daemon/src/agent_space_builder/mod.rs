@@ -122,7 +122,7 @@ pub fn verify_space(project_root: &Path, space_root: &Path) -> BuilderResult<Ver
         ))
     })?;
     let space_root = validate_space_root(&project_root, space_root)?;
-    detect_legacy(&space_root)?;
+
     let manifest = load_manifest(&space_root)?;
     let workspace = load_workspace(&project_root, &space_root, &manifest)?;
     let lock_digest = verify(&project_root, &space_root)?;
@@ -168,7 +168,6 @@ pub(crate) fn run_bound(
         return init(&project_root, space_root);
     }
     let space_root = validate_space_root(&project_root, space_root)?;
-    detect_legacy(&space_root)?;
 
     match command {
         Command::Init => unreachable!("init returned before existing-root validation"),
@@ -345,7 +344,7 @@ fn init(project_root: &Path, requested_root: &Path) -> BuilderResult<Report> {
                 .source(root.display().to_string()),
         );
     }
-    detect_legacy(&root)?;
+
     let _guard = BuildGuard::acquire(&root)?;
     let manifest_path = root.join("pipespace.json");
     let mut created = Vec::new();
@@ -519,47 +518,6 @@ fn validate_space_root(project_root: &Path, space_root: &Path) -> BuilderResult<
         );
     }
     Ok(root)
-}
-
-fn detect_legacy(root: &Path) -> BuilderResult<()> {
-    const LEGACY: [&str; 9] = [
-        "tagents",
-        "private",
-        "harness-space.json",
-        "harness-space-tree.json",
-        "pipespace-tree.json",
-        ".harness-builder",
-        ".harness-agents",
-        ".harness-space.yaml",
-        ".harness-lock.yaml",
-    ];
-    let mut found: Vec<String> = LEGACY
-        .into_iter()
-        .filter(|name| root.join(name).exists() || is_symlink(&root.join(name)))
-        .map(str::to_string)
-        .collect();
-    if let Ok(entries) = std::fs::read_dir(root) {
-        found.extend(entries.flatten().filter_map(|entry| {
-            entry
-                .file_name()
-                .to_str()
-                .filter(|name| name.ends_with(".code-workspace.src"))
-                .map(str::to_string)
-        }));
-    }
-    found.sort();
-    found.dedup();
-    if found.is_empty() {
-        Ok(())
-    } else {
-        fail(
-            Diagnostic::error(
-                "PB015",
-                format!("Legacy THarness layout detected: {}", found.join(", ")),
-            )
-            .sources(found),
-        )
-    }
 }
 
 fn reject_nested_spaces(root: &Path, scan_depth: u32) -> BuilderResult<()> {

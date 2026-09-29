@@ -256,7 +256,7 @@ jobs:
           # The runner's shell already has `-e`, which would end this script at
           # the failing pipeline and skip the reporting below entirely.
           set +e
-          cargo test --workspace --exclude genehub-testing --exclude genehub-host --no-fail-fast 2>&1 | tee /tmp/tests.log
+          cargo test --workspace --exclude genehub-host --no-fail-fast 2>&1 | tee /tmp/tests.log
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
             # Indented single words in a `failures:` block are the case names.
@@ -333,10 +333,6 @@ jobs:
       && (needs.rust.result == 'success' || needs.rust.result == 'skipped')
       && (needs.relay.result == 'success' || needs.relay.result == 'skipped')
     runs-on: ubuntu-latest
-    env:
-      GENET_E2E_REQUIRED: "1"
-      GENET_E2E_DAEMON: ${{ github.workspace }}/target/debug/genet-local
-      GENET_E2E_AGENT: ${{ github.workspace }}/target/debug/genet-agent-local
     defaults:
       run:
         working-directory: packages/workbench
@@ -398,24 +394,25 @@ jobs:
         with:
           name: open-ci-relay-dist
           path: apps/relay/dist
-      # And the self-hosted case drives a real relay on top of that. This is
-      # the job that proves the open repository stands on its own — a relay and
-      # a folder of static files — so letting it skip would drop the claim.
+      # Keep the mandatory web job and its build/unit checks. The unique real
+      # relay facts now run through testctl, whose missing inputs fail preflight.
       - name: Build relay
         if: needs.relay.result != 'success'
         run: npm ci && npm run build
         working-directory: apps/relay
       - run: npm ci
       - run: npm run typecheck
-      - name: Refuse to skip mandatory real-process journeys
-        run: |
-          test -x "$GENET_E2E_DAEMON"
-          test -x "$GENET_E2E_AGENT"
-          test -x "$GITHUB_WORKSPACE/target/debug/genehub-host-local"
-          test -f "$GITHUB_WORKSPACE/target/debug/genehub_guest.wasm"
-          test -f "$GITHUB_WORKSPACE/apps/relay/dist/main.js"
       - run: npm test
       - run: npm run build
+      - name: Install the unified public test coordinator
+        run: npm ci --prefix testing
+        working-directory: .
+      - name: Run mandatory real-relay facts through testctl
+        run: |
+          mkdir -p .testctl-ci
+          npm --prefix testing run testctl -- plan --open "$GITHUB_WORKSPACE" --gate change --tags refactor-relay-facts
+          npm --prefix testing run testctl -- run --space "$GITHUB_WORKSPACE/.testctl-ci" --open "$GITHUB_WORKSPACE" --gate change --tags refactor-relay-facts --topic web-relay --environments 2
+        working-directory: .
 
   desktop:
     needs: [changes, guest]

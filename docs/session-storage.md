@@ -4,6 +4,10 @@
 
 三层寻址模型（session / round / blob）的动机、trunk 与 batch 的切分规则见 `docs/agent-analysis-substrate-proposal.md`。本文承接它，只回答**物理布局**。`.genethub/` 的全貌、会话之外的数据放哪，见 [storage-layout.md](./storage-layout.md)。
 
+当前开发候选只读写 Session format 10。更早或更晚格式保留为不可打开的目录行；不自动升级、不覆盖原数据。`humanWait` 是唯一等待记录，旧 `pendingPermission` / `humanContinuation` / owner.lock 与项目别名迁移已删除。当前格式的 inbox、回执、检查点、墓碑和 writer.lock 恢复保护继续保留。
+
+inbox 总待处理容量 32，其中 Workflow activity 最多占 24，为 Human 预留 8；下一投递边界按 Human/activity 轮转，每批最多 8 条且正文预算 128 KiB（单条已经接收的大消息独立投递）。Human 等待期间仅接收咨询投递，activity 保持排队。接收消息不自动停止 Agent，明确 Stop 才取消并暂停队列。
+
 ---
 
 ## 1. 为什么要重排
@@ -231,3 +235,11 @@ N = 会话总 item 数，R = round 数，T = 某个 round 的 trunk 数，B = �
 - **版本单向：** `format` 高于本机的会话仍出现在列表里并说明原因，但打不开；本机只读它不会改动 `meta.json`。
 - **写入互斥：** 同一 session 的第二个 daemon 写入被拒绝并指出占用者，读取不受影响；不同 session 可跨 channel 并行写；占用者退出后无需重启即可恢复写入；从稳定 turn Fork 的新 session 不受源 session 锁影响。
 - **删除原子且可回收：** `session.delete` 持有该 session 的 writer lock 写入 durable tombstone；从此所有 channel 都隐藏并拒绝写入该 id。随后释放锁并删除整个会话目录，包括 blobs 与 scratch；Windows 若因开放 handle 暂时不能删除，启动/列表扫描会继续回收，墓碑保证残留目录永不复活。
+
+## 工作流观测
+
+工作流构建、请求与 Run 的权威路径见 [storage-layout.md](./storage-layout.md) §5。
+Agent 使用 `workflow get/profile` 获取运行事实，不直接扫描或修改组件内部记录。
+每轮活动累计调用次数，工作分配时固定有效成本档位、单价及配置摘要；成本是人民币估算，
+不代表服务账单。包内质量结果和依赖记录属于包数据，通过既有文件 API 读取。
+视图与规范随构建固定，变更当前包源不会重解释已启动 Run。

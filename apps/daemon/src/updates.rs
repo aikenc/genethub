@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use futures_util::StreamExt;
 use genehub_proto::{ServerFrame, UpdateDownload, UpdateStatus};
 use serde::Deserialize;

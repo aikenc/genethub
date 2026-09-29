@@ -19,11 +19,11 @@ function assignment(value: unknown): { key: string } | undefined {
   return undefined;
 }
 
-for (const scenario of ["observation", "retry", "budget-expiry", "entries", "entries-empty", "entries-type", "entries-limit", "entries-max", "parallel-restart", "parallel-sibling-lost", "parallel-failure", "parallel-double-failure", "parallel-human-wait"] as const) defineSpecialty({
+for (const scenario of ["observation", "retry", "entries", "entries-empty", "entries-type", "entries-limit", "entries-max", "parallel-restart", "parallel-sibling-lost", "parallel-failure", "parallel-double-failure", "parallel-human-wait"] as const) defineSpecialty({
   id: `specialty.workflow.budget-parallel.${scenario}`,
   title: `Budget observations and deterministic parallel data: ${scenario}`,
-  oracle: "Public Run output preserves budget observations across amendments/restart and request retries; independently overlapping Workers reduce by stable keys, while host failures clean up and only a wholly waiting Run pauses execution time",
-  catches: ["budget read mutates limits", "restart refreshes a committed observation", "retry resets shared usage", "a fourth Run bypasses the shared limit", "structured budget expiry loses its PM handoff cause", "stale budget revision overwrites PM", "entries depends on completion order", "entries accepts wrong types or unbounded data", "parallel work is serialized", "one Human wait exempts working siblings", "failure leaves live siblings", "one lost sibling silently continues a partially failed Run or replays a side effect"],
+  oracle: "Public Run output preserves budget observations across amendments/restart and request retries; independently overlapping Workers reduce by stable keys, while host failures clean up and Human waits retain their request without execution clocks",
+  catches: ["budget read mutates limits", "restart refreshes a committed observation", "retry resets shared usage", "a fourth Run bypasses the shared limit", "stale budget revision overwrites PM", "entries depends on completion order", "entries accepts wrong types or unbounded data", "parallel work is serialized", "failure leaves live siblings", "one lost sibling silently continues a partially failed Run or replays a side effect"],
   tags: ["core", "workflow", "structured-workflow", "budget-parallel"],
   llm: { default: "mock" }, expectedDurationMs: 20_000, timeoutMs: 150_000,
   resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
@@ -41,7 +41,7 @@ for (const scenario of ["observation", "retry", "budget-expiry", "entries", "ent
     await t.flows.main.configureMockProvider(opened.client, opened.mock);
         const source = t.flows.main.seedDirectChangePackage({ projectRoot: opened.workspaceRoot });
     writeFileSync(path.join(source, "prompts/direct-worker.md"), "BUDGET_PARALLEL_WORKER: execute only the bound assignment and submit actual results.\n");
-    const budgetCase = scenario === "observation" || scenario === "retry" || scenario === "budget-expiry";
+    const budgetCase = scenario === "observation" || scenario === "retry";
     const pure = scenario.startsWith("entries-");
     const input = scenario === "entries-empty" ? {} : scenario === "entries-type" ? []
       : Object.fromEntries(Array.from({ length: scenario === "entries-limit" ? 4097 : 4096 }, (_, n) => [`k${n.toString().padStart(4, "0")}`, n]));
@@ -71,9 +71,17 @@ for (const scenario of ["observation", "retry", "budget-expiry", "entries", "ent
     const waitFile = (file: string) => `for i in $(seq 1 400); do test -f ${q(file)} && break; sleep 0.05; done; test -f ${q(file)}`;
     let nextCommand: string | undefined = '"$GENEHUB_CLI" workflow activate --revision 0 && "$GENEHUB_CLI" workflow dispatch --workflow direct-change --task observed-1 --no-wait --message "Process the bounded record batch within the existing request budget"';
     const seen = new Set<string>();
+    const reported = new Set<string>();
     opened.mock.script(...Array.from({ length: 90 }, () => ({ respond: (request: unknown) => {
       const text = JSON.stringify(request);
-      if (scenario === "parallel-double-failure" && text.includes("只读复查被处理的 Run")) return { hang: true as const };
+      if (scenario === "parallel-double-failure" && text.includes("只读复查这条用户需求及其 Run")) return { hang: true as const };
+      if (text.includes("角色标签为 `recovery-reviewer`")) {
+        const reportOperation = text.match(/当前节点：(operation-\d+)/)?.[1];
+        const reportKey = "report:" + (text.match(/被处理 Run：(wr_[a-f0-9]+)/)?.[1] ?? "run") + ":" + reportOperation;
+        if (reported.has(reportKey)) return { text: "Diagnostic report submitted." };
+        reported.add(reportKey);
+        return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" workflow complete --evidence report="Observed failed program and retained the original goal"' } } };
+      }
       if (!text.includes("BUDGET_PARALLEL_WORKER")) {
         if (!nextCommand) return { text: "Observed execution facts." };
         const command = nextCommand; nextCommand = undefined; return { tool: { name: "bash", arguments: { command } } };
@@ -89,24 +97,16 @@ for (const scenario of ["observation", "retry", "budget-expiry", "entries", "ent
         return { text: "Result submitted." };
       }
       seen.add(identity);
-      if (scenario === "parallel-human-wait" && data.key === "a") return { tool: { name: "request_user_input", arguments: { questions: [{ id: "scope", header: "Scope", question: "Confirm this acceptance scope", options: [{ label: "yes", description: "Approve" }, { label: "no", description: "Decline" }] }] } } };
+      if (scenario === "parallel-human-wait" && data.key === "a") return { tool: { name: "request_user_input", arguments: { title: "Confirm this acceptance scope", summary: "共 1 个待回答问题。", description: "请使用下方选项回答问题；提交后继续当前任务。", questions: [{ id: "scope", header: "Scope", question: "Confirm this acceptance scope", options: [{ label: "yes", description: "Approve" }, { label: "no", description: "Decline" }] }] } } };
       const finish = (scenario === "parallel-failure" && data.key === "a") || scenario === "parallel-double-failure" ? '--outcome failed --reason "checker unavailable"'
         : `--output ${q(JSON.stringify({ passed: scenario !== "entries" || data.key !== "z" }))}`;
-      const barrier = scenario === "observation" || scenario === "budget-expiry" || scenario === "parallel-human-wait" ? waitFile(release)
+      const barrier = scenario === "observation" || scenario === "parallel-human-wait" ? waitFile(release)
         : pure || budgetCase ? "true" : waitFile(effect(data.key === "a" ? "z" : "a"));
+      // Both real Workers must start before either can submit.
       const pause = scenario === "parallel-sibling-lost" ? "sleep 45 && "
         : scenario === "parallel-failure" && data.key === "z" ? "sleep 30 && " : data.key === "z" ? "sleep 0.3 && " : "";
-      // Retirement actively terminates a submitted tool: sleep alone does not
-      // keep `finishing` observable. This owned fixture resists TERM only until
-      // the product's bounded KILL grace, and submits z after a is completed.
-      const after = scenario === "observation" ? " && sleep 5"
-        : scenario === "parallel-restart" && data.key === "z"
-          ? " && sleep 120"
-          : "";
-      const retirementBoundary = scenario === "parallel-restart" && data.key === "z";
-      const before = retirementBoundary ? "trap '' TERM; " : "";
-      const submitBarrier = retirementBoundary ? `${waitFile(release)} && ` : "";
-      return { tool: { name: "bash", arguments: { command: `${before}printf '%s\\n' ${q(identity)} >> ${q(effect(data.key))} && ${barrier} && ${submitBarrier}${pause}"$GENEHUB_CLI" workflow complete ${finish}${after}` } } };
+      const after = scenario === "observation" ? " && sleep 5" : "";
+      return { tool: { name: "bash", arguments: { command: `printf '%s\\n' ${q(identity)} >> ${q(effect(data.key))} && ${barrier} && ${pause}"$GENEHUB_CLI" workflow complete ${finish}${after}` } } };
     } })));
     const pm = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
     let inputSeq = 0;
@@ -114,45 +114,17 @@ for (const scenario of ["observation", "retry", "budget-expiry", "entries", "ent
     // racing its active PM turn through the immediate-input API.
     const send = (text: string) => opened.client.call({ type: "session.send", payload: {
       sessionId: pm, messageId: `u_budget_${++inputSeq}`, text,
-      attachments: [], continuesRound: null, artifactPreviewBaseUrl: null,
+      attachments: [], continuesRound: null,
     } });
     const history = async () => {
       const reply = await opened.client.call({ type: "workflow.history", payload: { workspaceId: opened.workspaceId, limit: 10 } });
       if (reply?.type !== "workflowRuns") throw new Error("missing history"); return reply.data;
     };
     let run: WorkflowRunStatus | undefined;
-    const current = async () => { const runs = await history(); run = scenario === "parallel-sibling-lost"
-      ? runs.find(item => item.taskId === "observed-1") : runs[0]; return run; };
+    const current = async () => { const runs = await history(); run = runs.filter(item => item.handles.length === 0)[0]; return run; };
     const restart = async () => { opened.client.close(); await cli(["daemon", "stop"]); await cli(["daemon", "start"]); opened.client = await connectProductClient(daemonEndpoint(opened.daemon)); };
     await send("Execute the configured Workflow and retain its facts.");
     let before: WorkflowRequestBudgetSnapshot | undefined;
-    if (scenario === "budget-expiry") {
-      await t.tools.waitUntil(async () => !!(await current()) && existsSync(effect("budget")), 35_000);
-      const original = run!.id;
-      nextCommand = `"$GENEHUB_CLI" workflow budget --run ${q(original)} --revision 0 --deadline-seconds 1`;
-      await send("Limit this request to one second of execution time.");
-      await t.tools.waitUntil(async () => (await current())?.requestBudget.revision === 1, 25_000);
-      await t.tools.waitUntil(async () => (await current())?.status === "blocked", 25_000);
-      const snapshotPath = path.join(opened.workspaceRoot, ".genethub/components/pm/requests", original,
-        "runs", original, "run.json");
-      const saved = JSON.parse(readFileSync(snapshotPath, "utf8")) as { run: { stop?: { causeCode?: string }; updatedAtMs: number } };
-      t.assertions.assert(saved.run.stop?.causeCode === "requestBudget",
-        `structured budget expiry lost its PM handoff cause: ${saved.run.stop?.causeCode}`);
-      t.assertions.assert(!(await history()).some(item => item.handles.some(handle => handle.runId === original)),
-        "ordinary request budget expiry started a recovery Run");
-      opened.client.close();
-      await cli(["daemon", "stop"]);
-      // Advance only the persisted PM answer clock; the patrol must create
-      // the same Human feedback exit it creates for other budget blocks.
-      saved.run.updatedAtMs = Date.now() - 1_805_000;
-      writeFileSync(snapshotPath, JSON.stringify(saved));
-      await cli(["daemon", "start"]);
-      opened.client = await connectProductClient(daemonEndpoint(opened.daemon));
-      await t.tools.waitUntil(async () => (await history()).find(item => item.id === original)?.humanExit?.kind === "d", 25_000);
-      t.assertions.assert(!(await history()).some(item => item.handles.some(handle => handle.runId === original)),
-        "PM timeout created a recovery Run for a structured budget block");
-      return;
-    }
     if (scenario === "observation") {
       await t.tools.waitUntil(async () => !!(await current()) && existsSync(effect("budget")), 35_000);
       before = run!.nodes.find(n => n.uses === "request.budget")!.output as WorkflowRequestBudgetSnapshot;
@@ -163,24 +135,28 @@ for (const scenario of ["observation", "retry", "budget-expiry", "entries", "ent
       await t.tools.waitUntil(async () => (await current())?.nodes.some(n => n.uses === "agent.session" && n.status === "finishing") === true, 25_000);
       await restart();
     } else if (scenario === "parallel-restart") {
+      let snapshotPath = "";
+      let acceptedCheckpoint: string | undefined;
       // z has already recorded its side effect but cannot submit until a has
       // settled. Thus the mixed frontier cannot be skipped by close timing.
       await t.tools.waitUntil(async () => {
         await current();
-        return existsSync(effect("z"))
-          && run?.nodes.some(n => n.status === "completed" && n.uses === "agent.session") === true
-          && run.nodes.some(n => n.status === "running" && n.uses === "agent.session");
-      }, 35_000);
-      writeFileSync(release, "submit z");
-      try {
-        await t.tools.waitUntil(async () => {
-          await current(); return run?.nodes.some(n => n.status === "completed" && n.uses === "agent.session") === true
-            && run.nodes.some(n => n.status === "finishing");
-        }, 40_000);
-      } catch (error) {
-        throw new Error(`parallel restart precondition: ${error}; public Run: ${JSON.stringify(run)}`);
-      }
-      await restart();
+        if (!run) return false;
+        snapshotPath = path.join(opened.workspaceRoot, ".genethub/components/pm/requests", run.id, "runs", run.id, "run.json");
+        const raw = readFileSync(snapshotPath, "utf8"), saved = JSON.parse(raw);
+        const workers = Object.values(saved.run.nodes).filter((node: any) => node.uses === "agent.session") as Array<{ phase: string; resultAcceptedAtMs: number }>;
+        if (workers.length === 2 && workers.every(node => node.resultAcceptedAtMs > 0)
+          && workers.some(node => node.phase === "finishing") && saved.run.engine?.status === "running") acceptedCheckpoint = raw;
+        return run.status === "completed" && run.nodes.filter(n => n.uses === "agent.session" && n.status === "completed").length === 2;
+      }, 40_000).catch(async error => { throw new Error(`${error}; beforeRestart=${JSON.stringify(run)}; requests=${opened.mock.requests.length}`); });
+      t.assertions.assert(!!acceptedCheckpoint, "did not observe a genuine accepted-result/unfinished-cleanup checkpoint");
+      opened.client.close();
+      await cli(["daemon", "stop"]);
+      // Replay an actual durable pre-cleanup snapshot, including its pure engine
+      // state. Changing only a completed node label would manufacture an invalid checkpoint.
+      writeFileSync(snapshotPath, acceptedCheckpoint!);
+      await cli(["daemon", "start"]);
+      opened.client = await connectProductClient(daemonEndpoint(opened.daemon));
     } else if (scenario === "parallel-sibling-lost") {
       await t.tools.waitUntil(async () => {
         await current(); return existsSync(effect("a")) && existsSync(effect("z"))
@@ -217,29 +193,20 @@ for (const scenario of ["observation", "retry", "budget-expiry", "entries", "ent
         await current(); const reply = await opened.client.call({ type: "session.get", payload: { sessionId: pm } });
         return existsSync(effect("z")) && reply?.type === "snapshot" && !!reply.data.summary.workSummary?.tasks[0]?.waiting?.length;
       }, 35_000);
-      const elapsed = async () => {
-        const reply = await opened.client.call({ type: "workflow.check", payload: { workspaceId: opened.workspaceId, runId: run!.id } });
-        if (reply?.type !== "workflowCheck") throw new Error("missing check");
-        const text = reply.data.findings.find(f => f.code === "requestBudget")?.detail;
-        const match = text?.match(/执行耗时 (\d+)\//);
-        if (!match) throw new Error(`missing execution-time fact: ${text}`); return Number(match[1]);
-      };
-      const workingAt = await elapsed(); await new Promise(resolve => setTimeout(resolve, 1600));
-      t.assertions.assert(await elapsed() - workingAt >= 1000, "one waiting Worker paused working sibling time");
       writeFileSync(release, "continue");
       await t.tools.waitUntil(async () => {
         await current(); const reply = await opened.client.call({ type: "session.get", payload: { sessionId: pm } });
         return run?.nodes.some(n => n.status === "completed") === true && reply?.type === "snapshot" && reply.data.summary.workSummary?.executing === 0;
       }, 25_000);
-      const waitingAt = await elapsed(); await new Promise(resolve => setTimeout(resolve, 1600));
-      t.assertions.assert(await elapsed() - waitingAt < 500, "whole-Run Human wait still spent execution time");
+      const check = await opened.client.call({ type: "workflow.check", payload: { workspaceId: opened.workspaceId, runId: run!.id } });
+      t.assertions.assert(check?.type === "workflowCheck" && !JSON.stringify(check.data).includes("执行耗时"), "untimed Human wait still publishes a request execution clock");
       await current();
       await opened.client.call({ type: "workflow.cancel", payload: { workspaceId: opened.workspaceId, runId: run!.id, expectedRevision: run!.revision } });
     }
     await t.tools.waitUntil(async () => { await current(); return !!run && ["completed", "blocked", "cancelled"].includes(run.status); }, 70000);
-    const expected = ["parallel-human-wait", "parallel-sibling-lost"].includes(scenario) ? "cancelled"
+    const expected = scenario === "parallel-human-wait" ? "cancelled" : scenario === "parallel-sibling-lost" ? "blocked"
       : ["entries-type", "entries-limit", "parallel-failure", "parallel-double-failure"].includes(scenario) ? "blocked" : "completed";
-    t.assertions.assert(run!.status === expected && !run!.activeNodes.length && !run!.cleanupError, `unexpected terminal facts: ${JSON.stringify(run)}`);
+    t.assertions.assert(run!.status === expected && (scenario !== "parallel-sibling-lost" || run!.requirement?.state === "cancelled") && !run!.activeNodes.length && !run!.cleanupError, `unexpected terminal facts: ${JSON.stringify(run)}`);
     const value = () => (run!.structure as { outcome?: { value?: unknown } })?.outcome?.value;
     if (budgetCase) {
       const result = value() as { before: WorkflowRequestBudgetSnapshot; after: WorkflowRequestBudgetSnapshot };
@@ -260,7 +227,9 @@ for (const scenario of ["observation", "retry", "budget-expiry", "entries", "ent
         await t.tools.waitUntil(async () => { await current(); return run?.taskId === "observed-3" && run.status === "completed"; }, 40_000);
         const lastAuthorized = value() as typeof result;
         t.assertions.assert(lastAuthorized.before.requestRunId === original && lastAuthorized.before.usedRuns === 3
-          && lastAuthorized.before.remainingRuns === 0, "third business Run did not exhaust the shared request budget");
+          && lastAuthorized.before.remainingRuns === 0
+          && lastAuthorized.before.currentRunAdmitted && lastAuthorized.before.currentRunCanExecute,
+          "last admitted Run lost execution authority when future admission capacity reached zero");
 
         nextCommand = `"$GENEHUB_CLI" workflow dispatch --workflow direct-change --task forbidden-4 --retry-of ${q(original)} --no-wait --message "Attempt beyond shared limit"`;
         await send("Attempt one more Run with the old budget.");

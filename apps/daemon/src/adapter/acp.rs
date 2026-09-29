@@ -4,65 +4,58 @@
 //! the MVP rather than later: it is the cheapest way to stop the abstraction
 //! from being a description of our own agent.
 //!
-//! Deprecated. Cursor, its main user, now runs through `adapter::cursor`:
-//! Cursor's ACP ignores the launch `--model` and offers one fixed variant per
-//! model, so effort and Fast cannot be chosen per session through it
-//! (fb_eVSh3fuuyrv6). Only the generic `acp` entry and user-declared
-//! `extends = "acp"` agents still use this module; do not add new agents here.
-#![allow(deprecated)]
+//! Generic and user-declared ACP agents use this live protocol. Cursor print
+//! turns are independent; only the standard history-import protocol is shared.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::os_process::{Child, ChildStdin, Command};
+use crate::os_process::{ChildStdin, Command};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use genehub_proto::{
-    Capabilities, Catalog, ImportContinuation, ItemDelta,
-    ModeInfo, ModelInfo, PermissionOption, PermissionOptionKind,
+    Capabilities, Catalog, ItemDelta, ModeInfo, ModelInfo, PermissionOption, PermissionOptionKind,
     PermissionRequest, PermissionRequestKind, ProbeState, RuntimeAxisInfo, RuntimeAxisValue,
     SessionEvent, TimelineItem, ToolCallDetail, ToolImage, ToolKind, ToolStatus, TurnError,
     TurnErrorCode, Usage,
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::{oneshot, watch, Mutex};
+use tokio::sync::{watch, Mutex};
 
 use super::stdio::write_json_line;
 use super::usage;
 use super::{
-    find_executable_in, AgentAdapter, AgentSession, Chatter, ImportCandidate, ImportedHistory,
+    find_executable_in, AgentAdapter, AgentSession, ImportCandidate, ImportedHistory,
     PersistHandle, PromptInput, ProviderMap, SessionConfig,
 };
 
-const PROTOCOL_VERSION: i64 = 1;
-/// How long a throwaway handshake may take. Cursor's first answer can be slow.
+pub(super) const PROTOCOL_VERSION: i64 = 1;
+/// How long a throwaway handshake may take. An installed agent's first answer can be slow.
 ///
 /// Two of these can happen in one send — a resume that fails is retried on a
 /// fresh thread — and the whole handover has to come back inside the sixty
 /// seconds a client waits, or the user gets a timeout while the session goes on
 /// claiming a turn that never started. That budget, not the patience of a slow
 /// CLI, is what sets this: twice this plus the work around it has to fit.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
-/// Asking whether this install is logged in. Short: it reads a file.
-const LOGIN_TIMEOUT: Duration = Duration::from_secs(5);
-
-#[deprecated(
-    note = "ACP cannot pin a model variant per session; Cursor uses adapter::cursor. Kept only for generic and user-declared ACP agents."
-)]
+pub(super) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 pub struct AcpAdapter {
     id: String,
     label: String,
     command: Vec<String>,
+    unattended_modes: Vec<String>,
     extra_dirs: Vec<PathBuf>,
     /// What `session/new` told us about models and modes. Remembered so the
     /// picker can be drawn before anyone opens a session; `agent.refresh`
-    /// clears it so a later Cursor catalog (new models) can appear.
+    /// clears it so a later Agent catalog (new models) can appear.
     hello: tokio::sync::RwLock<Option<Hello>>,
+    /// A discover that just timed out. Not a permanent failure: refresh and
+    /// the next handshake window both try again. It only stops one start from
+    /// paying the same unanswered handshake twice.
+    hello_miss: tokio::sync::RwLock<Option<std::time::Instant>>,
 }
 
 /// What one `session/new` told us about this install.
@@ -95,8 +88,10 @@ impl AcpAdapter {
             id: id.into(),
             label: label.into(),
             command,
+            unattended_modes: Vec::new(),
             extra_dirs: Vec::new(),
             hello: tokio::sync::RwLock::new(None),
+            hello_miss: tokio::sync::RwLock::new(None),
         }
     }
 
@@ -105,20 +100,42 @@ impl AcpAdapter {
         self
     }
 
+    pub fn with_unattended_modes(mut self, modes: Vec<String>) -> Self {
+        self.unattended_modes = modes;
+        self
+    }
+
     fn program(&self) -> Option<PathBuf> {
         find_executable_in(self.command.first()?, &self.extra_dirs)
     }
 
     async fn hello(&self, program: &Path) -> Option<Hello> {
-        // A failed handshake is not remembered: Cursor's ACP model table is
+        // A failed handshake is not remembered: an Agent's ACP model table is
         // sometimes empty on the first try, and a timeout while the CLI is
         // updating used to hide the picker until someone restarted us.
         if let Some(cached) = self.hello.read().await.clone() {
             return Some(cached);
         }
+        if self
+            .hello_miss
+            .read()
+            .await
+            .is_some_and(|at| at.elapsed() < HANDSHAKE_TIMEOUT)
+        {
+            return None;
+        }
         let found = discover(program, &self.command).await;
+        let found = found.map(|mut hello| {
+            for mode in &mut hello.modes {
+                mode.unattended |= self.unattended_modes.contains(&mode.id);
+            }
+            hello
+        });
         if let Some(hello) = found.clone() {
             *self.hello.write().await = Some(hello);
+            *self.hello_miss.write().await = None;
+        } else {
+            *self.hello_miss.write().await = Some(std::time::Instant::now());
         }
         found
     }
@@ -161,6 +178,7 @@ impl AgentAdapter for AcpAdapter {
 
     async fn invalidate_catalog(&self) {
         *self.hello.write().await = None;
+        *self.hello_miss.write().await = None;
     }
 
     async fn catalog(&self, _providers: &ProviderMap) -> Catalog {
@@ -187,7 +205,14 @@ impl AgentAdapter for AcpAdapter {
         let program = self
             .program()
             .ok_or_else(|| anyhow!("{} is not installed", self.command[0]))?;
-        let hello = self.hello(&program).await.unwrap_or_default();
+        // Catalog discovery is a separate process. Repeating it here makes a
+        // CLI that never answers `initialize` consume two handshake budgets
+        // before the live session can fail, and the sidebar stays running
+        // with no turn behind it.
+        let mut hello = self.hello.read().await.clone().unwrap_or_default();
+        for mode in &mut hello.modes {
+            mode.unattended |= self.unattended_modes.contains(&mode.id);
+        }
 
         let mut command = Command::new(&program);
         command
@@ -197,41 +222,39 @@ impl AgentAdapter for AcpAdapter {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        super::apply_session_environment(&mut command, &config);
-        super::owned_child(&mut command);
 
-        let mut child = command
-            .spawn()
-            .with_context(|| format!("spawning {}", program.display()))?;
-        let stdout = child.stdout.take().expect("stdout was piped");
-        let stderr = child.stderr.take().expect("stderr was piped");
-        let stdin = child.stdin.take().expect("stdin was piped");
-
-        let child = Arc::new(Mutex::new(Some(child)));
+        let (process, mut io) =
+            super::process::AgentProcess::spawn(&mut command, "acp", &config).await?;
+        let stdout = io.stdout.take().expect("stdout was piped");
+        let stdin = io.stdin.take().expect("stdin was piped");
+        let child = process.child.clone();
+        let stdin = Arc::new(Mutex::new(stdin));
         let (events, events_rx) = crate::adapter::EventTx::channel();
         let (settled, _) = watch::channel(false);
-        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+        let peer = super::stdio::StdioRpcPeer::new(super::stdio::RpcCodec::JsonRpc, stdin.clone());
         let turn = Arc::new(Mutex::new(TurnState::default()));
-        let interactions = Arc::new(Mutex::new(Vec::new()));
+        let current_mode = Arc::new(std::sync::Mutex::new(hello.default_mode.clone()));
+        let unattended_modes: std::collections::HashSet<String> = hello
+            .modes
+            .iter()
+            .filter(|mode| mode.unattended)
+            .map(|mode| mode.id.clone())
+            .collect();
 
         // Kept: a bridge that exits explains itself on stderr, and that used to
         // be logged below the default filter and then thrown away.
-        let said = Arc::new(Chatter::default());
-        said.watch("acp", Some(stderr)).await;
 
-        let stdin = Arc::new(Mutex::new(stdin));
         let session = AcpSession {
             tasks: super::SessionTasks::default(),
             stdin: stdin.clone(),
             events: events.clone(),
             events_rx: std::sync::Mutex::new(Some(events_rx)),
             settled,
-            pending: pending.clone(),
-            interactions: interactions.clone(),
+            peer: peer.clone(),
+            current_mode: current_mode.clone(),
             turn: turn.clone(),
             next_id: AtomicI64::new(1),
-            child: child.clone(),
-            said: said.clone(),
+            process: process.clone(),
             label: self.label.clone(),
             agent_id: self.id.clone(),
             acp_session: Mutex::new(None),
@@ -253,11 +276,12 @@ impl AgentAdapter for AcpAdapter {
             stdout,
             stdin,
             events,
-            pending.clone(),
+            peer.clone(),
             turn,
-            interactions,
+            current_mode,
+            unattended_modes,
+            child.clone(),
         ));
-        session.tasks.spawn(watch_for_exit(child.clone(), pending));
 
         session.initialize(&config).await?;
         Ok(Box::new(session))
@@ -270,265 +294,17 @@ impl AgentAdapter for AcpAdapter {
     ) -> Result<Option<Vec<ImportCandidate>>> {
         let program = self
             .program()
-            .ok_or_else(|| anyhow!("{} is not installed", self.command[0]))?;
-        let mut probe = AcpImportProbe::start(&program, &self.command, cwd).await?;
-        let outcome = async {
-            let initialized = probe.initialize().await?;
-            if !acp_can_list_sessions(&initialized) {
-                return Ok(None);
-            }
-            let (listed, _) = probe
-                .call(
-                    "session/list",
-                    json!({ "cwd": crate::guest_paths::host_path(cwd), "cursor": null }),
-                )
-                .await?;
-            let mut candidates = listed
-                .get("sessions")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(|session| {
-                    let source_id = session.get("sessionId")?.as_str()?.to_string();
-                    let title = session
-                        .get("title")
-                        .and_then(Value::as_str)
-                        .filter(|value| !value.trim().is_empty())
-                        .unwrap_or("ACP 会话")
-                        .to_string();
-                    Some(ImportCandidate {
-                        source_id,
-                        preview: String::new(),
-                        title,
-                        updated_at_ms: acp_time_ms(session.get("updatedAt")),
-                        continuation: ImportContinuation::Native,
-                    })
-                })
-                .collect::<Vec<_>>();
-            candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.updated_at_ms));
-            candidates.truncate(limit);
-            Ok(Some(candidates))
-        }
-        .await;
-        probe.stop().await;
-        outcome
+            .ok_or_else(|| anyhow!("{} is not installed", self.id))?;
+        super::acp_import::list_candidates(&program, &self.command, cwd, limit).await
     }
 
     async fn import_history(&self, cwd: &Path, source_id: &str) -> Result<ImportedHistory> {
         let program = self
             .program()
-            .ok_or_else(|| anyhow!("{} is not installed", self.command[0]))?;
-        let mut probe = AcpImportProbe::start(&program, &self.command, cwd).await?;
-        let outcome = async {
-            let initialized = probe.initialize().await?;
-            if !acp_can_list_sessions(&initialized) {
-                anyhow::bail!("this ACP agent does not advertise session import");
-            }
-            let method = if initialized
-                .get("agentCapabilities")
-                .and_then(|capabilities| capabilities.get("loadSession"))
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                "session/load"
-            } else {
-                match resume_method_in(&initialized) {
-                    Some(ResumeMethod::Load) => "session/load",
-                    Some(ResumeMethod::Resume) => "session/resume",
-                    None => anyhow::bail!("this ACP agent cannot load the selected session"),
-                }
-            };
-            let (_, updates) = probe
-                .call(
-                    method,
-                    json!({ "sessionId": source_id, "cwd": crate::guest_paths::host_path(cwd), "mcpServers": [] }),
-                )
-                .await?;
-            let items = acp_history_items(&updates);
-            if items.is_empty() {
-                anyhow::bail!(
-                    "the ACP agent loaded the session but did not replay its visible history"
-                );
-            }
-            let title = items.iter().find_map(|item| match item {
-                TimelineItem::UserMessage { text, .. } => Some(super::clip_text(text, 120)),
-                _ => None,
-            });
-            let now = chrono::Utc::now().timestamp_millis();
-            Ok(ImportedHistory {
-                title,
-                created_at_ms: now,
-                updated_at_ms: now,
-                items,
-                persist: Some(PersistHandle {
-                    agent_id: self.id.clone(),
-                    value: json!({ "sessionId": source_id }),
-                }),
-                continuation: ImportContinuation::Native,
-                warnings: Vec::new(),
-            })
-        }
-        .await;
-        probe.stop().await;
-        outcome
+            .ok_or_else(|| anyhow!("{} is not installed", self.id))?;
+        super::acp_import::read_history(&program, &self.command, &self.id, cwd, source_id).await
     }
 }
-
-struct AcpImportProbe {
-    child: Child,
-    stdin: ChildStdin,
-    lines: tokio::io::Lines<BufReader<crate::os_process::ChildStdout>>,
-    next_id: i64,
-}
-
-impl AcpImportProbe {
-    async fn start(program: &Path, command: &[String], cwd: &Path) -> Result<Self> {
-        let mut spawn = Command::new(program);
-        spawn
-            .args(&command[1..])
-            .current_dir(cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true);
-        super::owned_child(&mut spawn);
-        let mut child = spawn
-            .spawn()
-            .context("spawning ACP agent for session import")?;
-        let stdin = child.stdin.take().expect("stdin was piped");
-        let stdout = child.stdout.take().expect("stdout was piped");
-        Ok(Self {
-            child,
-            stdin,
-            lines: BufReader::new(stdout).lines(),
-            next_id: 1,
-        })
-    }
-
-    async fn initialize(&mut self) -> Result<Value> {
-        let (initialized, _) = self
-            .call(
-                "initialize",
-                json!({
-                    "protocolVersion": PROTOCOL_VERSION,
-                    "clientCapabilities": client_capabilities(),
-                }),
-            )
-            .await?;
-        Ok(initialized)
-    }
-
-    async fn call(&mut self, method: &str, params: Value) -> Result<(Value, Vec<Value>)> {
-        let id = self.next_id;
-        self.next_id += 1;
-        write_json_line(
-            &mut self.stdin,
-            &json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }),
-        )
-        .await?;
-        tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
-            let mut updates = Vec::new();
-            while let Some(line) = self.lines.next_line().await? {
-                let Ok(frame) = serde_json::from_str::<Value>(&line) else {
-                    continue;
-                };
-                if frame.get("id").and_then(Value::as_i64) == Some(id) {
-                    if let Some(error) = frame.get("error") {
-                        let message = error
-                            .get("message")
-                            .and_then(Value::as_str)
-                            .unwrap_or("unknown ACP error");
-                        return Err(anyhow!("{method} failed: {message}"));
-                    }
-                    return Ok((frame.get("result").cloned().unwrap_or(Value::Null), updates));
-                }
-                if frame.get("method").and_then(Value::as_str) == Some("session/update") {
-                    updates.push(frame.get("params").cloned().unwrap_or(Value::Null));
-                    continue;
-                }
-                if let (Some(request_id), Some(request_method)) =
-                    (frame.get("id"), frame.get("method").and_then(Value::as_str))
-                {
-                    write_json_line(
-                        &mut self.stdin,
-                        &unsupported_request(request_id, request_method),
-                    )
-                    .await?;
-                }
-            }
-            Err(anyhow!("{method} ended before the ACP agent answered"))
-        })
-        .await
-        .map_err(|_| anyhow!("{method} timed out"))?
-    }
-
-    async fn stop(&mut self) {
-        super::kill_tree(&mut self.child).await;
-    }
-}
-
-fn acp_can_list_sessions(initialized: &Value) -> bool {
-    let value = initialized
-        .get("agentCapabilities")
-        .and_then(|capabilities| capabilities.get("sessionCapabilities"))
-        .and_then(|session| session.get("list"));
-    value.is_some_and(|value| !value.is_null() && value.as_bool() != Some(false))
-}
-
-fn acp_time_ms(value: Option<&Value>) -> i64 {
-    match value {
-        Some(Value::Number(number)) => number.as_i64().unwrap_or_default(),
-        Some(Value::String(text)) => chrono::DateTime::parse_from_rfc3339(text)
-            .map(|time| time.timestamp_millis())
-            .unwrap_or_default(),
-        _ => 0,
-    }
-}
-
-fn acp_history_items(updates: &[Value]) -> Vec<TimelineItem> {
-    let mut items: Vec<TimelineItem> = Vec::new();
-    let mut current_role = "";
-    for params in updates {
-        let update = params.get("update").unwrap_or(&Value::Null);
-        let role = match update.get("sessionUpdate").and_then(Value::as_str) {
-            Some("user_message_chunk") => "user",
-            Some("agent_message_chunk") => "assistant",
-            _ => continue,
-        };
-        let text = update
-            .get("content")
-            .and_then(|content| content.get("text"))
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        if text.is_empty() {
-            continue;
-        }
-        if role == current_role {
-            if let Some(last) = items.last_mut() {
-                let _ = last.append_text(text);
-                continue;
-            }
-        }
-        current_role = role;
-        let id = format!("import-{}", uuid::Uuid::new_v4().simple());
-        items.push(if role == "user" {
-            TimelineItem::UserMessage {
-                id,
-                text: text.to_string(),
-                attachments: Vec::new(),
-            }
-        } else {
-            TimelineItem::AssistantMessage {
-                id,
-                text: text.to_string(),
-                received_at_ms: None,
-            }
-        });
-    }
-    items
-}
-
-type PendingMap = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>;
 
 #[derive(Default)]
 struct TurnState {
@@ -555,14 +331,13 @@ struct AcpSession {
     events: crate::adapter::EventTx,
     events_rx: std::sync::Mutex<Option<crate::adapter::EventRx>>,
     settled: watch::Sender<bool>,
-    pending: PendingMap,
-    interactions: Arc<Mutex<Vec<Value>>>,
+    peer: Arc<super::stdio::StdioRpcPeer>,
+    current_mode: Arc<std::sync::Mutex<Option<String>>>,
 
     turn: Arc<Mutex<TurnState>>,
     next_id: AtomicI64,
-    child: Arc<Mutex<Option<Child>>>,
+    process: super::process::AgentProcess,
     /// What the bridge said on its way out, for the turn that was waiting on it.
-    said: Arc<Chatter>,
     /// The agent's name as the user knows it, for the same failure.
     label: String,
     agent_id: String,
@@ -581,7 +356,7 @@ struct AcpSession {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ResumeMethod {
+pub(super) enum ResumeMethod {
     Resume,
     Load,
 }
@@ -594,24 +369,29 @@ impl AcpSession {
 
     async fn call(&self, method: &str, params: Value) -> Result<Value> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, tx);
-        self.write(json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-            "params": params,
-        }))
-        .await?;
-        match rx.await {
-            Ok(Ok(value)) => Ok(value),
-            Ok(Err(message)) => Err(anyhow!("{method} failed: {message}")),
-            Err(_) => Err(anyhow!("{method} failed: the agent closed the connection")),
-        }
+        self.peer
+            .call(json!(id), method, params, None)
+            .await
+            .map_err(|message| anyhow!("{method} failed: {message}"))
     }
 
     async fn initialize(&self, config: &SessionConfig) -> Result<()> {
-        let initialized = self.call("initialize", initialize_params()).await?;
+        // A CLI that accepts the pipe and never answers `initialize` must not
+        // leave the session running. The picker handshake uses the same bound.
+        let initialized = match tokio::time::timeout(
+            HANDSHAKE_TIMEOUT,
+            self.call("initialize", initialize_params()),
+        )
+        .await
+        {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(anyhow!(
+                    "the agent did not finish starting within {}s",
+                    HANDSHAKE_TIMEOUT.as_secs()
+                ))
+            }
+        };
         if let Some(method_id) = first_auth_method(&initialized) {
             // Official Cursor ACP flow is initialize → authenticate →
             // session/new. A missing login must not abort the session: the
@@ -676,9 +456,7 @@ impl AcpSession {
         *self.persisted_session.lock().unwrap() = Some(session_id);
 
         if let Some(model_id) = config.model_id.as_ref() {
-            if let Err(error) = self.set_model(model_id).await {
-                return Err(error);
-            }
+            self.set_model(model_id).await?;
         }
         if let Some(mode_id) = config.mode_id.as_ref() {
             self.set_mode(mode_id).await?;
@@ -723,6 +501,7 @@ impl AgentSession for AcpSession {
     }
 
     async fn send(&self, input: PromptInput) -> Result<String> {
+        self.settled.send_replace(false);
         let session_id = self.session_id().await?;
         let turn_id = format!("turn_{}", uuid::Uuid::new_v4().simple());
         {
@@ -753,23 +532,19 @@ impl AgentSession for AcpSession {
         // `session/prompt` only returns when the whole turn is done, so it runs
         // detached: the timeline arrives through notifications in the meantime.
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, tx);
-        self.write(json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": "session/prompt",
-            "params": params,
-        }))
-        .await?;
+        let reply = self
+            .peer
+            .start(json!(id), "session/prompt", params)
+            .await
+            .map_err(|message| anyhow!("session/prompt failed: {message}"))?;
 
         let completed_turn = turn_id.clone();
-        let child = self.child.clone();
-        let said = self.said.clone();
+        let child = self.process.child.clone();
+        let said = self.process.chatter.clone();
         let label = self.label.clone();
         let settled = self.settled.clone();
         self.tasks.spawn(async move {
-            let outcome = rx.await;
+            let outcome = reply.receive().await;
             let mut state = turn_state.lock().await;
             // A newer turn may already have started; do not close it out.
             if state.id.as_deref() != Some(completed_turn.as_str()) {
@@ -791,16 +566,7 @@ impl AgentSession for AcpSession {
                     _ => {
                         let mut usage = state.usage.clone();
                         if let Some(reported) = value.get("usage") {
-                            let parsed = usage::parse_usage(reported);
-                            if parsed.input_tokens > 0 || parsed.output_tokens > 0 {
-                                let rounds = usage.llm_rounds;
-                                let tool_out = usage.tool_output_tokens;
-                                let previous = usage.clone();
-                                usage = parsed;
-                                usage.llm_rounds = rounds;
-                                usage.tool_output_tokens = tool_out;
-                                usage::preserve_timing(&mut usage, &previous);
-                            }
+                            usage::replace_reported_usage(&mut usage, reported);
                         }
                         usage::finalize_output_rate(&mut usage);
                         SessionEvent::TurnCompleted {
@@ -836,18 +602,8 @@ impl AgentSession for AcpSession {
     }
 
     async fn interrupt(&self) -> Result<()> {
-        // ACP cancellation must also resolve each outstanding server request;
-        // the future Human answer belongs to GeneHub's durable interaction.
-        let requests = std::mem::take(&mut *self.interactions.lock().await);
-        let wait_for_terminal = !requests.is_empty();
-        if wait_for_terminal {
-            self.settled.send_replace(false);
-        }
-        for id in requests {
-            self.write(json!({ "jsonrpc": "2.0", "id": id,
-                "result": { "outcome": { "outcome": "cancelled" } } }))
-                .await?;
-        }
+        // Native requests were already answered. Only cancel the turn here;
+        // this bounded protocol drain never waits for a Human decision.
         let session_id = self.session_id().await?;
         self.write(json!({
             "jsonrpc": "2.0",
@@ -855,7 +611,7 @@ impl AgentSession for AcpSession {
             "params": { "sessionId": session_id },
         }))
         .await?;
-        if wait_for_terminal {
+        {
             // Let the peer persist cancellation before closing its process.
             // This bounded protocol drain never waits for the Human.
             let mut settled = self.settled.subscribe();
@@ -870,7 +626,8 @@ impl AgentSession for AcpSession {
     }
 
     async fn pid(&self) -> Option<u32> {
-        self.child
+        self.process
+            .child
             .lock()
             .await
             .as_ref()
@@ -878,7 +635,7 @@ impl AgentSession for AcpSession {
     }
 
     async fn close(&self) -> Result<()> {
-        super::close_child(&self.child).await?;
+        self.process.close().await?;
         self.tasks.stop().await;
         Ok(())
     }
@@ -895,7 +652,7 @@ impl AgentSession for AcpSession {
 
     async fn set_mode(&self, mode_id: &str) -> Result<()> {
         let session_id = self.session_id().await?;
-        match self
+        let result = match self
             .call(
                 "session/set_mode",
                 json!({ "sessionId": session_id, "modeId": mode_id }),
@@ -912,7 +669,10 @@ impl AgentSession for AcpSession {
                     .unwrap_or_else(|| "mode".into());
                 self.set_config_option(&config_id, json!(mode_id)).await
             }
-        }
+        };
+        result?;
+        *self.current_mode.lock().unwrap_or_else(|p| p.into_inner()) = Some(mode_id.to_string());
+        Ok(())
     }
 
     async fn set_runtime_axis(&self, axis_id: &str, value_id: &str) -> Result<()> {
@@ -936,73 +696,6 @@ impl AgentSession for AcpSession {
             value: json!({ "sessionId": session_id }),
         })
     }
-}
-
-pub(super) async fn logged_in(program: &Path) -> Option<bool> {
-    if let Some(answer) = run_status(program, &["status", "--format", "json"]).await {
-        return Some(answer);
-    }
-    run_status(program, &["status"]).await
-}
-
-async fn run_status(program: &Path, args: &[&str]) -> Option<bool> {
-    let mut command = Command::new(program);
-    command
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    super::owned_child(&mut command);
-
-    let output = tokio::time::timeout(LOGIN_TIMEOUT, command.output())
-        .await
-        .ok()?
-        .ok()?;
-    login_from_status_output(&output.stdout, &output.stderr)
-}
-
-/// Phrased as "is it logged in", because that is the only sentence worth
-/// acting on. Unknown wording — which account, which method, a new JSON
-/// shape — means the CLI is usable, and a check that guessed at those would
-/// hide working installs.
-fn login_from_status_output(stdout: &[u8], stderr: &[u8]) -> Option<bool> {
-    let mut said = String::from_utf8_lossy(stdout).to_string();
-    said.push_str(&String::from_utf8_lossy(stderr));
-    if let Some(value) = json_object_in(&said) {
-        if let Some(flag) = json_logged_in(&value) {
-            return Some(flag);
-        }
-    }
-    let lower = said.to_ascii_lowercase();
-    if lower.contains("not authenticated") || lower.contains("not logged in") {
-        return Some(false);
-    }
-    if lower.contains("logged in") {
-        return Some(true);
-    }
-    None
-}
-
-fn json_object_in(text: &str) -> Option<Value> {
-    let start = text.find('{')?;
-    let end = text.rfind('}')?;
-    serde_json::from_str(&text[start..=end]).ok()
-}
-
-fn json_logged_in(value: &Value) -> Option<bool> {
-    for key in [
-        "loggedIn",
-        "logged_in",
-        "authenticated",
-        "isAuthenticated",
-        "is_authenticated",
-    ] {
-        if let Some(flag) = value.get(key).and_then(Value::as_bool) {
-            return Some(flag);
-        }
-    }
-    None
 }
 
 /// Runs one handshake against a throwaway process and takes its answers away.
@@ -1117,7 +810,7 @@ fn initialize_params() -> Value {
     })
 }
 
-fn client_capabilities() -> Value {
+pub(super) fn client_capabilities() -> Value {
     json!({
         "fs": { "readTextFile": false, "writeTextFile": false },
         "session": {
@@ -1142,7 +835,7 @@ fn spawn_args(command: &[String]) -> Vec<String> {
     command.get(1..).unwrap_or(&[]).to_vec()
 }
 
-fn resume_method_in(initialized: &Value) -> Option<ResumeMethod> {
+pub(super) fn resume_method_in(initialized: &Value) -> Option<ResumeMethod> {
     let capabilities = initialized.get("agentCapabilities")?;
     if capabilities
         .get("sessionCapabilities")
@@ -1322,10 +1015,7 @@ fn acp_mode_unattended(mode: &Value) -> bool {
     {
         return true;
     }
-    matches!(
-        mode.get("id").and_then(Value::as_str).unwrap_or(""),
-        "full-access" | "bypassPermissions" | "acceptEdits"
-    )
+    false
 }
 
 fn modes_in(result: &Value) -> (Vec<ModeInfo>, Option<String>) {
@@ -1494,15 +1184,18 @@ where
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn read_loop(
     stdout: crate::os_process::ChildStdout,
     stdin: Arc<Mutex<ChildStdin>>,
     events: crate::adapter::EventTx,
-    pending: PendingMap,
+    peer: Arc<super::stdio::StdioRpcPeer>,
     turn: Arc<Mutex<TurnState>>,
-    interactions: Arc<Mutex<Vec<Value>>>,
+    current_mode: Arc<std::sync::Mutex<Option<String>>>,
+    unattended_modes: std::collections::HashSet<String>,
+    child: Arc<Mutex<Option<crate::os_process::Child>>>,
 ) {
-    let mut lines = BufReader::new(stdout).lines();
+    let mut lines = super::process::ProcessLines::new(stdout, child);
     while let Ok(Some(line)) = lines.next_line().await {
         if line.trim().is_empty() {
             continue;
@@ -1512,22 +1205,8 @@ async fn read_loop(
             continue;
         };
 
-        // A response to something we sent.
-        if let Some(id) = frame.get("id").and_then(Value::as_i64) {
-            if frame.get("method").is_none() {
-                if let Some(sender) = pending.lock().await.remove(&id) {
-                    let outcome = match frame.get("error") {
-                        Some(error) => Err(error
-                            .get("message")
-                            .and_then(Value::as_str)
-                            .unwrap_or("unknown error")
-                            .to_string()),
-                        None => Ok(frame.get("result").cloned().unwrap_or(Value::Null)),
-                    };
-                    let _ = sender.send(outcome);
-                }
-                continue;
-            }
+        if peer.response(&frame) {
+            continue;
         }
 
         let Some(method) = frame.get("method").and_then(Value::as_str) else {
@@ -1539,13 +1218,28 @@ async fn read_loop(
                 tracing::warn!("ACP permission request had no id");
                 continue;
             };
-            interactions.lock().await.push(id.clone());
-            translate_permission(&id, &params, &events);
-            let response = json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": { "outcome": { "outcome": "cancelled" } },
-            });
+            let unattended = current_mode
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .as_ref()
+                .is_some_and(|mode| unattended_modes.contains(mode));
+            let allowed = if unattended {
+                permission_options(&params).into_iter().find(|option| {
+                    matches!(
+                        option.kind,
+                        PermissionOptionKind::AllowOnce | PermissionOptionKind::AllowAlways
+                    )
+                })
+            } else {
+                None
+            };
+            let outcome = if let Some(option) = allowed {
+                json!({ "outcome": "selected", "optionId": option.id })
+            } else {
+                translate_permission(&id, &params, &events);
+                json!({ "outcome": "cancelled" })
+            };
+            let response = json!({ "jsonrpc": "2.0", "id": id, "result": { "outcome": outcome } });
             let mut input = stdin.lock().await;
             if let Err(error) = write_json_line(&mut input, &response).await {
                 tracing::warn!("could not cancel an ACP permission request: {error}");
@@ -1574,27 +1268,7 @@ async fn read_loop(
     // Saying so is what turns a dead agent into a failed turn; without it the
     // session sits on `running` forever with nothing behind it, which is the
     // freeze users report. Every other adapter already does this.
-    abandon_pending(&pending).await;
-}
-
-/// Fails everything still waiting on this agent.
-///
-/// Dropping the sender is the message: `AcpSession::send` reads a dropped
-/// sender as the agent having gone away mid-turn, and reports it with the
-/// process's exit code and last words rather than a bare timeout.
-async fn abandon_pending(pending: &PendingMap) {
-    super::fail_open_requests(pending, "an ACP agent went away with requests still open").await;
-}
-
-async fn watch_for_exit(child: Arc<Mutex<Option<crate::os_process::Child>>>, pending: PendingMap) {
-    // Never queue behind `close`: the shared watcher uses `try_lock`, and
-    // `close` holds this lock while it kills the tree.
-    super::watch_process_exit(
-        child,
-        pending,
-        "an ACP agent went away with requests still open",
-    )
-    .await;
+    peer.fail_open();
 }
 
 /// Builds a `session/prompt` content block array from a turn's text and
@@ -1737,6 +1411,9 @@ fn translate_permission(id: &Value, params: &Value, events: &crate::adapter::Eve
     let tool_call = params.get("toolCall");
     let _ = events.send(SessionEvent::PermissionRequested {
         request: PermissionRequest {
+            summary: tool_call.and_then(permission_detail),
+            description: Some(super::native_request_description("ACP Agent", params)),
+            author: None,
             id: request_id,
             kind: PermissionRequestKind::Permission,
             title: tool_call
@@ -1744,7 +1421,6 @@ fn translate_permission(id: &Value, params: &Value, events: &crate::adapter::Eve
                 .and_then(Value::as_str)
                 .unwrap_or("The agent is asking for permission")
                 .to_string(),
-            detail: tool_call.and_then(permission_detail),
             tool_call_id: tool_call
                 .and_then(|call| call.get("toolCallId"))
                 .and_then(Value::as_str)
@@ -1755,7 +1431,7 @@ fn translate_permission(id: &Value, params: &Value, events: &crate::adapter::Eve
     });
 }
 
-fn unsupported_request(id: &Value, method: &str) -> Value {
+pub(super) fn unsupported_request(id: &Value, method: &str) -> Value {
     rpc_error(id, -32601, &format!("method not supported: {method}"))
 }
 
@@ -1767,11 +1443,7 @@ fn rpc_error(id: &Value, code: i64, message: &str) -> Value {
     })
 }
 
-fn translate_update(
-    params: &Value,
-    state: &mut TurnState,
-    events: &crate::adapter::EventTx,
-) {
+fn translate_update(params: &Value, state: &mut TurnState, events: &crate::adapter::EventTx) {
     let update = params.get("update").unwrap_or(&Value::Null);
     let Some(kind) = update.get("sessionUpdate").and_then(Value::as_str) else {
         return;
@@ -1937,15 +1609,7 @@ fn translate_update(
         }
         _ => {
             if let Some(reported) = update.get("usage").or_else(|| update.get("tokenUsage")) {
-                let parsed = usage::parse_usage(reported);
-                if parsed.input_tokens > 0 || parsed.output_tokens > 0 {
-                    let rounds = state.usage.llm_rounds;
-                    let tool_out = state.usage.tool_output_tokens;
-                    let previous = state.usage.clone();
-                    state.usage = parsed;
-                    state.usage.llm_rounds = rounds;
-                    state.usage.tool_output_tokens = tool_out;
-                    usage::preserve_timing(&mut state.usage, &previous);
+                if usage::replace_reported_usage(&mut state.usage, reported) {
                     usage::emit_progress(events, &turn_id, &state.usage);
                 }
             }
@@ -2741,48 +2405,6 @@ mod tests {
         assert_eq!(first_auth_method(&json!({})), None);
     }
 
-    /// When cursor-agent is on PATH and signed in, discovery should return real
-    /// modes.
-    ///
-    /// A CLI that is installed but signed out answers `initialize` and then
-    /// refuses to open a session, which is the adapter working correctly — the
-    /// picker reports it as unavailable and says why. So this skips on the same
-    /// answer the adapter itself acts on, rather than reporting the machine's
-    /// login state as a defect in this code.
-    #[tokio::test]
-    async fn discover_cursor_when_installed() {
-        let Some(program) = crate::adapter::find_executable("cursor-agent") else {
-            eprintln!("skipping discover_cursor_when_installed: cursor-agent not on PATH");
-            return;
-        };
-        if logged_in(&program).await == Some(false) {
-            eprintln!("skipping discover_cursor_when_installed: cursor-agent is not signed in");
-            return;
-        }
-        let hello = discover(
-            &program,
-            &[
-                "cursor-agent".into(),
-                "--force".into(),
-                "--sandbox".into(),
-                "disabled".into(),
-                "--trust".into(),
-                "--approve-mcps".into(),
-                "acp".into(),
-            ],
-        )
-        .await
-        .expect("cursor-agent should answer a handshake");
-        assert!(
-            !hello.modes.is_empty(),
-            "Cursor should list agent/plan/ask modes"
-        );
-        assert!(
-            hello.model_config_id.is_some() || !hello.models.is_empty(),
-            "Cursor should expose model selection"
-        );
-    }
-
     #[tokio::test]
     async fn extra_install_dir_is_enough_for_probe_when_path_misses() {
         let dir = tempfile::tempdir().unwrap();
@@ -2792,28 +2414,6 @@ mod tests {
         let adapter = AcpAdapter::new("t", "T", vec![name.into()])
             .with_extra_dirs(vec![dir.path().to_path_buf()]);
         assert_eq!(adapter.probe().await, ProbeState::Ready);
-    }
-
-    #[test]
-    fn status_json_and_text_agree_on_login() {
-        assert_eq!(
-            login_from_status_output(br#"{"loggedIn":false}"#, b""),
-            Some(false)
-        );
-        assert_eq!(
-            login_from_status_output(br#"{"authenticated":true}"#, b""),
-            Some(true)
-        );
-        assert_eq!(
-            login_from_status_output(b"Not authenticated", b""),
-            Some(false)
-        );
-        assert_eq!(login_from_status_output(b"Not logged in", b""), Some(false));
-        assert_eq!(
-            login_from_status_output(b"Logged in as user@example.com", b""),
-            Some(true)
-        );
-        assert_eq!(login_from_status_output(b"usage: cursor-agent", b""), None);
     }
 
     #[cfg(unix)]

@@ -1329,24 +1329,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "genehub-testing"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "axum",
- "futures-util",
- "genehub-proto",
- "genet-daemon",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-tungstenite 0.24.0",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1366,6 +1348,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "genet-http",
+ "genet-native",
  "genet-wasi",
  "globset",
  "ignore",
@@ -1384,7 +1367,6 @@ dependencies = [
  "base64",
  "fs2",
  "futures-util",
- "genehub-testing",
  "genet-daemon",
  "genet-frontdoor",
  "genet-http",
@@ -1421,6 +1403,7 @@ dependencies = [
  "json5",
  "libc",
  "portable-pty",
+ "regex",
  "reqwest",
  "schemars",
  "serde",

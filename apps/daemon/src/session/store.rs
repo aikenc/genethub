@@ -100,13 +100,8 @@ const MAX_BLOB_BYTES: u64 = 512 * 1024 * 1024;
 ///     acknowledged continuation when rewriting metadata.
 /// 9 — durable input, execution fences and cleanup receipts. Older writers
 ///     would discard acknowledged messages or unfinished cancellation.
-pub const SESSION_FORMAT: u32 = 9;
-
-/// What a `meta.json` from before versioning is: the layout numbered 4, which
-/// is the only one that has ever been written into a workspace.
-fn format_before_versions() -> u32 {
-    4
-}
+/// 10 — current-only Human wait and input scheduler; no legacy metadata folds.
+pub const SESSION_FORMAT: u32 = 10;
 
 /// The part of a `meta.json` whose shape can never change.
 ///
@@ -119,7 +114,7 @@ fn format_before_versions() -> u32 {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct MetaHeader {
-    #[serde(default = "format_before_versions")]
+    #[serde(default)]
     format: u32,
     #[serde(default)]
     title: Option<String>,
@@ -129,38 +124,6 @@ struct MetaHeader {
     updated_at_ms: i64,
     #[serde(default)]
     project_key: String,
-}
-
-/// Durable Human decision and delivery intent. Completion is acknowledged only
-/// when its adapter turn terminates; a lost process may therefore redeliver it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HumanContinuation {
-    pub request: PermissionRequest,
-    #[serde(deserialize_with = "outcome_without_timer")]
-    pub outcome: genehub_proto::PermissionOutcome,
-    pub decided_at_ms: i64,
-    #[serde(default)]
-    pub project_approval: bool,
-    #[serde(default)]
-    pub grant_recorded: bool,
-    #[serde(default)]
-    pub completed: bool,
-}
-
-fn outcome_without_timer<'de, D>(
-    deserializer: D,
-) -> Result<genehub_proto::PermissionOutcome, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let outcome = genehub_proto::PermissionOutcome::deserialize(deserializer)?;
-    Ok(match outcome {
-        genehub_proto::PermissionOutcome::TimedOut { .. } => {
-            genehub_proto::PermissionOutcome::Canceled
-        }
-        other => other,
-    })
 }
 
 /// One durable Human wait. A session holds at most one.
@@ -178,13 +141,10 @@ pub struct HumanWait {
     pub origin: WaitOrigin,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision: Option<HumanDecision>,
-    /// The request the card and the resume prompt are built from. Absent only
-    /// on a wait written before this field existed; load fills it from the
-    /// older records.
+    /// The request the card and resume prompt are built from. Current persisted
+    /// waits require this field; Option supports constructing a wait in memory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request: Option<PermissionRequest>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub grant_recorded: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -197,12 +157,7 @@ pub enum WaitKind {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum WaitAuthor {
-    Daemon,
-    Agent,
-}
+pub use genehub_proto::PermissionAuthor as WaitAuthor;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -224,106 +179,93 @@ pub enum WaitOrigin {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HumanDecision {
-    #[serde(deserialize_with = "outcome_without_timer")]
     pub outcome: genehub_proto::PermissionOutcome,
     pub decided_at_ms: i64,
 }
 
-fn plain_text(value: &str, limit: usize) -> String {
-    let flat: String = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    flat.chars().take(limit).collect()
+/// Delivered Human inputs keep a bounded idempotency receipt, never another wait.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HumanResponseReceipt {
+    pub id: String,
+    pub origin: WaitOrigin,
+    pub outcome: genehub_proto::PermissionOutcome,
 }
 
-/// A completed continuation with no pending card is a finished wait. Otherwise
-/// a wait that already carries its request is the record writers update, and
-/// the older fields are a projection of it. A meta from before that request
-/// was stored is folded once.
-pub fn sync_human_wait(meta: &mut SessionMeta) {
-    let settled = meta
-        .human_continuation
-        .as_ref()
-        .is_some_and(|continuation| continuation.completed)
-        && meta.pending_permission.is_none();
-    if settled {
-        meta.human_wait = None;
-        meta.pending_project_approval = false;
-        return;
-    }
-    if meta
+pub fn retain_human_receipt(meta: &mut SessionMeta, request_id: &str) {
+    if let Some(wait) = meta
         .human_wait
         .as_ref()
-        .is_some_and(|wait| wait.request.is_some())
+        .filter(|wait| wait.id == request_id)
     {
-        project_legacy_from_wait(meta);
-        return;
+        if let Some(decision) = &wait.decision {
+            if !meta
+                .human_receipts
+                .iter()
+                .any(|receipt| receipt.id == request_id)
+            {
+                meta.human_receipts.push(HumanResponseReceipt {
+                    id: request_id.to_owned(),
+                    origin: wait.origin.clone(),
+                    outcome: decision.outcome.clone(),
+                });
+                if meta.human_receipts.len() > 256 {
+                    meta.human_receipts.drain(..meta.human_receipts.len() - 256);
+                }
+            }
+        }
     }
-    meta.human_wait = None;
-    adopt_human_wait(meta);
+}
+
+fn plain_text(value: &str, limit: usize) -> String {
+    let flat: String = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= limit {
+        return flat;
+    }
+    let mut clipped: String = flat.chars().take(limit.saturating_sub(5)).collect();
+    clipped.push_str("[已截断]");
+    clipped
+}
+
+fn bounded_description(value: &str) -> String {
+    const MAX: usize = 16 * 1024;
+    if value.len() <= MAX {
+        return value.to_string();
+    }
+    let suffix = "\n\n[已截断]";
+    let mut end = MAX - suffix.len();
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{}", &value[..end], suffix)
+}
+
+/// Bound a visible card without rejecting the pause or trusting its author tag.
+pub(crate) fn normalize_human_request(request: &mut PermissionRequest, author: WaitAuthor) {
+    request.title = plain_text(&request.title, 80);
+    request.summary = Some(plain_text(
+        request.summary.as_deref().unwrap_or(&request.title),
+        240,
+    ));
+    request.description = request.description.as_deref().map(bounded_description);
+    request.author = Some(author);
+}
+
+fn validate_human_wait(meta: &SessionMeta) -> Result<()> {
+    if let Some(wait) = &meta.human_wait {
+        let request = wait
+            .request
+            .as_ref()
+            .ok_or_else(|| anyhow!("Human wait has no request"))?;
+        if wait.id != request.id {
+            anyhow::bail!("Human wait request identity mismatch");
+        }
+    }
+    Ok(())
 }
 
 pub fn install_human_wait(meta: &mut SessionMeta, request: PermissionRequest, project: bool) {
-    meta.pending_permission = Some(request);
-    meta.pending_project_approval = project;
-    meta.human_continuation = None;
-    meta.human_wait = None;
-    adopt_human_wait(meta);
-}
-
-pub fn decide_human_wait(
-    meta: &mut SessionMeta,
-    request: PermissionRequest,
-    outcome: genehub_proto::PermissionOutcome,
-    project: bool,
-) {
-    meta.pending_permission = None;
-    meta.pending_project_approval = false;
-    meta.human_continuation = Some(HumanContinuation {
-        request,
-        outcome,
-        decided_at_ms: now_ms(),
-        project_approval: project,
-        grant_recorded: false,
-        completed: false,
-    });
-    meta.human_wait = None;
-    adopt_human_wait(meta);
-}
-
-pub fn adopt_human_wait(meta: &mut SessionMeta) {
-    if meta.human_wait.is_some() {
-        return;
-    }
-    let (request, decision, project, grant_recorded) =
-        if let Some(continuation) = meta.human_continuation.clone() {
-            let project = continuation.project_approval || meta.pending_project_approval;
-            (
-                continuation.request,
-                Some(HumanDecision {
-                    outcome: continuation.outcome,
-                    decided_at_ms: continuation.decided_at_ms,
-                }),
-                project,
-                continuation.grant_recorded,
-            )
-        } else if let Some(request) = meta.pending_permission.clone() {
-            (request, None, meta.pending_project_approval, false)
-        } else {
-            return;
-        };
-    let workflow = request
-        .id
-        .strip_prefix("workflow-human-")
-        .map(str::to_string);
-    let kind = if project || request.kind == genehub_proto::PermissionRequestKind::PlanApproval {
-        WaitKind::PlanApproval
-    } else if request.kind == genehub_proto::PermissionRequestKind::Question {
-        WaitKind::Question
-    } else {
-        WaitKind::Elevation
-    };
-    let origin = if let Some(run_id) = workflow {
-        WaitOrigin::Workflow { run_id }
-    } else if project {
+    let origin = if project {
         WaitOrigin::Project {
             challenge_id: request.id.clone(),
         }
@@ -332,17 +274,65 @@ pub fn adopt_human_wait(meta: &mut SessionMeta) {
             tool_call_id: request.tool_call_id.clone(),
         }
     };
+    meta.human_wait = Some(human_wait(request, None, origin));
+}
+
+pub fn decide_human_wait(
+    meta: &mut SessionMeta,
+    request: PermissionRequest,
+    outcome: genehub_proto::PermissionOutcome,
+    project: bool,
+) {
+    let origin = meta
+        .human_wait
+        .as_ref()
+        .map(|wait| wait.origin.clone())
+        .unwrap_or_else(|| {
+            if project {
+                WaitOrigin::Project {
+                    challenge_id: request.id.clone(),
+                }
+            } else {
+                WaitOrigin::Agent {
+                    tool_call_id: request.tool_call_id.clone(),
+                }
+            }
+        });
+    meta.human_wait = Some(human_wait(
+        request,
+        Some(HumanDecision {
+            outcome,
+            decided_at_ms: now_ms(),
+        }),
+        origin,
+    ));
+}
+
+fn human_wait(
+    mut request: PermissionRequest,
+    decision: Option<HumanDecision>,
+    origin: WaitOrigin,
+) -> HumanWait {
+    let project = matches!(origin, WaitOrigin::Project { .. });
+    let kind = if project || request.kind == genehub_proto::PermissionRequestKind::PlanApproval {
+        WaitKind::PlanApproval
+    } else if request.kind == genehub_proto::PermissionRequestKind::Question {
+        WaitKind::Question
+    } else {
+        WaitKind::Elevation
+    };
     let author = if matches!(origin, WaitOrigin::Agent { .. }) {
         WaitAuthor::Agent
     } else {
         WaitAuthor::Daemon
     };
-    let summary = plain_text(request.detail.as_deref().unwrap_or(&request.title), 300);
-    let description = request.detail.clone().filter(|detail| detail != &summary);
-    meta.human_wait = Some(HumanWait {
+    normalize_human_request(&mut request, author);
+    let summary = request.summary.clone().unwrap_or_default();
+    let description = request.description.clone();
+    HumanWait {
         id: request.id.clone(),
         kind,
-        title: plain_text(&request.title, 120),
+        title: request.title.clone(),
         summary,
         description,
         author,
@@ -362,42 +352,30 @@ pub fn adopt_human_wait(meta: &mut SessionMeta) {
         origin,
         decision,
         request: Some(request),
-        grant_recorded,
-    });
+    }
 }
 
-fn project_legacy_from_wait(meta: &mut SessionMeta) {
-    let Some(wait) = meta.human_wait.clone() else {
-        return;
-    };
-    let Some(request) = wait.request.clone() else {
-        return;
-    };
-    let project = matches!(wait.origin, WaitOrigin::Project { .. });
-    match wait.decision {
-        Some(decision) => {
-            meta.pending_permission = None;
-            meta.pending_project_approval = false;
-            meta.human_continuation = Some(HumanContinuation {
-                request,
-                outcome: decision.outcome,
-                decided_at_ms: decision.decided_at_ms,
-                project_approval: project,
-                grant_recorded: wait.grant_recorded,
-                completed: false,
-            });
-        }
-        None => {
-            meta.pending_permission = Some(request);
-            meta.pending_project_approval = project;
-            meta.human_continuation = None;
-        }
-    }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionCostSegment {
+    pub rate: serde_json::Value,
+    pub calls: u64,
+    pub milli_cny: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecutionActivity {
+    /// Assignment-time rate and accumulated estimate. Unknown legacy calls
+    /// remain unpriced rather than being repriced from today's preferences.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_rate: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cost_segments: Vec<ExecutionCostSegment>,
+    #[serde(default)]
+    pub estimated_milli_cny: u64,
+    #[serde(default)]
+    pub priced_llm_rounds: u64,
     pub last_at_ms: i64,
     pub llm_rounds: u64,
     pub tokens: Option<u64>,
@@ -411,6 +389,13 @@ pub struct ExecutionActivity {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionInbox {
+    /// Give a waiting activity batch a turn after a Human batch.
+    #[serde(default)]
+    pub activity_due: bool,
+    #[serde(default)]
+    pub pause_reason: Option<String>,
+    #[serde(default)]
+    pub control_revision: u64,
     #[serde(default)]
     pub entries: Vec<InboxEntry>,
     #[serde(default)]
@@ -419,6 +404,25 @@ pub struct SessionInbox {
     pub has_delivered: bool,
     #[serde(default)]
     pub error: Option<String>,
+}
+
+impl SessionInbox {
+    pub fn set_pause(&mut self, reason: Option<&str>) {
+        // A late failure callback cannot weaken an explicit stop (or an old
+        // pause whose origin is unknown). Only fresh authorized input clears it.
+        if reason == Some("executionFailure")
+            && self.paused
+            && self.pause_reason.as_deref() != Some("executionFailure")
+        {
+            return;
+        }
+        if self.paused == reason.is_some() && self.pause_reason.as_deref() == reason {
+            return;
+        }
+        self.paused = reason.is_some();
+        self.pause_reason = reason.map(str::to_string);
+        self.control_revision = self.control_revision.saturating_add(1);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -433,11 +437,18 @@ pub struct InboxEntry {
     /// receiving / queued / sent / handled; errors pause automatic processing.
     pub state: String,
     pub turn_id: Option<String>,
+    /// Kernel-authored Human continuation; not another chat bubble.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kernel_input: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continues_round: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionMeta {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub human_receipts: Vec<HumanResponseReceipt>,
     #[serde(default)]
     pub activity: ExecutionActivity,
     #[serde(default)]
@@ -463,7 +474,7 @@ pub struct SessionMeta {
     /// The layout this session is stored in, taken from the file's frozen
     /// header rather than from this field, and always written as this build's
     /// [`SESSION_FORMAT`] — see [`Store::save_meta`].
-    #[serde(default = "format_before_versions", skip_deserializing)]
+    #[serde(default, skip_deserializing)]
     pub format: u32,
     pub agent_id: String,
     /// Whether ordinary sends should resolve this conversation through the
@@ -511,16 +522,7 @@ pub struct SessionMeta {
     /// continuing a Worker whose previous process is still writing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_pid: Option<u32>,
-    /// A stopped interaction waiting for a user who may return much later.
-    /// Stored in meta so no live socket or Agent process is required.
-    #[serde(default)]
-    pub pending_permission: Option<PermissionRequest>,
-    #[serde(default)]
-    pub pending_project_approval: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub human_continuation: Option<HumanContinuation>,
-    /// Single Human wait. Older metas are folded into this on load; the three
-    /// fields above stay until every reader uses this record.
+    /// The only Human wait this session stores.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub human_wait: Option<HumanWait>,
     /// The Agent this session runs remains `agent_id`; lineage only describes
@@ -606,6 +608,7 @@ impl SessionMeta {
     /// does not know what the rest of it means.
     fn unopenable(id: String, workspace_id: String, cwd: PathBuf, header: MetaHeader) -> Self {
         SessionMeta {
+            human_receipts: Vec::new(),
             inbox: Default::default(),
             execution_retired: false,
             execution_cleanup: None,
@@ -633,9 +636,7 @@ impl SessionMeta {
             archived: false,
             persist: None,
             agent_pid: None,
-            pending_permission: None,
-            pending_project_approval: false,
-            human_continuation: None,
+
             human_wait: None,
             lineage: None,
             managed: None,
@@ -647,21 +648,12 @@ impl SessionMeta {
     /// Whether this build understands the session's layout well enough to read
     /// it, let alone add to it.
     pub fn openable(&self) -> bool {
-        self.format <= SESSION_FORMAT
+        self.format == SESSION_FORMAT
     }
 
-    /// A person still has to answer, or their answer is saved and not yet
-    /// delivered. `human_wait` is that record. The older fields cover a meta
-    /// that has not been folded yet.
+    /// A pending answer or saved decision not yet delivered is one durable wait.
     pub fn awaiting_human(&self) -> bool {
-        if self.human_wait.is_some() {
-            return true;
-        }
-        self.pending_permission.is_some()
-            || self
-                .human_continuation
-                .as_ref()
-                .is_some_and(|continuation| !continuation.completed)
+        self.human_wait.is_some()
     }
 
     pub fn summary(&self, status: SessionStatus) -> SessionSummary {
@@ -678,10 +670,33 @@ impl SessionMeta {
         status: SessionStatus,
         last_activity_at_ms: Option<i64>,
     ) -> SessionSummary {
+        let status = if status == SessionStatus::Idle
+            && self.openable()
+            && !self.awaiting_human()
+            && !self.inbox.paused
+            && self
+                .inbox
+                .entries
+                .iter()
+                .any(|entry| matches!(entry.state.as_str(), "receiving" | "queued" | "sent"))
+        {
+            SessionStatus::Running
+        } else {
+            status
+        };
         SessionSummary {
-            interaction_summary: self
-                .openable()
-                .then(|| interaction_summary(self.pending_permission.iter())),
+            interaction_summary: self.openable().then(|| {
+                let from_wait = self
+                    .human_wait
+                    .as_ref()
+                    .filter(|wait| wait.decision.is_none())
+                    .and_then(|wait| wait.request.as_ref());
+                if let Some(request) = from_wait {
+                    interaction_summary(std::iter::once(request))
+                } else {
+                    genehub_proto::SessionInteractionSummary::default()
+                }
+            }),
             latest_reply: self.latest_reply.clone(),
             input_summary: (!self.inbox.entries.is_empty()).then(|| {
                 genehub_proto::SessionInputSummary {
@@ -693,6 +708,8 @@ impl SessionMeta {
                         .map(|entry| entry.message_id.clone())
                         .collect(),
                     paused: self.inbox.paused,
+                    pause_reason: self.inbox.pause_reason.clone(),
+                    control_revision: Some(self.inbox.control_revision),
                     error: self.inbox.error.clone(),
                 }
             }),
@@ -742,8 +759,9 @@ pub struct ChatLog {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "camelCase")]
+#[allow(clippy::large_enum_variant)]
 enum ChatRow {
-    Item { item: TimelineItem },
+    Item { item: Box<TimelineItem> },
     Round { round: RoundRecord },
 }
 
@@ -809,12 +827,6 @@ pub fn sessions_dir(workspace_root: &Path) -> PathBuf {
 const HOME_DIR_NAME: &str = ".genethub";
 const TOMBSTONES_DIR: &str = "tombstones";
 
-/// Compatibility gate for builds that still take one exclusive workspace
-/// lock. Current builds hold it shared, so they can coexist with each other
-/// but never double-write alongside an older daemon.
-const LEGACY_OWNER_LOCK: &str = "owner.lock";
-const LEGACY_OWNER_NAME: &str = "owner";
-
 /// The file whose kernel lock decides which build may write one session.
 ///
 /// Kept empty. A Windows exclusive lock blocks reads as well as writes, so
@@ -829,8 +841,6 @@ const WRITER_NAME: &str = "writer";
 
 /// A registered workspace: where it is, and whether this daemon may write it.
 struct Home {
-    /// Shared compatibility lock excluding older workspace-locking builds.
-    compatibility: Option<File>,
     /// One write lock per session. Different channels may write different
     /// conversations in the same workspace at the same time.
     writers: BTreeMap<String, File>,
@@ -852,10 +862,6 @@ struct WorkspaceHome {
     /// Stable within this physical session home and independent of the local
     /// workspace id, so another GeneHub installation can adopt the history.
     project_key: String,
-    /// Older keys that still name this project. A `.code-workspace` file used
-    /// to hash the file path; the directory is the identity now, but those
-    /// conversations stay visible.
-    aliases: Vec<String>,
 }
 
 /// Which directory on disk belongs to each workspace id.
@@ -877,22 +883,14 @@ impl WorkspaceHomes {
     }
 
     pub fn attach_project(&self, workspace_id: &str, project_key: &str, root: &Path) {
-        self.attach_project_aliased(workspace_id, project_key, &[], root);
-    }
-
-    pub fn attach_project_aliased(
-        &self,
-        workspace_id: &str,
-        project_key: &str,
-        aliases: &[String],
-        root: &Path,
-    ) {
         let Ok(mut homes) = self.homes.write() else {
             return;
         };
-        if homes.workspaces.get(workspace_id).is_some_and(|known| {
-            known.root == root && known.project_key == project_key && known.aliases == aliases
-        }) {
+        if homes
+            .workspaces
+            .get(workspace_id)
+            .is_some_and(|known| known.root == root && known.project_key == project_key)
+        {
             return;
         }
         if let Some(previous) = homes.workspaces.insert(
@@ -900,7 +898,6 @@ impl WorkspaceHomes {
             WorkspaceHome {
                 root: root.to_path_buf(),
                 project_key: project_key.to_string(),
-                aliases: aliases.to_vec(),
             },
         ) {
             prune_home(&mut homes, &previous.root);
@@ -928,7 +925,12 @@ impl WorkspaceHomes {
             .workspaces
             .get(workspace_id)
             .map(|home| home.root.clone())
-            .ok_or_else(|| anyhow!("no such workspace: {workspace_id}"))
+            .ok_or_else(|| {
+                crate::rpc_error::failure(
+                    genehub_proto::ErrorCode::NotFound,
+                    format!("no such workspace: {workspace_id}"),
+                )
+            })
     }
 
     fn project_key(&self, workspace_id: &str) -> Result<String> {
@@ -940,7 +942,12 @@ impl WorkspaceHomes {
             .workspaces
             .get(workspace_id)
             .map(|home| home.project_key.clone())
-            .ok_or_else(|| anyhow!("no such workspace: {workspace_id}"))
+            .ok_or_else(|| {
+                crate::rpc_error::failure(
+                    genehub_proto::ErrorCode::NotFound,
+                    format!("no such workspace: {workspace_id}"),
+                )
+            })
     }
 
     fn claims_project_key(&self, workspace_id: &str, project_key: &str) -> Result<bool> {
@@ -948,9 +955,10 @@ impl WorkspaceHomes {
             .homes
             .read()
             .map_err(|_| anyhow!("the workspace registry is poisoned"))?;
-        Ok(homes.workspaces.get(workspace_id).is_some_and(|home| {
-            home.project_key == project_key || home.aliases.iter().any(|alias| alias == project_key)
-        }))
+        Ok(homes
+            .workspaces
+            .get(workspace_id)
+            .is_some_and(|home| home.project_key == project_key))
     }
 
     fn home_dir(&self, workspace_id: &str) -> Result<PathBuf> {
@@ -993,55 +1001,6 @@ impl WorkspaceHomes {
         })
     }
 
-    fn claim_compatibility(&self, workspace_id: &str, home_dir: &Path) -> Result<()> {
-        let mut homes = self
-            .homes
-            .write()
-            .map_err(|_| anyhow!("the workspace registry is poisoned"))?;
-        let root = homes
-            .workspaces
-            .get(workspace_id)
-            .map(|home| home.root.clone())
-            .ok_or_else(|| anyhow!("no such workspace: {workspace_id}"))?;
-        let home = homes
-            .roots
-            .get_mut(&root)
-            .ok_or_else(|| anyhow!("workspace {workspace_id} has no session home"))?;
-        if home.compatibility.is_some() {
-            return Ok(());
-        }
-        let path = home_dir.join(LEGACY_OWNER_LOCK);
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-            .with_context(|| format!("opening {}", path.display()))?;
-        match crate::fs_lock::try_lock_shared(&file, &path) {
-            Ok(()) => {}
-            Err(error) if crate::lifecycle::lock_contended(&error) => {
-                let holder = fs::read_to_string(home_dir.join(LEGACY_OWNER_NAME))
-                    .ok()
-                    .map(|text| text.trim().to_string())
-                    .filter(|text| !text.is_empty())
-                    .unwrap_or_else(|| "an older GeneHub".to_string());
-                tracing::warn!(
-                    event = "legacy_workspace_writer_contended",
-                    workspace = %workspace_id,
-                    %holder,
-                    "an older GeneHub is holding the workspace-wide session lock"
-                );
-                return Err(anyhow!(
-                    "{holder} uses the older workspace-wide session lock; close or upgrade it before writing here"
-                ));
-            }
-            Err(error) => return Err(error).with_context(|| format!("locking {}", path.display())),
-        }
-        home.compatibility = Some(file);
-        Ok(())
-    }
-
     /// Takes one session's write lock, or names who is holding it.
     ///
     /// Sessions live in the project, so a beta and a release pointed at the
@@ -1063,7 +1022,12 @@ impl WorkspaceHomes {
             .workspaces
             .get(workspace_id)
             .map(|home| home.root.clone())
-            .ok_or_else(|| anyhow!("no such workspace: {workspace_id}"))?;
+            .ok_or_else(|| {
+                crate::rpc_error::failure(
+                    genehub_proto::ErrorCode::NotFound,
+                    format!("no such workspace: {workspace_id}"),
+                )
+            })?;
         let home = homes
             .roots
             .get_mut(&root)
@@ -1117,7 +1081,12 @@ impl WorkspaceHomes {
             .workspaces
             .get(workspace_id)
             .map(|home| home.root.clone())
-            .ok_or_else(|| anyhow!("no such workspace: {workspace_id}"))?;
+            .ok_or_else(|| {
+                crate::rpc_error::failure(
+                    genehub_proto::ErrorCode::NotFound,
+                    format!("no such workspace: {workspace_id}"),
+                )
+            })?;
         if let Some(home) = homes.roots.get_mut(&root) {
             home.writers.remove(session_id);
         }
@@ -1128,7 +1097,6 @@ impl WorkspaceHomes {
 impl Home {
     fn at() -> Self {
         Home {
-            compatibility: None,
             writers: BTreeMap::new(),
         }
     }
@@ -1359,7 +1327,6 @@ impl Store {
         let home = self.homes.home_dir(workspace_id)?;
         if !self.homes.holds(workspace_id, session_id) {
             self.establish_home(&home)?;
-            self.homes.claim_compatibility(workspace_id, &home)?;
         }
         if !dir.exists() {
             fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -1419,6 +1386,7 @@ impl Store {
             format: SESSION_FORMAT,
             ..meta.clone()
         };
+        validate_human_wait(&stamped)?;
         let mut value = serde_json::to_value(stamped)?;
         value["projectKey"] =
             serde_json::Value::String(self.homes.project_key(&meta.workspace_id)?);
@@ -1431,7 +1399,7 @@ impl Store {
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         let header: MetaHeader = serde_json::from_str(&raw)
             .with_context(|| format!("reading the header of {}", path.display()))?;
-        if header.format > SESSION_FORMAT {
+        if header.format != SESSION_FORMAT {
             if !header.project_key.is_empty()
                 && !self
                     .homes
@@ -1456,7 +1424,7 @@ impl Store {
         }
         meta.workspace_id = workspace_id.to_string();
         meta.format = header.format;
-        adopt_human_wait(&mut meta);
+        validate_human_wait(&meta)?;
         Ok(meta)
     }
 
@@ -1531,10 +1499,7 @@ impl Store {
                 } else {
                     workspaces
                         .iter()
-                        .find(|(_, home)| {
-                            home.project_key == project_key
-                                || home.aliases.iter().any(|alias| alias == &project_key)
-                        })
+                        .find(|(_, home)| home.project_key == project_key)
                         .map(|(id, _)| id.clone())
                 };
                 let Some(workspace_id) = owner else {
@@ -1576,13 +1541,6 @@ impl Store {
 
     fn reap_tombstoned_session(&self, workspace_id: &str, session_id: &str, dir: &Path) {
         if !dir.exists() {
-            return;
-        }
-        let Ok(home) = self.homes.home_dir(workspace_id) else {
-            return;
-        };
-        if let Err(error) = self.homes.claim_compatibility(workspace_id, &home) {
-            tracing::warn!(event = "session_cleanup_deferred", reason = "legacy_writer", workspace = %workspace_id, session = %session_id, %error, "deleted session cleanup is waiting for an older GeneHub");
             return;
         }
         if !self.homes.holds(workspace_id, session_id) {
@@ -1628,7 +1586,9 @@ impl Store {
         let rows: Vec<ChatRow> = items
             .iter()
             .filter(|item| !is_work_item(item))
-            .map(|item| ChatRow::Item { item: item.clone() })
+            .map(|item| ChatRow::Item {
+                item: Box::new(item.clone()),
+            })
             .collect();
         self.append_chat_rows(workspace_id, session_id, &rows)
     }
@@ -1704,6 +1664,7 @@ impl Store {
             }
             match serde_json::from_str::<ChatRow>(&line) {
                 Ok(ChatRow::Item { item }) => {
+                    let item = *item;
                     // A failed append may have written complete rows before
                     // returning an error. Retrying preserves one item per id.
                     match item_positions.get(item.id()) {
@@ -1772,7 +1733,9 @@ impl Store {
             writeln!(
                 body,
                 "{}",
-                serde_json::to_string(&ChatRow::Item { item: item.clone() })?
+                serde_json::to_string(&ChatRow::Item {
+                    item: Box::new(item.clone())
+                })?
             )?;
         }
         crate::config::save_private(&path, &body)
@@ -1798,7 +1761,7 @@ impl Store {
             .lines()
             .filter(|line| !line.trim().is_empty())
             .map(|line| match serde_json::from_str::<ChatRow>(line)? {
-                ChatRow::Item { item } => Ok(item),
+                ChatRow::Item { item } => Ok(*item),
                 _ => anyhow::bail!("unexpected row in the interrupted answer"),
             })
             .collect()
@@ -2152,7 +2115,7 @@ impl Store {
         }
         let home = self.homes.home_dir(workspace_id)?;
         self.establish_home(&home)?;
-        self.homes.claim_compatibility(workspace_id, &home)?;
+
         if !self.homes.holds(workspace_id, session_id) {
             self.homes.claim(workspace_id, session_id, &dir)?;
         }
@@ -2333,7 +2296,10 @@ pub fn ensure_within(root: &Path, candidate: &Path) -> Result<PathBuf> {
     let normalized = normalize(&joined);
     let root = normalize(root);
     if !normalized.starts_with(&root) {
-        anyhow::bail!("path escapes the workspace");
+        return Err(crate::rpc_error::failure(
+            genehub_proto::ErrorCode::Forbidden,
+            "path escapes the workspace".to_owned(),
+        ));
     }
     Ok(normalized)
 }
@@ -2361,6 +2327,7 @@ mod project_home_tests {
 
     fn meta(id: &str, workspace_id: &str, cwd: &Path) -> SessionMeta {
         SessionMeta {
+            human_receipts: Vec::new(),
             inbox: Default::default(),
             execution_retired: false,
             execution_cleanup: None,
@@ -2388,9 +2355,7 @@ mod project_home_tests {
             archived: false,
             persist: None,
             agent_pid: None,
-            pending_permission: None,
-            pending_project_approval: false,
-            human_continuation: None,
+
             human_wait: None,
             lineage: None,
             managed: None,
@@ -2431,29 +2396,6 @@ mod project_home_tests {
 
         homes.attach_project("w_folder", "folder", root.path());
         assert_eq!(store.list_meta().unwrap().len(), 2);
-    }
-
-    #[test]
-    fn a_legacy_workspace_file_key_is_claimed_by_the_directory() {
-        let root = tempfile::tempdir().unwrap();
-        let homes = WorkspaceHomes::default();
-        homes.attach_project("w_old", "workspace:filehash", root.path());
-        let store = Store::new(homes.clone());
-        store
-            .save_meta(&meta("s_old", "w_old", root.path()))
-            .unwrap();
-
-        homes.detach("w_old");
-        homes.attach_project_aliased(
-            "w_dir",
-            "folder",
-            &["workspace:filehash".into()],
-            root.path(),
-        );
-        let listed = store.list_meta().unwrap();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].id, "s_old");
-        assert_eq!(listed[0].workspace_id, "w_dir");
     }
 
     #[test]
@@ -2559,41 +2501,5 @@ mod project_home_tests {
                 "missing structured {event} diagnostic"
             );
         }
-    }
-
-    #[test]
-    fn an_old_pending_permission_becomes_one_human_wait() {
-        let mut session = meta("s1", "w1", Path::new("/tmp"));
-        session.pending_permission = Some(PermissionRequest {
-            id: "workflow-human-wr_1".into(),
-            kind: genehub_proto::PermissionRequestKind::Question,
-            title: "Approve the budget".into(),
-            detail: Some("The request used its runs.".into()),
-            tool_call_id: None,
-            options: vec![genehub_proto::PermissionOption {
-                id: "a".into(),
-                label: "Add one run".into(),
-                kind: genehub_proto::PermissionOptionKind::AllowOnce,
-            }],
-            questions: None,
-        });
-        adopt_human_wait(&mut session);
-        assert!(session.awaiting_human());
-        let wait = session.human_wait.as_ref().expect("migrated");
-        assert_eq!(wait.kind, WaitKind::Question);
-        assert!(matches!(wait.origin, WaitOrigin::Workflow { ref run_id } if run_id == "wr_1"));
-        assert!(wait.decision.is_none());
-        assert!(wait.options[0].elevate);
-        session.human_continuation = Some(HumanContinuation {
-            request: session.pending_permission.take().unwrap(),
-            outcome: genehub_proto::PermissionOutcome::Canceled,
-            decided_at_ms: 3,
-            project_approval: false,
-            grant_recorded: true,
-            completed: true,
-        });
-        sync_human_wait(&mut session);
-        assert!(session.human_wait.is_none());
-        assert!(!session.awaiting_human());
     }
 }

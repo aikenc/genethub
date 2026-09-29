@@ -59,14 +59,16 @@ async function connected(options: Partial<ClientOptions> = {}): Promise<{
 }> {
   const proof = localProof();
   const queue = socketQueue({ secret: proof.proof, identity: localIdentity });
-  const client = new Client({
-    ...options,
+  // Keep the caller's options object. A later assignment to requestTimeoutMs
+  // applies only to exchanges started after that assignment.
+  const shared = Object.assign(options, {
     url: options.url ?? "ws://127.0.0.1:42123/ws",
     localServerProof: options.localServerProof ?? proof,
     socketFactory: options.socketFactory ?? queue.factory,
     rtcEnabled: options.rtcEnabled ?? false,
     backoffMs: options.backoffMs ?? (() => 0),
   });
+  const client = new Client(shared as ClientOptions);
   client.connect();
   const socket = queue.latest();
   socket.open();
@@ -97,7 +99,7 @@ describe("the logical peer connection", () => {
     expect(client.identity).toMatchObject({
       machineId: "m_local",
       fingerprint: "FP-LOCAL",
-      webProtocol: 3,
+      webProtocol: 4,
     });
     const types = queue.latest().sent.map((message) => message.type);
     expect(types.indexOf("protocol.identity")).toBeGreaterThanOrEqual(0);
@@ -107,7 +109,7 @@ describe("the logical peer connection", () => {
     client.close();
   });
 
-  it("assumes WebProtocol v3 when protocol.identity is missing", async () => {
+  it("uses the v3 adapter when protocol.identity is missing and exposes the current identity", async () => {
     const proof = localProof();
     const queue = socketQueue({
       secret: proof.proof,
@@ -127,7 +129,7 @@ describe("the logical peer connection", () => {
     await waitFor(() => client.connectionState === "ready");
 
     expect(queue.latest().lastOf("protocol.identity")).toBeDefined();
-    expect(client.identity).toMatchObject({ webProtocol: 3 });
+    expect(client.identity).toMatchObject({ webProtocol: 4 });
     client.close();
   });
 
@@ -135,7 +137,7 @@ describe("the logical peer connection", () => {
     const proof = localProof();
     const queue = socketQueue({
       secret: proof.proof,
-      identity: { ...localIdentity, webProtocol: 4 },
+      identity: { ...localIdentity, webProtocol: 5 },
     });
     const client = new Client({
       url: "ws://127.0.0.1:42123/ws",
@@ -526,7 +528,12 @@ describe("RPC exchanges are independent logical streams", () => {
     await expect(waiting).rejects.toBeInstanceOf(ClientRequestTimeoutError);
     offline.close();
 
-    const { client, socket } = await connected({ requestTimeoutMs: 5 });
+    // connection.identity uses the same request budget as later calls.
+    // The 5ms deadline starts after the handshake is ready, so a busy
+    // event loop cannot fail the connection before the exchange under test.
+    const session: Partial<ClientOptions> = {};
+    const { client, socket } = await connected(session);
+    session.requestTimeoutMs = 5;
     const unanswered = client.call({ type: "agent.list" });
     await waitFor(() => socket.sent.some((message) => message.type === "agent.list"));
     await expect(unanswered).rejects.toBeInstanceOf(ClientRequestTimeoutError);

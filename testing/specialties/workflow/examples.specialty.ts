@@ -117,7 +117,7 @@ for (const scenario of ["simple", "medium-repair", "medium-rejected", "complex-s
       }
       switch (pmStage++) {
         case 0: return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" workflow build --package game-delivery' } } };
-        case 1: return { tool: { name: "request_user_input", arguments: { questions: [{ id: field(request, "challengeId"), header: "接管", question: "确认接管隔离示例项目", options: [{ label: "yes", description: "接管" }, { label: "no", description: "拒绝" }] }] } } };
+        case 1: return { tool: { name: "request_user_input", arguments: { title: "确认接管隔离示例项目", summary: "共 1 个待回答问题。", description: "请使用下方选项回答问题；提交后继续当前任务。", questions: [{ id: field(request, "challengeId"), header: "接管", question: "确认接管隔离示例项目", options: [{ label: "yes", description: "接管" }, { label: "no", description: "拒绝" }] }] } } };
         case 2: return { tool: { name: "bash", arguments: { command: `"$GENEHUB_CLI" workflow build --package game-delivery --apply --plan-digest ${field(request, "planDigest")} --revision ${field(request, "expectedRevision")} --action-id install-examples-pack` } } };
         case 3: return { tool: { name: "bash", arguments: { command: `node -e ${q(install)} && git add -A && git commit -m 'install documented example definitions and the built team' && "$GENEHUB_CLI" workflow inspect` } } };
         case 4: {
@@ -143,8 +143,16 @@ for (const scenario of ["simple", "medium-repair", "medium-rejected", "complex-s
     await t.tools.waitUntil(async () => {
       const reply = await opened.client.call({ type: "workflow.history", payload: { workspaceId, limit: 10 } });
       if (reply?.type !== "workflowRuns") throw new Error("Run history unavailable");
-      t.assertions.assert(reply.data.length <= 1, "example escaped into another PM-dispatched Run");
-      run = reply.data[0]; return !!run && ["completed", "blocked", "failed", "cancelled"].includes(run.status);
+      // A recovery Run handles the failed execution; it is not another business
+      // milestone dispatched by PM. Still reject any additional business Run.
+      const business = reply.data.filter(candidate => candidate.handles.length === 0);
+      t.assertions.assert(business.length <= 1, "example escaped into another PM-dispatched Run");
+      run = business[0];
+      if (!run) return false;
+      t.assertions.assert(run.taskId === "documented-example", "unexpected business task");
+      t.assertions.assert(reply.data.every(candidate => candidate.id === run!.id ||
+        candidate.handles.every(handle => handle.runId === run!.id)), "recovery refers to another business Run");
+      return ["completed", "blocked", "failed", "cancelled"].includes(run.status);
     }, 180_000).catch(async error => { throw new Error(`${scenario}: ${error}; events=${JSON.stringify(events)}; run=${JSON.stringify(run)}; pm=${JSON.stringify((await snapshot()).items).slice(-6000)}`); });
     t.assertions.assert(run!.workflowId === selected.id && !!run!.executorSessionId && run!.executorTurns === 0, "example bypassed deterministic Executor");
     t.assertions.assert(run!.status === (scenario.endsWith("exhausted") ? "blocked" : "completed"), `unexpected Run outcome: ${JSON.stringify(run)}`);

@@ -1,12 +1,15 @@
 //! Shared session state and the read-only payloads the daemon polls for.
 
+#[cfg(test)]
+use crate::protocol::Usage;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
 
 use crate::config::ModelConfig;
-use crate::protocol::{Message, Usage};
+use crate::protocol::Message;
 use crate::rpc::Emitter;
 use crate::session::Session;
 use crate::skills::Skill;
@@ -47,17 +50,6 @@ impl Abort {
     }
 }
 
-/// Tokens from the latest successful model request, plus how many session
-/// messages that request already covered. Later messages are estimated.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct AccountedUsage {
-    pub input: u64,
-    pub output: u64,
-    pub cache_read: u64,
-    pub cache_write: u64,
-    pub accounted_messages: usize,
-}
-
 pub struct State {
     pub emitter: Emitter,
     pub session: Session,
@@ -68,10 +60,6 @@ pub struct State {
     pub skills: Vec<Skill>,
     pub additional_system_prompts: Vec<String>,
     pub cwd: PathBuf,
-    pub stats: Usage,
-    /// Latest successful request. Absent until one completes, and cleared when
-    /// a capsule replaces the context those tokens described.
-    pub last_request: Option<AccountedUsage>,
     pub streaming: bool,
     pub compacting: bool,
     pub tools_enabled: bool,
@@ -111,118 +99,125 @@ impl State {
         value
     }
 
-    /// `get_session_stats` payload.
-    pub fn stats_value(&self) -> Value {
-        let mut user_messages = 0;
-        let mut assistant_messages = 0;
-        let mut tool_calls = 0;
-        let mut tool_results = 0;
-
-        for message in &self.session.messages {
-            match message {
-                Message::User { .. } => user_messages += 1,
-                Message::Assistant { content, .. } => {
-                    assistant_messages += 1;
-                    tool_calls += content
-                        .iter()
-                        .filter(|block| matches!(block, crate::protocol::Content::ToolCall { .. }))
-                        .count();
+    /// Reuse a completed request from the actual current history, as PI does.
+    /// The boundary excludes retained pre-capsule usage and prior model settings.
+    fn last_usage(&self) -> Option<(usize, u64)> {
+        let selected = self.current_model.as_ref()?;
+        self.session
+            .messages
+            .iter()
+            .enumerate()
+            .rev()
+            .take_while(|(index, _)| *index >= self.session.usage_start)
+            .find_map(|(index, message)| match message {
+                Message::Assistant {
+                    usage,
+                    stop_reason,
+                    provider,
+                    model,
+                    ..
+                } if provider == &selected.provider
+                    && model == &selected.id
+                    && matches!(
+                        stop_reason,
+                        crate::protocol::StopReason::Stop
+                            | crate::protocol::StopReason::Length
+                            | crate::protocol::StopReason::ToolUse
+                    )
+                    && usage.input_reported
+                    && usage.output_reported =>
+                {
+                    // GeneHub input already includes cache. PI stores uncached input
+                    // and sums the components; both representations give this total.
+                    let total = usage.input.saturating_add(usage.output);
+                    (total > 0).then_some((index, total))
                 }
-                Message::ToolResult { .. } => tool_results += 1,
-            }
-        }
-
-        let mut value = json!({
-            "sessionId": self.session.id,
-            "userMessages": user_messages,
-            "assistantMessages": assistant_messages,
-            "toolCalls": tool_calls,
-            "toolResults": tool_results,
-            "totalMessages": self.session.messages.len(),
-            "tokens": {
-                "input": self.stats.input,
-                "output": self.stats.output,
-                "cacheRead": self.stats.cache_read,
-                "cacheWrite": self.stats.cache_write,
-                "total": self.stats.total_tokens,
-            },
-        });
-        if let Some(file) = &self.session.file {
-            value["sessionFile"] = json!(file.to_string_lossy());
-        }
-        if let Some(usage) = self.context_usage() {
-            value["contextUsage"] = usage;
-        }
-        value
+                _ => None,
+            })
     }
 
-    /// Omitted entirely when no model or context window is known, which is what
-    /// the daemon expects rather than nulls. The count is the latest request's
-    /// real tokens plus an estimate of messages added since, not the session's
-    /// cumulative total.
     fn context_usage(&self) -> Option<Value> {
         let window = self.current_model.as_ref()?.context_window?;
         if window == 0 {
             return None;
         }
-        let tokens = self.context_tokens();
+        let last = self.last_usage();
+        let start = last.map_or(0, |(index, _)| index + 1);
+        let trailing = &self.session.messages[start..];
+        // PI has no generic video/audio tokenizer. Do not turn a made-up reserve
+        // into an apparently measured context size. API usage will resolve it.
+        let unsupported_media = trailing.iter().any(|message| matches!(message,
+            Message::User { attachments, .. } if attachments.iter().any(|a| !a.mime.starts_with("image/"))));
+        let unknown = unsupported_media || (last.is_none() && self.session.usage_start > 0);
+        let usage_tokens = last.map(|(_, tokens)| tokens);
+        let trailing_tokens = (!unknown).then(|| estimate_message_tokens(trailing));
+        let tokens = trailing_tokens.map(|tail| usage_tokens.unwrap_or(0).saturating_add(tail));
+        let estimated = !unknown && (last.is_none() || !trailing.is_empty());
         Some(json!({
             "tokens": tokens,
+            "usageTokens": usage_tokens,
+            "estimatedTokens": trailing_tokens,
+            "estimated": estimated,
+            "source": if unknown { "unknown" } else if last.is_none() { "estimate" }
+                else if estimated { "apiBaselineWithEstimate" } else { "api" },
             "contextWindow": window,
-            "percent": ((tokens as f64 / window as f64) * 100.0).round(),
+            "percent": tokens.map(|tokens| (tokens as f64 / window as f64 * 100.0).round()),
         }))
     }
 
+    /// Estimate for local capsule sizing. UI provenance is handled separately:
+    /// a capsule invalidates old API usage until a subsequent response reports it.
     pub(crate) fn context_tokens(&self) -> u64 {
-        match self.last_request {
-            Some(last) => {
-                let base = last
-                    .input
-                    .saturating_add(last.cache_read)
-                    .saturating_add(last.cache_write)
-                    .saturating_add(last.output);
-                let start = last.accounted_messages.min(self.session.messages.len());
-                base.saturating_add(estimate_message_tokens(&self.session.messages[start..]))
+        match self.last_usage() {
+            Some((index, tokens)) => {
+                tokens.saturating_add(estimate_message_tokens(&self.session.messages[index + 1..]))
             }
             None => estimate_message_tokens(&self.session.messages),
         }
     }
 
-    /// Skills double as `/skill:<name>` slash commands.
-    pub fn commands_value(&self) -> Value {
-        let commands: Vec<Value> = self
-            .skills
-            .iter()
-            .map(|skill| {
-                json!({
-                    "name": format!("skill:{}", skill.name),
-                    "description": skill.description,
-                    "source": "skill",
-                    "sourceInfo": { "path": skill.file_path.to_string_lossy() },
-                })
-            })
-            .collect();
-        json!({ "commands": commands })
-    }
-
-    pub fn models_value(&self) -> Value {
-        let models: Vec<Value> = self
-            .models
-            .iter()
-            .map(|model| serde_json::to_value(model.to_ref()).unwrap_or(Value::Null))
-            .collect();
-        json!({ "models": models })
-    }
-
-    pub fn messages_value(&self) -> Value {
-        json!({ "messages": self.session.messages })
+    pub(crate) fn awaiting_context_usage(&self) -> bool {
+        self.session.usage_start > 0 && self.last_usage().is_none()
     }
 }
 
-/// Four characters per token, matching the capsule trigger's estimate.
+/// PI's fallback: UTF-16 text length / 4, rounded per message; 1200 tokens
+/// per image. Count content, not wire wrappers, signatures, IDs or base64.
+/// This heuristic is not a tokenizer or a guaranteed upper bound.
 pub(crate) fn estimate_message_tokens(messages: &[Message]) -> u64 {
-    let raw = serde_json::to_string(messages).unwrap_or_default();
-    (raw.chars().count() as u64) / 4
+    fn chars(text: &str) -> u64 {
+        text.encode_utf16().count() as u64
+    }
+    fn content_chars(content: &[crate::protocol::Content]) -> u64 {
+        content.iter().fold(0u64, |total, block| {
+            total.saturating_add(match block {
+                crate::protocol::Content::Text { text } => chars(text),
+                crate::protocol::Content::Thinking { thinking, .. } => chars(thinking),
+                crate::protocol::Content::ToolCall {
+                    name, arguments, ..
+                } => chars(name).saturating_add(chars(&arguments.to_string())),
+            })
+        })
+    }
+    messages.iter().fold(0u64, |total, message| {
+        let count = match message {
+            Message::User {
+                content,
+                attachments,
+                ..
+            } => chars(content).saturating_add(
+                (attachments
+                    .iter()
+                    .filter(|a| a.mime.starts_with("image/"))
+                    .count() as u64)
+                    .saturating_mul(4800),
+            ),
+            Message::Assistant { content, .. } | Message::ToolResult { content, .. } => {
+                content_chars(content)
+            }
+        };
+        total.saturating_add(count.div_ceil(4))
+    })
 }
 
 pub(crate) fn exceeds_capsule_threshold(used: u64, window: u64) -> bool {
@@ -232,7 +227,6 @@ pub(crate) fn exceeds_capsule_threshold(used: u64, window: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::Content;
     use crate::rpc::start_writer;
 
     fn state() -> State {
@@ -259,8 +253,6 @@ mod tests {
             additional_system_prompts: Vec::new(),
             skills: Vec::new(),
             cwd,
-            stats: Usage::default(),
-            last_request: None,
             streaming: false,
             compacting: false,
             tools_enabled: true,
@@ -279,41 +271,6 @@ mod tests {
         assert_eq!(value["model"]["provider"], "fake");
         // In-memory sessions have no file, and the field must be absent.
         assert!(value.get("sessionFile").is_none());
-    }
-
-    #[tokio::test]
-    async fn stats_count_messages_by_role() {
-        let mut state = state();
-        state.session.append_message(Message::user("hi"));
-        state.session.append_message(Message::Assistant {
-            content: vec![Content::ToolCall {
-                id: "a".into(),
-                name: "ls".into(),
-                arguments: json!({}),
-            }],
-            api: "fake".into(),
-            provider: "fake".into(),
-            model: "echo".into(),
-            usage: Usage::default(),
-            stop_reason: crate::protocol::StopReason::ToolUse,
-            error_message: None,
-            timestamp: 0,
-        });
-        state.session.append_message(Message::ToolResult {
-            tool_call_id: "a".into(),
-            tool_name: "ls".into(),
-            content: vec![Content::text("out")],
-            details: None,
-            is_error: false,
-            timestamp: 0,
-        });
-
-        let value = state.stats_value();
-        assert_eq!(value["userMessages"], 1);
-        assert_eq!(value["assistantMessages"], 1);
-        assert_eq!(value["toolCalls"], 1);
-        assert_eq!(value["toolResults"], 1);
-        assert_eq!(value["totalMessages"], 3);
     }
 
     #[tokio::test]
@@ -337,18 +294,37 @@ mod tests {
     #[tokio::test]
     async fn context_usage_follows_the_latest_request_not_the_session_total() {
         let mut state = state();
-        state.stats.input = 50_000;
-        state.stats.output = 50_000;
         state.session.append_message(Message::user("hello"));
-        state.last_request = Some(AccountedUsage {
+        let mut reply = crate::protocol::AssistantDraft::new("fake", "fake", "echo");
+        reply.stop_reason = crate::protocol::StopReason::Stop;
+        reply.usage = Usage {
             input: 100,
             output: 20,
-            cache_read: 5,
-            cache_write: 0,
-            accounted_messages: 1,
-        });
+            input_reported: true,
+            output_reported: true,
+            ..Usage::default()
+        };
+        state.session.append_message(reply.to_message());
         let usage = state.state_value()["contextUsage"].clone();
-        assert_eq!(usage["tokens"], 125);
+        assert_eq!(usage["tokens"], 120);
+        assert_eq!(usage["source"], "api");
+        assert_eq!(usage["estimatedTokens"], 0);
+        state.session.append_message(Message::user("12345678"));
+        let usage = state.state_value()["contextUsage"].clone();
+        assert_eq!(usage["tokens"], 122);
+        assert_eq!(usage["usageTokens"], 120);
+        assert_eq!(usage["estimatedTokens"], 2);
+        // Missing/all-zero reports cannot erase the valid request baseline.
+        reply.usage = Usage::default();
+        state.session.append_message(reply.to_message());
+        assert_eq!(state.state_value()["contextUsage"]["usageTokens"], 120);
+        state
+            .session
+            .replace_with_capsule("summary".into(), Vec::new());
+        let usage = state.state_value()["contextUsage"].clone();
+        assert!(usage["tokens"].is_null());
+        assert!(usage["percent"].is_null());
+        assert_eq!(usage["source"], "unknown");
     }
 
     #[tokio::test]
@@ -358,18 +334,23 @@ mod tests {
         assert!(state.state_value().get("contextUsage").is_none());
     }
 
-    #[tokio::test]
-    async fn skills_are_exposed_as_slash_commands() {
-        let mut state = state();
-        state.skills.push(Skill {
-            name: "demo".into(),
-            description: "Demo skill".into(),
-            file_path: PathBuf::from("/skills/demo/SKILL.md"),
-            base_dir: PathBuf::from("/skills/demo"),
-            disable_model_invocation: false,
-        });
-        let value = state.commands_value();
-        assert_eq!(value["commands"][0]["name"], "skill:demo");
-        assert_eq!(value["commands"][0]["source"], "skill");
+    #[test]
+    fn media_estimates_do_not_count_base64_bytes_as_text() {
+        use crate::protocol::MediaAttachment;
+        let image = |data: &str| {
+            Message::user_with_attachments(
+                "查看图片",
+                vec![MediaAttachment {
+                    name: "image.png".into(),
+                    mime: "image/png".into(),
+                    path: None,
+                    data_base64: Some(data.into()),
+                }],
+            )
+        };
+        assert_eq!(
+            estimate_message_tokens(&[image("tiny")]),
+            estimate_message_tokens(&[image(&"x".repeat(100000))])
+        );
     }
 }

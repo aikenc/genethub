@@ -9,7 +9,7 @@ defineJourney(
     title: "A session starts where it was told to and cannot be told to leave",
     oracle: "relative write lands in services/api, not the workspace root",
     catches: ["cwd ignored", "escape via cwd"],
-    tags: ["core", "session", "filesystem", "parity"],
+    tags: ["core", "session", "filesystem"],
     llm: { default: "mock" },
     resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
     expectedDurationMs: 30_000,

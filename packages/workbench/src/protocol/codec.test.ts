@@ -67,3 +67,35 @@ describe("WebProtocol adapters", () => {
     expect(() => protocolCodec(latest + 1, [], latest)).toThrow("请刷新网页");
   });
 });
+
+it("v3 translates only Human wire fields and leaves arbitrary payload data intact", () => {
+  const codec = protocolCodec(3);
+  const event = (event: unknown) => codec.decodeServerFrame(new TextEncoder().encode(JSON.stringify({
+    type: "event", topic: "s1", payload: { seq: 1, event },
+  })));
+  const converted = event({ type: "permissionRequested", request: {
+    id: "p1", title: "Confirm", detail: "Old description", options: [],
+  } });
+  expect(converted).toMatchObject({ payload: { event: { request: {
+    id: "p1", summary: "Confirm", description: "Old description",
+  } } } });
+  expect(JSON.stringify(converted)).not.toContain('"detail"');
+  expect(() => event({ type: "permissionResolved", requestId: "p1", outcome: {
+    outcome: "timedOut", appliedDefault: "allow",
+  } })).toThrow("自动超时决策");
+  const data = { type: "item", turnId: "t1", item: { type: "toolCall", detail: {
+    kind: "custom", payload: { outcome: "timedOut", detail: "user-owned data" },
+  } } };
+  expect(event(data)).toMatchObject({ payload: { event: data } });
+});
+
+it("v3 restores its inert send field but refuses the new window setting", () => {
+  const codec = protocolCodec(3);
+  expect(JSON.parse(text.decode(codec.encodeRequest({ type: "session.send", payload: {
+    sessionId: "s1", text: "hello", attachments: [], continuesRound: null,
+  } })))).toMatchObject({ payload: { artifactPreviewBaseUrl: null } });
+  expect(() => codec.encodeRequest({ type: "settings.setProvider", payload: {
+    providerId: "test", apiKey: null, baseUrl: null, label: null, dialect: null, models: null,
+    modelContextWindows: { test: 524288 },
+  } })).toThrow("不支持模型窗口");
+});

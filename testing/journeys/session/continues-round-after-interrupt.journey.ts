@@ -6,7 +6,7 @@ defineJourney(
     title: "A message naming continuesRound after an interrupt still runs normally",
     oracle: "after turnCanceled, send with a guessed continuesRound still completes",
     catches: ["interrupt wedges the next send"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     llm: { default: "mock" },
     expectedDurationMs: 30_000,
     timeoutMs: 90_000,

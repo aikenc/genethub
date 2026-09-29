@@ -815,6 +815,7 @@ interface Edit {
   baseUrl?: string;
   models?: string[];
   modelInputs?: Record<string, string[]>;
+  modelContextWindows?: Record<string, number>;
 }
 
 function ProviderRow({
@@ -885,11 +886,29 @@ function ProviderRow({
       <ModelsFound provider={provider} />
       {provider.models.length > 0 ? (
         <details className="text-xs text-muted">
-          <summary className="cursor-pointer">配置模型图片 / 视频输入</summary>
+          <summary className="cursor-pointer">配置模型上下文与图片 / 视频输入</summary>
           <div className="mt-2 max-h-52 space-y-1 overflow-y-auto">
             {provider.models.map((model) => (
               <div key={model} className="flex flex-wrap items-center gap-3 rounded border border-line px-2 py-1">
                 <span className="min-w-40 flex-1 break-all text-fg">{model}</span>
+                <label className="flex items-center gap-1">
+                  上下文
+                  <select
+                    aria-label={`${model} 上下文窗口`}
+                    value={provider.modelContextWindows?.[model] ?? 524288}
+                    disabled={busy}
+                    onChange={(event) => {
+                      const window = Number(event.target.value);
+                      setBusy(true);
+                      void onSave({ modelContextWindows: { [model]: window } }).finally(() => setBusy(false));
+                    }}
+                  >
+                    <option value={262144}>256K tokens</option>
+                    <option value={524288}>512K tokens（默认）</option>
+                    <option value={1048576}>1M tokens</option>
+                    <option value={2097152}>2M tokens</option>
+                  </select>
+                </label>
                 {(["image", "video"] as const).map((kind) => (
                   <label key={kind} className="flex items-center gap-1">
                     <input

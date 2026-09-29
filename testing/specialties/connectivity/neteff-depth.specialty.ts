@@ -938,6 +938,7 @@ defineSpecialty(
       const daemonOnly = samples.find(
         (sample) => sample.clientRttMs === 0 && sample.daemonRttMs === 100,
       );
+      t.note(samples.map(sample => sample.line).join("\n"));
       if (!coldStart) {
         t.assertions.assert(clientOnly !== undefined && daemonOnly !== undefined, "relay symmetry points missing");
         const symmetryDelta = Math.abs(clientOnly!.utilization - daemonOnly!.utilization);

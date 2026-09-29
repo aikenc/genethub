@@ -73,7 +73,10 @@ pub async fn stream(
 
     while let Some(chunk) = body_stream.next().await {
         let chunk = chunk?;
-        for payload in buffer.push(&String::from_utf8_lossy(&chunk)) {
+        for payload in buffer.push(&chunk) {
+            if payload == "[DONE]" {
+                continue;
+            }
             let event = match serde_json::from_str::<Value>(&payload) {
                 Ok(event) => event,
                 Err(error) => {
@@ -156,7 +159,8 @@ pub async fn stream(
                 }
                 match map_finish_reason(reason) {
                     StopReason::Error => {
-                        terminal_error = Some(format!("{} finish reason: {reason}", model.provider));
+                        terminal_error =
+                            Some(format!("{} finish reason: {reason}", model.provider));
                     }
                     other => {
                         stop_reason = other;
@@ -200,13 +204,9 @@ pub async fn stream(
         anyhow::bail!(error);
     }
     if !finished {
-        anyhow::bail!(
-            "{} stream ended before a finish reason",
-            model.provider
-        );
+        anyhow::bail!("{} stream ended before a finish reason", model.provider);
     }
 
-    usage.total_tokens = usage.input + usage.output + usage.cache_read + usage.cache_write;
     let _ = events.send(ProviderEvent::Usage(usage));
     let _ = events.send(ProviderEvent::Done(stop_reason));
     Ok(())
@@ -383,6 +383,7 @@ fn apply_usage(usage: &mut Usage, value: &Value) {
         &["prompt_tokens", "input_tokens", "inputTokens", "input"],
     ) {
         usage.input = input;
+        usage.input_reported = true;
     }
     if let Some(output) = first_u64(
         value,
@@ -394,6 +395,7 @@ fn apply_usage(usage: &mut Usage, value: &Value) {
         ],
     ) {
         usage.output = output;
+        usage.output_reported = true;
     }
     if let Some(cached) = first_u64(
         &value["prompt_tokens_details"],
@@ -419,6 +421,7 @@ fn apply_usage(usage: &mut Usage, value: &Value) {
     ) {
         usage.cache_write = written;
     }
+    usage.total_tokens = usage.input.saturating_add(usage.output);
 }
 
 fn first_u64(value: &Value, keys: &[&str]) -> Option<u64> {
@@ -617,5 +620,29 @@ mod tests {
         assert_eq!(usage.input, 20);
         assert_eq!(usage.output, 6);
         assert_eq!(usage.cache_read, 15);
+    }
+    #[test]
+    fn cache_details_never_inflate_total_and_missing_is_not_zero() {
+        let mut usage = Usage::default();
+        apply_usage(
+            &mut usage,
+            &json!({"prompt_tokens":100000,"completion_tokens":1000,
+            "prompt_tokens_details":{"cached_tokens":80000}}),
+        );
+        assert_eq!(usage.total_tokens, 101000);
+        assert!(usage.input_reported && usage.output_reported);
+        apply_usage(&mut usage, &json!({"completion_tokens":1000}));
+        assert_eq!(
+            usage.total_tokens, 101000,
+            "snapshot frames do not accumulate twice"
+        );
+        let mut missing = Usage::default();
+        apply_usage(&mut missing, &json!({}));
+        assert!(!missing.input_reported && !missing.output_reported);
+        apply_usage(
+            &mut missing,
+            &json!({"prompt_tokens":0,"completion_tokens":0}),
+        );
+        assert!(missing.input_reported && missing.output_reported);
     }
 }

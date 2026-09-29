@@ -77,8 +77,16 @@ for (const scenario of ["fold", "break", "nested-break", "restart", "cancel", "s
     const seen = new Set<string>();
     const trace = path.join(opened.workspaceRoot, "data-effects.jsonl");
     const rejectionTrace = path.join(opened.workspaceRoot, "rejections.txt");
+    const reported = new Set<string>();
     opened.mock.script(...Array.from({ length: 70 }, () => ({ respond: (request: unknown) => {
       const text = JSON.stringify(request);
+      if (text.includes("角色标签为 `recovery-reviewer`")) {
+        const reportOperation = text.match(/当前节点：(operation-\d+)/)?.[1];
+        const reportKey = "report:" + (text.match(/被处理 Run：(wr_[a-f0-9]+)/)?.[1] ?? "run") + ":" + reportOperation;
+        if (reported.has(reportKey)) return { text: "Diagnostic report submitted." };
+        reported.add(reportKey);
+        return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" workflow complete --evidence report="Observed failed program and retained the original goal"' } } };
+      }
       if (!text.includes("DATA_WORKER")) {
         if (dispatched) return { text: "Observed the Run facts." };
         dispatched = true;
@@ -107,8 +115,10 @@ for (const scenario of ["fold", "break", "nested-break", "restart", "cancel", "s
     const get = async () => {
       const reply = await opened.client.call({ type: "workflow.history", payload: { workspaceId: opened.workspaceId, limit: 10 } });
       if (reply?.type !== "workflowRuns") throw new Error("workflow history unavailable");
-      t.assertions.assert(reply.data.length <= 1, "data/control flow escaped into another Run");
-      return reply.data[0];
+      const business = reply.data.filter(item => item.handles.length === 0);
+      const reports = reply.data.filter(item => item.handles.length > 0);
+      t.assertions.assert(business.length <= 1 && reports.length <= 1 && reports.every(item => item.handles.some(handle => handle.runId === business[0]?.id)), "data/control flow duplicated business work or its diagnostic");
+      return business[0];
     };
     if (scenario === "restart" || scenario === "cancel") {
       let before: WorkflowRunStatus | undefined;

@@ -217,9 +217,17 @@ impl Terminals {
             .is_some_and(|terminal| terminal.closed.load(Ordering::Acquire))
         {
             sessions.remove(pty_id);
-            return Err(anyhow!("no such terminal: {pty_id}"));
+            return Err(crate::rpc_error::failure(
+                genehub_proto::ErrorCode::NotFound,
+                format!("no such terminal: {pty_id}"),
+            ));
         }
-        terminal.ok_or_else(|| anyhow!("no such terminal: {pty_id}"))
+        terminal.ok_or_else(|| {
+            crate::rpc_error::failure(
+                genehub_proto::ErrorCode::NotFound,
+                format!("no such terminal: {pty_id}"),
+            )
+        })
     }
 }
 

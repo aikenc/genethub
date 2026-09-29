@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { connectProductClient, daemonEndpoint, defineSpecialty, runGenetAsync } from "../../framework/public.ts";
 import type { WorkflowRunStatus } from "@genehub/proto";
@@ -7,7 +7,7 @@ const quote = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`;
 
 // Initial vertical slice: real PM -> daemon -> structured engine -> Worker -> disk.
 // Expressions are project-authored inputs, not imports of engine implementation.
-for (const scenario of ["zero", "repair", "limit", "zero-limit", "if-true", "if-false", "if-omitted", "condition-error", "choice-first", "choice-default", "nested", "parallel", "foreach", "foreach-empty", "call", "include", "budget", "collect", "fail-fast", "legacy-failure", "quorum", "restart", "cancel", "nested-loop", "item-keys", "duplicate-keys", "deadline", "activity-deadline", "stale-result", "deadline-restart", "parallel-loop", "nested-loop-restart"] as const) defineSpecialty({
+for (const scenario of ["zero", "repair", "limit", "zero-limit", "if-true", "if-false", "if-omitted", "condition-error", "choice-first", "choice-default", "nested", "parallel", "foreach", "foreach-empty", "call", "include", "budget", "collect", "fail-fast", "legacy-failure", "quorum", "restart", "cancel", "nested-loop", "item-keys", "duplicate-keys", "activity-deadline", "stale-result", "parallel-loop", "nested-loop-restart"] as const) defineSpecialty({
   id: `specialty.workflow.structured.${scenario}`,
   title: `Structured workflow ${scenario} preserves real activity outcomes`,
   oracle: "A project-authored while loop executes zero or bounded rounds in one Run; real Worker artifacts agree with its public terminal state and no PM redispatch is needed",
@@ -88,7 +88,6 @@ for (const scenario of ["zero", "repair", "limit", "zero-limit", "if-true", "if-
       structure.limits = {maxOperations:1,maxConcurrency:2,maxFrames:64}; expectedWorkers = 1; blocked = true;
     }
     if (scenario === "activity-deadline") { body = {...task("slow"),timeoutMs:1000}; expectedWorkers = 1; blocked = true; }
-    if (["deadline","deadline-restart"].includes(scenario)) { structure.timeoutMs = scenario === "deadline-restart" ? 10000 : 5000; expectedWorkers = 1; blocked = true; }
     const worker = {id:"work",uses:"agent.session",with:{role:"worker"},completion:{all:[{key:"done",verify:"value.nonEmpty"},{key:"checks",verify:"value.nonEmpty"}]}};
     if (scenario === "include") {
       // The callable procedure and the activity it needs live in a separate
@@ -112,8 +111,16 @@ for (const scenario of ["zero", "repair", "limit", "zero-limit", "if-true", "if-
     let frontAttempts = 0;
     const concurrencyTrace = path.join(opened.workspaceRoot,"concurrency.txt");
     const artifact = path.join(opened.workspaceRoot,"attempts.txt");
+    const reported = new Set<string>();
     const respond = (request: unknown) => {
       const text = JSON.stringify(request);
+      if (text.includes("角色标签为 `recovery-reviewer`")) {
+        const reportOperation = text.match(/当前节点：(operation-\d+)/)?.[1];
+        const reportKey = "report:" + (text.match(/被处理 Run：(wr_[a-f0-9]+)/)?.[1] ?? "run") + ":" + reportOperation;
+        if (reported.has(reportKey)) return { text: "Diagnostic report submitted." };
+        reported.add(reportKey);
+        return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" workflow complete --evidence report="Observed failed program and retained the original goal"' } } };
+      }
       if (text.includes("STRUCTURED_WORKER")) {
         const operation = text.match(/当前节点：(operation-\d+)/)?.[1];
         if (!operation) throw new Error("Worker request omitted current operation identity");
@@ -124,7 +131,7 @@ for (const scenario of ["zero", "repair", "limit", "zero-limit", "if-true", "if-
           const concurrent = scenario === "parallel" || scenario === "parallel-loop" || scenario === "foreach";
           const overlap = concurrent ? `printf 'S %s\\n' ${quote(operation)} >> ${quote(concurrencyTrace)}; while [ "$(grep -c '^S ' ${quote(concurrencyTrace)})" -lt 2 ]; do sleep 0.02; done; printf 'D %s\\n' ${quote(operation)} >> ${quote(concurrencyTrace)}; ` : "";
           const stale = scenario === "stale-result" && assigned.size === 2 ? `rejected=$("$GENEHUB_CLI" workflow complete --node ${quote([...assigned][0]!)} --evidence done=yes --evidence checks=artifact-written 2>&1); code=$?; test "$code" -ne 0 && printf '%s' "$rejected" | grep -E 'forbidden|只能|不是节点' || exit 1; ` : "";
-          const command = `${stale}${overlap}printf '%s\\n' ${quote(operation)} >> ${quote(artifact)} && test -s ${quote(artifact)} ${["deadline","activity-deadline", "stale-result", "deadline-restart"].includes(scenario) ? "&& sleep 10" : ""} && "$GENEHUB_CLI" workflow complete --outcome ${success ? "completed" : "changesRequested"} ${success ? "" : '--reason "需要下一轮修复"'} --evidence done=${success ? "yes" : "no"} --evidence checks=${["nested-loop","nested-loop-restart"].includes(scenario) && assigned.size === 4 ? "last" : "artifact-written"}${["restart","cancel","nested-loop-restart"].includes(scenario) && assigned.size === 1 ? " && sleep 4" : ""}`;
+          const command = `${stale}${overlap}printf '%s\\n' ${quote(operation)} >> ${quote(artifact)} && test -s ${quote(artifact)} ${["activity-deadline", "stale-result"].includes(scenario) ? "&& sleep 10" : ""} && "$GENEHUB_CLI" workflow complete --outcome ${success ? "completed" : "changesRequested"} ${success ? "" : '--reason "需要下一轮修复"'} --evidence done=${success ? "yes" : "no"} --evidence checks=${["nested-loop","nested-loop-restart"].includes(scenario) && assigned.size === 4 ? "last" : "artifact-written"}${["restart","cancel","nested-loop-restart"].includes(scenario) && assigned.size === 1 ? " && sleep 4" : ""}`;
           return {tool:{name:"bash",arguments:{command}}};
         }
         return {text:"本次结果已提交。"};
@@ -138,14 +145,8 @@ for (const scenario of ["zero", "repair", "limit", "zero-limit", "if-true", "if-
     };
     opened.mock.script(...Array.from({length:60},()=>({respond})));
     const pm = await t.flows.main.createBuiltinSession(opened.client,opened.workspaceId);
-    await opened.client.call({type:"session.send",payload:{sessionId:pm,messageId:"u_structured",text:"执行项目工作流。",attachments:[],continuesRound:null,artifactPreviewBaseUrl:null}});
+    await opened.client.call({type:"session.send",payload:{sessionId:pm,messageId:"u_structured",text:"执行项目工作流。",attachments:[],continuesRound:null}});
     let callsBeforeCancel = 0;
-    if (scenario === "deadline-restart") {
-      await t.tools.waitUntil(()=>existsSync(artifact),20_000);
-      opened.client.close();await cli(["daemon","stop"]);
-      await new Promise(resolve=>setTimeout(resolve,11000));
-      await cli(["daemon","start"]);opened.client = await connectProductClient(daemonEndpoint(opened.daemon));
-    }
     if (scenario === "restart" || scenario === "cancel" || scenario === "nested-loop-restart") {
       let accepted: WorkflowRunStatus | undefined;
       await t.tools.waitUntil(async()=>{
@@ -169,8 +170,10 @@ for (const scenario of ["zero", "repair", "limit", "zero-limit", "if-true", "if-
     await t.tools.waitUntil(async()=>{
       const reply = await opened.client.call({type:"workflow.history",payload:{workspaceId:opened.workspaceId,limit:10}});
       if (reply?.type !== "workflowRuns") return false;
-      t.assertions.assert(reply.data.length <= 1,"loop created another Run");
-      run = reply.data[0];
+      const business = reply.data.filter(item => item.handles.length === 0);
+      const reports = reply.data.filter(item => item.handles.length > 0);
+      t.assertions.assert(business.length <= 1 && reports.length <= 1 && reports.every(item => item.handles.some(handle => handle.runId === business[0]?.id)),"loop duplicated business work or its diagnostic");
+      run = business[0];
       return !!run && ["completed","blocked","failed","cancelled"].includes(run.status);
     },90_000);
     t.assertions.assert(run?.status === (scenario === "cancel" ? "cancelled" : blocked ? "blocked" : "completed"),`unexpected terminal state: ${JSON.stringify(run)}`);

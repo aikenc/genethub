@@ -268,23 +268,6 @@ describe("the session timeline", () => {
     });
   });
 
-  it("treats a historical plan timeout as a stop", () => {
-    const request = {
-      id: "plan-expired",
-      kind: "planApproval" as const,
-      title: "Initialize the PM project",
-      options: [{ id: "yes", label: "Confirm", kind: "allowOnce" as const }],
-    };
-    const asked = apply(emptyTimeline(), { type: "permissionRequested", request });
-    const refreshing = apply(asked, {
-      type: "permissionResolved",
-      requestId: request.id,
-      outcome: { outcome: "timedOut", appliedDefault: "refreshPlan" },
-    });
-
-    expect(refreshing.pendingPermission).toBeNull();
-    expect(refreshing.permissionProgress?.message).toBe("确认已超时；任务不会继续执行。");
-  });
 
   it("does not clear an approval that a different request resolved", () => {
     const request = {

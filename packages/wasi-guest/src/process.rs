@@ -224,7 +224,7 @@ impl Command {
             self.cwd.as_deref(),
             self.independent_session,
         )
-            .map_err(|error| io::Error::other(error.message))?;
+        .map_err(|error| io::Error::other(error.message))?;
         let pid = child.id();
         let id = NEXT.with(|next| {
             let value = next.get();

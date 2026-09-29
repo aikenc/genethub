@@ -6,7 +6,7 @@ defineJourney(
     title: "A key the provider will not accept says that and not add a key",
     oracle: "turnFailed names the provider and does not tell the user to add an API key",
     catches: ["add an API key after they just did"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     llm: { default: "mock" },
     expectedDurationMs: 25_000,
     timeoutMs: 75_000,

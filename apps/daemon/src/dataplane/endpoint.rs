@@ -234,7 +234,7 @@ impl Writer {
         let completion = answer
             .await
             .map_err(|_| anyhow!("the data-plane writer dropped a frame"))??;
-        if let (Some(timings), Some(began)) = (timings.as_deref_mut(), began) {
+        if let (Some(timings), Some(began)) = (timings, began) {
             timings.completion_us += began.elapsed().as_micros() as u64;
             timings.actor_queue_us += completion.actor_queue_us;
             timings.actor_send_us += completion.actor_send_us;
@@ -351,7 +351,10 @@ impl ServerStream {
                         .is_some_and(|expected| expected != body.len() as u64)
                     {
                         self.reset(RESET_PROTOCOL).await;
-                        anyhow::bail!("request body length does not match its head");
+                        return Err(crate::rpc_error::failure(
+                            genehub_proto::ErrorCode::Unsupported,
+                            "request body length does not match its head".to_owned(),
+                        ));
                     }
                     return Ok(body);
                 }
@@ -474,7 +477,10 @@ impl ServerStream {
             .expected_local_bytes
             .is_some_and(|expected| expected != self.local_bytes)
         {
-            anyhow::bail!("response body length does not match its head");
+            return Err(crate::rpc_error::failure(
+                genehub_proto::ErrorCode::Unsupported,
+                "response body length does not match its head".to_owned(),
+            ));
         }
         self.local_finished = true;
         self.writer
@@ -1416,6 +1422,7 @@ async fn send_reply(stream: &mut ServerStream, reply: Reply) -> Result<()> {
 
 async fn send_protocol_error(stream: &mut ServerStream, error: ProtocolError) -> Result<()> {
     let status = match error.code {
+        ErrorCode::QueueFull => 429,
         ErrorCode::BadRequest => 400,
         ErrorCode::Unauthorized => 401,
         ErrorCode::Forbidden => 403,

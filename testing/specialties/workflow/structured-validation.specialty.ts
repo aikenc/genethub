@@ -28,7 +28,7 @@ const invalid: Array<{name:string;structure?:Record<string,unknown>;definition?:
   {name:"library-block-collision",definition:{include:["shared"]},structure:{body:{id:"sequence",type:"sequence",steps:[{id:"entry",type:"call",procedure:"build"},{id:"build-body",type:"task",activity:"work"}]}},library,reason:"duplicate block"},
   {name:"duplicate-include",definition:{include:["shared","shared"]},structure:callShared,library,reason:"重复 include"},
   {name:"too-many-includes",definition:{include:Array.from({length:9},(_,index)=>`shared-${index}`)},structure:callShared,library,reason:"include 数量"},
-  {name:"include-without-structure",definition:{schema:"genehub.workflow.definition.v1",include:["shared"],entry:"work",structure:null},library,reason:"include 需要结构化"},
+  {name:"include-without-structure",definition:{include:["shared"],structure:null},library,reason:"include 需要结构化"},
 ];
 for(const fixture of invalid)defineSpecialty({
  id:`specialty.workflow.structured-validation.${fixture.name}`,title:`Invalid structured ${fixture.name} cannot replace the active workflow`,

@@ -6,7 +6,7 @@ defineJourney(
     title: "Reconnecting replays the gap without losing or repeating events",
     oracle: "a second Client.call subscribe sinceSeq:1 returns reset=false, ordered unique replay, last seq matches snapshot",
     catches: ["gap replay duplicates", "gap replay empty when the window still holds the turn"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     llm: { default: "mock" },
     expectedDurationMs: 35_000,
     timeoutMs: 100_000,
@@ -23,9 +23,11 @@ defineJourney(
       const events = await t.flows.main.attachEventLog(opened.client, sessionId);
       await t.flows.main.sendPrompt(opened.client, sessionId, "Say hello.");
       await t.tools.waitUntil(() => events.some((item) => item.type === "turnCompleted"), 45_000);
+      const before = await opened.client.call({ type: "session.get", payload: { sessionId } });
+      if (before?.type !== "snapshot") throw new Error("missing original stream epoch");
       const subscribed = await returning.call({
         type: "subscribe",
-        payload: { sessionId, sinceSeq: 1, expandLastRound: false },
+        payload: { sessionId, sinceSeq: 1, sinceEpoch: before.data.streamEpoch, expandLastRound: false },
       });
       t.assertions.assert(subscribed?.type === "subscribed", `subscribe returned ${subscribed?.type}`);
       if (subscribed?.type !== "subscribed") return;

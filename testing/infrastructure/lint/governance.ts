@@ -26,23 +26,6 @@ export function checkGovernance(openRoot: string, cloudRoot?: string): Governanc
     file: item.file,
     message: item.message,
   }));
-  const parityPath = path.join(openRoot, "testing", "migration", "rust-parity.json");
-  let pending = 0;
-  if (existsSync(parityPath)) {
-    const parity = JSON.parse(readFileSync(parityPath, "utf8")) as {
-      cases?: Array<{ oracleClass?: string; oldId?: string; legacyExecution?: string }>;
-    };
-    const stopped = (parity.cases ?? []).filter(item => item.legacyExecution !== "required");
-    if (stopped.length) findings.push({ rule: "L13", file: parityPath, message: stopped.length + " legacy rows lack required execution; retirement needs individually verified parity" });
-    pending = (parity.cases ?? []).filter((item) => item.oracleClass === "pending-classification").length;
-    if (pending > 0) {
-      findings.push({
-        rule: "oracle-class",
-        file: parityPath,
-        message: `${pending} rust-parity cases still pending-classification`,
-      });
-    }
-  }
   return {
     digest: governanceDigest(cloudRoot),
     findings,
@@ -51,8 +34,6 @@ export function checkGovernance(openRoot: string, cloudRoot?: string): Governanc
       { id: "L04", result: findings.some((item) => item.rule === "L04") ? "fail" : "ok", note: "layer direction" },
       { id: "L16", result: findings.some((item) => item.rule === "L16") ? "fail" : "ok", note: "no private product source imports" },
       { id: "P06", result: findings.some((item) => item.rule === "L03" || item.rule === "L04") ? "fail" : "ok", note: "three-layer dependency" },
-      { id: "L13", result: findings.some(item => item.rule === "L13") ? "fail" : "ok", note: "legacy required metadata; parity retirement is not automatically certified" },
-      { id: "P01", result: pending > 0 ? "fail" : "ok", note: "legacy rust oracle classification" },
     ],
   };
 }

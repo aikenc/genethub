@@ -29,6 +29,7 @@ function parseArgs(argv) {
     else if (key === "--journal") args.journal = String(value);
     else if (key === "--chunks") args.chunks = Number(value);
     else if (key === "--delay-ms") args.delayMs = Number(value);
+    else if (key === "--permission-id") args.permissionId = value;
     else if (key === "--process-tree") args.processTree = value === "1";
     else if (key === "--floods") args.floods = Number(value);
   }
@@ -113,6 +114,9 @@ function leaveGrandchildHoldingStdout() {
   });
 }
 
+const elevationProfile = args.profile === "acp-elevation" || args.profile === "acp-elevation-no-mode";
+const permissionId = args.permissionId === "string" ? "permission-7" : 7;
+let currentMode = "read-only";
 let sessionCounter = 0;
 let currentSessionId = null;
 /** The `session/prompt` we accepted and have not answered. */
@@ -139,25 +143,22 @@ async function onPrompt(id, params) {
 
   if (args.delayMs > 0) await sleep(args.delayMs);
 
-  if (args.profile === "native-plan") {
-    const text = (params.prompt ?? []).map(p => p.text ?? "").join("\n");
-    if (text.includes("The user approved the interrupted plan")) {
-      journal("approved-continuation", { sessionId });
-      messageChunk(sessionId, "native plan continued");
-      pendingPrompt = null;
-      respond(id, { stopReason: "end_turn" });
-    } else {
-      write({ jsonrpc: "2.0", id: 7, method: "session/request_permission", params: {
-        toolCall: { toolCallId: "plan-tool", title: "Native Agent plan" },
-        options: [
-          { optionId: "accept", name: "Approve and continue", kind: "allow_once" },
-          { optionId: "reject", name: "Reject plan", kind: "reject_once" },
-        ],
-      } });
-    }
-    return;
-  }
   switch (args.profile) {
+    case "acp-elevation":
+    case "acp-elevation-no-mode": {
+      if (args.profile === "acp-elevation" && currentMode === "run-unattended") {
+        messageChunk(sessionId, "continued-after-elevation");
+        pendingPrompt = null;
+        respond(id, { stopReason: "end_turn" });
+      } else {
+        journal("permission-request", { id: permissionId, sessionId, mode: currentMode });
+        write({ jsonrpc: "2.0", id: permissionId, method: "session/request_permission", params: {
+          sessionId, toolCall: { toolCallId: "edit-probe", title: "编辑测试文件", rawInput: { path: "probe.txt", content: "data only" } },
+          options: [{ optionId: "allow", name: "允许一次", kind: "allow_once" }, { optionId: "deny", name: "拒绝", kind: "reject_once" }],
+        } });
+      }
+      return;
+    }
     case "normal": {
       for (let i = 0; i < args.chunks; i += 1) messageChunk(sessionId, `chunk-${i} `);
       pendingPrompt = null;
@@ -244,7 +245,15 @@ function onCancel() {
 async function onFrame(frame) {
   const { id, method, params } = frame;
   if (typeof method !== "string") {
-    if (id === 7) journal("plan-cancellation", { result: frame.result });
+    if (elevationProfile && id === permissionId) {
+      journal("permission-reply", { id, result: frame.result });
+      if (pendingPrompt) {
+        const prompt = pendingPrompt;
+        pendingPrompt = null;
+        messageChunk(prompt.sessionId, frame.result?.outcome?.outcome === "selected" ? "continued-after-adapter-approval" : "paused-for-human");
+        respond(prompt.id, { stopReason: "end_turn" });
+      }
+    }
     return;
   }
   if (method !== "session/update") journal("rpc", { method, id: id ?? null });
@@ -266,7 +275,7 @@ async function onFrame(frame) {
         protocolVersion: PROTOCOL_VERSION,
         agentCapabilities: {
           loadSession: false,
-          ...(args.profile === "native-plan" ? { sessionCapabilities: { resume: {} } } : {}),
+          ...(elevationProfile ? { sessionCapabilities: { resume: {} } } : {}),
           promptCapabilities: { image: true, embeddedContext: true },
         },
       });
@@ -279,7 +288,13 @@ async function onFrame(frame) {
       }
       sessionCounter += 1;
       currentSessionId = `controlled-${process.pid}-${sessionCounter}`;
-      respond(id, { sessionId: currentSessionId });
+      journal("new-session", { sessionId: currentSessionId });
+      respond(id, { sessionId: currentSessionId, ...(elevationProfile ? { modes: {
+        currentModeId: currentMode,
+        availableModes: [{ id: "read-only", name: "Read only", _meta: { unattended: false } },
+          args.profile === "acp-elevation" ? { id: "run-unattended", name: "Continue freely", _meta: { unattended: true } }
+            : { id: "full-access", name: "Manual mode named full access", _meta: { unattended: false } }],
+      } } : {}) });
       // The handshake is over, so a profile that must go deaf can go deaf now
       // without breaking session setup.
       if (args.profile === "stdin-never-drains") stopReadingStdin();
@@ -288,6 +303,12 @@ async function onFrame(frame) {
     case "session/resume": {
       currentSessionId = params.sessionId;
       journal("resumed", { sessionId: currentSessionId });
+      respond(id, {});
+      return;
+    }
+    case "session/set_mode": {
+      currentMode = params.modeId;
+      journal("mode", { modeId: currentMode });
       respond(id, {});
       return;
     }

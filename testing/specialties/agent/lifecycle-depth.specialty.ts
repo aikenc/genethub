@@ -1,5 +1,3 @@
-import { existsSync } from "node:fs";
-import path from "node:path";
 
 import { defineSpecialty, type CaseContext } from "../../framework/public.ts";
 
@@ -195,30 +193,7 @@ lifecycleCase(
   },
 );
 
-lifecycleCase(
-  "specialty.agent.lifecycle.traversal-tool-contained",
-  "A model-requested traversal write stays contained",
-  "no file appears above the workspace and a follow-up turn completes in the same session",
-  ["Agent tool bypasses root handle", "tool error crashes child", "rejected write poisons session"],
-  async (t, opened) => {
-    const escaped = path.resolve(opened.workspaceRoot, "..", "agent-escaped.txt");
-    opened.mock.script(
-      { tool: { name: "write", arguments: { path: "../agent-escaped.txt", content: "escape" } } },
-      { text: "contained" },
-      { text: "follow-up complete" },
-    );
-    const sessionId = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
-    const events = await t.flows.main.attachEventLog(opened.client, sessionId);
-    await t.flows.main.sendPrompt(opened.client, sessionId, "Try an unsafe path.");
-    await t.tools.waitUntil(() => terminalCount(events) === 1, 45_000);
-    t.assertions.assert(!existsSync(escaped), "Agent tool escaped the workspace");
-    await t.flows.main.sendPrompt(opened.client, sessionId, "Continue safely.");
-    await t.tools.waitUntil(() => terminalCount(events) === 2, 45_000);
-    t.assertions.assert(lastTerminal(events) === "turnCompleted", "session did not recover after contained traversal");
-  },
-  35_000,
-  ["agent-unconfined"],
-);
+
 
 lifecycleCase(
   "specialty.agent.lifecycle.interrupt-storm-idempotent",

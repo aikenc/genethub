@@ -157,60 +157,22 @@ impl Drop for ProcessGroup {
             return;
         };
         eprintln!("event=tool_process_tree_kill pid={pid}");
-        kill_process_group(pid);
+        kill_process_tree(pid);
     }
 }
 
-#[cfg(unix)]
-fn kill_process_group(pid: u32) {
-    // The shell stays in the agent process group so the daemon can see
-    // background children. A timeout or abort kills this shell and the
-    // descendants that still name it, not the agent's group.
-    let mut victims = vec![pid];
-    let mut seen = std::collections::HashSet::from([pid]);
-    let mut index = 0;
-    while index < victims.len() {
-        let parent = victims[index];
-        index += 1;
-        let Ok(entries) = std::fs::read_dir("/proc") else {
-            break;
-        };
-        for entry in entries.flatten() {
-            let Ok(id) = entry.file_name().to_string_lossy().parse::<u32>() else {
-                continue;
-            };
-            if !seen.insert(id) {
-                continue;
-            }
-            let Ok(status) = std::fs::read_to_string(format!("/proc/{id}/status")) else {
-                seen.remove(&id);
-                continue;
-            };
-            let child = status.lines().any(|line| {
-                line.strip_prefix("PPid:")
-                    .is_some_and(|rest| rest.trim() == parent.to_string())
-            });
-            if child {
-                victims.push(id);
-            } else {
-                seen.remove(&id);
-            }
-        }
-    }
-    for id in victims.into_iter().rev() {
-        unsafe {
-            libc::kill(id as libc::pid_t, libc::SIGKILL);
-        }
-    }
+#[cfg(all(unix, not(target_family = "wasm")))]
+fn kill_process_tree(pid: u32) {
+    genet_native::process_tree::kill_descendants(pid);
 }
 
 /// The shell already kills the group when the last handle to the child drops,
 /// which is exactly what dropping this future does.
 #[cfg(target_family = "wasm")]
-fn kill_process_group(_pid: u32) {}
+fn kill_process_tree(_pid: u32) {}
 
 #[cfg(windows)]
-fn kill_process_group(pid: u32) {
+fn kill_process_tree(pid: u32) {
     let _ = std::process::Command::new("taskkill")
         .args(["/T", "/F", "/PID", &pid.to_string()])
         .stdout(Stdio::null())

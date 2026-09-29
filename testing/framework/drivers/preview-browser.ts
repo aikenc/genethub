@@ -17,7 +17,7 @@ export async function openPreviewBrowser(input: {
   refreshEndpoint?: () => DaemonEndpoint;
   workspaceId: string;
   entryPath: string;
-  surface?: "preview" | "processes" | "client-debug";
+  surface?: "preview" | "processes" | "client-debug" | "workflow";
 }) {
   const errors: string[] = [];
   input.page.on("pageerror", (error) => {
@@ -51,10 +51,11 @@ if(input.surface==='client-debug'){
  configureClientDebugHost({...browserHost(),targets:async()=>[{id:'coordinator',label:'Test coordinator',kind:'local'}],openTarget:async()=>({...((await window.previewInput()).endpoint),via:'loopback',label:'Test coordinator'})});
  document.getElementById('root').innerHTML='<h1>Client debug consumer</h1><input aria-label="Debug input"><p id="marker">original</p>';
  openClientDebug();
-}else if(input.surface==='processes'){
+}else if(input.surface==='processes'||input.surface==='workflow'){
  const host={...browserHost(),endpoint:async()=>({...((await window.previewInput()).endpoint),via:'loopback'})};
  createRoot(document.getElementById('root')).render(<App host={host}/>);
  while(useWorkbench.getState().connection!=='ready'||useWorkbench.getState().activeWorkspaceId!==input.workspaceId||(!useWorkbench.getState().draft&&!useWorkbench.getState().activeSessionId))await new Promise(r=>setTimeout(r,50));
+ if(input.surface==='workflow')useWorkbench.getState().openWorkflowView({workspaceId:input.workspaceId,runId:input.entryPath});
  window.previewAppReady=true;
 }else{
  const client=new Client({...input.endpoint,rtcEnabled:false});client.connect();

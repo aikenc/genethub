@@ -1,9 +1,9 @@
 import type { Reply, Request, ServerFrame } from "@genehub/proto";
 
 import { ADJACENT_PROTOCOL_ADAPTERS } from "./adapters";
-import * as v3 from "./versions/v3";
+import * as v4 from "./versions/v4";
 
-export const WEB_PROTOCOL_VERSION = v3.VERSION;
+export const WEB_PROTOCOL_VERSION = v4.VERSION;
 export const RETAINED_WEB_PROTOCOLS = 8;
 
 const encoder = new TextEncoder();
@@ -82,7 +82,7 @@ export function protocolCodec(
   return {
     version: requested,
     encodeRequest(request) {
-      let value: unknown = v3.request(request);
+      let value: unknown = v4.request(request);
       for (let index = chain.length - 1; index >= 0; index -= 1) {
         value = chain[index]!.downgradeRequest(value);
       }
@@ -91,12 +91,12 @@ export function protocolCodec(
     decodeReply(bytes) {
       let value: unknown = decodeJson(bytes);
       for (const adapter of chain) value = adapter.upgradeReply(value);
-      return v3.reply(value);
+      return v4.reply(value);
     },
     decodeServerFrame(bytes) {
       let value: unknown = decodeJson(bytes);
       for (const adapter of chain) value = adapter.upgradeServerFrame(value);
-      return v3.serverFrame(value);
+      return v4.serverFrame(value);
     },
   };
 }

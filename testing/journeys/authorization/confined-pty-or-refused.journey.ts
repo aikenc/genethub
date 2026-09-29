@@ -12,7 +12,7 @@ defineJourney(
     oracle:
       "a read+pty device either answers from inside the workspace without reading next door, or pty.open is isolationUnavailable rather than forbidden; full-grant and owner terminals still open",
     catches: ["remote pty is an unconstrained login shell", "isolation failure reported as forbidden"],
-    tags: ["core", "authorization", "parity"],
+    tags: ["core", "authorization"],
     resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
     expectedDurationMs: 40_000,
     timeoutMs: 120_000,

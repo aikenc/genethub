@@ -6,7 +6,7 @@ defineJourney(
     title: "A device revoked while connected stops being able to act",
     oracle: "workspace.list after device.revoke is forbidden or the link closes",
     catches: ["revoke is advisory"],
-    tags: ["core", "authorization", "parity"],
+    tags: ["core", "authorization"],
     expectedDurationMs: 30_000,
     timeoutMs: 90_000,
     surfaces: ["daemon", "workbench-client"],

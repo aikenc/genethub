@@ -50,6 +50,7 @@ GeneHub Agent 随安装包提供，配置 Anthropic 或 OpenAI-compatible 模型
 3. **Agent 可替换。** daemon 和前端只认统一协议，不把任何一家 agent 的私有事件格式变成产品协议；
    你已经付费和熟悉的 agent 是一等公民。
 4. **会话跟着人。** 关掉页面、切换网络或换一台设备，都不该终止正在机器上执行的任务，回来还能接上。
+   需要人决定时，待办不设默认答复期限；人晚些回来仍能答复，执行前核对当前事实。
 
 两条工程纪律支撑上面四条：**信任来自可核对的边界**——数据存在哪里、远程连接经过什么组件、设备如何
 获得授权，都写在代码和文档里，开源侧不依赖官方服务也能独立部署；**业务更新不该变成用户的安装任务**
@@ -249,7 +250,7 @@ node apps/desktop/scripts/bundle.mjs
 | [engineering-laws.md](./docs/engineering-laws.md) | 实现与提交之前：哪些事不许做 |
 | [third-party-agents.md](./docs/third-party-agents.md) | 接入 Claude Code、Codex、OpenCode、Cursor 或自定义 ACP agent |
 | [daemon.md](./docs/daemon.md) | 修改会话内核、工作区、设备、传输或存储 |
-| [workflow-executor-model.md](./docs/workflow-executor-model.md) | 理解 PM、WM、Workflow、Executor、测试项目与运行记录的分工 |
+| [Workflow 文档](./docs/workflow/README.md) | 角色模型、运行控制与恢复、包与候选、流程编写的统一入口 |
 | [web-workbench.md](./docs/web-workbench.md) | 修改工作台、宿主适配与移动端体验 |
 | [relay.md](./docs/relay.md) | 部署或开发 Fabric Relay |
 | [self-hosting.md](./docs/self-hosting.md) | 自建完整的远程访问闭环 |

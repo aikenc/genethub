@@ -9,7 +9,7 @@ defineJourney(
     title: "A completed round is recorded in the round ledger on disk",
     oracle: "the built-in Agent's completed round and its trunk/batch LLM timing are available through the public session API",
     catches: ["ledger only in memory", "built-in LLM round progress missing from process summaries"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     llm: { default: "mock" },
     expectedDurationMs: 25_000,
     timeoutMs: 75_000,
@@ -64,7 +64,7 @@ defineJourney(
   },
 );
 
-function foldRounds(contents: string): Array<{ roundId?: string; outcome?: string }> {
+function foldRounds(contents: string): Array<{ outcome?: string; roundId?: string }> {
   const rounds: Array<{ roundId?: string; outcome?: string }> = [];
   for (const line of contents.split("\n").filter((item) => item.trim())) {
     let row: { t?: string; round?: { roundId?: string; outcome?: string } };

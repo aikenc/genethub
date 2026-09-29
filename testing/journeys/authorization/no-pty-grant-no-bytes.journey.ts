@@ -6,7 +6,7 @@ defineJourney(
     title: "A device without a terminal grant is not sent the terminal anyway",
     oracle: "owner sees pty echo; a read+session device's onPty stays empty",
     catches: ["pty fanout ignores grants"],
-    tags: ["core", "authorization", "parity"],
+    tags: ["core", "authorization"],
     expectedDurationMs: 35_000,
     timeoutMs: 100_000,
     surfaces: ["daemon", "workbench-client"],

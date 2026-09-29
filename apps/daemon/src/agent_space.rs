@@ -16,7 +16,7 @@
 //!   authenticated caller, the project scope and the task.
 
 use anyhow::{bail, Result};
-use genehub_proto::{AgentComponentInfo, AgentSpaceInfo, AgentSpaceOperation, PipeSpaceInfo};
+use genehub_proto::{AgentComponentInfo, AgentSpaceInfo, AgentSpaceOperation};
 
 use crate::config::{AgentComponentEntry, AgentSpaceEntry};
 
@@ -24,9 +24,9 @@ pub const COMPONENT_PM: &str = "pm";
 pub const COMPONENT_EXECUTOR: &str = "executor";
 pub const COMPONENT_WORKER: &str = "worker";
 pub const COMPONENT_REVIEWER: &str = "reviewer";
-/// Carrier for the platform's bounded automatic diagnosis. The package chooses
-/// which Worker Space hosts it; every policy — trigger, quota, prompt, and the
-/// read-only evidence boundary — stays in `workflow::supervision`.
+/// Legacy Worker extension retained so installed Space registrations still load.
+/// Recovery now runs a Workflow selected by the package (or the built-in flow);
+/// this marker does not select a reviewer, schedule diagnosis or restrict tools.
 pub const COMPONENT_DIAGNOSTIC: &str = "diagnostic";
 
 /// Every component the first batch defines a contract for. Unknown ids are
@@ -44,11 +44,6 @@ pub const COMPONENT_IDS: [&str; 5] = [
 /// the same spirit as the session storage format: adding an optional field is
 /// not a reason to lock anybody out of their own project tree.
 pub const COMPONENT_SCHEMA_VERSION: u32 = 1;
-
-/// The single `workerRole` value the exclusive model used for the reusable
-/// flow carrier. It is now the `executor` component, and this constant exists
-/// only for the migration and the compatibility projection.
-pub const LEGACY_EXECUTOR_ROLE: &str = "workflow-executor";
 
 pub const LIFECYCLES: [&str; 3] = ["persistent", "pooled", "ephemeral"];
 
@@ -169,7 +164,10 @@ pub fn apply(
                 .iter()
                 .any(|component| component.component_id == component_id)
             {
-                bail!("this AgentSpace does not have a {component_id} component");
+                return Err(crate::rpc_error::failure(
+                    genehub_proto::ErrorCode::Unsupported,
+                    format!("this AgentSpace does not have a {component_id} component"),
+                ));
             }
             if component_id == COMPONENT_WORKER && has_enabled_component(&next, COMPONENT_REVIEWER)
             {
@@ -354,24 +352,6 @@ pub fn describe(entry: &AgentSpaceEntry) -> AgentSpaceInfo {
             .collect(),
         guidance: entry.guidance.clone(),
         health: None,
-    }
-}
-
-/// States the registration in the terms the exclusive model used, for clients
-/// written before components existed. Lossy by construction and derived on
-/// every read; nothing consults it to make a decision.
-pub fn describe_legacy(entry: &AgentSpaceEntry) -> PipeSpaceInfo {
-    let worker_role = if has_enabled_component(entry, COMPONENT_EXECUTOR) {
-        Some(LEGACY_EXECUTOR_ROLE.to_string())
-    } else {
-        enabled_component(entry, COMPONENT_WORKER).and_then(|component| component.role.clone())
-    };
-    PipeSpaceInfo {
-        parent_workspace_id: entry.parent_workspace_id.clone(),
-        pm: has_enabled_component(entry, COMPONENT_PM),
-        worker_role,
-        lifecycle: entry.lifecycle.clone(),
-        builder_lock_digest: entry.builder_lock_digest.clone(),
     }
 }
 
@@ -675,53 +655,6 @@ mod tests {
             schedulable_children(&registry, "ws_plain_parent").len(),
             1,
             "the tree still reports the child; the caller checks the executor component"
-        );
-    }
-
-    #[test]
-    fn the_legacy_projection_states_the_old_shape_without_storing_it() {
-        let project = set_component(&entry("ws_project", None), COMPONENT_PM, None).unwrap();
-        let legacy = describe_legacy(&project);
-        assert!(legacy.pm);
-        assert_eq!(legacy.worker_role, None);
-
-        let executor = set_component(
-            &entry("ws_executor", Some("ws_project")),
-            COMPONENT_EXECUTOR,
-            None,
-        )
-        .unwrap();
-        assert_eq!(
-            describe_legacy(&executor).worker_role.as_deref(),
-            Some(LEGACY_EXECUTOR_ROLE)
-        );
-
-        let tester = set_component(
-            &entry("ws_tester", Some("ws_project")),
-            COMPONENT_WORKER,
-            Some("tester"),
-        )
-        .unwrap();
-        assert_eq!(
-            describe_legacy(&tester).worker_role.as_deref(),
-            Some("tester")
-        );
-
-        let both = set_component(&executor, COMPONENT_WORKER, Some("coder")).unwrap();
-        let projected = describe_legacy(&both);
-        assert_eq!(
-            projected.worker_role.as_deref(),
-            Some(LEGACY_EXECUTOR_ROLE),
-            "a composed Space cannot be stated in one role; the executor is reported"
-        );
-        assert_eq!(
-            describe(&both)
-                .components
-                .iter()
-                .map(|component| component.component_id.clone())
-                .collect::<Vec<_>>(),
-            vec![COMPONENT_EXECUTOR.to_string(), COMPONENT_WORKER.to_string()],
-            "the component set stays the only complete answer"
         );
     }
 

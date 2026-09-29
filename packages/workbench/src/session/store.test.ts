@@ -991,7 +991,6 @@ describe("an action the user asked for that fails", () => {
         sessionId: "s1",
         text: "生成报告",
         attachments: [],
-        artifactPreviewBaseUrl: null,
         continuesRound: null,
       },
     });

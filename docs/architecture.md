@@ -14,7 +14,7 @@ GeneHub 是一套让你在自己的机器上跑 coding agent、并从任意设�
 ```
      浏览器 / 桌面 / 手机  ← 同一份工作台前端
               │
-              │  protocol-v3 DataEndpoint（本仓 packages/proto 定义）：
+              │  carrier-v4 DataEndpoint（本仓 packages/proto 定义）：
               │   ① 同机 127.0.0.1 WebSocket
               │   ② 跨设备 /fabric/v2 E2EE baseline
               │   ③ 网络允许时 WebRTC DataChannel direct
@@ -110,7 +110,7 @@ pub trait AgentAdapter: Send + Sync {
 
 模型、**思考强度**、**模式**是三条独立的轴，不要混用。思考强度是「想多久」（`ModelInfo.efforts` 里由模型自己报出档位，`session.setEffort` 切换）；模式是「动手前问不问」（`Catalog.modes`，`session.setMode`）。Agent 还可以通过 `Catalog.runtimeAxes` 声明 Fast 等额外运行轴；每条轴可以有任意档位，客户端只显示并原样回传 Agent 给出的 ID，不解析、更不把它拼进模型 ID。这几件事曾经被塞进同一个字段或字符串——同一个控件在不同 agent 下表达不同含义，还会生成 Agent 从未提供过的模型。现在一条轴一件事，前端不需要知道是哪个 agent 就能把控件画对。
 
-### 3.3 首批 adapter
+### 3.3 当前 adapter
 
 | adapter | 传输 | 覆盖 | 阶段 |
 |---------|------|------|------|
@@ -118,23 +118,30 @@ pub trait AgentAdapter: Send + Sync {
 | `opencode` | 本地 HTTP + SSE | OpenCode | MVP |
 | `claude` | 子进程 + 原生 `stream-json` stdio | Claude Code，直接拉起 `claude` 二进制 | MVP |
 | `codex` | 子进程 + 原生 `app-server` JSON-RPC | Codex，直接拉起 `codex app-server` | MVP |
-| `acp` | 子进程 + ACP over stdio | 一份代码覆盖 Cursor / Gemini / goose 等一批 CLI | MVP |
+| `cursor` | 子进程 + 原生 stream-json | Cursor CLI；导入不依赖 ACP 实时适配器 | MVP |
+| `acp` | 子进程 + ACP over stdio | 显式配置的 ACP CLI | MVP |
 
-五个各有各的理由：`genet` 是兜底，`acp` 是**一份适配换一批 agent**，`opencode` 是**形状差异最大的那个**——它不是 stdio 而是本地 HTTP + SSE，`claude` 和 `codex` 是**我们绕开 ACP、直接说其原生协议的两个**。
-
-这两个为什么值得自己写一份：ACP 是一份公开、双方都维护的契约，代价小；原生协议翻译要我们自己跟着对方的版本走。当前 ACP 已有 `session/request_permission` 和标准 `session/resume`，足够覆盖 Cursor 等通用接入；Claude 和 Codex 的原生协议仍提供更完整的模型、思考档位、模式、提问语义与会话恢复能力。`codex` 的 `model/list` 会报出每个模型自己的思考档位，而 `turn/start` 每回合都带 model / effort / 审批策略，所以三个选择器都是真的。两个都曾经挂在额外 ACP 桥接包上，也都因此让只装了官方 CLI 的人被告知「未安装」。详见 [third-party-agents.md](./third-party-agents.md)。
+六个适配器共享进程归属、启动环境和退出清理；stdio RPC 复用请求关联与读写边界。各 CLI 的事件翻译仍由适配器负责。平台暂不支持 steer；运行中的新输入持久排队，不自动中断。显式停止独立处理。详见 [third-party-agents.md](./third-party-agents.md)。
 
 ### 3.4 Agent 权限与暂停恢复
 
 GeneHub 面向长期无人值守的机器，默认权限不是“先拦住再等人点”，而是**在操作系统账户允许的范围内尽量放权**。已知 CLI 在启动层和 Agent 自身模式层都选择最高权限；daemon 不再添加工作区写入沙箱。用户显式选择只读或 plan 时才降低权限。
 
+**内置 Agent 不实现沙箱。** `read`、`write`、`edit`、`bash` 等工具在宿主授予的能力与启动账户权限内工作，工作区路径是定位上下文，不是工具访问的安全边界。只在文件工具里检查路径，无法约束 shell、子进程及其他文件访问入口，不能构成隔离；因此不添加路径白名单、工作区外拒绝或进程内审批来模拟沙箱。WASM 的宿主能力边界也不等于额外的工作区沙箱。需要隔离时，应在 OS 账户、容器或虚拟机等外层统一实施。
+
+这个决定不取消远程客户端的认证、设备授权、文件 RPC 的 workspace/path 校验或预览资源边界，也不改变第三方 Agent 自身的权限模式。Human 卡片用于业务决定和信息补充，不是内置 Agent 工具的安全隔离机制。测试应分别验证内置工具遵循宿主权限、远程文件接口遵循授权边界，不能用后者的路径拒绝断言约束前者。
+
 仍然出现的权限请求与真正的 Agent 问题都被建模成一个持久化的“暂停点”，但二者类型分开：批准权限时用 Agent 的最高默认模式恢复，回答问题时保持原模式。daemon 在写入 session meta 和原生 session handle 后终止当前 adapter turn 并关闭 Agent 子进程；同一用户业务 round 保留为等待状态，不保留等待中的 RPC、进程、WebSocket 或浏览器连接。稍后响应时，通过原生 session handle 开启新的 adapter turn，继续同一 Session / 用户 round。状态只有 `running → waiting → running/idle`，重启 daemon 也不丢请求。
 
-项目计划的 CLI 授权入口与原生授权事件使用同一个停止流程。`space approval request` 只提交请求；返回成功不代表批准，原 CLI 也可能随 Agent 关闭而被取消。Human 的计划回答先作为 session meta 中的一条持久续跑记录保存，再返回 Ack；后台派发与浏览器连接、旧 turn 和旧 CLI 完全解耦。daemon 启动时发现未完成记录，以保存的决策时间补齐项目 grant，并恢复原生会话；原生会话恢复失败会明确报告，不静默创建失去上下文的新会话。
+项目计划的 CLI 授权入口与原生授权事件使用同一个停止流程。`space approval request` 只提交请求；返回成功不代表批准，原 CLI 也可能随 Agent 关闭而被取消。Human 的计划回答先写入 `human_wait` 决策和 inbox 续做义务，再返回 Ack；后台派发与浏览器连接、旧 turn 和旧 CLI 完全解耦。daemon 启动时发现未完成记录，以保存的决策时间补齐项目 grant，并恢复原生会话；原生会话恢复失败会明确报告，不静默创建失去上下文的新会话。
 
-项目 challenge、决策和一次性 grant 由 daemon 的私有 `project-control/approvals.json` 原子保存。原生 Agent 计划与 GeneHub 项目计划都能暂停，但只有后者持有 daemon 签发的 challenge，才生成项目变更权限。重复 Human 回答必须相同；批准不能变成拒绝，拒绝不能被重放成批准。主动停止或关闭 Session 会取消续跑义务，daemon 正常退出则保留它。
+人工决定不设默认答复期限。项目计划与未答卡在用户离线和 daemon 重启后保留；审批不再按固定十分钟作废。
+答复和执行仍核对计划摘要、项目 revision、Git 状态、调用者归属及一次性 action；事实变化会拒绝旧计划。
+项目计划没有答复期限字段，也没有按期限作废后重建计划的续跑分支。
 
-崩溃后的续跑是可重投递的，不承诺模型调用 exactly-once。项目变更通过稳定 action ID、已有 receipt 和 revision 检查抵抗重复执行。若崩溃发生在变更事务内部且没有完成 receipt，保留的 applying 标记拒绝盲目重放；这不是任意项目事务的自动恢复日志。当前故障专项分别覆盖批准前、批准后执行前、变更完成后回报前的 daemon 强杀恢复，并验证拒绝/主动停止不会在重启后执行。
+项目 challenge、决策和一次性 grant 由 daemon 的私有 `project-control/approvals.json` 原子保存。原生 Agent 计划与 GeneHub 项目计划都能暂停，但只有后者持有 daemon 签发的 challenge，才生成项目变更权限。重复 Human 回答必须相同；批准不能变成拒绝，拒绝不能被重放成批准。主动停止暂停 inbox 并停止当前 execution，不替未回答的 Human 卡片作答；显式取消请求才记录取消。daemon 正常退出保留持久义务。
+
+崩溃后的续跑是可重投递的，不承诺模型调用 exactly-once。项目变更通过稳定 action ID、已有 receipt 和 revision 检查抵抗重复执行。若崩溃发生在变更事务内部且没有完成 receipt，保留的 applying 标记拒绝盲目重放；这不是任意项目事务的自动恢复日志。已有故障专项的断言范围包括批准前、批准后执行前、变更完成后回报前的 daemon 强杀恢复，以及拒绝或暂停后不在重启时擅自执行；本版改动仍待独立跑测。
 
 
 这里的“全盘可写”不等于提权：子进程继承 daemon 登录用户的 OS 权限，GeneHub 不绕过 ACL、UAC、macOS 隐私授权、只读文件系统或设备管理策略。
@@ -219,7 +226,7 @@ enum ToolCallDetail {                // 决定前端用哪个渲染器
 
 ### 6.2 Relay 只做 opaque admission，不做业务鉴权
 
-Relay 必须防止任何人无限占用 endpoint/route，所以会向 authority 核验短期 opaque ticket；但**最终 peer 身份与 workspace/path 权限在 daemon 完成**。Relay 不持有 peer secret，也不解释 protocol-v3 record。
+Relay 必须防止任何人无限占用 endpoint/route，所以会向 authority 核验短期 opaque ticket；但**最终 peer 身份与 workspace/path 权限在 daemon 完成**。Relay 不持有 peer secret，也不解释 carrier-v4 record。
 
 两种部署使用同一个 FabricCore，只替换 authority：
 
@@ -257,7 +264,7 @@ interface FabricAuthority {
 
 ### 6.5 加密的现状，说实话
 
-**当前实现：** 每个 routed peer carrier 先做 protocol-v3 PSK 双向 HMAC proof，再派生本次 peer-link AES-256-GCM key。每个 record 绑定 version、credential context、方向和严格 sequence；AES-GCM 同时提供加密与认证，HMAC 只用于 handshake/key derivation。Relay 能看到 IP、连接时序、长度、outer stream 和初始有界 `PeerHello`，但拿不到 secret，不能读取或伪造 Exchange 内容。
+**当前实现：** 每个 routed peer carrier 先做 carrier-v4 PSK 双向 HMAC proof，再派生本次 peer-link AES-256-GCM key。每个 record 绑定 version、credential context、方向和严格 sequence；AES-GCM 同时提供加密与认证，HMAC 只用于 handshake/key derivation。Relay 能看到 IP、连接时序、长度、outer stream 和初始有界 `PeerHello`，但拿不到 secret，不能读取或伪造 Exchange 内容。
 
 **这仍不等于“整个平台零知识”。** 托管 Control 生成 peer secret，分别返回给浏览器并供 daemon 兑换，因此平台运营方技术上知道该 secret；托管前端也处在浏览器凭证的信任路径里。当前协议是对称 PSK，没有公钥握手与前向保密。
 
@@ -265,7 +272,7 @@ interface FabricAuthority {
 
 ### 6.6 baseline 与 direct
 
-桌面壳内的 WebView 直连同一台机器的 `127.0.0.1`。跨设备先走 `/fabric/v2` baseline，再通过加密的 `rtc.negotiate` Exchange 协商 ordered reliable DataChannel。RTC connected 后普通新 logical streams 优先 direct；事件流及其订阅登记、补拉、取消始终属于同一个 baseline endpoint，心跳也检查该 endpoint。RTC 失败或关闭时 baseline 继续承载同一 v3 协议。已有流不迁移，业务写请求不自动重放；基线重连后的订阅恢复由协议客户端管理。
+桌面壳内的 WebView 直连同一台机器的 `127.0.0.1`。跨设备先走 `/fabric/v2` baseline，再通过加密的 `rtc.negotiate` Exchange 协商 ordered reliable DataChannel。RTC connected 后普通新 logical streams 优先 direct；事件流及其订阅登记、补拉、取消始终属于同一个 baseline endpoint，心跳也检查该 endpoint。RTC 失败或关闭时 baseline 继续承载同一 carrier v4 协议。已有流不迁移，业务写请求不自动重放；基线重连后的订阅恢复由协议客户端管理。
 
 完整数据面见 [e2ee-data-plane.md](./e2ee-data-plane.md)，Relay 实现边界见 [relay.md](./relay.md)。
 
@@ -332,3 +339,13 @@ testing/         ← 跨部件旅程测试（daemon + agent + mock 模型）
 我们调研过若干开源实现，借鉴的是**公开的接口约定**：[ACP](https://agentclientprotocol.com/)、[Agent Skills 标准](https://agentskills.io/specification)，以及各家 CLI 自己文档化的 stdio / HTTP 协议。这些本来就是发布出来给第三方对接的。
 
 GeneHub 的协议、daemon、前端与内置 agent 均为自有实现：不 fork、不 import、不复制代码。接入某个 agent 时我们实现的是**它对外公开的对接接口**，与任何第三方写客户端的做法无异。
+
+### 重构后的运行边界（2026-09-28）
+
+适配器输出经单消费者事件通道进入内核。发送不等待消费者，避免适配器锁与事件泵互等；队列上限为 8192 条、编码负载 32 MiB。越界会记录错误、关闭发送端，已接受事件排空后按通道失败回收 Agent；不会把丢失的终态当成成功。它是明确失败的容量保护，不是无损背压。
+
+Host/daemon 的自有进程组与原生 Agent shell 的后代树是不同的归属对象，分别由 `genet-native::process_group` 和 `process_tree` 实现，不能把 shell 的父 Agent 一并 kill。WASM 进程清理由宿主负责。适配器对象只持有发现配置与缓存；进程和后台任务由 Session 的 close/Drop 管理，不添加无人调用的 adapter shutdown 钩子。
+
+订阅快照返回 `streamEpoch`；增量重放需同时匹配 `sinceEpoch` 和 `sinceSeq`。缺失/错误纪元重新给快照，旧 v3 对端由独立转译层强制刷新快照。序号仍只在当前纪元内递增。快照核心在短执行锁内取得，回合与分支历史展开在锁外完成。
+
+产物操作只读取会话身份，不为上传加载全量对话。哈希按 64 KiB 分块并让出调度，上传互斥使用异步锁。RPC 错误类别由源头的类型确定，不再扫描错误文案；底层 IO 按 ErrorKind 映射。

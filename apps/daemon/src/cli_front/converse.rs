@@ -61,6 +61,7 @@ pub struct Run {
     pub title: Option<String>,
     pub wait: bool,
     pub since_seq: Option<u64>,
+    pub since_epoch: Option<String>,
     pub auto_approve: bool,
     pub open_workspace: bool,
     pub timeout: Option<u64>,
@@ -195,6 +196,7 @@ struct Options {
     request: Option<String>,
     choose: Option<String>,
     since_seq: Option<u64>,
+    since_epoch: Option<String>,
     timeout: Option<u64>,
     wait: Option<bool>,
     auto_approve: bool,
@@ -232,6 +234,7 @@ impl Options {
                 "--message" => options.positional.push(value()?),
                 "--request" => options.request = Some(value()?),
                 "--choose" => options.choose = Some(value()?),
+                "--since-epoch" => options.since_epoch = Some(value()?),
                 "--since-seq" => options.since_seq = Some(number(&value()?, "--since-seq")?),
                 "--timeout" => options.timeout = Some(number(&value()?, "--timeout")?),
                 "--wait" => options.wait = Some(true),
@@ -281,6 +284,7 @@ impl Options {
             title: self.title,
             wait,
             since_seq: self.since_seq,
+            since_epoch: self.since_epoch,
             auto_approve: self.auto_approve,
             open_workspace: self.open_workspace,
             timeout: self.timeout,
@@ -400,6 +404,7 @@ async fn run_conversation(rpc: &Rpc, run: Run, here: bool) -> Result<i32, CliFai
             reset,
         } = rpc
             .call(Request::Subscribe {
+                since_epoch: run.since_epoch.clone(),
                 recent_rounds: None,
                 session_id: session.id.clone(),
                 since_seq: run.since_seq,
@@ -471,7 +476,7 @@ async fn run_conversation(rpc: &Rpc, run: Run, here: bool) -> Result<i32, CliFai
         session_id: session.id.clone(),
         text: run.prompt.clone(),
         attachments: Vec::new(),
-        artifact_preview_base_url: None,
+
         continues_round: None,
     })
     .await
@@ -502,6 +507,7 @@ fn opened(session: &SessionSummary, snapshot: &SessionSnapshot, attached: bool) 
             "agentId": session.agent_id,
             "status": snapshot.summary.status,
             "seq": snapshot.seq,
+            "streamEpoch": snapshot.stream_epoch,
             "pendingPermissions": snapshot.pending_permissions,
         }),
     );
@@ -756,7 +762,7 @@ fn report(session_id: &str, outcome: Outcome) -> i32 {
         Outcome::Disconnected => (
             "disconnected",
             EXIT_UNREACHABLE,
-            json!({"note": "the daemon connection closed mid-turn; resubscribe with --since-seq"}),
+            json!({"note": "the daemon connection closed mid-turn; resubscribe with --since-seq and --since-epoch"}),
         ),
     };
     let mut data = json!({"sessionId": session_id, "status": status, "waited": true});
@@ -917,10 +923,12 @@ mod tests {
         options: &[(&str, PermissionOptionKind)],
     ) -> PermissionRequest {
         PermissionRequest {
+            summary: None,
+            description: None,
+            author: None,
             id: "r_1".into(),
             kind,
             title: "write a file".into(),
-            detail: None,
             tool_call_id: None,
             options: options
                 .iter()

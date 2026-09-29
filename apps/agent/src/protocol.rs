@@ -44,7 +44,13 @@ impl Content {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Usage {
+    /// Total input, including cache reads and writes. Cache fields are details.
     pub input: u64,
+    /// Presence is distinct from a reported zero; only complete usage anchors context.
+    #[serde(default)]
+    pub input_reported: bool,
+    #[serde(default)]
+    pub output_reported: bool,
     pub output: u64,
     pub cache_read: u64,
     pub cache_write: u64,
@@ -60,21 +66,6 @@ pub struct Cost {
     pub cache_read: f64,
     pub cache_write: f64,
     pub total: f64,
-}
-
-impl Usage {
-    pub fn add(&mut self, other: &Usage) {
-        self.input += other.input;
-        self.output += other.output;
-        self.cache_read += other.cache_read;
-        self.cache_write += other.cache_write;
-        self.total_tokens += other.total_tokens;
-        self.cost.input += other.cost.input;
-        self.cost.output += other.cost.output;
-        self.cost.cache_read += other.cost.cache_read;
-        self.cost.cache_write += other.cost.cache_write;
-        self.cost.total += other.cost.total;
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -386,22 +377,6 @@ mod tests {
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].1, "read");
         assert_eq!(calls[1].0, "b");
-    }
-
-    #[test]
-    fn usage_accumulates_tokens_and_cost() {
-        let mut total = Usage::default();
-        let mut one = Usage {
-            input: 10,
-            ..Default::default()
-        };
-        one.total_tokens = 15;
-        one.cost.total = 0.5;
-        total.add(&one);
-        total.add(&one);
-        assert_eq!(total.input, 20);
-        assert_eq!(total.total_tokens, 30);
-        assert_eq!(total.cost.total, 1.0);
     }
 
     #[test]

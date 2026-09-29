@@ -6,7 +6,7 @@ defineJourney(
     title: "A device gets what its invitation named and nothing else",
     oracle: "read grant lists workspaces; write/settings/process/invite are forbidden",
     catches: ["invitation ignored", "self-widening invite"],
-    tags: ["core", "authorization", "parity"],
+    tags: ["core", "authorization"],
     expectedDurationMs: 30_000,
     timeoutMs: 90_000,
     surfaces: ["daemon", "workbench-client"],

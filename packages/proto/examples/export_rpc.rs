@@ -3,6 +3,8 @@ use genehub_proto::*;
 use ts_rs::TS;
 fn main() -> Result<(), ts_rs::ExportError> {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/bindings");
+    AgentCapability::export_all_to(dir)?;
+    WorkflowRequestBudgetSnapshot::export_all_to(dir)?;
     ClientDebugRequest::export_all_to(dir)?;
     ClientDebugAction::export_all_to(dir)?;
     ClientDebugResponse::export_all_to(dir)?;
@@ -29,6 +31,7 @@ fn main() -> Result<(), ts_rs::ExportError> {
     CommandInfo::export_all_to(dir)?;
     Catalog::export_all_to(dir)?;
     ProbeState::export_all_to(dir)?;
+    AgentCapability::export_all_to(dir)?;
     AgentInfo::export_all_to(dir)?;
     WorkspaceFolderInfo::export_all_to(dir)?;
     WorkspaceInfo::export_all_to(dir)?;
@@ -167,5 +170,6 @@ fn main() -> Result<(), ts_rs::ExportError> {
     TimelineItem::export_all_to(dir)?;
     ServerFrame::export_all_to(dir)?;
     ShellRunRequest::export_all_to(dir)?;
+    WorkflowRequestBudgetSnapshot::export_all_to(dir)?;
     Ok(())
 }

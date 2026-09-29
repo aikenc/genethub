@@ -1192,13 +1192,19 @@ async fn validate_start(start: &SpeechStart, services: &PeerServices) -> Result<
         .as_deref()
         .is_some_and(|scope| scope != start.workspace_id)
     {
-        anyhow::bail!("the routed capability does not cover this workspace");
+        return Err(crate::rpc_error::failure(
+            genehub_proto::ErrorCode::Unsupported,
+            "the routed capability does not cover this workspace".to_owned(),
+        ));
     }
     services.state.workspaces.get(&start.workspace_id).await?;
     if let Some(session_id) = start.session_id.as_deref() {
         let snapshot = services.state.sessions.snapshot(session_id).await?;
         if snapshot.summary.workspace_id != start.workspace_id {
-            anyhow::bail!("session is not a member of this workspace");
+            return Err(crate::rpc_error::failure(
+                genehub_proto::ErrorCode::Forbidden,
+                "session is not a member of this workspace".to_owned(),
+            ));
         }
     }
     if start.audio != SpeechAudioFormat::default() {
@@ -1325,7 +1331,10 @@ fn validate_runtime_segments(
 
         let default = validate_runtime_candidates(&segment.candidates)?;
         if default.candidate_id != segment.default_candidate_id || default.text != segment.text {
-            anyhow::bail!("segment default candidate does not match its text");
+            return Err(crate::rpc_error::failure(
+                genehub_proto::ErrorCode::Unsupported,
+                "segment default candidate does not match its text".to_owned(),
+            ));
         }
         for candidate in &segment.candidates {
             if !candidate_ids.insert(candidate.candidate_id.as_str()) {
@@ -1403,7 +1412,10 @@ fn validate_runtime_segments(
                     .collect::<String>()
                     != default_alternative.text
             {
-                anyhow::bail!("uncertain span default does not match segment text");
+                return Err(crate::rpc_error::failure(
+                    genehub_proto::ErrorCode::Unsupported,
+                    "uncertain span default does not match segment text".to_owned(),
+                ));
             }
             previous_span_end = span_end;
         }
@@ -1462,9 +1474,11 @@ fn validate_runtime_result(
         || duration_ms != expected_duration_ms
         || context_snapshot_id != expected_context_snapshot_id
     {
-        anyhow::bail!(
+        return Err(crate::rpc_error::failure(
+            genehub_proto::ErrorCode::Unsupported,
             "completion identity, duration or context snapshot does not match the request"
-        );
+                .to_owned(),
+        ));
     }
     if candidates.len() > capabilities.n_best.max_candidates as usize
         || score_kind != capabilities.n_best.score_kind

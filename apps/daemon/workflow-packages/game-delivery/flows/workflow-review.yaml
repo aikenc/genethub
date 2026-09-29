@@ -1,7 +1,6 @@
-schema: genehub.workflow.definition.v1
+schema: genehub.workflow.definition.v2
 id: workflow-review
-version: 1
-entry: specialist
+version: 2
 nodes:
   - id: specialist
     uses: agent.session
@@ -11,7 +10,12 @@ nodes:
       all:
         - key: report
           verify: value.nonEmpty
-    on:
-      completed: [publish]
   - id: publish
     uses: result.publish
+structure:
+  body:
+    id: report-flow
+    type: sequence
+    steps:
+      - {id: report, type: task, activity: specialist}
+      - {id: result, type: task, activity: publish}

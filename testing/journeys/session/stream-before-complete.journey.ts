@@ -6,7 +6,7 @@ defineJourney(
     title: "Streaming output is visible before the turn ends",
     oracle: "text itemDelta arrives before turnCompleted, and settled text is at least as long as the streamed pieces",
     catches: ["UI blank until the end", "one-frame reply pretending to stream"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     llm: { default: "mock" },
     resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
     expectedDurationMs: 25_000,

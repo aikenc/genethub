@@ -16,9 +16,8 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use genehub_proto::{
-    Capabilities, Catalog, ImportContinuation, ModeInfo, ModelInfo, ProbeState,
-    SessionEvent, TimelineItem, ToolCallDetail, ToolImage, ToolStatus, TurnError, TurnErrorCode,
-    Usage,
+    Capabilities, Catalog, ImportContinuation, ModeInfo, ModelInfo, ProbeState, SessionEvent,
+    TimelineItem, ToolCallDetail, ToolImage, ToolStatus, TurnError, TurnErrorCode, Usage,
 };
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
@@ -99,18 +98,10 @@ impl AgentAdapter for OpenCodeAdapter {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        super::apply_session_environment(&mut command, &config);
-        super::owned_child(&mut command);
-        let mut child = command
-            .spawn()
-            .with_context(|| format!("spawning {}", binary.display()))?;
-
-        // What the server says about itself is worth keeping for two reasons: it
-        // is the only account of why a start failed, and a pipe nobody reads
-        // eventually fills and stops the process that is writing into it.
-        let chatter = Chatter::default();
-        chatter.watch("opencode", child.stdout.take()).await;
-        chatter.watch("opencode", child.stderr.take()).await;
+        let (process, io) =
+            super::process::AgentProcess::spawn(&mut command, "opencode", &config).await?;
+        // The HTTP server's stdout is diagnostic output, not a protocol stream.
+        process.chatter.watch("opencode", io.stdout).await;
 
         // No overall timeout, deliberately. A prompt POST here blocks for the whole
         // turn, and a real coding task runs longer than any number we could pick —
@@ -123,7 +114,16 @@ impl AgentAdapter for OpenCodeAdapter {
         let http = crate::http::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .build()?;
-        wait_until_ready(&http, &base, &mut child, &chatter).await?;
+        {
+            let mut child = process.child.lock().await;
+            wait_until_ready(
+                &http,
+                &base,
+                child.as_mut().expect("spawned process"),
+                &process.chatter,
+            )
+            .await?;
+        }
 
         // Prefer the session a previous run of this GeneHub session left behind.
         // OpenCode keeps those on disk across `serve` restarts; without this we
@@ -145,7 +145,7 @@ impl AgentAdapter for OpenCodeAdapter {
 
         Ok(Box::new(OpenCodeSession {
             tasks,
-            _chatter: chatter,
+            process,
             http,
             base,
             remote_session,
@@ -154,7 +154,6 @@ impl AgentAdapter for OpenCodeAdapter {
             events,
             events_rx: std::sync::Mutex::new(Some(events_rx)),
             turn,
-            child: Mutex::new(Some(child)),
         }))
     }
 
@@ -379,7 +378,7 @@ impl TurnState {
 
 struct OpenCodeSession {
     tasks: super::SessionTasks,
-    _chatter: Chatter,
+    process: super::process::AgentProcess,
     http: crate::http::Client,
     base: String,
     remote_session: String,
@@ -388,7 +387,6 @@ struct OpenCodeSession {
     events: crate::adapter::EventTx,
     events_rx: std::sync::Mutex<Option<crate::adapter::EventRx>>,
     turn: Arc<Mutex<TurnState>>,
-    child: Mutex<Option<Child>>,
 }
 
 #[async_trait]
@@ -516,15 +514,11 @@ impl AgentSession for OpenCodeSession {
     }
 
     async fn pid(&self) -> Option<u32> {
-        self.child
-            .lock()
-            .await
-            .as_ref()
-            .and_then(|child| child.id())
+        self.process.pid().await
     }
 
     async fn close(&self) -> Result<()> {
-        super::close_child(&self.child).await?;
+        self.process.close().await?;
         self.tasks.stop().await;
         Ok(())
     }
@@ -538,7 +532,10 @@ impl AgentSession for OpenCodeSession {
     }
 
     async fn set_mode(&self, _mode_id: &str) -> Result<()> {
-        Err(anyhow!("OpenCode does not expose switchable modes"))
+        Err(crate::rpc_error::failure(
+            genehub_proto::ErrorCode::Unsupported,
+            "OpenCode does not expose switchable modes".to_owned(),
+        ))
     }
 
     fn persistence(&self) -> Option<super::PersistHandle> {
@@ -717,54 +714,38 @@ async fn stream_events(
     events: crate::adapter::EventTx,
     turn: Arc<Mutex<TurnState>>,
 ) {
-    let response = match http.get(format!("{base}/event")).send().await {
-        Ok(response) => response,
-        Err(error) => {
-            tracing::warn!("could not open the OpenCode event stream: {error}");
-            return;
-        }
-    };
-
-    let mut buffer = String::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let Ok(chunk) = chunk else { break };
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-        // SSE frames are separated by a blank line; anything short of that is
-        // a partial frame and must stay in the buffer.
-        while let Some(index) = buffer.find("\n\n") {
-            let frame = buffer[..index].to_string();
-            buffer.drain(..index + 2);
-            let Some(payload) = sse_data(&frame) else {
-                continue;
-            };
-            let Ok(value) = serde_json::from_str::<Value>(&payload) else {
-                continue;
-            };
-            let mut state = turn.lock().await;
-            translate_event(&value, &remote_session, &mut state, &events);
-        }
-    }
-    // Worth a line: with the stream gone, a turn produces nothing at all until the
-    // prompt call returns with the finished message, and "it did not stream" is
-    // otherwise indistinguishable from "it is stuck".
-    tracing::warn!(
-        "the OpenCode event stream for {remote_session} ended; \
-                    replies will arrive only when each turn finishes"
-    );
-}
-
-fn sse_data(frame: &str) -> Option<String> {
-    let mut data = String::new();
-    for line in frame.lines() {
-        if let Some(rest) = line.strip_prefix("data:") {
-            if !data.is_empty() {
-                data.push('\n');
+    let mut delay = Duration::from_millis(250);
+    loop {
+        let started = tokio::time::Instant::now();
+        let response = tokio::time::timeout(
+            Duration::from_secs(10),
+            http.get(format!("{base}/event")).send(),
+        )
+        .await;
+        match response {
+            Ok(Ok(response)) if response.status().is_success() => {
+                let mut buffer = crate::http::SseDecoder::new();
+                let mut stream = response.bytes_stream();
+                while let Some(chunk) = stream.next().await {
+                    let Ok(chunk) = chunk else { break };
+                    for payload in buffer.push(&chunk) {
+                        let Ok(value) = serde_json::from_str::<Value>(&payload) else {
+                            continue;
+                        };
+                        let mut state = turn.lock().await;
+                        translate_event(&value, &remote_session, &mut state, &events);
+                    }
+                }
             }
-            data.push_str(rest.trim_start());
+            _ => tracing::warn!("could not open the OpenCode event stream"),
         }
+        if started.elapsed() >= Duration::from_secs(30) {
+            delay = Duration::from_millis(250);
+        }
+        tracing::warn!(session = %remote_session, "OpenCode event stream disconnected; reconnecting");
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(Duration::from_secs(4));
     }
-    (!data.is_empty()).then_some(data)
 }
 
 fn translate_event(
@@ -855,12 +836,7 @@ fn translate_event(
 /// twice is harmless: the second copy replaces the first rather than appending
 /// to it. That property is what lets the finished message be reconciled against
 /// whatever the event stream already delivered.
-fn emit_part(
-    part: &Value,
-    turn_id: &str,
-    state: &mut TurnState,
-    events: &crate::adapter::EventTx,
-) {
+fn emit_part(part: &Value, turn_id: &str, state: &mut TurnState, events: &crate::adapter::EventTx) {
     let Some(part_id) = part.get("id").and_then(Value::as_str) else {
         return;
     };
@@ -1288,15 +1264,6 @@ mod tests {
             message_parts(&input),
             vec![json!({ "type": "text", "text": "" })]
         );
-    }
-
-    #[test]
-    fn sse_frames_with_multiple_data_lines_are_joined() {
-        assert_eq!(
-            sse_data("event: x\ndata: {\"a\":\ndata: 1}"),
-            Some("{\"a\":\n1}".into())
-        );
-        assert_eq!(sse_data("event: ping"), None);
     }
 
     /// OpenCode resends a part in full each time. Emitting a delta here would

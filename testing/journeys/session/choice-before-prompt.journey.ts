@@ -6,7 +6,7 @@ defineJourney(
     title: "A choice made before the first prompt is announced and not only stored",
     oracle: "session.setEffort before any send is visible on session.get; unknown levels are refused",
     catches: ["picker springs back", "unknown effort stored"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     expectedDurationMs: 20_000,
     timeoutMs: 60_000,
     surfaces: ["daemon", "workbench-client"],

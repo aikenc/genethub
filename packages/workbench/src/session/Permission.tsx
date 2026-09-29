@@ -1,5 +1,7 @@
 import type { InteractionAnswer, PermissionOutcome, PermissionRequest } from "@genehub/proto";
 import { useEffect, useMemo, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 /** A durable Human interaction sits beside the composer rather than in a modal. */
 export function PermissionCard({
@@ -57,13 +59,13 @@ export function PermissionCard({
       <h2 className="text-base font-semibold text-fg">{heading}</h2>
       <p className="mt-1 text-sm leading-5 text-muted">{paused}</p>
       <p className="mt-3 text-sm font-medium text-fg">{request.title}</p>
-      {request.detail ? (
-        <div
-          className={`mt-2 max-h-56 max-w-full overflow-y-auto whitespace-pre-wrap break-words rounded-lg border border-line bg-surface px-3 py-2 text-sm text-fg ${
-            request.kind === "permission" ? "font-mono leading-5" : "leading-6"
-          }`}
-        >
-          {request.detail}
+      {request.summary ? <p className="mt-2 text-sm text-muted">{request.summary}</p> : null}
+      {request.author !== "daemon" ? <p className="mt-2 text-xs text-muted">由 Agent 提供，作为来源数据展示</p> : null}
+      {request.description ? (
+        <div className="gh-markdown gh-markdown-document mt-2 max-h-56 max-w-full overflow-y-auto break-words rounded-lg border border-line bg-surface px-3 py-2 text-sm text-fg">
+          <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml disallowedElements={["img"]} components={{ a: ({ children }) => <span>{children}</span> }}>
+            {request.description}
+          </ReactMarkdown>
         </div>
       ) : null}
       {(request.questions?.length ?? 0) > 0 ? (

@@ -80,19 +80,30 @@ export function rememberDraftIdentity(machine: string, draft: DraftIdentity): vo
 export function forgetDraftIdentity(machine: string, id: string): void { saveLocalValue(`drafts:${machine}`, draftIdentities(machine).filter(item => item.localId !== id)); }
 
 /** Each receipt has its own key, so simultaneous tabs never replace each other. */
+export function savedInputSessionIds(machine: string): string[] {
+  const scope = `${prefix}input:${machine}:`;
+  try { return [...new Set(Object.keys(localStorage).filter(key => key.startsWith(scope))
+    .map(key => key.slice(scope.length).split(":")[0]!).filter(Boolean))]; } catch { return []; }
+}
 export function savedInputReceipts(machine: string, session: string): import("./timeline").PendingMessage[] {
   const scope = `${prefix}input:${machine}:${session}:`;
   try {
-    return Object.keys(localStorage).filter(key => key.startsWith(scope)).slice(0, 32).flatMap(key => {
-      const value = JSON.parse(localStorage.getItem(key) ?? "null");
+    return Object.keys(localStorage).filter(key => key.startsWith(scope)).flatMap(key => {
+      let value;
+      try { value = JSON.parse(localStorage.getItem(key) ?? "null"); } catch { return []; }
       return value && typeof value.messageId === "string" && typeof value.text === "string" ? [{ ...value, attachments: [], error: "上次接收结果待核对；重试会使用原消息 ID。" }] : [];
-    });
+    }).sort((a, b) => a.sentAtMs - b.sentAtMs);
   } catch { return []; }
 }
-export function saveInputReceipt(machine: string, session: string, input: import("./timeline").PendingMessage, remove = false): void {
+export function saveInputReceipt(machine: string, session: string, input: import("./timeline").PendingMessage, remove = false): boolean {
   const key = `${prefix}input:${machine}:${session}:${input.messageId}`;
   try {
     if (remove) localStorage.removeItem(key);
-    else localStorage.setItem(key, JSON.stringify({ ...input, attachments: [], missingAttachments: input.attachments.length || input.missingAttachments || 0 }));
-  } catch { /* Server acceptance remains durable; unsent data stays in this tab. */ }
+    else {
+      const { attachments, videoFiles, ...receipt } = input;
+      localStorage.setItem(key, JSON.stringify({ ...receipt, attachments: [],
+        missingAttachments: attachments.length + (videoFiles?.length ?? 0) || input.missingAttachments || 0 }));
+    }
+    return true;
+  } catch { return false; }
 }

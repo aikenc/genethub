@@ -1,5 +1,5 @@
 export type CaseKind = "journey" | "specialty" | "e2e";
-export type RunnerKind = "node" | "playwright" | "rust-legacy";
+export type RunnerKind = "node" | "playwright";
 export type CaseStatus =
   | "passed"
   | "failed"
@@ -15,12 +15,7 @@ export type GateName =
   | "dev"
   | "dev-feedback"
   | "beta"
-  | "stable"
-  | "infra-compact"
-  | "infra-parallel"
-  | "specialty:page-experience"
-  | "specialty:contracts"
-  | "specialty:multichannel";
+  | "stable";
 
 export interface CaseResources {
   environments: number;

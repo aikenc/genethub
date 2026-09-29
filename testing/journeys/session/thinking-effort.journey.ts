@@ -6,7 +6,7 @@ defineJourney(
     title: "Switching the thinking level takes effect on the built-in agent",
     oracle: "session.setEffort stores effortId and does not write it as modeId",
     catches: ["thinking rides on mode"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     llm: { default: "mock" },
     expectedDurationMs: 25_000,
     timeoutMs: 75_000,

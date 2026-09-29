@@ -3,7 +3,7 @@ import { defineSpecialty, daemonEndpoint, openWorkbenchPage } from "../../framew
 defineSpecialty({
   id: "specialty.page-experience.session-interrupted-process",
   title: "A Human interruption starts a new process round under its own message",
-  oracle: "After a durable Human input interrupts an active turn, the daemon keeps each tool in a distinct round and the browser shows one process card under each user message",
+  oracle: "After an explicit Human Stop interrupts an active turn and a durable input follows, the daemon keeps each tool in a distinct round and the browser shows one process card under each user message",
   catches: ["durable inbox continues a new request into the interrupted round", "the browser attaches both turns' tools to the first user message"],
   tags: ["page-experience", "session", "process-history"],
   runner: "playwright",
@@ -29,7 +29,7 @@ defineSpecialty({
     const page = browser.page;
     const send = (messageId: string, text: string) => opened.client.call({
       type: "session.send",
-      payload: { sessionId, messageId, text, attachments: [], artifactPreviewBaseUrl: null, continuesRound: null },
+      payload: { sessionId, messageId, text, attachments: [], continuesRound: null },
     });
     const rounds = async () => {
       const reply = await opened.client.call({ type: "session.rounds", payload: { sessionId, throughRoundId: null, cursor: null, limit: 20 } });
@@ -51,6 +51,8 @@ defineSpecialty({
     }, 30_000);
     await page.getByTestId("round-progress").first().waitFor();
 
+    const stopped = await opened.client.call({ type: "session.interrupt", payload: { sessionId } });
+    t.assertions.assert(stopped?.type === "ack", "explicit Stop was not accepted");
     await send(secondId, "SECOND_REQUEST");
     await t.tools.waitUntil(async () => {
       const current = await rounds();

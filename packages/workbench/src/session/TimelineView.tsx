@@ -2143,14 +2143,12 @@ const EMPTY_USAGE: Usage = {
 };
 
 function uncachedTokens(usage: Usage): number {
-  return usage.inputTokens >= usage.cacheReadTokens
-    ? usage.inputTokens - usage.cacheReadTokens
-    : usage.inputTokens;
+  return Math.max(0, usage.inputTokens - usage.cacheReadTokens - usage.cacheWriteTokens);
 }
 
 /** A token count the provider actually sent, or an em-dash when it never did. */
-function reportedTokens(value: number): string {
-  return value > 0 ? formatTokens(value) : "—";
+function reportedTokens(value: number, reported?: boolean): string {
+  return value > 0 || reported === true ? formatTokens(value) : "—";
 }
 
 function estimateToolOutputTokens(items: TimelineItem[]): number {
@@ -2299,7 +2297,7 @@ function TurnFooter({
           )}
           <span data-testid="usage-summary">
             {usage
-              ? `本 Turn · input(cached:${reportedTokens(usage.cacheReadTokens)}, uncached:${reportedTokens(uncachedTokens(usage))}) output ${reportedTokens(usage.outputTokens)} · 工具 ${tools} 次 · 模型 ${rounds} 轮 · 工具输出约 ${reportedTokens(toolOut)} tokens`
+              ? `本 Turn${usage.inputTokensReported === true && usage.outputTokensReported === true ? "" : " · 用量未完整上报"} · input(cached:${reportedTokens(usage.cacheReadTokens)}, uncached:${reportedTokens(uncachedTokens(usage), usage.inputTokensReported)}) output ${reportedTokens(usage.outputTokens, usage.outputTokensReported)} · 工具 ${tools} 次 · 模型 ${rounds} 轮 · 工具输出约 ${reportedTokens(toolOut)} tokens`
               : "—"}
           </span>
           {usage && usage.compactionCount > 0 ? (

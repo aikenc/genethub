@@ -9,6 +9,16 @@ use crate::timeline::{TimelineItem, ToolCallDetail, ToolImage, ToolStatus};
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct Usage {
+    /// Whether every input contribution was reported. Missing on retained wire
+    /// generations; false means partial/absent, distinct from a reported zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub input_tokens_reported: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub output_tokens_reported: Option<bool>,
+    /// Total input including cache reads/writes; cache counters are details.
+
     #[ts(type = "number")]
     pub input_tokens: u64,
     #[ts(type = "number")]
@@ -135,8 +145,16 @@ pub struct PermissionRequest {
     #[serde(default)]
     pub kind: PermissionRequestKind,
     pub title: String,
+    /// Current display fields. External native adapters supply these at ingress.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
-    pub detail: Option<String>,
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub author: Option<PermissionAuthor>,
     /// The tool call this approval gates, when it gates one.
     #[ts(optional)]
     pub tool_call_id: Option<String>,
@@ -147,6 +165,14 @@ pub struct PermissionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub questions: Option<Vec<InteractionQuestion>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum PermissionAuthor {
+    Daemon,
+    Agent,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -224,13 +250,6 @@ pub enum PermissionOutcome {
     #[serde(rename_all = "camelCase")]
     Answered {
         answers: Vec<InteractionAnswer>,
-    },
-    /// Older peers and session logs may still carry this outcome. A saved
-    /// Human decision translates it to `Canceled` on read; the daemon does
-    /// not create approval timers.
-    #[serde(rename_all = "camelCase")]
-    TimedOut {
-        applied_default: String,
     },
     Canceled,
 }

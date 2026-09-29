@@ -55,7 +55,7 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
     id: outcome === "approved" ? "specialty.workflow.executor-session-flow" : `specialty.workflow.executor-session-flow.${outcome}`,
     title: "Executor Session drives Coder and Reviewer with structured messages",
     oracle:
-      "one ordinary PM turn discovers and applies the current Pack, then runs the preserved v7 repair configuration; one non-LLM Executor Session owns its snapshot and timeline while Workers execute in attached AgentSpaces; v8 business semantics have separate Pack journeys",
+      "one ordinary PM turn discovers and applies the current Pack, then runs the preserved v7 repair configuration; one non-LLM Executor Session exposes the PM-persisted Run and timeline while Workers execute in attached AgentSpaces; v8 business semantics have separate Pack journeys",
     catches: [
       "the PM has to know a hard-coded Pack id that cannot be discovered",
       "bootstrap leaves the project dirty so the first Coder cannot obtain its write lease",
@@ -110,9 +110,6 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
       let repairedFromFinding = false;
       const respond = (request: unknown) => {
         const body = JSON.stringify(request);
-        if (body.includes("bounded, read-only Workflow diagnosis")) {
-          return { text: "The repair path exhausted after a second rejected review. PM should replan the acceptance path; the Worker result is preserved." };
-        }
         if (body.includes("你是小游戏项目的 Coder")) {
           const operation = body.match(/当前节点：(operation-\d+)/)?.[1];
           if (operation) coderOperations.add(operation);
@@ -195,7 +192,7 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
           return {
             tool: {
               name: "request_user_input",
-              arguments: {
+              arguments: { title: "是否按这一份计划转换为 PM 驱动项目？", summary: "共 1 个待回答问题。", description: "请使用下方选项回答问题；提交后继续当前任务。",
                 questions: [
                   {
                     id: challengeId,
@@ -353,7 +350,17 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
           type: "workflow.history",
           payload: { workspaceId: projectId, limit: 10 },
         });
-        return history?.type === "workflowRuns" && history.data.length === 1 && history.data.some((run) => run.status === (outcome === "exhausted" ? "blocked" : "completed"));
+        if (history?.type !== "workflowRuns") return false;
+        // Patrol may already have started recovery for a blocked business Run.
+        // Keep the single business-dispatch oracle without racing that recovery.
+        const business = history.data.filter(run => run.handles.length === 0);
+        t.assertions.assert(business.length <= 1, "PM dispatched another business Run");
+        const run = business[0];
+        if (!run) return false;
+        t.assertions.assert(run.taskId === "asteroid-garden", "unexpected business task");
+        t.assertions.assert(history.data.every(candidate => candidate.id === run.id ||
+          candidate.handles.every(handle => handle.runId === run.id)), "recovery refers to another business Run");
+        return run.status === (outcome === "exhausted" ? "blocked" : "completed");
       }, 140_000);
       const listed = await opened.client.call({
         type: "session.list",

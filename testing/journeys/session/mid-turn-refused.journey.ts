@@ -6,7 +6,7 @@ defineJourney(
     title: "A prompt arriving mid-turn is refused rather than interleaved",
     oracle: "second session.send is conflict; first turn still completes; a later send is accepted",
     catches: ["two send buttons interleave one conversation"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     llm: { default: "mock" },
     expectedDurationMs: 30_000,
     timeoutMs: 90_000,

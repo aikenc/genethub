@@ -94,6 +94,35 @@ controlCase(
 );
 
 controlCase(
+  "specialty.cli.control.workflow-human-schema",
+  "Workflow Human command metadata advertises the current count budget",
+  "The real CLI schema exposes maxRuns/maxLlmRounds and the distinct recovery c exit; retired wall-time budget flags are rejected",
+  ["LLM copies an unsupported budget flag from schema", "recovery allowance vanishes from public command metadata"],
+  async (t) => {
+    await withCli(t, async (cli) => {
+    const started = await cli.runAsync(["daemon", "start"]);
+    t.assertions.assert(started.code === 0, started.stderr || started.stdout);
+    const data = cli.json(["schema", "workflow.human"]).data as Record<string, unknown>;
+    const command = data.command as Record<string, unknown>;
+    const properties = (command.inputSchema as Record<string, unknown>).properties as Record<string, Record<string, unknown>>;
+    t.assertions.assert(properties.maxRuns?.maximum === 64 && properties.maxLlmRounds?.maximum === 8192, "missing bounded count budget metadata");
+    t.assertions.assert(Array.isArray(properties.kind?.enum) && properties.kind.enum.includes("c"), "distinct recovery exit omitted");
+    t.assertions.assert(!("deadlineSeconds" in properties) && !String(command.synopsis).includes("--deadline-seconds"), "retired time budget advertised");
+    const rejected = cli.run(["workflow", "human", "--run", "wr_contract", "--revision", "0", "--kind", "a", "--reason", "contract", "--deadline-seconds", "1"]);
+    t.assertions.assert(rejected.code === 2, `retired wall-time flag was accepted: ${rejected.stdout}`);
+    const profileData = cli.json(["schema", "workflow.profile"]).data as Record<string, unknown>;
+    const profile = profileData.command as Record<string, unknown>;
+    t.assertions.assert(profile.name === "workflow.profile" && profile.mutation === false, "read-only profile missing from public command schema");
+    const consult = cli.run(["schema", "workflow.consult"]);
+    t.assertions.assert(consult.code === 2, "retired fixed-choice consultation still advertised by schema");
+    const usage = cli.run(["workflow"]);
+    t.assertions.assert(usage.code === 2 && !usage.stderr.includes("consult"), "retired consultation still advertised in Workflow usage");
+    });
+  },
+  1_000,
+);
+
+controlCase(
   "specialty.cli.control.invalid-command-envelope",
   "Invalid daemon arguments use the frozen machine error contract",
   "an unknown verb exits 2, emits one genet.cli/v1 error JSON value, and keeps human usage on stderr",

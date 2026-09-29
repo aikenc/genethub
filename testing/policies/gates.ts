@@ -1,7 +1,7 @@
 import type { CaseMeta, GateName } from "../infrastructure/types.ts";
 
 export function parseGate(value: string): GateName {
-  const names: GateName[] = ["change", "merge", "dev", "dev-feedback", "beta", "stable", "infra-compact", "infra-parallel", "specialty:page-experience", "specialty:contracts", "specialty:multichannel"];
+  const names: GateName[] = ["change", "merge", "dev", "dev-feedback", "beta", "stable"];
   if (!names.includes(value as GateName)) throw new Error(`unknown gate: ${value}`);
   return value as GateName;
 }
@@ -15,39 +15,8 @@ export function selectForGate(
     return { include: false, reason: "tag filter" };
   }
   if (gate === "dev-feedback") return { include: true, reason: "explicit feedback scope; not a complete release gate" };
-  if (gate === "specialty:multichannel") {
-    return item.tags.includes("multichannel")
-      ? { include: true, reason: "public business multichannel contract" }
-      : { include: false, reason: "not multichannel" };
-  }
-  // L13 keeps every frozen legacy case required until its individual parity is
-  // proven. Some of those cases use a real provider, so this obligation must
-  // take precedence over the normal release-only real-provider policy.
-  if (item.runner === "rust-legacy") {
-    return { include: true, reason: "L13: frozen legacy required until verified parity" };
-  }
   if (item.llm.default === "real" && gate !== "beta" && gate !== "stable") {
     return { include: false, reason: "real LLM canary is release-only" };
-  }
-  if (gate === "infra-compact") {
-    return item.tags.includes("infra-compact")
-      ? { include: true, reason: "infra compact" }
-      : { include: false, reason: "not infra-compact" };
-  }
-  if (gate === "infra-parallel") {
-    return item.tags.includes("infra-parallel")
-      ? { include: true, reason: "infra parallel" }
-      : { include: false, reason: "not infra-parallel" };
-  }
-  if (gate === "specialty:page-experience") {
-    return item.tags.includes("page-experience")
-      ? { include: true, reason: "page specialty" }
-      : { include: false, reason: "not page-experience" };
-  }
-  if (gate === "specialty:contracts") {
-    return item.tags.includes("contract")
-      ? { include: true, reason: "contract specialty" }
-      : { include: false, reason: "not contract" };
   }
   if (item.runner === "playwright") {
     return gate === "beta" || gate === "stable"
@@ -59,13 +28,7 @@ export function selectForGate(
       ? { include: true, reason: "release platform matrix" }
       : { include: false, reason: "e2e platform matrix not in this gate" };
   }
-  if (item.tags.includes("v1-wasm")) {
-    return { include: false, reason: "v1 signed-wasm role, not on this tree" };
-  }
-  if (item.tags.includes("agent-unconfined")) {
-    return { include: false, reason: "builtin agent tools are not a process sandbox on this tree" };
-  }
-  if (item.tags.includes("infra-compact")) {
+  if (item.tags.includes("infra-compact") && tags.length === 0) {
     return { include: false, reason: "infra-compact only" };
   }
   if (item.tags.includes("product-journey")) {

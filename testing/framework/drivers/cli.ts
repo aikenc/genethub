@@ -193,14 +193,15 @@ export function runGenetAsync(
   genet: string,
   args: string[],
   env: NodeJS.ProcessEnv,
-  options: { cwd?: string } = {},
+  options: { cwd?: string; stdin?: string | Uint8Array } = {},
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(genet, args, { env, cwd: options.cwd, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(genet, args, { env, cwd: options.cwd, stdio: [options.stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"] });
+    if (options.stdin !== undefined) { child.stdin?.once("error", reject); child.stdin?.end(options.stdin); }
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
-    child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
-    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+    child.stdout!.on("data", (chunk: Buffer) => stdout.push(chunk));
+    child.stderr!.on("data", (chunk: Buffer) => stderr.push(chunk));
     child.once("error", reject);
     child.once("close", (code) => {
       resolve({

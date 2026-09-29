@@ -72,9 +72,10 @@ daemon **不会**帮任何第三方 agent 写配置文件、注入密钥、或�
 | Claude Code / TClaude | CLI `--append-system-prompt` |
 | Codex | app-server `thread/start` / `thread/resume` 的 `developerInstructions` |
 | OpenCode | message API 的 `system` |
-| Cursor / 自定义 ACP | 标准 ACP 没有 system 字段。Cursor 把 guidance 放进 embedded `resource`（`genehub://system-guidance`）并在 `session/new` 带 `_meta.systemPrompt.append`，避免其自动起名吃到 Skill 目录；其他 ACP CLI 仍用每个 `session/prompt` 的首个 text block。用户请求始终是单独的 text block |
+| Cursor | print 模式把产品 guidance 包在 `genehub_system_guidance` 中，再通过 stdin 传入用户请求；不走 ACP 的在线回合 |
+| 自定义 ACP | 标准 ACP 没有 system 字段；产品 guidance 是 `session/prompt` 的首个 text block，用户请求保持独立 text block |
 
-这不是允许 Web 客户端提交任意 system prompt 的接口。RPC 仍可传 `artifactPreviewBaseUrl` 以兼容旧客户端，但 daemon 忽略部署前缀，只注入自有的路径链接指引（工作区相对文件路径、禁止目录、HTML 入口与支持类型）以及 `genehub-html-preview` 指针和沙箱短契约；用户消息在 GeneHub 时间线中保持原样。新增产品上下文先扩展 `SessionConfig`，再由各 adapter 映射，禁止在 session manager 里按 agent id 分支。
+这不是允许 Web 客户端提交任意 system prompt 的接口。当前 RPC 不再包含 `artifactPreviewBaseUrl`，旧字段只在独立 v3 协议转译边界处理；daemon 只注入自有的路径链接指引（工作区相对文件路径、禁止目录、HTML 入口与支持类型）以及 `genehub-html-preview` 指针和沙箱短契约；用户消息在 GeneHub 时间线中保持原样。新增产品上下文先扩展 `SessionConfig`，再由各 adapter 映射，禁止在 session manager 里按 agent id 分支。
 
 ```bash
 npm install -g @anthropic-ai/claude-code

@@ -25,6 +25,7 @@ import { useWorkbenchDocumentTitle } from "../location/title";
 import { NEW_SESSION_ID, scopedWorkbenchLocation } from "../location/workbench";
 import type { Target } from "../host";
 import { LogsPanel } from "../logs/LogsPanel";
+import { WorkflowView } from "../preview/WorkflowView";
 import { PreviewFloat } from "../preview/PreviewFloat";
 import { Client, type ProtocolDial } from "../protocol/client";
 import { SettingsPanel } from "../settings/SettingsPanel";
@@ -677,7 +678,6 @@ export function App({
               sessionId,
               text: capsule,
               attachments: [],
-              artifactPreviewBaseUrl: null,
               continuesRound: null,
             },
           });
@@ -1182,6 +1182,7 @@ export function App({
       {/* Outside every tab, because a finished download is not about whichever
           panel happens to be open. */}
       <UpdateToast host={host} />
+      {workbench.workflowView && workbench.client ? <WorkflowView key={`${workbench.workflowView.runId}/${workbench.workflowView.viewId ?? ""}`} target={workbench.workflowView} client={workbench.client} onClose={backPage} onSessionNavigation={() => { workbench.closeWorkflowView(); setSection("sessions"); setSessionsOpen(false); }} /> : null}
       {workbench.previewFloat ? (
         <PreviewFloat
           source={workbench.previewFloat}

@@ -1,4 +1,4 @@
-import { savedInputReceipts, saveInputReceipt, rememberDraftIdentity, draftIdentities, forgetDraftIdentity, saveLocalValue, localValue, initializeReplyReads, hasUnreadReply } from "./localConversation";
+import { savedInputSessionIds, savedInputReceipts, saveInputReceipt, rememberDraftIdentity, draftIdentities, forgetDraftIdentity, saveLocalValue, localValue, initializeReplyReads, hasUnreadReply } from "./localConversation";
 import type {
   AgentSpaceBuilderOperation,
   AgentSpaceBuilderReport,
@@ -241,6 +241,7 @@ interface WorkbenchState {
   rightPanel: RightPanel;
   /** Default Preview surface; null when closed. New-tab Preview is opt-in only. */
   previewFloat: PreviewFloatTarget | null;
+  workflowView: { workspaceId: string; runId: string; viewId?: string; nodeId?: string; params?: Record<string,unknown> } | null;
   timeline: TimelineState;
   /**
    * Warm snapshots for every chat tab still in the strip. Switching back to a
@@ -390,6 +391,7 @@ interface WorkbenchState {
     /** Written by hand, for an endpoint that cannot list its own models. */
     models?: string[];
     modelInputs?: Record<string, string[]>;
+  modelContextWindows?: Record<string, number>;
   }): Promise<void>;
   setSpeechQwen3(input: {
     stubEnabled: boolean;
@@ -439,6 +441,8 @@ interface WorkbenchState {
   setRightPanel(panel: RightPanel): void;
   openPreviewFloat(target: PreviewFloatRequest): void;
   closePreviewFloat(): void;
+  openWorkflowView(target: { workspaceId: string; runId: string; viewId?: string; nodeId?: string; params?: Record<string,unknown> }): void;
+  closeWorkflowView(): void;
   send(text: string, attachments?: Attachment[], videoFiles?: File[]): Promise<boolean>;
   /** Sends a failed message again, unchanged. */
   retryPending(messageId?: string): Promise<void>;
@@ -748,6 +752,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   activeTabId: null,
   rightPanel: null,
   previewFloat: null,
+  workflowView: null,
   timeline: emptyTimeline(),
   sessionTimelines: {},
   subscribedSessionIds: [],
@@ -810,6 +815,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       // what became of it. Only these lines' own sentences are withdrawn;
       // anything said since stands.
       if (connection === "ready") {
+        void flushInputOutboxes(get, set, client);
         if (reconnectNotice) {
           const stale = reconnectNotice;
           reconnectNotice = null;
@@ -867,6 +873,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         sessionListTimeoutNotice = { client, message: error.message };
       }
     });
+    if (get().client === client && sessions) void flushInputOutboxes(get, set, client);
     if (get().client === client && sessions && polledTurnFinished(previous, sessions)) {
       await loadWorkspaces(client, set).catch(unattended(client, get, set));
     }
@@ -1255,6 +1262,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     for (const input of previous.inputOutbox) {
       if (typedSnapshot.items.some(item => item.id === input.messageId) && client.identity) saveInputReceipt(client.identity.machineId, sessionId, input, true);
     }
+    void flushInputOutboxes(get, set, client, sessionId);
     const base = fromSnapshot(typedSnapshot, previous.pending, previous);
     // A slower subscription must not repaint whichever session the user opened
     // next. This is easy to hit when switching pages over a relay: both replies
@@ -1588,6 +1596,9 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     });
   },
 
+  openWorkflowView(target) { set({workflowView: target}); },
+  closeWorkflowView() { set({workflowView: null}); },
+
   closePreviewFloat() {
     set({ previewFloat: null });
   },
@@ -1697,7 +1708,6 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
           sessionId,
           text,
           attachments: sentAttachments,
-          artifactPreviewBaseUrl: null,
           continuesRound: null,
         },
       });
@@ -2394,7 +2404,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     if (reply?.type === "updateDownload") set({ download: reply.data });
   },
 
-  async setProvider({ providerId, apiKey, baseUrl, label, dialect, models, modelInputs }) {
+  async setProvider({ providerId, apiKey, baseUrl, label, dialect, models, modelInputs, modelContextWindows }) {
     set({ notice: null });
     const reply = await asked(set, () =>
       require_(get().client).call({
@@ -2407,6 +2417,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
           dialect: dialect ?? null,
           models: models ?? null,
           ...(modelInputs ? { modelInputs } : {}),
+          ...(modelContextWindows ? { modelContextWindows } : {}),
         },
       }),
     );
@@ -2794,12 +2805,30 @@ function openLandingPreview(get: () => WorkbenchState, intent: LandingIntent | n
  * is a caller that should quietly do nothing: `asked` has already said why if a
  * request was made and refused.
  */
-async function sendDurableInput(get: () => WorkbenchState, set: Setter, text: string, attachments: Attachment[], retry?: PendingMessage, videoFiles: File[] = []): Promise<boolean> {
+const flushingInputs = new WeakSet<Client>();
+async function flushInputOutboxes(get: () => WorkbenchState, set: Setter, client: Client, onlySession?: string): Promise<void> {
+  if (flushingInputs.has(client) || !client.identity?.features?.includes("session.input.v1")) return;
+  flushingInputs.add(client);
+  try {
+    const machine = client.identity.machineId;
+    const sessions = onlySession ? [onlySession] : savedInputSessionIds(machine);
+    for (const sessionId of sessions) {
+      for (const saved of savedInputReceipts(machine, sessionId)) {
+        if (get().client !== client || get().connection !== "ready") return;
+        if (!saved.autoRetry) break;
+        const inMemory = timelineOf(get(), sessionId).inputOutbox?.find(input => input.messageId === saved.messageId);
+        if (!await sendDurableInput(get, set, saved.text, saved.attachments, inMemory ?? saved, [], sessionId)) break;
+      }
+    }
+  } finally { flushingInputs.delete(client); }
+}
+
+async function sendDurableInput(get: () => WorkbenchState, set: Setter, text: string, attachments: Attachment[], retry?: PendingMessage, videoFiles: File[] = [], targetSessionId?: string): Promise<boolean> {
   const client = get().client;
   const machine = client?.identity?.machineId;
   const pendingVideos = retry?.videoFiles ?? videoFiles;
   if (!client || !machine) { set({ notice: "连接恢复后再发送。", restoreDraft: { text, attachments, ...(pendingVideos.length > 0 ? { videoFiles: pendingVideos } : {}) } }); return false; }
-  const origin = get().activeSessionId;
+  const origin = targetSessionId ?? get().activeSessionId;
   if (!origin && get().timeline.pending) { set({ restoreDraft: { text, attachments, ...(pendingVideos.length > 0 ? { videoFiles: pendingVideos } : {}) } }); return false; }
   // A Session can receive a new independent request while its squad works.
   // Do not silently bind arbitrary chat to the sole existing task. Explicit
@@ -2808,9 +2837,28 @@ async function sendDurableInput(get: () => WorkbenchState, set: Setter, text: st
   if (!origin) set(state => ({ timeline: { ...state.timeline, pending: input } }));
   const sessionId = origin ?? await start(get, set, input);
   if (!sessionId || get().client !== client) { if (get().client === client) set({ restoreDraft: { text, attachments, ...(pendingVideos.length > 0 ? { videoFiles: pendingVideos } : {}) } }); return false; }
+  if (!retry) {
+    // Make local admission order stable even when two inputs share a clock tick.
+    const previous = savedInputReceipts(machine, sessionId);
+    input.sentAtMs = Math.max(input.sentAtMs, ...previous.map(saved => saved.sentAtMs + 1));
+  }
   patchTimeline(sessionId, set, timeline => ({ pending: timeline.pending?.messageId === input.messageId ? null : timeline.pending,
     inputOutbox: [...(timeline.inputOutbox ?? []).filter(item => item.messageId !== input.messageId), { ...input, error: null }] }));
-  saveInputReceipt(machine, sessionId, input);
+  input.autoRetry = true;
+  if (!saveInputReceipt(machine, sessionId, input)) {
+    patchTimeline(sessionId, set, timeline => ({ inputOutbox: timeline.inputOutbox?.map(item => item.messageId === input.messageId ? { ...item, error: "本地保存失败，消息仅保留在当前页面；请勿关闭。" } : item) }));
+    return false;
+  }
+  const earlier = savedInputReceipts(machine, sessionId).some(saved => saved.messageId !== input.messageId && saved.sentAtMs <= input.sentAtMs);
+  if (retry && earlier) {
+    patchTimeline(sessionId, set, timeline => ({ inputOutbox: timeline.inputOutbox?.map(item => item.messageId === input.messageId ? { ...input, error: "请先核对较早的待发送消息，再重试此消息。" } : item) }));
+    return false;
+  }
+  if (get().connection !== "ready" || (!retry && earlier)) {
+    if (get().connection === "ready") void flushInputOutboxes(get, set, client, sessionId);
+    patchTimeline(sessionId, set, timeline => ({ inputOutbox: timeline.inputOutbox?.map(item => item.messageId === input.messageId ? { ...input, error: "本地待发送，连接恢复后自动核对并补发。" } : item) }));
+    return true;
+  }
   try {
     if (retry) {
       let received = false;
@@ -2839,13 +2887,16 @@ async function sendDurableInput(get: () => WorkbenchState, set: Setter, text: st
       input.attachments = sentAttachments;
       input.videoFiles = undefined;
     }
-    await client.call({ type: "session.send", payload: { sessionId, messageId: input.messageId, taskRunId: input.taskRunId, text: input.text, attachments: sentAttachments, artifactPreviewBaseUrl: null, continuesRound: null } });
+    await client.call({ type: "session.send", payload: { sessionId, messageId: input.messageId, taskRunId: input.taskRunId, text: input.text, attachments: sentAttachments, continuesRound: null } });
     saveInputReceipt(machine, sessionId, input, true);
     if (get().client === client) patchTimeline(sessionId, set, timeline => ({ inputOutbox: timeline.inputOutbox?.filter(item => item.messageId !== input.messageId) }));
     return true;
   } catch (error) {
+    input.autoRetry = Boolean(connectionLossMessage(error)) || get().connection !== "ready"
+      || (error instanceof ProtocolError_ && error.detail.code === "queueFull");
+    saveInputReceipt(machine, sessionId, input);
     const message = error instanceof ConnectionOutcomeUnknownError ? "接收结果待核对；重试会使用原消息 ID。" : error instanceof Error ? error.message : String(error);
-    if (get().client === client) patchTimeline(sessionId, set, timeline => ({ inputOutbox: timeline.inputOutbox?.map(item => item.messageId === input.messageId ? { ...item, error: message } : item) }));
+    if (get().client === client) patchTimeline(sessionId, set, timeline => ({ inputOutbox: timeline.inputOutbox?.map(item => item.messageId === input.messageId ? { ...input, error: message } : item) }));
     return false;
   }
 }

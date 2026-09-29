@@ -88,18 +88,20 @@ impl Shape {
                     }
                     walk(items, depth + 1, remaining)?;
                 }
-                Shape::String { values, min_length } => {
-                    if *min_length > 16384
-                        || values.as_ref().is_some_and(|v| {
-                            v.is_empty()
-                                || v.len() > 64
-                                || v.iter()
-                                    .any(|s| s.len() > 16384 || s.chars().count() < *min_length)
-                        })
-                    {
-                        bail!("output string enum/minLength exceeds bounds");
-                    }
+                Shape::String { min_length, .. } if *min_length > 16384 => {
+                    bail!("output string enum/minLength exceeds bounds");
                 }
+                Shape::String { values, min_length }
+                    if values.as_ref().is_some_and(|v| {
+                        v.is_empty()
+                            || v.len() > 64
+                            || v.iter()
+                                .any(|s| s.len() > 16384 || s.chars().count() < *min_length)
+                    }) =>
+                {
+                    bail!("output string enum/minLength exceeds bounds");
+                }
+                Shape::String { .. } => {}
                 _ => {}
             }
             Ok(())
@@ -124,7 +126,10 @@ impl Shape {
                 if values.keys().any(|k| !properties.contains_key(k))
                     || required.iter().any(|k| !values.contains_key(*k))
                 {
-                    bail!("output {path}: property set does not match its declared shape");
+                    return Err(crate::rpc_error::failure(
+                        genehub_proto::ErrorCode::Unsupported,
+                        format!("output {path}: property set does not match its declared shape"),
+                    ));
                 }
                 for (key, shape) in properties {
                     if let Some(value) = values.get(key) {
@@ -155,7 +160,10 @@ impl Shape {
                     || s.chars().count() < *min_length
                     || values.as_ref().is_some_and(|v| !v.contains(s))
                 {
-                    bail!("output {path}: string does not match its declared bounds/enum");
+                    return Err(crate::rpc_error::failure(
+                        genehub_proto::ErrorCode::Unsupported,
+                        format!("output {path}: string does not match its declared bounds/enum"),
+                    ));
                 }
             }
             (Self::Integer, Value::Number(n)) if n.is_i64() => {}

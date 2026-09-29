@@ -52,11 +52,6 @@ pub struct Config {
     /// neutral, backwards-compatible filesystem fact.
     #[serde(default)]
     pub agent_spaces: Vec<AgentSpaceEntry>,
-    /// The exclusive `pm` / `workerRole` shape this model replaced. Read once
-    /// so an existing installation keeps its project tree, then never written
-    /// again: two writable shapes would be two sources of truth.
-    #[serde(default, rename = "pipeSpaces", skip_serializing)]
-    pub(crate) legacy_pipe_spaces: Vec<LegacyPipeSpaceEntry>,
     /// Identifies one lifetime of the local workspace catalogue.
     ///
     /// This is deliberately unrelated to the machine identity and to any Hub
@@ -88,7 +83,6 @@ impl Default for Config {
             workspace_roots: Vec::new(),
             workspaces: Vec::new(),
             agent_spaces: Vec::new(),
-            legacy_pipe_spaces: Vec::new(),
             workspace_catalog_generation: String::new(),
             workspace_catalog_revision: 0,
             replay_window: 2048,
@@ -184,6 +178,9 @@ pub struct ProviderConfig {
 pub struct CustomAgent {
     pub extends: String,
     pub command: Vec<String>,
+    /// Explicit mode IDs whose ACP CLI can continue without Human approval.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unattended_modes: Vec<String>,
     #[serde(default)]
     pub label: Option<String>,
 }
@@ -264,49 +261,25 @@ pub struct AgentComponentEntry {
     pub role: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct LegacyPipeSpaceEntry {
-    workspace_id: String,
-    #[serde(default)]
-    parent_workspace_id: Option<String>,
-    #[serde(default)]
-    pm: bool,
-    #[serde(default)]
-    worker_role: Option<String>,
-    lifecycle: String,
-    builder_lock_digest: String,
-}
-
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         match fs::read_to_string(path) {
             Ok(raw) => {
-                let mut value: serde_json::Value = serde_json::from_str(&raw)
+                let value: serde_json::Value = serde_json::from_str(&raw)
                     .with_context(|| format!("parsing {}", path.display()))?;
-                let remove_legacy_speech_provider = value
-                    .get_mut("speech")
-                    .and_then(serde_json::Value::as_object_mut)
-                    .is_some_and(|speech| {
+                if value.get("pipeSpaces").is_some()
+                    || value.get("speech").is_some_and(|speech| {
                         ["region", "dashscopeWorkspaceId", "apiKey"]
                             .iter()
-                            .filter_map(|field| speech.remove(*field))
-                            .count()
-                            > 0
-                    });
-                if remove_legacy_speech_provider {
-                    let rewritten = serde_json::to_string_pretty(&value)?;
-                    save_private(path, rewritten.as_bytes()).with_context(|| {
-                        format!(
-                            "removing obsolete speech credentials from {}",
-                            path.display()
-                        )
-                    })?;
+                            .any(|key| speech.get(*key).is_some())
+                    })
+                {
+                    anyhow::bail!("unsupported development config format; recreate it using the current version");
                 }
                 let mut config: Self = serde_json::from_value(value)
                     .with_context(|| format!("parsing {}", path.display()))?;
                 config.normalize_workspace_paths();
-                config.adopt_legacy_pipe_spaces();
+                config.validate_workspace_layout()?;
                 Ok(config)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
@@ -314,65 +287,40 @@ impl Config {
         }
     }
 
+    pub fn validate_workspace_layout(&self) -> Result<()> {
+        let mut ids = std::collections::HashSet::new();
+        let mut handles = std::collections::HashSet::new();
+        let mut roots = std::collections::HashSet::new();
+        for mapping in &self.workspace_roots {
+            if !valid_workspace_root_handle(&mapping.handle)
+                || !handles.insert(&mapping.handle)
+                || !roots.insert(&mapping.root)
+            {
+                anyhow::bail!("invalid current workspace root mapping");
+            }
+        }
+        for workspace in &self.workspaces {
+            if workspace.id.is_empty()
+                || !ids.insert(&workspace.id)
+                || workspace.folders.is_empty()
+                || workspace.folders.first().map(|folder| &folder.root) != Some(&workspace.root)
+            {
+                anyhow::bail!("invalid current workspace layout: {}", workspace.id);
+            }
+            for folder in &workspace.folders {
+                if !self.workspace_roots.iter().any(|mapping| {
+                    mapping.handle == folder.root_handle && mapping.root == folder.root
+                }) {
+                    anyhow::bail!("workspace {} has an unregistered folder root", workspace.id);
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn save(&self, path: &Path) -> Result<()> {
         let body = serde_json::to_string_pretty(self)?;
         save_private(path, body.as_bytes())
-    }
-
-    /// Reads the exclusive-role registrations an older build wrote and states
-    /// them as component mounts.
-    ///
-    /// Directional on purpose. The old shape cannot express a Space with two
-    /// responsibilities, so a round trip through it would silently drop one;
-    /// the legacy field is therefore never written back. An entry already
-    /// present in `agentSpaces` wins, which makes a partially upgraded config
-    /// converge instead of resurrecting a stale relationship.
-    fn adopt_legacy_pipe_spaces(&mut self) {
-        for legacy in std::mem::take(&mut self.legacy_pipe_spaces) {
-            if self
-                .agent_spaces
-                .iter()
-                .any(|space| space.workspace_id == legacy.workspace_id)
-            {
-                continue;
-            }
-            let mut components = Vec::new();
-            if legacy.pm {
-                components.push(AgentComponentEntry {
-                    component_id: crate::agent_space::COMPONENT_PM.to_string(),
-                    schema_version: crate::agent_space::COMPONENT_SCHEMA_VERSION,
-                    enabled: true,
-                    role: None,
-                });
-            }
-            match legacy.worker_role.as_deref() {
-                None => {}
-                Some(crate::agent_space::LEGACY_EXECUTOR_ROLE) => {
-                    components.push(AgentComponentEntry {
-                        component_id: crate::agent_space::COMPONENT_EXECUTOR.to_string(),
-                        schema_version: crate::agent_space::COMPONENT_SCHEMA_VERSION,
-                        enabled: true,
-                        role: None,
-                    });
-                }
-                Some(role) => components.push(AgentComponentEntry {
-                    component_id: crate::agent_space::COMPONENT_WORKER.to_string(),
-                    schema_version: crate::agent_space::COMPONENT_SCHEMA_VERSION,
-                    enabled: true,
-                    role: Some(role.to_string()),
-                }),
-            }
-            components.sort_by(|left, right| left.component_id.cmp(&right.component_id));
-            self.agent_spaces.push(AgentSpaceEntry {
-                workspace_id: legacy.workspace_id,
-                parent_workspace_id: legacy.parent_workspace_id,
-                revision: 1,
-                lifecycle: legacy.lifecycle,
-                builder_lock_digest: legacy.builder_lock_digest,
-                components,
-                guidance: Vec::new(),
-            });
-        }
     }
 
     /// Rewrites workspace roots from a Windows host's spelling into the
@@ -414,118 +362,6 @@ impl Config {
             root: root.to_path_buf(),
         });
         handle
-    }
-
-    /// Rewrites the old one-root representation once, instead of carrying a
-    /// permanent runtime fallback through every filesystem operation.
-    pub fn migrate_workspace_folders(&mut self, path: &Path) -> Result<()> {
-        let mut changed = false;
-        for workspace in &mut self.workspaces {
-            if workspace.folders.is_empty() {
-                workspace.folders.push(WorkspaceFolderEntry {
-                    name: workspace
-                        .root
-                        .file_name()
-                        .map(|name| name.to_string_lossy().to_string())
-                        .unwrap_or_else(|| workspace.name.clone()),
-                    root: workspace.root.clone(),
-                    root_handle: String::new(),
-                });
-                changed = true;
-            }
-            if workspace.folders.first().map(|folder| &folder.root) != Some(&workspace.root) {
-                anyhow::bail!(
-                    "workspace {} primary root does not match its first folder",
-                    workspace.id
-                );
-            }
-        }
-        if changed {
-            self.save(path)?;
-        }
-        Ok(())
-    }
-
-    /// Gives every concrete folder one durable, device-local locator.
-    ///
-    /// This is a one-time rewrite for configurations written before roots were
-    /// first-class. Runtime resolution has no alias/path-name fallback after
-    /// startup: every project folder must carry the canonical global handle.
-    pub fn migrate_workspace_roots(&mut self, path: &Path) -> Result<()> {
-        let mut changed = false;
-        let mut handles = std::collections::HashMap::<String, PathBuf>::new();
-        let mut roots = std::collections::HashMap::<PathBuf, String>::new();
-        let mut normalized = Vec::with_capacity(self.workspace_roots.len());
-
-        for mut mapping in std::mem::take(&mut self.workspace_roots) {
-            if !valid_workspace_root_handle(&mapping.handle)
-                || handles
-                    .get(&mapping.handle)
-                    .is_some_and(|root| root != &mapping.root)
-            {
-                mapping.handle = new_workspace_root_handle(handles.keys().map(String::as_str));
-                changed = true;
-            }
-            if let Some(existing) = roots.get(&mapping.root) {
-                if existing != &mapping.handle {
-                    changed = true;
-                }
-                continue;
-            }
-            handles.insert(mapping.handle.clone(), mapping.root.clone());
-            roots.insert(mapping.root.clone(), mapping.handle.clone());
-            normalized.push(mapping);
-        }
-        self.workspace_roots = normalized;
-
-        for workspace in &mut self.workspaces {
-            for folder in &mut workspace.folders {
-                let handle = match roots.get(&folder.root) {
-                    Some(handle) => handle.clone(),
-                    None => {
-                        let handle = new_workspace_root_handle(handles.keys().map(String::as_str));
-                        roots.insert(folder.root.clone(), handle.clone());
-                        handles.insert(handle.clone(), folder.root.clone());
-                        self.workspace_roots.push(WorkspaceRootEntry {
-                            handle: handle.clone(),
-                            root: folder.root.clone(),
-                        });
-                        changed = true;
-                        handle
-                    }
-                };
-                if folder.root_handle != handle {
-                    folder.root_handle = handle;
-                    changed = true;
-                }
-            }
-        }
-
-        if changed {
-            self.save(path)?;
-        }
-        Ok(())
-    }
-
-    /// Repairs malformed local ids without merging distinct project sources.
-    /// A directly opened folder and every `.code-workspace` file are separate
-    /// projects even when their Agent root is the same physical directory.
-    pub fn migrate_workspace_identities(&mut self, path: &Path) -> Result<()> {
-        let mut changed = false;
-        let mut ids = std::collections::HashSet::new();
-        for workspace in &mut self.workspaces {
-            if workspace.id.trim().is_empty() || !ids.insert(workspace.id.clone()) {
-                workspace.id = format!("w_{}", uuid::Uuid::new_v4().simple());
-                ids.insert(workspace.id.clone());
-                changed = true;
-            }
-        }
-
-        if changed {
-            self.workspace_catalog_revision = self.workspace_catalog_revision.saturating_add(1);
-            self.save(path)?;
-        }
-        Ok(())
     }
 
     /// Makes the catalogue generation durable before it is ever uploaded.
@@ -780,6 +616,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn obsolete_config_is_rejected_without_rewriting_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        for raw in [
+            r#"{"pipeSpaces":[]}"#,
+            r#"{"speech":{"apiKey":"old"}}"#,
+            r#"{"workspaces":[{"id":"w1","root":"/old","name":"old"}]}"#,
+        ] {
+            std::fs::write(&path, raw).unwrap();
+            assert!(Config::load(&path).is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+        }
+    }
+
+    #[test]
     fn a_missing_config_reads_as_defaults_rather_than_failing() {
         let dir = tempfile::tempdir().unwrap();
         let config = Config::load(&dir.path().join("nope.json")).unwrap();
@@ -802,122 +653,6 @@ mod tests {
     }
 
     #[test]
-    fn exclusive_role_registrations_are_read_as_mounted_components() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        let mut value = serde_json::to_value(Config::default()).unwrap();
-        value.as_object_mut().unwrap().insert(
-            "pipeSpaces".into(),
-            serde_json::json!([
-                {
-                    "workspaceId": "ws_project",
-                    "pm": true,
-                    "lifecycle": "persistent",
-                    "builderLockDigest": "sha256:project",
-                },
-                {
-                    "workspaceId": "ws_executor",
-                    "parentWorkspaceId": "ws_project",
-                    "pm": false,
-                    "workerRole": "workflow-executor",
-                    "lifecycle": "pooled",
-                    "builderLockDigest": "sha256:executor",
-                },
-                {
-                    "workspaceId": "ws_tester",
-                    "parentWorkspaceId": "ws_project",
-                    "pm": false,
-                    "workerRole": "tester",
-                    "lifecycle": "persistent",
-                    "builderLockDigest": "sha256:tester",
-                },
-            ]),
-        );
-        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
-
-        let loaded = Config::load(&path).unwrap();
-
-        let components = |workspace_id: &str| {
-            loaded
-                .agent_spaces
-                .iter()
-                .find(|space| space.workspace_id == workspace_id)
-                .map(|space| {
-                    space
-                        .components
-                        .iter()
-                        .map(|component| (component.component_id.clone(), component.role.clone()))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap()
-        };
-        assert_eq!(components("ws_project"), vec![("pm".into(), None)]);
-        assert_eq!(components("ws_executor"), vec![("executor".into(), None)]);
-        assert_eq!(
-            components("ws_tester"),
-            vec![("worker".into(), Some("tester".into()))],
-            "an ordinary worker role becomes the worker component's role"
-        );
-        assert!(loaded
-            .agent_spaces
-            .iter()
-            .all(|space| space.revision == 1 && !space.builder_lock_digest.is_empty()));
-
-        loaded.save(&path).unwrap();
-        let rewritten: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert!(
-            rewritten.get("pipeSpaces").is_none(),
-            "the replaced shape is never written back, so there is only one truth on disk"
-        );
-        assert_eq!(
-            Config::load(&path).unwrap().agent_spaces,
-            loaded.agent_spaces,
-            "the migrated registry survives the rewrite it just caused"
-        );
-    }
-
-    #[test]
-    fn an_already_migrated_registration_is_not_overwritten_by_the_legacy_field() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        let mut value = serde_json::to_value(Config {
-            agent_spaces: vec![AgentSpaceEntry {
-                workspace_id: "ws_project".into(),
-                parent_workspace_id: None,
-                revision: 7,
-                lifecycle: "persistent".into(),
-                builder_lock_digest: "sha256:current".into(),
-                components: vec![AgentComponentEntry {
-                    component_id: "executor".into(),
-                    schema_version: 1,
-                    enabled: true,
-                    role: None,
-                }],
-                guidance: Vec::new(),
-            }],
-            ..Default::default()
-        })
-        .unwrap();
-        value.as_object_mut().unwrap().insert(
-            "pipeSpaces".into(),
-            serde_json::json!([{
-                "workspaceId": "ws_project",
-                "pm": true,
-                "lifecycle": "ephemeral",
-                "builderLockDigest": "sha256:stale",
-            }]),
-        );
-        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
-
-        let loaded = Config::load(&path).unwrap();
-
-        assert_eq!(loaded.agent_spaces.len(), 1);
-        assert_eq!(loaded.agent_spaces[0].revision, 7);
-        assert_eq!(loaded.agent_spaces[0].lifecycle, "persistent");
-    }
-
-    #[test]
     fn config_survives_a_save_and_load_cycle() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
@@ -930,6 +665,10 @@ mod tests {
             args: vec!["--model".into(), "Qwen/Qwen3-ASR-1.7B-hf".into()],
         });
         config.speech.stub_enabled = true;
+        config.workspace_roots.push(WorkspaceRootEntry {
+            handle: "r_demo".into(),
+            root: PathBuf::from("/tmp/demo"),
+        });
         config.workspaces.push(WorkspaceEntry {
             id: "w1".into(),
             name: "demo".into(),
@@ -951,174 +690,6 @@ mod tests {
         assert_eq!(loaded.workspaces[0].name, "demo");
         assert_eq!(loaded.speech.runtime, config.speech.runtime);
         assert!(loaded.speech.stub_enabled);
-    }
-
-    #[test]
-    fn loading_removes_obsolete_cloud_speech_credentials_from_disk() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        std::fs::write(
-            &path,
-            r#"{
-                "port": 1234,
-                "speech": {
-                    "region": "beijing",
-                    "dashscopeWorkspaceId": "legacy-workspace",
-                    "apiKey": "legacy-secret",
-                    "contextEnabled": false,
-                    "pinnedTerms": ["GeneHub"],
-                    "languageHints": ["zh"]
-                },
-                "futureField": {"keep": true}
-            }"#,
-        )
-        .unwrap();
-
-        let loaded = Config::load(&path).unwrap();
-
-        assert!(!loaded.speech.context_enabled);
-        assert_eq!(loaded.speech.pinned_terms, ["GeneHub"]);
-        let rewritten = std::fs::read_to_string(&path).unwrap();
-        assert!(!rewritten.contains("legacy-secret"));
-        assert!(!rewritten.contains("legacy-workspace"));
-        assert!(!rewritten.contains("dashscopeWorkspaceId"));
-        assert!(!rewritten.contains("\"region\""));
-        assert!(rewritten.contains("futureField"));
-    }
-
-    #[test]
-    fn legacy_workspace_roots_are_migrated_once_to_folder_records() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        let root = dir.path().join("project");
-        let mut config = Config::default();
-        config.workspaces.push(WorkspaceEntry {
-            id: "w1".into(),
-            name: "Project".into(),
-            root: root.clone(),
-            folders: Vec::new(),
-            workspace_file: None,
-            removed: false,
-            is_git_repo: false,
-        });
-        config.save(&path).unwrap();
-
-        let mut loaded = Config::load(&path).unwrap();
-        loaded.migrate_workspace_folders(&path).unwrap();
-        loaded.migrate_workspace_roots(&path).unwrap();
-        assert_eq!(loaded.workspaces[0].folders.len(), 1);
-        assert_eq!(loaded.workspaces[0].folders[0].root, root);
-        assert!(loaded.workspaces[0].folders[0]
-            .root_handle
-            .starts_with("r_"));
-
-        let saved = Config::load(&path).unwrap();
-        assert_eq!(saved.workspaces[0].folders.len(), 1);
-        assert_eq!(saved.workspace_roots.len(), 1);
-        assert_eq!(
-            saved.workspaces[0].folders[0].root_handle,
-            saved.workspace_roots[0].handle
-        );
-    }
-
-    #[test]
-    fn folder_and_workspace_projects_keep_distinct_ids_but_share_global_roots() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        let root = dir.path().join("product");
-        let docs = dir.path().join("docs");
-        let definition = dir.path().join("suite.code-workspace");
-        let folder = WorkspaceFolderEntry {
-            name: "product".into(),
-            root: root.clone(),
-            root_handle: String::new(),
-        };
-        let mut config = Config {
-            workspaces: vec![
-                WorkspaceEntry {
-                    id: "w_folder".into(),
-                    name: "product".into(),
-                    root: root.clone(),
-                    folders: vec![folder.clone()],
-                    workspace_file: None,
-                    removed: false,
-                    is_git_repo: false,
-                },
-                WorkspaceEntry {
-                    id: "w_suite".into(),
-                    name: "suite".into(),
-                    root: root.clone(),
-                    folders: vec![
-                        WorkspaceFolderEntry {
-                            name: "Product".into(),
-                            root: root.clone(),
-                            root_handle: String::new(),
-                        },
-                        WorkspaceFolderEntry {
-                            name: "Docs".into(),
-                            root: docs,
-                            root_handle: String::new(),
-                        },
-                    ],
-                    workspace_file: Some(definition.clone()),
-                    removed: true,
-                    is_git_repo: false,
-                },
-            ],
-            ..Config::default()
-        };
-
-        config.migrate_workspace_roots(&path).unwrap();
-        config.migrate_workspace_identities(&path).unwrap();
-
-        assert_eq!(config.workspaces.len(), 2);
-        assert_eq!(config.workspaces[0].id, "w_folder");
-        assert_eq!(config.workspaces[1].id, "w_suite");
-        assert_eq!(
-            config.workspaces[0].folders[0].root_handle,
-            config.workspaces[1].folders[0].root_handle
-        );
-        assert_ne!(
-            config.workspaces[0].folders[0].root_handle,
-            config.workspaces[1].folders[1].root_handle
-        );
-        assert_eq!(config.workspace_roots.len(), 2);
-        assert_eq!(config.workspace_catalog_revision, 0);
-        assert_eq!(Config::load(&path).unwrap().workspaces.len(), 2);
-    }
-
-    #[test]
-    fn malformed_root_handles_are_repaired_before_runtime_resolution() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        let root = dir.path().join("project");
-        let mut config = Config {
-            workspace_roots: vec![WorkspaceRootEntry {
-                handle: "../project".into(),
-                root: root.clone(),
-            }],
-            workspaces: vec![WorkspaceEntry {
-                id: "w_project".into(),
-                name: "project".into(),
-                root: root.clone(),
-                folders: vec![WorkspaceFolderEntry {
-                    name: "project".into(),
-                    root,
-                    root_handle: "../project".into(),
-                }],
-                workspace_file: None,
-                removed: false,
-                is_git_repo: false,
-            }],
-            ..Config::default()
-        };
-
-        config.migrate_workspace_roots(&path).unwrap();
-
-        let handle = &config.workspace_roots[0].handle;
-        assert!(valid_workspace_root_handle(handle));
-        assert_eq!(config.workspaces[0].folders[0].root_handle, *handle);
-        assert!(!handle.contains('/'));
     }
 
     #[test]

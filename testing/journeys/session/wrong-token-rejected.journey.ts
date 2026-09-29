@@ -6,7 +6,7 @@ defineJourney(
     title: "A connection without the token is rejected outright",
     oracle: "canonical Client without loopback proof or device credential never becomes ready",
     catches: ["anonymous peer is treated as local user"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     expectedDurationMs: 25_000,
     timeoutMs: 75_000,
     surfaces: ["daemon", "workbench-client"],

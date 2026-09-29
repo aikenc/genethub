@@ -9,7 +9,7 @@ defineJourney(
     title: "Files can be browsed and edited through the workspace",
     oracle: "file.tree shows src/ and file.write changes disk",
     catches: ["tree from memory", "write ignored"],
-    tags: ["core", "workspace", "filesystem", "parity"],
+    tags: ["core", "workspace", "filesystem"],
     expectedDurationMs: 20_000,
     timeoutMs: 60_000,
     surfaces: ["daemon", "workbench-client"],

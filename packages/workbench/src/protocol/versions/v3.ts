@@ -1,4 +1,4 @@
-import type { Reply, Request, ServerFrame } from "@genehub/proto";
+import type { Reply, Request, ServerFrame } from "./v3-types";
 
 /**
  * Business protocol v3's exact boundary types.

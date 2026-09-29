@@ -6,7 +6,7 @@ defineJourney(
     title: "A task with no credentials says so instead of failing silently",
     oracle: "turnFailed code is missingCredentials",
     catches: ["silent hang", "generic internal error"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     llm: { default: "none" },
     resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
     expectedDurationMs: 25_000,

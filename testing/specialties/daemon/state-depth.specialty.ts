@@ -226,7 +226,13 @@ daemonCase(
       const sessionId = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
       const observer = await t.flows.main.openSecondClient(opened, "session-delete-observer");
       try {
-        await opened.client.call({ type: "session.delete", payload: { sessionId } });
+        const deletes = await Promise.all([
+          opened.client.call({ type: "session.delete", payload: { sessionId } }),
+          observer.call({ type: "session.delete", payload: { sessionId } }),
+        ]);
+        t.assertions.assert(deletes.every(reply => reply?.type === "ack"), "concurrent deletion did not acknowledge the desired state");
+        const repeated = await observer.call({ type: "session.delete", payload: { sessionId } });
+        t.assertions.assert(repeated?.type === "ack", "deleting an absent session is not idempotent");
         const listed = await observer.call({
           type: "session.list",
           payload: { workspaceId: opened.workspaceId, includeArchived: true },

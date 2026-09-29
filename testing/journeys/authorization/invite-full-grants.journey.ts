@@ -6,7 +6,7 @@ defineJourney(
     title: "A device granted everything still works exactly as before",
     oracle: "an invite with no named grants can list workspaces and read settings",
     catches: ["empty grant set silently narrows existing devices"],
-    tags: ["core", "authorization", "parity"],
+    tags: ["core", "authorization"],
     expectedDurationMs: 30_000,
     timeoutMs: 90_000,
     surfaces: ["daemon", "workbench-client"],

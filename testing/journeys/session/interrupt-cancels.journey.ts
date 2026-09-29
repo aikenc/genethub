@@ -6,7 +6,7 @@ defineJourney(
     title: "Interrupting a running turn ends it as canceled",
     oracle: "session.interrupt yields turnCanceled, not turnCompleted",
     catches: ["stop button completes the turn"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     llm: { default: "mock" },
     resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
     expectedDurationMs: 25_000,

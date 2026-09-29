@@ -32,8 +32,9 @@ impl Emitter {
         }
     }
 
-    /// Lets a private in-process run collect frames instead of writing them to
-    /// the parent RPC stream. Tests use the same path.
+    /// Lets a private in-process test collect frames instead of writing them to
+    /// the parent RPC stream.
+    #[cfg(test)]
     pub fn collector(sink: mpsc::UnboundedSender<Value>) -> Self {
         let (tx, mut rx) = mpsc::unbounded_channel::<Frame>();
         tokio::spawn(async move {

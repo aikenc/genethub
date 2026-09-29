@@ -1,3 +1,4 @@
+import { writeWorkflowFlow } from "../../framework/public.ts";
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
@@ -35,16 +36,60 @@ defineSpecialty({
     t.assertions.assert(before.activationRevision === 1 && !!before.activeDigest, "initial Candidate was not activated");
 
     writeFileSync(manifest, "---\ndescription: Human activation fixture\nrecovery: flows/recovery.yaml\n---\n");
-    writeFileSync(path.join(source, "flows/recovery.yaml"), JSON.stringify({
-      schema: "genehub.workflow.definition.v1", id: "recovery", version: 1, entry: "review",
-      outcomes: { resume: { success: true }, human: { success: false } },
-      nodes: [{ id: "review", uses: "agent.session", with: { role: "worker" }, on: { resume: ["publish"], human: [] } },
-        { id: "publish", uses: "result.publish" }],
-    }));
+    writeWorkflowFlow(source, "recovery.yaml", {id: "recovery",
+outcomes: { resume: { success: true }, human: { success: false } },
+nodes: [{id: "review", uses: "agent.session", with: { role: "worker" }},
+{id: "publish", uses: "result.publish"}],
+structure: {
+  "body": {
+    "id": "sequence-review",
+    "type": "sequence",
+    "steps": [
+      {
+        "id": "step-review",
+        "type": "task",
+        "activity": "review",
+        "accept": [
+          "resume"
+        ]
+      },
+      {
+        "id": "choose-review",
+        "type": "choice",
+        "branches": [
+          {
+            "condition": {
+              "op": "eq",
+              "left": {
+                "op": "ref",
+                "path": "/results/step-review/outcome"
+              },
+              "right": {
+                "op": "literal",
+                "value": "resume"
+              }
+            },
+            "body": {
+              "id": "step-publish",
+              "type": "task",
+              "activity": "publish"
+            }
+          }
+        ],
+        "default": {
+          "id": "end-review",
+          "type": "sequence",
+          "steps": []
+        }
+      }
+    ]
+  }
+}});
     let attempts = 0, firstSent = false, retrySent = false, dispatched = false;
     opened.mock.script(...Array.from({ length: 40 }, () => ({ respond: (request: unknown) => {
       const body = JSON.stringify(request);
-      if (body.includes("只读复查被处理的 Run")) return { hang: true as const };
+      if (body.includes("角色标签为 `recovery-reviewer`")) return { hang: true as const };
+      if (body.includes('<genehub_managed_session>')) return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" workflow complete --outcome blocked --reason "fixture fault after reset" --evidence result=failed' } } };
       if (body.includes("START_AFTER_RESET") && !dispatched) {
         dispatched = true;
         return { tool: { name: "bash", arguments: {
@@ -76,7 +121,7 @@ defineSpecialty({
     t.assertions.assert(card.options?.map(option => option.id).join(",") === "approve,reject",
       "recovery activation card has the wrong Human options");
     const candidate = (await status()).candidateDigest;
-    t.assertions.assert(!!candidate && card.detail?.includes(candidate)
+    t.assertions.assert(!!candidate && card.description?.includes(candidate)
       && (await status()).activeDigest === before.activeDigest && (await status()).activationRevision === 1,
     "unapproved recovery Candidate became active or the card omitted its identity");
     const answered = await opened.client.call({ type: "session.respondPermission", payload: {

@@ -291,19 +291,7 @@ fn own_session(command: &mut tokio::process::Command) {
     // SAFETY: the closure runs in the forked child, where only
     // async-signal-safe syscalls are allowed. These two are.
     unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() != -1 {
-                return Ok(());
-            }
-            let error = std::io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::EPERM) {
-                return Err(error);
-            }
-            if libc::setpgid(0, 0) == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
+        command.pre_exec(genet_native::process_group::own_session);
     }
 }
 
@@ -351,26 +339,13 @@ impl ChildHandle {
 }
 #[cfg(unix)]
 fn signal_group(pid: Option<u32>, signal: libc::c_int) {
-    let Some(pid) = pid else { return };
-    // Looked up rather than assumed: aiming at a pid that never led a group
-    // would send the signal to strangers.
-    let group = unsafe { libc::getpgid(pid as libc::pid_t) };
-    if group > 0 {
-        unsafe { libc::killpg(group, signal) };
-        return;
+    if let Some(pid) = pid {
+        genet_native::process_group::signal_owned(pid, signal);
     }
-    // The leader has been reaped. What it started is still reachable by the
-    // group number, which is the leader's old pid.
-    unsafe { libc::killpg(pid as libc::pid_t, signal) };
 }
-
 #[cfg(unix)]
 fn group_alive(pid: Option<u32>) -> bool {
-    let Some(pid) = pid else { return false };
-    if unsafe { libc::getpgid(pid as libc::pid_t) } > 0 {
-        return true;
-    }
-    unsafe { libc::killpg(pid as libc::pid_t, 0) == 0 }
+    pid.is_some_and(genet_native::process_group::tree_exists)
 }
 
 #[cfg(not(unix))]

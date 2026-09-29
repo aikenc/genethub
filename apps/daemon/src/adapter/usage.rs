@@ -1,16 +1,33 @@
 //! Shared token accounting for every adapter.
 //!
-//! Providers disagree on field names and on whether `input` already includes
-//! the cached portion. This module only reads numbers; the UI subtracts cache
-//! when it can and keeps tool output as its own column.
+//! Input is always the total including cache; cache counts are details.
+//! Exclusive-input dialects must normalize at their adapter boundary.
 
 use std::collections::HashSet;
 
 use genehub_proto::{ItemDelta, SessionEvent, TimelineItem, ToolCallDetail, ToolStatus, Usage};
 use serde_json::Value;
 
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
+use crate::session::store::now_ms;
+
+/// Replace supplier totals while retaining the turn's measured local work.
+/// Empty reports must not erase token totals already observed.
+pub(super) fn replace_reported_usage(usage: &mut Usage, reported: &Value) -> bool {
+    let mut parsed = parse_usage(reported);
+    if parsed.input_tokens_reported != Some(true) && parsed.output_tokens_reported != Some(true) {
+        return false;
+    }
+    if parsed.input_tokens_reported != Some(true) {
+        parsed.input_tokens = usage.input_tokens;
+    }
+    if parsed.output_tokens_reported != Some(true) {
+        parsed.output_tokens = usage.output_tokens;
+    }
+    parsed.llm_rounds = usage.llm_rounds;
+    parsed.tool_output_tokens = usage.tool_output_tokens;
+    preserve_timing(&mut parsed, usage);
+    *usage = parsed;
+    true
 }
 
 /// Marks the moment one LLM round's request went out. TTFT for that round is
@@ -101,7 +118,7 @@ fn output_rate(usage: &Usage, active_ms: u64) -> Option<(f64, bool)> {
         }
     };
     let seconds = window_ms.max(1) as f64 / 1000.0;
-    if usage.output_tokens > 0 {
+    if usage.output_tokens_reported == Some(true) || usage.output_tokens > 0 {
         return Some((usage.output_tokens as f64 / seconds, false));
     }
     if usage.visible_output_chars > 0 {
@@ -166,6 +183,16 @@ pub fn emit_progress(events: &crate::adapter::EventTx, turn_id: &str, usage: &Us
     });
 }
 
+/// Claude's native usage uses Anthropic's exclusive input count.
+pub fn add_anthropic_usage(total: &mut Usage, value: &Value) {
+    let parsed = parse_usage(value);
+    add_usage(total, value);
+    total.input_tokens = total
+        .input_tokens
+        .saturating_add(parsed.cache_read_tokens)
+        .saturating_add(parsed.cache_write_tokens);
+}
+
 pub fn parse_usage(value: &Value) -> Usage {
     let mut usage = Usage::default();
     add_usage(&mut usage, value);
@@ -188,6 +215,44 @@ pub fn add_usage(total: &mut Usage, value: &Value) {
         .cloned()
         .unwrap_or(Value::Null);
 
+    let input_present = value
+        .get("inputReported")
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| {
+            first_u64(
+                value,
+                &[
+                    "input",
+                    "input_tokens",
+                    "inputTokens",
+                    "prompt_tokens",
+                    "promptTokens",
+                ],
+            )
+            .or_else(|| first_u64(tokens, &["input", "input_tokens", "inputTokens"]))
+            .is_some()
+        });
+    let output_present = value
+        .get("outputReported")
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| {
+            first_u64(
+                value,
+                &[
+                    "output",
+                    "output_tokens",
+                    "outputTokens",
+                    "completion_tokens",
+                    "completionTokens",
+                ],
+            )
+            .or_else(|| first_u64(tokens, &["output", "output_tokens", "outputTokens"]))
+            .is_some()
+        });
+    total.input_tokens_reported =
+        Some(total.input_tokens_reported.unwrap_or(true) && input_present);
+    total.output_tokens_reported =
+        Some(total.output_tokens_reported.unwrap_or(true) && output_present);
     if let Some(input) = first_u64(
         value,
         &[
@@ -272,10 +337,16 @@ pub fn add_usage(total: &mut Usage, value: &Value) {
 /// Prefer the incoming running totals; keep a field the incoming side left at
 /// zero so a later daemon estimate is not wiped.
 pub fn merge_progress(tracked: &mut Usage, incoming: &Usage) {
-    if incoming.input_tokens > 0 {
+    if incoming.input_tokens_reported.is_some() {
+        tracked.input_tokens_reported = incoming.input_tokens_reported;
+    }
+    if incoming.output_tokens_reported.is_some() {
+        tracked.output_tokens_reported = incoming.output_tokens_reported;
+    }
+    if incoming.input_tokens_reported == Some(true) || incoming.input_tokens > 0 {
         tracked.input_tokens = incoming.input_tokens;
     }
-    if incoming.output_tokens > 0 {
+    if incoming.output_tokens_reported == Some(true) || incoming.output_tokens > 0 {
         tracked.output_tokens = incoming.output_tokens;
     }
     if incoming.cache_read_tokens > 0 {

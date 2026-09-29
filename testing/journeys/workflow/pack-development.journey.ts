@@ -96,7 +96,7 @@ for (const scenario of ["milestones", "replan", "exhausted", "no-go", "budget-ga
       if (budgetCommand) { const command = budgetCommand; budgetCommand = undefined; return { tool: { name: "bash", arguments: { command } } }; }
       const stage = pmStage++;
       if (stage === 0) return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" workflow build --package game-delivery' } } };
-      if (stage === 1) return { tool: { name: "request_user_input", arguments: { questions: [{ id: field(request, "challengeId"), header: "接管", question: "确认接管测试项目", options: [{ label: "yes", description: "接管" }, { label: "no", description: "拒绝" }] }] } } };
+      if (stage === 1) return { tool: { name: "request_user_input", arguments: { title: "确认接管测试项目", summary: "共 1 个待回答问题。", description: "请使用下方选项回答问题；提交后继续当前任务。", questions: [{ id: field(request, "challengeId"), header: "接管", question: "确认接管测试项目", options: [{ label: "yes", description: "接管" }, { label: "no", description: "拒绝" }] }] } } };
       if (stage === 2) return { tool: { name: "bash", arguments: { command: `"$GENEHUB_CLI" workflow build --package game-delivery --apply --plan-digest ${field(request, "planDigest")} --revision ${field(request, "expectedRevision")} --action-id install-pack && cd ${q(opened.workspaceRoot)} && git add -A && git commit -m 'commit the built workflow team'` } } };
       if (stage === 3) return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" workflow dispatch --workflow game-dev --task four-contracts --message "Deliver all four contracts inside this Workflow; preserve accepted work on replan" --no-wait' } } };
       return { text: "Inspect the result; do not dispatch another milestone Run." };
@@ -121,7 +121,7 @@ for (const scenario of ["milestones", "replan", "exhausted", "no-go", "budget-ga
       budgetCommand = `"$GENEHUB_CLI" workflow budget --run ${q(run!.id)} --revision 0 --max-llm-rounds 31 && touch ${q(budgetReady)}`;
       await opened.client.call({ type: "session.send", payload: { sessionId: pm, messageId: "u_budget_amendment",
         text: "Limit this request to 31 rounds. Preserve the configured admission policy and report any gap.",
-        attachments: [], continuesRound: null, artifactPreviewBaseUrl: null,
+        attachments: [], continuesRound: null,
       } });
     }
     await t.tools.waitUntil(async () => {
@@ -136,7 +136,7 @@ for (const scenario of ["milestones", "replan", "exhausted", "no-go", "budget-ga
     const plans = events.filter(e => e.phase === "requirements"), writes = events.filter(e => e.phase === "implementation").map(e => e.contract!.id);
     const reviews = events.filter(e => e.phase === "acceptance-item");
     const noWork = ["no-go", "budget-gate", "empty-plan"].includes(scenario);
-    const expected = noWork ? [] : scenario === "budget-query-gate" ? ["m1"] : scenario === "exhausted" ? ["m1", ...Array.from({ length: 6 }, () => "m2")] : scenario === "replan" ? ["m1", "m2", "m2", "m2", "m3", "m4"] : ["m1", "m2", "m3", "m4"];
+    const expected = noWork ? [] : scenario === "budget-query-gate" ? [] : scenario === "exhausted" ? ["m1", ...Array.from({ length: 6 }, () => "m2")] : scenario === "replan" ? ["m1", "m2", "m2", "m2", "m3", "m4"] : ["m1", "m2", "m3", "m4"];
     t.assertions.assert(JSON.stringify(writes) === JSON.stringify(expected), `unexpected milestone execution order: ${writes}`);
     t.assertions.assert(reviews.length === (scenario === "budget-query-gate" ? 0 : writes.length * 2), "a declared criterion was omitted or replayed, or started without admission");
     for (let i = 0; i < reviews.length; i += 2) t.assertions.assert(JSON.stringify(reviews.slice(i, i + 2).map(r => r.criterion!.id).sort()) === '["correct","exists"]', "criterion identities drifted across parallel repairs");
@@ -148,8 +148,8 @@ for (const scenario of ["milestones", "replan", "exhausted", "no-go", "budget-ga
     const outcome = (run!.structure as { outcome?: { value?: { done: boolean; accepted: Contract[]; delivered: unknown[] } } })?.outcome?.value;
     const noDelivery = noWork || scenario === "budget-query-gate";
     if (scenario !== "exhausted") t.assertions.assert(outcome?.done === !noDelivery && outcome.accepted.length === (noDelivery ? 0 : 4) && outcome.delivered.length === (noDelivery ? 0 : 4), "execution completion was confused with accepted delivery");
-    if (scenario === "budget-query-gate") t.assertions.assert(JSON.stringify(outcome).includes('"needsAuthorization":true') && existsSync(path.join(opened.workspaceRoot, "m1.txt"))
-      && !existsSync(path.join(opened.workspaceRoot, "m2.txt")) && !run!.nodes.some(n => n.uses === "result.publish"), "budget gap lost the artifact, started later work or published");
+    if (scenario === "budget-query-gate") t.assertions.assert(JSON.stringify(outcome).includes('"needsAuthorization":true') && !existsSync(path.join(opened.workspaceRoot, "m1.txt"))
+      && !existsSync(path.join(opened.workspaceRoot, "m2.txt")) && !run!.nodes.some(n => n.uses === "result.publish"), "budget gap started implementation, later work or published");
     if (noWork || scenario === "exhausted") t.assertions.assert(!existsSync(path.join(opened.workspaceRoot, "m3.txt")), "later work started after refusal");
     // PM methods are a product built-in now, not something a package installs:
     // the root AgentSpace is single and its capability surface must not drift
@@ -167,7 +167,7 @@ for (const scenario of ["milestones", "replan", "exhausted", "no-go", "budget-ga
       await t.tools.waitUntil(async () => {
         const current = await opened.client.call({ type: "workflow.history", payload: { workspaceId: opened.workspaceId, limit: 10 } });
         return current?.type === "workflowRuns" && current.data.every(item =>
-          ["completed", "cancelled"].includes(item.status));
+          item.phase === "closed" && item.requirement?.state === "cancelled");
       }, 30_000);
     }
   } finally { opened.client.close(); opened.daemon.stop(); await opened.mock.stop(); }

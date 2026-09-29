@@ -21,7 +21,7 @@ for (const scenario of ["pending-entry", "reply-read"] as const) {
       let calls = 0;
       const respond = () => {
         const call = calls++;
-        if (scenario === "pending-entry" && call === 0) return { tool: { name: "request_user_input", arguments: { questions: [{ id: "scope", header: "范围", question: "选择验收范围", options: [{ label: "启动", description: "检查启动" }, { label: "全部", description: "检查所有关卡" }] }] } } };
+        if (scenario === "pending-entry" && call === 0) return { tool: { name: "request_user_input", arguments: { title: "选择验收范围", summary: "共 1 个待回答问题。", description: "请使用下方选项回答问题；提交后继续当前任务。", questions: [{ id: "scope", header: "范围", question: "选择验收范围", options: [{ label: "启动", description: "检查启动" }, { label: "全部", description: "检查所有关卡" }] }] } } };
         if (scenario === "reply-read" && call === 3) return { hang: true as const };
         return { text: `ATTENTION_REPLY_${call}：已处理本次要求。` };
       };

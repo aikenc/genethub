@@ -8,7 +8,7 @@ defineJourney(
     title: "Cursor reaches the same timeline as the built-in agent",
     oracle: "a cursor session turn completes with a reply after cursor-agent is on PATH and logged in",
     catches: ["ACP handshake never becomes a turn"],
-    tags: ["third-party", "session", "parity"],
+    tags: ["third-party", "session"],
     llm: { default: "real" },
     resources: { pool: "real-llm" },
     expectedDurationMs: 90_000,

@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { WorkflowViewLinks } from "./WorkflowViewLinks";
+import { useEffect, useRef, useState } from "react";
 import type { WorkflowRunStatus } from "@genehub/proto";
 import { useWorkbench } from "./store";
 
@@ -34,7 +35,7 @@ export function StructuredWorkflow({run}:{run:WorkflowRunStatus}) {
     const active = list(view.active).map(record).filter(f=>f.blockId === block.id);
     return <details key={block.id} open={depth < 2} className={depth < 4 ? "min-w-0 rounded-lg border border-line px-3 py-2" : "min-w-0 border-t border-line py-2"}>
       <summary className="cursor-pointer break-words text-sm">
-        {label[kind] ?? kind} · {block.id}
+        {label[kind] ?? kind} · {typeof block.title === "string" ? block.title : block.id}
         {kind === "loop" ? ` · 最多 ${String(block.maxRounds)} 轮` : ""}
         {kind === "forEach" ? ` · 并发 ${String(block.maxConcurrency)}` : ""}
         {!relevant.length && !active.length ? " · 未执行" : ""}
@@ -42,7 +43,7 @@ export function StructuredWorkflow({run}:{run:WorkflowRunStatus}) {
       <div className="mt-2 space-y-2">
         {workers.map(instance=>{
           const node = run.nodes.find(n=>n.id === instance.nodeId);
-          return node ? <div key={node.id} className="text-xs">
+          return node ? <div key={node.id} data-workflow-node-id={node.id} className="text-xs">
             <p>{node.id} · {status[node.status] ?? node.status}</p>
             {node.reason ? <p className="mt-1 break-words">{node.reason}</p> : null}
             {node.sessionId ? <button type="button" className="min-h-11 text-accent" onClick={()=>void selectSession(node.sessionId!)}>查看本次工作会话</button> : null}
@@ -60,6 +61,7 @@ export function StructuredWorkflow({run}:{run:WorkflowRunStatus}) {
   };
   return <section aria-label="结构化流程" className="space-y-2">
     <h3 className="text-sm font-medium">流程与执行实例</h3>
+    <WorkflowViewLinks workspaceId={run.workspaceId} runId={run.id} />
     {typeof view.error === "string" ? <p role="alert" className="text-sm text-danger">执行状态无法核对：{view.error}</p> : null}
     {render(definition.body,()=>true)}
   </section>;
@@ -71,12 +73,13 @@ function DagWorkflow({ run }: { run: WorkflowRunStatus }) {
   const view = record(run.structure);
   return <section aria-label="结构化流程" className="space-y-2">
     <h3 className="text-sm font-medium">流程与执行实例</h3>
+    <WorkflowViewLinks workspaceId={run.workspaceId} runId={run.id} />
     <p className="text-xs text-muted">入口：{String(view.entry ?? "未知")}</p>
     <ul className="space-y-2">
       {list(view.nodes).map(record).map(definition => {
         if (typeof definition.id !== "string") return null;
         const node = run.nodes.find(item => item.id === definition.id);
-        return <li key={definition.id} className="min-w-0 rounded-lg border border-line px-3 py-2 text-sm">
+        return <li key={definition.id} data-workflow-node-id={definition.id} className="min-w-0 rounded-lg border border-line px-3 py-2 text-sm">
           <p className="break-words">{definition.id} · {node ? status[node.status] ?? node.status : "状态待核对"}</p>
           {Object.entries(record(definition.on)).map(([outcome, targets]) =>
             <p key={outcome} className="mt-1 break-words text-xs text-muted">{status[outcome] ?? outcome} → {list(targets).filter((target): target is string => typeof target === "string").join("、")}</p>)}
@@ -93,9 +96,10 @@ function DagWorkflow({ run }: { run: WorkflowRunStatus }) {
 }
 
 /** Fetch full structure only when requested; list summaries stay lightweight. */
-export function WorkflowStructureDetails({workspaceId,runId,revision}:{workspaceId:string;runId:string;revision:number}) {
+export function WorkflowStructureDetails({workspaceId,runId,revision,nodeId,openInitially=false}:{workspaceId:string;runId:string;revision:number;nodeId?:string;openInitially?:boolean}) {
   const client = useWorkbench(s=>s.client);
-  const [open,setOpen] = useState(false);
+  const [open,setOpen] = useState(openInitially || !!nodeId);
+  const container = useRef<HTMLDetailsElement>(null);
   const [result,setResult] = useState<{owner:typeof client;run:WorkflowRunStatus}|null>(null);
   const [error,setError] = useState<string|null>(null);
   useEffect(()=>{
@@ -110,7 +114,18 @@ export function WorkflowStructureDetails({workspaceId,runId,revision}:{workspace
     return ()=>{disposed=true;};
   },[client,open,workspaceId,runId,revision]);
   const run = result?.owner === client && result.run.id === runId ? result.run : null;
-  return <details onToggle={event=>setOpen(event.currentTarget.open)} className="mt-2">
+  useEffect(()=>{
+    if (!run || !nodeId) return;
+    const target = container.current?.querySelector(`[data-workflow-node-id="${CSS.escape(nodeId)}"]`);
+    if (!target) return;
+    let ancestor = target.parentElement;
+    while (ancestor && ancestor !== container.current) {
+      if (ancestor instanceof HTMLDetailsElement) ancestor.open = true;
+      ancestor = ancestor.parentElement;
+    }
+    target.scrollIntoView({block:"center"});
+  },[run,nodeId]);
+  return <details ref={container} open={open} onToggle={event=>setOpen(event.currentTarget.open)} className="mt-2">
     <summary className="min-h-9 cursor-pointer text-xs text-accent">查看流程结构</summary>
     {open && error ? <p role="alert" className="text-sm text-danger">无法读取流程：{error}</p> : null}
     {open && run ? run.structure ? <StructuredWorkflow run={run}/> : <p className="text-xs text-muted">此记录使用原有 DAG 流程，可在执行记录中查看节点。</p> : open && !error ? <p className="text-xs text-muted">正在读取…</p> : null}

@@ -22,7 +22,9 @@ use crate::version::ProductVersion;
 
 const RELEASE_MANIFEST_SCHEMA: &str = "genehub.release-manifest.v2";
 const MAX_MANIFEST_BYTES: usize = 256 * 1024;
-const MAX_ARTIFACT_BYTES: usize = 32 * 1024 * 1024;
+// Current iterate components used by Beta Live exceed 32 MiB. Keep a finite
+// payload ceiling, shared by transport and signature verification.
+const MAX_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_REDIRECTS: usize = 3;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -449,6 +451,10 @@ fn fetch_manifest() -> Result<ComponentManifest> {
 }
 
 fn download_artifact(manifest: &ComponentManifest) -> Result<Vec<u8>> {
+    let transport_limit = MAX_ARTIFACT_BYTES + 16 * 1024;
+    if manifest.artifact.size > transport_limit as u64 {
+        bail!("component manifest exceeds the {transport_limit} byte limit");
+    }
     let mut last_error = None;
     for source in &manifest.artifact.sources {
         match get_bytes(&source.url, MAX_ARTIFACT_BYTES + 16 * 1024) {
@@ -485,7 +491,11 @@ fn get_bytes(url: &str, limit: usize) -> Result<Vec<u8>> {
     if !response.status().is_success() {
         bail!("{url} returned {}", response.status());
     }
-    let bytes = response.bytes()?.to_vec();
+    // Stop reading at the boundary even when a source omits Content-Length
+    // or lies about its size. Reading the whole body before checking is unbounded.
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    response.take((limit + 1) as u64).read_to_end(&mut bytes)?;
     if bytes.len() > limit {
         bail!("{url} exceeded the {limit} byte limit");
     }

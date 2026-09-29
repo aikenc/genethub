@@ -8,7 +8,7 @@ defineJourney(
     title: "The built-in Agent sends configured image and video inputs to the model",
     oracle: "a user turn with a pasted image and session-uploaded video reaches the mock Chat Completions endpoint as native image_url and video_url parts, and remains in follow-up history",
     catches: ["Genet silently drops attachments", "video is reduced to a path or sampled frames", "model media settings do not reach the Agent", "media disappears on the next turn", "switching to a text-only model traps the session on old media", "a provider-rejected video poisons later messages"],
-    tags: ["core", "session", "media", "parity"],
+    tags: ["core", "session", "media"],
     llm: { default: "mock" },
     expectedDurationMs: 35_000,
     timeoutMs: 100_000,
@@ -62,6 +62,12 @@ defineJourney(
       });
       t.assertions.assert(begin?.type === "sessionArtifactUpload", "video upload did not start");
       if (begin?.type !== "sessionArtifactUpload") return;
+      await t.assertions.expectProtocolCode(() => opened.client.call({
+        type: "session.artifact.chunk",
+        payload: { sessionId, uploadId: begin.data.uploadId, fileIndex: 0, offset: 0, dataBase64: "%%%invalid-base64%%%" },
+      }), "badRequest");
+      // The rejected chunk must not consume offset or poison the upload: the
+      // original valid chunk and completed bundle below still carry exact bytes.
       await opened.client.call({
         type: "session.artifact.chunk",
         payload: {
@@ -88,7 +94,6 @@ defineJourney(
             { name: "pixel.png", mime: "image/png", dataBase64: image.toString("base64") },
             { name: "clip.mp4", mime: "video/mp4", path: `${finished.data.workspacePath}/clip.mp4` },
           ],
-          artifactPreviewBaseUrl: null,
           continuesRound: null,
         },
       });
@@ -98,7 +103,18 @@ defineJourney(
       const user = first.messages?.find((message) => message.role === "user");
       const parts = user?.content as Array<{ type?: string; text?: string; image_url?: { url?: string }; video_url?: { url?: string } }>;
       t.assertions.assert(Array.isArray(parts), "media turn did not use structured content");
-      t.assertions.assert(parts.some((part) => part.type === "text" && part.text === "Describe both files"), "user text was lost");
+      const retainsUserText = parts.some((part) => {
+        if (part.type !== "text" || !part.text) return false;
+        if (part.text === "Describe both files") return true;
+        const marker = "\nInputs:\n";
+        const start = part.text.indexOf(marker);
+        if (start < 0) return false;
+        try {
+          const inputs = JSON.parse(part.text.slice(start + marker.length).split("\n", 1)[0]!);
+          return Array.isArray(inputs) && inputs.some((input) => input.source === "user" && input.text === "Describe both files");
+        } catch { return false; }
+      });
+      t.assertions.assert(retainsUserText, "user text was lost");
       t.assertions.assert(parts.some((part) => part.type === "image_url" && part.image_url?.url === `data:image/png;base64,${image.toString("base64")}`), "the exact image bytes did not reach image_url");
       t.assertions.assert(parts.some((part) => part.type === "video_url" && part.video_url?.url === `data:video/mp4;base64,${video.toString("base64")}`), "the exact video bytes did not reach native video_url");
 
@@ -147,7 +163,6 @@ defineJourney(
           sessionId: deniedSessionId,
           text: "Describe this clip",
           attachments: [{ name: "clip.mp4", mime: "video/mp4", dataBase64: video.toString("base64") }],
-          artifactPreviewBaseUrl: null,
           continuesRound: null,
         },
       });
@@ -184,7 +199,6 @@ defineJourney(
           messageId: "u_rejected_video",
           text: "Describe the rejected video",
           attachments: [{ name: "large.mp4", mime: "video/mp4", dataBase64: rejectedVideo.toString("base64") }],
-          artifactPreviewBaseUrl: null,
           continuesRound: null,
         },
       });
@@ -196,7 +210,6 @@ defineJourney(
           messageId: "u_replacement_video",
           text: "Describe only this replacement video",
           attachments: [{ name: "small.mp4", mime: "video/mp4", dataBase64: replacementVideo.toString("base64") }],
-          artifactPreviewBaseUrl: null,
           continuesRound: null,
         },
       });

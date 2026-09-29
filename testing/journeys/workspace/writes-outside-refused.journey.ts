@@ -6,7 +6,7 @@ defineJourney(
     title: "Writes outside the workspace are refused",
     oracle: "file.write of escaped paths returns forbidden",
     catches: ["path traversal", "absolute path write"],
-    tags: ["core", "workspace", "filesystem", "parity"],
+    tags: ["core", "workspace", "filesystem"],
     expectedDurationMs: 20_000,
     timeoutMs: 60_000,
     surfaces: ["daemon", "workbench-client"],

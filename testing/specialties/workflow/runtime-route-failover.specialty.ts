@@ -21,7 +21,7 @@ defineSpecialty({
   timeoutMs: 120_000,
   resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
   surfaces: ["daemon", "agent", "genet-cli", "workbench-client"],
-  productInterfaces: ["session.send", "session.get", "workflow.history", "settings.agentPreferences"],
+  productInterfaces: ["session.send", "session.get", "workflow.history", "settings.agentPreferences", "workflow.profile"],
 }, async t => {
   t.data.git.init(t.env.workspace);
   const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
@@ -60,22 +60,32 @@ defineSpecialty({
       userInteraction: "readOnly",
       prompt: "prompts/worker.md",
     }));
-    writeFileSync(path.join(source, "flows/runtime-failover.yaml"), JSON.stringify({
-      schema: "genehub.workflow.definition.v1",
-      id: "runtime-failover",
-      version: 1,
-      entry: "work",
-      nodes: [
-        {
-          id: "work",
-          uses: "agent.session",
-          with: { role: "worker", workspace: ".", writeLease: { ttlSeconds: 3600 } },
-          completion: { all: [{ key: "done", verify: "value.nonEmpty" }] },
-          on: { completed: ["publish"] },
-        },
-        { id: "publish", uses: "result.publish" },
-      ],
-    }));
+    writeFileSync(path.join(source, "flows/runtime-failover.yaml"), JSON.stringify({schema: "genehub.workflow.definition.v2",
+id: "runtime-failover",
+version: 1,
+nodes: [{id: "work", uses: "agent.session", with: { role: "worker", workspace: ".", writeLease: { ttlSeconds: 3600 } }, completion: { all: [{ key: "done", verify: "value.nonEmpty" }] }},
+{id: "publish", uses: "result.publish"}],
+structure: {
+  "body": {
+    "id": "sequence-work",
+    "type": "sequence",
+    "steps": [
+      {
+        "id": "step-work",
+        "type": "task",
+        "activity": "work",
+        "accept": [
+          "completed"
+        ]
+      },
+      {
+        "id": "step-publish",
+        "type": "task",
+        "activity": "publish"
+      }
+    ]
+  }
+}}));
 
     let dispatched = false;
     let flashWorkerRequests = 0;
@@ -162,6 +172,16 @@ defineSpecialty({
     t.assertions.assert(flashWorkerRequests >= 1, "cheapest route was not exercised");
     t.assertions.assert(backupWorkerRequests >= 1, "next matching model was not exercised");
     t.assertions.fileEquals(opened.workspaceRoot, "runtime-before-failover.txt", "preserved");
+    const profileReply = await opened.client.call({type:"workflow.profile",payload:{workspaceId:opened.workspaceId,runId:completed!.id}});
+    t.assertions.assert(profileReply?.type === "workflowProfile", "failover cost facts missing");
+    const cost = (profileReply as any).data.cost;
+    const groups = cost.byModelRate as Array<{rate:{modelId:string;unitMilliCny:number};calls:number;milliCny:number}>;
+    const flash = groups.find(g=>g.rate.modelId === "deepseek/deepseek-v4-flash");
+    const backup = groups.find(g=>g.rate.modelId === "deepseek/deepseek-v4-pro");
+    t.assertions.assert(!!flash && !!backup && flash.calls>0 && backup.calls>0, "model switch lost one priced segment");
+    t.assertions.assert(flash!.rate.unitMilliCny===20 && backup!.rate.unitMilliCny===500, "cost segments did not preserve tier rates");
+    t.assertions.assert(groups.every(g=>g.milliCny===g.calls*g.rate.unitMilliCny) && groups.reduce((n,g)=>n+g.milliCny,0)===cost.milliCny, "failover model totals disagree with the five-tier call estimate");
+
 
     const snapshotReply = await opened.client.call({ type: "session.get", payload: { sessionId: originalWorkerId! } });
     if (snapshotReply?.type !== "snapshot") throw new Error("migrated Worker Session is unreadable");

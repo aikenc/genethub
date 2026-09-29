@@ -105,15 +105,11 @@ genet agent-serve --mode rpc
 | `prompt` | 接受即回，执行异步走事件流 | `{agentInvoked: bool}` |
 | `abort` | 中止当前 loop | 无 |
 | `get_state` | 会话状态 | `SessionState`（cwd、模型、思考档位、会话文件、消息数） |
-| `get_messages` | 全量消息 | `{messages: [...]}` |
-| `get_available_models` | 已配置模型 | `{models: [...]}` |
 | `set_model` | 切模型 | 完整 `Model` 对象 |
 | `set_thinking_level` | 记录思考档位 | 无 |
 
-思考档位在协议里走的是 effort 轴（`ModelInfo.efforts` + `session.setEffort`），不是 `mode`——`mode` 留给「动手前问不问」那类策略，而这个 agent 没有审批流程，也就没有模式可选。旧会话把档位记在 `mode` 上，启动时仍然认这个名字，重开一个旧会话不会悄悄掉回默认档。
-| `get_session_stats` | token / 成本 | `{tokens, cost}` |
-| `get_commands` | 斜杠命令（Skills 与 compact） | `{commands: [...]}` |
-| `compact` | 用 `genet session context` 取得确定性投影，在禁用工具的纯内存子会话中生成带引用摘要，再以 append-only compaction entry 替换活跃模型上下文 | `{agentInvoked: true}` |
+思考档位在协议里走的是 effort 轴（`ModelInfo.efforts` + `session.setEffort`），不是 `mode`——`mode` 留给「动手前问不问」那类策略，而这个 agent 没有审批流程，也就没有模式可选。开发期只接受当前 effort 字段，旧 `mode` 思考档位迁移已退役。
+| `compact` | 用 `genet session context` 取得确定性历史材料，构造带引用胶囊，再以 append-only compaction entry 替换活跃模型上下文；不调用模型摘要子会话 | `{agentInvoked: true}` |
 
 `prompt` 可带 `attachments` 数组，元素含 `name`、`mime`，以及 `dataBase64`（小图片）或工作区相对 `path`（会话上传的视频）。User message 持久化附件引用；模型继续支持该媒体时，后续轮次继续传递原生内容。切换到不支持该媒体的模型后，历史附件会变成文字说明，本轮新附件仍会被拒绝。所选模型的 `inputModalities` 声明 `image` / `video` 后才允许发送；OpenAI 兼容接口使用 `image_url` / `video_url` 内容块，Anthropic Messages 接口使用原生图片块。视频先经 `session.artifact.*` 分块上传，再由 Agent 从工作区读取并内联到模型请求；应用单视频上限 64 MiB，服务商可能有更低的请求上限。
 
@@ -178,7 +174,7 @@ GeneHub 产品内置 Skill 的目录、构建期扫描、打包和新增流程�
 - frontmatter：`name`（缺省用父目录名，≤64 字符）、`description`（必填，≤1024 字符）、`disable-model-invocation`
 - 注入：daemon 对所有 Agent 统一写入一次 GeneHub 内置 Skill 的「名称 + 描述 + 路径」清单；内置 Agent 仍加载这些 entrypoint 以提供 `/skill:`，但不会重复注入第二份产品清单；技能正文在被调用时才读入
 - 相对路径：技能文件里的相对路径按 `SKILL.md` 所在目录解析
-- 同时通过 `get_commands` 暴露为 `/skill:<name>`，`source: "skill"`
+- `/skill:<name>` 展开由 Agent 本地加载的 Skills 提供；不另建查询命令表
 - `genehub-session-history`、`genehub-html-preview` 与 `genehub-speech-runtime` 都由 daemon 物化并注入所有内置/第三方 Agent，不再存在 Agent 私有的产品内置 Skill
 - daemon 只加载编译时登记的 GeneHub 内置 entrypoint；工作区 `.genethub/skills`、`.genehub/skills` 和数据目录中的未知文件都不能进入产品目录
 - daemon 同时在摘要中给出当前 channel 启动器绑定的 CLI 绝对路径，并向 Agent 进程设置 `GENEHUB_CLI`；绑定缺失时明确 unavailable，禁止猜命令名
@@ -193,7 +189,7 @@ GeneHub 产品内置 Skill 的目录、构建期扫描、打包和新增流程�
 - `--no-session`：纯内存
 - 默认（都没给）：写到 agent 数据目录下 `<时间戳>_<sessionId>.jsonl`
 - `get_state` 里的 `sessionFile` / `sessionId` / `messageCount` 必须真实反映持久化状态
-- `compaction` entry 不删除旧行；回放到该 entry 时清空旧 provider context，只恢复带 `ghref`、coverage、source digest 与 `genet` 回查命令的压缩上下文。生成摘要的子会话使用 `Session::in_memory`，不写文件、不出现在会话列表，且不能执行工具
+- `compaction` entry 不删除旧行；回放到该 entry 时清空旧 provider context，只恢复带 `ghref`、coverage、source digest 与 `genet` 回查命令的压缩上下文。胶囊由确定性历史材料构造，不再创建模型摘要子会话
 
 ---
 
@@ -204,7 +200,7 @@ GeneHub 产品内置 Skill 的目录、构建期扫描、打包和新增流程�
 | 环境变量 `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `OPENAI_BASE_URL` 等 | 独立运行时直接可用 |
 | 配置文件（agent 数据目录下 `models.json`） | daemon 每次启动会话时写入，声明 provider、baseUrl、模型清单 |
 
-无任何凭证时：`get_available_models` 返回空数组，`prompt` 以明确错误消息结束当前 turn，提示去设置页填 Key——**不要静默失败**。
+无任何凭证时：`prompt` 以明确错误消息结束当前 turn，提示去设置页填 Key——**不要静默失败**。
 
 ### 7.1 「某个 provider 在哪个地址」只有一个地方回答
 
@@ -239,10 +235,10 @@ GeneHub 产品内置 Skill 的目录、构建期扫描、打包和新增流程�
 | 阶段 | 内容 |
 |------|------|
 | **A（MVP，本次）** | 本文 §2.1 + §2.2 全部；能被真实 daemon 拉起并跑完一轮带工具调用的任务 |
-| **B** | 图片输入、steering/follow-up 队列、auto-retry、更完整的模型目录 |
+| **B** | auto-retry、更完整的模型目录 |
 | **C** | subagents、extensions、MCP、fork/branch/tree |
 
-阶段 B/C 的取舍视桌面端实际使用反馈决定，不预先承诺。
+阶段 B/C 的取舍视桌面端实际使用反馈决定，不预先承诺。平台当前不支持 steer；运行中补充由 daemon 的持久 inbox 排队，不自动中断正在执行的工具。显式停止是独立操作。
 
 ---
 
@@ -259,3 +255,20 @@ GeneHub 产品内置 Skill 的目录、构建期扫描、打包和新增流程�
 ## 10. 与 daemon、桌面端的关系
 
 桌面端把二进制放进 Tauri `resources`；daemon 的 `genet` adapter 按需拉起它，路径可用 `GENET_AGENT_COMMAND` 覆盖。用户无需安装任何外部 CLI，也无需知道它的存在——在 agent 选择器里它和其他 agent 平级排列，只是默认选中。
+
+
+## 当前窗口与用量口径（2026-09-28 候选）
+
+设置页按模型选择 256K / 512K / 1M / 2M tokens，默认 512K（分别为 262144 / 524288 / 1048576 / 2097152）。保存后在下一次 prompt 边界更新已有内置 Agent；正在执行的请求不变。自动胶囊仍按窗口 80% 触发，输出预算为窗口的 1/8、上限 65536，与胶囊材料预算分开。
+
+OpenAI input 包含缓存，Anthropic 在边界把 input + cache read + cache creation 转为含缓存总输入；缓存与 thinking 是明细，不能再次加入总数。API 返回的用量照实记账，字段缺失与上报零分开。累计消耗与当前上下文占用分别计算。
+
+上下文算法参考本地 PI `a96fb984d` 的 `estimateContextTokens`：从当前历史反向找最近一条有效 assistant usage，基准为 input + output，只估算该消息之后的新增内容。停止于 error/aborted、字段不完整或合计为零的响应不能成为基准。GeneHub 的 input 已含缓存，因此不再次相加 cacheRead/cacheWrite；PI 的 input 不含缓存，表达形式不同、合计口径一致。历史中的 usage 是唯一基准，不再维护另一份 `last_request` 缓存。同模型重启可以从历史恢复有效基准。
+
+无 API 基准时按消息内容估算；新增文本、thinking、工具名和参数使用 PI 的 UTF-16 长度 / 4、逐条向上取整，每张图片估 1200 tokens。不计传输包装、工具 ID、签名或 base64 字节，不另加 system/tools 的字节预留。这个兜底不是 tokenizer，也不是保证覆盖中文或媒体的上界。未经 API 覆盖的音频/视频没有通用估算值，用量查询显示 unknown，而非任意预留 64K。
+
+用量查询区分 API 基准与新增估算：`usageTokens`、`estimatedTokens`、`source`。胶囊替换或模型变更后，旧 usage 不再作为基准；尚无新 usage 时 `tokens` / `percent` 为 null，且避免仅凭旧值重复自动胶囊。该边界从已有 JSONL 事件恢复，不新增持久账本。窗口仍为四档、默认 512K，自动胶囊仍按 80% 触发。
+
+内置 Agent 没有沙箱。路径白名单约束不了 shell 与子进程；进程隔离由宿主 OS/容器/虚拟机承担，远程 RPC 的设备和路径授权继续保留。
+
+内置 JSONL 接口只保留 `get_state` 作为只读诊断与探活，包含当前模型、运行状态及上下文计量来源。消息、模型目录和累计统计的平行查询已退役，产品会话与目录由 daemon 公共接口提供。

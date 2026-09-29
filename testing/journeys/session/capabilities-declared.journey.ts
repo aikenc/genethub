@@ -6,7 +6,7 @@ defineJourney(
     title: "Capabilities are declared so the UI never offers a dead control",
     oracle: "agent.list never advertises models/modes/efforts the agent cannot set",
     catches: ["picker for a dead axis"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     expectedDurationMs: 20_000,
     timeoutMs: 60_000,
     surfaces: ["daemon", "workbench-client"],

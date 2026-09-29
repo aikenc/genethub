@@ -293,9 +293,8 @@ defineSpecialty(
         `the component set is not the wire truth: ${JSON.stringify(projectInfo?.agentSpace)}`,
       );
       t.assertions.assert(
-        projectInfo?.pipeSpace?.pm === true &&
-          projectInfo?.pipeSpace?.workerRole === "workflow-executor",
-        `the older exclusive-role shape stopped being readable: ${JSON.stringify(projectInfo?.pipeSpace)}`,
+        !!projectInfo && !("pipeSpace" in projectInfo),
+        "workspace.list must expose the component model without the retired exclusive-role projection",
       );
 
       t.note(

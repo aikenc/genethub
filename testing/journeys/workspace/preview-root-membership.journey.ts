@@ -11,7 +11,7 @@ defineJourney(
     title: "Preview accepts only root handles owned by its workspace",
     oracle: "member-qualified preview succeeds; rootless and foreign-root locators are 403",
     catches: ["single-root fallback bypasses membership", "foreign root substitutes local bytes"],
-    tags: ["core", "workspace", "filesystem", "authorization", "parity"],
+    tags: ["core", "workspace", "filesystem", "authorization"],
     expectedDurationMs: 20_000,
     timeoutMs: 60_000,
     surfaces: ["daemon", "workbench-client"],

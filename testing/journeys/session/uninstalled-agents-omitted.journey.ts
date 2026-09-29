@@ -6,7 +6,7 @@ defineJourney(
     title: "Agents that are not installed stay out of the picker",
     oracle: "genet is builtin and Ready; every Ready agent has a label",
     catches: ["ghost rows in the agent picker"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     expectedDurationMs: 20_000,
     timeoutMs: 60_000,
     surfaces: ["daemon", "workbench-client"],

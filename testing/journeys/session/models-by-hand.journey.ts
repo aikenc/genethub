@@ -6,7 +6,7 @@ defineJourney(
     title: "Models written by hand need no list call",
     oracle: "settings.setProvider with explicit models stores them and has no problem",
     catches: ["empty picker when /models is down"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     expectedDurationMs: 20_000,
     timeoutMs: 60_000,
     surfaces: ["daemon", "workbench-client"],

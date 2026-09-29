@@ -6,17 +6,17 @@
 //! and every transport above it see only those.
 
 pub mod acp;
+mod acp_import;
 pub mod claude;
 pub mod codex;
 pub mod cursor;
 pub mod genet;
 pub mod opencode;
+mod process;
 pub mod registry;
 pub mod stdio;
 pub mod usage;
 
-use std::collections::HashMap;
-use std::hash::Hash;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,8 +24,7 @@ use std::time::Duration;
 use anyhow::Result;
 use async_trait::async_trait;
 use genehub_proto::{
-    Attachment, Capabilities, Catalog, ImportContinuation, ProbeState,
-    SessionEvent, TimelineItem,
+    Attachment, Capabilities, Catalog, ImportContinuation, ProbeState, SessionEvent, TimelineItem,
 };
 use tokio::sync::{mpsc, Mutex};
 
@@ -34,7 +33,6 @@ use crate::config::ProviderConfig;
 /// Everything an adapter needs to start a session.
 #[derive(Debug, Clone)]
 pub struct SessionConfig {
-    pub evidence_scope: Option<genehub_proto::SessionEvidenceScope>,
     pub session_id: String,
     pub cwd: PathBuf,
     pub model_id: Option<String>,
@@ -136,12 +134,6 @@ pub trait AgentAdapter: Send + Sync {
 
     fn capabilities(&self) -> Capabilities;
 
-    /// Can enforce the host-provided read-only paths and bounded Session set.
-    /// A prompt or an Agent's generic plan mode is not an evidence boundary.
-    fn supports_evidence_scope(&self) -> bool {
-        false
-    }
-
     /// Is it installed and does it answer? Never an error: "not installed" is a
     /// normal state that simply hides the agent from the picker.
     async fn probe(&self) -> ProbeState;
@@ -160,17 +152,6 @@ pub trait AgentAdapter: Send + Sync {
     /// one cannot read; the session layer then seeds from its own log.
     fn accepts_resume(&self, _handle: &PersistHandle) -> bool {
         true
-    }
-
-    /// Map a saved model id this catalog no longer lists onto a current model,
-    /// plus the effort and Fast that id implied. `None` falls back to the
-    /// catalog default. The kernel does not know adapter-specific encodings.
-    fn migrate_selection(
-        &self,
-        _model_id: &str,
-        _catalog: &Catalog,
-    ) -> Option<(String, Option<String>, Option<bool>)> {
-        None
     }
 
     /// Tag routing may offer this agent when its catalog lists no models.
@@ -195,16 +176,15 @@ pub trait AgentAdapter: Send + Sync {
         _cwd: &std::path::Path,
         _source_id: &str,
     ) -> Result<ImportedHistory> {
-        Err(anyhow::anyhow!(
-            "this agent does not support session import"
+        Err(crate::rpc_error::failure(
+            genehub_proto::ErrorCode::Unsupported,
+            "this agent does not support session import".to_owned(),
         ))
     }
 }
 
 pub type ProviderMap = std::collections::BTreeMap<String, ProviderConfig>;
 
-// Text notifications emit progress and content separately. Allow 4000 such
-// pairs plus terminal metadata; the independent byte cap still bounds payloads.
 const EVENT_QUEUE_CAPACITY: usize = 8192;
 
 /// Single-consumer delivery without waiting while protocol locks are held.
@@ -313,6 +293,15 @@ pub trait AgentSession: Send + Sync {
     /// The one and only output: already-normalized events.
     fn events(&self) -> crate::adapter::EventRx;
 
+    /// Apply provider-owned settings at the next prompt boundary, never mid-request.
+    async fn configure_for_prompt(
+        &self,
+        _model_id: Option<&str>,
+        _providers: &ProviderMap,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     async fn send(&self, input: PromptInput) -> Result<String>;
     async fn interrupt(&self) -> Result<()>;
     async fn close(&self) -> Result<()>;
@@ -335,7 +324,10 @@ pub trait AgentSession: Send + Sync {
     /// The checkpoint is opaque to the session kernel and came from this same
     /// adapter when that turn completed.
     async fn fork(&self, _checkpoint: &str) -> Result<PersistHandle> {
-        Err(anyhow::anyhow!("this agent does not support forking"))
+        Err(crate::rpc_error::failure(
+            genehub_proto::ErrorCode::Unsupported,
+            "this agent does not support forking".to_owned(),
+        ))
     }
 
     /// How hard to think. Refused by default: an agent with no such dial should
@@ -348,7 +340,10 @@ pub trait AgentSession: Send + Sync {
     }
     async fn set_fast(&self, fast: bool) -> Result<()> {
         if fast {
-            Err(anyhow::anyhow!("this agent does not support fast mode"))
+            Err(crate::rpc_error::failure(
+                genehub_proto::ErrorCode::Unsupported,
+                "this agent does not support fast mode".to_owned(),
+            ))
         } else {
             Ok(())
         }
@@ -534,14 +529,28 @@ async fn exit_code(child: &Mutex<Option<crate::os_process::Child>>) -> Option<i3
     None
 }
 
-/// Prepares a child process this daemon is answerable for.
-///
-/// Two unrelated-looking things, always wanted together, because they are the
-/// same requirement seen from two platforms: what we start must not surprise
-/// the person at the machine, and must not survive us. On Windows that means
-/// no console window; everywhere it means a process group of our own, so that
-/// ending the agent ends what the agent started rather than orphaning a
-/// language server or a dev server onto init (`crate::process`).
+/// Native payload is explanatory data, never a recovery instruction.
+pub(super) fn native_request_description(agent: &str, value: &serde_json::Value) -> String {
+    // Indentation cannot be closed by payload backticks or HTML. Bound the
+    // formatted block so central display truncation keeps the provenance.
+    let json = serde_json::to_string_pretty(value).unwrap_or_default();
+    let mut body = json
+        .lines()
+        .map(|line| format!("    {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    const BODY_LIMIT: usize = 14 * 1024;
+    if body.len() > BODY_LIMIT {
+        let mut end = BODY_LIMIT;
+        while !body.is_char_boundary(end) {
+            end -= 1;
+        }
+        body.truncate(end);
+        body.push_str("\n    [已截断]");
+    }
+    format!("> 以下内容来自 {agent}，未经验证\n\n{body}")
+}
+
 /// Trim, then keep at most `limit` characters, appending `…` when cut.
 pub(super) fn clip_text(value: &str, limit: usize) -> String {
     let trimmed = value.trim();
@@ -552,6 +561,14 @@ pub(super) fn clip_text(value: &str, limit: usize) -> String {
     text
 }
 
+/// Prepares a child process this daemon is answerable for.
+///
+/// Two unrelated-looking things, always wanted together, because they are the
+/// same requirement seen from two platforms: what we start must not surprise
+/// the person at the machine, and must not survive us. On Windows that means
+/// no console window; everywhere it means a process group of our own, so that
+/// ending the agent ends what the agent started rather than orphaning a
+/// language server or a dev server onto init (`crate::process`).
 pub fn owned_child(command: &mut crate::os_process::Command) {
     without_a_window(command);
     crate::process::own_group(command);
@@ -628,55 +645,6 @@ pub(super) fn append_system_prompt_arg(
 pub async fn kill_tree(child: &mut crate::os_process::Child) {
     if let Err(error) = kill_tree_checked(child).await {
         tracing::warn!(%error, "could not confirm child cleanup");
-    }
-}
-
-/// Drops every in-flight reply. The sender closing is the failure: each
-/// adapter reads that as the process having gone away.
-pub(super) async fn fail_open_requests<K, T>(
-    pending: &Arc<Mutex<HashMap<K, tokio::sync::oneshot::Sender<T>>>>,
-    message: &'static str,
-) where
-    K: Eq + Hash,
-{
-    let waiting: Vec<_> = pending
-        .lock()
-        .await
-        .drain()
-        .map(|(_, sender)| sender)
-        .collect();
-    if !waiting.is_empty() {
-        tracing::warn!(outstanding = waiting.len(), "{message}");
-    }
-}
-
-/// Polls until the process is gone, then fails requests still waiting on it.
-///
-/// Stdout can stay open after the process exits when a grandchild inherited
-/// the pipe. Waiting for EOF in that shape waits forever.
-pub(super) async fn watch_process_exit<K, T>(
-    child: Arc<Mutex<Option<crate::os_process::Child>>>,
-    pending: Arc<Mutex<HashMap<K, tokio::sync::oneshot::Sender<T>>>>,
-    message: &'static str,
-) where
-    K: Eq + Hash + Send + 'static,
-    T: Send + 'static,
-{
-    loop {
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        let gone = {
-            let Ok(mut held) = child.try_lock() else {
-                continue;
-            };
-            match held.as_mut() {
-                None => return,
-                Some(child) => matches!(child.try_wait(), Ok(Some(_)) | Err(_)),
-            }
-        };
-        if gone {
-            fail_open_requests(&pending, message).await;
-            return;
-        }
     }
 }
 
@@ -852,14 +820,24 @@ mod tests {
     #[test]
     fn every_agent_is_started_as_a_child_this_daemon_can_account_for() {
         let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/adapter");
-        for file in ["claude.rs", "codex.rs", "opencode.rs", "acp.rs", "genet.rs"] {
+        let process = std::fs::read_to_string(here.join("process.rs")).unwrap();
+        assert!(process.contains("apply_session_environment(command, config)"));
+        assert!(process.contains("owned_child(command)"));
+        for file in [
+            "claude.rs",
+            "codex.rs",
+            "opencode.rs",
+            "acp.rs",
+            "genet.rs",
+            "cursor.rs",
+        ] {
             let source = std::fs::read_to_string(here.join(file)).expect("read the adapter");
             assert!(
-                source.contains("owned_child"),
+                source.contains("AgentProcess::spawn"),
                 "{file} starts a program without preparing it to be owned"
             );
             assert!(
-                source.contains("apply_session_environment"),
+                source.contains("AgentProcess::spawn"),
                 "{file} starts a live Agent without the shared GeneHub CLI/session binding"
             );
             assert!(
@@ -907,6 +885,37 @@ mod tests {
     }
 
     #[test]
+    fn event_pipe_preserves_order_without_a_runtime_and_reseats_atomically() {
+        let (tx, mut first) = EventTx::channel();
+        for number in 0..4096 {
+            tx.send(SessionEvent::TitleChanged {
+                title: number.to_string(),
+            })
+            .unwrap();
+        }
+        let mut second = tx.reseat();
+        tx.send(SessionEvent::TitleChanged {
+            title: "new".into(),
+        })
+        .unwrap();
+        for number in 0..4096 {
+            assert!(
+                matches!(first.try_recv().unwrap(), SessionEvent::TitleChanged { title } if title == number.to_string())
+            );
+        }
+        assert!(first.try_recv().is_err());
+        assert!(
+            matches!(second.try_recv().unwrap(), SessionEvent::TitleChanged { title } if title == "new")
+        );
+        drop(second);
+        assert!(tx
+            .send(SessionEvent::TitleChanged {
+                title: "closed".into()
+            })
+            .is_err());
+    }
+
+    #[test]
     fn multiline_system_context_is_one_literal_cli_argument() {
         let mut command = crate::os_process::Command::new("agent");
         append_system_prompt_arg(
@@ -932,7 +941,6 @@ mod tests {
     fn every_agent_process_receives_the_exact_front_door_binding() {
         let mut command = crate::os_process::Command::new("agent");
         let config = SessionConfig {
-            evidence_scope: None,
             session_id: "s-bound".into(),
             cwd: PathBuf::from("/workspace"),
             model_id: None,

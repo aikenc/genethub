@@ -6,7 +6,7 @@ defineJourney(
     title: "A real provider that rejects our key says so instead of hanging",
     oracle: "settings.setProvider deepseek with a fake key and no override URL names deepseek and leaves models empty; the next turn fails naming deepseek",
     catches: ["rejected key sent to the wrong host", "turn hangs on a dead key"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     expectedDurationMs: 40_000,
     timeoutMs: 90_000,
     surfaces: ["daemon", "workbench-client"],

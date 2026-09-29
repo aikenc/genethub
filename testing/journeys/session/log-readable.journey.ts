@@ -9,7 +9,7 @@ defineJourney(
     title: "The log can be read from whatever device saw the error",
     oracle: "log.tail returns daemon.log text written on disk",
     catches: ["log only on the host filesystem"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     expectedDurationMs: 20_000,
     timeoutMs: 60_000,
     surfaces: ["daemon", "workbench-client"],

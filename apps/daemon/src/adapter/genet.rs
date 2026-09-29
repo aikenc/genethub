@@ -14,11 +14,10 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use genehub_proto::{
     Capabilities, Catalog, CommandInfo, InteractionOption, InteractionQuestion, ItemDelta,
-    ModelInfo, PermissionRequest, PermissionRequestKind, ProbeState,
-    SessionEvent, TimelineItem, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
+    ModelInfo, PermissionRequest, PermissionRequestKind, ProbeState, SessionEvent, TimelineItem,
+    ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
 };
 use serde_json::{json, Map, Value};
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{Mutex, Notify};
 
 use super::stdio::write_json_line;
@@ -115,10 +114,6 @@ impl AgentAdapter for GenetAdapter {
 
     fn starts_without_model_catalog(&self) -> bool {
         false
-    }
-
-    fn supports_evidence_scope(&self) -> bool {
-        true
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -225,7 +220,7 @@ impl AgentAdapter for GenetAdapter {
 
         let session_file = home.join("session.jsonl");
         let legacy_native = self.binary.is_some();
-        let (mut command, describe) = match self.binary.clone() {
+        let (mut command, _describe) = match self.binary.clone() {
             Some(binary) => (Command::new(&binary), binary.display().to_string()),
             // v2: the agent is the `agent-run` entry of the same component the
             // daemon runs from, reached through the front door — the shell
@@ -264,10 +259,6 @@ impl AgentAdapter for GenetAdapter {
             .env(crate::channel::ENV_AGENT_HOME, &home)
             .env("GENET_WORKSPACE_ROOT", workspace_root);
         super::apply_session_environment(&mut command, &config);
-        command.env_remove("GENEHUB_EVIDENCE_SCOPE");
-        if let Some(scope) = &config.evidence_scope {
-            command.env("GENEHUB_EVIDENCE_SCOPE", serde_json::to_string(scope)?);
-        }
 
         if let Some(dir) = &config.skills_dir {
             command.env("GENEHUB_SKILLS_DIR", dir);
@@ -277,7 +268,6 @@ impl AgentAdapter for GenetAdapter {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        super::owned_child(&mut command);
 
         // Under the daemon, `models.json` is the only source of models. The
         // agent also picks up provider keys straight from its environment when
@@ -302,45 +292,32 @@ impl AgentAdapter for GenetAdapter {
             config.additional_system_prompt.as_deref(),
         );
 
-        let mut child = command
-            .spawn()
-            .with_context(|| format!("spawning {describe}"))?;
-        let stdout = child.stdout.take().expect("stdout was piped");
-        let stderr = child.stderr.take().expect("stderr was piped");
-        let stdin = child.stdin.take().expect("stdin was piped");
-
-        let child = Arc::new(Mutex::new(Some(child)));
+        let (process, mut io) =
+            super::process::AgentProcess::spawn(&mut command, "genet-agent", &config).await?;
+        let stdout = io.stdout.take().expect("stdout was piped");
+        let stdin = io.stdin.take().expect("stdin was piped");
+        let child = process.child.clone();
+        let said = process.chatter.clone();
         let (events, events_rx) = crate::adapter::EventTx::channel();
         let turn = Arc::new(Mutex::new(TurnState::default()));
         let turn_ended = Arc::new(Notify::new());
 
         // stderr is kept as well as drained: a full pipe would block the process,
         // and what it wrote on the way out is the only account of why it left.
-        let said = Arc::new(Chatter::default());
-        said.watch("genet-agent", Some(stderr)).await;
 
         let session = GenetSession {
             tasks: super::SessionTasks::default(),
             stdin: Mutex::new(stdin),
-            events: events.clone(),
             events_rx: std::sync::Mutex::new(Some(events_rx)),
             turn: turn.clone(),
             turn_ended: turn_ended.clone(),
-            child: child.clone(),
-            said: said.clone(),
+            process: process.clone(),
             session_file,
         };
 
-        session
-            .tasks
-            .spawn(translate_stream(
-                stdout,
-                events,
-                turn,
-                turn_ended,
-                child,
-                said,
-            ));
+        session.tasks.spawn(translate_stream(
+            stdout, events, turn, turn_ended, child, said,
+        ));
 
         Ok(Box::new(session))
     }
@@ -375,14 +352,12 @@ impl TurnState {
 struct GenetSession {
     tasks: super::SessionTasks,
     stdin: Mutex<ChildStdin>,
-    events: crate::adapter::EventTx,
     events_rx: std::sync::Mutex<Option<crate::adapter::EventRx>>,
     turn: Arc<Mutex<TurnState>>,
     turn_ended: Arc<Notify>,
     /// Shared with the stream reader, which needs the exit code to explain a crash.
-    child: Arc<Mutex<Option<Child>>>,
+    process: super::process::AgentProcess,
     /// What the agent said, for a prompt that cannot be written because it is gone.
-    said: Arc<Chatter>,
     session_file: PathBuf,
 }
 
@@ -401,6 +376,32 @@ impl AgentSession for GenetSession {
             .unwrap_or_else(|poison| poison.into_inner())
             .take()
             .expect("the session event stream is single-consumer")
+    }
+
+    async fn configure_for_prompt(
+        &self,
+        model_id: Option<&str>,
+        providers: &ProviderMap,
+    ) -> Result<()> {
+        let models = configured_models(providers);
+        let selected = match model_id {
+            Some(id) => Some(
+                models
+                    .iter()
+                    .find(|model| format!("{}/{}", model.provider, model.id) == id)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "model {id} is no longer configured; select an available model"
+                        )
+                    })?,
+            ),
+            None => models.first(),
+        };
+        if let Some(model) = selected {
+            self.command(json!({"type": "set_context_window", "tokens": model.context_window}))
+                .await?;
+        }
+        Ok(())
     }
 
     async fn send(&self, input: PromptInput) -> Result<String> {
@@ -422,7 +423,12 @@ impl AgentSession for GenetSession {
             })
         };
         if let Err(broken) = self.command(command).await {
-            let why = super::stopped(crate::channel::AGENT_LABEL, &self.child, &self.said).await;
+            let why = super::stopped(
+                crate::channel::AGENT_LABEL,
+                &self.process.child,
+                &self.process.chatter,
+            )
+            .await;
             tracing::warn!("{why} (writing the prompt failed: {broken})");
             self.turn.lock().await.pending_id = None;
             anyhow::bail!(why);
@@ -460,7 +466,7 @@ impl AgentSession for GenetSession {
             .await
             .context("agent tool cancellation is unconfirmed; cleanup can be retried")??;
         }
-        super::close_child(&self.child).await?;
+        self.process.close().await?;
         self.tasks.stop().await;
         Ok(())
     }
@@ -486,7 +492,10 @@ impl AgentSession for GenetSession {
 
     async fn set_effort(&self, effort_id: &str) -> Result<()> {
         if !THINKING_LEVELS.contains(&effort_id) {
-            return Err(anyhow!("unknown thinking level '{effort_id}'"));
+            return Err(crate::rpc_error::failure(
+                genehub_proto::ErrorCode::BadRequest,
+                format!("unknown thinking level '{effort_id}'"),
+            ));
         }
         self.command(json!({ "type": "set_thinking_level", "level": effort_id }))
             .await?;
@@ -509,7 +518,7 @@ async fn translate_stream(
     child: Arc<Mutex<Option<Child>>>,
     said: Arc<Chatter>,
 ) {
-    let mut lines = BufReader::new(stdout).lines();
+    let mut lines = super::process::ProcessLines::new(stdout, child.clone());
     loop {
         match lines.next_line().await {
             Ok(Some(line)) => {
@@ -649,23 +658,23 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &crate::adapter
             started_at_ms: 0,
         }),
 
-        "message_start" => {
+        "message_start"
             if frame
                 .get("message")
                 .and_then(|message| message.get("role"))
                 .and_then(Value::as_str)
                 == Some("assistant")
-                && !state.assistant_in_flight
-            {
-                // The built-in Agent emits this before any reasoning/text/tool
-                // item. Attribute the LLM call to that item and show the round
-                // while it is still running, not only after message_end.
-                state.assistant_in_flight = true;
-                state.usage.llm_rounds += 1;
-                usage::record_round_start(&mut state.usage);
-                usage::emit_progress(events, &turn_id, &state.usage);
-            }
+                && !state.assistant_in_flight =>
+        {
+            // The built-in Agent emits this before any reasoning/text/tool
+            // item. Attribute the LLM call to that item and show the round
+            // while it is still running, not only after message_end.
+            state.assistant_in_flight = true;
+            state.usage.llm_rounds += 1;
+            usage::record_round_start(&mut state.usage);
+            usage::emit_progress(events, &turn_id, &state.usage);
         }
+        "message_start" => {}
 
         "user_input_requested" => {
             let Some(questions) = builtin_questions(frame) else {
@@ -676,15 +685,16 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &crate::adapter
                 .and_then(Value::as_str)
                 .unwrap_or("user-input")
                 .to_string();
-            let title = frame_line(frame, "title", 120)
-                .unwrap_or_else(|| questions[0].prompt.clone());
-            let detail = frame_text(frame, "description").or_else(|| frame_line(frame, "summary", 300));
+            let title =
+                frame_line(frame, "title", 80).unwrap_or_else(|| questions[0].prompt.clone());
             emit(SessionEvent::PermissionRequested {
                 request: PermissionRequest {
+                    summary: frame_line(frame, "summary", 240),
+                    description: frame_text(frame, "description"),
+                    author: None,
                     id: request_id.clone(),
                     kind: PermissionRequestKind::Question,
                     title,
-                    detail,
                     tool_call_id: Some(request_id),
                     options: Vec::new(),
                     questions: Some(questions),
@@ -921,7 +931,10 @@ fn apply_command_response(frame: &Value, state: &mut TurnState, events: &crate::
     let Some(pending) = state.pending_id.take() else {
         return;
     };
-    let success = frame.get("success").and_then(Value::as_bool).unwrap_or(false);
+    let success = frame
+        .get("success")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     if success {
         if state.id.is_none() {
             state.id = Some(pending);
@@ -1448,7 +1461,7 @@ mod tests {
                 assert_eq!(request.id, "ask_takeover");
                 assert_eq!(request.kind, PermissionRequestKind::Question);
                 assert_eq!(request.title, "是否转换为 PM 项目？");
-                assert_eq!(request.detail, None);
+                assert_eq!(request.description, None);
                 let questions = request.questions.as_ref().expect("structured questions");
                 assert_eq!(questions[0].id, "pm-bootstrap-challenge");
                 assert_eq!(questions[0].options[0].label, "确认");
@@ -1482,7 +1495,7 @@ mod tests {
             [SessionEvent::PermissionRequested { request }] => {
                 assert_eq!(request.title, "是否接管这个项目");
                 assert_eq!(
-                    request.detail.as_deref(),
+                    request.description.as_deref(),
                     Some("会在项目里登记一个 Workflow。\n已有文件不会被覆盖。")
                 );
             }
@@ -1508,7 +1521,8 @@ mod tests {
         );
         match drain(&mut rx).as_slice() {
             [SessionEvent::PermissionRequested { request }] => {
-                assert_eq!(request.detail.as_deref(), Some("应用共享的工作流包。"));
+                assert_eq!(request.summary.as_deref(), Some("应用共享的工作流包。"));
+                assert_eq!(request.description, None);
             }
             other => panic!("unexpected events: {other:?}"),
         }

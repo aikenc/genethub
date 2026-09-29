@@ -23,13 +23,16 @@ mod skills;
 mod state;
 mod tools;
 
+#[cfg(test)]
+use crate::protocol::Usage;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
-use protocol::{error_response, error_response_with, response, Command, Message, Usage, THINKING_LEVELS};
+use protocol::{error_response, error_response_with, response, Command, Message, THINKING_LEVELS};
 use session::Session;
 use state::State;
 
@@ -97,8 +100,6 @@ pub async fn run() -> i32 {
         skills: skills::load(&cwd, &data_dir),
         additional_system_prompts: args.add_system_prompt,
         cwd,
-        stats: Usage::default(),
-        last_request: None,
         streaming: false,
         compacting: false,
         tools_enabled: true,
@@ -145,14 +146,14 @@ async fn handle(state: &Arc<Mutex<State>>, command: Command) {
 
             let busy = { state.lock().await.streaming };
             if busy {
-            emitter.send(error_response_with(
-                id,
-                kind,
-                "agent is streaming; queueing is not supported",
-                "busy",
-                Some(409),
-                true,
-            ));
+                emitter.send(error_response_with(
+                    id,
+                    kind,
+                    "agent is streaming; queueing is not supported",
+                    "busy",
+                    Some(409),
+                    true,
+                ));
                 return;
             }
 
@@ -201,21 +202,34 @@ async fn handle(state: &Arc<Mutex<State>>, command: Command) {
             let value = state.lock().await.state_value();
             emitter.send(response(id, kind, Some(value)));
         }
-        "get_messages" => {
-            let value = state.lock().await.messages_value();
-            emitter.send(response(id, kind, Some(value)));
-        }
-        "get_available_models" => {
-            let value = state.lock().await.models_value();
-            emitter.send(response(id, kind, Some(value)));
-        }
-        "get_session_stats" => {
-            let value = state.lock().await.stats_value();
-            emitter.send(response(id, kind, Some(value)));
-        }
-        "get_commands" => {
-            let value = state.lock().await.commands_value();
-            emitter.send(response(id, kind, Some(value)));
+        "set_context_window" => {
+            let Some(tokens) = command
+                .rest
+                .get("tokens")
+                .and_then(Value::as_u64)
+                .filter(|n| [262_144, 524_288, 1_048_576, 2_097_152].contains(n))
+            else {
+                emitter.send(error_response(
+                    id,
+                    kind,
+                    "context window must be 256K, 512K, 1M or 2M",
+                ));
+                return;
+            };
+            let mut guard = state.lock().await;
+            if guard.streaming {
+                emitter.send(error_response(
+                    id,
+                    kind,
+                    "cannot change context window during a request",
+                ));
+                return;
+            }
+            if let Some(model) = guard.current_model.as_mut() {
+                model.context_window = Some(tokens);
+                model.max_tokens = Some((tokens / 8).min(65_536));
+            }
+            emitter.send(response(id, kind, None));
         }
         "set_model" => {
             let (Some(provider), Some(model_id)) =
@@ -352,7 +366,7 @@ pub(crate) async fn capsule_replace(
     open_round_from: Option<usize>,
 ) -> bool {
     let idle = open_round_from.is_none();
-    let (session_id, fallback_messages, tail, abort, budget, tokens_before) = {
+    let (session_id, fallback_messages, tail, abort, window, budget, tokens_before) = {
         let guard = state.lock().await;
         let window = guard
             .current_model
@@ -363,7 +377,9 @@ pub(crate) async fn capsule_replace(
             let Some(window) = window else {
                 return false;
             };
-            if !state::exceeds_capsule_threshold(guard.context_tokens(), window) {
+            if guard.awaiting_context_usage()
+                || !state::exceeds_capsule_threshold(guard.context_tokens(), window)
+            {
                 return false;
             }
         }
@@ -386,6 +402,7 @@ pub(crate) async fn capsule_replace(
             guard.session.messages.clone(),
             tail,
             guard.abort.clone(),
+            window,
             budget,
             guard.context_tokens(),
         )
@@ -399,7 +416,7 @@ pub(crate) async fn capsule_replace(
     emitter.send(json!({ "type": "compaction_start", "reason": reason }));
 
     let material = match session_id.as_deref() {
-        Some(session_id) => fetch_context_material(session_id, budget)
+        Some(session_id) => fetch_context_material(session_id, window, budget)
             .await
             .unwrap_or_else(|error| {
                 fallback_context(session_id, &fallback_messages, &error, budget)
@@ -434,7 +451,6 @@ pub(crate) async fn capsule_replace(
     let tokens_after = {
         let mut guard = state.lock().await;
         guard.session.replace_with_capsule(summary, tail);
-        guard.last_request = None;
         guard.compacting = false;
         if idle {
             guard.streaming = false;
@@ -491,7 +507,11 @@ fn fit_open_round(tail: Vec<Message>, room: u64) -> Vec<Message> {
     assemble_round(&leading, &omitted, &groups)
 }
 
-fn assemble_round(leading: &[Message], omitted: &[String], groups: &[Vec<Message>]) -> Vec<Message> {
+fn assemble_round(
+    leading: &[Message],
+    omitted: &[String],
+    groups: &[Vec<Message>],
+) -> Vec<Message> {
     let mut out = leading.to_vec();
     if !omitted.is_empty() {
         out.push(Message::user(format!(
@@ -540,19 +560,29 @@ fn capsule_token_budget(window: Option<u64>) -> u64 {
         .unwrap_or(16_000)
 }
 
-async fn fetch_context_material(session_id: &str, budget: u64) -> Result<ContextMaterial, String> {
+async fn fetch_context_material(
+    session_id: &str,
+    window: Option<u64>,
+    budget: u64,
+) -> Result<ContextMaterial, String> {
     let binary = std::env::var_os("GENEHUB_CLI")
         .map(PathBuf::from)
         .ok_or_else(|| "GENEHUB_CLI is unavailable".to_string())?;
+    let mut args = vec![
+        "session".to_string(),
+        "context".to_string(),
+        session_id.to_string(),
+        "--exclude-open-round".to_string(),
+    ];
+    if let Some(window) = window.filter(|window| *window > 0) {
+        args.push("--context-window".to_string());
+        args.push(window.to_string());
+    } else {
+        args.push("--budget-tokens".to_string());
+        args.push(budget.to_string());
+    }
     let output = crate::os_process::Command::new(binary)
-        .args([
-            "session",
-            "context",
-            session_id,
-            "--budget-tokens",
-            &budget.to_string(),
-            "--exclude-open-round",
-        ])
+        .args(args)
         .output()
         .await
         .map_err(|error| format!("could not invoke genet session context: {error}"))?;
@@ -620,7 +650,10 @@ fn fallback_context(
     budget: u64,
 ) -> ContextMaterial {
     let raw = serde_json::to_string(messages).unwrap_or_default();
-    let text = tail_chars(&raw, usize::try_from(budget.saturating_mul(4)).unwrap_or(usize::MAX));
+    let text = tail_chars(
+        &raw,
+        usize::try_from(budget.saturating_mul(4)).unwrap_or(usize::MAX),
+    );
     ContextMaterial {
         text: format!(
             "The deterministic context projection was unavailable ({error}). The following is a bounded tail of the built-in Agent's private context and may be incomplete:\n{text}"
@@ -656,9 +689,11 @@ async fn expand_skill_command(state: &Arc<Mutex<State>>, message: String) -> Str
 
     let located = {
         let guard = state.lock().await;
-        guard.skills.iter().find(|skill| skill.name == name).map(|skill| {
-            (skill.file_path.clone(), skill.base_dir.clone())
-        })
+        guard
+            .skills
+            .iter()
+            .find(|skill| skill.name == name)
+            .map(|skill| (skill.file_path.clone(), skill.base_dir.clone()))
     };
     let Some((path, base_dir)) = located else {
         return message;
@@ -773,8 +808,6 @@ mod tests {
             skills: Vec::new(),
             additional_system_prompts: Vec::new(),
             cwd: dir.clone(),
-            stats: Usage::default(),
-            last_request: None,
             streaming: true,
             compacting: true,
             tools_enabled: true,
@@ -819,8 +852,6 @@ mod tests {
             skills: Vec::new(),
             additional_system_prompts: Vec::new(),
             cwd: dir,
-            stats: Usage::default(),
-            last_request: None,
             streaming: true,
             compacting: true,
             tools_enabled: true,
@@ -859,8 +890,6 @@ mod tests {
             skills: Vec::new(),
             additional_system_prompts: Vec::new(),
             cwd: dir,
-            stats: Usage::default(),
-            last_request: None,
             streaming: true,
             compacting: true,
             tools_enabled: true,

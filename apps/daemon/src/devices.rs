@@ -109,7 +109,6 @@ impl Devices {
             .collect();
         for device in &mut devices {
             if device.grants_version == 0 {
-                device.grants.add_speech_to_legacy_full();
                 device.grants_version = GRANTS_VERSION;
             }
         }

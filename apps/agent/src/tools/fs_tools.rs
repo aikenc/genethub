@@ -44,15 +44,12 @@ pub fn read(args: &Value, cwd: &Path) -> ToolResult {
     result
 }
 
+#[cfg(test)]
 pub fn write(args: &Value, cwd: &Path) -> ToolResult {
     write_cancellable(args, cwd, &|| false)
 }
 
-pub(crate) fn write_cancellable(
-    args: &Value,
-    cwd: &Path,
-    cancel: &dyn Fn() -> bool,
-) -> ToolResult {
+pub(crate) fn write_cancellable(args: &Value, cwd: &Path, cancel: &dyn Fn() -> bool) -> ToolResult {
     let Some(raw_path) = arg_str(args, "path") else {
         return ToolResult::error("write: 'path' is required");
     };
@@ -82,15 +79,12 @@ pub(crate) fn write_cancellable(
 /// Every `oldText` is matched against the original file, never against the
 /// partially edited buffer, so overlapping edits are rejected rather than
 /// silently applied in sequence.
+#[cfg(test)]
 pub fn edit(args: &Value, cwd: &Path) -> ToolResult {
     edit_cancellable(args, cwd, &|| false)
 }
 
-pub(crate) fn edit_cancellable(
-    args: &Value,
-    cwd: &Path,
-    cancel: &dyn Fn() -> bool,
-) -> ToolResult {
+pub(crate) fn edit_cancellable(args: &Value, cwd: &Path, cancel: &dyn Fn() -> bool) -> ToolResult {
     let Some(raw_path) = arg_str(args, "path") else {
         return ToolResult::error("edit: 'path' is required");
     };
@@ -223,9 +217,9 @@ pub fn ls(args: &Value, cwd: &Path) -> ToolResult {
     let truncation = truncate_head(&names.join("\n"), usize::MAX, DEFAULT_MAX_BYTES);
     let mut result = ToolResult::ok(truncation.content.clone()).with_truncation(&truncation);
     if omitted > 0 || truncation.truncated {
-        result.text.push_str(
-            "\n\n[More directory entries omitted. Narrow the path or raise limit.]",
-        );
+        result
+            .text
+            .push_str("\n\n[More directory entries omitted. Narrow the path or raise limit.]");
     }
     result
 }
@@ -301,7 +295,10 @@ mod tests {
             &dir,
         );
         assert!(!result.is_error, "{}", result.text);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "\u{feff}hello\r\nthere\r\n");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "\u{feff}hello\r\nthere\r\n"
+        );
     }
 
     #[test]

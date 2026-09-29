@@ -6,7 +6,7 @@ defineJourney(
     title: "A request for a session that does not exist is answered with notFound",
     oracle: "session.get of a fake id is notFound rather than hanging",
     catches: ["unknown session waits forever"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     expectedDurationMs: 20_000,
     timeoutMs: 60_000,
     surfaces: ["daemon", "workbench-client"],

@@ -11,7 +11,7 @@ defineJourney(
     title: "A device without a files grant cannot take the bytes by another door",
     oracle: "asset.preview is 403 without files; 200 with read+files",
     catches: ["files grant only gates RPC"],
-    tags: ["core", "authorization", "parity"],
+    tags: ["core", "authorization"],
     expectedDurationMs: 35_000,
     timeoutMs: 100_000,
     surfaces: ["daemon", "workbench-client"],

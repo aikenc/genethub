@@ -20,3 +20,6 @@ mod wasi_http;
 
 #[cfg(target_family = "wasm")]
 pub use wasi_http::*;
+
+mod sse;
+pub use sse::SseDecoder;

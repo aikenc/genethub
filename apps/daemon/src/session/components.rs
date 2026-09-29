@@ -16,8 +16,9 @@
 //! point of having two:
 //!
 //! * **Space scope** outlives every Session. It is where a responsibility
-//!   keeps what belongs to the Space itself — an Executor's flow ledger, a
-//!   PM's project state — so closing a conversation does not lose it.
+//!   keeps what belongs to the Space itself — an Executor's candidates and
+//!   activation pointers, a PM's requirement/Run records — so closing a
+//!   conversation does not lose it. FlowMessages live in the PM-owned Run.
 //! * **Session scope** belongs to one conversation and is reclaimed with it.
 //!
 //! Directories are created when an instance is resolved rather than when a

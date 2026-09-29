@@ -6,7 +6,7 @@ defineJourney(
     title: "A session title comes from the first thing the user says",
     oracle: "titleChanged event and session.get title match the prompt",
     catches: ["daemon invented placeholder title"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     llm: { default: "mock" },
     expectedDurationMs: 25_000,
     timeoutMs: 75_000,

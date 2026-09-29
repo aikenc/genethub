@@ -6,7 +6,7 @@ defineJourney(
     title: "A command's output stays behind the access layer",
     oracle: "a bash seq 1 200000 turn completes without putting 200000 lines on the event stream",
     catches: ["full command transcript fanout"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     llm: { default: "mock" },
     resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
     expectedDurationMs: 40_000,

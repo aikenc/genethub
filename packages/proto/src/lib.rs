@@ -257,7 +257,7 @@ mod tests {
             web_protocol: WEB_PROTOCOL_VERSION,
         })
         .expect("serialize");
-        assert_eq!(encoded, json!({"webProtocol": 3}));
+        assert_eq!(encoded, json!({"webProtocol": WEB_PROTOCOL_VERSION}));
         round_trip(ProtocolIdentity {
             web_protocol: WEB_PROTOCOL_VERSION,
         });

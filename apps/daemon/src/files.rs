@@ -641,7 +641,12 @@ fn workspace_dir(root: &Path) -> Result<crate::fs_cap::Dir> {
 fn workspace_relative(root: &Path, path: &Path) -> Result<PathBuf> {
     let relative = path
         .strip_prefix(root)
-        .map_err(|_| anyhow::anyhow!("path escapes the workspace"))?
+        .map_err(|_| {
+            crate::rpc_error::failure(
+                genehub_proto::ErrorCode::Forbidden,
+                "path escapes the workspace".to_owned(),
+            )
+        })?
         .to_path_buf();
     for component in relative.components() {
         if matches!(
@@ -650,7 +655,10 @@ fn workspace_relative(root: &Path, path: &Path) -> Result<PathBuf> {
                 | std::path::Component::RootDir
                 | std::path::Component::Prefix(_)
         ) {
-            anyhow::bail!("path escapes the workspace");
+            return Err(crate::rpc_error::failure(
+                genehub_proto::ErrorCode::Forbidden,
+                "path escapes the workspace".to_owned(),
+            ));
         }
     }
     Ok(relative)

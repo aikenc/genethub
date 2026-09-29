@@ -19,13 +19,13 @@ export interface RelayHandle {
  * mode on a dynamic loopback port. A missing bundle blocks the case rather
  * than silently substituting anything else for the forwarding layer.
  */
-export async function startRelay(input: { openRoot: string; port?: number; control?: { origin: string; token: string } }): Promise<RelayHandle> {
+export async function startRelay(input: { openRoot: string; port?: number; joinToken?: string; control?: { origin: string; token: string } }): Promise<RelayHandle> {
   const bundle = path.join(input.openRoot, "apps", "relay", "dist", "main.js");
   if (!existsSync(bundle)) {
     throw new BlockedError(`relay bundle missing at ${bundle}; build it with: npm --prefix apps/relay run build`);
   }
   // Rendezvous joins tokens are validated at 32-256 chars even on loopback.
-  const joinToken = `testctl-${randomBytes(24).toString("hex")}`;
+  const joinToken = input.joinToken ?? `testctl-${randomBytes(24).toString("hex")}`;
   const child = spawn(process.execPath, [bundle], {
     env: {
       ...process.env,

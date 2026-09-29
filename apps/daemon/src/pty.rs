@@ -202,9 +202,17 @@ mod guest {
                 .is_some_and(|session| session.exit_code().is_some())
             {
                 sessions.remove(pty_id);
-                return Err(anyhow!("no such terminal: {pty_id}"));
+                return Err(crate::rpc_error::failure(
+                    genehub_proto::ErrorCode::NotFound,
+                    format!("no such terminal: {pty_id}"),
+                ));
             }
-            session.ok_or_else(|| anyhow!("no such terminal: {pty_id}"))
+            session.ok_or_else(|| {
+                crate::rpc_error::failure(
+                    genehub_proto::ErrorCode::NotFound,
+                    format!("no such terminal: {pty_id}"),
+                )
+            })
         }
     }
 

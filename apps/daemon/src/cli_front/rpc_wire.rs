@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use crate::dataplane::client::ClientEndpoint;
 use genehub_proto::{
-    Confinement, HelloResult, HubTicket, PeerAuth, PeerHello, ProtocolError, Reply,
-    Request, SequencedEvent, ServerFrame, ShellFrame, ShellRunRequest,
+    Confinement, HelloResult, HubTicket, PeerAuth, PeerHello, ProtocolError, Reply, Request,
+    SequencedEvent, ServerFrame, ShellFrame, ShellRunRequest,
 };
 use serde_json::Value;
 use tokio::sync::{mpsc, Mutex};
@@ -656,6 +656,7 @@ impl Drop for Rpc {
 fn error_code_name(code: genehub_proto::ErrorCode) -> &'static str {
     use genehub_proto::ErrorCode::*;
     match code {
+        QueueFull => "queue_full",
         BadRequest => "bad_request",
         Unauthorized => "unauthorized",
         NotFound => "not_found",

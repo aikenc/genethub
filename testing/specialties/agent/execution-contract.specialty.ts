@@ -172,6 +172,31 @@ contractCase(
 );
 
 contractCase(
+  "close-during-startup-owns-the-process",
+  "close during session creation acknowledges closure and reaps the exact CLI process within 12 seconds",
+  ["close waits for the same handover it must cancel", "a dropped startup future leaves its child alive"],
+  { profile: "hang-session-new" },
+  async (t, session) => {
+    const journalBefore = session.journal().length;
+    await t.flows.main.sendPrompt(session.client, session.sessionId, "Close before startup finishes.");
+    const starting = () => session.journal().slice(journalBefore).find((entry) =>
+      entry.event === "withholding-session-new" && t.flows.branches.processAlive(Number(entry.pid)));
+    await t.tools.waitUntil(() => Boolean(starting()), 45_000);
+    const pid = Number(starting()!.pid);
+    let closeFinished = false;
+    let closeError: unknown;
+    let acknowledged = false;
+    const closing = session.client.call({ type: "session.close", payload: { sessionId: session.sessionId } })
+      .then((reply) => { acknowledged = reply?.type === "ack"; closeFinished = true; },
+        (error) => { closeError = error; closeFinished = true; });
+    await t.tools.waitUntil(() => closeFinished && !t.flows.branches.processAlive(pid), 12_000)
+      .catch(() => { throw new Error(`startup close: finished=${closeFinished}, processAlive=${t.flows.branches.processAlive(pid)}, error=${String(closeError)}`); });
+    await closing;
+    t.assertions.assert(!closeError && acknowledged, `startup Close did not acknowledge: ${String(closeError)}`);
+  },
+);
+
+contractCase(
   "previous-stop-cannot-end-a-continued-round",
   "a second execution continuing the same round remains running past the first stop escalation deadline",
   ["round identity reused as execution identity", "previous interrupt kills a new execution"],

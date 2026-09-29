@@ -18,16 +18,15 @@ pub(crate) async fn check(
             checked_at_ms: now_ms(),
             findings: Vec::new(),
             runs: Vec::new(),
-            draft: Some(authoring::check_draft(
-                &workspace.root,
-                package_id,
-                &state.registry,
-            )),
+            draft: Some(authoring::check_draft(&workspace.root, package_id)),
         });
     }
     let runtime = RuntimeStore::new(&state.paths.root, workspace_id, &workspace.root)?;
     let scan = if let Some(id) = run_id {
-        RunScan { runs: vec![load_run(&runtime, id)?], unreadable: Vec::new() }
+        RunScan {
+            runs: vec![load_run(&runtime, id)?],
+            unreadable: Vec::new(),
+        }
     } else {
         scan_runs(&runtime)?
     };
@@ -62,50 +61,56 @@ pub(crate) async fn check(
                 detail,
             });
         };
-        if let Some(recovery) = &run.recovery {
-            if run.status == "recoverable" {
-                if recovery.reuse_session {
-                    finding(Some(recovery.node_id.clone()), "recoverableOperation", "warning",
-                        format!("未交卷 Worker Session {} 仍保留；核对 git 状态与潜在副作用后，可用 workflow recover --run {} --revision {} 通知同一 Worker 继续。已通过节点不会重跑，写租约不会释放。", recovery.previous_session_id, run.id, run.revision));
-                } else {
-                    finding(Some(recovery.node_id.clone()), "recoverableOperation", "warning",
-                        format!("旧 Worker Session {} 已封禁并关闭；核对潜在副作用和预算后，可用 workflow recover --run {} --revision {} 在同一 Run 重试这个无写租约操作；不会重跑已完成节点。", recovery.previous_session_id, run.id, run.revision));
-                }
+        for (id, node) in &run.nodes {
+            if let Some(fault) = &node.interruption {
+                let detail = match state.sessions.worker_continuation(&fault.session_id).await {
+                    crate::session::manager::WorkerContinuation::Ready => {
+                        "原 Session 仍保留，可在预算与取消门禁通过后续接".into()
+                    }
+                    crate::session::manager::WorkerContinuation::ProcessAlive { pid } => {
+                        format!("旧进程仍在运行：{pid:?}")
+                    }
+                    crate::session::manager::WorkerContinuation::Unavailable { reason } => reason,
+                };
+                finding(
+                    Some(id.clone()),
+                    "recoverableOperation",
+                    "warning",
+                    format!(
+                        "异常 {}：{detail}；workflow recover --run {} --revision {}",
+                        fault.occurrence, run.id, run.revision
+                    ),
+                );
             }
         }
-        let definitions = if run.engine.is_some() {
+        if run.interrupted() || !run.route_wait().is_empty() || !run.program_open() {
+            if let Some((code, detail)) =
+                control::recovery_suppression(state, &runtime, &run).await?
+            {
+                finding(
+                    None,
+                    "recoverySuppressed",
+                    "info",
+                    format!("{code}: {detail}"),
+                );
+            } else {
+                finding(
+                    None,
+                    "recoveryEligible",
+                    "info",
+                    "自动复查门禁已满足；巡查将在原执行收尾后启动普通恢复流程".into(),
+                );
+            }
+        }
+        let definitions = {
             run.nodes
                 .keys()
                 .map(|id| runtime_node(&run, id))
                 .collect::<Result<Vec<_>>>()?
-        } else {
-            run.definition.nodes.clone()
         };
         for node in &definitions {
             if node.uses != "agent.session" {
                 continue;
-            }
-            let fallback = ["changesRequested", "failed", "blocked"]
-                .into_iter()
-                .chain(
-                    run.definition
-                        .outcomes
-                        .iter()
-                        .filter(|(_, declared)| !declared.success)
-                        .map(|(name, _)| name.as_str()),
-                )
-                .filter(|event| !node.on.contains_key(*event))
-                .collect::<Vec<_>>();
-            if run.engine.is_none() && !fallback.is_empty() {
-                finding(
-                    Some(node.id.clone()),
-                    "defaultBlockedExit",
-                    "info",
-                    format!(
-                        "{} 未配置业务后续边；框架提供默认受阻出口；后续处理由项目工作流与任务负责人决定",
-                        fallback.join(", ")
-                    ),
-                );
             }
             let Some(record) = run.nodes.get(&node.id) else {
                 finding(
@@ -116,7 +121,7 @@ pub(crate) async fn check(
                 );
                 continue;
             };
-            if record.status == "finishing" {
+            if record.status() == "finishing" {
                 finding(
                     Some(node.id.clone()),
                     "nodeFinishing",
@@ -124,7 +129,7 @@ pub(crate) async fn check(
                     "节点结果已持久化，正在确认执行及进程收尾；成功后按定义激活后续节点。".into(),
                 );
             }
-            if record.status == "running" {
+            if record.status() == "running" {
                 match &record.session_id {
                     None => finding(
                         Some(node.id.clone()),
@@ -192,10 +197,15 @@ pub(crate) async fn check(
             .iter()
             .filter(|other| request::group_id(other) == request::group_id(&run))
             .collect::<Vec<_>>();
-        let snapshot = match request::observation(&all, &run, now_ms()) {
+        let snapshot = match request::observation(&runtime, &all, &run, now_ms()) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                finding(None, "requestUnreadable", "error", format!("请求预算无法读取：{error:#}"));
+                finding(
+                    None,
+                    "requestUnreadable",
+                    "error",
+                    format!("请求预算无法读取：{error:#}"),
+                );
                 continue;
             }
         };
@@ -206,7 +216,23 @@ pub(crate) async fn check(
                 activity.tokens.map(|tokens| sum.saturating_add(tokens))
             });
         let budget = &snapshot.budget;
-        finding(None, "requestBudget", "info", format!("原请求 {}：{}/{} 次 Run；已观测 {}/{} 次 LLM 调用；token {}；预算 revision {}（观测不代表额度预留）", snapshot.request_run_id, snapshot.used_runs, budget.max_runs, snapshot.observed_llm_rounds, budget.max_llm_rounds, tokens.map(|tokens| tokens.to_string()).unwrap_or_else(|| "未知".into()), budget.revision));
+        finding(
+            None,
+            "requestBudget",
+            "info",
+            format!(
+                "原请求 {}：{}/{} 次 Run；已观测 {}/{} 次 LLM 请求；token {}；预算 revision {}",
+                snapshot.request_run_id,
+                snapshot.used_runs,
+                budget.max_runs,
+                snapshot.observed_llm_rounds,
+                budget.max_llm_rounds,
+                tokens
+                    .map(|tokens| tokens.to_string())
+                    .unwrap_or_else(|| "未知".into()),
+                budget.revision
+            ),
+        );
         if let Some(stop) = &run.stop {
             finding(
                 None,
@@ -228,7 +254,12 @@ pub(crate) async fn check(
         }
         match run_status(&runtime, &run) {
             Ok(status) => report.runs.push(status),
-            Err(error) => finding(None, "requestUnreadable", "error", format!("Run 状态无法读取：{error:#}")),
+            Err(error) => finding(
+                None,
+                "requestUnreadable",
+                "error",
+                format!("Run 状态无法读取：{error:#}"),
+            ),
         }
     }
     Ok(report)

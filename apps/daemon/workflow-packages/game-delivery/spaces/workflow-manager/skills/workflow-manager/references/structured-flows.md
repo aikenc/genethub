@@ -59,7 +59,7 @@ Declare `{id: budget, uses: request.budget}` with no `with` or `completion`.
 A task referencing it returns `/results/<step>/output`: `requestRunId`,
 `observedAtMs`, `budget` (`revision`, `maxRuns`, `maxLlmRounds`),
 `usedRuns`, `observedLlmRounds`, `remainingRuns`,
-`remainingLlmRounds`. Numbers are nonnegative except
+`remainingLlmRounds`, `currentRunAdmitted`, `currentRunCanExecute`. Numbers are nonnegative except
 the wall-clock timestamp. The host persists this current-request observation
 before downstream control runs; a completed query is not refreshed on restart.
 Place another query task where a fresh observation is required, including each

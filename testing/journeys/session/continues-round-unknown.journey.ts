@@ -6,7 +6,7 @@ defineJourney(
     title: "continuesRound is accepted over the wire and ignored when unrecognized",
     oracle: "session.send with a fake continuesRound still completes the turn",
     catches: ["unknown round id is a protocol error"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     llm: { default: "mock" },
     expectedDurationMs: 25_000,
     timeoutMs: 75_000,

@@ -9,7 +9,7 @@ defineJourney(
     title: "An interrupted round left dangling is ledgered as superseded once a new one starts",
     oracle: "chat.jsonl has superseded then completed after interrupt + new send",
     catches: ["dangling round dropped"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     llm: { default: "mock" },
     expectedDurationMs: 35_000,
     timeoutMs: 100_000,

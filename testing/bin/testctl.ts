@@ -18,7 +18,6 @@ import {
   hasClaimable,
 } from "../infrastructure/engine/scheduler.ts";
 import { runNodeUnit } from "../infrastructure/adapters/node.ts";
-import { runRustLegacyUnit } from "../infrastructure/adapters/rust-legacy.ts";
 import { preflight, digest } from "../infrastructure/engine/preflight.ts";
 import { reusableResults } from "../infrastructure/engine/resume.ts";
 import { createRunStore, readRunResults } from "../infrastructure/evidence/run-store.ts";
@@ -74,12 +73,11 @@ function usage(): string {
 `;
 }
 
-async function runUnit(unit: WorkUnit, extraEnv: Record<string, string>, openRoot: string): Promise<UnitResult> {
+async function runUnit(unit: WorkUnit, extraEnv: Record<string, string>): Promise<UnitResult> {
   if (unit.meta.runner === "playwright") {
     const { runPlaywrightUnit } = await import("../infrastructure/adapters/playwright.ts");
     return runPlaywrightUnit(unit, extraEnv);
   }
-  if (unit.meta.runner === "rust-legacy") return runRustLegacyUnit(unit, openRoot);
   return runNodeUnit(unit, extraEnv);
 }
 
@@ -265,7 +263,7 @@ async function main(): Promise<number> {
           );
         }
         active.set(unit.id, Date.now()); progress();
-        const task = runUnit(unit, env, openRoot).then((result) => {
+        const task = runUnit(unit, env).then((result) => {
           active.delete(unit.id);
           completeUnit(scheduler, unit, result.durationMs);
           results.push(result);

@@ -6,7 +6,7 @@ defineJourney(
     title: "Sessions list per workspace and can be archived",
     oracle: "session.list drops an archived session unless includeArchived is true",
     catches: ["global session list", "archive is a local flag"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     expectedDurationMs: 20_000,
     timeoutMs: 60_000,
     surfaces: ["daemon", "workbench-client"],

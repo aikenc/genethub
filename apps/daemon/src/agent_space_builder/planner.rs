@@ -7,6 +7,46 @@ use super::diagnostic::{fail, BuilderError, BuilderResult, Diagnostic};
 use super::manifest::{valid_name, Manifest, Provider, Workspace};
 use super::{read_bytes, scan_files, sha256_bytes, tree_digest};
 
+struct AgentLayout {
+    id: &'static str,
+    skills: &'static str,
+    workspace: &'static str,
+    prefix: &'static [u8],
+}
+const AGENT_LAYOUTS: &[AgentLayout] = &[
+    AgentLayout {
+        id: "codex",
+        skills: ".agents/skills",
+        workspace: "AGENTS.md",
+        prefix: b"",
+    },
+    AgentLayout {
+        id: "cursor",
+        skills: ".cursor/skills",
+        workspace: ".cursor/rules/pipebuilder-workspace.mdc",
+        prefix:
+            b"---\ndescription: PipeBuilder workspace folder inventory.\nalwaysApply: true\n---\n\n",
+    },
+    AgentLayout {
+        id: "codebuddy",
+        skills: ".codebuddy/skills",
+        workspace: ".codebuddy/rules/pipebuilder-workspace.md",
+        prefix: b"",
+    },
+    AgentLayout {
+        id: "claude-code",
+        skills: ".claude/skills",
+        workspace: ".claude/rules/pipebuilder-workspace.md",
+        prefix: b"",
+    },
+];
+fn agent_layout(id: &str) -> &'static AgentLayout {
+    AGENT_LAYOUTS
+        .iter()
+        .find(|layout| layout.id == id)
+        .expect("manifest Agent was validated")
+}
+
 #[derive(Debug, Clone)]
 pub struct Skill {
     pub name: String,
@@ -318,13 +358,7 @@ impl<'a> Planner<'a> {
     }
 
     fn install_common_skills(&mut self, agent: &str) -> BuilderResult<()> {
-        let destination = match agent {
-            "codex" => ".agents/skills",
-            "cursor" => ".cursor/skills",
-            "codebuddy" => ".codebuddy/skills",
-            "claude-code" => ".claude/skills",
-            _ => unreachable!("manifest Agent was validated"),
-        };
+        let destination = agent_layout(agent).skills;
         for skill in self.skills {
             for path in scan_files(&skill.root, true)? {
                 let relative = path
@@ -347,28 +381,14 @@ impl<'a> Planner<'a> {
     }
 
     fn add_workspace_projection(&mut self, agent: &str, rule: &[u8]) -> BuilderResult<()> {
-        let (target, logical_type, merge, content) = match agent {
-            "codex" => ("AGENTS.md", "project-instructions", Merge::Concat, rule.to_vec()),
-            "cursor" => (
-                ".cursor/rules/pipebuilder-workspace.mdc",
-                "workspace-rule",
-                Merge::Plain,
-                [b"---\ndescription: PipeBuilder workspace folder inventory.\nalwaysApply: true\n---\n\n".as_slice(), rule].concat(),
-            ),
-            "codebuddy" => (
-                ".codebuddy/rules/pipebuilder-workspace.md",
-                "workspace-rule",
-                Merge::Plain,
-                rule.to_vec(),
-            ),
-            "claude-code" => (
-                ".claude/rules/pipebuilder-workspace.md",
-                "workspace-rule",
-                Merge::Plain,
-                rule.to_vec(),
-            ),
-            _ => unreachable!(),
+        let layout = agent_layout(agent);
+        let target = layout.workspace;
+        let (logical_type, merge) = if target == "AGENTS.md" {
+            ("project-instructions", Merge::Concat)
+        } else {
+            ("workspace-rule", Merge::Plain)
         };
+        let content = [layout.prefix, rule].concat();
         self.add(Contribution {
             target: target.into(),
             content,

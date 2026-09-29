@@ -1,3 +1,4 @@
+import { waitUntil } from "../../tools/wait.ts";
 import {
   readControlledAgentJournal,
   registerControlledAgent,
@@ -103,13 +104,7 @@ export async function openControlledAgentSession(input: {
       journal: () => readControlledAgentJournal(agent),
       terminal: () => events.find((event) => TERMINAL.has(event.type ?? "")),
       async waitForTerminal(timeoutMs = 20_000) {
-        const deadline = Date.now() + timeoutMs;
-        while (Date.now() < deadline) {
-          const found = events.find((event) => TERMINAL.has(event.type ?? ""));
-          if (found) return found;
-          await new Promise((resolve) => setTimeout(resolve, 50));
-        }
-        throw new Error(`no turnCompleted or turnFailed within ${timeoutMs}ms`);
+        return waitUntil(() => events.find(event => TERMINAL.has(event.type ?? "")), timeoutMs);
       },
       async daemonStatus() {
         const reply = await opened.client.call({

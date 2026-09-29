@@ -6,7 +6,7 @@ defineJourney(
     title: "The built-in agent still answers to the old name for thinking",
     oracle: "session.setMode high is accepted on genet",
     catches: ["old mode axis silently dropped"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     llm: { default: "mock" },
     expectedDurationMs: 25_000,
     timeoutMs: 75_000,

@@ -8,7 +8,7 @@ defineJourney(
     title: "A Cursor tool call is visible while the turn is still running",
     oracle: "a tool event arrives at least 250ms before turnCompleted when Cursor writes ping.txt",
     catches: ["ACP timeline flushed only at turn end"],
-    tags: ["third-party", "session", "parity"],
+    tags: ["third-party", "session"],
     llm: { default: "real" },
     resources: { pool: "real-llm" },
     expectedDurationMs: 120_000,

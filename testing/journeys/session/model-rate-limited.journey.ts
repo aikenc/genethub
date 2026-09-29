@@ -6,7 +6,7 @@ defineJourney(
     title: "Model failures surface as actionable errors",
     oracle: "HTTP 429 from the mock LLM becomes turnFailed rateLimited",
     catches: ["hang on 429", "generic internal"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     llm: { default: "mock" },
     resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
     expectedDurationMs: 25_000,

@@ -251,6 +251,7 @@ export class ClientQueueFullError extends Error {
 
 interface Subscription {
   seq: number;
+  streamEpoch?: string;
   onEvent(event: SequencedEvent): void;
   onResync(snapshot: unknown, replayed: SequencedEvent[], reset: boolean): void;
   resync: Promise<void> | null;
@@ -1406,6 +1407,7 @@ export class Client {
           payload: {
             sessionId,
             sinceSeq: subscription.resetRequired ? 0 : subscription.seq,
+            sinceEpoch: subscription.streamEpoch,
             expandLastRound: subscription.expandLastRound,
             recentRounds: subscription.recentRounds,
           },
@@ -1433,6 +1435,7 @@ export class Client {
 
   private acceptCursor(subscription: Subscription, data: { snapshot: unknown; replayed: SequencedEvent[]; reset: boolean }): void {
     subscription.resetRequired = false;
+    subscription.streamEpoch = (data.snapshot as { streamEpoch?: string } | null)?.streamEpoch;
     const seq = (data.snapshot as { seq?: number } | null)?.seq;
     // A daemon restart restarts its sequence. The snapshot is the boundary,
     // including when it moves backwards; replay alone cannot describe it.

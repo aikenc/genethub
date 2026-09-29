@@ -3,7 +3,7 @@
 2026-09-10，dev-net。关联 [v1 总体设计](logical-connection-v1-plan.md)。
 
 当前候选已将日志接入 TS DataEndpoint、Rust daemon 与原生 ClientEndpoint。数据面握手、AEAD
-record 和 RTC channel label 为 v4；业务 WebProtocol 仍为 v3。浏览器重拨完成新通道认证后，
+record 和 RTC channel label 为 v4；业务 WebProtocol 为 v4（Web 保留 v3 adapter）。浏览器重拨完成新通道认证后，
 通过 daemon registry 接回同一个流表、订阅和 handler；不会在恢复成功后重新调用业务或重新订阅。
 邀请 bootstrap 不进入 registry，继续使用同一个流引擎的不可恢复物理生命周期。
 
@@ -62,7 +62,7 @@ offset 32..35 为 payload 长度。保留现有 DataFrame 语义，不嵌入 v3 
 不超过 8,192 字节。进展类 WINDOW_UPDATE/FIN/RESET 必须为空 payload，具体 value 和 stream
 状态合法性仍由流状态机检查。长度、枚举、reserved、u64 和总长在有界解码时检查。
 
-其余连接控制使用下文定义的 opcode 16 有界 JSON。dev-net 数据面为 v4；WebProtocol 仍为 v3。
+其余连接控制使用下文定义的 opcode 16 有界 JSON。dev-net 数据面为 v4；WebProtocol 为 v4。
 
 ## 两种 PAYLOAD 预算
 

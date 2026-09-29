@@ -4,7 +4,6 @@
 
 mod bash;
 mod diff;
-pub(crate) mod evidence;
 mod fs_tools;
 mod media;
 mod search;
@@ -107,7 +106,7 @@ impl ToolResult {
 /// JSON Schema definitions handed to the model. Anthropic and OpenAI both
 /// accept plain JSON Schema, so one description serves both.
 pub fn definitions() -> Vec<Value> {
-    let mut definitions = vec![
+    vec![
         json!({
             "name": "read",
             "description": format!("Read the contents of a file. Output is truncated to {DEFAULT_MAX_LINES} lines or {}KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.", DEFAULT_MAX_BYTES / 1024),
@@ -250,13 +249,7 @@ pub fn definitions() -> Vec<Value> {
                 "required": ["title", "summary", "questions"]
             }
         }),
-    ];
-    if evidence::enabled() {
-        definitions
-            .retain(|tool| matches!(tool["name"].as_str(), Some("read" | "ls" | "read_media" | "request_user_input")));
-        definitions.push(evidence::definition());
-    }
-    definitions
+    ]
 }
 
 /// The details key under which read_media registers an attachment for the
@@ -271,13 +264,6 @@ pub async fn execute(
     cwd: &Path,
     cancel: impl Fn() -> bool + Send + 'static,
 ) -> ToolResult {
-    if evidence::enabled() {
-        match name {
-            "genet" => return evidence::run(args, cwd).await,
-            "read" | "ls" | "read_media" => {}
-            _ => return ToolResult::error("tool is unavailable to evidence-only analysis"),
-        }
-    }
     if name == "bash" {
         if cancel() {
             return ToolResult::error("Operation aborted");
@@ -294,7 +280,7 @@ fn dispatch_sync(name: &str, args: &Value, cwd: &Path, cancel: &dyn Fn() -> bool
     if cancel() {
         return ToolResult::error("Operation aborted");
     }
-    let mut result = match name {
+    match name {
         "read" => fs_tools::read(args, cwd),
         "read_media" => media::read(args, cwd),
         "write" => fs_tools::write_cancellable(args, cwd, cancel),
@@ -303,13 +289,7 @@ fn dispatch_sync(name: &str, args: &Value, cwd: &Path, cancel: &dyn Fn() -> bool
         "grep" => search::grep_cancellable(args, cwd, cancel),
         "find" => search::find_cancellable(args, cwd, cancel),
         other => ToolResult::error(format!("Tool {other} not found")),
-    };
-    if evidence::enabled() && matches!(name, "read" | "ls" | "read_media") {
-        if let Some(hint) = evidence::path_hint(args, cwd) {
-            result.text = format!("{hint}\n{}", result.text);
-        }
     }
-    result
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -542,7 +522,9 @@ mod tests {
         .unwrap();
         assert_eq!(accepted["title"], "是否接管这个项目");
         assert!(user_input(&json!({"questions": []})).is_err());
-        assert!(user_input(&json!({"title": "t", "summary": "s", "questions": [{"id": "x"}]})).is_err());
+        assert!(
+            user_input(&json!({"title": "t", "summary": "s", "questions": [{"id": "x"}]})).is_err()
+        );
     }
 
     #[test]

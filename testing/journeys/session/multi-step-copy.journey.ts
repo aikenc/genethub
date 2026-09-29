@@ -9,7 +9,7 @@ defineJourney(
     title: "A multi-step task feeds tool results back until it finishes",
     oracle: "copy.txt matches source.txt after a read then a write",
     catches: ["one-shot write without read"],
-    tags: ["core", "session", "filesystem", "parity"],
+    tags: ["core", "session", "filesystem"],
     llm: { default: "mock" },
     resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
     expectedDurationMs: 30_000,

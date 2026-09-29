@@ -27,7 +27,7 @@ function cli(id: string, title: string, oracle: string, catches: string[], run: 
       title,
       oracle,
       catches,
-      tags: ["core", "cli", "parity"],
+      tags: ["core", "cli"],
       expectedDurationMs: 20_000,
       timeoutMs: 120_000,
       surfaces: ["daemon", "workbench-client"],

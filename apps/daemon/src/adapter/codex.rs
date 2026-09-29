@@ -69,7 +69,7 @@
 //!   so a menu that inserts `/name` as plain text would be a control that does
 //!   nothing.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -87,7 +87,7 @@ use genehub_proto::{
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::Mutex;
 
 use super::stdio::write_json_line;
 use super::usage;
@@ -338,26 +338,16 @@ impl AgentAdapter for CodexAdapter {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        super::apply_session_environment(&mut command, &config);
-        super::owned_child(&mut command);
 
-        let mut child = command
-            .spawn()
-            .with_context(|| format!("spawning {}", program.display()))?;
-        let stdout = child.stdout.take().expect("stdout was piped");
-        let stderr = child.stderr.take().expect("stderr was piped");
-        let stdin = child.stdin.take().expect("stdin was piped");
-
-        // Kept rather than dropped: when this CLI exits on its own, its stderr
-        // is the only account of why.
-        let said = Arc::new(Chatter::default());
-        said.watch("codex", Some(stderr)).await;
-
+        let (process, mut io) =
+            super::process::AgentProcess::spawn(&mut command, "codex", &config).await?;
+        let stdout = io.stdout.take().expect("stdout was piped");
+        let stdin = io.stdin.take().expect("stdin was piped");
+        let child = process.child.clone();
+        let said = process.chatter.clone();
         let stdin = Arc::new(Mutex::new(stdin));
-        let child = Arc::new(Mutex::new(Some(child)));
         let (events, events_rx) = crate::adapter::EventTx::channel();
-        let pending: PendingMap = Arc::default();
-        let asks: AskMap = Arc::default();
+        let peer = super::stdio::StdioRpcPeer::new(super::stdio::RpcCodec::JsonRpc, stdin.clone());
         let turn = Arc::new(Mutex::new(TurnState::default()));
         // A resumed thread is known before `thread/resume` can replay any of its
         // notifications. A brand-new one is filled from `thread/start` below.
@@ -402,10 +392,10 @@ impl AgentAdapter for CodexAdapter {
             stdin: stdin.clone(),
             events: events.clone(),
             events_rx: std::sync::Mutex::new(Some(events_rx)),
-            pending: pending.clone(),
+            peer: peer.clone(),
             turn: turn.clone(),
             next_id: AtomicI64::new(1),
-            child: child.clone(),
+            process: process.clone(),
             // `std`, not `tokio`: `persistence()` is synchronous, and this value
             // is only ever held for a single field read or write. The reader
             // shares it so multiplexed sub-agent notifications can be rejected.
@@ -418,15 +408,11 @@ impl AgentAdapter for CodexAdapter {
             scratch_dir: config.scratch_dir.clone(),
         };
 
-        session
-            .tasks
-            .spawn(watch_for_exit(child.clone(), pending.clone()));
         session.tasks.spawn(read_loop(Reader {
             stdout,
             stdin,
             events,
-            pending,
-            asks,
+            peer,
             turn,
             thread,
             child,
@@ -857,8 +843,6 @@ fn default_model_in(listed: &Value) -> Option<(String, Option<String>)> {
     Some((id, effort))
 }
 
-type PendingMap = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>;
-type AskMap = Arc<Mutex<HashSet<String>>>;
 type SharedThread = Arc<std::sync::Mutex<Option<String>>>;
 
 #[derive(Copy, Clone)]
@@ -909,10 +893,10 @@ struct CodexSession {
     stdin: Arc<Mutex<ChildStdin>>,
     events: crate::adapter::EventTx,
     events_rx: std::sync::Mutex<Option<crate::adapter::EventRx>>,
-    pending: PendingMap,
+    peer: Arc<super::stdio::StdioRpcPeer>,
     turn: Arc<Mutex<TurnState>>,
     next_id: AtomicI64,
-    child: Arc<Mutex<Option<Child>>>,
+    process: super::process::AgentProcess,
     thread: SharedThread,
     mode: Mutex<String>,
     model: Mutex<Option<String>>,
@@ -937,24 +921,15 @@ impl CodexSession {
 
     async fn call(&self, method: &str, params: Value) -> Result<Value> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, tx);
-        self.write(json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-            "params": params,
-        }))
-        .await?;
-        match tokio::time::timeout(CALL_TIMEOUT, rx).await {
-            Ok(Ok(Ok(value))) => Ok(value),
-            Ok(Ok(Err(message))) => Err(anyhow!("{method} failed: {message}")),
-            Ok(Err(_)) => Err(anyhow!("{method} failed: Codex closed the connection")),
-            Err(_) => {
-                self.pending.lock().await.remove(&id);
-                Err(anyhow!("Codex did not answer {method}"))
-            }
-        }
+        self.peer
+            .call(
+                json!(id),
+                method,
+                params,
+                Some(tokio::time::Instant::now() + CALL_TIMEOUT),
+            )
+            .await
+            .map_err(|message| anyhow!("{method} failed: {message}"))
     }
 
     /// Introduces ourselves and opens — or reopens — the thread this session talks to.
@@ -1196,7 +1171,8 @@ impl AgentSession for CodexSession {
     }
 
     async fn pid(&self) -> Option<u32> {
-        self.child
+        self.process
+            .child
             .lock()
             .await
             .as_ref()
@@ -1204,7 +1180,7 @@ impl AgentSession for CodexSession {
     }
 
     async fn close(&self) -> Result<()> {
-        super::close_child(&self.child).await?;
+        self.process.close().await?;
         self.tasks.stop().await;
         Ok(())
     }
@@ -1418,8 +1394,7 @@ struct Reader {
     stdout: crate::os_process::ChildStdout,
     stdin: Arc<Mutex<ChildStdin>>,
     events: crate::adapter::EventTx,
-    pending: PendingMap,
-    asks: AskMap,
+    peer: Arc<super::stdio::StdioRpcPeer>,
     turn: Arc<Mutex<TurnState>>,
     thread: SharedThread,
     child: Arc<Mutex<Option<Child>>>,
@@ -1431,14 +1406,13 @@ async fn read_loop(reader: Reader) {
         stdout,
         stdin,
         events,
-        pending,
-        asks,
+        peer,
         turn,
         thread,
         child,
         said,
     } = reader;
-    let mut lines = BufReader::new(stdout).lines();
+    let mut lines = super::process::ProcessLines::new(stdout, child.clone());
     while let Ok(Some(line)) = lines.next_line().await {
         if line.trim().is_empty() {
             continue;
@@ -1458,20 +1432,8 @@ async fn read_loop(reader: Reader) {
 
         match (id, method) {
             // A reply to something we sent.
-            (Some(id), None) => {
-                if let Some(id) = id.as_i64() {
-                    if let Some(sender) = pending.lock().await.remove(&id) {
-                        let outcome = match frame.get("error") {
-                            Some(error) => Err(error
-                                .get("message")
-                                .and_then(Value::as_str)
-                                .unwrap_or("unknown error")
-                                .to_string()),
-                            None => Ok(frame.get("result").cloned().unwrap_or(Value::Null)),
-                        };
-                        let _ = sender.send(outcome);
-                    }
-                }
+            (Some(_), None) => {
+                peer.response(&frame);
             }
             // A request from the CLI: it is waiting on a reply keyed by this id.
             (Some(id), Some(method)) => {
@@ -1491,7 +1453,6 @@ async fn read_loop(reader: Reader) {
                     params,
                     surface,
                     stdin: &stdin,
-                    asks: &asks,
                     events: &events,
                 })
                 .await;
@@ -1502,7 +1463,7 @@ async fn read_loop(reader: Reader) {
                     .expect("the thread id is never poisoned")
                     .clone();
                 if method == "serverRequest/resolved" {
-                    resolve_ask(&params, expected_thread.as_deref(), &asks, &events).await;
+                    resolve_ask(&params, expected_thread.as_deref(), &events).await;
                 } else {
                     translate(&method, &params, expected_thread.as_deref(), &turn, &events).await;
                 }
@@ -1524,20 +1485,7 @@ async fn read_loop(reader: Reader) {
             },
         });
     }
-    abandon_pending(&pending).await;
-}
-
-async fn abandon_pending(pending: &PendingMap) {
-    super::fail_open_requests(pending, "Codex went away with requests still open").await;
-}
-
-async fn watch_for_exit(child: Arc<Mutex<Option<Child>>>, pending: PendingMap) {
-    super::watch_process_exit(
-        child,
-        pending,
-        "Codex went away with requests still open",
-    )
-    .await;
+    peer.fail_open();
 }
 
 /// One request the CLI is waiting on.
@@ -1549,7 +1497,6 @@ struct Asked<'a> {
     /// requests are answered conservatively without impersonating root.
     surface: bool,
     stdin: &'a Mutex<ChildStdin>,
-    asks: &'a AskMap,
     events: &'a crate::adapter::EventTx,
 }
 
@@ -1602,7 +1549,6 @@ async fn translate_ask(asked: Asked<'_>) {
         params,
         surface,
         stdin,
-        asks,
         events,
     } = asked;
     let Some(request_id) = request_key(&id) else {
@@ -1631,10 +1577,14 @@ async fn translate_ask(asked: Asked<'_>) {
     let ask = |title: String| {
         let _ = events.send(SessionEvent::PermissionRequested {
             request: PermissionRequest {
+                summary: reason
+                    .clone()
+                    .or_else(|| Some(command_text(params.get("command")))),
+                description: Some(super::native_request_description("Codex", &params)),
+                author: None,
                 id: request_id.clone(),
                 kind: PermissionRequestKind::Permission,
                 title,
-                detail: reason.clone(),
                 tool_call_id: item_id.clone(),
                 options: allow_or_deny(),
                 questions: None,
@@ -1655,7 +1605,6 @@ async fn translate_ask(asked: Asked<'_>) {
 
     match method.as_str() {
         "item/commandExecution/requestApproval" => {
-            asks.lock().await.insert(request_id.clone());
             let command = command_text(params.get("command"));
             ask(if command.is_empty() {
                 "Run a command?".to_string()
@@ -1669,7 +1618,6 @@ async fn translate_ask(asked: Asked<'_>) {
             .await;
         }
         "item/fileChange/requestApproval" => {
-            asks.lock().await.insert(request_id.clone());
             ask("Apply file changes?".to_string());
             answer(
                 stdin,
@@ -1687,13 +1635,14 @@ async fn translate_ask(asked: Asked<'_>) {
             let parsed: Vec<Question> = questions.iter().filter_map(question_in).collect();
             match parsed.len() == questions.len() && !parsed.is_empty() {
                 true => {
-                    asks.lock().await.insert(request_id.clone());
                     let _ = events.send(SessionEvent::PermissionRequested {
                         request: PermissionRequest {
+                            summary: Some(format!("共 {} 个问题", parsed.len())),
+                            description: Some(super::native_request_description("Codex", &params)),
+                            author: None,
                             id: request_id.clone(),
                             kind: PermissionRequestKind::Question,
                             title: parsed[0].header.clone(),
-                            detail: None,
                             tool_call_id: item_id.clone(),
                             options: Vec::new(),
                             questions: Some(parsed.iter().map(Question::interaction).collect()),
@@ -1757,7 +1706,6 @@ async fn answer(stdin: &Mutex<ChildStdin>, value: Value) {
 async fn resolve_ask(
     params: &Value,
     expected_thread: Option<&str>,
-    asks: &AskMap,
     events: &crate::adapter::EventTx,
 ) {
     let Some(expected_thread) = expected_thread else {
@@ -1769,12 +1717,10 @@ async fn resolve_ask(
     let Some(request_id) = params.get("requestId").and_then(request_key) else {
         return;
     };
-    if asks.lock().await.remove(&request_id) {
-        let _ = events.send(SessionEvent::PermissionResolved {
-            request_id,
-            outcome: PermissionOutcome::Canceled,
-        });
-    }
+    let _ = events.send(SessionEvent::PermissionResolved {
+        request_id,
+        outcome: PermissionOutcome::Canceled,
+    });
 }
 
 #[derive(Clone)]
@@ -2071,12 +2017,7 @@ fn token_counts(source: &Value) -> Usage {
 }
 
 /// Streamed text for an item, which may be the first anyone has heard of it.
-fn stream(
-    params: &Value,
-    kind: Kind,
-    state: &mut TurnState,
-    events: &crate::adapter::EventTx,
-) {
+fn stream(params: &Value, kind: Kind, state: &mut TurnState, events: &crate::adapter::EventTx) {
     let Some(turn_id) = state.id.clone() else {
         return;
     };
@@ -2627,33 +2568,6 @@ mod tests {
         assert_eq!(request_key(&Value::Null), None);
     }
 
-    #[tokio::test]
-    async fn a_dead_codex_fails_an_open_call_without_the_timeout() {
-        let pending: PendingMap = Arc::default();
-        let (tx, rx) = oneshot::channel();
-        pending.lock().await.insert(1, tx);
-        abandon_pending(&pending).await;
-        assert!(rx.await.is_err());
-        assert!(pending.lock().await.is_empty());
-    }
-
-    #[tokio::test]
-    async fn an_exited_codex_fails_an_open_call_while_the_pipe_is_still_held() {
-        let mut child = Command::new("true")
-            .stdout(Stdio::piped())
-            .spawn()
-            .expect("spawn true");
-        let _stdout = child.stdout.take();
-        let held = Arc::new(Mutex::new(Some(child)));
-        let pending: PendingMap = Arc::default();
-        let (tx, rx) = oneshot::channel();
-        pending.lock().await.insert(4, tx);
-        let started = std::time::Instant::now();
-        watch_for_exit(held, pending.clone()).await;
-        assert!(started.elapsed() < Duration::from_secs(3));
-        assert!(rx.await.is_err());
-    }
-
     #[test]
     fn foreign_interactive_requests_have_least_authority_replies() {
         assert_eq!(
@@ -2699,27 +2613,25 @@ mod tests {
 
     #[tokio::test]
     async fn server_resolution_clears_only_the_root_threads_pending_request() {
-        let asks: AskMap = Arc::default();
-        asks.lock().await.insert("7".into());
         let (events, mut seen) = crate::adapter::EventTx::channel();
 
         resolve_ask(
             &json!({ "threadId": "child-thread", "requestId": 7 }),
             Some("root-thread"),
-            &asks,
             &events,
         )
         .await;
-        assert!(asks.lock().await.contains("7"));
+        assert!(
+            seen.try_recv().is_err(),
+            "another thread does not clear this session"
+        );
 
         resolve_ask(
             &json!({ "threadId": "root-thread", "requestId": 7 }),
             Some("root-thread"),
-            &asks,
             &events,
         )
         .await;
-        assert!(asks.lock().await.is_empty());
         assert!(matches!(
             seen.try_recv().expect("the external resolution"),
             SessionEvent::PermissionResolved {

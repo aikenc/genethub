@@ -71,7 +71,10 @@ pub async fn stream(
 
     while let Some(chunk) = body_stream.next().await {
         let chunk = chunk?;
-        for payload in buffer.push(&String::from_utf8_lossy(&chunk)) {
+        for payload in buffer.push(&chunk) {
+            if payload == "[DONE]" {
+                continue;
+            }
             let event = match serde_json::from_str::<Value>(&payload) {
                 Ok(event) => event,
                 Err(error) => {
@@ -185,13 +188,15 @@ pub async fn stream(
         anyhow::bail!(error);
     }
     if !finished {
-        anyhow::bail!(
-            "{} stream ended before a finish reason",
-            model.provider
-        );
+        anyhow::bail!("{} stream ended before a finish reason", model.provider);
     }
 
-    usage.total_tokens = usage.input + usage.output + usage.cache_read + usage.cache_write;
+    // Anthropic input excludes cache; normalize once after merging stream snapshots.
+    usage.input = usage
+        .input
+        .saturating_add(usage.cache_read)
+        .saturating_add(usage.cache_write);
+    usage.total_tokens = usage.input.saturating_add(usage.output);
     let _ = events.send(ProviderEvent::Usage(usage));
     let _ = events.send(ProviderEvent::Done(stop_reason));
     Ok(())
@@ -356,9 +361,11 @@ fn flatten_text(content: &[Content]) -> String {
 fn apply_usage(usage: &mut Usage, value: &Value) {
     if let Some(input) = value["input_tokens"].as_u64() {
         usage.input = input;
+        usage.input_reported = true;
     }
     if let Some(output) = value["output_tokens"].as_u64() {
         usage.output = output;
+        usage.output_reported = true;
     }
     if let Some(cache_read) = value["cache_read_input_tokens"].as_u64() {
         usage.cache_read = cache_read;
@@ -457,7 +464,10 @@ mod tests {
         let body = build_body(&model, &request).unwrap();
         assert_eq!(body["thinking"]["budget_tokens"], 8192);
         model.reasoning = Some(false);
-        assert!(build_body(&model, &request).unwrap().get("thinking").is_none());
+        assert!(build_body(&model, &request)
+            .unwrap()
+            .get("thinking")
+            .is_none());
     }
 
     #[test]
@@ -474,7 +484,10 @@ mod tests {
         let body = build_body(&model, &request).unwrap();
         assert_eq!(body["thinking"]["budget_tokens"], 7_168);
         model.max_tokens = Some(1_024);
-        assert!(build_body(&model, &request).unwrap().get("thinking").is_none());
+        assert!(build_body(&model, &request)
+            .unwrap()
+            .get("thinking")
+            .is_none());
     }
 
     #[test]

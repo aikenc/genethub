@@ -30,12 +30,32 @@ defineSpecialty({
       schema: "genehub.workflow.role.v3", id: "worker", tags: ["Max"],
       userInteraction: "readOnly", prompt: "prompts/worker.md",
     }));
-    writeFileSync(path.join(source, "flows/second-channel.yaml"), JSON.stringify({
-      schema: "genehub.workflow.definition.v1", id: "second-channel", version: 1, entry: "work",
-      nodes: [{ id: "work", uses: "agent.session", with: { role: "worker", workspace: "." },
-        completion: { all: [{ key: "result", verify: "value.nonEmpty" }] }, on: { completed: ["publish"] } },
-        { id: "publish", uses: "result.publish" }],
-    }));
+    writeFileSync(path.join(source, "flows/second-channel.yaml"), JSON.stringify({schema: "genehub.workflow.definition.v2",
+id: "second-channel",
+version: 1,
+nodes: [{id: "work", uses: "agent.session", with: { role: "worker", workspace: "." }, completion: { all: [{ key: "result", verify: "value.nonEmpty" }] }},
+{id: "publish", uses: "result.publish"}],
+structure: {
+  "body": {
+    "id": "sequence-work",
+    "type": "sequence",
+    "steps": [
+      {
+        "id": "step-work",
+        "type": "task",
+        "activity": "work",
+        "accept": [
+          "completed"
+        ]
+      },
+      {
+        "id": "step-publish",
+        "type": "task",
+        "activity": "publish"
+      }
+    ]
+  }
+}}));
     await opened.client.call({ type: "settings.setAgentPreferences", payload: { preferences: {
       runtimes: {}, selectedTags: ["Max"], modelProfiles: [{ agentId: "genet",
         modelId: "deepseek/deepseek-v4-flash", tags: ["Flash"], cost: "low" }],
@@ -54,7 +74,7 @@ defineSpecialty({
     await t.tools.waitUntil(async () => {
       const reply = await opened.client.call({ type: "workflow.history", payload: { workspaceId: opened.workspaceId, limit: 10 } });
       original = reply?.type === "workflowRuns" ? reply.data.find(run => run.taskId === "shared-request") : undefined;
-      return original?.status === "blocked" && original.reason?.includes("RouteUnavailable") === true;
+      return original?.status === "running" && original.phase === "open" && !original.programResult && original.conditions.some(condition => condition.code === "routeUnavailable");
     }, 30_000);
 
     const started = await runGenetAsync(opened.daemon.genet, ["daemon", "start"], secondEnv);
@@ -83,7 +103,7 @@ defineSpecialty({
     }
     const beforeTakeover = (await history()).find(run => run.id === original!.id);
     t.assertions.assert(/writer|持锁|归属|owner|接管|另一个 daemon/i.test(denial)
-      && beforeTakeover?.status === "blocked",
+      && beforeTakeover?.conditions.some(condition => condition.code === "routeUnavailable"),
       `second channel changed a request still owned by the first daemon: denial=${denial}; status=${beforeTakeover?.status}`);
 
     opened.client.close();
@@ -92,14 +112,14 @@ defineSpecialty({
       try {
         const reply = await secondClient!.call({ type: "workflow.budget", payload: {
           workspaceId: secondWorkspaceId, runId: original!.id, expectedRevision: 0,
-          maxRuns: 4,
+          maxLlmRounds: 512,
         } });
-        return reply?.type === "workflowRun" && reply.data.requestBudget.maxRuns === 4;
+        return reply?.type === "workflowRun" && reply.data.requestBudget.maxLlmRounds === 512;
       } catch { return false; }
     }, 30_000);
     const after = await history();
     t.assertions.assert(after.length === 1 && after[0]!.id === original!.id
-      && after[0]!.requestBudget.revision === 1 && after[0]!.requestBudget.maxRuns === 4,
+      && after[0]!.requestBudget.revision === 1 && after[0]!.requestBudget.maxLlmRounds === 512,
     "takeover lost the original request or repeated the budget mutation");
   } finally {
     secondClient?.close();

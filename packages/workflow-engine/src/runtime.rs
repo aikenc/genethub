@@ -142,8 +142,7 @@ pub fn advance(program: &Program, previous: &EngineState, input: Input) -> Resul
                         if target.phase == OperationPhase::Requested
                             && matches!(update, ActivityUpdate::Accepted)
                         {
-                            target.deadline_ms =
-                                target.timeout_ms.map(|ms| now.saturating_add(ms));
+                            target.deadline_ms = target.timeout_ms.map(|ms| now.saturating_add(ms));
                         } else if matches!(update, ActivityUpdate::Waiting) {
                             if target.phase != OperationPhase::Waiting {
                                 target.deadline_ms = target

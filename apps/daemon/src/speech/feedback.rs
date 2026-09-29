@@ -171,7 +171,10 @@ fn authoritative_candidates(
             if scope.segment_start_ms != Some(segment.start_ms)
                 || scope.segment_end_ms != Some(segment.end_ms)
             {
-                anyhow::bail!("segment preference timing does not match the completed result");
+                return Err(crate::rpc_error::failure(
+                    genehub_proto::ErrorCode::Unsupported,
+                    "segment preference timing does not match the completed result".to_owned(),
+                ));
             }
             if scope.level == SpeechFeedbackLevel::Span {
                 let span_id = scope
@@ -188,7 +191,10 @@ fn authoritative_candidates(
                 if scope.span_start_char != Some(span.start_char)
                     || scope.span_end_char != Some(span.end_char)
                 {
-                    anyhow::bail!("span preference range does not match the completed result");
+                    return Err(crate::rpc_error::failure(
+                        genehub_proto::ErrorCode::Unsupported,
+                        "span preference range does not match the completed result".to_owned(),
+                    ));
                 }
             }
             Ok(segment.candidates.clone())
@@ -212,7 +218,12 @@ fn authoritative_scope(
             .candidates
             .iter()
             .find(|candidate| candidate.candidate_id == selected_candidate_id)
-            .ok_or_else(|| anyhow::anyhow!("selected Qwen3 candidate does not exist"))?;
+            .ok_or_else(|| {
+                crate::rpc_error::failure(
+                    genehub_proto::ErrorCode::NotFound,
+                    "selected Qwen3 candidate does not exist".to_owned(),
+                )
+            })?;
         return Ok(SpeechFeedbackScope {
             level,
             utterance_text: selected.text.clone(),
@@ -241,13 +252,21 @@ fn authoritative_scope(
     if requested.segment_start_ms != Some(segment.start_ms)
         || requested.segment_end_ms != Some(segment.end_ms)
     {
-        anyhow::bail!("segment preference timing does not match the completed result");
+        return Err(crate::rpc_error::failure(
+            genehub_proto::ErrorCode::Unsupported,
+            "segment preference timing does not match the completed result".to_owned(),
+        ));
     }
     let selected = segment
         .candidates
         .iter()
         .find(|candidate| candidate.candidate_id == selected_candidate_id)
-        .ok_or_else(|| anyhow::anyhow!("selected Qwen3 segment candidate does not exist"))?;
+        .ok_or_else(|| {
+            crate::rpc_error::failure(
+                genehub_proto::ErrorCode::NotFound,
+                "selected Qwen3 segment candidate does not exist".to_owned(),
+            )
+        })?;
     let preceding_text = evidence.segments[..segment_index]
         .iter()
         .map(default_segment_text)
@@ -281,7 +300,10 @@ fn authoritative_scope(
             if requested.span_start_char != Some(span.start_char)
                 || requested.span_end_char != Some(span.end_char)
             {
-                anyhow::bail!("span preference range does not match the completed result");
+                return Err(crate::rpc_error::failure(
+                    genehub_proto::ErrorCode::Unsupported,
+                    "span preference range does not match the completed result".to_owned(),
+                ));
             }
             (
                 Some(span.span_id.clone()),
@@ -311,7 +333,12 @@ fn default_segment_text(segment: &genehub_proto::SpeechSegment) -> Result<String
         .iter()
         .find(|candidate| candidate.candidate_id == segment.default_candidate_id)
         .map(|candidate| candidate.text.clone())
-        .ok_or_else(|| anyhow::anyhow!("Qwen3 segment default candidate does not exist"))
+        .ok_or_else(|| {
+            crate::rpc_error::failure(
+                genehub_proto::ErrorCode::NotFound,
+                "Qwen3 segment default candidate does not exist".to_owned(),
+            )
+        })
 }
 
 fn validate(
@@ -363,7 +390,10 @@ fn validate(
         anyhow::bail!("Qwen3 preference candidate ranks are not contiguous");
     }
     if !ids.contains(selected_candidate_id) {
-        anyhow::bail!("selected Qwen3 candidate does not exist");
+        return Err(crate::rpc_error::failure(
+            genehub_proto::ErrorCode::NotFound,
+            "selected Qwen3 candidate does not exist".to_owned(),
+        ));
     }
     if rejected_candidate_id.is_some_and(|id| id == selected_candidate_id || !ids.contains(id)) {
         anyhow::bail!("rejected Qwen3 candidate is invalid");

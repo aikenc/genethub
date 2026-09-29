@@ -45,13 +45,32 @@ for (const width of [390, 1280]) defineSpecialty({
     await cli(["space", "component", "set", "--workspace", workerSpace.id, "--component", "executor"]);
     const root = t.flows.main.seedDirectChangePackage({ projectRoot: project.root });
     writeFileSync(path.join(root, "prompts/direct-worker.md"), "LEGACY_FEEDBACK_WORKER: submit evidence for your assigned node.");
-    writeFileSync(path.join(root, "flows/direct-change.yaml"), JSON.stringify({
-      schema: "genehub.workflow.definition.v1", id: "direct-change", version: 1, entry: "specialist",
-      nodes: [
-        { id: "specialist", uses: "agent.session", with: { role: "worker" }, completion: { all: [{ key: "report", verify: "value.nonEmpty" }] }, on: { completed: ["publish"] } },
-        { id: "publish", uses: "result.publish" },
-      ],
-    }));
+    writeFileSync(path.join(root, "flows/direct-change.yaml"), JSON.stringify({schema: "genehub.workflow.definition.v2",
+id: "direct-change",
+version: 1,
+nodes: [{id: "specialist", uses: "agent.session", with: { role: "worker" }, completion: { all: [{ key: "report", verify: "value.nonEmpty" }] }},
+{id: "publish", uses: "result.publish"}],
+structure: {
+  "body": {
+    "id": "sequence-specialist",
+    "type": "sequence",
+    "steps": [
+      {
+        "id": "step-specialist",
+        "type": "task",
+        "activity": "specialist",
+        "accept": [
+          "completed"
+        ]
+      },
+      {
+        "id": "step-publish",
+        "type": "task",
+        "activity": "publish"
+      }
+    ]
+  }
+}}));
     await t.flows.main.configureMockProvider(opened.client, opened.mock);
     let dispatched = false, completed = false, workerCalls = 0;
     opened.mock.script(...Array.from({ length: 16 }, () => ({ respond: (request: unknown) => {
@@ -60,7 +79,7 @@ for (const width of [390, 1280]) defineSpecialty({
         if (!completed) { completed = true; return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" workflow complete --evidence report=legacy-evidence' } } }; }
         return { text: "节点已汇报。" };
       }
-      if (!dispatched) { dispatched = true; return { tool: { name: "bash", arguments: { command: `"$GENEHUB_CLI" workflow activate --workspace ${project.id} --revision 1 && "$GENEHUB_CLI" workflow dispatch --workspace ${project.id} --workflow direct-change --task legacy-view --message "核对旧流程展示" --no-wait` } } }; }
+      if (!dispatched) { dispatched = true; return { tool: { name: "bash", arguments: { command: `"$GENEHUB_CLI" workflow activate --workspace ${project.id} --revision 0 && "$GENEHUB_CLI" workflow dispatch --workspace ${project.id} --workflow direct-change --task legacy-view --message "核对旧流程展示" --no-wait` } } }; }
       return { text: "流程结果已核对。" };
     } })));
     const pm = await t.flows.main.createBuiltinSession(opened.client, project.id);

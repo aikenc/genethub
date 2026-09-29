@@ -28,12 +28,12 @@ defineSpecialty({
       const body = JSON.stringify(request);
       if (body.includes("你是当前项目直达流程中的实现 Worker")) {
         workerCalls++;
-        return { tool: { name: "request_user_input", arguments: { questions: [{ id: "worker-scope", header: "范围", question: "确认 Worker 验收范围", options: [{ label: "启动", description: "检查启动" }, { label: "全部", description: "检查全部关卡" }] }] } } };
+        return { tool: { name: "request_user_input", arguments: { title: "确认 Worker 验收范围", summary: "共 1 个待回答问题。", description: "请使用下方选项回答问题；提交后继续当前任务。", questions: [{ id: "worker-scope", header: "范围", question: "确认 Worker 验收范围", options: [{ label: "启动", description: "检查启动" }, { label: "全部", description: "检查全部关卡" }] }] } } };
       }
       if (pmCalls++ === 0) return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" workflow dispatch --workflow direct-change --task browser-task --message "等待进一步实现要求" --no-wait' } } };
       if (body.includes("BROWSER_ASK_COLOR") && !asked) {
         asked = true;
-        return { tool: { name: "request_user_input", arguments: { questions: [{ id: "color", header: "颜色", question: "选择一个颜色", options: [{ label: "蓝色", description: "使用蓝色" }, { label: "绿色", description: "使用绿色" }] }] } } };
+        return { tool: { name: "request_user_input", arguments: { title: "选择一个颜色", summary: "共 1 个待回答问题。", description: "请使用下方选项回答问题；提交后继续当前任务。", questions: [{ id: "color", header: "颜色", question: "选择一个颜色", options: [{ label: "蓝色", description: "使用蓝色" }, { label: "绿色", description: "使用绿色" }] }] } } };
       }
       if (body.includes("BROWSER_CONSULT") && !consulted) { consulted = true; return { hang: true as const }; }
       return { text: "BROWSER_PM_ANSWER：已核对当前任务，原问题保持待回答。" };
@@ -45,7 +45,7 @@ defineSpecialty({
       if (result?.type !== "snapshot") throw new Error("missing PM snapshot");
       return result.data;
     };
-    await opened.client.call({ type: "session.send", payload: { sessionId: pm, messageId: "u_browser_start", text: "执行 browser-task，随后等待我的问题。", attachments: [], artifactPreviewBaseUrl: null, continuesRound: null } });
+    await opened.client.call({ type: "session.send", payload: { sessionId: pm, messageId: "u_browser_start", text: "执行 browser-task，随后等待我的问题。", attachments: [], continuesRound: null } });
     await t.tools.waitUntil(async () => workerCalls === 1 && (await snapshot()).summary.status === "idle", 35_000);
     browser = await openWorkbenchPage(t.openRoot, () => daemonEndpoint(opened.daemon), opened.workspaceId, pm);
     const page = browser.page;

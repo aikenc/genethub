@@ -410,9 +410,9 @@ mod tests {
     /// someone gives it one. Guessing here is the whole problem.
     #[test]
     fn a_provider_we_do_not_know_has_no_address_of_its_own() {
-        let resolved = resolve("inhouse-llm", &key_only());
+        let resolved = resolve("unregistered-test-provider", &key_only());
         assert_eq!(resolved.base_url, None);
-        assert_eq!(resolved.label, "inhouse-llm");
+        assert_eq!(resolved.label, "unregistered-test-provider");
         assert!(resolved.custom);
         assert_eq!(resolved.dialect, Dialect::OpenAi);
     }
@@ -433,7 +433,7 @@ mod tests {
 
     #[tokio::test]
     async fn listing_without_an_address_says_so_instead_of_picking_one() {
-        let error = list_models("inhouse-llm", &key_only())
+        let error = list_models("unregistered-test-provider", &key_only())
             .await
             .expect_err("there is nowhere to ask");
         assert!(

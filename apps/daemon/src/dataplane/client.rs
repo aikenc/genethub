@@ -398,7 +398,7 @@ async fn run(
                         }
                         let head = stream.response_head.take().unwrap();
                         if head.body_length.is_some_and(|length| length != stream.received_response_bytes as u64) {
-                            anyhow::bail!("exchange response length does not match its head");
+                            return Err(crate::rpc_error::failure(genehub_proto::ErrorCode::Unsupported, "exchange response length does not match its head".to_owned()));
                         }
                         let body = std::mem::take(&mut stream.response);
                         stream.target.finish(head, body);

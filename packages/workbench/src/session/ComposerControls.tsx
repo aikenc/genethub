@@ -70,7 +70,7 @@ export function ComposerControls({
   const automaticTags = normalizeTags(mediaTags ?? []);
   const agentProfile = selection.current ? resolveAgentProfile(selection.current.id) : null;
   const permissionAxis = Boolean(
-    selection.current?.capabilities.permissions && agentProfile?.modeKind === "permission",
+    selection.current?.capabilities.setMode && agentProfile?.modeKind === "permission",
   );
   const effort =
     selection.current?.capabilities.setEffort && (selection.model?.efforts.length ?? 0) > 0

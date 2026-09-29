@@ -94,3 +94,7 @@ export { registerControlledAgent, readControlledAgentJournal } from "../infrastr
 export { createScheduler, defaultBudget, claimNext, completeUnit, hasClaimable } from "../infrastructure/public.ts";
 
 export { selectForGate } from "../policies/gates.ts";
+
+export { waitUntil } from "./tools/wait.ts";
+
+export { writeWorkflowRole, writeWorkflowFlow, workflowSequence } from "./builders/workflow-human.ts";

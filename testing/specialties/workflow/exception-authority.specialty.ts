@@ -45,8 +45,17 @@ defineSpecialty({
     let bootstrapStage = 0, command: string | undefined, workerCalls = 0;
     let phase = "bootstrap", commandTaken = false;
     const assessed = new Set<string>();
+    const cli = (args: string[]) => ({ tool: { name: "bash", arguments: { command: ["\"$GENEHUB_CLI\"", ...args.map(arg => `'${arg.replaceAll("'", `'\\''`)}'`)].join(" ") } } });
     const respond = (request: unknown) => {
       const body = JSON.stringify(request);
+      const messages = (request as { messages?: Array<{ role: string; content?: unknown }> }).messages ?? [];
+      const roleInstructions = JSON.stringify(messages.filter(message => ["system", "developer"].includes(message.role)));
+      if (roleInstructions.includes("角色标签为 `recovery-reviewer`")) {
+        // Derive submission from this conversation, rather than consuming a
+        // shared flag during a separate model request or another Session.
+        if (body.includes("controlled-recovery-assessment")) return { text: "Recovery report submitted." };
+        return cli(["workflow", "complete", "--evidence", "report=controlled-recovery-assessment"]);
+      }
       if (body.includes("<genehub_managed_session>") && body.includes("角色标签为 `reviewer`")) {
         const assessment = body.includes("`game-assessment`") ? "assessment" : "review";
         if (!assessed.has(assessment)) {
@@ -58,16 +67,17 @@ defineSpecialty({
       }
       if (body.includes("EXCEPTION_TEST_WORKER")) {
         workerCalls++;
-        if (workerCalls === 1) return { text: "Unable to finish; no node result submitted." };
-        if (workerCalls % 2 === 0) return { emptyToolIdDeltas: true, tool: { name: "genet", arguments: { args: ["workflow", "complete", "--evidence", "review=approved"] } } };
+        if (workerCalls === 1) return cli(["workflow", "complete", "--outcome", "failed", "--reason", "Injected execution failure for authority verification"]);
+        if (workerCalls % 2 === 0) return { emptyToolIdDeltas: true, ...cli(["workflow", "complete", "--evidence", "review=approved"]) };
         return { text: "Recovered result submitted." };
       }
       if (phase === "bootstrap") {
         const stage = bootstrapStage++;
         if (stage === 0) return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" workflow build --package game-delivery' } } };
-        if (stage === 1) return { tool: { name: "request_user_input", arguments: { questions: [{ id: field(request, "challengeId"), header: "接管", question: "确认接管项目", options: [{ label: "yes", description: "接管" }, { label: "no", description: "不接管" }] }] } } };
+        if (stage === 1) return { tool: { name: "request_user_input", arguments: { title: "确认接管项目", summary: "共 1 个待回答问题。", description: "请使用下方选项回答问题；提交后继续当前任务。", questions: [{ id: field(request, "challengeId"), header: "接管", question: "确认接管项目", options: [{ label: "yes", description: "接管" }, { label: "no", description: "不接管" }] }] } } };
         if (stage === 2) return { tool: { name: "bash", arguments: { command: `"$GENEHUB_CLI" workflow build --package game-delivery --apply --plan-digest ${field(request, "planDigest")} --revision ${field(request, "expectedRevision")} --action-id initial-takeover` } } };
-      } else if (command && body.includes(phase)) {
+      } else if (command && new RegExp(`(?<![A-Za-z0-9_])${phase}(?![A-Za-z0-9_])`).test(
+        JSON.stringify(messages.filter(message => message.role === "user").at(-1)?.content ?? ""))) {
         const value = command; command = undefined; commandTaken = true;
         return { emptyToolIdDeltas: true, tool: { name: "bash", arguments: { command: value } } };
       }
@@ -90,15 +100,35 @@ defineSpecialty({
     t.assertions.assert(installed?.type === "workspaces" && installed.data.find(space => space.id === opened.workspaceId)?.agentSpace?.components.some(component => component.componentId === "pm" && component.enabled), `bootstrap did not install PM: ${JSON.stringify(installed)}`);
     const source = path.join(opened.workspaceRoot, ".genethub/workflows/game-delivery");
     const workflowFile = path.join(source, "flows/game-dev.yaml");
-    const schema = "genehub.workflow.definition.v1"; // This permission fixture intentionally exercises legacy compatibility.
     const roleFile = path.join(source, "roles/coder.yaml");
-    const roleSchema = "genehub.workflow.role.v1";
-    writeFileSync(roleFile, JSON.stringify({ schema: roleSchema, id: "coder", agentId: "genet", modelId: "deepseek/deepseek-v4-flash", evidenceOnly: true, userInteraction: "readOnly", prompt: "prompts/exception-worker.md" }));
+    writeFileSync(roleFile, JSON.stringify({schema: "genehub.workflow.role.v3", tags: ["Flash"], id: "coder", userInteraction: "readOnly", prompt: "prompts/exception-worker.md"}));
     writeFileSync(path.join(source, "prompts/exception-worker.md"), "EXCEPTION_TEST_WORKER: complete assigned node only.");
-    writeFileSync(workflowFile, JSON.stringify({ schema, id: "game-dev", version: 1, entry: "check", nodes: [
-      { id: "check", uses: "agent.session", with: { role: "coder", workspace: "." }, completion: { all: [{ key: "review", verify: "value.equals", expected: "approved" }] }, on: { completed: ["publish"] } },
-      { id: "publish", uses: "result.publish" },
-    ] }));
+    writeFileSync(workflowFile, JSON.stringify({schema: "genehub.workflow.definition.v2",
+id: "game-dev",
+version: 1,
+nodes: [{id: "check", uses: "agent.session", with: { role: "coder", workspace: "." }, completion: { all: [{ key: "review", verify: "value.equals", expected: "approved" }] }},
+{id: "publish", uses: "result.publish"}],
+structure: {
+  "body": {
+    "id": "sequence-check",
+    "type": "sequence",
+    "steps": [
+      {
+        "id": "step-check",
+        "type": "task",
+        "activity": "check",
+        "accept": [
+          "completed"
+        ]
+      },
+      {
+        "id": "step-publish",
+        "type": "task",
+        "activity": "publish"
+      }
+    ]
+  }
+}}));
     const history = async (): Promise<WorkflowRunStatus[]> => {
       const reply = await opened.client.call({ type: "workflow.history", payload: { workspaceId: opened.workspaceId, limit: 50 } });
       if (reply?.type !== "workflowRuns") throw new Error("missing history");
@@ -107,7 +137,7 @@ defineSpecialty({
     const runCommand = async (pm: string, marker: string, value: string, taskRunId?: string) => {
       phase = marker; command = value; commandTaken = false;
       const start = opened.mock.requests.length;
-      const reply = await opened.client.call({ type: "session.send", payload: { sessionId: pm, messageId: marker, text: marker, taskRunId, attachments: [], continuesRound: null, artifactPreviewBaseUrl: null } });
+      const reply = await opened.client.call({ type: "session.send", payload: { sessionId: pm, messageId: marker, text: marker, taskRunId, attachments: [], continuesRound: null } });
       t.assertions.assert(reply?.type === "ack", `input refused: ${JSON.stringify(reply)}`);
       await t.tools.waitUntil(async () => commandTaken && (await snapshot(pm)).summary.status === "idle", 40_000)
         .catch(async error => { throw new Error(`${marker}, commandTaken=${commandTaken}: ${error}; ${JSON.stringify((await snapshot(pm)).items).slice(-6500)}`); });
@@ -134,13 +164,13 @@ defineSpecialty({
     const status = await opened.client.call({ type: "workflow.inspect", payload: { workspaceId: opened.workspaceId } });
     if (status?.type !== "workflowProject") throw new Error("candidate did not compile");
     const initial = await runCommand(owner, "u_owner_start", `"$GENEHUB_CLI" workflow activate --revision ${status.data.activationRevision} && ${dispatch("original")}`);
-    t.assertions.assert(!initial.includes('"error"'), `owner could not start the candidate: ${initial}`);
+    t.assertions.assert(initial.includes('workflow.started'), `owner could not start the candidate: ${initial}`);
     await t.tools.waitUntil(async () => (await history()).some(run => run.status === "blocked"), 35_000)
       .catch(async error => { throw new Error(`${error}; initial=${initial}; runs=${JSON.stringify(await history())}; workerCalls=${workerCalls}`); });
-    const original = (await history())[0]!;
+    const original = (await history()).find(run => run.taskId === "original" && !run.handles.length)!;
     const worker = original.nodes.find(node => node.sessionId)?.sessionId!;
     const stopped = await runCommand(other, "u_exception_worker", `"$GENEHUB_CLI" session interrupt ${worker}`);
-    t.assertions.assert(!stopped.includes("forbidden"), "exception PM cannot control project-managed execution");
+    t.assertions.assert(!stopped.includes("forbidden"), `exception PM cannot control project-managed execution: ${stopped}; original=${JSON.stringify(original)}`);
     const unrelatedRoot = path.join(t.env.root, "unrelated-project");
     mkdirSync(unrelatedRoot);
     const unrelated = await opened.client.call({ type: "workspace.open", payload: { root: unrelatedRoot } });
@@ -166,13 +196,13 @@ defineSpecialty({
     // The failed business Run automatically starts recovery. A second
     // business Run may only begin after that recovery execution settles.
     await t.tools.waitUntil(async () => (await history()).some(run =>
-      run.handles.some(handle => handle.runId === original.id) && ["blocked", "completed", "cancelled"].includes(run.status)), 40_000);
+      run.handles.some(handle => handle.runId === original.id) && run.status === "completed" && !run.reason), 40_000);
     const recovered = await runCommand(other, "u_exception_recover", `${dispatch("recovered")} --retry-of ${original.id}`, original.id);
     t.assertions.assert(!recovered.includes("retry target belongs to another PM"), "exception did not cross the original PM ownership boundary");
     await t.tools.waitUntil(async () => (await history()).some(run => run.taskId === "recovered" && run.status === "completed"), 40_000)
       .catch(async error => { throw new Error(`${error}; retry=${recovered}; workerCalls=${workerCalls}; runs=${JSON.stringify(await history())}`); });
     const successor = (await history()).find(run => run.taskId === "recovered")!;
-    t.assertions.assert(successor.requestRunId === original.id && successor.parentSessionId === other, "recovery lost request lineage or responding PM");
+    t.assertions.assert(successor.requestRunId === original.id && successor.parentSessionId === other, `recovery lost request lineage or responding PM: expectedRoot=${original.id}; expectedPM=${other}; successor=${JSON.stringify(successor)}; dispatch=${recovered}`);
     // A successful recovery withdraws management escalation, but the user's next
     // business request must remain usable in this original conversation.
     const beforeAssessment = spawnSync("git", ["status", "--porcelain=v1"], { cwd: opened.workspaceRoot, env: opened.daemon.env, encoding: "utf8" }).stdout;
@@ -189,6 +219,24 @@ defineSpecialty({
       t.assertions.assert(JSON.stringify(reportRun).includes("partial"), "negative business conclusion was lost or treated as acceptance");
     }
     t.assertions.assert(spawnSync("git", ["status", "--porcelain=v1"], { cwd: opened.workspaceRoot, env: opened.daemon.env, encoding: "utf8" }).stdout === beforeAssessment, "assessment changed project files");
+    // Execution completion leaves PM disposition outstanding. Record each
+    // actual deliverable through the same public PM entry before testing withdrawal.
+    for (const taskId of ["recovered", "business-assessment", "business-review"]) {
+      const goal = (await history()).find(run => run.taskId === taskId)!;
+      const decided = await runCommand(other, `u_delivery_${taskId}`,
+        `"$GENEHUB_CLI" workflow deliver --run ${goal.id} --revision ${goal.requirement!.revision} --reason "Requested report accepted" --evidence delivery=${goal.id}`);
+      if (field(decided, "type") !== "workflow.requirement.completed") {
+        const recovery = (await history()).find(run => run.handles.length > 0)!;
+        const reviewer = recovery.nodes.find(node => node.sessionId)?.sessionId;
+        const inspection = reviewer ? await opened.client.call({ type: "session.inspect", payload: { sessionId: reviewer, throughRoundId: null } }) : null;
+        const trunk = reviewer && inspection?.type === "sessionInspection" && inspection.data.latestRoundId
+          ? await opened.client.call({ type: "round.trunk.get", payload: { sessionId: reviewer, roundId: inspection.data.latestRoundId, trunkIndex: 0 } }) : null;
+        const references = trunk?.type === "roundTrunk" ? trunk.data.batches.flatMap(batch => batch.blobs).filter(row => row.blob && row.kind === "toolCall") : [];
+        const tools = await Promise.all(references.map(row => opened.client.call({ type: "blob.get", payload: { sessionId: reviewer!, blob: row.blob! } })));
+        throw new Error(`PM delivery rejected: ${taskId}; ${decided}; recovery=${JSON.stringify(recovery)}; tools=${JSON.stringify(tools)}`);
+      }
+      await t.tools.waitUntil(async () => (await history()).find(run => run.id === goal.id)?.requirement?.state === "completed", 15_000);
+    }
     // Once the exception settles, the escalation it granted is gone: what
     // remains is ordinary project management, which every main Session in a
     // taken-over project has. Management is therefore still available here,

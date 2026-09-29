@@ -25,24 +25,25 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-use crate::os_process::{Child, Command};
-use anyhow::{Context, Result, anyhow, bail};
+use crate::os_process::Command;
+use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use genehub_proto::{
     Capabilities, Catalog, ItemDelta, ModeInfo, ModelInfo, ProbeState, SearchMatch, SessionEvent,
     TimelineItem, TodoEntry, TodoStatus, ToolCallDetail, ToolKind, ToolStatus, TurnError,
     TurnErrorCode, Usage,
 };
-use serde_json::{Map, Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use serde_json::{json, Map, Value};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex, RwLock};
 
-use super::acp::AcpAdapter;
+mod login;
 use super::usage;
 use super::{
-    AgentAdapter, AgentSession, Chatter, ImportCandidate, ImportedHistory, PersistHandle,
-    PromptInput, ProviderMap, SessionConfig, find_executable_in,
+    find_executable_in, AgentAdapter, AgentSession, ImportCandidate, ImportedHistory,
+    PersistHandle, PromptInput, ProviderMap, SessionConfig,
 };
+use login::logged_in;
 
 const LIST_MODELS_TIMEOUT: Duration = Duration::from_secs(15);
 /// Keys every print run writes into `cli-config.json`.
@@ -57,7 +58,7 @@ pub struct CursorAdapter {
     extra_dirs: Vec<PathBuf>,
     /// Import still reads Cursor's ACP session store: print mode cannot list
     /// or replay sessions.
-    importer: AcpAdapter,
+    acp_command: Vec<String>,
     models: RwLock<Option<ListedModels>>,
 }
 
@@ -83,8 +84,7 @@ impl CursorAdapter {
         let label = label.into();
         CursorAdapter {
             program_name: acp_command.first().cloned().unwrap_or_default(),
-            importer: AcpAdapter::new(id.clone(), label.clone(), acp_command)
-                .with_extra_dirs(extra_dirs.clone()),
+            acp_command,
             id,
             label,
             extra_dirs,
@@ -162,14 +162,6 @@ impl AgentAdapter for CursorAdapter {
         }
     }
 
-    fn migrate_selection(
-        &self,
-        model_id: &str,
-        catalog: &Catalog,
-    ) -> Option<(String, Option<String>, Option<bool>)> {
-        resolve_legacy_cursor_model(model_id, catalog)
-    }
-
     fn accepts_resume(&self, handle: &PersistHandle) -> bool {
         handle
             .value
@@ -185,7 +177,7 @@ impl AgentAdapter for CursorAdapter {
         if std::env::var_os("CURSOR_API_KEY").is_some() {
             return ProbeState::Ready;
         }
-        match super::acp::logged_in(&program).await {
+        match logged_in(&program).await {
             Some(false) => ProbeState::Unavailable {
                 reason: "找到了 Cursor，但它还没登录：先跑 cursor-agent login".into(),
             },
@@ -195,7 +187,6 @@ impl AgentAdapter for CursorAdapter {
 
     async fn invalidate_catalog(&self) {
         *self.models.write().await = None;
-        self.importer.invalidate_catalog().await;
     }
 
     async fn catalog(&self, _providers: &ProviderMap) -> Catalog {
@@ -245,7 +236,7 @@ impl AgentAdapter for CursorAdapter {
             chat_id: Arc::new(std::sync::Mutex::new(chat_id)),
             interrupted: Arc::new(std::sync::Mutex::new(None)),
             turn: Arc::new(Mutex::new(TurnState::default())),
-            child: Arc::new(Mutex::new(None)),
+            process: Arc::new(Mutex::new(None)),
             canceled: Arc::new(AtomicBool::new(false)),
             events,
             events_rx: std::sync::Mutex::new(Some(events_rx)),
@@ -258,13 +249,19 @@ impl AgentAdapter for CursorAdapter {
         cwd: &Path,
         limit: usize,
     ) -> Result<Option<Vec<ImportCandidate>>> {
-        self.importer.list_import_candidates(cwd, limit).await
+        let program = self
+            .program()
+            .ok_or_else(|| anyhow!("Cursor is not installed"))?;
+        super::acp_import::list_candidates(&program, &self.acp_command, cwd, limit).await
     }
 
     async fn import_history(&self, cwd: &Path, source_id: &str) -> Result<ImportedHistory> {
         // The imported handle names an ACP session, which `accepts_resume`
         // refuses; the first prompt is then seeded from the imported items.
-        self.importer.import_history(cwd, source_id).await
+        let program = self
+            .program()
+            .ok_or_else(|| anyhow!("Cursor is not installed"))?;
+        super::acp_import::read_history(&program, &self.acp_command, &self.id, cwd, source_id).await
     }
 }
 
@@ -318,7 +315,7 @@ struct CursorSession {
     chat_id: Arc<std::sync::Mutex<Option<String>>>,
     interrupted: Arc<std::sync::Mutex<Option<String>>>,
     turn: Arc<Mutex<TurnState>>,
-    child: Arc<Mutex<Option<Child>>>,
+    process: Arc<Mutex<Option<super::process::AgentProcess>>>,
     canceled: Arc<AtomicBool>,
     events: crate::adapter::EventTx,
     events_rx: std::sync::Mutex<Option<crate::adapter::EventRx>>,
@@ -411,17 +408,11 @@ impl AgentSession for CursorSession {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        super::apply_session_environment(&mut command, &self.config);
-        super::owned_child(&mut command);
-
         let guard = GlobalModelGuard::enter();
-        let mut child = command
-            .spawn()
-            .with_context(|| format!("spawning {}", self.program.display()))?;
-        let mut stdin = child.stdin.take().expect("stdin was piped");
-        let stdout = child.stdout.take().expect("stdout was piped");
-        let said = Arc::new(Chatter::default());
-        said.watch("cursor", child.stderr.take()).await;
+        let (process, io) =
+            super::process::AgentProcess::spawn(&mut command, "cursor", &self.config).await?;
+        let mut stdin = io.stdin.expect("stdin was piped");
+        let stdout = io.stdout.expect("stdout was piped");
         tracing::info!(
             model = slug.as_deref().unwrap_or("(Cursor default)"),
             resume = chat_id.is_some(),
@@ -429,7 +420,7 @@ impl AgentSession for CursorSession {
         );
 
         self.canceled.store(false, Ordering::SeqCst);
-        *self.child.lock().await = Some(child);
+        *self.process.lock().await = Some(process.clone());
         *turn = TurnState {
             id: Some(turn_id.clone()),
             prompt: input.text.clone(),
@@ -457,8 +448,7 @@ impl AgentSession for CursorSession {
             stdout,
             turn_id: turn_id.clone(),
             turn: self.turn.clone(),
-            child: self.child.clone(),
-            said,
+            process,
             label: self.label.clone(),
             events: self.events.clone(),
             chat_id: self.chat_id.clone(),
@@ -479,21 +469,25 @@ impl AgentSession for CursorSession {
                 Some(interrupted_note(&turn.prompt, &turn.partial));
         }
         self.canceled.store(true, Ordering::SeqCst);
-        super::close_child(&self.child).await
+        let process = self.process.lock().await.clone();
+        if let Some(process) = process {
+            process.close().await?;
+        }
+        Ok(())
     }
 
     async fn close(&self) -> Result<()> {
-        super::close_child(&self.child).await?;
+        let process = self.process.lock().await.take();
+        if let Some(process) = process {
+            process.close().await?;
+        }
         self.tasks.stop().await;
         Ok(())
     }
 
     async fn pid(&self) -> Option<u32> {
-        self.child
-            .lock()
-            .await
-            .as_ref()
-            .and_then(|child| child.id())
+        let process = self.process.lock().await.clone()?;
+        process.pid().await
     }
 
     async fn set_model(&self, model_id: &str) -> Result<()> {
@@ -563,8 +557,7 @@ struct RunTurn {
     stdout: crate::os_process::ChildStdout,
     turn_id: String,
     turn: Arc<Mutex<TurnState>>,
-    child: Arc<Mutex<Option<Child>>>,
-    said: Arc<Chatter>,
+    process: super::process::AgentProcess,
     label: String,
     events: crate::adapter::EventTx,
     chat_id: Arc<std::sync::Mutex<Option<String>>>,
@@ -574,7 +567,7 @@ struct RunTurn {
 }
 
 async fn run_turn(run: RunTurn) {
-    let mut lines = BufReader::new(run.stdout).lines();
+    let mut lines = super::process::ProcessLines::new(run.stdout, run.process.child.clone());
     while let Ok(Some(line)) = lines.next_line().await {
         let Ok(event) = serde_json::from_str::<Value>(&line) else {
             continue;
@@ -597,14 +590,7 @@ async fn run_turn(run: RunTurn) {
         Some(Outcome::Success(reported)) => {
             let mut usage = snapshot;
             if let Some(reported) = reported {
-                let parsed = usage::parse_usage(&reported);
-                if parsed.input_tokens > 0 || parsed.output_tokens > 0 {
-                    let previous = usage.clone();
-                    usage = parsed;
-                    usage.llm_rounds = previous.llm_rounds;
-                    usage.tool_output_tokens = previous.tool_output_tokens;
-                    usage::preserve_timing(&mut usage, &previous);
-                }
+                usage::replace_reported_usage(&mut usage, &reported);
             }
             usage::finalize_output_rate(&mut usage);
             SessionEvent::TurnCompleted {
@@ -624,7 +610,7 @@ async fn run_turn(run: RunTurn) {
             turn_id: run.turn_id.clone(),
             error: TurnError {
                 code: TurnErrorCode::AgentCrashed,
-                message: super::stopped(&run.label, &run.child, &run.said).await,
+                message: run.process.failure_message(&run.label).await,
             },
         },
     };
@@ -633,7 +619,7 @@ async fn run_turn(run: RunTurn) {
         // interruption note set during a race is stale by now.
         run.interrupted.lock().expect("never poisoned").take();
     }
-    if let Err(error) = super::close_child(&run.child).await {
+    if let Err(error) = run.process.close().await {
         tracing::warn!(%error, "cursor print process did not exit cleanly");
     }
     run.turn.lock().await.id = None;
@@ -646,6 +632,9 @@ fn print_args(slug: Option<&str>, chat_id: Option<&str>, mode_id: Option<&str>) 
     let mut args: Vec<String> = [
         "--print",
         "--single-turn",
+        // An embedded execution must not upgrade its CLI or leave a detached
+        // updater running after the owned turn has exited.
+        "--disable-auto-update",
         "--output-format",
         "stream-json",
         "--stream-partial-output",
@@ -936,7 +925,7 @@ fn tool_item(event: &Value, completed: bool, state: &mut TurnState) -> Option<Ti
     let failure = || {
         result
             .filter(|_| success.is_none())
-            .map(|result| compact_json(result))
+            .map(compact_json)
             .unwrap_or_default()
     };
     let empty = Value::Null;
@@ -1317,61 +1306,6 @@ pub(crate) fn parse_cli_model_id(id: &str) -> (String, Option<String>, bool) {
     (base, effort, is_fast)
 }
 
-/// Maps a model id saved by the ACP adapter — an opaque
-/// `grok-4.7[effort=high,fast=true]` or a raw CLI slug — onto this catalog's
-/// base model plus the effort and Fast it implied.
-pub(crate) fn resolve_legacy_cursor_model(
-    raw_id: &str,
-    catalog: &genehub_proto::Catalog,
-) -> Option<(String, Option<String>, Option<bool>)> {
-    let id = raw_id.trim();
-    if id.is_empty() {
-        return None;
-    }
-    if let Some(m) = catalog.models.iter().find(|m| m.id == id) {
-        return Some((m.id.clone(), None, None));
-    }
-
-    let (opaque_base, params) = parse_opaque_model_id(id);
-    let opaque_effort = params
-        .iter()
-        .find(|(k, _)| k == "effort" || k == "reasoning_effort")
-        .map(|(_, v)| {
-            if v == "extra-high" {
-                "xhigh".to_string()
-            } else {
-                v.clone()
-            }
-        });
-    let opaque_fast = params
-        .iter()
-        .find(|(k, _)| k == "fast")
-        .map(|(_, v)| v == "true");
-
-    for b in &base_aliases(opaque_base) {
-        if let Some(m) = catalog.models.iter().find(|m| &m.id == b) {
-            let effort = opaque_effort.filter(|e| m.efforts.contains(e));
-            let fast = opaque_fast.filter(|f| !*f || m.supports_fast);
-            return Some((m.id.clone(), effort, fast));
-        }
-    }
-
-    let (cli_base, cli_effort, is_fast) = parse_cli_model_id(opaque_base);
-    for b in &base_aliases(&cli_base) {
-        if let Some(m) = catalog.models.iter().find(|m| &m.id == b) {
-            let effort = opaque_effort
-                .or(cli_effort.clone())
-                .filter(|e| m.efforts.contains(e));
-            let fast = opaque_fast
-                .or(if is_fast { Some(true) } else { None })
-                .filter(|f| !*f || m.supports_fast);
-            return Some((m.id.clone(), effort, fast));
-        }
-    }
-
-    None
-}
-
 fn effort_rank(effort: &str) -> usize {
     match effort {
         "none" => 0,
@@ -1494,22 +1428,6 @@ fn group_cli_models(
         .collect();
 
     (models, resolved_default)
-}
-
-fn parse_opaque_model_id(id: &str) -> (&str, Vec<(String, String)>) {
-    let Some((base, rest)) = id.split_once('[') else {
-        return (id, Vec::new());
-    };
-    let params = rest
-        .strip_suffix(']')
-        .unwrap_or(rest)
-        .split(',')
-        .filter_map(|pair| {
-            let (key, value) = pair.split_once('=')?;
-            Some((key.trim().to_string(), value.trim().to_string()))
-        })
-        .collect();
-    (base.trim(), params)
 }
 
 pub(crate) fn models_from_cli_list(text: &str) -> (Vec<ModelInfo>, Option<String>) {
@@ -1662,7 +1580,7 @@ mod tests {
         let args = print_args(Some("grok-4.7-low-fast"), Some("chat-1"), Some("plan"));
         let joined = args.join(" ");
         assert!(joined.starts_with(
-            "--print --single-turn --output-format stream-json --stream-partial-output"
+            "--print --single-turn --disable-auto-update --output-format stream-json --stream-partial-output"
         ));
         assert!(joined.contains("--model grok-4.7-low-fast"));
         assert!(joined.contains("--resume chat-1"));
@@ -1727,62 +1645,6 @@ mod tests {
         assert_eq!(
             parse_cli_model_id("composer-2.5-fast"),
             ("composer-2.5".into(), None, true)
-        );
-    }
-
-    #[test]
-    fn resolve_legacy_cursor_model_maps_both_opaque_and_raw_ids() {
-        let catalog = genehub_proto::Catalog {
-            models: vec![
-                ModelInfo {
-                    id: "grok-4.7".into(),
-                    label: "Grok 4.7".into(),
-                    context_window: None,
-                    reasoning: true,
-                    efforts: vec!["low".into(), "medium".into(), "high".into()],
-                    supports_fast: true,
-                    input_modalities: None,
-                },
-                ModelInfo {
-                    id: "cursor-grok-4.6".into(),
-                    label: "Cursor Grok 4.6".into(),
-                    context_window: None,
-                    reasoning: true,
-                    efforts: vec!["high".into()],
-                    supports_fast: true,
-                    input_modalities: None,
-                },
-            ],
-            modes: vec![],
-            commands: vec![],
-            runtime_axes: None,
-            default_model: Some("auto".into()),
-            default_mode: None,
-            default_effort: Some("medium".into()),
-        };
-
-        assert_eq!(
-            resolve_legacy_cursor_model("grok-4.7", &catalog),
-            Some(("grok-4.7".into(), None, None))
-        );
-        assert_eq!(
-            resolve_legacy_cursor_model("grok-4.7[effort=high,fast=true]", &catalog),
-            Some(("grok-4.7".into(), Some("high".into()), Some(true)))
-        );
-        assert_eq!(
-            resolve_legacy_cursor_model(
-                "grok-4.7[context=256k,reasoning_effort=high,fast=true]",
-                &catalog
-            ),
-            Some(("grok-4.7".into(), Some("high".into()), Some(true)))
-        );
-        assert_eq!(
-            resolve_legacy_cursor_model("cursor-grok-4.6-high-fast", &catalog),
-            Some(("cursor-grok-4.6".into(), Some("high".into()), Some(true)))
-        );
-        assert_eq!(
-            resolve_legacy_cursor_model("nonexistent-model", &catalog),
-            None
         );
     }
 

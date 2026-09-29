@@ -1,3 +1,4 @@
+import { HumanDecisionSummary } from "./HumanDecisionSummary";
 import { WorkspaceDetailsDialog } from "../workspace/WorkspaceDetailsDialog";
 import type { SessionSummary } from "@genehub/proto";
 import { useEffect, useState } from "react";
@@ -7,10 +8,14 @@ import { refreshAgentActivities, useAgentActivities } from "../workspace/useAgen
 import { useWorkbench } from "./store";
 import { WorkflowStructureDetails } from "./StructuredWorkflow";
 import { canHandleInteraction } from "./attention";
+import { buildAgentSpaceTree } from "../workspace/agent-space-tree";
+import { WorkflowViewLinks } from "./WorkflowViewLinks";
+import { observationLabel, workflowObservation } from "./workflow-observation";
 
 const labels: Record<string, string> = {
+  awaitingPm: "等待 PM 落实",
   running: "进行中", stopping: "停止中", cancelling: "停止中",
-  blocked: "受阻", failed: "失败", cancelled: "已取消", completed: "执行完成",
+  blocked: "受阻", failed: "失败", cancelled: "已取消", completed: "已交付", completing: "交付判定中",
 };
 
 const CANCEL_ATTEMPTS = 4;
@@ -56,6 +61,7 @@ export function TaskProgress({ session, onReportSession }: { session: SessionSum
   const client = useWorkbench((state) => state.client);
   const connection = useWorkbench((state) => state.connection);
   const selectSession = useWorkbench((state) => state.selectSession);
+  const workspaces = useWorkbench(state => state.workspaces);
   const activity = useAgentActivities();
   const current = activity.sessions?.find((item) => item.id === session.id) ?? session;
   const summary = current.workSummary;
@@ -65,28 +71,34 @@ export function TaskProgress({ session, onReportSession }: { session: SessionSum
   useEffect(() => {
     if (client && connection === "ready") void refreshAgentActivities(client);
   }, [client, connection, session.id, session.status]);
-  if (!summary || session.managed) return null;
+  if (session.managed) return <WorkflowViewLinks workspaceId={buildAgentSpaceTree(workspaces).projectRootById[session.workspaceId] ?? session.workspaceId} runId={session.managed.workflowRunId} nodeId={session.managed.nodeId} compact />;
+  if (!summary) return null;
   const stateLabel = summary.stopping ? "停止中" : summary.blocked ? "受阻"
+    : summary.tasks.some(task => task.humanExit && !task.humanExit.answer) ? "等待人工决定"
     : summary.tasks.some(task => task.waiting?.length) ? "等待处理"
+    : summary.tasks.some(task => task.requirement?.state === "completing") ? "等待 PM 落实"
+    : summary.tasks.some(task => task.recovery && task.executing) ? "恢复审查中"
     : summary.tasks.some(task => task.executing) ? "小队执行中"
     : summary.running ? "等待推进"
     : summary.tasks.some(task => task.status === "failed") ? "失败"
-    : summary.tasks.length && summary.tasks.every(task => task.status === "cancelled") ? "已取消" : "执行记录";
+    : summary.tasks.some(task => task.status === "completed" && !task.requirement) ? "交付待核对"
+    : summary.tasks.length && summary.tasks.every(task => task.status === "cancelled") ? "已取消" : summary.tasks.length && summary.tasks.every(task => ["completed", "cancelled"].includes(task.status)) ? "已交付" : "等待推进";
   const ready = connection === "ready" && !activity.error && !summary.error;
-  const heading = `小队任务 · ${ready ? stateLabel : "待同步"} · ${summary.tasks.length + summary.more} 项`;
+  const heading = `小队任务 · ${ready ? stateLabel : "待同步"} · ${summary.tasks.length + summary.more} 项${ready && summary.tasks.length === 1 && summary.more === 0 && summary.tasks[0]?.observation ? ` · ${observationLabel(summary.tasks[0].observation)}` : ""}`;
   const canCancel = ready && client?.identity?.features?.includes("workflow.control.v1");
   return <section aria-label="任务进度" className="shrink-0 border-b border-line bg-raised px-4 text-sm">
-    <button type="button" aria-expanded={expanded} aria-haspopup="dialog" className="flex min-h-11 w-full items-center justify-between gap-2 text-left font-medium"
-      onClick={() => setExpanded(true)}><span className="min-w-0 truncate">{heading}</span><span aria-hidden>›</span></button>
+    <div className="flex items-center gap-2"><button type="button" aria-expanded={expanded} aria-haspopup="dialog" className="flex min-h-11 min-w-0 flex-1 items-center justify-between gap-2 text-left font-medium"
+      onClick={() => setExpanded(true)}><span className="min-w-0 truncate">{heading}</span><span aria-hidden>›</span></button>{ready && summary.tasks.length === 1 && summary.more === 0 && <WorkflowViewLinks workspaceId={session.workspaceId} runId={summary.tasks[0]!.runId} compact />}</div>
     {error && !expanded && <p role="alert" className="pb-2 text-danger">{error}</p>}
     {expanded && <WorkspaceDetailsDialog title="小队任务" onClose={() => setExpanded(false)}>
+      {current.inputSummary?.paused && <p role="status" className="mt-2 text-muted">PM 会话已暂停；后台任务状态见下方。发送新消息或答复待处理问题后继续。</p>}
       {!ready && <p role="status" className="mt-2 text-muted">{summary.error ?? "任务状态待核对，连接恢复后更新。"}</p>}
       {!ready && summary.checkedAtMs > 0 && <p className="mt-1 text-xs text-muted">最近核对：{new Date(summary.checkedAtMs).toLocaleTimeString()}。</p>}
       {error && <p role="alert" className="mt-2 text-danger">{error}</p>}
       <ul className="mt-2 space-y-3">
         {summary.tasks.map((task, index) => <li key={task.runId} className="border-t border-line pt-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <span>{activity.sessions?.find(item => item.id === task.executorSessionId)?.title || `任务 ${index + 1}`} · {task.executing ? "小队执行中" : task.status === "running" && task.waiting?.length ? "等待处理" : labels[task.status] ?? task.status}</span>
+            <span>{activity.sessions?.find(item => item.id === task.executorSessionId)?.title || `任务 ${index + 1}`} · {task.executing ? "小队执行中" : task.status === "running" && task.waiting?.length ? "等待处理" : task.status === "completed" && !task.requirement ? "执行已结束，交付待核对" : labels[task.status] ?? task.status}</span>
             {canCancel && !["completed", "cancelled"].includes(task.status) && <button type="button"
               title={`终止 ${task.taskId} 及其小队；不影响 PM 本轮和其他任务`}
               className="min-h-9 px-2 text-danger disabled:opacity-50" disabled={!!busy || task.status === "cancelling"}
@@ -105,19 +117,22 @@ export function TaskProgress({ session, onReportSession }: { session: SessionSum
                   .finally(() => { if (useWorkbench.getState().client === owner) setBusy(null); });
               }}>{busy === task.runId ? "正在提交终止…" : task.status === "cancelling" ? "停止中" : "终止任务"}</button>}
           </div>
+          {task.recovery && <p role="status" className="mt-1 text-xs text-muted">恢复流程 · {task.humanExit && !task.humanExit.answer ? "等待人工决定" : task.waiting?.length ? "等待 PM 决定" : task.runStatus === "completed" ? "执行已结束，需求仍需核对交付" : labels[task.runStatus ?? ""] ?? "状态待同步"}</p>}
+          {task.requirement?.patrolError && <p role="alert" className="mt-1 text-xs text-danger">{task.requirement.patrolError}</p>}
+          {task.requirement?.conclusion && <p className="mt-1 text-xs text-muted">交付结论：{task.requirement.conclusion}</p>}
           {task.reportPending && <p className="mt-1 text-xs text-muted">{task.status === "running" ? "任务有新情况，待 PM 处理。" : "执行结果待 PM 核对新消息并汇报。"}</p>}
           {task.humanExit && <div role="status" className="mt-2 rounded-lg border border-line px-2 py-2 text-xs">
-            <p className="font-medium">人工决定 · 出口 {task.humanExit.kind}{task.humanExit.answer ? ` · 已选择 ${task.humanExit.answer}` : " · 待答复"}</p>
-            <p className="mt-1 break-words">{task.humanExit.reason}</p>
+            <HumanDecisionSummary decision={task.humanExit} />
             {!task.humanExit.answer && <button type="button" className="mt-1 min-h-9 text-accent" onClick={() => void selectSession(task.humanExit!.pmSessionId)}>前往问题卡</button>}
-            {((task.humanExit.kind === "d" && task.humanExit.answer === "confirmFeedback")
-              || (task.humanExit.kind === "c" && task.humanExit.answer === "reject")) && onReportSession &&
+            {task.humanExit.kind === "d" && task.humanExit.answer === "confirmFeedback" && onReportSession &&
               <button type="button" className="mt-1 min-h-9 text-accent" onClick={() => onReportSession(
                 task.humanExit!.pmSessionId,
-                `Workflow 恢复失败\nRun: ${task.runId}\n请求: ${task.requestRunId ?? task.runId}\n原因: ${task.humanExit!.reason}\n日志引用: workflow journal --run ${task.runId}`,
+                `Workflow 恢复失败\nRun: ${task.runId}\n用户需求: ${task.requestRunId ?? task.runId}\n原因: ${task.humanExit!.reason}\n日志引用: workflow journal --run ${task.runId}`,
               )}>打开预填反馈</button>}
           </div>}
-          {task.activeNodes.length > 0 && <p className="mt-1 text-xs text-muted">当前步骤：{task.activeNodes.join("、")}</p>}
+          <WorkflowViewLinks workspaceId={session.workspaceId} runId={task.runId} />
+          {task.observation && <TaskObservation value={task.observation} />}
+          {task.activeNodes.length > 0 && <p className="mt-1 text-xs text-muted">当前步骤：{task.activeNodes.map(id => String((task.observation as {nodeLabels?:Record<string,string>} | undefined)?.nodeLabels?.[id] ?? id)).join("、")}</p>}
           {task.reason && <details className="mt-1 text-xs"><summary className="cursor-pointer truncate">{task.reason.split("\n")[0]}</summary><p className="mt-2 whitespace-pre-wrap break-words">{task.reason}</p></details>}
           {task.waiting?.map(waiting => {
             const owner = activity.sessions?.find(item => item.id === waiting.sessionId);
@@ -135,6 +150,7 @@ export function TaskProgress({ session, onReportSession }: { session: SessionSum
               </div>}
             </div>;
           })}
+          {task.conditions?.map(condition => <p key={`${condition.nodeId}:${condition.code}:${condition.occurrence}`} className="mt-1 text-xs">{condition.nodeId ? `${condition.nodeId}：` : ""}{condition.reason}</p>)}
           {task.cleanupError && <p className="mt-1 text-xs text-danger">收尾待处理：{task.cleanupError}</p>}
           <WorkflowStructureDetails workspaceId={session.workspaceId} runId={task.runId} revision={task.revision} />
           {task.executorSessionId && <button type="button" className="min-h-9 text-xs text-accent"
@@ -144,4 +160,23 @@ export function TaskProgress({ session, onReportSession }: { session: SessionSum
       {summary.more > 0 && <p className="mt-2 text-xs text-muted">另有 {summary.more} 项任务未在此展开；可向 PM 查询。</p>}
     </WorkspaceDetailsDialog>}
   </section>;
+}
+
+function TaskObservation({value}: {value: unknown}) {
+  const o = workflowObservation(value);
+  if (!o) return null;
+  const budget = o.requestBudget;
+  return <div className="my-2 grid grid-cols-3 gap-2 rounded-lg bg-raised p-2 text-xs">
+    <div>平均并行 {(o.parallelism ?? 0).toFixed(1)} 人<p className="mt-1 text-muted">峰值 {o.peakWorkers ?? 0} 人 · 含助手等待时间</p></div>
+    <div>迭代<p className="mt-1 text-muted">{o.iterations?.length ? o.iterations.map(loop => `${loop.rounds} 轮`).join(" / ") : "尚无循环迭代"}</p><p className="mt-1 text-muted">各循环实例分别计轮 · 观察时长 {Math.round((o.observedWallMs ?? 0) / 60000)} 分钟</p></div>
+    <div>预算
+      {budget ? <>
+        <p className={`mt-1 ${(o.callBudgetPercent ?? 0) >= 80 ? "text-danger" : "text-muted"}`}>调用 {budget.observedLlmRounds}/{budget.budget.maxLlmRounds} · {Math.round(o.callBudgetPercent ?? 0)}%</p>
+        <p className={`mt-1 ${(o.runBudgetPercent ?? 0) >= 80 ? "text-danger" : "text-muted"}`}>Run {budget.usedRuns}/{budget.budget.maxRuns} 次 · {Math.round(o.runBudgetPercent ?? 0)}%</p>
+        <p className="mt-1 text-muted">剩余 Run {budget.remainingRuns} 次</p>
+      </> : <p className="mt-1 text-muted">{Math.round(o.budgetPercent ?? 0)}%</p>}
+      <p className="mt-1 text-muted">估算 ¥{((o.estimatedMilliCny ?? 0) / 1000).toFixed(2)}</p>
+    </div>
+    {!!o.recovering && <p className="col-span-3 text-muted">恢复中 · {o.recovering} 个恢复 Run；人工决定仍在原问题卡处理</p>}
+  </div>;
 }

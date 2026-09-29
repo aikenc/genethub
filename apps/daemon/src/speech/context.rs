@@ -52,7 +52,10 @@ pub async fn compile(
         if let Some(session_id) = session_id {
             let snapshot = state.sessions.snapshot(session_id).await?;
             if snapshot.summary.workspace_id != workspace_id {
-                anyhow::bail!("session is not a member of this workspace");
+                return Err(crate::rpc_error::failure(
+                    genehub_proto::ErrorCode::Forbidden,
+                    "session is not a member of this workspace".to_owned(),
+                ));
             }
             let available = snapshot
                 .items

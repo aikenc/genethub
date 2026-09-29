@@ -6,7 +6,7 @@ defineJourney(
     title: "Tool calls move through their states rather than appearing finished",
     oracle: "event stream contains pending then running then ok for a bash tool call",
     catches: ["tool appears finished immediately"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session"],
     llm: { default: "mock" },
     expectedDurationMs: 25_000,
     timeoutMs: 75_000,

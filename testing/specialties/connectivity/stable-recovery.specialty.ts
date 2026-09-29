@@ -18,10 +18,10 @@ defineSpecialty({
     const owner = client.logicalConnectionId;
     for (let n = 0; n < 3; n++) {
       const until = Date.now() + 31000;
-      while (Date.now() < until) {
+      await t.tools.waitUntil(async () => {
         t.assertions.assert((await client.call({ type: "workspace.list" }))?.type === "workspaces", "stable interval lost business access");
-        await new Promise(r => setTimeout(r, 500));
-      }
+        return Date.now() >= until;
+      }, 35_000, 500);
       retries.length = 0; const connections = link.connections(); const start = performance.now(); link.cut();
       await t.tools.waitUntil(() => link.connections() > connections && client.connectionState === "ready", 10000);
       t.assertions.assert(retries.length === 1 && retries[0] === 0, "healthy interval retained failure backoff: " + retries);

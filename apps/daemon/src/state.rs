@@ -20,6 +20,17 @@ use crate::remote::SharedRemote;
 use crate::session::{SessionManager, Store, WorkspaceHomes};
 use crate::workspace::Workspaces;
 
+#[derive(Default)]
+pub(crate) struct ProviderUpdate {
+    pub api_key: Option<String>,
+    pub base_url: Option<String>,
+    pub label: Option<String>,
+    pub dialect: Option<String>,
+    pub models: Option<Vec<String>>,
+    pub model_inputs: Option<std::collections::BTreeMap<String, Vec<String>>>,
+    pub model_context_windows: Option<std::collections::BTreeMap<String, u64>>,
+}
+
 pub struct AppState {
     pub(crate) logical_connections: Arc<crate::dataplane::logical_registry::Registry>,
     pub client_debug: crate::client_debug::Broker,
@@ -41,6 +52,8 @@ pub struct AppState {
     pub processes: Arc<crate::processes::Processes>,
     /// Bounded categorical facts safe for explicit feedback attachment.
     pub diagnostics: Arc<crate::diagnostics::Diagnostics>,
+    /// How much bulk preview data may sit on the shared relay uplink.
+    pub uplink_pace: Arc<crate::dataplane::uplink_pace::UplinkPace>,
     pub version: String,
     /// Owner-only token used to mint loopback control proofs.
     pub token: String,
@@ -120,9 +133,6 @@ impl AppState {
         paths.ensure()?;
         let mut config = Config::load(&paths.config_file())?;
         config.ensure_workspace_catalog_generation(&paths.config_file())?;
-        config.migrate_workspace_folders(&paths.config_file())?;
-        config.migrate_workspace_roots(&paths.config_file())?;
-        config.migrate_workspace_identities(&paths.config_file())?;
         config.refresh_workspace_catalog_facts(&paths.config_file())?;
         let machine = MachineState::load_or_create(&paths.state_file())?;
         let devices = Devices::load(paths.devices_file());
@@ -151,7 +161,8 @@ impl AppState {
             diagnostics.clone(),
         )
         .with_builtin_skills(skills_dir, front_door_cli)
-        .with_project_control(project_control.clone());
+        .with_project_control(project_control.clone())
+        .with_workflow_data_root(paths.root.clone());
 
         let config = Arc::new(RwLock::new(config));
         let workspaces = Workspaces::new(config.clone(), paths.config_file(), homes);
@@ -184,6 +195,9 @@ impl AppState {
             terminals,
             processes,
             diagnostics,
+            uplink_pace: Arc::new(crate::dataplane::uplink_pace::UplinkPace::new(
+                genehub_proto::INITIAL_STREAM_WINDOW_BYTES as u64,
+            )),
             client_debug: crate::client_debug::Broker::default(),
             version: crate::version::product_version(),
             token: uuid::Uuid::new_v4().simple().to_string(),
@@ -306,6 +320,7 @@ impl AppState {
                         } else {
                             provider.models.clone()
                         },
+                        model_context_windows: Some(provider.model_context_windows.clone()),
                         model_inputs: Some({
                             let mut inputs =
                                 found.map(|f| f.model_inputs.clone()).unwrap_or_default();
@@ -489,16 +504,20 @@ impl AppState {
     /// An empty key clears the entry rather than storing a blank one: a stored
     /// empty string would read as "configured" everywhere and fail only at the
     /// moment the user runs a task.
-    pub async fn set_provider(
+    pub(crate) async fn set_provider(
         &self,
         provider_id: &str,
-        api_key: Option<String>,
-        base_url: Option<String>,
-        label: Option<String>,
-        dialect: Option<String>,
-        models: Option<Vec<String>>,
-        model_inputs: Option<std::collections::BTreeMap<String, Vec<String>>>,
+        update: ProviderUpdate,
     ) -> Result<Settings> {
+        let ProviderUpdate {
+            api_key,
+            base_url,
+            label,
+            dialect,
+            models,
+            model_inputs,
+            model_context_windows,
+        } = update;
         {
             let mut config = self.config.write().await;
             let mut entry = config
@@ -521,6 +540,16 @@ impl AppState {
             }
             if let Some(models) = models {
                 entry.models = models.into_iter().filter(|m| !m.is_empty()).collect();
+            }
+            if let Some(windows) = model_context_windows {
+                for (model, window) in windows {
+                    if model.trim().is_empty()
+                        || ![262_144, 524_288, 1_048_576, 2_097_152].contains(&window)
+                    {
+                        anyhow::bail!("上下文窗口只接受 256K、512K、1M 或 2M tokens");
+                    }
+                    entry.model_context_windows.insert(model, window);
+                }
             }
             if let Some(model_inputs) = model_inputs {
                 for (model, inputs) in model_inputs {
@@ -548,11 +577,10 @@ impl AppState {
                     crate::provider::validate_credential_url(&url)?;
                 }
             }
-            config
-                .agents
-                .providers
-                .insert(provider_id.to_string(), entry);
-            config.save(&self.paths.config_file())?;
+            let mut next = config.clone();
+            next.agents.providers.insert(provider_id.to_string(), entry);
+            next.save(&self.paths.config_file())?;
+            *config = next;
         }
         crate::config::restrict_to_owner(&self.paths.config_file())?;
         // The settings that come back are asked again with the new details,
@@ -569,7 +597,10 @@ impl AppState {
                 return Ok(self.settings().await);
             };
             if !crate::provider::resolve(provider_id, entry).custom {
-                return Err(anyhow::anyhow!("{provider_id} 是内置的，只能清空它的 Key"));
+                return Err(crate::rpc_error::failure(
+                    genehub_proto::ErrorCode::BadRequest,
+                    format!("{provider_id} 是内置的，只能清空它的 Key"),
+                ));
             }
             config.agents.providers.remove(provider_id);
             config.save(&self.paths.config_file())?;
@@ -610,6 +641,20 @@ impl AppState {
 }
 
 fn validate_agent_preferences(preferences: &AgentSelectionPreferences) -> Result<()> {
+    if let Some(rates) = &preferences.cost_rates {
+        if [
+            rates.very_high,
+            rates.high,
+            rates.medium,
+            rates.low,
+            rates.very_low,
+        ]
+        .iter()
+        .any(|rate| *rate > 1_000_000)
+        {
+            anyhow::bail!("每次 LLM 请求的估算成本不能超过 1000 元");
+        }
+    }
     if preferences.runtimes.len() > 64 {
         anyhow::bail!("最多记住 64 个 Agent 的运行设置");
     }
@@ -694,7 +739,11 @@ fn validate_tag_groups(preferences: &AgentSelectionPreferences) -> Result<()> {
         validate_tags(&group.tags, false)?;
         for tag in &group.tags {
             let key = tag.trim().to_lowercase();
-            let key = if key == "flush" { "flash".to_string() } else { key };
+            let key = if key == "flush" {
+                "flash".to_string()
+            } else {
+                key
+            };
             if builtins.contains(&key.as_str()) {
                 anyhow::bail!("内置标签不能加入自定义标签组");
             }
@@ -713,7 +762,11 @@ fn validate_tag_group_selection(
     let mut claimed = std::collections::BTreeSet::new();
     for tag in tags {
         let key = tag.trim().to_lowercase();
-        let key = if key == "flush" { "flash" } else { key.as_str() };
+        let key = if key == "flush" {
+            "flash"
+        } else {
+            key.as_str()
+        };
         let group = if ["max", "pro", "flash"].contains(&key) {
             Some("builtin-intelligence")
         } else {
@@ -776,12 +829,14 @@ mod machine_state_tests {
                 tags: tags.into_iter().map(str::to_string).collect(),
                 cost: Some(genehub_proto::AgentCostLevel::Medium),
             };
-        let mut preferences = AgentSelectionPreferences::default();
-        preferences.model_profiles = vec![profile(
-            "codex",
-            "model",
-            vec!["Max", "图片理解", "视频理解", "私有"],
-        )];
+        let mut preferences = AgentSelectionPreferences {
+            model_profiles: vec![profile(
+                "codex",
+                "model",
+                vec!["Max", "图片理解", "视频理解", "私有"],
+            )],
+            ..AgentSelectionPreferences::default()
+        };
         validate_agent_preferences(&preferences).expect("four distinct tags are valid");
 
         preferences.model_profiles[0].tags.push("第五个".into());
@@ -898,12 +953,12 @@ mod machine_state_tests {
         let result = state
             .set_provider(
                 "private",
-                Some("sk-secret".into()),
-                Some("http://192.168.1.20:8080/v1".into()),
-                None,
-                None,
-                Some(vec!["model".into()]),
-                None,
+                ProviderUpdate {
+                    api_key: Some("sk-secret".into()),
+                    base_url: Some("http://192.168.1.20:8080/v1".into()),
+                    models: Some(vec!["model".into()]),
+                    ..Default::default()
+                },
             )
             .await;
         assert!(result.is_err());

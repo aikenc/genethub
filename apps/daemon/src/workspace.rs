@@ -70,7 +70,10 @@ pub fn list_directory(requested: Option<&Path>) -> Result<DirectoryListing> {
         .canonicalize()
         .context("no such directory")?;
     if !path.is_dir() {
-        return Err(anyhow!("{} is not a directory", path.display()));
+        return Err(crate::rpc_error::failure(
+            genehub_proto::ErrorCode::BadRequest,
+            format!("{} is not a directory", path.display()),
+        ));
     }
 
     let mut directories = Vec::new();
@@ -115,7 +118,10 @@ pub fn mkdir_directory(parent: &Path, name: &str) -> Result<DirectoryListing> {
         .canonicalize()
         .with_context(|| format!("no such directory: {}", parent.display()))?;
     if !parent.is_dir() {
-        return Err(anyhow!("{} is not a directory", parent.display()));
+        return Err(crate::rpc_error::failure(
+            genehub_proto::ErrorCode::BadRequest,
+            format!("{} is not a directory", parent.display()),
+        ));
     }
     let path = parent.join(name);
     if path.exists() {
@@ -382,7 +388,12 @@ impl Workspaces {
             .get(id)
             .filter(|entry| !entry.removed)
             .cloned()
-            .ok_or_else(|| anyhow!("no such workspace: {id}"))?;
+            .ok_or_else(|| {
+                crate::rpc_error::failure(
+                    genehub_proto::ErrorCode::NotFound,
+                    format!("no such workspace: {id}"),
+                )
+            })?;
         hydrate_entry(entry, &self.config.read().await.workspace_roots)
     }
 
@@ -400,7 +411,12 @@ impl Workspaces {
             .get(id)
             .filter(|entry| !entry.removed)
             .cloned()
-            .ok_or_else(|| anyhow!("no such workspace: {id}"))?;
+            .ok_or_else(|| {
+                crate::rpc_error::failure(
+                    genehub_proto::ErrorCode::NotFound,
+                    format!("no such workspace: {id}"),
+                )
+            })?;
         let config = self.config.read().await;
         if let Some(space) = config
             .agent_spaces
@@ -420,16 +436,13 @@ impl Workspaces {
     /// `workflow list` reports "built but not authorized" and "authorized but
     /// drifted" as distinct facts, which needs both the registration and a
     /// fresh Builder verification of the directory as it stands now.
-    pub async fn registration_at(
-        &self,
-        project_root: &Path,
-        space_root: &Path,
-    ) -> (bool, bool) {
+    pub async fn registration_at(&self, project_root: &Path, space_root: &Path) -> (bool, bool) {
         let entries = self.entries.read().await;
         let config = self.config.read().await;
         let Some(entry) = entries.values().find(|entry| {
             !entry.removed
-                && entry.root.canonicalize().ok().as_deref() == space_root.canonicalize().ok().as_deref()
+                && entry.root.canonicalize().ok().as_deref()
+                    == space_root.canonicalize().ok().as_deref()
         }) else {
             return (false, false);
         };
@@ -484,7 +497,12 @@ impl Workspaces {
             .get(workspace_id)
             .filter(|entry| !entry.removed)
             .cloned()
-            .ok_or_else(|| anyhow!("no such workspace: {workspace_id}"))?;
+            .ok_or_else(|| {
+                crate::rpc_error::failure(
+                    genehub_proto::ErrorCode::NotFound,
+                    format!("no such workspace: {workspace_id}"),
+                )
+            })?;
         let config_view = self.config.read().await;
         let current = existing_or_unregistered(&config_view, workspace_id);
         let project_workspace_id = match operation {
@@ -501,7 +519,12 @@ impl Workspaces {
             .get(&project_workspace_id)
             .filter(|entry| !entry.removed)
             .map(|entry| entry.root.clone())
-            .ok_or_else(|| anyhow!("no such project workspace: {project_workspace_id}"))?;
+            .ok_or_else(|| {
+                crate::rpc_error::failure(
+                    genehub_proto::ErrorCode::NotFound,
+                    format!("no such project workspace: {project_workspace_id}"),
+                )
+            })?;
         let lock_digest = verify_pipe_space(&project_root, &entry)?;
         if let AgentSpaceOperation::SetParent {
             parent_workspace_id: Some(parent_id),
@@ -510,7 +533,12 @@ impl Workspaces {
             let parent = entries
                 .get(parent_id.as_str())
                 .filter(|entry| !entry.removed)
-                .ok_or_else(|| anyhow!("no such parent workspace: {parent_id}"))?;
+                .ok_or_else(|| {
+                    crate::rpc_error::failure(
+                        genehub_proto::ErrorCode::NotFound,
+                        format!("no such parent workspace: {parent_id}"),
+                    )
+                })?;
             verify_pipe_space(&project_root, parent)?;
         }
         drop(config_view);
@@ -557,7 +585,12 @@ impl Workspaces {
         let project = entries
             .get(project_workspace_id)
             .filter(|entry| !entry.removed)
-            .ok_or_else(|| anyhow!("no such project workspace: {project_workspace_id}"))?;
+            .ok_or_else(|| {
+                crate::rpc_error::failure(
+                    genehub_proto::ErrorCode::NotFound,
+                    format!("no such project workspace: {project_workspace_id}"),
+                )
+            })?;
         let mut verified = HashMap::new();
         for desired in plan {
             let entry = entries
@@ -683,6 +716,10 @@ impl Workspaces {
         // Workspace mutations consistently acquire entries before config.
         // Preserve that order here so an open/remove cannot deadlock against
         // a concurrent Workflow dispatch.
+        let selected_root = selected_root
+            .map(Path::canonicalize)
+            .transpose()
+            .context("读取选定的 Workflow executor 目录")?;
         let entries = self.entries.read().await;
         let config = self.config.read().await;
         let project = match config
@@ -701,7 +738,7 @@ impl Workspaces {
                 space.parent_workspace_id.as_deref() == Some(project_workspace_id)
                     && crate::agent_space::has_enabled_component(space, component_id)
                     && space.lifecycle != "ephemeral"
-                    && selected_root.is_none_or(|root| {
+                    && selected_root.as_deref().is_none_or(|root| {
                         entries.get(&space.workspace_id).is_some_and(|entry| {
                             entry.root.canonicalize().ok().as_deref() == Some(root)
                         })
@@ -715,7 +752,7 @@ impl Workspaces {
             // package has named the product directory it expects.
             anyhow::bail!(
                 "{}; found {}",
-                match selected_root {
+                match selected_root.as_deref() {
                     Some(root) => format!(
                         "no single reusable {component_id} AgentSpace at {}",
                         root.display()
@@ -765,12 +802,20 @@ impl Workspaces {
             .agent_spaces
             .iter()
             .find(|space| space.workspace_id == executor_workspace_id)
-            .ok_or_else(|| anyhow!("no such AgentSpace: {executor_workspace_id}"))?;
+            .ok_or_else(|| {
+                crate::rpc_error::failure(
+                    genehub_proto::ErrorCode::NotFound,
+                    format!("no such AgentSpace: {executor_workspace_id}"),
+                )
+            })?;
         if !crate::agent_space::has_enabled_component(
             executor,
             crate::agent_space::COMPONENT_EXECUTOR,
         ) {
-            anyhow::bail!("this AgentSpace does not mount an enabled executor component");
+            return Err(crate::rpc_error::failure(
+                genehub_proto::ErrorCode::Unsupported,
+                "this AgentSpace does not mount an enabled executor component".to_owned(),
+            ));
         }
         Ok(
             crate::agent_space::schedulable_children(&config.agent_spaces, executor_workspace_id)
@@ -805,12 +850,20 @@ impl Workspaces {
             .agent_spaces
             .iter()
             .find(|space| space.workspace_id == executor_workspace_id)
-            .ok_or_else(|| anyhow!("no such Executor AgentSpace: {executor_workspace_id}"))?;
+            .ok_or_else(|| {
+                crate::rpc_error::failure(
+                    genehub_proto::ErrorCode::NotFound,
+                    format!("no such Executor AgentSpace: {executor_workspace_id}"),
+                )
+            })?;
         if !crate::agent_space::has_enabled_component(
             executor,
             crate::agent_space::COMPONENT_EXECUTOR,
         ) {
-            anyhow::bail!("the scheduling AgentSpace does not mount an enabled executor component");
+            return Err(crate::rpc_error::failure(
+                genehub_proto::ErrorCode::Unsupported,
+                "the scheduling AgentSpace does not mount an enabled executor component".to_owned(),
+            ));
         }
         let matches = config
             .agent_spaces
@@ -977,9 +1030,12 @@ impl Workspaces {
         } else if source.is_file() && is_workspace_file(&source) && name.is_none() {
             code_workspace(&source)?
         } else {
-            return Err(anyhow!(
-                "{} is neither a directory nor a .code-workspace file",
-                source.display()
+            return Err(crate::rpc_error::failure(
+                genehub_proto::ErrorCode::BadRequest,
+                format!(
+                    "{} is neither a directory nor a .code-workspace file",
+                    source.display()
+                ),
             ));
         };
 
@@ -1049,11 +1105,18 @@ impl Workspaces {
             .get(id)
             .filter(|entry| !entry.removed)
             .cloned()
-            .ok_or_else(|| anyhow!("no such workspace: {id}"))?;
-        let path = existing
-            .workspace_file
-            .as_ref()
-            .ok_or_else(|| anyhow!("adding roots requires a .code-workspace Agent"))?;
+            .ok_or_else(|| {
+                crate::rpc_error::failure(
+                    genehub_proto::ErrorCode::NotFound,
+                    format!("no such workspace: {id}"),
+                )
+            })?;
+        let path = existing.workspace_file.as_ref().ok_or_else(|| {
+            crate::rpc_error::failure(
+                genehub_proto::ErrorCode::BadRequest,
+                "adding roots requires a .code-workspace Agent".to_owned(),
+            )
+        })?;
         let original = std::fs::read_to_string(path)?;
         anyhow::ensure!(
             original.len() as u64 <= MAX_WORKSPACE_FILE_BYTES,
@@ -1081,7 +1144,12 @@ impl Workspaces {
             document
                 .get_mut("folders")
                 .and_then(serde_json::Value::as_array_mut)
-                .ok_or_else(|| anyhow!("workspace folders must be an array"))?
+                .ok_or_else(|| {
+                    crate::rpc_error::failure(
+                        genehub_proto::ErrorCode::BadRequest,
+                        "workspace folders must be an array".to_owned(),
+                    )
+                })?
                 .push(serde_json::json!({"path": absolute}));
         }
         let body = if current.folders.iter().any(|folder| folder.root == root) {
@@ -1129,10 +1197,12 @@ impl Workspaces {
     /// reactivate the same id when the source is opened again.
     pub async fn remove(&self, id: &str) -> Result<Vec<WorkspaceInfo>> {
         let mut entries = self.entries.write().await;
-        let entry = entries
-            .get(id)
-            .cloned()
-            .ok_or_else(|| anyhow!("no such workspace: {id}"))?;
+        let entry = entries.get(id).cloned().ok_or_else(|| {
+            crate::rpc_error::failure(
+                genehub_proto::ErrorCode::NotFound,
+                format!("no such workspace: {id}"),
+            )
+        })?;
         if entry.removed {
             let config = self.config.read().await;
             return Ok(active_descriptions(entries.values(), &config));
@@ -1176,11 +1246,17 @@ impl Workspaces {
         }
 
         let mut entries = self.entries.write().await;
-        let entry = entries
-            .get(id)
-            .ok_or_else(|| anyhow!("no such workspace: {id}"))?;
+        let entry = entries.get(id).ok_or_else(|| {
+            crate::rpc_error::failure(
+                genehub_proto::ErrorCode::NotFound,
+                format!("no such workspace: {id}"),
+            )
+        })?;
         if entry.removed {
-            return Err(anyhow!("no such workspace: {id}"));
+            return Err(crate::rpc_error::failure(
+                genehub_proto::ErrorCode::NotFound,
+                format!("no such workspace: {id}"),
+            ));
         }
         if entry.name == name {
             return Ok(describe(entry));
@@ -1287,7 +1363,6 @@ fn apply_space_projection(info: &mut WorkspaceInfo, config: &Config) {
         return;
     };
     info.agent_space = Some(crate::agent_space::describe(space));
-    info.pipe_space = Some(crate::agent_space::describe_legacy(space));
 }
 
 fn apply_space_health(info: &mut WorkspaceInfo, entry: &WorkspaceEntry, config: &Config) {
@@ -1384,7 +1459,6 @@ fn describe(entry: &WorkspaceEntry) -> WorkspaceInfo {
             .as_ref()
             .map(|path| path.display().to_string()),
         agent_space: None,
-        pipe_space: None,
     }
 }
 
@@ -1422,9 +1496,12 @@ fn folder_workspace(root: PathBuf, name: Option<String>) -> WorkspaceEntry {
 /// An external edit detected before publication is rejected instead of overwritten.
 fn replace_workspace_file(path: &Path, expected: &str, body: &str) -> Result<()> {
     use std::io::Write;
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow!("workspace file has no parent"))?;
+    let parent = path.parent().ok_or_else(|| {
+        crate::rpc_error::failure(
+            genehub_proto::ErrorCode::BadRequest,
+            "workspace file has no parent".to_owned(),
+        )
+    })?;
     let temporary = parent.join(format!(".genehub-workspace-{}.tmp", uuid::Uuid::new_v4()));
     let result = (|| -> Result<()> {
         #[cfg(not(target_family = "wasm"))]
@@ -1458,11 +1535,14 @@ fn code_workspace(path: &Path) -> Result<WorkspaceEntry> {
     let metadata = std::fs::metadata(path)
         .with_context(|| format!("reading workspace file {}", path.display()))?;
     if metadata.len() > MAX_WORKSPACE_FILE_BYTES {
-        anyhow::bail!(
-            "workspace file is {} bytes, above the {} byte limit",
-            metadata.len(),
-            MAX_WORKSPACE_FILE_BYTES
-        );
+        return Err(crate::rpc_error::failure(
+            genehub_proto::ErrorCode::BadRequest,
+            format!(
+                "workspace file is {} bytes, above the {} byte limit",
+                metadata.len(),
+                MAX_WORKSPACE_FILE_BYTES
+            ),
+        ));
     }
     let source = std::fs::read_to_string(path)
         .with_context(|| format!("reading workspace file {} as UTF-8", path.display()))?;
@@ -1473,34 +1553,54 @@ fn parse_code_workspace(path: &Path, source: &str) -> Result<WorkspaceEntry> {
     let parsed: CodeWorkspace = json5::from_str(source)
         .with_context(|| format!("parsing workspace file {}", path.display()))?;
     if parsed.folders.is_empty() {
-        anyhow::bail!("workspace file must contain at least one folder");
+        return Err(crate::rpc_error::failure(
+            genehub_proto::ErrorCode::BadRequest,
+            "workspace file must contain at least one folder".to_owned(),
+        ));
     }
     if parsed.folders.len() > MAX_WORKSPACE_FOLDERS {
-        anyhow::bail!(
-            "workspace file contains {} folders, above the {} folder limit",
-            parsed.folders.len(),
-            MAX_WORKSPACE_FOLDERS
-        );
+        return Err(crate::rpc_error::failure(
+            genehub_proto::ErrorCode::BadRequest,
+            format!(
+                "workspace file contains {} folders, above the {} folder limit",
+                parsed.folders.len(),
+                MAX_WORKSPACE_FOLDERS
+            ),
+        ));
     }
 
-    let base = path
-        .parent()
-        .ok_or_else(|| anyhow!("workspace file has no parent directory"))?;
+    let base = path.parent().ok_or_else(|| {
+        crate::rpc_error::failure(
+            genehub_proto::ErrorCode::BadRequest,
+            "workspace file has no parent directory".to_owned(),
+        )
+    })?;
     let mut roots = HashSet::new();
     let mut folders = Vec::with_capacity(parsed.folders.len());
     for (index, folder) in parsed.folders.into_iter().enumerate() {
         if folder.uri.is_some() {
-            anyhow::bail!(
-                "workspace folder {} uses a URI; this version supports local path entries only",
-                index + 1
-            );
+            return Err(crate::rpc_error::failure(
+                genehub_proto::ErrorCode::BadRequest,
+                format!(
+                    "workspace folder {} uses a URI; this version supports local path entries only",
+                    index + 1
+                ),
+            ));
         }
         let raw = folder
             .path
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| anyhow!("workspace folder {} has no path", index + 1))?;
+            .ok_or_else(|| {
+                crate::rpc_error::failure(
+                    genehub_proto::ErrorCode::BadRequest,
+                    format!("workspace folder {} has no path", index + 1),
+                )
+            })?;
         if raw.contains('\0') {
-            anyhow::bail!("workspace folder {} contains NUL", index + 1);
+            return Err(crate::rpc_error::failure(
+                genehub_proto::ErrorCode::BadRequest,
+                format!("workspace folder {} contains NUL", index + 1),
+            ));
         }
         // A .code-workspace written on Windows names its folders in the
         // host's spelling, which is not absolute from the guest's POSIX point
@@ -1522,14 +1622,20 @@ fn parse_code_workspace(path: &Path, source: &str) -> Result<WorkspaceEntry> {
             )
         })?;
         if !root.is_dir() {
-            anyhow::bail!(
-                "workspace folder {} is not a directory: {}",
-                index + 1,
-                root.display()
-            );
+            return Err(crate::rpc_error::failure(
+                genehub_proto::ErrorCode::BadRequest,
+                format!(
+                    "workspace folder {} is not a directory: {}",
+                    index + 1,
+                    root.display()
+                ),
+            ));
         }
         if !roots.insert(root.clone()) {
-            anyhow::bail!("workspace file contains the same folder more than once");
+            return Err(crate::rpc_error::failure(
+                genehub_proto::ErrorCode::BadRequest,
+                "workspace file contains the same folder more than once".to_owned(),
+            ));
         }
         let name = workspace_folder_name(folder.name.as_deref(), &root)?;
         folders.push(WorkspaceFolderEntry {
@@ -1571,7 +1677,10 @@ fn workspace_folder_name(configured: Option<&str>, root: &Path) -> Result<String
                 )
         })
     {
-        anyhow::bail!("workspace folder name is empty or contains control characters");
+        return Err(crate::rpc_error::failure(
+            genehub_proto::ErrorCode::BadRequest,
+            "workspace folder name is empty or contains control characters".to_owned(),
+        ));
     }
     Ok(value.chars().take(80).collect())
 }
@@ -1584,10 +1693,16 @@ fn is_workspace_file(path: &Path) -> bool {
 
 fn resolve_entry(entry: &WorkspaceEntry, virtual_path: &str) -> Result<ResolvedWorkspacePath> {
     if virtual_path.contains('\0') || virtual_path.contains('\\') {
-        anyhow::bail!("workspace path is not canonical");
+        return Err(crate::rpc_error::failure(
+            genehub_proto::ErrorCode::Forbidden,
+            "workspace path is not canonical".to_owned(),
+        ));
     }
     if matches!(virtual_path, "" | ".") {
-        anyhow::bail!("a workspace resource path must name its root handle");
+        return Err(crate::rpc_error::failure(
+            genehub_proto::ErrorCode::Forbidden,
+            "a workspace resource path must name its root handle".to_owned(),
+        ));
     }
     let (handle, relative) = virtual_path
         .split_once('/')
@@ -1596,7 +1711,12 @@ fn resolve_entry(entry: &WorkspaceEntry, virtual_path: &str) -> Result<ResolvedW
         .folders
         .iter()
         .find(|folder| folder.root_handle == handle)
-        .ok_or_else(|| anyhow!("root handle is not a member of this workspace"))?;
+        .ok_or_else(|| {
+            crate::rpc_error::failure(
+                genehub_proto::ErrorCode::Forbidden,
+                "root handle is not a member of this workspace".to_owned(),
+            )
+        })?;
     let requested = if matches!(relative, "" | ".") {
         Path::new(".")
     } else {
@@ -1605,7 +1725,12 @@ fn resolve_entry(entry: &WorkspaceEntry, virtual_path: &str) -> Result<ResolvedW
     let absolute = crate::session::ensure_within(&folder.root, requested)?;
     let relative = absolute
         .strip_prefix(&folder.root)
-        .map_err(|_| anyhow!("path escapes the workspace folder"))?
+        .map_err(|_| {
+            crate::rpc_error::failure(
+                genehub_proto::ErrorCode::Forbidden,
+                "path escapes the workspace folder".to_owned(),
+            )
+        })?
         .to_path_buf();
     Ok(ResolvedWorkspacePath {
         root: folder.root.clone(),
@@ -1623,7 +1748,12 @@ fn hydrate_entry(
         let mapping = mappings
             .iter()
             .find(|mapping| mapping.handle == folder.root_handle)
-            .ok_or_else(|| anyhow!("no such filesystem root: {}", folder.root_handle))?;
+            .ok_or_else(|| {
+                crate::rpc_error::failure(
+                    genehub_proto::ErrorCode::NotFound,
+                    format!("no such filesystem root: {}", folder.root_handle),
+                )
+            })?;
         folder.root = mapping.root.clone();
     }
     entry.root = entry
@@ -1636,12 +1766,7 @@ fn hydrate_entry(
 }
 
 fn attach_project_home(homes: &WorkspaceHomes, entry: &WorkspaceEntry) {
-    homes.attach_project_aliased(
-        &entry.id,
-        &session_project_key(entry),
-        &legacy_project_keys(entry),
-        &entry.root,
-    );
+    homes.attach_project(&entry.id, &session_project_key(entry), &entry.root);
 }
 
 fn existing_project<'a>(
@@ -1689,21 +1814,6 @@ fn session_project_key(entry: &WorkspaceEntry) -> String {
                 hashed_workspace_key(home)
             }
         }
-    }
-}
-
-fn legacy_project_keys(entry: &WorkspaceEntry) -> Vec<String> {
-    match &entry.workspace_file {
-        Some(path) => {
-            let hashed = hashed_workspace_key(path);
-            let current = session_project_key(entry);
-            if hashed != current {
-                vec![hashed]
-            } else {
-                Vec::new()
-            }
-        }
-        None => Vec::new(),
     }
 }
 
@@ -2662,7 +2772,12 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![crate::agent_space::COMPONENT_PM]
         );
-        assert!(find(&project).pipe_space.unwrap().pm);
+        assert!(find(&project)
+            .agent_space
+            .unwrap()
+            .components
+            .iter()
+            .any(|component| component.component_id == "pm" && component.enabled));
 
         let executor_space = find(&executor).agent_space.unwrap();
         assert_eq!(
@@ -2674,11 +2789,12 @@ mod tests {
             executor_space.revision, 3,
             "attach, mount and lifecycle each advance the one registration revision"
         );
-        assert_eq!(
-            find(&executor).pipe_space.unwrap().worker_role.as_deref(),
-            Some(crate::agent_space::LEGACY_EXECUTOR_ROLE),
-            "the older exclusive-role shape is still readable"
-        );
+        assert!(find(&executor)
+            .agent_space
+            .unwrap()
+            .components
+            .iter()
+            .any(|component| component.component_id == "executor" && component.enabled));
 
         let first = spaces
             .reusable_component_space(&project, crate::agent_space::COMPONENT_EXECUTOR)
@@ -2866,8 +2982,12 @@ mod tests {
             &["project", "pkg--executor", "pkg--coder", "pkg--wm"],
         )
         .await;
-        let (project, executor, coder, manager) =
-            (ids[0].clone(), ids[1].clone(), ids[2].clone(), ids[3].clone());
+        let (project, executor, coder, manager) = (
+            ids[0].clone(),
+            ids[1].clone(),
+            ids[2].clone(),
+            ids[3].clone(),
+        );
 
         let plan = vec![
             BootstrapSpaceRegistration {
@@ -2916,7 +3036,10 @@ mod tests {
             .expect("one plan registers the whole package team");
 
         let registered = spaces.agent_space(&executor).await.unwrap();
-        assert_eq!(registered.parent_workspace_id.as_deref(), Some(project.as_str()));
+        assert_eq!(
+            registered.parent_workspace_id.as_deref(),
+            Some(project.as_str())
+        );
         assert_eq!(
             spaces
                 .reusable_component_space_at(
@@ -2930,7 +3053,11 @@ mod tests {
             Some(executor.clone()),
         );
         assert_eq!(
-            spaces.worker_space_for_role(&executor, "coder").await.unwrap().id,
+            spaces
+                .worker_space_for_role(&executor, "coder")
+                .await
+                .unwrap()
+                .id,
             coder
         );
     }
@@ -3006,7 +3133,7 @@ mod tests {
         assert_eq!(space.revision, 0);
         assert!(space.components.is_empty());
         assert!(
-            plain.agent_space.is_none() && plain.pipe_space.is_none(),
+            plain.agent_space.is_none(),
             "an ordinary folder stays a neutral filesystem fact on the wire"
         );
         assert!(

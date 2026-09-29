@@ -29,6 +29,7 @@ fn scripts() -> std::sync::MutexGuard<'static, HashMap<String, VecDeque<Round>>>
         .expect("fake script lock")
 }
 
+#[cfg(test)]
 pub fn register_rounds(model_id: &str, rounds: Vec<Round>) {
     scripts().insert(model_id.to_string(), VecDeque::from(rounds));
 }
@@ -92,6 +93,8 @@ pub async fn stream(
 
     let mut usage = Usage {
         input: 10,
+        input_reported: true,
+        output_reported: true,
         ..Default::default()
     };
     usage.output = 5;
