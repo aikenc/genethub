@@ -489,6 +489,11 @@ impl Group {
         }
 
         signal_group(pid, KILL);
+        // `signal_group` is a Unix kill. On Windows nothing else stops the
+        // child, and `wait` would sit there until the process exited on its
+        // own — a script that ignores the timeout never does.
+        #[cfg(windows)]
+        let _ = self.child.start_kill();
         let _ = self.wait().await;
         // Reaping the leader does not synchronously reap every descendant.
         // Wait until the killed group has actually disappeared so callers do
