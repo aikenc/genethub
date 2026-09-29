@@ -6846,6 +6846,7 @@ mod tests {
     #[test]
     fn oversized_activation_history_is_rejected_before_use() {
         let root = tempfile::tempdir().unwrap();
+        seed_package(root.path());
         let runtime = test_runtime(root.path());
         let digest = format!("sha256:{}", "a".repeat(64));
         let history = (0..=MAX_ACTIVATION_HISTORY)
@@ -6878,6 +6879,7 @@ mod tests {
         // Reaching the cap used to refuse every further activation, so a
         // long-lived project could never adopt a new DCG again.
         let root = tempfile::tempdir().unwrap();
+        seed_package(root.path());
         let runtime = test_runtime(root.path());
         let digest = format!("sha256:{}", "a".repeat(64));
         let history = (0..MAX_ACTIVATION_HISTORY)
@@ -7382,10 +7384,9 @@ mod tests {
         let untrusted = project.path().join(".genethub/runtime/workflows");
         fs::create_dir_all(untrusted.join("runs")).unwrap();
         fs::write(untrusted.join("runs/wr_forged.json"), b"{}").unwrap();
-        assert!(load_run(&runtime, "wr_forged")
-            .unwrap_err()
-            .to_string()
-            .contains("不存在"));
+        let error = format!("{:#}", load_run(&runtime, "wr_forged").unwrap_err());
+        assert!(error.contains("Workflow Run 不存在：wr_forged"), "{error}");
+        assert!(!run_path(&runtime, "wr_forged", false).unwrap().exists());
 
         let lease = LeaseRecord {
             run_id: "wr_forged".into(),
@@ -7495,6 +7496,25 @@ mod tests {
         assert!(activation.starts_with(&project_root));
         assert!(!activation.starts_with(data.path().canonicalize().unwrap()));
         assert!(!activation.starts_with(project_root.join(".genethub/runtime")));
+        assert!(activation.starts_with(project_root.join(".genethub/components/executor")));
+        // Component-owned business state is the same when another channel
+        // opens the project with its own machine-local data and workspace id.
+        let other_data = tempfile::tempdir().unwrap();
+        let other = RuntimeStore::for_package(
+            other_data.path(),
+            "other-workspace",
+            project.path(),
+            TEST_PACKAGE,
+        )
+        .unwrap();
+        assert_eq!(activation_path(&other, false).unwrap(), activation);
+        assert_eq!(
+            inspect(project.path(), &other)
+                .unwrap()
+                .active_digest
+                .as_deref(),
+            Some(active.as_str())
+        );
     }
 
     #[test]
@@ -7960,58 +7980,62 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         let data = tempfile::tempdir().unwrap();
         let runtime = RuntimeStore::new(data.path(), "w_project", project.path()).unwrap();
-        let carrier = |status: &str, executor: Option<&str>| RunRecord {
-            engine: None,
-            stop: None,
-            recovery: None,
-            request: None,
-            handles: Vec::new(),
-            supervision: Default::default(),
-            execution_root: None,
-            experimental: false,
-            id: format!("wr_{status}"),
-            workspace_id: "w_project".into(),
-            package_id: String::new(),
-            executor_workspace_id: executor.map(str::to_string),
-            executor_session_id: None,
-            parent_session_id: "s_root".into(),
-            workflow_id: "direct".into(),
-            dcg_digest: "sha256:dcg".into(),
-            activation_revision: Some(1),
-            bundle_digest: "sha256:test".into(),
-            task_id: "task".into(),
-            task_prompt: "work".into(),
-            status: status.into(),
-            revision: 0,
-            journal_seq: 0,
-            journal_bytes: 0,
-            journal_segment: String::new(),
-            journal_actor: String::new(),
-            human_exit_journal: None,
-            recovery_fallback: false,
-            executor_turns: 0,
-            definition: WorkflowDefinition {
-                structure: None,
-                include: Vec::new(),
-                budget: None,
-                pm_answer_seconds: None,
-                schema: DEFINITION_SCHEMA.into(),
-                id: "direct".into(),
-                version: 1,
-                entry: "work".into(),
-                outcomes: BTreeMap::new(),
-                nodes: Vec::new(),
-            },
-            roles: BTreeMap::new(),
-            failed_routes: Vec::new(),
-            route_wait: Vec::new(),
-            nodes: BTreeMap::new(),
-            leases: BTreeMap::new(),
-            delivery_total: 0,
-            delivery_queue: Vec::new(),
-            created_at_ms: 1,
-            updated_at_ms: 1,
-            snapshot_relative: None,
+        let carrier = |status: &str, executor: Option<&str>| {
+            let mut run = RunRecord {
+                engine: None,
+                stop: None,
+                recovery: None,
+                request: None,
+                handles: Vec::new(),
+                supervision: Default::default(),
+                execution_root: None,
+                experimental: false,
+                id: format!("wr_{status}"),
+                workspace_id: "w_project".into(),
+                package_id: String::new(),
+                executor_workspace_id: executor.map(str::to_string),
+                executor_session_id: None,
+                parent_session_id: "s_root".into(),
+                workflow_id: "direct".into(),
+                dcg_digest: "sha256:dcg".into(),
+                activation_revision: Some(1),
+                bundle_digest: "sha256:test".into(),
+                task_id: "task".into(),
+                task_prompt: "work".into(),
+                status: status.into(),
+                revision: 0,
+                journal_seq: 0,
+                journal_bytes: 0,
+                journal_segment: String::new(),
+                journal_actor: String::new(),
+                human_exit_journal: None,
+                recovery_fallback: false,
+                executor_turns: 0,
+                definition: WorkflowDefinition {
+                    structure: None,
+                    include: Vec::new(),
+                    budget: None,
+                    pm_answer_seconds: None,
+                    schema: DEFINITION_SCHEMA.into(),
+                    id: "direct".into(),
+                    version: 1,
+                    entry: "work".into(),
+                    outcomes: BTreeMap::new(),
+                    nodes: Vec::new(),
+                },
+                roles: BTreeMap::new(),
+                failed_routes: Vec::new(),
+                route_wait: Vec::new(),
+                nodes: BTreeMap::new(),
+                leases: BTreeMap::new(),
+                delivery_total: 0,
+                delivery_queue: Vec::new(),
+                created_at_ms: 1,
+                updated_at_ms: 1,
+                snapshot_relative: None,
+            };
+            run.snapshot_relative = Some(pm_snapshot_relative(&runtime, &run.id, &run.id).unwrap());
+            run
         };
         let busy = |space: &str, parent: Option<&str>| {
             !carrier_active_run_ids(data.path(), "w_project", project.path(), space, parent)
@@ -8023,12 +8047,16 @@ mod tests {
             !busy("w_executor", None),
             "a project that has never dispatched pins nothing"
         );
-        save_run(&runtime, &carrier("completed", Some("w_executor"))).unwrap();
+        let completed = carrier("completed", Some("w_executor"));
+        assert!(claim_request_writer(&runtime, &completed).unwrap());
+        save_run(&runtime, &completed).unwrap();
         assert!(
             !busy("w_executor", None),
             "a settled Run must not keep its carrier pinned forever"
         );
-        save_run(&runtime, &carrier("running", Some("w_executor"))).unwrap();
+        let running = carrier("running", Some("w_executor"));
+        assert!(claim_request_writer(&runtime, &running).unwrap());
+        save_run(&runtime, &running).unwrap();
         assert!(busy("w_executor", None));
         assert!(
             !busy("w_other", None),

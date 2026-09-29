@@ -2572,6 +2572,10 @@ mod tests {
     fn claude_child_always_gets_sandbox_compat_env() {
         // WASI cannot see the host uid, so this must not be gated on euid==0.
         assert_eq!(CLAUDE_SANDBOX_COMPAT_ENV, ("IS_SANDBOX", "1"));
+        assert_eq!(CLAUDE.sandbox_env, Some(CLAUDE_SANDBOX_COMPAT_ENV));
+        assert_eq!(TCLAUDE.sandbox_env, Some(CLAUDE_SANDBOX_COMPAT_ENV));
+        // CodeBuddy's `-y` still prompts for HIGH/CRITICAL without its own env.
+        assert_eq!(CODEBUDDY.sandbox_env, Some(("CODEBUDDY_IS_SANDBOX", "1")));
     }
 
     #[test]
@@ -2635,6 +2639,189 @@ mod tests {
                 "--\n--permission-mode\nbypassPermissions\n--version\n",
             )
         );
+    }
+
+    #[test]
+    fn codebuddy_is_a_separate_agent_from_claude_and_tclaude() {
+        let codebuddy = ClaudeAdapter::codebuddy();
+        assert_eq!(codebuddy.id(), "codebuddy");
+        assert_eq!(codebuddy.label(), "CodeBuddy");
+        assert_eq!(CODEBUDDY.binary, "cbc");
+        assert_eq!(CODEBUDDY.binary_fallback, Some("codebuddy"));
+        assert_eq!(CODEBUDDY.help_args, ["--help"]);
+        assert_eq!(
+            CODEBUDDY.skip_permissions_flag,
+            "--dangerously-skip-permissions"
+        );
+        assert!(!codebuddy.flavor.permission_prompt_tool);
+        assert!(matches!(
+            CODEBUDDY.project_encoding,
+            ProjectEncoding::CodeBuddy
+        ));
+        assert!(ClaudeAdapter::claude().flavor.permission_prompt_tool);
+        assert!(matches!(CLAUDE.project_encoding, ProjectEncoding::Claude));
+    }
+
+    #[test]
+    fn codebuddy_history_lives_under_dot_codebuddy() {
+        let path = claude_config_dir(&CODEBUDDY).expect("home");
+        assert!(path.ends_with(".codebuddy"), "{}", path.display());
+    }
+
+    #[test]
+    fn codebuddy_project_key_preserves_filename_characters_claude_replaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = claude_project_dir(dir.path(), &CLAUDE).unwrap();
+        let tclaude = claude_project_dir(dir.path(), &TCLAUDE).unwrap();
+        let codebuddy = claude_project_dir(dir.path(), &CODEBUDDY).unwrap();
+        let claude_key = claude.file_name().unwrap().to_string_lossy().into_owned();
+        let tclaude_key = tclaude.file_name().unwrap().to_string_lossy().into_owned();
+        let codebuddy_key = codebuddy
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(claude_key.starts_with('-'), "{claude_key}");
+        assert_eq!(tclaude_key, claude_key);
+        let expected = dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .replace(['/', '\\', ':'], "-")
+            .split('-')
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("-");
+        assert_eq!(codebuddy_key, expected);
+        assert!(codebuddy
+            .components()
+            .any(|component| component.as_os_str() == ".codebuddy"));
+    }
+
+    #[test]
+    fn codebuddy_also_looks_beside_node_and_in_local_bin() {
+        let dirs = codebuddy_install_dirs();
+        if std::env::var_os("HOME").is_some() || std::env::var_os("USERPROFILE").is_some() {
+            assert!(dirs
+                .iter()
+                .any(|dir| dir.ends_with(std::path::Path::new(".local").join("bin"))));
+        }
+        if let Some(node) = crate::adapter::find_executable("node") {
+            let beside = node.parent().expect("node lives in a directory");
+            assert!(dirs.iter().any(|dir| dir == beside), "{dirs:?}");
+        }
+    }
+
+    /// CodeBuddy's `initialize` models are `{id, name}` and the current model
+    /// is `currentModelId`. Effort levels stay empty unless that row says
+    /// `supportsEffort` — we do not invent a dial the payload did not list.
+    #[test]
+    fn codebuddy_models_use_id_name_and_current_model_id() {
+        let hello = json!({
+            "currentModelId": "deepseek-v4",
+            "models": [
+                { "id": "claude-sonnet", "name": "Sonnet" },
+                { "id": "deepseek-v4", "name": "DeepSeek" },
+                { "name": "No id" },
+            ],
+        });
+        let models = models_in(&hello);
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| (model.id.as_str(), model.label.as_str()))
+                .collect::<Vec<_>>(),
+            [("claude-sonnet", "Sonnet"), ("deepseek-v4", "DeepSeek")]
+        );
+        assert!(models.iter().all(|model| model.efforts.is_empty()));
+        assert_eq!(reported_model(&hello).as_deref(), Some("deepseek-v4"));
+        assert_eq!(
+            reported_model(&json!({"model": "sonnet", "currentModelId": "other"})).as_deref(),
+            Some("sonnet")
+        );
+        assert_eq!(reported_model(&json!({})), None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codebuddy_launch_omits_the_flag_its_parser_rejects() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("cbc");
+        std::fs::write(
+            &fake,
+            r#"#!/bin/sh
+args=${0%/*}/args
+{
+  printf '%s\n' "$@"
+  if [ -n "$CODEBUDDY_IS_SANDBOX" ]; then
+    printf 'ENV CODEBUDDY_IS_SANDBOX=%s\n' "$CODEBUDDY_IS_SANDBOX"
+  fi
+  if [ -n "$IS_SANDBOX" ]; then
+    printf 'ENV IS_SANDBOX=%s\n' "$IS_SANDBOX"
+  fi
+  printf '\n'
+} >> "$args"
+if [ "$1" = "--help" ]; then
+  echo '--permission-mode <mode> (choices: "acceptEdits", "bypassPermissions", "default", "plan")'
+fi
+exit 0
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+
+        let adapter = ClaudeAdapter::codebuddy_with_program(fake);
+        let session = adapter
+            .start(SessionConfig {
+                evidence_scope: None,
+                effort_id: None,
+                fast: None,
+                additional_system_prompt: None,
+                skills_dir: None,
+                front_door_cli: None,
+                controller_token: None,
+                session_id: "s1".into(),
+                cwd: dir.path().to_path_buf(),
+                model_id: None,
+                mode_id: None,
+                runtime_values: Default::default(),
+                scratch_dir: dir.path().to_path_buf(),
+                providers: Default::default(),
+                resume: None,
+            })
+            .await
+            .expect("fake CLI still spawns");
+
+        let args_path = dir.path().join("args");
+        let args = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Ok(text) = std::fs::read_to_string(&args_path) {
+                    if text.contains("--permission-mode\nbypassPermissions\n") {
+                        return text;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("launch argv");
+
+        assert!(
+            !args.contains("--permission-prompt-tool"),
+            "CodeBuddy rejects this flag: {args}"
+        );
+        assert!(
+            !args.contains("--allow-dangerously-skip-permissions"),
+            "wrong bypass spelling: {args}"
+        );
+        assert!(args.contains("--dangerously-skip-permissions\n"));
+        assert!(args.contains("ENV CODEBUDDY_IS_SANDBOX=1\n"));
+        if std::env::var_os("IS_SANDBOX").is_none() {
+            assert!(!args.contains("ENV IS_SANDBOX="), "{args}");
+        }
+        drop(session);
     }
 
     /// How hard to think is a second axis, and the CLI reports it per model —

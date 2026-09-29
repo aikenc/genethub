@@ -31,6 +31,11 @@ describe("Agent presentation catalog", () => {
       kind: "glyph",
       glyph: "T",
     });
+    expect(resolveAgentPresentation({ id: "codebuddy", label: "CodeBuddy" })).toMatchObject({
+      kind: "glyph",
+      label: "CodeBuddy",
+      glyph: "B",
+    });
     expect(resolveAgentPresentation({ id: "codex", label: "Codex" })).toEqual({
       kind: "glyph",
       label: "Codex",
@@ -252,6 +257,7 @@ describe("runtime badges", () => {
     expect(resolveAgentProfile("codex").modeKind).toBe("permission");
     expect(resolveAgentProfile("claude").modeKind).toBe("permission");
     expect(resolveAgentProfile("tclaude").modeKind).toBe("permission");
+    expect(resolveAgentProfile("codebuddy").modeKind).toBe("permission");
     expect(resolveAgentProfile("cursor").modeKind).toBe("workflow");
     expect(resolveAgentProfile("acp:private")).toEqual({
       modeKind: "unknown",
@@ -263,6 +269,14 @@ describe("runtime badges", () => {
     expect(
       resolveModeBadge({
         agentId: "tclaude",
+        permissions: true,
+        modeId: "bypassPermissions",
+        modeLabel: "Bypass permissions",
+      }),
+    ).toMatchObject({ emoji: "🔓", risk: "unrestricted" });
+    expect(
+      resolveModeBadge({
+        agentId: "codebuddy",
         permissions: true,
         modeId: "bypassPermissions",
         modeLabel: "Bypass permissions",
