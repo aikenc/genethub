@@ -460,8 +460,7 @@ async fn execute_calls(
     let abort = { state.lock().await.abort.clone() };
     let tools_enabled = snapshot.tools_enabled;
     let interaction_is_valid = calls.len() == 1 && calls[0].1 == "request_user_input";
-    let requested_input = interaction_is_valid
-        && tools::user_input(&calls[0].2).is_ok();
+    let requested_input = interaction_is_valid && tools::user_input(&calls[0].2).is_ok();
     let futures = calls.iter().map(|(id, name, arguments)| {
         let emitter = emitter.clone();
         let cwd = snapshot.cwd.clone();

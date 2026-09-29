@@ -660,10 +660,7 @@ pub enum Request {
         effort_id: String,
     },
     #[serde(rename = "session.setFast", rename_all = "camelCase")]
-    SessionSetFast {
-        session_id: String,
-        fast: bool,
-    },
+    SessionSetFast { session_id: String, fast: bool },
     #[serde(rename = "session.setRuntimeAxis", rename_all = "camelCase")]
     SessionSetRuntimeAxis {
         session_id: String,

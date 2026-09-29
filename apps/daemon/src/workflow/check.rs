@@ -27,7 +27,10 @@ pub(crate) async fn check(
     }
     let runtime = RuntimeStore::new(&state.paths.root, workspace_id, &workspace.root)?;
     let scan = if let Some(id) = run_id {
-        RunScan { runs: vec![load_run(&runtime, id)?], unreadable: Vec::new() }
+        RunScan {
+            runs: vec![load_run(&runtime, id)?],
+            unreadable: Vec::new(),
+        }
     } else {
         scan_runs(&runtime)?
     };
@@ -195,7 +198,12 @@ pub(crate) async fn check(
         let snapshot = match request::observation(&all, &run, now_ms()) {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                finding(None, "requestUnreadable", "error", format!("请求预算无法读取：{error:#}"));
+                finding(
+                    None,
+                    "requestUnreadable",
+                    "error",
+                    format!("请求预算无法读取：{error:#}"),
+                );
                 continue;
             }
         };
@@ -228,7 +236,12 @@ pub(crate) async fn check(
         }
         match run_status(&runtime, &run) {
             Ok(status) => report.runs.push(status),
-            Err(error) => finding(None, "requestUnreadable", "error", format!("Run 状态无法读取：{error:#}")),
+            Err(error) => finding(
+                None,
+                "requestUnreadable",
+                "error",
+                format!("Run 状态无法读取：{error:#}"),
+            ),
         }
     }
     Ok(report)

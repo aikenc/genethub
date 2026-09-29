@@ -210,7 +210,7 @@ impl Writer {
             .clone()
             .acquire_many_owned((frame.payload.len() + 36) as u32)
             .await?;
-        if let (Some(timings), Some(began)) = (timings.as_deref_mut(), began) {
+        if let (Some(timings), Some(began)) = (timings.as_mut(), began) {
             timings.budget_us += began.elapsed().as_micros() as u64;
         }
         let began = timings.as_ref().map(|_| Instant::now());
@@ -227,14 +227,14 @@ impl Writer {
             })
             .await
             .map_err(|_| anyhow!("the data-plane writer stopped"))?;
-        if let (Some(timings), Some(began)) = (timings.as_deref_mut(), began) {
+        if let (Some(timings), Some(began)) = (timings.as_mut(), began) {
             timings.enqueue_us += began.elapsed().as_micros() as u64;
         }
         let began = timings.as_ref().map(|_| Instant::now());
         let completion = answer
             .await
             .map_err(|_| anyhow!("the data-plane writer dropped a frame"))??;
-        if let (Some(timings), Some(began)) = (timings.as_deref_mut(), began) {
+        if let (Some(timings), Some(began)) = (timings.as_mut(), began) {
             timings.completion_us += began.elapsed().as_micros() as u64;
             timings.actor_queue_us += completion.actor_queue_us;
             timings.actor_send_us += completion.actor_send_us;
@@ -416,7 +416,7 @@ impl ServerStream {
             if let Some(pace) = &self.pace {
                 pace.reserve(length as u64).await;
             }
-            if let (Some(timings), Some(began)) = (timings.as_deref_mut(), began) {
+            if let (Some(timings), Some(began)) = (timings.as_mut(), began) {
                 timings.credit_us += began.elapsed().as_micros() as u64;
             }
             let next = self
@@ -445,7 +445,7 @@ impl ServerStream {
                     self.head.method == "asset.preview",
                 )
                 .await?;
-            if let Some(timings) = timings.as_deref_mut() {
+            if let Some(timings) = timings.as_mut() {
                 timings.frames += 1;
             }
             self.local_bytes = next;

@@ -928,7 +928,8 @@ fn context_data(hello: &HelloResult, machine: Option<&str>) -> Value {
         Some(id) => (id.to_string(), String::new()),
         None => (hello.machine_id.clone(), hello.machine_name.clone()),
     };
-    let (workflow_patrol_active_jobs, workflow_patrol_oldest_job_ms) = crate::workflow::patrol_jobs();
+    let (workflow_patrol_active_jobs, workflow_patrol_oldest_job_ms) =
+        crate::workflow::patrol_jobs();
     json!({
         "source": if machine.is_some() { "remoteDaemon" } else { "localDaemon" },
         "principal": {"type": if machine.is_some() { "pairedDevice" } else { "localUser" }},
