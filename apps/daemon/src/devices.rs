@@ -30,9 +30,8 @@ use crate::channel_auth::{self, SessionKey};
 // becomes weaker than the rest.
 pub use genet_frontdoor::proof::random_token;
 
-/// How long an invite is worth anything. Short because it is the one moment
-/// this machine will talk to a stranger.
-const INVITE_LIFETIME_MINUTES: i64 = 15;
+/// How long a freshly minted one-time pairing invite stays valid.
+const INVITE_LIFETIME_MINUTES: i64 = 24 * 60;
 
 /// How many recently used nonces to remember. Generous next to the handful of
 /// connections a machine actually gets, and bounded so it cannot grow forever.
