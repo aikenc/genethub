@@ -1372,10 +1372,31 @@ async fn finish_nodes(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> R
                 continue;
             }
             if let Err(error) = cleanup {
-                request_stop(
+                // Accepted output and process retirement are distinct facts.
+                // A bounded adapter close can leave its owned handle/receipt
+                // pending; retry that cleanup without replaying the Worker or
+                // handing its lease to a successor. Activity supervision still bounds failed retirement below;
+                // this does not introduce a wall-time request budget.
+                let accepted_at = run.nodes[node_id]
+                    .result_accepted_at_ms
+                    .max(run.nodes[node_id].assigned_at_ms)
+                    .max(run.created_at_ms);
+                if !error.is::<crate::session::manager::SessionMissing>()
+                    && now_ms().saturating_sub(accepted_at) < supervision::NODE_WALL_MS
+                {
+                    tracing::warn!(run = %run.id, node = %node_id, %error,
+                        "accepted Worker retirement remains pending; ownership retained");
+                    continue;
+                }
+                request_stop_with_cause(
                     &mut run,
                     "blocked",
                     format!("节点 {node_id} 收尾失败：{error:#}"),
+                    if error.is::<crate::session::manager::SessionMissing>() {
+                        "executionException"
+                    } else {
+                        "progressDeadline"
+                    },
                 );
                 run.revision += 1;
                 save_run(runtime, &run)?;
