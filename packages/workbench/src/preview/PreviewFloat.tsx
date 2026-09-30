@@ -6,8 +6,8 @@ import {
   useState,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import { flushSync } from "react-dom";
 
+import { PreviewShareButton } from "./PreviewShareButton";
 import type { Host } from "../host";
 import type { Client } from "../protocol/client";
 import { useWorkbench, type PreviewFloatTarget } from "../session/store";
@@ -182,8 +182,7 @@ export function PreviewFloat({
           setInfoOpen(false);
           return;
         }
-        if (mode === "expanded") setMode("float");
-        else onClose();
+        onClose();
       }
     };
     window.addEventListener("keydown", onKey);
@@ -394,7 +393,7 @@ export function PreviewFloat({
         {expanded ? (
           <header
             aria-label="预览工具栏"
-            className="relative z-30 flex min-h-9 shrink-0 items-center gap-1 border-b border-line px-1.5"
+            className="gh-preview-toolbar relative z-30 flex min-h-9 shrink-0 items-center gap-1 border-b border-line px-1.5"
             // iOS standalone PWA uses viewport-fit=cover; a fixed h-9 header
             // sits under the status bar and the close control cannot be tapped.
             style={{ paddingTop: "env(safe-area-inset-top)" }}
@@ -417,7 +416,8 @@ export function PreviewFloat({
                     ? "正在生成预览链接…"
                     : title}
             </span>
-            <div ref={setToolbarTarget} className="flex shrink-0 items-center gap-1 text-xs" />
+            {client?.identity?.features?.includes("preview.feedback.v1") ? <PreviewShareButton client={client} source={source} resources={meta?.resourcePaths} /> : null}
+            <div ref={setToolbarTarget} className="gh-preview-toolbar-slot flex shrink-0 items-center gap-1 text-xs" />
             <button
               type="button"
               aria-label="最小化"
@@ -427,7 +427,7 @@ export function PreviewFloat({
             >
               <MinimizeIcon />
             </button>
-            <button
+            {copyLinkMode && client?.identity?.features?.includes("preview.feedback.v1") ? <PreviewShareButton client={client} source={source} resources={meta?.resourcePaths} quick label="在浏览器打开预览" /> : <button
                 type="button"
                 aria-label={copyLinkMode ? "复制预览链接" : "新窗口打开"}
                 title={
@@ -461,11 +461,8 @@ export function PreviewFloat({
                       detail: { path: source.path, url: popout.url },
                     }),
                   );
-                  // Keep window.open in this exact user gesture so mobile popup
-                  // blockers allow it. flushSync commits the float first; if the
-                  // browser backgrounds this tab immediately, no later ready
-                  // message is needed to make the original Preview collapse.
-                  flushSync(() => shrinkToSmallFloat());
+                  // Keep window.open in the user gesture so popup blockers allow it.
+                  // Opening externally leaves this preview expanded.
                   try {
                     // A named same-origin window keeps `opener` just long enough
                     // for the trusted shell to take the shared Client. `_blank`
@@ -476,12 +473,12 @@ export function PreviewFloat({
                     popouts.current.delete(popout.id);
                     popoutBridges.current.get(popout.id)?.();
                     popoutBridges.current.delete(popout.id);
-                    flushSync(() => maximize());
+                    maximize();
                   }
                 }}
               >
                 {copyLinkMode ? <LinkIcon /> : <ExternalLinkIcon />}
-              </button>
+              </button>}
             <button
               type="button"
               aria-label="关闭预览"
@@ -656,8 +653,9 @@ function PreviewInfoDialog({
             </div>
             <div>
               <dt className="text-faint">路径</dt>
-              <dd className="break-all font-mono text-fg">{path}</dd>
+              <dd className="break-all font-mono text-fg">{meta?.sourceInfo?.displayPath ?? basename(path)}</dd>
             </div>
+            {meta?.sourceInfo ? <div><dt className="text-faint">绝对路径</dt><dd className="break-all font-mono text-fg">{meta.sourceInfo.machineName}：{meta.sourceInfo.absolutePath}</dd></div> : null}
           </dl>
           {meta?.transfer ? <PreviewTransferSummary stats={meta.transfer} /> : null}
           <ul className="mt-4 list-disc space-y-2 pl-5 text-xs leading-relaxed text-muted">

@@ -55,6 +55,18 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
     if services.state.workspaces.get(workspace_id).await.is_err() {
         return preview_error(stream, 404, AssetPreviewError::NotFound, None).await;
     }
+    let caller = crate::authz::Principal::of(&services.state, &services.access);
+    if crate::preview_feedback::authorize_asset(
+        &services.state,
+        &caller,
+        workspace_id,
+        &request.source.path,
+    )
+    .await
+    .is_err()
+    {
+        return preview_error(stream, 403, AssetPreviewError::Forbidden, None).await;
+    }
     let resolved = match services
         .state
         .workspaces
@@ -103,7 +115,7 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
     // concurrent disk readers.
     let _slot = slot;
     let send_started = Instant::now();
-    let stats = send_file(stream, file).await?;
+    let stats = send_file(stream, file, services, workspace_id, &request.source.path).await?;
     tracing::debug!(
         event = "preview_stage_timing",
         request_id = super::endpoint::diagnostic_id(&stream.head.metadata),
@@ -333,8 +345,13 @@ struct PreviewSendStats {
     write_timings: WriteTimings,
 }
 
-async fn send_file(stream: &mut ServerStream, file: PreviewFile) -> Result<PreviewSendStats> {
-    let (metadata, mut source, expected_digest) = file.into_parts();
+async fn send_file(
+    stream: &mut ServerStream,
+    file: PreviewFile,
+    services: &PeerServices,
+    workspace: &str,
+    path: &str,
+) -> Result<PreviewSendStats> {    let (metadata, mut source, expected_digest) = file.into_parts();
     let snapshot = source.is_snapshot();
     let expected_bytes = metadata.source_bytes;
     let mut stats = PreviewSendStats {
@@ -355,6 +372,8 @@ async fn send_file(stream: &mut ServerStream, file: PreviewFile) -> Result<Previ
     let mut sent = 0u64;
     let mut step = vec![0u8; PREVIEW_SEND_STEP_BYTES];
     loop {
+        let caller = crate::authz::Principal::of(&services.state, &services.access);
+        crate::preview_feedback::authorize_asset(&services.state, &caller, workspace, path).await?;
         let began = Instant::now();
         let read = source
             .read(&mut step)

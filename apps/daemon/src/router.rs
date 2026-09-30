@@ -286,6 +286,18 @@ async fn authorize_session_request(
         );
     }
 
+    if let (Some(controller), Request::PreviewFeedback(feedback)) =
+        (caller.session_controller_id(), request)
+    {
+        let session = state
+            .sessions
+            .summary(controller)
+            .await
+            .map_err(|e| e.to_string())?;
+        if session.workspace_id != feedback.workspace_id {
+            return Err("feedback belongs to another workspace".into());
+        }
+    }
     let target = match request {
         Request::SessionSend { session_id, .. }
         | Request::SessionArtifactBegin { session_id, .. }
@@ -850,7 +862,24 @@ async fn dispatch(
     caller: &crate::authz::Principal,
     request: Request,
 ) -> Handled {
+    if matches!(caller, crate::authz::Principal::PreviewShare { .. })
+        && !matches!(
+            &request,
+            Request::ConnectionIdentity | Request::PreviewFeedback(_)
+        )
+    {
+        return Handled::err(
+            ErrorCode::Forbidden,
+            "preview share permits only its file preview and feedback",
+        );
+    }
     match request {
+        Request::PreviewFeedback(request) => Box::pin(async move {
+            match crate::preview_feedback::handle(state, caller, request).await {
+                Ok(reply) => Handled::ok(Reply::PreviewFeedback(reply)),
+                Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
+            }
+        }).await,
         Request::ClientDebug(request) => Box::pin(async move {
             match state.client_debug.handle(request).await {
                 Ok(reply) => Handled::ok(Reply::ClientDebug(reply)),
@@ -877,6 +906,7 @@ async fn dispatch(
                     "agentSpace.builderPlans.v1".to_string(),
                     "session.input.v1".to_string(),
                     "session.previewAnnotations.v1".to_string(),
+                    "preview.feedback.v1".to_string(),
                     "session.switch-agent.v1".to_string(),
                     "agent-tag-routing.v1".to_string(),
                     genehub_proto::SPEECH_FEATURE_TRANSCRIBE.to_string(),
@@ -886,8 +916,7 @@ async fn dispatch(
                 ]),
                 isolation: Some(crate::isolation::report()),
             }))
-        }).await,
-        Request::Subscribe {
+        }).await,        Request::Subscribe {
             session_id,
             since_seq,
             expand_last_round,

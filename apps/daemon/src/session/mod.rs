@@ -1,11 +1,11 @@
 pub mod artifact_links;
-mod artifacts;
+pub(crate) mod artifacts;
 pub mod components;
 mod context_seed;
 pub mod images;
 pub mod manager;
 pub mod overview;
-mod preview_review;
+pub(crate) mod preview_review;
 pub mod rounds;
 pub mod store;
 

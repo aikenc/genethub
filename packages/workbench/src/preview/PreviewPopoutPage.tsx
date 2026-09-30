@@ -6,6 +6,7 @@ import { emitClientDiagnostic, registerDiagnosticClient } from "../diagnostics";
 import type { Host } from "../host";
 import { Client } from "../protocol/client";
 import { readRtcEnabled } from "../settings/rtc";
+import { redeemPreviewShare, type PreviewShareCredential } from "./PreviewShareButton";
 import { AssetPreviewPage } from "./AssetPreviewPage";
 import {
   createPreviewPopoutChannel,
@@ -22,11 +23,13 @@ export function PreviewPopoutPage({
   source,
   context,
   portableTicket = null,
+  shareCredential = null,
   host,
 }: {
   source: AssetPreviewLocation;
   context: PreviewPopoutContext | null;
   portableTicket?: PortablePreviewTicket | null;
+  shareCredential?: PreviewShareCredential | null;
   host?: Host;
 }) {
   const channelRef = useRef<ReturnType<typeof createPreviewPopoutChannel> | null>(null);
@@ -58,7 +61,7 @@ export function PreviewPopoutPage({
     | null
   >(null);
   useEffect(() => {
-    if (!portableTicket || sharedClient) {
+    if ((!portableTicket && !shareCredential) || sharedClient) {
       setPortable(null);
       return;
     }
@@ -68,14 +71,18 @@ export function PreviewPopoutPage({
     setPortable({ kind: "connecting" });
     void (async () => {
       try {
+        const shareDial = shareCredential ? await redeemPreviewShare(shareCredential) : null;
+        if (cancelled) return;
         owned = new Client({
-          url: portableTicket.url,
-          fabricRouteTicket: portableTicket.fabricRouteTicket,
-          channelCredential: {
+          url: shareDial?.url ?? portableTicket!.url,
+          fabricRouteTicket: shareDial?.fabricRouteTicket ?? portableTicket?.fabricRouteTicket,
+          channelCredential: shareDial?.channelCredential ?? (portableTicket ? {
             capabilityId: portableTicket.channelCapability,
             secret: portableTicket.channelSecret,
-          },
-          rtcEnabled: readRtcEnabled(),
+          } : undefined),
+          fabricAuthorizationExpiresAt: shareDial?.fabricAuthorizationExpiresAt,
+          redial: shareCredential ? signal => redeemPreviewShare(shareCredential, signal) : undefined,
+          rtcEnabled: shareCredential ? false : readRtcEnabled(),
           onDiagnostic: emitClientDiagnostic,
         });
         unregisterDiagnosticClient = registerDiagnosticClient(owned);
@@ -96,7 +103,7 @@ export function PreviewPopoutPage({
           const message = error instanceof Error ? error.message : "";
           setPortable({
             kind: "failed",
-            message: `预览链接已失效，请回到原设备重新复制。${message}`.trim(),
+            message: shareCredential ? `分享预览暂时不可用：${message}。可刷新页面重试。` : `预览链接已失效，请回到原设备重新复制。${message}`.trim(),
           });
         }
       }
@@ -108,6 +115,7 @@ export function PreviewPopoutPage({
     };
   }, [
     portableTicket,
+    shareCredential,
     sharedClient,
     source.deviceHandle,
   ]);
@@ -143,7 +151,7 @@ export function PreviewPopoutPage({
 
   const portableClient = portable?.kind === "ready" ? portable.client : null;
 
-  if (portableTicket && !sharedClient && portable?.kind !== "ready") {
+  if ((portableTicket || shareCredential) && !sharedClient && portable?.kind !== "ready") {
     return (
       <p role="status" className="m-auto p-6 text-center text-sm text-muted">
         {portable?.kind === "failed" ? portable.message : "正在连接资源所在的设备…"}
@@ -158,7 +166,9 @@ export function PreviewPopoutPage({
         host={host}
         client={sharedClient ?? portableClient}
         runtimeSessionId={effectiveContext?.sessionId ?? null}
-        annotationWrite={sharedClient != null}
+        annotationWrite={sharedClient != null || !!shareCredential}
+        shareAccess={!!shareCredential}
+        feedbackAccessScope={shareCredential ? shareStorageScope(shareCredential.token) : "owner"}
         onRuntimeArtifactSaved={effectiveContext?.sessionId ? reportSaved : undefined}
         onRuntimeReady={effectiveContext ? reportReady : undefined}
       />
@@ -258,4 +268,11 @@ function RuntimeArtifactReceipt({
       </section>
     </div>
   );
+}
+
+// A storage discriminator, never an authorization proof. Do not persist the link token.
+function shareStorageScope(token: string): string {
+  let hash = 2166136261;
+  for (const char of token) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619);
+  return `share:${(hash >>> 0).toString(16)}`;
 }

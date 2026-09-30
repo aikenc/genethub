@@ -695,6 +695,7 @@ async fn serve_streams(
             loop {
                 match receiver.recv().await {
                     Ok(frame) => {
+                        if matches!(watcher, Principal::PreviewShare { .. }) { continue; }
                         if frame_requires(&frame)
                             .is_some_and(|capability| !watcher.allows(capability))
                         {
@@ -1096,6 +1097,10 @@ async fn serve_stream(stream: &mut ServerStream, services: &PeerServices) -> Res
     let Some(method) = StreamMethod::parse(&stream.head.method) else {
         return send_error(stream, 404, ErrorCode::NotFound, "unknown exchange method").await;
     };
+    if matches!(Principal::of(&services.state, &services.access), Principal::PreviewShare { .. })
+        && !matches!(method, StreamMethod::Events | StreamMethod::ProtocolIdentity | StreamMethod::AssetPreview) {
+        return send_error(stream, 403, ErrorCode::Forbidden, "preview share does not allow this operation").await;
+    }
     let needed = method.required();
     if !Principal::of(&services.state, &services.access).allows(needed) {
         services.state.diagnostics.record(
@@ -1536,6 +1541,7 @@ async fn handle_events(stream: &mut ServerStream, services: &PeerServices) -> Re
 
 fn request_workspace(request: &Request) -> Option<&str> {
     match request {
+        Request::PreviewFeedback(request) => Some(&request.workspace_id),
         Request::SessionFork {
             target: Some(target),
             ..

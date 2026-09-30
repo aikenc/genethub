@@ -30,6 +30,8 @@ pub struct ProtocolIdentity {
 #[serde(tag = "type", content = "payload", rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub enum Request {
+    #[serde(rename = "preview.feedback")]
+    PreviewFeedback(crate::PreviewFeedbackRequest),
     #[serde(rename = "client.debug")]
     ClientDebug(crate::ClientDebugRequest),
     /// Returns machine metadata only after the channel key is active, so a
@@ -1064,6 +1066,7 @@ pub enum Request {
 #[serde(tag = "type", content = "data", rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub enum Reply {
+    PreviewFeedback(crate::PreviewFeedbackResponse),
     #[serde(rename = "client.debug")]
     ClientDebug(crate::ClientDebugResponse),
     Hello(HelloResult),

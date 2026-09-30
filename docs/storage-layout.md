@@ -29,6 +29,7 @@ agent CLI 自己的线程库（`~/.codex/` 之类）不归我们管，只在会�
   components/<组件>/          组件实例的 Space 级存储
   tombstones/<会话>.json      会话删除墓碑
   workflows/<包>/             Workflow 包源（仅项目根）；手写，可自带 git
+  preview-feedback/           文件与版本绑定的反馈草稿、证据、提交回执与限时分享范围
   speech/                     项目级语音偏好与学习词表（仅项目根）
   temp/                       普通临时材料，例如 Workflow 试验材料 temp/exp/<testname>/
   owner.lock                  滚动升级期间的旧版兼容锁
@@ -53,7 +54,7 @@ agent CLI 自己的线程库（`~/.codex/` 之类）不归我们管，只在会�
 
 | 目录 | 谁写 |
 | --- | --- |
-| `sessions/`、`components/`、`tombstones/` | 只由 daemon 写。Agent 不直接改写 |
+| `sessions/`、`components/`、`tombstones/`、`preview-feedback/` | 只由 daemon 写。Agent 不直接改写 |
 | `workflows/`、`temp/` | 普通目录，Agent 按任务需要编辑 |
 
 "只由 daemon 写"是**纪律，不是强制**：任何有项目写权限的 Agent 技术上都能写，放进 `<data>` 也挡不住。

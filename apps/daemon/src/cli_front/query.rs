@@ -16,7 +16,7 @@ use super::output::{self, CliFailure, CLI_SCHEMA};
 use super::rpc::{ConnectError, Refusal, Rpc, RpcError};
 use super::target::{self, Routing, Selection};
 
-const COMMAND_NAMES: [&str; 67] = [
+const COMMAND_NAMES: [&str; 68] = [
     "schema",
     "context",
     "capabilities",
@@ -26,6 +26,7 @@ const COMMAND_NAMES: [&str; 67] = [
     "process.killAll",
     "workspace.list",
     "workspace.show",
+    "preview.feedback",
     "session.list",
     "session.get",
     "session.components",
@@ -142,6 +143,10 @@ enum Query {
     },
     Context,
     Capabilities,
+    PreviewFeedback {
+        workspace_id: String,
+        id: String,
+    },
     WorkspaceList,
     WorkspaceShow {
         workspace_id: String,
@@ -217,6 +222,19 @@ fn parse(args: &[String]) -> Result<Query, CliFailure> {
         "schema" => parse_schema(rest),
         "context" => no_args(rest, Query::Context, "context"),
         "capabilities" => no_args(rest, Query::Capabilities, "capabilities"),
+        "preview" => match rest {
+            [verb, action, id, flag, workspace]
+                if verb == "feedback" && action == "show" && flag == "--workspace" =>
+            {
+                Ok(Query::PreviewFeedback {
+                    workspace_id: workspace.clone(),
+                    id: id.clone(),
+                })
+            }
+            _ => Err(CliFailure::invalid_args(
+                "usage: genet preview feedback show <id> --workspace <workspace-id>",
+            )),
+        },
         "workspace" => parse_workspace(rest),
         "session" => parse_session(rest),
         _ => Err(CliFailure::invalid_args(format!(
@@ -515,6 +533,24 @@ async fn execute(
                 "context",
                 context_data(rpc.hello(), selection.machine.as_deref()),
             ))
+        }
+        Query::PreviewFeedback { workspace_id, id } => {
+            let rpc = connect_selected(selection).await?;
+            let reply = rpc
+                .call(Request::PreviewFeedback(
+                    genehub_proto::PreviewFeedbackRequest {
+                        workspace_id,
+                        operation: genehub_proto::PreviewFeedbackOperation::Read { id },
+                    },
+                ))
+                .await
+                .map_err(rpc_error)?;
+            match reply {
+                Reply::PreviewFeedback(genehub_proto::PreviewFeedbackResponse::Receipt(record)) => {
+                    Ok(("preview.feedback", json!({"feedback":record})))
+                }
+                other => Err(unexpected_reply("preview feedback", &other)),
+            }
         }
         Query::WorkspaceList => {
             let rpc = connect_selected(selection).await?;
@@ -1050,6 +1086,7 @@ fn schema_data(command: Option<&str>) -> Value {
 
 fn command_schema(name: &str) -> Value {
     let (synopsis, requires_daemon, input) = match name {
+        "preview.feedback" => ("genet preview feedback show <id> --workspace <workspace-id>",true,object_input(json!({"id":{"type":"string"},"workspaceId":{"type":"string"}}), &["id","workspaceId"])) ,
         "client.list" => ("genet client list [--machine <coordinator>]", true, object_input(json!({}), &[])),
         "client.attach" => ("genet client attach <clientId> --label <operator> [--machine <coordinator>]", true, object_input(json!({"clientId":{"type":"string"},"label":{"type":"string"}}), &["clientId","label"])),
         "client.eval" => (
@@ -1870,6 +1907,7 @@ pub fn reply_kind(reply: &Reply) -> &'static str {
         Reply::GitCommit { .. } => "git commit",
         Reply::Pty { .. } => "pty",
         Reply::Processes(_) => "background processes",
+        Reply::PreviewFeedback(_) => "preview feedback",
         Reply::Ack => "ack",
     }
 }

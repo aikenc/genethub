@@ -197,6 +197,8 @@ pub enum Principal {
     /// device. It keeps the authority it has always had; narrowing it belongs
     /// with the hosted enrolment that issues it, not here.
     Channel,
+    /// Daemon-issued file scope carried by a hosted admission.
+    PreviewShare { id: String },
     /// A peer that authenticated with a pairing invitation. It may redeem that
     /// invitation and nothing else, which the data plane enforces before this
     /// layer is consulted.
@@ -210,6 +212,9 @@ impl Principal {
     /// revoked mid-connection stops being able to act at once instead of when
     /// it next reconnects.
     pub fn of(state: &Shared, access: &PeerAccess) -> Principal {
+        if let Some(id) = access.principal.strip_prefix("preview:") {
+            return Principal::PreviewShare { id: id.to_owned() };
+        }
         if access.bootstrap_invite.is_some() {
             return Principal::Pairing;
         }
@@ -236,6 +241,9 @@ impl Principal {
     pub fn allows(&self, capability: Capability) -> bool {
         match self {
             Principal::LocalUser | Principal::Channel => true,
+            Principal::PreviewShare { .. } => {
+                matches!(capability, Capability::Handshake | Capability::Files)
+            }
             Principal::SessionController { .. } => matches!(
                 capability,
                 Capability::Handshake | Capability::Read | Capability::Session
@@ -327,6 +335,10 @@ impl StreamMethod {
 /// authority it needs, which is the one moment when the answer is obvious.
 pub fn required(request: &Request) -> Capability {
     match request {
+        Request::PreviewFeedback(request) => match request.operation {
+            genehub_proto::PreviewFeedbackOperation::Read { .. } => Capability::Read,
+            _ => Capability::Files,
+        },
         Request::ClientDebug(_) => Capability::Settings,
         Request::ConnectionIdentity | Request::DeviceClaim { .. } => Capability::Handshake,
 

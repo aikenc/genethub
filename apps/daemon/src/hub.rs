@@ -419,10 +419,11 @@ impl Client {
             .http
             .post(self.url("/api/fabric/v2/peer-admissions/redeem")?)
             .bearer_auth(&enrollment.secret)
-            .json(&serde_json::json!({
-                "daemonId": enrollment.daemon_id,
-                "capabilityId": capability_id,
-            }))
+            .json(&{
+                let mut payload = serde_json::json!({"daemonId":enrollment.daemon_id,"capabilityId":capability_id});
+                if capability_id.starts_with("fpp_") { payload["previewScopeVersion"] = serde_json::json!(1); }
+                payload
+            })
             .send();
         let response = tokio::time::timeout(Duration::from_secs(5), request)
             .await
@@ -444,6 +445,14 @@ impl Client {
         )
         .await?;
         validate_channel_secret(&reply.secret)?;
+        if capability_id.starts_with("fpp_")
+            && !reply
+                .principal
+                .as_deref()
+                .is_some_and(|p| p.starts_with("preview:ps_"))
+        {
+            anyhow::bail!("Control did not return the required preview scope");
+        }
         if reply
             .principal
             .as_ref()
@@ -475,6 +484,28 @@ impl Client {
             workspace_handle: reply.workspace_handle,
             local_workspace_id: reply.local_workspace_id,
         }))
+    }
+
+    pub async fn preview_share(
+        &self,
+        enrollment: &Enrollment,
+        id: &str,
+        expires_at_ms: i64,
+    ) -> Result<genehub_proto::PreviewShareLink> {
+        let response = self
+            .http
+            .post(self.url(&format!(
+                "/api/machines/{}/preview-shares",
+                enrollment.daemon_id
+            ))?)
+            .bearer_auth(&enrollment.secret)
+            .json(&serde_json::json!({"shareId":id,"expiresAtMs":expires_at_ms}))
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            anyhow::bail!("Hub refused preview share: {}", response.status());
+        }
+        read_json(response, 4096, "preview share reply").await
     }
 
     /// Tickets are keyed by the Hub row id (`mch_…`). Workbench URLs and

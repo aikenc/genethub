@@ -911,10 +911,24 @@ export type PreviewAnnotationSource = { root: PreviewAnnotationRoot, relativePat
  */
 export type PreviewAnnotationTarget = { "kind": "markdownLines", startLine: number, endLine: number, excerpt: string, } | { "kind": "htmlElement", selector: string, tag: string, excerpt: string, domFingerprint: string, } | { "kind": "imageRect", x: number, y: number, width: number, height: number, naturalWidth: number, naturalHeight: number, };
 
+export type PreviewFeedbackDraft = { id: string, source: PreviewSourceInfo, review: PreviewReviewDraft, bundles: Array<SessionArtifactBundle>, receipt: PreviewFeedbackRecord | null, };
+
+export type PreviewFeedbackOperation = { "kind": "source", path: string, } | { "kind": "share", path: string, ttlSeconds: number, resources: Array<string>, } | { "kind": "revoke", shareId: string, } | { "kind": "open", path: string, version: string, draftId: string | null, } | { "kind": "draft", id: string, } | { "kind": "upsert", id: string, annotation: PreviewAnnotation, expectedRevision: number, } | { "kind": "remove", id: string, ids: Array<string>, expectedRevision: number, } | { "kind": "beginArtifact", id: string, files: Array<SessionArtifactFile>, metadata: JsonValue, } | { "kind": "chunk", id: string, uploadId: string, fileIndex: number, offset: number, dataBase64: string, } | { "kind": "finishArtifact", id: string, uploadId: string, } | { "kind": "abortArtifact", id: string, uploadId: string, } | { "kind": "submit", id: string, description: string, annotationIds: Array<string>, bundlePaths: Array<string>, } | { "kind": "read", id: string, };
+
+export type PreviewFeedbackRecord = { id: string, source: PreviewSourceInfo, description: string, annotations: Array<PreviewAnnotation>, bundles: Array<SessionArtifactBundle>, submittedAtMs: number, workspacePath: string, trust: string, };
+
+export type PreviewFeedbackRequest = { workspaceId: string, operation: PreviewFeedbackOperation, };
+
+export type PreviewFeedbackResponse = { "kind": "source", "data": PreviewSourceInfo } | { "kind": "share", "data": PreviewShareLink } | { "kind": "draft", "data": PreviewFeedbackDraft } | { "kind": "upload", "data": SessionArtifactUpload } | { "kind": "artifact", "data": SessionArtifactBundle } | { "kind": "receipt", "data": PreviewFeedbackRecord } | { "kind": "ack" };
+
 /**
  * The one preview-annotation draft owned by a session. Not a `SessionDraft`.
  */
 export type PreviewReviewDraft = { revision: number, annotations: Array<PreviewAnnotation>, };
+
+export type PreviewShareLink = { shareId: string, token: string, redeemUrl: string, expiresAtMs: number, };
+
+export type PreviewSourceInfo = { machineName: string, projectName: string, rootName: string, rootHandle: string, path: string, relativePath: string, displayPath: string, absolutePath: string, version: string, };
 
 export type ProbeState = { "state": "ready" } | { "state": "notInstalled" } | { "state": "unavailable", reason: string, };
 
@@ -976,14 +990,14 @@ rendezvousUrl?: string, online: boolean, };
 /**
  * Successful payloads, one per request that returns something.
  */
-export type Reply = { "type": "client.debug", "data": ClientDebugResponse } | { "type": "hello", "data": HelloResult } | { "type": "subscribed", "data": { snapshot: SessionSnapshot, replayed: Array<SequencedEvent>, 
+export type Reply = { "type": "previewFeedback", "data": PreviewFeedbackResponse } | { "type": "client.debug", "data": ClientDebugResponse } | { "type": "hello", "data": HelloResult } | { "type": "subscribed", "data": { snapshot: SessionSnapshot, replayed: Array<SequencedEvent>, 
 /**
  * True when the requested `sinceSeq` fell outside the retained window
  * and the snapshot is a full reset rather than a continuation.
  */
 reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "speechCapabilities", "data": SpeechCapabilities } | { "type": "speechRuntimeStatus", "data": SpeechRuntimeStatus } | { "type": "speechContext", "data": SpeechContextPack } | { "type": "speechFeedbackReceipt", "data": SpeechFeedbackReceipt } | { "type": "log", "data": LogTail } | { "type": "diagnostics", "data": SupportDiagnostics } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "forkTransfer", "data": ForkTransfer } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionDrafts", "data": Array<SessionDraft> } | { "type": "previewAnnotations", "data": PreviewReviewDraft } | { "type": "sessionComponents", "data": Array<ComponentInstanceInfo> } | { "type": "sessionFlow", "data": ExecutorFlowStatus } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "sessionInspection", "data": SessionInspection } | { "type": "sessionNarrative", "data": SessionNarrativePage } | { "type": "sessionRounds", "data": SessionRoundPage } | { "type": "sessionContext", "data": SessionContext } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "roundTrunks", "data": Array<RoundTrunk> } | { "type": "blob", "data": BlobPayload } | { "type": "blobs", "data": Array<BlobPayload> } | { "type": "sessionArtifactUpload", "data": SessionArtifactUpload } | { "type": "sessionArtifact", "data": SessionArtifactBundle } | { "type": "workflowProject", "data": WorkflowProjectStatus } | { "type": "workflowPackages", "data": WorkflowPackageList } | { "type": "workflowBuild", "data": WorkflowBuildReport } | { "type": "workflowRun", "data": WorkflowRunStatus } | { "type": "workflowJournal", "data": Array<JsonValue> } | { "type": "workflowCheck", "data": WorkflowCheckReport } | { "type": "workflowRuns", "data": Array<WorkflowRunStatus> } | { "type": "agentSpaceBuilder", "data": AgentSpaceBuilderReport } | { "type": "agentSpaceChangePlan", "data": AgentSpaceChangePlan } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "processes", "data": Array<BackgroundProcess> } | { "type": "ack" };
 
-export type Request = { "type": "client.debug", "payload": ClientDebugRequest } | { "type": "connection.identity" } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, 
+export type Request = { "type": "preview.feedback", "payload": PreviewFeedbackRequest } | { "type": "client.debug", "payload": ClientDebugRequest } | { "type": "connection.identity" } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, 
 /**
  * Prefetches the last round's trunk index and final trunk details in
  * the subscription response.

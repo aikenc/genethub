@@ -694,3 +694,21 @@ input:focus-visible {
   .gh-dialog-full header { padding-top: max(12px, var(--safe-area-top)); }
   .gh-dialog-full .gh-dialog-content > :last-child { padding-bottom: max(20px, var(--safe-area-bottom)); }
 }
+
+/* Preview embeds several document controls in one narrow row. Scope compact
+ * sizing to direct toolbar controls so feedback/share dialogs retain their
+ * normal touch targets. Nine controls still fit in a 320px viewport. */
+.gh-preview-toolbar { gap: 2px; padding-inline: 4px; }
+.gh-preview-toolbar-slot { gap: 2px; }
+.genehub-ui .gh-preview-toolbar > button,
+.genehub-ui .gh-preview-toolbar-slot > button,
+.gh-preview-toolbar > button,
+.gh-preview-toolbar-slot > button,
+.gh-preview-toolbar-slot > details > summary {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  min-height: 32px;
+  padding-inline: 0;
+}

@@ -17,6 +17,7 @@ pub mod dataplane;
 pub mod devices;
 pub mod diagnostics;
 pub mod files;
+pub(crate) mod preview_feedback;
 pub(crate) mod fs_cap;
 pub mod git;
 pub(crate) mod guest_paths;

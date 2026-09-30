@@ -64,3 +64,5 @@ export type {
 export type { ExtraTab } from "./shell/tabs";
 
 export { configureClientDebugHost, disconnectClientDebug, openClientDebug } from "./client-debug";
+
+export { parsePreviewShare } from "./preview/PreviewShareButton";
