@@ -228,6 +228,18 @@ impl SessionManager {
 
     /// Execution ownership, including startup and cleanup, is stronger than a
     /// rendered idle status. Workflow reconciliation must not guess from chat.
+    /// Stop has already fenced this live session. Missing sessions are not
+    /// closing; callers treat absence with their own existence check.
+    pub(crate) async fn is_closing(&self, session_id: &str) -> bool {
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return true;
+        }
+        let Some(live) = self.sessions.read().await.get(session_id).cloned() else {
+            return false;
+        };
+        live.closing.load(Ordering::SeqCst)
+    }
+
     pub(crate) async fn has_execution(&self, session_id: &str) -> bool {
         let live = self.sessions.read().await.get(session_id).cloned();
         match live {
@@ -586,6 +598,7 @@ impl SessionManager {
     /// Stops every agent process. Called on daemon shutdown so no orphan
     /// children survive the tray exiting.
     pub async fn shutdown(&self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
         let sessions: Vec<(String, Arc<Live>)> = self.sessions.write().await.drain().collect();
         for (session_id, live) in sessions {
             if let Err(error) = live.prepare_shutdown().await {

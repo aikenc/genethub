@@ -487,6 +487,9 @@ pub struct SessionManager {
     /// with a daemon-authored mutation plan before the card reaches a Human.
     project_control: Option<crate::project_control::Broker>,
     workflow_data_root: Option<PathBuf>,
+    /// Daemon shutdown has started. Worker results that arrive after this
+    /// point belong to a stop, not to a still-open node.
+    shutting_down: AtomicBool,
 }
 
 impl SessionManager {
@@ -514,6 +517,7 @@ impl SessionManager {
             controller_secret: uuid::Uuid::new_v4().simple().to_string(),
             project_control: None,
             workflow_data_root: None,
+            shutting_down: AtomicBool::new(false),
         }
     }
 

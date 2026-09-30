@@ -2962,6 +2962,14 @@ pub(crate) async fn complete(
         }
         bail!("节点已有不同结果；不能覆盖已接收提交");
     }
+    // Shutdown fences the Worker before its process is gone. A command still
+    // running inside that process must not land a result after Stop began.
+    if state.sessions.is_closing(caller_session_id).await {
+        return Err(crate::rpc_error::failure(
+            genehub_proto::ErrorCode::Conflict,
+            "会话正在关闭，未完成的节点结果不能在停止后提交".into(),
+        ));
+    }
     request::ensure_open(&runtime, &run)?;
     if expected_attempt.is_none() && run.revision != expected_revision {
         return Err(crate::rpc_error::failure(
