@@ -48,7 +48,7 @@
 - 不在 v4 失败时静默回退到 Control 可签发 secret 的 v3 hosted 通道。
 - 不为了展示安全感增加无实际密码学作用的确认页。
 
-**生成链接这个动作本身就是授权动作。** 链接是有效期不超过 15 分钟、只能成功核销一次的 bearer
+**生成链接这个动作本身就是授权动作。** 链接是有效期不超过 24 小时、只能成功核销一次的 bearer
 capability；谁先拿到并打开，谁就获得这次设备登记机会。这是无二次确认体验必须接受并清楚告知的风险，
 由短时、单次、来源端可信、设备列表可见和立即撤销共同约束。
 
@@ -65,7 +65,7 @@ capability；谁先拿到并打开，谁就获得这次设备登记机会。这�
 - `packages/workbench/src/devices/machines.ts` 把 `claim` 和 `endpoint` 放在 URL fragment，fragment 不进入 HTTP access log。
 - `packages/workbench/src/App.tsx` 发现待配对链接后自动核销，不等待第二次确认。
 - `packages/workbench/src/devices/claim.ts` 通过邀请凭证建立加密通道，只发送一次 `device.claim`，成功后保存长期设备凭证。
-- `apps/daemon/src/devices.rs` 在 daemon 内存生成 15 分钟一次性 invite，并在加密 claim 中原子消费。
+- `apps/daemon/src/devices.rs` 在 daemon 内存生成 24 小时一次性 invite，并在加密 claim 中原子消费。
 
 需要替换的是托管通道和 v3 密钥派生：
 
@@ -163,7 +163,7 @@ Control 被绕过时不能拿到 route；Control 被攻破时也不能仅凭 ses
 外部 API 和 UI 可以继续叫 `hub.claimLink` / “在另一台设备打开”。内部改为：
 
 1. daemon 验证请求来自 loopback 或已有设备凭证，并检查 `devices:invite` scope。
-2. daemon 本地生成 `inviteId + 256-bit secret`，只在内存保存，TTL 保持 15 分钟，最多成功消费一次。
+2. daemon 本地生成 `inviteId + 256-bit secret`，只在内存保存，TTL 保持 24 小时，最多成功消费一次。
 3. 托管形态下，daemon 向 Control 申请**账号 transfer ticket 和 opaque route**；它们不含数据面 secret。
 4. daemon 或当前工作台在可信端本地组合最终链接。invite secret 只放在 fragment，例如：
 
