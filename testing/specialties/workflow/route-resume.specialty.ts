@@ -1,6 +1,6 @@
 import { writeFileSync } from "node:fs";
 import path from "node:path";
-import type { WorkflowRunStatus } from "@genehub/proto";
+import type { AgentSelectionPreferences, WorkflowRunStatus } from "@genehub/proto";
 
 import { defineSpecialty, runGenetAsync } from "../../framework/public.ts";
 
@@ -20,7 +20,7 @@ defineSpecialty({
   const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
   try {
     await t.flows.main.configureMockProvider(opened.client, opened.mock);
-    const profiles = (available: boolean) => ({
+    const profiles = (available: boolean): AgentSelectionPreferences => ({
       runtimes: {}, selectedTags: ["Max"], modelProfiles: [{
         agentId: "genet", modelId: "deepseek/deepseek-v4-flash",
         tags: available ? ["Max"] : ["Flash"], cost: "low" as const,

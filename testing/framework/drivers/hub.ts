@@ -51,7 +51,7 @@ interface ControlServerLike {
   close(): Promise<void>;
 }
 
-export async function startHub(input: { databasePath: string; relayOrigin?: string; relayToken?: string; routeGrantTtlSeconds?: number }): Promise<HubHandle> {
+export async function startHub(input: { databasePath: string; relayOrigin?: string; relayToken?: string; routeGrantTtlSeconds?: number; consoleDir?: string }): Promise<HubHandle> {
   const cloudRoot = process.env.TESTCTL_CLOUD_ROOT?.trim();
   if (!cloudRoot) {
     throw new BlockedError(
@@ -91,7 +91,7 @@ export async function startHub(input: { databasePath: string; relayOrigin?: stri
     databasePath: input.databasePath,
     // API only: whether someone happens to have built the console locally
     // must not change what these cases exercise.
-    consoleDir: path.join(path.dirname(input.databasePath), "no-console"),
+    consoleDir: input.consoleDir ?? path.join(path.dirname(input.databasePath), "no-console"),
     // The relay authenticates to the control plane with this token. No relay
     // ever dials in these cases, but the server refuses to start without one.
     relayToken: input.relayToken ?? `testctl-${randomBytes(24).toString("hex")}`,

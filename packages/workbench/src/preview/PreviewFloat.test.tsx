@@ -108,7 +108,7 @@ describe("PreviewFloat", () => {
     const onClose = vi.fn();
     const open = vi.spyOn(window, "open").mockImplementation(() => {
       expect(
-        screen.getByRole("button", { name: "预览浮窗 Cursor Demo Title" }),
+        screen.getByRole("dialog", { name: "文件预览" }),
       ).toBeInTheDocument();
       return window;
     });
@@ -159,7 +159,7 @@ describe("PreviewFloat", () => {
     const popoutId = opened.searchParams.get("genehubPreviewPopout")!;
     expect(open.mock.calls[0]?.[1]).toBe(`genehub-preview-${popoutId}`);
     expect(
-      screen.getByRole("button", { name: "预览浮窗 Cursor Demo Title" }),
+      screen.getByRole("dialog", { name: "文件预览" }),
     ).toBeInTheDocument();
 
     emitPopoutMessage({
@@ -169,7 +169,7 @@ describe("PreviewFloat", () => {
       sessionId: "s_demo",
     });
     expect(
-      await screen.findByRole("button", { name: "预览浮窗 Cursor Demo Title" }),
+      await screen.findByRole("dialog", { name: "文件预览" }),
     ).toBeInTheDocument();
 
     emitPopoutMessage({
