@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { PreviewAnnotationBar } from "./PreviewAnnotation";
 import {
   PreviewPixelCapture,
   supportsDisplayCapture,
@@ -415,6 +416,7 @@ export function PreviewRuntimeControls({
 
   return (
     <div className="flex min-h-9 shrink-0 items-center gap-1.5 border-b border-line bg-surface px-2 text-[11px] text-muted">
+      <PreviewAnnotationBar />
       <span className="min-w-0 flex-1 truncate" role="status" title={notice}>
         {recording ? (
           <span className="text-red-500">● 录制 {elapsedSeconds}s</span>

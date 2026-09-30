@@ -18,7 +18,7 @@ import { HighlightedCode, languageForPath, Markdown } from "../session/Markdown"
 import { loadSessionImage } from "../session/imagePreviewRequests";
 import { HtmlAnnotationOverlay, ImageAnnotationLayer, PreviewReviewChrome } from "./PreviewAnnotation";
 import { readRtcEnabled } from "../settings/rtc";
-import { remapHtmlSite, resolveRuntimeAssetPath } from "./htmlSite";
+import { remapHtmlSite, resolveRuntimeAssetPath, sameSiteHtmlPath } from "./htmlSite";
 import {
   applyPreviewStoreMutation,
   clearPreviewStore,
@@ -327,6 +327,31 @@ function PreviewDocument({
   annotationWrite?: boolean;
 }) {
   const { metadata, bytes, transfer } = result;
+  const [followedHtml, setFollowedHtml] = useState<{ path: string; result: AssetPreviewResult } | null>(null);
+  const [linkProblem, setLinkProblem] = useState<string | null>(null);
+  const followGeneration = useRef(0);
+  useEffect(() => {
+    followGeneration.current += 1;
+    setFollowedHtml(null);
+    setLinkProblem(null);
+  }, [path]);
+  const shown = followedHtml ?? { path, result };
+  const openHtml = useCallback(async (nextPath: string) => {
+    const generation = ++followGeneration.current;
+    setLinkProblem(null);
+    try {
+      const loaded = await client.preview(workspaceHandle, nextPath);
+      if (generation !== followGeneration.current) return;
+      if (loaded.metadata.kind !== "html") {
+        setLinkProblem("这个链接不是可以预览的 HTML 页面");
+        return;
+      }
+      setFollowedHtml({ path: nextPath, result: loaded });
+    } catch (error) {
+      if (generation !== followGeneration.current) return;
+      setLinkProblem(error instanceof Error ? error.message : "无法打开这个链接");
+    }
+  }, [client, workspaceHandle]);
   const rootHandle = path.split("/")[0] ?? "";
   const loadPreview = useCallback(
     async (assetPath: string) => {
@@ -384,19 +409,23 @@ function PreviewDocument({
   ) : metadata.kind === "text" ? (
     <HighlightedCode text={text} language={languageForPath(path)} document />
   ) : metadata.kind === "html" ? (
-    <ServiceHtmlDocument
-      client={client}
-      workspaceHandle={workspaceHandle}
-      bytes={bytes}
-      metadata={metadata}
-      transfer={transfer}
-      entryPath={path}
-      storageScope={{ deviceHandle, workspaceHandle }}
-      fetchAsset={loadPreview}
-      onMetaChange={onMetaChange}
-      onRuntimeArtifact={onRuntimeArtifact}
-      onRuntimeReady={onRuntimeReady}
-    />
+    <>
+      {linkProblem ? <p role="alert" className="shrink-0 px-3 py-1 text-xs text-danger">{linkProblem}</p> : null}
+      <ServiceHtmlDocument
+        client={client}
+        workspaceHandle={workspaceHandle}
+        bytes={shown.result.bytes}
+        metadata={shown.result.metadata}
+        transfer={shown.result.transfer}
+        entryPath={shown.path}
+        storageScope={{ deviceHandle, workspaceHandle }}
+        fetchAsset={loadPreview}
+        onMetaChange={onMetaChange}
+        onRuntimeArtifact={onRuntimeArtifact}
+        onRuntimeReady={onRuntimeReady}
+        onOpenHtml={(next) => void openHtml(next)}
+      />
+    </>
   ) : metadata.kind === "wasm" || metadata.kind === "binary" ? (
     <p className="m-auto max-w-lg px-6 text-center text-sm text-muted">
       二进制资源（{metadata.mediaType}，{metadata.sourceBytes} bytes）。请从入口 HTML 打开以运行游戏或站点。
@@ -409,9 +438,9 @@ function PreviewDocument({
       client={client}
       sessionId={runtimeSessionId ?? null}
       enabled={annotationWrite}
-      path={path}
-      version={metadata.version}
-      kind={metadata.kind}
+      path={shown.path}
+      version={shown.result.metadata.version}
+      kind={shown.result.metadata.kind}
       sourceText={text}
     >
       {body}
@@ -536,6 +565,7 @@ export function HtmlDocument({
   onMetaChange,
   onRuntimeArtifact,
   onRuntimeReady,
+  onOpenHtml,
   service = null,
 }: {
   service?: ServicePreviewClient | null;
@@ -549,12 +579,16 @@ export function HtmlDocument({
   onMetaChange?: (meta: PreviewMeta | null) => void;
   onRuntimeArtifact?: RuntimeArtifactSubmit;
   onRuntimeReady?: () => void;
+  /** Opens another HTML file from this site without leaving the sandbox. */
+  onOpenHtml?: (path: string) => void;
 }) {
   const [srcDoc, setSrcDoc] = useState<string | null>(null);
   const [frameReady, setFrameReady] = useState(false);
   const [collectorReady, setCollectorReady] = useState(false);
   const [eventCount, setEventCount] = useState(0);
   const frameRef = useRef<HTMLIFrameElement>(null);
+  const onOpenHtmlRef = useRef(onOpenHtml);
+  onOpenHtmlRef.current = onOpenHtml;
   useServiceBridge(frameRef, service, srcDoc);
   const eventsRef = useRef<PreviewRuntimeEvent[]>([]);
   const collectorReadyRef = useRef(false);
@@ -678,6 +712,14 @@ export function HtmlDocument({
         requestId?: string;
         detail?: unknown;
       };
+      if (data.source === PREVIEW_RUNTIME_SOURCE && data.kind === "open-path") {
+        const url = data.detail && typeof data.detail === "object"
+          ? String((data.detail as { url?: unknown }).url ?? "")
+          : "";
+        const next = url ? sameSiteHtmlPath(entryPath, url) : null;
+        if (next && next !== entryPath) onOpenHtmlRef.current?.(next);
+        return;
+      }
       if (data.source === PREVIEW_RUNTIME_SOURCE && data.kind === "dom-snapshot") {
         const pending = data.requestId ? domRequestsRef.current.get(data.requestId) : null;
         if (!pending || !isPreviewDomSnapshot(data.detail)) return;
@@ -910,7 +952,7 @@ export function HtmlDocument({
               onLoad={() => setFrameReady(true)}
               className="absolute inset-0 h-full w-full border-0 bg-white [isolation:isolate]"
             />
-            <HtmlAnnotationOverlay frameRef={frameRef} />
+            <HtmlAnnotationOverlay frameRef={frameRef} frameReady={frameReady} />
           </div>
         </>
       ) : (
@@ -1446,6 +1488,57 @@ const PREVIEW_DIAG_BRIDGE = `(function(){
     }
     return parts.join(" > ");
   }
+  function scrollableAt(x, y) {
+    var node = document.elementFromPoint(x, y);
+    while (node && node !== document.documentElement) {
+      var taller = node.scrollHeight > node.clientHeight + 1 || node.scrollWidth > node.clientWidth + 1;
+      if (taller) {
+        var style = window.getComputedStyle(node);
+        var scrollable = /auto|scroll|overlay/.test(style.overflowY) || /auto|scroll|overlay/.test(style.overflowX);
+        if (scrollable) return node;
+      }
+      node = node.parentElement;
+    }
+    return document.scrollingElement || document.documentElement;
+  }
+  var locatedItems = [];
+  function locateMarks(requestId) {
+    var marks = [];
+    for (var i = 0; i < locatedItems.length && i < 32; i++) {
+      var item = locatedItems[i] || {};
+      var node = null;
+      try { node = document.querySelector(String(item.selector || "")); } catch (e) { node = null; }
+      if (!node || !node.getBoundingClientRect) {
+        marks.push({ id: String(item.id || ""), missing: true });
+        continue;
+      }
+      var box = node.getBoundingClientRect();
+      marks.push({ id: String(item.id || ""), x: box.left, y: box.top, width: box.width, height: box.height });
+    }
+    sendRuntime("locate", requestId || "locate", { marks: marks });
+  }
+  document.addEventListener("click", function(event) {
+    var node = event.target;
+    if (node && node.nodeType !== 1) node = node.parentElement;
+    while (node && node !== document.body && String(node.tagName || "").toUpperCase() !== "A") node = node.parentElement;
+    if (!node || String(node.tagName || "").toUpperCase() !== "A") return;
+    var href = node.getAttribute("href") || "";
+    if (!href || /^(javascript:|mailto:|tel:)/i.test(href)) return;
+    var parsed;
+    try { parsed = new URL(href, document.baseURI); } catch (e) { return; }
+    if (parsed.protocol !== "https:" || parsed.hostname !== "preview.invalid") return;
+    event.preventDefault();
+    event.stopPropagation();
+    var path = parsed.pathname.replace(/^\\/+/, "");
+    if (!path) {
+      if (parsed.hash) {
+        var target = document.getElementById(decodeURIComponent(parsed.hash.slice(1)));
+        if (target && target.scrollIntoView) target.scrollIntoView();
+      }
+      return;
+    }
+    sendRuntime("open-path", "open-path", { url: parsed.href });
+  }, true);
   window.addEventListener("message", function(event){
     if (event.source !== parent) return;
     var data = event.data;
@@ -1456,7 +1549,13 @@ const PREVIEW_DIAG_BRIDGE = `(function(){
       return;
     }
     if (data.command === "scroll-by") {
-      window.scrollBy(Number(data.dx) || 0, Number(data.dy) || 0);
+      var scroller = scrollableAt(Number(data.x) || 0, Number(data.y) || 0);
+      if (scroller && scroller.scrollBy) scroller.scrollBy(Number(data.dx) || 0, Number(data.dy) || 0);
+      return;
+    }
+    if (data.command === "locate") {
+      locatedItems = Array.isArray(data.items) ? data.items.slice(0, 32) : [];
+      locateMarks(requestId);
       return;
     }
     if (data.command === "hit-test") {
@@ -1467,11 +1566,16 @@ const PREVIEW_DIAG_BRIDGE = `(function(){
       }
       var excerpt = String(target.innerText || target.getAttribute("alt") || "").replace(/\s+/g, " ").trim().slice(0, 256);
       var fingerprint = target.tagName.toLowerCase() + ":" + excerpt.slice(0, 80);
+      var hitBox = target.getBoundingClientRect();
       sendRuntime("hit-test", requestId, {
         selector: previewSelector(target).slice(0, 512),
         tag: target.tagName.toLowerCase().slice(0, 32),
         excerpt: excerpt,
-        domFingerprint: fingerprint.slice(0, 128)
+        domFingerprint: fingerprint.slice(0, 128),
+        x: hitBox.left,
+        y: hitBox.top,
+        width: hitBox.width,
+        height: hitBox.height
       });
       return;
     }
@@ -1746,6 +1850,7 @@ const PREVIEW_DIAG_BRIDGE = `(function(){
     scrollTimer = window.setTimeout(function(){
       scrollTimer = 0;
       send("log", { topic: "interaction", action: "scroll", x: Math.round(window.scrollX || 0), y: Math.round(window.scrollY || 0) });
+      if (locatedItems.length) locateMarks("locate");
     }, 200);
   }, true);
   ["pushState", "replaceState"].forEach(function(method){
