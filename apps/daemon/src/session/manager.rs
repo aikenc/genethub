@@ -35,8 +35,8 @@ use super::overview;
 use super::rounds::{self, RoundOutcome, RoundRecord, TrunkBuilder, TrunkItem, TrunkSummary};
 use super::store::{
     self, agent_title_fits_current, apply_catalog_title_repair, is_catalog_noise_title,
-    normalize_session_title, now_ms, prompt_title, title_from, ChatLog, ContextSeed, ContextSeedState,
-    HumanContinuation, ImportedSessionMeta, SessionMeta, Store, SESSION_FORMAT,
+    normalize_session_title, now_ms, prompt_title, title_from, ChatLog, ContextSeed,
+    ContextSeedState, HumanContinuation, ImportedSessionMeta, SessionMeta, Store, SESSION_FORMAT,
 };
 use crate::adapter::registry::Registry;
 use crate::adapter::usage::{self as token_usage};
