@@ -37,7 +37,7 @@ import { mediaTagsForTimeline, normalizeTags } from "./capability-preferences";
 import { attachmentPreviewUrl } from "./attachments";
 import {
   attributeRounds,
-  splitForwardEnvelope,
+  splitForwardMessage,
   type CapsuleMessage,
   type ForwardEnvelopeInfo,
   type ForwardSource,
@@ -351,9 +351,10 @@ export function TimelineView({
         absorbedCompactions,
       );
       const seen = new Set<string>();
+      const excerpts = new Set(state.historyExcerptIds ?? []);
       const selectable: SelectableMessage[] = [];
       for (const item of [...narrative, ...(finalAssistant ? [finalAssistant] : [])]) {
-        if (!isSelectableItem(item) || seen.has(item.id)) continue;
+        if (!isSelectableItem(item) || seen.has(item.id) || excerpts.has(item.id)) continue;
         seen.add(item.id);
         selectable.push(toSelectable(item));
       }
@@ -617,7 +618,7 @@ export function TimelineView({
                   <div className="flex justify-end">
                     <button
                       type="button"
-                      disabled={liveTurn || Boolean(state.historyExcerptIds?.length)}
+                      disabled={liveTurn}
                       className="text-xs text-accent underline decoration-dotted disabled:opacity-50"
                       onClick={() => {
                         const step = applySelectionAddMany(
@@ -678,7 +679,7 @@ export function TimelineView({
                       })
                     }
                     onSelect={
-                      !selection && turnSelectable.length > 0 && !state.historyExcerptIds?.length
+                      !selection && turnSelectable.length > 0
                         ? () => {
                             const ids = turnSelectable.map((message) => message.id);
                             const step = applySelectionAddMany(emptySelection(), ids);
@@ -1043,7 +1044,8 @@ function ForwardedHistoryCard({ text, info }: { text: string; info: ForwardEnvel
 function Item({ item }: { item: TimelineItem }) {
   switch (item.type) {
     case "userMessage": {
-      const forwarded = splitForwardEnvelope(item.text);
+      const forwardedParts = splitForwardMessage(item.text);
+      const forwarded = forwardedParts.some((part) => part.kind === "forward");
       return (
         <div className="flex flex-col items-end gap-1.5">
           {item.attachments.length > 0 ? (
@@ -1063,14 +1065,17 @@ function Item({ item }: { item: TimelineItem }) {
               })}
             </div>
           ) : null}
-          {forwarded ? <ForwardedHistoryCard text={forwarded.capsule} info={forwarded.info} /> : null}
-          {forwarded ? (
-            forwarded.rest ? (
-              <p className="max-w-[80%] whitespace-pre-wrap rounded-2xl bg-accent px-3 py-2 text-white">
-                {forwarded.rest}
-              </p>
-            ) : null
-          ) : item.text ? (
+          {forwarded
+            ? forwardedParts.map((part, index) =>
+                part.kind === "forward" ? (
+                  <ForwardedHistoryCard key={index} text={part.capsule} info={part.info} />
+                ) : (
+                  <p key={index} className="max-w-[80%] whitespace-pre-wrap rounded-2xl bg-accent px-3 py-2 text-white">
+                    {part.text}
+                  </p>
+                ),
+              )
+            : item.text ? (
             <p className="max-w-[80%] whitespace-pre-wrap rounded-2xl bg-accent px-3 py-2 text-white">
               {item.text}
             </p>

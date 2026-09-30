@@ -9,7 +9,6 @@ import {
   WorkspaceList,
 } from "./MachineCatalogPicker";
 import { IMAGE_TAG, routeTarget } from "./capability-preferences";
-import { ModelPicker } from "./ModelPicker";
 import { SessionPicker } from "./SessionPicker";
 import {
   buildForwardCapsule,
@@ -91,10 +90,7 @@ export function ForwardDialog({
     workspaceId,
     setWorkspaceId,
     tags,
-    setTags,
-    preferences,
     route,
-    pickRoute,
     loadingMachines,
     loadingCatalog,
     problem: machineProblem,
@@ -133,11 +129,12 @@ export function ForwardDialog({
   const [remoteSessions, setRemoteSessions] = useState<SessionSummary[]>([]);
   const [loadingSessions, setLoadingSessions] = useState(false);
   const [budget, setBudget] = useState<number>(DEFAULT_FORWARD_BUDGET);
-  const [fillDetail, setFillDetail] = useState(true);
+  const [includeToolDetails, setIncludeToolDetails] = useState(false);
   const [includeBlobBodies, setIncludeBlobBodies] = useState(false);
   const [building, setBuilding] = useState(true);
   const [problem, setProblem] = useState<string | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
+  const [optionsOpen, setOptionsOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const dialog = useRef<HTMLElement>(null);
 
@@ -201,7 +198,7 @@ export function ForwardDialog({
         const data: CapsuleData = { layers, trunks: {}, blobs: {} };
         const options = {
           budgetTokens: budget,
-          fillDetail,
+          includeToolDetails,
           includeBlobBodies,
           sourceAccessible: true,
         };
@@ -234,17 +231,21 @@ export function ForwardDialog({
     return () => {
       cancelled = true;
     };
-  }, [client, stableSource, stableMessages, stableRounds, budget, fillDetail, includeBlobBodies, fetchTrunkDetails, fetchBlobPayloads]);
+  }, [client, stableSource, stableMessages, stableRounds, budget, includeToolDetails, includeBlobBodies, fetchTrunkDetails, fetchBlobPayloads]);
 
   useEffect(() => {
     const dismiss = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || busy) return;
       event.preventDefault();
+      if (optionsOpen) {
+        setOptionsOpen(false);
+        return;
+      }
       onClose();
     };
     document.addEventListener("keydown", dismiss);
     return () => document.removeEventListener("keydown", dismiss);
-  }, [busy, onClose]);
+  }, [busy, onClose, optionsOpen]);
 
   const valid =
     built !== null &&
@@ -341,16 +342,23 @@ export function ForwardDialog({
         role="dialog"
         aria-modal="true"
         aria-labelledby="forward-title"
-        className="flex max-h-[min(88dvh,52rem)] w-full max-w-2xl flex-col overflow-hidden rounded-t-2xl border border-line-strong bg-surface shadow-2xl md:rounded-2xl"
+        className="flex max-h-[min(92dvh,44rem)] w-full max-w-lg flex-col overflow-hidden rounded-t-2xl border border-line-strong bg-surface shadow-2xl md:max-w-2xl md:rounded-2xl"
       >
         <header className="flex items-center gap-3 border-b border-line px-4 py-3">
           <div className="min-w-0 flex-1">
             <h2 id="forward-title" className="font-medium text-fg">
               转发 {stableMessages.length} 条消息
             </h2>
-            <p className="text-xs text-faint">
-              组装成一段受预算约束的上下文。本机目标放入输入框由你审阅后发出；其他机器会直接送达。
-            </p>
+            <p className="text-xs text-faint">本机放入输入框；其他机器直接送达。</p>
+            <button
+              type="button"
+              className="mt-1 block max-w-full truncate text-left text-xs text-accent"
+              onClick={() => setOptionsOpen(true)}
+            >
+              {BUDGET_LABELS[budget]}
+              {built ? ` · ${formatTokens(built.estimatedTokens)}` : ""}
+              {" · 预算和细节"}
+            </button>
           </div>
           <button
             type="button"
@@ -363,10 +371,10 @@ export function ForwardDialog({
           </button>
         </header>
 
-        <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-4">
+        <div className="min-h-0 w-full min-w-0 flex-1 space-y-3 overflow-x-hidden overflow-y-auto overscroll-contain px-4 py-3">
           <fieldset disabled={busy}>
-            <legend className="text-xs font-medium uppercase tracking-wide text-faint">去向</legend>
-            <div className="mt-2 grid grid-cols-2 gap-2">
+            <legend className="sr-only">去向</legend>
+            <div className="grid grid-cols-2 rounded-lg bg-raised p-0.5">
               {(
                 [
                   ["new", "新会话"],
@@ -375,7 +383,7 @@ export function ForwardDialog({
               ).map(([value, label]) => (
                 <label
                   key={value}
-                  className="flex cursor-pointer items-center justify-center rounded-xl border border-line px-3 py-2 text-sm has-[:checked]:border-accent has-[:checked]:bg-accent/10"
+                  className="flex min-h-9 cursor-pointer items-center justify-center rounded-md px-3 text-sm text-muted has-[:checked]:bg-surface has-[:checked]:text-fg"
                 >
                   <input
                     type="radio"
@@ -401,41 +409,19 @@ export function ForwardDialog({
           />
 
           {destination === "new" ? (
-            <>
-              <WorkspaceList
-                workspaces={catalog.workspaces}
-                selectedWorkspaceId={workspaceId}
-                disabled={busy || loadingCatalog}
-                loading={loadingCatalog}
-                onSelect={setWorkspaceId}
-              />
-
-              <fieldset disabled={busy || loadingCatalog}>
-                <legend className="text-xs font-medium uppercase tracking-wide text-faint">模型选择</legend>
-                <div className="mt-2">
-              <ModelPicker
-                agents={catalog.agents}
-                preferences={preferences}
-                filterTags={tags}
-                automaticTags={automaticTags}
-                selected={{
-                  agentId: route?.agent.id ?? null,
-                  modelId: route?.modelId ?? null,
-                }}
-                disabled={busy || loadingCatalog}
-                onFilterTags={setTags}
-                onSelect={pickRoute}
-              />
-                </div>
-              </fieldset>
-            </>
+            <WorkspaceList
+              workspaces={catalog.workspaces}
+              selectedWorkspaceId={workspaceId}
+              disabled={busy || loadingCatalog}
+              loading={loadingCatalog}
+              onSelect={setWorkspaceId}
+            />
           ) : (
             <fieldset disabled={busy || loadingSessions}>
               <legend className="text-xs font-medium uppercase tracking-wide text-faint">目标会话</legend>
               <div className="mt-2">
                 <SessionPicker
                   sessions={onSourceMachine ? sessions : remoteSessions}
-                  agents={onSourceMachine ? agents : catalog.agents}
                   workspaces={onSourceMachine ? workspaces : catalog.workspaces}
                   selectedId={targetSessionId}
                   onSelect={setTargetSessionId}
@@ -450,7 +436,32 @@ export function ForwardDialog({
               </div>
             </fieldset>
           )}
+        </div>
 
+        {optionsOpen ? (
+          <div
+            className="fixed inset-0 z-[90] flex items-end justify-center bg-black/60 md:items-center md:p-4"
+            onMouseDown={(event) => {
+              if (event.target === event.currentTarget) setOptionsOpen(false);
+            }}
+          >
+            <section
+              role="dialog"
+              aria-modal="true"
+              aria-label="预算和细节"
+              className="max-h-[min(88dvh,40rem)] w-full max-w-lg overflow-y-auto rounded-t-2xl border border-line-strong bg-surface px-4 py-3 shadow-2xl md:rounded-2xl"
+            >
+              <div className="mb-3 flex items-center gap-3">
+                <h3 className="min-w-0 flex-1 font-medium text-fg">预算和细节</h3>
+                <button
+                  type="button"
+                  aria-label="关闭预算和细节"
+                  className="flex h-10 w-10 items-center justify-center rounded-full text-xl text-muted hover:bg-raised hover:text-fg"
+                  onClick={() => setOptionsOpen(false)}
+                >
+                  ×
+                </button>
+              </div>
           <fieldset disabled={busy}>
             <legend className="text-xs font-medium uppercase tracking-wide text-faint">预算</legend>
             <div className="mt-2 grid grid-cols-4 gap-2">
@@ -479,11 +490,11 @@ export function ForwardDialog({
               <label className="flex cursor-pointer items-center gap-2 text-sm text-fg">
                 <input
                   type="checkbox"
-                  checked={fillDetail}
-                  onChange={(event) => setFillDetail(event.target.checked)}
+                  checked={includeToolDetails}
+                  onChange={(event) => setIncludeToolDetails(event.target.checked)}
                   className="h-4 w-4 accent-accent"
                 />
-                填充工作明细（trunk 独白与工具概览，预算内自动填充）
+                附带 toolcall 详情（工具列表；超出预算时先去掉列表，保留独白）
               </label>
               <label className="flex cursor-pointer items-center gap-2 text-sm text-fg">
                 <input
@@ -517,8 +528,8 @@ export function ForwardDialog({
                     built.stats.trunkTitlesTotal > 0
                       ? `trunk 标题 ${built.stats.trunkTitlesKept}/${built.stats.trunkTitlesTotal}`
                       : null,
-                    fillDetail && built.stats.trunkTitlesTotal > 0
-                      ? `明细填充 ${built.stats.detailFilledTrunks} 段${
+                    includeToolDetails && built.stats.trunkTitlesTotal > 0
+                      ? `toolcall 详情 ${built.stats.detailFilledTrunks} 段${
                           built.stats.detailOmittedTrunks > 0
                             ? `、省略 ${built.stats.detailOmittedTrunks} 段`
                             : ""
@@ -551,13 +562,15 @@ export function ForwardDialog({
               <p className="text-muted">正在组装…</p>
             )}
           </div>
+            </section>
+          </div>
+        ) : null}
 
-          {problem || machineProblem ? (
-            <p role="alert" className="rounded-xl border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
-              {problem ?? machineProblem}
-            </p>
-          ) : null}
-        </div>
+        {problem || machineProblem ? (
+          <p role="alert" className="mx-4 mb-2 rounded-xl border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
+            {problem ?? machineProblem}
+          </p>
+        ) : null}
 
         <footer className="flex justify-end gap-2 border-t border-line px-4 py-3">
           <button

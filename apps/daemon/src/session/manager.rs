@@ -35,7 +35,7 @@ use super::overview;
 use super::rounds::{self, RoundOutcome, RoundRecord, TrunkBuilder, TrunkItem, TrunkSummary};
 use super::store::{
     self, agent_title_fits_current, apply_catalog_title_repair, is_catalog_noise_title,
-    normalize_session_title, now_ms, title_from, ChatLog, ContextSeed, ContextSeedState,
+    normalize_session_title, now_ms, prompt_title, title_from, ChatLog, ContextSeed, ContextSeedState,
     HumanContinuation, ImportedSessionMeta, SessionMeta, Store, SESSION_FORMAT,
 };
 use crate::adapter::registry::Registry;
@@ -2875,7 +2875,7 @@ impl SessionManager {
                 self.store.save_meta(&meta)?;
             }
             if needs_title {
-                if let Some(title) = title_from(&text) {
+                if let Some(title) = prompt_title(&text) {
                     {
                         let mut meta = live.meta.lock().await;
                         meta.title = Some(title.clone());

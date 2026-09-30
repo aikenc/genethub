@@ -21,6 +21,8 @@ export function AgentList({
   deviceName = "",
   rootIds,
   memberIds,
+  pick = false,
+  listLabel = "项目列表",
 }: {
   rootIds?: string[];
   memberIds?: string[];
@@ -33,6 +35,9 @@ export function AgentList({
   density?: ListDensity;
   actions?: boolean;
   deviceName?: string;
+  /** Selection rows: same project list, without session activity or management. */
+  pick?: boolean;
+  listLabel?: string;
 }) {
   const tree = useMemo(() => buildAgentSpaceTree(workspaces), [workspaces]);
   const wb = useWorkbench();
@@ -85,6 +90,7 @@ export function AgentList({
       onRemove={() => wb.removeWorkspace(node.workspace.id)}
       density={density}
       actions={actions}
+      pick={pick}
       childCount={0}
     >
       {null}
@@ -94,7 +100,8 @@ export function AgentList({
     <ul
       data-density={density}
       className="entity-list agent-list space-y-1"
-      aria-label="项目列表"
+      role={pick ? "listbox" : undefined}
+      aria-label={listLabel}
     >
       {sorted(visible).map((node) => row(node))}
       {!visible.length && (

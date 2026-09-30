@@ -3,7 +3,7 @@ import type {
   AgentSelectionPreferences,
   WorkspaceInfo,
 } from "@genehub/proto";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -179,8 +179,8 @@ describe("ForkDialog", () => {
     expect(screen.getByText("重建会话")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "重建到所选目标" })).toBeEnabled();
     expect(screen.getByRole("option", { name: /GeneHub/ })).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByRole("option", { name: /GeneHub/ }).querySelector("[data-workspace-icon=folder]")).toBeTruthy();
-    expect(screen.getByRole("option", { name: /Suite/ }).querySelector("[data-workspace-icon=workspace]")).toBeTruthy();
+    expect(within(screen.getByRole("option", { name: "GeneHub" })).getByRole("img", { name: "GeneHub的头像" })).toBeInTheDocument();
+    expect(within(screen.getByRole("option", { name: "Suite" })).getByRole("img", { name: "Suite的头像" })).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "重建到所选目标" }));
     await waitFor(() => expect(onConfirm).toHaveBeenCalledWith({
@@ -273,6 +273,7 @@ describe("ForkDialog", () => {
       />,
     );
 
+    await userEvent.click(await screen.findByRole("button", { name: "选择目标机器" }));
     expect(await screen.findByRole("radio", { name: "GPU 工作站" })).toBeEnabled();
     expect(screen.getByRole("radio", { name: "离线机器 离线" })).toBeDisabled();
     await userEvent.click(screen.getByRole("radio", { name: "GPU 工作站" }));

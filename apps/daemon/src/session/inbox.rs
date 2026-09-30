@@ -1,5 +1,5 @@
 //! Durable admission and serialized delivery inside the existing Session.
-use super::super::store::{InboxEntry, SessionInbox};
+use super::super::store::{prompt_title, InboxEntry, SessionInbox};
 use super::*;
 use crate::state::Shared;
 
@@ -212,7 +212,7 @@ impl SessionManager {
             }
             next.message_preview = visible_message_preview(std::slice::from_ref(&item));
             let title = if next.title.is_none() && source == "user" {
-                title_from(&text)
+                prompt_title(&text)
             } else {
                 None
             };

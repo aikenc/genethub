@@ -5,8 +5,8 @@ import type {
 } from "@genehub/proto";
 import { useEffect, useRef, useState } from "react";
 
-import { WorkspaceIcon } from "../workspace/WorkspaceIcon";
-import { buildAgentSpaceTree, flattenAgentSpaceTree } from "../workspace/agent-space-tree";
+import { ListSearch } from "../ui/ListLayout";
+import { AgentList } from "../workspace/AgentList";
 import {
   matchingTagRoutes,
   normalizeAgentPreferences,
@@ -198,40 +198,80 @@ export function MachineGrid({
   onPick(machine: MachineOption): void;
   loading?: boolean;
 }) {
-  return (
-    <fieldset disabled={disabled}>
-      <legend className="text-xs font-medium uppercase tracking-wide text-faint">目标机器</legend>
-      <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
-        {machines.map((machine) => (
-          <label
-            key={machine.id}
-            className="flex min-h-14 cursor-pointer items-center gap-2 rounded-xl border border-line px-3 py-2 text-sm has-[:checked]:border-accent has-[:checked]:bg-accent/10 has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-50"
-          >
-            <input
-              type="radio"
-              name="machine-catalog-machine"
-              value={machine.id}
-              aria-label={`${machine.label}${machine.online === false ? " 离线" : ""}`}
-              checked={machine.id === selectedMachineId}
-              disabled={machine.online === false}
-              onChange={() => onPick(machine)}
-              className="sr-only"
-            />
-            <span
-              className={`h-2 w-2 shrink-0 rounded-full ${machine.online === false ? "bg-faint" : "bg-ok"}`}
-              aria-hidden
-            />
-            <span className="min-w-0 flex-1">
-              <span className="block truncate text-fg">{machine.label}</span>
-              <span className="block text-[10px] text-faint">
-                {machine.id === sourceMachineId ? "当前机器" : machine.online === false ? "离线" : "可连接"}
-              </span>
-            </span>
-          </label>
-        ))}
+  const [open, setOpen] = useState(false);
+  const selected = machines.find((machine) => machine.id === selectedMachineId) ?? machines[0];
+  const note = (machine: MachineOption) =>
+    machine.id === sourceMachineId ? "当前机器" : machine.online === false ? "离线" : "";
+
+  if (machines.length <= 1) {
+    return (
+      <div className="flex min-h-10 items-center gap-2 text-sm">
+        <span className="text-[10px] uppercase tracking-wide text-faint">机器</span>
+        <span
+          className={`h-1.5 w-1.5 shrink-0 rounded-full ${selected?.online === false ? "bg-faint" : "bg-ok"}`}
+          aria-hidden
+        />
+        <span className="min-w-0 flex-1 truncate text-fg">{selected?.label ?? "当前机器"}</span>
+        <span className="shrink-0 text-[10px] text-faint">{selected ? note(selected) : ""}</span>
+        {loading ? <span className="shrink-0 text-[10px] text-faint">正在读取机器列表…</span> : null}
       </div>
-      {loading ? <p className="mt-2 text-xs text-faint">正在读取机器列表…</p> : null}
-    </fieldset>
+    );
+  }
+
+  return (
+    <div>
+      <button
+        type="button"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label="选择目标机器"
+        disabled={disabled}
+        className="flex min-h-10 w-full items-center gap-2 text-left text-sm disabled:opacity-50"
+        onClick={() => setOpen((shown) => !shown)}
+      >
+        <span className="text-[10px] uppercase tracking-wide text-faint">机器</span>
+        <span
+          className={`h-1.5 w-1.5 shrink-0 rounded-full ${selected?.online === false ? "bg-faint" : "bg-ok"}`}
+          aria-hidden
+        />
+        <span className="min-w-0 flex-1 truncate text-fg">{selected?.label ?? "选择机器"}</span>
+        <span className="shrink-0 text-[10px] text-faint">{selected ? note(selected) : ""}</span>
+        <span className="shrink-0 text-faint" aria-hidden>
+          {open ? "▴" : "▾"}
+        </span>
+      </button>
+      {open ? (
+        <div role="listbox" aria-label="目标机器" className="border-t border-line py-1">
+          {machines.map((machine) => (
+            <label
+              key={machine.id}
+              className="flex min-h-10 cursor-pointer items-center gap-2 px-1 text-sm has-[:checked]:text-fg has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-50"
+            >
+              <input
+                type="radio"
+                name="machine-catalog-machine"
+                value={machine.id}
+                aria-label={`${machine.label}${machine.online === false ? " 离线" : ""}`}
+                checked={machine.id === selectedMachineId}
+                disabled={machine.online === false}
+                onChange={() => {
+                  onPick(machine);
+                  setOpen(false);
+                }}
+                className="sr-only"
+              />
+              <span
+                className={`h-1.5 w-1.5 shrink-0 rounded-full ${machine.online === false ? "bg-faint" : "bg-ok"}`}
+                aria-hidden
+              />
+              <span className="min-w-0 flex-1 truncate">{machine.label}</span>
+              <span className="shrink-0 text-[10px] text-faint">{note(machine)}</span>
+            </label>
+          ))}
+        </div>
+      ) : null}
+      {loading ? <p className="mt-1 text-xs text-faint">正在读取机器列表…</p> : null}
+    </div>
   );
 }
 
@@ -248,45 +288,49 @@ export function WorkspaceList({
   loading?: boolean;
   onSelect(workspaceId: string): void;
 }) {
-  const tree = buildAgentSpaceTree(workspaces);
-  const ordered = flattenAgentSpaceTree(tree);
+  const [query, setQuery] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
   return (
     <fieldset disabled={disabled}>
       <legend className="text-xs font-medium uppercase tracking-wide text-faint">目标项目</legend>
       {loading ? (
         <p className="mt-2 text-xs text-faint">正在读取目标机器…</p>
       ) : workspaces.length > 0 ? (
-        <div
-          role="listbox"
-          aria-label="目标项目"
-          className="mt-2 max-h-48 space-y-1 overflow-y-auto rounded-xl border border-line p-1"
-        >
-          {ordered.map((workspace) => {
-            const selected = workspace.id === selectedWorkspaceId;
-            return (
-              <button
-                key={workspace.id}
-                type="button"
-                role="option"
-                aria-selected={selected}
-                title={workspace.root}
-                onClick={() => onSelect(workspace.id)}
-                className={`flex w-full min-w-0 items-center gap-2 rounded-lg px-2 py-2 text-left text-sm ${
-                  selected
-                    ? "bg-accent/10 text-fg"
-                    : "text-muted hover:bg-raised hover:text-fg"
-                }`}
-              >
-                <WorkspaceIcon workspace={workspace} />
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-fg">
-                    {tree.breadcrumbById[workspace.id] ?? workspace.name}
-                  </span>
-                  <span className="block truncate text-[10px] text-faint">{workspace.root}</span>
-                </span>
-              </button>
-            );
-          })}
+        <div className="mt-2">
+          {workspaces.length > 8 && !searchOpen ? (
+            <button
+              type="button"
+              aria-label="搜索项目"
+              aria-expanded={false}
+              className="mb-2 flex min-h-10 items-center text-sm text-muted"
+              onClick={() => setSearchOpen(true)}
+            >
+              搜索项目
+            </button>
+          ) : null}
+          {searchOpen ? (
+            <div className="mb-2">
+              <ListSearch
+                label="搜索项目"
+                value={query}
+                onChange={setQuery}
+                onClose={() => {
+                  setSearchOpen(false);
+                  setQuery("");
+                }}
+              />
+            </div>
+          ) : null}
+          <AgentList
+            pick
+            listLabel="目标项目"
+            workspaces={workspaces}
+            selectedId={selectedWorkspaceId}
+            density="compact"
+            actions={false}
+            query={query}
+            onPick={onSelect}
+          />
         </div>
       ) : (
         <p className="mt-2 rounded-xl border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
