@@ -218,24 +218,31 @@ export function PreviewReviewChrome({
       <MarkdownAnnotationContext.Provider value={context.active && kind === "markdown" ? pickMarkdown : null}>
         <div className="relative flex min-h-0 flex-1 flex-col">
           {available ? (
-            <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-1.5 text-xs">
+            <div className="pointer-events-none absolute left-2 top-2 z-20 flex gap-1">
               <button
                 type="button"
                 aria-pressed={context.active}
                 disabled={!sessionId}
-                title={sessionId ? "在当前文件上批注" : "先从会话打开这个文件"}
-                className="rounded-full border border-line px-3 py-1 disabled:opacity-40"
+                aria-label={context.active ? "完成批注" : "进入批注"}
+                title={sessionId ? (context.active ? "完成批注" : "进入批注") : "先从会话打开这个文件"}
+                className="pointer-events-auto flex h-7 items-center rounded-full border border-line bg-surface/95 px-2.5 text-xs text-fg shadow-sm disabled:opacity-40"
                 onClick={() => {
                   setActive((value) => !value);
                   setPending(null);
                 }}
               >
-                {context.active ? "完成批注" : "进入批注"}
+                {context.active ? "完成" : "批注"}
               </button>
-              <button type="button" className="rounded-full border border-line px-3 py-1" onClick={() => setDrawer(true)}>
-                草稿 {draft.annotations.length}
-              </button>
-              {!sessionId ? <span className="text-muted">这个预览没有绑定会话，只能浏览。</span> : null}
+              {draft.annotations.length > 0 ? (
+                <button
+                  type="button"
+                  className="pointer-events-auto flex h-7 items-center rounded-full border border-line bg-surface/95 px-2.5 text-xs text-muted shadow-sm"
+                  aria-label={`查看批注草稿 ${draft.annotations.length}`}
+                  onClick={() => setDrawer(true)}
+                >
+                  {draft.annotations.length}
+                </button>
+              ) : null}
             </div>
           ) : null}
           {problem && !pending ? <p role="alert" className="px-3 py-1 text-xs text-danger">{problem}</p> : null}

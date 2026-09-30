@@ -140,11 +140,19 @@ function locatorSegment(value: string, name: string): string {
 
 function decodeCanonical(raw: string, name: string): string {
   if (!raw) throw new TypeError(`empty ${name}`);
-  const value = decodeURIComponent(raw);
-  // URL percent escapes are case-insensitive. Everything else must round-trip
-  // exactly so a locator never has two path-boundary interpretations.
-  if (encodeURIComponent(value).toUpperCase() !== raw.toUpperCase()) {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(raw);
+  } catch {
     throw new TypeError(`non-canonical ${name}`);
   }
-  return value;
+  // URL percent escapes are case-insensitive. A still-encoded segment must
+  // round-trip exactly so `%2E%2E` and `%2F` cannot become a second path.
+  if (encodeURIComponent(decoded).toUpperCase() === raw.toUpperCase()) {
+    return decoded;
+  }
+  // `location.pathname` is already decoded. A literal segment with no escape
+  // marker is the file name itself, including CJK characters and spaces.
+  if (!raw.includes("%")) return raw;
+  throw new TypeError(`non-canonical ${name}`);
 }
