@@ -319,8 +319,7 @@ defineSpecialty({
     stage = "wait for WM and acceptance";
     await t.tools.waitUntil(async () => {
       recovery = (await history()).find(run => run.id === recovery!.id);
-      return recovery?.status === "blocked" && (humanB || humanF || cancelExit || recovery.reason?.includes("controlled exit") === true);
-    }, 75_000);
+      return recovery?.status === "blocked" && (humanB || humanF || cancelExit || recovery.reason?.includes("controlled exit") === true);    }, 75_000);
     if (cancelExit) {
       t.assertions.assert(!recovery!.humanExit, "PM cancellation recommendation was incorrectly classified as Human exit d");
       const business = (await history()).find(run => run.id === originalId)!;
@@ -376,8 +375,7 @@ defineSpecialty({
     "PM answer was missing or repeated in the committed journal");
 
     stage = "wait for PM to settle after recovery";
-    await sendWhenAccepted(pm, "CONTINUE_RECOVERY_LIFECYCLE");
-    stage = "wait for business successor";
+    await sendWhenAccepted(pm, "CONTINUE_RECOVERY_LIFECYCLE");    stage = "wait for business successor";
     await t.tools.waitUntil(async () => {
       const runs = await history();
       return runs.some(run => run.taskId === "candidate-successor" && run.status === "completed")

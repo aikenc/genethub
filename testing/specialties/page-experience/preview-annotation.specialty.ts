@@ -11,7 +11,7 @@ defineSpecialty({
   expectedDurationMs: 30_000, timeoutMs: 120_000, retention: true,
   resources: { environments: 1, cpu: 2, memoryMb: 1536, io: 1, browser: 1, pool: "browser" },
   surfaces: ["workbench-ui", "daemon", "asset-preview"],
-  productInterfaces: ["@genehub/workbench", "session.previewAnnotations.get"],
+  productInterfaces: ["@genehub/workbench", "preview.feedback"],
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
 }, async t => {
   const paragraphs = Array.from({ length: 20 }, (_, n) => `<p id="paragraph-${n}" style="margin:24px 0;min-height:100px">Section ${n}: content for scrolling and annotation.</p>`).join("");
@@ -35,13 +35,13 @@ defineSpecialty({
     const checkRow = async () => {
       const header = page.getByLabel("预览工具栏", { exact: true });
       const boxes = await header.locator("button:visible, summary:visible").evaluateAll(nodes => nodes.map(node => {
-        const r = node.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height };
+        const r = node.getBoundingClientRect(); return { name: node.getAttribute("aria-label") ?? node.textContent, x: r.x, y: r.y, width: r.width, height: r.height };
       }));
       t.assertions.assert(boxes.length >= 4 && Math.max(...boxes.map(b => b.y + b.height / 2)) - Math.min(...boxes.map(b => b.y + b.height / 2)) < 3, `Preview controls are not on one row: ${JSON.stringify(boxes)}`);
       for (const [i, box] of boxes.entries()) for (const other of boxes.slice(i + 1))
         t.assertions.assert(box.x + box.width <= other.x + 1 || other.x + other.width <= box.x + 1, "Preview controls overlap");
       const geometry = await header.evaluate(node => ({ width: node.clientWidth, scrollWidth: node.scrollWidth, height: node.getBoundingClientRect().height }));
-      t.assertions.assert(geometry.scrollWidth <= geometry.width + 1 && geometry.height < 50, `toolbar geometry: ${JSON.stringify(geometry)}`);
+      t.assertions.assert(geometry.scrollWidth <= geometry.width + 1 && geometry.height < 50, `toolbar geometry: ${JSON.stringify(geometry)} controls=${JSON.stringify(boxes)}`);
     };
     await openFile("review.md");
     for (const width of [320, 430]) { await page.setViewportSize({ width, height: 775 }); await checkRow(); }
@@ -91,14 +91,24 @@ defineSpecialty({
     await cdp.detach();
     await page.getByRole("textbox", { name: "批注", exact: true }).fill("Keep this section readable");
     await page.getByRole("button", { name: "加入草稿", exact: true }).click();
-    await t.tools.waitUntil(async () => {
-      const reply = await opened.client.call({ type: "session.previewAnnotations.get", payload: { sessionId: session } });
-      return reply?.type === "previewAnnotations" && reply.data.annotations.some(note => note.comment === "Keep this section readable" && note.target.kind === "htmlElement" && note.target.selector === "p#paragraph-0");
-    }, 5000);
-    t.assertions.assert(await page.getByRole("button", { name: "查看批注", exact: true }).count() === 0, "offscreen note stuck to viewport top");
     await page.getByRole("button", { name: "完成批注", exact: true }).click();
+    await page.getByRole("button", { name: "提交预览反馈", exact: true }).click();
+    await page.getByText("Keep this section readable", { exact: true }).waitFor();
+    await page.getByRole("button", { name: "提交反馈", exact: true }).click();
+    const receipt = page.getByRole("textbox", { name: "可复制的预览反馈", exact: true });
+    await receipt.waitFor();
+    const id = (await receipt.inputValue()).match(/pf_[a-f0-9]{32}/)![0];
+    const saved = await opened.client.call({ type: "preview.feedback", payload: { workspaceId: opened.workspaceId, operation: {kind: "read", id} } });
+    t.assertions.assert(saved?.type === "previewFeedback" && saved.data.kind === "receipt" && saved.data.data.annotations.some(note => note.comment === "Keep this section readable" && note.target.kind === "htmlElement" && note.target.selector === "p#paragraph-0"), "selected HTML note was not persisted in file feedback");
+    await page.getByRole("button", { name: "关闭反馈", exact: true }).click();
+    t.assertions.assert(await page.getByRole("button", { name: "查看批注", exact: true }).count() === 0, "offscreen note stuck to viewport top");
     await frame.locator("#action").click();
     t.assertions.assert(await frame.locator("#action").innerText() === "Activated", "browse mode did not restore HTML interaction");
+    const popupEvent = page.waitForEvent("popup");
+    await page.getByRole("button", {name: "新窗口打开", exact: true}).click();
+    const popup = await popupEvent;
+    t.assertions.assert(await page.getByRole("dialog", {name: "文件预览", exact: true}).isVisible(), "external open minimized the original preview");
+    await popup.close();
     await page.screenshot({ path: path.join(process.env.TESTCTL_BROWSER_ARTIFACTS!, "preview-toolbar-430.png") });
     t.note("Real session MD/H5 links, 320/430px toolbar, menu, wheel/touch, moving selection, daemon note save and browse restore passed; Chromium, not real iPhone WebKit.");
   } finally { await browser?.close(); opened.client.close(); opened.daemon.stop(); await opened.mock.stop(); }

@@ -13,7 +13,8 @@
     "isolatedModules": true,
     "noEmit": true,
     "types": ["node"],
-    "allowImportingTsExtensions": true
+    "allowImportingTsExtensions": true,
+    "paths": { "@genehub/proto": ["../packages/proto/bindings/index.ts"] }
   },
   "include": ["bin", "infrastructure", "framework", "journeys", "specialties", "e2e", "policies"]
 }
