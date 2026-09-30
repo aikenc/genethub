@@ -167,9 +167,6 @@ fn interpreter_script_path(script: &Path) -> String {
     }
 }
 
-fn resolve_interpreter(interpreter: &str) -> PathBuf {
-    crate::adapter::find_executable(interpreter).unwrap_or_else(|| PathBuf::from(interpreter))
-}
 
 /// Runs one script and returns its parsed result.
 ///
@@ -264,6 +261,10 @@ pub(crate) async fn run(
             tail(&stderr)
         )
     })
+}
+
+fn resolve_interpreter(interpreter: &str) -> PathBuf {
+    crate::adapter::find_executable(interpreter).unwrap_or_else(|| PathBuf::from(interpreter))
 }
 
 fn parse(stdout: &[u8]) -> Result<ScriptResult> {
@@ -442,10 +443,7 @@ mod tests {
                 script: "scripts/probe.sh".into(),
                 args: Vec::new(),
                 interpreter: Some(shell_interpreter()),
-                env: BTreeMap::from([(
-                    "DEPOT".into(),
-                    elsewhere.to_string_lossy().replace('\\', "/"),
-                )]),
+                env: BTreeMap::from([("DEPOT".into(), interpreter_script_path(&elsewhere))]),
                 cwd: Some("work".into()),
                 input: Some(serde_json::Value::Null),
                 timeout_seconds: Some(30),

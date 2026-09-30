@@ -3,6 +3,7 @@
 //! The Web/guest can request `check` or `apply`. They cannot name a URL, path,
 //! version, channel or key.
 
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -493,7 +494,6 @@ fn get_bytes(url: &str, limit: usize) -> Result<Vec<u8>> {
     }
     // Stop reading at the boundary even when a source omits Content-Length
     // or lies about its size. Reading the whole body before checking is unbounded.
-    use std::io::Read;
     let mut bytes = Vec::new();
     response.take((limit + 1) as u64).read_to_end(&mut bytes)?;
     if bytes.len() > limit {

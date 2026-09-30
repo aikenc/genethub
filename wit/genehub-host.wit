@@ -226,6 +226,22 @@ interface component-update {
   apply: func(request-id: string) -> result<_, string>;
 }
 
+/// CPU-heavy image decoding runs on a bounded native worker. The guest polls
+/// instead of awaiting a host import, so other sessions keep making progress.
+interface image-preview {
+  record image-result {
+    bytes: list<u8>,
+    media-type: string,
+    width: u32,
+    height: u32,
+  }
+  resource job {
+    /// `none` while work is pending; dropping the job discards its result.
+    poll: func() -> result<option<image-result>, string>;
+  }
+  resize: func(bytes: list<u8>, edge: u16) -> result<job, string>;
+}
+
 /// The one v2 artifact. A single component carries both entries; the shell
 /// picks one per OS process (`genehub-host-dev run --entry daemon|agent`).
 world daemon {
@@ -236,6 +252,7 @@ world daemon {
   import fs-perms;
   import isolation;
   import component-update;
+  import image-preview;
   /// Resident daemon. Returns "reload" or "shutdown".
   export run: func() -> result<string, string>;
   /// Independent OS process: same artifact, agent entry.

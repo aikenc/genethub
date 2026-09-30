@@ -32,6 +32,13 @@
       "startWithoutModelCatalog": true
     },
     {
+      "ids": ["codebuddy"],
+      "label": "CodeBuddy",
+      "glyph": "B",
+      "modeKind": "permission",
+      "startWithoutModelCatalog": true
+    },
+    {
       "ids": ["codex", "acp:codex", "acp:codex-acp"],
       "label": "Codex",
       "glyph": "C",

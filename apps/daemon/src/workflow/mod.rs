@@ -54,6 +54,7 @@ pub(crate) fn activation_choice(
 mod facts;
 pub(crate) mod observability;
 mod script;
+mod storage;
 mod structured;
 mod supervision;
 mod view_sources;
@@ -694,6 +695,9 @@ impl RuntimeStore {
         if let Some(package_id) = package_id {
             for segment in package_id.split('/') {
                 validate_id(segment, "Workflow 包 id 片段")?;
+                if matches!(segment, "." | "..") {
+                    bail!("Workflow 包 id 不能含路径导航片段");
+                }
             }
         }
         let project_root = project_root
@@ -756,43 +760,7 @@ impl RuntimeStore {
     }
 
     fn executor_directory(&self, relative: &Path, create: bool) -> Result<PathBuf> {
-        let executor_root = match self.package_id.as_deref() {
-            Some(id) => {
-                // Reading an active snapshot must not depend on the source
-                // package still being present. Pin its storage location when
-                // materializing it; both old and new locations remain checked
-                // project-relative paths, with no symlink traversal.
-                let binding = self
-                    .directory(&self.activation_scope()?, create)?
-                    .join("executor-storage.json");
-                let source = package::load(&self.project_root, id);
-                let relative = if create {
-                    let relative = source?.executor_relative()?;
-                    crate::config::save_private(&binding, &serde_json::to_vec(&relative)?)?;
-                    relative
-                } else {
-                    match crate::config::sensitive_metadata(&binding) {
-                        Ok(metadata) => {
-                            crate::config::reject_link_or_reparse(&binding, &metadata)?;
-                            if !metadata.is_file() {
-                                bail!("Executor storage binding 不是普通文件");
-                            }
-                            ensure_record_size("Executor storage binding", metadata.len(), 4096)?;
-                            serde_json::from_slice::<Option<String>>(&fs::read(&binding)?)?
-                        }
-                        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                            source?.executor_relative()?
-                        }
-                        Err(error) => return Err(error.into()),
-                    }
-                };
-                match relative {
-                    Some(relative) => self.project_file(&relative)?,
-                    None => self.project_root.clone(),
-                }
-            }
-            None => self.project_root.clone(),
-        };
+        let executor_root = self.executor_root(create)?;
         if create && executor_root != self.project_root {
             let home = executor_root.join(".genethub");
             crate::config::ensure_real_directory(&home)?;
@@ -1235,25 +1203,30 @@ pub(crate) fn activate_package_source(
 /// because "which pipeline is this" is a question the platform cannot answer
 /// for a project that deliberately runs several.
 pub(crate) fn resolve_package_id(project_root: &Path, requested: Option<&str>) -> Result<String> {
-    let packages = package::discover(project_root)?;
     if let Some(requested) = requested {
-        return packages
-            .into_iter()
-            .find(|entry| entry.id == requested)
-            .map(|entry| entry.id)
-            .ok_or_else(|| anyhow!("Workflow 包不存在：{requested}；用 `workflow list` 查看候选"));
+        let runtime =
+            RuntimeStore::for_package(project_root, "inspection", project_root, requested)?;
+        if load_activation(&runtime)?.is_some() {
+            return Ok(requested.to_string());
+        }
+        return package::load(project_root, requested).map(|entry| entry.id);
     }
+    let mut packages = package::discover(project_root)?
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect::<BTreeSet<_>>();
+    packages.extend(storage::active_package_ids(project_root)?);
     match packages.len() {
         0 => bail!(
             "项目尚未 clone 任何 Workflow 包；把包 clone 到 {} 下再重试",
             package::PACKAGES_DIR
         ),
-        1 => Ok(packages.into_iter().next().expect("checked above").id),
+        1 => Ok(packages.into_iter().next().expect("checked above")),
         _ => bail!(
             "项目有多个 Workflow 包，请点名其中一个：{}",
             packages
                 .iter()
-                .map(|entry| entry.id.as_str())
+                .map(String::as_str)
                 .collect::<Vec<_>>()
                 .join("、")
         ),
@@ -1266,21 +1239,34 @@ pub(crate) fn resolve_flow_id(
     package_id: &str,
     requested: Option<&str>,
 ) -> Result<String> {
-    let package = package::load(project_root, package_id)?;
+    let flow_ids = match package::load(project_root, package_id) {
+        Ok(package) => package.flow_ids,
+        Err(source_error) => {
+            let runtime =
+                RuntimeStore::for_package(project_root, "inspection", project_root, package_id)?;
+            let Some(activation) = load_activation(&runtime)? else {
+                return Err(source_error);
+            };
+            load_candidate(&runtime, &activation.active_digest)?
+                .workflows
+                .into_keys()
+                .collect::<Vec<_>>()
+        }
+    };
     if let Some(requested) = requested {
-        if !package.flow_ids.iter().any(|id| id == requested) {
+        if !flow_ids.iter().any(|id| id == requested) {
             bail!(
                 "Workflow 包 {package_id} 中不存在流程 {requested}；候选：{}",
-                package.flow_ids.join("、")
+                flow_ids.join("、")
             );
         }
         return Ok(requested.to_string());
     }
-    match package.flow_ids.len() {
-        1 => Ok(package.flow_ids.into_iter().next().expect("checked above")),
+    match flow_ids.len() {
+        1 => Ok(flow_ids.into_iter().next().expect("checked above")),
         _ => bail!(
             "Workflow 包 {package_id} 有多条流程，请用 --workflow 点名：{}",
-            package.flow_ids.join("、")
+            flow_ids.join("、")
         ),
     }
 }
@@ -4230,6 +4216,13 @@ fn load_candidate(runtime: &RuntimeStore, digest: &str) -> Result<DcgCandidateRe
     if candidate.digest != digest {
         bail!("DCG Candidate 文件名与内容摘要不匹配");
     }
+    if candidate.package.id != runtime.require_package()? {
+        bail!(
+            "Candidate 属于 Workflow 包 {}，不能在包 {} 上读取",
+            candidate.package.id,
+            runtime.require_package()?
+        );
+    }
     Ok(candidate)
 }
 
@@ -5156,10 +5149,27 @@ fn load_run(runtime: &RuntimeStore, run_id: &str) -> Result<RunRecord> {
                 tracing::warn!(%run_id, %index_error, "resolved Workflow Run from PM request snapshot");
                 Ok(run)
             }
-            Err(rebuild_error) => Err(index_error)
-                .with_context(|| format!("无法从 PM request 重建 Run {run_id}：{rebuild_error:#}")),
+            Err(rebuild_error) => {
+                // A locator that was never written is "not found". Wrapping
+                // that in the rebuild failure hides the answer from Display,
+                // which only shows the outermost context.
+                if error_is_not_found(&index_error) {
+                    return Err(index_error);
+                }
+                Err(index_error).with_context(|| {
+                    format!("无法从 PM request 重建 Run {run_id}：{rebuild_error:#}")
+                })
+            }
         },
     }
+}
+
+fn error_is_not_found(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+    })
 }
 
 fn resolve_run_from_requests(runtime: &RuntimeStore, run_id: &str) -> Result<RunRecord> {
@@ -5207,7 +5217,7 @@ fn resolve_run_from_requests(runtime: &RuntimeStore, run_id: &str) -> Result<Run
     found.ok_or_else(|| anyhow!("PM request 中未找到 Run {run_id}"))
 }
 
-fn read_run_index(runtime: &RuntimeStore, run_id: &str) -> Result<RunIndex> {
+fn read_run_bytes(runtime: &RuntimeStore, run_id: &str) -> Result<Vec<u8>> {
     validate_id(run_id, "run id")?;
     let path = run_path(runtime, run_id, false)?;
     let metadata = crate::config::sensitive_metadata(&path)
@@ -5217,7 +5227,12 @@ fn read_run_index(runtime: &RuntimeStore, run_id: &str) -> Result<RunIndex> {
         bail!("Workflow Run 不是普通文件：{}", path.display());
     }
     ensure_record_size("Workflow Run", metadata.len(), MAX_RUN_RECORD_BYTES)?;
-    let bytes = fs::read(&path)?;
+    Ok(fs::read(&path)?)
+}
+
+fn read_run_index(runtime: &RuntimeStore, run_id: &str) -> Result<RunIndex> {
+    let path = run_path(runtime, run_id, false)?;
+    let bytes = read_run_bytes(runtime, run_id)?;
     let index: RunIndex = serde_json::from_slice(&bytes)
         .with_context(|| format!("读取 Workflow Run index：{}", path.display()))?;
     if index.schema != RUN_INDEX_SCHEMA {
@@ -7501,9 +7516,36 @@ mod tests {
         let (candidate, revision) = dispatch_candidate(project.path(), &runtime).unwrap();
         assert_eq!(candidate.digest, active);
         assert_eq!(revision, Some(1));
-        let activation = activation_path(&runtime, false).unwrap();
-        assert!(activation.starts_with(project.path().join(".genethub/components/executor")));
-        assert!(!activation.starts_with(&untrusted));
+        let activation = activation_path(&runtime, false)
+            .unwrap()
+            .canonicalize()
+            .unwrap();
+        let project_root = project.path().canonicalize().unwrap();
+        // Control records travel with the project, under the executor
+        // component, not the daemon data dir and not the legacy runtime tree
+        // a project can forge.
+        assert!(activation.starts_with(&project_root));
+        assert!(!activation.starts_with(data.path().canonicalize().unwrap()));
+        assert!(!activation.starts_with(project_root.join(".genethub/runtime")));
+        assert!(activation.starts_with(project_root.join(".genethub/components/executor")));
+        // Component-owned business state is the same when another channel
+        // opens the project with its own machine-local data and workspace id.
+        let other_data = tempfile::tempdir().unwrap();
+        let other = RuntimeStore::for_package(
+            other_data.path(),
+            "other-workspace",
+            project.path(),
+            TEST_PACKAGE,
+        )
+        .unwrap();
+        assert_eq!(activation_path(&other, false).unwrap(), activation);
+        assert_eq!(
+            inspect(project.path(), &other)
+                .unwrap()
+                .active_digest
+                .as_deref(),
+            Some(active.as_str())
+        );
     }
 
     #[test]
@@ -7974,12 +8016,16 @@ mod tests {
             !busy("w_executor", None),
             "a project that has never dispatched pins nothing"
         );
-        save_run(&runtime, &carrier("completed", Some("w_executor"))).unwrap();
+        let completed = carrier("completed", Some("w_executor"));
+        assert!(claim_request_writer(&runtime, &completed).unwrap());
+        save_run(&runtime, &completed).unwrap();
         assert!(
             !busy("w_executor", None),
             "a settled Run must not keep its carrier pinned forever"
         );
-        save_run(&runtime, &carrier("running", Some("w_executor"))).unwrap();
+        let running = carrier("running", Some("w_executor"));
+        assert!(claim_request_writer(&runtime, &running).unwrap());
+        save_run(&runtime, &running).unwrap();
         assert!(busy("w_executor", None));
         assert!(
             !busy("w_other", None),

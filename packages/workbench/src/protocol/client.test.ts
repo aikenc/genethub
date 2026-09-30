@@ -44,7 +44,7 @@ const localIdentity: FakePeerOptions["identity"] = {
   rtcSupported: false,
 };
 
-async function waitFor(test: () => boolean, turns = 50): Promise<void> {
+async function waitFor(test: () => boolean, turns = 200): Promise<void> {
   for (let turn = 0; turn < turns; turn += 1) {
     if (test()) return;
     await settle();
@@ -52,13 +52,13 @@ async function waitFor(test: () => boolean, turns = 50): Promise<void> {
   throw new Error("condition did not settle");
 }
 
-async function connected(options: Partial<ClientOptions> = {}): Promise<{
+async function connected(options: Partial<ClientOptions> = {}, features?: string[]): Promise<{
   client: Client;
   socket: FakeSocket;
   queue: ReturnType<typeof socketQueue>;
 }> {
   const proof = localProof();
-  const queue = socketQueue({ secret: proof.proof, identity: localIdentity });
+  const queue = socketQueue({ secret: proof.proof, identity: { ...localIdentity, ...(features ? { features } : {}) } });
   // Keep the caller's options object. A later assignment to requestTimeoutMs
   // applies only to exchanges started after that assignment.
   const shared = Object.assign(options, {
@@ -668,6 +668,69 @@ describe("events, Preview and RTC use the same endpoint abstraction", () => {
       limitBytes: 64 * 1024 * 1024,
     });
     await expect(missing).rejects.toBeInstanceOf(AssetPreviewError_);
+    client.close();
+  });
+
+  it("requires an advertised image capability and rejects a full-size answer to a thumbnail request", async () => {
+    const old = await connected();
+    await expect(old.client.preview("workspace-1", "r_root/picture.png", "image-128"))
+      .rejects.toThrow("不支持图片缩略图");
+    expect(old.socket.sent.filter((message) => message.type === "asset.preview")).toHaveLength(0);
+    old.client.close();
+
+    const { client, socket } = await connected({}, ["asset.preview.image.v1"]);
+    const preview = client.preview("workspace-1", "r_root/picture.png", "image-128");
+    await waitFor(() => socket.sent.some((message) => message.type === "asset.preview"));
+    const exchange = socket.lastOf("asset.preview");
+    expect(exchange.payload?.representation).toBe("image-128");
+    socket.respondExchange(exchange.id, 200, {
+      version: "0123456789abcdef0123456789abcdef",
+      kind: "image",
+      mediaType: "image/png",
+      sourceBytes: 7_259_740,
+    }, new Uint8Array([1, 2, 3]));
+    await expect(preview).rejects.toThrow("requested image representation");
+
+    const valid = client.preview("workspace-1", "r_root/picture.png", "image-128");
+    await waitFor(() => socket.lastOf("asset.preview").id !== exchange.id);
+    socket.respondExchange(socket.lastOf("asset.preview").id, 200, {
+      version: "0123456789abcdef0123456789abcdef",
+      kind: "image",
+      mediaType: "image/png",
+      sourceBytes: 7_259_740,
+      representation: "image-128",
+      width: 128,
+      height: 64,
+    }, new Uint8Array([1, 2, 3]));
+    expect((await valid).bytes.byteLength).toBe(3);
+    client.close();
+  });
+
+  it("rechecks thumbnail support when Preview retries after a lost session", async () => {
+    const { client, socket } = await connected({}, ["asset.preview.image.v1"]);
+    const attempt = vi.spyOn(client as any, "previewAttempt")
+      .mockRejectedValueOnce(new Error("SessionLost"));
+    vi.spyOn(client as any, "waitForPreviewRecovery").mockImplementationOnce(async () => {
+      client.identity = { ...client.identity!, features: [] };
+    });
+    await expect(client.preview("workspace-1", "r_root/picture.png", "image-128"))
+      .rejects.toThrow("不支持图片缩略图");
+    expect(attempt).toHaveBeenCalledTimes(2);
+    expect(socket.sent.filter((message) => message.type === "asset.preview")).toHaveLength(0);
+    client.close();
+  });
+
+  it("cancels a thumbnail while waiting for connection recovery", async () => {
+    const { client, socket } = await connected({}, ["asset.preview.image.v1"]);
+    vi.spyOn(client as any, "previewAttempt").mockRejectedValueOnce(new Error("SessionLost"));
+    (client as any).state = "reconnecting";
+    const onStateChange = vi.spyOn(client, "onStateChange");
+    const abort = new AbortController();
+    const pending = client.preview("workspace-1", "r_root/picture.png", "image-128", abort.signal);
+    await waitFor(() => onStateChange.mock.calls.length > 0);
+    abort.abort();
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(socket.sent.filter((message) => message.type === "asset.preview")).toHaveLength(0);
     client.close();
   });
 

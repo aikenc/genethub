@@ -3443,34 +3443,46 @@ async fn a_settled_round_is_replaced_quietly_not_marked_superseded_again() {
 /// of them could take 5 and 6 and arrive in the other order — and a client
 /// asking to be caught up would be handed the session's history in an order
 /// that never happened.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn concurrent_publishers_leave_the_replay_in_sequence() {
-    let (live, _store_dir) = live_session(meta());
+#[test]
+fn concurrent_publishers_leave_the_replay_in_sequence() {
+    // Debug builds of `publish` use more stack than a Windows tokio
+    // worker (2 MiB, with a smaller usable region) can hold. macOS and
+    // Linux workers finish the same test. Give this runtime the 8 MiB
+    // the other platforms effectively have.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .thread_stack_size(8 * 1024 * 1024)
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let (live, _store_dir) = live_session(meta());
 
-    let mut publishers = Vec::new();
-    for n in 0..256 {
-        let live = live.clone();
-        publishers.push(tokio::spawn(async move {
-            live.publish(SessionEvent::TurnProgress {
-                turn_id: format!("t{n}"),
-                usage: Usage::default(),
-            })
-            .await;
-        }));
-    }
-    for publisher in publishers {
-        publisher.await.expect("a publisher panicked");
-    }
+        let mut publishers = Vec::new();
+        for n in 0..256 {
+            let live = live.clone();
+            publishers.push(tokio::spawn(async move {
+                live.publish(SessionEvent::TurnProgress {
+                    turn_id: format!("t{n}"),
+                    usage: Usage::default(),
+                })
+                .await;
+            }));
+        }
+        for publisher in publishers {
+            publisher.await.expect("a publisher panicked");
+        }
 
-    let replay = live.replay.lock().await;
-    let seqs: Vec<u64> = replay.iter().map(|event| event.seq).collect();
-    let mut sorted = seqs.clone();
-    sorted.sort_unstable();
-    assert_eq!(
-        seqs, sorted,
-        "the replay buffer holds the session's own history out of order"
-    );
-    assert_eq!(seqs.len(), 256, "an event went missing");
+        let replay = live.replay.lock().await;
+        let seqs: Vec<u64> = replay.iter().map(|event| event.seq).collect();
+        let mut sorted = seqs.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            seqs, sorted,
+            "the replay buffer holds the session's own history out of order"
+        );
+        assert_eq!(seqs.len(), 256, "an event went missing");
+    });
 }
 
 /// The straggler.

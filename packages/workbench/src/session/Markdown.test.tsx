@@ -199,7 +199,7 @@ describe("an agent's reply", () => {
       />,
     );
 
-    expect(loadPreview).toHaveBeenCalledWith("r_product/assets/landscape-painting.png");
+    expect(loadPreview).toHaveBeenCalledWith("r_product/assets/landscape-painting.png", expect.any(AbortSignal));
     const ref = await screen.findByTestId("markdown-image-ref");
     expect(ref.querySelector("img")).toHaveAttribute("src", "blob:painting");
     expect(ref).toHaveTextContent("landscape-painting.png");

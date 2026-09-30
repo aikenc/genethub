@@ -139,7 +139,7 @@ describe("round gallery", () => {
     expect(visible.map((row) => row.summary.firstItemId)).toEqual(["t1"]);
   });
 
-  it("matches a root-qualified preview path to a session thumb", () => {
+  it("does not guess that a root-qualified path is the same thumbnail", () => {
     const images = inlineImagesFromTrunks([
       {
         summary: { index: 0, firstItemId: "t1", blobCount: 1, title: "画", batches: [] },
@@ -149,7 +149,8 @@ describe("round gallery", () => {
     expect(images).toHaveLength(1);
     expect(
       thumbForPath(images, "r_repo/.genethub/sessions/s1/images/aa.png"),
-    ).toEqual(images[0]);
+    ).toBeUndefined();
+    expect(thumbForPath(images, ".genethub/sessions/s1/images/aa.png")).toEqual(images[0]);
     expect(thumbDataUrl(images[0]!)).toBe("data:image/jpeg;base64,dGh1bWI=");
   });
 

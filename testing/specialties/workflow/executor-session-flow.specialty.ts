@@ -133,11 +133,15 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
             const waitForHandoff = handoff
               ? ` && while [ ! -e ${shellArg(handoffRelease)} ]; do sleep 0.05; done`
               : "";
+            // The accepted Worker is actively retired. For cancellation, keep
+            // its tool alive through the bounded TERM grace so the observed
+            // finishing frontier cannot disappear before the cancel RPC.
+            const holdCancelHandoff = outcome === "cancel-handoff" ? "trap '' TERM; " : "";
             return {
               tool: {
                 name: "bash",
                 arguments: {
-                  command: `cd ${shellArg(projectRoot)} && git add index.html && git commit -m "build asteroid garden" && commit=$(git rev-parse HEAD) && "$GENEHUB_CLI" workflow complete --evidence commit="$commit" --evidence checks="index-html-static-smoke"${waitForHandoff}`,
+                  command: `${holdCancelHandoff}cd ${shellArg(projectRoot)} && git add index.html && git commit -m "build asteroid garden" && commit=$(git rev-parse HEAD) && "$GENEHUB_CLI" workflow complete --evidence commit="$commit" --evidence checks="index-html-static-smoke"${waitForHandoff}`,
                 },
               },
             };
@@ -287,7 +291,27 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
         }, 35_000);
         if (outcome === "cancel-handoff") {
           const callsBefore = pmStage;
-          await opened.client.call({type: "workflow.cancel", payload: {workspaceId: projectId, runId: accepted!.id, expectedRevision: accepted!.revision}});
+          await t.tools.waitUntil(async () => {
+            const current = await opened.client.call({type: "workflow.get", payload: {workspaceId: projectId, runId: accepted!.id}});
+            t.assertions.assert(current?.type === "workflowRun", "handoff Run disappeared before cancellation");
+            if (current?.type !== "workflowRun") return false;
+            t.assertions.assert(current.data.nodes.filter(node => node.sessionId).length === 1
+              && current.data.nodes.some(node => node.status === "finishing"),
+              `handoff advanced before cancellation: ${JSON.stringify(current.data.nodes)}`);
+            try {
+              const cancelled = await opened.client.call({type: "workflow.cancel", payload: {
+                workspaceId: projectId, runId: accepted!.id, expectedRevision: current.data.revision,
+              }});
+              t.assertions.assert(cancelled?.type === "workflowRun", "workflow.cancel did not return the cancelled Run");
+              return true;
+            } catch (error) {
+              // A conflicting revision is an explicit non-commit. Refresh only
+              // while the same Worker remains at the observed handoff frontier.
+              if (!(error instanceof Error) || error.name !== "ProtocolError"
+                || error.message !== "Workflow revision 冲突：先重新读取 workflow get") throw error;
+              return false;
+            }
+          }, 10_000);
           await t.tools.waitUntil(async () => {
             const result = await opened.client.call({type: "workflow.get", payload: {workspaceId: projectId, runId: accepted!.id}});
             if (result?.type !== "workflowRun" || result.data.status !== "cancelled") return false;

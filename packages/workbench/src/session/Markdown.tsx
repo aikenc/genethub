@@ -61,12 +61,12 @@ import remarkGfm from "remark-gfm";
 
 import {
   resolveArtifactRef,
+  resolveWorkspacePath,
   type ArtifactResolveContext,
 } from "../preview/resolveArtifactRef";
 import {
   isSafeInlineImageDataUrl,
   thumbDataUrl,
-  thumbForPath,
   type InlineImage,
 } from "./roundGallery";
 import { useWorkbench, type PreviewFloatRequest } from "./store";
@@ -270,6 +270,7 @@ export type MarkdownArtifactProps = ArtifactResolveContext & {
   /** Authenticated workspace read used to inline local images. */
   loadPreview?: (
     path: string,
+    signal?: AbortSignal,
   ) => Promise<{ bytes: Uint8Array; mediaType: string } | null>;
 };
 
@@ -539,12 +540,35 @@ function isImageLinkPath(path: string): boolean {
 /** Authenticated inline load of a workspace image, shared by `![](…)` embeds
  * and image file links. Prefers a session-inlined thumb so tiles do not
  * fetch the original. */
+function useNearViewport(): [(node: HTMLElement | null) => void, boolean] {
+  const [element, setElement] = useState<HTMLElement | null>(null);
+  const [near, setNear] = useState(false);
+  useEffect(() => {
+    if (!element) return;
+    if (typeof IntersectionObserver === "undefined") {
+      setNear(true);
+      return;
+    }
+    const observer = new IntersectionObserver(
+      ([entry]) => setNear(Boolean(entry?.isIntersecting)),
+      { rootMargin: "300px" },
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [element]);
+  return [setElement, near];
+}
+
 function usePreviewImageUrl(
   previewPath: string | null,
   loadPreview: MarkdownArtifactProps["loadPreview"],
   inlineImages?: readonly InlineImage[],
+  enabled = true,
+  artifact?: MarkdownArtifactProps | null,
 ): { url: string | null; failed: boolean } {
-  const thumb = thumbForPath(inlineImages ?? [], previewPath);
+  const thumb = artifact && previewPath
+    ? inlineImages?.find((image) => resolveWorkspacePath(image.path, artifact) === previewPath)
+    : undefined;
   const thumbUrl = thumb ? thumbDataUrl(thumb) : null;
   const [url, setUrl] = useState<string | null>(thumbUrl);
   const [failed, setFailed] = useState(false);
@@ -559,13 +583,15 @@ function usePreviewImageUrl(
     }
     setUrl(null);
     setFailed(false);
+    if (!enabled) return () => {};
     if (!previewPath || !loadPreview) {
       if (previewPath) setFailed(true);
       return () => {};
     }
+    const abort = new AbortController();
     void (async () => {
       try {
-        const loaded = await loadPreview(previewPath);
+        const loaded = await loadPreview(previewPath, abort.signal);
         if (cancelled) return;
         if (!loaded || !loaded.mediaType.startsWith("image/")) {
           setFailed(true);
@@ -584,9 +610,10 @@ function usePreviewImageUrl(
     })();
     return () => {
       cancelled = true;
+      abort.abort();
       if (revoke) URL.revokeObjectURL(revoke);
     };
-  }, [loadPreview, previewPath, thumbUrl]);
+  }, [loadPreview, previewPath, thumbUrl, enabled]);
 
   return { url: thumbUrl ?? url, failed: thumbUrl ? false : failed };
 }
@@ -604,10 +631,13 @@ function MarkdownImage({
   const inlineData = src && isSafeInlineImageDataUrl(src) ? src.trim() : null;
   const resolved = resolveArtifactRef(inlineData ? null : src, artifact);
   const previewPath = resolved.kind === "preview" ? resolved.path : null;
+  const [observe, near] = useNearViewport();
   const { url, failed } = usePreviewImageUrl(
     previewPath,
     artifact?.loadPreview,
     artifact?.inlineImages,
+    near,
+    artifact,
   );
 
   if (inlineData) {
@@ -623,7 +653,7 @@ function MarkdownImage({
   }
   if (!url) {
     return (
-      <span className="gh-blocked-image" role="status">
+      <span ref={observe} className="gh-blocked-image" role="status">
         图片加载中{alt ? `：${alt}` : ""}
       </span>
     );
@@ -639,6 +669,7 @@ function MarkdownImage({
   ) {
     return (
       <button
+        ref={observe}
         type="button"
         className="gh-markdown-image-ref"
         data-testid="markdown-image-embed"
@@ -655,7 +686,7 @@ function MarkdownImage({
       </button>
     );
   }
-  return image;
+  return <span ref={observe}>{image}</span>;
 }
 
 /** A file link that points at a workspace image: shows the picture inline
@@ -674,17 +705,19 @@ function MarkdownImageRef({
   onOpen: (event: { preventDefault: () => void }) => void;
   children?: ReactNode;
 }) {
-  const { url } = usePreviewImageUrl(path, artifact?.loadPreview, artifact?.inlineImages);
+  const [observe, near] = useNearViewport();
+  const { url } = usePreviewImageUrl(path, artifact?.loadPreview, artifact?.inlineImages, near, artifact);
 
   if (!url) {
     return (
-      <a href={href} onClick={onOpen}>
+      <a ref={observe} href={href} onClick={onOpen}>
         {children}
       </a>
     );
   }
   return (
     <button
+      ref={observe}
       type="button"
       className="gh-markdown-image-ref"
       data-testid="markdown-image-ref"

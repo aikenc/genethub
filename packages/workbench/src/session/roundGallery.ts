@@ -72,9 +72,7 @@ export function markdownLinkedImagePaths(text: string): string[] {
 
 export function sameImagePath(left: string, right: string): boolean {
   const normalize = (path: string) => path.replace(/^\/+/, "").replace(/\\/g, "/");
-  const a = normalize(left);
-  const b = normalize(right);
-  return a === b || a.endsWith(`/${b}`) || b.endsWith(`/${a}`);
+  return normalize(left) === normalize(right);
 }
 
 /** Session-inlined 128px thumb used for tiles, copy, and forward. */

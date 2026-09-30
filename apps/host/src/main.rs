@@ -14,6 +14,8 @@ mod file_lock;
 mod fs_perms;
 mod guest_paths;
 mod http_hooks;
+mod image_cache;
+mod image_preview;
 mod isolation;
 mod keys;
 mod load;
@@ -48,6 +50,12 @@ fn main() {
                 std::process::exit(2);
             });
             run_and_exit(&component, &guest_args, entry);
+        }
+        Some("thumbnail") => {
+            if let Err(error) = image_preview::thumbnail_cli(args) {
+                eprintln!("error: {error}");
+                std::process::exit(1);
+            }
         }
         Some(command @ ("pack" | "inspect")) => {
             let mut artifact_args = vec![command.to_string()];
@@ -89,8 +97,7 @@ fn run_and_exit(component: &std::path::Path, guest_args: &[String], entry: load:
     std::process::exit(code);
 }
 
-const USAGE: &str =
-    "usage: genehub-host-local run --component <path.wasm> [--entry daemon|agent] [-- <guest args>]";
+const USAGE: &str = "usage: genehub-host-local run --component <path.wasm> [--entry daemon|agent] [-- <guest args>]\n       genehub-host-local thumbnail --input <image> --output <file> --max-edge <pixels>";
 
 /// Anything after `--` belongs to the guest, which reads it as its own argv.
 fn parse_run(

@@ -74,6 +74,10 @@ impl Registry {
             // is shared; the binary, help passthrough and `~/.tclaude`
             // history are not.
             Arc::new(ClaudeAdapter::tclaude()),
+            // CodeBuddy Code (`cbc`) speaks the same stream-json control
+            // protocol. Flag spelling, catalog keys and project-dir encoding
+            // differ; those live on `ClaudeFlavor`, not a second parser.
+            Arc::new(ClaudeAdapter::codebuddy()),
             // Codex likewise (`adapter::codex`): its own `app-server`
             // JSON-RPC, not `codex-acp`. Which also removes an install step
             // nobody could guess at — this entry used to report "not
@@ -383,8 +387,10 @@ mod tests {
         let registry = Registry::new(&BTreeMap::new());
         let claude = registry.get("claude").expect("official Claude Code");
         let tclaude = registry.get("tclaude").expect("TClaude");
+        let codebuddy = registry.get("codebuddy").expect("CodeBuddy");
         assert_eq!(claude.label(), "Claude Code");
         assert_eq!(tclaude.label(), "TClaude");
+        assert_eq!(codebuddy.label(), "CodeBuddy");
     }
 
     #[tokio::test]

@@ -240,10 +240,17 @@ pub(crate) fn discover(project_root: &Path) -> Result<Vec<Package>> {
 /// Loads one package by id, failing when it is absent. Callers that need the
 /// whole set use `discover`, which also enforces the cross-package checks.
 pub(crate) fn load(project_root: &Path, id: &str) -> Result<Package> {
-    discover(project_root)?
-        .into_iter()
-        .find(|package| package.id == id)
+    find(project_root, id)?
         .ok_or_else(|| anyhow!("Workflow 包不存在：{id}；用 `workflow list` 查看已 clone 的包"))
+}
+
+/// Like `load`, but a project that no longer has this package is `Ok(None)`.
+/// Stored activation and candidates must stay readable after the source tree
+/// is removed; callers that still need the source use `load`.
+pub(crate) fn find(project_root: &Path, id: &str) -> Result<Option<Package>> {
+    Ok(discover(project_root)?
+        .into_iter()
+        .find(|package| package.id == id))
 }
 
 fn walk(
@@ -655,21 +662,33 @@ pub(crate) fn resolve_reference(
     let target = target
         .canonicalize()
         .with_context(|| format!("读取 Skill Provider 目录：{}", target.display()))?;
-    // The future Space may not exist yet. Keep its relative location before
-    // canonicalizing the existing project, then compare both paths in the
-    // same namespace (macOS /var aliases and Windows verbatim prefixes).
-    let space_relative = space_directory
-        .strip_prefix(project_root)
-        .context("Skill Provider 的 Space 必须位于项目根目录下")?;
-    let project_root = project_root
+    let canonical_project = project_root
         .canonicalize()
         .with_context(|| format!("读取项目根目录：{}", project_root.display()))?;
-    let space_directory = project_root.join(space_relative);
-    if !target.starts_with(&project_root) {
+    if !target.starts_with(&canonical_project) {
         bail!(
             "Workflow 包 {} 的 Skill Provider 越出项目根目录：{path}",
             package.id
         );
+    }
+    // A planned Space need not exist yet. Resolve its project-relative suffix
+    // against the same canonical root as the provider, including macOS aliases.
+    let space_directory = match space_directory.strip_prefix(project_root) {
+        Ok(relative) => {
+            if relative
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+            {
+                bail!("Skill Provider Space 路径必须是普通项目相对路径");
+            }
+            canonical_project.join(relative)
+        }
+        Err(_) => space_directory
+            .canonicalize()
+            .with_context(|| format!("读取 Skill Provider Space：{}", space_directory.display()))?,
+    };
+    if !space_directory.starts_with(&canonical_project) {
+        bail!("Skill Provider Space 越出项目根目录");
     }
     relative_from(&space_directory, &target)
 }

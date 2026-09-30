@@ -584,6 +584,7 @@ pub(crate) async fn recover(
     run_status(&runtime, &load_run(&runtime, run_id)?)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn budget(
     state: &Shared,
     workspace_id: &str,

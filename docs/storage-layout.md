@@ -64,6 +64,7 @@ agent CLI 自己的线程库（`~/.codex/` 之类）不归我们管，只在会�
 | 数据 | 位置 |
 | --- | --- |
 | 工作流构建（内部 Candidate）、激活指针 | 包的 Executor Space 级 `components/executor/`；无独立载体的定义包使用项目根的同名目录 |
+| Executor 存储绑定 | 项目根 `components/executor/packages/<flat-id>/executor.json`，首次写入固定相对载体路径；读取旧快照不依赖包源 |
 | Run 快照（按用户需求归档） | 项目 PM Space 级 `components/pm/requests/<用户需求 id>/runs/<Run id>/run.json` |
 | Run ID 定位记录、用户需求写锁与引用租约 | 项目 PM Space 级 `components/pm/`；定位记录可从用户需求目录重建 |
 
@@ -87,3 +88,6 @@ Run 固定构建摘要，宿主从该构建读取视图，不从当前包源补�
 累积条目采用 `<YYMMDD-HHMMSS>_<hash>[_<slug>].json`，时间为东八区，hash 按并发和
 碰撞风险选择 4/8/16 位；写入先完成临时文件，再原子发布完整条目。实体已有天然 id 时沿用 id；
 单个当前值的指针文件无需拆分。历史条目排序和去重由目录与内容身份完成。
+
+没有存储绑定的既有激活记录，按包身份在项目根及包名前缀对应的 Executor 目录中有界查找；出现多个
+激活位置时明确报错。只读查询不写绑定，后续写入才固定位置。缺少源包时可用 `--package` 点名旧包。

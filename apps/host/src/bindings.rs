@@ -11,5 +11,6 @@ wasmtime::component::bindgen!({
         "genehub:host/pty.session": crate::pty::PtySession,
         "genehub:host/rtc.session": crate::rtc::RtcSession,
         "genehub:host/file-lock.handle": crate::file_lock::LockHandle,
+        "genehub:host/image-preview.job": crate::image_preview::Job,
     },
 });

@@ -414,6 +414,12 @@ fn build_instance(
     )
     .anyhow()
     .context("component-update linker")?;
+    crate::bindings::genehub::host::image_preview::add_to_linker::<_, HasSelf<_>>(
+        &mut linker,
+        |state| state,
+    )
+    .anyhow()
+    .context("image-preview linker")?;
     Ok((store, linker))
 }
 

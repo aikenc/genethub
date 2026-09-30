@@ -21,7 +21,7 @@
       "risk": "restricted"
     },
     {
-      "agentIds": ["claude", "tclaude"],
+      "agentIds": ["claude", "tclaude", "codebuddy"],
       "ids": ["plan"],
       "emoji": "📝",
       "shortLabel": "规划",
@@ -29,7 +29,7 @@
       "risk": "restricted"
     },
     {
-      "agentIds": ["claude", "tclaude"],
+      "agentIds": ["claude", "tclaude", "codebuddy"],
       "ids": ["default", "manual"],
       "emoji": "🛡️",
       "shortLabel": "确认",
@@ -45,7 +45,7 @@
       "risk": "write"
     },
     {
-      "agentIds": ["claude", "tclaude"],
+      "agentIds": ["claude", "tclaude", "codebuddy"],
       "ids": ["acceptEdits"],
       "emoji": "✍️",
       "shortLabel": "编辑",
@@ -61,7 +61,7 @@
       "risk": "unrestricted"
     },
     {
-      "agentIds": ["claude", "tclaude"],
+      "agentIds": ["claude", "tclaude", "codebuddy"],
       "ids": ["bypassPermissions"],
       "emoji": "🔓",
       "shortLabel": "完全",

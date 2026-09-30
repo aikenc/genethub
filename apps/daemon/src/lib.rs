@@ -24,6 +24,7 @@ pub mod host_pid;
 pub(crate) mod host_update;
 pub(crate) mod http;
 pub mod hub;
+pub(crate) mod image_preview;
 pub mod isolation;
 pub mod link;
 pub(crate) mod os_process;
