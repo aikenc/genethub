@@ -2865,7 +2865,7 @@ describe("the controls offered to the user", () => {
   });
 
   it("sends checked preview annotations ahead of the message and consumes those ids", async () => {
-    const onSend = vi.fn(async () => {});
+    const onSend = vi.fn(async (_text: string) => {});
     const onConsumePreviewReview = vi.fn(async () => true);
     render(<Composer {...composerProps({
       onSend,

@@ -69,6 +69,7 @@ describe("Preview runtime artifacts without display capture", () => {
         />,
       );
 
+      await user.click(screen.getByLabelText("更多预览操作"));
       await user.click(screen.getByRole("button", { name: "保存运行产物" }));
       await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
 
@@ -122,6 +123,7 @@ describe("Preview runtime artifacts without display capture", () => {
       />,
     );
 
+    await user.click(screen.getByLabelText("更多预览操作"));
     expect(screen.getByRole("button", { name: "截图" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "录制" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "保存运行产物" })).toBeEnabled();
@@ -199,6 +201,7 @@ describe("Preview runtime artifacts without display capture", () => {
       />,
     );
 
+    await user.click(screen.getByLabelText("更多预览操作"));
     await user.click(screen.getByRole("button", { name: "录制" }));
     await screen.findByRole("button", { name: "停止" });
     await user.click(screen.getByRole("button", { name: "停止" }));

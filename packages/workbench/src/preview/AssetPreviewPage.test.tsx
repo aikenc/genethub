@@ -140,6 +140,7 @@ describe("active single-file HTML Preview", () => {
     );
 
     const frame = await screen.findByTitle("HTML 文件预览");
+    screen.getByLabelText("更多预览操作").click();
     expect(screen.getByRole("button", { name: "截图" })).toBeVisible();
     expect(screen.getByRole("button", { name: "录制" })).toBeVisible();
     expect(screen.getByRole("button", { name: "保存运行产物" })).toBeDisabled();
@@ -341,6 +342,7 @@ describe("active single-file HTML Preview", () => {
       ),
     );
     await waitFor(() => expect(onRuntimeReady).toHaveBeenCalledTimes(1));
+    screen.getByLabelText("更多预览操作").click();
     expect(screen.getByRole("button", { name: "保存运行产物" })).toBeEnabled();
 
     act(() =>

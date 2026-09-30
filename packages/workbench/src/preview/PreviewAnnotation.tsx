@@ -12,6 +12,7 @@ import {
 import type { PreviewAnnotation, PreviewAnnotationTarget, PreviewReviewDraft } from "@genehub/proto";
 
 import type { Client } from "../protocol/client";
+import { PreviewToolbarPortal } from "./PreviewToolbar";
 import {
   MarkdownAnnotationContext,
   MarkdownAnnotationMarksContext,
@@ -44,8 +45,8 @@ type ReviewContextValue = {
   pickHtml: (hit: HtmlAnnotationHit) => void;
   pickImage: (rect: NaturalRect) => void;
   openNote: (id: string) => void;
-  /** Present for HTML, where the control sits in the existing runtime bar. */
-  bar: { toggle: () => void; count: number; openDraft: () => void } | null;
+  htmlSelection: string | null;
+  bar: { toggle: () => void; count: number; disabled: boolean; openDraft: () => void } | null;
 };
 
 const PreviewReviewContext = createContext<ReviewContextValue | null>(null);
@@ -219,13 +220,15 @@ export function PreviewReviewChrome({
     pickHtml,
     pickImage,
     openNote,
-    bar: available && kind === "html"
+    htmlSelection: pending?.mode === "create" && pending.target.kind === "htmlElement" ? pending.target.selector : null,
+    bar: available
       ? {
           toggle: () => {
             setActive((value) => !value);
             setPending(null);
           },
           count: draft.annotations.length,
+          disabled: !sessionId,
           openDraft: () => setDrawer(true),
         }
       : null,
@@ -242,34 +245,7 @@ export function PreviewReviewChrome({
       <MarkdownAnnotationContext.Provider value={context.active && kind === "markdown" ? pickMarkdown : null}>
         <MarkdownAnnotationMarksContext.Provider value={markdownMarks}>
         <div className="relative flex min-h-0 flex-1 flex-col">
-          {available && kind !== "html" ? (
-            <div className="pointer-events-none absolute left-2 top-2 z-20 flex gap-1">
-              <button
-                type="button"
-                aria-pressed={context.active}
-                disabled={!sessionId}
-                aria-label={context.active ? "完成批注" : "进入批注"}
-                title={sessionId ? (context.active ? "完成批注" : "进入批注") : "先从会话打开这个文件"}
-                className="pointer-events-auto flex h-7 items-center rounded-full border border-line bg-surface/95 px-2.5 text-xs text-fg shadow-sm disabled:opacity-40"
-                onClick={() => {
-                  setActive((value) => !value);
-                  setPending(null);
-                }}
-              >
-                {context.active ? "完成" : "批注"}
-              </button>
-              {draft.annotations.length > 0 ? (
-                <button
-                  type="button"
-                  className="pointer-events-auto flex h-7 items-center rounded-full border border-line bg-surface/95 px-2.5 text-xs text-muted shadow-sm"
-                  aria-label={`查看批注草稿 ${draft.annotations.length}`}
-                  onClick={() => setDrawer(true)}
-                >
-                  {draft.annotations.length}
-                </button>
-              ) : null}
-            </div>
-          ) : null}
+          {available ? <PreviewToolbarPortal><PreviewAnnotationBar /></PreviewToolbarPortal> : null}
           {problem && !pending ? <p role="alert" className="px-3 py-1 text-xs text-danger">{problem}</p> : null}
           {children}
           {pending ? (
@@ -424,7 +400,10 @@ export function PreviewAnnotationBar() {
       <button
         type="button"
         aria-pressed={review.active}
-        className="shrink-0 rounded border border-line bg-surface px-2 py-1 text-fg hover:bg-raised"
+        aria-label={review.active ? "完成批注" : "进入批注"}
+        disabled={review.bar.disabled}
+        title={review.bar.disabled ? "先从会话打开这个文件" : undefined}
+        className="h-7 shrink-0 rounded border border-line bg-surface px-2 text-xs text-fg hover:bg-raised disabled:opacity-40"
         onClick={review.bar.toggle}
       >
         {review.active ? "完成" : "批注"}
@@ -456,7 +435,6 @@ export function HtmlAnnotationOverlay({
   const [outline, setOutline] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
   const [marks, setMarks] = useState<HtmlMark[]>([]);
   const [hint, setHint] = useState<string | null>(null);
-  const captureRef = useRef<HTMLDivElement>(null);
   const htmlNotes = review?.notes.filter((item) => item.target.kind === "htmlElement") ?? [];
   const htmlNotesRef = useRef(htmlNotes);
   htmlNotesRef.current = htmlNotes;
@@ -492,12 +470,12 @@ export function HtmlAnnotationOverlay({
       if (data?.source !== RUNTIME_SOURCE) return;
       if (data.kind === "locate") {
         setMarks(parseMarks(data.detail));
+        const selection = (data.detail as { selection?: HtmlAnnotationHit } | null)?.selection;
+        setOutline(selection ? hitBox(selection) : null);
         return;
       }
       if (data.kind !== "hit-test" || !review?.active) return;
-      const pendingId = frameRef.current?.dataset.hitRequest;
-      if (!pendingId || data.requestId !== pendingId) return;
-      delete frameRef.current?.dataset.hitRequest;
+      if (data.requestId !== "annotation-pick") return;
       if (!isHtmlHit(data.detail)) {
         setOutline(null);
         setHint("没有点到可选元素");
@@ -515,86 +493,29 @@ export function HtmlAnnotationOverlay({
   }, [frameRef, review]);
 
   useEffect(() => {
-    const node = captureRef.current;
-    if (!node || !review?.active) return;
-    const onWheel = (event: WheelEvent) => {
-      event.preventDefault();
-      const frame = frameRef.current;
-      const box = frame?.getBoundingClientRect();
-      if (!frame?.contentWindow || !box) return;
-      frame.contentWindow.postMessage({
-        source: RUNTIME_COMMAND_SOURCE,
-        command: "scroll-by",
-        requestId: "scroll",
-        x: event.clientX - box.left,
-        y: event.clientY - box.top,
-        dx: event.deltaX,
-        dy: event.deltaY,
-      }, "*");
-    };
-    node.addEventListener("wheel", onWheel, { passive: false });
-    return () => node.removeEventListener("wheel", onWheel);
-  }, [frameRef, review?.active]);
+    const frame = frameRef.current;
+    if (!frame) return;
+    const publish = () => frame.contentWindow?.postMessage({
+      source: RUNTIME_COMMAND_SOURCE,
+      command: "annotation-mode",
+      requestId: "annotation-mode",
+      active: Boolean(review?.active),
+      selection: review?.htmlSelection ?? null,
+    }, "*");
+    frame.addEventListener("load", publish);
+    publish();
+    return () => frame.removeEventListener("load", publish);
+  }, [frameRef, frameReady, review?.active, review?.htmlSelection]);
 
   if (!review || (!review.active && marks.length === 0)) return null;
   return (
-    <div className="pointer-events-none absolute inset-0 z-10">
-      {review.active ? (
-        <div
-          ref={captureRef}
-          className="pointer-events-auto absolute inset-0 cursor-crosshair"
-          onPointerDown={(event) => {
-            if ((event.target as Element).closest("[data-annotation-mark]")) return;
-            event.currentTarget.setPointerCapture(event.pointerId);
-            event.currentTarget.dataset.clientX = String(event.clientX);
-            event.currentTarget.dataset.clientY = String(event.clientY);
-            event.currentTarget.dataset.scrolling = "0";
-          }}
-          onPointerMove={(event) => {
-            if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
-            const dx = event.clientX - Number(event.currentTarget.dataset.clientX);
-            const dy = event.clientY - Number(event.currentTarget.dataset.clientY);
-            if (Math.hypot(dx, dy) < 8) return;
-            event.currentTarget.dataset.scrolling = "1";
-            event.currentTarget.dataset.clientX = String(event.clientX);
-            event.currentTarget.dataset.clientY = String(event.clientY);
-            const box = frameRef.current?.getBoundingClientRect();
-            frameRef.current?.contentWindow?.postMessage({
-              source: RUNTIME_COMMAND_SOURCE,
-              command: "scroll-by",
-              requestId: "scroll",
-              x: box ? event.clientX - box.left : 0,
-              y: box ? event.clientY - box.top : 0,
-              dx: -dx,
-              dy: -dy,
-            }, "*");
-          }}
-          onPointerUp={(event) => {
-            if (event.currentTarget.dataset.scrolling === "1") return;
-            const frame = frameRef.current;
-            const box = frame?.getBoundingClientRect();
-            if (!frame?.contentWindow || !box) return;
-            const requestId = `hit-${crypto.randomUUID()}`;
-            frame.dataset.hitRequest = requestId;
-            frame.contentWindow.postMessage({
-              source: RUNTIME_COMMAND_SOURCE,
-              command: "hit-test",
-              requestId,
-              x: event.clientX - box.left,
-              y: event.clientY - box.top,
-            }, "*");
-          }}
-        >
-          {outline ? (
-            <span
-              className="pointer-events-none absolute border-2 border-accent bg-accent/10"
-              style={{ left: outline.x, top: outline.y, width: outline.width, height: outline.height }}
-            />
-          ) : null}
-          {hint ? <span className="pointer-events-none absolute left-2 top-2 rounded bg-surface px-2 py-1 text-xs text-muted shadow">{hint}</span> : null}
-        </div>
-      ) : null}
-      {marks.map((mark) => (
+    <div className="pointer-events-none absolute inset-0 z-10 overflow-hidden">
+      {review.active && outline ? <span aria-label="选中批注元素" className="pointer-events-none absolute border-2 border-accent bg-accent/10" style={{ left: outline.x, top: outline.y, width: outline.width, height: outline.height }} /> : null}
+      {review.active && hint ? <span className="pointer-events-none absolute left-2 top-2 rounded bg-surface px-2 py-1 text-xs text-muted shadow">{hint}</span> : null}
+      {marks.filter((mark) => {
+        const frame = frameRef.current;
+        return frame && mark.y + mark.height > 0 && mark.y < frame.clientHeight && mark.x + mark.width > 0 && mark.x < frame.clientWidth;
+      }).map((mark) => (
         <button
           key={mark.id}
           type="button"

@@ -38,6 +38,7 @@ import {
 import type { PixelSnapshot } from "./runtimeCapture";
 import type { AssetPreviewLocation } from "./url";
 import { uploadSessionArtifact } from "./sessionArtifactUpload";
+import { PreviewToolbarContext } from "./PreviewToolbar";
 
 type ViewState =
   | { kind: "loading" }
@@ -68,6 +69,7 @@ export function AssetPreviewPage({
   onRuntimeArtifactSaved,
   onRuntimeReady,
   annotationWrite = false,
+  toolbarTarget = null,
 }: {
   source: AssetPreviewLocation;
   host?: Host;
@@ -90,11 +92,13 @@ export function AssetPreviewPage({
   onRuntimeReady?: () => void;
   /** Fullscreen workbench preview and same-origin popout may write. Portable links stay read-only. */
   annotationWrite?: boolean;
+  toolbarTarget?: HTMLElement | null;
 }) {
   const [state, setState] = useState<ViewState>({ kind: "loading" });
   const [pageInfoOpen, setPageInfoOpen] = useState(false);
   const [meta, setMeta] = useState<PreviewMeta | null>(null);
   const legacyAbort = useRef<AbortController | null>(null);
+  const [pageToolbarTarget, setPageToolbarTarget] = useState<HTMLDivElement | null>(null);
 
   const reportMeta = useCallback(
     (next: PreviewMeta | null) => {
@@ -235,9 +239,10 @@ export function AssetPreviewPage({
     onRuntimeArtifact ?? (runtimeSessionId ? submitStandaloneArtifact : undefined);
 
   return (
+    <PreviewToolbarContext.Provider value={toolbarTarget ?? pageToolbarTarget}>
     <main className={`${chrome === "page" ? "safe-area-page" : ""} flex h-full min-h-0 flex-col overflow-hidden bg-bg text-fg`}>
       {chrome === "page" ? (
-        <header className="flex min-h-11 shrink-0 items-center gap-2 border-b border-line px-4 py-2">
+        <header aria-label="预览工具栏" className="relative z-30 flex min-h-9 shrink-0 items-center gap-1 border-b border-line px-2 py-1">
           <button
             type="button"
             aria-label="查看预览信息"
@@ -248,7 +253,7 @@ export function AssetPreviewPage({
             <PageInfoIcon />
           </button>
           <span className="min-w-0 flex-1 truncate font-mono text-xs">{source.path}</span>
-          <span className="shrink-0 text-[11px] text-faint">{source.workspaceHandle}</span>
+          <div ref={setPageToolbarTarget} className="flex shrink-0 items-center gap-1 text-xs" />
         </header>
       ) : null}
       {state.kind === "loading" ? (
@@ -300,6 +305,7 @@ export function AssetPreviewPage({
         />
       ) : null}
     </main>
+    </PreviewToolbarContext.Provider>
   );
 }
 
@@ -545,13 +551,13 @@ function ServiceHtmlDocument(props: React.ComponentProps<typeof HtmlDocument> & 
     void ServicePreviewClient.discover(props.client,props.workspaceHandle,props.entryPath).then(value=>{loaded=value;if(cancelled || props.client.connectionState!=="ready")value?.close();else setCandidate(value);}).catch(()=>{if(!cancelled)setProblem("服务登记不可用，请检查运行状态与 services 授权。");});
     return()=>{cancelled=true;loaded?.close();};
   },[props.client,props.workspaceHandle,props.entryPath,generation]);
-  return <><button type="button" className="shrink-0 border-b border-line p-2 text-xs text-left" onClick={() => setGeneration(n => n + 1)}>重新检查服务</button>{candidate?<section className="shrink-0 border-b border-line p-2 text-xs" aria-label="本地服务访问">
+  return <>{candidate?<section className="shrink-0 border-b border-line p-2 text-xs" aria-label="本地服务访问">
     <span>{candidate.descriptor.name} · {candidate.descriptor.dataPolicy==='direct-only'?'业务仅直连':'允许 GeneHub 数据中继'}</span>
     <button className="ml-3 rounded border border-line px-2 py-1" onClick={()=>{setEnabled(!enabled);}}>{enabled?'暂停服务访问':'允许本次预览访问登记服务'}</button>
   </section>:null}
   {problem?<p role="alert" className="p-2 text-xs">{problem}</p>:null}
   {enabled&&candidate?<ServiceMediaPanel service={candidate}/>:null}
-  <HtmlDocument {...props} service={enabled?candidate:null}/></>;
+  <HtmlDocument {...props} service={enabled?candidate:null} onRecheckService={props.client.identity?.features?.includes("service.preview.v1") ? () => setGeneration(n => n + 1) : undefined}/></>;
 }
 
 /** Exported for tests. */
@@ -567,8 +573,10 @@ export function HtmlDocument({
   onRuntimeReady,
   onOpenHtml,
   service = null,
+  onRecheckService,
 }: {
   service?: ServicePreviewClient | null;
+  onRecheckService?: () => void;
   bytes: Uint8Array;
   metadata: AssetPreviewMetadata;
   transfer?: AssetPreviewTransferStats;
@@ -937,6 +945,7 @@ export function HtmlDocument({
             requestDomSnapshot={requestDomSnapshot}
             requestRenderedSnapshot={requestRenderedSnapshot}
             onSubmit={onRuntimeArtifact}
+            onRecheckService={onRecheckService}
           />
           {/* iOS WebKit stretches a srcDoc iframe to its content height,
               ignoring flex sizing. Pin it to an absolutely-sized box. */}
@@ -1502,6 +1511,24 @@ const PREVIEW_DIAG_BRIDGE = `(function(){
     return document.scrollingElement || document.documentElement;
   }
   var locatedItems = [];
+  var annotationActive = false;
+  var selectedElement = null;
+  var annotationPointer = null;
+  var annotationMoved = false;
+  var markFrame = 0;
+  function elementHit(target) {
+    var excerpt = String(target.innerText || target.getAttribute("alt") || "").replace(/\\s+/g, " ").trim().slice(0, 256);
+    var box = target.getBoundingClientRect();
+    return {
+      selector: previewSelector(target).slice(0, 512), tag: target.tagName.toLowerCase().slice(0, 32),
+      excerpt: excerpt, domFingerprint: (target.tagName.toLowerCase() + ":" + excerpt.slice(0, 80)).slice(0, 128),
+      x: box.left, y: box.top, width: box.width, height: box.height
+    };
+  }
+  function scheduleMarks() {
+    if (markFrame || (!locatedItems.length && !selectedElement)) return;
+    markFrame = requestAnimationFrame(function(){ markFrame = 0; locateMarks("locate"); });
+  }
   function locateMarks(requestId) {
     var marks = [];
     for (var i = 0; i < locatedItems.length && i < 32; i++) {
@@ -1515,9 +1542,34 @@ const PREVIEW_DIAG_BRIDGE = `(function(){
       var box = node.getBoundingClientRect();
       marks.push({ id: String(item.id || ""), x: box.left, y: box.top, width: box.width, height: box.height });
     }
-    sendRuntime("locate", requestId || "locate", { marks: marks });
+    sendRuntime("locate", requestId || "locate", {
+      marks: marks, selection: selectedElement && selectedElement.isConnected ? elementHit(selectedElement) : null
+    });
   }
+  // Let WebKit handle pan, momentum and nested scrolling inside the iframe.
+  // Capture taps only; no transparent parent layer or synthetic scroll deltas.
+  document.addEventListener("pointerdown", function(event){
+    if (!annotationActive) return;
+    annotationPointer = { id: event.pointerId, x: event.clientX, y: event.clientY };
+    annotationMoved = false;
+  }, true);
+  document.addEventListener("pointermove", function(event){
+    if (!annotationPointer || event.pointerId !== annotationPointer.id) return;
+    if (Math.hypot(event.clientX - annotationPointer.x, event.clientY - annotationPointer.y) > 8) annotationMoved = true;
+  }, true);
+  document.addEventListener("pointercancel", function(){ annotationMoved = true; annotationPointer = null; }, true);
   document.addEventListener("click", function(event) {
+    if (annotationActive) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (annotationMoved && event.detail !== 0) return;
+      var picked = event.target;
+      if (picked && picked.nodeType !== 1) picked = picked.parentElement;
+      if (!picked || picked === document.documentElement || picked === document.body) return;
+      selectedElement = picked;
+      sendRuntime("hit-test", "annotation-pick", elementHit(picked));
+      return;
+    }
     var node = event.target;
     if (node && node.nodeType !== 1) node = node.parentElement;
     while (node && node !== document.body && String(node.tagName || "").toUpperCase() !== "A") node = node.parentElement;
@@ -1546,6 +1598,17 @@ const PREVIEW_DIAG_BRIDGE = `(function(){
     var requestId = String(data.requestId || "");
     if (data.command === "snapshot-render") {
       captureRenderedFrame(requestId);
+      return;
+    }
+    if (data.command === "annotation-mode") {
+      annotationActive = data.active === true;
+      selectedElement = null;
+      if (annotationActive && typeof data.selection === "string") {
+        try { selectedElement = document.querySelector(data.selection); } catch (e) {}
+      }
+      annotationPointer = null;
+      annotationMoved = false;
+      locateMarks("locate");
       return;
     }
     if (data.command === "scroll-by") {
@@ -1846,13 +1909,14 @@ const PREVIEW_DIAG_BRIDGE = `(function(){
     send("log", { topic: "interaction", action: "keydown", key: allowed.test(event.key) ? event.key : "character", target: targetLabel(event.target) });
   }, true);
   window.addEventListener("scroll", function(){
+    scheduleMarks();
     if (scrollTimer) return;
     scrollTimer = window.setTimeout(function(){
       scrollTimer = 0;
       send("log", { topic: "interaction", action: "scroll", x: Math.round(window.scrollX || 0), y: Math.round(window.scrollY || 0) });
-      if (locatedItems.length) locateMarks("locate");
     }, 200);
   }, true);
+  window.addEventListener("resize", scheduleMarks);
   ["pushState", "replaceState"].forEach(function(method){
     var original = history[method];
     history[method] = function(){
@@ -1864,7 +1928,7 @@ const PREVIEW_DIAG_BRIDGE = `(function(){
   window.addEventListener("hashchange", function(){ send("log", { topic: "navigation", action: "hashchange", url: safeUrl(location.href) }); });
   window.addEventListener("popstate", function(){ send("log", { topic: "navigation", action: "popstate", url: safeUrl(location.href) }); });
   try {
-    new MutationObserver(function(records){ mutationCount += records.length; }).observe(document.documentElement, {
+    new MutationObserver(function(records){ mutationCount += records.length; scheduleMarks(); }).observe(document.documentElement, {
       subtree: true, childList: true, attributes: true, characterData: true
     });
   } catch (e) {}

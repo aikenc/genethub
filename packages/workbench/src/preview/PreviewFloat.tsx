@@ -63,6 +63,7 @@ export function PreviewFloat({
   }));
   const [meta, setMeta] = useState<PreviewMeta | null>(null);
   const [infoOpen, setInfoOpen] = useState(false);
+  const [toolbarTarget, setToolbarTarget] = useState<HTMLDivElement | null>(null);
   const drag = useRef<{
     pointerId: number;
     startX: number;
@@ -332,6 +333,7 @@ export function PreviewFloat({
       onRuntimeArtifact={submitRuntimeArtifact}
       runtimeSessionId={source.sessionId}
       annotationWrite={expanded}
+      toolbarTarget={toolbarTarget}
     />
   ) : (
     <p role="status" className="m-auto p-6 text-center text-sm text-muted">
@@ -391,7 +393,8 @@ export function PreviewFloat({
       >
         {expanded ? (
           <header
-            className="flex min-h-9 shrink-0 items-center gap-1 overflow-hidden border-b border-line px-1.5"
+            aria-label="预览工具栏"
+            className="relative z-30 flex min-h-9 shrink-0 items-center gap-1 border-b border-line px-1.5"
             // iOS standalone PWA uses viewport-fit=cover; a fixed h-9 header
             // sits under the status bar and the close control cannot be tapped.
             style={{ paddingTop: "env(safe-area-inset-top)" }}
@@ -414,6 +417,7 @@ export function PreviewFloat({
                     ? "正在生成预览链接…"
                     : title}
             </span>
+            <div ref={setToolbarTarget} className="flex shrink-0 items-center gap-1 text-xs" />
             <button
               type="button"
               aria-label="最小化"
