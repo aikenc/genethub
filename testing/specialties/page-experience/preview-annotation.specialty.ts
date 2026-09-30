@@ -28,7 +28,7 @@ defineSpecialty({
     browser = await openWorkbenchPage(t.openRoot, () => daemonEndpoint(opened.daemon), opened.workspaceId, session, { viewport: { width: 430, height: 775 }, hasTouch: true, isMobile: true });
     const page = browser.page;
     const openFile = async (name: string) => {
-      await page.getByRole("link", { name, exact: true }).click();
+      await page.getByRole("link", { name, exact: true }).first().click();
       await page.getByRole("dialog", { name: "文件预览", exact: true }).waitFor();
       await page.getByRole("button", { name: "进入批注", exact: true }).waitFor();
     };
