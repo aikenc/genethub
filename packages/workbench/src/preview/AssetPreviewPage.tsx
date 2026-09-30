@@ -1,3 +1,8 @@
+import { previewFeedback, useFileFeedback, type FileFeedbackReview } from "./fileFeedback";
+import { PreviewFeedbackPanel } from "./PreviewFeedbackPanel";
+import { PreviewShareButton, PreviewShareCopyButton } from "./PreviewShareButton";
+import { PreviewToolbarPortal } from "./PreviewToolbar";
+import type { PreviewSourceInfo } from "@genehub/proto";
 import { ServicePreviewClient } from "./serviceClient";
 import { ServiceMediaPanel } from "./ServiceMediaPanel";
 import { serviceBridgeScript, useServiceBridge } from "./serviceBridge";
@@ -47,6 +52,8 @@ type ViewState =
   | { kind: "error"; message: string };
 
 export type PreviewMeta = {
+  sourceInfo?: PreviewSourceInfo;
+  resourcePaths?: Set<string>;
   documentTitle: string | null;
   infoLines: string[];
   /** Measured entry-file transfer facts shared by page and float chrome. */
@@ -70,6 +77,8 @@ export function AssetPreviewPage({
   onRuntimeReady,
   annotationWrite = false,
   toolbarTarget = null,
+  shareAccess = false,
+  feedbackAccessScope = "owner",
 }: {
   source: AssetPreviewLocation;
   host?: Host;
@@ -90,11 +99,16 @@ export function AssetPreviewPage({
   onRuntimeArtifactSaved?: (bundle: SessionArtifactBundle) => void;
   /** Fires when the HTML diagnostic bridge can collect logs and DOM state. */
   onRuntimeReady?: () => void;
-  /** Fullscreen workbench preview and same-origin popout may write. Portable links stay read-only. */
+  /** Fullscreen workbench preview and same-origin popout may write. Shared links save to file feedback. */
   annotationWrite?: boolean;
   toolbarTarget?: HTMLElement | null;
+  shareAccess?: boolean;
+  feedbackAccessScope?: string;
 }) {
   const [state, setState] = useState<ViewState>({ kind: "loading" });
+  const resources = useRef(new Set<string>());
+  const [feedbackSource, setFeedbackSource] = useState<{path: string; version: string} | null>(null);
+  const [sourceInfo, setSourceInfo] = useState<PreviewSourceInfo | null>(null);
   const [pageInfoOpen, setPageInfoOpen] = useState(false);
   const [meta, setMeta] = useState<PreviewMeta | null>(null);
   const legacyAbort = useRef<AbortController | null>(null);
@@ -102,10 +116,11 @@ export function AssetPreviewPage({
 
   const reportMeta = useCallback(
     (next: PreviewMeta | null) => {
-      setMeta(next);
-      onMetaChange?.(next);
+      const merged = next ? { ...next, resourcePaths: resources.current, ...(sourceInfo ? { sourceInfo } : {}) } : null;
+      setMeta(merged);
+      onMetaChange?.(merged);
     },
-    [onMetaChange],
+    [onMetaChange, sourceInfo],
   );
 
   useEffect(() => {
@@ -121,6 +136,9 @@ export function AssetPreviewPage({
     let owned: Client | null = null;
     let unregisterDiagnosticClient: (() => void) | null = null;
     setState({ kind: "loading" });
+    setSourceInfo(null);
+    setFeedbackSource(null);
+    resources.current = new Set([source.path]);
     emitPreviewDiagnostic("log", {
       topic: "preview-load",
       path: source.path,
@@ -161,6 +179,10 @@ export function AssetPreviewPage({
           imageFile ? "image-1024" : "original",
           abort.signal,
         );
+        if (active.identity?.features?.includes("preview.feedback.v1")) {
+          const info = await previewFeedback(active, source.workspaceHandle, { kind: "source", path: source.path });
+          if (!cancelled && info.kind === "source") setSourceInfo(info.data);
+        }
         if (cancelled) {
           owned?.close();
           return;
@@ -235,14 +257,29 @@ export function AssetPreviewPage({
     [onRuntimeArtifactSaved, runtimeSessionId, state],
   );
 
-  const runtimeArtifactSubmit =
+  const feedbackClient = state.kind === "ready" ? state.client : null;
+  const fileFeedbackEnabled = !!feedbackClient?.identity?.features?.includes("preview.feedback.v1");
+  const feedback = useFileFeedback(feedbackClient, source.workspaceHandle, feedbackSource?.path ?? source.path, feedbackSource?.version ?? (state.kind === "ready" ? state.result.metadata.version : ""), feedbackAccessScope);
+  useEffect(() => {
+    if (!feedbackClient || !fileFeedbackEnabled || !feedbackSource || feedbackSource.path === source.path) return;
+    let cancelled = false;
+    void previewFeedback(feedbackClient, source.workspaceHandle, {kind: "source", path: feedbackSource.path}).then(reply => {
+      if (!cancelled && reply.kind === "source") setSourceInfo(reply.data);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [feedbackClient, fileFeedbackEnabled, feedbackSource?.path, source.workspaceHandle, source.path]);
+  const submitFileArtifact = useCallback<RuntimeArtifactSubmit>(async (artifact, onProgress) => {
+    const bundle = await feedback.upload(artifact, ({ uploadedBytes, totalBytes }) => onProgress(uploadedBytes, totalBytes));
+    return { relativePath: bundle.relativePath, addedToDraft: false, feedbackSaved: true };
+  }, [feedback.upload]);
+  const runtimeArtifactSubmit = fileFeedbackEnabled ? submitFileArtifact :
     onRuntimeArtifact ?? (runtimeSessionId ? submitStandaloneArtifact : undefined);
 
   return (
     <PreviewToolbarContext.Provider value={toolbarTarget ?? pageToolbarTarget}>
     <main className={`${chrome === "page" ? "safe-area-page" : ""} flex h-full min-h-0 flex-col overflow-hidden bg-bg text-fg`}>
       {chrome === "page" ? (
-        <header aria-label="预览工具栏" className="relative z-30 flex min-h-9 shrink-0 items-center gap-1 border-b border-line px-2 py-1">
+        <header aria-label="预览工具栏" className="gh-preview-toolbar relative z-30 flex min-h-9 shrink-0 items-center gap-1 border-b border-line px-2 py-1">
           <button
             type="button"
             aria-label="查看预览信息"
@@ -252,8 +289,8 @@ export function AssetPreviewPage({
           >
             <PageInfoIcon />
           </button>
-          <span className="min-w-0 flex-1 truncate font-mono text-xs">{source.path}</span>
-          <div ref={setPageToolbarTarget} className="flex shrink-0 items-center gap-1 text-xs" />
+          <span className="min-w-0 flex-1 truncate font-mono text-xs">{sourceInfo?.displayPath ?? basenamePath(source.path)}</span>
+          <div ref={setPageToolbarTarget} className="gh-preview-toolbar-slot flex shrink-0 items-center gap-1 text-xs" />
         </header>
       ) : null}
       {state.kind === "loading" ? (
@@ -291,12 +328,19 @@ export function AssetPreviewPage({
           onRuntimeArtifact={runtimeArtifactSubmit}
           runtimeSessionId={runtimeSessionId}
           onRuntimeReady={onRuntimeReady}
-          annotationWrite={annotationWrite}
+          annotationWrite={fileFeedbackEnabled || annotationWrite}
+          fileFeedback={fileFeedbackEnabled ? feedback.review : undefined}
+          onSourceChange={setFeedbackSource}
+          resourcePaths={resources.current}
         />
       )}
+      {fileFeedbackEnabled ? <PreviewFeedbackPanel feedback={feedback} /> : null}
+      {fileFeedbackEnabled && !shareAccess && feedbackClient && chrome === "page" ? <PreviewToolbarPortal><PreviewShareButton client={feedbackClient} source={source} resources={resources.current} /></PreviewToolbarPortal> : null}
+      {fileFeedbackEnabled && shareAccess && chrome === "page" ? <PreviewToolbarPortal><PreviewShareCopyButton /></PreviewToolbarPortal> : null}
       {chrome === "page" && pageInfoOpen ? (
         <EmbeddedInfoDialog
-          path={source.path}
+          path={sourceInfo?.displayPath ?? basenamePath(source.path)}
+          absolutePath={sourceInfo ? `${sourceInfo.machineName}：${sourceInfo.absolutePath}` : undefined}
           title={meta?.documentTitle?.trim() || basenamePath(source.path)}
           lines={meta?.infoLines ?? ["预览信息尚未就绪，请稍候再打开。"]}
           transfer={meta?.transfer}
@@ -320,6 +364,9 @@ function PreviewDocument({
   runtimeSessionId,
   onRuntimeReady,
   annotationWrite = false,
+  fileFeedback,
+  onSourceChange,
+  resourcePaths,
 }: {
   result: AssetPreviewResult;
   path: string;
@@ -331,6 +378,9 @@ function PreviewDocument({
   runtimeSessionId?: string | null;
   onRuntimeReady?: () => void;
   annotationWrite?: boolean;
+  fileFeedback?: FileFeedbackReview;
+  onSourceChange?: (source: {path: string; version: string}) => void;
+  resourcePaths?: Set<string>;
 }) {
   const { metadata, bytes, transfer } = result;
   const [followedHtml, setFollowedHtml] = useState<{ path: string; result: AssetPreviewResult } | null>(null);
@@ -342,6 +392,7 @@ function PreviewDocument({
     setLinkProblem(null);
   }, [path]);
   const shown = followedHtml ?? { path, result };
+  useEffect(() => { onSourceChange?.({path: shown.path, version: shown.result.metadata.version}); }, [shown.path, shown.result.metadata.version, onSourceChange]);
   const openHtml = useCallback(async (nextPath: string) => {
     const generation = ++followGeneration.current;
     setLinkProblem(null);
@@ -363,12 +414,13 @@ function PreviewDocument({
     async (assetPath: string) => {
       try {
         const loaded = await client.preview(workspaceHandle, assetPath);
+        resourcePaths?.add(assetPath);
         return { bytes: loaded.bytes, mediaType: loaded.metadata.mediaType };
       } catch {
         return null;
       }
     },
-    [client, workspaceHandle],
+    [client, workspaceHandle, resourcePaths],
   );
   const loadInlineImage = useCallback(
     (assetPath: string, signal?: AbortSignal) =>
@@ -442,6 +494,7 @@ function PreviewDocument({
   return (
     <PreviewReviewChrome
       client={client}
+      fileFeedback={fileFeedback}
       sessionId={runtimeSessionId ?? null}
       enabled={annotationWrite}
       path={shown.path}
@@ -989,6 +1042,7 @@ function basenamePath(path: string): string {
 
 function EmbeddedInfoDialog({
   path,
+  absolutePath,
   title,
   lines,
   transfer,
@@ -996,6 +1050,7 @@ function EmbeddedInfoDialog({
   onClose,
 }: {
   path: string;
+  absolutePath?: string;
   title: string;
   lines: string[];
   transfer?: PreviewMeta["transfer"];
@@ -1036,6 +1091,7 @@ function EmbeddedInfoDialog({
               <dt className="text-faint">路径</dt>
               <dd className="break-all font-mono text-fg">{path}</dd>
             </div>
+            {absolutePath ? <div><dt className="text-faint">绝对路径</dt><dd className="break-all font-mono text-fg">{absolutePath}</dd></div> : null}
           </dl>
           {transfer ? <PreviewTransferSummary stats={transfer} /> : null}
           <ul className="mt-4 list-disc space-y-2 pl-5 text-xs leading-relaxed text-muted">

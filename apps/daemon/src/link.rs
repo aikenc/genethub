@@ -188,6 +188,21 @@ impl Link {
         }
     }
 
+    pub async fn preview_share(
+        &self,
+        id: &str,
+        expires_at_ms: i64,
+    ) -> Result<genehub_proto::PreviewShareLink> {
+        match &*self.stage.lock().await {
+            Stage::Paired { enrollment, .. } => {
+                hub::Client::new(&enrollment.hub_url)
+                    .preview_share(enrollment, id, expires_at_ms)
+                    .await
+            }
+            _ => anyhow::bail!("这台机器尚未连接 Hub，无法生成分享链接"),
+        }
+    }
+
     async fn start(
         self: &Arc<Self>,
         hub_url: &str,

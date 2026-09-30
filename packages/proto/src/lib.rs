@@ -7,6 +7,8 @@
 
 pub mod client_debug;
 pub use client_debug::*;
+pub mod preview_feedback;
+pub use preview_feedback::*;
 pub mod data;
 pub mod domain;
 pub mod event;

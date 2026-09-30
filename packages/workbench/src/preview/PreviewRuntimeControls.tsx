@@ -49,6 +49,7 @@ export type RuntimeArtifactJson =
 export type RuntimeArtifactSaveResult = {
   relativePath: string;
   addedToDraft: boolean;
+  feedbackSaved?: boolean;
   draftError?: string;
 };
 
@@ -174,7 +175,7 @@ export function PreviewRuntimeControls({
         ? "日志已开始记录"
         : onSubmit
           ? "可先保存当前日志；截图与录制正在就绪…"
-          : "未关联会话，无法保存运行产物",
+          : "尚未连接可保存反馈的设备",
     );
   }, [onSubmit, ready]);
 
@@ -406,7 +407,9 @@ export function PreviewRuntimeControls({
       engineRef.current?.dispose();
       setCaptureActive(false);
       setNotice(
-        saved.addedToDraft
+        saved.feedbackSaved
+          ? "已保存到文件反馈草稿，请点击反馈选择并提交"
+          : saved.addedToDraft
           ? `已保存到 ${saved.relativePath}，已加入输入框`
           : `已保存到 ${saved.relativePath}；${saved.draftError ?? "未加入输入框"}`,
       );
@@ -506,9 +509,9 @@ export function PreviewRuntimeControls({
         title={
           onSubmit
             ? ready
-              ? "把日志、DOM、截图和体验录制写入 daemon 当前 session，并把路径加入输入框"
+              ? "保存日志、DOM、截图和体验录制，供反馈时选择"
               : "先把当前日志写入 daemon；截图和 DOM 会在采集就绪后加入"
-            : "需要关联会话后保存"
+            : "需要连接设备后保存"
         }
       >
         保存运行产物

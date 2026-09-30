@@ -1,3 +1,4 @@
+import { parsePreviewShare } from "./preview/PreviewShareButton";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -52,6 +53,7 @@ createRoot(root).render(
         source={preview}
         context={previewPopout}
         portableTicket={previewTicket}
+        shareCredential={parsePreviewShare(window.location.hash)}
       />
     ) : (
       <App />

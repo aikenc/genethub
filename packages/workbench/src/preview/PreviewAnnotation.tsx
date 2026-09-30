@@ -11,6 +11,7 @@ import {
 
 import type { PreviewAnnotation, PreviewAnnotationTarget, PreviewReviewDraft } from "@genehub/proto";
 
+import type { FileFeedbackReview } from "./fileFeedback";
 import type { Client } from "../protocol/client";
 import { PreviewToolbarPortal } from "./PreviewToolbar";
 import {
@@ -36,7 +37,7 @@ const RUNTIME_SOURCE = "genehub-preview-runtime";
 const RUNTIME_COMMAND_SOURCE = "genehub-preview-runtime-command";
 
 type Pending =
-  | { mode: "create"; label: string; target: PreviewAnnotationTarget }
+  | { mode: "create"; id: string; label: string; target: PreviewAnnotationTarget }
   | { mode: "edit"; id: string; label: string; comment: string };
 
 type ReviewContextValue = {
@@ -61,6 +62,7 @@ export function PreviewReviewChrome({
   version,
   kind,
   sourceText = "",
+  fileFeedback,
   children,
 }: {
   client: Client;
@@ -70,10 +72,11 @@ export function PreviewReviewChrome({
   version: string;
   kind: string;
   sourceText?: string;
+  fileFeedback?: FileFeedbackReview;
   children: ReactNode;
 }) {
   const supported = kind === "markdown" || kind === "html" || kind === "image";
-  const available = enabled && supported && !!client.identity?.features?.includes(PREVIEW_ANNOTATIONS_FEATURE);
+  const available = enabled && supported && (!!fileFeedback || !!client.identity?.features?.includes(PREVIEW_ANNOTATIONS_FEATURE));
   const [draft, setDraft] = useState<PreviewReviewDraft>(emptyDraft);
   const [active, setActive] = useState(false);
   const [pending, setPending] = useState<Pending | null>(null);
@@ -84,11 +87,15 @@ export function PreviewReviewChrome({
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
+    if (fileFeedback) { setDraft(emptyDraft); setActive(false); setPending(null); setProblem(null); setDrawer(false); setLineRange(null); setComment(""); }
+  }, [path, version, fileFeedback]);
+
+  useEffect(() => {
     if (!enabled) setActive(false);
   }, [enabled]);
 
   useEffect(() => {
-    if (!available || !sessionId) return;
+    if (!available || !sessionId || fileFeedback) return;
     let cancelled = false;
     void client.call({ type: "session.previewAnnotations.get", payload: { sessionId } })
       .then((reply) => {
@@ -100,13 +107,14 @@ export function PreviewReviewChrome({
     return () => {
       cancelled = true;
     };
-  }, [available, client, sessionId]);
+  }, [available, client, sessionId, fileFeedback]);
 
   const pickMarkdown = useCallback((pick: MarkdownBlockPick) => {
     setLineRange({ start: pick.startLine, end: pick.endLine, baseStart: pick.startLine, baseEnd: pick.endLine });
     const excerpt = lineExcerpt(sourceText, pick.startLine, pick.endLine) || pick.excerpt;
     setPending({
       mode: "create",
+      id: `ann-${crypto.randomUUID()}`,
       label: lineLabel(pick.startLine, pick.endLine),
       target: { kind: "markdownLines", startLine: pick.startLine, endLine: pick.endLine, excerpt },
     });
@@ -118,6 +126,7 @@ export function PreviewReviewChrome({
     setLineRange(null);
     setPending({
       mode: "create",
+      id: `ann-${crypto.randomUUID()}`,
       label: `${hit.tag} ${hit.selector}`,
       target: {
         kind: "htmlElement",
@@ -135,6 +144,7 @@ export function PreviewReviewChrome({
     setLineRange(null);
     setPending({
       mode: "create",
+      id: `ann-${crypto.randomUUID()}`,
       label: "图片区域，编号在保存时确定",
       target: { kind: "imageRect", ...rect },
     });
@@ -153,7 +163,7 @@ export function PreviewReviewChrome({
   }, [draft.annotations]);
 
   const save = async () => {
-    if (!sessionId || !pending || saving) return;
+    if ((!sessionId && !fileFeedback) || !pending || saving) return;
     const text = comment.trim();
     if (!text) {
       setProblem("请填写批注");
@@ -173,15 +183,19 @@ export function PreviewReviewChrome({
       const annotation: PreviewAnnotation = existing
         ? { ...existing, comment: text }
         : {
-            id: `ann-${crypto.randomUUID()}`,
+            id: pending.id,
             source: { root: { kind: "primary" }, relativePath: path, contentVersion: version },
             target: pending.mode === "create" ? pending.target : existing!.target,
             comment: text,
             createdAtMs: Date.now(),
           };
+      if (fileFeedback) {
+        setDraft(await fileFeedback.upsert(annotation, draft.revision));
+        setPending(null); setComment(""); return;
+      }
       const reply = await client.call({
         type: "session.previewAnnotations.upsert",
-        payload: { sessionId, annotation, expectedRevision: draft.revision },
+        payload: { sessionId: sessionId!, annotation, expectedRevision: draft.revision },
       });
       if (reply?.type !== "previewAnnotations") throw new Error("保存预览批注失败");
       setDraft(reply.data);
@@ -195,13 +209,14 @@ export function PreviewReviewChrome({
   };
 
   const remove = async (id: string) => {
-    if (!sessionId || saving) return;
+    if ((!sessionId && !fileFeedback) || saving) return;
     setSaving(true);
     setProblem(null);
     try {
+      if (fileFeedback) { setDraft(await fileFeedback.remove([id], draft.revision)); setPending(null); return; }
       const reply = await client.call({
         type: "session.previewAnnotations.remove",
-        payload: { sessionId, ids: [id], expectedRevision: draft.revision },
+        payload: { sessionId: sessionId!, ids: [id], expectedRevision: draft.revision },
       });
       if (reply?.type !== "previewAnnotations") throw new Error("删除预览批注失败");
       setDraft(reply.data);
@@ -215,7 +230,7 @@ export function PreviewReviewChrome({
 
   const notes = draft.annotations.filter((item) => item.source.relativePath === path && item.source.contentVersion === version);
   const context: ReviewContextValue = {
-    active: available && !!sessionId && active,
+    active: available && (!!sessionId || !!fileFeedback) && active,
     notes,
     pickHtml,
     pickImage,
@@ -225,10 +240,11 @@ export function PreviewReviewChrome({
       ? {
           toggle: () => {
             setActive((value) => !value);
+            if (fileFeedback) void fileFeedback.load().then(setDraft).catch(error => setProblem(String(error)));
             setPending(null);
           },
           count: draft.annotations.length,
-          disabled: !sessionId,
+          disabled: !sessionId && !fileFeedback,
           openDraft: () => setDrawer(true),
         }
       : null,
@@ -269,6 +285,7 @@ export function PreviewReviewChrome({
                       setLineRange({ ...lineRange, start, end });
                       setPending({
                         mode: "create",
+      id: `ann-${crypto.randomUUID()}`,
                         label: lineLabel(start, end),
                         target: { ...pending.target, startLine: start, endLine: end, excerpt: lineExcerpt(sourceText, start, end) },
                       });
