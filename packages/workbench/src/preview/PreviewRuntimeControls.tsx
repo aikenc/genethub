@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { PreviewAnnotationBar } from "./PreviewAnnotation";
+import { PreviewToolbarPortal } from "./PreviewToolbar";
 import {
   PreviewPixelCapture,
   supportsDisplayCapture,
@@ -91,6 +91,7 @@ export function PreviewRuntimeControls({
   requestDomSnapshot,
   requestRenderedSnapshot,
   onSubmit,
+  onRecheckService,
 }: {
   frameRef: React.RefObject<HTMLIFrameElement>;
   ready: boolean;
@@ -101,12 +102,21 @@ export function PreviewRuntimeControls({
   requestDomSnapshot(): Promise<PreviewDomSnapshot>;
   requestRenderedSnapshot(): Promise<PixelSnapshot>;
   onSubmit?: RuntimeArtifactSubmit;
+  onRecheckService?: () => void;
 }) {
   const captureHandle = useMemo(
     () => runtimeId("capture"),
     [entryPath, sourceVersion],
   );
   const engineRef = useRef<PreviewPixelCapture | null>(null);
+  const menuRef = useRef<HTMLDetailsElement>(null);
+  useEffect(() => {
+    const close = (event: PointerEvent) => {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) menuRef.current.open = false;
+    };
+    document.addEventListener("pointerdown", close);
+    return () => document.removeEventListener("pointerdown", close);
+  }, []);
   const framesRef = useRef<RuntimeFrame[]>([]);
   const frameInFlight = useRef(false);
   const recordingRef = useRef(false);
@@ -415,18 +425,22 @@ export function PreviewRuntimeControls({
       : "webm";
 
   return (
-    <div className="flex min-h-9 shrink-0 items-center gap-1.5 border-b border-line bg-surface px-2 text-[11px] text-muted">
-      <PreviewAnnotationBar />
-      <span className="min-w-0 flex-1 truncate" role="status" title={notice}>
-        {recording ? (
-          <span className="text-red-500">● 录制 {elapsedSeconds}s</span>
-        ) : (
-          notice
-        )}
-      </span>
-      <span className="hidden shrink-0 text-faint sm:inline">
+    <PreviewToolbarPortal>
+      {recording ? <button type="button" className="h-7 shrink-0 rounded border border-red-500/60 px-2 text-xs text-red-500" disabled={busy !== null} onClick={() => void stopRecording()}>停止 · {elapsedSeconds}s</button> : null}
+      <details ref={menuRef} className="relative text-xs text-muted" onKeyDown={(event) => {
+        if (event.key === "Escape" && event.currentTarget.open) {
+          event.stopPropagation();
+          event.currentTarget.open = false;
+          event.currentTarget.querySelector("summary")?.focus();
+        }
+      }}>
+      <summary aria-label="更多预览操作" title="更多预览操作" className="flex h-7 w-7 cursor-pointer list-none items-center justify-center rounded-md border border-line bg-surface text-fg hover:bg-raised [&::-webkit-details-marker]:hidden">···</summary>
+      <div className="absolute right-0 top-full z-50 mt-1 flex w-56 max-w-[calc(100vw-1rem)] flex-col gap-2 rounded-lg border border-line bg-surface p-3 shadow-lg">
+      <span className="break-words" role="status">{notice}</span>
+      <span className="text-faint">
         日志 {eventCount} · 现场 {frameCount}
       </span>
+      {onRecheckService ? <button type="button" className="rounded border border-line px-2 py-1 text-left hover:bg-raised" onClick={onRecheckService}>重新检查服务</button> : null}
       {recordingUrl ? (
         <a
           className="shrink-0 rounded px-2 py-1 text-accent hover:bg-raised"
@@ -499,7 +513,9 @@ export function PreviewRuntimeControls({
       >
         保存运行产物
       </button>
-    </div>
+      </div>
+      </details>
+    </PreviewToolbarPortal>
   );
 }
 
