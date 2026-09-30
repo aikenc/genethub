@@ -82,9 +82,11 @@ for (const runtime of ["mock", "codex-luna"] as const) defineSpecialty({
     }, runtime === "mock" ? 30_000 : 120_000);
     stage = "wait for PM idle";
     await t.tools.waitUntil(async () => {
+      const run = (await history()).find(item => item.id === originalRun);
+      if (!run || run.status !== "completed" || run.reportPending) return false;
       const reply = await opened.client.call({ type: "session.get", payload: { sessionId: pm } });
-      return reply?.type === "snapshot" && reply.data.summary.status !== "running";
-    }, 10_000);
+      return reply?.type === "snapshot" && reply.data.summary.status === "idle";
+    }, 30_000);
     stage = "successor completion";
     await t.flows.main.sendPrompt(opened.client, pm, "EXACT_MODEL_SUCCESSOR: Continue with the authorized successor; keep the original model.");
     await t.tools.waitUntil(async () => (await history()).some(r => r.taskId === "exact-successor" && r.status === "completed"), runtime === "mock" ? 30_000 : 120_000);
