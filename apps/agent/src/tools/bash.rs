@@ -1,23 +1,34 @@
-//! bash — runs with the permissions of the agent process. Isolation is the
-//! deployment's job, not this tool's.
+//! bash — runs with the agent's permissions and keeps background children
+//! visible to the platform. Both native and WASI use the same bounded capture.
 
-use std::path::Path;
+use std::collections::VecDeque;
+use std::future::{pending, Future};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use crate::os_process::{Command, Output};
+use crate::os_process::{Child, Command};
 use serde_json::{json, Value};
+use tokio::io::AsyncReadExt;
+use tokio::time::Instant;
 
-use super::{
-    arg_str, arg_usize, truncate_tail, ToolResult, TruncationResult, DEFAULT_MAX_BYTES,
-    DEFAULT_MAX_LINES,
-};
+use super::{arg_str, arg_usize, truncate_tail, ToolResult, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES};
+
+const DRAIN: Duration = Duration::from_millis(200);
 
 pub async fn run(args: &Value, cwd: &Path) -> ToolResult {
+    run_with_cancel(args, cwd, pending()).await
+}
+
+pub(crate) async fn run_with_cancel(
+    args: &Value,
+    cwd: &Path,
+    cancel: impl Future<Output = ()>,
+) -> ToolResult {
     let Some(command_text) = arg_str(args, "command") else {
         return ToolResult::error("bash: 'command' is required");
     };
-
     let mut command = Command::new(shell());
     command
         .arg(shell_flag())
@@ -29,135 +40,98 @@ pub async fn run(args: &Value, cwd: &Path) -> ToolResult {
         .kill_on_drop(true);
     #[cfg(target_family = "wasm")]
     command.independent_session(false);
-
-    let started = output(command);
+    let child = match command.spawn() {
+        Ok(child) => child,
+        Err(err) => return ToolResult::error(format!("Failed to run command: {err}")),
+    };
+    let mut guard = ProcessGroup { child, armed: true };
+    let mut stdout = guard.child.stdout.take();
+    let mut stderr = guard.child.stderr.take();
+    let mut out = [0; 8192];
+    let mut err = [0; 8192];
+    let mut capture = Capture::default();
     let timeout_secs = arg_usize(args, "timeout");
-    let output = match timeout_secs {
-        Some(seconds) => {
-            match tokio::time::timeout(Duration::from_secs(seconds as u64), started).await {
-                Ok(result) => result,
-                Err(_) => {
-                    return ToolResult::error(append_status(
-                        "",
-                        &format!("Command timed out after {seconds} seconds"),
-                    ))
+    let deadline =
+        timeout_secs.and_then(|n| Instant::now().checked_add(Duration::from_secs(n as u64)));
+    let mut drain = None;
+    let mut status = None;
+    let mut failure = None;
+    tokio::pin!(cancel);
+    let collected: io::Result<()> = async {
+        loop {
+            if status.is_some() && stdout.is_none() && stderr.is_none() { break; }
+            tokio::select! {
+                () = &mut cancel, if failure.is_none() && status.is_none() => {
+                    failure = Some("Operation aborted".to_string());
+                    drain = Some(Instant::now() + DRAIN);
+                    guard.stop()?;
+                }
+                () = wait_deadline(deadline), if failure.is_none() && status.is_none() => {
+                    failure = Some(format!("Command timed out after {} seconds", timeout_secs.unwrap()));
+                    drain = Some(Instant::now() + DRAIN);
+                    guard.stop()?;
+                }
+                () = wait_deadline(drain) => break,
+                read = async { stdout.as_mut().unwrap().read(&mut out).await }, if stdout.is_some() => {
+                    let n = read?;
+                    if n == 0 { stdout = None; } else { capture.push(&out[..n])?; }
+                }
+                read = async { stderr.as_mut().unwrap().read(&mut err).await }, if stderr.is_some() => {
+                    let n = read?;
+                    if n == 0 { stderr = None; } else { capture.push(&err[..n])?; }
+                }
+                ended = guard.child.wait(), if status.is_none() => {
+                    status = Some(ended?);
+                    drain.get_or_insert(Instant::now() + DRAIN);
+                    // A normal shell exit leaves its background children alive.
+                    guard.armed = failure.is_some();
                 }
             }
         }
-        None => started.await,
-    };
-
-    let output = match output {
-        Ok(output) => output,
-        Err(err) => return ToolResult::error(format!("Failed to run command: {err}")),
-    };
-
-    let mut combined = decode_output(&output.stdout);
-    let stderr = decode_output(&output.stderr);
-    if !stderr.is_empty() {
-        if !combined.is_empty() && !combined.ends_with('\n') {
-            combined.push('\n');
-        }
-        combined.push_str(&stderr);
+        Ok(())
+    }.await;
+    if let Err(error) = collected {
+        failure = Some(append_status(
+            failure.as_deref().unwrap_or(""),
+            &format!("Failed to collect command output: {error}"),
+        ));
     }
+    let exit_code = status.and_then(|status| status.code());
+    let failure = failure.or_else(|| match exit_code {
+        Some(0) => None,
+        Some(code) => Some(format!("Command exited with code {code}")),
+        None => Some("Command terminated by signal".into()),
+    });
+    capture.finish(failure, exit_code)
+}
 
-    let truncation = truncate_tail(&combined, DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES);
-    let text = truncation.content.clone();
-    let full_output_path = if truncation.truncated {
-        save_full_output(&combined)
-    } else {
-        None
-    };
-
-    match output.status.code() {
-        Some(0) => finish(text, &truncation, full_output_path),
-        Some(code) => {
-            let mut result = ToolResult::error(append_status(
-                &text,
-                &format!("Command exited with code {code}"),
-            ));
-            result.details = Some(json!({ "exitCode": code }));
-            result
-        }
-        // Killed by a signal: no exit code to report.
-        None => ToolResult::error(append_status(&text, "Command terminated by signal")),
+async fn wait_deadline(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => pending().await,
     }
 }
 
-/// Runs a command while retaining a synchronous teardown guard. Dropping this
-/// future—because the turn was interrupted or its timeout elapsed—kills the
-/// shell and the descendants that still name it. A normal exit leaves
-/// background children in the agent process group.
-#[cfg(not(target_family = "wasm"))]
-async fn output(mut command: Command) -> std::io::Result<Output> {
-    let child = command.spawn()?;
-    let mut guard = ProcessGroup::new(child);
-    let output = guard.wait_with_output().await;
-    guard.disarm();
-    output
-}
-
-#[cfg(target_family = "wasm")]
-async fn output(mut command: Command) -> std::io::Result<Output> {
-    let child = command.spawn()?;
-    child.wait_with_output().await
-}
-
-#[cfg(not(target_family = "wasm"))]
 struct ProcessGroup {
-    child: Option<tokio::process::Child>,
+    child: Child,
+    armed: bool,
 }
 
-#[cfg(not(target_family = "wasm"))]
 impl ProcessGroup {
-    fn new(child: tokio::process::Child) -> Self {
-        Self { child: Some(child) }
-    }
-
-    fn disarm(&mut self) {
-        self.child.take();
-    }
-
-    async fn wait_with_output(&mut self) -> std::io::Result<Output> {
-        let child = self.child.as_mut().expect("child");
-        let mut stdout = child.stdout.take();
-        let mut stderr = child.stderr.take();
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let status = tokio::try_join!(
-            child.wait(),
-            read_pipe(stdout.as_mut(), &mut out),
-            read_pipe(stderr.as_mut(), &mut err),
-        )?
-        .0;
-        Ok(Output {
-            status,
-            stdout: out,
-            stderr: err,
-        })
+    fn stop(&mut self) -> io::Result<()> {
+        #[cfg(not(target_family = "wasm"))]
+        if let Some(pid) = self.child.id() {
+            kill_process_tree(pid);
+        }
+        self.child.start_kill()
     }
 }
 
-#[cfg(not(target_family = "wasm"))]
-async fn read_pipe<R>(pipe: Option<&mut R>, buf: &mut Vec<u8>) -> std::io::Result<()>
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    if let Some(pipe) = pipe {
-        use tokio::io::AsyncReadExt;
-        pipe.read_to_end(buf).await?;
-    }
-    Ok(())
-}
-
-#[cfg(not(target_family = "wasm"))]
 impl Drop for ProcessGroup {
     fn drop(&mut self) {
-        let Some(pid) = self.child.as_ref().and_then(|child| child.id()) else {
-            return;
-        };
-        eprintln!("event=tool_process_tree_kill pid={pid}");
-        kill_process_tree(pid);
+        if self.armed {
+            let _ = self.stop();
+        }
     }
 }
 
@@ -165,11 +139,6 @@ impl Drop for ProcessGroup {
 fn kill_process_tree(pid: u32) {
     genet_native::process_tree::kill_descendants(pid);
 }
-
-/// The shell already kills the group when the last handle to the child drops,
-/// which is exactly what dropping this future does.
-#[cfg(target_family = "wasm")]
-fn kill_process_tree(_pid: u32) {}
 
 #[cfg(windows)]
 fn kill_process_tree(pid: u32) {
@@ -180,37 +149,101 @@ fn kill_process_tree(pid: u32) {
         .status();
 }
 
-fn finish(
-    text: String,
-    truncation: &TruncationResult,
-    full_output_path: Option<String>,
-) -> ToolResult {
-    let result = ToolResult::ok(text);
-    if !truncation.truncated && full_output_path.is_none() {
-        return result;
-    }
-    let mut details = json!({
-        "truncation": serde_json::to_value(truncation).unwrap_or(Value::Null),
-    });
-    if let Some(path) = full_output_path {
-        details["fullOutputPath"] = json!(path);
-    }
-    result.with_details(details)
+#[derive(Default)]
+struct Capture {
+    tail: VecDeque<u8>,
+    bytes: usize,
+    newlines: usize,
+    last: Option<u8>,
+    full: Option<(std::fs::File, PathBuf)>,
 }
 
-/// Keep the output, then the status on its own paragraph.
+impl Capture {
+    fn push(&mut self, bytes: &[u8]) -> io::Result<()> {
+        let total = self.bytes.saturating_add(bytes.len());
+        let newlines = self.newlines + bytes.iter().filter(|&&c| c == b'\n').count();
+        let lines = newlines + usize::from(bytes.last().is_some_and(|&c| c != b'\n'));
+        if self.full.is_none() && (total > DEFAULT_MAX_BYTES || lines > DEFAULT_MAX_LINES) {
+            let path =
+                crate::os::temp_dir().join(format!("genet-bash-{}.log", uuid::Uuid::new_v4()));
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&path)?;
+            let (a, b) = self.tail.as_slices();
+            file.write_all(a)?;
+            file.write_all(b)?;
+            self.full = Some((file, path));
+        }
+        if let Some((file, _)) = &mut self.full {
+            file.write_all(bytes)?;
+        }
+        self.bytes = total;
+        self.newlines = newlines;
+        self.last = bytes.last().copied().or(self.last);
+        self.tail.extend(bytes);
+        if self.tail.len() > DEFAULT_MAX_BYTES {
+            self.tail.drain(..self.tail.len() - DEFAULT_MAX_BYTES);
+        }
+        Ok(())
+    }
+
+    fn finish(mut self, failure: Option<String>, exit_code: Option<i32>) -> ToolResult {
+        let decoded = decode_output(self.tail.make_contiguous());
+        let mut start = decoded.len().saturating_sub(DEFAULT_MAX_BYTES);
+        while !decoded.is_char_boundary(start) {
+            start += 1;
+        }
+        let mut truncation = truncate_tail(&decoded[start..], DEFAULT_MAX_LINES, DEFAULT_MAX_BYTES);
+        truncation.total_bytes = self.bytes;
+        truncation.total_lines = self.newlines + usize::from(self.last.is_some_and(|c| c != b'\n'));
+        if self.full.is_some() || start > 0 {
+            truncation.truncated = true;
+            truncation
+                .truncated_by
+                .get_or_insert(if self.bytes > DEFAULT_MAX_BYTES || start > 0 {
+                    "bytes"
+                } else {
+                    "lines"
+                });
+            truncation.first_line_exceeds_limit =
+                self.bytes > DEFAULT_MAX_BYTES && truncation.total_lines == 1;
+        }
+        let mut result = match failure {
+            Some(failure) => ToolResult::error(append_status(&truncation.content, &failure)),
+            None => ToolResult::ok(truncation.content.clone()),
+        };
+        let mut details = result.details.take().unwrap_or_else(|| json!({}));
+        if result.is_error {
+            details["exitCode"] = json!(exit_code);
+        }
+        if truncation.truncated {
+            details["truncation"] = json!(truncation);
+        }
+        if let Some((file, path)) = self.full {
+            drop(file);
+            details["fullOutputPath"] = json!(path.to_string_lossy());
+        }
+        if details
+            .as_object()
+            .is_some_and(|details| !details.is_empty())
+        {
+            result.details = Some(details);
+        }
+        result
+    }
+}
+
 fn append_status(text: &str, status: &str) -> String {
     if text.is_empty() {
-        status.to_string()
+        status.into()
     } else {
         format!("{text}\n\n{status}")
     }
-}
-
-fn save_full_output(content: &str) -> Option<String> {
-    let path = crate::os::temp_dir().join(format!("genet-bash-{}.log", uuid::Uuid::new_v4()));
-    std::fs::write(&path, content).ok()?;
-    Some(path.to_string_lossy().to_string())
 }
 
 #[cfg(unix)]
@@ -458,6 +491,93 @@ mod tests {
         assert!(std::fs::read_to_string(saved).unwrap().contains("5000"));
         // The tail is what the model sees.
         assert!(result.text.ends_with("5000"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_returns_output_produced_before_it() {
+        let result = run(
+            &json!({"command": "printf 'partial-before-timeout'; sleep 30", "timeout": 1}),
+            Path::new("."),
+        )
+        .await;
+        assert!(result.is_error);
+        assert!(result.text.starts_with("partial-before-timeout"));
+        assert!(result.text.ends_with("Command timed out after 1 seconds"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_long_single_line_keeps_its_tail_and_full_output_even_on_failure() {
+        let result = run(&json!({"command": "printf 'prefix'; head -c 200000 /dev/zero | tr '\\0' x; printf 'TAIL'; exit 7"}), Path::new(".")).await;
+        assert!(result.is_error);
+        assert!(result.text.ends_with("TAIL\n\nCommand exited with code 7"));
+        assert!(result.text.len() <= DEFAULT_MAX_BYTES + 40);
+        let details = result.details.unwrap();
+        assert_eq!(details["exitCode"], 7);
+        assert_eq!(details["truncation"]["totalBytes"], 200010);
+        let path = details["fullOutputPath"].as_str().unwrap();
+        let full = std::fs::read(path).unwrap();
+        assert_eq!(full.len(), 200010);
+        assert!(full.starts_with(b"prefix") && full.ends_with(b"TAIL"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_exit_returns_without_killing_a_child_that_holds_the_pipes() {
+        let dir =
+            crate::os::temp_dir().join(format!("genet-bash-background-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            run(
+                &json!({"command": "sleep 30 & echo $! > pid; echo background-ready"}),
+                &dir,
+            ),
+        )
+        .await;
+        let pid = std::fs::read_to_string(dir.join("pid"))
+            .unwrap()
+            .trim()
+            .parse::<i32>()
+            .unwrap();
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+        let result = result.expect("shell exit must not wait for background pipe EOF");
+        assert!(!result.is_error, "{}", result.text);
+        assert_eq!(result.text, "background-ready");
+        assert!(
+            alive,
+            "normal tool return must leave background processes alive"
+        );
+    }
+
+    #[tokio::test]
+    async fn streamed_capture_keeps_memory_bounded_and_preserves_every_spooled_byte() {
+        let mut capture = Capture::default();
+        let chunk = vec![b'x'; 8192];
+        for _ in 0..1024 {
+            capture.push(&chunk).unwrap();
+            assert!(capture.tail.len() <= DEFAULT_MAX_BYTES);
+        }
+        let result = capture.finish(None, Some(0));
+        let details = result.details.unwrap();
+        let path = details["fullOutputPath"].as_str().unwrap();
+        assert_eq!(std::fs::metadata(path).unwrap().len(), 8 * 1024 * 1024);
+        assert_eq!(result.text.len(), DEFAULT_MAX_BYTES);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        std::fs::remove_file(path).unwrap();
     }
 
     #[cfg(unix)]

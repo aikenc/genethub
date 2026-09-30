@@ -1,5 +1,47 @@
 use super::*;
 
+// Routed creation has no production consumer; preserve routing regression setup here.
+impl SessionManager {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn create_routed(
+        &self,
+        workspace_id: &str,
+        cwd: PathBuf,
+        agent_id: &str,
+        model_id: Option<String>,
+        effort_id: Option<String>,
+        fast: Option<bool>,
+        mode_id: Option<String>,
+        runtime_values: std::collections::BTreeMap<String, String>,
+        title: Option<String>,
+        routing_tags: Vec<String>,
+        media_tags: Vec<String>,
+    ) -> Result<SessionSummary> {
+        let created = self
+            .create(
+                workspace_id,
+                cwd,
+                agent_id,
+                model_id,
+                effort_id.clone(),
+                fast,
+                mode_id,
+                runtime_values,
+                title,
+            )
+            .await?;
+        let live = self.live(&created.id).await?;
+        let mut meta = live.meta.lock().await;
+        let mut next = meta.clone();
+        next.tag_routing = true;
+        next.routing_tags = routing_tags;
+        next.media_tags = media_tags;
+        self.store.save_meta(&next)?;
+        *meta = next.clone();
+        Ok(next.summary(SessionStatus::Idle))
+    }
+}
+
 // Fixture delivery uses the actual ledger and handover; no test-only product API.
 async fn deliver_decision(
     sessions: &SessionManager,
@@ -2196,6 +2238,79 @@ async fn deleting_a_session_twice_is_not_an_error() {
         sessions.delete("s1").await.is_ok(),
         "two windows deleting the same row would show the second one an error"
     );
+}
+
+#[tokio::test]
+async fn a_failed_delete_keeps_its_cleanup_owner_but_cannot_reopen_the_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let sessions = manager(dir.path());
+    sessions.store.save_meta(&meta()).unwrap();
+    let live = sessions.live("s1").await.unwrap();
+    let attempts = Arc::new(AtomicU64::new(0));
+    *live.agent.lock().await = Some(Arc::new(TestSession::new(SessionBehavior::CloseFailsOnce(
+        attempts.clone(),
+    ))));
+    let mut execution = Execution::new(1);
+    execution.phase = ExecutionPhase::Running;
+    *live.execution.lock().await = Some(execution);
+
+    let error = sessions.delete("s1").await.unwrap_err();
+    assert!(error.to_string().contains("injected adapter close failure"));
+    assert!(sessions.store.is_tombstoned("w1", "s1"));
+    assert!(Arc::ptr_eq(
+        sessions.sessions.read().await.get("s1").unwrap(),
+        &live
+    ));
+    assert!(live.agent.lock().await.is_some());
+    assert!(sessions.has_execution("s1").await);
+    assert!(matches!(
+        live.execution.lock().await.as_ref().unwrap().phase,
+        ExecutionPhase::CleanupFailed
+    ));
+    assert!(sessions
+        .summary("s1")
+        .await
+        .unwrap_err()
+        .downcast_ref::<SessionMissing>()
+        .is_some());
+    assert!(live.claim_execution(None).await.is_err());
+    assert!(sessions.list(None, false).await.unwrap().is_empty());
+    assert!(
+        dir.path().join(".genethub/sessions/s1/meta.json").is_file(),
+        "a catalog scan released the failed cleanup owner's files"
+    );
+    assert!(live.agent.lock().await.is_some());
+
+    // A retry must close the original adapter, rather than acknowledge a
+    // missing catalog row while dropping the only cleanup handle.
+    sessions.delete("s1").await.unwrap();
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    assert!(live.agent.lock().await.is_none());
+    assert!(live.execution.lock().await.is_none());
+    assert!(!sessions.sessions.read().await.contains_key("s1"));
+    assert!(!dir.path().join(".genethub/sessions/s1").exists());
+    assert!(sessions.list(None, false).await.unwrap().is_empty());
+    sessions.delete("s1").await.unwrap();
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn concurrent_delete_retries_share_one_retained_cleanup_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let sessions = manager(dir.path());
+    sessions.store.save_meta(&meta()).unwrap();
+    let live = sessions.live("s1").await.unwrap();
+    let attempts = Arc::new(AtomicU64::new(0));
+    *live.agent.lock().await = Some(Arc::new(TestSession::new(SessionBehavior::CloseFailsOnce(
+        attempts.clone(),
+    ))));
+    let (first, second) = tokio::join!(sessions.delete("s1"), sessions.delete("s1"));
+    assert_ne!(first.is_ok(), second.is_ok());
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    assert!(sessions.sessions.read().await.is_empty());
+    assert!(live.agent.lock().await.is_none());
+    assert!(live.execution.lock().await.is_none());
+    assert!(sessions.store.is_tombstoned("w1", "s1"));
 }
 
 #[tokio::test]
@@ -4502,7 +4617,7 @@ async fn approving_a_permission_stitches_the_same_round_across_two_adapter_turns
 
     // The real pump broke its loop for the interaction, same as
     // `stop_agent_for_interaction` does against a real adapter. A fresh
-    // fake stands in for whatever `ensure_started_in_mode` would really
+    // fake stands in for whatever `ensure_started` would really
     // start on approval, sharing the turn-id counter so the ids stay
     // distinct across the "restart".
     *live.agent.lock().await = Some(Arc::new(TestSession::sharing(
@@ -5319,6 +5434,7 @@ type RecordedPrompts = Arc<std::sync::Mutex<Vec<PromptInput>>>;
 
 enum SessionBehavior {
     Blank,
+    CloseFailsOnce(Arc<AtomicU64>),
     Fork {
         id: &'static str,
         native: bool,
@@ -5405,7 +5521,7 @@ impl AgentSession for TestSession {
                 prompts.push(input);
                 Ok(format!("turn-{}", prompts.len()))
             }
-            SessionBehavior::Stop { .. } => bail!("not used"),
+            SessionBehavior::Stop { .. } | SessionBehavior::CloseFailsOnce(_) => bail!("not used"),
             SessionBehavior::Record(prompts) => {
                 prompts.lock().unwrap().push(input);
                 Ok("t-resumed".into())
@@ -5426,6 +5542,11 @@ impl AgentSession for TestSession {
         Ok(())
     }
     async fn close(&self) -> Result<()> {
+        if let SessionBehavior::CloseFailsOnce(attempts) = &self.behavior {
+            if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                bail!("injected adapter close failure");
+            }
+        }
         if let SessionBehavior::Stop { closed, .. } = &self.behavior {
             closed.store(true, Ordering::SeqCst);
         }

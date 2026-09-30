@@ -360,7 +360,6 @@ pub fn required(request: &Request) -> Capability {
         }
 
         Request::SessionCreate { .. }
-        | Request::SessionCreateRouted { .. }
         | Request::AgentSpaceBuilder { .. }
         | Request::ProjectApprovalRequest { .. }
         | Request::WorkflowBuild { .. }
@@ -384,7 +383,6 @@ pub fn required(request: &Request) -> Capability {
         | Request::SessionForkRouted { .. }
         | Request::SessionForkExport { .. }
         | Request::SessionForkImport { .. }
-        | Request::SessionForkImportRouted { .. }
         | Request::SessionImport { .. }
         | Request::SessionInterrupt { .. }
         | Request::SessionClose { .. }

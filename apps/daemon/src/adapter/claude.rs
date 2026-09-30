@@ -1405,6 +1405,10 @@ impl ClaudeSession {
 
 #[async_trait]
 impl AgentSession for ClaudeSession {
+    async fn pid(&self) -> Option<u32> {
+        self.process.pid().await
+    }
+
     fn events(&self) -> crate::adapter::EventRx {
         self.events_rx
             .lock()

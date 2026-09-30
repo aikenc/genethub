@@ -2,45 +2,6 @@ use super::*;
 
 impl SessionManager {
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn create_routed(
-        &self,
-        workspace_id: &str,
-        cwd: PathBuf,
-        agent_id: &str,
-        model_id: Option<String>,
-        effort_id: Option<String>,
-        fast: Option<bool>,
-        mode_id: Option<String>,
-        runtime_values: std::collections::BTreeMap<String, String>,
-        title: Option<String>,
-        routing_tags: Vec<String>,
-        media_tags: Vec<String>,
-    ) -> Result<SessionSummary> {
-        let created = self
-            .create(
-                workspace_id,
-                cwd,
-                agent_id,
-                model_id,
-                effort_id.clone(),
-                fast,
-                mode_id,
-                runtime_values,
-                title,
-            )
-            .await?;
-        let live = self.live(&created.id).await?;
-        let mut meta = live.meta.lock().await;
-        let mut next = meta.clone();
-        next.tag_routing = true;
-        next.routing_tags = routing_tags;
-        next.media_tags = media_tags;
-        self.store.save_meta(&next)?;
-        *meta = next.clone();
-        Ok(next.summary(SessionStatus::Idle))
-    }
-
-    #[allow(clippy::too_many_arguments)]
     pub async fn create(
         &self,
         workspace_id: &str,

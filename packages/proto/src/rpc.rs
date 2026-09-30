@@ -437,18 +437,6 @@ pub enum Request {
     /// child's own scheduling boundary.
     #[serde(rename = "agentSpace.children", rename_all = "camelCase")]
     AgentSpaceChildren { workspace_id: String },
-    #[serde(rename = "session.createRouted", rename_all = "camelCase")]
-    SessionCreateRouted {
-        workspace_id: String,
-        #[serde(default)]
-        tags: Vec<String>,
-        #[serde(default)]
-        media_tags: Vec<String>,
-        #[serde(default)]
-        title: Option<String>,
-        #[serde(default)]
-        cwd: Option<String>,
-    },
     #[serde(rename = "session.list", rename_all = "camelCase")]
     SessionList {
         #[serde(default)]
@@ -639,13 +627,6 @@ pub enum Request {
     },
     #[serde(rename = "session.forkExport", rename_all = "camelCase")]
     SessionForkExport { session_id: String, turn_id: String },
-    #[serde(rename = "session.forkImportRouted", rename_all = "camelCase")]
-    SessionForkImportRouted {
-        transfer: ForkTransfer,
-        workspace_id: String,
-        #[serde(default)]
-        tags: Vec<String>,
-    },
     #[serde(rename = "session.forkImport", rename_all = "camelCase")]
     SessionForkImport {
         transfer: ForkTransfer,

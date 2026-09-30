@@ -3,12 +3,14 @@ use super::*;
 impl SessionManager {
     pub(super) async fn live(&self, session_id: &str) -> Result<Arc<Live>> {
         loop {
-            if let Some(live) = self.sessions.read().await.get(session_id).cloned() {
-                return Ok(live);
+            let resident = self.sessions.read().await.get(session_id).cloned();
+            if let Some(live) = resident {
+                return self.live_not_deleted(live).await;
             }
             let mut gates = self.hydrating.lock().await;
-            if let Some(live) = self.sessions.read().await.get(session_id).cloned() {
-                return Ok(live);
+            let resident = self.sessions.read().await.get(session_id).cloned();
+            if let Some(live) = resident {
+                return self.live_not_deleted(live).await;
             }
             if let Some(sender) = gates.get(session_id) {
                 let mut done = sender.subscribe();
@@ -24,7 +26,7 @@ impl SessionManager {
             let loaded = self.hydrate_from_disk(session_id).await;
             let mut sessions = self.sessions.write().await;
             let outcome = if let Some(existing) = sessions.get(session_id).cloned() {
-                Ok(existing)
+                self.live_not_deleted(existing).await
             } else {
                 match loaded {
                     Ok(live) => {
@@ -47,6 +49,17 @@ impl SessionManager {
             let _ = sender.send(true);
             return outcome;
         }
+    }
+
+    /// A logically deleted resident may still own a failed cleanup. Keep that
+    /// owner for delete retries without making the session readable or writable.
+    async fn live_not_deleted(&self, live: Arc<Live>) -> Result<Arc<Live>> {
+        let meta = live.meta.lock().await;
+        if self.store.is_tombstoned(&meta.workspace_id, &meta.id) {
+            return Err(SessionMissing(meta.id.clone()).into());
+        }
+        drop(meta);
+        Ok(live)
     }
 
     /// Disk load for a session that is not in the memory map. The `sessions`
@@ -347,14 +360,38 @@ impl SessionManager {
         if let Some(workspace_id) = &workspace_id {
             self.store.mark_deleted(workspace_id, session_id)?;
         }
-        let live = self.sessions.write().await.remove(session_id);
+        let live = self.sessions.read().await.get(session_id).cloned();
+        // Hydration can publish between the first resident snapshot and the
+        // tombstone. Use the owner we will actually retire for physical cleanup.
+        let workspace_id = match &live {
+            Some(live) => {
+                let workspace_id = live.meta.lock().await.workspace_id.clone();
+                self.store.mark_deleted(&workspace_id, session_id)?;
+                Some(workspace_id)
+            }
+            None => workspace_id,
+        };
+        let _interaction = match &live {
+            Some(live) => Some(live.interaction_lock.lock().await),
+            None => None,
+        };
         // Stopped before the files go. An agent still running would keep
         // appending to a timeline we just removed, and the session would
         // reappear a moment after being deleted. The tombstone is already
         // on disk, so a concurrent load cannot rebuild it.
-        if let Some(live) = live {
-            let _interaction = live.interaction_lock.lock().await;
-            cancel_human_continuation(&live, &self.store).await?;
+        if let Some(live) = &live {
+            // A competing delete may already have completed while this one
+            // waited for the interaction lock. Do not retire the same owner twice.
+            if self
+                .sessions
+                .read()
+                .await
+                .get(session_id)
+                .is_none_or(|kept| !Arc::ptr_eq(kept, live))
+            {
+                return Ok(());
+            }
+            cancel_human_continuation(live, &self.store).await?;
             if let Some(broker) = &self.project_control {
                 broker.revoke_session(session_id).await?;
             }
@@ -362,11 +399,22 @@ impl SessionManager {
             self.end_what_it_left(session_id).await;
             live.shutdown().await?;
         }
+        if let Some(workspace_id) = workspace_id {
+            self.store.delete(&workspace_id, session_id)?;
+        }
+        // Fallible retirement must finish before releasing the cleanup owner.
+        // The tombstone blocks public access throughout a failed attempt.
+        if let Some(live) = &live {
+            let mut sessions = self.sessions.write().await;
+            if sessions
+                .get(session_id)
+                .is_some_and(|kept| Arc::ptr_eq(kept, live))
+            {
+                sessions.remove(session_id);
+            }
+        }
         self.processes.forget(session_id).await;
-        let Some(workspace_id) = workspace_id else {
-            return Ok(());
-        };
-        self.store.delete(&workspace_id, session_id)
+        Ok(())
     }
 
     pub(crate) async fn fence_execution(&self, session_id: &str) -> Result<()> {

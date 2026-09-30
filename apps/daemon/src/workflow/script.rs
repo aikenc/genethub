@@ -167,7 +167,6 @@ fn interpreter_script_path(script: &Path) -> String {
     }
 }
 
-
 /// Runs one script and returns its parsed result.
 ///
 /// `task_cwd` is the Run's own working directory. Nothing here confines the

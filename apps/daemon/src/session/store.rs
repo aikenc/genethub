@@ -1543,11 +1543,15 @@ impl Store {
         if !dir.exists() {
             return;
         }
-        if !self.homes.holds(workspace_id, session_id) {
-            if let Err(error) = self.homes.claim(workspace_id, session_id, dir) {
-                tracing::warn!(event = "session_cleanup_deferred", reason = "session_writer", workspace = %workspace_id, session = %session_id, %error, "deleted session cleanup is waiting for its writer");
-                return;
-            }
+        // A catalog scan cannot retire a writer that this daemon still owns:
+        // SessionManager may be retrying a failed Agent close. Explicit delete
+        // releases that claim only after resource retirement succeeds.
+        if self.homes.holds(workspace_id, session_id) {
+            return;
+        }
+        if let Err(error) = self.homes.claim(workspace_id, session_id, dir) {
+            tracing::warn!(event = "session_cleanup_deferred", reason = "session_writer", workspace = %workspace_id, session = %session_id, %error, "deleted session cleanup is waiting for its writer");
+            return;
         }
         if let Err(error) = self.homes.release(workspace_id, session_id) {
             tracing::warn!(event = "session_cleanup_deferred", reason = "lock_release", workspace = %workspace_id, session = %session_id, %error, "could not release deleted session before cleanup");
@@ -2107,6 +2111,7 @@ impl Store {
         let dir = self.raw_session_dir(workspace_id, session_id)?;
         let tombstone = self.tombstone_path(workspace_id, session_id)?;
         if tombstone.exists() {
+            self.homes.release(workspace_id, session_id)?;
             self.reap_tombstoned_session(workspace_id, session_id, &dir);
             return Ok(());
         }

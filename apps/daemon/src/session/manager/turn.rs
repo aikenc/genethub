@@ -386,18 +386,6 @@ impl SessionManager {
         Ok(turn_id)
     }
 
-    /// Starts the agent process if it is not already running.
-    ///
-    /// Lazily, on first send: creating a session should not cost a process, or
-    /// clicking through the sidebar would spawn one per session.
-    pub(super) async fn ensure_started(
-        &self,
-        live: &Arc<Live>,
-        providers: &ProviderMap,
-    ) -> Result<()> {
-        self.ensure_started_in_mode(live, providers, None).await
-    }
-
     /// The saved handle names a store the current adapter cannot read (Cursor
     /// ACP session ids after the move to print mode). The conversation goes on
     /// from GeneHub's own log, handed over once like an Agent switch.
@@ -499,16 +487,15 @@ impl SessionManager {
                 agent.set_mode(&mode_id).await?;
             }
         }
-        self.ensure_started_in_mode(live, providers, None).await?;
+        self.ensure_started(live, providers).await?;
         Ok(!elevated || applied)
     }
 
     /// Starts a stopped native session in the mode stored on the session.
-    pub(super) async fn ensure_started_in_mode(
+    pub(super) async fn ensure_started(
         &self,
         live: &Arc<Live>,
         providers: &ProviderMap,
-        mode_override: Option<String>,
     ) -> Result<()> {
         if live.agent.lock().await.is_some() {
             return Ok(());
@@ -598,7 +585,7 @@ impl SessionManager {
             session_id: meta.id.clone(),
             cwd: meta.cwd.clone(),
             model_id: meta.model_id.clone(),
-            mode_id: mode_override.clone().or_else(|| meta.mode_id.clone()),
+            mode_id: meta.mode_id.clone(),
             effort_id: meta.effort_id.clone(),
             fast: meta.fast,
             runtime_values: meta.runtime_values.clone(),

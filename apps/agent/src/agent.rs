@@ -554,6 +554,8 @@ async fn execute_one(
         ))
     } else if abort.requested() {
         tools::ToolResult::error("Operation aborted")
+    } else if name == "bash" {
+        tools::bash_with_cancel(arguments, cwd, abort.cancelled()).await
     } else {
         let cancel = abort.poll();
         tokio::select! {
@@ -628,7 +630,14 @@ fn normalize_path(path: &Path) -> PathBuf {
             Component::ParentDir => {
                 out.pop();
             }
-            other => out.push(other.as_os_str()),
+            other => {
+                out.push(other.as_os_str());
+                // Resolve each existing prefix before handling a later `..`.
+                // A missing leaf under a symlinked parent still shares its key.
+                if let Ok(real) = std::fs::canonicalize(&out) {
+                    out = real;
+                }
+            }
         }
     }
     out
@@ -828,6 +837,30 @@ mod tests {
             ("4".into(), "edit".into(), json!({"path": "b.txt"})),
         ];
         assert_eq!(mutation_batches(&calls, &cwd), vec![vec![0, 1], vec![2, 3]]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_aliases_and_missing_leaves_share_the_mutation_batch() {
+        let dir = std::env::temp_dir().join(format!("genet-mutation-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("real/sub")).unwrap();
+        std::os::unix::fs::symlink(dir.join("real/sub"), dir.join("alias")).unwrap();
+        std::fs::write(dir.join("real/existing"), "before").unwrap();
+        let calls = vec![
+            ("1".into(), "write".into(), json!({"path": "alias/new"})),
+            ("2".into(), "edit".into(), json!({"path": "real/sub/new"})),
+            (
+                "3".into(),
+                "write".into(),
+                json!({"path": "alias/../existing"}),
+            ),
+            ("4".into(), "edit".into(), json!({"path": "real/existing"})),
+        ];
+        assert_eq!(
+            mutation_batches(&calls, &dir),
+            vec![vec![0], vec![1, 2], vec![3]]
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
@@ -1104,6 +1137,48 @@ mod tests {
             Message::ToolResult { is_error: true, content, .. }
                 if matches!(content.first(), Some(Content::Text { text }) if text == "Operation aborted")
         ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_aborted_bash_tool_reports_its_partial_output() {
+        let dir = std::env::temp_dir().join(format!("genet-abort-output-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (emitter, rx) = capture();
+        let abort = crate::state::Abort::new();
+        let args = json!({"command": "printf 'before-abort'; echo ready > ready; sleep 30"});
+        let model = fake_model();
+        let running = execute_one(
+            &emitter,
+            &dir,
+            &abort,
+            &model,
+            true,
+            true,
+            "call_partial",
+            "bash",
+            &args,
+        );
+        tokio::pin!(running);
+        tokio::select! {
+            () = async {
+                while !dir.join("ready").exists() { tokio::time::sleep(std::time::Duration::from_millis(10)).await; }
+                abort.request();
+            } => (),
+            _ = &mut running => panic!("command finished before abort"),
+        }
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), &mut running)
+            .await
+            .unwrap();
+        assert!(
+            matches!(result, Message::ToolResult { is_error: true, ref content, .. }
+            if matches!(content.first(), Some(Content::Text {text}) if text == "before-abort\n\nOperation aborted"))
+        );
+        let frames = drain(rx).await;
+        assert!(frames.iter().any(|f| f["type"] == "tool_execution_end"
+            && f["isError"] == true
+            && f.to_string().contains("before-abort")));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[tokio::test]

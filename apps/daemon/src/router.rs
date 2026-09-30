@@ -234,9 +234,7 @@ async fn authorize_session_request(
         && matches!(
             request,
             Request::SessionCreate { .. }
-                | Request::SessionCreateRouted { .. }
                 | Request::SessionForkImport { .. }
-                | Request::SessionForkImportRouted { .. }
                 | Request::SessionImport { .. }
         )
     {
@@ -1896,81 +1894,6 @@ async fn dispatch(
             }
         }).await,
 
-        Request::SessionCreateRouted {
-            workspace_id,
-            tags,
-            media_tags,
-            title,
-            cwd,
-        } => Box::pin(async move {
-            let workspace = match state.workspaces.get(&workspace_id).await {
-                Ok(workspace) => workspace,
-                Err(error) => return failed(error),
-            };
-            let start_in = match cwd {
-                Some(cwd) => {
-                    let candidate = std::path::Path::new(&cwd);
-                    match workspace
-                        .folders
-                        .iter()
-                        .find_map(|folder| {
-                            crate::session::store::ensure_within(&folder.root, candidate).ok()
-                        })
-                        .or_else(|| {
-                            crate::session::store::ensure_within(&workspace.root, candidate).ok()
-                        }) {
-                        Some(resolved) => resolved,
-                        None => {
-                            return failed(crate::rpc_error::failure(
-                                ErrorCode::Forbidden,
-                                format!("cwd {cwd} escapes the workspace"),
-                            ))
-                        }
-                    }
-                }
-                None => workspace.root,
-            };
-            let routing_tags = match crate::agent_routing::validate_selected_tags(tags) {
-                Ok(tags) => tags,
-                Err(error) => return failed(error),
-            };
-            let media_tags = match crate::agent_routing::validate_media_tags(media_tags) {
-                Ok(tags) => tags,
-                Err(error) => return failed(error),
-            };
-            let required = crate::agent_routing::normalize_tags(
-                routing_tags.iter().chain(media_tags.iter()).cloned(),
-            );
-            let (route, _) = match crate::agent_routing::resolve_live_route(state, &required).await
-            {
-                Ok(route) => route,
-                Err(error) => return failed(error),
-            };
-            match state
-                .sessions
-                .create_routed(
-                    &workspace_id,
-                    start_in,
-                    &route.agent_id,
-                    route.model_id,
-                    route.effort_id,
-                    route.fast,
-                    route.mode_id,
-                    route.runtime_values,
-                    title,
-                    routing_tags,
-                    media_tags,
-                )
-                .await
-            {
-                Ok(summary) => match rebind_project_control_if_pm(state, &summary).await {
-                    Ok(()) => Handled::ok(Reply::Session(summary)),
-                    Err(error) => failed(error),
-                },
-                Err(error) => failed(error),
-            }
-        }).await,
-
         Request::SessionList {
             workspace_id,
             include_archived,
@@ -2479,59 +2402,6 @@ async fn dispatch(
                     target,
                     &providers,
                     false,
-                )
-                .await
-            {
-                Ok(summary) => match rebind_project_control_if_pm(state, &summary).await {
-                    Ok(()) => Handled::ok(Reply::Session(summary)),
-                    Err(error) => failed(error),
-                },
-                Err(error) => failed(error),
-            }
-        }).await,
-
-        Request::SessionForkImportRouted {
-            transfer,
-            workspace_id,
-            tags,
-        } => Box::pin(async move {
-            let workspace = match state.workspaces.get(&workspace_id).await {
-                Ok(workspace) => workspace,
-                Err(error) => return failed(error),
-            };
-            let routing_tags = match crate::agent_routing::validate_selected_tags(tags) {
-                Ok(tags) => tags,
-                Err(error) => return failed(error),
-            };
-            let media_tags = crate::agent_routing::media_tags_for_timeline(&transfer.items);
-            let required = crate::agent_routing::normalize_tags(
-                routing_tags.iter().chain(media_tags.iter()).cloned(),
-            );
-            let (route, providers) =
-                match crate::agent_routing::resolve_live_route(state, &required).await {
-                    Ok(route) => route,
-                    Err(error) => return failed(error),
-                };
-            let target = genehub_proto::ForkTarget {
-                agent_id: route.agent_id,
-                workspace_id: Some(workspace_id.clone()),
-                model_id: route.model_id,
-                mode_id: route.mode_id,
-                effort_id: route.effort_id,
-                fast: route.fast,
-                runtime_values: route.runtime_values,
-            };
-            match state
-                .sessions
-                .fork_import_routed(
-                    &workspace_id,
-                    workspace.root,
-                    transfer,
-                    target,
-                    &providers,
-                    false,
-                    routing_tags,
-                    media_tags,
                 )
                 .await
             {

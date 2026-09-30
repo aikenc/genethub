@@ -316,6 +316,13 @@ impl ChildHandle {
         if self.own_group {
             signal_group(self.pid, signal);
         } else {
+            // A bash shell shares the Agent group. Killing that whole group
+            // would kill the host; killing only the shell would orphan its work.
+            if signal == KILL {
+                if let Some(pid) = self.pid {
+                    genet_native::process_tree::kill_descendants(pid);
+                }
+            }
             signal_one(self.pid, signal);
         }
     }

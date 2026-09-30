@@ -370,6 +370,10 @@ impl GenetSession {
 
 #[async_trait]
 impl AgentSession for GenetSession {
+    async fn pid(&self) -> Option<u32> {
+        self.process.pid().await
+    }
+
     fn events(&self) -> crate::adapter::EventRx {
         self.events_rx
             .lock()
@@ -451,9 +455,9 @@ impl AgentSession for GenetSession {
     }
 
     async fn close(&self) -> Result<()> {
-        // Tools own separate process groups. Killing only the Agent's group
-        // first can orphan them; its abort protocol drops those tool futures
-        // before agent_end. Keep ownership if that acknowledgement is missing.
+        // Let tools stop their exact shell trees and report partial output
+        // before agent_end. Shared-group background children remain attributable
+        // to this Agent. Keep ownership if cancellation is unconfirmed.
         if self.turn.lock().await.id.is_some() || self.turn.lock().await.pending_id.is_some() {
             tokio::time::timeout(std::time::Duration::from_secs(2), async {
                 self.interrupt().await?;

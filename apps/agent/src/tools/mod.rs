@@ -199,7 +199,7 @@ pub fn definitions() -> Vec<Value> {
         }),
         json!({
             "name": "bash",
-            "description": format!("Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last {DEFAULT_MAX_LINES} lines or {}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.", DEFAULT_MAX_BYTES / 1024),
+            "description": format!("Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last {DEFAULT_MAX_LINES} lines or {}KB (whichever is hit first). If truncated, full output is saved to a temp file. No default timeout. Optionally provide a timeout in seconds. Background processes should redirect their output to a file.", DEFAULT_MAX_BYTES / 1024),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -257,6 +257,8 @@ pub fn definitions() -> Vec<Value> {
 pub(crate) fn media_attachment_detail_key() -> &'static str {
     media::ATTACHMENT_DETAIL
 }
+
+pub(crate) use bash::run_with_cancel as bash_with_cancel;
 
 pub async fn execute(
     name: &str,
