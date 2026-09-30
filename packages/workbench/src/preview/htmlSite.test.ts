@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { remapHtmlSite, resolveRuntimeAssetPath } from "./htmlSite";
+import { remapHtmlSite, resolveRuntimeAssetPath, sameSiteHtmlPath } from "./htmlSite";
 
 describe("remapHtmlSite", () => {
   beforeEach(() => {
@@ -131,5 +131,16 @@ describe("resolveRuntimeAssetPath", () => {
       "r_demo/pkg/game.wasm",
     );
     expect(resolveRuntimeAssetPath("r_demo/index.html", "https://cdn.example/x.wasm")).toBeNull();
+  });
+
+  it("follows a same-site HTML link, including a decoded Chinese name", () => {
+    expect(sameSiteHtmlPath("r_docs/gallery.html", "https://preview.invalid/room.html")).toBe(
+      "r_docs/room.html",
+    );
+    expect(sameSiteHtmlPath("r_docs/gallery.html", "https://preview.invalid/文档/说明.html")).toBe(
+      "r_docs/文档/说明.html",
+    );
+    expect(sameSiteHtmlPath("r_docs/gallery.html", "https://preview.invalid/app.js")).toBeNull();
+    expect(sameSiteHtmlPath("r_docs/gallery.html", "https://cdn.example/room.html")).toBeNull();
   });
 });

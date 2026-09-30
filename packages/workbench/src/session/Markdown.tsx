@@ -293,6 +293,12 @@ export type MarkdownBlockPick = { startLine: number; endLine: number; excerpt: s
 /** Set only while a preview is in annotation mode. Chat markdown leaves this null. */
 export const MarkdownAnnotationContext = createContext<((pick: MarkdownBlockPick) => void) | null>(null);
 
+/** Saved notes for the open preview. Chat markdown leaves this null. */
+export const MarkdownAnnotationMarksContext = createContext<{
+  notes: { id: string; startLine: number; endLine: number }[];
+  open: (id: string) => void;
+} | null>(null);
+
 function AnnotationBlock({
   tag,
   node,
@@ -305,9 +311,13 @@ function AnnotationBlock({
   children?: ReactNode;
 }) {
   const pick = useContext(MarkdownAnnotationContext);
+  const marks = useContext(MarkdownAnnotationMarksContext);
   const start = node?.position?.start.line;
   const end = node?.position?.end.line;
   const clickable = Boolean(pick && start && end);
+  const marked = start && end
+    ? marks?.notes.find((note) => note.startLine <= end && note.endLine >= start)
+    : undefined;
   const onClick = clickable
     ? (event: MouseEvent<HTMLElement>) => {
         if (event.target instanceof Element && event.target.closest("a, button, input, textarea, select")) return;
@@ -320,24 +330,42 @@ function AnnotationBlock({
         });
       }
     : undefined;
-  const classNames = [className, clickable ? "cursor-pointer rounded-sm hover:bg-accent/10" : ""].filter(Boolean).join(" ") || undefined;
+  const classNames = [
+    className,
+    clickable ? "cursor-pointer rounded-sm hover:bg-accent/10" : "",
+    marked && tag !== "table" ? "relative" : "",
+  ].filter(Boolean).join(" ") || undefined;
+  const markButton = marked && tag !== "table" ? (
+    <button
+      type="button"
+      className="absolute right-1 top-1 z-10 h-5 rounded-full border border-line bg-surface px-1.5 text-[10px] text-accent shadow-sm"
+      aria-label="查看批注"
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        marks?.open(marked.id);
+      }}
+    >
+      批注
+    </button>
+  ) : null;
   const shared = {
     className: classNames,
     "data-md-start": clickable ? start : undefined,
     "data-md-end": clickable ? end : undefined,
     onClick,
   };
-  if (tag === "h1") return <h1 {...shared}>{children}</h1>;
-  if (tag === "h2") return <h2 {...shared}>{children}</h2>;
-  if (tag === "h3") return <h3 {...shared}>{children}</h3>;
-  if (tag === "h4") return <h4 {...shared}>{children}</h4>;
-  if (tag === "h5") return <h5 {...shared}>{children}</h5>;
-  if (tag === "h6") return <h6 {...shared}>{children}</h6>;
-  if (tag === "li") return <li {...shared}>{children}</li>;
-  if (tag === "blockquote") return <blockquote {...shared}>{children}</blockquote>;
-  if (tag === "pre") return <div {...shared}>{children}</div>;
+  if (tag === "h1") return <h1 {...shared}>{children}{markButton}</h1>;
+  if (tag === "h2") return <h2 {...shared}>{children}{markButton}</h2>;
+  if (tag === "h3") return <h3 {...shared}>{children}{markButton}</h3>;
+  if (tag === "h4") return <h4 {...shared}>{children}{markButton}</h4>;
+  if (tag === "h5") return <h5 {...shared}>{children}{markButton}</h5>;
+  if (tag === "h6") return <h6 {...shared}>{children}{markButton}</h6>;
+  if (tag === "li") return <li {...shared}>{children}{markButton}</li>;
+  if (tag === "blockquote") return <blockquote {...shared}>{children}{markButton}</blockquote>;
+  if (tag === "pre") return <div {...shared}>{children}{markButton}</div>;
   if (tag === "table") return <table {...shared}>{children}</table>;
-  return <p {...shared}>{children}</p>;
+  return <p {...shared}>{children}{markButton}</p>;
 }
 
 function MarkdownParagraph({ children, node }: MarkdownChildren & { node?: PositionedNode }) {
@@ -387,7 +415,11 @@ function MarkdownDel({ children }: MarkdownChildren) {
 }
 function MarkdownPre({ children, node }: MarkdownChildren & { node?: PositionedNode }) {
   const pick = useContext(MarkdownAnnotationContext);
-  if (!pick) return <>{children}</>;
+  const marks = useContext(MarkdownAnnotationMarksContext);
+  const start = node?.position?.start.line;
+  const end = node?.position?.end.line;
+  const marked = Boolean(start && end && marks?.notes.some((note) => note.startLine <= end && note.endLine >= start));
+  if (!pick && !marked) return <>{children}</>;
   return <AnnotationBlock tag="pre" node={node}>{children}</AnnotationBlock>;
 }
 function MarkdownTable({ children, node }: MarkdownChildren & { node?: PositionedNode }) {

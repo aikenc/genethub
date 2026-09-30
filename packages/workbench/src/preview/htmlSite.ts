@@ -262,6 +262,15 @@ export async function remapHtmlSite(options: {
   };
 }
 
+/** Same-site HTML navigation stays inside Preview. Other files stay on the asset bridge. */
+export function sameSiteHtmlPath(entryPath: string, rawUrl: string): string | null {
+  const resolved = resolveRuntimeAssetPath(entryPath, rawUrl);
+  if (!resolved) return null;
+  const lower = resolved.toLowerCase();
+  if (!lower.endsWith(".html") && !lower.endsWith(".htm")) return null;
+  return resolved;
+}
+
 export function resolveRuntimeAssetPath(entryPath: string, rawUrl: string): string | null {
   try {
     const parsed = new URL(rawUrl, PREVIEW_ORIGIN);

@@ -3,6 +3,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useRef,
   useState,
   type ReactNode,
   type RefObject,
@@ -11,7 +12,11 @@ import {
 import type { PreviewAnnotation, PreviewAnnotationTarget, PreviewReviewDraft } from "@genehub/proto";
 
 import type { Client } from "../protocol/client";
-import { MarkdownAnnotationContext, type MarkdownBlockPick } from "../session/Markdown";
+import {
+  MarkdownAnnotationContext,
+  MarkdownAnnotationMarksContext,
+  type MarkdownBlockPick,
+} from "../session/Markdown";
 import {
   defaultImageRect,
   PREVIEW_ANNOTATIONS_FEATURE,
@@ -39,6 +44,8 @@ type ReviewContextValue = {
   pickHtml: (hit: HtmlAnnotationHit) => void;
   pickImage: (rect: NaturalRect) => void;
   openNote: (id: string) => void;
+  /** Present for HTML, where the control sits in the existing runtime bar. */
+  bar: { toggle: () => void; count: number; openDraft: () => void } | null;
 };
 
 const PreviewReviewContext = createContext<ReviewContextValue | null>(null);
@@ -205,19 +212,37 @@ export function PreviewReviewChrome({
     }
   };
 
+  const notes = draft.annotations.filter((item) => item.source.relativePath === path && item.source.contentVersion === version);
   const context: ReviewContextValue = {
     active: available && !!sessionId && active,
-    notes: draft.annotations.filter((item) => item.source.relativePath === path && item.source.contentVersion === version),
+    notes,
     pickHtml,
     pickImage,
     openNote,
+    bar: available && kind === "html"
+      ? {
+          toggle: () => {
+            setActive((value) => !value);
+            setPending(null);
+          },
+          count: draft.annotations.length,
+          openDraft: () => setDrawer(true),
+        }
+      : null,
+  };
+  const markdownMarks = {
+    notes: notes.flatMap((item) => item.target.kind === "markdownLines"
+      ? [{ id: item.id, startLine: item.target.startLine, endLine: item.target.endLine }]
+      : []),
+    open: openNote,
   };
 
   return (
     <PreviewReviewContext.Provider value={context}>
       <MarkdownAnnotationContext.Provider value={context.active && kind === "markdown" ? pickMarkdown : null}>
+        <MarkdownAnnotationMarksContext.Provider value={markdownMarks}>
         <div className="relative flex min-h-0 flex-1 flex-col">
-          {available ? (
+          {available && kind !== "html" ? (
             <div className="pointer-events-none absolute left-2 top-2 z-20 flex gap-1">
               <button
                 type="button"
@@ -249,7 +274,7 @@ export function PreviewReviewChrome({
           {children}
           {pending ? (
             <form
-              className="shrink-0 border-t border-line bg-surface p-3"
+              className="absolute inset-x-0 bottom-0 z-30 border-t border-line bg-surface p-3 shadow-lg"
               onSubmit={(event) => {
                 event.preventDefault();
                 void save();
@@ -317,6 +342,7 @@ export function PreviewReviewChrome({
             </aside>
           ) : null}
         </div>
+        </MarkdownAnnotationMarksContext.Provider>
       </MarkdownAnnotationContext.Provider>
     </PreviewReviewContext.Provider>
   );
@@ -390,78 +416,201 @@ export function ImageAnnotationLayer({ image }: { image: HTMLImageElement | null
   );
 }
 
+export function PreviewAnnotationBar() {
+  const review = useContext(PreviewReviewContext);
+  if (!review?.bar) return null;
+  return (
+    <>
+      <button
+        type="button"
+        aria-pressed={review.active}
+        className="shrink-0 rounded border border-line bg-surface px-2 py-1 text-fg hover:bg-raised"
+        onClick={review.bar.toggle}
+      >
+        {review.active ? "完成" : "批注"}
+      </button>
+      {review.bar.count > 0 ? (
+        <button
+          type="button"
+          className="shrink-0 rounded border border-line bg-surface px-2 py-1 text-muted hover:bg-raised"
+          aria-label={`查看批注草稿 ${review.bar.count}`}
+          onClick={review.bar.openDraft}
+        >
+          {review.bar.count}
+        </button>
+      ) : null}
+    </>
+  );
+}
+
+type HtmlMark = { id: string; x: number; y: number; width: number; height: number };
+
 export function HtmlAnnotationOverlay({
   frameRef,
+  frameReady,
 }: {
   frameRef: RefObject<HTMLIFrameElement | null>;
+  frameReady: boolean;
 }) {
   const review = useContext(PreviewReviewContext);
   const [outline, setOutline] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  const [marks, setMarks] = useState<HtmlMark[]>([]);
+  const [hint, setHint] = useState<string | null>(null);
+  const captureRef = useRef<HTMLDivElement>(null);
+  const htmlNotes = review?.notes.filter((item) => item.target.kind === "htmlElement") ?? [];
+  const htmlNotesRef = useRef(htmlNotes);
+  htmlNotesRef.current = htmlNotes;
+  const locateKey = htmlNotes.map((item) => item.target.kind === "htmlElement" ? `${item.id}:${item.target.selector}` : "").join("\n");
+
   useEffect(() => {
-    if (!review?.active) return;
+    if (!review?.active) setOutline(null);
+  }, [review?.active]);
+
+  useEffect(() => {
+    const frame = frameRef.current;
+    if (!frame) return;
+    const publish = () => {
+      const items = htmlNotesRef.current.flatMap((item) => item.target.kind === "htmlElement"
+        ? [{ id: item.id, selector: item.target.selector }]
+        : []);
+      frame.contentWindow?.postMessage({
+        source: RUNTIME_COMMAND_SOURCE,
+        command: "locate",
+        requestId: "locate",
+        items,
+      }, "*");
+    };
+    frame.addEventListener("load", publish);
+    publish();
+    return () => frame.removeEventListener("load", publish);
+  }, [frameRef, locateKey, frameReady]);
+
+  useEffect(() => {
     const receive = (event: MessageEvent) => {
       if (event.source !== frameRef.current?.contentWindow) return;
       const data = event.data as { source?: string; kind?: string; requestId?: string; detail?: unknown };
-      if (data?.source !== RUNTIME_SOURCE || data.kind !== "hit-test") return;
+      if (data?.source !== RUNTIME_SOURCE) return;
+      if (data.kind === "locate") {
+        setMarks(parseMarks(data.detail));
+        return;
+      }
+      if (data.kind !== "hit-test" || !review?.active) return;
       const pendingId = frameRef.current?.dataset.hitRequest;
       if (!pendingId || data.requestId !== pendingId) return;
       delete frameRef.current?.dataset.hitRequest;
-      if (!isHtmlHit(data.detail)) return;
+      if (!isHtmlHit(data.detail)) {
+        setOutline(null);
+        setHint("没有点到可选元素");
+        return;
+      }
       const selector = clampUtf8(data.detail.selector, 512);
       const domFingerprint = clampUtf8(data.detail.domFingerprint, 128);
       if (!selector || !domFingerprint) return;
-      setOutline(null);
+      setHint(null);
+      setOutline(hitBox(data.detail));
       review.pickHtml({ ...data.detail, selector, domFingerprint });
     };
     window.addEventListener("message", receive);
     return () => window.removeEventListener("message", receive);
   }, [frameRef, review]);
-  if (!review?.active) return null;
+
+  useEffect(() => {
+    const node = captureRef.current;
+    if (!node || !review?.active) return;
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      const frame = frameRef.current;
+      const box = frame?.getBoundingClientRect();
+      if (!frame?.contentWindow || !box) return;
+      frame.contentWindow.postMessage({
+        source: RUNTIME_COMMAND_SOURCE,
+        command: "scroll-by",
+        requestId: "scroll",
+        x: event.clientX - box.left,
+        y: event.clientY - box.top,
+        dx: event.deltaX,
+        dy: event.deltaY,
+      }, "*");
+    };
+    node.addEventListener("wheel", onWheel, { passive: false });
+    return () => node.removeEventListener("wheel", onWheel);
+  }, [frameRef, review?.active]);
+
+  if (!review || (!review.active && marks.length === 0)) return null;
   return (
-    <div
-      className="absolute inset-0 z-10 cursor-crosshair"
-      onPointerDown={(event) => {
-        event.currentTarget.setPointerCapture(event.pointerId);
-        event.currentTarget.dataset.clientX = String(event.clientX);
-        event.currentTarget.dataset.clientY = String(event.clientY);
-        event.currentTarget.dataset.scrolling = "0";
-      }}
-      onPointerMove={(event) => {
-        if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
-        const dx = event.clientX - Number(event.currentTarget.dataset.clientX);
-        const dy = event.clientY - Number(event.currentTarget.dataset.clientY);
-        if (Math.hypot(dx, dy) < 8) return;
-        event.currentTarget.dataset.scrolling = "1";
-        event.currentTarget.dataset.clientX = String(event.clientX);
-        event.currentTarget.dataset.clientY = String(event.clientY);
-        frameRef.current?.contentWindow?.postMessage({
-          source: RUNTIME_COMMAND_SOURCE,
-          command: "scroll-by",
-          requestId: "scroll",
-          dx: -dx,
-          dy: -dy,
-        }, "*");
-      }}
-      onPointerUp={(event) => {
-        if (event.currentTarget.dataset.scrolling === "1") return;
-        const frame = frameRef.current;
-        const box = frame?.getBoundingClientRect();
-        if (!frame?.contentWindow || !box) return;
-        const requestId = `hit-${crypto.randomUUID()}`;
-        frame.dataset.hitRequest = requestId;
-        const x = event.clientX - box.left;
-        const y = event.clientY - box.top;
-        setOutline({ x, y, width: 2, height: 2 });
-        frame.contentWindow.postMessage({
-          source: RUNTIME_COMMAND_SOURCE,
-          command: "hit-test",
-          requestId,
-          x,
-          y,
-        }, "*");
-      }}
-    >
-      {outline ? <span className="pointer-events-none absolute border-2 border-accent" style={{ left: outline.x, top: outline.y }} /> : null}
+    <div className="pointer-events-none absolute inset-0 z-10">
+      {review.active ? (
+        <div
+          ref={captureRef}
+          className="pointer-events-auto absolute inset-0 cursor-crosshair"
+          onPointerDown={(event) => {
+            if ((event.target as Element).closest("[data-annotation-mark]")) return;
+            event.currentTarget.setPointerCapture(event.pointerId);
+            event.currentTarget.dataset.clientX = String(event.clientX);
+            event.currentTarget.dataset.clientY = String(event.clientY);
+            event.currentTarget.dataset.scrolling = "0";
+          }}
+          onPointerMove={(event) => {
+            if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+            const dx = event.clientX - Number(event.currentTarget.dataset.clientX);
+            const dy = event.clientY - Number(event.currentTarget.dataset.clientY);
+            if (Math.hypot(dx, dy) < 8) return;
+            event.currentTarget.dataset.scrolling = "1";
+            event.currentTarget.dataset.clientX = String(event.clientX);
+            event.currentTarget.dataset.clientY = String(event.clientY);
+            const box = frameRef.current?.getBoundingClientRect();
+            frameRef.current?.contentWindow?.postMessage({
+              source: RUNTIME_COMMAND_SOURCE,
+              command: "scroll-by",
+              requestId: "scroll",
+              x: box ? event.clientX - box.left : 0,
+              y: box ? event.clientY - box.top : 0,
+              dx: -dx,
+              dy: -dy,
+            }, "*");
+          }}
+          onPointerUp={(event) => {
+            if (event.currentTarget.dataset.scrolling === "1") return;
+            const frame = frameRef.current;
+            const box = frame?.getBoundingClientRect();
+            if (!frame?.contentWindow || !box) return;
+            const requestId = `hit-${crypto.randomUUID()}`;
+            frame.dataset.hitRequest = requestId;
+            frame.contentWindow.postMessage({
+              source: RUNTIME_COMMAND_SOURCE,
+              command: "hit-test",
+              requestId,
+              x: event.clientX - box.left,
+              y: event.clientY - box.top,
+            }, "*");
+          }}
+        >
+          {outline ? (
+            <span
+              className="pointer-events-none absolute border-2 border-accent bg-accent/10"
+              style={{ left: outline.x, top: outline.y, width: outline.width, height: outline.height }}
+            />
+          ) : null}
+          {hint ? <span className="pointer-events-none absolute left-2 top-2 rounded bg-surface px-2 py-1 text-xs text-muted shadow">{hint}</span> : null}
+        </div>
+      ) : null}
+      {marks.map((mark) => (
+        <button
+          key={mark.id}
+          type="button"
+          data-annotation-mark=""
+          className="pointer-events-auto absolute z-20 h-5 rounded-full border border-line bg-surface px-1.5 text-[10px] text-accent shadow-sm"
+          style={{ left: Math.max(0, mark.x + mark.width - 36), top: Math.max(0, mark.y) }}
+          aria-label="查看批注"
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            review.openNote(mark.id);
+          }}
+        >
+          批注
+        </button>
+      ))}
     </div>
   );
 }
@@ -490,6 +639,35 @@ function isHtmlHit(value: unknown): value is HtmlAnnotationHit {
     && typeof hit.tag === "string" && hit.tag.length > 0 && hit.tag.length <= 32
     && typeof hit.excerpt === "string" && hit.excerpt.length <= 256
     && typeof hit.domFingerprint === "string" && hit.domFingerprint.length > 0;
+}
+
+function hitBox(hit: HtmlAnnotationHit): { x: number; y: number; width: number; height: number } | null {
+  const record = hit as HtmlAnnotationHit & { x?: unknown; y?: unknown; width?: unknown; height?: unknown };
+  const x = Number(record.x);
+  const y = Number(record.y);
+  const width = Number(record.width);
+  const height = Number(record.height);
+  if (![x, y, width, height].every(Number.isFinite) || width < 1 || height < 1) return null;
+  return { x, y, width, height };
+}
+
+function parseMarks(detail: unknown): HtmlMark[] {
+  if (!detail || typeof detail !== "object") return [];
+  const marks = (detail as { marks?: unknown }).marks;
+  if (!Array.isArray(marks)) return [];
+  return marks.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const mark = item as { id?: unknown; missing?: unknown; x?: unknown; y?: unknown; width?: unknown; height?: unknown };
+    if (mark.missing || typeof mark.id !== "string") return [];
+    const box = hitBox({
+      selector: "x",
+      tag: "div",
+      excerpt: "",
+      domFingerprint: "x",
+      ...mark,
+    } as HtmlAnnotationHit);
+    return box ? [{ id: mark.id, ...box }] : [];
+  });
 }
 
 function clampUtf8(value: string, maxBytes: number): string {

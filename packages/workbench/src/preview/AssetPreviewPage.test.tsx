@@ -80,6 +80,9 @@ describe("active single-file HTML Preview", () => {
     expect(bridge?.textContent).toContain('source: "genehub-preview-diag"');
     expect(bridge?.textContent).toContain("securitypolicyviolation");
     expect(bridge?.textContent).toContain('["debug", "log", "info", "warn", "error"]');
+    expect(bridge?.textContent).toContain('sendRuntime("open-path"');
+    expect(bridge?.textContent).toContain("scrollableAt");
+    expect(bridge?.textContent).toContain('data.command === "locate"');
     expect(bridge?.textContent).toContain('data.command === "snapshot-render"');
     expect(bridge?.textContent).toContain('data.command !== "snapshot-dom"');
     expect(bridge?.textContent).toContain("MutationObserver");
