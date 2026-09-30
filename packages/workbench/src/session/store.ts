@@ -61,6 +61,7 @@ import {
   withRuntimePreference,
   withSelectedTags,
 } from "./capability-preferences";
+import { forwardedFromNames } from "./forwardCapsule";
 import {
   applySequenced,
   emptyTimeline,
@@ -1817,6 +1818,16 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         sessions: state.sessions.map((entry) => entry.id === sessionId ? { ...entry, draftCount: savedDrafts.length } : entry),
       }));
       forwardMemory.delete(key);
+      const sourceName = (item: SessionDraft) =>
+        item.forward ? [item.forward.sourceTitle || item.forward.sourceSessionId] : [];
+      const previousTitle = forwardedFromNames(
+        normalizeSessionDrafts(currentReply.data).flatMap(sourceName),
+      );
+      const nextTitle = forwardedFromNames(savedDrafts.flatMap(sourceName));
+      const currentTitle = get().sessions.find((entry) => entry.id === sessionId)?.title?.trim() || null;
+      if (nextTitle && (!currentTitle || currentTitle === previousTitle)) {
+        await get().renameSession(sessionId, nextTitle);
+      }
     } catch (error) {
       reportError(set, error);
     }

@@ -22,11 +22,17 @@ import type { SelectableMessage } from "./selection";
  * data, every output is deterministic, so the dialog can re-run it after each
  * batch fetch and the tests can pin the exact wire format.
  *
- * The budget is bidirectional: assembly starts from the narrative base
- * (L0–L3), trims oldest-first when over budget, and fills detail layers
- * (L4 trunk details, then L5 blob bodies) newest-first while budget remains.
- * Filling is atomic per trunk/blob — a unit that does not fit whole is not
- * filled at all, so the receiver never reads half a tool log.
+ * The work log is a containment hierarchy. Outer layers outlive inner ones:
+ *
+ *   trunk title
+ *     batch summary (the short monologue already on the trunk list)
+ *       toolcall detail (overview line, then full body)
+ *
+ * Default text keeps the trunk title, the batch summary, and `[toolcall * N]`.
+ * Overview lines and blob bodies are opt-in. They are added newest-first, and
+ * only while the outer layers still fit. A single tool line that does not fit
+ * is skipped whole. When the monologues themselves exceed the budget, batch
+ * lines are dropped oldest-first, then trunk titles, then long messages by time.
  */
 
 export const FORWARD_BUDGET_TIERS = [8_000, 16_000, 32_000, 64_000] as const;
@@ -68,9 +74,9 @@ export interface CapsuleData {
 
 export interface CapsuleOptions {
   budgetTokens: number;
-  /** L4 fill: trunk details (monologue + blob overviews). */
-  fillDetail: boolean;
-  /** L5 fill: full blob bodies. Requires explicit opt-in (sensitive). */
+  /** Tool overview list. Off by default; the capsule stays a monologue plus a count. */
+  includeToolDetails: boolean;
+  /** Full blob bodies. Off by default (sensitive). A body replaces that tool's overview line. */
   includeBlobBodies: boolean;
   /** Same-machine forwarding embeds `genet session` drill-down commands. */
   sourceAccessible: boolean;
@@ -128,6 +134,35 @@ export function parseForwardEnvelope(text: string): ForwardEnvelopeInfo | null {
   return { sourceSessionId, messageCount: count ? Number(count) : null };
 }
 
+/** Sidebar and draft label: 转发自「原会话名」. */
+export function forwardedFromLabel(name: string): string {
+  const trimmed = name.trim() || "未命名会话";
+  return `转发自「${trimmed}」`;
+}
+
+/** One session title for every forwarded source, in display order. */
+export function forwardedFromNames(names: readonly string[]): string | null {
+  const cleaned = names.map((name) => name.trim()).filter(Boolean);
+  if (cleaned.length === 0) return null;
+  return `转发自${cleaned.map((name) => `「${name}」`).join("、")}`;
+}
+
+/**
+ * Names a new session after every forwarded source in the prompt.
+ * The user's own text after the envelopes stays in the message, not the title.
+ * Returns null when the text is not a forward, so the caller keeps the first line.
+ */
+export function forwardedSessionTitle(text: string): string | null {
+  const names = splitForwardMessage(text).flatMap((part) => {
+    if (part.kind !== "forward") return [];
+    const title = /^Source title: (.+)$/m.exec(part.capsule)?.[1]?.trim();
+    const session = part.info.sourceSessionId?.trim();
+    const name = title || session;
+    return name ? [name] : [];
+  });
+  return forwardedFromNames(names);
+}
+
 /**
  * Splits a user message into the leading capsule and whatever the sender
  * wrote after it. The composer prepends the capsule, so anything following
@@ -142,6 +177,41 @@ export function splitForwardEnvelope(
   if (closing === -1) return { capsule: text, rest: "", info };
   const end = closing + "</genehub-chat-history>".length;
   return { capsule: text.slice(0, end), rest: text.slice(end).trim(), info };
+}
+
+const FORWARD_OPEN = "<genehub-chat-history>";
+const FORWARD_CLOSE = "</genehub-chat-history>";
+
+export type ForwardMessagePart =
+  | { kind: "text"; text: string }
+  | { kind: "forward"; capsule: string; info: ForwardEnvelopeInfo };
+
+/** Every capsule in a message, including ones after the first, stays a card. */
+export function splitForwardMessage(text: string): ForwardMessagePart[] {
+  const parts: ForwardMessagePart[] = [];
+  let cursor = 0;
+  while (cursor < text.length) {
+    const start = text.indexOf(FORWARD_OPEN, cursor);
+    if (start === -1) break;
+    const before = text.slice(cursor, start).trim();
+    if (before) parts.push({ kind: "text", text: before });
+    const closing = text.indexOf(FORWARD_CLOSE, start);
+    if (closing === -1) {
+      const capsule = text.slice(start);
+      const info = parseForwardEnvelope(capsule);
+      parts.push(info ? { kind: "forward", capsule, info } : { kind: "text", text: capsule.trim() });
+      return parts;
+    }
+    const end = closing + FORWARD_CLOSE.length;
+    const capsule = text.slice(start, end);
+    const info = parseForwardEnvelope(capsule);
+    if (info) parts.push({ kind: "forward", capsule, info });
+    else parts.push({ kind: "text", text: capsule });
+    cursor = end;
+  }
+  const tail = text.slice(cursor).trim();
+  if (tail) parts.push({ kind: "text", text: tail });
+  return parts;
 }
 
 function clip(text: string, maxChars: number): string {
@@ -181,27 +251,39 @@ function renderTrunkTitle(roundId: string, trunk: RoundTrunkSummary): string {
   return `- [trunk ${roundId}/t-${String(trunk.index).padStart(4, "0")}] ${trunk.title}`;
 }
 
-function renderTrunkDetail(
+function trunkToken(roundId: string, index: number): string {
+  return `${roundId}/t-${String(index).padStart(4, "0")}`;
+}
+
+function trunkKey(roundId: string, index: number): string {
+  return `${roundId}:${index}`;
+}
+
+function batchKey(roundId: string, trunkIndex: number, batchIndex: number): string {
+  return `${roundId}:${trunkIndex}:${batchIndex}`;
+}
+
+function blobKey(
   roundId: string,
-  trunk: RoundTrunk,
-  blobBody: (ref: BlobRef) => string | null,
+  trunkIndex: number,
+  batchIndex: number,
+  itemId: string,
 ): string {
-  const lines: string[] = [
-    `[trunk-detail id="${roundId}/t-${String(trunk.summary.index).padStart(4, "0")}" title="${trunk.summary.title.replaceAll('"', "'")}"]`,
-  ];
-  for (const batch of trunk.batches) {
-    if (batch.monologue) lines.push(`[batch]\n${batch.monologue}\n[/batch]`);
-    for (const blob of batch.blobs) {
-      const body = blob.blob ? blobBody(blob.blob) : null;
-      if (body !== null) {
-        lines.push(`[tool-detail kind="${blob.kind}"]\n${body}\n[/tool-detail]`);
-      } else {
-        lines.push(`[tool-overview kind="${blob.kind}"]\n${blob.overview}\n[/tool-overview]`);
-      }
-    }
-  }
-  lines.push("[/trunk-detail]");
-  return lines.join("\n");
+  return `${roundId}:${trunkIndex}:${batchIndex}:${itemId}`;
+}
+
+/** Image batches already say so in their summary; they are not tool calls. */
+function imageBatch(text: string): boolean {
+  return text.includes("张图片");
+}
+
+function countedTools(
+  batch: RoundTrunkSummary["batches"][number],
+  detailKinds: readonly { kind: string }[] | null,
+): number {
+  if (batch.marker || imageBatch(batch.text)) return 0;
+  if (detailKinds) return detailKinds.filter((blob) => blob.kind === "toolCall").length;
+  return batch.blobCount;
 }
 
 function renderBlobBody(payload: BlobPayload): string {
@@ -277,14 +359,15 @@ export function buildForwardCapsule(
     Math.min(options.budgetTokens, MAX_FORWARD_BUDGET) * CHARS_PER_TOKEN -
     COVERAGE_RESERVE_CHARS;
 
-  const droppedRounds = new Set<string>();
   const clippedMessages = new Set<string>();
-  const filledTrunks = new Set<string>();
-  const filledBlobs = new Set<string>();
+  const hiddenTrunks = new Set<string>();
+  const hiddenBatches = new Set<string>();
+  const shownDetails = new Set<string>();
+  const shownBodies = new Set<string>();
   let roundsCompressed = false;
 
-  const blobBody = (ref: BlobRef): string | null => {
-    if (!filledBlobs.has(ref.id)) return null;
+  const bodyText = (ref: BlobRef, key: string): string | null => {
+    if (!shownBodies.has(key)) return null;
     const payload = data.blobs[ref.id];
     return payload ? renderBlobBody(payload) : null;
   };
@@ -313,7 +396,11 @@ export function buildForwardCapsule(
         );
       } else {
         for (const round of rounds) {
-          parts.push(renderRoundLine(round, droppedRounds.has(round.roundId)));
+          const trunks = data.layers[round.roundId] ?? [];
+          const omitted =
+            trunks.length > 0 &&
+            trunks.every((trunk) => hiddenTrunks.has(trunkKey(round.roundId, trunk.index)));
+          parts.push(renderRoundLine(round, omitted));
         }
       }
       parts.push("[/rounds]");
@@ -321,15 +408,44 @@ export function buildForwardCapsule(
 
     const workLog: string[] = [];
     for (const round of rounds) {
-      if (droppedRounds.has(round.roundId)) continue;
-      for (const trunk of data.layers[round.roundId] ?? []) {
-        const key = `${round.roundId}:${trunk.index}`;
+      const trunks = [...(data.layers[round.roundId] ?? [])].sort((a, b) => a.index - b.index);
+      for (const trunk of trunks) {
+        const key = trunkKey(round.roundId, trunk.index);
+        if (hiddenTrunks.has(key)) continue;
+        const visibleBatches = [...trunk.batches]
+          .sort((a, b) => a.index - b.index)
+          .filter((batch) => !hiddenBatches.has(batchKey(round.roundId, trunk.index, batch.index)));
+        if (visibleBatches.length === 0) {
+          workLog.push(renderTrunkTitle(round.roundId, trunk));
+          continue;
+        }
+        const title = trunk.title.replaceAll('"', "'");
+        const lines = [`[trunk id="${trunkToken(round.roundId, trunk.index)}" title="${title}"]`];
         const detail = data.trunks[key];
-        workLog.push(
-          detail && filledTrunks.has(key)
-            ? renderTrunkDetail(round.roundId, detail, blobBody)
-            : renderTrunkTitle(round.roundId, trunk),
-        );
+        for (const batch of visibleBatches) {
+          const detailBatch = detail?.batches.find((item) => item.summary.index === batch.index);
+          const blobs = (detailBatch?.blobs ?? []).filter((blob) => blob.kind !== "image");
+          const toolCount = countedTools(batch, detailBatch ? detailBatch.blobs : null);
+          const batchLines = ["[batch]", batch.text];
+          let shownTools = 0;
+          for (const blob of blobs) {
+            const itemKey = blobKey(round.roundId, trunk.index, batch.index, blob.itemId);
+            if (!shownDetails.has(itemKey)) continue;
+            if (blob.kind === "toolCall") shownTools += 1;
+            const body = blob.blob ? bodyText(blob.blob, itemKey) : null;
+            if (body !== null) {
+              batchLines.push(`[tool-detail kind="${blob.kind}"]\n${body}\n[/tool-detail]`);
+            } else {
+              batchLines.push(`[tool-overview kind="${blob.kind}"]\n${blob.overview}\n[/tool-overview]`);
+            }
+          }
+          const omitted = toolCount - shownTools;
+          if (omitted > 0) batchLines.push(`[toolcall * ${omitted}]`);
+          batchLines.push("[/batch]");
+          lines.push(batchLines.join("\n"));
+        }
+        lines.push("[/trunk]");
+        workLog.push(lines.join("\n"));
       }
     }
     if (workLog.length > 0) {
@@ -339,50 +455,141 @@ export function buildForwardCapsule(
     return `${parts.join("\n")}${coverage}\n</genehub-chat-history>`;
   };
 
-  // --- Fill direction (only while the base fits) ---------------------------
+  const within = (value: string) => [...value].length <= charBudget;
   const wantedTrunks: TrunkLocator[] = [];
   const wantedBlobs: BlobRef[] = [];
-  const candidates = options.fillDetail ? fillOrder(rounds, data) : [];
 
-  let text = assemble("");
-  if (options.fillDetail && [...text].length <= charBudget) {
-    for (const candidate of candidates) {
-      if (!data.trunks[candidate.key]) {
-        if (wantedTrunks.length < FILL_BATCH_SIZE) {
-          wantedTrunks.push({ roundId: candidate.roundId, trunkIndex: candidate.index });
+  interface DetailItem {
+    blobKey: string;
+    ref: BlobRef | null;
+  }
+
+  const loadedDetailsNewestFirst = (): DetailItem[] => {
+    const items: DetailItem[] = [];
+    for (const candidate of fillOrder(rounds, data)) {
+      if (hiddenTrunks.has(candidate.key)) continue;
+      const detail = data.trunks[candidate.key];
+      if (!detail) continue;
+      const batches = [...detail.batches].sort((a, b) => b.summary.index - a.summary.index);
+      for (const batch of batches) {
+        if (hiddenBatches.has(batchKey(candidate.roundId, candidate.index, batch.summary.index))) {
+          continue;
         }
-        continue;
+        const blobs = batch.blobs.filter((blob) => blob.kind !== "image");
+        for (let index = blobs.length - 1; index >= 0; index -= 1) {
+          const blob = blobs[index]!;
+          items.push({
+            blobKey: blobKey(
+              candidate.roundId,
+              candidate.index,
+              batch.summary.index,
+              blob.itemId,
+            ),
+            ref: blob.blob ?? null,
+          });
+        }
       }
-      filledTrunks.add(candidate.key);
-      const attempt = assemble("");
-      if ([...attempt].length > charBudget) {
-        filledTrunks.delete(candidate.key);
-      } else {
-        text = attempt;
+    }
+    return items;
+  };
+
+  const oldestVisibleBatch = (): string | null => {
+    for (const round of rounds) {
+      const trunks = [...(data.layers[round.roundId] ?? [])].sort((a, b) => a.index - b.index);
+      for (const trunk of trunks) {
+        if (hiddenTrunks.has(trunkKey(round.roundId, trunk.index))) continue;
+        const batches = [...trunk.batches].sort((a, b) => a.index - b.index);
+        for (const batch of batches) {
+          const key = batchKey(round.roundId, trunk.index, batch.index);
+          if (!hiddenBatches.has(key)) return key;
+        }
       }
+    }
+    return null;
+  };
+
+  const oldestVisibleTrunk = (): string | null => {
+    for (const round of rounds) {
+      const trunks = [...(data.layers[round.roundId] ?? [])].sort((a, b) => a.index - b.index);
+      for (const trunk of trunks) {
+        const key = trunkKey(round.roundId, trunk.index);
+        if (!hiddenTrunks.has(key)) return key;
+      }
+    }
+    return null;
+  };
+
+  // Outer layers first. Drop every batch monologue before any trunk title,
+  // and within a layer drop the oldest unit first.
+  let text = assemble("");
+  while (!within(text)) {
+    const batch = oldestVisibleBatch();
+    if (batch) {
+      hiddenBatches.add(batch);
+      text = assemble("");
+      continue;
+    }
+    const trunk = oldestVisibleTrunk();
+    if (!trunk) break;
+    hiddenTrunks.add(trunk);
+    text = assemble("");
+  }
+  if (!within(text) && rounds.length > 1) {
+    roundsCompressed = true;
+    text = assemble("");
+  }
+  if (!within(text)) {
+    const byTime = messages
+      .map((message, index) => ({ message, index }))
+      .sort((left, right) => {
+        if (left.message.atMs === null && right.message.atMs === null) return left.index - right.index;
+        if (left.message.atMs === null) return 1;
+        if (right.message.atMs === null) return -1;
+        return left.message.atMs - right.message.atMs || left.index - right.index;
+      });
+    for (const { message } of byTime) {
+      if (within(text)) break;
+      if ([...message.text].length <= MESSAGE_CLIP_CHARS) continue;
+      clippedMessages.add(message.id);
+      text = assemble("");
     }
   }
 
-  const blobOrder: BlobRef[] = [];
-  if (options.includeBlobBodies) {
-    for (const candidate of candidates) {
-      if (!filledTrunks.has(candidate.key)) continue;
-      for (const batch of data.trunks[candidate.key]!.batches) {
-        for (const blob of batch.blobs) {
-          if (blob.blob) blobOrder.push(blob.blob);
-        }
-      }
+  if (options.includeToolDetails && within(text)) {
+    for (const item of loadedDetailsNewestFirst()) {
+      shownDetails.add(item.blobKey);
+      const attempt = assemble("");
+      if (!within(attempt)) shownDetails.delete(item.blobKey);
+      else text = attempt;
     }
-    if ([...text].length <= charBudget) {
-      for (const ref of blobOrder) {
-        if (!data.blobs[ref.id]) {
-          if (wantedBlobs.length < FILL_BATCH_SIZE) wantedBlobs.push(ref);
+  }
+
+  const bodyKeys = new Set<string>();
+  if (options.includeBlobBodies) {
+    for (const item of loadedDetailsNewestFirst()) {
+      if (!item.ref) continue;
+      if (options.includeToolDetails && !shownDetails.has(item.blobKey)) continue;
+      bodyKeys.add(item.blobKey);
+    }
+    if (within(text)) {
+      for (const item of loadedDetailsNewestFirst()) {
+        if (!item.ref || !bodyKeys.has(item.blobKey)) continue;
+        if (!data.blobs[item.ref.id]) {
+          if (
+            wantedBlobs.length < FILL_BATCH_SIZE &&
+            !wantedBlobs.some((ref) => ref.id === item.ref!.id)
+          ) {
+            wantedBlobs.push(item.ref);
+          }
           continue;
         }
-        filledBlobs.add(ref.id);
+        const hadOverview = shownDetails.has(item.blobKey);
+        shownDetails.add(item.blobKey);
+        shownBodies.add(item.blobKey);
         const attempt = assemble("");
-        if ([...attempt].length > charBudget) {
-          filledBlobs.delete(ref.id);
+        if (!within(attempt)) {
+          shownBodies.delete(item.blobKey);
+          if (!hadOverview) shownDetails.delete(item.blobKey);
         } else {
           text = attempt;
         }
@@ -390,47 +597,45 @@ export function buildForwardCapsule(
     }
   }
 
-  // --- Trim direction (only when still over budget) ------------------------
-  if ([...text].length > charBudget) {
-    for (const round of rounds) {
-      if ([...text].length <= charBudget) break;
-      if ((data.layers[round.roundId] ?? []).length === 0) continue;
-      droppedRounds.add(round.roundId);
-      text = assemble("");
+  if (within(text)) {
+    for (const candidate of fillOrder(rounds, data)) {
+      if (hiddenTrunks.has(candidate.key) || data.trunks[candidate.key]) continue;
+      if (wantedTrunks.length >= FILL_BATCH_SIZE) break;
+      wantedTrunks.push({ roundId: candidate.roundId, trunkIndex: candidate.index });
     }
   }
-  if ([...text].length > charBudget && rounds.length > 1) {
-    roundsCompressed = true;
-    text = assemble("");
-  }
-  if ([...text].length > charBudget) {
-    const byLength = [...messages].sort((a, b) => b.text.length - a.text.length);
-    for (const message of byLength) {
-      if ([...text].length <= charBudget) break;
-      if ([...message.text].length <= MESSAGE_CLIP_CHARS) continue;
-      clippedMessages.add(message.id);
-      text = assemble("");
-    }
-  }
-  const overBudget = [...text].length > charBudget;
+
+  const overBudget = !within(text);
+  const detailRequested = options.includeToolDetails || options.includeBlobBodies;
+  const candidates = detailRequested ? fillOrder(rounds, data) : [];
+  const detailFilledTrunks = candidates.filter((candidate) => {
+    const prefix = `${candidate.key}:`;
+    for (const key of shownDetails) if (key.startsWith(prefix)) return true;
+    return false;
+  }).length;
 
   const trunkTitlesTotal = rounds.reduce(
     (total, round) => total + (data.layers[round.roundId] ?? []).length,
     0,
   );
-  const trunkTitlesKept = rounds
-    .filter((round) => !droppedRounds.has(round.roundId))
-    .reduce((total, round) => total + (data.layers[round.roundId] ?? []).length, 0);
+  const trunkTitlesKept = rounds.reduce(
+    (total, round) =>
+      total +
+      (data.layers[round.roundId] ?? []).filter(
+        (trunk) => !hiddenTrunks.has(trunkKey(round.roundId, trunk.index)),
+      ).length,
+    0,
+  );
 
   const stats: CapsuleStats = {
     selectedCount: messages.length,
     roundCount: rounds.length,
     trunkTitlesKept,
     trunkTitlesTotal,
-    detailFilledTrunks: filledTrunks.size,
-    detailOmittedTrunks: candidates.length - filledTrunks.size,
-    blobsFilled: filledBlobs.size,
-    blobsOmitted: blobOrder.length - filledBlobs.size,
+    detailFilledTrunks,
+    detailOmittedTrunks: candidates.length - detailFilledTrunks,
+    blobsFilled: shownBodies.size,
+    blobsOmitted: bodyKeys.size - shownBodies.size,
     clippedMessages: clippedMessages.size,
     roundsCompressed,
   };
@@ -460,6 +665,8 @@ function buildHeader(
     `Source session: ${source.sessionId}`,
     `Source agent: ${source.agentLabel ?? "unknown"}`,
   ];
+  const sourceTitle = source.sessionTitle?.split(/\r?\n/, 1)[0]?.trim();
+  if (sourceTitle) lines.push(`Source title: ${sourceTitle}`);
   if (source.spanMs) {
     lines.push(
       `Session span: ${formatClock(source.spanMs.start)} – ${formatClock(source.spanMs.end)}`,
@@ -497,7 +704,7 @@ function renderCoverage(stats: CapsuleStats, options: CapsuleOptions): string {
     `rounds="${stats.roundCount}"`,
     `trunk-titles="${stats.trunkTitlesKept}/${stats.trunkTitlesTotal}"`,
   ];
-  if (options.fillDetail) {
+  if (options.includeToolDetails || options.includeBlobBodies) {
     attrs.push(`trunk-detail-filled="${stats.detailFilledTrunks}"`);
     attrs.push(`trunk-detail-omitted="${stats.detailOmittedTrunks}"`);
   }

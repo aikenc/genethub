@@ -41,6 +41,7 @@ export function WorkspaceRow({
   onNewSession,
   children,
   browse = false,
+  pick = false,
   density = "auto",
   expanded,
   onExpand,
@@ -48,6 +49,8 @@ export function WorkspaceRow({
   actions = true,
 }: {
   browse?: boolean;
+  /** Same row identity as the project list, used only to choose a project. */
+  pick?: boolean;
   density?: "auto" | "comfortable" | "compact";
   expanded?: boolean;
   onExpand?(): void;
@@ -78,6 +81,31 @@ export function WorkspaceRow({
   const [removing, setRemoving] = useState(false);
   const [removeBusy, setRemoveBusy] = useState(false);
   const [removeError, setRemoveError] = useState("");
+  if (pick) {
+    return (
+      <li data-density={density} className="entity-row">
+        <button
+          type="button"
+          role="option"
+          aria-selected={active}
+          aria-label={workspace.name}
+          title={breadcrumb}
+          className={`flex min-h-11 w-full items-center gap-3 rounded-lg px-2 py-1.5 text-left ${
+            active ? "bg-accent/10 text-fg" : "text-fg hover:bg-raised"
+          }`}
+          onClick={onPick}
+        >
+          <EntityAvatar id={workspace.id} name={workspace.name} />
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-sm font-medium">{workspace.name}</span>
+            {breadcrumb && breadcrumb !== workspace.name ? (
+              <span className="block truncate text-[11px] font-normal text-faint">{breadcrumb}</span>
+            ) : null}
+          </span>
+        </button>
+      </li>
+    );
+  }
   return (
     <li data-density={density} className="entity-row group relative mb-1">
       {editing ? (
@@ -269,20 +297,26 @@ export function RecentSessions({
   workspaces,
   activeSessionId,
   density = "auto",
+  pick = false,
+  listLabel = "最近会话",
   ...actions
 }: {
   density?: "auto" | "comfortable" | "compact";
   sessions: ListedSession[];
   workspaces: WorkspaceInfo[];
   activeSessionId: string | null;
+  /** Same rows as the sidebar, used only to choose a conversation. */
+  pick?: boolean;
+  listLabel?: string;
 } & RowActions) {
   const machine = useWorkbench((s) => s.client?.identity?.machineId ?? "");
   const { groups } = useAgentGroups(machine);
   return (
     <ul
       data-density={density}
-      className="entity-list conversation-list space-y-1"
-      aria-label="最近会话"
+      className={`entity-list conversation-list w-full min-w-0 max-w-full space-y-1 ${pick ? "overflow-hidden" : ""}`}
+      role={pick ? "listbox" : undefined}
+      aria-label={listLabel}
     >
       {[...sessions]
         .sort(
@@ -294,6 +328,7 @@ export function RecentSessions({
           <SessionRow
             key={session.id}
             session={session}
+            pick={pick}
             groupNames={groups.filter((g) => inAgentGroup(session, g)).map((g) => g.name)}
             active={session.id === activeSessionId}
             project={workspaces.find(({ id }) => id === session.workspaceId)}
@@ -309,6 +344,7 @@ function SessionRow({
   active,
   project,
   groupNames,
+  pick = false,
   onPickSession,
   onRename,
   onDelete,
@@ -318,6 +354,7 @@ function SessionRow({
   active: boolean;
   project?: WorkspaceInfo;
   groupNames: string[];
+  pick?: boolean;
 } & RowActions) {
   const [menu, setMenu] = useState<"shut" | "open" | "confirming">("shut");
   const [editing, setEditing] = useState(false);
@@ -349,10 +386,12 @@ function SessionRow({
   }
 
   return (
-    <li className="conversation-row group relative flex items-center">
+    <li className={`conversation-row group relative flex w-full min-w-0 max-w-full items-center ${pick ? "overflow-hidden" : ""}`}>
       {selection && <input type="checkbox" aria-label={`选择 ${title(session)}`} checked={selection.ids.has(session.id)} disabled={selection.disabled} onChange={() => selection.toggle(session.id)} className="ml-2 h-5 w-5 shrink-0 accent-[rgb(var(--accent))]" />}
       <button
         type="button"
+        role={pick ? "option" : undefined}
+        aria-selected={pick ? active : undefined}
         disabled={selection ? selection.disabled : Boolean(unsupported)}
         title={unsupported ? whyUnsupported(unsupported) : undefined}
         className={`entity-main conversation-main flex min-h-16 min-w-0 flex-1 items-center gap-3 rounded-lg px-3 py-3 text-left text-sm ${
@@ -375,7 +414,7 @@ function SessionRow({
         </EntityText>
       </button>
 
-      {!selection && <button
+      {!selection && !pick && <button
         type="button"
         aria-label={`${title(session)} 的更多操作`}
         aria-expanded={menu !== "shut"}

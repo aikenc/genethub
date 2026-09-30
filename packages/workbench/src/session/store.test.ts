@@ -1906,6 +1906,82 @@ describe("renaming and deleting a conversation", () => {
     expect(useWorkbench.getState().tabs[0]?.title).toBe("发布收尾");
   });
 
+  it("names an untitled session when a forward is parked, before anything is sent", async () => {
+    const untitled = { ...SESSION, id: "s-new", title: undefined };
+    const client = {
+      call: async (request: { type: string; payload?: { drafts?: unknown; title?: string } }) => {
+        if (request.type === "session.drafts") return { type: "sessionDrafts", data: [] };
+        if (request.type === "session.drafts.replace") {
+          return { type: "sessionDrafts", data: request.payload?.drafts ?? [] };
+        }
+        if (request.type === "session.rename") {
+          return { type: "session", data: { ...untitled, title: request.payload?.title } };
+        }
+        return undefined;
+      },
+      subscribe: async () => ({
+        snapshot: { seq: 0, items: [], summary: untitled },
+        replayed: [],
+        reset: false,
+      }),
+      unsubscribe: async () => {},
+    } as unknown as Client;
+    useWorkbench.setState({
+      client,
+      sessions: [untitled],
+      activeSessionId: "s-new",
+      tabs: [{ id: "chat:s-new", kind: "chat", title: "新会话", sessionId: "s-new" }],
+    });
+
+    await useWorkbench.getState().setForwardDraft({
+      sessionId: "s-new",
+      capsule: "<genehub-chat-history>\nSource session: s-src\n</genehub-chat-history>",
+      itemCount: 2,
+      estimatedTokens: 20,
+      sourceSessionId: "s-src",
+      sourceTitle: "给我编写一个小游戏来体验",
+    });
+
+    expect(useWorkbench.getState().sessions.find((entry) => entry.id === "s-new")?.title).toBe(
+      "转发自「给我编写一个小游戏来体验」",
+    );
+    expect(useWorkbench.getState().tabs[0]?.title).toBe("转发自「给我编写一个小游戏来体验」");
+  });
+
+  it("does not rename a session that already has a name when a forward is parked", async () => {
+    const named = { ...SESSION, id: "s-old", title: "既有会话" };
+    const asked: string[] = [];
+    const client = {
+      call: async (request: { type: string; payload?: { drafts?: unknown } }) => {
+        asked.push(request.type);
+        if (request.type === "session.drafts") return { type: "sessionDrafts", data: [] };
+        if (request.type === "session.drafts.replace") {
+          return { type: "sessionDrafts", data: request.payload?.drafts ?? [] };
+        }
+        return undefined;
+      },
+      subscribe: async () => ({
+        snapshot: { seq: 0, items: [], summary: named },
+        replayed: [],
+        reset: false,
+      }),
+      unsubscribe: async () => {},
+    } as unknown as Client;
+    useWorkbench.setState({ client, sessions: [named], activeSessionId: "s-old" });
+
+    await useWorkbench.getState().setForwardDraft({
+      sessionId: "s-old",
+      capsule: "<genehub-chat-history>\n</genehub-chat-history>",
+      itemCount: 1,
+      estimatedTokens: 10,
+      sourceSessionId: "s-src",
+      sourceTitle: "另一段",
+    });
+
+    expect(asked).not.toContain("session.rename");
+    expect(useWorkbench.getState().sessions[0]?.title).toBe("既有会话");
+  });
+
   it("does not ask the machine to call a session nothing", async () => {
     const { client, asked } = answering(() => undefined);
     useWorkbench.setState({ client });

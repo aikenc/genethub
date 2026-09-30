@@ -1935,6 +1935,65 @@ pub fn title_from(text: &str) -> Option<String> {
     (!trimmed.is_empty()).then_some(trimmed)
 }
 
+/// Session name for a prompt. A forward is named after its source sessions,
+/// `转发自「原会话名」`, instead of the envelope tag on the first line.
+pub fn prompt_title(text: &str) -> Option<String> {
+    let names = forward_source_names(text);
+    if names.is_empty() {
+        return title_from(text);
+    }
+    let labeled = names
+        .into_iter()
+        .map(|name| format!("「{name}」"))
+        .collect::<Vec<_>>()
+        .join("、");
+    title_from(&format!("转发自{labeled}"))
+}
+
+fn forward_source_names(text: &str) -> Vec<String> {
+    const OPEN: &str = "<genehub-chat-history>";
+    const CLOSE: &str = "</genehub-chat-history>";
+    let mut names = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find(OPEN) {
+        let after = &rest[start + OPEN.len()..];
+        let (body, next) = match after.find(CLOSE) {
+            Some(end) => (&after[..end], &after[end + CLOSE.len()..]),
+            None => (after, ""),
+        };
+        if let Some(name) = source_name_in_capsule(body) {
+            names.push(name);
+        }
+        if next.is_empty() {
+            break;
+        }
+        rest = next;
+    }
+    names
+}
+
+fn source_name_in_capsule(body: &str) -> Option<String> {
+    let mut session = None;
+    for line in body.lines() {
+        let line = line.trim();
+        if let Some(title) = line.strip_prefix("Source title:") {
+            let title = title.trim();
+            if !title.is_empty() {
+                return Some(title.to_string());
+            }
+        }
+        if session.is_none() {
+            if let Some(id) = line.strip_prefix("Source session:") {
+                let id = id.trim();
+                if !id.is_empty() {
+                    session = Some(id.to_string());
+                }
+            }
+        }
+    }
+    session
+}
+
 /// Trim a session name to the same length `rename` accepts.
 ///
 /// Empty after trim stays `None` so an Agent cannot blank a title with
@@ -1993,7 +2052,7 @@ pub fn is_catalog_noise_title(title: &str) -> bool {
 pub fn first_user_title(chat: &ChatLog) -> Option<String> {
     chat.items.iter().find_map(|item| match item {
         TimelineItem::UserMessage { text, .. } => {
-            title_from(text).filter(|title| !is_catalog_noise_title(title))
+            prompt_title(text).filter(|title| !is_catalog_noise_title(title))
         }
         _ => None,
     })
@@ -2275,5 +2334,34 @@ mod project_home_tests {
                 "missing structured {event} diagnostic"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod prompt_title_tests {
+    use super::prompt_title;
+
+    #[test]
+    fn keeps_an_ordinary_first_line() {
+        assert_eq!(prompt_title("说的啥？").as_deref(), Some("说的啥？"));
+    }
+
+    #[test]
+    fn names_a_forward_after_each_source_session() {
+        let text = "\
+<genehub-chat-history>
+Source session: s-1
+Source title: 坦克复盘
+</genehub-chat-history>
+
+<genehub-chat-history>
+Source session: s-2
+</genehub-chat-history>
+
+说的啥？";
+        assert_eq!(
+            prompt_title(text).as_deref(),
+            Some("转发自「坦克复盘」、「s-2」")
+        );
     }
 }

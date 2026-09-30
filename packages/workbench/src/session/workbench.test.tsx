@@ -2839,12 +2839,29 @@ describe("the controls offered to the user", () => {
       ],
     })} />);
 
-    await userEvent.click(screen.getByRole("checkbox", { name: "选择草稿 第一条" }));
-    await userEvent.click(screen.getByRole("checkbox", { name: "选择草稿 第二条" }));
+    expect(screen.getByRole("checkbox", { name: "选择草稿 第一条" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "选择草稿 第二条" })).toBeChecked();
     await userEvent.click(screen.getByRole("button", { name: "发送" }));
 
     expect(onSend).toHaveBeenCalledWith("第一条\n\n第二条", []);
     expect(onReplaceDrafts).toHaveBeenCalledWith([]);
+  });
+
+  it("hides selected drafts as soon as send starts", async () => {
+    let release: (saved: boolean) => void = () => {};
+    const onReplaceDrafts = vi.fn(() => new Promise<boolean>((resolve) => {
+      release = resolve;
+    }));
+    render(<Composer {...composerProps({
+      onSend: vi.fn(async () => {}),
+      onReplaceDrafts,
+      drafts: [{ id: "d1", text: "马上发出", attachments: [] }],
+    })} />);
+
+    const sending = userEvent.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => expect(screen.queryByRole("checkbox", { name: "选择草稿 马上发出" })).not.toBeInTheDocument());
+    release(true);
+    await sending;
   });
 
   it("keeps text-only drafts from older peers usable when attachments are absent", async () => {
@@ -2854,7 +2871,7 @@ describe("the controls offered to the user", () => {
     render(<Composer {...composerProps({ onSend, drafts: [legacyDraft] })} />);
 
     expect(screen.getByRole("button", { name: "旧草稿仍可继续" })).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("checkbox", { name: "选择草稿 旧草稿仍可继续" }));
+    expect(screen.getByRole("checkbox", { name: "选择草稿 旧草稿仍可继续" })).toBeChecked();
     await userEvent.click(screen.getByRole("button", { name: "发送" }));
 
     expect(onSend).toHaveBeenCalledWith("旧草稿仍可继续", []);
@@ -3303,7 +3320,7 @@ describe("a whole turn as the timeline sees it", () => {
     );
     expect(screen.getByText("重建会话")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "重建到所选目标" })).toBeEnabled();
-    expect(screen.getByRole("option", { name: /GeneHub/ }).querySelector("[data-workspace-icon=folder]")).toBeTruthy();
+    expect(within(screen.getByRole("option", { name: "GeneHub" })).getByRole("img", { name: "GeneHub的头像" })).toBeInTheDocument();
   });
 
   it("lets a running turn open a reconstruct-only Fork dialog", async () => {
@@ -3484,6 +3501,90 @@ describe("a whole turn as the timeline sees it", () => {
     // Clicking a checked bubble unchecks it (反选).
     await userEvent.click(screen.getByRole("checkbox", { name: /第一个回答/ }));
     expect(screen.getByTestId("selection-bar")).toHaveTextContent("已选 3/30 条");
+  });
+
+  it("keeps 选择 on fully loaded turns when another message is only an excerpt", async () => {
+    useWorkbench.setState({
+      sessions: [
+        {
+          id: "s1",
+          workspaceId: "w1",
+          agentId: "codex",
+          title: undefined,
+          createdAtMs: 0,
+          updatedAtMs: 0,
+          archived: false,
+          status: "idle",
+        },
+      ],
+      activeSessionId: "s1",
+      workspaces: [{
+        id: "w1",
+        name: "GeneHub",
+        root: "/work/genehub",
+        isGitRepo: true,
+        folders: [],
+      }],
+      agents: [agent({ id: "codex", label: "Codex" })],
+    });
+    const completedTurn = (turnId: string, userText: string, assistantText: string) => [
+      {
+        type: "item" as const,
+        turnId,
+        item: { type: "userMessage" as const, id: `u-${turnId}`, text: userText, attachments: [] },
+      },
+      { type: "turnStarted" as const, turnId, startedAtMs: 1 },
+      {
+        type: "item" as const,
+        turnId,
+        item: { type: "assistantMessage" as const, id: `a-${turnId}`, text: assistantText },
+      },
+      {
+        type: "item" as const,
+        turnId,
+        item: {
+          type: "turnSummary" as const,
+          id: `summary-${turnId}`,
+          stats: {
+            turnId,
+            outcome: "completed" as const,
+            startedAtMs: 1,
+            finishedAtMs: 2,
+            durationMs: 1,
+            usage: {
+              inputTokens: 1,
+              outputTokens: 1,
+              cacheReadTokens: 0,
+              cacheWriteTokens: 0,
+              llmRounds: 1,
+              toolOutputTokens: 0,
+              compactionCount: 0,
+              outputRateEstimated: false,
+              costUsd: undefined,
+            },
+            toolCalls: 0,
+            forkCheckpoint: undefined,
+          },
+        },
+      },
+    ];
+    let state = emptyTimeline();
+    for (const event of [
+      ...completedTurn("t1", "带图的问题", "带图的回答"),
+      ...completedTurn("t2", "生成4张4k图", "四张图已生成"),
+    ]) {
+      state = apply(state, event);
+    }
+    state = { ...state, historyExcerptIds: ["u-t1"] };
+
+    render(<TimelineView state={state} />);
+
+    const entries = screen.getAllByRole("button", { name: "选择" });
+    expect(entries).toHaveLength(2);
+    await userEvent.click(entries[0]!);
+    expect(screen.queryByRole("checkbox", { name: /带图的问题/ })).toBeNull();
+    expect(screen.getByRole("checkbox", { name: /带图的回答/ })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByTestId("selection-bar")).toHaveTextContent("已选 1/30 条");
   });
 });
 

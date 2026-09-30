@@ -34,6 +34,7 @@ import {
   validateInlineAttachmentBudget,
   VIDEO_ATTACHMENT_MIMES,
 } from "./attachments";
+import { forwardedFromLabel } from "./forwardCapsule";
 import { resolveArtifactRef } from "../preview/resolveArtifactRef";
 import {
   mediaTagsForMimes,
@@ -256,7 +257,11 @@ export function Composer({
   const [draftSaveState, setDraftSaveState] = useState<"idle" | "saving" | "saved">("idle");
   const draftSavePending = useRef(false);
   const draftSavedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [selectedDraftIds, setSelectedDraftIds] = useState<Set<string>>(() => new Set());
+  const [selectedDraftIds, setSelectedDraftIds] = useState<Set<string>>(
+    () => new Set((drafts ?? []).map((item) => item.id)),
+  );
+  const seenDraftIds = useRef<Set<string>>(new Set((drafts ?? []).map((item) => item.id)));
+  const [hidingDraftIds, setHidingDraftIds] = useState<Set<string>>(() => new Set());
   const [expandedDraftId, setExpandedDraftId] = useState<string | null>(null);
   const draftPicker = useRef<HTMLInputElement>(null);
   const activeDraftFile = useRef<string | null>(null);
@@ -391,6 +396,22 @@ export function Composer({
     setHighlighted(0);
   };
 
+  useEffect(() => {
+    const ids = (drafts ?? []).map((item) => item.id);
+    const seen = seenDraftIds.current;
+    const added = ids.filter((id) => !seen.has(id));
+    const removed = [...seen].some((id) => !ids.includes(id));
+    if (added.length === 0 && !removed) return;
+    seenDraftIds.current = new Set(ids);
+    setSelectedDraftIds((current) => {
+      const next = new Set([...current].filter((id) => ids.includes(id)));
+      for (const id of added) next.add(id);
+      return next;
+    });
+  }, [drafts]);
+
+  const visibleDrafts = (drafts ?? []).filter((item) => !hidingDraftIds.has(item.id));
+
   const send = async () => {
     // The button is gone outside `idle`, but the textarea's Enter is not: it
     // used to reach the daemon mid-turn and come back as "a turn is already
@@ -424,17 +445,27 @@ export function Composer({
     setMissingAttachments(0);
     if (persistenceKey) saveLocalDraft(persistenceKey, { text: "", attachments: [], missingAttachments: 0 });
     setDismissed(false);
+    const removing = new Set(selectedDrafts.map((item) => item.id));
+    if (removing.size > 0) setHidingDraftIds(removing);
     try {
       if (videoFiles.length > 0) await onSend(payload, outgoing, videoFiles);
       else await onSend(payload, outgoing);
     } catch {
       // The owning store has already restored/reporting the live input. Saved
       // draft cards stay intact until admission is confirmed.
+      setHidingDraftIds(new Set());
       return;
     }
-    if (selectedDrafts.length > 0) {
-      await onReplaceDrafts?.((drafts ?? []).filter((item) => !selectedDraftIds.has(item.id)));
-      setSelectedDraftIds(new Set());
+    if (removing.size > 0) {
+      const saved = await onReplaceDrafts?.((drafts ?? []).filter((item) => !removing.has(item.id)));
+      setHidingDraftIds(new Set());
+      if (saved !== false) {
+        setSelectedDraftIds((current) => {
+          const next = new Set(current);
+          for (const id of removing) next.delete(id);
+          return next;
+        });
+      }
     }
     if (forwardDraft) onClearForwardDraft?.();
   };
@@ -676,18 +707,21 @@ export function Composer({
           focused ? "border-muted/50" : "border-line-strong"
         }`}
       >
-        {(drafts?.length ?? 0) > 0 ? (
+        {visibleDrafts.length > 0 ? (
           <div className="space-y-1 px-4 pt-3" data-testid="session-drafts">
-            {drafts!.map((item) => {
+            {visibleDrafts.map((item) => {
               const expanded = expandedDraftId === item.id;
               const itemAttachments = item.attachments ?? [];
               const firstLine = item.text.split(/\r?\n/, 1)[0]?.trim() || itemAttachments[0]?.name || "附件";
+              const label = item.forward
+                ? forwardedFromLabel(item.forward.sourceTitle || item.forward.sourceSessionId)
+                : firstLine;
               return (
                 <div key={item.id} className="rounded-xl border border-line bg-raised/40">
                   <div className="flex min-h-9 items-center gap-2 px-2.5">
                     <input
                       type="checkbox"
-                      aria-label={`选择草稿 ${firstLine}`}
+                      aria-label={`选择草稿 ${label}`}
                       checked={selectedDraftIds.has(item.id)}
                       onChange={() => setSelectedDraftIds((current) => {
                         const next = new Set(current);
@@ -703,20 +737,20 @@ export function Composer({
                       onClick={() => setExpandedDraftId(expanded ? null : item.id)}
                     >
                       {item.forward ? <span aria-hidden className="mr-1.5">↪</span> : null}
-                      {firstLine}
+                      {label}
                       {itemAttachments.length > 0 ? <span className="ml-1.5 text-faint">· {itemAttachments.length} 个附件</span> : null}
                     </button>
                     <button
                       type="button"
-                      aria-label={`移除草稿 ${firstLine}`}
+                      aria-label={`移除草稿 ${label}`}
                       className="shrink-0 px-1.5 py-1 text-xs text-muted hover:text-fg"
-                      onClick={() => void onReplaceDrafts?.(drafts!.filter((candidate) => candidate.id !== item.id))}
+                      onClick={() => void onReplaceDrafts?.((drafts ?? []).filter((candidate) => candidate.id !== item.id))}
                     >移除</button>
                   </div>
                   {expanded ? (
                     <div className="border-t border-line px-2.5 pb-2 pt-2">
                       <textarea
-                        aria-label={`编辑草稿 ${firstLine}`}
+                        aria-label={`编辑草稿 ${label}`}
                         defaultValue={item.text}
                         rows={3}
                         className="w-full resize-none bg-transparent text-sm text-fg outline-none"
@@ -776,7 +810,7 @@ export function Composer({
                 ↪
               </span>
               <span className="min-w-0 flex-1 truncate text-xs text-muted">
-                转发自 {forwardDraft.sourceTitle ?? forwardDraft.sourceSessionId} ·{" "}
+                {forwardedFromLabel(forwardDraft.sourceTitle ?? forwardDraft.sourceSessionId)} ·{" "}
                 {forwardDraft.itemCount} 条 · 约{" "}
                 {forwardDraft.estimatedTokens >= 1000
                   ? `${(forwardDraft.estimatedTokens / 1000).toFixed(1)}k`

@@ -5,7 +5,7 @@ import type {
   SessionSummary,
   WorkspaceInfo,
 } from "@genehub/proto";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -184,7 +184,7 @@ describe("ForwardDialog", () => {
     await userEvent.click(screen.getByRole("radio", { name: "既有会话" }));
     const row = await screen.findByRole("option", { name: /既有会话/ });
     // The row carries its workspace so same-named sessions stay tellable apart.
-    expect(within(row).getByText("GeneHub")).toBeInTheDocument();
+    expect(row).toHaveTextContent("GeneHub");
     await userEvent.click(row);
     await userEvent.click(screen.getByRole("button", { name: "放入输入框" }));
 
@@ -223,10 +223,11 @@ describe("ForwardDialog", () => {
 
     await waitForBuilt();
     await userEvent.click(screen.getByRole("radio", { name: "既有会话" }));
+    await userEvent.click(await screen.findByRole("button", { name: "选择目标机器" }));
     await userEvent.click(await screen.findByRole("radio", { name: "工作机" }));
     const remoteRow = await screen.findByRole("option", { name: /远端会话/ });
     // Remote rows resolve the workspace from the remote machine's own catalog.
-    expect(within(remoteRow).getByText("远程项目")).toBeInTheDocument();
+    expect(remoteRow).toHaveTextContent("远程项目");
     await userEvent.click(remoteRow);
     await userEvent.click(screen.getByRole("button", { name: "直接发送" }));
 
@@ -343,6 +344,7 @@ describe("ForwardDialog", () => {
     );
 
     await waitForBuilt();
+    await userEvent.click(await screen.findByRole("button", { name: "选择目标机器" }));
     await userEvent.click(await screen.findByRole("radio", { name: "工作机" }));
     await userEvent.click(await screen.findByRole("option", { name: /远程项目/ }));
     await userEvent.click(screen.getByRole("button", { name: "创建并发送" }));
