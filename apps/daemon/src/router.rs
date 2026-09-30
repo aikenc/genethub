@@ -1909,7 +1909,12 @@ async fn dispatch(
         } => Box::pin(async move {
             match state
                 .sessions
-                .upsert_preview_annotation(&session_id, annotation, expected_revision)
+                .upsert_preview_annotation(
+                    Some(&state.workspaces),
+                    &session_id,
+                    annotation,
+                    expected_revision,
+                )
                 .await
             {
                 Ok(draft) => Handled::ok(Reply::PreviewAnnotations(draft)),

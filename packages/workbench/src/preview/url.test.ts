@@ -37,6 +37,29 @@ describe("portable Asset Preview locators", () => {
     ).toThrow(/canonical root-qualified/);
   });
 
+  it("accepts a browser pathname that has already decoded Chinese segments", () => {
+    const url = assetPreviewUrl(
+      "device-office",
+      "workspace-demo",
+      "r_docs/文档/说明.md",
+      "https://app.example",
+    );
+    expect(parseAssetPreviewPath(new URL(url).pathname)).toEqual({
+      deviceHandle: "device-office",
+      workspaceHandle: "workspace-demo",
+      path: "r_docs/文档/说明.md",
+    });
+    expect(
+      parseAssetPreviewPath(
+        "/assets/preview/v2/device-office/workspace-demo/r_docs/文档/说明.md",
+      ),
+    ).toEqual({
+      deviceHandle: "device-office",
+      workspaceHandle: "workspace-demo",
+      path: "r_docs/文档/说明.md",
+    });
+  });
+
   it("keeps a deployment subpath in both generation and parsing", () => {
     const url = assetPreviewUrl(
       "device",

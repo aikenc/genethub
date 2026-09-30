@@ -422,6 +422,30 @@ impl ActiveRound {
     }
 }
 
+/// Opens the file `asset.preview` already resolved.
+///
+/// The workbench path is `<root handle>/<relative>`. Looking that string up
+/// under the primary folder reports the file missing even though preview
+/// itself succeeded. A resolver failure falls back to the plain relative
+/// path used by single-folder tests.
+async fn open_annotation_source(
+    workspaces: Option<&crate::workspace::Workspaces>,
+    workspace_id: &str,
+    fallback_root: &std::path::Path,
+    virtual_path: &str,
+) -> std::result::Result<crate::files::PreviewFile, crate::files::PreviewFailure> {
+    if let Some(workspaces) = workspaces {
+        if let Ok(resolved) = workspaces.resolve(workspace_id, virtual_path).await {
+            let relative = resolved.relative.to_string_lossy().replace('\\', "/");
+            if relative.is_empty() {
+                return Err(crate::files::PreviewFailure::Unsupported);
+            }
+            return crate::files::preview(&resolved.root, &relative).await;
+        }
+    }
+    crate::files::preview(fallback_root, virtual_path).await
+}
+
 pub struct SessionManager {
     store: Store,
     registry: Arc<Registry>,
@@ -3446,6 +3470,7 @@ impl SessionManager {
     /// be published without the snapshot that explains it.
     pub async fn upsert_preview_annotation(
         &self,
+        workspaces: Option<&crate::workspace::Workspaces>,
         session_id: &str,
         annotation: genehub_proto::PreviewAnnotation,
         expected_revision: u64,
@@ -3460,9 +3485,14 @@ impl SessionManager {
                 self.store.workspace_root(&meta.workspace_id)?,
             )
         };
-        let preview = crate::files::preview(&root, &annotation.source.relative_path)
-            .await
-            .map_err(|error| anyhow!("无法核对预览源文件：{error}"))?;
+        let preview = open_annotation_source(
+            workspaces,
+            &workspace_id,
+            &root,
+            &annotation.source.relative_path,
+        )
+        .await
+        .map_err(|error| anyhow!("无法核对预览源文件：{error}"))?;
         if preview.metadata.version != annotation.source.content_version {
             anyhow::bail!("源文件版本已变化，请重新打开预览后再批注");
         }
@@ -7664,12 +7694,13 @@ mod tests {
         let mut stale = preview_note("ann-md", "docs/note.md", &markdown.metadata.version, "行");
         stale.source.content_version = "a".repeat(32);
         assert!(sessions
-            .upsert_preview_annotation("s1", stale, 0)
+            .upsert_preview_annotation(None, "s1", stale, 0)
             .await
             .is_err());
 
         let saved = sessions
             .upsert_preview_annotation(
+                None,
                 "s1",
                 preview_note("ann-md", "docs/note.md", &markdown.metadata.version, "行"),
                 0,
@@ -7679,6 +7710,7 @@ mod tests {
         assert_eq!(saved.revision, 1);
         let with_image = sessions
             .upsert_preview_annotation(
+                None,
                 "s1",
                 preview_image("ann-img", "design/dot.png", &image.metadata.version),
                 1,
@@ -7706,6 +7738,55 @@ mod tests {
             .unwrap();
         assert_eq!(kept.annotations.len(), 1);
         assert_eq!(kept.annotations[0].id, "ann-img");
+    }
+
+    #[tokio::test]
+    async fn preview_annotations_resolve_the_root_handle_and_unicode_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(project.join("文档")).unwrap();
+        std::fs::write(project.join("文档/说明.md"), "第一行\n第二行\n").unwrap();
+        let homes = crate::session::WorkspaceHomes::default();
+        let spaces = crate::workspace::Workspaces::new(
+            Arc::new(RwLock::new(crate::config::Config::default())),
+            dir.path().join("config.json"),
+            homes.clone(),
+        );
+        let info = spaces.open(&project, None).await.unwrap();
+        let sessions = SessionManager::new(
+            Store::new(homes),
+            Arc::new(Registry::new(&std::collections::BTreeMap::new())),
+            16,
+        );
+        let mut owned = meta();
+        owned.workspace_id = info.id.clone();
+        sessions.store.save_meta(&owned).unwrap();
+        let handle = &info.folders[0].root_handle;
+        let virtual_path = format!("{handle}/文档/说明.md");
+        let version = crate::files::preview(&project, "文档/说明.md")
+            .await
+            .unwrap()
+            .metadata
+            .version;
+        let saved = sessions
+            .upsert_preview_annotation(
+                Some(&spaces),
+                "s1",
+                preview_note("ann-zh", &virtual_path, &version, "中文路径"),
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(saved.annotations[0].source.relative_path, virtual_path);
+        assert!(sessions
+            .upsert_preview_annotation(
+                None,
+                "s1",
+                preview_note("ann-miss", &virtual_path, &version, "找不到"),
+                1,
+            )
+            .await
+            .is_err());
     }
 
     fn preview_note(
