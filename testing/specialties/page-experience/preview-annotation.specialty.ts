@@ -59,6 +59,9 @@ defineSpecialty({
     await page.getByLabel("更多预览操作", { exact: true }).click();
     for (const name of ["截图", "录制", "保存运行产物", "分享预览"])
       t.assertions.assert(await page.getByRole("button", { name, exact: true }).isVisible(), `menu omitted ${name}`);
+    t.assertions.assert(await page.getByText("日志已开始记录", { exact: true }).count() === 0, "overflow menu still shows the log status");
+    t.assertions.assert(await page.getByText(/日志 \d+ · 现场/).count() === 0, "overflow menu still shows log counts");
+    t.assertions.assert(!(await page.getByRole("button", { name: "保存运行产物", exact: true }).evaluate(node => (node as HTMLElement).className.includes("bg-accent"))), "save action still uses the accent fill");
     await page.keyboard.press("Escape");
     await page.getByRole("button", { name: "预览信息", exact: true }).click();
     await page.getByText("这个文件没有登记本地服务。", { exact: true }).waitFor();
