@@ -180,7 +180,7 @@ pub fn ensure_image_snapshot(
     dir: &Path,
     session_id: &str,
     annotation: &PreviewAnnotation,
-    source: &mut std::fs::File,
+    source: &mut crate::files::PreviewSource,
     stored: &mut StoredReview,
 ) -> Result<Option<String>> {
     let PreviewAnnotationTarget::ImageRect { .. } = &annotation.target else {
