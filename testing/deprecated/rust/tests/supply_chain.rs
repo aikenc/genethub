@@ -76,7 +76,7 @@ fn app_release_embeds_one_signed_logic_and_separates_fast_from_official_distribu
     assert!(workflow.contains("\"$host_bin\" inspect dist/genehub_guest.wasm"));
     assert!(workflow.contains("identity.releaseVersion !== process.env.VERSION"));
     assert!(workflow
-        .contains("cmp \"$GENEHUB_COMPONENT_WASM\" apps/desktop/src-tauri/bin/genehub_guest.wasm"));
+        .contains("cmp \"$GENEHUB_COMPONENT_WASM\" \"apps/desktop/src-tauri/bin/$COMPONENT_FILE\""));
     assert!(workflow.contains("needs: [channel, verify, signed_component]"));
     assert!(workflow.contains("cp component/genehub_guest.wasm dist/genehub_guest.wasm"));
     assert!(workflow.contains("not a signed\n      # updater manifest"));
