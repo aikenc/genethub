@@ -28,6 +28,10 @@ export function startDaemon(input: {
    * exercises a fallback path cannot just delete the key from the lease,
    * because the merge with `process.env` would resurrect it. */
   dropEnv?: string[];
+  /** What the launcher's own environment carried, given to `daemon start`
+   * only: a case can start a daemon the way one is restarted from inside an
+   * Agent Session without later CLI calls speaking for that session. */
+  launchEnv?: NodeJS.ProcessEnv;
 }): DaemonHandle {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
@@ -39,7 +43,7 @@ export function startDaemon(input: {
   delete env.GENEHUB_SESSION_ID;
   delete env.GENEHUB_CONTROLLER_TOKEN;
   for (const key of input.dropEnv ?? []) delete env[key];
-  const started = runGenet(input.genet, ["daemon", "start"], env);
+  const started = runGenet(input.genet, ["daemon", "start"], { ...env, ...input.launchEnv });
   if (started.code !== 0) {
     throw new BlockedError(`genet daemon start failed: ${started.stderr || started.stdout}`);
   }
