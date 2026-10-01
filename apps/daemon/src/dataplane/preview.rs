@@ -351,7 +351,8 @@ async fn send_file(
     services: &PeerServices,
     workspace: &str,
     path: &str,
-) -> Result<PreviewSendStats> {    let (metadata, mut source, expected_digest) = file.into_parts();
+) -> Result<PreviewSendStats> {
+    let (metadata, mut source, expected_digest) = file.into_parts();
     let snapshot = source.is_snapshot();
     let expected_bytes = metadata.source_bytes;
     let mut stats = PreviewSendStats {

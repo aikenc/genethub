@@ -17,7 +17,6 @@ pub mod dataplane;
 pub mod devices;
 pub mod diagnostics;
 pub mod files;
-pub(crate) mod preview_feedback;
 pub(crate) mod fs_cap;
 pub mod git;
 pub(crate) mod guest_paths;
@@ -29,6 +28,7 @@ pub(crate) mod image_preview;
 pub mod isolation;
 pub mod link;
 pub(crate) mod os_process;
+pub(crate) mod preview_feedback;
 
 #[cfg(test)]
 #[path = "../build_support.rs"]

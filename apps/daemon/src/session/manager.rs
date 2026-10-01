@@ -3541,12 +3541,8 @@ impl SessionManager {
         let mut meta = live.meta.lock().await;
         let dir = self.store.session_dir(&meta.workspace_id, &meta.id)?;
         let mut stored = super::preview_review::load(&dir)?;
-        let (changed, released) = super::preview_review::apply_remove(
-            &mut stored,
-            &ids,
-            expected_revision,
-            now_ms(),
-        )?;
+        let (changed, released) =
+            super::preview_review::apply_remove(&mut stored, &ids, expected_revision, now_ms())?;
         let draft = if changed {
             let draft = super::preview_review::commit(&dir, &stored)?;
             for relative in released {
