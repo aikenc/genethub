@@ -44,7 +44,7 @@ export function ToolsMenu({
   };
 
   return (
-    <nav className={`flex flex-1 flex-col overflow-y-auto ${phone ? "gap-3 p-3" : "gap-3 p-3"}`}>
+    <nav className={`flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-x-hidden overflow-y-auto ${phone ? "gap-3 p-3" : "gap-3 p-3"}`}>
       {leading}
       {scope === "all" ? <Section title="项目" phone={phone}>
         <Entry phone={phone} label="变更" onClick={openChanges} />

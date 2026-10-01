@@ -136,13 +136,16 @@ export function TargetSwitcher({
               onClick={() => setOpen(false)}
             />
           )}
+          {/* The page cannot scroll (the shell is fixed), so a long roster has
+              to scroll inside the list. overflow-hidden here used to clip
+              every machine past the screen. */}
           <div
             role="listbox"
             aria-label="我能控制的机器"
             className={
               compact
-                ? "border-t border-line bg-raised/30 py-1"
-                : "absolute left-0 right-0 top-full z-50 mt-1 overflow-hidden rounded-xl border border-line-strong bg-surface py-1 shadow-[0_8px_30px_rgb(0_0_0_/0.35)]"
+                ? "max-h-[min(24rem,60dvh)] overflow-x-hidden overflow-y-auto overscroll-y-contain border-t border-line bg-raised/30 py-1"
+                : "absolute left-0 right-0 top-full z-50 mt-1 max-h-[min(24rem,70dvh)] w-full min-w-0 overflow-x-hidden overflow-y-auto overscroll-y-contain rounded-xl border border-line-strong bg-surface py-1 shadow-[0_8px_30px_rgb(0_0_0_/0.35)]"
             }
           >
             {targets === null && !problem ? (

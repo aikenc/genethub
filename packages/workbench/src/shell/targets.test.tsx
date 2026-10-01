@@ -410,6 +410,30 @@ describe("switching from the sidebar", () => {
     await userEvent.click(await screen.findByRole("button", { name: /切换机器/ }));
   };
 
+  it("scrolls a long machine list instead of clipping it", async () => {
+    render(
+      <App
+        host={host({
+          targets: async () =>
+            Array.from({ length: 24 }, (_, index) => ({
+              id: `m_${index}`,
+              label: `机器 ${index}`,
+              kind: "remote" as const,
+              online: true,
+            })),
+        })}
+        connect={() => stubClient()}
+      />,
+    );
+
+    await openMachineSwitcher();
+    const list = await screen.findByRole("listbox", { name: "我能控制的机器" });
+    expect(list.className).toContain("overflow-y-auto");
+    expect(list.className).toContain("overflow-x-hidden");
+    expect(list.className).toContain("max-h-");
+    expect(screen.getByRole("option", { name: /机器 23/ })).toBeInTheDocument();
+  });
+
   it("names the machine everything below it belongs to", async () => {
     render(<App host={host()} connect={() => stubClient()} />);
 
