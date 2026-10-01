@@ -299,12 +299,14 @@ export async function startLocalEnvironment(input: {
   openRoot: string;
   lease: EnvironmentLease;
   onDiagnostic?: Parameters<typeof connectProductClient>[0]["onDiagnostic"];
+  launchEnv?: NodeJS.ProcessEnv;
 }): Promise<{ daemon: DaemonHandle; mock: MockLlmHandle; client: ProductSession["client"] }> {
   const mock = await startMockLlm();
   const daemon = startDaemon({
     genet: locateGenet(input.openRoot),
     wasm: tryLocateDaemonComponent(input.openRoot),
     lease: input.lease,
+    launchEnv: input.launchEnv,
   });
   const endpoint = daemonEndpoint(daemon);
   const client = await connectProductClient({
@@ -319,6 +321,7 @@ export async function openWorkspace(input: {
   openRoot: string;
   lease: EnvironmentLease;
   onDiagnostic?: Parameters<typeof connectProductClient>[0]["onDiagnostic"];
+  launchEnv?: NodeJS.ProcessEnv;
 }): Promise<OpenedWorkspace> {
   const started = await startLocalEnvironment(input);
   try {

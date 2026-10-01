@@ -91,12 +91,16 @@ impl ChildHandle {
     pub fn spawn(
         argv: &[String],
         env: &[(String, String)],
+        env_remove: &[String],
         cwd: Option<&str>,
         independent_session: bool,
     ) -> Result<Self, String> {
         let (program, arguments) = argv.split_first().ok_or("empty argv")?;
         let mut command =
             tokio::process::Command::new(crate::guest_paths::host_path_from_guest(program));
+        for key in env_remove {
+            command.env_remove(key);
+        }
         command
             .args(arguments)
             .envs(
@@ -251,11 +255,18 @@ impl wit::Host for crate::load::Host {
         &mut self,
         argv: Vec<String>,
         env: Vec<(String, String)>,
+        env_remove: Vec<String>,
         cwd: Option<String>,
         independent_session: bool,
     ) -> Result<Resource<ChildHandle>, wit::SpawnError> {
-        let child = ChildHandle::spawn(&argv, &env, cwd.as_deref(), independent_session)
-            .map_err(|message| wit::SpawnError { message })?;
+        let child = ChildHandle::spawn(
+            &argv,
+            &env,
+            &env_remove,
+            cwd.as_deref(),
+            independent_session,
+        )
+        .map_err(|message| wit::SpawnError { message })?;
         self.table.push(child).map_err(|error| wit::SpawnError {
             message: error.to_string(),
         })

@@ -99,6 +99,10 @@ defineSpecialty(
     t.assertions.assert(workflow.includes('cmp "$GENEHUB_COMPONENT_WASM" "apps/desktop/src-tauri/bin/$COMPONENT_FILE"'), "desktop byte identity not checked");
     t.assertions.assert(workflow.includes("cp component/genehub_guest.wasm dist/genehub_guest.wasm"), "release did not copy shared component");
     t.assertions.assert(
+      workflow.includes('-C "$GITHUB_WORKSPACE/target/wasm32-wasip2/release" "$COMPONENT_FILE"'),
+      "CLI tarball does not carry the component under the name its CLI looks for",
+    );
+    t.assertions.assert(
       !workflow.includes("COMPONENT_SIGNING_KEY"),
       "external signing keys are removed until the stable line graduates",
     );

@@ -63,6 +63,31 @@ fn component_candidates(dir: &Path) -> Vec<PathBuf> {
     components
 }
 
+/// The environment names a developer points at their own host or component
+/// build with. They carry no channel, so only the source tree honours them:
+/// in a released channel a value left behind by another channel's launcher
+/// would start that channel's build under this one's name.
+const HOST_OVERRIDES: &[&str] = &["GENEHUB_HOST"];
+// `GENEHUB_LOCAL_DAEMON_COMPONENT` is the bring-up name, still honoured so
+// older runbooks keep working.
+const COMPONENT_OVERRIDES: &[&str] = &["GENEHUB_LOCAL_COMPONENT", "GENEHUB_LOCAL_DAEMON_COMPONENT"];
+
+fn honours_overrides(channel: &str) -> bool {
+    channel == "local"
+}
+
+fn dev_override(names: &[&str]) -> Option<PathBuf> {
+    if !honours_overrides(channel::CHANNEL) {
+        return None;
+    }
+    names
+        .iter()
+        .filter_map(|name| std::env::var_os(name))
+        .find(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .filter(|path| is_file(path))
+}
+
 fn host_name() -> String {
     if cfg!(windows) {
         format!("{}.exe", channel::HOST_BINARY)
@@ -84,11 +109,7 @@ pub fn locate() -> Result<Guest, String> {
         hosts.push(target.join("debug").join(host_name()));
         hosts.push(target.join("release").join(host_name()));
     }
-    let host = std::env::var("GENEHUB_HOST")
-        .ok()
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .filter(|path| is_file(path))
+    let host = dev_override(HOST_OVERRIDES)
         .or_else(|| first_file(hosts))
         .ok_or_else(|| {
             format!(
@@ -98,14 +119,7 @@ pub fn locate() -> Result<Guest, String> {
         })?;
 
     let components = component_candidates(&dir);
-    let component = std::env::var("GENEHUB_LOCAL_COMPONENT")
-        .ok()
-        .filter(|value| !value.is_empty())
-        // The bring-up name, still honoured so older runbooks keep working.
-        .or_else(|| std::env::var("GENEHUB_LOCAL_DAEMON_COMPONENT").ok())
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .filter(|path| is_file(path))
+    let component = dev_override(COMPONENT_OVERRIDES)
         .or_else(|| first_file(components))
         .ok_or_else(|| {
             format!(
@@ -140,6 +154,17 @@ mod tests {
             candidates.last(),
             Some(&cli_dir.join(channel::COMPONENT_FILE))
         );
+    }
+
+    #[test]
+    fn only_the_source_tree_honours_build_overrides() {
+        assert!(honours_overrides("local"));
+        for released in ["dev", "beta", "stable"] {
+            assert!(
+                !honours_overrides(released),
+                "{released} honours GENEHUB_HOST/GENEHUB_LOCAL_COMPONENT"
+            );
+        }
     }
 
     #[test]

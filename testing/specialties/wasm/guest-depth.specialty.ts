@@ -66,9 +66,10 @@ async function withOpened(
   t: CaseContext,
   run: (opened: Opened) => Promise<void>,
   configureMock = false,
+  launchEnv?: NodeJS.ProcessEnv,
 ): Promise<void> {
   requireWasmArtifacts(t.openRoot);
-  const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
+  const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env, launchEnv });
   try {
     if (configureMock) await t.flows.main.configureMockProvider(opened.client, opened.mock);
     await run(opened);
@@ -494,6 +495,47 @@ defineSpecialty(
         );
       },
       true,
+    );
+  },
+);
+
+defineSpecialty(
+  wasmMeta(
+    "specialty.wasm.agent.launcher-provider-key-stays-out",
+    "A provider key in the shell that started the daemon does not reach the built-in agent",
+    "the agent's bash prints an empty OPENAI_API_KEY although the daemon was started with one",
+    [
+      "a key left in someone's shell overrides the configured model",
+      "the guest's env_remove only drops names the guest itself set",
+    ],
+    { llm: "mock", ms: 45_000 },
+  ),
+  async (t) => {
+    const marker = "launcher-shell-provider-key";
+    await withOpened(
+      t,
+      async (opened) => {
+        opened.mock.script(
+          { tool: { name: "bash", arguments: { command: 'echo "provider-key=[${OPENAI_API_KEY:-}]"' } } },
+          { text: "checked" },
+        );
+        const sessionId = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
+        const events = await t.flows.main.attachEventLog(opened.client, sessionId);
+        await t.flows.main.sendPrompt(opened.client, sessionId, "Print the provider key variable with bash and stop.");
+        await t.tools.waitUntil(
+          () => events.some((event) => event.type === "turnCompleted" || event.type === "turnFailed"),
+          45_000,
+        );
+        t.assertions.assert(
+          events.some((event) => event.type === "turnCompleted"),
+          `turn did not complete: ${JSON.stringify(events.map((event) => event.type))}`,
+        );
+        const said: string[] = JSON.stringify(opened.mock.requests).match(/provider-key=\[[^\]]*\]/g) ?? [];
+        t.assertions.assert(!said.some((line) => line.includes(marker)), `the launcher's provider key reached the agent's bash: ${said.join(", ")}`);
+        t.assertions.assert(said.includes("provider-key=[]"), `bash output never reached the model: ${said.join(", ")}`);
+      },
+      true,
+      { OPENAI_API_KEY: marker },
     );
   },
 );

@@ -39,9 +39,13 @@ interface process {
   /// `independent-session` puts the child in a session of its own. Evidence
   /// collection and the `genet` CLI keep that. A shell that should leave
   /// background children in the agent's process group passes false.
+  ///
+  /// The child starts from this shell's own environment. `env-remove` names
+  /// what it must not inherit from there; `env` is applied after it.
   spawn: func(
     argv: list<string>,
     env: list<tuple<string, string>>,
+    env-remove: list<string>,
     cwd: option<string>,
     independent-session: bool,
   ) -> result<child, spawn-error>;

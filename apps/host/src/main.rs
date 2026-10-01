@@ -49,6 +49,9 @@ fn main() {
                 eprintln!("{error}");
                 std::process::exit(2);
             });
+            if matches!(entry, load::Entry::Daemon) {
+                forget_launching_session();
+            }
             run_and_exit(&component, &guest_args, entry);
         }
         Some("thumbnail") => {
@@ -70,6 +73,36 @@ fn main() {
             eprintln!("{USAGE}");
             std::process::exit(2);
         }
+    }
+}
+
+/// What an Agent session hands each of its own processes. A daemon is often
+/// started or restarted from inside one, and everything this process inherits
+/// reaches every terminal, remote command and script the daemon starts, which
+/// would then speak for a session they are not part of, possibly on another
+/// channel's daemon. The daemon sets them again for its own sessions' agents.
+const SESSION_SCOPED: &[&str] = &[
+    "GENEHUB_SESSION_ID",
+    "GENEHUB_CONTROLLER_TOKEN",
+    "GENEHUB_EVIDENCE_SCOPE",
+    "GENEHUB_SKILLS_DIR",
+    "GENET_WORKSPACE_ROOT",
+];
+
+/// Must run while this process still has one thread.
+fn forget_launching_session() {
+    for name in SESSION_SCOPED {
+        env::remove_var(name);
+    }
+    // The session's front door, too. Whatever this daemon starts should reach
+    // this daemon's own CLI, as its launcher named it under the channel's
+    // variable — on Stable that variable is this very name.
+    match env::var(channel::ENV_CLI)
+        .ok()
+        .filter(|cli| !cli.is_empty())
+    {
+        Some(cli) => env::set_var("GENEHUB_CLI", cli),
+        None => env::remove_var("GENEHUB_CLI"),
     }
 }
 

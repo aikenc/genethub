@@ -1,12 +1,16 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { defineSpecialty, type CaseContext } from "../../framework/public.ts";
 
 type Opened = Awaited<ReturnType<CaseContext["flows"]["main"]["openWorkspace"]>>;
 
-async function withWorkspace(t: CaseContext, run: (opened: Opened) => Promise<void>): Promise<void> {
-  const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
+async function withWorkspace(
+  t: CaseContext,
+  run: (opened: Opened) => Promise<void>,
+  launchEnv?: NodeJS.ProcessEnv,
+): Promise<void> {
+  const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env, launchEnv });
   try {
     await run(opened);
   } finally {
@@ -320,6 +324,38 @@ cli(
         `env missing: ${JSON.stringify(result.frames)}`,
       );
     });
+  },
+);
+
+cli(
+  "specialty.cli.launcher-session-stays-out",
+  "A daemon started from inside an Agent Session does not hand that session to its commands",
+  "every session-scoped name the launcher carried is empty in a command run through the daemon, and GENEHUB_CLI is the daemon's own CLI rather than the launcher's",
+  ["daemon restarted from a session speaks for it in every child", "another channel's front door reaches this daemon's commands"],
+  async (t) => {
+    const launcher: Record<string, string> = {
+      GENEHUB_SESSION_ID: "s_launcher",
+      GENEHUB_CONTROLLER_TOKEN: "launcher-controller-token",
+      GENEHUB_EVIDENCE_SCOPE: "{\"launcher\":true}",
+      GENEHUB_SKILLS_DIR: "/launcher/skills",
+      GENET_WORKSPACE_ROOT: "/launcher/workspace",
+      GENEHUB_CLI: "/launcher/genet-other-channel",
+    };
+    await withWorkspace(
+      t,
+      async (opened) => {
+        const names = Object.keys(launcher);
+        const script = names.map((name) => `echo "${name}=\${${name}:-}"`).join("; ");
+        const result = await t.flows.main.runShell(opened.client, ask(opened.workspaceId, ["/bin/sh", "-c", script]));
+        t.assertions.assert(t.flows.main.shellExit(result.frames)?.code === 0, `exit ${JSON.stringify(t.flows.main.shellExit(result.frames))}`);
+        const seen = t.flows.main.shellText(result.frames, "stdout").trim().split("\n");
+        t.assertions.assert(seen.length === names.length, `printed ${JSON.stringify(seen)}`);
+        const ownCli = `GENEHUB_CLI=${realpathSync(opened.daemon.genet)}`;
+        const leaked = seen.filter((line) => (line.startsWith("GENEHUB_CLI=") ? line !== ownCli : !line.endsWith("=")));
+        t.assertions.assert(leaked.length === 0, `launcher environment reached the command (want ${ownCli}): ${leaked.join(", ")}`);
+      },
+      launcher,
+    );
   },
 );
 
