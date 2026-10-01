@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { defineSpecialty, type CaseContext } from "../../framework/public.ts";
@@ -330,7 +330,7 @@ cli(
 cli(
   "specialty.cli.launcher-session-stays-out",
   "A daemon started from inside an Agent Session does not hand that session to its commands",
-  "every session-scoped name the launcher carried, and another channel's GENEHUB_CLI, is empty in a command run through the daemon",
+  "every session-scoped name the launcher carried is empty in a command run through the daemon, and GENEHUB_CLI is the daemon's own CLI rather than the launcher's",
   ["daemon restarted from a session speaks for it in every child", "another channel's front door reaches this daemon's commands"],
   async (t) => {
     const launcher: Record<string, string> = {
@@ -350,8 +350,9 @@ cli(
         t.assertions.assert(t.flows.main.shellExit(result.frames)?.code === 0, `exit ${JSON.stringify(t.flows.main.shellExit(result.frames))}`);
         const seen = t.flows.main.shellText(result.frames, "stdout").trim().split("\n");
         t.assertions.assert(seen.length === names.length, `printed ${JSON.stringify(seen)}`);
-        const leaked = seen.filter((line) => !line.endsWith("="));
-        t.assertions.assert(leaked.length === 0, `launcher environment reached the command: ${leaked.join(", ")}`);
+        const ownCli = `GENEHUB_CLI=${realpathSync(opened.daemon.genet)}`;
+        const leaked = seen.filter((line) => (line.startsWith("GENEHUB_CLI=") ? line !== ownCli : !line.endsWith("=")));
+        t.assertions.assert(leaked.length === 0, `launcher environment reached the command (want ${ownCli}): ${leaked.join(", ")}`);
       },
       launcher,
     );

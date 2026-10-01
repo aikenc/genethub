@@ -74,12 +74,16 @@ case "$channel" in
 esac
 
 # The daemon and the agent are one wasm component; the CLI execs the shell
-# (host_binary) with it, so all three have to land side by side. The tarball
-# carries it under one name for every channel; it is installed under the
-# channel's own name (set above), because the bin directory is shared and a
-# running daemon reloads whenever its component file changes. Another
-# channel's component in the same directory is left alone.
-component_asset=genehub_guest.wasm
+# (host_binary) with it, so all three have to land side by side. It is
+# installed under the channel's own name (set above), because the bin
+# directory is shared and a running daemon reloads whenever its component file
+# changes: another channel's component in the same directory is left alone.
+#
+# The name is the tarball's, not this script's: the CLI in it looks for the
+# component under the name it was built with. This script is served apart
+# from the tarball and can be newer than it, and a release from before
+# per-channel names carries, and looks for, only the shared one.
+shared_component=genehub_guest.wasm
 
 # Downloads are executable code. Do not let an environment override turn the
 # explicit installer into an HTTP, local-file or credential-bearing fetch. A
@@ -166,11 +170,12 @@ got="$(digest "$tmp/$asset")"
 say "==> installing into $bin_dir"
 mkdir -p "$tmp/unpacked" "$bin_dir"
 tar -xzf "$tmp/$asset" -C "$tmp/unpacked"
+if [ -z "$(find "$tmp/unpacked" -name "$component" -type f -print | head -n 1)" ]; then
+  component="$shared_component"
+fi
 for binary in "$cli_binary" "$host_binary" "$component"; do
-  packed="$binary"
-  [ "$binary" = "$component" ] && packed="$component_asset"
-  found="$(find "$tmp/unpacked" -name "$packed" -type f -print | head -n 1)"
-  [ -n "$found" ] || die "$packed is missing from $asset"
+  found="$(find "$tmp/unpacked" -name "$binary" -type f -print | head -n 1)"
+  [ -n "$found" ] || die "$binary is missing from $asset"
   # Replaced rather than written in place: overwriting a running binary is what
   # produces "text file busy" on Linux.
   rm -f "$bin_dir/$binary"

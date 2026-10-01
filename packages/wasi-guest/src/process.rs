@@ -114,6 +114,7 @@ pub struct Output {
 pub struct Command {
     argv: Vec<String>,
     env: Vec<(String, String)>,
+    env_remove: Vec<String>,
     cwd: Option<String>,
     independent_session: bool,
 }
@@ -123,6 +124,7 @@ impl Command {
         Command {
             argv: vec![program.as_ref().to_string_lossy().into_owned()],
             env: Vec::new(),
+            env_remove: Vec::new(),
             cwd: None,
             independent_session: true,
         }
@@ -176,16 +178,16 @@ impl Command {
         self
     }
 
-    /// Only clears what this builder set. The shell's own environment is
-    /// the child's baseline and the guest cannot take it away.
-    pub fn env_clear(&mut self) -> &mut Self {
-        self.env.clear();
-        self
-    }
-
+    /// Also takes the name away from what the child inherits from the shell,
+    /// as `std::process::Command` does. There is deliberately no `env_clear`:
+    /// a child of the shell without `PATH` and `HOME` is not something any
+    /// caller here wants.
     pub fn env_remove(&mut self, key: impl AsRef<OsStr>) -> &mut Self {
         let key = key.as_ref().to_string_lossy().into_owned();
         self.env.retain(|(name, _)| *name != key);
+        if !self.env_remove.contains(&key) {
+            self.env_remove.push(key);
+        }
         self
     }
 
@@ -221,6 +223,7 @@ impl Command {
         let child = host::spawn(
             &self.argv,
             &self.env,
+            &self.env_remove,
             self.cwd.as_deref(),
             self.independent_session,
         )
