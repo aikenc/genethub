@@ -341,8 +341,8 @@ impl ArtifactStorage {
             relative_path: relative_path(&state.bundle_name),
             workspace_path: format!("{}/{}", self.workspace_prefix, state.bundle_name),
             manifest_path: format!(
-                "{}/manifest.json",
-                format!("{}/{}", self.workspace_prefix, state.bundle_name)
+                "{}/{}/manifest.json",
+                self.workspace_prefix, state.bundle_name
             ),
             created_at_ms: state.created_at_ms,
             total_bytes,
@@ -587,13 +587,6 @@ fn receipt_path(root: &Path, upload_id: &str) -> PathBuf {
 
 fn relative_path(bundle_name: &str) -> String {
     format!("artifacts/{bundle_name}")
-}
-
-fn workspace_path(session_id: &str, bundle_name: &str) -> String {
-    format!(
-        ".genethub/sessions/{session_id}/{}",
-        relative_path(bundle_name)
-    )
 }
 
 #[cfg(test)]

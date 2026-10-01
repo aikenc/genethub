@@ -3497,7 +3497,7 @@ impl SessionManager {
             anyhow::bail!("源文件版本已变化，请重新打开预览后再批注");
         }
         super::preview_review::ensure_kind(&annotation, preview.metadata.kind)?;
-        let mut meta = live.meta.lock().await;
+        let meta = live.meta.lock().await;
         let dir = self.store.session_dir(&workspace_id, &owned_id)?;
         let mut stored = super::preview_review::load(&dir)?;
         let (_metadata, mut source, _) = preview.into_parts();
@@ -3538,7 +3538,7 @@ impl SessionManager {
         expected_revision: Option<u64>,
     ) -> Result<genehub_proto::PreviewReviewDraft> {
         let live = self.live(session_id).await?;
-        let mut meta = live.meta.lock().await;
+        let meta = live.meta.lock().await;
         let dir = self.store.session_dir(&meta.workspace_id, &meta.id)?;
         let mut stored = super::preview_review::load(&dir)?;
         let (changed, released) =

@@ -131,12 +131,19 @@ pub fn validate_shape(annotation: &PreviewAnnotation) -> Result<()> {
 }
 
 pub fn ensure_kind(annotation: &PreviewAnnotation, kind: AssetPreviewKind) -> Result<()> {
-    let ok = match (&annotation.target, kind) {
-        (PreviewAnnotationTarget::MarkdownLines { .. }, AssetPreviewKind::Markdown) => true,
-        (PreviewAnnotationTarget::HtmlElement { .. }, AssetPreviewKind::Html) => true,
-        (PreviewAnnotationTarget::ImageRect { .. }, AssetPreviewKind::Image) => true,
-        _ => false,
-    };
+    let ok = matches!(
+        (&annotation.target, kind),
+        (
+            PreviewAnnotationTarget::MarkdownLines { .. },
+            AssetPreviewKind::Markdown
+        ) | (
+            PreviewAnnotationTarget::HtmlElement { .. },
+            AssetPreviewKind::Html
+        ) | (
+            PreviewAnnotationTarget::ImageRect { .. },
+            AssetPreviewKind::Image
+        )
+    );
     if ok {
         Ok(())
     } else {
