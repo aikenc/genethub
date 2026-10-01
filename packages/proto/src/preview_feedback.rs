@@ -139,9 +139,9 @@ pub struct PreviewFeedbackRecord {
 pub enum PreviewFeedbackResponse {
     Source(PreviewSourceInfo),
     Share(PreviewShareLink),
-    Draft(PreviewFeedbackDraft),
+    Draft(Box<PreviewFeedbackDraft>),
     Upload(SessionArtifactUpload),
     Artifact(SessionArtifactBundle),
-    Receipt(PreviewFeedbackRecord),
+    Receipt(Box<PreviewFeedbackRecord>),
     Ack,
 }

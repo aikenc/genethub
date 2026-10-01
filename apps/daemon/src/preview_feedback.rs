@@ -373,12 +373,12 @@ pub async fn handle(
                 bail!("share permission does not include project feedback retrieval");
             }
             let (dir, _) = load_draft(state, caller, workspace, id).await?;
-            return Ok(Out::Receipt(read(&dir.join("feedback.json"))?));
+            return Ok(Out::Receipt(Box::new(read(&dir.join("feedback.json"))?)));
         }
         Op::Draft { id } => {
-            return Ok(Out::Draft(
+            return Ok(Out::Draft(Box::new(
                 load_draft(state, caller, workspace, id).await?.1.data,
-            ));
+            )));
         }
         Op::Open {
             path,
@@ -390,7 +390,7 @@ pub async fn handle(
             if &draft.data.source.path != path || &draft.data.source.version != version {
                 bail!("preview feedback source mismatch");
             }
-            return Ok(Out::Draft(draft.data));
+            return Ok(Out::Draft(Box::new(draft.data)));
         }
         _ => {}
     }
@@ -499,7 +499,7 @@ pub async fn handle(
                 if draft.data.source.path != path || draft.data.source.version != version {
                     bail!("preview feedback source mismatch");
                 }
-                return Ok(Out::Draft(draft.data));
+                return Ok(Out::Draft(Box::new(draft.data)));
             }
             let src = source(state, workspace, &path).await?;
             if src.version != version {
@@ -559,14 +559,14 @@ pub async fn handle(
                 snapshot,
             };
             save(&dir.join("draft.json"), &draft)?;
-            Ok(Out::Draft(draft.data))
+            Ok(Out::Draft(Box::new(draft.data)))
         }
         Op::Read { id } => {
             if share_id(caller).is_some() {
                 bail!("share permission does not include project feedback retrieval");
             }
             let (dir, _) = load_draft(state, caller, workspace, &id).await?;
-            Ok(Out::Receipt(read(&dir.join("feedback.json"))?))
+            Ok(Out::Receipt(Box::new(read(&dir.join("feedback.json"))?)))
         }
         operation => {
             let id = match &operation {
@@ -582,7 +582,7 @@ pub async fn handle(
             };
             let (dir, mut draft) = load_draft(state, caller, workspace, &id).await?;
             if matches!(operation, Op::Draft { .. }) {
-                return Ok(Out::Draft(draft.data));
+                return Ok(Out::Draft(Box::new(draft.data)));
             }
             if let Op::Submit {
                 description,
@@ -601,7 +601,7 @@ pub async fn handle(
                     {
                         bail!("feedback already submitted with different content");
                     }
-                    return Ok(Out::Receipt(receipt.clone()));
+                    return Ok(Out::Receipt(Box::new(receipt.clone())));
                 }
             }
             writable(&draft)?;
@@ -624,7 +624,7 @@ pub async fn handle(
                             && n.comment == annotation.comment
                             && n.target == annotation.target
                     }) {
-                        return Ok(Out::Draft(draft.data));
+                        return Ok(Out::Draft(Box::new(draft.data)));
                     }
                     if draft.data.review.revision != expected_revision {
                         bail!("preview feedback revision conflict; reload draft");
@@ -757,12 +757,12 @@ pub async fn handle(
                     save(&dir.join("feedback.json"), &receipt)?;
                     draft.data.receipt = Some(receipt.clone());
                     save(&dir.join("draft.json"), &draft)?;
-                    return Ok(Out::Receipt(receipt));
+                    return Ok(Out::Receipt(Box::new(receipt)));
                 }
                 _ => unreachable!(),
             }
             save(&dir.join("draft.json"), &draft)?;
-            Ok(Out::Draft(draft.data))
+            Ok(Out::Draft(Box::new(draft.data)))
         }
     }
 }
