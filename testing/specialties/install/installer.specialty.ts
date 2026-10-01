@@ -68,6 +68,8 @@ interface ReleaseNames {
   cli: string;
   host: string;
   guest: string;
+  /** The component's name inside the tarball: the one its CLI looks for. */
+  component: string;
 }
 
 const LOCAL_RELEASE: ReleaseNames = {
@@ -75,10 +77,9 @@ const LOCAL_RELEASE: ReleaseNames = {
   cli: "genet-local",
   host: "genehub-host-local",
   guest: "guest-component-fixture",
+  component: "genehub_guest.wasm",
 };
 
-// Every channel's tarball carries the component as genehub_guest.wasm; only
-// the installed name differs.
 function fakeRelease(names: ReleaseNames = LOCAL_RELEASE): string {
   const dir = mkdtempSync(path.join(tmpdir(), "genehub-install-release-"));
   const staged = path.join(dir, "staged");
@@ -92,11 +93,11 @@ function fakeRelease(names: ReleaseNames = LOCAL_RELEASE): string {
   const host = path.join(staged, names.host);
   writeFileSync(host, `#!/bin/sh\necho ${names.host}\n`);
   chmodSync(host, 0o755);
-  writeFileSync(path.join(staged, "genehub_guest.wasm"), names.guest);
+  writeFileSync(path.join(staged, names.component), names.guest);
   const asset = assetName(names.prefix);
   const tar = spawnSync(
     "tar",
-    ["-czf", path.join(dir, asset), "-C", staged, names.cli, names.host, "genehub_guest.wasm"],
+    ["-czf", path.join(dir, asset), "-C", staged, names.cli, names.host, names.component],
     { encoding: "utf8" },
   );
   if (tar.status !== 0) throw new Error(`tar failed: ${tar.stderr}`);
@@ -195,8 +196,20 @@ defineSpecialty(
   },
   async (t) => {
     if (installerUnsupported()) return;
-    const beta: ReleaseNames = { prefix: "genet-beta", cli: "genet-beta", host: "genehub-host-beta", guest: "beta-guest" };
-    const stable: ReleaseNames = { prefix: "genet", cli: "genet", host: "genehub-host", guest: "stable-guest" };
+    const beta: ReleaseNames = {
+      prefix: "genet-beta",
+      cli: "genet-beta",
+      host: "genehub-host-beta",
+      guest: "beta-guest",
+      component: "genehub_guest-beta.wasm",
+    };
+    const stable: ReleaseNames = {
+      prefix: "genet",
+      cli: "genet",
+      host: "genehub-host",
+      guest: "stable-guest",
+      component: "genehub_guest.wasm",
+    };
     const releases = { beta: fakeRelease(beta), stable: fakeRelease(stable) };
     const home = mkdtempSync(path.join(tmpdir(), "genehub-install-home-"));
     const bin = path.join(home, "bin");
@@ -236,6 +249,49 @@ defineSpecialty(
     } finally {
       rmSync(releases.beta, { recursive: true, force: true });
       rmSync(releases.stable, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  },
+);
+
+defineSpecialty(
+  {
+    id: "specialty.install.older-release-keeps-its-component-name",
+    title: "A newer install script still installs an older release the way that release's CLI expects",
+    oracle: "beta install.sh given a tarball that carries only genehub_guest.wasm installs the component under that name and creates no channel-named copy",
+    catches: ["install script served ahead of the App renames the component its CLI cannot find"],
+    tags: ["core", "install"],
+    expectedDurationMs: 6_000,
+    timeoutMs: 30_000,
+    surfaces: ["install"],
+  },
+  async (t) => {
+    if (installerUnsupported()) return;
+    const older: ReleaseNames = {
+      prefix: "genet-beta",
+      cli: "genet-beta",
+      host: "genehub-host-beta",
+      guest: "older-beta-guest",
+      component: "genehub_guest.wasm",
+    };
+    const release = fakeRelease(older);
+    const home = mkdtempSync(path.join(tmpdir(), "genehub-install-home-"));
+    const bin = path.join(home, "bin");
+    try {
+      const output = runInstall(
+        t.openRoot,
+        release,
+        bin,
+        { GENEHUB_BETA_DOWNLOAD_BASE: "https://downloads.example.invalid", GENEHUB_BETA_BIN_DIR: bin },
+        channelScript(t.openRoot, home, "beta"),
+      );
+      t.assertions.assert(output.status === 0, `install failed: ${output.stderr}`);
+      const shared = path.join(bin, "genehub_guest.wasm");
+      t.assertions.assert(existsSync(shared) && readFileSync(shared, "utf8") === "older-beta-guest", "component not where the older CLI looks");
+      t.assertions.assert(!existsSync(path.join(bin, "genehub_guest-beta.wasm")), "installed a name the older CLI never reads");
+      t.assertions.assert(output.stdout.includes(shared), `install summary does not name ${shared}:\n${output.stdout}`);
+    } finally {
+      rmSync(release, { recursive: true, force: true });
       rmSync(home, { recursive: true, force: true });
     }
   },
