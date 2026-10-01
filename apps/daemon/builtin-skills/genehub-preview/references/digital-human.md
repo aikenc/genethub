@@ -1,6 +1,6 @@
 # 数字人制作与实时驱动
 
-数字人包含在[内容创作过程](creative-workflows.md)中。用户要求「可预览的数字人」时，**先按本 Skill 的 6 步把 python-adapter 登记，并在聊天里给出入口 HTML 链接让用户点开**，再把 `http_response` / offer 换成现有大脑、语音、口型程序。不要先写分层长文，也不要把用户赶到进程列表。画面在预览的可信媒体面板，不在本机演示页或 HTML 里。
+数字人包含在[内容创作过程](creative-workflows.md)中。用户要求「可预览的数字人」时，**先按[实时服务预览](live-service.md)的 6 步把 python-adapter 登记，并在聊天里给出入口 HTML 链接让用户点开**，再把 `http_response` / offer 换成现有大脑、语音、口型程序。不要先写分层长文，也不要把用户赶到进程列表。画面在预览的可信媒体面板，不在本机演示页或 HTML 里。
 
 先判断用户正在制作角色资产、绑定/动画/口型、渲染镜头，还是搭建实时驱动/对话应用；前几类未必需要语音或实时媒体服务。需要应用后端时读[启动与分享](getting-started.md)和[媒体契约](media-contract.md)。
 
@@ -27,7 +27,7 @@ GeneHub 提供登记、授权传输、可信麦克风控制与媒体播放，不
 5. 需要麦克风时消费输入 WebRTC 音轨，完成应用要求的采样率/声道转换。已有管线只接受 WS PCM 时需后端音频适配，`microphone: "webrtc"` 本身不会实现它。
 6. 文字/控制走声明的 HTTP/WS 路由；自定义认证头或专有端点在后端适配，不在入口放秘密。验证真实内容响应、音画同步、停止/取消、第二次连接和目标网络。
 
-GeneHub Composer 听写使用另一套机器级语音识别契约。只有任务也要求安装/配置该功能时才使用 `genehub-speech-runtime`；注册听写 runtime 不会自动把它接到数字人的媒体后端。
+GeneHub Composer 听写使用另一套机器级语音识别契约。只有任务也要求安装/配置该功能时才读取 `genehub` 的语音 runtime 参考（`genehub/references/speech-runtime.md`）；注册听写 runtime 不会自动把它接到数字人的媒体后端。
 
 ## 交付
 

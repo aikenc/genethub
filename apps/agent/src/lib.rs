@@ -349,7 +349,7 @@ async fn run_compaction(state: Arc<Mutex<State>>) {
     };
     let skill = skills
         .iter()
-        .find(|skill| skill.name == "genehub-session-history")
+        .find(|skill| skill.name == "genehub-introspect")
         .and_then(|skill| std::fs::read_to_string(&skill.file_path).ok())
         .unwrap_or_else(|| {
             "Preserve source references and direct the next Agent to retrieve missing details with `genet session narrative`.".into()

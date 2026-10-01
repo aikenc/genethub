@@ -9385,9 +9385,10 @@ mod tests {
 
         let prompt = captured.lock().unwrap().clone().expect("catalog");
         assert!(prompt.contains("index.html"));
-        assert!(prompt.contains("genehub-session-history"));
-        assert!(prompt.contains("genehub-html-preview"));
-        assert!(prompt.contains("genehub-speech-runtime"));
+        assert!(prompt.contains("genehub-introspect"));
+        assert!(prompt.contains("genehub-preview"));
+        assert!(prompt.contains("<name>genehub</name>"));
+        assert!(!prompt.contains("genehub-speech-runtime"));
         assert!(prompt.contains("/opt/genehub/genet-dev"));
         assert!(prompt.contains("<available_skills>"));
         assert!(prompt.contains("<location>"));

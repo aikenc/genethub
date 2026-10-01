@@ -179,16 +179,16 @@ impl AgentAdapter for GenetAdapter {
             runtime_axes: None,
             commands: vec![
                 CommandInfo {
-                    name: "skill:genehub-session-history".into(),
+                    name: "skill:genehub-introspect".into(),
                     description: Some(
-                        "Load the deterministic GeneHub session-history analysis SOP".into(),
+                        "Load the read-only GeneHub introspection SOP (session history analysis)".into(),
                     ),
                     argument_hint: Some("[analysis goal]".into()),
                 },
                 CommandInfo {
-                    name: "skill:genehub-html-preview".into(),
+                    name: "skill:genehub-preview".into(),
                     description: Some(
-                        "Load the GeneHub HTML / H5 Asset Preview authoring contract".into(),
+                        "Load the GeneHub Asset Preview contract (static HTML / H5 and live service previews)".into(),
                     ),
                     argument_hint: Some("[preview goal]".into()),
                 },

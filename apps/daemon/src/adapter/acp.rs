@@ -2582,7 +2582,7 @@ mod tests {
         };
         let blocks = prompt_blocks_with_context(
             &input,
-            Some("read genehub-session-history when inspecting a past chat"),
+            Some("read genehub-introspect when inspecting a past chat"),
             GuidancePlacement::EmbeddedResource,
         );
         assert_eq!(blocks[0]["type"], "resource");
@@ -3133,7 +3133,7 @@ mod tests {
         );
         assert!(drain(&mut rx).is_empty());
         assert!(crate::session::store::is_catalog_noise_title(
-            "  genehub-html-preview  "
+            "  genehub-preview  "
         ));
         assert!(!crate::session::store::is_catalog_noise_title(
             "修复登录跳转"

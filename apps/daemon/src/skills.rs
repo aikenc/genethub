@@ -284,12 +284,12 @@ mod tests {
     }
 
     #[test]
-    fn session_history_is_materialized_under_the_daemon_skills_dir() {
+    fn introspect_is_materialized_under_the_daemon_skills_dir() {
         let root = temp_dir("builtin");
         let skills = load(&root);
         let skill = skills
             .iter()
-            .find(|skill| skill.name == "genehub-session-history")
+            .find(|skill| skill.name == "genehub-introspect")
             .expect("built-in skill");
         assert!(skill.file_path.starts_with(&root));
         let body = std::fs::read_to_string(&skill.file_path).unwrap();
@@ -310,31 +310,155 @@ mod tests {
         }
         let entrypoints = std::fs::read_to_string(root.join(ENTRYPOINT_MANIFEST)).unwrap();
         assert_eq!(entrypoints.lines().collect::<Vec<_>>(), BUILTIN_ENTRYPOINTS);
-        assert!(skills
+        let mut names: Vec<&str> = skills.iter().map(|skill| skill.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [
+                "genehub",
+                "genehub-introspect",
+                "genehub-preview",
+                "pm-project-bootstrap",
+                "project-manager",
+            ],
+            "the product catalog is exactly these five Skills; capability detail belongs in references"
+        );
+        // Capabilities folded into the hub stay reachable as references, not Skills.
+        let hub = skills
             .iter()
-            .any(|skill| skill.name == "genehub-session-history"));
-        assert!(skills
+            .find(|skill| skill.name == "genehub")
+            .expect("hub built-in");
+        let hub_dir = hub.file_path.parent().unwrap();
+        for reference in [
+            "multi-machine.md",
+            "daemon.md",
+            "daemon-restart.md",
+            "client-debug.md",
+            "client-debug-commands.md",
+            "speech-runtime.md",
+            "speech-models.md",
+            "speech-runtime-contract.md",
+        ] {
+            assert!(
+                hub_dir.join("references").join(reference).is_file(),
+                "genehub reference {reference} is missing"
+            );
+        }
+        let preview = skills
             .iter()
-            .any(|skill| skill.name == "genehub-html-preview"));
-        assert!(skills.iter().any(|skill| skill.name == "genehub"));
-        let lifecycle = skills
+            .find(|skill| skill.name == "genehub-preview")
+            .expect("preview built-in");
+        let preview_dir = preview.file_path.parent().unwrap();
+        for reference in ["static.md", "live-service.md", "getting-started.md"] {
+            assert!(preview_dir.join("references").join(reference).is_file());
+        }
+        assert!(preview_dir.join("assets/python-adapter/app.py").is_file());
+    }
+
+    #[test]
+    fn the_hub_routes_multi_machine_work_and_gates_disruptive_actions() {
+        let root = temp_dir("hub-routing");
+        let skills = load(&root);
+        let hub = skills
             .iter()
-            .find(|skill| skill.name == "genehub-daemon-management")
-            .expect("daemon management built-in");
-        assert!(lifecycle
-            .file_path
-            .parent()
-            .unwrap()
-            .join("references/restart.md")
-            .is_file());
-        let speech = skills
-            .iter()
-            .find(|skill| skill.name == "genehub-speech-runtime")
-            .expect("speech runtime built-in");
-        let base = speech.file_path.parent().unwrap();
-        assert!(base.join("agents/openai.yaml").is_file());
-        assert!(base.join("references/models.md").is_file());
-        assert!(base.join("references/runtime-contract.md").is_file());
+            .find(|skill| skill.name == "genehub")
+            .expect("hub built-in");
+        let body = std::fs::read_to_string(&hub.file_path).unwrap();
+        for needle in [
+            "references/multi-machine.md",
+            "references/daemon-restart.md",
+            "references/client-debug.md",
+            "references/speech-runtime.md",
+            "genehub-preview",
+            "genehub-introspect",
+            "machineNotPaired",
+            "--machine",
+        ] {
+            assert!(body.contains(needle), "the hub no longer mentions {needle}");
+        }
+        for trigger in [
+            "--machine",
+            "shell",
+            "daemon",
+            "联调",
+            "语音识别",
+            "genehub-preview",
+            "genehub-introspect",
+        ] {
+            assert!(
+                hub.description.contains(trigger),
+                "the hub description lost its trigger {trigger}: it is the only text every session sees"
+            );
+        }
+        let multi = std::fs::read_to_string(
+            hub.file_path
+                .parent()
+                .unwrap()
+                .join("references/multi-machine.md"),
+        )
+        .unwrap();
+        assert!(multi.contains("machineNotPaired"));
+        assert!(multi.contains("--cwd"));
+        assert!(multi.contains("不带 `--grant` 的邀请是不受限设备"));
+    }
+
+    #[test]
+    fn every_relative_markdown_link_in_the_built_ins_resolves() {
+        let root = temp_dir("link-integrity");
+        let _ = load(&root);
+        let mut checked = 0;
+        for file in BUILTIN_FILES {
+            // Authored Skill text only; bundled third-party packages ship their own READMEs.
+            let authored = file.relative_path.ends_with("/SKILL.md")
+                || file.relative_path.contains("/references/");
+            if !authored || !file.relative_path.ends_with(".md") {
+                continue;
+            }
+            let text = String::from_utf8_lossy(file.contents);
+            let base = Path::new(file.relative_path).parent().unwrap();
+            let mut fenced = false;
+            for line in text.lines() {
+                if line.trim_start().starts_with("```") {
+                    fenced = !fenced;
+                    continue;
+                }
+                if fenced {
+                    continue;
+                }
+                let mut from = 0;
+                while let Some(offset) = line[from..].find("](") {
+                    let open = from + offset;
+                    let after = &line[open + 2..];
+                    let Some(close) = after.find(')') else { break };
+                    from = open + 2 + close;
+                    // A link example inside an inline code span is prose, not a link.
+                    if line[..open].matches('`').count() % 2 == 1 {
+                        continue;
+                    }
+                    let target = after[..close].split('#').next().unwrap_or("");
+                    if target.is_empty() || target.contains("://") || target.starts_with("mailto:")
+                    {
+                        continue;
+                    }
+                    // Repository-relative links only make sense in docs, never in an installed Skill.
+                    assert!(
+                        !target.starts_with("../../"),
+                        "{} links outside the installed Skill tree: {target}",
+                        file.relative_path
+                    );
+                    assert!(
+                        root.join(base).join(target).exists(),
+                        "{} has a dangling link: {target}",
+                        file.relative_path
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(
+            checked > 10,
+            "link check saw too few links ({checked}); the scan is broken"
+        );
     }
 
     #[test]
@@ -451,9 +575,11 @@ mod tests {
             false,
         );
         assert!(prompt.contains("index.html"));
-        assert!(prompt.contains("genehub-session-history"));
-        assert!(prompt.contains("genehub-html-preview"));
-        assert!(prompt.contains("genehub-speech-runtime"));
+        assert!(prompt.contains("genehub-introspect"));
+        assert!(prompt.contains("genehub-preview"));
+        assert!(prompt.contains("--machine"));
+        assert!(!prompt.contains("genehub-speech-runtime"));
+        assert!(!prompt.contains("genehub-html-preview"));
         assert!(prompt.contains("/opt/genehub/genet-beta"));
         assert!(prompt.contains("<available_skills>"));
     }

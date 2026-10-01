@@ -58,7 +58,7 @@ defineSpecialty(
           {
             command: [
               process.execPath,
-              join(t.openRoot, "apps/daemon/builtin-skills/genehub-service-preview/assets/demo/backend.mjs"),
+              join(t.openRoot, "apps/daemon/builtin-skills/genehub-preview/assets/demo/backend.mjs"),
             ],
             origin: `http://127.0.0.1:${port}`,
             env: { PREVIEW_DEMO_PORT: String(port) },
@@ -71,7 +71,7 @@ defineSpecialty(
     const runner = spawn(
       process.execPath,
       [
-        join(t.openRoot, "apps/daemon/builtin-skills/genehub-service-preview/assets/node-adapter/run.mjs"),
+        join(t.openRoot, "apps/daemon/builtin-skills/genehub-preview/assets/node-adapter/run.mjs"),
         "--config",
         config,
         "--daemon-root",

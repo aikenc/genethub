@@ -388,22 +388,18 @@ mod tests {
         let dir = temp_dir("daemon-builtins");
         write_skill(
             &dir,
-            "genehub-session-history",
-            "---\nname: genehub-session-history\ndescription: Read history\n---\n",
+            "genehub-introspect",
+            "---\nname: genehub-introspect\ndescription: Read history\n---\n",
         );
         write_skill(
             &dir,
             "must-not-load",
             "---\nname: must-not-load\ndescription: Unknown data-dir Skill\n---\n",
         );
-        std::fs::write(
-            dir.join(".entrypoints"),
-            "genehub-session-history/SKILL.md\n",
-        )
-        .unwrap();
+        std::fs::write(dir.join(".entrypoints"), "genehub-introspect/SKILL.md\n").unwrap();
         let skills = load_daemon_builtins(&dir);
         assert_eq!(skills.len(), 1);
-        assert_eq!(skills[0].name, "genehub-session-history");
+        assert_eq!(skills[0].name, "genehub-introspect");
         assert!(skills[0].disable_model_invocation);
         assert!(format_for_prompt(&skills).is_empty());
     }

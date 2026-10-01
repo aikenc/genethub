@@ -1,13 +1,8 @@
----
-name: genehub-speech-runtime
-description: Safely test GeneHub's built-in speech protocol Stub, inspect this PC, recommend and install through official or community instructions, and register a local speech-to-text runtime. Use when a user asks to test the speech path, implement an adapter, install, configure, replace, diagnose, verify, or remove Qwen3-ASR or another local ASR model, or when GeneHub reports that its speech runtime is unavailable. Covers GPU/VRAM-aware selection, explicit approval before mutations, the GeneHub adapter contract, honest Partial/N-best capability declarations, smoke tests, and rollback.
----
-
 # GeneHub Speech Runtime
 
 Connect a user-owned local ASR runtime to GeneHub without making GeneHub the model installer or model server. Prefer Qwen3-ASR-1.7B for the target 8–16 GB GPU class, but select from measured hardware and the user's languages rather than from a model name alone.
 
-Read [references/models.md](references/models.md) before recommending a checkpoint. Read [references/runtime-contract.md](references/runtime-contract.md) before selecting or registering an adapter.
+Read [speech-models.md](speech-models.md) before recommending a checkpoint. Read [speech-runtime-contract.md](speech-runtime-contract.md) before selecting or registering an adapter.
 
 ## Non-negotiable boundaries
 
@@ -49,7 +44,7 @@ When the user wants to test the flow or the runtime is unavailable, offer the **
 
 The Stub preserves a registered adapter and restores it when disabled. It does not spawn `--genehub-stdio`; disable it before probing or smoke-testing a real adapter. Do not diagnose model accuracy from Stub text and do not manufacture preference records from its fixed candidates.
 
-Use the Stub result as a behavioral baseline: a real Best-1 adapter first needs to match Ready, Audio, Finish and Completed; add Partial next; add N-best/segments only when the backend exposes real decoder evidence. See `references/runtime-contract.md`.
+Use the Stub result as a behavioral baseline: a real Best-1 adapter first needs to match Ready, Audio, Finish and Completed; add Partial next; add N-best/segments only when the backend exposes real decoder evidence. See `speech-runtime-contract.md`.
 
 ### 3. Recommend one primary plan
 
@@ -85,7 +80,7 @@ After approval, follow the current official model/backend documentation rather t
 
 For Qwen3, prefer the native Transformers path for a simple Best-1 baseline or the official vLLM path when the adapter requires documented streaming. Do not add the forced aligner unless the user needs timestamps; it is a separate model and memory cost.
 
-Install or select a community adapter that implements the exact contract in `references/runtime-contract.md`. A generic HTTP, OpenAI-compatible, Gradio, or WebSocket ASR endpoint is not directly registrable. Do not generate an unreviewed shell wrapper that hides such an incompatibility.
+Install or select a community adapter that implements the exact contract in `speech-runtime-contract.md`. A generic HTTP, OpenAI-compatible, Gradio, or WebSocket ASR endpoint is not directly registrable. Do not generate an unreviewed shell wrapper that hides such an incompatibility.
 
 If the model works but no compatible adapter exists, stop with the truthful state `model ready, GeneHub adapter missing`. Provide the contract link and do not register a fake runtime.
 

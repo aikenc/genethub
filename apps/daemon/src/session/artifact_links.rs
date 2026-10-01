@@ -29,7 +29,7 @@ runtime fetch/import into the workspace.
 recognized)
 
 When authoring HTML, H5 games, or static sites for Preview, read the \
-`genehub-html-preview` skill. Write a regular static site (entry HTML + \
+`genehub-preview` skill. Write a regular static site (entry HTML + \
 relative paths) that also opens as a local file. Do not start an HTTP server \
 for static assets, and do not embed Preview-specific scripts — GeneHub \
 injects its own loader. `localStorage` works via a persistent sandbox shim; \
@@ -51,7 +51,7 @@ mod tests {
         assert!(text.contains(".md"));
         assert!(text.contains(".wasm"));
         assert!(text.contains("64 MiB"));
-        assert!(text.contains("genehub-html-preview"));
+        assert!(text.contains("genehub-preview"));
         assert!(text.contains("relative paths"));
         assert!(text.contains("localStorage"));
     }

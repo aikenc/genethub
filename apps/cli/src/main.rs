@@ -267,7 +267,7 @@ pub fn usage() -> i32 {
                                     daemon-dependent session: verify independent
                                     SSH/console recovery before restarting
                                     do not wrap restart in a transient task
-                                    SOP: built-in genehub-daemon-management
+                                    SOP: built-in genehub skill, references/daemon-restart.md
                                     use the channel-bound GENEHUB_CLI
   genet daemon status               whether the daemon is running
   genet daemon endpoint             one-use local wsUrl and process facts

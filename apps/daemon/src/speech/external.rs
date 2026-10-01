@@ -805,7 +805,7 @@ fn log_runtime_process_end(
 fn not_configured() -> SpeechFailure {
     failure(
         SpeechFailureCode::RuntimeUnavailable,
-        "尚未注册本地语音 runtime。请让内置 Agent 使用 genehub-speech-runtime Skill 安装并登记模型。",
+        "尚未注册本地语音 runtime。请让内置 Agent 使用 genehub Skill 的语音 runtime 参考（references/speech-runtime.md）安装并登记模型。",
         false,
     )
 }

@@ -125,7 +125,7 @@ fn build_context_seed_with_source_access(
     let retrieval_note = if source_accessible {
         format!(
             "Claims carry ghref references. If a missing detail matters, do not guess. \
-             Load the genehub-session-history Skill when available, or inspect the source with:\n  \
+             Load the genehub-introspect Skill when available, or inspect the source with:\n  \
              {}",
             retrieval_commands.join("\n  ")
         )

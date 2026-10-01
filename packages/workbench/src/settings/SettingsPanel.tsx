@@ -293,7 +293,7 @@ function SpeechSettingsCard({
         ) : null}
 
         <p className="text-faint">
-          GeneHub 只提供 UI、连接协议、上下文和反馈接口，不下载模型或创建 Python 环境。可在内置 Agent 中说“安装本地语音模型”，它会使用 genehub-speech-runtime Skill 先检查硬件、说明方案并征得确认，再按社区文档安装、探测和登记。
+          GeneHub 只提供 UI、连接协议、上下文和反馈接口，不下载模型或创建 Python 环境。可在内置 Agent 中说“安装本地语音模型”，它会按 genehub Skill 的语音 runtime 参考先检查硬件、说明方案并征得确认，再按社区文档安装、探测和登记。
           <button
             type="button"
             className="ml-1 underline decoration-dotted hover:text-accent"

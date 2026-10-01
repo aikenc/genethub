@@ -27,12 +27,28 @@ frontmatter 必须包含与目录名完全相同的 `name` 和非空 `descriptio
 
 | Skill | 负责的任务 |
 |---|---|
-| `genehub-html-preview` | 静态 H5、站点、相册及内容创作阶段产物；需要过程服务时转向 Service Preview |
-| `genehub-service-preview` | 影视、DCC、游戏引擎等创作过程预览；按需接入 HTTP/WS、原生媒体和操作回传，数字人为子场景 |
-| `genehub-session-history` | 使用绑定 CLI 查阅会话历史 |
-| `genehub-speech-runtime` | Composer 的本机语音识别 runtime 接入 |
+| `genehub` | 通用能力入口与多机协作：机器目录、配对授权、`--machine` 远程 shell 与 Agent、身份对照；daemon 生命周期、客户端联调、本机语音 runtime 作为它的 `references/` |
+| `genehub-preview` | 静态 H5、站点、相册、阶段产物，以及影视、DCC、游戏引擎等创作过程预览；按需接入 HTTP/WS、原生媒体和操作回传，数字人为子场景 |
+| `genehub-introspect` | 对 GeneHub 自身的只读观察；目前是使用绑定 CLI 查阅会话历史 |
+| `pm-project-bootstrap` | 把工作区接管为 PM 管理的项目、克隆并构建 Workflow 包 |
+| `project-manager` | 在已构建的项目里对齐目标、委派 Workflow、检查执行与预算 |
 
-[Service Preview Skill](../apps/daemon/builtin-skills/genehub-service-preview/SKILL.md) 以中文随包携带创作过程接入、启动、媒体架构与契约、数字人、UE 参考文档，可在没有源码的安装环境中阅读。Skill 携带可复制的 Python 直接接入与可选 Node 多后端示例，不携带依赖、模型或 UE 环境；启动参考无需获取产品源码。GeneHub 本体不依赖示例的语言运行时。当前媒体面板没有 UE 输入协议，Skill 必须区分远程观看、交互云游玩和不同 PIE 模式，不能把适配引导宣传为已实现的 UE 功能。
+### 收束原则
+
+目录里只保留两类 Skill：被代码或系统提示按名字引用、或触发来自任务内容而不是“用户问 GeneHub 怎么用”的 Skill
+（`genehub-preview`、`genehub-introspect`、两个 PM Skill），以及一个通用入口 `genehub`。低频、长尾的产品能力
+（daemon 生命周期、客户端联调、本机语音 runtime）不单独成为 Skill，而是 `genehub/references/` 下的参考，由入口
+的路由表和动手前门禁引导读取。每次会话都会注入 Skill 目录，所以入口描述必须写明这些能力的触发词；新增长尾能力
+时先加 reference 并更新入口描述，不要再开新的 Skill。多机协作是产品核心，因此它的规则写在入口正文里，细节才下沉到
+`references/multi-machine.md`。
+
+`genehub-introspect` 保持只读；任何会修改平台的能力都需要自己的授权门禁，不并入它。
+
+旧名称 `genehub-session-history`、`genehub-html-preview`、`genehub-service-preview`、`genehub-daemon-management`、
+`genehub-client-debug`、`genehub-speech-runtime` 已不再是产品 Skill。`is_catalog_noise_title` 仍保留其中曾被模型当作会话标题的折叠形式，
+因为已持久化的会话可能用它们作标题。
+
+[Preview 的实时服务参考](../apps/daemon/builtin-skills/genehub-preview/references/live-service.md) 以中文随包携带创作过程接入、启动、媒体架构与契约、数字人、UE 参考文档，可在没有源码的安装环境中阅读。Skill 携带可复制的 Python 直接接入与可选 Node 多后端示例，不携带依赖、模型或 UE 环境；启动参考无需获取产品源码。GeneHub 本体不依赖示例的语言运行时。当前媒体面板没有 UE 输入协议，参考必须区分远程观看、交互云游玩和不同 PIE 模式，不能把适配引导宣传为已实现的 UE 功能。
 
 ## 构建与分发
 

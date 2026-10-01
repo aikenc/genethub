@@ -20,7 +20,7 @@ requiredArtifacts:["genehub-host-local","genehub_guest.wasm"],
   if(!python)throw new BlockedError("GENEHUB_PREVIEW_MEDIA_PYTHON must point to Python 3.11+ with aiohttp");
   const opened=await t.flows.main.openWorkspace({openRoot:t.openRoot,lease:t.env});
   const copied=join(t.env.workspace,"adapter");
-  await cp(join(t.env.data,"builtin-skills/genehub-service-preview/assets/python-adapter"),copied,{recursive:true});
+  await cp(join(t.env.data,"builtin-skills/genehub-preview/assets/python-adapter"),copied,{recursive:true});
   const entry=join(t.env.workspace,"index.html");
   await writeFile(entry,"<!doctype html><title>内容预览</title>");
   const entryPath=`${opened.rootHandle}/index.html`;

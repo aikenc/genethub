@@ -1,12 +1,7 @@
----
-name: genehub-daemon-management
-description: Explain or operate GeneHub daemon startup, shutdown, restart, configuration activation and recovery on local or remote machines. Use for questions such as how to restart daemon, daemon offline after restart, or applying daemon environment changes. Preserve the existing desktop/service/manual lifecycle owner; not a Beta release workflow.
----
-
 # GeneHub daemon 管理
 
-询问“如何启动/停止/重启 daemon”、配置是否生效、重启后离线时使用本 Skill。
-解释用法不授权执行重启。先读 [标准重启与恢复 SOP](references/restart.md)，再提出或执行中断连接的操作。
+询问“如何启动/停止/重启 daemon”、配置是否生效、重启后离线时使用本文。
+解释用法不授权执行重启。先读 [标准重启与恢复 SOP](daemon-restart.md)，再提出或执行中断连接的操作。
 
 ## 定位与命令
 
@@ -35,5 +30,5 @@ description: Explain or operate GeneHub daemon startup, shutdown, restart, confi
 
 ## 范围
 
-本 Skill 管理 daemon 生命周期，不发布产品版本、不改配对关系。Beta 诊断、候选交接和发布
+本文管理 daemon 生命周期，不发布产品版本、不改配对关系。Beta 诊断、候选交接和发布
 遵循用户所在 Space 的专用 Skill。业务发布任务持久执行与 daemon 存活是两件事。

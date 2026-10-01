@@ -2039,9 +2039,13 @@ pub fn is_catalog_noise_title(title: &str) -> bool {
         folded_title(title).as_str(),
         "skillselectionguidance"
             | "skilldescription"
+            | "genehubintrospect"
+            | "genehubpreview"
+            // Legacy Skill names: persisted sessions may still carry them as titles.
             | "genehubsessionhistory"
             | "genehubspeechruntime"
             | "genehubhtmlpreview"
+            | "genehubservicepreview"
             | "htmlpreviewinfo"
             | "myskills"
             | "whatareyourskills"
@@ -2268,6 +2272,8 @@ mod project_home_tests {
     fn catalog_headings_are_not_session_names() {
         assert!(is_catalog_noise_title("Skill Selection Guidance"));
         assert!(is_catalog_noise_title("  genehub-html-preview  "));
+        assert!(is_catalog_noise_title("  genehub-preview  "));
+        assert!(is_catalog_noise_title("GeneHub Introspect"));
         assert!(!is_catalog_noise_title("修复登录跳转"));
         assert!(!is_catalog_noise_title("genet-beta 更新到最新"));
     }

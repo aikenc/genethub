@@ -17,7 +17,7 @@ requiredArtifacts:["genehub-host-local","genehub_guest.wasm"],
   if(!python||!t.browser)throw new BlockedError("Chromium and Python aiohttp/aiortc/PyAV/numpy required");
   const opened=await t.flows.main.openWorkspace({openRoot:t.openRoot,lease:t.env});
   const copied=join(t.env.workspace,"adapter");
-  const assets=join(t.env.data,"builtin-skills/genehub-service-preview/assets");
+  const assets=join(t.env.data,"builtin-skills/genehub-preview/assets");
   await cp(join(assets,"python-adapter"),copied,{recursive:true});
   const entry=join(t.env.workspace,"index.html");await copyFile(join(assets,"demo/index.html"),entry);
   const video=join(t.env.workspace,"clip.mp4");

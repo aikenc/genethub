@@ -1,6 +1,6 @@
 # 客户端联调
 
-Agent 操作入口是产品内置 [genehub-client-debug Skill](../apps/daemon/builtin-skills/genehub-client-debug/SKILL.md)，
+Agent 操作入口是产品内置 [`genehub` Skill 的客户端联调参考](../apps/daemon/builtin-skills/genehub/references/client-debug.md)，
 随 daemon 自动收录到内置目录。它适用于 dev/Beta/Stable，独立于反馈取证与发布流程。
 
 浏览器、手机和桌面 App 的客户端使用同一套联调运行时，不按 Stable/Beta 分支隐藏。

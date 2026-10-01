@@ -183,7 +183,7 @@ session_id → process(pid, 已追踪) → proxy { name, addr, ready }
 
 ## 8. SKILL 引导契约
 
-内置 `genehub-html-preview` 已落地（`apps/daemon/builtin-skills/genehub-html-preview/`）。所有 adapter 的 `artifact_links` guidance 指向它；内置 genet-agent 按需 `read` 完整 SOP，也可 `/skill:genehub-html-preview`。当前实现把理解成本降为：
+内置 `genehub-preview` 已落地（`apps/daemon/builtin-skills/genehub-preview/`，静态部分见 `references/static.md`；原 `genehub-html-preview` 已并入）。所有 adapter 的 `artifact_links` guidance 指向它；内置 genet-agent 按需 `read` 完整 SOP，也可 `/skill:genehub-preview`。当前实现把理解成本降为：
 
 1. 纯静态 H5（相对路径、`fetch`、媒体、`localStorage`）→ 直接产静态文件，Preview 原生支持，桌面双击 `index.html` 也能开；
 2. 不要为静态资源起 HTTP 服务器——Preview **尚未**代理 `127.0.0.1`（§7 仍是提案）；

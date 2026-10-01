@@ -8,8 +8,8 @@
 
 不应触发：
 
-1. “按 fb_xxx 读取 Beta 服务器反馈包。”——反馈取证 Skill；需要实时现场时再调用本 Skill。
-2. “做一个 H5 游戏并给我预览链接。”——HTML Preview Skill。
+1. “按 fb_xxx 读取 Beta 服务器反馈包。”——反馈取证 Skill；需要实时现场时再调用客户端联调。
+2. “做一个 H5 游戏并给我预览链接。”——`genehub-preview`。
 3. “打开任意电商网站并下单。”——不是 GeneHub 已授权文档联调。
 
 成功：有能力的 CLI/控制机器/页面 → list 确认特定文档 → attach pending → 用户页面限时授权 →

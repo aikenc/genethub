@@ -4,9 +4,9 @@
 
 ## Agent 引导
 
-内置 [genehub-service-preview](../apps/daemon/builtin-skills/genehub-service-preview/SKILL.md) 提供随产品分发的任务入口，按需读取创作过程接入、启动与分享、媒体契约、数字人和 UE 参考。静态页面仍由 `genehub-html-preview` 引导。安装包中的 Skill 携带可选示例源码，不包含依赖环境或模型权重；启动前提见其 [启动参考](../apps/daemon/builtin-skills/genehub-service-preview/references/getting-started.md)。
+内置 [genehub-preview](../apps/daemon/builtin-skills/genehub-preview/references/live-service.md) 提供随产品分发的任务入口，按需读取创作过程接入、启动与分享、媒体契约、数字人和 UE 参考。静态页面由同一 Skill 的[静态预览参考](../apps/daemon/builtin-skills/genehub-preview/references/static.md)引导。安装包中的 Skill 携带可选示例源码，不包含依赖环境或模型权重；启动前提见其 [启动参考](../apps/daemon/builtin-skills/genehub-preview/references/getting-started.md)。
 
-UE 接入需要版本匹配的信令适配；当前可信媒体面板没有 Pixel Streaming 的键鼠/触摸/手柄输入协议，也没有内置 UE 适配器。远程观看、交互云游玩及特定 Editor/PIE 模式必须分别验证，详见 [UE 参考](../apps/daemon/builtin-skills/genehub-service-preview/references/unreal-engine.md)。
+UE 接入需要版本匹配的信令适配；当前可信媒体面板没有 Pixel Streaming 的键鼠/触摸/手柄输入协议，也没有内置 UE 适配器。远程观看、交互云游玩及特定 Editor/PIE 模式必须分别验证，详见 [UE 参考](../apps/daemon/builtin-skills/genehub-preview/references/unreal-engine.md)。
 
 ## 服务基础能力与前端
 
@@ -18,9 +18,9 @@ UE 接入需要版本匹配的信令适配；当前可信媒体面板没有 Pixe
 
 ## 开始使用
 
-GeneHub 本体不依赖 Node.js/Python。应用可直接实现[语言无关登记与访问协议](../apps/daemon/builtin-skills/genehub-service-preview/references/registration-contract.md)，也可将内置 Skill 携带的 [Python 示例](../apps/daemon/builtin-skills/genehub-service-preview/assets/python-adapter/app.py) 或 [Node 多后端示例](../apps/daemon/builtin-skills/genehub-service-preview/assets/node-adapter/run.mjs) 复制到用户工作区改写。示例依赖只安装在外部项目，不需要 GeneHub 源码环境。
+GeneHub 本体不依赖 Node.js/Python。应用可直接实现[语言无关登记与访问协议](../apps/daemon/builtin-skills/genehub-preview/references/registration-contract.md)，也可将内置 Skill 携带的 [Python 示例](../apps/daemon/builtin-skills/genehub-preview/assets/python-adapter/app.py) 或 [Node 多后端示例](../apps/daemon/builtin-skills/genehub-preview/assets/node-adapter/run.mjs) 复制到用户工作区改写。示例依赖只安装在外部项目，不需要 GeneHub 源码环境。
 
-完整步骤见[启动与手机预览](../apps/daemon/builtin-skills/genehub-service-preview/references/getting-started.md)。Workspace 后台运行列表将显式登记关联到进程树，显示服务入口。停止应用通过认证运行身份发出 shutdown；关闭预览只清理访问。重新启动后用“重新检查服务”发现新的 runId。
+完整步骤见[启动与手机预览](../apps/daemon/builtin-skills/genehub-preview/references/getting-started.md)。Workspace 后台运行列表将显式登记关联到进程树，显示服务入口。停止应用通过认证运行身份发出 shutdown；关闭预览只清理访问。重新启动后用“重新检查服务”发现新的 runId。
 
 ## 访问边界与生命周期
 
@@ -35,7 +35,7 @@ GeneHub 本体不依赖 Node.js/Python。应用可直接实现[语言无关登�
 
 ## 接入影视、DCC、引擎等创作软件的实时媒体
 
-内容工作者的过程预览包括阶段产物、任务状态、实时画面和操作回传。影视剪辑/合成、DCC 建模/材质/动画/仿真、游戏引擎是主要场景，数字人制作与实时驱动包含在这些流程中。已有产物优先使用静态预览，应用状态使用登记 HTTP/WS，实时媒体才接入以下契约。软件连接器、状态采集、画面采集和控制回传仍由实际应用适配，不能把这些软件类别宣传为内置兼容清单。通用工作流见 [创作过程接入](../apps/daemon/builtin-skills/genehub-service-preview/references/creative-workflows.md)。
+内容工作者的过程预览包括阶段产物、任务状态、实时画面和操作回传。影视剪辑/合成、DCC 建模/材质/动画/仿真、游戏引擎是主要场景，数字人制作与实时驱动包含在这些流程中。已有产物优先使用静态预览，应用状态使用登记 HTTP/WS，实时媒体才接入以下契约。软件连接器、状态采集、画面采集和控制回传仍由实际应用适配，不能把这些软件类别宣传为内置兼容清单。通用工作流见 [创作过程接入](../apps/daemon/builtin-skills/genehub-preview/references/creative-workflows.md)。
 
 应用适配为以下契约可复用媒体基础设施：
 

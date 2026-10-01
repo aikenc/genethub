@@ -88,7 +88,7 @@ createServer((req,res)=>{
     const config = join(t.env.workspace, "preview.json");
     await writeFile(config, JSON.stringify({ entry: "index.html", dataPolicy: "direct-only",
       backends: [{ command: [process.execPath, backendFile], origin: `http://127.0.0.1:${port}`, health: "/health", routes: [{ prefix: "/api/stream/" }] }] }));
-    runner = spawn(process.execPath, [join(t.openRoot, "apps/daemon/builtin-skills/genehub-service-preview/assets/node-adapter/run.mjs"), "--config", config, "--daemon-root", t.env.data], { stdio: ["ignore", "pipe", "pipe"] });
+    runner = spawn(process.execPath, [join(t.openRoot, "apps/daemon/builtin-skills/genehub-preview/assets/node-adapter/run.mjs"), "--config", config, "--daemon-root", t.env.data], { stdio: ["ignore", "pipe", "pipe"] });
     let tail = ""; runner.stderr?.on("data", b => { tail = (tail + b).slice(-1000); });
     await stack.rtc();
     await stack.page.evaluate(async ({ workspace, entry }) => {
