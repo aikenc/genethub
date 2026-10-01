@@ -92,7 +92,6 @@ export function PreviewRuntimeControls({
   requestDomSnapshot,
   requestRenderedSnapshot,
   onSubmit,
-  onRecheckService,
 }: {
   frameRef: React.RefObject<HTMLIFrameElement>;
   ready: boolean;
@@ -103,7 +102,6 @@ export function PreviewRuntimeControls({
   requestDomSnapshot(): Promise<PreviewDomSnapshot>;
   requestRenderedSnapshot(): Promise<PixelSnapshot>;
   onSubmit?: RuntimeArtifactSubmit;
-  onRecheckService?: () => void;
 }) {
   const captureHandle = useMemo(
     () => runtimeId("capture"),
@@ -443,7 +441,6 @@ export function PreviewRuntimeControls({
       <span className="text-faint">
         日志 {eventCount} · 现场 {frameCount}
       </span>
-      {onRecheckService ? <button type="button" className="rounded border border-line px-2 py-1 text-left hover:bg-raised" onClick={onRecheckService}>重新检查服务</button> : null}
       {recordingUrl ? (
         <a
           className="shrink-0 rounded px-2 py-1 text-accent hover:bg-raised"

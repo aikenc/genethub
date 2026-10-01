@@ -44,6 +44,37 @@ export async function* servicePackets(
   }
   if (pending.length) throw new Error("服务帧不完整");
 }
+export class ServicePreviewQueryError extends Error {
+  readonly status: number;
+  readonly code?: string;
+  constructor(message: string, status: number, code?: string) {
+    super(message);
+    this.name = "ServicePreviewQueryError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+/** Maps a failed registration lookup to the two header states that are not “absent” or “reachable”. */
+export function classifyServiceFailure(error: unknown): {
+  state: "unauthorized" | "unreachable";
+  detail: string;
+} {
+  const detail = error instanceof Error && error.message ? error.message : "服务查询失败";
+  const status = error instanceof ServicePreviewQueryError ? error.status : 0;
+  const code = error instanceof ServicePreviewQueryError ? error.code : undefined;
+  if (
+    status === 401 ||
+    status === 403 ||
+    code === "forbidden" ||
+    code === "unauthorized" ||
+    /not granted `services`/.test(detail)
+  ) {
+    return { state: "unauthorized", detail };
+  }
+  return { state: "unreachable", detail };
+}
+
 export class ServicePreviewClient {
   private readonly streams = new Set<DataStream>();
   private closed = false;
@@ -68,7 +99,11 @@ export class ServicePreviewClient {
       const head = await stream.responseHead;
       if (head.status === 404) return null;
       if (head.status !== 200 || head.error)
-        throw new Error(head.error?.message ?? "服务预览不可用");
+        throw new ServicePreviewQueryError(
+          head.error?.message ?? "服务预览不可用",
+          head.status,
+          head.error?.code,
+        );
       const value = JSON.parse(
         new TextDecoder().decode(await collectBody(stream.body(), 16 * 1024)),
       ) as ServicePreviewDescriptor;
