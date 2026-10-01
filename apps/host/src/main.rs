@@ -49,6 +49,9 @@ fn main() {
                 eprintln!("{error}");
                 std::process::exit(2);
             });
+            if matches!(entry, load::Entry::Daemon) {
+                forget_launching_session();
+            }
             run_and_exit(&component, &guest_args, entry);
         }
         Some("thumbnail") => {
@@ -70,6 +73,37 @@ fn main() {
             eprintln!("{USAGE}");
             std::process::exit(2);
         }
+    }
+}
+
+/// What an Agent session hands each of its own processes. A daemon is often
+/// started or restarted from inside one, and everything this process inherits
+/// reaches every terminal, remote command and script the daemon starts: the
+/// guest cannot take an inherited name away (`packages/wasi-guest`). Those
+/// children would then speak for a session they are not part of, possibly on
+/// another channel's daemon.
+const SESSION_SCOPED: &[&str] = &[
+    "GENEHUB_SESSION_ID",
+    "GENEHUB_CONTROLLER_TOKEN",
+    "GENEHUB_EVIDENCE_SCOPE",
+    "GENEHUB_SKILLS_DIR",
+    "GENET_WORKSPACE_ROOT",
+];
+
+/// `GENEHUB_CLI` is the session's front door too, except that Stable's
+/// launcher names its own CLI to us under that very name.
+fn launching_session_names(env_cli: &str) -> Vec<&'static str> {
+    let mut names = SESSION_SCOPED.to_vec();
+    if env_cli != "GENEHUB_CLI" {
+        names.push("GENEHUB_CLI");
+    }
+    names
+}
+
+/// Must run while this process still has one thread.
+fn forget_launching_session() {
+    for name in launching_session_names(channel::ENV_CLI) {
+        env::remove_var(name);
     }
 }
 
@@ -128,4 +162,20 @@ fn parse_run(
         }
     };
     Ok((path, entry, guest))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::launching_session_names;
+
+    #[test]
+    fn only_stable_keeps_an_inherited_front_door() {
+        assert!(!launching_session_names("GENEHUB_CLI").contains(&"GENEHUB_CLI"));
+        for env_cli in ["GENEHUB_LOCAL_CLI", "GENEHUB_DEV_CLI", "GENEHUB_BETA_CLI"] {
+            let names = launching_session_names(env_cli);
+            assert!(names.contains(&"GENEHUB_CLI"), "{env_cli}");
+            assert!(names.contains(&"GENEHUB_SESSION_ID"), "{env_cli}");
+            assert!(names.contains(&"GENEHUB_CONTROLLER_TOKEN"), "{env_cli}");
+        }
+    }
 }
