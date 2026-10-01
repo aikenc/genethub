@@ -299,6 +299,79 @@ defineSpecialty(
 
 defineSpecialty(
   {
+    id: "specialty.install.older-release-refuses-to-share-a-component",
+    title: "An older release is not installed over a component another channel in the directory may be running",
+    oracle: "beta install.sh given a tarball that carries only genehub_guest.wasm, into a directory that already holds stable's CLI, installs nothing, names a separate directory, and leaves stable's component bytes alone",
+    catches: ["older-release fallback overwrites the shared component of a co-installed channel"],
+    tags: ["core", "install"],
+    expectedDurationMs: 8_000,
+    timeoutMs: 30_000,
+    surfaces: ["install"],
+  },
+  async (t) => {
+    if (installerUnsupported()) return;
+    const stable: ReleaseNames = {
+      prefix: "genet",
+      cli: "genet",
+      host: "genehub-host",
+      guest: "stable-guest",
+      component: "genehub_guest.wasm",
+    };
+    const older: ReleaseNames = {
+      prefix: "genet-beta",
+      cli: "genet-beta",
+      host: "genehub-host-beta",
+      guest: "older-beta-guest",
+      component: "genehub_guest.wasm",
+    };
+    const releases = { stable: fakeRelease(stable), older: fakeRelease(older) };
+    const home = mkdtempSync(path.join(tmpdir(), "genehub-install-home-"));
+    const bin = path.join(home, "bin");
+    const apart = path.join(home, "beta-bin");
+    const installOlder = (dir: string) =>
+      runInstall(
+        t.openRoot,
+        releases.older,
+        dir,
+        { GENEHUB_BETA_DOWNLOAD_BASE: "https://downloads.example.invalid", GENEHUB_BETA_BIN_DIR: dir },
+        channelScript(t.openRoot, home, "beta"),
+      );
+    try {
+      const first = runInstall(
+        t.openRoot,
+        releases.stable,
+        bin,
+        { GENEHUB_DOWNLOAD_BASE: "https://downloads.example.invalid", GENEHUB_BIN_DIR: bin },
+        channelScript(t.openRoot, home, "stable"),
+      );
+      t.assertions.assert(first.status === 0, `stable install failed: ${first.stderr}`);
+
+      const refused = installOlder(bin);
+      t.assertions.assert(refused.status !== 0, `older beta release was installed beside stable:\n${refused.stdout}`);
+      t.assertions.assert(
+        refused.stderr.includes("GENEHUB_BETA_BIN_DIR"),
+        `refusal does not name the directory setting:\n${refused.stderr}`,
+      );
+      const shared = path.join(bin, "genehub_guest.wasm");
+      t.assertions.assert(readFileSync(shared, "utf8") === "stable-guest", "stable's component was replaced");
+      t.assertions.assert(!existsSync(path.join(bin, "genet-beta")), "refused install still wrote files");
+
+      const separate = installOlder(apart);
+      t.assertions.assert(separate.status === 0, `install into a separate directory failed: ${separate.stderr}`);
+      t.assertions.assert(
+        readFileSync(path.join(apart, "genehub_guest.wasm"), "utf8") === "older-beta-guest",
+        "component not where the older CLI looks in the separate directory",
+      );
+    } finally {
+      rmSync(releases.stable, { recursive: true, force: true });
+      rmSync(releases.older, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  },
+);
+
+defineSpecialty(
+  {
     id: "specialty.install.restart-daemon-with-new-binary",
     title: "An explicit install can restart the daemon with the new binary",
     oracle: "GENEHUB_RESTART_DAEMON=1 makes the newly installed CLI receive daemon restart",
