@@ -30,7 +30,7 @@ defineSpecialty({
     const openFile = async (name: string) => {
       await page.getByRole("link", { name, exact: true }).first().click();
       await page.getByRole("dialog", { name: "文件预览", exact: true }).waitFor();
-      await page.getByRole("button", { name: "进入批注", exact: true }).waitFor();
+      await page.getByLabel("批注", { exact: true }).waitFor();
     };
     const checkRow = async () => {
       const header = page.getByLabel("预览工具栏", { exact: true });
@@ -65,7 +65,8 @@ defineSpecialty({
     t.assertions.assert(await page.getByText("服务登记不可用，请检查运行状态与 services 授权。").count() === 0, "service failure still occupies a content row");
     await page.keyboard.press("Escape");
     t.assertions.assert(await page.getByRole("dialog", { name: "文件预览", exact: true }).isVisible(), "Escape from menu minimized Preview");
-    await page.getByRole("button", { name: "进入批注", exact: true }).click();
+    await page.getByLabel("批注", { exact: true }).click();
+    await page.getByRole("button", { name: "开始批注", exact: true }).click();
     await frame.locator("#action").click();
     await page.getByRole("textbox", { name: "批注", exact: true }).waitFor();
     t.assertions.assert(await frame.locator("#action").innerText() === "Action", "annotation tap activated HTML application");
@@ -98,7 +99,9 @@ defineSpecialty({
     await page.getByRole("textbox", { name: "批注", exact: true }).fill("Keep this section readable");
     await page.getByRole("button", { name: "加入草稿", exact: true }).click();
     await page.getByRole("button", { name: "完成批注", exact: true }).click();
-    await page.getByRole("button", { name: "提交预览反馈", exact: true }).click();
+    await page.getByLabel("批注", { exact: true }).click();
+    await page.getByRole("button", { name: "提交批注反馈", exact: true }).click();
+    await page.getByRole("dialog", { name: "预览反馈", exact: true }).waitFor();
     await page.getByText("Keep this section readable", { exact: true }).waitFor();
     await page.getByRole("button", { name: "提交反馈", exact: true }).click();
     const receipt = page.getByRole("textbox", { name: "可复制的预览反馈", exact: true });
