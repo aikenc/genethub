@@ -160,8 +160,15 @@ pub async fn handle(
     request: Request,
 ) -> Handled {
     let needed = crate::authz::required(&request);
-    let project_management = if !caller.allows(needed) {
+    let session_exception = if !caller.allows(needed) {
         match (&request, caller.session_controller_id()) {
+            // An Agent Session reaches the other machines of its owner's own
+            // account the way the owner's terminal does: the Hub issues a
+            // per-connection ticket and the target authenticates the channel.
+            // Fetching one changes nothing on this machine, so it is not the
+            // machine-wide Settings capability. Pairing, unpairing and the
+            // other Hub verbs still require it.
+            (Request::HubConnect { .. }, Some(_)) => true,
             (
                 Request::AgentSpaceConfigure {
                     workspace_id,
@@ -190,7 +197,7 @@ pub async fn handle(
     } else {
         false
     };
-    if !caller.allows(needed) && !project_management {
+    if !caller.allows(needed) && !session_exception {
         return Handled::err(
             ErrorCode::Unauthorized,
             format!("caller lacks the {} capability", needed.as_str()),
