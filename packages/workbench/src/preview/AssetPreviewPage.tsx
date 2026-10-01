@@ -3,7 +3,8 @@ import { PreviewFeedbackPanel } from "./PreviewFeedbackPanel";
 import { PreviewShareButton, PreviewShareCopyButton } from "./PreviewShareButton";
 import { PreviewToolbarPortal } from "./PreviewToolbar";
 import type { PreviewSourceInfo } from "@genehub/proto";
-import { ServicePreviewClient } from "./serviceClient";
+import { ServicePreviewClient, classifyServiceFailure } from "./serviceClient";
+import { ServiceStatusMenu, type ServiceMark } from "./ServiceStatusMenu";
 import { ServiceMediaPanel } from "./ServiceMediaPanel";
 import { serviceBridgeScript, useServiceBridge } from "./serviceBridge";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -589,28 +590,36 @@ function BlobDocument({
   );
 }
 
+function serviceMark(client: ServicePreviewClient): ServiceMark {
+  return {
+    state: "reachable",
+    name: client.descriptor.name,
+    policy: client.descriptor.dataPolicy === "direct-only" ? "业务仅直连" : "允许 GeneHub 数据中继",
+  };
+}
+
 function ServiceHtmlDocument(props: React.ComponentProps<typeof HtmlDocument> & {client:Client;workspaceHandle:string}) {
   const [candidate,setCandidate]=useState<ServicePreviewClient|null>(null);
+  const [mark,setMark]=useState<ServiceMark|null>(null);
   const [generation,setGeneration]=useState(0);
+  const [enabled,setEnabled]=useState(false);
+  const supported = !!props.client.identity?.features?.includes("service.preview.v1");
   useEffect(() => props.client.onStateChange(state => {
     setEnabled(false);
     if (state === "ready") setGeneration(n => n + 1);
-    else { setCandidate(null); setProblem("源电脑连接已断开，请重连后重新检查服务。"); }
-  }), [props.client]);
-  const [enabled,setEnabled]=useState(false);
-  const [problem,setProblem]=useState("");
-  useEffect(()=>{let cancelled=false;let loaded:ServicePreviewClient|null=null;setCandidate(null);setEnabled(false);setProblem("");
-    if(!props.client.identity?.features?.includes("service.preview.v1"))return;
-    void ServicePreviewClient.discover(props.client,props.workspaceHandle,props.entryPath).then(value=>{loaded=value;if(cancelled || props.client.connectionState!=="ready")value?.close();else setCandidate(value);}).catch(()=>{if(!cancelled)setProblem("服务登记不可用，请检查运行状态与 services 授权。");});
+    else if (supported) {
+      setCandidate(null);
+      setMark({ state: "unreachable", detail: "源电脑连接已断开，请重连后重新检查服务。" });
+    }
+  }), [props.client, supported]);
+  useEffect(()=>{let cancelled=false;let loaded:ServicePreviewClient|null=null;setCandidate(null);setEnabled(false);setMark(null);
+    if(!supported)return;
+    void ServicePreviewClient.discover(props.client,props.workspaceHandle,props.entryPath).then(value=>{loaded=value;if(cancelled || props.client.connectionState!=="ready")value?.close();else { setCandidate(value); setMark(value ? serviceMark(value) : { state: "absent" }); }}).catch(error=>{if(!cancelled)setMark(classifyServiceFailure(error));});
     return()=>{cancelled=true;loaded?.close();};
-  },[props.client,props.workspaceHandle,props.entryPath,generation]);
-  return <>{candidate?<section className="shrink-0 border-b border-line p-2 text-xs" aria-label="本地服务访问">
-    <span>{candidate.descriptor.name} · {candidate.descriptor.dataPolicy==='direct-only'?'业务仅直连':'允许 GeneHub 数据中继'}</span>
-    <button className="ml-3 rounded border border-line px-2 py-1" onClick={()=>{setEnabled(!enabled);}}>{enabled?'暂停服务访问':'允许本次预览访问登记服务'}</button>
-  </section>:null}
-  {problem?<p role="alert" className="p-2 text-xs">{problem}</p>:null}
+  },[props.client,props.workspaceHandle,props.entryPath,generation,supported]);
+  return <>{mark?<ServiceStatusMenu mark={mark} enabled={enabled} onToggle={()=>setEnabled(value=>!value)} onRecheck={()=>setGeneration(n=>n+1)}/>:null}
   {enabled&&candidate?<ServiceMediaPanel service={candidate}/>:null}
-  <HtmlDocument {...props} service={enabled?candidate:null} onRecheckService={props.client.identity?.features?.includes("service.preview.v1") ? () => setGeneration(n => n + 1) : undefined}/></>;
+  <HtmlDocument {...props} service={enabled?candidate:null}/></>;
 }
 
 /** Exported for tests. */
@@ -626,10 +635,8 @@ export function HtmlDocument({
   onRuntimeReady,
   onOpenHtml,
   service = null,
-  onRecheckService,
 }: {
   service?: ServicePreviewClient | null;
-  onRecheckService?: () => void;
   bytes: Uint8Array;
   metadata: AssetPreviewMetadata;
   transfer?: AssetPreviewTransferStats;
@@ -998,7 +1005,6 @@ export function HtmlDocument({
             requestDomSnapshot={requestDomSnapshot}
             requestRenderedSnapshot={requestRenderedSnapshot}
             onSubmit={onRuntimeArtifact}
-            onRecheckService={onRecheckService}
           />
           {/* iOS WebKit stretches a srcDoc iframe to its content height,
               ignoring flex sizing. Pin it to an absolutely-sized box. */}
