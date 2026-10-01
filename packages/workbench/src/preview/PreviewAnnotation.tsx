@@ -309,7 +309,7 @@ export function PreviewReviewChrome({
               {problem ? <p role="alert" className="mt-1 text-xs text-danger">{problem}</p> : null}
               <div className="mt-2 flex gap-2">
                 <button type="submit" disabled={saving} className="rounded bg-accent px-3 py-1 text-xs text-white disabled:opacity-40">
-                  {pending.mode === "edit" ? "保存" : "加入草稿"}
+                  {pending.mode === "edit" ? "保存" : "添加批注"}
                 </button>
                 {pending.mode === "edit" ? (
                   <button type="button" disabled={saving} className="rounded border border-line px-3 py-1 text-xs" onClick={() => void remove(pending.id)}>删除</button>
@@ -424,8 +424,9 @@ export function PreviewAnnotationBar() {
   const closeMenu = () => {
     if (menuRef.current) menuRef.current.open = false;
   };
+  // One stable host so swapping 批注 and 完成 does not reinsert the portal node.
   return (
-    <>
+    <div className="flex shrink-0 items-center">
       {review.active ? (
         <button
           type="button"
@@ -476,6 +477,18 @@ export function PreviewAnnotationBar() {
             >
               开始批注
             </button>
+            {review.bar.count > 0 ? (
+              <button
+                type="button"
+                className="rounded px-2 py-1 text-left hover:bg-raised"
+                onClick={() => {
+                  closeMenu();
+                  review.bar?.openDraft();
+                }}
+              >
+                查看批注
+              </button>
+            ) : null}
             {openFileFeedback ? (
               <button
                 type="button"
@@ -491,17 +504,7 @@ export function PreviewAnnotationBar() {
           </div>
         </details>
       )}
-      {review.bar.count > 0 ? (
-        <button
-          type="button"
-          className="shrink-0 rounded border border-line bg-surface px-2 py-1 text-muted hover:bg-raised"
-          aria-label={`查看批注草稿 ${review.bar.count}`}
-          onClick={review.bar.openDraft}
-        >
-          {review.bar.count}
-        </button>
-      ) : null}
-    </>
+    </div>
   );
 }
 

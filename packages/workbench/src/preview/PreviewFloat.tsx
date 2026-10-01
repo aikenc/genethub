@@ -17,6 +17,7 @@ import {
   PreviewTransferSummary,
   type PreviewMeta,
 } from "./AssetPreviewPage";
+import { PreviewServiceSection } from "./ServiceStatusMenu";
 import {
   createPortablePreviewUrl,
   createPreviewPopoutChannel,
@@ -400,8 +401,8 @@ export function PreviewFloat({
           >
             <button
               type="button"
-              aria-label="查看预览信息"
-              title="查看文件与传输信息"
+              aria-label="预览信息"
+              title="预览信息"
               className={expandedIconBtn}
               onClick={() => setInfoOpen(true)}
             >
@@ -416,7 +417,6 @@ export function PreviewFloat({
                     ? "正在生成预览链接…"
                     : title}
             </span>
-            {client?.identity?.features?.includes("preview.feedback.v1") ? <PreviewShareButton client={client} source={source} resources={meta?.resourcePaths} /> : null}
             <div ref={setToolbarTarget} className="gh-preview-toolbar-slot flex shrink-0 items-center gap-1 text-xs" />
             <button
               type="button"
@@ -657,6 +657,7 @@ function PreviewInfoDialog({
             </div>
             {meta?.sourceInfo ? <div><dt className="text-faint">绝对路径</dt><dd className="break-all font-mono text-fg">{meta.sourceInfo.machineName}：{meta.sourceInfo.absolutePath}</dd></div> : null}
           </dl>
+          {meta?.service ? <PreviewServiceSection service={meta.service} /> : null}
           {meta?.transfer ? <PreviewTransferSummary stats={meta.transfer} /> : null}
           <ul className="mt-4 list-disc space-y-2 pl-5 text-xs leading-relaxed text-muted">
             {lines.map((line) => (

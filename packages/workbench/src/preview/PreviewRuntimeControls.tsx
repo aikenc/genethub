@@ -1,6 +1,6 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 
-import { PreviewProductFeedbackContext, PreviewToolbarPortal } from "./PreviewToolbar";
+import { PreviewProductFeedbackContext, PreviewShareOpenContext, PreviewToolbarPortal } from "./PreviewToolbar";
 import {
   PreviewPixelCapture,
   supportsDisplayCapture,
@@ -104,6 +104,7 @@ export function PreviewRuntimeControls({
   onSubmit?: RuntimeArtifactSubmit;
 }) {
   const reportProduct = useContext(PreviewProductFeedbackContext);
+  const openShare = useContext(PreviewShareOpenContext);
   const captureHandle = useMemo(
     () => runtimeId("capture"),
     [entryPath, sourceVersion],
@@ -514,6 +515,18 @@ export function PreviewRuntimeControls({
       >
         保存运行产物
       </button>
+      {openShare ? (
+        <button
+          type="button"
+          className="shrink-0 rounded border border-line px-2 py-1 text-left hover:bg-raised"
+          onClick={() => {
+            if (menuRef.current) menuRef.current.open = false;
+            openShare();
+          }}
+        >
+          分享预览
+        </button>
+      ) : null}
       {reportProduct ? (
         <button
           type="button"
@@ -535,6 +548,7 @@ export function PreviewRuntimeControls({
 /** Overflow for previews that have no runtime menu, so product feedback stays reachable. */
 export function ProductFeedbackOverflow() {
   const reportProduct = useContext(PreviewProductFeedbackContext);
+  const openShare = useContext(PreviewShareOpenContext);
   const menuRef = useRef<HTMLDetailsElement>(null);
   useEffect(() => {
     const close = (event: PointerEvent) => {
@@ -543,7 +557,10 @@ export function ProductFeedbackOverflow() {
     document.addEventListener("pointerdown", close);
     return () => document.removeEventListener("pointerdown", close);
   }, []);
-  if (!reportProduct) return null;
+  if (!reportProduct && !openShare) return null;
+  const closeMenu = () => {
+    if (menuRef.current) menuRef.current.open = false;
+  };
   return (
     <PreviewToolbarPortal>
       <details
@@ -559,16 +576,30 @@ export function ProductFeedbackOverflow() {
       >
         <summary aria-label="更多预览操作" title="更多预览操作" className="flex h-7 w-7 cursor-pointer list-none items-center justify-center rounded-md border border-line bg-surface text-fg hover:bg-raised [&::-webkit-details-marker]:hidden">···</summary>
         <div className="absolute right-0 top-full z-50 mt-1 flex w-40 flex-col rounded-lg border border-line bg-surface p-2 shadow-lg">
-          <button
-            type="button"
-            className="rounded px-2 py-1 text-left text-fg hover:bg-raised"
-            onClick={() => {
-              if (menuRef.current) menuRef.current.open = false;
-              reportProduct();
-            }}
-          >
-            反馈问题
-          </button>
+          {openShare ? (
+            <button
+              type="button"
+              className="rounded px-2 py-1 text-left text-fg hover:bg-raised"
+              onClick={() => {
+                closeMenu();
+                openShare();
+              }}
+            >
+              分享预览
+            </button>
+          ) : null}
+          {reportProduct ? (
+            <button
+              type="button"
+              className="rounded px-2 py-1 text-left text-fg hover:bg-raised"
+              onClick={() => {
+                closeMenu();
+                reportProduct();
+              }}
+            >
+              反馈问题
+            </button>
+          ) : null}
         </div>
       </details>
     </PreviewToolbarPortal>

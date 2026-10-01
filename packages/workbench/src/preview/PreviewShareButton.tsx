@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Share2, ExternalLink } from "lucide-react";
 import type { Client, ProtocolDial } from "../protocol/client";
 import type { PreviewShareLink } from "@genehub/proto";
@@ -49,15 +49,25 @@ export async function mintPreviewShare(client: Client, source: AssetPreviewLocat
         throw new Error("设备未确认分享授权");
     return { url: previewShareUrl(source, result.data), link: result.data };
 }
-export function PreviewShareButton({ client, source, defaultTtl = 3600, label = "分享预览", quick = false, resources }: {
+export function PreviewShareButton({ client, source, defaultTtl = 3600, label = "分享预览", quick = false, resources, trigger = true, bindOpen }: {
     client: Client;
     source: AssetPreviewLocation;
     defaultTtl?: number;
     label?: string;
     quick?: boolean;
     resources?: Iterable<string>;
+    /** Icon button. Menus use bindOpen and leave the dialog mounted outside the menu. */
+    trigger?: boolean;
+    bindOpen?: (open: (() => void) | null) => void;
 }) {
     const [open, setOpen] = useState(false);
+    const bindRef = useRef(bindOpen);
+    bindRef.current = bindOpen;
+    useEffect(() => {
+        if (!bindRef.current) return;
+        bindRef.current(() => setOpen(true));
+        return () => bindRef.current?.(null);
+    }, []);
     const [ttl, setTtl] = useState(defaultTtl);
     const [busy, setBusy] = useState(false);
     const [value, setValue] = useState<{
@@ -75,8 +85,8 @@ export function PreviewShareButton({ client, source, defaultTtl = 3600, label = 
     finally {
         setBusy(false);
     } };
-    return <><button type="button" aria-label={label} title={label} className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted hover:bg-raised hover:text-fg" onClick={() => { setOpen(true); if (quick)
-        void generate(3600); }}>{quick ? <ExternalLink size={14} /> : <Share2 size={14} />}</button>
+    return <>{trigger ? <button type="button" aria-label={label} title={label} className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted hover:bg-raised hover:text-fg" onClick={() => { setOpen(true); if (quick)
+        void generate(3600); }}>{quick ? <ExternalLink size={14} /> : <Share2 size={14} />}</button> : null}
     {open ? <div role="dialog" aria-modal="true" aria-label="分享预览链接" onKeyDown={event => { if (event.key === "Escape") { event.stopPropagation(); setOpen(false); } }} className="fixed inset-0 z-[95] flex items-center justify-center bg-black/60 p-3"><section className="w-full max-w-lg rounded-xl border border-line bg-surface p-4 text-sm text-fg">
       <header className="mb-3 flex items-center justify-between"><h2>{quick ? "在浏览器打开预览" : "分享预览"}</h2><button aria-label="关闭分享" onClick={() => setOpen(false)}>关闭</button></header>
       {!quick ? <label>授权时间 <select aria-label="分享授权时间" value={ttl} onChange={e => { setTtl(Number(e.target.value)); setValue(null); setCopied(false); }} className="rounded border border-line bg-bg p-1"><option value={3600}>1h</option><option value={86400}>1d</option><option value={604800}>7d</option></select></label> : <p>链接授权时间：1h</p>}
@@ -89,10 +99,17 @@ export function PreviewShareButton({ client, source, defaultTtl = 3600, label = 
     </section></div> : null}
   </>;
 }
-export function PreviewShareCopyButton() {
+export function PreviewShareCopyButton({ trigger = true, bindOpen }: { trigger?: boolean; bindOpen?: (open: (() => void) | null) => void } = {}) {
     const [open, setOpen] = useState(false);
     const [copied, setCopied] = useState(false);
-    return <><button aria-label="分享预览" className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted hover:bg-raised hover:text-fg" onClick={() => setOpen(true)} title="分享预览"><Share2 size={14} /></button>
+    const bindRef = useRef(bindOpen);
+    bindRef.current = bindOpen;
+    useEffect(() => {
+        if (!bindRef.current) return;
+        bindRef.current(() => setOpen(true));
+        return () => bindRef.current?.(null);
+    }, []);
+    return <>{trigger ? <button aria-label="分享预览" className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted hover:bg-raised hover:text-fg" onClick={() => setOpen(true)} title="分享预览"><Share2 size={14} /></button> : null}
     {open ? <div role="dialog" aria-modal="true" aria-label="分享预览" onKeyDown={event => { if (event.key === "Escape") { event.stopPropagation(); setOpen(false); } }} className="fixed inset-0 z-[95] flex items-center justify-center bg-black/60 p-3"><section className="w-full max-w-lg rounded-xl border border-line bg-surface p-4 text-sm text-fg">
       <p>转发当前分享链接，沿用原授权期限。</p><textarea aria-label="预览分享链接" readOnly value={window.location.href} className="my-3 h-24 w-full border border-line bg-bg p-2"/>
       <button onClick={() => { void navigator.clipboard?.writeText(window.location.href).then(() => setCopied(true)).catch(() => { }); }}>{copied ? "已复制" : "复制链接"}</button><button className="ml-4" onClick={() => setOpen(false)}>关闭</button>
