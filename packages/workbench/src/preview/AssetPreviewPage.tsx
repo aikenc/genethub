@@ -1,7 +1,7 @@
 import { previewFeedback, useFileFeedback, type FileFeedbackReview } from "./fileFeedback";
 import { PreviewFeedbackPanel } from "./PreviewFeedbackPanel";
 import { PreviewShareButton, PreviewShareCopyButton } from "./PreviewShareButton";
-import { PreviewToolbarPortal } from "./PreviewToolbar";
+import { PreviewFileFeedbackOpenContext, PreviewToolbarPortal } from "./PreviewToolbar";
 import type { PreviewSourceInfo } from "@genehub/proto";
 import { ServicePreviewClient, classifyServiceFailure } from "./serviceClient";
 import { ServiceStatusMenu, type ServiceMark } from "./ServiceStatusMenu";
@@ -37,6 +37,7 @@ import {
 } from "./storage";
 import {
   PreviewRuntimeControls,
+  ProductFeedbackOverflow,
   type PreviewDomSnapshot,
   type PreviewRuntimeEvent,
   type RuntimeArtifactSubmit,
@@ -260,6 +261,11 @@ export function AssetPreviewPage({
 
   const feedbackClient = state.kind === "ready" ? state.client : null;
   const fileFeedbackEnabled = !!feedbackClient?.identity?.features?.includes("preview.feedback.v1");
+  const [openFileFeedback, setOpenFileFeedback] = useState<(() => void) | null>(null);
+  const bindFileFeedback = useCallback((open: (() => void) | null) => {
+    setOpenFileFeedback(() => open);
+  }, []);
+  const annotatable = state.kind === "ready" && (state.result.metadata.kind === "markdown" || state.result.metadata.kind === "html" || state.result.metadata.kind === "image");
   const feedback = useFileFeedback(feedbackClient, source.workspaceHandle, feedbackSource?.path ?? source.path, feedbackSource?.version ?? (state.kind === "ready" ? state.result.metadata.version : ""), feedbackAccessScope);
   useEffect(() => {
     if (!feedbackClient || !fileFeedbackEnabled || !feedbackSource || feedbackSource.path === source.path) return;
@@ -277,6 +283,7 @@ export function AssetPreviewPage({
     onRuntimeArtifact ?? (runtimeSessionId ? submitStandaloneArtifact : undefined);
 
   return (
+    <PreviewFileFeedbackOpenContext.Provider value={fileFeedbackEnabled ? openFileFeedback : null}>
     <PreviewToolbarContext.Provider value={toolbarTarget ?? pageToolbarTarget}>
     <main className={`${chrome === "page" ? "safe-area-page" : ""} flex h-full min-h-0 flex-col overflow-hidden bg-bg text-fg`}>
       {chrome === "page" ? (
@@ -335,7 +342,7 @@ export function AssetPreviewPage({
           resourcePaths={resources.current}
         />
       )}
-      {fileFeedbackEnabled ? <PreviewFeedbackPanel feedback={feedback} /> : null}
+      {fileFeedbackEnabled ? <PreviewFeedbackPanel feedback={feedback} bindOpen={annotatable ? bindFileFeedback : undefined} showToolbarButton={!annotatable} /> : null}
       {fileFeedbackEnabled && !shareAccess && feedbackClient && chrome === "page" ? <PreviewToolbarPortal><PreviewShareButton client={feedbackClient} source={source} resources={resources.current} /></PreviewToolbarPortal> : null}
       {fileFeedbackEnabled && shareAccess && chrome === "page" ? <PreviewToolbarPortal><PreviewShareCopyButton /></PreviewToolbarPortal> : null}
       {chrome === "page" && pageInfoOpen ? (
@@ -351,6 +358,7 @@ export function AssetPreviewPage({
       ) : null}
     </main>
     </PreviewToolbarContext.Provider>
+    </PreviewFileFeedbackOpenContext.Provider>
   );
 }
 
@@ -504,6 +512,7 @@ function PreviewDocument({
       sourceText={text}
     >
       {body}
+      {shown.result.metadata.kind === "html" ? null : <ProductFeedbackOverflow />}
     </PreviewReviewChrome>
   );
 }

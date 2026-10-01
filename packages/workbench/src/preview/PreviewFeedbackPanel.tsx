@@ -1,10 +1,13 @@
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { MessageSquareText } from "lucide-react";
 import type { PreviewFeedbackRecord } from "@genehub/proto";
 import { feedbackReceiptText, type useFileFeedback } from "./fileFeedback";
 import { PreviewToolbarPortal } from "./PreviewToolbar";
-export function PreviewFeedbackPanel({ feedback }: {
+export function PreviewFeedbackPanel({ feedback, bindOpen, showToolbarButton = false }: {
     feedback: ReturnType<typeof useFileFeedback>;
+    bindOpen?: (open: (() => void) | null) => void;
+    /** Files that cannot be annotated keep a toolbar button. Annotatable files open this from the 批注 menu. */
+    showToolbarButton?: boolean;
 }) {
     const [open, setOpen] = useState(false);
     const [busy, setBusy] = useState(false);
@@ -14,7 +17,7 @@ export function PreviewFeedbackPanel({ feedback }: {
     const [bundles, setBundles] = useState<string[]>([]);
     const [receipt, setReceipt] = useState<PreviewFeedbackRecord | null>(null);
     const [copied, setCopied] = useState(false);
-    const show = async () => { setOpen(true); setCopied(false); setBusy(true); setProblem(""); try {
+    const show = useCallback(async () => { setOpen(true); setCopied(false); setBusy(true); setProblem(""); try {
         const draft = await feedback.ensure();
         setReceipt(draft.receipt);
         setNotes(draft.review.annotations.map(n => n.id));
@@ -25,7 +28,14 @@ export function PreviewFeedbackPanel({ feedback }: {
     }
     finally {
         setBusy(false);
-    } };
+    } }, [feedback]);
+    const showRef = useRef(show);
+    showRef.current = show;
+    useEffect(() => {
+        if (!bindOpen) return;
+        bindOpen(() => { void showRef.current(); });
+        return () => bindOpen(null);
+    }, [bindOpen]);
     const submit = async () => { setBusy(true); setProblem(""); try {
         const d = await feedback.ensure();
         const result = await feedback.operation({ kind: "submit", id: d.id, description, annotationIds: notes, bundlePaths: bundles });
@@ -40,10 +50,10 @@ export function PreviewFeedbackPanel({ feedback }: {
         setBusy(false);
     } };
     const toggle = (values: string[], id: string) => values.includes(id) ? values.filter(v => v !== id) : [...values, id];
-    return <><PreviewToolbarPortal><button type="button" aria-label="提交预览反馈" title="提交预览反馈" className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted hover:bg-raised hover:text-fg" onClick={() => void show()}><MessageSquareText size={14} /></button></PreviewToolbarPortal>
-    {open ? <div role="dialog" aria-modal="true" aria-label="预览文件反馈" onKeyDown={event => { if (event.key === "Escape") { event.stopPropagation(); setOpen(false); } }} className="fixed inset-0 z-[90] flex items-center justify-center bg-black/60 p-3">
+    return <>{showToolbarButton ? <PreviewToolbarPortal><button type="button" aria-label="预览反馈" title="预览反馈" className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted hover:bg-raised hover:text-fg" onClick={() => void show()}><MessageSquareText size={14} /></button></PreviewToolbarPortal> : null}
+    {open ? <div role="dialog" aria-modal="true" aria-label="预览反馈" onKeyDown={event => { if (event.key === "Escape") { event.stopPropagation(); setOpen(false); } }} className="fixed inset-0 z-[90] flex items-center justify-center bg-black/60 p-3">
       <section className="flex max-h-[85dvh] w-full max-w-xl flex-col rounded-xl border border-line bg-surface p-4 text-sm text-fg">
-        <header className="mb-3 flex items-center justify-between"><h2>预览文件反馈</h2><button aria-label="关闭反馈" onClick={() => setOpen(false)}>关闭</button></header>
+        <header className="mb-3 flex items-center justify-between"><h2>预览反馈</h2><button aria-label="关闭反馈" onClick={() => setOpen(false)}>关闭</button></header>
         <div className="min-h-0 overflow-y-auto">
           {receipt ? <><p role="status">反馈已提交：{receipt.id}</p><textarea aria-label="可复制的预览反馈" readOnly value={feedbackReceiptText(receipt)} className="mt-3 h-56 w-full rounded border border-line bg-bg p-2 text-xs"/></> : <>
             <p className="mb-2 text-xs text-muted">{feedback.draft?.source.displayPath}</p>

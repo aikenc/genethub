@@ -13,7 +13,7 @@ import type { PreviewAnnotation, PreviewAnnotationTarget, PreviewReviewDraft } f
 
 import type { FileFeedbackReview } from "./fileFeedback";
 import type { Client } from "../protocol/client";
-import { PreviewToolbarPortal } from "./PreviewToolbar";
+import { PreviewFileFeedbackOpenContext, PreviewToolbarPortal } from "./PreviewToolbar";
 import {
   MarkdownAnnotationContext,
   MarkdownAnnotationMarksContext,
@@ -411,20 +411,86 @@ export function ImageAnnotationLayer({ image }: { image: HTMLImageElement | null
 
 export function PreviewAnnotationBar() {
   const review = useContext(PreviewReviewContext);
+  const openFileFeedback = useContext(PreviewFileFeedbackOpenContext);
+  const menuRef = useRef<HTMLDetailsElement>(null);
+  useEffect(() => {
+    const close = (event: PointerEvent) => {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) menuRef.current.open = false;
+    };
+    document.addEventListener("pointerdown", close);
+    return () => document.removeEventListener("pointerdown", close);
+  }, []);
   if (!review?.bar) return null;
+  const closeMenu = () => {
+    if (menuRef.current) menuRef.current.open = false;
+  };
   return (
     <>
-      <button
-        type="button"
-        aria-pressed={review.active}
-        aria-label={review.active ? "完成批注" : "进入批注"}
-        disabled={review.bar.disabled}
-        title={review.bar.disabled ? "先从会话打开这个文件" : undefined}
-        className="h-7 shrink-0 rounded border border-line bg-surface px-2 text-xs text-fg hover:bg-raised disabled:opacity-40"
-        onClick={review.bar.toggle}
-      >
-        {review.active ? "完成" : "批注"}
-      </button>
+      {review.active ? (
+        <button
+          type="button"
+          aria-pressed
+          aria-label="完成批注"
+          className="h-7 shrink-0 rounded border border-line bg-surface px-2 text-xs text-fg hover:bg-raised"
+          onClick={review.bar.toggle}
+        >
+          完成
+        </button>
+      ) : review.bar.disabled ? (
+        <button
+          type="button"
+          aria-label="批注"
+          disabled
+          title="先从会话打开这个文件"
+          className="h-7 shrink-0 rounded border border-line bg-surface px-2 text-xs text-fg disabled:opacity-40"
+        >
+          批注
+        </button>
+      ) : (
+        <details
+          ref={menuRef}
+          className="relative text-xs"
+          onKeyDown={(event) => {
+            if (event.key === "Escape" && event.currentTarget.open) {
+              event.stopPropagation();
+              event.currentTarget.open = false;
+              event.currentTarget.querySelector("summary")?.focus();
+            }
+          }}
+        >
+          <summary
+            aria-label="批注"
+            title="批注"
+            className="flex h-7 cursor-pointer list-none items-center rounded border border-line bg-surface px-2 text-xs text-fg hover:bg-raised [&::-webkit-details-marker]:hidden"
+          >
+            批注
+          </summary>
+          <div className="absolute right-0 top-full z-50 mt-1 flex w-40 flex-col gap-1 rounded-lg border border-line bg-surface p-2 text-fg shadow-lg">
+            <button
+              type="button"
+              className="rounded px-2 py-1 text-left hover:bg-raised"
+              onClick={() => {
+                closeMenu();
+                review.bar?.toggle();
+              }}
+            >
+              开始批注
+            </button>
+            {openFileFeedback ? (
+              <button
+                type="button"
+                className="rounded px-2 py-1 text-left hover:bg-raised"
+                onClick={() => {
+                  closeMenu();
+                  openFileFeedback();
+                }}
+              >
+                提交批注反馈
+              </button>
+            ) : null}
+          </div>
+        </details>
+      )}
       {review.bar.count > 0 ? (
         <button
           type="button"
