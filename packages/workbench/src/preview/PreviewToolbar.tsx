@@ -10,6 +10,9 @@ export const PreviewFileFeedbackOpenContext = createContext<(() => void) | null>
 /** Opens GeneHub product feedback from the preview overflow menu. */
 export const PreviewProductFeedbackContext = createContext<(() => void) | null>(null);
 
+/** Opens the preview share dialog from the overflow menu. */
+export const PreviewShareOpenContext = createContext<(() => void) | null>(null);
+
 export function PreviewToolbarPortal({ children }: { children: ReactNode }) {
   const target = useContext(PreviewToolbarContext);
   return target ? createPortal(children, target) : (

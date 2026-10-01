@@ -1,10 +1,10 @@
 import { previewFeedback, useFileFeedback, type FileFeedbackReview } from "./fileFeedback";
 import { PreviewFeedbackPanel } from "./PreviewFeedbackPanel";
 import { PreviewShareButton, PreviewShareCopyButton } from "./PreviewShareButton";
-import { PreviewFileFeedbackOpenContext, PreviewToolbarPortal } from "./PreviewToolbar";
+import { PreviewFileFeedbackOpenContext, PreviewShareOpenContext } from "./PreviewToolbar";
 import type { PreviewSourceInfo } from "@genehub/proto";
 import { ServicePreviewClient, classifyServiceFailure } from "./serviceClient";
-import { ServiceStatusMenu, type ServiceMark } from "./ServiceStatusMenu";
+import { previewServiceInfo, PreviewServiceSection, type PreviewServiceInfo, type ServiceMark } from "./ServiceStatusMenu";
 import { ServiceMediaPanel } from "./ServiceMediaPanel";
 import { serviceBridgeScript, useServiceBridge } from "./serviceBridge";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -65,6 +65,8 @@ export type PreviewMeta = {
    * the parent. `onClear` wipes both the parent-side store and the live frame.
    */
   storage?: { count: number; onClear: () => void };
+  /** Local service registration for this HTML file, shown in 预览信息. */
+  service?: PreviewServiceInfo | null;
 };
 
 export function AssetPreviewPage({
@@ -115,19 +117,41 @@ export function AssetPreviewPage({
   const [meta, setMeta] = useState<PreviewMeta | null>(null);
   const legacyAbort = useRef<AbortController | null>(null);
   const [pageToolbarTarget, setPageToolbarTarget] = useState<HTMLDivElement | null>(null);
+  const serviceRef = useRef<PreviewServiceInfo | null>(null);
+  const metaRef = useRef<PreviewMeta | null>(null);
+
+  const publishMeta = useCallback(
+    (next: PreviewMeta | null) => {
+      metaRef.current = next;
+      setMeta(next);
+      onMetaChange?.(next);
+    },
+    [onMetaChange],
+  );
 
   const reportMeta = useCallback(
     (next: PreviewMeta | null) => {
-      const merged = next ? { ...next, resourcePaths: resources.current, ...(sourceInfo ? { sourceInfo } : {}) } : null;
-      setMeta(merged);
-      onMetaChange?.(merged);
+      const merged = next
+        ? { ...next, resourcePaths: resources.current, ...(sourceInfo ? { sourceInfo } : {}), service: serviceRef.current }
+        : null;
+      publishMeta(merged);
     },
-    [onMetaChange, sourceInfo],
+    [publishMeta, sourceInfo],
+  );
+
+  const reportService = useCallback(
+    (service: PreviewServiceInfo | null) => {
+      serviceRef.current = service;
+      if (!metaRef.current) return;
+      publishMeta({ ...metaRef.current, service });
+    },
+    [publishMeta],
   );
 
   useEffect(() => {
     legacyAbort.current?.abort();
     legacyAbort.current = null;
+    serviceRef.current = null;
     reportMeta(null);
     setPageInfoOpen(false);
   }, [source.path, source.workspaceHandle, source.deviceHandle, reportMeta]);
@@ -265,6 +289,10 @@ export function AssetPreviewPage({
   const bindFileFeedback = useCallback((open: (() => void) | null) => {
     setOpenFileFeedback(() => open);
   }, []);
+  const [openShare, setOpenShare] = useState<(() => void) | null>(null);
+  const bindShare = useCallback((open: (() => void) | null) => {
+    setOpenShare(() => open);
+  }, []);
   const annotatable = state.kind === "ready" && (state.result.metadata.kind === "markdown" || state.result.metadata.kind === "html" || state.result.metadata.kind === "image");
   const feedback = useFileFeedback(feedbackClient, source.workspaceHandle, feedbackSource?.path ?? source.path, feedbackSource?.version ?? (state.kind === "ready" ? state.result.metadata.version : ""), feedbackAccessScope);
   useEffect(() => {
@@ -284,14 +312,15 @@ export function AssetPreviewPage({
 
   return (
     <PreviewFileFeedbackOpenContext.Provider value={fileFeedbackEnabled ? openFileFeedback : null}>
+    <PreviewShareOpenContext.Provider value={fileFeedbackEnabled ? openShare : null}>
     <PreviewToolbarContext.Provider value={toolbarTarget ?? pageToolbarTarget}>
     <main className={`${chrome === "page" ? "safe-area-page" : ""} flex h-full min-h-0 flex-col overflow-hidden bg-bg text-fg`}>
       {chrome === "page" ? (
         <header aria-label="预览工具栏" className="gh-preview-toolbar relative z-30 flex min-h-9 shrink-0 items-center gap-1 border-b border-line px-2 py-1">
           <button
             type="button"
-            aria-label="查看预览信息"
-            title="查看文件与传输信息"
+            aria-label="预览信息"
+            title="预览信息"
             className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted hover:bg-raised hover:text-fg"
             onClick={() => setPageInfoOpen(true)}
           >
@@ -339,12 +368,13 @@ export function AssetPreviewPage({
           annotationWrite={fileFeedbackEnabled || annotationWrite}
           fileFeedback={fileFeedbackEnabled ? feedback.review : undefined}
           onSourceChange={setFeedbackSource}
+          onServiceChange={reportService}
           resourcePaths={resources.current}
         />
       )}
       {fileFeedbackEnabled ? <PreviewFeedbackPanel feedback={feedback} bindOpen={annotatable ? bindFileFeedback : undefined} showToolbarButton={!annotatable} /> : null}
-      {fileFeedbackEnabled && !shareAccess && feedbackClient && chrome === "page" ? <PreviewToolbarPortal><PreviewShareButton client={feedbackClient} source={source} resources={resources.current} /></PreviewToolbarPortal> : null}
-      {fileFeedbackEnabled && shareAccess && chrome === "page" ? <PreviewToolbarPortal><PreviewShareCopyButton /></PreviewToolbarPortal> : null}
+      {fileFeedbackEnabled && !shareAccess && feedbackClient ? <PreviewShareButton client={feedbackClient} source={source} resources={resources.current} trigger={false} bindOpen={bindShare} /> : null}
+      {fileFeedbackEnabled && shareAccess ? <PreviewShareCopyButton trigger={false} bindOpen={bindShare} /> : null}
       {chrome === "page" && pageInfoOpen ? (
         <EmbeddedInfoDialog
           path={sourceInfo?.displayPath ?? basenamePath(source.path)}
@@ -353,11 +383,13 @@ export function AssetPreviewPage({
           lines={meta?.infoLines ?? ["预览信息尚未就绪，请稍候再打开。"]}
           transfer={meta?.transfer}
           storage={meta?.storage}
+          service={meta?.service}
           onClose={() => setPageInfoOpen(false)}
         />
       ) : null}
     </main>
     </PreviewToolbarContext.Provider>
+    </PreviewShareOpenContext.Provider>
     </PreviewFileFeedbackOpenContext.Provider>
   );
 }
@@ -375,6 +407,7 @@ function PreviewDocument({
   annotationWrite = false,
   fileFeedback,
   onSourceChange,
+  onServiceChange,
   resourcePaths,
 }: {
   result: AssetPreviewResult;
@@ -389,6 +422,7 @@ function PreviewDocument({
   annotationWrite?: boolean;
   fileFeedback?: FileFeedbackReview;
   onSourceChange?: (source: {path: string; version: string}) => void;
+  onServiceChange?: (service: PreviewServiceInfo | null) => void;
   resourcePaths?: Set<string>;
 }) {
   const { metadata, bytes, transfer } = result;
@@ -491,6 +525,7 @@ function PreviewDocument({
         onRuntimeArtifact={onRuntimeArtifact}
         onRuntimeReady={onRuntimeReady}
         onOpenHtml={(next) => void openHtml(next)}
+        onServiceChange={onServiceChange}
       />
     </>
   ) : metadata.kind === "wasm" || metadata.kind === "binary" ? (
@@ -607,12 +642,19 @@ function serviceMark(client: ServicePreviewClient): ServiceMark {
   };
 }
 
-function ServiceHtmlDocument(props: React.ComponentProps<typeof HtmlDocument> & {client:Client;workspaceHandle:string}) {
+function ServiceHtmlDocument(props: React.ComponentProps<typeof HtmlDocument> & {client:Client;workspaceHandle:string;onServiceChange?:(service:PreviewServiceInfo|null)=>void}) {
   const [candidate,setCandidate]=useState<ServicePreviewClient|null>(null);
   const [mark,setMark]=useState<ServiceMark|null>(null);
   const [generation,setGeneration]=useState(0);
   const [enabled,setEnabled]=useState(false);
   const supported = !!props.client.identity?.features?.includes("service.preview.v1");
+  const onToggle = useCallback(() => setEnabled(value => !value), []);
+  const onRecheck = useCallback(() => setGeneration(n => n + 1), []);
+  const { onServiceChange } = props;
+  useEffect(() => {
+    onServiceChange?.(mark ? previewServiceInfo(mark, enabled, onToggle, onRecheck) : null);
+  }, [enabled, mark, onRecheck, onServiceChange, onToggle]);
+  useEffect(() => () => onServiceChange?.(null), [onServiceChange]);
   useEffect(() => props.client.onStateChange(state => {
     setEnabled(false);
     if (state === "ready") setGeneration(n => n + 1);
@@ -626,8 +668,7 @@ function ServiceHtmlDocument(props: React.ComponentProps<typeof HtmlDocument> & 
     void ServicePreviewClient.discover(props.client,props.workspaceHandle,props.entryPath).then(value=>{loaded=value;if(cancelled || props.client.connectionState!=="ready")value?.close();else { setCandidate(value); setMark(value ? serviceMark(value) : { state: "absent" }); }}).catch(error=>{if(!cancelled)setMark(classifyServiceFailure(error));});
     return()=>{cancelled=true;loaded?.close();};
   },[props.client,props.workspaceHandle,props.entryPath,generation,supported]);
-  return <>{mark?<ServiceStatusMenu mark={mark} enabled={enabled} onToggle={()=>setEnabled(value=>!value)} onRecheck={()=>setGeneration(n=>n+1)}/>:null}
-  {enabled&&candidate?<ServiceMediaPanel service={candidate}/>:null}
+  return <>{enabled&&candidate?<ServiceMediaPanel service={candidate}/>:null}
   <HtmlDocument {...props} service={enabled?candidate:null}/></>;
 }
 
@@ -1062,6 +1103,7 @@ function EmbeddedInfoDialog({
   lines,
   transfer,
   storage,
+  service,
   onClose,
 }: {
   path: string;
@@ -1070,6 +1112,7 @@ function EmbeddedInfoDialog({
   lines: string[];
   transfer?: PreviewMeta["transfer"];
   storage?: PreviewMeta["storage"];
+  service?: PreviewServiceInfo | null;
   onClose(): void;
 }) {
   return (
@@ -1108,6 +1151,7 @@ function EmbeddedInfoDialog({
             </div>
             {absolutePath ? <div><dt className="text-faint">绝对路径</dt><dd className="break-all font-mono text-fg">{absolutePath}</dd></div> : null}
           </dl>
+          {service ? <PreviewServiceSection service={service} /> : null}
           {transfer ? <PreviewTransferSummary stats={transfer} /> : null}
           <ul className="mt-4 list-disc space-y-2 pl-5 text-xs leading-relaxed text-muted">
             {lines.map((line) => (
