@@ -172,6 +172,20 @@ mkdir -p "$tmp/unpacked" "$bin_dir"
 tar -xzf "$tmp/$asset" -C "$tmp/unpacked"
 if [ -z "$(find "$tmp/unpacked" -name "$component" -type f -print | head -n 1)" ]; then
   component="$shared_component"
+  # A release from before per-channel names looks for the shared name, which
+  # is also the one stable's component lives under. If another channel's CLI
+  # is already in this directory, writing it would swap the component that
+  # channel's running daemon reloads from — the failure per-channel names
+  # exist to prevent — so refuse before touching anything.
+  for other in genet genet-dev genet-beta genet-local; do
+    if [ "$other" != "$cli_binary" ] && [ -e "$bin_dir/$other" ]; then
+      case "$channel" in
+        dev) bin_var=GENEHUB_DEV_BIN_DIR ;;
+        *) bin_var=GENEHUB_BETA_BIN_DIR ;;
+      esac
+      die "$asset predates per-channel component names and would replace $bin_dir/$shared_component, which $other in the same directory may be running. Install it into its own directory instead: $bin_var=<directory> (or wait for a newer release)."
+    fi
+  done
 fi
 for binary in "$cli_binary" "$host_binary" "$component"; do
   found="$(find "$tmp/unpacked" -name "$binary" -type f -print | head -n 1)"
