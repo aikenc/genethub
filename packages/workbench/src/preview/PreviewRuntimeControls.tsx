@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 
-import { PreviewToolbarPortal } from "./PreviewToolbar";
+import { PreviewProductFeedbackContext, PreviewToolbarPortal } from "./PreviewToolbar";
 import {
   PreviewPixelCapture,
   supportsDisplayCapture,
@@ -103,6 +103,7 @@ export function PreviewRuntimeControls({
   requestRenderedSnapshot(): Promise<PixelSnapshot>;
   onSubmit?: RuntimeArtifactSubmit;
 }) {
+  const reportProduct = useContext(PreviewProductFeedbackContext);
   const captureHandle = useMemo(
     () => runtimeId("capture"),
     [entryPath, sourceVersion],
@@ -406,7 +407,7 @@ export function PreviewRuntimeControls({
       setCaptureActive(false);
       setNotice(
         saved.feedbackSaved
-          ? "已保存到文件反馈草稿，请点击反馈选择并提交"
+          ? "已保存到文件反馈草稿，请从批注菜单选择并提交"
           : saved.addedToDraft
           ? `已保存到 ${saved.relativePath}，已加入输入框`
           : `已保存到 ${saved.relativePath}；${saved.draftError ?? "未加入输入框"}`,
@@ -513,7 +514,62 @@ export function PreviewRuntimeControls({
       >
         保存运行产物
       </button>
+      {reportProduct ? (
+        <button
+          type="button"
+          className="shrink-0 rounded px-2 py-1 text-left hover:bg-raised"
+          onClick={() => {
+            if (menuRef.current) menuRef.current.open = false;
+            reportProduct();
+          }}
+        >
+          反馈问题
+        </button>
+      ) : null}
       </div>
+      </details>
+    </PreviewToolbarPortal>
+  );
+}
+
+/** Overflow for previews that have no runtime menu, so product feedback stays reachable. */
+export function ProductFeedbackOverflow() {
+  const reportProduct = useContext(PreviewProductFeedbackContext);
+  const menuRef = useRef<HTMLDetailsElement>(null);
+  useEffect(() => {
+    const close = (event: PointerEvent) => {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) menuRef.current.open = false;
+    };
+    document.addEventListener("pointerdown", close);
+    return () => document.removeEventListener("pointerdown", close);
+  }, []);
+  if (!reportProduct) return null;
+  return (
+    <PreviewToolbarPortal>
+      <details
+        ref={menuRef}
+        className="relative text-xs text-muted"
+        onKeyDown={(event) => {
+          if (event.key === "Escape" && event.currentTarget.open) {
+            event.stopPropagation();
+            event.currentTarget.open = false;
+            event.currentTarget.querySelector("summary")?.focus();
+          }
+        }}
+      >
+        <summary aria-label="更多预览操作" title="更多预览操作" className="flex h-7 w-7 cursor-pointer list-none items-center justify-center rounded-md border border-line bg-surface text-fg hover:bg-raised [&::-webkit-details-marker]:hidden">···</summary>
+        <div className="absolute right-0 top-full z-50 mt-1 flex w-40 flex-col rounded-lg border border-line bg-surface p-2 shadow-lg">
+          <button
+            type="button"
+            className="rounded px-2 py-1 text-left text-fg hover:bg-raised"
+            onClick={() => {
+              if (menuRef.current) menuRef.current.open = false;
+              reportProduct();
+            }}
+          >
+            反馈问题
+          </button>
+        </div>
       </details>
     </PreviewToolbarPortal>
   );

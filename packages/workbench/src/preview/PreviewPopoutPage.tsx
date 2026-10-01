@@ -8,6 +8,7 @@ import { Client } from "../protocol/client";
 import { readRtcEnabled } from "../settings/rtc";
 import { redeemPreviewShare, type PreviewShareCredential } from "./PreviewShareButton";
 import { AssetPreviewPage } from "./AssetPreviewPage";
+import { PreviewProductFeedbackContext } from "./PreviewToolbar";
 import {
   createPreviewPopoutChannel,
   previewPopoutArtifact,
@@ -25,12 +26,14 @@ export function PreviewPopoutPage({
   portableTicket = null,
   shareCredential = null,
   host,
+  onReportProduct = null,
 }: {
   source: AssetPreviewLocation;
   context: PreviewPopoutContext | null;
   portableTicket?: PortablePreviewTicket | null;
   shareCredential?: PreviewShareCredential | null;
   host?: Host;
+  onReportProduct?: (() => void) | null;
 }) {
   const channelRef = useRef<ReturnType<typeof createPreviewPopoutChannel> | null>(null);
   const [savedWorkspacePath, setSavedWorkspacePath] = useState<string | null>(null);
@@ -160,6 +163,7 @@ export function PreviewPopoutPage({
   }
 
   return (
+    <PreviewProductFeedbackContext.Provider value={onReportProduct}>
     <>
       <AssetPreviewPage
         source={source}
@@ -180,6 +184,7 @@ export function PreviewPopoutPage({
         />
       ) : null}
     </>
+    </PreviewProductFeedbackContext.Provider>
   );
 }
 
