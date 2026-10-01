@@ -33,7 +33,7 @@ impl Drop for JobPermit {
 
 fn reserve() -> Result<JobPermit, String> {
     ACTIVE
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
             (active < MAX_JOBS).then_some(active + 1)
         })
         .map_err(|_| "image workers are busy".to_string())?;

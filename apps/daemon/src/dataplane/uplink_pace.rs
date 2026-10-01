@@ -371,7 +371,7 @@ impl PaceShare {
     pub fn release(&self, bytes: u64) {
         let previous = self
             .outstanding
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
                 Some(n.saturating_sub(bytes))
             })
             .unwrap();

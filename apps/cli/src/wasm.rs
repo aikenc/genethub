@@ -82,7 +82,7 @@ fn dev_override(names: &[&str]) -> Option<PathBuf> {
     }
     names
         .iter()
-        .filter_map(|name| std::env::var_os(name))
+        .filter_map(std::env::var_os)
         .find(|value| !value.is_empty())
         .map(PathBuf::from)
         .filter(|path| is_file(path))

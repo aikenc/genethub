@@ -1452,7 +1452,7 @@ pub(crate) fn recovery_activation_change(
     } else {
         before
             .as_ref()
-            .map(&recovery_identity)
+            .map(recovery_identity)
             .transpose()?
             .unwrap_or_else(|| "builtin".into())
     };
