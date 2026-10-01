@@ -136,7 +136,7 @@ describe("PreviewFloat", () => {
     expect(chrome).toHaveClass("min-h-9");
     expect(chrome).toHaveStyle({ paddingTop: "env(safe-area-inset-top)" });
 
-    await user.click(screen.getByRole("button", { name: "查看预览信息" }));
+    await user.click(screen.getByRole("button", { name: "预览信息" }));
     expect(screen.getByRole("dialog", { name: "预览信息" })).toBeInTheDocument();
     expect(screen.getByText("静态多文件（内联）")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "关闭信息" }));
