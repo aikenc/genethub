@@ -82,7 +82,7 @@ const TABLE = {
     beta: "genet-agent-beta",
     stable: "genet-agent",
   },
-  // The wasm shell: it loads genehub_guest.wasm and picks the daemon or the
+  // The wasm shell: it loads the guest component and picks the daemon or the
   // agent entry per process. Shipped beside the CLI in every package — the
   // CLI refuses to start a daemon without it.
   host_binary: {
@@ -90,6 +90,19 @@ const TABLE = {
     dev: "genehub-host-dev",
     beta: "genehub-host-beta",
     stable: "genehub-host",
+  },
+  // The component as installed beside the CLI. Every channel's install.sh
+  // defaults to the same bin directory and the running daemon reloads when
+  // this file changes, so a shared name lets one channel's installer swap
+  // its component under another channel's daemon. Stable keeps the bare name
+  // because its published install.sh already writes it; local is never
+  // installed and keeps Cargo's output name. Release assets and Cargo's
+  // `target/wasm32-wasip2/*/genehub_guest.wasm` keep the bare name too.
+  component_file: {
+    local: "genehub_guest.wasm",
+    dev: "genehub_guest-dev.wasm",
+    beta: "genehub_guest-beta.wasm",
+    stable: "genehub_guest.wasm",
   },
   agent_home_dir: {
     local: ".genet-agent-local",
@@ -331,9 +344,11 @@ pub const WORKSPACE_DIR_NAME: &str = "${value("workspace_dir_name", channel)}";
 /// The one binary: CLI to agents, daemon as \`genet daemon run\`.
 pub const CLI_BINARY: &str = "${value("cli_binary", channel)}";
 pub const AGENT_BINARY: &str = "${value("agent_binary", channel)}";
-/// The wasm shell next to the CLI: loads \`genehub_guest.wasm\` and runs its
+/// The wasm shell next to the CLI: loads \`COMPONENT_FILE\` and runs its
 /// daemon or agent entry. The CLI refuses to start a daemon without it.
 pub const HOST_BINARY: &str = "${value("host_binary", channel)}";
+/// The guest component as installed next to the CLI.
+pub const COMPONENT_FILE: &str = "${value("component_file", channel)}";
 /// Where the agent keeps its sessions and \`models.json\`, under the home dir.
 pub const AGENT_HOME_DIR: &str = "${value("agent_home_dir", channel)}";
 pub const ENV_DATA_DIR: &str = "${value("env_data_dir", channel)}";
@@ -447,8 +462,10 @@ pub const DATA_DIR_NAME: &str = "${value("data_dir_name", channel)}";
 /// What the shell spawns (with \`daemon run\`): the merged CLI+daemon binary.
 pub const CLI_BINARY: &str = "${value("cli_binary", channel)}";
 /// The wasm shell staged next to the CLI: the desktop spawns it directly with
-/// \`genehub_guest.wasm\` when both are found beside the CLI binary.
+/// \`COMPONENT_FILE\` when both are found beside the CLI binary.
 pub const HOST_BINARY: &str = "${value("host_binary", channel)}";
+/// The guest component as staged next to the CLI.
+pub const COMPONENT_FILE: &str = "${value("component_file", channel)}";
 /// Names the front-door CLI to the wasm shell it spawns; the shell hands it
 /// to the guest as GENEHUB_CLI.
 pub const ENV_CLI: &str = "${value("env_cli", channel)}";
@@ -500,6 +517,7 @@ DESKTOP_BINARY=${value("desktop_binary", channel)}
 CLI_BINARY=${value("cli_binary", channel)}
 AGENT_BINARY=${value("agent_binary", channel)}
 HOST_BINARY=${value("host_binary", channel)}
+COMPONENT_FILE=${value("component_file", channel)}
 ENV_DATA_DIR=${value("env_data_dir", channel)}
 ENV_WORKSPACE_DIR=${value("env_workspace_dir", channel)}
 # The daemon's override for where the agent binary lives — the journey

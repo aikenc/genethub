@@ -20,8 +20,10 @@ pub const DATA_DIR_NAME: &str = "GeneHub-local";
 /// What the shell spawns (with `daemon run`): the merged CLI+daemon binary.
 pub const CLI_BINARY: &str = "genet-local";
 /// The wasm shell staged next to the CLI: the desktop spawns it directly with
-/// `genehub_guest.wasm` when both are found beside the CLI binary.
+/// `COMPONENT_FILE` when both are found beside the CLI binary.
 pub const HOST_BINARY: &str = "genehub-host-local";
+/// The guest component as staged next to the CLI.
+pub const COMPONENT_FILE: &str = "genehub_guest.wasm";
 /// Names the front-door CLI to the wasm shell it spawns; the shell hands it
 /// to the guest as GENEHUB_CLI.
 pub const ENV_CLI: &str = "GENEHUB_LOCAL_CLI";

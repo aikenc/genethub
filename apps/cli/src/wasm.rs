@@ -1,8 +1,8 @@
 //! Locate the v2 shell and its one component, then become them.
 //!
 //! `genet daemon run` / `start` are no longer a native daemon, and the agent
-//! is no longer a second artifact: both are entries of `genehub_guest.wasm`
-//! under `genehub-host-local`. A missing artifact is a start failure, not a
+//! is no longer a second artifact: both are entries of the guest component
+//! under the channel's wasm shell. A missing artifact is a start failure, not a
 //! silent fall back to a native binary.
 
 use std::path::{Path, PathBuf};
@@ -55,9 +55,11 @@ fn component_candidates(dir: &Path) -> Vec<PathBuf> {
             );
         }
     }
-    // Published installs put the paired component beside the CLI. This is also
-    // the last-resort layout for source builds that have no cross-target output.
-    components.push(dir.join("genehub_guest.wasm"));
+    // Published installs put the paired component beside the CLI under the
+    // channel's own name, so another channel's component in a shared bin
+    // directory is never picked up. This is also the last-resort layout for
+    // source builds that have no cross-target output.
+    components.push(dir.join(channel::COMPONENT_FILE));
     components
 }
 
@@ -106,8 +108,10 @@ pub fn locate() -> Result<Guest, String> {
         .filter(|path| is_file(path))
         .or_else(|| first_file(components))
         .ok_or_else(|| {
-            "genehub_guest.wasm is missing; build it with `cargo build -p genehub-guest --profile iterate --target wasm32-wasip2`"
-                .to_string()
+            format!(
+                "{} is missing; build it with `cargo build -p genehub-guest --profile iterate --target wasm32-wasip2`",
+                channel::COMPONENT_FILE
+            )
         })?;
 
     Ok(Guest { host, component })
@@ -132,7 +136,10 @@ mod tests {
                     .join("genehub_guest.wasm")
             )
         );
-        assert_eq!(candidates.last(), Some(&cli_dir.join("genehub_guest.wasm")));
+        assert_eq!(
+            candidates.last(),
+            Some(&cli_dir.join(channel::COMPONENT_FILE))
+        );
     }
 
     #[test]
@@ -140,7 +147,7 @@ mod tests {
         let cli_dir = PathBuf::from("installed-bin");
         assert_eq!(
             component_candidates(&cli_dir),
-            vec![cli_dir.join("genehub_guest.wasm")]
+            vec![cli_dir.join(channel::COMPONENT_FILE)]
         );
     }
 }

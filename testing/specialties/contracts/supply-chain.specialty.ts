@@ -96,7 +96,7 @@ defineSpecialty(
     t.assertions.assert(workflow.includes('"$host_bin" pack "$raw" dist/genehub_guest.wasm "$CHANNEL" "$version"'), "signed component pack missing");
     t.assertions.assert(workflow.includes('"$host_bin" inspect dist/genehub_guest.wasm'), "packed identity inspection missing");
     t.assertions.assert(workflow.includes("identity.releaseVersion !== process.env.VERSION"), "release version not checked");
-    t.assertions.assert(workflow.includes('cmp "$GENEHUB_COMPONENT_WASM" apps/desktop/src-tauri/bin/genehub_guest.wasm'), "desktop byte identity not checked");
+    t.assertions.assert(workflow.includes('cmp "$GENEHUB_COMPONENT_WASM" "apps/desktop/src-tauri/bin/$COMPONENT_FILE"'), "desktop byte identity not checked");
     t.assertions.assert(workflow.includes("cp component/genehub_guest.wasm dist/genehub_guest.wasm"), "release did not copy shared component");
     t.assertions.assert(
       !workflow.includes("COMPONENT_SIGNING_KEY"),

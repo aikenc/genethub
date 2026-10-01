@@ -1202,7 +1202,7 @@ mod tests {
             "the installer no longer stages the wasm shell under its stamped name"
         );
         assert!(
-            script.contains("genehub_guest.wasm"),
+            script.contains("join(binDir, COMPONENT_FILE)"),
             "the installer no longer stages the guest component"
         );
         assert!(

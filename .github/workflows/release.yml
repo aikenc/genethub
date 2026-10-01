@@ -369,7 +369,8 @@ jobs:
               | tail -15 | while IFS= read -r line; do echo "::error::$line"; done
             exit "$status"
           fi
-          cmp "$GENEHUB_COMPONENT_WASM" apps/desktop/src-tauri/bin/genehub_guest.wasm || {
+          . scripts/channel.env
+          cmp "$GENEHUB_COMPONENT_WASM" "apps/desktop/src-tauri/bin/$COMPONENT_FILE" || {
             echo "::error::desktop bundle did not embed the signed guest artifact byte-for-byte"
             exit 1
           }

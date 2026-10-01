@@ -25,6 +25,7 @@ let CHANNEL = "local";
 let PRODUCT = "GeneHub Local";
 let CLI_BINARY = "genet-local";
 let HOST_BINARY = "genehub-host-local";
+let COMPONENT_FILE = "genehub_guest.wasm";
 
 const envFile = join(repo, "scripts/channel.env");
 if (existsSync(envFile)) {
@@ -36,6 +37,7 @@ if (existsSync(envFile)) {
     else if (key === "PRODUCT") PRODUCT = val;
     else if (key === "CLI_BINARY") CLI_BINARY = val;
     else if (key === "HOST_BINARY") HOST_BINARY = val;
+    else if (key === "COMPONENT_FILE") COMPONENT_FILE = val;
   }
 }
 
@@ -101,7 +103,7 @@ for (const binary of [CLI_BINARY, HOST_BINARY]) {
 }
 cpSync(
   preparedGuest ?? join(repo, "target/wasm32-wasip2", guestProfile, "genehub_guest.wasm"),
-  join(binDir, "genehub_guest.wasm"),
+  join(binDir, COMPONENT_FILE),
 );
 
 console.log(`==> building the installer (${bundles})`);

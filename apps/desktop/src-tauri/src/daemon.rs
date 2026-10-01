@@ -235,7 +235,7 @@ impl Daemon {
         } else {
             crate::channel::HOST_BINARY.to_string()
         };
-        let mut command = match (sibling(&host_name), sibling("genehub_guest.wasm")) {
+        let mut command = match (sibling(&host_name), sibling(crate::channel::COMPONENT_FILE)) {
             (Some(host), Some(component)) => {
                 let mut command = Command::new(host);
                 command.args(["run", "--component"]).arg(component);

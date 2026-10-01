@@ -17,10 +17,10 @@ function installerUnsupported(): boolean {
   return process.platform === "linux" && process.arch === "arm64";
 }
 
-function assetName(): string {
+function assetName(prefix = "genet-local"): string {
   const os = process.platform === "darwin" ? "macos" : "linux";
   const arch = process.arch === "arm64" ? "arm64" : "x64";
-  return `genet-local-${os}-${arch}.tar.gz`;
+  return `${prefix}-${os}-${arch}.tar.gz`;
 }
 
 function scriptPath(openRoot: string): string {
@@ -63,30 +63,58 @@ cp "$GENEHUB_TEST_RELEASE/\${url##*/}" "$output"
   return curl;
 }
 
-function fakeRelease(): string {
+interface ReleaseNames {
+  prefix: string;
+  cli: string;
+  host: string;
+  guest: string;
+}
+
+const LOCAL_RELEASE: ReleaseNames = {
+  prefix: "genet-local",
+  cli: "genet-local",
+  host: "genehub-host-local",
+  guest: "guest-component-fixture",
+};
+
+// Every channel's tarball carries the component as genehub_guest.wasm; only
+// the installed name differs.
+function fakeRelease(names: ReleaseNames = LOCAL_RELEASE): string {
   const dir = mkdtempSync(path.join(tmpdir(), "genehub-install-release-"));
   const staged = path.join(dir, "staged");
   mkdirSync(staged, { recursive: true });
-  const binary = path.join(staged, "genet-local");
+  const binary = path.join(staged, names.cli);
   writeFileSync(
     binary,
     "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${GENEHUB_TEST_CALLS:-/dev/null}\"\necho ok\n",
   );
   chmodSync(binary, 0o755);
-  const host = path.join(staged, "genehub-host-local");
-  writeFileSync(host, "#!/bin/sh\necho genehub-host-local\n");
+  const host = path.join(staged, names.host);
+  writeFileSync(host, `#!/bin/sh\necho ${names.host}\n`);
   chmodSync(host, 0o755);
-  writeFileSync(path.join(staged, "genehub_guest.wasm"), "guest-component-fixture");
+  writeFileSync(path.join(staged, "genehub_guest.wasm"), names.guest);
+  const asset = assetName(names.prefix);
   const tar = spawnSync(
     "tar",
-    ["-czf", path.join(dir, assetName()), "-C", staged, "genet-local", "genehub-host-local", "genehub_guest.wasm"],
+    ["-czf", path.join(dir, asset), "-C", staged, names.cli, names.host, "genehub_guest.wasm"],
     { encoding: "utf8" },
   );
   if (tar.status !== 0) throw new Error(`tar failed: ${tar.stderr}`);
-  const sums = spawnSync("sha256sum", [assetName()], { cwd: dir, encoding: "utf8" });
+  const sums = spawnSync("sha256sum", [asset], { cwd: dir, encoding: "utf8" });
   if (sums.status !== 0) throw new Error(`sha256sum failed: ${sums.stderr}`);
   writeFileSync(path.join(dir, "SHA256SUMS"), sums.stdout);
   return dir;
+}
+
+// What deployment serves: the tree's install.sh with only its `channel=`
+// line rewritten.
+function channelScript(openRoot: string, dir: string, channel: string): string {
+  const source = readFileSync(scriptPath(openRoot), "utf8");
+  const stamped = source.replace(/^channel=.*$/m, `channel=${channel}`);
+  if (stamped === source) throw new Error("install.sh has no channel= line to stamp");
+  const script = path.join(dir, `install-${channel}.sh`);
+  writeFileSync(script, stamped);
+  return script;
 }
 
 function runInstall(
@@ -94,10 +122,11 @@ function runInstall(
   release: string,
   bin: string,
   extra: Record<string, string> = {},
+  script = scriptPath(openRoot),
 ): { status: number | null; stdout: string; stderr: string } {
   const tools = mkdtempSync(path.join(tmpdir(), "genehub-install-tools-"));
   writeCurlShim(tools);
-  const result = spawnSync("sh", [scriptPath(openRoot)], {
+  const result = spawnSync("sh", [script], {
     encoding: "utf8",
     env: {
       ...process.env,
@@ -148,6 +177,65 @@ defineSpecialty(
       t.assertions.assert(output.stdout.includes("genet-local daemon start"), `did not say what to run:\n${output.stdout}`);
     } finally {
       rmSync(release, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  },
+);
+
+defineSpecialty(
+  {
+    id: "specialty.install.channels-share-bin-dir",
+    title: "Installing one channel leaves another channel's files in the same directory alone",
+    oracle: "beta then stable then beta into one bin dir: each channel's CLI, shell and component keep that channel's bytes",
+    catches: ["two channels install the component under one name", "stable install replaces the component a beta daemon runs"],
+    tags: ["core", "install"],
+    expectedDurationMs: 10_000,
+    timeoutMs: 45_000,
+    surfaces: ["install"],
+  },
+  async (t) => {
+    if (installerUnsupported()) return;
+    const beta: ReleaseNames = { prefix: "genet-beta", cli: "genet-beta", host: "genehub-host-beta", guest: "beta-guest" };
+    const stable: ReleaseNames = { prefix: "genet", cli: "genet", host: "genehub-host", guest: "stable-guest" };
+    const releases = { beta: fakeRelease(beta), stable: fakeRelease(stable) };
+    const home = mkdtempSync(path.join(tmpdir(), "genehub-install-home-"));
+    const bin = path.join(home, "bin");
+    const install = (channel: "beta" | "stable") => {
+      const base = channel === "beta" ? "GENEHUB_BETA" : "GENEHUB";
+      const output = runInstall(
+        t.openRoot,
+        releases[channel],
+        bin,
+        { [`${base}_DOWNLOAD_BASE`]: "https://downloads.example.invalid", [`${base}_BIN_DIR`]: bin },
+        channelScript(t.openRoot, home, channel),
+      );
+      t.assertions.assert(output.status === 0, `${channel} install failed: ${output.stderr}`);
+    };
+    const expectInstalled = (after: string) => {
+      const files: Array<[string, string]> = [
+        ["genehub_guest-beta.wasm", "beta-guest"],
+        ["genehub_guest.wasm", "stable-guest"],
+        ["genehub-host-beta", "#!/bin/sh\necho genehub-host-beta\n"],
+        ["genehub-host", "#!/bin/sh\necho genehub-host\n"],
+      ];
+      for (const [file, bytes] of files) {
+        const installed = path.join(bin, file);
+        t.assertions.assert(existsSync(installed), `${file} missing after ${after}`);
+        t.assertions.assert(readFileSync(installed, "utf8") === bytes, `${file} holds another channel's bytes after ${after}`);
+      }
+      for (const cli of ["genet-beta", "genet"]) {
+        t.assertions.assert(existsSync(path.join(bin, cli)), `${cli} missing after ${after}`);
+      }
+    };
+    try {
+      install("beta");
+      install("stable");
+      expectInstalled("installing stable over beta");
+      install("beta");
+      expectInstalled("reinstalling beta over stable");
+    } finally {
+      rmSync(releases.beta, { recursive: true, force: true });
+      rmSync(releases.stable, { recursive: true, force: true });
       rmSync(home, { recursive: true, force: true });
     }
   },

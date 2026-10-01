@@ -61,6 +61,42 @@ test("no two channels share a feed, a hub, or a data directory", () => {
   }
 });
 
+test("no two released channels install a file under the same name", () => {
+  // Every channel's install.sh defaults to the same bin directory, and the
+  // daemon reloads when its component file changes: one shared name there
+  // and installing one channel swaps the files under another's daemon.
+  const seen = new Map();
+  for (const key of ["cli_binary", "host_binary", "component_file"]) {
+    for (const channel of ["dev", "beta", "stable"]) {
+      const name = TABLE[key][channel];
+      assert.ok(name, `${key}.${channel} is empty`);
+      assert.ok(!seen.has(name), `${key}.${channel} installs ${name}, already installed as ${seen.get(name)}`);
+      seen.set(name, `${key}.${channel}`);
+    }
+  }
+  // The published stable install.sh keeps writing the bare name; the other
+  // lines must be the ones that moved away from it.
+  assert.equal(TABLE.component_file.stable, "genehub_guest.wasm");
+});
+
+test("install.sh installs each channel under the table's names", () => {
+  // Deployment rewrites only the `channel=` line of the served install.sh, so
+  // the per-channel names live in its own case table and must not drift
+  // from the one the binaries are built from.
+  const script = readFileSync(join(repo, "scripts/install.sh"), "utf8");
+  const branch = (label) => {
+    const match = script.match(new RegExp(`^  ${label}\\)\\n([\\s\\S]*?)^    ;;$`, "m"));
+    assert.ok(match, `install.sh has no ${label}) branch`);
+    return match[1];
+  };
+  for (const [channel, label] of [["dev", "dev"], ["beta", "beta"], ["stable", "stable"], ["local", "\\*"]]) {
+    const body = branch(label);
+    for (const [key, variable] of [["cli_binary", "cli_binary"], ["host_binary", "host_binary"], ["component_file", "component"]]) {
+      assert.match(body, new RegExp(`^    ${variable}=${TABLE[key][channel].replace(/\./g, "\\.")}$`, "m"), `install.sh ${channel} ${variable}`);
+    }
+  }
+});
+
 test("release tags map to their channel and nothing else does", () => {
   const cases = [
     ["v0.7.0-beta.3", "beta"],
@@ -138,6 +174,8 @@ test("a beta stamp writes beta identity everywhere and local restores it", () =>
     assert.match(beta, /pub const CHANNEL: &str = "beta";/);
     assert.ok(beta.includes(TABLE.manifest_url.beta), "beta app manifest URL not stamped");
     assert.ok(beta.includes("relay-beta"), "beta component feed not stamped");
+    assert.match(beta, /pub const COMPONENT_FILE: &str = "genehub_guest-beta\.wasm";/);
+    assert.match(readFileSync(join(root, "scripts/channel.env"), "utf8"), /^COMPONENT_FILE=genehub_guest-beta\.wasm$/m);
 
     const tauri = JSON.parse(readFileSync(join(root, "apps/desktop/src-tauri/tauri.conf.json"), "utf8"));
     assert.equal(tauri.productName, TABLE.data_dir_name.beta);

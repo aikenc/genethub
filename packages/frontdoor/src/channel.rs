@@ -20,9 +20,11 @@ pub const WORKSPACE_DIR_NAME: &str = "GeneHub-local";
 /// The one binary: CLI to agents, daemon as `genet daemon run`.
 pub const CLI_BINARY: &str = "genet-local";
 pub const AGENT_BINARY: &str = "genet-agent-local";
-/// The wasm shell next to the CLI: loads `genehub_guest.wasm` and runs its
+/// The wasm shell next to the CLI: loads `COMPONENT_FILE` and runs its
 /// daemon or agent entry. The CLI refuses to start a daemon without it.
 pub const HOST_BINARY: &str = "genehub-host-local";
+/// The guest component as installed next to the CLI.
+pub const COMPONENT_FILE: &str = "genehub_guest.wasm";
 /// Where the agent keeps its sessions and `models.json`, under the home dir.
 pub const AGENT_HOME_DIR: &str = ".genet-agent-local";
 pub const ENV_DATA_DIR: &str = "GENEHUB_LOCAL_DATA_DIR";

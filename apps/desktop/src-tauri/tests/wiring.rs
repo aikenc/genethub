@@ -77,8 +77,9 @@ fn every_release_package_embeds_one_signed_component_and_pins_its_baseline() {
     assert!(release.contains("signed_component:"));
     assert!(release.contains("name: guest-wasm-release"));
     assert!(release.contains("GENEHUB_BUNDLED_RELEASE_VERSION"));
-    assert!(release
-        .contains("cmp \"$GENEHUB_COMPONENT_WASM\" apps/desktop/src-tauri/bin/genehub_guest.wasm"));
+    assert!(release.contains(
+        "cmp \"$GENEHUB_COMPONENT_WASM\" \"apps/desktop/src-tauri/bin/$COMPONENT_FILE\""
+    ));
     // The internal dev root signs every channel for now; an external key
     // mechanism returns with the stable pipeline, and the App workflow must
     // not grow one back in the meantime.
