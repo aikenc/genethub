@@ -47,6 +47,7 @@ defineSpecialty({
     consumer = await openPreviewBrowser({ openRoot: t.openRoot, lease: t.env, page: owner.page, endpoint: daemonEndpoint(opened.daemon), refreshEndpoint: () => daemonEndpoint(opened!.daemon), workspaceId: opened.workspaceId, entryPath });
     const page = owner.page;
     await page.frameLocator('iframe[title="HTML 文件预览"]').locator("#data").getByText("Unicode resource loaded").waitFor();
+    await page.getByLabel("更多预览操作", { exact: true }).click();
     await page.getByRole("button", { name: "分享预览", exact: true }).click();
     const select = page.getByLabel("分享授权时间", { exact: true });
     t.assertions.assert(JSON.stringify(await select.locator("option").evaluateAll(nodes => nodes.map(n => (n as HTMLOptionElement).value))) === JSON.stringify(["3600", "86400", "604800"]), "share lifetimes are not 1h/1d/7d");
@@ -64,7 +65,7 @@ defineSpecialty({
     await v.getByRole("button", { name: "开始批注", exact: true }).click();
     await frame.locator("#target").click();
     await v.getByRole("textbox", { name: "批注", exact: true }).fill("Visitor annotation");
-    await v.getByRole("button", { name: "加入草稿", exact: true }).click();
+    await v.getByRole("button", { name: "添加批注", exact: true }).click();
     await v.getByRole("button", { name: "完成批注", exact: true }).click();
     await v.getByLabel("更多预览操作", { exact: true }).click();
     await v.getByRole("button", { name: "保存运行产物", exact: true }).click();
@@ -106,7 +107,7 @@ defineSpecialty({
     await v.getByRole("button", { name: "开始批注", exact: true }).click();
     await frame.locator("#target").click();
     await v.getByRole("textbox", { name: "批注", exact: true }).fill("Second visitor annotation");
-    await v.getByRole("button", { name: "加入草稿", exact: true }).click();
+    await v.getByRole("button", { name: "添加批注", exact: true }).click();
     await v.getByRole("textbox", { name: "批注", exact: true }).waitFor({ state: "detached" });
     await v.getByRole("button", { name: "完成批注", exact: true }).click();
     await v.getByLabel("批注", { exact: true }).click();

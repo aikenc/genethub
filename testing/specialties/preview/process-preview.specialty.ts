@@ -53,8 +53,10 @@ with av.open(sys.argv[1],'w') as out:
     await page.getByRole('button',{name:'打开预览',exact:true}).click();
     const openServiceAction = async (name: string) => {
       const action = page.getByRole('button', { name, exact: true });
-      if (!(await action.isVisible())) await page.getByLabel("本地服务：可达", { exact: true }).click({ timeout: 30000 });
+      if (!(await action.isVisible())) await page.getByRole("button", { name: "预览信息", exact: true }).click({ timeout: 30000 });
       await action.click({ timeout: 30000 });
+      const closeInfo = page.getByRole("button", { name: "关闭信息", exact: true });
+      if (await closeInfo.isVisible()) await closeInfo.click();
     };
     await openServiceAction('允许本次预览访问登记服务');
     await page.getByRole('button',{name:'连接音视频',exact:true}).click();

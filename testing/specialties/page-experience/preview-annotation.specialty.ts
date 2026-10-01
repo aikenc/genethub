@@ -50,23 +50,32 @@ defineSpecialty({
     t.assertions.assert((await heading.boundingBox())!.y >= header!.y + header!.height, "MD controls cover the heading");
     await page.getByRole("button", { name: "关闭预览", exact: true }).click();
     await openFile("review.html");
-    await page.getByLabel(/^本地服务：/).waitFor();
     const frame = page.frameLocator('iframe[title="HTML 文件预览"]');
     await frame.locator("#paragraph-0").waitFor();
     for (const width of [320, 430]) { await page.setViewportSize({ width, height: 775 }); await checkRow(); }
     t.assertions.assert(!(await page.getByRole("button", { name: "截图", exact: true }).isVisible()), "low frequency action remains on toolbar");
+    t.assertions.assert(!(await page.getByRole("button", { name: "分享预览", exact: true }).isVisible()), "share stays on the toolbar");
+    t.assertions.assert(await page.getByLabel(/^本地服务：/).count() === 0, "service status stays on the toolbar");
     await page.getByLabel("更多预览操作", { exact: true }).click();
-    for (const name of ["截图", "录制", "保存运行产物"])
+    for (const name of ["截图", "录制", "保存运行产物", "分享预览"])
       t.assertions.assert(await page.getByRole("button", { name, exact: true }).isVisible(), `menu omitted ${name}`);
     await page.keyboard.press("Escape");
-    await page.getByLabel("本地服务：无登记", { exact: true }).click();
+    await page.getByRole("button", { name: "预览信息", exact: true }).click();
+    await page.getByText("这个文件没有登记本地服务。", { exact: true }).waitFor();
     t.assertions.assert(await page.getByText("这个文件没有登记本地服务。", { exact: true }).isVisible(), "absent service hides its reason");
-    t.assertions.assert(await page.getByRole("button", { name: "重新检查服务", exact: true }).isVisible(), "service menu omitted recheck");
+    t.assertions.assert(await page.getByRole("button", { name: "重新检查服务", exact: true }).isVisible(), "preview info omitted recheck");
     t.assertions.assert(await page.getByText("服务登记不可用，请检查运行状态与 services 授权。").count() === 0, "service failure still occupies a content row");
     await page.keyboard.press("Escape");
+    t.assertions.assert(await page.getByRole("dialog", { name: "预览信息", exact: true }).count() === 0, "Escape left preview info open");
     t.assertions.assert(await page.getByRole("dialog", { name: "文件预览", exact: true }).isVisible(), "Escape from menu minimized Preview");
+    const annotationBefore = (await page.getByLabel("批注", { exact: true }).boundingBox())!;
+    const overflowBefore = (await page.getByLabel("更多预览操作", { exact: true }).boundingBox())!;
+    t.assertions.assert(annotationBefore.x < overflowBefore.x, "annotation starts to the right of overflow");
     await page.getByLabel("批注", { exact: true }).click();
     await page.getByRole("button", { name: "开始批注", exact: true }).click();
+    const annotationAfter = (await page.getByLabel("完成批注", { exact: true }).boundingBox())!;
+    const overflowAfter = (await page.getByLabel("更多预览操作", { exact: true }).boundingBox())!;
+    t.assertions.assert(annotationAfter.x < overflowAfter.x, "starting annotation reordered the toolbar");
     await frame.locator("#action").click();
     await page.getByRole("textbox", { name: "批注", exact: true }).waitFor();
     t.assertions.assert(await frame.locator("#action").innerText() === "Action", "annotation tap activated HTML application");
@@ -97,7 +106,7 @@ defineSpecialty({
     await t.tools.waitUntil(async () => (await frame.locator("body").evaluate(() => scrollY)) > touchBefore + 50, 5000);
     await cdp.detach();
     await page.getByRole("textbox", { name: "批注", exact: true }).fill("Keep this section readable");
-    await page.getByRole("button", { name: "加入草稿", exact: true }).click();
+    await page.getByRole("button", { name: "添加批注", exact: true }).click();
     await page.getByRole("button", { name: "完成批注", exact: true }).click();
     await page.getByLabel("批注", { exact: true }).click();
     await page.getByRole("button", { name: "提交批注反馈", exact: true }).click();
