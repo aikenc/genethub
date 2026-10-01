@@ -88,7 +88,7 @@ export function PreviewRuntimeControls({
   entryPath,
   sourceVersion,
   eventsRef,
-  eventCount,
+  eventCount: _eventCount,
   requestDomSnapshot,
   requestRenderedSnapshot,
   onSubmit,
@@ -129,7 +129,7 @@ export function PreviewRuntimeControls({
   const sampleTimer = useRef<number | null>(null);
   const elapsedTimer = useRef<number | null>(null);
   const maximumTimer = useRef<number | null>(null);
-  const [frameCount, setFrameCount] = useState(0);
+  const [, setFrameCount] = useState(0);
   const [captureActive, setCaptureActive] = useState(false);
   const [busy, setBusy] = useState<"screenshot" | "recording" | "upload" | null>(null);
   const [recording, setRecording] = useState(false);
@@ -422,6 +422,8 @@ export function PreviewRuntimeControls({
 
   const captureDisabled = !ready || busy !== null;
   const saveDisabled = busy !== null || !onSubmit;
+  const idleNotice = notice === "正在连接日志采集…" || notice === "日志已开始记录";
+  const menuItem = "rounded px-2 py-1 text-left text-fg hover:bg-raised disabled:opacity-45";
   const videoExtension =
     recordingResult?.kind === "video" && recordingResult.mimeType.includes("mp4")
       ? "mp4"
@@ -438,14 +440,11 @@ export function PreviewRuntimeControls({
         }
       }}>
       <summary aria-label="更多预览操作" title="更多预览操作" className="flex h-7 w-7 cursor-pointer list-none items-center justify-center rounded-md border border-line bg-surface text-fg hover:bg-raised [&::-webkit-details-marker]:hidden">···</summary>
-      <div className="absolute right-0 top-full z-50 mt-1 flex w-56 max-w-[calc(100vw-1rem)] flex-col gap-2 rounded-lg border border-line bg-surface p-3 shadow-lg">
-      <span className="break-words" role="status">{notice}</span>
-      <span className="text-faint">
-        日志 {eventCount} · 现场 {frameCount}
-      </span>
+      <div className="absolute right-0 top-full z-50 mt-1 flex w-40 max-w-[calc(100vw-1rem)] flex-col gap-1 rounded-lg border border-line bg-surface p-2 text-fg shadow-lg">
+      {idleNotice ? null : <span className="break-words px-2 py-1 text-muted" role="status">{notice}</span>}
       {recordingUrl ? (
         <a
-          className="shrink-0 rounded px-2 py-1 text-accent hover:bg-raised"
+          className={menuItem}
           href={recordingUrl}
           download={`preview-experience-${Date.now()}.${videoExtension}`}
           title="保存完整高帧率体验视频"
@@ -456,7 +455,7 @@ export function PreviewRuntimeControls({
       {captureActive && !recording ? (
         <button
           type="button"
-          className="shrink-0 rounded px-2 py-1 text-faint hover:bg-raised hover:text-fg"
+          className={menuItem}
           disabled={busy !== null}
           onClick={() => {
             engineRef.current?.dispose();
@@ -470,7 +469,7 @@ export function PreviewRuntimeControls({
       ) : null}
       <button
         type="button"
-        className="shrink-0 rounded border border-line px-2 py-1 hover:bg-raised disabled:opacity-45"
+        className={menuItem}
         disabled={captureDisabled || recording}
         onClick={() => void takeScreenshot()}
         title={
@@ -483,11 +482,7 @@ export function PreviewRuntimeControls({
       </button>
       <button
         type="button"
-        className={`shrink-0 rounded border px-2 py-1 disabled:opacity-45 ${
-          recording
-            ? "border-red-500/60 bg-red-500/10 text-red-500"
-            : "border-line hover:bg-raised"
-        }`}
+        className={menuItem}
         disabled={!ready || busy !== null}
         onClick={() => void (recording ? stopRecording() : startRecording())}
         title={
@@ -502,7 +497,7 @@ export function PreviewRuntimeControls({
       </button>
       <button
         type="button"
-        className="shrink-0 rounded bg-accent px-2 py-1 text-white hover:opacity-90 disabled:opacity-45"
+        className={menuItem}
         disabled={saveDisabled}
         onClick={() => void uploadArtifact()}
         title={
@@ -518,7 +513,7 @@ export function PreviewRuntimeControls({
       {openShare ? (
         <button
           type="button"
-          className="shrink-0 rounded border border-line px-2 py-1 text-left hover:bg-raised"
+          className={menuItem}
           onClick={() => {
             if (menuRef.current) menuRef.current.open = false;
             openShare();
@@ -530,7 +525,7 @@ export function PreviewRuntimeControls({
       {reportProduct ? (
         <button
           type="button"
-          className="shrink-0 rounded px-2 py-1 text-left hover:bg-raised"
+          className={menuItem}
           onClick={() => {
             if (menuRef.current) menuRef.current.open = false;
             reportProduct();
