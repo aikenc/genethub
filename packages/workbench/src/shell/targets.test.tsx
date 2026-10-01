@@ -608,6 +608,7 @@ describe("switching from the sidebar", () => {
     );
 
     await userEvent.click(await screen.findByRole("button", { name: "Fork" }));
+    await userEvent.click(await screen.findByRole("button", { name: "选择目标机器" }));
     await userEvent.click(await screen.findByRole("radio", { name: "工作机" }));
     expect(await screen.findByRole("option", { name: /Remote/ })).toBeInTheDocument();
     expect(screen.getByRole("dialog", { name: "Fork 会话" })).toBeInTheDocument();
