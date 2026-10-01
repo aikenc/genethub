@@ -191,6 +191,15 @@ impl Read for PreviewSource {
     }
 }
 
+impl Seek for PreviewSource {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        match self {
+            Self::File(file) => file.seek(pos),
+            Self::Snapshot { bytes, .. } => bytes.seek(pos),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreviewFailure {
     NotFound,
