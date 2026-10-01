@@ -50,13 +50,19 @@ defineSpecialty({
     t.assertions.assert((await heading.boundingBox())!.y >= header!.y + header!.height, "MD controls cover the heading");
     await page.getByRole("button", { name: "关闭预览", exact: true }).click();
     await openFile("review.html");
+    await page.getByLabel(/^本地服务：/).waitFor();
     const frame = page.frameLocator('iframe[title="HTML 文件预览"]');
     await frame.locator("#paragraph-0").waitFor();
     for (const width of [320, 430]) { await page.setViewportSize({ width, height: 775 }); await checkRow(); }
     t.assertions.assert(!(await page.getByRole("button", { name: "截图", exact: true }).isVisible()), "low frequency action remains on toolbar");
     await page.getByLabel("更多预览操作", { exact: true }).click();
-    for (const name of ["截图", "录制", "保存运行产物", "重新检查服务"])
+    for (const name of ["截图", "录制", "保存运行产物"])
       t.assertions.assert(await page.getByRole("button", { name, exact: true }).isVisible(), `menu omitted ${name}`);
+    await page.keyboard.press("Escape");
+    await page.getByLabel("本地服务：无登记", { exact: true }).click();
+    t.assertions.assert(await page.getByText("这个文件没有登记本地服务。", { exact: true }).isVisible(), "absent service hides its reason");
+    t.assertions.assert(await page.getByRole("button", { name: "重新检查服务", exact: true }).isVisible(), "service menu omitted recheck");
+    t.assertions.assert(await page.getByText("服务登记不可用，请检查运行状态与 services 授权。").count() === 0, "service failure still occupies a content row");
     await page.keyboard.press("Escape");
     t.assertions.assert(await page.getByRole("dialog", { name: "文件预览", exact: true }).isVisible(), "Escape from menu minimized Preview");
     await page.getByRole("button", { name: "进入批注", exact: true }).click();

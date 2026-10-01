@@ -51,12 +51,17 @@ with av.open(sys.argv[1],'w') as out:
       throw new Error("registered service missing from process UI: " + JSON.stringify({ services, controls: controls.slice(0, 30), errors: consumer?.errors, body: (await page.locator("body").innerText()).slice(-1800) }));
     });
     await page.getByRole('button',{name:'打开预览',exact:true}).click();
-    await page.getByRole('button',{name:'允许本次预览访问登记服务',exact:true}).click({timeout:30000});
+    const openServiceAction = async (name: string) => {
+      const action = page.getByRole('button', { name, exact: true });
+      if (!(await action.isVisible())) await page.getByLabel("本地服务：可达", { exact: true }).click({ timeout: 30000 });
+      await action.click({ timeout: 30000 });
+    };
+    await openServiceAction('允许本次预览访问登记服务');
     await page.getByRole('button',{name:'连接音视频',exact:true}).click();
     await page.waitForFunction(()=>Array.from(document.querySelectorAll('video')).some(v=>v.videoWidth>0&&v.currentTime>0),{},{timeout:30000});
-    await page.getByRole('button',{name:'暂停服务访问',exact:true}).click();
+    await openServiceAction('暂停服务访问');
     // Re-enable and query application's real session inventory via its public route.
-    await page.getByRole('button',{name:'允许本次预览访问登记服务',exact:true}).click();
+    await openServiceAction('允许本次预览访问登记服务');
     const frame=page.frameLocator('iframe').first();
     await frame.getByRole('button',{name:'请求后端',exact:true}).click();
     await t.tools.waitUntil(async()=>{
