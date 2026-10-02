@@ -44,6 +44,11 @@
 - 输出是 JSON Lines；以 `shell.exit.data.exitCode` 为准，CLI 进程的退出码不是命令的退出码；
   `timedOut: true` 表示是被超时终止的。
 
+## 跨机传文件
+
+上传、下载和 GB 文件续传先读 [file-transfer.md](file-transfer.md)。`shell` 的输入与文本输出都有
+独立限制；能远程执行命令不代表已有可靠的大文件传输能力。
+
 ## 在目标机器上跑 Agent 并接力
 
 ```bash
