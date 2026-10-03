@@ -1048,6 +1048,15 @@ function Item({ item }: { item: TimelineItem }) {
       const forwarded = forwardedParts.some((part) => part.kind === "forward");
       return (
         <div className="flex flex-col items-end gap-1.5">
+          {item.origin ? (
+            <span
+              data-testid="user-message-origin"
+              className="max-w-[80%] truncate text-xs text-muted"
+              title={`${item.origin.machineName ?? item.origin.machineId} · ${item.origin.sessionId}`}
+            >
+              来自 Agent · {item.origin.machineName || item.origin.machineId} · {item.origin.sessionId}
+            </span>
+          ) : null}
           {item.attachments.length > 0 ? (
             <div className="flex max-w-[80%] flex-wrap justify-end gap-1.5">
               {item.attachments.map((attachment, index) => {

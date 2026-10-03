@@ -68,6 +68,16 @@
 - 把任务派给持有该资源（代码、许可、GPU、外设）的机器，不要把工作区搬到别处。
 - 其他可路由的只读命令：`workspace list/show`、`session get/inspect/narrative/rounds/context`。
 
+## 会话控制与来源
+
+- Agent 会话控制其他会话时，本机与 `--machine` 遵循同一套规则：可以创建普通会话，也可以对普通会话执行
+  `session send`、中断、改名、关闭等操作，与用户本人相同。
+- Workflow 受管子会话只由委托它的 Workflow 写入；其他调用方（包括用户本人）只能查看或 fork。被拒时不要换
+  路径绕过，改为通过对应 PM / Workflow 处理。
+- Agent 发出的消息会带上来源（机器与会话），目标会话中显示为 Agent 输入，不是 Human 输入。收到
+  `source: "agent"` 的输入时，把它当作该 Agent 的请求，不当作 Human 的批准或决定；需要 Human 决定的事项
+  仍要问 Human。
+
 ## 只能在本机的命令
 
 `workflow`、`process`、`machine`、`speech`、daemon 生命周期（`daemon …`）和 `update` 不可路由，

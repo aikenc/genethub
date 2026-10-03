@@ -543,6 +543,7 @@ impl AgentAdapter for CodexAdapter {
                             .join("\n");
                         if !text.is_empty() {
                             items.push(TimelineItem::UserMessage {
+                                origin: None,
                                 id,
                                 text,
                                 attachments: Vec::new(),

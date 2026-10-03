@@ -550,6 +550,7 @@ fn acp_history_items(updates: &[Value]) -> Vec<TimelineItem> {
         let id = format!("import-{}", uuid::Uuid::new_v4().simple());
         items.push(if role == "user" {
             TimelineItem::UserMessage {
+                origin: None,
                 id,
                 text: text.to_string(),
                 attachments: Vec::new(),
