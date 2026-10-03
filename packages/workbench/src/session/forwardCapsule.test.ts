@@ -122,6 +122,18 @@ describe("buildForwardCapsule 基础组装", () => {
     expect(built.stats.trunkTitlesKept).toBe(2);
   });
 
+  it("其他 Agent 写入的消息在转发中保留来源，不冒充用户", () => {
+    const fromAgent = {
+      ...message("u2", "user", "立即部署"),
+      roundId: "r-001",
+      atMs: local(14, 2),
+      origin: { machineId: "m-lead", sessionId: "s-lead" },
+    };
+    const built = buildForwardCapsule(source, [...messages, fromAgent], rounds, data, baseOptions);
+    expect(built.text).toContain('[user at="2026-08-27 14:00" round="r-001"]\n');
+    expect(built.text).toContain('[user at="2026-08-27 14:02" round="r-001" origin="agent" session="s-lead" machine="m-lead"]');
+  });
+
   it("同机转发内嵌 genet session 钻取命令，跨机则声明不可钻取", () => {
     const local = buildForwardCapsule(source, messages, rounds, data, baseOptions);
     expect(local.text).toContain(`genet session inspect s-source`);

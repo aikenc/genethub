@@ -34,6 +34,24 @@ fn lane_of(entry: &InboxEntry) -> Lane {
     }
 }
 
+/// The receipt digest of one accepted input. Used both when the input is
+/// accepted and when a half-recorded one is recovered, so the two can never
+/// disagree. An origin joins the digest only when present, so receipts written
+/// before attribution existed still match.
+fn input_digest(
+    text: &str,
+    attachments: &[Attachment],
+    task_run_id: &Option<String>,
+    source: &str,
+    origin: Option<&InputOrigin>,
+) -> Result<String> {
+    let bytes = match origin {
+        None => serde_json::to_vec(&(text, attachments, task_run_id, source))?,
+        Some(origin) => serde_json::to_vec(&(text, attachments, task_run_id, source, origin))?,
+    };
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
 /// A new Human message after a failed turn is a decision to move on, not an
 /// implicit retry of every Human input from the rejected provider request.
 fn retire_failed_human_inputs(inbox: &mut SessionInbox) {
@@ -99,17 +117,20 @@ impl SessionManager {
         if text.len() > 65_536 || attachments.len() > 16 {
             bail!("one accepted message is limited to 64 KiB of text and 16 attachments");
         }
-        // An origin joins the digest only when present, so receipts written
-        // before attribution existed still match their retries.
-        let digest = format!(
-            "{:x}",
-            Sha256::digest(match &origin {
-                None => serde_json::to_vec(&(&text, &attachments, &task_run_id, source))?,
-                Some(origin) => {
-                    serde_json::to_vec(&(&text, &attachments, &task_run_id, source, origin))?
-                }
-            })
-        );
+        let digest = input_digest(&text, &attachments, &task_run_id, source, origin.as_ref())?;
+        // A retry of an input an older daemon accepted before attribution
+        // existed: same body, recorded then as the Human's. It is the same
+        // message, so its original receipt stays valid.
+        let legacy_digest = match origin {
+            Some(_) => Some(input_digest(
+                &text,
+                &attachments,
+                &task_run_id,
+                "user",
+                None,
+            )?),
+            None => None,
+        };
         let live = self.live(session_id).await?;
         let _admission = live.inbox_lock.lock().await;
         if live.closing.load(Ordering::SeqCst) {
@@ -122,13 +143,16 @@ impl SessionManager {
             .iter()
             .find(|item| item.id() == message_id)
         {
-            let expected = TimelineItem::UserMessage {
-                id: message_id.clone(),
-                text: text.clone(),
-                attachments: attachments.clone(),
-                origin: origin.clone(),
+            let same = |origin: Option<InputOrigin>| -> Result<bool> {
+                let expected = TimelineItem::UserMessage {
+                    id: message_id.clone(),
+                    text: text.clone(),
+                    attachments: attachments.clone(),
+                    origin,
+                };
+                Ok(serde_json::to_value(existing)? == serde_json::to_value(expected)?)
             };
-            if serde_json::to_value(existing)? != serde_json::to_value(expected)? {
+            if !(same(origin.clone())? || legacy_digest.is_some() && same(None)?) {
                 bail!("messageId collides with an existing chat item");
             }
         }
@@ -150,7 +174,7 @@ impl SessionManager {
                 .iter()
                 .find(|entry| entry.message_id == message_id)
             {
-                if entry.digest != digest {
+                if entry.digest != digest && legacy_digest.as_ref() != Some(&entry.digest) {
                     bail!("messageId already belongs to different content or a different target");
                 }
                 if entry.state != "receiving" {
@@ -375,18 +399,19 @@ impl SessionManager {
                         continue;
                     }
                     if let Some(TimelineItem::UserMessage {
-                        text, attachments, ..
+                        text,
+                        attachments,
+                        origin,
+                        ..
                     }) = chat.items.iter().find(|item| item.id() == entry.message_id)
                     {
-                        let digest = format!(
-                            "{:x}",
-                            Sha256::digest(serde_json::to_vec(&(
-                                text,
-                                attachments,
-                                &entry.task_run_id,
-                                &entry.source
-                            ))?)
-                        );
+                        let digest = input_digest(
+                            text,
+                            attachments,
+                            &entry.task_run_id,
+                            &entry.source,
+                            origin.as_ref(),
+                        )?;
                         if digest != entry.digest {
                             bail!("accepted input body does not match its reserved receipt");
                         }

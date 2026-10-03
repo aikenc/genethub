@@ -160,8 +160,21 @@ fn update(registry: &Registry, live: &Live, change: impl FnOnce(&mut Transfer)) 
         record.updated_at_ms = now_ms();
         record.clone()
     };
-    let _ = persist(registry, &snapshot);
+    // The in-memory record stays authoritative for this daemon; a record that
+    // failed to persist is recovered on the next run by checking the
+    // destination itself (see `run`), so it is reported rather than fatal.
+    if let Err(error) = persist(registry, &snapshot) {
+        tracing::warn!(transfer = %snapshot.transfer_id, %error, "transfer record not persisted");
+    }
     snapshot
+}
+
+/// The verified file is already in place but its completion was never
+/// recorded: the daemon stopped between the final rename and the receipt.
+fn already_published(transfer: &Transfer) -> bool {
+    transfer.source_identity.is_some()
+        && !Path::new(&transfer.partial).exists()
+        && Path::new(&transfer.destination).is_file()
 }
 
 struct Ask {
@@ -184,14 +197,6 @@ fn start(ask: Ask) -> Result<Transfer, CliFailure> {
         .filter(|parent| parent.is_dir())
         .ok_or_else(|| CliFailure::invalid_args("the destination's directory does not exist"))?;
     let destination = ask.destination.to_string_lossy().into_owned();
-    if ask.destination.exists() && !ask.overwrite {
-        return Err(CliFailure::business(
-            "destinationExists",
-            format!("{destination} already exists; pass --overwrite to replace it"),
-            Some(json!({"destination": destination})),
-        ));
-    }
-
     let resumable = load_all(registry).into_iter().find(|transfer| {
         transfer.from_machine_id == ask.from
             && transfer.source == ask.source
@@ -201,6 +206,14 @@ fn start(ask: Ask) -> Result<Transfer, CliFailure> {
                 TransferState::Running | TransferState::Verifying | TransferState::Interrupted
             )
     });
+    let recovering = resumable.as_ref().is_some_and(already_published);
+    if ask.destination.exists() && !ask.overwrite && !recovering {
+        return Err(CliFailure::business(
+            "destinationExists",
+            format!("{destination} already exists; pass --overwrite to replace it"),
+            Some(json!({"destination": destination})),
+        ));
+    }
     let mut live_map = registry.live.lock().expect("transfer registry");
     if let Some(existing) = &resumable {
         if let Some(live) = live_map.get(&existing.transfer_id) {
@@ -209,6 +222,24 @@ fn start(ask: Ask) -> Result<Transfer, CliFailure> {
                 return Ok(current);
             }
         }
+    }
+    // One destination has one writer at a time; checked under the registry
+    // lock so two downloads cannot both pass it.
+    let resumed_id = resumable
+        .as_ref()
+        .map(|transfer| transfer.transfer_id.clone());
+    if let Some(busy) = live_map.values().find_map(|live| {
+        let record = live.record.lock().expect("transfer");
+        (record.state.active()
+            && record.destination == destination
+            && Some(&record.transfer_id) != resumed_id.as_ref())
+        .then(|| record.transfer_id.clone())
+    }) {
+        return Err(CliFailure::business(
+            "destinationBusy",
+            format!("transfer {busy} is already writing {destination}"),
+            Some(json!({"destination": destination, "transferId": busy})),
+        ));
     }
     let transfer = match resumable {
         Some(mut transfer) => {
@@ -293,6 +324,12 @@ fn classify(error: RpcError) -> Stop {
             Stop::Fatal(error.message)
         }
         other => Stop::Retry(other.to_string()),
+    }
+}
+
+async fn canceled(live: &Live) {
+    while !live.cancel.load(Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }
 
@@ -390,7 +427,12 @@ async fn receive(registry: &Registry, live: &Live) -> Result<(), Stop> {
         if live.cancel.load(Ordering::SeqCst) {
             return Err(Stop::Canceled);
         }
-        let bytes = match stream.next_chunk().await {
+        // A stalled stream must not keep a cancel waiting for its next byte.
+        let next = tokio::select! {
+            next = stream.next_chunk() => next,
+            () = canceled(live) => return Err(Stop::Canceled),
+        };
+        let bytes = match next {
             Some(Ok(bytes)) => bytes,
             Some(Err(error)) => return Err(Stop::Retry(format!("{error:#}"))),
             None => {
@@ -417,13 +459,13 @@ async fn receive(registry: &Registry, live: &Live) -> Result<(), Stop> {
     Ok(())
 }
 
-async fn verify(live: &Live) -> Result<String, Stop> {
-    let (from, source, partial, identity) = {
+/// Compares the file at `received` with the source's SHA-256.
+async fn verify(live: &Live, received: &Path) -> Result<String, Stop> {
+    let (from, source, identity) = {
         let record = live.record.lock().expect("transfer");
         (
             record.from_machine_id.clone(),
             record.source.clone(),
-            PathBuf::from(&record.partial),
             record.source_identity.clone(),
         )
     };
@@ -438,7 +480,7 @@ async fn verify(live: &Live) -> Result<String, Stop> {
         .head
         .sha256
         .ok_or_else(|| Stop::Fatal("the source did not report a digest".into()))?;
-    let local_digest = hash(&partial).await.map_err(local)?;
+    let local_digest = hash(received).await.map_err(local)?;
     if local_digest != remote {
         return Err(Stop::Fatal(format!(
             "integrityMismatch: received sha256 {local_digest} but the source has {remote}"
@@ -472,90 +514,113 @@ fn discard_partial(live: &Live) {
 }
 
 async fn run(registry: &'static Registry, live: Arc<Live>) {
-    let mut failures = 0u32;
-    loop {
-        let stop = match receive(registry, &live).await {
-            Ok(()) => break,
-            Err(stop) => stop,
-        };
-        match stop {
-            Stop::Retry(message) => {
-                failures += 1;
-                if failures > MAX_RETRIES {
-                    update(registry, &live, |record| {
-                        record.state = TransferState::Interrupted;
-                        record.error = Some(message);
-                    });
-                    return;
-                }
-                update(registry, &live, |record| {
-                    record.retries += 1;
-                    record.error = Some(message);
-                });
-                let pause = Duration::from_secs(1 << failures.min(5));
-                let resume_at = tokio::time::Instant::now() + pause;
-                while tokio::time::Instant::now() < resume_at {
-                    if live.cancel.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                }
-            }
-            other => {
-                settle(registry, &live, other);
-                return;
-            }
+    let (partial, destination, overwrite, published) = {
+        let record = live.record.lock().expect("transfer");
+        (
+            PathBuf::from(&record.partial),
+            PathBuf::from(&record.destination),
+            record.overwrite,
+            already_published(&record),
+        )
+    };
+    if !published {
+        if let Err(stop) = receive_with_retries(registry, &live).await {
+            settle(registry, &live, stop);
+            return;
         }
+    }
+    if live.cancel.load(Ordering::SeqCst) {
+        settle(registry, &live, Stop::Canceled);
+        return;
     }
     update(registry, &live, |record| {
         record.state = TransferState::Verifying;
         record.error = None;
     });
-    let digest = match verify(&live).await {
+    let received = if published { &destination } else { &partial };
+    let digest = match verify(&live, received).await {
         Ok(digest) => digest,
         Err(stop) => {
-            if matches!(stop, Stop::Fatal(ref message) if message.starts_with("integrityMismatch"))
-            {
+            let mismatch = matches!(stop, Stop::Fatal(ref message) if message.starts_with("integrityMismatch"));
+            // A published file that fails verification is not ours to delete.
+            if mismatch && !published {
                 discard_partial(&live);
-            }
-            if let Stop::Retry(message) = stop {
-                update(registry, &live, |record| {
-                    record.state = TransferState::Interrupted;
-                    record.error = Some(message);
-                });
-                return;
             }
             settle(registry, &live, stop);
             return;
         }
     };
-    let (partial, destination, overwrite) = {
-        let record = live.record.lock().expect("transfer");
-        (
-            record.partial.clone(),
-            record.destination.clone(),
-            record.overwrite,
-        )
-    };
-    if !overwrite && Path::new(&destination).exists() {
-        settle(
-            registry,
-            &live,
-            Stop::Fatal(format!(
-                "destinationExists: {destination} appeared during the transfer"
-            )),
-        );
-        return;
-    }
-    if let Err(error) = std::fs::rename(&partial, &destination) {
-        settle(registry, &live, local(error));
-        return;
+    if !published {
+        if live.cancel.load(Ordering::SeqCst) {
+            settle(registry, &live, Stop::Canceled);
+            return;
+        }
+        if let Err(stop) = publish(&partial, &destination, overwrite) {
+            settle(registry, &live, stop);
+            return;
+        }
     }
     update(registry, &live, |record| {
         record.state = TransferState::Completed;
         record.sha256 = Some(digest);
         record.error = None;
     });
+}
+
+async fn receive_with_retries(registry: &Registry, live: &Live) -> Result<(), Stop> {
+    let mut failures = 0u32;
+    loop {
+        match receive(registry, live).await {
+            Ok(()) => return Ok(()),
+            Err(Stop::Retry(message)) => {
+                failures += 1;
+                if failures > MAX_RETRIES {
+                    return Err(Stop::Retry(message));
+                }
+                update(registry, live, |record| {
+                    record.retries += 1;
+                    record.error = Some(message);
+                });
+                let resume_at =
+                    tokio::time::Instant::now() + Duration::from_secs(1 << failures.min(5));
+                while tokio::time::Instant::now() < resume_at {
+                    if live.cancel.load(Ordering::SeqCst) {
+                        return Err(Stop::Canceled);
+                    }
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            }
+            Err(other) => return Err(other),
+        }
+    }
+}
+
+/// Moves the verified partial into place. Without `overwrite` the destination
+/// is claimed with an exclusive create first, so a file that appeared in the
+/// meantime is refused instead of replaced.
+fn publish(partial: &Path, destination: &Path, overwrite: bool) -> Result<(), Stop> {
+    if !overwrite {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(destination)
+        {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(Stop::Fatal(format!(
+                    "destinationExists: {} appeared during the transfer",
+                    destination.display()
+                )))
+            }
+            Err(error) => return Err(local(error)),
+        }
+    }
+    std::fs::rename(partial, destination).map_err(|error| {
+        if !overwrite {
+            let _ = std::fs::remove_file(destination);
+        }
+        local(error)
+    })
 }
 
 fn settle(registry: &Registry, live: &Live, stop: Stop) {
@@ -772,6 +837,15 @@ fn cancel(args: &[String]) -> i32 {
     match live {
         Some(live) if live.record.lock().expect("transfer").state.active() => {
             live.cancel.store(true, Ordering::SeqCst);
+            output::succeed(
+                "transfer.cancel",
+                json!({"transferId": id, "requested": true}),
+            )
+        }
+        // Known to this daemon but no longer moving: settle it here, where
+        // `status` reads it, rather than only on disk.
+        Some(live) if live.record.lock().expect("transfer").state == TransferState::Interrupted => {
+            settle(registry, &live, Stop::Canceled);
             output::succeed(
                 "transfer.cancel",
                 json!({"transferId": id, "requested": true}),

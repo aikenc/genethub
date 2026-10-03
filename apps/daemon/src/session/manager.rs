@@ -7683,6 +7683,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_retry_after_upgrade_keeps_the_receipt_an_older_daemon_issued() {
+        // An older daemon accepted this message with no origin, as the Human's.
+        // The same send retried through a daemon that now attributes it is the
+        // same message, while a different body under that id is still refused.
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = manager(workspace.path());
+        sessions.store.save_meta(&meta()).unwrap();
+        sessions
+            .accept_input(
+                "s1",
+                "m_retry".into(),
+                "run it".into(),
+                vec![],
+                None,
+                "user",
+                None,
+            )
+            .await
+            .unwrap();
+        let origin = InputOrigin {
+            machine_id: "m_lead".into(),
+            machine_name: None,
+            session_id: "s_lead".into(),
+        };
+        let restarted = manager(workspace.path());
+        restarted
+            .accept_input(
+                "s1",
+                "m_retry".into(),
+                "run it".into(),
+                vec![],
+                None,
+                "agent",
+                Some(origin.clone()),
+            )
+            .await
+            .expect("the retry of an already accepted message is acknowledged");
+        assert!(restarted
+            .accept_input(
+                "s1",
+                "m_retry".into(),
+                "something else".into(),
+                vec![],
+                None,
+                "agent",
+                Some(origin),
+            )
+            .await
+            .is_err());
+        let entries = restarted.store.load_meta("w1", "s1").unwrap().inbox.entries;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].source, "user");
+    }
+
+    #[tokio::test]
     async fn drafts_are_bounded_and_survive_a_manager_restart() {
         let workspace = tempfile::tempdir().unwrap();
         let sessions = manager(workspace.path());
