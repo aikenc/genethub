@@ -543,6 +543,12 @@ pub enum Request {
         /// wrong stitch is a worse failure than an extra round.
         #[serde(default)]
         continues_round: Option<String>,
+        /// The Agent Session that wrote this message, declared by its daemon
+        /// when it forwards the send to another machine. A local Agent caller's
+        /// own identity replaces whatever it declares here.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        origin: Option<crate::timeline::InputOrigin>,
     },
     /// Starts a daemon-owned runtime artifact bundle inside this session.
     ///

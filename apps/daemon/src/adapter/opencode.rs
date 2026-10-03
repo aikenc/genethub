@@ -261,6 +261,7 @@ impl AgentAdapter for OpenCodeAdapter {
                 let id = format!("import-{}", uuid::Uuid::new_v4().simple());
                 match role {
                     Some("user") => items.push(TimelineItem::UserMessage {
+                        origin: None,
                         id,
                         text,
                         attachments: Vec::new(),

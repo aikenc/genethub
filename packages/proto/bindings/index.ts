@@ -709,6 +709,15 @@ width: number, height: number, };
  */
 export type ImportContinuation = "native" | "readOnly";
 
+/**
+ * Which Agent Session wrote an input, as declared by the daemon that hosts it.
+ *
+ * Attribution, not authority: a peer that may send at all may send as the
+ * owner, so a declared origin can only make the receiver treat the text as
+ * Agent output rather than a Human instruction.
+ */
+export type InputOrigin = { machineId: string, machineName?: string, sessionId: string, };
+
 export type InteractionAnswer = { questionId: string, selectedOptionIds: Array<string>, freeformText?: string, };
 
 export type InteractionOption = { id: string, label: string, };
@@ -1123,7 +1132,13 @@ artifactPreviewBaseUrl: string | null,
  * round that already ended, this is treated as a new round — a
  * wrong stitch is a worse failure than an extra round.
  */
-continuesRound: string | null, } } | { "type": "session.artifact.begin", "payload": { sessionId: string, files: Array<SessionArtifactFile>, metadata: JsonValue, } } | { "type": "session.artifact.chunk", "payload": { sessionId: string, uploadId: string, fileIndex: number, offset: number, dataBase64: string, } } | { "type": "session.artifact.finish", "payload": { sessionId: string, uploadId: string, } } | { "type": "session.artifact.abort", "payload": { sessionId: string, uploadId: string, } } | { "type": "session.fork", "payload": { sessionId: string, turnId: string, 
+continuesRound: string | null, 
+/**
+ * The Agent Session that wrote this message, declared by its daemon
+ * when it forwards the send to another machine. A local Agent caller's
+ * own identity replaces whatever it declares here.
+ */
+origin?: InputOrigin, } } | { "type": "session.artifact.begin", "payload": { sessionId: string, files: Array<SessionArtifactFile>, metadata: JsonValue, } } | { "type": "session.artifact.chunk", "payload": { sessionId: string, uploadId: string, fileIndex: number, offset: number, dataBase64: string, } } | { "type": "session.artifact.finish", "payload": { sessionId: string, uploadId: string, } } | { "type": "session.artifact.abort", "payload": { sessionId: string, uploadId: string, } } | { "type": "session.fork", "payload": { sessionId: string, turnId: string, 
 /**
  * Absent is the legacy native-only request. New clients send an
  * explicit target to opt into provider-agnostic reconstruction when
@@ -1824,7 +1839,12 @@ workflowPatrolOldestJobMs?: number, events: Array<SupportDiagnosticEvent>, dropp
  * `id` is assigned by the daemon, not the agent, so that deltas can address an
  * item regardless of whether the underlying agent has a concept of message ids.
  */
-export type TimelineItem = { "type": "userMessage", id: string, text: string, attachments: Array<Attachment>, } | { "type": "assistantMessage", id: string, text: string, 
+export type TimelineItem = { "type": "userMessage", id: string, text: string, attachments: Array<Attachment>, 
+/**
+ * Present when another Agent Session wrote this message; absent means
+ * the Human typed it (or an older daemon did not say).
+ */
+origin?: InputOrigin, } | { "type": "assistantMessage", id: string, text: string, 
 /**
  * When the daemon first saw this item. Drives batch/trunk timing for
  * items that carry no tool timestamps of their own.

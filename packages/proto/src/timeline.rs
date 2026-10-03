@@ -314,6 +314,22 @@ pub struct ToolImage {
     pub path: Option<String>,
 }
 
+/// Which Agent Session wrote an input, as declared by the daemon that hosts it.
+///
+/// Attribution, not authority: a peer that may send at all may send as the
+/// owner, so a declared origin can only make the receiver treat the text as
+/// Agent output rather than a Human instruction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct InputOrigin {
+    pub machine_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub machine_name: Option<String>,
+    pub session_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
@@ -359,6 +375,11 @@ pub enum TimelineItem {
         text: String,
         #[serde(default)]
         attachments: Vec<Attachment>,
+        /// Present when another Agent Session wrote this message; absent means
+        /// the Human typed it (or an older daemon did not say).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        origin: Option<InputOrigin>,
     },
     #[serde(rename_all = "camelCase")]
     AssistantMessage {

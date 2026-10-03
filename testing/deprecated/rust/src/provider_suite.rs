@@ -83,6 +83,7 @@ mod tests {
                 id: "u1".into(),
                 text: "Say hi".into(),
                 attachments: Vec::new(),
+                origin: None,
             },
             TimelineItem::AssistantMessage {
                 id: "a1".into(),
@@ -114,6 +115,7 @@ mod tests {
                 id: "u1".into(),
                 text: "Say hi".into(),
                 attachments: Vec::new(),
+                origin: None,
             },
             TimelineItem::AssistantMessage {
                 id: "a1".into(),

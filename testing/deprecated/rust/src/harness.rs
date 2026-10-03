@@ -379,6 +379,7 @@ impl Journey {
                 attachments: vec![],
                 artifact_preview_base_url: None,
                 continues_round: continues_round.map(str::to_string),
+                origin: None,
             })
             .await?;
         Ok(())

@@ -263,29 +263,18 @@ async fn authorize_pm_space_open(
     Ok(())
 }
 
-/// Keeps a Workflow-managed child human-read-only without inventing a second
-/// Session runtime. Fork remains a human operation and deliberately does not
-/// appear here: the fork is an ordinary Session with no managed binding.
+/// Keeps a Workflow-managed child read-only to everyone but the Workflow that
+/// delegated it, without inventing a second Session runtime.
+///
+/// That is a property of the target, not of who asks: an Agent Session acts
+/// with its owner's authority, exactly as it already does when it reaches a
+/// machine through `--machine`, so it may create, write and stop ordinary
+/// Sessions here too. Its writes are attributed, not narrowed.
 async fn authorize_session_request(
     state: &Shared,
     caller: &crate::authz::Principal,
     request: &Request,
 ) -> Result<(), String> {
-    if caller.session_controller_id().is_some()
-        && matches!(
-            request,
-            Request::SessionCreate { .. }
-                | Request::SessionCreateRouted { .. }
-                | Request::SessionForkImport { .. }
-                | Request::SessionForkImportRouted { .. }
-                | Request::SessionImport { .. }
-        )
-    {
-        return Err(
-            "受会话绑定的 Agent 不能创建普通会话；请通过项目 Workflow 委托受管子会话".into(),
-        );
-    }
-
     if let (Some(controller), Request::PreviewFeedback(feedback)) =
         (caller.session_controller_id(), request)
     {
@@ -331,30 +320,29 @@ async fn authorize_session_request(
     };
     let summary = match state.sessions.summary(target).await {
         Ok(summary) => summary,
-        // Process ownership is checked by the process registry itself. Let an
-        // ordinary caller reach that check when the Session record is already
-        // gone: killing one process then remains `notFound`, while `kill all`
-        // remains an idempotent desired-state cleanup. Session-bound Agents
-        // still take the normal path so a made-up id cannot bypass their child
-        // boundary.
+        // Process ownership is checked by the process registry itself. Let the
+        // caller reach that check when the Session record is already gone:
+        // killing one process then remains `notFound`, while `kill all`
+        // remains an idempotent desired-state cleanup.
         Err(error) => {
-            if caller.session_controller_id().is_none()
-                && matches!(
-                    request,
-                    Request::ProcessKill { .. } | Request::ProcessKillAll { .. }
-                )
-                && error.is::<crate::session::manager::SessionMissing>()
+            if matches!(
+                request,
+                Request::ProcessKill { .. } | Request::ProcessKillAll { .. }
+            ) && error.is::<crate::session::manager::SessionMissing>()
             {
                 return Ok(());
             }
             return Err(format!("{error:#}"));
         }
     };
-    match (caller.session_controller_id(), summary.managed) {
-        (Some(controller), Some(managed)) if managed.parent_session_id == controller => Ok(()),
-        (Some(controller), Some(_))
-            if !matches!(request, Request::SessionRespondPermission { .. }) =>
-        {
+    let Some(managed) = summary.managed else {
+        return Ok(());
+    };
+    if let Some(controller) = caller.session_controller_id() {
+        if managed.parent_session_id == controller {
+            return Ok(());
+        }
+        if !matches!(request, Request::SessionRespondPermission { .. }) {
             let project = state
                 .workspaces
                 .project_root(&summary.workspace_id)
@@ -364,19 +352,17 @@ async fn authorize_session_request(
                 .await
                 .unwrap_or(false)
             {
-                Ok(())
-            } else {
-                Err("受会话绑定的 Agent 只能控制由自己委托的受管子会话".into())
+                return Ok(());
             }
         }
-        (Some(_), _) => Err("受会话绑定的 Agent 只能控制由自己委托的受管子会话".into()),
-        (None, Some(managed))
-            if managed.user_interaction == genehub_proto::SessionUserInteraction::ReadOnly =>
-        {
-            Err("这是 Workflow 管理的只读子会话；可查看或 fork，但不能直接改写".into())
-        }
-        (None, _) => Ok(()),
     }
+    if managed.user_interaction == genehub_proto::SessionUserInteraction::ReadOnly {
+        return Err(
+            "这是 Workflow 管理的只读子会话；只有委托它的 Workflow 可以改写，其他调用方可查看或 fork"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 async fn authorize_project_workflow_mutation(
@@ -2129,10 +2115,22 @@ async fn dispatch(
             attachments,
             artifact_preview_base_url,
             continues_round,
+            origin,
         } => Box::pin(async move {
             if text.trim().is_empty() && attachments.is_empty() {
                 return Handled::err(ErrorCode::BadRequest, "there is nothing to send");
             }
+            // A local Agent caller is attributed by its verified identity, not
+            // by what it declares. Any other caller already acts as the owner,
+            // so a declared origin can only mark its text as Agent-written.
+            let origin = match caller.session_controller_id() {
+                Some(session_id) => Some(genehub_proto::InputOrigin {
+                    machine_id: state.machine.machine_id.clone(),
+                    machine_name: Some(crate::link::default_display_name()),
+                    session_id: session_id.to_string(),
+                }),
+                None => origin,
+            };
             if let Some(message_id) = message_id {
                 if let Some(run_id) = task_run_id.as_deref() {
                     if let Err(error) =
@@ -2149,7 +2147,8 @@ async fn dispatch(
                         text,
                         attachments,
                         task_run_id,
-                        "user",
+                        if origin.is_some() { "agent" } else { "user" },
+                        origin,
                     )
                     .await
                 {
@@ -2176,13 +2175,14 @@ async fn dispatch(
             let providers = state.providers().await;
             match state
                 .sessions
-                .send(
+                .send_attributed(
                     &session_id,
                     text,
                     attachments,
                     &providers,
                     artifact_preview_base_url,
                     continues_round,
+                    origin,
                 )
                 .await
             {

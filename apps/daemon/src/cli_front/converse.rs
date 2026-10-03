@@ -473,6 +473,7 @@ async fn run_conversation(rpc: &Rpc, run: Run, here: bool) -> Result<i32, CliFai
         attachments: Vec::new(),
         artifact_preview_base_url: None,
         continues_round: None,
+        origin: caller_origin(),
     })
     .await
     .map_err(query::rpc_error)?;
@@ -487,6 +488,22 @@ async fn run_conversation(rpc: &Rpc, run: Run, here: bool) -> Result<i32, CliFai
 
     let outcome = pump(rpc, &session.id, run.auto_approve, run.timeout, seq).await;
     Ok(report(&session.id, outcome))
+}
+
+/// The Agent Session this CLI runs in, declared to whichever daemon receives
+/// the send. A remote daemon cannot see the caller's local identity, so without
+/// this its Agent would read another Agent's text as the Human's.
+fn caller_origin() -> Option<genehub_proto::InputOrigin> {
+    let crate::authz::Principal::SessionController { session_id } = super::caller_principal()
+    else {
+        return None;
+    };
+    let state = super::local_state().ok()?;
+    Some(genehub_proto::InputOrigin {
+        machine_id: state.machine.machine_id.clone(),
+        machine_name: Some(crate::link::default_display_name()),
+        session_id,
+    })
 }
 
 fn opened(session: &SessionSummary, snapshot: &SessionSnapshot, attached: bool) {

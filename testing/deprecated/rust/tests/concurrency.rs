@@ -779,6 +779,7 @@ async fn run_turn_phase(
                     attachments: Vec::new(),
                     artifact_preview_base_url: None,
                     continues_round: None,
+                    origin: None,
                 })
                 .await;
             (started.elapsed(), reply)

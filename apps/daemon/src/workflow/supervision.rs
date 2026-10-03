@@ -257,6 +257,7 @@ pub(super) async fn deliver_notice(
                 Vec::new(),
                 Some(run.id.clone()),
                 "workflow",
+                None,
             )
             .await?;
         let handled = state.sessions.input_handled(&recipient, &notice.id).await? == Some(true);

@@ -1232,6 +1232,7 @@ async fn claude_history(
             "user" => {
                 title.get_or_insert_with(|| clip_import_text(&text, 120));
                 items.push(TimelineItem::UserMessage {
+                    origin: None,
                     id,
                     text,
                     attachments: Vec::new(),

@@ -532,6 +532,7 @@ mod tests {
             &mut usage,
             &[
                 TimelineItem::UserMessage {
+                    origin: None,
                     id: "u".into(),
                     text: "abcd".into(),
                     attachments: Vec::new(),
