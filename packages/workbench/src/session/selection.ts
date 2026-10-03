@@ -1,4 +1,4 @@
-import type { TimelineItem } from "@genehub/proto";
+import type { InputOrigin, TimelineItem } from "@genehub/proto";
 
 /** Hard cap on one forwarded/copied selection (user + assistant messages). */
 export const MAX_FORWARD_SELECTION = 30;
@@ -10,6 +10,8 @@ export interface SelectableMessage {
   text: string;
   /** Attachments are listed by name/mime only; payloads never travel. */
   attachments: { name: string; mime: string }[];
+  /** Present when another Agent Session wrote this "user" message. */
+  origin?: InputOrigin;
 }
 
 export function toSelectable(
@@ -26,6 +28,7 @@ export function toSelectable(
             mime: attachment.mime,
           }))
         : [],
+    ...(item.type === "userMessage" && item.origin ? { origin: item.origin } : {}),
   };
 }
 

@@ -32,7 +32,8 @@ pub struct ExchangeResponse {
 struct Call {
     head: ExchangeRequestHead,
     body: Vec<u8>,
-    maximum_response_bytes: usize,
+    /// `u64`, not `usize`: on wasm32 a `usize` caps a streamed file at 4 GiB.
+    maximum_response_bytes: u64,
     target: ResponseTarget,
 }
 
@@ -52,8 +53,8 @@ struct Stream {
     local_finished: bool,
     response_head: Option<ExchangeResponseHead>,
     response: Vec<u8>,
-    received_response_bytes: usize,
-    maximum_response_bytes: usize,
+    received_response_bytes: u64,
+    maximum_response_bytes: u64,
     remote_sequence: u32,
     target: ResponseTarget,
 }
@@ -159,7 +160,7 @@ impl ClientEndpoint {
                     timeout_ms,
                 },
                 body,
-                maximum_response_bytes,
+                maximum_response_bytes: u64::try_from(maximum_response_bytes)?,
                 target: ResponseTarget::Unary(Some(answer)),
             })
             .await
@@ -197,7 +198,7 @@ impl ClientEndpoint {
                     timeout_ms,
                 },
                 body,
-                maximum_response_bytes: usize::MAX,
+                maximum_response_bytes: u64::MAX,
                 target: ResponseTarget::Streaming {
                     head: Some(head),
                     chunks,
@@ -330,7 +331,7 @@ async fn run(
                         let head: ExchangeResponseHead = serde_json::from_slice(&frame.payload)
                             .context("invalid exchange response head")?;
                         if head.body_length.is_some_and(|length| {
-                            length > stream.maximum_response_bytes as u64
+                            length > stream.maximum_response_bytes
                         }) {
                             send_reset(
                                 &mut writer,
@@ -348,7 +349,7 @@ async fn run(
                     Kind::Data => {
                         let expected = stream.remote_sequence.checked_add(1)
                             .ok_or_else(|| anyhow!("stream sequence exhausted"))?;
-                        let next = stream.received_response_bytes.checked_add(frame.payload.len())
+                        let next = stream.received_response_bytes.checked_add(frame.payload.len() as u64)
                             .ok_or_else(|| anyhow!("response length overflow"))?;
                         if frame.value != expected || frame.payload.is_empty()
                             || stream.response_head.is_none()
@@ -397,7 +398,7 @@ async fn run(
                             anyhow::bail!("invalid exchange response FIN");
                         }
                         let head = stream.response_head.take().unwrap();
-                        if head.body_length.is_some_and(|length| length != stream.received_response_bytes as u64) {
+                        if head.body_length.is_some_and(|length| length != stream.received_response_bytes) {
                             anyhow::bail!("exchange response length does not match its head");
                         }
                         let body = std::mem::take(&mut stream.response);

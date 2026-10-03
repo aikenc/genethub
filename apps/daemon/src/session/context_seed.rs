@@ -336,6 +336,19 @@ struct RenderedItem {
 
 fn render_item(index: usize, item: &TimelineItem) -> Option<RenderedItem> {
     let (kind, text) = match item {
+        // Another Agent's request stays marked as such in the history a fork
+        // reads; otherwise the next Agent would take it for the Human's.
+        TimelineItem::UserMessage {
+            text,
+            origin: Some(origin),
+            ..
+        } => (
+            RenderedKind::User,
+            format!(
+                "[user origin=\"agent\" session=\"{}\" machine=\"{}\"]\n{text}\n[/user]",
+                origin.session_id, origin.machine_id
+            ),
+        ),
         TimelineItem::UserMessage { text, .. } => {
             (RenderedKind::User, format!("[user]\n{text}\n[/user]"))
         }
@@ -462,6 +475,37 @@ mod tests {
         assert!(built.seed.text.contains("history-omission"));
         assert!(built.stats.omitted_item_count > 0);
         assert!(built.stats.estimated_tokens <= built.stats.token_budget + 64);
+    }
+
+    #[test]
+    fn a_forked_history_keeps_an_agent_request_apart_from_the_human() {
+        let mut from_agent = user("u_agent", "deploy now");
+        if let TimelineItem::UserMessage { origin, .. } = &mut from_agent {
+            *origin = Some(genehub_proto::InputOrigin {
+                machine_id: "m_lead".into(),
+                machine_name: None,
+                session_id: "s_lead".into(),
+            });
+        }
+        let items = vec![
+            user("u", "hello"),
+            from_agent,
+            assistant("a", "ok"),
+            turn("t"),
+        ];
+        let built = build_context_seed(
+            "s",
+            "t",
+            Some("round-t"),
+            "codex",
+            &items,
+            4_096,
+            coverage(items.len()),
+        );
+        assert!(built.seed.text.contains("[user]\nhello\n[/user]"));
+        assert!(built.seed.text.contains(
+            "[user origin=\"agent\" session=\"s_lead\" machine=\"m_lead\"]\ndeploy now\n[/user]"
+        ));
     }
 
     #[test]

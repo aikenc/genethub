@@ -49,7 +49,8 @@ export function buildSelectionCopy(
   for (const message of messages) {
     lines.push("");
     const when = message.atMs === null ? "时间未知" : formatClock(message.atMs);
-    lines.push(`## ${message.role === "user" ? "用户" : "助手"} · ${when}`);
+    const speaker = message.role === "assistant" ? "助手" : message.origin ? `Agent（${message.origin.sessionId}）` : "用户";
+    lines.push(`## ${speaker} · ${when}`);
     if (message.text) lines.push(message.text);
     for (const image of message.gallery ?? []) {
       const href = image.dataUrl || image.path;

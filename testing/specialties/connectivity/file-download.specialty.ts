@@ -12,14 +12,16 @@ const records = (stdout: string): Array<Record<string, any>> =>
 
 defineSpecialty({
   id: "specialty.connectivity.file-download",
-  title: "A machine downloads a file from another, survives its own restart mid-transfer, and refuses a changed source",
-  oracle: "The receiving daemon's product CLI downloads a file that lives outside every workspace on the source machine; the landed file's SHA-256 equals the source and the CLI reports the same digest; an existing destination is refused; a transfer stalled mid-stream and cut off by a receiver restart is reported interrupted and resumes from the bytes already on disk to a byte-identical file; a source changed during an interrupted transfer is refused and its partial removed",
+  title: "A machine downloads a file from another, survives its own restart mid-transfer, refuses a changed source, and cancels a stalled transfer",
+  oracle: "The receiving daemon's product CLI downloads a file that lives outside every workspace on the source machine; the landed file's SHA-256 equals the source and the CLI reports the same digest; an existing destination is refused; a transfer stalled mid-stream and cut off by a receiver restart is reported interrupted and resumes from the bytes already on disk to a byte-identical file; a source changed during an interrupted transfer is refused and its partial removed; while one transfer writes a destination a second one to it is refused; cancelling a stalled transfer settles it as canceled without waiting for more bytes and leaves nothing behind",
   catches: [
     "completion claimed before the bytes were verified",
     "a resumed transfer restarting from zero or splicing two versions",
     "a receiver restart losing the transfer record",
     "a destination silently overwritten",
     "paths outside a workspace refused for the account owner",
+    "two transfers racing to the same destination",
+    "a cancel that waits on a stalled stream or still publishes the file",
   ],
   tags: ["network-risk-v2", "file-transfer", "genet-cli"],
   llm: { default: "none" },
@@ -28,7 +30,7 @@ defineSpecialty({
   resources: { environments: 1, cpu: 2, memoryMb: 1024, io: 2, browser: 0, pool: "standard" },
   surfaces: ["genet-cli", "daemon", "relay"],
   productInterfaces: ["genet-cli", "@genehub/workbench/client"],
-  stages: ["pair", "download", "refuse-existing", "resume-after-restart", "refuse-changed-source"],
+  stages: ["pair", "download", "refuse-existing", "resume-after-restart", "busy-and-cancel", "refuse-changed-source"],
   requiredArtifacts: ["genehub-host-local", "genehub_guest.wasm"],
 }, async t => {
   const receiverData = join(t.env.root, "receiver"); mkdirSync(receiverData, { recursive: true });
@@ -107,6 +109,31 @@ defineSpecialty({
         `the interrupted transfer did not resume from disk: exit=${resumed.code} ${scrub(resumed.stdout)} ${scrub(resumed.stderr)}`,
       );
       t.assertions.assert(sha256(join(landing, "second.bin")) === sourceDigest, "the resumed file differs from the source");
+    });
+
+    await t.stage("busy-and-cancel", async () => {
+      link.blackholeAfterServerBytes(6 * MIB);
+      const target = join(landing, "fourth.bin");
+      const begun = await genet(["file", "download", "--from", machineId, source, target, "--no-wait"]);
+      const id = (records(begun.stdout).find(record => record.type === "transfer.started")?.data?.transferId ?? "") as string;
+      t.assertions.assert(begun.code === 0 && id !== "", `the download did not start: ${scrub(begun.stdout)}`);
+      await t.tools.waitUntil(() => link.heldBytes().server > 0 && partials().some(file => statSync(join(landing, file)).size > 0), 30_000);
+      const other = join(sourceDir, "other.bin");
+      writeFileSync(other, randomBytes(MIB));
+      const busy = await genet(["file", "download", "--from", machineId, other, target, "--no-wait"]);
+      const busyError = parseJson(busy.stdout).error as { code?: string } | undefined;
+      t.assertions.assert(busy.code !== 0 && busyError?.code === "destinationBusy", `a second writer to the same destination was not refused: ${scrub(busy.stdout)}`);
+      const canceled = await genet(["file", "transfer", "cancel", id]);
+      t.assertions.assert(canceled.code === 0, `cancel failed: ${scrub(canceled.stdout)}`);
+      // The stream is still stalled: the cancel must settle without more bytes.
+      let state: string | undefined;
+      await t.tools.waitUntil(async () => {
+        const status = await genet(["file", "transfer", "status", id]);
+        state = (parseJson(status.stdout).data as { state?: string } | undefined)?.state;
+        return state === "canceled";
+      }, 15_000);
+      t.assertions.assert(!existsSync(target) && partials().length === 0, "a canceled transfer left files behind");
+      link.clearBlackhole(); link.cut();
     });
 
     await t.stage("refuse-changed-source", async () => {

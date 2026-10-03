@@ -239,7 +239,12 @@ function renderMessage(
     .map((attachment) => `[attachment name="${attachment.name}" mime="${attachment.mime}"]`)
     .join("\n");
   const body = attachmentLines ? `${text}\n${attachmentLines}` : text;
-  return `[${tag} at="${at}" round="${round}"]\n${body}\n[/${tag}]\n[source-ref id="${referenceId(source.sessionId, message.id)}"]`;
+  // An Agent's request keeps that attribution in forwarded history, so the
+  // receiving Agent does not read it as the Human's instruction.
+  const origin = message.origin
+    ? ` origin="agent" session="${message.origin.sessionId}" machine="${message.origin.machineId}"`
+    : "";
+  return `[${tag} at="${at}" round="${round}"${origin}]\n${body}\n[/${tag}]\n[source-ref id="${referenceId(source.sessionId, message.id)}"]`;
 }
 
 function renderRoundLine(round: RoundSummary, detailOmitted: boolean): string {
