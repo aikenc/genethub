@@ -283,6 +283,8 @@ pub enum StreamMethod {
     AssetPreview,
     /// Runs a command and streams what it writes.
     ShellRun,
+    /// Streams one file's bytes from an offset, for a peer downloading it.
+    FileRead,
     /// Moves this same authenticated peer onto a direct carrier.
     RtcNegotiate,
     RtcConfig,
@@ -299,6 +301,7 @@ impl StreamMethod {
             "asset.preview" => Some(StreamMethod::AssetPreview),
             "service.preview" => Some(StreamMethod::ServicePreview),
             "shell.run" => Some(StreamMethod::ShellRun),
+            "file.read" => Some(StreamMethod::FileRead),
             "rtc.negotiate" => Some(StreamMethod::RtcNegotiate),
             "rtc.config" => Some(StreamMethod::RtcConfig),
             genehub_proto::SPEECH_TRANSCRIBE_METHOD => Some(StreamMethod::SpeechTranscribe),
@@ -313,7 +316,7 @@ impl StreamMethod {
             StreamMethod::Events | StreamMethod::ProtocolIdentity => Capability::Handshake,
             // Returns file bytes. That it arrives as a stream rather than a
             // request does not make it a cheaper thing to hand out.
-            StreamMethod::AssetPreview => Capability::Files,
+            StreamMethod::AssetPreview | StreamMethod::FileRead => Capability::Files,
             StreamMethod::ServicePreview => Capability::Services,
             // The same authority as a terminal, deliberately not a grant of
             // its own. Running one command and opening a shell to run it are

@@ -1,6 +1,6 @@
 ---
 name: genehub
-description: GeneHub 通用能力入口与多机协作指南。用于：了解 GeneHub 工作台、机器、workspace、Agent 会话与 CLI；多机协作——查看机器目录、配对与授权、用 --machine 远程执行命令（shell）、判断跨机文件传输能力与验收结果、在其他机器启动或续接 Agent 会话；daemon 启动/停止/重启/离线恢复/环境生效；实时联调页面（网页白屏、DOM、截图、手机复现）；测试、安装或诊断本地语音识别 runtime（Qwen3-ASR）。静态与实时预览读 genehub-preview，会话历史读 genehub-introspect。不是通用软件开发流程。
+description: GeneHub 通用能力入口与多机协作指南。用于：了解 GeneHub 工作台、机器、workspace、Agent 会话与 CLI；多机协作——查看机器目录、配对与授权、用 --machine 远程执行命令（shell）、跨机下载/传输文件（file download）与验收、在其他机器启动或续接 Agent 会话；daemon 启动/停止/重启/离线恢复/环境生效；实时联调页面（网页白屏、DOM、截图、手机复现）；测试、安装或诊断本地语音识别 runtime（Qwen3-ASR）。静态与实时预览读 genehub-preview，会话历史读 genehub-introspect。不是通用软件开发流程。
 ---
 
 # GeneHub 使用入口
@@ -26,13 +26,13 @@ GeneHub 是端侧多机器 Agent 的 hub：每台机器上的 daemon 持有自�
 - 先 `context` 确认当前连接到哪台机器；`machine list --reachable` 看机器目录。**列出、在线都不等于
   当前身份能到达**：不可达会返回 `machineNotPaired`，据此报告并请用户处理，不要换身份或猜别的路径。
 - 可路由到其他机器：`context`、`shell`、`workspace`、`session`、`agent`（含 `agent run`）、`device`、
-  `client`。只能在本机：`workflow`、`process`、`machine`、`speech`、`daemon` 生命周期、`update`。
+  `client`。只能在本机：`workflow`、`process`、`machine`、`speech`、`file`、`daemon` 生命周期、`update`。
 - 配对、`device invite`、授权范围属于授权变更，只在用户明确要求时执行；授权只给所需最小范围，不要生成
   不限范围的设备，也不要把邀请链接或码贴进聊天以外的地方。
 - 会话控制本机与跨机同规则：Agent 可创建并控制普通会话，Workflow 受管子会话只由其 Workflow 写入；
   Agent 发出的消息带来源，按 Agent 输入而非 Human 决定对待。
 - 数据留在所属机器：不要为了“方便”把工作区或密钥搬到别的机器；把任务派给持有资源的那台机器。
-  用户明确要求传文件时，按指定源、目标和方向传输，见 [file-transfer.md](references/file-transfer.md)。
+  用户明确要求传文件时，由接收方 `file download --from <源>`，见 [file-transfer.md](references/file-transfer.md)。
 
 细节、命令形态和排障见 [multi-machine.md](references/multi-machine.md)。
 
@@ -41,7 +41,7 @@ GeneHub 是端侧多机器 Agent 的 hub：每台机器上的 daemon 持有自�
 | 任务 | 读什么 |
 |---|---|
 | 跨机器执行命令、派发或续接 Agent、配对与授权 | [multi-machine.md](references/multi-machine.md) |
-| 跨机上传、下载、GB 文件传输或续传能力判断 | [file-transfer.md](references/file-transfer.md) |
+| 跨机上传、下载、GB 文件传输与续传 | [file-transfer.md](references/file-transfer.md) |
 | daemon 启动、停止、重启、环境生效、离线恢复 | [daemon.md](references/daemon.md)，重启前必读 [daemon-restart.md](references/daemon-restart.md) |
 | 实时联调页面：白屏、DOM、交互、截图、移动端复现 | [client-debug.md](references/client-debug.md) |
 | 本地语音识别 runtime：测试、安装、登记、诊断、移除 | [speech-runtime.md](references/speech-runtime.md) |

@@ -221,6 +221,30 @@ impl Rpc {
         }
     }
 
+    /// A data stream on another machine. This daemon is never its own
+    /// source: a local file needs no transfer.
+    pub async fn open_data_stream(
+        &self,
+        method: &str,
+        metadata: serde_json::Value,
+    ) -> Result<
+        (
+            genehub_proto::ExchangeResponseHead,
+            crate::dataplane::client::ClientStream,
+        ),
+        RpcError,
+    > {
+        match &self.inner {
+            Inner::Local(_) => Err(RpcError::Transport(format!(
+                "{method} needs another machine; this one is local"
+            ))),
+            Inner::Remote(remote) => remote
+                .open_data_stream(method, metadata)
+                .await
+                .map_err(RpcError::from),
+        }
+    }
+
     pub async fn run_command(
         &self,
         request: &ShellRunRequest,

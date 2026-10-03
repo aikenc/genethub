@@ -380,6 +380,34 @@ impl Rpc {
     /// The body is the command's standard input, sent with the request rather
     /// than after it: the command must not start before its input is known, or
     /// a reader would reach end-of-file on input that was on its way.
+    /// Opens one data stream on the machine and returns once its head has
+    /// arrived, so a refusal comes back as the machine's typed error.
+    pub async fn open_data_stream(
+        &self,
+        method: &str,
+        metadata: Value,
+    ) -> Result<
+        (
+            genehub_proto::ExchangeResponseHead,
+            crate::dataplane::client::ClientStream,
+        ),
+        RpcError,
+    > {
+        let mut stream = self
+            .endpoint
+            .open_stream(method, metadata, Vec::new(), None)
+            .await
+            .map_err(|error| RpcError::Transport(format!("open {method}: {error:#}")))?;
+        let head = stream
+            .response_head()
+            .await
+            .map_err(|error| RpcError::Transport(format!("{method} head: {error:#}")))?;
+        if let Some(error) = head.error.clone() {
+            return Err(RpcError::Remote(error));
+        }
+        Ok((head, stream))
+    }
+
     pub async fn run_command(
         &self,
         request: &ShellRunRequest,

@@ -5,6 +5,7 @@
 
 mod converse;
 mod desktop;
+mod file;
 mod hub;
 mod machine;
 mod machines;
@@ -115,6 +116,26 @@ pub(crate) fn caller_stdin() -> Vec<u8> {
     CALLER_STDIN.try_with(Clone::clone).unwrap_or_default()
 }
 
+/// Runs `future` past the end of the invocation that started it, keeping the
+/// daemon state and caller it needs to keep dialling other machines.
+pub(crate) fn spawn_detached<F>(future: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let state = LOCAL_STATE.try_with(Arc::clone).ok();
+    let principal = caller_principal();
+    tokio::spawn(async move {
+        match state {
+            Some(state) => {
+                CALLER_PRINCIPAL
+                    .scope(principal, LOCAL_STATE.scope(state, future))
+                    .await
+            }
+            None => future.await,
+        }
+    });
+}
+
 pub(crate) fn caller_principal() -> Principal {
     CALLER_PRINCIPAL
         .try_with(Clone::clone)
@@ -192,6 +213,7 @@ async fn dispatch(args: Vec<String>) -> i32 {
         },
         Some("agent") => Box::pin(converse::agent(&args[1..], &selection)).await,
         Some("shell") => Box::pin(shell::shell(&args[1..], &selection)).await,
+        Some("file") => Box::pin(file::file(&args[1..], &selection)).await,
         Some("client") => Box::pin(client::run(&args[1..], &selection)).await,
         Some("speech") => Box::pin(speech::speech(&args[1..], &selection)).await,
         Some("workflow") => Box::pin(workflow::workflow(&args[1..], &selection)).await,

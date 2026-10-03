@@ -1132,6 +1132,7 @@ async fn serve_stream(stream: &mut ServerStream, services: &PeerServices) -> Res
             crate::dataplane::service_preview::handle(stream, services).await
         }
         StreamMethod::ShellRun => crate::dataplane::exec::handle(stream, services).await,
+        StreamMethod::FileRead => crate::dataplane::file_read::handle(stream, services).await,
         StreamMethod::RtcNegotiate => crate::dataplane::rtc::handle(stream, services).await,
         StreamMethod::RtcConfig => crate::dataplane::rtc::config_handle(stream, services).await,
         StreamMethod::SpeechTranscribe => crate::speech::handle(stream, services).await,
@@ -1402,6 +1403,7 @@ fn support_stream_operation(method: &str) -> Option<&'static str> {
         "service.preview" => Some("service.preview"),
         "rtc.negotiate" => Some("rtc.negotiate"),
         "shell.run" => Some("shell.run"),
+        "file.read" => Some("file.read"),
         _ => None,
     }
 }

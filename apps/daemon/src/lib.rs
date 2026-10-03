@@ -54,6 +54,7 @@ pub mod session;
 pub mod skills;
 pub mod speech;
 pub mod state;
+pub mod transfer;
 pub mod transport;
 pub mod updates;
 pub mod version;

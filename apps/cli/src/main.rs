@@ -24,6 +24,7 @@ const FORWARDED: &[&str] = &[
     "session",
     "agent",
     "shell",
+    "file",
     "speech",
     "client",
     "workflow",
