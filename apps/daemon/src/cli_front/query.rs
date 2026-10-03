@@ -16,11 +16,14 @@ use super::output::{self, CliFailure, CLI_SCHEMA};
 use super::rpc::{ConnectError, Refusal, Rpc, RpcError};
 use super::target::{self, Routing, Selection};
 
-const COMMAND_NAMES: [&str; 68] = [
+const COMMAND_NAMES: [&str; 71] = [
     "schema",
     "context",
     "capabilities",
     "shell",
+    "file.download",
+    "file.transfer.status",
+    "file.transfer.cancel",
     "process.list",
     "process.kill",
     "process.killAll",
@@ -109,6 +112,8 @@ fn mutates(name: &str) -> bool {
     matches!(
         name,
         "shell"
+            | "file.download"
+            | "file.transfer.cancel"
             | "process.kill"
             | "process.killAll"
             | "agent.run"
@@ -1217,6 +1222,51 @@ fn command_schema(name: &str) -> Value {
                 &["argv"],
             ),
         ),
+        "file.download" => (
+            "genet file download --from <machineId> <source> <destination> [--overwrite] \
+             [--no-wait] [--timeout <s>]",
+            true,
+            object_input(
+                json!({
+                    "from": {
+                        "type": "string",
+                        "minLength": 1,
+                        "$comment": "the machine the file is on, from `machine list --reachable`; \
+                                     the file lands on the machine running this command, so \
+                                     to receive elsewhere run it there (e.g. through \
+                                     `--machine <id> shell`)",
+                    },
+                    "source": {"type": "string", "minLength": 1, "$comment": "absolute path on the source machine"},
+                    "destination": {
+                        "type": "string",
+                        "minLength": 1,
+                        "$comment": "file path on this machine; relative paths resolve against \
+                                     the caller's directory; an existing file is refused \
+                                     unless overwrite",
+                    },
+                    "overwrite": {"type": "boolean"},
+                    "wait": {"type": "boolean", "$comment": "default true; --no-wait returns transfer.started at once"},
+                    "timeout": {
+                        "type": ["integer", "null"],
+                        "minimum": 1,
+                        "$comment": "seconds to wait; the transfer itself keeps running after \
+                                     the wait ends, and asking for the same download again \
+                                     resumes it rather than starting over",
+                    },
+                }),
+                &["from", "source", "destination"],
+            ),
+        ),
+        "file.transfer.status" => (
+            "genet file transfer status [<transferId>]",
+            true,
+            object_input(json!({"transferId": {"type": ["string", "null"]}}), &[]),
+        ),
+        "file.transfer.cancel" => (
+            "genet file transfer cancel <transferId>",
+            true,
+            object_input(json!({"transferId": {"type": "string", "minLength": 1}}), &["transferId"]),
+        ),
         "process.list" => (
             "genet process list [--machine <id>]",
             true,
@@ -1564,6 +1614,19 @@ fn command_schema(name: &str) -> Value {
                 "properties": {"schema": {"const": CLI_SCHEMA},
                     "type": {"enum": ["workflow.started", "session.event", "session.result", "workflow.result", "error"]}},
             }),
+            "file.download" => json!({
+                "type": "object",
+                "$comment": "JSON Lines; transfer.started first, transfer.progress every 10s \
+                             while waiting, then transfer.result (completed, or waited:false \
+                             after --timeout) or error (transferFailed, transferInterrupted, \
+                             transferCanceled, destinationExists). Completion means the file \
+                             was verified against the source's SHA-256 and renamed into place.",
+                "required": ["schema", "type"],
+                "properties": {"schema": {"const": CLI_SCHEMA},
+                    "type": {"enum": ["transfer.started", "transfer.progress", "transfer.result", "error"]}},
+            }),
+            "file.transfer.status" => single_output("transfer"),
+            "file.transfer.cancel" => single_output("transfer.cancel"),
             _ if !streams(name) => single_output(name),
             "shell" => command_output(),
             _ => stream_output(),
@@ -1621,7 +1684,7 @@ fn command_output() -> Value {
 fn streams(name: &str) -> bool {
     matches!(
         name,
-        "shell" | "agent.run" | "session.send" | "workflow.dispatch"
+        "shell" | "file.download" | "agent.run" | "session.send" | "workflow.dispatch"
     )
 }
 

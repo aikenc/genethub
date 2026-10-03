@@ -4,6 +4,7 @@ mod authenticated_channel;
 pub mod client;
 pub mod endpoint;
 pub mod exec;
+pub mod file_read;
 pub mod frame;
 pub mod handshake;
 pub mod preview;

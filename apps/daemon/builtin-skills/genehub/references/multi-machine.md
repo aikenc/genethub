@@ -46,8 +46,9 @@
 
 ## 跨机传文件
 
-上传、下载和 GB 文件续传先读 [file-transfer.md](file-transfer.md)。`shell` 的输入与文本输出都有
-独立限制；能远程执行命令不代表已有可靠的大文件传输能力。
+机器之间传文件（含 GB 文件、续传）用 `file download --from <源机器> <源路径> <目标路径>`，由接收文件的
+机器执行；反方向用 `--machine <对方> shell` 让对方下载。详见 [file-transfer.md](file-transfer.md)。不要用
+`shell` 的输入或输出搬运文件内容。
 
 ## 在目标机器上跑 Agent 并接力
 
@@ -80,7 +81,7 @@
 
 ## 只能在本机的命令
 
-`workflow`、`process`、`machine`、`speech`、daemon 生命周期（`daemon …`）和 `update` 不可路由，
+`workflow`、`process`、`machine`、`speech`、`file`、daemon 生命周期（`daemon …`）和 `update` 不可路由，
 `--machine` 对它们无效。远端的 daemon 重启走那台机器自己的独立连接，见 [daemon.md](daemon.md)。
 
 ## 配对与授权（授权变更，需用户明确要求）

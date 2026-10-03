@@ -11,6 +11,7 @@ export async function startFaultLink(target: string) {
   const held = new Set<{ socket: Socket; target: Socket; bytes: Buffer; direction: "client" | "server" }>();
   let cutAt: number | null = null;
   let serverCutAt: number | null = null;
+  let serverHoldAt: number | null = null;
   const server = createServer((front) => {
     accepted++;
     if (blocked) { front.destroy(); return; }
@@ -29,6 +30,7 @@ export async function startFaultLink(target: string) {
     back.on("data", bytes => {
       serverBytes += bytes.length;
       if (serverCutAt !== null && serverBytes >= serverCutAt) { serverCutAt = null; cuts++; close(); return; }
+      if (serverHoldAt !== null && serverBytes >= serverHoldAt) { serverHoldAt = null; dropServer = true; }
       if (dropServer) { heldServer += bytes.length; back.pause(); held.add({ socket: back, target: front, bytes, direction: "server" }); return; }
       if (!front.write(bytes)) { back.pause(); front.once("drain", () => back.resume()); }
     });
@@ -48,10 +50,12 @@ export async function startFaultLink(target: string) {
     injectedCuts: () => cuts,
     cutAfterServerBytes(bytes: number) { if (!Number.isSafeInteger(bytes) || bytes <= 0) throw new Error("positive fault byte threshold required"); serverCutAt = serverBytes + bytes; },
     bytes: () => ({ client: clientBytes, server: serverBytes }),
+    /** Starts holding server-to-client bytes once this many more have passed: a stall in mid-transfer, not a cut. */
+    blackholeAfterServerBytes(bytes: number) { if (!Number.isSafeInteger(bytes) || bytes <= 0) throw new Error("positive fault byte threshold required"); serverHoldAt = serverBytes + bytes; },
     heldBytes: () => ({ client: heldClient, server: heldServer }),
     blackhole(direction: "client" | "server" | "both") { dropClient = direction !== "server"; dropServer = direction !== "client"; },
     clearBlackhole() {
-      dropClient = false; dropServer = false;
+      dropClient = false; dropServer = false; serverHoldAt = null;
       for (const item of held) {
         if (!item.target.destroyed && !item.socket.destroyed) {
           if (item.target.write(item.bytes)) item.socket.resume();
