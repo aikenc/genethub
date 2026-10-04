@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{SinkExt, Stream, StreamExt};
 use genehub_proto::{PeerAuth, PeerHello, TransportKind};
 use tokio::sync::{mpsc, Notify};
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
@@ -39,6 +39,12 @@ const BACKOFF: [u64; 6] = [1, 2, 5, 10, 30, 60];
 /// An uplink that stayed up this long was healthy, so its loss starts a fresh
 /// backoff; one that the relay drops immediately keeps escalating.
 const STABLE_UPLINK: Duration = Duration::from_secs(30);
+/// The relay pings every endpoint on its heartbeat (30 s by default) and drops
+/// one that misses it. When that drop never reaches this end — NAT rebinding,
+/// a laptop or WSL VM that slept — the socket stays half open: nothing more
+/// arrives, nothing fails, and the daemon keeps calling itself online while
+/// the Hub has listed it offline for days. Silence this long is that state.
+const UPLINK_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Default)]
 struct UplinkBackoff {
@@ -369,7 +375,15 @@ async fn run_once(
     let tasks = Arc::new(tokio::sync::Mutex::new(Vec::new()));
 
     let read_result = async {
-        while let Some(message) = source.next().await {
+        loop {
+            let message = match next_or_silent(&mut source, UPLINK_IDLE_TIMEOUT).await {
+                Ok(Some(message)) => message,
+                Ok(None) => break,
+                Err(error) => {
+                    *close_reason = Some("silent");
+                    return Err(error);
+                }
+            };
             match message? {
                 Message::Binary(bytes) => {
                     let frame = decode(&bytes).ok_or_else(|| anyhow!("malformed Fabric frame"))?;
@@ -411,6 +425,17 @@ async fn run_once(
     socket_writer.abort();
     read_result?;
     anyhow::bail!("Fabric WebSocket ended")
+}
+
+/// The next uplink message, or an error once the relay has been silent for
+/// `idle` — its own pings included, so a live relay never trips this.
+async fn next_or_silent<S: Stream + Unpin>(
+    source: &mut S,
+    idle: Duration,
+) -> Result<Option<S::Item>> {
+    tokio::time::timeout(idle, source.next())
+        .await
+        .map_err(|_| anyhow!("the Fabric relay sent nothing for {}s", idle.as_secs()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1326,6 +1351,21 @@ mod tests {
         assert_eq!(
             transport_flow_url("wss://relay.example/fabric/v2?ticket=one-use").unwrap(),
             "wss://relay.example/fabric/v2?ticket=one-use&flow=transport-v1"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_silent_uplink_is_given_up_instead_of_awaited_forever() {
+        let idle = Duration::from_millis(50);
+        let mut half_open = futures_util::stream::pending::<u8>();
+        assert!(next_or_silent(&mut half_open, idle).await.is_err());
+
+        let mut talking = futures_util::stream::iter([7u8]);
+        assert_eq!(next_or_silent(&mut talking, idle).await.unwrap(), Some(7));
+        assert_eq!(next_or_silent(&mut talking, idle).await.unwrap(), None);
+        assert!(
+            UPLINK_IDLE_TIMEOUT > Duration::from_secs(60),
+            "must outlast relay heartbeats"
         );
     }
 
