@@ -557,6 +557,7 @@ impl SessionManager {
             media_tags: Vec::new(),
             title,
             title_locked: false,
+            labels: Vec::new(),
             cwd,
             model_id,
             mode_id,
@@ -729,6 +730,7 @@ impl SessionManager {
             media_tags: Vec::new(),
             title,
             title_locked: false,
+            labels: Vec::new(),
             cwd,
             model_id,
             mode_id,
@@ -984,6 +986,7 @@ impl SessionManager {
             media_tags,
             title,
             title_locked: source_meta.title_locked,
+            labels: Vec::new(),
             cwd: source_meta.cwd,
             model_id,
             mode_id,
@@ -1246,6 +1249,7 @@ impl SessionManager {
                 .as_deref()
                 .and_then(|title| title_from(&format!("{title} · 分支"))),
             title_locked: false,
+            labels: Vec::new(),
             cwd,
             model_id,
             mode_id: target.mode_id,
@@ -1464,6 +1468,7 @@ impl SessionManager {
             media_tags: Vec::new(),
             title: history.title.or(Some(candidate.title)),
             title_locked: false,
+            labels: Vec::new(),
             cwd,
             model_id: None,
             mode_id: None,
@@ -4611,6 +4616,27 @@ impl SessionManager {
         Ok(summary)
     }
 
+    /// Applies a label change under the meta lock, so concurrent writers from
+    /// different devices compose instead of overwriting one another.
+    pub async fn label(
+        &self,
+        session_id: &str,
+        add: &[String],
+        remove: &[String],
+    ) -> Result<SessionSummary> {
+        let live = self.live(session_id).await?;
+        let mut meta = live.meta.lock().await;
+        let labels = super::store::apply_session_labels(&meta.labels, add, remove)
+            .map_err(|error| anyhow!("invalid session label: {error}"))?;
+        if labels != meta.labels {
+            meta.labels = labels;
+            meta.updated_at_ms = now_ms();
+            self.store.save_meta(&meta)?;
+        }
+        let status = *live.status.lock().await;
+        Ok(meta.summary(status))
+    }
+
     /// Erases a session: timeline, metadata and scratch space.
     ///
     /// Deleting one that is already gone succeeds. The caller asked for it not
@@ -7566,6 +7592,7 @@ mod tests {
             media_tags: Vec::new(),
             title: None,
             title_locked: false,
+            labels: Vec::new(),
             cwd: PathBuf::from("/tmp"),
             model_id: None,
             mode_id: None,
@@ -9841,6 +9868,44 @@ mod tests {
                 .as_deref(),
             Some("收尾发布"),
             "the new name only reached the copy in memory, so it is lost on restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn labels_compose_across_writers_and_survive_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = manager(dir.path());
+        sessions.store.save_meta(&meta()).unwrap();
+        let words = |list: &[&str]| list.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+
+        sessions
+            .label("s1", &words(&[" 4090 ", "pm"]), &[])
+            .await
+            .unwrap();
+        // A second writer that only knows its own change must not drop "pm".
+        let summary = sessions
+            .label("s1", &words(&["评审", "4090"]), &words(&["4090"]))
+            .await
+            .unwrap();
+        assert_eq!(summary.labels, words(&["pm", "评审", "4090"]));
+        assert_eq!(
+            sessions.store.load_meta("w1", "s1").unwrap().labels,
+            summary.labels,
+            "labels only reached the copy in memory"
+        );
+
+        let error = sessions
+            .label("s1", &words(&["十一个字符的标签名称呀"]), &[])
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("invalid session label"));
+        assert!(sessions.label("s1", &words(&["  "]), &[]).await.is_err());
+        let too_many: Vec<String> = (0..16).map(|n| format!("l{n}")).collect();
+        assert!(sessions.label("s1", &too_many, &[]).await.is_err());
+        assert_eq!(
+            sessions.summary("s1").await.unwrap().labels,
+            words(&["pm", "评审", "4090"]),
+            "a refused change must leave the labels untouched"
         );
     }
 

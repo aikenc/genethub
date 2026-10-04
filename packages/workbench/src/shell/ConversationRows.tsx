@@ -14,6 +14,7 @@ import { relativeTime } from "../ui/relativeTime";
 import { useAgentActivity } from "../workspace/useAgentActivity";
 import { inAgentGroup, useAgentGroups } from "../workspace/agentGroups";
 import { AgentDetailsDialog, AgentDetailsEnvironment } from "../workspace/AgentDetails";
+import { AgentAvatar } from "../workspace/AgentAvatar";
 import { SessionStatusIcon } from "./SessionStatusIcon";
 
 interface RowActions {
@@ -358,6 +359,7 @@ function SessionRow({
 } & RowActions) {
   const [menu, setMenu] = useState<"shut" | "open" | "confirming">("shut");
   const [editing, setEditing] = useState(false);
+  const [labeling, setLabeling] = useState(false);
   const [processesOpen, setProcessesOpen] = useState(false);
   const summaries = useWorkbench(state => state.sessions);
   const stale = useWorkbench(state => state.sessionsError || state.connection !== "ready");
@@ -386,46 +388,56 @@ function SessionRow({
   }
 
   return (
-    <li className={`conversation-row group relative flex w-full min-w-0 max-w-full items-center ${pick ? "overflow-hidden" : ""}`}>
-      {selection && <input type="checkbox" aria-label={`选择 ${title(session)}`} checked={selection.ids.has(session.id)} disabled={selection.disabled} onChange={() => selection.toggle(session.id)} className="ml-2 h-5 w-5 shrink-0 accent-[rgb(var(--accent))]" />}
-      <button
-        type="button"
-        role={pick ? "option" : undefined}
-        aria-selected={pick ? active : undefined}
-        disabled={selection ? selection.disabled : Boolean(unsupported)}
-        title={unsupported ? whyUnsupported(unsupported) : undefined}
-        className={`entity-main conversation-main flex min-h-16 min-w-0 flex-1 items-center gap-3 rounded-lg px-3 py-3 text-left text-sm ${
-          unsupported
-            ? "cursor-not-allowed text-faint"
-            : active
-              ? "bg-raised text-fg"
-              : "text-muted hover:bg-sidebar-hover hover:text-fg"
-        }`}
-        onClick={() => selection ? selection.toggle(session.id) : onPickSession(session.id)}
-      >
-        <EntityAvatar id={session.workspaceId} name={project?.name ?? "项目"} badge={session.unread ? <span role="img" aria-label="有未读新回复" title="有未读新回复" className="block h-2 w-2 rounded-full bg-accent" /> : undefined}/>
-        <EntityText title={title(session)} hint={`${messageDate.toLocaleString()} · ${project?.name ?? "项目"}${groupNames.length ? " · " + groupNames.join("、") : ""}`}>
-          <span className="min-w-0 flex-1">
-          {(facts.label || stale) && <span className="block"><SessionStatusIcon session={session} sessions={summaries} showLabel stale={stale} /></span>}
-          <span className="flex min-w-0 items-center gap-1">
-          <time dateTime={messageDate.toISOString()} className="shrink-0">{relativeTime(messageDate.getTime())}</time>
-          <span className="truncate">· {project?.name ?? "项目"}{groupNames.length ? ` · ${groupNames.join("、")}` : ""}{session.draftCount ? ` · ${session.draftCount} 个草稿` : ""}{managedReadOnly ? " · 只读" : ""}{session.archived ? " · 已归档" : ""}{unsupported ? " · 需升级" : ""}</span>
-          </span></span>
-        </EntityText>
-      </button>
+    <li className={`conversation-row group relative w-full min-w-0 max-w-full ${pick ? "overflow-hidden" : ""}`}>
+      <div className="flex w-full min-w-0 items-center">
+        {selection && <input type="checkbox" aria-label={`选择 ${title(session)}`} checked={selection.ids.has(session.id)} disabled={selection.disabled} onChange={() => selection.toggle(session.id)} className="ml-2 h-5 w-5 shrink-0 accent-[rgb(var(--accent))]" />}
+        <div className="relative min-w-0 flex-1">
+          <button
+            type="button"
+            role={pick ? "option" : undefined}
+            aria-selected={pick ? active : undefined}
+            disabled={selection ? selection.disabled : Boolean(unsupported)}
+            title={unsupported ? whyUnsupported(unsupported) : undefined}
+            className={`entity-main conversation-main block min-h-16 w-full min-w-0 rounded-lg px-3 py-3 text-left text-sm ${
+              unsupported
+                ? "cursor-not-allowed text-faint"
+                : active
+                  ? "bg-raised text-fg"
+                  : "text-muted hover:bg-sidebar-hover hover:text-fg"
+            }`}
+            onClick={() => selection ? selection.toggle(session.id) : onPickSession(session.id)}
+          >
+            {/* Always three lines: title, time and project, then a short status icon with labels. */}
+            <span className="entity-copy block min-w-0">
+              <span className="entity-title flex min-w-0 items-center gap-1.5 text-sm font-medium leading-5 text-fg">
+                {session.unread && <span role="img" aria-label="有未读新回复" title="有未读新回复" className="block h-2 w-2 shrink-0 rounded-full bg-accent" />}
+                <span className="truncate">{title(session)}</span>
+              </span>
+              <span className={`conversation-facts entity-secondary flex min-w-0 items-center gap-1 text-xs font-normal leading-4 text-muted ${!selection && !pick ? "conversation-row-meta" : ""}`} title={`${messageDate.toLocaleString()} · ${project?.name ?? "项目"}${groupNames.length ? " · " + groupNames.join("、") : ""}`}>
+                <AgentAvatar id={session.workspaceId} name={project?.name ?? "项目"} size="small" />
+                <span className="min-w-0 truncate"><time dateTime={messageDate.toISOString()}>{relativeTime(messageDate.getTime())}</time> · {project?.name ?? "项目"}{groupNames.length ? ` · ${groupNames.join("、")}` : ""}{session.draftCount ? ` · ${session.draftCount} 个草稿` : ""}{managedReadOnly ? " · 只读" : ""}{session.archived ? " · 已归档" : ""}{unsupported ? " · 需升级" : ""}</span>
+              </span>
+              <span className={`conversation-marks entity-secondary flex min-h-3.5 min-w-0 items-center gap-1 text-[10px] font-normal leading-[14px] ${!selection && !pick ? "conversation-row-meta" : ""}`}>
+                {(facts.kind || stale) && <SessionStatusIcon session={session} sessions={summaries} stale={stale} />}
+                {session.labels?.map((label) => <span key={label} className="session-label shrink-0 rounded bg-accent/10 px-1 text-accent">{label}</span>)}
+              </span>
+            </span>
+          </button>
 
-      {!selection && !pick && <button
-        type="button"
-        aria-label={`${title(session)} 的更多操作`}
-        aria-expanded={menu !== "shut"}
-        // Always there on a touch screen: hover is the one interaction a phone
-        // cannot perform, and hiding the only way to delete a conversation
-        // behind it is how this ended up missing entirely.
-        className="conversation-row-more flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-sidebar-hover hover:text-fg"
-        onClick={() => setMenu((state) => (state === "shut" ? "open" : "shut"))}
-      >
-        <span aria-hidden>⋯</span>
-      </button>}
+          {!selection && !pick && <button
+            type="button"
+            aria-label={`${title(session)} 的更多操作`}
+            aria-expanded={menu !== "shut"}
+            // Always there on a touch screen: hover is the one interaction a phone
+            // cannot perform, and hiding the only way to delete a conversation
+            // behind it is how this ended up missing entirely.
+            className="conversation-row-more absolute bottom-0.5 right-0.5 flex h-10 w-10 items-center justify-center rounded-lg text-muted hover:bg-sidebar-hover hover:text-fg"
+            onClick={() => setMenu((state) => (state === "shut" ? "open" : "shut"))}
+          >
+            <span aria-hidden>⋯</span>
+          </button>}
+        </div>
+      </div>
 
       {menu === "shut" || selection ? null : (
         <Menu
@@ -446,6 +458,10 @@ function SessionRow({
             setMenu("shut");
             setEditing(true);
           }}
+          onLabel={() => {
+            setMenu("shut");
+            setLabeling(true);
+          }}
           onOpenProcesses={() => {
             setMenu("shut");
             setProcessesOpen(true);
@@ -456,6 +472,13 @@ function SessionRow({
             onDelete(session.id);
           }}
           onDismiss={() => setMenu("shut")}
+        />
+      )}
+      {labeling && (
+        <LabelEditor
+          labels={session.labels ?? []}
+          onChange={(change) => useWorkbench.getState().labelSession(session.id, change)}
+          onDone={() => setLabeling(false)}
         />
       )}
       {processesOpen ? (
@@ -483,6 +506,7 @@ function Menu({
   confirming,
   readOnly,
   onRename,
+  onLabel,
   onOpenProcesses,
   onAskDelete,
   onDelete,
@@ -494,6 +518,7 @@ function Menu({
   confirming: boolean;
   readOnly: boolean;
   onRename(): void;
+  onLabel(): void;
   onOpenProcesses(): void;
   onAskDelete(): void;
   onDelete(): void;
@@ -554,6 +579,16 @@ function Menu({
                 onClick={onRename}
               >
                 重命名
+              </button>
+            ) : null}
+            {!readOnly ? (
+              <button
+                type="button"
+                role="menuitem"
+                className="flex min-h-10 w-full items-center px-3 text-left text-sm text-fg hover:bg-raised md:min-h-0 md:py-1.5 md:text-xs"
+                onClick={onLabel}
+              >
+                标签
               </button>
             ) : null}
             <button
@@ -627,6 +662,81 @@ function Rename({
         }
       }}
     />
+  );
+}
+
+/** Mirrors the daemon's limit so an over-long label is refused before it is sent. */
+const MAX_LABEL_CHARS = 10;
+
+/**
+ * Add, remove and rename a conversation's labels in place.
+ *
+ * A rename is one `remove` + `add` request, so another device never sees the
+ * label briefly missing.
+ */
+function LabelEditor({
+  labels,
+  onChange,
+  onDone,
+}: {
+  labels: string[];
+  onChange(change: { add?: string[]; remove?: string[] }): Promise<boolean>;
+  onDone(): void;
+}) {
+  const [draft, setDraft] = useState("");
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const field = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    field.current?.focus();
+  }, [renaming]);
+
+  const commit = async () => {
+    const label = draft.trim();
+    if (!label) return setRenaming(null);
+    if ([...label].length > MAX_LABEL_CHARS) return setError(`标签最多 ${MAX_LABEL_CHARS} 个字符`);
+    if (await onChange({ add: [label], remove: renaming ? [renaming] : [] })) {
+      setDraft("");
+      setRenaming(null);
+      setError("");
+    }
+  };
+
+  return (
+    <div role="group" aria-label="会话标签" className="mx-1 mb-2 rounded-lg border border-line-strong bg-surface p-2 text-xs">
+      {labels.length > 0 && (
+        <ul className="mb-2 flex flex-wrap gap-1">
+          {labels.map((label) => (
+            <li key={label} className={`inline-flex items-center rounded text-accent ${label === renaming ? "bg-accent/25" : "bg-accent/10"}`}>
+              <button type="button" aria-label={`修改标签 ${label}`} className="min-h-8 px-1.5" onClick={() => { setRenaming(label); setDraft(label); setError(""); }}>{label}</button>
+              <button type="button" aria-label={`删除标签 ${label}`} className="min-h-8 px-1.5 text-muted hover:text-danger" onClick={() => void onChange({ remove: [label] })}>×</button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="flex gap-2">
+        <input
+          ref={field}
+          aria-label={renaming ? `把标签 ${renaming} 改为` : "添加标签"}
+          placeholder={renaming ? "新的标签名，回车确认" : "添加标签，回车确认"}
+          value={draft}
+          onChange={(event) => { setDraft(event.target.value); setError(""); }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+              event.preventDefault();
+              void commit();
+            }
+            if (event.key === "Escape") {
+              event.preventDefault();
+              if (renaming) { setRenaming(null); setDraft(""); } else onDone();
+            }
+          }}
+          className="min-h-9 min-w-0 flex-1 rounded-md border border-line bg-surface px-2 text-base text-fg outline-none focus:border-accent md:text-xs"
+        />
+        <button type="button" className="min-h-9 shrink-0 px-2 text-accent" onClick={onDone}>完成</button>
+      </div>
+      {error ? <p role="alert" className="mt-1 text-danger">{error}</p> : <p className="mt-1 text-faint">每个标签最多 {MAX_LABEL_CHARS} 个字符；点标签可修改。</p>}
+    </div>
   );
 }
 

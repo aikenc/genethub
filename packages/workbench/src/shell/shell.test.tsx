@@ -122,6 +122,44 @@ describe("what can be done to one conversation", () => {
     expect(screen.getByText("更新流程")).toBeInTheDocument();
   });
 
+  it("adds, renames and removes labels, each as one atomic change", async () => {
+    const labelSession = vi.fn(async () => true);
+    useWorkbench.setState({
+      labelSession,
+      sessions: [session("s1", "w1", "修复移动端横向拖动", true), session("s2", "w1", "更新流程"), { ...session("s4", "w1", "评审"), labels: ["4090", "pm"] }],
+    });
+    sidebar();
+    // Every row is three lines. Time and project stay on their own line; labels share a smaller line with the status icon.
+    const review = screen.getByText("评审").closest(".conversation-main");
+    expect(review?.querySelectorAll(".entity-title, .conversation-facts, .conversation-marks")).toHaveLength(3);
+    expect(review?.querySelector(".entity-title")?.textContent).toBe("评审");
+    expect(review?.querySelector(".conversation-facts")?.textContent).toContain("genethub");
+    expect(review?.querySelector(".conversation-facts")?.textContent).not.toContain("4090");
+    expect(review?.querySelector(".conversation-marks")?.textContent).toContain("4090");
+    const running = screen.getByText("修复移动端横向拖动").closest(".conversation-main");
+    expect(running?.querySelectorAll(".entity-title, .conversation-facts, .conversation-marks")).toHaveLength(3);
+    expect(running?.querySelector(".conversation-marks")?.textContent).not.toContain("处理中");
+    expect(running?.querySelector("[aria-label='Agent 处理中']")).not.toBeNull();
+
+    await openMenu("评审");
+    await userEvent.click(screen.getByRole("menuitem", { name: "标签" }));
+    await userEvent.type(screen.getByLabelText("添加标签"), "  mac {Enter}");
+    expect(labelSession).toHaveBeenLastCalledWith("s4", { add: ["mac"], remove: [] });
+
+    await userEvent.click(screen.getByRole("button", { name: "修改标签 pm" }));
+    const rename = screen.getByLabelText("把标签 pm 改为");
+    await userEvent.clear(rename);
+    await userEvent.type(rename, "组长{Enter}");
+    expect(labelSession).toHaveBeenLastCalledWith("s4", { add: ["组长"], remove: ["pm"] });
+
+    await userEvent.click(screen.getByRole("button", { name: "删除标签 4090" }));
+    expect(labelSession).toHaveBeenLastCalledWith("s4", { remove: ["4090"] });
+
+    await userEvent.type(screen.getByLabelText("添加标签"), "十一个字符的标签名称呀{Enter}");
+    expect(screen.getByRole("alert")).toHaveTextContent("最多 10 个字符");
+    expect(labelSession).toHaveBeenCalledTimes(3);
+  });
+
   it("opens one conversation's process dialog from its own menu", async () => {
     sidebar();
     await openMenu("更新流程");

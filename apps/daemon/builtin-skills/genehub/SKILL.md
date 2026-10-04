@@ -31,6 +31,8 @@ GeneHub 是端侧多机器 Agent 的 hub：每台机器上的 daemon 持有自�
   不限范围的设备，也不要把邀请链接或码贴进聊天以外的地方。
 - 会话控制本机与跨机同规则：Agent 可创建并控制普通会话，只读的 Workflow 受管子会话只由委托它的 PM（或项目例外权限）写入；
   Agent 发出的消息带来源，按 Agent 输入而非 Human 决定对待。
+- 用会话标签（`session label`、`agent run --label`、`session list --label`）标明会话的设备、角色或分工，
+  不要把 `[标签]` 写进标题；见 [multi-machine.md](references/multi-machine.md)。
 - 数据留在所属机器：不要为了“方便”把工作区或密钥搬到别的机器；把任务派给持有资源的那台机器。
   用户明确要求传文件时，由接收方 `file download --from <源>`，见 [file-transfer.md](references/file-transfer.md)。
 

@@ -56,7 +56,7 @@ pub const RESERVED: [&str; 19] = [
     "file",
 ];
 
-const ROUTABLE: [&str; 33] = [
+const ROUTABLE: [&str; 34] = [
     "context",
     "shell",
     "workspace.list",
@@ -74,6 +74,7 @@ const ROUTABLE: [&str; 33] = [
     "session.respond",
     "session.interrupt",
     "session.close",
+    "session.label",
     "agent.list",
     "agent.run",
     "device.list",

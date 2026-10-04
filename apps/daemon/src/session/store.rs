@@ -240,6 +240,9 @@ pub struct SessionMeta {
     /// Metas written before this existed read back as unlocked.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub title_locked: bool,
+    /// See [`apply_session_labels`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
     pub cwd: PathBuf,
     pub model_id: Option<String>,
     pub mode_id: Option<String>,
@@ -370,6 +373,7 @@ impl SessionMeta {
             media_tags: Vec::new(),
             title: header.title,
             title_locked: false,
+            labels: Vec::new(),
             cwd,
             model_id: None,
             mode_id: None,
@@ -440,6 +444,7 @@ impl SessionMeta {
             media_tags: self.media_tags.clone(),
             managed: self.managed.clone(),
             title: self.title.clone(),
+            labels: self.labels.clone(),
             status,
             model_id: self.model_id.clone(),
             mode_id: self.mode_id.clone(),
@@ -2006,6 +2011,48 @@ pub fn normalize_session_title(title: &str) -> Option<String> {
     Some(trimmed.chars().take(120).collect())
 }
 
+pub const MAX_SESSION_LABEL_CHARS: usize = 10;
+pub const MAX_SESSION_LABELS: usize = 16;
+
+/// Removes, then adds, labels on top of `current`, keeping first-added order.
+///
+/// Labels are trimmed and compared exactly. Removing an absent label is a
+/// no-op, so a retried relabel converges instead of failing.
+pub fn apply_session_labels(
+    current: &[String],
+    add: &[String],
+    remove: &[String],
+) -> Result<Vec<String>, String> {
+    let mut labels: Vec<String> = current
+        .iter()
+        .filter(|label| !remove.iter().any(|gone| gone.trim() == label.as_str()))
+        .cloned()
+        .collect();
+    for raw in add {
+        let label = raw.trim();
+        if label.is_empty() {
+            return Err("a session label cannot be empty".into());
+        }
+        if label.chars().count() > MAX_SESSION_LABEL_CHARS {
+            return Err(format!(
+                "session label '{label}' is longer than {MAX_SESSION_LABEL_CHARS} characters"
+            ));
+        }
+        if label.chars().any(char::is_control) {
+            return Err("a session label cannot contain control characters".into());
+        }
+        if !labels.iter().any(|existing| existing == label) {
+            labels.push(label.to_string());
+        }
+    }
+    if labels.len() > MAX_SESSION_LABELS {
+        return Err(format!(
+            "a session can have at most {MAX_SESSION_LABELS} labels"
+        ));
+    }
+    Ok(labels)
+}
+
 fn has_cjk(text: &str) -> bool {
     text.chars().any(|ch| {
         matches!(
@@ -2157,6 +2204,7 @@ mod project_home_tests {
             media_tags: Vec::new(),
             title: Some(id.into()),
             title_locked: false,
+            labels: Vec::new(),
             cwd: cwd.to_path_buf(),
             model_id: None,
             mode_id: None,

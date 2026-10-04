@@ -69,6 +69,23 @@
 - 把任务派给持有该资源（代码、许可、GPU、外设）的机器，不要把工作区搬到别处。
 - 其他可路由的只读命令：`workspace list/show`、`session get/inspect/narrative/rounds/context`。
 
+## 用会话标签标识协作角色
+
+标签是会话上的短字符串（每个最多 10 个字符，每个会话最多 16 个），用来标明会话的设备、角色或分工，
+例如 `4090`、`组长`、`评审`。**不要再把 `[标签]` 写进会话标题**：标题留给内容，标签可单独增删和筛选。
+
+```bash
+"$GENEHUB_CLI" agent run --machine <machineId> --agent <agentId> --cwd /abs/path --label 4090 --label 组员 "<任务>" --no-wait
+"$GENEHUB_CLI" session label <sessionId> --add 评审 [--machine <machineId>]
+"$GENEHUB_CLI" session label <sessionId> --remove 组员 --add 组长     # 改名：一次请求内先删后加
+"$GENEHUB_CLI" session list --machine <machineId> --label 4090 --label 组员  # 同时带这些标签的会话
+```
+
+- 当前标签在 `session get` / `session list` 返回的 `labels` 里；工作台会话列表每条固定三行：标题、时间与项目名、较小的状态图标和标签。状态不写文字。也可在“⋯ → 标签”里增删改。
+- `--add` 与 `--remove` 都可重复；同一请求先删后加，在会话所属机器上原子执行，多台设备同时改不会互相覆盖。
+  删除不存在的标签不报错；空标签、超长或超过数量上限时整次请求被拒，标签保持不变。
+- 标签只用于标识和筛选，不影响权限、路由或 Agent 选择（选路仍用 `--tag`）；fork 出的会话不继承标签。
+
 ## 会话控制与来源
 
 - Agent 会话控制其他会话时，本机与 `--machine` 遵循同一套规则：可以创建普通会话，也可以对普通会话执行

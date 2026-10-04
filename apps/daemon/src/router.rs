@@ -70,6 +70,7 @@ fn failed(error: anyhow::Error) -> Handled {
         || message.contains("session artifact metadata")
         || message.contains("session artifact exceeds")
         || message.contains("artifact upload incomplete")
+        || message.contains("invalid session label")
     {
         ErrorCode::BadRequest
     } else if message.contains("artifact upload conflict")
@@ -297,6 +298,7 @@ async fn authorize_session_request(
         | Request::SessionClose { session_id }
         | Request::SessionArchive { session_id, .. }
         | Request::SessionRename { session_id, .. }
+        | Request::SessionLabel { session_id, .. }
         | Request::SessionDrafts { session_id }
         | Request::SessionDraftsReplace { session_id, .. }
         | Request::SessionPreviewAnnotationsGet { session_id }
@@ -2548,6 +2550,13 @@ async fn dispatch(
 
         Request::SessionRename { session_id, title } => Box::pin(async move {
             match state.sessions.rename(&session_id, &title).await {
+                Ok(summary) => Handled::ok(Reply::Session(summary)),
+                Err(error) => failed(error),
+            }
+        }).await,
+
+        Request::SessionLabel { session_id, add, remove } => Box::pin(async move {
+            match state.sessions.label(&session_id, &add, &remove).await {
                 Ok(summary) => Handled::ok(Reply::Session(summary)),
                 Err(error) => failed(error),
             }

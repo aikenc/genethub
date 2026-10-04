@@ -425,6 +425,7 @@ pub fn required(request: &Request) -> Capability {
         | Request::SessionClose { .. }
         | Request::SessionArchive { .. }
         | Request::SessionRename { .. }
+        | Request::SessionLabel { .. }
         | Request::SessionDrafts { .. }
         | Request::SessionDraftsReplace { .. }
         | Request::SessionPreviewAnnotationsGet { .. }

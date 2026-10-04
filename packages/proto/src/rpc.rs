@@ -651,6 +651,17 @@ pub enum Request {
     /// outcome that would make this feature untrustworthy.
     #[serde(rename = "session.rename", rename_all = "camelCase")]
     SessionRename { session_id: String, title: String },
+    /// Removes, then adds, short labels that tell collaborating devices and
+    /// Agents what a session is for. One request carries both halves so a
+    /// relabel is atomic and two writers never overwrite each other's labels.
+    #[serde(rename = "session.label", rename_all = "camelCase")]
+    SessionLabel {
+        session_id: String,
+        #[serde(default)]
+        add: Vec<String>,
+        #[serde(default)]
+        remove: Vec<String>,
+    },
     /// Erases a session: its timeline, its metadata and its scratch space.
     ///
     /// Not `archive`, which only hides. There is no undo and no bin — a

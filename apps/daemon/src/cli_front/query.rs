@@ -16,7 +16,7 @@ use super::output::{self, CliFailure, CLI_SCHEMA};
 use super::rpc::{ConnectError, Refusal, Rpc, RpcError};
 use super::target::{self, Routing, Selection};
 
-const COMMAND_NAMES: [&str; 71] = [
+const COMMAND_NAMES: [&str; 72] = [
     "schema",
     "context",
     "capabilities",
@@ -47,6 +47,7 @@ const COMMAND_NAMES: [&str; 71] = [
     "session.respond",
     "session.interrupt",
     "session.close",
+    "session.label",
     "workflow.list",
     "workflow.build",
     "workflow.inspect",
@@ -121,6 +122,7 @@ fn mutates(name: &str) -> bool {
             | "session.respond"
             | "session.interrupt"
             | "session.close"
+            | "session.label"
             | "workflow.build"
             | "workflow.activate"
             | "workflow.dispatch"
@@ -158,6 +160,7 @@ enum Query {
     },
     SessionList {
         workspace_id: Option<String>,
+        labels: Vec<String>,
     },
     SessionGet {
         session_id: String,
@@ -301,6 +304,7 @@ fn parse_session(args: &[String]) -> Result<Query, CliFailure> {
     match verb {
         "list" => {
             let mut workspace_id = None;
+            let mut labels = Vec::new();
             let mut index = 1;
             while index < args.len() {
                 match args[index].as_str() {
@@ -321,6 +325,14 @@ fn parse_session(args: &[String]) -> Result<Query, CliFailure> {
                         }
                         workspace_id = Some(value.clone());
                     }
+                    "--label" => {
+                        index += 1;
+                        let value = args
+                            .get(index)
+                            .filter(|value| !value.trim().is_empty())
+                            .ok_or_else(|| CliFailure::invalid_args("--label needs a label"))?;
+                        labels.push(value.trim().to_string());
+                    }
                     other => {
                         return Err(CliFailure::invalid_args(format!(
                             "unknown session list argument: {other}"
@@ -329,7 +341,10 @@ fn parse_session(args: &[String]) -> Result<Query, CliFailure> {
                 }
                 index += 1;
             }
-            Ok(Query::SessionList { workspace_id })
+            Ok(Query::SessionList {
+                workspace_id,
+                labels,
+            })
         }
         "get" => match &args[1..] {
             [session_id] if !session_id.trim().is_empty() => Ok(Query::SessionGet {
@@ -572,7 +587,10 @@ async fn execute(
                 .ok_or_else(|| CliFailure::target_not_found("workspace", &workspace_id))?;
             Ok(("workspace.show", json!({"workspace": workspace})))
         }
-        Query::SessionList { workspace_id } => {
+        Query::SessionList {
+            workspace_id,
+            labels,
+        } => {
             let rpc = connect_selected(selection).await?;
             if let Some(id) = workspace_id.as_deref() {
                 let listed =
@@ -581,7 +599,7 @@ async fn execute(
                     return Err(CliFailure::target_not_found("workspace", id));
                 }
             }
-            let sessions = sessions(
+            let mut sessions = sessions(
                 rpc.call(Request::SessionList {
                     workspace_id: workspace_id.clone(),
                     include_archived: false,
@@ -589,6 +607,7 @@ async fn execute(
                 .await
                 .map_err(rpc_error)?,
             )?;
+            sessions.retain(|session| labels.iter().all(|label| session.labels.contains(label)));
             Ok((
                 "session.list",
                 json!({"workspaceId": workspace_id, "sessions": sessions}),
@@ -1161,10 +1180,14 @@ fn command_schema(name: &str) -> Value {
             ),
         ),
         "session.list" => (
-            "genet session list [--workspace <id>]",
+            "genet session list [--workspace <id>] [--label <label>]...",
             true,
             object_input(
-                json!({"workspaceId": {"type": ["string", "null"], "minLength": 1}}),
+                json!({
+                    "workspaceId": {"type": ["string", "null"], "minLength": 1},
+                    "labels": {"type": "array", "items": {"type": "string", "minLength": 1},
+                        "description": "--label, repeatable; keeps sessions carrying every given label"},
+                }),
                 &[],
             ),
         ),
@@ -1300,7 +1323,7 @@ fn command_schema(name: &str) -> Value {
         "agent.run" => (
             "genet agent run --agent <id> \"<prompt>\" [--cwd <dir> | --workspace <id>] \
              [--session <id>] [--model <id>] [--mode <id>] [--effort <id>] [--title <t>] \
-             [--wait|--no-wait] [--since-seq <n>] [--auto-approve] [--timeout <s>] \
+             [--label <label>]... [--wait|--no-wait] [--since-seq <n>] [--auto-approve] [--timeout <s>] \
              [--open-workspace]",
             true,
             object_input(
@@ -1313,6 +1336,8 @@ fn command_schema(name: &str) -> Value {
                     "modeId": {"type": ["string", "null"], "minLength": 1},
                     "effortId": {"type": ["string", "null"], "minLength": 1},
                     "title": {"type": ["string", "null"], "minLength": 1},
+                    "labels": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 10},
+                        "description": "--label, repeatable; added to the session before the prompt is sent"},
                     "wait": {"type": "boolean", "default": true},
                     "sinceSeq": {"type": ["integer", "null"], "minimum": 0},
                     "autoApprove": {"type": "boolean", "default": false},
@@ -1454,6 +1479,20 @@ fn command_schema(name: &str) -> Value {
                     "optionId": {"type": "string", "minLength": 1},
                 }),
                 &["sessionId", "requestId", "optionId"],
+            ),
+        ),
+        "session.label" => (
+            "genet session label <id> [--add <label>]... [--remove <label>]...",
+            true,
+            object_input(
+                json!({
+                    "sessionId": {"type": "string", "minLength": 1},
+                    "add": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 10},
+                        "description": "--add, repeatable; trimmed, at most 10 characters, at most 16 labels per session"},
+                    "remove": {"type": "array", "items": {"type": "string", "minLength": 1},
+                        "description": "--remove, repeatable; applied before --add, so --remove old --add new renames atomically"},
+                }),
+                &["sessionId"],
             ),
         ),
         "session.interrupt" | "session.close" => (
@@ -2105,15 +2144,29 @@ mod tests {
     }
 
     #[test]
-    fn session_list_has_only_an_explicit_optional_workspace() {
+    fn session_list_has_an_optional_workspace_and_repeatable_labels() {
         assert_eq!(
             parse(&words(&["session", "list"])).unwrap(),
-            Query::SessionList { workspace_id: None }
+            Query::SessionList {
+                workspace_id: None,
+                labels: Vec::new()
+            }
         );
         assert_eq!(
-            parse(&words(&["session", "list", "--workspace", "w_1"])).unwrap(),
+            parse(&words(&[
+                "session",
+                "list",
+                "--workspace",
+                "w_1",
+                "--label",
+                "4090",
+                "--label",
+                "pm"
+            ]))
+            .unwrap(),
             Query::SessionList {
-                workspace_id: Some("w_1".into())
+                workspace_id: Some("w_1".into()),
+                labels: vec!["4090".into(), "pm".into()]
             }
         );
         let duplicate = parse(&words(&[
@@ -2282,6 +2335,7 @@ mod tests {
             routing_tags: Vec::new(),
             media_tags: Vec::new(),
             title: None,
+            labels: Vec::new(),
             status: SessionStatus::Idle,
             model_id: None,
             mode_id: None,

@@ -4,13 +4,15 @@
 .genehub-ui .conversation-row { border-radius: 8px; }
 .genehub-ui .agent-row-body { padding: 0; }
 .genehub-ui .entity-main { min-height: 72px; padding: 12px; }
+.genehub-ui .conversation-main { min-height: 68px; padding: 8px 12px; }
 .genehub-ui .entity-row:hover > .agent-row-body,
-.genehub-ui .conversation-row:hover > .entity-main { background: rgb(var(--sidebar-hover)); }
+.genehub-ui .conversation-row:hover .conversation-main { background: rgb(var(--sidebar-hover)); }
 .genehub-ui .entity-title { color: rgb(var(--fg)); }
 .genehub-ui .entity-secondary { padding-right: 0; }
+/* The more button sits on the meta line so the title keeps the full first line. */
+.genehub-ui .conversation-row-meta { margin-right: 40px; overflow: hidden; }
 /* Trailing actions take real space; text never flows underneath them. */
 .genehub-ui .agent-row-actions { display: flex; flex: 0 0 auto; align-items: center; border-radius: var(--gh-radius-control); }
-.genehub-ui .conversation-row-more { position: static; }
 .genehub-ui .agent-row-body { flex-wrap: wrap; }
 .genehub-ui .agent-row-body > .entity-main { flex-basis: 140px; }
 .genehub-ui .agent-row-actions { margin-left: auto; }
