@@ -342,7 +342,10 @@ cp "$GENEHUB_TEST_RELEASE/${url##*/}" "$output"
             "GENEHUB_LOCAL_DOWNLOAD_BASE",
             "https://downloads.example.invalid",
         )
-        .env("GENEHUB_LOCAL_BIN_DIR", bin);
+        .env("GENEHUB_LOCAL_BIN_DIR", bin)
+        // The stand-in CLI is no daemon: never register it with the real
+        // user service manager of whoever runs the tests.
+        .env("GENEHUB_NO_SERVICE", "1");
     if let Some(calls) = calls {
         command
             .env("GENEHUB_RESTART_DAEMON", "1")

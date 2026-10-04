@@ -213,10 +213,156 @@ say "  $bin_dir/$cli_binary"
 say "  $bin_dir/$host_binary"
 say "  $bin_dir/$component"
 
-# Explicit first-install automation may opt into starting/restarting the daemon
-# after files have landed. The CLI self-update command is deliberately disabled
-# until releases have an independent signing root.
-if [ "${GENEHUB_RESTART_DAEMON:-}" = 1 ]; then
+# The daemon runs under the platform's user service manager whenever one is
+# usable: started at boot or login, restarted whenever it exits, and outside
+# whichever shell ran this script — a daemon started by hand from a remote
+# shell dies with that shell. GENEHUB_NO_SERVICE=1 keeps the hand-run daemon.
+# Each channel gets its own service, so upgrading one never touches another.
+service=none
+systemd_unit="genehub-$channel.service"
+launchd_label="com.genethub.$channel.daemon"
+
+daemon_pid() {
+  "$bin_dir/$cli_binary" daemon status 2>/dev/null \
+    | sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p' | head -n 1
+}
+
+# Whether pid $1 is this script's ancestor: run from that daemon's own shell,
+# stopping it would kill this script halfway through.
+runs_inside() {
+  p=$$
+  while [ -n "$p" ] && [ "$p" -gt 1 ]; do
+    [ "$p" = "$1" ] && return 0
+    p="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"
+  done
+  return 1
+}
+
+# Hands a daemon started by hand over to the service manager. Returns 1 when
+# that cannot be done from here.
+stop_hand_run_daemon() {
+  pid="$(daemon_pid)"
+  [ -n "$pid" ] || return 0
+  if runs_inside "$pid"; then
+    say "    the daemon started by hand (pid $pid) is running this installer, so it"
+    say "    stays as it is; rerun from SSH or another channel's shell to hand it over"
+    return 1
+  fi
+  say "==> stopping the daemon started by hand (pid $pid)"
+  "$bin_dir/$cli_binary" daemon stop >/dev/null || die "could not stop the daemon (pid $pid)"
+}
+
+setup_systemd() {
+  command -v systemctl >/dev/null 2>&1 || return 1
+  if [ -z "${XDG_RUNTIME_DIR:-}" ] && [ -d "/run/user/$(id -u)" ]; then
+    XDG_RUNTIME_DIR="/run/user/$(id -u)"
+    export XDG_RUNTIME_DIR
+  fi
+  systemctl --user show-environment >/dev/null 2>&1 || return 1
+  config="${XDG_CONFIG_HOME:-$HOME/.config}"
+  unit="$config/systemd/user/$systemd_unit"
+  if [ ! -f "$unit" ]; then
+    stop_hand_run_daemon || { service=deferred; return 0; }
+  fi
+  mkdir -p "$config/systemd/user"
+  # Agents are found on PATH, and a user service otherwise gets a bare one.
+  # `%` is a systemd specifier; the quotes keep spaces (WSL's Windows dirs).
+  service_path="$(printf '%s' "$PATH" | sed 's/%/%%/g; s/"/\\"/g')"
+  cat > "$unit.tmp" <<UNIT
+[Unit]
+Description=GeneHub daemon ($channel)
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+ExecStart="$bin_dir/$cli_binary" daemon run
+WorkingDirectory=%h
+Environment="PATH=$service_path"
+# Extra settings for this channel's daemon, one KEY=value per line.
+EnvironmentFile=-$config/genehub/$channel.env
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+UNIT
+  mv "$unit.tmp" "$unit"
+  systemctl --user daemon-reload
+  systemctl --user enable "$systemd_unit" >/dev/null 2>&1 \
+    || die "systemctl --user enable $systemd_unit failed"
+  # --no-block: from this daemon's own shell the restart ends this script too.
+  systemctl --user restart --no-block "$systemd_unit"
+  # Without lingering the user manager, and the daemon, stop at logout.
+  if [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" != yes ]; then
+    loginctl enable-linger "$(id -un)" 2>/dev/null \
+      || say "    to keep it running after logout: sudo loginctl enable-linger $(id -un)"
+  fi
+  service=systemd
+}
+
+xml_escape() { printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
+
+setup_launchd() {
+  command -v launchctl >/dev/null 2>&1 || return 1
+  domain="gui/$(id -u)"
+  launchctl print "$domain" >/dev/null 2>&1 || return 1
+  plist="$HOME/Library/LaunchAgents/$launchd_label.plist"
+  loaded=0
+  launchctl print "$domain/$launchd_label" >/dev/null 2>&1 && loaded=1
+  if [ ! -f "$plist" ] && [ "$loaded" = 0 ]; then
+    stop_hand_run_daemon || { service=deferred; return 0; }
+  fi
+  mkdir -p "$HOME/Library/LaunchAgents"
+  cat > "$plist.tmp" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$launchd_label</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$(xml_escape "$bin_dir/$cli_binary")</string>
+    <string>daemon</string>
+    <string>run</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>$(xml_escape "$PATH")</string></dict>
+  <key>WorkingDirectory</key><string>$(xml_escape "$HOME")</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>5</integer>
+</dict>
+</plist>
+PLIST
+  changed=1
+  cmp -s "$plist.tmp" "$plist" 2>/dev/null && changed=0
+  mv "$plist.tmp" "$plist"
+  if [ "$loaded" = 0 ]; then
+    launchctl bootstrap "$domain" "$plist" || die "launchctl bootstrap $plist failed"
+  elif [ "$changed" = 1 ] && ! runs_inside "$(daemon_pid)"; then
+    # A changed definition only loads on bootstrap; bootout ends the daemon,
+    # which would also end this script were it running inside it.
+    launchctl bootout "$domain/$launchd_label" 2>/dev/null || true
+    launchctl bootstrap "$domain" "$plist" || die "launchctl bootstrap $plist failed"
+  else
+    [ "$changed" = 1 ] && say "    the new service definition loads at next login"
+    launchctl kickstart -k "$domain/$launchd_label"
+  fi
+  service=launchd
+}
+
+if [ "${GENEHUB_NO_SERVICE:-}" != 1 ]; then
+  say ""
+  case "$os" in
+    linux) setup_systemd || true ;;
+    darwin) setup_launchd || true ;;
+  esac
+fi
+
+# Explicit first-install automation may opt into restarting a hand-run daemon
+# after files have landed. The CLI self-update command is deliberately
+# disabled until releases have an independent signing root.
+if [ "$service" = none ] && [ "${GENEHUB_RESTART_DAEMON:-}" = 1 ]; then
   say ""
   say "==> restarting daemon with the new binary"
   "$bin_dir/$cli_binary" daemon restart
@@ -232,8 +378,22 @@ case ":$PATH:" in
 esac
 
 say ""
-say "Start the daemon, then connect this machine to the hub:"
-say "  $cli_binary daemon start"
+case "$service" in
+  systemd)
+    say "The daemon runs as the systemd user service $systemd_unit:"
+    say "  systemctl --user status $systemd_unit"
+    ;;
+  launchd)
+    say "The daemon runs as the launchd agent $launchd_label:"
+    say "  launchctl print gui/\$(id -u)/$launchd_label"
+    ;;
+  deferred) ;;
+  *)
+    say "Start the daemon:"
+    say "  $cli_binary daemon start"
+    ;;
+esac
+say "Connect this machine to the hub (once):"
 say "  $cli_binary hub login --wait"
 say ""
 say "'$cli_binary daemon endpoint' prints a one-use local connection address."

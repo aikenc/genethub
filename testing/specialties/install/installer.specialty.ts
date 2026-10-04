@@ -131,11 +131,14 @@ function runInstall(
     encoding: "utf8",
     env: {
       ...process.env,
-      PATH: `${tools}:${process.env.PATH ?? ""}`,
       GENEHUB_TEST_RELEASE: release,
       GENEHUB_LOCAL_DOWNLOAD_BASE: "https://downloads.example.invalid",
       GENEHUB_LOCAL_BIN_DIR: bin,
+      // The stand-in CLI is no daemon: never register it with the real user
+      // service manager of whoever runs the tests.
+      GENEHUB_NO_SERVICE: "1",
       ...extra,
+      PATH: `${tools}:${extra.PATH ?? process.env.PATH ?? ""}`,
     },
   });
   rmSync(tools, { recursive: true, force: true });
@@ -400,6 +403,74 @@ defineSpecialty(
     } finally {
       rmSync(release, { recursive: true, force: true });
       rmSync(home, { recursive: true, force: true });
+    }
+  },
+);
+
+// systemctl/loginctl stand-ins: record every call, and report a usable user
+// manager so the installer takes its service path.
+function writeServiceShims(tools: string, calls: string): void {
+  for (const tool of ["systemctl", "loginctl"]) {
+    const shim = path.join(tools, tool);
+    writeFileSync(
+      shim,
+      `#!/bin/sh\nprintf '%s %s\\n' ${tool} "$*" >> "${calls}"\n` +
+        (tool === "loginctl" ? `[ "$1" = show-user ] && echo yes\n` : "") +
+        "exit 0\n",
+    );
+    chmodSync(shim, 0o755);
+  }
+}
+
+defineSpecialty(
+  {
+    id: "specialty.install.user-service",
+    title: "Where systemd is usable, the daemon is installed as a per-channel user service",
+    oracle:
+      "install.sh writes genehub-local.service running `<cli> daemon run` with Restart=always and the caller's PATH, enables it and restarts it --no-block through systemctl, never through `daemon restart`",
+    catches: ["daemon left hand-run and dying with the shell", "service without agents on PATH", "upgrade restarting beside the service"],
+    tags: ["core", "install"],
+    expectedDurationMs: 8_000,
+    timeoutMs: 30_000,
+    surfaces: ["install"],
+  },
+  async (t) => {
+    if (installerUnsupported() || process.platform !== "linux") return;
+    const release = fakeRelease();
+    const home = mkdtempSync(path.join(tmpdir(), "genehub-install-home-"));
+    const tools = mkdtempSync(path.join(tmpdir(), "genehub-install-service-tools-"));
+    const bin = path.join(home, "bin");
+    const calls = path.join(home, "calls");
+    writeServiceShims(tools, calls);
+    try {
+      const output = runInstall(t.openRoot, release, bin, {
+        GENEHUB_NO_SERVICE: "",
+        HOME: home,
+        XDG_CONFIG_HOME: path.join(home, ".config"),
+        XDG_RUNTIME_DIR: home,
+        PATH: `${tools}:${process.env.PATH ?? ""}`,
+        GENEHUB_TEST_CALLS: calls,
+      });
+      t.assertions.assert(output.status === 0, `install failed: ${output.stderr}`);
+      const unit = readFileSync(path.join(home, ".config/systemd/user/genehub-local.service"), "utf8");
+      t.assertions.assert(
+        unit.includes(`ExecStart="${path.join(bin, "genet-local")}" daemon run`),
+        `unit does not run the installed CLI:\n${unit}`,
+      );
+      t.assertions.assert(unit.includes("Restart=always"), "unit does not restart the daemon");
+      t.assertions.assert(/^Environment="PATH=.*/m.test(unit) && unit.includes(`:${tools}:`), "unit drops the caller's PATH");
+      const made = readFileSync(calls, "utf8");
+      t.assertions.assert(made.includes("systemctl --user enable genehub-local.service"), made);
+      t.assertions.assert(made.includes("systemctl --user restart --no-block genehub-local.service"), made);
+      t.assertions.assert(!made.includes("daemon restart"), `restarted beside the service:\n${made}`);
+      t.assertions.assert(
+        output.stdout.includes("systemctl --user status genehub-local.service"),
+        `did not say how to reach the service:\n${output.stdout}`,
+      );
+    } finally {
+      rmSync(release, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+      rmSync(tools, { recursive: true, force: true });
     }
   },
 );
