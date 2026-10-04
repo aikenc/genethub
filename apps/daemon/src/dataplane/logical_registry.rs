@@ -17,6 +17,13 @@ const MAX_CONNECTIONS: usize = 32;
 // capped a daemon at 8 peers, and a few browser windows plus their RTC peers
 // left new clients refused with ResourceExhausted.
 const GLOBAL_BYTES: usize = MAX_CONNECTIONS * CONNECTION_BYTES;
+// The semaphore counts KiB, not bytes. tokio caps a semaphore at usize::MAX >> 3
+// permits, which on the 32-bit wasm guest is 512 Mi: 640 MiB counted in bytes
+// panics the guest at startup (0.16.1-beta.3).
+const PERMIT_BYTES: usize = 1024;
+const GLOBAL_PERMITS: usize = GLOBAL_BYTES / PERMIT_BYTES;
+const CONNECTION_PERMITS: u32 = (CONNECTION_BYTES / PERMIT_BYTES) as u32;
+const _: () = assert!(GLOBAL_PERMITS <= (u32::MAX >> 3) as usize);
 // Reserve conservatively for both journals, receive custody, physical crypto
 // queues and stream command queues before creating any of those owners.
 pub(crate) const CONNECTION_BYTES: usize = 20 * 1024 * 1024;
@@ -97,7 +104,7 @@ impl Default for Registry {
         Self {
             incarnation: crate::devices::random_token(),
             entries: Mutex::new(HashMap::new()),
-            bytes: Arc::new(tokio::sync::Semaphore::new(GLOBAL_BYTES)),
+            bytes: Arc::new(tokio::sync::Semaphore::new(GLOBAL_PERMITS)),
         }
     }
 }
@@ -124,7 +131,7 @@ impl Registry {
         let reservation = self
             .bytes
             .clone()
-            .try_acquire_many_owned(CONNECTION_BYTES as u32)
+            .try_acquire_many_owned(CONNECTION_PERMITS)
             .map_err(|_| anyhow!("logical connection byte admission exhausted"))?;
         let id = crate::devices::random_token();
         let secret = crate::devices::random_token();
@@ -416,6 +423,17 @@ fn direct_path(carrier: CarrierKind, transport: genehub_proto::TransportKind) ->
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_byte_budget_admits_every_connection_and_fits_a_32_bit_semaphore() {
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(GLOBAL_PERMITS));
+        let held: Vec<_> = (0..MAX_CONNECTIONS)
+            .map(|_| semaphore.clone().try_acquire_many_owned(CONNECTION_PERMITS).unwrap())
+            .collect();
+        assert!(semaphore.clone().try_acquire_many_owned(CONNECTION_PERMITS).is_err());
+        drop(held);
+        assert!(GLOBAL_PERMITS <= (u32::MAX >> 3) as usize, "tokio's 32-bit MAX_PERMITS");
+    }
+
     use super::*;
     use std::sync::atomic::AtomicBool;
 
