@@ -13,7 +13,10 @@ use crate::channel_auth::{self, SessionKey};
 
 pub(crate) const RESUME_TTL: Duration = Duration::from_secs(60);
 const MAX_CONNECTIONS: usize = 32;
-const GLOBAL_BYTES: usize = 160 * 1024 * 1024;
+// Room for every connection MAX_CONNECTIONS admits: at 160 MiB the byte budget
+// capped a daemon at 8 peers, and a few browser windows plus their RTC peers
+// left new clients refused with ResourceExhausted.
+const GLOBAL_BYTES: usize = MAX_CONNECTIONS * CONNECTION_BYTES;
 // Reserve conservatively for both journals, receive custody, physical crypto
 // queues and stream command queues before creating any of those owners.
 pub(crate) const CONNECTION_BYTES: usize = 20 * 1024 * 1024;
