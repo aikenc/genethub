@@ -343,7 +343,14 @@ PLIST
     # A changed definition only loads on bootstrap; bootout ends the daemon,
     # which would also end this script were it running inside it.
     launchctl bootout "$domain/$launchd_label" 2>/dev/null || true
-    launchctl bootstrap "$domain" "$plist" || die "launchctl bootstrap $plist failed"
+    # bootout returns before the old job is gone; bootstrapping at once fails
+    # with "5: Input/output error" and leaves no daemon at all.
+    tries=0
+    until launchctl bootstrap "$domain" "$plist" 2>/dev/null; do
+      tries=$((tries + 1))
+      [ "$tries" -lt 10 ] || die "launchctl bootstrap $plist failed"
+      sleep 1
+    done
   else
     [ "$changed" = 1 ] && say "    the new service definition loads at next login"
     launchctl kickstart -k "$domain/$launchd_label"
