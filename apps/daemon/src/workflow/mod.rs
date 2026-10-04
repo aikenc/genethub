@@ -5919,6 +5919,7 @@ mod tests {
                 ..Default::default()
             },
             builtin: id == "genet",
+            routes: None,
         }
     }
 

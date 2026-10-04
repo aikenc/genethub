@@ -30,6 +30,7 @@ fn main() -> Result<(), ts_rs::ExportError> {
     Catalog::export_all_to(dir)?;
     ProbeState::export_all_to(dir)?;
     AgentInfo::export_all_to(dir)?;
+    AgentRouteInfo::export_all_to(dir)?;
     WorkspaceFolderInfo::export_all_to(dir)?;
     WorkspaceInfo::export_all_to(dir)?;
     ForkMethod::export_all_to(dir)?;

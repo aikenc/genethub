@@ -164,6 +164,25 @@ pub struct AgentInfo {
     /// True for the agent shipped in the installer, which is preselected on
     /// first run so a new user can run something immediately.
     pub builtin: bool,
+    /// What a tag-routed start can pick from this Agent on this machine right
+    /// now: one entry per usable model, with the tags and cost the router uses.
+    /// Filled by `agent.list` only; omitted elsewhere so older clients are
+    /// unaffected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub routes: Option<Vec<AgentRouteInfo>>,
+}
+
+/// One routable Agent + model pair as the tag router sees it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct AgentRouteInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model_id: Option<String>,
+    pub tags: Vec<String>,
+    pub cost: AgentCostLevel,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

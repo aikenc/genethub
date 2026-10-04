@@ -201,6 +201,7 @@ impl Registry {
                     capabilities: adapter.capabilities(),
                     catalog,
                     builtin: adapter.builtin(),
+                    routes: None,
                 }
             }))
             .await;

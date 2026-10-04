@@ -54,7 +54,7 @@
 "$GENEHUB_CLI" agent run --machine <machineId> --agent <agentId> --session <sessionId> --since-seq <n> "<续接>"
 ```
 
-- 先 `agent list` 确认目标机器真有这个 Agent；可用 Agent 与模型随机器而异。
+- 先 `agent list` 确认目标机器真有这个 Agent。就绪 Agent 的 `routes` 是该机器此刻可路由的模型、标签和成本，与 `--tag` 选路使用同一份候选；可用 Agent 与模型随机器而异。
 - 会话在**所属机器**上运行并保存；换设备或断线后，用 `--session` 与 `--since-seq` 续接，任务不会因客户端
   断开而停止。
 - 无人值守时，权限请求默认被拒，除非显式 `--auto-approve`；Agent 提问总会停下等待回答

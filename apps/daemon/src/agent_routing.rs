@@ -9,8 +9,8 @@ use std::fmt;
 
 use anyhow::{anyhow, Result};
 use genehub_proto::{
-    AgentCostLevel, AgentInfo, AgentModelProfile, AgentSelectionPreferences, ModelInfo, ProbeState,
-    SessionAgentTarget, SessionSummary, TimelineItem,
+    AgentCostLevel, AgentInfo, AgentModelProfile, AgentRouteInfo, AgentSelectionPreferences,
+    ModelInfo, ProbeState, SessionAgentTarget, SessionSummary, TimelineItem,
 };
 
 use crate::adapter::{registry::Registry, ProviderMap};
@@ -199,6 +199,49 @@ pub(crate) fn select_tag_route_excluding(
     excluded: &BTreeSet<(String, Option<String>)>,
 ) -> Result<ResolvedAgentRoute> {
     let required = normalize_tags(required_tags.iter().cloned());
+    let mut candidates = collect_candidates(preferences, agents, registry, evidence_only);
+    candidates.retain(|candidate| {
+        !excluded.contains(&(
+            candidate.route.agent_id.clone(),
+            candidate.route.model_id.clone(),
+        )) && required.iter().all(|required| {
+            candidate
+                .tags
+                .iter()
+                .any(|offered| tags_equal(offered, required))
+        })
+    });
+    candidates.sort_by(|left, right| {
+        cost_rank(left.cost)
+            .cmp(&cost_rank(right.cost))
+            .then_with(|| left.route.agent_id.cmp(&right.route.agent_id))
+            .then_with(|| left.route.model_id.cmp(&right.route.model_id))
+    });
+    candidates
+        .into_iter()
+        .next()
+        .map(|candidate| candidate.route)
+        .ok_or_else(|| {
+            let label = if required.is_empty() {
+                "任意标签".to_string()
+            } else {
+                required.join(" + ")
+            };
+            anyhow!(RouteUnavailable(format!(
+                "agentTagRouteUnavailable: 没有可用的 Agent 与模型同时匹配「{label}」；交给 PM 核对替代路由或机器全局配置，需要安装、登录时再向人提出暂停点"
+            )))
+        })
+}
+
+/// Every live Agent/model pair the router may pick, before tags and
+/// exclusions are applied. Shared by selection and by `agent.list`, so what
+/// the CLI shows is exactly what routing considers.
+fn collect_candidates(
+    preferences: &AgentSelectionPreferences,
+    agents: &[AgentInfo],
+    registry: &Registry,
+    evidence_only: bool,
+) -> Vec<Candidate> {
     let mut candidates = Vec::new();
     for agent in agents {
         if !matches!(agent.probe, ProbeState::Ready) {
@@ -246,38 +289,24 @@ pub(crate) fn select_tag_route_excluding(
             );
         }
     }
-
-    candidates.retain(|candidate| {
-        !excluded.contains(&(
-            candidate.route.agent_id.clone(),
-            candidate.route.model_id.clone(),
-        )) && required.iter().all(|required| {
-            candidate
-                .tags
-                .iter()
-                .any(|offered| tags_equal(offered, required))
-        })
-    });
-    candidates.sort_by(|left, right| {
-        cost_rank(left.cost)
-            .cmp(&cost_rank(right.cost))
-            .then_with(|| left.route.agent_id.cmp(&right.route.agent_id))
-            .then_with(|| left.route.model_id.cmp(&right.route.model_id))
-    });
     candidates
+}
+
+/// The routable Agent/model pairs of `agent`, with the tags and cost the
+/// router would use for each.
+pub(crate) fn route_infos(
+    preferences: &AgentSelectionPreferences,
+    agent: &AgentInfo,
+    registry: &Registry,
+) -> Vec<AgentRouteInfo> {
+    collect_candidates(preferences, std::slice::from_ref(agent), registry, false)
         .into_iter()
-        .next()
-        .map(|candidate| candidate.route)
-        .ok_or_else(|| {
-            let label = if required.is_empty() {
-                "任意标签".to_string()
-            } else {
-                required.join(" + ")
-            };
-            anyhow!(RouteUnavailable(format!(
-                "agentTagRouteUnavailable: 没有可用的 Agent 与模型同时匹配「{label}」；交给 PM 核对替代路由或机器全局配置，需要安装、登录时再向人提出暂停点"
-            )))
+        .map(|candidate| AgentRouteInfo {
+            model_id: candidate.route.model_id,
+            tags: candidate.tags,
+            cost: candidate.cost,
         })
+        .collect()
 }
 
 fn is_auto_model(model: &ModelInfo) -> bool {
@@ -630,6 +659,7 @@ mod tests {
                 ..Default::default()
             },
             builtin: true,
+            routes: None,
         }
     }
 
@@ -664,6 +694,44 @@ mod tests {
             false,
         )
         .is_err());
+    }
+
+    #[test]
+    fn listed_routes_are_the_pairs_tag_selection_considers() {
+        let mut info = agent("genet", "model-flash", None);
+        info.catalog.models.push(ModelInfo {
+            id: "model-max".into(),
+            label: "model-max".into(),
+            context_window: None,
+            reasoning: true,
+            efforts: vec!["medium".into(), "high".into()],
+            input_modalities: None,
+            supports_fast: false,
+        });
+        let registry = Registry::of(Vec::new());
+        let preferences = AgentSelectionPreferences::default();
+        let routes = route_infos(&preferences, &info, &registry);
+        assert_eq!(
+            routes
+                .iter()
+                .filter_map(|route| route.model_id.clone())
+                .collect::<Vec<_>>(),
+            vec!["model-flash".to_string(), "model-max".to_string()]
+        );
+        for listed in &routes {
+            let selected = select_tag_route(
+                &preferences,
+                &listed.tags,
+                std::slice::from_ref(&info),
+                &registry,
+                false,
+            )
+            .expect("a listed route's tags select a live pair");
+            assert_eq!(selected.model_id, listed.model_id);
+            assert!(!listed.tags.is_empty());
+        }
+        info.probe = ProbeState::NotInstalled;
+        assert!(route_infos(&preferences, &info, &registry).is_empty());
     }
 
     #[test]

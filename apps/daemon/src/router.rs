@@ -958,7 +958,23 @@ async fn dispatch(
 
         Request::AgentList => Box::pin(async move {
             let providers = state.providers().await;
-            Handled::ok(Reply::Agents(state.registry.list(&providers).await))
+            let mut agents = state.registry.list(&providers).await;
+            // Routes depend on the Human-edited tag/cost configuration, so
+            // they are attached per request and never enter the catalog cache.
+            let preferences = state
+                .config
+                .read()
+                .await
+                .agent_preferences
+                .clone()
+                .unwrap_or_default();
+            for agent in &mut agents {
+                if matches!(agent.probe, genehub_proto::ProbeState::Ready) {
+                    agent.routes =
+                        Some(crate::agent_routing::route_infos(&preferences, agent, &state.registry));
+                }
+            }
+            Handled::ok(Reply::Agents(agents))
         }).await,
 
         Request::AgentRefresh => Box::pin(async move {
