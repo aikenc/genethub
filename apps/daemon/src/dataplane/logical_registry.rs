@@ -427,11 +427,22 @@ mod tests {
     fn the_byte_budget_admits_every_connection_and_fits_a_32_bit_semaphore() {
         let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(GLOBAL_PERMITS));
         let held: Vec<_> = (0..MAX_CONNECTIONS)
-            .map(|_| semaphore.clone().try_acquire_many_owned(CONNECTION_PERMITS).unwrap())
+            .map(|_| {
+                semaphore
+                    .clone()
+                    .try_acquire_many_owned(CONNECTION_PERMITS)
+                    .unwrap()
+            })
             .collect();
-        assert!(semaphore.clone().try_acquire_many_owned(CONNECTION_PERMITS).is_err());
+        assert!(semaphore
+            .clone()
+            .try_acquire_many_owned(CONNECTION_PERMITS)
+            .is_err());
         drop(held);
-        assert!(GLOBAL_PERMITS <= (u32::MAX >> 3) as usize, "tokio's 32-bit MAX_PERMITS");
+        assert!(
+            GLOBAL_PERMITS <= (u32::MAX >> 3) as usize,
+            "tokio's 32-bit MAX_PERMITS"
+        );
     }
 
     use super::*;
