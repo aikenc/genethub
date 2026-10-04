@@ -953,6 +953,10 @@ pub struct SessionSummary {
     /// the daemon has no business picking a word in the user's language.
     #[ts(optional)]
     pub title: Option<String>,
+    /// Short labels set with `session.label`, in the order they were added.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<_>")]
+    pub labels: Vec<String>,
     pub status: crate::event::SessionStatus,
     #[ts(optional)]
     pub model_id: Option<String>,

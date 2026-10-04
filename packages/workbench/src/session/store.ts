@@ -433,6 +433,8 @@ interface WorkbenchState {
   loadBlob(blob: BlobRef): Promise<void>;
   /** Gives a session the name the user typed, on the machine and here. */
   renameSession(sessionId: string, title: string): Promise<boolean>;
+  /** Removes, then adds, labels in one daemon step; the stored set comes back. */
+  labelSession(sessionId: string, change: { add?: string[]; remove?: string[] }): Promise<boolean>;
   /** Erases a session. There is no undo; the caller does the asking. */
   deleteSession(sessionId: string): Promise<void>;
   openTab(kind: TabKind, title?: string): void;
@@ -2305,6 +2307,18 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     // From the reply rather than from what was typed: the daemon trims and
     // caps, and the sidebar should show the name that was actually stored.
     applyTitle(sessionId, reply.data.title ?? wanted, set);
+    return true;
+  },
+
+  async labelSession(sessionId, { add = [], remove = [] }) {
+    const reply = await asked(set, () =>
+      require_(get().client).call({ type: "session.label", payload: { sessionId, add, remove } }),
+    );
+    if (reply?.type !== "session") return false;
+    const labels = reply.data.labels ?? [];
+    set((state) => ({
+      sessions: state.sessions.map((session) => (session.id === sessionId ? { ...session, labels } : session)),
+    }));
     return true;
   },
 

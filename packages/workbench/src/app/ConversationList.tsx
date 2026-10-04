@@ -72,7 +72,7 @@ function ConversationListContent({ host, endpoint, open, hidden, onNavigate, mac
     if (!matchesConversation(s, wb.workspaces, { ...defaultConversationFilter,
       ownership: explicit || state === "pending" ? "all" : ownership,
       archived: currentView && hasCurrentWork(s, wb.sessions) ? s.archived : wb.includeArchived })) return false;
-    if (!`${s.title} ${wb.workspaces.find((w) => w.id === s.workspaceId)?.name ?? ""}`.toLowerCase().includes(query.trim().toLowerCase())) return false;
+    if (!`${s.title} ${s.labels?.join(" ") ?? ""} ${wb.workspaces.find((w) => w.id === s.workspaceId)?.name ?? ""}`.toLowerCase().includes(query.trim().toLowerCase())) return false;
     return matchesAttention(s, state, hasUnreadReply(machine, s), wb.sessions);
   }).map((s) => ({ ...s, unread: hasUnreadReply(machine, s) }));
   const visibleIds = new Set(rows.map((s) => s.id));

@@ -59,6 +59,7 @@ pub struct Run {
     pub mode_id: Option<String>,
     pub effort_id: Option<String>,
     pub title: Option<String>,
+    pub labels: Vec<String>,
     pub wait: bool,
     pub since_seq: Option<u64>,
     pub auto_approve: bool,
@@ -80,6 +81,11 @@ pub enum Command {
     },
     Close {
         session_id: String,
+    },
+    Label {
+        session_id: String,
+        add: Vec<String>,
+        remove: Vec<String>,
     },
 }
 
@@ -171,6 +177,25 @@ fn parse_session(args: &[String], selection: &Selection) -> Result<Command, CliF
         }
         "interrupt" => Ok(Command::Interrupt { session_id }),
         "close" => Ok(Command::Close { session_id }),
+        "label" => {
+            let usage = "usage: genet session label <id> [--add <label>]... [--remove <label>]...";
+            let (mut add, mut remove) = (Vec::new(), Vec::new());
+            for pair in args[2..].chunks(2) {
+                match pair {
+                    [flag, value] if flag == "--add" => add.push(value.clone()),
+                    [flag, value] if flag == "--remove" => remove.push(value.clone()),
+                    _ => return Err(CliFailure::invalid_args(usage)),
+                }
+            }
+            if add.is_empty() && remove.is_empty() {
+                return Err(CliFailure::invalid_args(usage));
+            }
+            Ok(Command::Label {
+                session_id,
+                add,
+                remove,
+            })
+        }
         _ => Err(CliFailure::invalid_args(format!(
             "unknown session command: {verb}"
         ))),
@@ -192,6 +217,7 @@ struct Options {
     mode: Option<String>,
     effort: Option<String>,
     title: Option<String>,
+    labels: Vec<String>,
     request: Option<String>,
     choose: Option<String>,
     since_seq: Option<u64>,
@@ -229,6 +255,7 @@ impl Options {
                 "--mode" => options.mode = Some(value()?),
                 "--effort" => options.effort = Some(value()?),
                 "--title" => options.title = Some(value()?),
+                "--label" => options.labels.push(value()?),
                 "--message" => options.positional.push(value()?),
                 "--request" => options.request = Some(value()?),
                 "--choose" => options.choose = Some(value()?),
@@ -266,6 +293,10 @@ impl Options {
         if self.task_run_id.is_some() && self.message_id.is_none() {
             return Err(CliFailure::invalid_args("--task-run requires --message-id"));
         }
+        // Checked before anything is created, so a bad label cannot leave a
+        // new session behind without its prompt.
+        crate::session::store::apply_session_labels(&[], &self.labels, &[])
+            .map_err(CliFailure::invalid_args)?;
         let wait = self.wait.unwrap_or(self.message_id.is_none());
         Ok(Run {
             message_id: self.message_id,
@@ -279,6 +310,7 @@ impl Options {
             mode_id: self.mode,
             effort_id: self.effort,
             title: self.title,
+            labels: self.labels,
             wait,
             since_seq: self.since_seq,
             auto_approve: self.auto_approve,
@@ -325,6 +357,14 @@ async fn execute(command: Command, selection: &Selection) -> i32 {
             )
             .await
         }
+        Command::Label {
+            session_id,
+            add,
+            remove,
+        } => label(&rpc, &session_id, add, remove).await.map(|session| {
+            output::succeed("session.label", json!({"session": session}));
+            EXIT_OK
+        }),
         Command::Close { session_id } => {
             acknowledge(
                 &rpc,
@@ -352,6 +392,26 @@ async fn acknowledge(
     rpc.call(request).await.map_err(query::rpc_error)?;
     output::succeed(kind, json!({"sessionId": session_id}));
     Ok(EXIT_OK)
+}
+
+async fn label(
+    rpc: &Rpc,
+    session_id: &str,
+    add: Vec<String>,
+    remove: Vec<String>,
+) -> Result<SessionSummary, CliFailure> {
+    match rpc
+        .call(Request::SessionLabel {
+            session_id: session_id.to_string(),
+            add,
+            remove,
+        })
+        .await
+        .map_err(query::rpc_error)?
+    {
+        Reply::Session(summary) => Ok(summary),
+        other => Err(query::unexpected_reply("session", &other)),
+    }
 }
 
 async fn agent_list(rpc: &Rpc) -> Result<Value, CliFailure> {
@@ -384,10 +444,13 @@ async fn respond(
 }
 
 async fn run_conversation(rpc: &Rpc, run: Run, here: bool) -> Result<i32, CliFailure> {
-    let session = match run.session_id.as_deref() {
+    let mut session = match run.session_id.as_deref() {
         Some(session_id) => attach(rpc, session_id, run.agent_id.as_deref()).await?,
         None => create(rpc, &run, here).await?,
     };
+    if !run.labels.is_empty() {
+        session = label(rpc, &session.id, run.labels.clone(), Vec::new()).await?;
+    }
 
     // Subscribing before sending is what makes the stream gap-free: a turn that
     // starts and finishes between the two calls would otherwise be invisible.
@@ -918,6 +981,57 @@ mod tests {
                 .code,
             "invalidArgs"
         );
+    }
+
+    #[test]
+    fn session_label_carries_both_halves_and_agent_run_takes_repeated_labels() {
+        assert_eq!(
+            parse_session(
+                &words(&["label", "s_1", "--remove", "old", "--add", "4090", "--add", "评审"]),
+                &selection(None)
+            )
+            .unwrap(),
+            Command::Label {
+                session_id: "s_1".into(),
+                add: vec!["4090".into(), "评审".into()],
+                remove: vec!["old".into()],
+            }
+        );
+        for bad in [
+            &["label", "s_1"][..],
+            &["label", "s_1", "--add"],
+            &["label", "s_1", "x"],
+        ] {
+            assert_eq!(
+                parse_session(&words(bad), &selection(None))
+                    .unwrap_err()
+                    .code,
+                "invalidArgs"
+            );
+        }
+        let run = run_of(
+            parse_agent(
+                &words(&[
+                    "run", "--agent", "codex", "--label", "mac", "--label", "pm", "hi",
+                ]),
+                &selection(Some("/s")),
+            )
+            .unwrap(),
+        );
+        assert_eq!(run.labels, vec!["mac", "pm"]);
+        let error = parse_agent(
+            &words(&[
+                "run",
+                "--agent",
+                "codex",
+                "--label",
+                "十一个字符的标签名称呀",
+                "hi",
+            ]),
+            &selection(Some("/s")),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "invalidArgs");
     }
 
     #[test]
