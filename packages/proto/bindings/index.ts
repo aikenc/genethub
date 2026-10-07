@@ -652,7 +652,16 @@ export type HubStatus = { "state": "unpaired" } | { "state": "pairing", hubUrl: 
 /**
  * The same address with the code already filled in, for a QR code.
  */
-verificationUriComplete: string, expiresAt: string, } | { "state": "paired", hubUrl: string, 
+verificationUriComplete: string, expiresAt: string, 
+/**
+ * Proves the bearer is this machine, so the desktop shell can finish
+ * the approval without anyone pressing a button.
+ *
+ * Defaulted because a Hub that predates it never sends the field, and
+ * pairing has to keep working there — it just falls back to a human
+ * approving the code.
+ */
+pairProof: string, } | { "state": "paired", hubUrl: string, 
 /**
  * The Hub's id for this machine, which is what the owner sees listed.
  */

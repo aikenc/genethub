@@ -34,6 +34,11 @@ pub struct PairingCode {
     pub verification_uri_complete: String,
     pub expires_at: String,
     pub interval: u64,
+    /// Proves this machine is the one that asked, for the desktop shell to hand
+    /// to a local browser. Defaulted so an older Hub — which never sends it —
+    /// still pairs, just with a human pressing the button.
+    #[serde(default)]
+    pub pair_proof: String,
 }
 
 /// A way into an identity that has no login: a one-time link, and the key that
