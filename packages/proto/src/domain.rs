@@ -2459,6 +2459,14 @@ pub enum HubStatus {
         /// The same address with the code already filled in, for a QR code.
         verification_uri_complete: String,
         expires_at: String,
+        /// Proves the bearer is this machine, so the desktop shell can finish
+        /// the approval without anyone pressing a button.
+        ///
+        /// Defaulted because a Hub that predates it never sends the field, and
+        /// pairing has to keep working there — it just falls back to a human
+        /// approving the code.
+        #[serde(default)]
+        pair_proof: String,
     },
     #[serde(rename_all = "camelCase")]
     Paired {

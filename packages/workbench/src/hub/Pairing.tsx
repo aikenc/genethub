@@ -166,7 +166,7 @@ export function Pairing({
                 void onTrial(defaultHubUrl.trim()).finally(() => setBusy(false));
               }}
             >
-              {busy ? "连接中…" : "连接"}
+              {busy ? "连接中…" : "先试用，不注册"}
             </button>
             <button
               type="button"
@@ -182,7 +182,9 @@ export function Pairing({
             </button>
           </div>
           <p className="text-xs text-muted">
-            直接连不用注册，在这个应用里就完成了。已经有账号的话走右边那个，这台电脑会记到你名下。
+            已经有账号就走右边那个，这台电脑会记到你名下。先试用不用注册，但它会给这台电脑新建一个
+            <b>临时身份</b>
+            ，这台电脑<b>不会</b>进入你已有的账号；之后可以在官网用恢复密钥把它认领回去。
           </p>
         </div>
       ) : null}

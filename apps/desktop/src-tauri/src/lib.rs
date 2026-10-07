@@ -20,6 +20,10 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const MAX_CLI_OUTPUT_BYTES: usize = 64 * 1024;
 const MIN_RETRY: Duration = Duration::from_millis(250);
 const MAX_RETRY: Duration = Duration::from_secs(30);
+/// Navigation outruns the shell, so the proof is offered until the approval
+/// page is there to take it. It is worth one pairing and expires with the code.
+const PAIR_PROOF_ATTEMPTS: usize = 6;
+const PAIR_PROOF_INTERVAL: Duration = Duration::from_millis(500);
 
 pub struct AppState {
     pub daemon: Arc<Daemon>,
@@ -83,6 +87,10 @@ struct DesktopDirective {
     navigate: String,
     complete: bool,
     retry_after_millis: Option<u64>,
+    /// Set only while a pairing code is waiting for approval. The shell may
+    /// hand it to the page it just opened, and to nothing else.
+    #[serde(default)]
+    pair_proof: Option<String>,
 }
 
 /// The shell knows only a generic navigation directive. Hub state, channel
@@ -99,8 +107,25 @@ fn apply_application_routes(
         let directive = application_route(binary, data_dir)?;
         if previous.as_deref() != Some(directive.navigate.as_str()) {
             let target = external_web_url(&directive.navigate)?;
-            ensure_web_reachable(&target)?;
+            // The website being unreachable is not a reason to give up: it is
+            // the reason to say so and keep trying. Losing the window here
+            // leaves someone who just installed staring at a splash screen.
+            if let Err(error) = ensure_web_reachable(&target) {
+                tracing_line(&error);
+                show_boot_status(app, &error);
+                let retry = Duration::from_millis(directive.retry_after_millis.unwrap_or(2_000))
+                    .clamp(MIN_RETRY, MAX_RETRY);
+                std::thread::sleep(retry);
+                continue;
+            }
             navigate(app, target)?;
+            if let Some(proof) = directive
+                .pair_proof
+                .as_deref()
+                .filter(|value| !value.is_empty())
+            {
+                inject_pair_proof(app, &target, proof);
+            }
             previous = Some(directive.navigate);
         }
         if directive.complete {
@@ -146,6 +171,41 @@ fn application_route(binary: &Path, data_dir: &Path) -> Result<DesktopDirective,
         .map_err(|error| format!("Wasm 桌面指令不是有效 JSON: {error}"))
 }
 
+/// Hands the machine's proof to the approval page this shell just opened.
+///
+/// The page cannot reach it any other way: the proof is never part of the URL,
+/// so it stays out of history, logs and referrers, and only the window the
+/// shell navigated can receive it. The page re-checks the path, so offering it
+/// repeatedly costs nothing and a late arrival still completes the pairing.
+fn inject_pair_proof(app: &tauri::AppHandle, target: &tauri::Url, proof: &str) {
+    // The approval page and the first-install page both take the proof; nothing
+    // else the shell ever opens should.
+    if target.path() != "/activate" && target.path() != "/setup" {
+        return;
+    }
+    let literal = match serde_json::to_string(proof) {
+        Ok(value) => value,
+        Err(_) => return,
+    };
+    let script = format!(
+        "(function (proof) {{ var path = location.pathname; \
+         if (path !== '/activate' && path !== '/setup') return; \
+         window.__genehubPairProof = proof; }})({literal});"
+    );
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    // `eval` is fire-and-forget and navigation has not finished yet, so offer it
+    // until the page is there. Every attempt is guarded by the page's own path
+    // check, and the value is worth one pairing, so repeating costs nothing.
+    for attempt in 0..PAIR_PROOF_ATTEMPTS {
+        if attempt > 0 {
+            std::thread::sleep(PAIR_PROOF_INTERVAL);
+        }
+        let _ = window.eval(&script);
+    }
+}
+
 fn navigate(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
     let window = app
         .get_webview_window("main")
@@ -183,6 +243,17 @@ fn ensure_web_reachable(url: &tauri::Url) -> Result<(), String> {
             .map(|error| error.to_string())
             .unwrap_or_else(|| "没有可用地址".to_string())
     ))
+}
+
+/// Reports progress on the splash screen without ending the attempt.
+fn show_boot_status(app: &tauri::AppHandle, message: &str) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let encoded = serde_json::to_string(message).unwrap_or_else(|_| "\"\"".to_string());
+    let _ = window.eval(format!(
+        "const node=document.getElementById('status');if(node)node.textContent={encoded};"
+    ));
 }
 
 fn show_boot_error(app: &tauri::AppHandle, message: &str) {

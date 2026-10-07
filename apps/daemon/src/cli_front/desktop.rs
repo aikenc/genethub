@@ -101,10 +101,11 @@ async fn route(args: &[String]) -> i32 {
         }
         HubStatus::Pairing {
             verification_uri_complete,
+            pair_proof,
             ..
         } => output::succeed(
             "desktop.route",
-            desktop_directive(verification_uri_complete, false, Some(2_000)),
+            desktop_pairing_directive(verification_uri_complete, pair_proof),
         ),
         HubStatus::Unpaired | HubStatus::Failed { .. } => match rpc
             .call(Request::HubPair {
@@ -115,10 +116,11 @@ async fn route(args: &[String]) -> i32 {
         {
             Ok(Reply::HubStatus(HubStatus::Pairing {
                 verification_uri_complete,
+                pair_proof,
                 ..
             })) => output::succeed(
                 "desktop.route",
-                desktop_directive(verification_uri_complete, false, Some(2_000)),
+                desktop_pairing_directive(verification_uri_complete, pair_proof),
             ),
             Ok(other) => output::fail(CliFailure::business(
                 "internal",
@@ -168,6 +170,20 @@ fn desktop_directive(
     })
 }
 
+/// The pairing page, plus the proof the shell may hand to that page.
+///
+/// The proof rides along in the directive the desktop shell reads from stdout,
+/// which is the same boundary as the machine itself: the shell is the only thing
+/// that can put it into a local browser. It is left out entirely when the Hub
+/// did not issue one, so an older Hub keeps the human confirm button.
+fn desktop_pairing_directive(navigate: String, pair_proof: String) -> serde_json::Value {
+    let mut directive = desktop_directive(navigate, false, Some(2_000));
+    if !pair_proof.is_empty() {
+        directive["pairProof"] = json!(pair_proof);
+    }
+    directive
+}
+
 fn workbench_url(base: &str, machine_id: &str) -> Result<String, CliFailure> {
     let mut url = Url::parse(base).map_err(|error| {
         CliFailure::business("internal", format!("invalid workbench URL: {error}"), None)
@@ -187,7 +203,21 @@ fn claim_url_with_next(value: &str, workbench: &str) -> Result<String, CliFailur
 
 #[cfg(test)]
 mod tests {
-    use super::{claim_url_with_next, desktop_directive, workbench_url};
+    use super::{claim_url_with_next, desktop_directive, desktop_pairing_directive, workbench_url};
+
+    #[test]
+    fn the_pairing_directive_carries_the_proof_only_when_the_hub_issued_one() {
+        let with_proof =
+            desktop_pairing_directive("https://relay.genethub.com/activate".into(), "prf_1".into());
+        assert_eq!(with_proof["pairProof"], "prf_1");
+        assert_eq!(with_proof["complete"], false);
+
+        // A Hub that predates the proof gets the same page and no proof, so the
+        // shell leaves the human confirm button alone.
+        let without =
+            desktop_pairing_directive("https://relay.genethub.com/activate".into(), String::new());
+        assert_eq!(without.get("pairProof"), None);
+    }
 
     #[test]
     fn desktop_and_hub_navigation_shapes_are_built_in_the_cli() {

@@ -58,6 +58,8 @@ describe("connecting a machine to a Hub", () => {
     verificationUri: "https://hub.example.com/activate",
     verificationUriComplete: "https://hub.example.com/activate?code=VCL9-47CG",
     expiresAt: "2026-01-01T00:00:00Z",
+    // Empty when the Hub predates the proof; the shell then skips the injection.
+    pairProof: "",
   } as const;
 
   it("approves the code in a window of this app rather than throwing the user out", async () => {

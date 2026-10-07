@@ -523,6 +523,7 @@ fn pairing_status(hub_url: &str, code: &hub::PairingCode) -> HubStatus {
         verification_uri: code.verification_uri.clone(),
         verification_uri_complete: code.verification_uri_complete.clone(),
         expires_at: code.expires_at.clone(),
+        pair_proof: code.pair_proof.clone(),
     }
 }
 
