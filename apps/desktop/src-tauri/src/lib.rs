@@ -118,7 +118,7 @@ fn apply_application_routes(
                 std::thread::sleep(retry);
                 continue;
             }
-            navigate(app, target)?;
+            navigate(app, target.clone())?;
             if let Some(proof) = directive
                 .pair_proof
                 .as_deref()
