@@ -60,12 +60,13 @@ defineJourney(
       await cli(["daemon", "start"]);
 
       // First launch on a fresh machine: unpaired, so the route sends the
-      // window to the Hub's pairing page and asks the shell to keep polling.
+      // window to the Hub's first-install page (`/setup`, not the hand-typed
+      // `/activate`) and asks the shell to keep polling.
       const first = await route();
       t.assertions.assert(first.complete === false, `unpaired route complete=${first.complete}`);
       const pairing = new URL(first.navigate);
       t.assertions.assert(
-        pairing.origin === hub.origin && pairing.pathname === "/activate",
+        pairing.origin === hub.origin && pairing.pathname === "/setup",
         `pairing page is ${pairing.origin}${pairing.pathname}`,
       );
       const userCode = pairing.searchParams.get("code");
