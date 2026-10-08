@@ -68,7 +68,12 @@ fn the_bundle_contains_only_a_boot_surface_then_applies_the_wasm_route() {
     assert!(!shell.contains("channel::WEB_APP_URL"));
     assert!(!shell.contains("HubStatus"));
     assert!(shell.contains("window.navigate(url)"));
-    assert!(shell.contains("ensure_web_reachable(&target)?"));
+    // Reachability is still checked, but it no longer ends the attempt: an
+    // unreachable website used to leave a fresh install parked on the splash
+    // screen with nowhere to go. Now it says so and keeps trying, which is the
+    // same boot surface, held for a reason the person can read.
+    assert!(shell.contains("ensure_web_reachable(&target)"));
+    assert!(!shell.contains("ensure_web_reachable(&target)?"));
 }
 
 #[test]
