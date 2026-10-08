@@ -186,10 +186,62 @@ fn build_body(model: &ModelConfig, request: &Request) -> anyhow::Result<Value> {
     }
 
     if let Some(budget) = thinking_budget(&request.thinking_level) {
-        body["thinking"] = json!({ "type": "enabled", "budget_tokens": budget });
+        if adaptive_thinking(model) {
+            // An adaptive model decides how much to think; the only thing left
+            // to ask for is how hard to push it.
+            body["thinking"] = json!({ "type": "adaptive" });
+            body["output_config"] = json!({ "effort": adaptive_effort(&request.thinking_level) });
+        } else {
+            body["thinking"] = json!({ "type": "enabled", "budget_tokens": budget });
+        }
     }
 
     Ok(body)
+}
+
+/// Whether this model takes adaptive thinking instead of a token budget.
+///
+/// An explicit `thinkingMode` always wins: gateways hand out aliased ids
+/// (`vendor--claude-opus-latest`) that no id rule can recognise, and a provider
+/// that only proxies cannot report the requirement itself. With nothing
+/// configured we follow the split Anthropic introduced with Opus 4.6, the same
+/// one pi bakes into its generated metadata.
+fn adaptive_thinking(model: &ModelConfig) -> bool {
+    match model.thinking_mode.as_deref() {
+        Some("adaptive") => true,
+        Some(_) => false,
+        None => requires_adaptive_thinking(&model.id),
+    }
+}
+
+fn requires_adaptive_thinking(model_id: &str) -> bool {
+    let id = model_id.to_ascii_lowercase();
+    [
+        "opus-4-6",
+        "opus-4.6",
+        "opus-4-7",
+        "opus-4.7",
+        "opus-4-8",
+        "opus-4.8",
+        "opus-5",
+        "opus.5",
+        "sonnet-4-6",
+        "sonnet-4.6",
+        "sonnet-5",
+        "sonnet.5",
+    ]
+    .iter()
+    .any(|needle| id.contains(needle))
+}
+
+/// Effort is coarser than a token budget, so the levels that have no native
+/// counterpart (`xhigh`, `max`) land on `high` rather than being invented.
+fn adaptive_effort(level: &str) -> &'static str {
+    match level {
+        "minimal" | "low" => "low",
+        "medium" => "medium",
+        _ => "high",
+    }
 }
 
 /// Tool results ride on user turns in the Anthropic format.
@@ -334,6 +386,7 @@ mod tests {
 
     fn model() -> ModelConfig {
         ModelConfig {
+            thinking_mode: None,
             provider: "anthropic".into(),
             id: "claude-test".into(),
             name: None,
@@ -374,6 +427,83 @@ mod tests {
         };
         let body = build_body(&model(), &request).unwrap();
         assert_eq!(body["thinking"]["budget_tokens"], 8192);
+    }
+
+    fn request_with(level: &str) -> Request {
+        Request {
+            system_prompt: "sys".into(),
+            messages: vec![],
+            tools: vec![],
+            thinking_level: level.into(),
+            cwd: ".".into(),
+        }
+    }
+
+    fn model_with(id: &str, mode: Option<&str>) -> ModelConfig {
+        ModelConfig {
+            thinking_mode: mode.map(|mode| mode.to_string()),
+            id: id.into(),
+            ..model()
+        }
+    }
+
+    /// The bug this pins: Opus 5.5 rejects `budget_tokens` outright, so a
+    /// built-in id has to arrive speaking the adaptive format.
+    #[test]
+    fn adaptive_models_take_an_effort_instead_of_a_budget() {
+        let body = build_body(
+            &model_with("claude-opus-5-5", None),
+            &request_with("medium"),
+        )
+        .unwrap();
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert!(body["thinking"].get("budget_tokens").is_none());
+        assert_eq!(body["output_config"]["effort"], "medium");
+    }
+
+    #[test]
+    fn an_explicit_mode_beats_the_built_in_id_rule() {
+        let legacy = build_body(
+            &model_with("claude-opus-5-5", Some("budget")),
+            &request_with("high"),
+        )
+        .unwrap();
+        assert_eq!(legacy["thinking"]["type"], "enabled");
+        assert_eq!(legacy["thinking"]["budget_tokens"], 8192);
+        assert!(legacy.get("output_config").is_none());
+
+        // Gateways hand out aliased ids no rule can recognise, which is why the
+        // mode exists at all.
+        let aliased = build_body(
+            &model_with("vendor--claude-opus-latest", Some("adaptive")),
+            &request_with("high"),
+        )
+        .unwrap();
+        assert_eq!(aliased["thinking"]["type"], "adaptive");
+        assert_eq!(aliased["output_config"]["effort"], "high");
+    }
+
+    #[test]
+    fn effort_levels_are_coarser_than_budgets() {
+        for (level, effort) in [
+            ("minimal", "low"),
+            ("low", "low"),
+            ("medium", "medium"),
+            ("high", "high"),
+            ("xhigh", "high"),
+            ("max", "high"),
+        ] {
+            let body =
+                build_body(&model_with("claude-opus-5-5", None), &request_with(level)).unwrap();
+            assert_eq!(body["output_config"]["effort"], effort, "level {level}");
+        }
+    }
+
+    #[test]
+    fn a_turned_off_level_sends_no_thinking_at_all() {
+        let body = build_body(&model_with("claude-opus-5-5", None), &request_with("off")).unwrap();
+        assert!(body.get("thinking").is_none());
+        assert!(body.get("output_config").is_none());
     }
 
     #[test]

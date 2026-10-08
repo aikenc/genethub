@@ -587,6 +587,7 @@ mod tests {
 
     fn model(provider: &str, id: &str) -> ModelConfig {
         ModelConfig {
+            thinking_mode: None,
             provider: provider.into(),
             id: id.into(),
             name: None,

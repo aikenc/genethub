@@ -262,6 +262,8 @@ impl AppState {
                 (
                     id,
                     ProviderConfig {
+                        thinking_mode: None,
+                        model_thinking: std::collections::BTreeMap::new(),
                         base_url: credential_valid.then_some(resolved.base_url).flatten(),
                         label: Some(resolved.label),
                         dialect: Some(resolved.dialect.as_str().to_string()),
@@ -936,6 +938,8 @@ mod machine_state_tests {
         config.agents.providers.insert(
             "private".into(),
             ProviderConfig {
+                thinking_mode: None,
+                model_thinking: std::collections::BTreeMap::new(),
                 api_key: Some("sk-secret".into()),
                 base_url: Some("http://192.168.1.20:8080/v1".into()),
                 models: vec!["model".into()],

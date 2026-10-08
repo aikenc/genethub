@@ -383,6 +383,7 @@ mod tests {
 
     fn model() -> ModelConfig {
         ModelConfig {
+            thinking_mode: None,
             provider: "openai".into(),
             id: "gpt-test".into(),
             name: None,

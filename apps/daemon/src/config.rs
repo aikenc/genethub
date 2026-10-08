@@ -174,6 +174,16 @@ pub struct ProviderConfig {
     pub models: Vec<String>,
     /// Explicit per-model media support; entries override provider discovery.
     pub model_inputs: std::collections::BTreeMap<String, Vec<String>>,
+    /// How this provider's models take extended thinking: `adaptive` sends
+    /// `thinking.type="adaptive"` with `output_config.effort`, `budget` sends the
+    /// legacy `thinking.type="enabled"` with `budget_tokens`. Unset leaves each
+    /// model to the built-in id rule.
+    ///
+    /// A gateway that only proxies reports nothing about the model behind it, so
+    /// this is the only way to name a requirement the id does not reveal.
+    pub thinking_mode: Option<String>,
+    /// Explicit per-model thinking mode; entries override `thinking_mode`.
+    pub model_thinking: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1195,6 +1205,8 @@ mod tests {
         config.agents.providers.insert(
             "private".into(),
             ProviderConfig {
+                thinking_mode: None,
+                model_thinking: std::collections::BTreeMap::new(),
                 api_key: Some("secret".into()),
                 ..Default::default()
             },
@@ -1231,6 +1243,8 @@ mod tests {
         config.agents.providers.insert(
             "private".into(),
             ProviderConfig {
+                thinking_mode: None,
+                model_thinking: std::collections::BTreeMap::new(),
                 api_key: Some("secret".into()),
                 ..Default::default()
             },

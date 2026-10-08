@@ -375,6 +375,8 @@ mod tests {
 
     fn key_only() -> ProviderConfig {
         ProviderConfig {
+            thinking_mode: None,
+            model_thinking: std::collections::BTreeMap::new(),
             api_key: Some("sk-test".into()),
             ..Default::default()
         }
@@ -396,6 +398,8 @@ mod tests {
     #[test]
     fn what_the_user_typed_wins_over_what_we_ship() {
         let config = ProviderConfig {
+            thinking_mode: None,
+            model_thinking: std::collections::BTreeMap::new(),
             api_key: Some("sk-test".into()),
             base_url: Some("http://127.0.0.1:8080/v1".into()),
             ..Default::default()
@@ -420,6 +424,8 @@ mod tests {
     #[test]
     fn a_custom_provider_can_say_it_speaks_anthropic() {
         let config = ProviderConfig {
+            thinking_mode: None,
+            model_thinking: std::collections::BTreeMap::new(),
             api_key: Some("sk-test".into()),
             base_url: Some("https://example.test".into()),
             dialect: Some("anthropic".into()),
@@ -463,6 +469,8 @@ mod tests {
                 .unwrap();
         });
         let config = ProviderConfig {
+            thinking_mode: None,
+            model_thinking: std::collections::BTreeMap::new(),
             api_key: Some("sk-test".into()),
             base_url: Some(format!("http://{address}")),
             ..Default::default()

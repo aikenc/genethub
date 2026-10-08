@@ -1068,6 +1068,7 @@ struct ConfiguredModel {
     max_tokens: Option<u64>,
     reasoning: bool,
     input_modalities: Vec<String>,
+    thinking_mode: Option<String>,
 }
 
 /// Turns configured providers into the models the picker offers.
@@ -1109,6 +1110,11 @@ fn configured_models(providers: &ProviderMap) -> Vec<ConfiguredModel> {
                 max_tokens: None,
                 reasoning: crate::provider::reasons(id),
                 input_modalities: config.model_inputs.get(id).cloned().unwrap_or_default(),
+                thinking_mode: config
+                    .model_thinking
+                    .get(id)
+                    .cloned()
+                    .or_else(|| config.thinking_mode.clone()),
             });
         }
     }
@@ -1149,6 +1155,7 @@ fn write_models_file(home: &std::path::Path, providers: &ProviderMap) -> Result<
                 "maxTokens": model.max_tokens,
                 "reasoning": model.reasoning,
                 "inputModalities": model.input_modalities,
+                "thinkingMode": model.thinking_mode,
             })
         })
         .collect();
@@ -1621,6 +1628,8 @@ mod tests {
             (
                 "deepseek",
                 ProviderConfig {
+                    thinking_mode: None,
+                    model_thinking: std::collections::BTreeMap::new(),
                     api_key: Some("sk-test".into()),
                     base_url: Some("https://api.deepseek.com/v1".into()),
                     label: Some("DeepSeek".into()),
@@ -1631,6 +1640,8 @@ mod tests {
             (
                 "anthropic",
                 ProviderConfig {
+                    thinking_mode: None,
+                    model_thinking: std::collections::BTreeMap::new(),
                     models: vec!["claude-sonnet-4-20250514".into()],
                     ..Default::default()
                 },
@@ -1638,6 +1649,8 @@ mod tests {
             (
                 "kimi",
                 ProviderConfig {
+                    thinking_mode: None,
+                    model_thinking: std::collections::BTreeMap::new(),
                     api_key: Some("sk-test".into()),
                     models: vec!["kimi-k2".into()],
                     ..Default::default()
@@ -1661,6 +1674,8 @@ mod tests {
         let providers = provider_map(vec![(
             "deepseek",
             ProviderConfig {
+                thinking_mode: None,
+                model_thinking: std::collections::BTreeMap::new(),
                 api_key: Some("sk-test".into()),
                 base_url: Some("https://api.deepseek.com/v1".into()),
                 label: Some("DeepSeek".into()),
@@ -1679,6 +1694,8 @@ mod tests {
         let providers = provider_map(vec![(
             "deepseek",
             ProviderConfig {
+                thinking_mode: None,
+                model_thinking: std::collections::BTreeMap::new(),
                 api_key: Some("sk-test".into()),
                 base_url: Some("http://127.0.0.1:9/v1".into()),
                 models: vec!["deepseek-v4-flash".into()],

@@ -199,6 +199,7 @@ mod tests {
             session: Session::in_memory(cwd.clone()),
             models: Vec::new(),
             current_model: Some(ModelConfig {
+                thinking_mode: None,
                 provider: "fake".into(),
                 id: "echo".into(),
                 name: None,

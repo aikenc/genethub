@@ -33,6 +33,12 @@ pub struct ModelConfig {
     /// Native media accepted by this exact model, as declared by the daemon.
     #[serde(default)]
     pub input_modalities: Vec<String>,
+    /// How this model takes extended thinking: `adaptive` sends
+    /// `thinking.type="adaptive"` with `output_config.effort`, `budget` sends the
+    /// legacy `thinking.type="enabled"` with `budget_tokens`. Unset leaves the
+    /// choice to the built-in model id rule.
+    #[serde(default)]
+    pub thinking_mode: Option<String>,
 }
 
 impl ModelConfig {
@@ -122,6 +128,7 @@ fn env_models() -> Vec<ModelConfig> {
 
     if std::env::var("GENET_AGENT_FAKE_PROVIDER").is_ok() {
         models.push(ModelConfig {
+            thinking_mode: None,
             provider: FAKE_PROVIDER.into(),
             id: "echo".into(),
             name: Some("Fake echo model".into()),
@@ -140,6 +147,7 @@ fn env_models() -> Vec<ModelConfig> {
         let id = std::env::var("ANTHROPIC_MODEL")
             .unwrap_or_else(|_| "claude-sonnet-4-20250514".to_string());
         models.push(ModelConfig {
+            thinking_mode: None,
             provider: "anthropic".into(),
             id,
             name: None,
@@ -163,6 +171,7 @@ fn env_models() -> Vec<ModelConfig> {
     if env_present("OPENAI_API_KEY") {
         let id = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
         models.push(ModelConfig {
+            thinking_mode: None,
             provider: "openai".into(),
             id,
             name: None,
@@ -208,6 +217,7 @@ mod tests {
     #[test]
     fn api_defaults_to_provider_name() {
         let model = ModelConfig {
+            thinking_mode: None,
             provider: "anthropic".into(),
             id: "claude".into(),
             name: None,
@@ -227,6 +237,7 @@ mod tests {
     #[test]
     fn duplicate_provider_and_id_collapse() {
         let make = |id: &str| ModelConfig {
+            thinking_mode: None,
             provider: "openai".into(),
             id: id.into(),
             name: None,

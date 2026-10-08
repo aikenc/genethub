@@ -648,6 +648,7 @@ mod tests {
 
     fn fake_model() -> ModelConfig {
         ModelConfig {
+            thinking_mode: None,
             provider: "fake".into(),
             id: "echo".into(),
             name: None,
