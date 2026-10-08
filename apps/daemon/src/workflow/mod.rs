@@ -5920,6 +5920,16 @@ mod tests {
             },
             builtin: id == "genet",
             routes: None,
+            source: None,
+            version: None,
+            description: None,
+            message: None,
+            actions: None,
+            job: None,
+            pending_requests: None,
+            icon: None,
+            dir: None,
+            override_stale: None,
         }
     }
 
@@ -6448,7 +6458,7 @@ mod tests {
 
     #[test]
     fn tag_routes_use_live_cost_and_and_matching() {
-        let registry = crate::adapter::registry::Registry::new(&BTreeMap::new());
+        let registry = crate::adapter::registry::Registry::builtin_only();
         let agents = vec![
             ready_agent("claude", &[("opus-max", &["low", "medium", "high"])], &[]),
             ready_agent(
@@ -6493,7 +6503,7 @@ mod tests {
 
     #[test]
     fn tag_route_failure_hands_to_pm() {
-        let registry = crate::adapter::registry::Registry::new(&BTreeMap::new());
+        let registry = crate::adapter::registry::Registry::builtin_only();
         let error = crate::agent_routing::select_tag_route(
             &AgentSelectionPreferences::default(),
             &["视频理解".into()],
@@ -6711,7 +6721,7 @@ mod tests {
         let report = authoring::check_draft(
             root.path(),
             Some(TEST_PACKAGE),
-            &crate::adapter::registry::Registry::new(&BTreeMap::new()),
+            &crate::adapter::registry::Registry::builtin_only(),
         );
         let first = report.diagnostics.first().expect("a diagnostic");
         assert_eq!(first.code, "WF_EXPRESSION_TYPE", "{report:?}");

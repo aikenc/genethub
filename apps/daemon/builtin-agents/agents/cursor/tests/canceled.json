@@ -1,0 +1,32 @@
+{
+  "kind": "translate",
+  "turnId": "turn_3",
+  "canceled": true,
+  "lines": [
+    {
+      "type": "assistant",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "partial"
+          }
+        ]
+      },
+      "session_id": "chat-9",
+      "timestamp_ms": 1
+    },
+    {
+      "type": "result",
+      "subtype": "success",
+      "is_error": false
+    }
+  ],
+  "expect": {
+    "final": {
+      "type": "turnCanceled",
+      "turnId": "turn_3"
+    }
+  }
+}

@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import path from "node:path";
 
 import {
@@ -7,6 +7,7 @@ import {
   defineSpecialty,
   genetEnv,
   locateGenet,
+  registerScriptedCodex,
   tryLocateDaemonComponent,
   tryLocateHost,
   type CaseContext,
@@ -72,38 +73,26 @@ async function withOpened(t: CaseContext, run: (opened: Opened) => Promise<void>
 }
 
 defineSpecialty(
-  parityMeta(
-    "specialty.wasm.agents.path-install-is-discovered",
-    "An agent CLI that is only on PATH is offered by the component daemon",
-    "with a directory holding an executable named opencode prepended to the daemon's PATH, agent.refresh reports opencode ready",
-    [
-      "the guest skips PATH entirely and only ever finds configured absolute paths",
-      "every third-party agent silently disappears in the wasm build",
-      "PATH is split with the guest's separator rather than the machine's",
-    ],
-  ),
+  {
+    ...parityMeta(
+      "specialty.wasm.agents.path-install-is-discovered",
+      "An agent CLI that is only on PATH is offered by the component daemon",
+      "with a directory holding a codex executable (the declared app-server double) prepended to the daemon's PATH, the built-in codex script Agent started by the component daemon reports codex ready",
+      [
+        "the guest cannot start script Agents (no sh / Python runtime found from inside the component)",
+        "every third-party agent silently disappears in the wasm build",
+        "the daemon's PATH does not reach the script Agent and the CLI it looks for",
+      ],
+    ),
+  },
   async (t) => {
-    const bin = path.join(t.env.root, "path-install");
-    mkdirSync(bin, { recursive: true });
-    const installed = path.join(bin, process.platform === "win32" ? "opencode.bat" : "opencode");
-    writeFileSync(installed, "#!/bin/sh\nexit 0\n");
-    chmodSync(installed, 0o755);
     // Prepended, so this is the copy that is found even on a machine that has
     // a real one. The daemon inherits this through the shell that loads it.
-    t.env.env.PATH = `${bin}${path.delimiter}${process.env.PATH ?? ""}`;
-
+    registerScriptedCodex(t.env, []);
     await withOpened(t, async (opened) => {
-      const agents = await opened.client.call({ type: "agent.refresh" });
-      if (agents?.type !== "agents") throw new Error(`agent.refresh returned ${agents?.type}`);
-      const opencode = agents.data.find((agent) => agent.id === "opencode");
-      t.assertions.assert(
-        opencode != null,
-        `opencode is not in the catalogue: ${agents.data.map((agent) => agent.id).join(",")}`,
-      );
-      t.assertions.assert(
-        opencode?.probe.state === "ready",
-        `an installed agent was not discovered: ${JSON.stringify(opencode?.probe)}`,
-      );
+      const codex = await t.flows.branches.waitForAgent(opened.client, "codex", t.flows.branches.agentReady,
+        { timeoutMs: 60_000, what: "ready from a PATH-only CLI" });
+      t.assertions.assert(codex.source === "builtin", `codex source ${codex.source}`);
     });
   },
 );

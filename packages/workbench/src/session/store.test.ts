@@ -1156,11 +1156,12 @@ describe("opening a new conversation", () => {
     });
   });
 
-  it("lets an external Agent use its own default even when discovery returned no models", () => {
+  it("lets a script Agent use its own default even when discovery returned no models", () => {
     const external = {
       id: "opencode",
       label: "OpenCode",
       builtin: false,
+      source: "user",
       probe: { state: "ready" },
       capabilities: {
         interrupt: true,
@@ -1247,6 +1248,7 @@ describe("opening a new conversation", () => {
       id: "claude",
       label: "Claude Code",
       builtin: false,
+      source: "user",
       probe: { state: "ready" },
       capabilities: {
         interrupt: true,
@@ -2332,6 +2334,9 @@ describe("returning after a disconnection", () => {
       onNotice: () => {},
       onUpdateDownload: () => {},
       onBackgroundProcesses: () => {},
+      onAgents: () => {},
+      onAgentRequest: () => {},
+      onAgentRequestClosed: () => {},
       call: async () => undefined,
       lastCloseReason: close,
       failure: undefined,
@@ -2480,6 +2485,9 @@ describe("landing from a bookmark", () => {
       onNotice: () => {},
       onUpdateDownload: () => {},
       onBackgroundProcesses: () => {},
+      onAgents: () => {},
+      onAgentRequest: () => {},
+      onAgentRequestClosed: () => {},
       call: async (request: { type: string }) => {
         if (request.type === "workspace.list") {
           return {
@@ -2535,6 +2543,9 @@ describe("landing from a bookmark", () => {
       onNotice: () => {},
       onUpdateDownload: () => {},
       onBackgroundProcesses: () => {},
+      onAgents: () => {},
+      onAgentRequest: () => {},
+      onAgentRequestClosed: () => {},
       call: async (request: { type: string }) => {
         if (request.type === "workspace.list") {
           return {
@@ -2591,6 +2602,9 @@ describe("landing from a bookmark", () => {
       onNotice: () => {},
       onUpdateDownload: () => {},
       onBackgroundProcesses: () => {},
+      onAgents: () => {},
+      onAgentRequest: () => {},
+      onAgentRequestClosed: () => {},
       call: async (request: { type: string }) => {
         if (request.type === "workspace.list") {
           return {
@@ -2690,6 +2704,9 @@ function catalogClient(
     onNotice: () => {},
     onUpdateDownload: () => {},
     onBackgroundProcesses: () => {},
+    onAgents: () => {},
+    onAgentRequest: () => {},
+    onAgentRequestClosed: () => {},
     call: async (request: { type: string }) => {
       if (request.type === "workspace.list") {
         return { type: "workspaces", data: workspaces };

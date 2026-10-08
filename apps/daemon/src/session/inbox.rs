@@ -34,6 +34,15 @@ fn lane_of(entry: &InboxEntry) -> Lane {
     }
 }
 
+/// Already sent messages retain a delivery obligation, but a durable Human
+/// pause is not a crash or a new consultation. Only new queued inputs may
+/// start a consultation; the sent original becomes eligible after a decision
+/// clears the pending request. Use persisted state, including during stop.
+fn dispatchable(entry: &InboxEntry, meta: &SessionMeta) -> bool {
+    matches!(entry.state.as_str(), "receiving" | "queued")
+        || entry.state == "sent" && meta.pending_permission.is_none()
+}
+
 /// The receipt digest of one accepted input. Used both when the input is
 /// accepted and when a half-recorded one is recovered, so the two can never
 /// disagree. An origin joins the digest only when present, so receipts written
@@ -283,7 +292,15 @@ impl SessionManager {
                 .human_continuation
                 .as_ref()
                 .is_some_and(|c| !c.completed);
-            if !meta.openable() || !(has_input || has_decision) {
+            if !meta.openable() {
+                continue;
+            }
+            if let Some(decision) = &meta.human_continuation {
+                let live = self.live(&meta.id).await?;
+                self.record_human_response(&live, decision).await?;
+            }
+            let provider_pending = meta.pending_permission.as_ref().is_some_and(|request| request.kind == PermissionRequestKind::ProviderConfiguration);
+            if !(has_input || has_decision || provider_pending) {
                 continue;
             }
             let live = self.live(&meta.id).await?;
@@ -311,16 +328,29 @@ impl SessionManager {
     pub(crate) async fn dispatch_deliveries(&self, state: &Shared) {
         let lives: Vec<_> = self.sessions.read().await.values().cloned().collect();
         for live in lives {
+            let configuration = {
+                let meta = live.meta.lock().await;
+                meta.pending_permission.as_ref().filter(|r| r.kind == PermissionRequestKind::ProviderConfiguration)
+                    .map(|r| (meta.id.clone(), r.id.clone()))
+            };
+            if let Some((session_id, request_id)) = configuration {
+                if let Err(error) = crate::provider_control::recover(state, &session_id, &request_id).await {
+                    tracing::error!(event = "provider_continuation_failed", %error, "provider continuation needs attention");
+                }
+            }
             let eligible = {
                 let meta = live.meta.lock().await;
                 !meta.inbox.paused
-                    && (meta.inbox.entries.iter().any(|entry| {
-                        matches!(entry.state.as_str(), "receiving" | "queued" | "sent")
-                    }) || (meta
-                        .human_continuation
-                        .as_ref()
-                        .is_some_and(|c| !c.completed)
-                        && !live.continuation_dispatched.load(Ordering::SeqCst)))
+                    && (meta
+                        .inbox
+                        .entries
+                        .iter()
+                        .any(|entry| dispatchable(entry, &meta))
+                        || (meta
+                            .human_continuation
+                            .as_ref()
+                            .is_some_and(|c| !c.completed)
+                            && !live.continuation_dispatched.load(Ordering::SeqCst)))
             };
             if !eligible
                 || live.closing.load(Ordering::SeqCst)
@@ -331,14 +361,13 @@ impl SessionManager {
             let state = state.clone();
             let task_live = live.clone();
             live.cleanup.spawn(async move {
-                let has_inputs = task_live
-                    .meta
-                    .lock()
-                    .await
-                    .inbox
-                    .entries
-                    .iter()
-                    .any(|entry| matches!(entry.state.as_str(), "receiving" | "queued" | "sent"));
+                let has_inputs = {
+                    let meta = task_live.meta.lock().await;
+                    meta.inbox
+                        .entries
+                        .iter()
+                        .any(|entry| dispatchable(entry, &meta))
+                };
                 let result = if has_inputs {
                     state.sessions.deliver_inputs(&state, &task_live).await
                 } else {
@@ -473,7 +502,7 @@ impl SessionManager {
             .inbox
             .entries
             .iter()
-            .filter(|entry| matches!(entry.state.as_str(), "queued" | "sent"))
+            .filter(|entry| dispatchable(entry, &meta) && entry.state != "receiving")
             .map(|entry| entry.message_id.as_str())
             .collect::<std::collections::BTreeSet<_>>();
         let media_tags = {
@@ -501,7 +530,7 @@ impl SessionManager {
             .inbox
             .entries
             .iter()
-            .filter(|entry| matches!(entry.state.as_str(), "queued" | "sent"))
+            .filter(|entry| dispatchable(entry, &meta) && entry.state != "receiving")
             .collect();
         // One turn carries one lane. Mixing a user's new requirement with
         // several Runs' completion notices left "which of these is the

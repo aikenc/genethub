@@ -57,7 +57,7 @@ function livenessCase(
       timeoutMs: durationMs * 4,
       resources: { environments: 1, cpu: 1, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
       surfaces: ["daemon", "agent-adapter", "workbench-client"],
-      productInterfaces: ["@genehub/workbench/client", "daemon-protocol", "agents.custom"],
+      productInterfaces: ["@genehub/workbench/client", "daemon-protocol", "agent-serve-protocol-1"],
     },
     async (t) => {
       const session = await t.flows.branches.openControlledAgentSession({
@@ -74,16 +74,27 @@ function livenessCase(
   );
 }
 
-/** The external fault is a live CLI whose stdin is paused. Control requests
+/** The external fault is a live serve process that stopped reading its protocol pipe. Control requests
  * must remain available regardless of whether cancellation is queued or
  * immediately acknowledged. Requiring a stuck control request as the fixture
  * made the previous oracle block when the control plane was fixed. */
 async function wedgeControlPlane(t: CaseContext, session: ControlledAgent): Promise<string> {
   const before = session.journal().length;
-  await t.flows.main.sendPrompt(session.client, session.sessionId, OVERSIZED_PROMPT);
+  // Not awaited: the script takes at most one chunk of this frame, so the
+  // daemon's write — and the handover of this send — stays blocked. What is
+  // under test is everything else the user can still do meanwhile.
+  void t.flows.main.sendPrompt(session.client, session.sessionId, OVERSIZED_PROMPT).catch(() => undefined);
   const samples = () => session.journal().slice(before).filter((entry) => entry.event === "stdin-idle"
     && t.flows.branches.processAlive(Number(entry.pid)));
-  await t.tools.waitUntil(() => samples().length >= 2, 10_000);
+  // Settled: the pipe took its one chunk of the frame (bytesRead moved past
+  // the first sample) and then did not move again between two samples.
+  const settled = () => {
+    const seen = samples();
+    const [a, b] = seen.slice(-2);
+    return seen.length >= 3 && a !== undefined && b !== undefined && a.bytesRead === b.bytesRead
+      && Number(b.bytesRead) > Number(seen[0]!.bytesRead);
+  };
+  await t.tools.waitUntil(settled, 15_000);
   const [first, second] = samples().slice(-2);
   if (!first || !second) throw new Error("the CLI stopped before its unreadable state could be observed");
   t.assertions.assert(first.pid === second.pid && first.bytesRead === second.bytesRead,
@@ -179,54 +190,11 @@ livenessCase(
   },
 );
 
-livenessCase(
-  "close-outlives-an-agent-that-ignores-sigterm",
-  "Close reaps an agent that ignores SIGTERM",
-  "against an agent that ignores the cancel and SIGTERM, session.close returns within 15s and the agent process is gone",
-  [
-    "termination stops at a signal the agent can catch",
-    "agent process leaks after the session is closed",
-    // Not "kill_tree waits for the reap without a deadline". A process killed on
-    // Linux is reaped immediately, so nothing here reaches that wait; claiming
-    // it would be claiming a guard this case does not provide. Blocking a reap
-    // needs a process stuck in the kernel, which no profile can arrange.
-  ],
-  { profile: "ignore-sigterm", id: "liveness-sigterm" },
-  async (t, session) => {
-    await t.flows.main.sendPrompt(session.client, session.sessionId, "outlive me");
-    await t.tools.waitUntil(
-      () => session.journal().some((entry) => entry.event === "went-silent"),
-      10_000,
-    );
-    // The process that took the prompt. The probe the daemon started to read
-    // the agent's catalog is already gone, so watching that one exit would
-    // pass without close having done anything.
-    const agentPid = Number(
-      session.journal().find((entry) => entry.event === "went-silent")?.pid ?? 0,
-    );
-    t.assertions.assert(agentPid > 0, "the controlled agent never reported its pid");
-
-    try {
-      const timed = await t.flows.branches.timeControlCall(() =>
-        session.client.call({ type: "session.close", payload: { sessionId: session.sessionId } }),
-      );
-      t.note(`close ${timed.outcome} in ${timed.ms}ms`);
-      t.assertions.assert(
-        timed.ms < CONTROL_BUDGET_MS,
-        `session.close took ${timed.ms}ms against an agent that ignores SIGTERM`,
-      );
-      await t.tools.waitUntil(() => !t.flows.branches.processAlive(agentPid), 10_000);
-    } finally {
-      if (t.flows.branches.processAlive(agentPid)) {
-        try {
-          process.kill(agentPid, "SIGKILL");
-        } catch {
-          // Already reaped between the check and the signal.
-        }
-      }
-    }
-  },
-);
+// No "close reaps an agent that ignores SIGTERM" case any more: closing a
+// session no longer ends a process. One serve process hosts every session of
+// a script Agent and the CLI a session starts is the script's to end. The
+// kernel's own escalation past SIGTERM, when it restarts a deaf serve process,
+// is held by specialty.agent.script.missed-deadline-restarts.
 
 livenessCase(
   "a-new-message-survives-the-previous-stop",

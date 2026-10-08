@@ -1,0 +1,93 @@
+{
+ "description": "A stale turn on the root thread cannot touch the current turn; the bound one still completes.",
+ "thread": "root-thread",
+ "steps": [
+  {
+   "begin": "t1"
+  },
+  {
+   "frame": {
+    "method": "turn/started",
+    "params": {
+     "threadId": "root-thread",
+     "turn": {
+      "id": "root-turn",
+      "items": [],
+      "status": "inProgress"
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "item/completed",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "stale-turn",
+     "item": {
+      "type": "agentMessage",
+      "id": "stale",
+      "text": "old"
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "thread/tokenUsage/updated",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "stale-turn",
+     "tokenUsage": {
+      "last": {
+       "inputTokens": 999
+      }
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "turn/completed",
+    "params": {
+     "threadId": "root-thread",
+     "turn": {
+      "id": "stale-turn",
+      "items": [],
+      "status": "completed"
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "turn/completed",
+    "params": {
+     "threadId": "root-thread",
+     "turn": {
+      "id": "root-turn",
+      "items": [],
+      "status": "completed"
+     }
+    }
+   }
+  }
+ ],
+ "events": [
+  {
+   "type": "turnCompleted",
+   "turnId": "t1",
+   "usage": {
+    "inputTokens": 0,
+    "outputTokens": 0,
+    "cacheReadTokens": 0,
+    "cacheWriteTokens": 0,
+    "llmRounds": 0,
+    "toolOutputTokens": 0,
+    "compactionCount": 0,
+    "tokenUsageStatus": "unavailable"
+   },
+   "forkCheckpoint": "root-turn"
+  }
+ ]
+}

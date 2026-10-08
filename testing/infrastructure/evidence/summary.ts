@@ -36,6 +36,7 @@ export function renderRunSummary(input: {
   const language = input.language ?? "en";
   const problems = failed.map((item) => `  - ${item.caseId} ${item.status} ${item.message ?? ""}`).join("\n");
   const durations = slowest.map((item) => `${item.caseId} ${item.durationMs}ms`).join(", ");
+  const suspended = (manifest.notExecuted ?? []).filter((item) => item.reason.startsWith("L13 suspended")).map((item) => item.id);
   if (language === "zh-CN") {
     return [
       `# ${CHINESE_STATUS[manifest.status]} · ${CHINESE_GATE[manifest.gate] ?? manifest.gate}`,
@@ -48,6 +49,7 @@ export function renderRunSummary(input: {
       ...(manifest.gate === "dev-feedback" ? [`- 验收范围：${manifest.selection?.reason ?? "未记录"}；不授予完整 dev/Beta/Stable 资格`] : []),
       ...(manifest.resumedFrom ? [`- 补跑来源：${manifest.resumedFrom.runId}；复用 ${manifest.resumedFrom.reused.length} 项已通过结果`] : []),
       ...(manifest.preflight?.issues.length ? [`- 依赖预检阻塞：${manifest.preflight.issues.map(item => `${item.caseId}: ${item.reason}`).join("；")}`] : []),
+      ...(suspended.length ? [`- 已暂停的 legacy 用例（未执行，不计通过）：${suspended.length} 项，${suspended.join("、")}`] : []),
       ...manifest.qualification.reasons.map(reason => `- 未获资格原因：${reason}`),
       failed.length ? `- 发现问题：\n${problems}` : "- 发现问题：无",
       `- 最慢用例：${durations}`,
@@ -65,6 +67,7 @@ export function renderRunSummary(input: {
     `- qualified: ${manifest.qualification.qualified}`,
     ...(manifest.gate === "dev-feedback" ? [`- feedback scope: ${manifest.selection?.reason ?? "missing"}; not a complete dev/Beta/Stable gate`] : []),
     ...(manifest.resumedFrom ? [`- resumed from: ${manifest.resumedFrom.runId}; reused ${manifest.resumedFrom.reused.length} passed results`] : []),
+    ...(suspended.length ? [`- suspended legacy (not executed, not passed): ${suspended.length}: ${suspended.join(", ")}`] : []),
     ...manifest.qualification.reasons.map(reason => `- qualification reason: ${reason}`),
     failed.length ? `- problems:\n${problems}` : "- problems: none",
     `- slowest: ${durations}`,

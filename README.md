@@ -15,14 +15,14 @@ GeneHub 是一个开源、local-first 的 coding agent 工作台。它把你的�
 | 开发者的痛点 | GeneHub 的方案 |
 | --- | --- |
 | Agent 被绑在一台电脑的一个终端或 IDE 里，离开座位就失去控制 | 常驻 daemon 持有任务与会话；桌面、浏览器和手机使用同一份工作台 |
-| Claude Code、Codex、OpenCode、Cursor 等各有协议、事件和恢复方式 | adapter 把它们归一化为同一套会话、时间线和能力模型 |
+| Codex、Cursor 等各有协议、事件和恢复方式 | 每个第三方 Agent 是一个可热修改的脚本目录，把它们归一化为同一套会话、时间线和能力模型 |
 | 远程使用高权限开发工具，往往意味着暴露端口或把代码环境交给第三方 | daemon 只监听本机并主动建立远程连接；业务内容加密后再中转 |
 | 更换 agent、模型或设备后，项目上下文与操作入口随之碎片化 | 工作区、文件、Git、终端、会话和 agent 选择集中在一个工作台里 |
 | 远程能力被绑定在厂商账号和云服务上，想退出就得换工具或搬数据 | 官方 Hub 开箱即用，也可以自行部署开源 Relay 与工作台；项目和会话仍留在自己的机器上 |
 
 ## 现在可以做什么
 
-- 使用随安装包提供的 **GeneHub Agent**，或自动接入本机已有的 **Claude Code、Codex、OpenCode、Cursor** 和其他 ACP agent。
+- 使用随安装包提供的 **GeneHub Agent**，或在工作台里安装、登录 **Codex、Cursor**；其他 Agent 写一个脚本目录即可接入（第一期内置 Codex 与 Cursor，Claude 家族与 OpenCode 待以脚本重新接入）。
 - 从任意已授权设备创建、恢复和切换会话；客户端断线时任务继续在资源电脑上运行。
 - 在同一界面浏览项目文件、查看 Git 变更、使用终端，并预览 agent 生成的 Markdown、图片、HTML 和视频。
 - 为不同会话选择 agent、模型、思考强度和权限模式；界面只展示对应 agent 真正支持的能力。
@@ -119,7 +119,7 @@ flowchart LR
     daemon --> kernel[会话 · 文件 · Git · 终端]
     kernel --> adapters[统一 adapter 层]
     adapters --> builtin[GeneHub Agent]
-    adapters --> external[Claude Code · Codex · OpenCode · Cursor · ACP]
+    adapters --> external[脚本 Agent：Codex · Cursor · 自定义]
 ```
 
 | 部件 | 职责 |
@@ -248,7 +248,7 @@ node apps/desktop/scripts/bundle.mjs
 | [architecture.md](./docs/architecture.md) | 理解顶层分层、不可让步的边界和演进顺序 |
 | [engineering-guidance.md](./docs/engineering-guidance.md) | 动手之前：这个方案该长什么形状 |
 | [engineering-laws.md](./docs/engineering-laws.md) | 实现与提交之前：哪些事不许做 |
-| [third-party-agents.md](./docs/third-party-agents.md) | 接入 Claude Code、Codex、OpenCode、Cursor 或自定义 ACP agent |
+| [third-party-agents.md](./docs/third-party-agents.md) | 第三方 Agent 如何以脚本目录接入；线协议见 [agent-serve-protocol.md](./docs/agent-serve-protocol.md) |
 | [daemon.md](./docs/daemon.md) | 修改会话内核、工作区、设备、传输或存储 |
 | [workflow-executor-model.md](./docs/workflow-executor-model.md) | 理解 PM、WM、Workflow、Executor、测试项目与运行记录的分工 |
 | [web-workbench.md](./docs/web-workbench.md) | 修改工作台、宿主适配与移动端体验 |

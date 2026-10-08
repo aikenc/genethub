@@ -294,3 +294,6 @@ mod tests {
 
 pub mod service_preview;
 pub use service_preview::*;
+
+pub mod provider_control;
+pub use provider_control::*;

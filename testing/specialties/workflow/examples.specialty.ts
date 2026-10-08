@@ -143,8 +143,9 @@ for (const scenario of ["simple", "medium-repair", "medium-rejected", "complex-s
     await t.tools.waitUntil(async () => {
       const reply = await opened.client.call({ type: "workflow.history", payload: { workspaceId, limit: 10 } });
       if (reply?.type !== "workflowRuns") throw new Error("Run history unavailable");
-      t.assertions.assert(reply.data.length <= 1, "example escaped into another PM-dispatched Run");
-      run = reply.data[0]; return !!run && ["completed", "blocked", "failed", "cancelled"].includes(run.status);
+      const business = t.assertions.businessRuns(reply.data);
+      t.assertions.assert(business.length <= 1, "example escaped into another PM-dispatched Run");
+      run = business[0]; return !!run && ["completed", "blocked", "failed", "cancelled"].includes(run.status);
     }, 180_000).catch(async error => { throw new Error(`${scenario}: ${error}; events=${JSON.stringify(events)}; run=${JSON.stringify(run)}; pm=${JSON.stringify((await snapshot()).items).slice(-6000)}`); });
     t.assertions.assert(run!.workflowId === selected.id && !!run!.executorSessionId && run!.executorTurns === 0, "example bypassed deterministic Executor");
     t.assertions.assert(run!.status === (scenario.endsWith("exhausted") ? "blocked" : "completed"), `unexpected Run outcome: ${JSON.stringify(run)}`);

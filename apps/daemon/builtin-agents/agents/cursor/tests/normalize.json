@@ -1,0 +1,128 @@
+{
+  "kind": "normalize",
+  "description": "saved selections are migrated or replaced at session start (old manager.rs normalize_runtime_selection + resolve_legacy_cursor_model)",
+  "cliList": "auto - Auto (default)\ncursor-grok-4.6-high-fast - Cursor Grok 4.6 Fast\ncursor-grok-4.6-high - Cursor Grok 4.6\ngrok-4.7-low - Grok 4.7 Low\ngrok-4.7-low-fast - Grok 4.7 Low Fast\ngrok-4.7-medium - Grok 4.7 Medium\ncomposer-2.5 - Composer 2.5\n",
+  "sessions": [
+    {
+      "config": {
+        "modelId": "grok-4.7[effort=low,fast=true]"
+      },
+      "expect": {
+        "modelId": "grok-4.7",
+        "effortId": "low",
+        "fast": true,
+        "slug": "grok-4.7-low-fast",
+        "events": [
+          {
+            "type": "modelChanged",
+            "modelId": "grok-4.7"
+          },
+          {
+            "type": "effortChanged",
+            "effortId": "low"
+          },
+          {
+            "type": "fastChanged",
+            "fast": true
+          }
+        ]
+      }
+    },
+    {
+      "config": {
+        "modelId": "grok-4.7[effort=low,fast=true]",
+        "effortId": "medium",
+        "fast": false
+      },
+      "expect": {
+        "modelId": "grok-4.7",
+        "effortId": "medium",
+        "fast": false,
+        "slug": "grok-4.7-medium",
+        "events": [
+          {
+            "type": "modelChanged",
+            "modelId": "grok-4.7"
+          }
+        ]
+      }
+    },
+    {
+      "config": {
+        "modelId": "cursor-grok-4.6-high-fast"
+      },
+      "expect": {
+        "modelId": "cursor-grok-4.6",
+        "effortId": "high",
+        "fast": true,
+        "slug": "cursor-grok-4.6-high-fast"
+      }
+    },
+    {
+      "config": {
+        "modelId": "gone-model",
+        "modeId": "debug",
+        "effortId": "max",
+        "fast": true
+      },
+      "expect": {
+        "modelId": "auto",
+        "modeId": "agent",
+        "fast": false,
+        "slug": "auto",
+        "events": [
+          {
+            "type": "modelChanged",
+            "modelId": "auto"
+          },
+          {
+            "type": "modeChanged",
+            "modeId": "agent"
+          },
+          {
+            "type": "fastChanged",
+            "fast": false
+          }
+        ]
+      }
+    },
+    {
+      "config": {
+        "modelId": "grok-4.7",
+        "effortId": "xhigh",
+        "modeId": "plan"
+      },
+      "expect": {
+        "modelId": "grok-4.7",
+        "effortId": "medium",
+        "modeId": "plan",
+        "slug": "grok-4.7-medium",
+        "events": [
+          {
+            "type": "effortChanged",
+            "effortId": "medium"
+          }
+        ]
+      }
+    },
+    {
+      "config": {
+        "modelId": "composer-2.5",
+        "effortId": "low"
+      },
+      "expect": {
+        "modelId": "composer-2.5",
+        "slug": "composer-2.5",
+        "events": []
+      }
+    },
+    {
+      "config": {},
+      "expect": {
+        "modelId": null,
+        "slug": null,
+        "events": []
+      }
+    }
+  ]
+}

@@ -1,0 +1,70 @@
+{
+ "kind": "catalog",
+ "description": "model/list: each model keeps its own thinking levels, hidden models are dropped, the default model and its default level are taken.",
+ "listed": {
+  "data": [
+   {
+    "id": "gpt-5.6-sol",
+    "displayName": "GPT-5.6-Sol",
+    "isDefault": true,
+    "defaultReasoningEffort": "medium",
+    "supportedReasoningEfforts": [
+     {
+      "reasoningEffort": "low",
+      "description": "Fast"
+     },
+     {
+      "reasoningEffort": "high",
+      "description": "Deeper"
+     }
+    ]
+   },
+   {
+    "id": "gpt-5.2",
+    "supportedReasoningEfforts": []
+   },
+   {
+    "id": "legacy",
+    "supportedReasoningEfforts": [
+     "minimal"
+    ]
+   },
+   {
+    "id": "internal-thing",
+    "hidden": true
+   }
+  ]
+ },
+ "expect": {
+  "models": [
+   {
+    "id": "gpt-5.6-sol",
+    "label": "GPT-5.6-Sol",
+    "reasoning": true,
+    "efforts": [
+     "low",
+     "high"
+    ],
+    "supportsFast": false
+   },
+   {
+    "id": "gpt-5.2",
+    "label": "gpt-5.2",
+    "reasoning": false,
+    "efforts": [],
+    "supportsFast": false
+   },
+   {
+    "id": "legacy",
+    "label": "legacy",
+    "reasoning": true,
+    "efforts": [
+     "minimal"
+    ],
+    "supportsFast": false
+   }
+  ],
+  "defaultModel": "gpt-5.6-sol",
+  "defaultEffort": "medium"
+ }
+}

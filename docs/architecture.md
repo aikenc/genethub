@@ -23,11 +23,11 @@ GeneHub 是一套让你在自己的机器上跑 coding agent、并从任意设�
         │  daemon  │ ─── /fabric/v2 ──────► │   relay   │
         │ （你的机器）│                        │ 只搬字节   │
         └────┬─────┘                        └─────┬─────┘
-             │  Adapter 层（每种 agent 一个）        │ 四个 Fabric authority 操作
-             ├─ genet    自研内置 agent              ▼
-             ├─ acp      一份适配覆盖一批 CLI    ┌──────────────┐
-             ├─ opencode 本地 HTTP + SSE        │  控制面       │
-             └─ …                              │ 本仓之外的服务 │
+             │  Adapter 层                          │ 四个 Fabric authority 操作
+             ├─ genet    自研内置 agent（原生）     ▼
+             └─ script   每个第三方 Agent 一个   ┌──────────────┐
+                         目录 + 常驻 serve 进程  │  控制面       │
+                                               │ 本仓之外的服务 │
                                                └──────────────┘
 ```
 
@@ -95,7 +95,7 @@ Normalizer      ── 把它的事件翻成 GeneHub 的 TimelineItem
 ```rust
 #[async_trait]
 pub trait AgentAdapter: Send + Sync {
-    fn id(&self) -> &str;                       // "genet" / "acp:cursor" / "opencode"
+    fn id(&self) -> &str;                       // "genet" / "codex" / "cursor"
     fn capabilities(&self) -> Capabilities;     // 支不支持中断、切模型、审批、恢复
 
     async fn probe(&self) -> Probe;             // 二进制在不在、能不能握手
@@ -110,19 +110,21 @@ pub trait AgentAdapter: Send + Sync {
 
 模型、**思考强度**、**模式**是三条独立的轴，不要混用。思考强度是「想多久」（`ModelInfo.efforts` 里由模型自己报出档位，`session.setEffort` 切换）；模式是「动手前问不问」（`Catalog.modes`，`session.setMode`）。Agent 还可以通过 `Catalog.runtimeAxes` 声明 Fast 等额外运行轴；每条轴可以有任意档位，客户端只显示并原样回传 Agent 给出的 ID，不解析、更不把它拼进模型 ID。这几件事曾经被塞进同一个字段或字符串——同一个控件在不同 agent 下表达不同含义，还会生成 Agent 从未提供过的模型。现在一条轴一件事，前端不需要知道是哪个 agent 就能把控件画对。
 
-### 3.3 首批 adapter
+### 3.3 Adapter 只有两种
 
-| adapter | 传输 | 覆盖 | 阶段 |
-|---------|------|------|------|
-| `genet` | 子进程 + stdio JSONL | 自研内置 agent，装完即可跑 | MVP |
-| `opencode` | 本地 HTTP + SSE | OpenCode | MVP |
-| `claude` | 子进程 + 原生 `stream-json` stdio | Claude Code，直接拉起 `claude` 二进制 | MVP |
-| `codex` | 子进程 + 原生 `app-server` JSON-RPC | Codex，直接拉起 `codex app-server` | MVP |
-| `acp` | 子进程 + ACP over stdio | 一份代码覆盖 Cursor / Gemini / goose 等一批 CLI | MVP |
+| adapter | 传输 | 覆盖 |
+|---------|------|------|
+| `genet` | 子进程 + stdio JSONL | 自研内置 agent，装完即可跑；原生实现，不走脚本层 |
+| `script` | 每个 Agent 一个常驻 `serve` 进程 + stdio JSON-RPC | 所有第三方 Agent；第一期内置 `codex`、`cursor` |
 
-五个各有各的理由：`genet` 是兜底，`acp` 是**一份适配换一批 agent**，`opencode` 是**形状差异最大的那个**——它不是 stdio 而是本地 HTTP + SSE，`claude` 和 `codex` 是**我们绕开 ACP、直接说其原生协议的两个**。
+第三方 Agent 的全部知识——安装、登录、登录态、CLI 参数、协议翻译、历史导入——都在
+`<数据目录>/agents/<layer>/<id>/` 的 Python 里，daemon 只认目录规范和
+[agent-serve-protocol.md](./agent-serve-protocol.md)。上游 CLI 的变化通过改脚本、`agent test`、`agent reload`
+解决，不需要发版。设计与取舍见 [agent-script-adapters-proposal.md](./agent-script-adapters-proposal.md)，
+现状见 [third-party-agents.md](./third-party-agents.md)。
 
-这两个为什么值得自己写一份：ACP 是一份公开、双方都维护的契约，代价小；原生协议翻译要我们自己跟着对方的版本走。当前 ACP 已有 `session/request_permission` 和标准 `session/resume`，足够覆盖 Cursor 等通用接入；Claude 和 Codex 的原生协议仍提供更完整的模型、思考档位、模式、提问语义与会话恢复能力。`codex` 的 `model/list` 会报出每个模型自己的思考档位，而 `turn/start` 每回合都带 model / effort / 审批策略，所以三个选择器都是真的。两个都曾经挂在额外 ACP 桥接包上，也都因此让只装了官方 CLI 的人被告知「未安装」。详见 [third-party-agents.md](./third-party-agents.md)。
+B3「两种形状截然不同的 agent」由 `codex`（JSON-RPC app-server，每会话一个常驻进程）与 `cursor`
+（每轮一个 print 进程，stream-json）在脚本层继续证伪抽象。
 
 ### 3.4 Agent 权限与暂停恢复
 
@@ -139,13 +141,12 @@ GeneHub 面向长期无人值守的机器，默认权限不是“先拦住再等
 
 这里的“全盘可写”不等于提权：子进程继承 daemon 登录用户的 OS 权限，GeneHub 不绕过 ACL、UAC、macOS 隐私授权、只读文件系统或设备管理策略。
 
-**外部 agent 一律不随包分发**，只检测用户自己安装的。除了体积与授权，还有一条更硬的理由：有些 agent 自带 Node 或其他运行时，打包它们等于把它们的运行时依赖变成我们的，而 PC 端零 Node 运行时是硬约束（[desktop-client.md](./desktop-client.md) §4.1）。
+**外部 agent 一律不随包分发。** 随包分发的只是接入它们的脚本；CLI 本身由脚本在用户点「安装」、并经人确认后
+按该 CLI 自己的官方方式装进用户目录。有些 agent 自带 Node 或其他运行时，打包它们等于把它们的运行时依赖变成
+我们的，而 PC 端零 Node 运行时是硬约束（[desktop-client.md](./desktop-client.md) §4.1）。
 
-用户自定义 agent 走配置声明，不需要改代码：
-
-```jsonc
-{ "agents": { "goose": { "extends": "acp", "command": ["goose", "acp"] } } }
-```
+用户自定义 agent 是 `<数据目录>/agents/user/<id>/` 下的一个目录，不需要改代码，也不需要改配置
+（[third-party-agents.md](./third-party-agents.md) §5）。
 
 ---
 
@@ -332,3 +333,14 @@ testing/         ← 跨部件旅程测试（daemon + agent + mock 模型）
 我们调研过若干开源实现，借鉴的是**公开的接口约定**：[ACP](https://agentclientprotocol.com/)、[Agent Skills 标准](https://agentskills.io/specification)，以及各家 CLI 自己文档化的 stdio / HTTP 协议。这些本来就是发布出来给第三方对接的。
 
 GeneHub 的协议、daemon、前端与内置 agent 均为自有实现：不 fork、不 import、不复制代码。接入某个 agent 时我们实现的是**它对外公开的对接接口**，与任何第三方写客户端的做法无异。
+
+### Provider 配置的会话操作
+
+Provider 自举使用 daemon 的机器配置接口和既有 Session 暂停/恢复，不依赖具体 Agent。
+Agent 只能查询脱敏配置、提交有界非敏感草案、读取本会话操作回执；Human 在工作台确认具体配置并直接提交
+密钥。密钥不经过普通会话答案，不进入 Session meta、续跑 prompt 或操作记录。
+
+操作绑定 Session、目标机器、稳定 action ID 和原 provider 配置指纹。保存前检查原配置仍匹配；更换地址或
+协议不能沿用旧密钥。机器配置保存与操作回执跨文件，执行前写 applying；恢复时只核对目标配置指纹，
+匹配才确认已保存，否则报告 unknown 并拒绝盲目重放。Human 决定和无密钥结果先持久保存，再恢复原 Session；
+重启恢复同一义务，主动停止或关闭原 Session 后不再执行未提交的配置。模型验证有独立状态，保存不等于可用。

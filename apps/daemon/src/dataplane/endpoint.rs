@@ -703,7 +703,7 @@ async fn serve_streams(
                         {
                             continue;
                         }
-                        let frame = if scoped_processes
+                        let mut frame = if scoped_processes
                             && matches!(frame, ServerFrame::BackgroundProcesses { .. })
                         {
                             // A notification only; the client refetches its scoped snapshot.
@@ -713,6 +713,9 @@ async fn serve_streams(
                         } else {
                             frame
                         };
+                        if let ServerFrame::AgentsChanged { agents } = &mut frame {
+                            filter_agent_logs(agents, &watcher);
+                        }
                         if events.send(frame).await.is_err() {
                             return;
                         }
@@ -1151,6 +1154,13 @@ fn frame_requires(frame: &ServerFrame) -> Option<Capability> {
         // Command lines of what an agent ran. The same material as the tool
         // calls in a timeline, and gated the same way.
         ServerFrame::BackgroundProcesses { .. } => Some(Capability::Session),
+        // What Agents exist and their state: the same as `agent.list`.
+        ServerFrame::AgentsChanged { .. } => Some(Capability::Read),
+        // A login link, a device code, a prompt for a key: only for a client
+        // that may change this machine's configuration.
+        ServerFrame::AgentRequestOpened { .. } | ServerFrame::AgentRequestClosed { .. } => {
+            Some(Capability::Settings)
+        }
         ServerFrame::Event { .. }
         | ServerFrame::Desync { .. }
         | ServerFrame::Notice { .. }
@@ -1360,12 +1370,33 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
     let handled =
         router::handle(&services.state, services.access.transport, &caller, request).await;
     match handled.reply {
-        Ok(reply) => {
+        Ok(mut reply) => {
+            if let Reply::Agents(agents) = &mut reply {
+                filter_agent_logs(agents, &caller);
+            }
             send_reply(stream, reply).await?;
             apply_side_effect(services, handled.effect).await;
             Ok(())
         }
         Err(error) => send_protocol_error(stream, error).await,
+    }
+}
+
+/// List/push carry public readiness, but the text a script obtains from CLI
+/// output has the same Session grant as agent.logs. Apply one projection at
+/// both peer boundaries, rather than relying on scripts to classify stderr.
+fn filter_agent_logs(agents: &mut [genehub_proto::AgentInfo], caller: &Principal) {
+    if caller.allows(authz::Capability::Session) { return; }
+    for agent in agents {
+        agent.message = None;
+        if let genehub_proto::ProbeState::Unavailable { reason } = &mut agent.probe {
+            *reason = "当前不可用；需要会话权限查看详细原因".into();
+        }
+        if let Some(job) = &mut agent.job {
+            job.log_tail.clear();
+            job.message = None;
+            if job.error.is_some() { job.error = Some("动作失败；需要会话权限查看详细原因".into()); }
+        }
     }
 }
 

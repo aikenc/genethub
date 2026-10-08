@@ -46,6 +46,7 @@ pub mod process;
 pub mod processes;
 pub mod project_control;
 pub mod provider;
+pub(crate) mod provider_control;
 pub mod pty;
 pub mod remote;
 pub mod router;
@@ -72,6 +73,7 @@ pub struct Daemon {
     listener: tokio::task::JoinHandle<()>,
     session_deliveries: tokio::task::JoinHandle<()>,
     workflow_control: tokio::task::JoinHandle<()>,
+    agent_pushes: tokio::task::JoinHandle<()>,
 }
 
 impl Daemon {
@@ -123,9 +125,11 @@ impl Daemon {
                 }
             }
         });
+        let agent_pushes = tokio::spawn(push_agent_changes(state.clone()));
         Ok(Daemon {
             session_deliveries,
             workflow_control,
+            agent_pushes,
             state,
             port: listener.port,
             listener: listener.handle,
@@ -156,7 +160,16 @@ impl Daemon {
         self.workflow_control.abort();
         let _ = self.workflow_control.await;
         self.state.workflow_tasks.stop().await;
-        self.state.sessions.shutdown().await;
+        self.agent_pushes.abort();
+        let _ = self.agent_pushes.await;
+        // Script Agents first and alongside: stopping one takes the process
+        // away before anything waits on it, so closing its sessions fails
+        // fast instead of spending a deadline on a script that stopped
+        // reading — longer than the host waits for this daemon to exit.
+        tokio::join!(
+            self.state.registry.shutdown(),
+            self.state.sessions.shutdown()
+        );
         self.state.terminals.close_all().await;
         if let Some(link) = self.state.link.get() {
             link.stop().await;
@@ -166,5 +179,54 @@ impl Daemon {
         }
         self.listener.abort();
         let _ = std::fs::remove_file(self.state.paths.endpoint_file());
+    }
+}
+
+/// Tells every connected client when an Agent's state changes, and hands an
+/// Agent-level request to the clients allowed to answer it. Bursts (a job
+/// streaming its log) collapse into one list push per interval.
+async fn push_agent_changes(state: Shared) {
+    use adapter::script::RegistryEvent;
+    let mut events = state.registry.subscribe();
+    loop {
+        let event = match events.recv().await {
+            Ok(event) => event,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => RegistryEvent::Changed,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+        };
+        match event {
+            RegistryEvent::RequestOpened(request) => {
+                state.push(genehub_proto::ServerFrame::AgentRequestOpened { request });
+            }
+            RegistryEvent::RequestClosed {
+                agent_id,
+                request_id,
+            } => {
+                state.push(genehub_proto::ServerFrame::AgentRequestClosed {
+                    agent_id,
+                    request_id,
+                });
+            }
+            RegistryEvent::Changed => {
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                while let Ok(next) = events.try_recv() {
+                    match next {
+                        RegistryEvent::RequestOpened(request) => {
+                            state.push(genehub_proto::ServerFrame::AgentRequestOpened { request })
+                        }
+                        RegistryEvent::RequestClosed {
+                            agent_id,
+                            request_id,
+                        } => state.push(genehub_proto::ServerFrame::AgentRequestClosed {
+                            agent_id,
+                            request_id,
+                        }),
+                        RegistryEvent::Changed => {}
+                    }
+                }
+                let agents = router::agent_infos(&state, false).await;
+                state.push(genehub_proto::ServerFrame::AgentsChanged { agents });
+            }
+        }
     }
 }

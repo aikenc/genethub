@@ -22,6 +22,8 @@ function agent(id: string, label: string): AgentInfo {
     id,
     label,
     builtin: false,
+    // Every third-party Agent is a script Agent, which owns its defaults.
+    source: "user",
     probe: { state: "ready" },
     capabilities: {
       interrupt: false,

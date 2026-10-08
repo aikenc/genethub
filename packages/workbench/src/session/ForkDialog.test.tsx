@@ -80,11 +80,11 @@ describe("ForkDialog", () => {
         sourceTags={["Pro"]}
         sourceMediaTags={["图片理解"]}
         sourceCatalog={{
-          agents: [agent("codex", "Codex", true), agent("claude", "Claude Code", false)],
+          agents: [agent("codex", "Codex", true), agent("cursor", "Cursor", false)],
           workspaces: [workspace("w1", "GeneHub")],
           agentPreferences: preferences(["Pro"], [
             { agentId: "codex", tags: ["Pro"], cost: "low" },
-            { agentId: "claude", tags: ["Pro", "图片理解"] },
+            { agentId: "cursor", tags: ["Pro", "图片理解"] },
           ]),
         }}
         hasNativeCheckpoint
@@ -95,7 +95,7 @@ describe("ForkDialog", () => {
 
     expect(screen.getByRole("button", { name: "图片理解 · 自动" })).toBeDisabled();
     expect(screen.queryByRole("option", { name: /Codex · Model/ })).not.toBeInTheDocument();
-    expect(screen.getByRole("option", { name: /Claude · Model.*当前/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Cursor · Model.*当前/ })).toBeInTheDocument();
     expect(screen.getByText("重建会话")).toBeInTheDocument();
   });
 
@@ -112,13 +112,13 @@ describe("ForkDialog", () => {
         sourceCatalog={{
           agents: [
             agent("codex", "Codex", true),
-            agent("claude", "Claude Code", false),
+            agent("cursor", "Cursor", false),
             agent("cursor", "Cursor", false, false),
           ],
           workspaces: [workspace("w1", "GeneHub")],
           agentPreferences: preferences(["Pro"], [
             { agentId: "codex", tags: ["Pro"], cost: "low" },
-            { agentId: "claude", tags: ["Flash"] },
+            { agentId: "cursor", tags: ["Flash"] },
             { agentId: "cursor", tags: ["Max"] },
           ]),
         }}
@@ -133,7 +133,7 @@ describe("ForkDialog", () => {
     expect(screen.getByText("原生分支")).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "Flash" }));
-    expect(screen.getByRole("option", { name: /Claude · Model/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Cursor · Model/ })).toBeInTheDocument();
     expect(screen.getByText("重建会话")).toBeInTheDocument();
     expect(screen.getByText(/上下文窗口的 35%/)).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "重建到所选目标" }));
@@ -142,7 +142,7 @@ describe("ForkDialog", () => {
       machine: sourceMachine,
       workspaceId: "w1",
       target: {
-        agentId: "claude",
+        agentId: "cursor",
         workspaceId: "w1",
         modelId: "model",
         runtimeValues: {},
@@ -245,10 +245,10 @@ describe("ForkDialog", () => {
     };
     const onConfirm = vi.fn(async () => true);
     const loadCatalog = vi.fn(async () => ({
-      agents: [agent("claude", "Claude Code", false)],
+      agents: [agent("cursor", "Cursor", false)],
       workspaces: [workspace("remote-w", "模型仓库")],
       agentPreferences: preferences(["Flash"], [
-        { agentId: "claude", tags: ["Flash"] },
+        { agentId: "cursor", tags: ["Flash"] },
       ]),
     }));
     render(
@@ -280,14 +280,14 @@ describe("ForkDialog", () => {
 
     expect(await screen.findByRole("option", { name: /模型仓库/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Flash" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByRole("option", { name: /Claude · Model/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Cursor · Model/ })).toBeInTheDocument();
     expect(loadCatalog).toHaveBeenCalledWith(remote);
     await userEvent.click(screen.getByRole("button", { name: "重建到所选目标" }));
     await waitFor(() => expect(onConfirm).toHaveBeenCalledWith({
       machine: remote,
       workspaceId: "remote-w",
       target: {
-        agentId: "claude",
+        agentId: "cursor",
         workspaceId: "remote-w",
         modelId: "model",
         runtimeValues: {},

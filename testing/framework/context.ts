@@ -4,8 +4,8 @@ import { BlockedError, createLease, releaseLease, type CaseMeta, type Environmen
 
 import { assertions } from "./assertions/index.ts";
 import { data } from "./builders/index.ts";
-import { clonePackage, seedWorkflowPackage, seedDirectChangePackage, completeVerifiableTask, handshakeAndList, startLocalEnvironment, openWorkspace, createBuiltinSession, createAgentSession, requireAgentReady, selectRealModel, configureMockProvider, sendPrompt, attachEventLog, openSecondClient, pairDevice, connectDevice, claimDeviceInvite, daemonWsUrl, connectWithoutAdmission, seedHostCursorLogin, seedHostBetaProviders, seedHostCodexLogin, pointClaudeAtBuiltinLlm, writeOpencodeBuiltinConfig, sessionEventOf, startShell, runShell, shellText, shellExit, shellTimedOut } from "./flows/main/index.ts";
-import { leftoverProcesses, openControlledAgentSession, processAlive, reconnectAfterStop, timeControlCall } from "./flows/branches/index.ts";
+import { clonePackage, seedWorkflowPackage, seedDirectChangePackage, completeVerifiableTask, handshakeAndList, startLocalEnvironment, openWorkspace, createBuiltinSession, createAgentSession, requireAgentReady, selectRealModel, configureMockProvider, sendPrompt, attachEventLog, openSecondClient, pairDevice, connectDevice, claimDeviceInvite, daemonWsUrl, connectWithoutAdmission, seedHostCursorLogin, seedHostBetaProviders, seedHostCodexLogin, sessionEventOf, startShell, runShell, shellText, shellExit, shellTimedOut } from "./flows/main/index.ts";
+import { agentControl, agentLogs, agentReady, answerAgentRequest, leftoverProcesses, listAgents, openControlledAgentSession, processAlive, reconnectAfterStop, recordAgentPushes, summarizeAgent, timeControlCall, waitForAgent } from "./flows/branches/index.ts";
 import { waitUntil } from "./tools/wait.ts";
 
 export interface CaseContext {
@@ -45,8 +45,6 @@ export interface CaseContext {
       seedHostCursorLogin: typeof seedHostCursorLogin;
       seedHostBetaProviders: typeof seedHostBetaProviders;
       seedHostCodexLogin: typeof seedHostCodexLogin;
-      pointClaudeAtBuiltinLlm: typeof pointClaudeAtBuiltinLlm;
-      writeOpencodeBuiltinConfig: typeof writeOpencodeBuiltinConfig;
       clonePackage: typeof clonePackage;
       seedWorkflowPackage: typeof seedWorkflowPackage;
       seedDirectChangePackage: typeof seedDirectChangePackage;
@@ -63,6 +61,14 @@ export interface CaseContext {
       openControlledAgentSession: typeof openControlledAgentSession;
       timeControlCall: typeof timeControlCall;
       processAlive: typeof processAlive;
+      listAgents: typeof listAgents;
+      waitForAgent: typeof waitForAgent;
+      agentReady: typeof agentReady;
+      summarizeAgent: typeof summarizeAgent;
+      recordAgentPushes: typeof recordAgentPushes;
+      agentLogs: typeof agentLogs;
+      answerAgentRequest: typeof answerAgentRequest;
+      agentControl: typeof agentControl;
     };
   };
   data: typeof data;
@@ -150,8 +156,6 @@ export async function createCaseContext(meta: CaseMeta): Promise<CaseContext> {
         seedHostCursorLogin,
         seedHostBetaProviders,
         seedHostCodexLogin,
-        pointClaudeAtBuiltinLlm,
-        writeOpencodeBuiltinConfig,
         clonePackage,
         seedWorkflowPackage,
         seedDirectChangePackage,
@@ -168,6 +172,14 @@ export async function createCaseContext(meta: CaseMeta): Promise<CaseContext> {
         openControlledAgentSession,
         timeControlCall,
         processAlive,
+        listAgents,
+        waitForAgent,
+        agentReady,
+        summarizeAgent,
+        recordAgentPushes,
+        agentLogs,
+        answerAgentRequest,
+        agentControl,
       },
     },
     data,

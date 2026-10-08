@@ -1,4 +1,5 @@
 import type {
+  AgentInfo,
   ProviderInfo,
   SpeechRuntimeStatus,
   SpeechSettings,
@@ -6,12 +7,21 @@ import type {
 } from "@genehub/proto";
 import { useEffect, useState } from "react";
 
+import {
+  AgentActionButton,
+  AgentJobProgress,
+  agentNeedsRepair,
+  agentSourceLabel,
+  orderedAgentActions,
+  visibleAgentJob,
+} from "../agents/AgentLifecycle";
 import { BUILD, PRODUCT_VERSION } from "../build";
 import { CHANNEL, type BuildIdentity } from "../channel";
 import type { Endpoint, Host } from "../host";
 import { Pairing } from "../hub/Pairing";
+import { AgentMark } from "../presentation/AgentMark";
 import type { RtcFailure, RtcState } from "../protocol/client";
-import { useWorkbench } from "../session/store";
+import { agentRequestKey, useWorkbench } from "../session/store";
 import { UI_SCALE_OPTIONS, useUiScale } from "../theme/scale";
 import { THEME_OPTIONS, useTheme } from "../theme/store";
 import { readRtcEnabled, writeRtcEnabled } from "./rtc";
@@ -108,19 +118,12 @@ export function SettingsPanel({ host, endpoint }: { host: Host; endpoint?: Endpo
       <section>
         <h2 className="mb-2 text-sm font-medium">Agent</h2>
         <ul className="flex flex-col gap-1 text-sm">
-          {agents.map((agent) => (
-            <li key={agent.id} className="flex items-center gap-2 rounded bg-surface px-3 py-2">
-              <span>{agent.label}</span>
-              {agent.builtin ? <span className="text-xs text-muted">内置</span> : null}
-              <span className="ml-auto text-xs text-muted">
-                {agent.probe.state === "ready"
-                  ? "可用"
-                  : agent.probe.state === "notInstalled"
-                    ? "未安装"
-                    : agent.probe.reason}
-              </span>
-            </li>
-          ))}
+          {/* Usable ones first (proposal §8.2); the sort is stable. */}
+          {[...agents]
+            .sort((left, right) => Number(right.probe.state === "ready") - Number(left.probe.state === "ready"))
+            .map((agent) => (
+              <AgentRow key={agent.id} agent={agent} />
+            ))}
         </ul>
       </section>
 
@@ -143,6 +146,125 @@ export function SettingsPanel({ host, endpoint }: { host: Host; endpoint?: Endpo
 
       <Version host={host} endpoint={endpoint} daemonVersion={client?.identity?.daemonVersion} />
     </div>
+  );
+}
+
+/** One Agent in the settings list: what it is, where it came from, what it offers. */
+function AgentRow({ agent }: { agent: AgentInfo & { description?: string } }) {
+  const runAgentAction = useWorkbench((state) => state.runAgentAction);
+  const resetAgent = useWorkbench((state) => state.resetAgent);
+  const reloadAgent = useWorkbench((state) => state.reloadAgent);
+  const repairAgent = useWorkbench((state) => state.repairAgent);
+  const showAgentRequest = useWorkbench((state) => state.showAgentRequest);
+  const repairing = useWorkbench((state) => state.repairingAgentIds.includes(agent.id));
+  const hiddenRequest = useWorkbench((state) =>
+    state.agentRequests.find(
+      (request) =>
+        request.agentId === agent.id &&
+        state.hiddenAgentRequests.includes(agentRequestKey(request.agentId, request.id)),
+    ),
+  );
+  const [busy, setBusy] = useState(false);
+  const source = agentSourceLabel(agent);
+  const job = visibleAgentJob(agent);
+  const running = Boolean(agent.job && !agent.job.done);
+  const ready = agent.probe.state === "ready";
+  // A script Agent's reason is its message, shown in full underneath.
+  const status =
+    agent.probe.state === "ready"
+      ? "可用"
+      : agent.probe.state === "notInstalled"
+        ? "未安装"
+        : agent.message
+          ? "不可用"
+          : agent.probe.reason || "不可用";
+  const actions = orderedAgentActions(agent.actions);
+  // Edits under user/ take effect on reload, including the copy a repair
+  // session makes of a built-in that the daemon has not seen yet.
+  const reloadable = agent.source === "user" || agent.source === "override" || repairing;
+  const repairable = agentNeedsRepair(agent);
+  const run = (work: () => Promise<unknown>) => {
+    setBusy(true);
+    void work().finally(() => setBusy(false));
+  };
+  const buttonClass =
+    "min-h-11 rounded border border-line px-3 text-xs text-fg hover:border-accent disabled:opacity-40";
+
+  return (
+    <li className="flex flex-col rounded bg-surface px-3 py-2">
+      <div className="flex min-w-0 items-center gap-2">
+        <AgentMark agent={agent} className="h-5 w-5" fallbackToText={false} />
+        <span className="min-w-0 truncate">{agent.label}</span>
+        {source ? (
+          <span className="shrink-0 rounded bg-raised px-1.5 py-0.5 text-[10px] text-muted">{source}</span>
+        ) : null}
+        {agent.source === "override" && agent.overrideStale ? (
+          <span className="shrink-0 rounded bg-raised px-1.5 py-0.5 text-[10px] text-muted">基于旧内置版本</span>
+        ) : null}
+        {agent.version ? <span className="shrink-0 text-xs text-faint">{agent.version}</span> : null}
+        <span className={`ml-auto shrink-0 text-xs ${ready ? "text-muted" : "text-faint"}`}>{status}</span>
+      </div>
+      {/* What a not-yet-usable script Agent is, from its manifest (proposal §8.2). */}
+      {agent.source != null && !ready && agent.description ? (
+        <p className="mt-1 text-xs text-faint">{agent.description}</p>
+      ) : null}
+      {agent.message ? (
+        <p className="mt-1 whitespace-pre-wrap text-xs text-muted">{agent.message}</p>
+      ) : null}
+      {job ? <AgentJobProgress job={job} /> : null}
+      {actions.length > 0 || agent.source === "override" || reloadable || repairable || hiddenRequest ? (
+        <div className="mt-2 flex flex-wrap gap-2">
+          {hiddenRequest ? (
+            <button
+              type="button"
+              className={buttonClass}
+              onClick={() => showAgentRequest(hiddenRequest.agentId, hiddenRequest.id)}
+            >
+              查看请求：{hiddenRequest.title}
+            </button>
+          ) : null}
+          {actions.map((action) => (
+            <AgentActionButton
+              key={action.id}
+              action={action}
+              agentLabel={agent.label}
+              disabled={busy || running}
+              onRun={(actionId) => run(() => runAgentAction(agent.id, actionId))}
+            />
+          ))}
+          {reloadable ? (
+            <button
+              type="button"
+              disabled={busy || running}
+              className={buttonClass}
+              onClick={() => run(() => reloadAgent(agent.id))}
+            >
+              重新加载
+            </button>
+          ) : null}
+          {agent.source === "override" ? (
+            <button
+              type="button"
+              disabled={busy || running}
+              className={buttonClass}
+              onClick={() => run(() => resetAgent(agent.id))}
+            >
+              恢复内置
+            </button>
+          ) : null}
+          {repairable ? (
+            <button
+              type="button"
+              disabled={busy}
+              className={buttonClass}
+              onClick={() => run(() => repairAgent(agent.id))}
+            >
+              让内置 Agent 修复
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+    </li>
   );
 }
 

@@ -1,18 +1,18 @@
+import type { EnvironmentLease } from "../../../infrastructure/public.ts";
 import {
   readControlledAgentJournal,
   registerControlledAgent,
   type ControlledAgentHandle,
   type ControlledAgentJournalEntry,
   type ControlledAgentOptions,
-  type EnvironmentLease,
-} from "../../../infrastructure/public.ts";
+} from "../../builders/script-agent.ts";
 import {
   createAgentSession,
   openWorkspace,
-  requireAgentReady,
   type ProductSession,
 } from "../main/index.ts";
 import { runGenetAsync } from "../../drivers/cli.ts";
+import { agentReady, waitForAgent } from "./script-agent.ts";
 
 /** Terminal round outcomes as they appear on the wire. A round that reaches
  * neither is the freeze this whole group of cases is about. */
@@ -48,10 +48,12 @@ export interface ControlledAgentSession {
   dispose(): Promise<void>;
 }
 
-/** Opens a session against an ACP agent that will misbehave in one named way.
+/** Opens a session against a script Agent that will misbehave in one named way.
  *
- * The agent is declared in the daemon's config before it starts, so the
- * product resolves and launches it exactly as it would any third-party CLI.
+ * The fixture is written to `<data>/agents/user/<id>/` before the daemon
+ * starts, so the product scans, starts and talks to it exactly as it does any
+ * user-layer script Agent. The pinned runtime is seeded first
+ * (`seedScriptAgentRuntime`), so nothing is downloaded.
  */
 export async function openControlledAgentSession(input: {
   openRoot: string;
@@ -67,7 +69,9 @@ export async function openControlledAgentSession(input: {
       if (connectionDiagnostics.length > 32) connectionDiagnostics.shift();
     } });
   try {
-    await requireAgentReady(opened.client, agent.agentId);
+    // A fixture that never gets ready is this case's failure, not an absent
+    // environment, so this waits rather than blocking.
+    await waitForAgent(opened.client, agent.agentId, agentReady, { timeoutMs: 45_000, what: "ready" });
     const sessionId = await createAgentSession(opened.client, {
       workspaceId: opened.workspaceId,
       agentId: agent.agentId,

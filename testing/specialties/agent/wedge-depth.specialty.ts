@@ -1,12 +1,14 @@
 // A round that never ends is the freeze users report, and every way it
-// happens starts outside the product: an agent CLI that exits without a
-// terminal frame, dies behind a grandchild that still holds the pipe, or
-// says far more than the channel between us can carry.
+// happens starts outside the product: an Agent script that exits without a
+// terminal event, dies behind a grandchild that inherited its descriptors,
+// never finishes a handover, or says far more than the channel between us
+// can carry.
 //
-// The agent under these cases is a real external process registered through
-// `agents.custom`, the same door a user opens for Goose or any other ACP CLI.
-// Nothing inside the daemon is stubbed: what varies is only what a CLI is
-// free to do to a turn already in flight.
+// The Agent under these cases is a real user-layer script Agent
+// (`<data>/agents/user/<id>/`, the fixture in testing/fixtures/script-agent),
+// the same door a user opens for any third-party CLI. Nothing inside the
+// daemon is stubbed: what varies is only what a script is free to do to a
+// turn already in flight.
 
 import { defineSpecialty, type CaseContext } from "../../framework/public.ts";
 
@@ -43,7 +45,7 @@ function wedgeCase(
       timeoutMs: durationMs * 4,
       resources: { environments: 1, cpu, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
       surfaces: ["daemon", "agent-adapter", "workbench-client"],
-      productInterfaces: ["@genehub/workbench/client", "daemon-protocol", "agents.custom"],
+      productInterfaces: ["@genehub/workbench/client", "daemon-protocol", "agent-serve-protocol-1"],
     },
     async (t) => {
       const session = await t.flows.branches.openControlledAgentSession({
@@ -79,9 +81,9 @@ function assertPromptReached(t: CaseContext, session: ControlledAgent): void {
 
 wedgeCase(
   "control-normal-round-ends",
-  "A well-behaved ACP agent ends its round",
-  "an agents.custom ACP CLI that answers session/prompt produces turnCompleted and leaves the session sendable",
-  ["controlled-agent harness does not speak ACP", "custom agent registration regressed"],
+  "A well-behaved script Agent ends its round",
+  "a user-layer script Agent that completes session.send produces turnCompleted and leaves the session sendable",
+  ["the fixture script does not speak the serve protocol", "user-layer Agent scan regressed"],
   { profile: "normal", id: "wedge-normal", chunks: 3 },
   async (t, session) => {
     await t.flows.main.sendPrompt(session.client, session.sessionId, "hello");
@@ -101,8 +103,8 @@ wedgeCase(
   "An agent that exits mid-turn still ends the round",
   "after the agent process is gone, the session emits a terminal round event within 15s and reports a non-running status",
   [
-    "ACP read loop leaves the pending session/prompt sender alive at EOF",
-    "no synthesized TurnFailed when an agent dies mid-turn",
+    "the serve read loop leaves the in-flight turn alive at EOF",
+    "no synthesized TurnFailed when a script dies mid-turn",
     "session pinned to running with no live process",
   ],
   { profile: "exit-without-terminal", id: "wedge-exit" },
@@ -125,22 +127,22 @@ wedgeCase(
 );
 
 wedgeCase(
-  "grandchild-holds-stdout",
-  "A round ends even when no EOF ever arrives",
-  "the agent exits leaving a grandchild holding stdout; the round still reaches a terminal event within 15s and the grandchild is gone after session.close",
+  "grandchild-holds-stdio",
+  "A round ends even when a grandchild outlives the script",
+  "the script exits mid-turn leaving a grandchild that inherited every inheritable descriptor; the round still reaches turnFailed within 15s, and the grandchild is gone after session.close",
   [
-    "termination detection depends on stdout EOF",
-    "shim-shaped agents (npm/.cmd wrappers) never close the pipe",
-    "grandchild survives session close",
+    "termination detection waits for an EOF a grandchild can hold off",
+    "the protocol pipes are inherited by what a script starts (shims never close them)",
+    "a grandchild of the script survives the session",
   ],
-  { profile: "grandchild-holds-stdout", id: "wedge-grandchild" },
+  { profile: "grandchild-holds-stdio", id: "wedge-grandchild", once: true },
   async (t, session) => {
     await t.flows.main.sendPrompt(session.client, session.sessionId, "please crash quietly");
     await t.tools
       .waitUntil(() => session.journal().some((entry) => entry.event === "orphan-spawned"), 10_000)
       .catch(() => {
         throw new Error(
-          `the agent never reported a grandchild: ${session
+          `the script never reported a grandchild: ${session
             .journal()
             .map((entry) => `${entry.pid}:${entry.event}`)
             .join(" ")}`,
@@ -149,13 +151,13 @@ wedgeCase(
     const orphanPid = Number(
       session.journal().find((entry) => entry.event === "orphan-spawned")?.orphanPid ?? 0,
     );
-    t.assertions.assert(orphanPid > 0, "the controlled agent did not report a grandchild pid");
+    t.assertions.assert(orphanPid > 0, "the fixture did not report a grandchild pid");
 
     try {
       const terminal = await session.waitForTerminal(15_000);
       t.assertions.assert(
         terminal.type === "turnFailed",
-        `a dead agent must fail the round, not ${terminal.type}`,
+        `a dead script must fail the round, not ${terminal.type}`,
       );
       const status = await session.daemonStatus();
       t.assertions.assert(status !== "running", `session still running: ${status}`);
@@ -167,8 +169,7 @@ wedgeCase(
           throw new Error(`grandchild ${orphanPid} outlived session.close`);
         });
     } finally {
-      // The grandchild is deliberately outside the daemon's direct child set;
-      // leaking it into the next case would be this file's own bug.
+      // Leaking it into the next case would be this file's own bug.
       if (t.flows.branches.processAlive(orphanPid)) {
         try {
           process.kill(orphanPid, "SIGKILL");
@@ -294,6 +295,11 @@ async function definiteAnswer(
 
 // The freeze that never gets as far as a turn.
 //
+// With script Agents the serve process is already running when a session is
+// first prompted; the handover that can hang is `session.start`, which the
+// `hang-session-new` script never answers (formerly an ACP CLI that never
+// answered `initialize`).
+//
 // A prompt to an agent that has not started yet announces a running session
 // before it has anything running: the status is set and published, and only
 // then does the daemon go and start the CLI and hand the message over. If that
@@ -308,13 +314,13 @@ async function definiteAnswer(
 wedgeCase(
   "a-startup-that-hangs-does-not-claim-the-session-forever",
   "A session survives an agent that never finishes starting",
-  "a prompt to an agent whose handshake never completes ends in a definite failure, leaves the session idle or failed, and does not refuse the next prompt as a conflict",
+  "a prompt to a script Agent whose session.start never completes ends in a definite failure, leaves the session idle or failed, and does not refuse the next prompt as a conflict",
   [
     "a running status is published before there is anything running",
     "a handover with no deadline leaves the claim behind it standing",
     "a turn that never began refuses every prompt after it",
   ],
-  { profile: "never-finishes-starting", id: "wedge-slow-start" },
+  { profile: "hang-session-new", id: "wedge-slow-start" },
   async (t, session) => {
     // A definite answer either way. Which one does not matter here — a refusal
     // is a fine outcome, a silence is not.

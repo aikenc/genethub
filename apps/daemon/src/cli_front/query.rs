@@ -16,10 +16,14 @@ use super::output::{self, CliFailure, CLI_SCHEMA};
 use super::rpc::{ConnectError, Refusal, Rpc, RpcError};
 use super::target::{self, Routing, Selection};
 
-const COMMAND_NAMES: [&str; 72] = [
+const COMMAND_NAMES: [&str; 83] = [
     "schema",
     "context",
     "capabilities",
+    "provider.list",
+    "provider.configure",
+    "provider.get",
+    "provider.verify",
     "shell",
     "file.download",
     "file.transfer.status",
@@ -43,7 +47,14 @@ const COMMAND_NAMES: [&str; 72] = [
     "session.context",
     "agent.list",
     "agent.run",
+    "agent.show",
+    "agent.action",
+    "agent.reload",
+    "agent.reset",
+    "agent.test",
+    "agent.logs",
     "session.send",
+    "session.ask",
     "session.respond",
     "session.interrupt",
     "session.close",
@@ -113,12 +124,18 @@ fn mutates(name: &str) -> bool {
     matches!(
         name,
         "shell"
+            | "provider.configure"
+            | "provider.verify"
             | "file.download"
             | "file.transfer.cancel"
             | "process.kill"
             | "process.killAll"
             | "agent.run"
+            | "agent.action"
+            | "agent.reload"
+            | "agent.reset"
             | "session.send"
+            | "session.ask"
             | "session.respond"
             | "session.interrupt"
             | "session.close"
@@ -549,10 +566,20 @@ async fn execute(
         Query::Capabilities => Ok(("capabilities", capabilities_data())),
         Query::Context => {
             let rpc = connect_selected(selection).await?;
-            Ok((
-                "context",
-                context_data(rpc.hello(), selection.machine.as_deref()),
-            ))
+            let mut value = context_data(rpc.hello(), selection.machine.as_deref());
+            if !rpc.hello().features.as_ref().is_some_and(|features| features.iter().any(|feature| feature == "provider.configuration.v1")) {
+                value["principal"] = serde_json::json!({"type":"unreported"});
+                value["authority"] = serde_json::json!({"available":false,"reason":"selected daemon does not report effective caller authority"});
+                return Ok(("context", value));
+            }
+            match rpc.call(Request::CallerAuthority).await.map_err(rpc_error)? {
+                Reply::CallerAuthority(authority) => {
+                    value["principal"] = serde_json::json!({"type":authority.principal_type,"sessionId":authority.session_id,"grants":authority.grants});
+                    value["authority"] = serde_json::to_value(authority).expect("serializable authority");
+                }
+                other => return Err(unexpected_reply("caller authority", &other)),
+            }
+            Ok(("context", value))
         }
         Query::PreviewFeedback { workspace_id, id } => {
             let rpc = connect_selected(selection).await?;
@@ -1031,6 +1058,8 @@ fn context_data(hello: &HelloResult, machine: Option<&str>) -> Value {
 fn capabilities_data() -> Value {
     json!({
         "source": "staticCliContract",
+        "effectiveAuthority": "context.authority",
+        "providerConfiguration": {"request":"provider.configure","receipt":"provider.get","verification":"provider.verify","secretInput":"Human workbench -> daemon only","requiresConfirmation":true},
         "transport": "localDaemon",
         "readOnly": false,
         "agentConversation": {
@@ -1134,6 +1163,11 @@ fn command_schema(name: &str) -> Value {
             false,
             object_input(json!({"command": {"type": "string"}}), &[]),
         ),
+        "provider.list" => ("genet provider list", true, object_input(json!({}), &[])),
+        "provider.configure" => ("genet provider configure <id> --session <id> --action <stable-id> --base-url <url> --dialect <openai|anthropic> --label <name> [--model <id>]", true,
+            object_input(json!({"providerId":{"type":"string"},"sessionId":{"type":"string"},"actionId":{"type":"string"},"baseUrl":{"type":"string"},"dialect":{"enum":["openai","anthropic"]},"label":{"type":"string"},"models":{"type":"array","items":{"type":"string"}}}), &["providerId","sessionId","actionId","baseUrl","dialect","label"])),
+        "provider.get" | "provider.verify" => ("genet provider <get|verify> <action-id> --session <session-id>", true,
+            object_input(json!({"actionId":{"type":"string"},"sessionId":{"type":"string"}}), &["actionId","sessionId"])),
         "context" => ("genet context", true, object_input(json!({}), &[])),
         "capabilities" => ("genet capabilities", false, object_input(json!({}), &[])),
         "speech.runtime.status" => (
@@ -1320,6 +1354,49 @@ fn command_schema(name: &str) -> Value {
             ),
         ),
         "agent.list" => ("genet agent list", true, object_input(json!({}), &[])),
+        "agent.show" | "agent.reload" | "agent.reset" => (
+            match name {
+                "agent.show" => "genet agent show <id>",
+                "agent.reload" => "genet agent reload <id>",
+                _ => "genet agent reset <id>",
+            },
+            true,
+            object_input(json!({"agentId": {"type": "string", "minLength": 1}}), &["agentId"]),
+        ),
+        "agent.action" => (
+            "genet agent action <id> <action>",
+            true,
+            object_input(
+                json!({
+                    "agentId": {"type": "string", "minLength": 1},
+                    "actionId": {"type": "string", "minLength": 1,
+                        "$comment": "one of the ids in the Agent's `actions`; needs the settings grant"},
+                }),
+                &["agentId", "actionId"],
+            ),
+        ),
+        "agent.test" => (
+            "genet agent test <id> [--live]",
+            true,
+            object_input(
+                json!({
+                    "agentId": {"type": "string", "minLength": 1},
+                    "live": {"type": "boolean", "default": false},
+                }),
+                &["agentId"],
+            ),
+        ),
+        "agent.logs" => (
+            "genet agent logs <id> [--lines <1-500>]",
+            true,
+            object_input(
+                json!({
+                    "agentId": {"type": "string", "minLength": 1},
+                    "lines": {"type": ["integer", "null"], "minimum": 1, "maximum": 500},
+                }),
+                &["agentId"],
+            ),
+        ),
         "agent.run" => (
             "genet agent run --agent <id> \"<prompt>\" [--cwd <dir> | --workspace <id>] \
              [--session <id>] [--model <id>] [--mode <id>] [--effort <id>] [--title <t>] \
@@ -1346,6 +1423,18 @@ fn command_schema(name: &str) -> Value {
                 }),
                 &["agentId", "prompt"],
             ),
+        ),
+        "session.ask" => (
+            "genet session ask <id> --question <text> [--choice <label>]... [--request-id <id>] [--title <text>] [--no-text]",
+            false,
+            object_input(json!({
+                "sessionId": {"type": "string", "minLength": 1},
+                "question": {"type": "string", "minLength": 1, "maxLength": 2048},
+                "choices": {"type": "array", "maxItems": 8, "items": {"type": "string", "minLength": 1, "maxLength": 200}},
+                "requestId": {"type": "string", "description": "stable question identity; reuse only for the identical question"},
+                "title": {"type": "string", "maxLength": 200},
+                "freeform": {"type": "boolean", "default": true},
+            }), &["sessionId", "question"]),
         ),
         "session.send" => (
             "genet session send <id> \"<text>\" [--message-id <id> [--task-run <run>]] [--wait|--no-wait] [--timeout <s>]",
@@ -1954,6 +2043,9 @@ pub fn reply_kind(reply: &Reply) -> &'static str {
         Reply::Hello(_) => "hello",
         Reply::Subscribed { .. } => "subscribed",
         Reply::Agents(_) => "agents",
+        Reply::AgentRequests(_) => "agent requests",
+        Reply::AgentTestResult { .. } => "agent test result",
+        Reply::AgentLogs { .. } => "agent logs",
         Reply::HubStatus(_) => "hub status",
         Reply::HubClaim { .. } => "hub claim",
         Reply::HubMachines(_) => "hub machines",
@@ -1963,6 +2055,9 @@ pub fn reply_kind(reply: &Reply) -> &'static str {
         Reply::Claimed(_) => "claimed device",
         Reply::RemoteAccess(_) => "remote access",
         Reply::Settings(_) => "settings",
+        Reply::CallerAuthority(_) => "caller authority",
+        Reply::Providers(_) => "providers",
+        Reply::ProviderOperation(_) => "provider operation",
         Reply::SpeechCapabilities(_) => "speech capabilities",
         Reply::SpeechRuntimeStatus(_) => "speech runtime status",
         Reply::SpeechContext(_) => "speech context",
@@ -2267,6 +2362,16 @@ mod tests {
         assert_eq!(routed["target"]["machineId"], "m_far");
         assert_eq!(routed["target"]["resolvedFrom"], "--machine");
         assert_eq!(routed["target"]["credential"], "pairedDeviceSecret");
+    }
+
+    #[test]
+    fn every_routable_command_has_a_schema() {
+        for name in target::ROUTABLE {
+            assert!(COMMAND_NAMES.contains(&name), "{name} is routable but has no schema");
+        }
+        for name in COMMAND_NAMES {
+            command_schema(name);
+        }
     }
 
     #[test]

@@ -306,9 +306,11 @@ fn flatten_text(content: &[Content]) -> String {
 
 fn apply_usage(usage: &mut Usage, value: &Value) {
     if let Some(input) = value["input_tokens"].as_u64() {
+        usage.token_usage_reported = true;
         usage.input += input;
     }
     if let Some(output) = value["output_tokens"].as_u64() {
+        usage.token_usage_reported = true;
         usage.output += output;
     }
     if let Some(cache_read) = value["cache_read_input_tokens"].as_u64() {

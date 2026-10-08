@@ -5,6 +5,8 @@ import { userInfo } from "node:os";
 import type { UnitResult, WorkUnit } from "../types.ts";
 import { spawnGroup } from "../process/group.ts";
 import { createLease, releaseLease } from "../environment/lease.ts";
+import { pinnedPythonRuntimeCache } from "../environment/pinned-runtime.ts";
+import { registerLeaseWorker } from "../environment/ownership.ts";
 import { trackResources } from "../environment/resource-census.ts";
 import { collectOutput, waitForExit } from "../process/wait.ts";
 
@@ -19,6 +21,20 @@ function locateSignedWasm(openRoot: string): string | null {
   if (override) return override;
   const candidate = path.join(openRoot, "target", "genehub-app.wasm");
   return existsSync(candidate) ? candidate : null;
+}
+
+/** The frozen harness's daemons install the pinned Python into their own
+ * data directories, as on a fresh machine. With the host cache warm, the
+ * documented `GENEHUB_PYTHON_MIRRORS` serves the archive from it (still
+ * hash-checked and unpacked by the shipped installer). The coordinator
+ * never fills the cache itself; while it is cold the environment is left
+ * as it was and the installer downloads. */
+function pinnedPythonMirror(openRoot: string): Record<string, string> {
+  try {
+    return { GENEHUB_PYTHON_MIRRORS: pinnedPythonRuntimeCache(openRoot, { build: false }).mirror };
+  } catch {
+    return {};
+  }
 }
 
 function failureExcerpt(stdout: string, stderr: string): string {
@@ -72,8 +88,10 @@ export async function runRustLegacyUnit(
       // keep a bounded test-only budget as protocol and workflow types grow.
       RUST_MIN_STACK: process.env.RUST_MIN_STACK || String(16 * 1024 * 1024),
       ...(wasm ? { GENET_APP_WASM: wasm } : {}),
+      ...pinnedPythonMirror(openRoot),
     },
   });
+  if (child.pid) registerLeaseWorker(lease.root, child.pid);
   const resources = trackResources(lease.id, child.pid ?? -1);
   let result: UnitResult | undefined;
   const output = collectOutput(child);
@@ -116,6 +134,6 @@ export async function runRustLegacyUnit(
         result.message = (result.message ?? "") + "; leaked resources: " + JSON.stringify(cleanup.before);
       }
     }
-    releaseLease(lease);
+    if (cleanup.after.processes === 0) releaseLease(lease);
   }
 }

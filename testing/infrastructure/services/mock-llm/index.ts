@@ -1,4 +1,6 @@
+import { createHash } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import * as zlib from "node:zlib";
 
 export interface ScriptedTurn {
   text?: string;
@@ -22,10 +24,20 @@ export interface ScriptedTurn {
   respond?: (request: unknown) => Omit<ScriptedTurn, "respond">;
 }
 
+/** One inbound HTTP request, as far as it can be recorded without a secret. */
+export interface MockLlmCall {
+  method: string;
+  path: string;
+  /** sha256 hex of the exact `Authorization` header value; the value itself is never kept. */
+  authorizationSha256: string | null;
+}
+
 export interface MockLlmHandle {
   origin: string;
   requests: unknown[];
   inboundHeaders: Array<Record<string, string>>;
+  /** Every request in arrival order, including model listings. */
+  calls: MockLlmCall[];
   script(...turns: ScriptedTurn[]): void;
   stop(): Promise<void>;
 }
@@ -100,20 +112,81 @@ function anthropic(turn: ScriptedTurn): string[] {
   ];
 }
 
-function responses(turn: ScriptedTurn): string[] {
+/** OpenAI Responses streaming: the item and content-part envelope around the
+ * text and a full usage object, as a strict client (codex) requires. */
+function responses(turn: ScriptedTurn, responseIndex: number): string[] {
   const text = turn.text ?? "ok";
-  return [
-    `data: ${JSON.stringify({ type: "response.output_text.delta", delta: text })}`,
-    `data: ${JSON.stringify({ type: "response.completed", response: { id: "resp_1", usage: { input_tokens: 8, output_tokens: 4 } } })}`,
-    "data: [DONE]",
+  const id = `resp_${responseIndex}`;
+  const itemId = `msg_${responseIndex}`;
+  const part = { type: "output_text", text, annotations: [] };
+  const item = { id: itemId, type: "message", role: "assistant", status: "completed", content: [part] };
+  const response = (status: string, output: unknown[]) => ({
+    id, object: "response", created_at: 0, model: "mock-llm", status, output,
+  });
+  const usage = {
+    input_tokens: 8,
+    input_tokens_details: { cached_tokens: 0 },
+    output_tokens: 4,
+    output_tokens_details: { reasoning_tokens: 0 },
+    total_tokens: 12,
+  };
+  const tools = turn.tools ?? (turn.tool ? [turn.tool] : []);
+  if (tools.length) {
+    const items = tools.map((tool, index) => ({
+      id: `fc_${responseIndex}_${index}`, type: "function_call", status: "completed",
+      call_id: `call_${responseIndex}_${index}`, name: tool.name, arguments: JSON.stringify(tool.arguments),
+    }));
+    const events: Array<Record<string, unknown>> = [
+      { type: "response.created", response: response("in_progress", []) },
+      { type: "response.in_progress", response: response("in_progress", []) },
+    ];
+    items.forEach((item, index) => {
+      const at = { item_id: item.id, output_index: index };
+      events.push(
+        { type: "response.output_item.added", output_index: index, item: { ...item, status: "in_progress", arguments: "" } },
+        { type: "response.function_call_arguments.delta", ...at, delta: item.arguments },
+        { type: "response.function_call_arguments.done", ...at, arguments: item.arguments },
+        { type: "response.output_item.done", output_index: index, item },
+      );
+    });
+    events.push({ type: "response.completed", response: { ...response("completed", items), usage } });
+    return events.map((event, sequence) => `event: ${String(event.type)}\ndata: ${JSON.stringify({ ...event, sequence_number: sequence })}`);
+  }
+  const at = { item_id: itemId, output_index: 0, content_index: 0 };
+  const events: Array<Record<string, unknown>> = [
+    { type: "response.created", response: response("in_progress", []) },
+    { type: "response.in_progress", response: response("in_progress", []) },
+    { type: "response.output_item.added", output_index: 0, item: { ...item, status: "in_progress", content: [] } },
+    { type: "response.content_part.added", ...at, part: { ...part, text: "" } },
+    { type: "response.output_text.delta", ...at, delta: text },
+    { type: "response.output_text.done", ...at, text },
+    { type: "response.content_part.done", ...at, part },
+    { type: "response.output_item.done", output_index: 0, item },
+    { type: "response.completed", response: { ...response("completed", [item]), usage } },
   ];
+  return events.map((event, sequence) =>
+    `event: ${String(event.type)}\ndata: ${JSON.stringify({ ...event, sequence_number: sequence })}`);
 }
 
 async function readJson(request: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
-  for await (const chunk of request) chunks.push(chunk as Buffer);
+  let size = 0;
+  const limit = 16 * 1024 * 1024;
+  for await (const chunk of request) {
+    size += (chunk as Buffer).length;
+    if (size > limit) throw new Error("model request too large");
+    chunks.push(chunk as Buffer);
+  }
   if (chunks.length === 0) return {};
-  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  let bytes = Buffer.concat(chunks);
+  const encoding = request.headers["content-encoding"];
+  const options = { maxOutputLength: limit };
+  if (encoding === "gzip") bytes = zlib.gunzipSync(bytes, options);
+  else if (encoding === "deflate") bytes = zlib.inflateSync(bytes, options);
+  else if (encoding === "br") bytes = zlib.brotliDecompressSync(bytes, options);
+  else if (encoding === "zstd" && typeof zlib.zstdDecompressSync === "function") bytes = zlib.zstdDecompressSync(bytes, options);
+  else if (encoding && encoding !== "identity") throw new Error("unsupported model request encoding");
+  return JSON.parse(bytes.toString("utf8"));
 }
 
 function redact(value: unknown): unknown {
@@ -134,6 +207,7 @@ export async function startMockLlm(): Promise<MockLlmHandle> {
   const queue: ScriptedTurn[] = [];
   const requests: unknown[] = [];
   const inboundHeaders: Array<Record<string, string>> = [];
+  const calls: MockLlmCall[] = [];
   let responseIndex = 0;
   const server: Server = createServer(async (request, response) => {
     const url = request.url ?? "";
@@ -147,6 +221,14 @@ export async function startMockLlm(): Promise<MockLlmHandle> {
       headers[lower] = value;
     }
     inboundHeaders.push(headers);
+    const authorization = request.headers.authorization;
+    calls.push({
+      method: request.method ?? "GET",
+      path: url.split("?")[0] ?? url,
+      authorizationSha256: typeof authorization === "string"
+        ? createHash("sha256").update(authorization).digest("hex")
+        : null,
+    });
     if (url.endsWith("/models")) {
       request.resume();
       response.writeHead(200, { "content-type": "application/json" }).end(
@@ -161,7 +243,10 @@ export async function startMockLlm(): Promise<MockLlmHandle> {
     try {
       body = await readJson(request);
     } catch {
-      body = {};
+      response.writeHead(400, { "content-type": "application/json" }).end(JSON.stringify({
+        error: { type: "invalid_request_error", message: "invalid or unsupported compressed JSON request" },
+      }));
+      return;
     }
     requests.push(redact(body));
     const scripted = queue.shift() ?? { text: "ok" };
@@ -188,14 +273,26 @@ export async function startMockLlm(): Promise<MockLlmHandle> {
       return;
     }
     if (url.includes("/messages")) {
+      if ((body as {stream?: unknown}).stream === false) {
+        response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
+          id: "msg_test", type: "message", role: "assistant", content: [{type:"text", text:turn.text ?? "ok"}], stop_reason:"end_turn", usage:{input_tokens:8,output_tokens:4},
+        }));
+        return;
+      }
       sse(response, anthropic(turn));
       return;
     }
     if (url.includes("/responses")) {
-      sse(response, responses(turn));
+      sse(response, responses(turn, ++responseIndex));
       return;
     }
     if (url.includes("/chat/completions") || url.endsWith("/completions")) {
+      if ((body as {stream?: unknown}).stream === false) {
+        response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
+          id: "chatcmpl-test", object:"chat.completion", choices:[{index:0,message:{role:"assistant",content:turn.text ?? "ok"},finish_reason:"stop"}], usage:{prompt_tokens:8,completion_tokens:4},
+        }));
+        return;
+      }
       sse(response, openaiChat(turn, ++responseIndex));
       return;
     }
@@ -208,6 +305,7 @@ export async function startMockLlm(): Promise<MockLlmHandle> {
     origin: `http://127.0.0.1:${port}`,
     requests,
     inboundHeaders,
+    calls,
     script: (...turns) => {
       queue.push(...turns);
     },

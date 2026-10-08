@@ -1,5 +1,6 @@
 import { BlockedError } from "../../infrastructure/public.ts";
 import type { EnvironmentLease } from "../../infrastructure/public.ts";
+import { seedScriptAgentRuntimeByDefault } from "../builders/script-agent.ts";
 import { parseJson, runGenet } from "./cli.ts";
 
 export interface DaemonHandle {
@@ -42,7 +43,13 @@ export function startDaemon(input: {
   // managed Agent Session, whose controller identity must not cross into it.
   delete env.GENEHUB_SESSION_ID;
   delete env.GENEHUB_CONTROLLER_TOKEN;
+  // Foreign Agent contexts and credential roots must not cross a lease.
+  // A case may opt in through its own env/launchEnv; no host value is printed.
+  for (const key of ["CODEX_HOME", "CURSOR_AGENT", "CURSOR_CONVERSATION_ID", "CURSOR_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "npm_config_prefix"]) {
+    if (!(key in input.lease.env)) delete env[key];
+  }
   for (const key of input.dropEnv ?? []) delete env[key];
+  seedScriptAgentRuntimeByDefault(input.lease);
   const started = runGenet(input.genet, ["daemon", "start"], { ...env, ...input.launchEnv });
   if (started.code !== 0) {
     throw new BlockedError(`genet daemon start failed: ${started.stderr || started.stdout}`);

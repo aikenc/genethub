@@ -64,6 +64,7 @@ pub async fn stream(
     };
 
     let mut usage = Usage {
+        token_usage_reported: true,
         input: 10,
         ..Default::default()
     };

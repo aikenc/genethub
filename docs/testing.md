@@ -154,7 +154,7 @@ JOURNEY_LLM=real   → 每日 + 发版前跑，模型为 deepseek-v4-flash
 | 连接落后丢事件 | 客户端收到 `desync` 自己补齐缺口，不弹提示、不留空洞 |
 | 未配置凭证 | 首条任务给出明确提示，不是静默失败或空白 |
 | 第一次打开 | 没有项目时请他选一个（桌面弹原生选择器，浏览器收路径）；有项目没密钥时指到设置页；两样齐了才给「新建会话」。目录不存在时显示 daemon 的原话 |
-| agent 未安装 | 该 agent 不出现在选择器，且不影响其他 agent |
+| agent 未安装 | 列表里显示原因和主动作，不能被选中或路由，且不影响其他 agent |
 | agent 子进程崩溃 | 会话进入错误态，daemon 存活，其他会话不受影响 |
 | 未知工具类型 `[mock]` | 走 `Unknown` 兜底渲染，不白屏、不丢事件 |
 
@@ -207,13 +207,13 @@ daemon 是产品，窗口只是方便，所以这一组测的都是「窗口不�
 | 维度 | 取值 |
 |------|------|
 | 模式 | `mock`（每次合并）、`real`（每日 + 发版前） |
-| Agent | `genet`（内置）、`opencode`；`acp` 至少跑主旅程 |
+| Agent | `genet`（内置）；脚本 Agent 由 `specialty.agent.script.*` 与 scripted Codex 覆盖 |
 | 旅程 | §3 主旅程 + §4 分支旅程 |
 
 规则：
 
 - **主旅程**：每个 agent × 每种模式都跑。
-- **分支旅程**：默认在 `genet` 上跑全套；`opencode` 至少覆盖 §4.2 会话与 agent 那一组——那里才是 adapter 差异会暴露的地方。
+- **分支旅程**：默认在 `genet` 上跑全套；脚本 Agent 的差异由脚本 Agent 专项覆盖。
 - `[mock]` 标记的分支只在 mock 模式执行。
 
 「同一批用例在两个形状完全不同的 agent 上都通过」，就是 [architecture.md](./architecture.md) §2 B3 的验收动作。
@@ -276,15 +276,13 @@ Windows/macOS **装包之后**的首启仍要每次发版手动过一遍主旅�
 
 ## 8.1 当前落地的套件
 
-`testing/tests/opencode.rs` 与 `testing/tests/claude.rs` 这一类——真实拉起某一个具体第三方 CLI、验证它接进归一化事件层之后行为对不对——统称**专项测试**：它们不是通用旅程矩阵（§5）里"随便换个 agent 都要过"的那一批，而是**只为这一个 adapter 的私有协议细节**（Claude Code 的权限控制、OpenCode 的 HTTP+SSE 事件流……）而存在，写法上也允许比通用旅程更贴合该 CLI 自己的怪癖。共享断言收在 `testing/src/provider_suite.rs`，避免每个专项测试重新发明"turn 有没有正常结束"这类判断。
+真实拉起某一个具体第三方 CLI、验证它接进归一化事件层之后行为对不对，统称**专项测试**：它们不是通用旅程矩阵（§5）里"随便换个 agent 都要过"的那一批，而是只为这一个 adapter 的私有协议细节而存在。Claude Code 与 OpenCode 的适配器已在脚本 Agent 第一期删除，对应专项测试一并移除；仍保留的是 Cursor。共享断言收在 `testing/deprecated/rust/src/provider_suite.rs`。
 
 | 套件 | 位置 | 跑的是什么 | 需要什么 |
 |------|------|-----------|---------|
 | testctl 业务主干 | `testing/{journeys,specialties,e2e}` | TypeScript 经公开 Client/CLI 驱动真实 launcher、host、WASM guest、agent、relay 与磁盘；run 绑定双仓 SHA/dirty/artifact | 按 `testing/README.md` 用 `testctl` 选择 policy；required 前置缺失必须 blocked，不得用旧 run 顶替 |
 | Rust 单元与 legacy | `cargo test --workspace`、`testing/deprecated/rust` | 性质/原生内在事实与冻结 parity；不是默认业务测试层 | 原生 `cargo build -p genet-cli -p genehub-host`；需要真实默认 daemon 时另构建 `cargo build --profile iterate -p genehub-guest --target wasm32-wasip2` |
-| 专项测试（OpenCode） | `testing/tests/opencode.rs` | **真实 OpenCode 进程**接同一个模型后端，事件归一化后进同一条时间线 | PATH 上有 `opencode`，否则跳过并打印原因 |
-| 专项测试（Claude Code） | `testing/tests/claude.rs` | **真实 `claude` 进程**（原生 `stream-json`，非 ACP wrapper）接 DeepSeek 的 Anthropic 兼容端点：基本对话、默认 bypass 放行、显式低权限模式下产生可持久化暂停点、daemon 中断请求真的打断生成 | `JOURNEY_LLM=real` + PATH 上有 `claude`，否则跳过并打印原因；只在真实模式跑（mock 不实现 Anthropic 协议） |
-| 专项测试（Cursor） | `testing/tests/cursor.rs` | **真实 `cursor-agent` 进程**（ACP over stdio）跑主旅程：探测的二进制真能起、ACP 握手真有应答、一个回合经归一化事件层进同一条时间线 | `JOURNEY_LLM=real` + PATH 上有登录过的 `cursor-agent`，否则跳过并打印原因；mock 模式不跑（它没有可指向 mock 的后端配置，同 Codex 的处境） |
+| 专项测试（Cursor） | `testing/deprecated/rust/tests/cursor.rs` | **真实 `cursor-agent` 进程**（ACP over stdio）跑主旅程：探测的二进制真能起、ACP 握手真有应答、一个回合经归一化事件层进同一条时间线 | `JOURNEY_LLM=real` + PATH 上有登录过的 `cursor-agent`，否则跳过并打印原因；mock 模式不跑（它没有可指向 mock 的后端配置，同 Codex 的处境） |
 | 安装脚本 | `testing/tests/install.rs` | **端到端跑 `scripts/install.sh`**：真 tar、真 sha256sum、真目录；curl shim 强制核对 HTTPS/重定向约束且只映射到本地假发布目录。装完的二进制可执行且真能跑；非 HTTPS 基址、校验和不符或缺少 `SHA256SUMS` 都拒绝 | 无（Linux arm64 上跳过并打印原因） |
 | 发布供应链 | `testing/tests/supply_chain.rs` | release workflow 的第三方 Action 全部固定完整 commit SHA；checkout 不保留凭据；只有 publish job 有 `contents: write`；发布注释不把同源摘要冒充签名 | 无 |
 | 设备准入 | `testing/tests/devices.rs` | **真实 daemon + 进程内汇合 relay**：新设备经 relay 配对、换到凭证后重连、陌生人被拒、邀请码只能用一次、握手不能重放、撤销当场断连、重启后仍然可达且仍然认得旧设备 | 无 |
@@ -303,7 +301,7 @@ Windows/macOS **装包之后**的首启仍要每次发版手动过一遍主旅�
 
 全栈旅程这一条是分量最重的：其他前端测试都把 socket 假掉了，而"事件发到了一个没人监听的 topic"在假 socket 下和"没有事件"长得一模一样。它上线的第一天就抓到了这个 bug。
 
-两条专项测试同样不能省。OpenCode 是唯一形状不同的 adapter——HTTP 服务加独立事件流，而不是 stdio 子进程；只有让它真的跑起来，才知道归一化层是抽象而不是内置 agent 的别名。它接的模型后端与内置 agent 完全一致（mock 模式下配置文件里指向 mock 服务，真实模式下指向 DeepSeek），因此两种模式共用同一份用例。Claude Code 那条只能在真实模式跑：它说的是 Anthropic Messages 协议而不是 OpenAI 兼容协议，mock 服务没有实现那一套，硬跑只会验证出「mock 也不认识这个协议」这种没意义的失败。它连的是 DeepSeek 官方的 Anthropic 兼容端点，环境变量的配法与限制见 [third-party-agents.md](./third-party-agents.md)。Claude 的专项测试负责证明原生模式与中断控制真的生效；持久化暂停/恢复的跨 Agent 状态机由 daemon 测试覆盖。Codex 现在也是原生适配器（`adapter::codex`），但它还欠一条对称的真实专项测试：它没有可用的第三方后端可指（Codex 只认 Responses API，DeepSeek 只有 Chat Completions，见 [third-party-agents.md](./third-party-agents.md) §4.1），所以要跑在一个真登录了的 OpenAI 账号上。眼下协议翻译、最高权限启动参数、权限与问题分类、状态映射和计费统计由 `adapter::codex` 单元测试守住；端到端仍应在有登录态的机器上补齐。
+第三方 Agent 的专项测试现在针对脚本层：`specialty.agent.script.*` 覆盖目录加载、热加载、崩溃退回、超时重启、Agent 级用户请求与密钥遮罩；Codex 由测试框架里的 scripted Codex（只替换外部 CLI 协议对端）跑完整回合；真实 CLI 的 Codex / Cursor 旅程只在本机有登录态时运行，否则 blocked。Claude 家族与 OpenCode 重新以脚本接入后，各自补回真实专项。
 
 ---
 

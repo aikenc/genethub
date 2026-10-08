@@ -63,7 +63,7 @@ export function normalizeAgentPreferences(
     if (disabled.has(agent.id.toLocaleLowerCase())) return [];
     const models: Array<ModelInfo | null> = agent.catalog.models.length
       ? agent.catalog.models.filter((model) => !isAutoModel(model))
-      : resolveAgentProfile(agent.id).startWithoutModelCatalog
+      : resolveAgentProfile(agent).startWithoutModelCatalog
         ? [null]
         : [];
     const savedForAgent = saved.filter((profile) => profile.agentId === agent.id);
@@ -460,7 +460,7 @@ export function resolveAgentRuntime(
   preferredModelId?: string | null,
 ): ResolvedCapabilityRoute | null {
   const models = agent.catalog.models ?? [];
-  const opaque = models.length === 0 && resolveAgentProfile(agent.id).startWithoutModelCatalog;
+  const opaque = models.length === 0 && resolveAgentProfile(agent).startWithoutModelCatalog;
   const model = preferredModelId
     ? models.find((candidate) => candidate.id === preferredModelId)
     : models.find((candidate) => candidate.id === agent.catalog.defaultModel) ?? models[0];
