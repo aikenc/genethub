@@ -3330,8 +3330,13 @@ impl SessionManager {
         // A durable-input PM instead preserves the Human card during a stop.
         let provider_interaction = {
             let meta = live.meta.lock().await;
-            meta.pending_permission.as_ref().is_some_and(|request| request.kind == PermissionRequestKind::ProviderConfiguration)
-                || meta.human_continuation.as_ref().is_some_and(|decision| !decision.completed && decision.request.kind == PermissionRequestKind::ProviderConfiguration)
+            meta.pending_permission
+                .as_ref()
+                .is_some_and(|request| request.kind == PermissionRequestKind::ProviderConfiguration)
+                || meta.human_continuation.as_ref().is_some_and(|decision| {
+                    !decision.completed
+                        && decision.request.kind == PermissionRequestKind::ProviderConfiguration
+                })
         };
         if provider_interaction || live.meta.lock().await.inbox.entries.is_empty() {
             let had_interaction = {
@@ -4070,7 +4075,9 @@ impl SessionManager {
 
         if matches!(
             request.kind,
-            PermissionRequestKind::PlanApproval | PermissionRequestKind::Question | PermissionRequestKind::ProviderConfiguration
+            PermissionRequestKind::PlanApproval
+                | PermissionRequestKind::Question
+                | PermissionRequestKind::ProviderConfiguration
         ) || request.id.starts_with("workflow-human-")
             || !live.meta.lock().await.inbox.entries.is_empty()
         {
@@ -4415,7 +4422,10 @@ impl SessionManager {
         request: PermissionRequest,
         require_running: bool,
     ) -> Result<()> {
-        if !matches!(request.kind, PermissionRequestKind::Question | PermissionRequestKind::ProviderConfiguration) {
+        if !matches!(
+            request.kind,
+            PermissionRequestKind::Question | PermissionRequestKind::ProviderConfiguration
+        ) {
             bail!("expected a Human question or provider configuration");
         }
         let live = self.live(session_id).await?;
@@ -4685,22 +4695,53 @@ impl SessionManager {
         }
     }
 
-    pub(crate) async fn apply_provider_confirmation<T>(&self, session_id: &str, request_id: &str, operation: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+    pub(crate) async fn apply_provider_confirmation<T>(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        operation: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
         let live = self.live(session_id).await?;
         let _interaction = live.interaction_lock.lock().await;
-        anyhow::ensure!(!live.closing.load(Ordering::SeqCst), "original Session is closing");
-        anyhow::ensure!(!live.meta.lock().await.inbox.paused, "original Session was explicitly stopped; submit a new goal before configuring it");
-        anyhow::ensure!(live.pending_permissions.lock().await.iter().any(|request| request.id == request_id && request.kind == PermissionRequestKind::ProviderConfiguration), "original Session stopped or no longer holds this configuration request");
+        anyhow::ensure!(
+            !live.closing.load(Ordering::SeqCst),
+            "original Session is closing"
+        );
+        anyhow::ensure!(
+            !live.meta.lock().await.inbox.paused,
+            "original Session was explicitly stopped; submit a new goal before configuring it"
+        );
+        anyhow::ensure!(
+            live.pending_permissions
+                .lock()
+                .await
+                .iter()
+                .any(|request| request.id == request_id
+                    && request.kind == PermissionRequestKind::ProviderConfiguration),
+            "original Session stopped or no longer holds this configuration request"
+        );
         operation.await
     }
 
-    pub(crate) async fn provider_operation_path(&self, session_id: &str, action_id: &str) -> Result<std::path::PathBuf> {
+    pub(crate) async fn provider_operation_path(
+        &self,
+        session_id: &str,
+        action_id: &str,
+    ) -> Result<std::path::PathBuf> {
         let live = self.live(session_id).await?;
         let meta = live.meta.lock().await;
-        Ok(self.store.session_dir(&meta.workspace_id, &meta.id)?.join("provider-operations").join(format!("{action_id}.json")))
+        Ok(self
+            .store
+            .session_dir(&meta.workspace_id, &meta.id)?
+            .join("provider-operations")
+            .join(format!("{action_id}.json")))
     }
 
-    pub(crate) async fn request_provider_configuration(&self, session_id: &str, request: PermissionRequest) -> Result<()> {
+    pub(crate) async fn request_provider_configuration(
+        &self,
+        session_id: &str,
+        request: PermissionRequest,
+    ) -> Result<()> {
         self.request_question(session_id, request, false).await
     }
 
@@ -6017,7 +6058,9 @@ fn continuation_for(
             }))
         }
         PermissionRequestKind::ProviderConfiguration => {
-            let Some(option) = selected_option(request, outcome)? else { return Ok(None); };
+            let Some(option) = selected_option(request, outcome)? else {
+                return Ok(None);
+            };
             Ok(Some(Continuation {
                 elevated: false,
                 prompt: format!("GeneHub provider operation {} was {}. The daemon has the durable receipt. Inspect it through provider get using the original Session and action ID before reporting success. Secrets were submitted directly to the daemon and are not part of this conversation. Do not repeat the mutation. Continue the original goal with the unchanged permission mode.", request.id, if option.kind == PermissionOptionKind::Reject { "rejected" } else { "saved; verification must be checked" }),

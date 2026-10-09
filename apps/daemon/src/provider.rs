@@ -203,9 +203,14 @@ pub struct ListedModel {
 }
 
 #[derive(Debug)]
-struct ProviderStatusError { status: u16, message: String }
+struct ProviderStatusError {
+    status: u16,
+    message: String,
+}
 impl std::fmt::Display for ProviderStatusError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(&self.message) }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
 }
 impl std::error::Error for ProviderStatusError {}
 
@@ -214,27 +219,52 @@ impl std::error::Error for ProviderStatusError {}
 pub async fn verify(id: &str, config: &ProviderConfig) -> genehub_proto::ProviderValidation {
     use genehub_proto::ProviderValidation;
     let result = |status: &str, detail: &str, model: Option<String>| ProviderValidation {
-        status: status.into(), detail: detail.into(), model,
+        status: status.into(),
+        detail: detail.into(),
+        model,
     };
     let Some(key) = config.api_key.as_deref().filter(|key| !key.is_empty()) else {
         return result("missingCredential", "尚未配置密钥", None);
     };
     let resolved = resolve(id, config);
-    let Some(base) = resolved.base_url.filter(|base| validate_credential_url(base).is_ok()) else {
+    let Some(base) = resolved
+        .base_url
+        .filter(|base| validate_credential_url(base).is_ok())
+    else {
         return result("unreachable", "接口地址无效", None);
     };
-    let model = if let Some(model) = config.models.first() { model.clone() }
-    else {
+    let model = if let Some(model) = config.models.first() {
+        model.clone()
+    } else {
         match list_models(id, config).await {
-            Ok(models) => match models.first().filter(|m| !m.id.is_empty() && m.id.len() <= 200 && !m.id.chars().any(char::is_control)) {
+            Ok(models) => match models.first().filter(|m| {
+                !m.id.is_empty() && m.id.len() <= 200 && !m.id.chars().any(char::is_control)
+            }) {
                 Some(model) => model.id.clone(),
-                None => return result("modelUnavailable", "服务商未返回可用模型；可指定模型后重新配置", None),
+                None => {
+                    return result(
+                        "modelUnavailable",
+                        "服务商未返回可用模型；可指定模型后重新配置",
+                        None,
+                    )
+                }
             },
             Err(error) => {
-                if error.downcast_ref::<ProviderStatusError>().is_some_and(|e| matches!(e.status, 401 | 403)) {
-                    return result("authenticationFailed", "模型服务拒绝了认证，请检查密钥和权限", None);
+                if error
+                    .downcast_ref::<ProviderStatusError>()
+                    .is_some_and(|e| matches!(e.status, 401 | 403))
+                {
+                    return result(
+                        "authenticationFailed",
+                        "模型服务拒绝了认证，请检查密钥和权限",
+                        None,
+                    );
                 }
-                return result("modelUnavailable", "无法发现模型；可指定模型后重新配置", None);
+                return result(
+                    "modelUnavailable",
+                    "无法发现模型；可指定模型后重新配置",
+                    None,
+                );
             }
         }
     };
@@ -269,10 +299,22 @@ pub async fn verify(id: &str, config: &ProviderConfig) -> genehub_proto::Provide
     }.await;
     match attempt {
         Ok((200..=299, true)) => result("ready", "认证与模型调用已验证", Some(model)),
-        Ok((401 | 403, _)) => result("authenticationFailed", "模型服务拒绝了认证，请检查密钥和权限", Some(model)),
+        Ok((401 | 403, _)) => result(
+            "authenticationFailed",
+            "模型服务拒绝了认证，请检查密钥和权限",
+            Some(model),
+        ),
         Ok((200..=299, false)) => result("invalidResponse", "服务响应不符合所选协议", Some(model)),
-        Ok(_) => result("modelUnavailable", "模型调用失败，请检查模型名称、协议和额度", Some(model)),
-        Err(_) => result("unreachable", "验证请求失败或超时，请检查地址和网络后重新验证", Some(model)),
+        Ok(_) => result(
+            "modelUnavailable",
+            "模型调用失败，请检查模型名称、协议和额度",
+            Some(model),
+        ),
+        Err(_) => result(
+            "unreachable",
+            "验证请求失败或超时，请检查地址和网络后重新验证",
+            Some(model),
+        ),
     }
 }
 
@@ -329,7 +371,11 @@ pub async fn list_models(id: &str, config: &ProviderConfig) -> Result<Vec<Listed
         // common case here and only the provider can say why.
         let safe_body = body.replace(config.api_key.as_deref().unwrap_or("\0"), "[redacted]");
         let detail: String = safe_body.chars().take(300).collect();
-        return Err(ProviderStatusError { status: status.as_u16(), message: format!("{id} 返回 {status}：{detail}") }.into());
+        return Err(ProviderStatusError {
+            status: status.as_u16(),
+            message: format!("{id} 返回 {status}：{detail}"),
+        }
+        .into());
     }
 
     let parsed: serde_json::Value =

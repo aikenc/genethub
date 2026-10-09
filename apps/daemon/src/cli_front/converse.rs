@@ -239,9 +239,16 @@ fn parse_session(args: &[String], selection: &Selection) -> Result<Command, CliF
             let mut index = 2;
             while index < args.len() {
                 let flag = args[index].as_str();
-                if flag == "--no-text" { freeform = false; index += 1; continue; }
-                let value = args.get(index + 1).filter(|v| !v.trim().is_empty())
-                    .ok_or_else(|| CliFailure::invalid_args(usage))?.clone();
+                if flag == "--no-text" {
+                    freeform = false;
+                    index += 1;
+                    continue;
+                }
+                let value = args
+                    .get(index + 1)
+                    .filter(|v| !v.trim().is_empty())
+                    .ok_or_else(|| CliFailure::invalid_args(usage))?
+                    .clone();
                 match flag {
                     "--question" if question.is_none() => question = Some(value),
                     "--request-id" if request_id.is_none() => request_id = Some(value),
@@ -251,11 +258,17 @@ fn parse_session(args: &[String], selection: &Selection) -> Result<Command, CliF
                 }
                 index += 2;
             }
-            if choices.len() > 8 || (!freeform && choices.is_empty()) { return Err(CliFailure::invalid_args(usage)); }
+            if choices.len() > 8 || (!freeform && choices.is_empty()) {
+                return Err(CliFailure::invalid_args(usage));
+            }
             Ok(Command::Ask {
-                session_id, request_id: request_id.unwrap_or_else(|| format!("cli-question-{}", uuid::Uuid::new_v4().simple())),
+                session_id,
+                request_id: request_id
+                    .unwrap_or_else(|| format!("cli-question-{}", uuid::Uuid::new_v4().simple())),
                 title: title.unwrap_or_else(|| "需要你的回答".into()),
-                question: question.ok_or_else(|| CliFailure::invalid_args(usage))?, choices, freeform,
+                question: question.ok_or_else(|| CliFailure::invalid_args(usage))?,
+                choices,
+                freeform,
             })
         }
         "send" => {

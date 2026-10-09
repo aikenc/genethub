@@ -299,7 +299,9 @@ impl SessionManager {
                 let live = self.live(&meta.id).await?;
                 self.record_human_response(&live, decision).await?;
             }
-            let provider_pending = meta.pending_permission.as_ref().is_some_and(|request| request.kind == PermissionRequestKind::ProviderConfiguration);
+            let provider_pending = meta.pending_permission.as_ref().is_some_and(|request| {
+                request.kind == PermissionRequestKind::ProviderConfiguration
+            });
             if !(has_input || has_decision || provider_pending) {
                 continue;
             }
@@ -330,11 +332,15 @@ impl SessionManager {
         for live in lives {
             let configuration = {
                 let meta = live.meta.lock().await;
-                meta.pending_permission.as_ref().filter(|r| r.kind == PermissionRequestKind::ProviderConfiguration)
+                meta.pending_permission
+                    .as_ref()
+                    .filter(|r| r.kind == PermissionRequestKind::ProviderConfiguration)
                     .map(|r| (meta.id.clone(), r.id.clone()))
             };
             if let Some((session_id, request_id)) = configuration {
-                if let Err(error) = crate::provider_control::recover(state, &session_id, &request_id).await {
+                if let Err(error) =
+                    crate::provider_control::recover(state, &session_id, &request_id).await
+                {
                     tracing::error!(event = "provider_continuation_failed", %error, "provider continuation needs attention");
                 }
             }

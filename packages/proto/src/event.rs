@@ -104,7 +104,7 @@ pub struct Usage {
 
 impl Usage {
     pub fn token_status(&self) -> TokenUsageStatus {
-        self.token_usage_status.unwrap_or_else(|| {
+        self.token_usage_status.unwrap_or(
             if self.input_tokens > 0
                 || self.output_tokens > 0
                 || self.cache_read_tokens > 0
@@ -113,8 +113,8 @@ impl Usage {
                 TokenUsageStatus::Reported
             } else {
                 TokenUsageStatus::Unavailable
-            }
-        })
+            },
+        )
     }
 }
 

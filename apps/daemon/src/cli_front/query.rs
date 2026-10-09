@@ -567,15 +567,24 @@ async fn execute(
         Query::Context => {
             let rpc = connect_selected(selection).await?;
             let mut value = context_data(rpc.hello(), selection.machine.as_deref());
-            if !rpc.hello().features.as_ref().is_some_and(|features| features.iter().any(|feature| feature == "provider.configuration.v1")) {
+            if !rpc.hello().features.as_ref().is_some_and(|features| {
+                features
+                    .iter()
+                    .any(|feature| feature == "provider.configuration.v1")
+            }) {
                 value["principal"] = serde_json::json!({"type":"unreported"});
                 value["authority"] = serde_json::json!({"available":false,"reason":"selected daemon does not report effective caller authority"});
                 return Ok(("context", value));
             }
-            match rpc.call(Request::CallerAuthority).await.map_err(rpc_error)? {
+            match rpc
+                .call(Request::CallerAuthority)
+                .await
+                .map_err(rpc_error)?
+            {
                 Reply::CallerAuthority(authority) => {
                     value["principal"] = serde_json::json!({"type":authority.principal_type,"sessionId":authority.session_id,"grants":authority.grants});
-                    value["authority"] = serde_json::to_value(authority).expect("serializable authority");
+                    value["authority"] =
+                        serde_json::to_value(authority).expect("serializable authority");
                 }
                 other => return Err(unexpected_reply("caller authority", &other)),
             }
@@ -2367,7 +2376,10 @@ mod tests {
     #[test]
     fn every_routable_command_has_a_schema() {
         for name in target::ROUTABLE {
-            assert!(COMMAND_NAMES.contains(&name), "{name} is routable but has no schema");
+            assert!(
+                COMMAND_NAMES.contains(&name),
+                "{name} is routable but has no schema"
+            );
         }
         for name in COMMAND_NAMES {
             command_schema(name);

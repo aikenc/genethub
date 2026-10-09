@@ -1386,7 +1386,9 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
 /// output has the same Session grant as agent.logs. Apply one projection at
 /// both peer boundaries, rather than relying on scripts to classify stderr.
 fn filter_agent_logs(agents: &mut [genehub_proto::AgentInfo], caller: &Principal) {
-    if caller.allows(authz::Capability::Session) { return; }
+    if caller.allows(authz::Capability::Session) {
+        return;
+    }
     for agent in agents {
         agent.message = None;
         if let genehub_proto::ProbeState::Unavailable { reason } = &mut agent.probe {
@@ -1395,7 +1397,9 @@ fn filter_agent_logs(agents: &mut [genehub_proto::AgentInfo], caller: &Principal
         if let Some(job) = &mut agent.job {
             job.log_tail.clear();
             job.message = None;
-            if job.error.is_some() { job.error = Some("动作失败；需要会话权限查看详细原因".into()); }
+            if job.error.is_some() {
+                job.error = Some("动作失败；需要会话权限查看详细原因".into());
+            }
         }
     }
 }

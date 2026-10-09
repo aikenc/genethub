@@ -36,7 +36,8 @@ pub struct AppState {
     pub workflow_tasks: crate::adapter::SessionTasks,
     pub workspaces: Workspaces,
     pub project_control: crate::project_control::Broker,
-    pub(crate) provider_operations: std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Weak<Mutex<()>>>>,
+    pub(crate) provider_operations:
+        std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Weak<Mutex<()>>>>,
     pub terminals: Arc<Terminals>,
     /// What each session's agent has left running.
     pub processes: Arc<crate::processes::Processes>,
@@ -540,7 +541,10 @@ impl AppState {
                 }
             }
             let new_endpoint = crate::provider::resolve(provider_id, &entry);
-            if !supplied_key && (new_endpoint.base_url != old_endpoint.base_url || new_endpoint.dialect != old_endpoint.dialect) {
+            if !supplied_key
+                && (new_endpoint.base_url != old_endpoint.base_url
+                    || new_endpoint.dialect != old_endpoint.dialect)
+            {
                 // A metadata-only update must never move an existing key to another endpoint.
                 entry.api_key = None;
             }
