@@ -159,6 +159,8 @@ pub fn usage() -> i32 {
   genet session list [--workspace <id>]
                                     list local daemon sessions
   genet session get <id>            get one session snapshot
+  genet session ask <id> --question <text> [--choice <label>]... [--request-id <id>]
+                                    save a Human question and stop the current execution
   genet session send <id> --message-id <stable-id> [--task-run <run-id>] \"<text>\"
                                     durably accept PM input; inspect the session for its answer
   genet session inspect <id>        inspect session structure and coverage
@@ -172,6 +174,21 @@ pub fn usage() -> i32 {
                                     resolve one blob ref
   genet session context <id>        build bounded, cited context without an LLM
   genet agent list                  agents installed on this machine
+  genet agent show <id>             one agent: state, actions, job, requests
+  genet agent action <id> <action>  run an install/login/... action (settings grant)
+  genet agent reload <id>           restart a script agent from its directory
+  genet agent reset <id>            delete user/<id> and use the built-in copy
+  genet agent test <id> [--live]    run a script agent's own tests
+  genet agent logs <id> [--lines N] recent stderr of a script agent (1-500)
+  genet provider list               GeneHub model providers (genet's LLMs); keys show only hasApiKey
+  genet provider configure <id> --session <id> --action <stable-id> --base-url <url>
+              --dialect <openai|anthropic> --label <name> [--model <id>]
+                                    ask the Human to confirm a provider and type its key
+                                    in the workbench; stops this execution until they answer
+  genet provider get <action-id> --session <id>
+                                    read that request's receipt (saved, verified, rejected)
+  genet provider verify <action-id> --session <id>
+                                    re-check auth and models of a saved provider
   genet agent run --agent <id> \"<prompt>\" [--cwd <dir> | --workspace <id>]
                                     start a session and stream it as JSON Lines
   genet <agentId> \"<prompt>\" [...]   the same thing, spelled shorter

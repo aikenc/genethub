@@ -56,6 +56,9 @@ function stubClient(answers: Partial<Record<Request["type"], (payload: never) =>
     onNotice: () => () => {},
     onUpdateDownload: () => () => {},
     onBackgroundProcesses: () => () => {},
+    onAgents: () => () => {},
+    onAgentRequest: () => () => {},
+    onAgentRequestClosed: () => () => {},
     onStateChange: (listener: (state: string) => void) => {
       onState = listener;
       return () => {};
@@ -572,6 +575,7 @@ describe("the first run", () => {
       id: "opencode",
       label: "OpenCode",
       builtin: false,
+      source: "user",
       capabilities: {
         ...UNCONFIGURED_AGENT.capabilities,
         setEffort: false,

@@ -23,9 +23,7 @@ defineSpecialty(
       "concurrency.rs",
       "command.rs",
       "authorization.rs",
-      "claude.rs",
       "cursor.rs",
-      "opencode.rs",
       "install.rs",
       "supply_chain.rs",
     ]) {
@@ -34,14 +32,22 @@ defineSpecialty(
     const parity = JSON.parse(readFileSync(path.join(t.openRoot, "testing/migration/rust-parity.json"), "utf8")) as {
       cases: Array<{ oldId: string; legacyExecution?: string }>;
     };
-    const stopped = parity.cases.filter(item => item.legacyExecution !== "required");
-    t.assertions.assert(stopped.length === 0, "legacy cases stopped without verified per-case retirement");
+    const stopped = parity.cases.filter(item => item.legacyExecution !== "required" && item.legacyExecution !== "suspended");
+    t.assertions.assert(stopped.length === 0, "legacy cases stopped without verified per-case retirement or an L13 suspension");
     const tsx = path.join(t.openRoot, "testing/node_modules/tsx/dist/cli.mjs");
     for (const gate of ["change", "merge", "dev", "beta", "stable"]) {
       const output = execFileSync(process.execPath, [tsx, path.join(t.openRoot, "testing/bin/testctl.ts"), "plan", "--open", t.openRoot,
         "--cloud", process.env.TESTCTL_CLOUD_ROOT!, "--gate", gate], { encoding: "utf8", timeout: 10000 });
-      const planned = new Set((JSON.parse(output) as { units: Array<{ id: string }> }).units.map(u => u.id));
-      for (const row of parity.cases) t.assertions.assert(planned.has(row.oldId + "::default"), gate + " omitted required legacy " + row.oldId);
+      const plan = JSON.parse(output) as { units: Array<{ id: string }>; skipped: Array<{ id: string; reason: string }> };
+      const planned = new Set(plan.units.map(u => u.id));
+      for (const row of parity.cases) {
+        if (row.legacyExecution === "suspended") {
+          t.assertions.assert(!planned.has(row.oldId + "::default"), gate + " ran suspended legacy " + row.oldId);
+          t.assertions.assert(plan.skipped.some(s => s.id === row.oldId && s.reason.startsWith("L13 suspended")), gate + " hid suspended legacy " + row.oldId);
+        } else {
+          t.assertions.assert(planned.has(row.oldId + "::default"), gate + " omitted required legacy " + row.oldId);
+        }
+      }
     }
     const cargoToml = readFileSync(path.join(t.openRoot, "Cargo.toml"), "utf8");
     t.assertions.assert(

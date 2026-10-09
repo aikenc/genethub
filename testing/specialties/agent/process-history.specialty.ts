@@ -25,7 +25,7 @@ defineSpecialty({
   expectedDurationMs: 30_000, timeoutMs: 120_000,
   resources: { environments: 1, cpu: 1, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
   surfaces: ["daemon", "agent-adapter", "workbench-client"],
-  productInterfaces: ["@genehub/workbench/client", "codex-app-server-v2"],
+  productInterfaces: ["@genehub/workbench/client", "codex-app-server-v2", "agent-serve-protocol-1"],
 }, async (t) => {
   const journal = registerScriptedCodex(t.env, [
     [...message("before"), usage(1), tool("before-tool"), usage(2),
@@ -46,6 +46,7 @@ defineSpecialty({
   let client = opened.client;
   let restarted: typeof opened | undefined;
   try {
+    await t.flows.branches.waitForAgent(client, "codex", t.flows.branches.agentReady, { timeoutMs: 60_000, what: "ready on the app-server double" });
     const created = await client.call({ type: "session.create", payload: {
       workspaceId: opened.workspaceId, agentId: "codex", modelId: "scripted", modeId: null, title: null, cwd: null,
     } });

@@ -198,7 +198,7 @@ TURN/TLS 作为后续企业网增强。优先独立 IP 的 TCP 443；开发验�
 5. **基线验证**：先真实后端原生页面验证媒体，再验证经过 GeneHub 服务桥和媒体面板；分别记录 GeneHub DataChannel 与应用媒体状态。
 6. **受控开启 TURN**：STUN 验证后，在独立 dev 实例启用短期凭证和限额；禁止 UDP 直连的环境验证媒体经 TURN，确认已选 relay 候选及收发统计。
 7. **四网络与手机**：执行第 11 节矩阵，按结果决定是否需要第二 STUN 或 TURN/TLS 443，不先建设全国网络。
-8. **交付 dev 体验**：由 Cloud 的 pipespaces/genethub-dev 所属开发交付流程构建、发布、确认脱离启动会话后的存活与探针；本 dev-net Space 形成实现候选后移交，不自行发布公网 beta/stable。
+8. **交付 dev 体验**：由当前 dev-net Space 的 genethub-dev-development 流程在同名受管槽位构建、运行，确认脱离启动会话后的存活、构建身份与探针；同一会话继续交付，不自行发布公网 beta/stable。
 
 应用包发布与 coturn 变更解耦；更改 STUN/TURN 配置必须独立记录配置版本。不得借普通 Web 更新重启全部 Channel 的 coturn 或 Caddy。
 

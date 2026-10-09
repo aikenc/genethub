@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { BlockedError, defineSpecialty } from "../../framework/public.ts";
+import { BlockedError, defineSpecialty, scriptAgentRuntimeMirror } from "../../framework/public.ts";
 
 defineSpecialty({
   id: "specialty.contracts.workbench-baseline",
@@ -15,9 +15,17 @@ defineSpecialty({
   surfaces: ["workbench-owning-package", "vitest"],
 }, async t => {
   const cwd = join(t.openRoot, "packages/workbench"), report = join(t.env.root, "vitest.json");
+  // The suite's daemons use data directories it creates itself, so their
+  // runtime cannot be seeded; the pinned archive is served from the cache.
+  let mirrors: string | undefined;
+  try {
+    mirrors = scriptAgentRuntimeMirror();
+  } catch (error) {
+    if (!(error instanceof BlockedError)) throw error;
+  }
   try {
     await promisify(execFile)(process.execPath, [join(cwd, "node_modules/vitest/vitest.mjs"), "run", "--maxWorkers", "2", "--reporter=default", "--reporter=json", "--outputFile", report], {
-      cwd, env: process.env, timeout: 220000, maxBuffer: 4 * 1024 * 1024,
+      cwd, env: mirrors ? { ...process.env, GENEHUB_PYTHON_MIRRORS: mirrors } : process.env, timeout: 220000, maxBuffer: 4 * 1024 * 1024,
     });
     const result = JSON.parse(readFileSync(report, "utf8"));
     t.assertions.assert(result.success === true && result.numPassedTests > 0 && result.numFailedTests === 0,

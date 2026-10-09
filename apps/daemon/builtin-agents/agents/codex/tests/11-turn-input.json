@@ -1,0 +1,49 @@
+{
+ "kind": "turnInput",
+ "description": "A pasted image is written under the scratch dir and sent as a localImage path; a path-only image is passed through; non-images are not sent.",
+ "text": "look",
+ "attachments": [
+  {
+   "name": "shot.png",
+   "mime": "image/png",
+   "dataBase64": "aGk="
+  },
+  {
+   "name": "photo.jpg",
+   "mime": "image/jpeg",
+   "dataBase64": "YQ=="
+  },
+  {
+   "name": "notes.txt",
+   "mime": "text/plain",
+   "dataBase64": "aGk="
+  },
+  {
+   "name": "disk.png",
+   "mime": "image/png",
+   "path": "/abs/disk.png"
+  }
+ ],
+ "bytes": [
+  "hi",
+  "a"
+ ],
+ "expect": [
+  {
+   "type": "text",
+   "text": "look"
+  },
+  {
+   "type": "localImage",
+   "path": "<scratch>.png"
+  },
+  {
+   "type": "localImage",
+   "path": "<scratch>.jpg"
+  },
+  {
+   "type": "localImage",
+   "path": "/abs/disk.png"
+  }
+ ]
+}

@@ -1,4 +1,6 @@
 import type {
+  AgentInfo,
+  ModelCapabilities,
   ProviderInfo,
   SpeechRuntimeStatus,
   SpeechSettings,
@@ -6,12 +8,21 @@ import type {
 } from "@genehub/proto";
 import { useEffect, useState } from "react";
 
+import {
+  AgentActionButton,
+  AgentJobProgress,
+  agentNeedsRepair,
+  agentSourceLabel,
+  orderedAgentActions,
+  visibleAgentJob,
+} from "../agents/AgentLifecycle";
 import { BUILD, PRODUCT_VERSION } from "../build";
 import { CHANNEL, type BuildIdentity } from "../channel";
 import type { Endpoint, Host } from "../host";
 import { Pairing } from "../hub/Pairing";
+import { AgentMark } from "../presentation/AgentMark";
 import type { RtcFailure, RtcState } from "../protocol/client";
-import { useWorkbench } from "../session/store";
+import { agentRequestKey, useWorkbench } from "../session/store";
 import { UI_SCALE_OPTIONS, useUiScale } from "../theme/scale";
 import { THEME_OPTIONS, useTheme } from "../theme/store";
 import { readRtcEnabled, writeRtcEnabled } from "./rtc";
@@ -108,19 +119,12 @@ export function SettingsPanel({ host, endpoint }: { host: Host; endpoint?: Endpo
       <section>
         <h2 className="mb-2 text-sm font-medium">Agent</h2>
         <ul className="flex flex-col gap-1 text-sm">
-          {agents.map((agent) => (
-            <li key={agent.id} className="flex items-center gap-2 rounded bg-surface px-3 py-2">
-              <span>{agent.label}</span>
-              {agent.builtin ? <span className="text-xs text-muted">内置</span> : null}
-              <span className="ml-auto text-xs text-muted">
-                {agent.probe.state === "ready"
-                  ? "可用"
-                  : agent.probe.state === "notInstalled"
-                    ? "未安装"
-                    : agent.probe.reason}
-              </span>
-            </li>
-          ))}
+          {/* Usable ones first (proposal §8.2); the sort is stable. */}
+          {[...agents]
+            .sort((left, right) => Number(right.probe.state === "ready") - Number(left.probe.state === "ready"))
+            .map((agent) => (
+              <AgentRow key={agent.id} agent={agent} />
+            ))}
         </ul>
       </section>
 
@@ -143,6 +147,125 @@ export function SettingsPanel({ host, endpoint }: { host: Host; endpoint?: Endpo
 
       <Version host={host} endpoint={endpoint} daemonVersion={client?.identity?.daemonVersion} />
     </div>
+  );
+}
+
+/** One Agent in the settings list: what it is, where it came from, what it offers. */
+function AgentRow({ agent }: { agent: AgentInfo & { description?: string } }) {
+  const runAgentAction = useWorkbench((state) => state.runAgentAction);
+  const resetAgent = useWorkbench((state) => state.resetAgent);
+  const reloadAgent = useWorkbench((state) => state.reloadAgent);
+  const repairAgent = useWorkbench((state) => state.repairAgent);
+  const showAgentRequest = useWorkbench((state) => state.showAgentRequest);
+  const repairing = useWorkbench((state) => state.repairingAgentIds.includes(agent.id));
+  const hiddenRequest = useWorkbench((state) =>
+    state.agentRequests.find(
+      (request) =>
+        request.agentId === agent.id &&
+        state.hiddenAgentRequests.includes(agentRequestKey(request.agentId, request.id)),
+    ),
+  );
+  const [busy, setBusy] = useState(false);
+  const source = agentSourceLabel(agent);
+  const job = visibleAgentJob(agent);
+  const running = Boolean(agent.job && !agent.job.done);
+  const ready = agent.probe.state === "ready";
+  // A script Agent's reason is its message, shown in full underneath.
+  const status =
+    agent.probe.state === "ready"
+      ? "可用"
+      : agent.probe.state === "notInstalled"
+        ? "未安装"
+        : agent.message
+          ? "不可用"
+          : agent.probe.reason || "不可用";
+  const actions = orderedAgentActions(agent.actions);
+  // Edits under user/ take effect on reload, including the copy a repair
+  // session makes of a built-in that the daemon has not seen yet.
+  const reloadable = agent.source === "user" || agent.source === "override" || repairing;
+  const repairable = agentNeedsRepair(agent);
+  const run = (work: () => Promise<unknown>) => {
+    setBusy(true);
+    void work().finally(() => setBusy(false));
+  };
+  const buttonClass =
+    "min-h-11 rounded border border-line px-3 text-xs text-fg hover:border-accent disabled:opacity-40";
+
+  return (
+    <li className="flex flex-col rounded bg-surface px-3 py-2">
+      <div className="flex min-w-0 items-center gap-2">
+        <AgentMark agent={agent} className="h-5 w-5" fallbackToText={false} />
+        <span className="min-w-0 truncate">{agent.label}</span>
+        {source ? (
+          <span className="shrink-0 rounded bg-raised px-1.5 py-0.5 text-[10px] text-muted">{source}</span>
+        ) : null}
+        {agent.source === "override" && agent.overrideStale ? (
+          <span className="shrink-0 rounded bg-raised px-1.5 py-0.5 text-[10px] text-muted">基于旧内置版本</span>
+        ) : null}
+        {agent.version ? <span className="shrink-0 text-xs text-faint">{agent.version}</span> : null}
+        <span className={`ml-auto shrink-0 text-xs ${ready ? "text-muted" : "text-faint"}`}>{status}</span>
+      </div>
+      {/* What a not-yet-usable script Agent is, from its manifest (proposal §8.2). */}
+      {agent.source != null && !ready && agent.description ? (
+        <p className="mt-1 text-xs text-faint">{agent.description}</p>
+      ) : null}
+      {agent.message ? (
+        <p className="mt-1 whitespace-pre-wrap text-xs text-muted">{agent.message}</p>
+      ) : null}
+      {job ? <AgentJobProgress job={job} /> : null}
+      {actions.length > 0 || agent.source === "override" || reloadable || repairable || hiddenRequest ? (
+        <div className="mt-2 flex flex-wrap gap-2">
+          {hiddenRequest ? (
+            <button
+              type="button"
+              className={buttonClass}
+              onClick={() => showAgentRequest(hiddenRequest.agentId, hiddenRequest.id)}
+            >
+              查看请求：{hiddenRequest.title}
+            </button>
+          ) : null}
+          {actions.map((action) => (
+            <AgentActionButton
+              key={action.id}
+              action={action}
+              agentLabel={agent.label}
+              disabled={busy || running}
+              onRun={(actionId) => run(() => runAgentAction(agent.id, actionId))}
+            />
+          ))}
+          {reloadable ? (
+            <button
+              type="button"
+              disabled={busy || running}
+              className={buttonClass}
+              onClick={() => run(() => reloadAgent(agent.id))}
+            >
+              重新加载
+            </button>
+          ) : null}
+          {agent.source === "override" ? (
+            <button
+              type="button"
+              disabled={busy || running}
+              className={buttonClass}
+              onClick={() => run(() => resetAgent(agent.id))}
+            >
+              恢复内置
+            </button>
+          ) : null}
+          {repairable ? (
+            <button
+              type="button"
+              disabled={busy}
+              className={buttonClass}
+              onClick={() => run(() => repairAgent(agent.id))}
+            >
+              让内置 Agent 修复
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+    </li>
   );
 }
 
@@ -815,6 +938,7 @@ interface Edit {
   baseUrl?: string;
   models?: string[];
   modelInputs?: Record<string, string[]>;
+  modelCapabilities?: Record<string, ModelCapabilities>;
 }
 
 function ProviderRow({
@@ -885,36 +1009,177 @@ function ProviderRow({
       <ModelsFound provider={provider} />
       {provider.models.length > 0 ? (
         <details className="text-xs text-muted">
-          <summary className="cursor-pointer">配置模型图片 / 视频输入</summary>
-          <div className="mt-2 max-h-52 space-y-1 overflow-y-auto">
+          <summary className="cursor-pointer">配置模型能力（输入 / 思考 / 上下文）</summary>
+          <div className="mt-2 max-h-72 space-y-1 overflow-y-auto">
             {provider.models.map((model) => (
-              <div key={model} className="flex flex-wrap items-center gap-3 rounded border border-line px-2 py-1">
-                <span className="min-w-40 flex-1 break-all text-fg">{model}</span>
-                {(["image", "video"] as const).map((kind) => (
-                  <label key={kind} className="flex items-center gap-1">
-                    <input
-                      type="checkbox"
-                      aria-label={`${model} ${kind === "image" ? "图片" : "视频"}输入`}
-                      checked={(provider.modelInputs?.[model] ?? []).includes(kind)}
-                      disabled={busy || (kind === "video" && provider.dialect === "anthropic")}
-                      onChange={(event) => {
-                        const current = provider.modelInputs?.[model] ?? [];
-                        const next = event.target.checked
-                          ? [...current, kind]
-                          : current.filter((input) => input !== kind);
-                        setBusy(true);
-                        void onSave({ modelInputs: { [model]: next } }).finally(() => setBusy(false));
-                      }}
-                    />
-                    {kind === "image" ? "图片" : "视频"}
-                  </label>
-                ))}
-              </div>
+              <ModelCapabilityRow
+                key={model}
+                model={model}
+                provider={provider}
+                busy={busy}
+                onSave={(user) => {
+                  setBusy(true);
+                  return onSave({ modelCapabilities: { [model]: user } }).finally(() => setBusy(false));
+                }}
+              />
             ))}
           </div>
         </details>
       ) : null}
     </div>
+  );
+}
+
+const THINKING_LABELS: Record<string, string> = {
+  adaptive: "adaptive（模型自定思考量）",
+  budget: "budget（固定思考预算）",
+  only: "始终思考（不可关闭）",
+  none: "不思考",
+};
+
+const SOURCE_LABELS: Record<string, string> = {
+  rule: "规则",
+  discovered: "服务商",
+  user: "手动",
+};
+
+/** Where a value came from, next to it, so a wrong guess can be traced. */
+function SourceTag({ source }: { source?: string }) {
+  if (!source) return null;
+  return <span className="rounded border border-line px-1 text-[10px] text-faint">{SOURCE_LABELS[source] ?? source}</span>;
+}
+
+/**
+ * One model's capabilities: what the agent will be told, where each part came
+ * from, and the user's override of it. Each edit sends the model's whole user
+ * entry, so clearing a field hands it back to discovery and the rules.
+ */
+function ModelCapabilityRow({
+  model,
+  provider,
+  busy,
+  onSave,
+}: {
+  model: string;
+  provider: ProviderInfo;
+  busy: boolean;
+  onSave(user: ModelCapabilities): Promise<void>;
+}) {
+  const info = provider.modelCapabilities?.[model];
+  const effective = info?.effective ?? { inputs: provider.modelInputs?.[model] };
+  const user = info?.user ?? {};
+  const sources = info?.sources ?? {};
+  const save = (change: Partial<ModelCapabilities>) => {
+    const next: ModelCapabilities = { ...user, ...change };
+    for (const field of Object.keys(next) as (keyof ModelCapabilities)[]) {
+      if (next[field] === undefined) delete next[field];
+    }
+    return onSave(next);
+  };
+  const number = (field: "contextWindow" | "maxTokens", label: string) => (
+    <NumberField
+      label={`${model} ${label}`}
+      placeholder={effective[field] === undefined ? "未知" : String(effective[field])}
+      value={user[field]}
+      disabled={busy}
+      onCommit={(value) => void save({ [field]: value })}
+    />
+  );
+  return (
+    <div className="flex flex-col gap-1 rounded border border-line px-2 py-1">
+      <span className="break-all text-fg">{model}</span>
+      <div className="flex flex-wrap items-center gap-3">
+        {(["image", "video"] as const).map((kind) => (
+          <label key={kind} className="flex items-center gap-1">
+            <input
+              type="checkbox"
+              aria-label={`${model} ${kind === "image" ? "图片" : "视频"}输入`}
+              checked={(effective.inputs ?? []).includes(kind)}
+              disabled={busy || (kind === "video" && provider.dialect === "anthropic")}
+              onChange={(event) => {
+                const current = effective.inputs ?? [];
+                const next = event.target.checked
+                  ? [...current, kind]
+                  : current.filter((input) => input !== kind);
+                void save({ inputs: next });
+              }}
+            />
+            {kind === "image" ? "图片" : "视频"}
+          </label>
+        ))}
+        <SourceTag source={sources.inputs} />
+        <label className="flex items-center gap-1">
+          思考
+          <select
+            aria-label={`${model} 思考方式`}
+            className="rounded border border-line bg-bg px-1 py-0.5"
+            disabled={busy}
+            value={user.thinking ?? ""}
+            onChange={(event) => {
+              const thinking = event.target.value || undefined;
+              // Choosing a way to think says the model reasons; "none" says it does not.
+              void save({
+                thinking,
+                reasoning: thinking === undefined ? undefined : thinking !== "none",
+              });
+            }}
+          >
+            <option value="">
+              自动（{effective.thinking ? THINKING_LABELS[effective.thinking] ?? effective.thinking : effective.reasoning ? "budget" : "未知"}）
+            </option>
+            {Object.entries(THINKING_LABELS).map(([mode, label]) => (
+              <option key={mode} value={mode}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <SourceTag source={sources.thinking ?? sources.reasoning} />
+      </div>
+      <div className="flex flex-wrap items-center gap-3">
+        {number("contextWindow", "上下文窗口")}
+        <SourceTag source={sources.contextWindow} />
+        {number("maxTokens", "最大输出")}
+        <SourceTag source={sources.maxTokens} />
+      </div>
+    </div>
+  );
+}
+
+/** A token count, saved when the box loses focus; empty means automatic. */
+function NumberField({
+  label,
+  placeholder,
+  value,
+  disabled,
+  onCommit,
+}: {
+  label: string;
+  placeholder: string;
+  value?: number;
+  disabled: boolean;
+  onCommit(value: number | undefined): void;
+}) {
+  const [text, setText] = useState(value === undefined ? "" : String(value));
+  useEffect(() => setText(value === undefined ? "" : String(value)), [value]);
+  const short = label.slice(label.lastIndexOf(" ") + 1);
+  return (
+    <label className="flex items-center gap-1">
+      {short}
+      <input
+        aria-label={label}
+        inputMode="numeric"
+        className="w-28 rounded border border-line bg-bg px-1 py-0.5 outline-none focus:border-accent"
+        placeholder={placeholder}
+        value={text}
+        disabled={disabled}
+        onChange={(event) => setText(event.target.value.replace(/[^0-9]/g, ""))}
+        onBlur={() => {
+          const next = text === "" ? undefined : Number(text);
+          if (next !== value) onCommit(next);
+        }}
+      />
+    </label>
   );
 }
 

@@ -1,4 +1,4 @@
-import { BlockedError, defineJourney } from "../../framework/public.ts";
+import { BlockedError, defineJourney, hideHostAgentClis, seedScriptAgentRuntime } from "../../framework/public.ts";
 
 defineJourney(
   {
@@ -13,6 +13,10 @@ defineJourney(
     productInterfaces: ["@genehub/workbench/client"],
   },
   async (t) => {
+    // agent.list starts the built-in script Agents: give them the declared
+    // Python instead of a download, and none of this machine's own CLIs.
+    seedScriptAgentRuntime(t.env);
+    hideHostAgentClis(t.env);
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
     try {
       let saved;

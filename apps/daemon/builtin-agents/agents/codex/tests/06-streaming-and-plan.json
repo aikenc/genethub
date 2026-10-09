@@ -1,0 +1,251 @@
+{
+ "description": "A streamed reply opens one item then extends it; a delta after the settled frame still extends; a plan is one todo list upserted in place.",
+ "thread": "root-thread",
+ "ignoreTypes": [
+  "turnProgress"
+ ],
+ "steps": [
+  {
+   "begin": "t1"
+  },
+  {
+   "turnStartResponse": {
+    "turn": {
+     "id": "root-turn"
+    }
+   },
+   "turnId": "t1"
+  },
+  {
+   "frame": {
+    "method": "item/reasoning/summaryTextDelta",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "itemId": "rs-1",
+     "delta": "Thinking"
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "itemId": "item-1",
+     "delta": "Hel"
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "itemId": "item-1",
+     "delta": "lo"
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "itemId": "item-1",
+     "delta": ""
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "item/completed",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "item": {
+      "type": "agentMessage",
+      "id": "item-1",
+      "text": "Hello"
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "itemId": "item-1",
+     "delta": "!"
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "turn/plan/updated",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "plan": [
+      {
+       "step": "read the code",
+       "status": "completed"
+      },
+      {
+       "step": "write the fix",
+       "status": "in_progress"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "turn/plan/updated",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "plan": [
+      {
+       "step": "read the code",
+       "status": "completed"
+      },
+      {
+       "step": "write the fix",
+       "status": "completed"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "turn/started",
+    "params": {
+     "threadId": "root-thread",
+     "turn": {
+      "id": "late-duplicate",
+      "items": [],
+      "status": "inProgress"
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "turn/completed",
+    "params": {
+     "threadId": "root-thread",
+     "turn": {
+      "id": "root-turn",
+      "items": [],
+      "status": "completed"
+     }
+    }
+   }
+  }
+ ],
+ "events": [
+  {
+   "type": "item",
+   "turnId": "t1",
+   "item": {
+    "type": "reasoning",
+    "id": "rs-1",
+    "text": "Thinking"
+   }
+  },
+  {
+   "type": "item",
+   "turnId": "t1",
+   "item": {
+    "type": "assistantMessage",
+    "id": "item-1",
+    "text": "Hel"
+   }
+  },
+  {
+   "type": "itemDelta",
+   "turnId": "t1",
+   "itemId": "item-1",
+   "delta": {
+    "kind": "text",
+    "delta": "lo"
+   }
+  },
+  {
+   "type": "item",
+   "turnId": "t1",
+   "item": {
+    "type": "assistantMessage",
+    "id": "item-1",
+    "text": "Hello"
+   }
+  },
+  {
+   "type": "itemDelta",
+   "turnId": "t1",
+   "itemId": "item-1",
+   "delta": {
+    "kind": "text",
+    "delta": "!"
+   }
+  },
+  {
+   "type": "item",
+   "turnId": "t1",
+   "item": {
+    "type": "todo",
+    "id": "t1-plan",
+    "items": [
+     {
+      "text": "read the code",
+      "status": "completed"
+     },
+     {
+      "text": "write the fix",
+      "status": "inProgress"
+     }
+    ]
+   }
+  },
+  {
+   "type": "item",
+   "turnId": "t1",
+   "item": {
+    "type": "todo",
+    "id": "t1-plan",
+    "items": [
+     {
+      "text": "read the code",
+      "status": "completed"
+     },
+     {
+      "text": "write the fix",
+      "status": "completed"
+     }
+    ]
+   }
+  },
+  {
+   "type": "turnCompleted",
+   "turnId": "t1",
+   "usage": {
+    "inputTokens": 0,
+    "outputTokens": 0,
+    "cacheReadTokens": 0,
+    "cacheWriteTokens": 0,
+    "llmRounds": 0,
+    "toolOutputTokens": 0,
+    "compactionCount": 0,
+    "tokenUsageStatus": "unavailable"
+   },
+   "forkCheckpoint": "root-turn"
+  }
+ ]
+}

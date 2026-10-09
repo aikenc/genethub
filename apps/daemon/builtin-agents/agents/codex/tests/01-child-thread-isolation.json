@@ -1,0 +1,257 @@
+{
+ "description": "A sub-agent thread finishing first must not write to or complete the root turn (codex.rs a_child_thread_cannot_write_to_or_complete_the_root_turn).",
+ "thread": "root-thread",
+ "ignoreTypes": [
+  "turnProgress"
+ ],
+ "steps": [
+  {
+   "begin": "t1"
+  },
+  {
+   "frame": {
+    "method": "turn/started",
+    "params": {
+     "threadId": "root-thread",
+     "turn": {
+      "id": "root-turn",
+      "items": [],
+      "status": "inProgress"
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "turn/started",
+    "params": {
+     "threadId": "child-thread",
+     "turn": {
+      "id": "child-turn",
+      "items": [],
+      "status": "inProgress"
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "turn/started",
+    "params": {
+     "threadId": "other-child-thread",
+     "turn": {
+      "id": "other-child-turn",
+      "items": [],
+      "status": "inProgress"
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "item/started",
+    "params": {
+     "threadId": "child-thread",
+     "turnId": "child-turn",
+     "item": {
+      "type": "agentMessage",
+      "id": "child-final",
+      "text": "",
+      "phase": "final_answer"
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "child-thread",
+     "turnId": "child-turn",
+     "itemId": "child-final",
+     "delta": "Audit complete and returned to the parent agent."
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "item/completed",
+    "params": {
+     "threadId": "child-thread",
+     "turnId": "child-turn",
+     "item": {
+      "type": "agentMessage",
+      "id": "child-final",
+      "text": "Audit complete and returned to the parent agent.",
+      "phase": "final_answer"
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "thread/tokenUsage/updated",
+    "params": {
+     "threadId": "child-thread",
+     "turnId": "child-turn",
+     "tokenUsage": {
+      "last": {
+       "inputTokens": 67092,
+       "cachedInputTokens": 65280,
+       "outputTokens": 231,
+       "reasoningOutputTokens": 0,
+       "totalTokens": 67323
+      },
+      "total": {
+       "inputTokens": 67092,
+       "cachedInputTokens": 65280,
+       "outputTokens": 231,
+       "reasoningOutputTokens": 0,
+       "totalTokens": 67323
+      }
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "turn/completed",
+    "params": {
+     "threadId": "child-thread",
+     "turn": {
+      "id": "child-turn",
+      "items": [],
+      "status": "completed"
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "item/started",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "item": {
+      "type": "agentMessage",
+      "id": "root-final",
+      "text": "",
+      "phase": "final_answer"
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "item/agentMessage/delta",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "itemId": "root-final",
+     "delta": "Done."
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "item/completed",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "item": {
+      "type": "agentMessage",
+      "id": "root-final",
+      "text": "Done.",
+      "phase": "final_answer"
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "thread/tokenUsage/updated",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "tokenUsage": {
+      "last": {
+       "inputTokens": 101,
+       "cachedInputTokens": 61,
+       "outputTokens": 13,
+       "reasoningOutputTokens": 0,
+       "totalTokens": 114
+      },
+      "total": {
+       "inputTokens": 101,
+       "cachedInputTokens": 61,
+       "outputTokens": 13,
+       "reasoningOutputTokens": 0,
+       "totalTokens": 114
+      }
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "turn/completed",
+    "params": {
+     "threadId": "root-thread",
+     "turn": {
+      "id": "root-turn",
+      "items": [],
+      "status": "completed"
+     }
+    }
+   }
+  }
+ ],
+ "state": {
+  "id": null,
+  "codexTurn": null
+ },
+ "events": [
+  {
+   "type": "item",
+   "turnId": "t1",
+   "item": {
+    "type": "assistantMessage",
+    "id": "root-final",
+    "text": ""
+   }
+  },
+  {
+   "type": "itemDelta",
+   "turnId": "t1",
+   "itemId": "root-final",
+   "delta": {
+    "kind": "text",
+    "delta": "Done."
+   }
+  },
+  {
+   "type": "item",
+   "turnId": "t1",
+   "item": {
+    "type": "assistantMessage",
+    "id": "root-final",
+    "text": "Done."
+   }
+  },
+  {
+   "type": "turnCompleted",
+   "turnId": "t1",
+   "usage": {
+    "inputTokens": 101,
+    "outputTokens": 13,
+    "cacheReadTokens": 61,
+    "cacheWriteTokens": 0,
+    "llmRounds": 1,
+    "toolOutputTokens": 0,
+    "compactionCount": 0,
+    "tokenUsageStatus": "reported"
+   },
+   "forkCheckpoint": "root-turn"
+  }
+ ]
+}

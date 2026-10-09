@@ -134,6 +134,7 @@ mod tests {
             file_path: dir.join("SKILL.md"),
             base_dir: dir.clone(),
             disable_model_invocation: false,
+            paths: Vec::new(),
         }];
         let prompt = build(&dir, &skills, &[]);
         let skills_at = prompt.find("<available_skills>").unwrap();

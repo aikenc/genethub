@@ -232,7 +232,7 @@ impl wit::HostChild for crate::load::Host {
         let child = self.table.get_mut(&this).map_err(|e| e.to_string())?;
         match child.child.try_wait().map_err(|error| error.to_string())? {
             None => Ok(None),
-            Some(status) => Ok(Some(status.code().unwrap_or(-1) as u32)),
+            Some(status) => Ok(Some(exit_word(&status))),
         }
     }
 
@@ -281,6 +281,27 @@ impl wit::Host for crate::load::Host {
     async fn scratch_dir(&mut self) -> String {
         crate::guest_paths::env_value_for_guest(std::env::temp_dir().to_string_lossy())
     }
+}
+
+/// `try-wait`'s one `u32`, which has to carry "killed by a signal" as well as
+/// an exit code. The WIT is not changed for it: its digest pairs host and
+/// guest, and a new field there would be a native release for every user.
+///
+/// A plain exit is its code (0–255 on Unix). A signal is `SIGNALED | signo`,
+/// a band no Unix exit code reaches. Hosts before this sent `u32::MAX` (-1)
+/// for any signal, which the guest still reads as "a signal, unknown which".
+/// Mirrored in `packages/wasi-guest/src/process.rs`.
+const SIGNALED: u32 = 0xFFFF_FF00;
+
+fn exit_word(status: &std::process::ExitStatus) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return SIGNALED | (signal as u32 & 0xFF);
+        }
+    }
+    status.code().map_or(u32::MAX, |code| code as u32)
 }
 
 #[cfg(unix)]
@@ -365,4 +386,19 @@ fn signal_group(_pid: Option<u32>, _signal: i32) {}
 #[cfg(not(unix))]
 fn group_alive(_pid: Option<u32>) -> bool {
     false
+}
+
+#[cfg(all(test, unix))]
+mod exit_word_tests {
+    use super::*;
+
+    #[test]
+    fn a_signal_is_carried_in_its_own_band() {
+        use std::os::unix::process::ExitStatusExt;
+        // Raw wait statuses: a signal is the low 7 bits, an exit code byte 2.
+        assert_eq!(exit_word(&std::process::ExitStatus::from_raw(9)), SIGNALED | 9);
+        assert_eq!(exit_word(&std::process::ExitStatus::from_raw(15)), SIGNALED | 15);
+        assert_eq!(exit_word(&std::process::ExitStatus::from_raw(3 << 8)), 3);
+        assert_eq!(exit_word(&std::process::ExitStatus::from_raw(0)), 0);
+    }
 }

@@ -12,6 +12,7 @@ import { definedRuntimeValues, normalizeGroupedTags, routeTarget } from "./capab
 import { ModelPicker } from "./ModelPicker";
 import { CompactRuntimeControls, RuntimeSettings } from "./RuntimeSettings";
 import { resolveRuntimeSelection, type RuntimeSelection } from "./runtime-selection";
+import { useWorkbench } from "./store";
 
 export function RuntimeSettingsPanel({
   id,
@@ -49,6 +50,8 @@ export function RuntimeSettingsPanel({
   const [filters, setFilters] = useState(() => normalizeGroupedTags(tags, preferences));
   const [target, setTarget] = useState<SessionAgentTarget | null>(() => targetFrom(selection));
   const [saving, setSaving] = useState(false);
+  // The composer's Agents are this window's own machine, so its client runs them.
+  const runAgentAction = useWorkbench((state) => state.runAgentAction);
   // While a turn runs, the daemon can retarget everything the current Agent
   // already owns — model, mode, effort, runtime axes — and each lands on the
   // next turn. Rebinding to a different Agent rebuilds the Agent-native
@@ -145,6 +148,7 @@ export function RuntimeSettingsPanel({
                 pinnedAgentId={busy && currentAgentId ? currentAgentId : null}
                 onFilterTags={setFilters}
                 onSelect={(route) => setTarget(routeTarget(route))}
+                onRunAgentAction={(agentId, actionId) => void runAgentAction(agentId, actionId)}
               />
 
               {target ? (

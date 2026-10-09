@@ -8,7 +8,7 @@ use crate::protocol::ModelRef;
 
 pub const FAKE_PROVIDER: &str = "fake";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelConfig {
     pub provider: String,
@@ -33,12 +33,59 @@ pub struct ModelConfig {
     /// Native media accepted by this exact model, as declared by the daemon.
     #[serde(default)]
     pub input_modalities: Vec<String>,
-    /// How this model takes extended thinking: `adaptive` sends
-    /// `thinking.type="adaptive"` with `output_config.effort`, `budget` sends the
-    /// legacy `thinking.type="enabled"` with `budget_tokens`. Unset leaves the
-    /// choice to the built-in model id rule.
+    /// How this model takes extended thinking, resolved by the daemon
+    /// (`docs/builtin-agent-next-proposal.md` §3): `adaptive` sends
+    /// `thinking.type="adaptive"` with an effort, `budget` sends
+    /// `thinking.type="enabled"` with `budget_tokens`, `only` means the model
+    /// always thinks and takes no switch, `none` means it cannot think. Unset
+    /// falls back to `budget` for a reasoning model; the agent no longer
+    /// guesses from the id.
     #[serde(default)]
     pub thinking_mode: Option<String>,
+    /// Native effort values this model accepts (`low` … `max`), when known.
+    /// Levels above the highest declared one land on it instead of being sent
+    /// raw; empty means the conservative low/medium/high ladder.
+    #[serde(default, alias = "efforts")]
+    pub thinking_efforts: Vec<String>,
+    /// Endpoint quirks, detected by the daemon from provider id and base URL
+    /// and overridable by the user. Every field is optional so files written
+    /// by an older daemon still load.
+    #[serde(default)]
+    pub compat: Compat,
+}
+
+/// Request-shape differences between endpoints that speak the same dialect.
+/// Mirrors the subset of pi's `OpenAICompletionsCompat` /
+/// `AnthropicMessagesCompat` that GeneHub's endpoints need.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Compat {
+    /// OpenAI-compatible: `max_tokens` or `max_completion_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens_field: Option<String>,
+    /// OpenAI-compatible: whether `reasoning_effort` is accepted at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_reasoning_effort: Option<bool>,
+    /// OpenAI-compatible: send the system prompt as a `developer` message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_developer_role: Option<bool>,
+    /// OpenAI-compatible: assistant turns must carry `reasoning_content`
+    /// (DeepSeek, Kimi), even when empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_reasoning_content: Option<bool>,
+    /// OpenAI-compatible: `openai` (`reasoning_effort`), `deepseek`
+    /// (`thinking: {type}` plus effort) or `openrouter` (`reasoning: {effort}`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_format: Option<String>,
+    /// Anthropic: prompt-cache breakpoints on system, tools and the last user
+    /// turn. Defaults on, like pi; a gateway that rejects them can turn it off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_cache_control: Option<bool>,
+    /// Anthropic: `thinking.display` (`summarized` | `omitted`). Defaults to
+    /// `summarized`, like pi, so thinking stays visible on models whose API
+    /// default became `omitted`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_display: Option<String>,
 }
 
 impl ModelConfig {
@@ -52,6 +99,17 @@ impl ModelConfig {
         }
         let var = self.api_key_env.as_deref()?;
         std::env::var(var).ok().filter(|k| !k.is_empty())
+    }
+
+    /// The thinking mode the request builders act on.
+    pub fn thinking(&self) -> &str {
+        match self.thinking_mode.as_deref() {
+            Some(mode @ ("adaptive" | "budget" | "only" | "none")) => mode,
+            // `enabled` is what Anthropic calls the budget form.
+            Some("enabled") => "budget",
+            _ if self.reasoning == Some(false) => "none",
+            _ => "budget",
+        }
     }
 
     pub fn to_ref(&self) -> ModelRef {
@@ -129,6 +187,8 @@ fn env_models() -> Vec<ModelConfig> {
     if std::env::var("GENET_AGENT_FAKE_PROVIDER").is_ok() {
         models.push(ModelConfig {
             thinking_mode: None,
+            thinking_efforts: Vec::new(),
+            compat: crate::config::Compat::default(),
             provider: FAKE_PROVIDER.into(),
             id: "echo".into(),
             name: Some("Fake echo model".into()),
@@ -148,6 +208,8 @@ fn env_models() -> Vec<ModelConfig> {
             .unwrap_or_else(|_| "claude-sonnet-4-20250514".to_string());
         models.push(ModelConfig {
             thinking_mode: None,
+            thinking_efforts: Vec::new(),
+            compat: crate::config::Compat::default(),
             provider: "anthropic".into(),
             id,
             name: None,
@@ -172,6 +234,8 @@ fn env_models() -> Vec<ModelConfig> {
         let id = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
         models.push(ModelConfig {
             thinking_mode: None,
+            thinking_efforts: Vec::new(),
+            compat: crate::config::Compat::default(),
             provider: "openai".into(),
             id,
             name: None,
@@ -218,6 +282,8 @@ mod tests {
     fn api_defaults_to_provider_name() {
         let model = ModelConfig {
             thinking_mode: None,
+            thinking_efforts: Vec::new(),
+            compat: crate::config::Compat::default(),
             provider: "anthropic".into(),
             id: "claude".into(),
             name: None,
@@ -238,6 +304,8 @@ mod tests {
     fn duplicate_provider_and_id_collapse() {
         let make = |id: &str| ModelConfig {
             thinking_mode: None,
+            thinking_efforts: Vec::new(),
+            compat: crate::config::Compat::default(),
             provider: "openai".into(),
             id: id.into(),
             name: None,

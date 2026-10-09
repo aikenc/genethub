@@ -1,0 +1,68 @@
+{
+ "description": "Usage replayed by thread/resume while no turn is open must not count toward the next turn.",
+ "thread": "root-thread",
+ "steps": [
+  {
+   "frame": {
+    "method": "thread/tokenUsage/updated",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "previous-turn",
+     "tokenUsage": {
+      "last": {
+       "inputTokens": 120,
+       "cachedInputTokens": 40,
+       "outputTokens": 7
+      }
+     }
+    }
+   }
+  },
+  {
+   "begin": "next-genehub-turn"
+  },
+  {
+   "frame": {
+    "method": "turn/started",
+    "params": {
+     "threadId": "root-thread",
+     "turn": {
+      "id": "next-root-turn",
+      "items": [],
+      "status": "inProgress"
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "turn/completed",
+    "params": {
+     "threadId": "root-thread",
+     "turn": {
+      "id": "next-root-turn",
+      "items": [],
+      "status": "completed"
+     }
+    }
+   }
+  }
+ ],
+ "events": [
+  {
+   "type": "turnCompleted",
+   "turnId": "next-genehub-turn",
+   "usage": {
+    "inputTokens": 0,
+    "outputTokens": 0,
+    "cacheReadTokens": 0,
+    "cacheWriteTokens": 0,
+    "llmRounds": 0,
+    "toolOutputTokens": 0,
+    "compactionCount": 0,
+    "tokenUsageStatus": "unavailable"
+   },
+   "forkCheckpoint": "next-root-turn"
+  }
+ ]
+}

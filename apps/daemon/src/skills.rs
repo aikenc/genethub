@@ -134,7 +134,12 @@ pub fn session_guidance(
     front_door_cli: Option<&Path>,
     host_form_paths: bool,
 ) -> String {
-    let artifact = crate::session::artifact_links::guidance().to_string();
+    let mut artifact = crate::session::artifact_links::guidance().to_string();
+    // §6.3, fb_IXUzjtBuA4wt: an agent ended its own host with `ps | grep | kill`.
+    artifact.push_str("\n\nProcess safety: $GENEHUB_AGENT_PID is this Agent's process and $GENEHUB_HOST_PID the GeneHub daemon. Before ending any process, exclude these pids and their ancestors; find the target by its pid file or listening port rather than a broad `ps | grep | kill` or `pkill -f`, since a pattern can match this Agent's own command line.");
+    if front_door_cli.is_some() {
+        artifact.push_str("\n\nGeneHub conversation interactions: for a non-secret input box or choices in this conversation, use the native request_user_input tool if available, or the platform CLI: \"$GENEHUB_CLI\" session ask \"$GENEHUB_SESSION_ID\" --request-id <stable-question-id> --question <prompt> --choice <label> --choice <label>. Text input is enabled by default. This saves the question and stops the current execution; do not poll or wait for the answer. The Human answer resumes a new execution in the same Session. Reuse an id only for the identical question. An HTML preview page does not submit conversation answers. Do not request API keys, device codes or credentials here. For GeneHub model providers, use provider list and provider configure with --session $GENEHUB_SESSION_ID, --action <stable-id>, --base-url, --dialect and --label; use --model for gateways without discovery. This creates a workbench configuration card and stops the execution. The Human enters credentials directly to the daemon, then the original Session resumes. Use provider get and provider verify to inspect the durable receipt, never read config.json or modify unrelated Claude/Codex settings. context.authority reports actual permissions; a sessionController can prepare the operation without Settings. Confirm availability through the bound CLI's capabilities/schema; never invent a missing command. Read-only Workflow child sessions use the existing Workflow Human exit instead.");
+    }
     let Some(root) = skills_root else {
         return artifact;
     };
@@ -144,6 +149,44 @@ pub fn session_guidance(
     } else {
         format!("{artifact}\n\n{catalog}")
     }
+}
+
+/// Proposal §6.4 for the Skills this daemon catalogs, across every Agent: a
+/// prompt naming one gets a pointer to its file, once per session (`already`
+/// carries the names reminded so far). The catalog alone leaves reading to
+/// the model, which skipped a Skill its imported history named eight times.
+/// Names match as whole tokens in their own case, so the product name in
+/// prose or in a path does not trigger the `genehub` Skill.
+pub fn mention_reminder(
+    skills_root: &Path,
+    text: &str,
+    already: &mut std::collections::HashSet<String>,
+    host_form_paths: bool,
+) -> Option<String> {
+    let tokens: std::collections::HashSet<&str> = text
+        .split(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_'))
+        .filter(|token| !token.is_empty())
+        .collect();
+    let notes: Vec<String> = load(skills_root)
+        .into_iter()
+        .filter(|skill| !skill.disable_model_invocation && tokens.contains(skill.name.as_str()))
+        .filter(|skill| already.insert(skill.name.clone()))
+        .map(|skill| {
+            let path = skill.file_path.to_string_lossy();
+            let path = if host_form_paths {
+                crate::guest_paths::host_form(&path).into_owned()
+            } else {
+                path.into_owned()
+            };
+            format!(
+                "<skill_reminder name=\"{}\">This request names the GeneHub Skill `{}`. If you have not read `{}` in this session, read it before acting and follow it.</skill_reminder>",
+                escape_xml(&skill.name),
+                escape_xml(&skill.name),
+                escape_xml(&path)
+            )
+        })
+        .collect();
+    (!notes.is_empty()).then(|| notes.join("\n"))
 }
 
 pub fn format_catalog(
@@ -296,6 +339,35 @@ mod tests {
         assert!(body.contains("schema session.inspect"));
         assert!(body.contains("--through-round"));
         assert!(!body.contains("session inspect \"$GENEHUB_SESSION_ID\""));
+    }
+
+    #[test]
+    fn a_prompt_naming_a_built_in_skill_points_at_its_file_once() {
+        let root = temp_dir("mention");
+        let mut already = std::collections::HashSet::new();
+        let reminder = mention_reminder(
+            &root,
+            "按 genehub-preview 的要求做个看板",
+            &mut already,
+            false,
+        )
+        .expect("a reminder");
+        assert!(reminder.contains("genehub-preview/SKILL.md"), "{reminder}");
+        assert!(
+            !reminder.contains("Asset Preview"),
+            "the body stays out of the prompt"
+        );
+        assert!(mention_reminder(&root, "genehub-preview 再来", &mut already, false).is_none());
+        // The product name in prose or a path is not the `genehub` Skill.
+        for text in [
+            "GeneHub 的预览",
+            "~/.local/share/GeneHub-beta/builtin-skills",
+        ] {
+            assert!(
+                mention_reminder(&root, text, &mut already, false).is_none(),
+                "{text}"
+            );
+        }
     }
 
     #[test]

@@ -1,11 +1,14 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 
-import { defineSpecialty, type CaseContext } from "../../framework/public.ts";
+import { defineSpecialty, hideHostAgentClis, seedScriptAgentRuntime, type CaseContext } from "../../framework/public.ts";
 
 type Opened = Awaited<ReturnType<CaseContext["flows"]["main"]["openWorkspace"]>>;
 
 async function withAgent(t: CaseContext, run: (opened: Opened) => Promise<void>): Promise<void> {
+  // agent.refresh starts the built-in script Agents: declared Python, no host CLIs.
+  seedScriptAgentRuntime(t.env);
+  hideHostAgentClis(t.env);
   const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
   try {
     await t.flows.main.configureMockProvider(opened.client, opened.mock);

@@ -11,6 +11,10 @@ pub struct Args {
     pub no_session: bool,
     /// Repeatable product/host guidance appended to the built-in system prompt.
     pub add_system_prompt: Vec<String>,
+    /// The first stdin line is a `configure` command carrying the session
+    /// path, the public session id and the added system prompts (§6.1): argv
+    /// is what `ps aux | grep` matches, and a prompt there matches anything.
+    pub configure_from_stdin: bool,
     /// Accepted and ignored; refusing to start would break the daemon.
     pub ignored: Vec<String>,
 }
@@ -41,6 +45,7 @@ pub fn parse<I: IntoIterator<Item = String>>(argv: I) -> Result<Args, String> {
             }
             "--add-system-prompt" => args.add_system_prompt.push(value("--add-system-prompt")?),
             "--no-session" => args.no_session = true,
+            "--configure-from-stdin" => args.configure_from_stdin = true,
             "--mcp-config" | "--extension" => {
                 let value = value(&flag)?;
                 args.ignored.push(format!("{flag} {value}"));
@@ -110,6 +115,13 @@ mod tests {
     fn missing_value_is_reported() {
         let err = parse(vec!["--model".to_string()]).unwrap_err();
         assert!(err.contains("--model"));
+    }
+
+    #[test]
+    fn the_daemon_can_keep_its_settings_off_the_command_line() {
+        let args = parse_str(&["--mode", "rpc", "--configure-from-stdin"]);
+        assert!(args.configure_from_stdin);
+        assert!(args.ignored.is_empty());
     }
 
     #[test]

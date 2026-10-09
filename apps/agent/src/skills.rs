@@ -16,6 +16,9 @@ pub struct Skill {
     pub file_path: PathBuf,
     pub base_dir: PathBuf,
     pub disable_model_invocation: bool,
+    /// `paths` globs, relative to the working directory: what this Skill is
+    /// responsible for beyond its own folder (`skill_guard`).
+    pub paths: Vec<String>,
 }
 
 /// Global then project locations; on a name collision the first one wins.
@@ -187,7 +190,49 @@ fn parse_skill_file(path: &Path) -> Option<Skill> {
         file_path: path.to_path_buf(),
         base_dir: path.parent().unwrap_or(Path::new(".")).to_path_buf(),
         disable_model_invocation,
+        paths: frontmatter_list(&raw, "paths"),
     })
+}
+
+/// A list-valued key, inline (`paths: a, b` or `paths: [a, b]`) or as a
+/// YAML block sequence on the lines after it.
+fn frontmatter_list(raw: &str, key: &str) -> Vec<String> {
+    let mut lines = raw.lines();
+    if lines.next().map(str::trim) != Some("---") {
+        return Vec::new();
+    }
+    let clean = |item: &str| item.trim().trim_matches('"').trim_matches('\'').to_string();
+    let mut items = Vec::new();
+    let mut in_block = false;
+    for line in lines {
+        if line.trim() == "---" {
+            break;
+        }
+        if in_block {
+            match line.trim_start().strip_prefix("- ") {
+                Some(item) => {
+                    items.push(clean(item));
+                    continue;
+                }
+                None if line.starts_with(char::is_whitespace) => continue,
+                None => in_block = false,
+            }
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.trim() != key {
+            continue;
+        }
+        let value = value.trim().trim_start_matches('[').trim_end_matches(']');
+        if value.is_empty() {
+            in_block = true;
+        } else {
+            items.extend(value.split(',').map(clean));
+        }
+    }
+    items.retain(|item| !item.is_empty());
+    items
 }
 
 /// Minimal YAML frontmatter: flat `key: value` pairs between `---` fences,
@@ -293,6 +338,20 @@ mod tests {
     }
 
     #[test]
+    fn paths_are_read_inline_or_as_a_block() {
+        let inline = "---\nname: a\npaths: guidance/, \"docs/*.md\"\ndescription: d\n---\n";
+        assert_eq!(
+            frontmatter_list(inline, "paths"),
+            ["guidance/", "docs/*.md"]
+        );
+        let flow = "---\npaths: [a/**, b]\n---\n";
+        assert_eq!(frontmatter_list(flow, "paths"), ["a/**", "b"]);
+        let block = "---\nname: a\npaths:\n  - guidance/\n  - 'sop/*.md'\ndescription: d\n---\npaths: body\n";
+        assert_eq!(frontmatter_list(block, "paths"), ["guidance/", "sop/*.md"]);
+        assert!(frontmatter_list("no frontmatter\npaths: x\n", "paths").is_empty());
+    }
+
+    #[test]
     fn frontmatter_pairs_are_parsed() {
         let pairs = parse_frontmatter("---\nname: demo\ndescription: does things\n---\nbody\n");
         assert_eq!(pairs[0], ("name".into(), "demo".into()));
@@ -361,6 +420,7 @@ mod tests {
             file_path: PathBuf::from("/skills/pdf/SKILL.md"),
             base_dir: PathBuf::from("/skills/pdf"),
             disable_model_invocation: false,
+            paths: Vec::new(),
         }];
         let prompt = format_for_prompt(&skills);
         assert!(prompt.starts_with("\n\nThe following skills provide specialized instructions"));
@@ -379,6 +439,7 @@ mod tests {
             file_path: PathBuf::from("/skills/hidden/SKILL.md"),
             base_dir: PathBuf::from("/skills/hidden"),
             disable_model_invocation: true,
+            paths: Vec::new(),
         }];
         assert!(format_for_prompt(&skills).is_empty());
     }

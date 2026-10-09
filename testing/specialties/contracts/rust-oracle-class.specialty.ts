@@ -26,6 +26,7 @@ defineSpecialty(
         assertionDelta?: string;
         tsId?: string | null;
         legacyExecution?: string;
+        suspension?: { approvedBy?: string; approvedAt?: string; reason?: string; resumeWhen?: string };
       }>;
     };
     const probes = JSON.parse(readFileSync(probesPath, "utf8")) as {
@@ -62,9 +63,16 @@ defineSpecialty(
       owned.every((item) => Boolean(item.tsId)),
       "ts-owned row without tsId",
     );
+    const suspended = parity.cases.filter((item) => item.legacyExecution === "suspended");
     t.assertions.assert(
-      parity.cases.every((item) => item.legacyExecution === "required"),
-      "frozen legacy execution must remain required pending verified parity",
+      parity.cases.every((item) => item.legacyExecution === "required" || item.legacyExecution === "suspended"),
+      "frozen legacy execution must remain required pending verified parity or be suspended under L13",
+    );
+    t.assertions.assert(
+      suspended.every((item) => item.status === "source-retained" && !item.tsId
+        && Boolean(item.suspension?.approvedBy?.trim() && item.suspension.approvedAt?.trim()
+          && item.suspension.reason?.trim() && item.suspension.resumeWhen?.trim())),
+      `suspended row without retained source or a complete suspension record: ${suspended.filter((item) => item.status !== "source-retained" || !item.suspension?.resumeWhen).map((item) => item.oldId).join(",")}`,
     );
     t.assertions.assert(
       Boolean(parity.parityEvidence?.tsCore && parity.parityEvidence.rustLegacy && parity.parityEvidence.openSha && parity.parityEvidence.artifact),

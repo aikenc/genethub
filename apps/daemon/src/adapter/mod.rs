@@ -5,13 +5,9 @@
 //! into `SessionEvent` and accept a fixed set of commands; the session kernel
 //! and every transport above it see only those.
 
-pub mod acp;
-pub mod claude;
-pub mod codex;
-pub mod cursor;
 pub mod genet;
-pub mod opencode;
 pub mod registry;
+pub mod script;
 pub mod stdio;
 pub mod usage;
 
@@ -134,6 +130,14 @@ pub trait AgentAdapter: Send + Sync {
 
     fn capabilities(&self) -> Capabilities;
 
+    /// True when the Agent itself migrates a stored model, mode, effort or
+    /// runtime value its current catalog no longer offers. The session layer
+    /// then passes the stored choice through instead of replacing it with
+    /// the catalog default, and follows the Agent's `*Changed` events.
+    fn owns_runtime_selection(&self) -> bool {
+        false
+    }
+
     /// Can enforce the host-provided read-only paths and bounded Session set.
     /// A prompt or an Agent's generic plan mode is not an evidence boundary.
     fn supports_evidence_scope(&self) -> bool {
@@ -191,6 +195,14 @@ pub trait AgentSession: Send + Sync {
     async fn send(&self, input: PromptInput) -> Result<String>;
     async fn interrupt(&self) -> Result<()>;
     async fn close(&self) -> Result<()>;
+
+    /// Hands a message to the turn in progress, to be read after its current
+    /// tool results (pi `steer`). `Ok(false)` means it was not taken (no such
+    /// mechanism, or nothing running) and the caller delivers it some other
+    /// way; `Ok(true)` means this turn owns it now.
+    async fn steer(&self, _text: &str, _attachments: &[Attachment]) -> Result<bool> {
+        Ok(false)
+    }
 
     async fn set_model(&self, model_id: &str) -> Result<()>;
     async fn set_mode(&self, mode_id: &str) -> Result<()>;
@@ -362,21 +374,75 @@ impl Drop for Chatter {
     }
 }
 
+/// How a child process ended, as far as the operating system will say.
+///
+/// A signal is kept apart from an exit code because the two call for different
+/// readings: "exit 1" is the program's own verdict, "SIGKILL" means something
+/// outside it ended it — the OOM killer, a `kill` someone ran, or, as in
+/// fb_IXUzjtBuA4wt, the agent's own shell command aimed at the wrong pid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ending {
+    Code(i32),
+    Signal(i32),
+    /// Killed by a signal on a shell too old to say which one.
+    SomeSignal,
+}
+
+impl Ending {
+    pub fn of(status: &crate::os_process::ExitStatus) -> Self {
+        match (status.code(), crate::os_process::signal_of(status)) {
+            (_, Some(signal)) => Ending::Signal(signal),
+            (Some(code), None) => Ending::Code(code),
+            (None, None) => Ending::SomeSignal,
+        }
+    }
+
+    pub fn by_signal(&self) -> bool {
+        !matches!(self, Ending::Code(_))
+    }
+
+    /// The clause after the agent's name. The platform's own stops are not
+    /// described with this — they are recorded before the signal is sent, and
+    /// never reach it.
+    pub fn describe(&self, label: &str) -> String {
+        match *self {
+            Ending::Code(code) => format!("{label} 退出了（退出码 {code}）"),
+            Ending::Signal(9) => format!(
+                "{label} 被外部的 SIGKILL 终止了（不是平台发起的停止；常见原因是内存不足被系统回收，或有命令 kill 了它）"
+            ),
+            Ending::Signal(signal @ (1 | 2 | 15)) => format!(
+                "{label} 被外部的 {} 终止了（不是平台发起的停止；可能有命令 kill 了它）",
+                crate::os_process::signal_name(signal)
+            ),
+            Ending::Signal(signal) => format!(
+                "{label} 因 {} 崩溃退出了",
+                crate::os_process::signal_name(signal)
+            ),
+            Ending::SomeSignal => format!("{label} 被信号终止了（不是平台发起的停止）"),
+        }
+    }
+}
+
 /// How a child process that stopped on its own should be described.
 ///
 /// "Claude Code stopped unexpectedly." was the whole message, on every cause:
 /// a missing credential, a CLI too old for the flags we pass, a shim that could
 /// not find node. All three look identical to the person reading it, and none of
-/// them can be acted on. The exit code and the last lines it wrote are what
+/// them can be acted on. How it ended and the last lines it wrote are what
 /// separate them, and both are already in hand here.
 pub async fn stopped(
     label: &str,
     child: &Mutex<Option<crate::os_process::Child>>,
     said: &Chatter,
 ) -> String {
+    stopped_with(label, ending(child).await, said).await
+}
+
+/// [`stopped`], for a caller that already asked how the child ended.
+pub async fn stopped_with(label: &str, ending: Option<Ending>, said: &Chatter) -> String {
     said.settle().await;
-    let mut message = match exit_code(child).await {
-        Some(code) => format!("{label} 退出了（退出码 {code}）"),
+    let mut message = match ending {
+        Some(ending) => ending.describe(label),
         None => format!("{label} 意外退出了"),
     };
     message.push_str(&said.tail());
@@ -388,17 +454,17 @@ pub async fn stopped(
     message
 }
 
-/// The exit code of a child that has already stopped writing.
+/// How a child that has already stopped writing ended.
 ///
 /// Polled rather than awaited, and briefly: stdout closing is not quite the same
 /// as the process being gone, and a child that closed its pipes but kept running
 /// must not hold this lock — `stop()` needs it to kill the thing.
-async fn exit_code(child: &Mutex<Option<crate::os_process::Child>>) -> Option<i32> {
+pub async fn ending(child: &Mutex<Option<crate::os_process::Child>>) -> Option<Ending> {
     for _ in 0..20 {
         {
             let mut held = child.lock().await;
             match held.as_mut()?.try_wait() {
-                Ok(Some(status)) => return status.code(),
+                Ok(Some(status)) => return Some(Ending::of(&status)),
                 // Still there: give it a moment. The lock is released first,
                 // because `stop()` may be the reason it is about to go.
                 Ok(None) => {}
@@ -430,6 +496,7 @@ pub(super) fn apply_session_environment(
     command: &mut crate::os_process::Command,
     config: &SessionConfig,
 ) {
+    apply_process_identity(command);
     command.env("GENEHUB_SESSION_ID", &config.session_id);
     match &config.controller_token {
         Some(token) => {
@@ -449,6 +516,24 @@ pub(super) fn apply_session_environment(
     }
 }
 
+/// §6.3: the pids an agent must never end, as a contract it can rely on.
+///
+/// `GENEHUB_HOST_PID` is the daemon's own process (the shell, under wasm).
+/// `GENEHUB_AGENT_PID` is set by the agent itself for what it starts — the
+/// daemon cannot know it before the spawn — so any copy inherited from
+/// whoever started this daemon is dropped rather than passed on as true.
+pub(super) fn apply_process_identity(command: &mut crate::os_process::Command) {
+    match crate::host_pid::current() {
+        0 => {
+            command.env_remove("GENEHUB_HOST_PID");
+        }
+        pid => {
+            command.env("GENEHUB_HOST_PID", pid.to_string());
+        }
+    }
+    command.env_remove("GENEHUB_AGENT_PID");
+}
+
 /// Starts a child process without giving it a console window.
 ///
 /// Every agent here is a console program, and on Windows starting one from a GUI
@@ -465,19 +550,6 @@ pub fn without_a_window(command: &mut crate::os_process::Command) {
     }
     #[cfg(not(windows))]
     let _ = command;
-}
-
-/// Adds product-owned system context to a CLI without shell interpolation.
-/// Claude and the built-in Agent use different native flag names but share the
-/// same argument boundary and multiline-value safety.
-pub(super) fn append_system_prompt_arg(
-    command: &mut crate::os_process::Command,
-    flag: &str,
-    prompt: Option<&str>,
-) {
-    if let Some(prompt) = prompt.filter(|value| !value.trim().is_empty()) {
-        command.arg(flag).arg(prompt);
-    }
 }
 
 /// Ends a child and everything it started.
@@ -523,6 +595,20 @@ async fn kill_tree_checked(child: &mut crate::os_process::Child) -> Result<()> {
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true);
         let _ = tokio::time::timeout(Duration::from_secs(2), command.status()).await;
+    }
+    // The guest holds no pid it may signal; the shell ends the group. Polite
+    // first, so a child that cleans up on SIGTERM (a script Agent ending the
+    // CLIs it started) gets to.
+    #[cfg(target_family = "wasm")]
+    {
+        let _ = child.terminate();
+        let deadline = tokio::time::Instant::now() + crate::process::GRACE;
+        while tokio::time::Instant::now() < deadline && child.group_alive() {
+            if child.try_wait()?.is_some() && !child.group_alive() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
     if child.try_wait()?.is_some() {
         return Ok(());
@@ -618,6 +704,49 @@ mod tests {
         assert!(message.contains("日志"), "nowhere to look next: {message}");
     }
 
+    /// fb_IXUzjtBuA4wt read "退出码 -1, and it said nothing". A signal is
+    /// named, and said not to be the platform's doing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_child_killed_by_a_signal_is_described_by_it() {
+        let mut child = crate::os_process::Command::new("sh")
+            .arg("-c")
+            .arg("kill -9 $$")
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("sh runs");
+        let said = Chatter::default();
+        said.watch("genet-agent", child.stderr.take()).await;
+        let child = Mutex::new(Some(child));
+
+        assert_eq!(ending(&child).await, Some(Ending::Signal(9)));
+        let message = stopped(crate::channel::AGENT_LABEL, &child, &said).await;
+        assert!(message.contains("SIGKILL"), "{message}");
+        assert!(message.contains("不是平台发起"), "{message}");
+        assert!(!message.contains("-1"), "{message}");
+    }
+
+    #[test]
+    fn every_agent_child_is_told_the_daemon_pid_and_not_a_stale_agent_pid() {
+        let mut command = crate::os_process::Command::new("true");
+        apply_process_identity(&mut command);
+        let env: std::collections::HashMap<_, _> = command
+            .as_std()
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            env.get("GENEHUB_HOST_PID"),
+            Some(&Some(std::process::id().to_string()))
+        );
+        assert_eq!(env.get("GENEHUB_AGENT_PID"), Some(&None));
+    }
+
     /// An agent that honours `SIGTERM` is gone at once, but stays a zombie of
     /// ours until reaped. Closing it must not wait out the grace for that.
     #[cfg(unix)]
@@ -669,7 +798,22 @@ mod tests {
     #[test]
     fn every_agent_is_started_as_a_child_this_daemon_can_account_for() {
         let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/adapter");
-        for file in ["claude.rs", "codex.rs", "opencode.rs", "acp.rs", "genet.rs"] {
+        // Script processes are not sessions: they get the process group but
+        // deliberately not the session binding (each session's CLI gets it
+        // from the script).
+        for file in ["script/host.rs", "script/runtime.rs"] {
+            let source = std::fs::read_to_string(here.join(file)).expect("read the adapter");
+            assert!(
+                source.contains("owned_child"),
+                "{file} starts a program without preparing it to be owned"
+            );
+            assert!(
+                !source.contains("without_a_window"),
+                "{file} skips the process group"
+            );
+        }
+        {
+            let file = "genet.rs";
             let source = std::fs::read_to_string(here.join(file)).expect("read the adapter");
             assert!(
                 source.contains("owned_child"),
@@ -721,28 +865,6 @@ mod tests {
         let present = dir.join(format!("{name}{suffix}"));
         std::fs::write(&present, b"").unwrap();
         present
-    }
-
-    #[test]
-    fn multiline_system_context_is_one_literal_cli_argument() {
-        let mut command = crate::os_process::Command::new("agent");
-        append_system_prompt_arg(
-            &mut command,
-            "--append-system-prompt",
-            Some("first line\nhttps://app.example/assets/preview/v2/d/w/r_root/"),
-        );
-        let args: Vec<_> = command
-            .as_std()
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(
-            args,
-            [
-                "--append-system-prompt",
-                "first line\nhttps://app.example/assets/preview/v2/d/w/r_root/",
-            ]
-        );
     }
 
     #[test]

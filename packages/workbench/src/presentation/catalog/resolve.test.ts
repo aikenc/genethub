@@ -1,9 +1,11 @@
+import type { AgentInfo } from "@genehub/proto";
 import { describe, expect, it } from "vitest";
 
 import { agentAssets } from "../../assets/agents";
 import agentConfig from "./agents.json";
 import modelConfig from "./model-aliases.json";
 import {
+  canStartAgent,
   resolveAgentPresentation,
   resolveAgentProfile,
   resolveEffortBadge,
@@ -15,26 +17,23 @@ import {
 import badgeConfig from "./runtime-badges.json";
 
 describe("Agent presentation catalog", () => {
-  it("covers every built-in registry Agent with an icon, glyph, or name", () => {
+  it("prefers the icon a script Agent ships over the bundled map", () => {
+    const icon = "data:image/svg+xml;base64,PHN2Zy8+";
+    expect(resolveAgentPresentation({ id: "cursor", label: "Cursor", icon })).toEqual({
+      kind: "icon",
+      label: "Cursor",
+      asset: { default: icon },
+    });
+    // Anything but an image data URL falls back to the map.
+    expect(
+      resolveAgentPresentation({ id: "cursor", label: "Cursor", icon: "https://x/icon.svg" }),
+    ).not.toMatchObject({ asset: { default: "https://x/icon.svg" } });
+  });
+
+  it("covers every shipped Agent with an icon, glyph, or name", () => {
     expect(resolveAgentPresentation({ id: "genet", label: "GeneHub Dev Agent" })).toMatchObject({
       kind: "icon",
       label: "Genet",
-    });
-    expect(resolveAgentPresentation({ id: "opencode", label: "OpenCode" }).kind).toBe("icon");
-    expect(resolveAgentPresentation({ id: "acp:goose", label: "goose" }).kind).toBe("icon");
-    expect(resolveAgentPresentation({ id: "claude", label: "Claude Code" })).toMatchObject({
-      kind: "glyph",
-      label: "Claude",
-      glyph: "✱",
-    });
-    expect(resolveAgentPresentation({ id: "tclaude", label: "TClaude" })).toMatchObject({
-      kind: "glyph",
-      glyph: "T",
-    });
-    expect(resolveAgentPresentation({ id: "codebuddy", label: "CodeBuddy" })).toMatchObject({
-      kind: "glyph",
-      label: "CodeBuddy",
-      glyph: "B",
     });
     expect(resolveAgentPresentation({ id: "codex", label: "Codex" })).toEqual({
       kind: "glyph",
@@ -42,20 +41,22 @@ describe("Agent presentation catalog", () => {
       glyph: "C",
     });
     expect(resolveAgentPresentation({ id: "cursor", label: "Cursor" }).kind).toBe("icon");
-    expect(resolveAgentPresentation({ id: "acp", label: "ACP agent" }).kind).toBe("icon");
-    expect(
-      resolveAgentPresentation({ id: "acp:github-copilot", label: "GitHub Copilot" }),
-    ).toEqual({ kind: "text", label: "GitHub Copilot" });
+    // Removed native adapters keep no bundled mark; a script Agent of that
+    // name is shown by its own icon or its label.
+    expect(resolveAgentPresentation({ id: "claude", label: "Claude Code" })).toEqual({
+      kind: "text",
+      label: "Claude Code",
+    });
   });
 
   it("does not guess a vendor icon from an arbitrary custom Agent label", () => {
-    expect(resolveAgentPresentation({ id: "acp:private", label: "My Codex wrapper" })).toEqual({
+    expect(resolveAgentPresentation({ id: "private", label: "My Codex wrapper" })).toEqual({
       kind: "text",
       label: "My Codex wrapper",
     });
-    expect(resolveAgentPresentation({ id: "acp:private", label: "" })).toEqual({
+    expect(resolveAgentPresentation({ id: "private", label: "" })).toEqual({
       kind: "text",
-      label: "acp:private",
+      label: "private",
     });
   });
 });
@@ -132,7 +133,7 @@ describe("model display names", () => {
   });
 
   it("applies the same eight-grapheme fallback to every dynamic Agent catalog", () => {
-    for (const agentId of ["genet", "opencode", "claude", "tclaude", "codex", "cursor", "acp"]) {
+    for (const agentId of ["genet", "codex", "cursor", "private"]) {
       expect(
         resolveModelPresentation({
           agentId,
@@ -161,7 +162,7 @@ describe("model display names", () => {
       ["claude-hy3", "HY3"],
       ["deepseek/deepseek-v4-flash", "DeepSeek V4 Flash"],
     ] as const;
-    for (const agentId of ["tclaude", "claude", "genet", "acp:private"]) {
+    for (const agentId of ["codex", "cursor", "genet", "private"]) {
       for (const [modelId, shortLabel] of cases) {
         expect(
           resolveModelPresentation({
@@ -177,7 +178,7 @@ describe("model display names", () => {
   it("keeps a real runtime display name and only shortens the chip", () => {
     expect(
       resolveModelPresentation({
-        agentId: "tclaude",
+        agentId: "cursor",
         modelId: "default",
         modelLabel: "Default (recommended)",
       }),
@@ -188,7 +189,7 @@ describe("model display names", () => {
     });
     expect(
       resolveModelPresentation({
-        agentId: "claude",
+        agentId: "cursor",
         modelId: "sonnet",
         modelLabel: "Sonnet",
       }),
@@ -253,35 +254,29 @@ describe("runtime badges", () => {
     ).toEqual({ reasoning: false, multimodal: false });
   });
 
-  it("separates a permission policy from an ACP workflow selector", () => {
+  it("separates a permission policy from a workflow selector", () => {
     expect(resolveAgentProfile("codex").modeKind).toBe("permission");
-    expect(resolveAgentProfile("claude").modeKind).toBe("permission");
-    expect(resolveAgentProfile("tclaude").modeKind).toBe("permission");
-    expect(resolveAgentProfile("codebuddy").modeKind).toBe("permission");
     expect(resolveAgentProfile("cursor").modeKind).toBe("workflow");
-    expect(resolveAgentProfile("acp:private")).toEqual({
+    expect(resolveAgentProfile("private")).toEqual({
       modeKind: "unknown",
-      startWithoutModelCatalog: true,
+      startWithoutModelCatalog: false,
     });
   });
 
+  it("lets any script Agent start without a model catalog, and no unknown native one", () => {
+    expect(resolveAgentProfile({ id: "private", source: "user" }).startWithoutModelCatalog).toBe(true);
+    expect(resolveAgentProfile({ id: "private" }).startWithoutModelCatalog).toBe(false);
+    // The shipped rule wins over the layer.
+    expect(resolveAgentProfile({ id: "genet", source: "user" }).startWithoutModelCatalog).toBe(false);
+    const empty = { models: [], modes: [], commands: [] } as unknown as AgentInfo["catalog"];
+    expect(canStartAgent({ id: "private", probe: { state: "ready" }, catalog: empty, source: "user" })).toBe(true);
+    expect(canStartAgent({ id: "private", probe: { state: "ready" }, catalog: empty })).toBe(false);
+    expect(
+      canStartAgent({ id: "private", probe: { state: "unavailable", reason: "x" }, catalog: empty, source: "user" }),
+    ).toBe(false);
+  });
+
   it("only shows the unlock emoji for known unrestricted modes", () => {
-    expect(
-      resolveModeBadge({
-        agentId: "tclaude",
-        permissions: true,
-        modeId: "bypassPermissions",
-        modeLabel: "Bypass permissions",
-      }),
-    ).toMatchObject({ emoji: "🔓", risk: "unrestricted" });
-    expect(
-      resolveModeBadge({
-        agentId: "codebuddy",
-        permissions: true,
-        modeId: "bypassPermissions",
-        modeLabel: "Bypass permissions",
-      }),
-    ).toMatchObject({ emoji: "🔓", risk: "unrestricted" });
     expect(
       resolveModeBadge({
         agentId: "codex",
@@ -300,7 +295,7 @@ describe("runtime badges", () => {
     ).toMatchObject({ emoji: "🛡️", risk: "unknown" });
     expect(
       resolveModeBadge({
-        agentId: "acp:codex",
+        agentId: "my-codex",
         permissions: true,
         modeId: "full-access",
         modeLabel: "Vendor full access",
@@ -311,7 +306,7 @@ describe("runtime badges", () => {
   it("uses a neutral settings badge for a non-permission mode axis", () => {
     expect(
       resolveModeBadge({
-        agentId: "acp:goose",
+        agentId: "cursor",
         permissions: false,
         modeId: "agent",
         modeLabel: "Agent",

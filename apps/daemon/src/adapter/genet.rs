@@ -5,16 +5,17 @@
 //! layer ever sees an agent-shaped frame.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::os_process::{Child, ChildStdin, Command};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use genehub_proto::{
-    Capabilities, Catalog, CommandInfo, InteractionOption, InteractionQuestion, ItemDelta,
-    ModelInfo, PermissionOutcome, PermissionRequest, PermissionRequestKind, ProbeState,
+    Attachment, Capabilities, Catalog, CommandInfo, InteractionOption, InteractionQuestion,
+    ItemDelta, ModelInfo, PermissionOutcome, PermissionRequest, PermissionRequestKind, ProbeState,
     SessionEvent, TimelineItem, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
 };
 use serde_json::{json, Map, Value};
@@ -221,6 +222,13 @@ impl AgentAdapter for GenetAdapter {
         write_models_file(&home, &config.providers)?;
 
         let session_file = home.join("session.jsonl");
+        // §6.2: a process the platform did not stop left word of how it went,
+        // for the one that resumes the conversation. Read once, then gone.
+        let exit_note_file = home.join(EXIT_NOTE_FILE);
+        let exit_note = std::fs::read_to_string(&exit_note_file)
+            .ok()
+            .filter(|note| !note.trim().is_empty());
+        let _ = std::fs::remove_file(&exit_note_file);
         let legacy_native = self.binary.is_some();
         let (mut command, describe) = match self.binary.clone() {
             Some(binary) => (Command::new(&binary), binary.display().to_string()),
@@ -250,13 +258,15 @@ impl AgentAdapter for GenetAdapter {
         } else {
             session_file.clone()
         };
+        // argv is what `ps aux | grep` matches against, and a system prompt
+        // there makes the agent match almost any pattern its own commands
+        // grep for (proposal §6.1). The session path, the session id and the
+        // added prompts go in the first stdin line instead; argv keeps only
+        // the mode, the model and the thinking level.
         command
             .arg("--mode")
             .arg("rpc")
-            .arg("--session")
-            .arg(&session_arg)
-            .arg("--genehub-session-id")
-            .arg(&config.session_id)
+            .arg("--configure-from-stdin")
             .current_dir(&config.cwd)
             .env(crate::channel::ENV_AGENT_HOME, &home)
             .env("GENET_WORKSPACE_ROOT", workspace_root);
@@ -293,18 +303,17 @@ impl AgentAdapter for GenetAdapter {
         if let Some(level) = config.effort_id.as_ref().or(config.mode_id.as_ref()) {
             command.arg("--thinking").arg(level);
         }
-        super::append_system_prompt_arg(
-            &mut command,
-            "--add-system-prompt",
-            config.additional_system_prompt.as_deref(),
-        );
+        let configure = configure_command(&session_arg, &config);
 
         let mut child = command
             .spawn()
             .with_context(|| format!("spawning {describe}"))?;
         let stdout = child.stdout.take().expect("stdout was piped");
         let stderr = child.stderr.take().expect("stderr was piped");
-        let stdin = child.stdin.take().expect("stdin was piped");
+        let mut stdin = child.stdin.take().expect("stdin was piped");
+        write_json_line(&mut stdin, &configure)
+            .await
+            .with_context(|| format!("configuring {describe}"))?;
 
         let child = Arc::new(Mutex::new(Some(child)));
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
@@ -315,6 +324,8 @@ impl AgentAdapter for GenetAdapter {
         let said = Arc::new(Chatter::default());
         said.watch("genet-agent", Some(stderr)).await;
 
+        let closing = Arc::new(AtomicBool::new(false));
+        let replies = Replies::default();
         let session = GenetSession {
             tasks: super::SessionTasks::default(),
             stdin: Mutex::new(stdin),
@@ -323,11 +334,23 @@ impl AgentAdapter for GenetAdapter {
             child: child.clone(),
             said: said.clone(),
             session_file,
+            closing: closing.clone(),
+            exit_note: Mutex::new(exit_note),
+            replies: replies.clone(),
         };
 
-        session
-            .tasks
-            .spawn(translate_stream(stdout, events, turn, child, said));
+        session.tasks.spawn(translate_stream(
+            stdout,
+            events,
+            turn,
+            replies,
+            child,
+            said,
+            Exit {
+                closing,
+                note_file: exit_note_file,
+            },
+        ));
 
         Ok(Box::new(session))
     }
@@ -357,6 +380,23 @@ impl TurnState {
     }
 }
 
+/// The launch settings the agent reads before anything else under
+/// `--configure-from-stdin`.
+fn configure_command(session: &Path, config: &SessionConfig) -> Value {
+    let prompts: Vec<&str> = config
+        .additional_system_prompt
+        .as_deref()
+        .filter(|prompt| !prompt.trim().is_empty())
+        .into_iter()
+        .collect();
+    json!({
+        "type": "configure",
+        "session": session.to_string_lossy(),
+        "genehubSessionId": config.session_id,
+        "systemPrompts": prompts,
+    })
+}
+
 struct GenetSession {
     tasks: super::SessionTasks,
     stdin: Mutex<ChildStdin>,
@@ -367,6 +407,40 @@ struct GenetSession {
     /// What the agent said, for a prompt that cannot be written because it is gone.
     said: Arc<Chatter>,
     session_file: PathBuf,
+    /// Set before the platform itself stops the process, so the exit that
+    /// follows is read as the stop it is and not as a crash.
+    closing: Arc<AtomicBool>,
+    /// Left by the process before this one, for the next prompt to carry.
+    exit_note: Mutex<Option<String>>,
+    /// Control commands awaiting their `response` frame, by request id.
+    replies: Replies,
+}
+
+type Replies = Arc<std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<Value>>>>;
+
+/// How long a steer waits for the agent to say whether it took the message.
+/// The agent answers from its command loop, never from inside a model call.
+const STEER_REPLY_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Beside `session.jsonl`, so it follows the conversation across processes.
+const EXIT_NOTE_FILE: &str = "exit-note.txt";
+
+/// What the stream reader needs to tell a crash from a stop, and where to
+/// leave word of a crash.
+struct Exit {
+    closing: Arc<AtomicBool>,
+    note_file: PathBuf,
+}
+
+/// The note the next process reads first, after one was killed by a signal it
+/// was not sent by us. Plain facts and the rule that would have prevented
+/// fb_IXUzjtBuA4wt; the user's own text follows it unchanged.
+fn exit_note(why: &str) -> String {
+    format!(
+        "<genehub_notice>上一个 Agent 进程没有正常结束：{why}。这不是平台发起的停止。\
+如果当时在执行 kill/pkill/killall，很可能误杀了 Agent 自己：结束进程前先排除 $GENEHUB_AGENT_PID、$GENEHUB_HOST_PID 及其祖先进程，按 PID 文件或端口定位目标，不要用宽泛的 grep | kill。\
+继续之前，先确认上一轮未完成的操作做到了哪一步。</genehub_notice>\n\n"
+    )
 }
 
 impl GenetSession {
@@ -399,10 +473,17 @@ impl AgentSession for GenetSession {
                 "type": "compact",
             })
         } else {
+            // A slash command has to stay first to be one; the note waits for
+            // a message it can sit in front of.
+            let note = if input.text.trim_start().starts_with('/') {
+                None
+            } else {
+                self.exit_note.lock().await.take()
+            };
             json!({
                 "id": turn_id,
                 "type": "prompt",
-                "message": input.text,
+                "message": format!("{}{}", note.unwrap_or_default(), input.text),
                 "attachments": input.attachments,
             })
         };
@@ -421,6 +502,49 @@ impl AgentSession for GenetSession {
             turn.canceled = true;
         }
         self.command(json!({ "type": "abort" })).await
+    }
+
+    async fn steer(&self, text: &str, attachments: &[Attachment]) -> Result<bool> {
+        {
+            let turn = self.turn.lock().await;
+            if turn.id.is_none() || turn.canceled {
+                return Ok(false);
+            }
+        }
+        let id = format!("steer_{}", uuid::Uuid::new_v4().simple());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        // Registered before the write: the reply can beat this task back.
+        self.replies
+            .lock()
+            .expect("replies poisoned")
+            .insert(id.clone(), tx);
+        let written = self
+            .command(json!({
+                "id": id,
+                "type": "steer",
+                "message": text,
+                "attachments": attachments,
+            }))
+            .await;
+        if let Err(error) = written {
+            self.replies.lock().expect("replies poisoned").remove(&id);
+            return Err(error);
+        }
+        let reply = tokio::time::timeout(STEER_REPLY_BUDGET, rx).await;
+        self.replies.lock().expect("replies poisoned").remove(&id);
+        match reply {
+            // A refusal is the ordinary race with the turn's own end.
+            Ok(Ok(frame)) => Ok(frame.get("success").and_then(Value::as_bool) == Some(true)),
+            Ok(Err(_)) => Err(anyhow!(
+                "{} exited before answering",
+                crate::channel::AGENT_LABEL
+            )),
+            Err(_) => Err(anyhow!(
+                "{} did not answer the steer within {}s",
+                crate::channel::AGENT_LABEL,
+                STEER_REPLY_BUDGET.as_secs()
+            )),
+        }
     }
 
     async fn close(&self) -> Result<()> {
@@ -446,6 +570,8 @@ impl AgentSession for GenetSession {
             .await
             .context("agent tool cancellation is unconfirmed; cleanup can be retried")??;
         }
+        // Recorded before any signal goes out: the exit it causes is ours.
+        self.closing.store(true, Ordering::SeqCst);
         super::close_child(&self.child).await?;
         self.tasks.stop().await;
         Ok(())
@@ -497,8 +623,10 @@ async fn translate_stream(
     stdout: crate::os_process::ChildStdout,
     events: broadcast::Sender<SessionEvent>,
     turn: Arc<Mutex<TurnState>>,
+    replies: Replies,
     child: Arc<Mutex<Option<Child>>>,
     said: Arc<Chatter>,
+    exit: Exit,
 ) {
     let mut lines = BufReader::new(stdout).lines();
     loop {
@@ -509,6 +637,10 @@ async fn translate_stream(
                 }
                 match serde_json::from_str::<Value>(&line) {
                     Ok(frame) => {
+                        if let Some(waiting) = reply_waiter(&frame, &replies) {
+                            let _ = waiting.send(frame);
+                            continue;
+                        }
                         let mut state = turn.lock().await;
                         translate_frame(&frame, &mut state, &events);
                     }
@@ -525,11 +657,39 @@ async fn translate_stream(
         }
     }
 
+    // Whoever waits on a reply learns the agent is gone.
+    replies.lock().expect("replies poisoned").clear();
+
     // The process died. If a turn was in flight the client is still waiting for
     // it, so fail it explicitly rather than leaving a spinner forever — and say
     // what the process said, which is the part that can be acted on.
-    let why = super::stopped(crate::channel::AGENT_LABEL, &child, &said).await;
+    let ending = super::ending(&child).await;
+    if exit.closing.load(Ordering::SeqCst) {
+        // The platform stopped it; there is nothing to explain.
+        tracing::info!(?ending, "agent stopped by the platform");
+        if let Some(turn_id) = turn.lock().await.id.take() {
+            let _ = events.send(SessionEvent::TurnFailed {
+                turn_id,
+                error: TurnError {
+                    code: TurnErrorCode::Canceled,
+                    message: format!("{} 已由平台停止", crate::channel::AGENT_LABEL),
+                },
+            });
+        }
+        return;
+    }
+    let why = super::stopped_with(crate::channel::AGENT_LABEL, ending, &said).await;
     tracing::warn!("{why}");
+    if ending.is_some_and(|ending| ending.by_signal()) {
+        // The next process resumes this conversation without knowing how
+        // the last one ended; the user, who saw it, should not have to say.
+        let reason = ending
+            .map(|e| e.describe(crate::channel::AGENT_LABEL))
+            .unwrap_or_default();
+        if let Err(error) = std::fs::write(&exit.note_file, exit_note(&reason)) {
+            tracing::warn!(%error, "could not leave the exit note");
+        }
+    }
     let mut state = turn.lock().await;
     if let Some(turn_id) = state.id.take() {
         let _ = events.send(SessionEvent::TurnFailed {
@@ -540,6 +700,14 @@ async fn translate_stream(
             },
         });
     }
+}
+
+fn reply_waiter(frame: &Value, replies: &Replies) -> Option<tokio::sync::oneshot::Sender<Value>> {
+    if frame.get("type").and_then(Value::as_str) != Some("response") {
+        return None;
+    }
+    let id = frame.get("id")?.as_str()?;
+    replies.lock().expect("replies poisoned").remove(id)
 }
 
 fn builtin_questions(frame: &Value) -> Option<Vec<InteractionQuestion>> {
@@ -827,6 +995,28 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &broadcast::Sen
         }
 
         "compaction_end" => {
+            // pi semantics: an aborted archive replaced nothing and the run
+            // settles as cancelled; a failed one surfaces its error; one that
+            // will replay the request supersedes the overflow that caused it.
+            if frame.get("aborted").and_then(Value::as_bool) == Some(true) {
+                state.canceled = true;
+                return;
+            }
+            if let Some(error) = frame.get("errorMessage").and_then(Value::as_str) {
+                let id = state.next_item_id();
+                emit(SessionEvent::Item {
+                    turn_id,
+                    item: TimelineItem::Error {
+                        id,
+                        message: error.to_string(),
+                    },
+                });
+                state.failure.get_or_insert_with(|| classify_failure(error));
+                return;
+            }
+            if frame.get("willRetry").and_then(Value::as_bool) == Some(true) {
+                state.failure = None;
+            }
             let id = state.next_item_id();
             let reason = frame
                 .get("reason")
@@ -841,6 +1031,49 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &broadcast::Sen
                     received_at_ms: None,
                 },
             });
+        }
+
+        // The agent backs off and replays the request: the failure that
+        // triggered it is not the turn's outcome unless the retries run out.
+        "auto_retry_start" => {
+            state.failure = None;
+            let attempt = frame.get("attempt").and_then(Value::as_u64).unwrap_or(1);
+            let max = frame
+                .get("maxAttempts")
+                .and_then(Value::as_u64)
+                .unwrap_or(attempt);
+            let delay_ms = frame.get("delayMs").and_then(Value::as_u64).unwrap_or(0);
+            let cause = frame
+                .get("errorMessage")
+                .and_then(Value::as_str)
+                .unwrap_or("Unknown error");
+            let id = state.next_item_id();
+            emit(SessionEvent::Item {
+                turn_id,
+                item: TimelineItem::Error {
+                    id,
+                    message: format!(
+                        "模型服务暂时不可用，{:.1} 秒后自动重试（第 {attempt}/{max} 次）：{cause}",
+                        delay_ms as f64 / 1000.0
+                    ),
+                },
+            });
+        }
+
+        "auto_retry_end" => {
+            if frame.get("success").and_then(Value::as_bool) == Some(true) {
+                return;
+            }
+            match frame.get("finalError").and_then(Value::as_str) {
+                Some("Retry cancelled") => {
+                    state.failure = None;
+                    state.canceled = true;
+                }
+                Some(error) => {
+                    state.failure = Some(classify_failure(error));
+                }
+                None => {}
+            }
         }
 
         "agent_end" => {
@@ -1069,6 +1302,11 @@ struct ConfiguredModel {
     reasoning: bool,
     input_modalities: Vec<String>,
     thinking_mode: Option<String>,
+    efforts: Vec<String>,
+    compat: genehub_proto::ModelCompat,
+    /// Which layer each value came from (`crate::capabilities`), so a wrong
+    /// guess in models.json can be traced without the settings page.
+    sources: std::collections::BTreeMap<String, String>,
 }
 
 /// Turns configured providers into the models the picker offers.
@@ -1091,6 +1329,8 @@ fn configured_models(providers: &ProviderMap) -> Vec<ConfiguredModel> {
         };
         let label = config.label.clone().unwrap_or_else(|| provider.clone());
         for id in &config.models {
+            let resolved = crate::capabilities::resolve(provider, config, id);
+            let caps = resolved.caps;
             models.push(ConfiguredModel {
                 provider: provider.clone(),
                 id: id.clone(),
@@ -1105,16 +1345,16 @@ fn configured_models(providers: &ProviderMap) -> Vec<ConfiguredModel> {
                     .unwrap_or_else(|| "openai".to_string()),
                 base_url: Some(base_url.clone()),
                 api_key: config.api_key.clone(),
-                // Not in any provider's list response, so not claimed.
-                context_window: None,
-                max_tokens: None,
-                reasoning: crate::provider::reasons(id),
-                input_modalities: config.model_inputs.get(id).cloned().unwrap_or_default(),
-                thinking_mode: config
-                    .model_thinking
-                    .get(id)
-                    .cloned()
-                    .or_else(|| config.thinking_mode.clone()),
+                // Discovery, endpoint rules and the user, merged; unknown
+                // stays unknown rather than being claimed.
+                context_window: caps.context_window,
+                max_tokens: caps.max_tokens,
+                reasoning: caps.reasoning.unwrap_or(false),
+                input_modalities: caps.inputs.unwrap_or_default(),
+                thinking_mode: caps.thinking,
+                efforts: caps.efforts.unwrap_or_default(),
+                compat: caps.compat.unwrap_or_default(),
+                sources: resolved.sources,
             });
         }
     }
@@ -1156,6 +1396,9 @@ fn write_models_file(home: &std::path::Path, providers: &ProviderMap) -> Result<
                 "reasoning": model.reasoning,
                 "inputModalities": model.input_modalities,
                 "thinkingMode": model.thinking_mode,
+                "thinkingEfforts": model.efforts,
+                "compat": model.compat,
+                "capabilitySources": model.sources,
             })
         })
         .collect();
@@ -1246,6 +1489,143 @@ mod tests {
         if let Some(found) = adapter.binary {
             assert!(!found.starts_with(dir.path()), "invented {found:?}");
         }
+    }
+
+    /// `steer` is the one command whose answer the daemon waits for: the
+    /// reply frame is matched back by id, and a refusal reads as "not taken".
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_steer_waits_for_the_agents_answer() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let agent = dir.path().join("fake-agent");
+        std::fs::write(
+            &agent,
+            "#!/bin/sh\nIFS= read -r configure\nwhile IFS= read -r line; do\n  case \"$line\" in\n    *'\"type\":\"steer\"'*)\n      id=$(printf '%s' \"$line\" | sed -n 's/.*\"id\":\"\\(steer_[0-9a-f]*\\)\".*/\\1/p')\n      case \"$line\" in\n        *refuse*) ok=false ;;\n        *) ok=true ;;\n      esac\n      printf '{\"type\":\"response\",\"command\":\"steer\",\"id\":\"%s\",\"success\":%s}\\n' \"$id\" \"$ok\" ;;\n    *'\"type\":\"abort\"'*)\n      printf '{\"type\":\"agent_end\",\"messages\":[]}\\n' ;;\n  esac\ndone\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let scratch = dir.path().join("w/.genehub/sessions/s_steer/scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let session = GenetAdapter {
+            binary: Some(agent),
+        }
+        .start(SessionConfig {
+            evidence_scope: None,
+            session_id: "s_steer".into(),
+            cwd: dir.path().to_path_buf(),
+            model_id: None,
+            mode_id: None,
+            effort_id: None,
+            fast: None,
+            runtime_values: Default::default(),
+            additional_system_prompt: None,
+            skills_dir: None,
+            front_door_cli: None,
+            controller_token: None,
+            scratch_dir: scratch,
+            providers: Default::default(),
+            resume: None,
+        })
+        .await
+        .expect("the agent starts");
+
+        assert!(
+            !session.steer("nothing is running", &[]).await.unwrap(),
+            "no turn, nothing to steer into"
+        );
+        session
+            .send(PromptInput {
+                text: "start".into(),
+                attachments: Vec::new(),
+            })
+            .await
+            .unwrap();
+        assert!(session.steer("also the docs", &[]).await.unwrap());
+        assert!(!session.steer("refuse this one", &[]).await.unwrap());
+        session.close().await.unwrap();
+    }
+
+    /// §6.1: the system prompt made the agent's own command line match the
+    /// patterns its commands grep for, so `ps aux | grep … | kill` found the
+    /// agent. What argv used to carry now arrives as the first stdin line.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_prompt_and_the_session_path_stay_off_the_command_line() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let seen = dir.path().join("seen");
+        let agent = dir.path().join("fake-agent");
+        std::fs::write(
+            &agent,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{0}.args'\nIFS= read -r line\nprintf '%s' \"$line\" > '{0}.tmp'\nmv '{0}.tmp' '{0}.stdin'\ncat >/dev/null\n",
+                seen.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let scratch = dir.path().join("w/.genehub/sessions/s_cfg/scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+
+        let adapter = GenetAdapter {
+            binary: Some(agent),
+        };
+        let session = adapter
+            .start(SessionConfig {
+                evidence_scope: None,
+                session_id: "s_cfg".into(),
+                cwd: dir.path().to_path_buf(),
+                model_id: Some("anthropic/claude".into()),
+                mode_id: None,
+                effort_id: Some("high".into()),
+                fast: None,
+                runtime_values: Default::default(),
+                additional_system_prompt: Some("kill the dev server\nGeneHub rules".into()),
+                skills_dir: None,
+                front_door_cli: None,
+                controller_token: None,
+                scratch_dir: scratch.clone(),
+                providers: Default::default(),
+                resume: None,
+            })
+            .await
+            .expect("the agent starts");
+
+        let stdin_file = dir.path().join("seen.stdin");
+        for _ in 0..200 {
+            if stdin_file.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let args = std::fs::read_to_string(dir.path().join("seen.args")).unwrap();
+        let args: Vec<&str> = args.lines().collect();
+        assert_eq!(
+            args,
+            [
+                "--mode",
+                "rpc",
+                "--configure-from-stdin",
+                "--model",
+                "anthropic/claude",
+                "--thinking",
+                "high"
+            ]
+        );
+        let configure: Value =
+            serde_json::from_str(&std::fs::read_to_string(&stdin_file).unwrap()).unwrap();
+        assert_eq!(configure["type"], "configure");
+        assert_eq!(configure["genehubSessionId"], "s_cfg");
+        assert_eq!(
+            configure["systemPrompts"],
+            json!(["kill the dev server\nGeneHub rules"])
+        );
+        let session_path = configure["session"].as_str().unwrap();
+        assert!(session_path.ends_with("session.jsonl"), "{session_path}");
+        session.close().await.unwrap();
     }
 
     fn state_with_turn() -> TurnState {
@@ -1501,6 +1881,141 @@ mod tests {
         }
     }
 
+    fn error_end(message: &str) -> Value {
+        json!({"type": "message_end", "message": {
+            "role": "assistant", "stopReason": "error", "errorMessage": message
+        }})
+    }
+
+    #[test]
+    fn a_retried_failure_does_not_fail_the_turn() {
+        let (tx, mut rx) = broadcast::channel(64);
+        let mut state = state_with_turn();
+        translate_frame(&error_end("openai 429: rate limit"), &mut state, &tx);
+        translate_frame(
+            &json!({"type": "auto_retry_start", "attempt": 1, "maxAttempts": 3,
+                    "delayMs": 2000, "errorMessage": "openai 429: rate limit"}),
+            &mut state,
+            &tx,
+        );
+        translate_frame(
+            &json!({"type": "message_end", "message": {"role": "assistant", "stopReason": "stop"}}),
+            &mut state,
+            &tx,
+        );
+        translate_frame(
+            &json!({"type": "auto_retry_end", "success": true, "attempt": 1}),
+            &mut state,
+            &tx,
+        );
+        translate_frame(&json!({"type": "agent_end"}), &mut state, &tx);
+        let events = drain(&mut rx);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            SessionEvent::Item { item: TimelineItem::Error { message, .. }, .. }
+                if message.contains("第 1/3 次")
+        )));
+        assert!(matches!(
+            events.last().unwrap(),
+            SessionEvent::TurnCompleted { .. }
+        ));
+    }
+
+    #[test]
+    fn exhausted_retries_fail_with_the_final_error() {
+        let (tx, mut rx) = broadcast::channel(64);
+        let mut state = state_with_turn();
+        translate_frame(
+            &json!({"type": "auto_retry_start", "attempt": 3}),
+            &mut state,
+            &tx,
+        );
+        translate_frame(&error_end("openai 429: rate limit"), &mut state, &tx);
+        translate_frame(
+            &json!({"type": "auto_retry_end", "success": false, "attempt": 3,
+                    "finalError": "openai 429: rate limit"}),
+            &mut state,
+            &tx,
+        );
+        translate_frame(&json!({"type": "agent_end"}), &mut state, &tx);
+        match drain(&mut rx).last().unwrap() {
+            SessionEvent::TurnFailed { error, .. } => {
+                assert_eq!(error.code, TurnErrorCode::RateLimited)
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_cancelled_backoff_is_a_cancelled_turn() {
+        let (tx, mut rx) = broadcast::channel(64);
+        let mut state = state_with_turn();
+        translate_frame(&error_end("openai 503"), &mut state, &tx);
+        translate_frame(
+            &json!({"type": "auto_retry_start", "attempt": 1}),
+            &mut state,
+            &tx,
+        );
+        translate_frame(
+            &json!({"type": "auto_retry_end", "success": false, "attempt": 1,
+                    "finalError": "Retry cancelled"}),
+            &mut state,
+            &tx,
+        );
+        translate_frame(&json!({"type": "agent_end"}), &mut state, &tx);
+        assert!(matches!(
+            drain(&mut rx).last().unwrap(),
+            SessionEvent::TurnCanceled { .. }
+        ));
+    }
+
+    #[test]
+    fn an_overflow_archive_that_replays_clears_the_overflow() {
+        let (tx, mut rx) = broadcast::channel(64);
+        let mut state = state_with_turn();
+        translate_frame(&error_end("prompt is too long"), &mut state, &tx);
+        translate_frame(
+            &json!({"type": "compaction_end", "reason": "overflow", "willRetry": true}),
+            &mut state,
+            &tx,
+        );
+        translate_frame(&json!({"type": "agent_end"}), &mut state, &tx);
+        let events = drain(&mut rx);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            SessionEvent::Item { item: TimelineItem::Compaction { reason, .. }, .. } if reason == "overflow"
+        )));
+        assert!(matches!(
+            events.last().unwrap(),
+            SessionEvent::TurnCompleted { .. }
+        ));
+    }
+
+    #[test]
+    fn a_failed_overflow_recovery_is_shown_and_fails_the_turn() {
+        let (tx, mut rx) = broadcast::channel(64);
+        let mut state = state_with_turn();
+        translate_frame(
+            &json!({"type": "compaction_end", "reason": "overflow", "willRetry": false,
+                    "errorMessage": "Context overflow recovery failed"}),
+            &mut state,
+            &tx,
+        );
+        translate_frame(&json!({"type": "agent_end"}), &mut state, &tx);
+        let events = drain(&mut rx);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            SessionEvent::Item {
+                item: TimelineItem::Error { .. },
+                ..
+            }
+        )));
+        assert!(matches!(
+            events.last().unwrap(),
+            SessionEvent::TurnFailed { .. }
+        ));
+    }
+
     #[test]
     fn an_aborted_turn_is_reported_as_canceled_not_completed() {
         let (tx, mut rx) = broadcast::channel(64);
@@ -1628,8 +2143,6 @@ mod tests {
             (
                 "deepseek",
                 ProviderConfig {
-                    thinking_mode: None,
-                    model_thinking: std::collections::BTreeMap::new(),
                     api_key: Some("sk-test".into()),
                     base_url: Some("https://api.deepseek.com/v1".into()),
                     label: Some("DeepSeek".into()),
@@ -1640,8 +2153,6 @@ mod tests {
             (
                 "anthropic",
                 ProviderConfig {
-                    thinking_mode: None,
-                    model_thinking: std::collections::BTreeMap::new(),
                     models: vec!["claude-sonnet-4-20250514".into()],
                     ..Default::default()
                 },
@@ -1649,8 +2160,6 @@ mod tests {
             (
                 "kimi",
                 ProviderConfig {
-                    thinking_mode: None,
-                    model_thinking: std::collections::BTreeMap::new(),
                     api_key: Some("sk-test".into()),
                     models: vec!["kimi-k2".into()],
                     ..Default::default()
@@ -1674,8 +2183,6 @@ mod tests {
         let providers = provider_map(vec![(
             "deepseek",
             ProviderConfig {
-                thinking_mode: None,
-                model_thinking: std::collections::BTreeMap::new(),
                 api_key: Some("sk-test".into()),
                 base_url: Some("https://api.deepseek.com/v1".into()),
                 label: Some("DeepSeek".into()),
@@ -1694,8 +2201,6 @@ mod tests {
         let providers = provider_map(vec![(
             "deepseek",
             ProviderConfig {
-                thinking_mode: None,
-                model_thinking: std::collections::BTreeMap::new(),
                 api_key: Some("sk-test".into()),
                 base_url: Some("http://127.0.0.1:9/v1".into()),
                 models: vec!["deepseek-v4-flash".into()],
@@ -1708,5 +2213,77 @@ mod tests {
                 .unwrap();
         assert_eq!(written["models"][0]["baseUrl"], "http://127.0.0.1:9/v1");
         assert_eq!(written["models"][0]["apiKey"], "sk-test");
+        // DeepSeek's endpoint rule reaches the agent as compat.
+        assert_eq!(written["models"][0]["compat"]["thinkingFormat"], "deepseek");
+        assert_eq!(
+            written["models"][0]["compat"]["requiresReasoningContent"],
+            true
+        );
+    }
+
+    /// §3.5: an aliased gateway model the user marked adaptive, and an official
+    /// one whose capabilities came from discovery, both reach models.json in
+    /// the shape the agent reads (`apps/agent/src/config.rs` `ModelConfig`).
+    #[test]
+    fn merged_capabilities_reach_the_models_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut gateway = ProviderConfig {
+            api_key: Some("sk-test".into()),
+            base_url: Some("https://gateway.example".into()),
+            dialect: Some("anthropic".into()),
+            models: vec!["vendor--opus".into()],
+            ..Default::default()
+        };
+        gateway.model_capabilities.insert(
+            "vendor--opus".into(),
+            genehub_proto::ModelCapabilities {
+                reasoning: Some(true),
+                thinking: Some("adaptive".into()),
+                ..Default::default()
+            },
+        );
+        let mut official = ProviderConfig {
+            api_key: Some("sk-test".into()),
+            base_url: Some("https://api.anthropic.com".into()),
+            dialect: Some("anthropic".into()),
+            models: vec!["claude-opus-5".into()],
+            ..Default::default()
+        };
+        official.discovered.insert(
+            "claude-opus-5".into(),
+            genehub_proto::ModelCapabilities {
+                context_window: Some(1_000_000),
+                max_tokens: Some(128_000),
+                thinking: Some("adaptive".into()),
+                efforts: Some(vec!["low".into(), "high".into(), "max".into()]),
+                ..Default::default()
+            },
+        );
+        let providers = provider_map(vec![("aiclick", gateway), ("anthropic", official)]);
+        write_models_file(dir.path(), &providers).unwrap();
+        let written: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("models.json")).unwrap())
+                .unwrap();
+        let find = |id: &str| {
+            written["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|m| m["id"] == id)
+                .unwrap()
+                .clone()
+        };
+        let alias = find("vendor--opus");
+        assert_eq!(alias["thinkingMode"], "adaptive");
+        assert_eq!(alias["reasoning"], true);
+        assert_eq!(alias["capabilitySources"]["thinking"], "user");
+        let opus = find("claude-opus-5");
+        assert_eq!(opus["contextWindow"], 1_000_000);
+        assert_eq!(opus["maxTokens"], 128_000);
+        assert_eq!(opus["thinkingEfforts"][2], "max");
+        assert_eq!(opus["capabilitySources"]["contextWindow"], "discovered");
+        // The id rule says it reasons; discovery said nothing about that.
+        assert_eq!(opus["reasoning"], true);
+        assert_eq!(opus["capabilitySources"]["reasoning"], "rule");
     }
 }

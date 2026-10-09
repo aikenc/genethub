@@ -1,0 +1,138 @@
+{
+ "description": "thread/compacted and a contextCompaction item for the same compaction make one marker; started frames and repeats make none.",
+ "thread": "root-thread",
+ "steps": [
+  {
+   "begin": "t1"
+  },
+  {
+   "frame": {
+    "method": "turn/started",
+    "params": {
+     "threadId": "root-thread",
+     "turn": {
+      "id": "root-turn",
+      "items": [],
+      "status": "inProgress"
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "thread/compacted",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn"
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "item/started",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "item": {
+      "type": "contextCompaction",
+      "id": "cc-1"
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "item/completed",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "item": {
+      "type": "contextCompaction",
+      "id": "cc-1"
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "item/completed",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "item": {
+      "type": "agentMessage",
+      "id": "m-1",
+      "text": "between"
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "item/completed",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "item": {
+      "type": "contextCompaction",
+      "id": "cc-2"
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "item/completed",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "item": {
+      "type": "contextCompaction",
+      "id": "cc-2"
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "thread/compacted",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn"
+    }
+   }
+  }
+ ],
+ "ignoreTypes": [
+  "turnProgress"
+ ],
+ "events": [
+  {
+   "type": "item",
+   "turnId": "t1",
+   "item": {
+    "type": "compaction",
+    "id": "compaction-*",
+    "reason": "Codex pruned its own history to make room."
+   }
+  },
+  {
+   "type": "item",
+   "turnId": "t1",
+   "item": {
+    "type": "assistantMessage",
+    "id": "m-1",
+    "text": "between"
+   }
+  },
+  {
+   "type": "item",
+   "turnId": "t1",
+   "item": {
+    "type": "compaction",
+    "id": "cc-2",
+    "reason": "Codex pruned its own history to make room."
+   }
+  }
+ ]
+}

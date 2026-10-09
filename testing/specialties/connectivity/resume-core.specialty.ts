@@ -21,7 +21,7 @@ defineSpecialty({
   const run = promisify(execFile);
   const generated = await mkdtemp(join(t.env.root, "resume-proto-"));
   const commands: Array<[string, string[], string]> = [
-    [process.execPath, [join(t.openRoot, "packages/workbench/node_modules/vitest/vitest.mjs"), "run", "src/dataplane/resume.test.ts", "src/dataplane/authenticated-channel.test.ts", "src/dataplane/endpoint.test.ts", "src/dataplane/handshake.test.ts"], join(t.openRoot, "packages/workbench")],
+    [process.execPath, [join(t.openRoot, "packages/workbench/node_modules/vitest/vitest.mjs"), "run", "--maxWorkers", "2", "src/dataplane/resume.test.ts", "src/dataplane/authenticated-channel.test.ts", "src/dataplane/endpoint.test.ts", "src/dataplane/handshake.test.ts"], join(t.openRoot, "packages/workbench")],
     [process.execPath, [join(t.openRoot, "packages/workbench/node_modules/typescript/bin/tsc"), "-p", "tsconfig.json", "--noEmit"], join(t.openRoot, "packages/workbench")],
     ["cargo", ["test", "-p", "genehub-proto", "--lib", "export_bindings"], t.openRoot],
     ["cargo", ["test", "-p", "genehub-proto", "--lib", "resume::tests", "--", "--nocapture"], t.openRoot],

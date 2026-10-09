@@ -340,13 +340,7 @@ async fn pump<R>(
 /// asked how it ended, which happens only after it has already been stopped —
 /// so there is still an answer to give, just a less specific one.
 fn exit_frame(status: Option<&crate::os_process::ExitStatus>, timed_out: bool) -> ShellFrame {
-    #[cfg(unix)]
-    let signal = {
-        use std::os::unix::process::ExitStatusExt;
-        status.and_then(ExitStatusExt::signal)
-    };
-    #[cfg(not(unix))]
-    let signal = None;
+    let signal = status.and_then(crate::os_process::signal_of);
     ShellFrame::Exit {
         code: status.and_then(|status| status.code()),
         signal,

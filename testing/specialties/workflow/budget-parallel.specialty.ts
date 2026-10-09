@@ -122,7 +122,9 @@ for (const scenario of ["observation", "retry", "budget-expiry", "entries", "ent
     };
     let run: WorkflowRunStatus | undefined;
     const current = async () => { const runs = await history(); run = scenario === "parallel-sibling-lost"
-      ? runs.find(item => item.taskId === "observed-1") : runs[0]; return run; };
+      // A blocked Run gets a recovery Run that names it in `handles`; the
+      // business Run is the newest one that handles nothing.
+      ? runs.find(item => item.taskId === "observed-1") : t.assertions.businessRuns(runs)[0]; return run; };
     const restart = async () => { opened.client.close(); await cli(["daemon", "stop"]); await cli(["daemon", "start"]); opened.client = await connectProductClient(daemonEndpoint(opened.daemon)); };
     await send("Execute the configured Workflow and retain its facts.");
     let before: WorkflowRequestBudgetSnapshot | undefined;

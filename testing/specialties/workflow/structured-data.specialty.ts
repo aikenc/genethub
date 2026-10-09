@@ -107,8 +107,11 @@ for (const scenario of ["fold", "break", "nested-break", "restart", "cancel", "s
     const get = async () => {
       const reply = await opened.client.call({ type: "workflow.history", payload: { workspaceId: opened.workspaceId, limit: 10 } });
       if (reply?.type !== "workflowRuns") throw new Error("workflow history unavailable");
-      t.assertions.assert(reply.data.length <= 1, "data/control flow escaped into another Run");
-      return reply.data[0];
+      // A blocked Run is handed to the built-in recovery flow, which is a
+      // separate Run that names it in `handles`; it must name this one.
+      const business = t.assertions.businessRuns(reply.data);
+      t.assertions.assert(business.length <= 1, "data/control flow escaped into another Run");
+      return business[0];
     };
     if (scenario === "restart" || scenario === "cancel") {
       let before: WorkflowRunStatus | undefined;

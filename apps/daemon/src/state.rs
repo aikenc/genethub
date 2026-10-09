@@ -36,6 +36,8 @@ pub struct AppState {
     pub workflow_tasks: crate::adapter::SessionTasks,
     pub workspaces: Workspaces,
     pub project_control: crate::project_control::Broker,
+    pub(crate) provider_operations:
+        std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Weak<Mutex<()>>>>,
     pub terminals: Arc<Terminals>,
     /// What each session's agent has left running.
     pub processes: Arc<crate::processes::Processes>,
@@ -84,7 +86,7 @@ struct Discovery {
     /// The key, address and dialect this answer belongs to.
     question: String,
     models: Vec<String>,
-    model_inputs: std::collections::BTreeMap<String, Vec<String>>,
+    capabilities: std::collections::BTreeMap<String, genehub_proto::ModelCapabilities>,
     problem: Option<String>,
     at: std::time::Instant,
 }
@@ -127,12 +129,6 @@ impl AppState {
         let machine = MachineState::load_or_create(&paths.state_file())?;
         let devices = Devices::load(paths.devices_file());
 
-        let registry = Arc::new(Registry::new(&config.agents.custom));
-        // Sessions are stored inside their workspace, so the store reaches disk
-        // only through what the workspace registry has published.
-        let homes = WorkspaceHomes::default();
-        let store = Store::new(homes.clone());
-        let diagnostics = Arc::new(crate::diagnostics::Diagnostics::new());
         // The front door owns the shared data layout; the daemon owns the
         // product Skill subtree and the exact CLI binding exposed to Agents.
         let skills_dir = crate::skills::builtin_skills_dir(&paths.root);
@@ -143,6 +139,12 @@ impl AppState {
                 "GENEHUB_CLI is unavailable or not absolute; Agent sessions will not guess a channel command"
             );
         }
+        let registry = Arc::new(Registry::new(&paths.root, front_door_cli.clone()));
+        // Sessions are stored inside their workspace, so the store reaches disk
+        // only through what the workspace registry has published.
+        let homes = WorkspaceHomes::default();
+        let store = Store::new(homes.clone());
+        let diagnostics = Arc::new(crate::diagnostics::Diagnostics::new());
         let project_control = crate::project_control::Broker::new(&paths.root)?;
         let sessions = SessionManager::new_with_diagnostics(
             store,
@@ -181,6 +183,7 @@ impl AppState {
             workflow_tasks: Default::default(),
             workspaces,
             project_control,
+            provider_operations: Default::default(),
             terminals,
             processes,
             diagnostics,
@@ -247,11 +250,17 @@ impl AppState {
                 } else {
                     config.models.clone()
                 };
-                let mut model_inputs = discovered
-                    .get(&id)
-                    .map(|found| found.model_inputs.clone())
-                    .unwrap_or_default();
-                model_inputs.extend(config.model_inputs.clone());
+                // Only for a listed endpoint: what a provider said about a model
+                // is meaningless for a hand-written list it never saw.
+                let found_capabilities = if credential_problem.is_none() && config.models.is_empty()
+                {
+                    discovered
+                        .get(&id)
+                        .map(|found| found.capabilities.clone())
+                        .unwrap_or_default()
+                } else {
+                    Default::default()
+                };
                 let problem = if credential_problem.is_some() {
                     credential_problem
                 } else if config.models.is_empty() {
@@ -262,13 +271,11 @@ impl AppState {
                 (
                     id,
                     ProviderConfig {
-                        thinking_mode: None,
-                        model_thinking: std::collections::BTreeMap::new(),
                         base_url: credential_valid.then_some(resolved.base_url).flatten(),
                         label: Some(resolved.label),
                         dialect: Some(resolved.dialect.as_str().to_string()),
                         models,
-                        model_inputs,
+                        discovered: found_capabilities,
                         problem,
                         ..config
                     },
@@ -293,6 +300,26 @@ impl AppState {
                 .map(|(id, provider)| {
                     let resolved = crate::provider::resolve(id, provider);
                     let found = discovered.get(id);
+                    let mut provider = provider.clone();
+                    if provider.models.is_empty() {
+                        provider.discovered =
+                            found.map(|f| f.capabilities.clone()).unwrap_or_default();
+                    }
+                    let models = if provider.models.is_empty() {
+                        found.map(|f| f.models.clone()).unwrap_or_default()
+                    } else {
+                        provider.models.clone()
+                    };
+                    let capabilities: std::collections::BTreeMap<_, _> = models
+                        .iter()
+                        .chain(provider.model_capabilities.keys())
+                        .map(|model| {
+                            (
+                                model.clone(),
+                                crate::capabilities::info(id, &provider, model),
+                            )
+                        })
+                        .collect();
                     ProviderInfo {
                         id: id.clone(),
                         has_api_key: provider
@@ -303,17 +330,16 @@ impl AppState {
                         label: resolved.label,
                         dialect: resolved.dialect.as_str().to_string(),
                         custom: resolved.custom,
-                        models: if provider.models.is_empty() {
-                            found.map(|f| f.models.clone()).unwrap_or_default()
-                        } else {
-                            provider.models.clone()
-                        },
-                        model_inputs: Some({
-                            let mut inputs =
-                                found.map(|f| f.model_inputs.clone()).unwrap_or_default();
-                            inputs.extend(provider.model_inputs.clone());
-                            inputs
-                        }),
+                        model_inputs: Some(
+                            capabilities
+                                .iter()
+                                .filter_map(|(model, info)| {
+                                    Some((model.clone(), info.effective.inputs.clone()?))
+                                })
+                                .collect(),
+                        ),
+                        model_capabilities: Some(capabilities),
+                        models,
                         problem: if provider.models.is_empty() {
                             found.and_then(|f| f.problem.clone())
                         } else {
@@ -459,9 +485,10 @@ impl AppState {
                     Ok(listed) => Discovery {
                         question,
                         models: listed.iter().map(|model| model.id.clone()).collect(),
-                        model_inputs: listed
+                        capabilities: listed
                             .into_iter()
-                            .map(|model| (model.id, model.input_modalities))
+                            .filter(|model| !model.capabilities.is_empty())
+                            .map(|model| (model.id, model.capabilities))
                             .collect(),
                         problem: None,
                         at: std::time::Instant::now(),
@@ -469,7 +496,7 @@ impl AppState {
                     Err(error) => Discovery {
                         question,
                         models: Vec::new(),
-                        model_inputs: Default::default(),
+                        capabilities: Default::default(),
                         problem: Some(format!("{error:#}")),
                         at: std::time::Instant::now(),
                     },
@@ -501,6 +528,9 @@ impl AppState {
         dialect: Option<String>,
         models: Option<Vec<String>>,
         model_inputs: Option<std::collections::BTreeMap<String, Vec<String>>>,
+        model_capabilities: Option<
+            std::collections::BTreeMap<String, genehub_proto::ModelCapabilities>,
+        >,
     ) -> Result<Settings> {
         {
             let mut config = self.config.write().await;
@@ -510,6 +540,8 @@ impl AppState {
                 .get(provider_id)
                 .cloned()
                 .unwrap_or_default();
+            let old_endpoint = crate::provider::resolve(provider_id, &entry);
+            let supplied_key = api_key.is_some();
             if let Some(key) = api_key {
                 entry.api_key = (!key.is_empty()).then_some(key);
             }
@@ -525,26 +557,33 @@ impl AppState {
             if let Some(models) = models {
                 entry.models = models.into_iter().filter(|m| !m.is_empty()).collect();
             }
+            // The older field, from clients that only know the media boxes.
             if let Some(model_inputs) = model_inputs {
                 for (model, inputs) in model_inputs {
-                    if model.trim().is_empty()
-                        || inputs
-                            .iter()
-                            .any(|input| input != "image" && input != "video")
-                    {
-                        anyhow::bail!("模型输入能力只接受 image 和 video");
-                    }
-                    entry.model_inputs.insert(model, inputs);
+                    entry.model_capabilities.entry(model).or_default().inputs = Some(inputs);
                 }
             }
-            if crate::provider::resolve(provider_id, &entry).dialect
-                == crate::provider::Dialect::Anthropic
-                && entry
-                    .model_inputs
-                    .values()
-                    .any(|inputs| inputs.iter().any(|input| input == "video"))
+            if let Some(model_capabilities) = model_capabilities {
+                for (model, capabilities) in model_capabilities {
+                    if capabilities.is_empty() {
+                        entry.model_capabilities.remove(&model);
+                    } else {
+                        entry.model_capabilities.insert(model, capabilities);
+                    }
+                }
+            }
+            let new_endpoint = crate::provider::resolve(provider_id, &entry);
+            if !supplied_key
+                && (new_endpoint.base_url != old_endpoint.base_url
+                    || new_endpoint.dialect != old_endpoint.dialect)
             {
-                anyhow::bail!("Anthropic Messages API 不支持原生视频输入");
+                // A metadata-only update must never move an existing key to another endpoint.
+                crate::capabilities::retarget(&mut entry);
+            }
+            let dialect = new_endpoint.dialect;
+            crate::capabilities::validate("*", &entry.model_defaults, dialect)?;
+            for (model, capabilities) in &entry.model_capabilities {
+                crate::capabilities::validate(model, capabilities, dialect)?;
             }
             if entry.api_key.as_deref().is_some_and(|key| !key.is_empty()) {
                 if let Some(url) = crate::provider::resolve(provider_id, &entry).base_url {
@@ -917,6 +956,7 @@ mod machine_state_tests {
                 None,
                 Some(vec!["model".into()]),
                 None,
+                None,
             )
             .await;
         assert!(result.is_err());
@@ -938,8 +978,6 @@ mod machine_state_tests {
         config.agents.providers.insert(
             "private".into(),
             ProviderConfig {
-                thinking_mode: None,
-                model_thinking: std::collections::BTreeMap::new(),
                 api_key: Some("sk-secret".into()),
                 base_url: Some("http://192.168.1.20:8080/v1".into()),
                 models: vec!["model".into()],
@@ -953,5 +991,203 @@ mod machine_state_tests {
         assert!(provider.base_url.is_none());
         assert!(provider.models.is_empty());
         assert!(provider.problem.as_deref().unwrap().contains("https"));
+    }
+
+    /// A gateway alias says nothing about the model behind it, so the thinking
+    /// mode the user wrote down is the only signal there is. It must survive
+    /// the migration from the pre-§3 fields and `AppState::providers()`, and
+    /// reach the models file the agent reads, or an aliased Opus 5.5 gets
+    /// `budget_tokens` again.
+    #[tokio::test]
+    async fn the_thinking_mode_the_user_wrote_reaches_the_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        paths.ensure().unwrap();
+        // Written by the previous release: the legacy field names.
+        std::fs::write(
+            paths.config_file(),
+            serde_json::to_vec(&serde_json::json!({"agents": {"providers": {"gateway": {
+                "apiKey": "sk-test",
+                "baseUrl": "https://gateway.example.test/v1",
+                "dialect": "anthropic",
+                "models": ["vendor--claude-opus-latest", "legacy-model"],
+                "thinkingMode": "adaptive",
+                "modelThinking": {"legacy-model": "budget"},
+                "modelInputs": {"legacy-model": ["image"]}
+            }}}}))
+            .unwrap(),
+        )
+        .unwrap();
+        let (state, _) = AppState::build(paths.clone()).await.unwrap();
+
+        let providers = state.providers().await;
+        let provider = &providers["gateway"];
+        assert_eq!(
+            provider.model_defaults.thinking.as_deref(),
+            Some("adaptive")
+        );
+        assert_eq!(
+            provider.model_capabilities["legacy-model"]
+                .thinking
+                .as_deref(),
+            Some("budget")
+        );
+        let alias = crate::capabilities::resolve("gateway", provider, "vendor--claude-opus-latest");
+        assert_eq!(alias.caps.thinking.as_deref(), Some("adaptive"));
+        assert_eq!(alias.sources["thinking"], crate::capabilities::SOURCE_USER);
+
+        // The settings page sees the same merge, with its sources.
+        let settings = state.settings().await;
+        let info = settings
+            .providers
+            .iter()
+            .find(|p| p.id == "gateway")
+            .unwrap();
+        let caps = info.model_capabilities.as_ref().unwrap();
+        assert_eq!(
+            caps["legacy-model"].effective.thinking.as_deref(),
+            Some("budget")
+        );
+        assert_eq!(caps["legacy-model"].sources["inputs"], "user");
+        assert_eq!(
+            info.model_inputs.as_ref().unwrap()["legacy-model"],
+            vec!["image".to_string()]
+        );
+
+        // Saving anything writes the new shape and drops the old field names.
+        state
+            .set_provider(
+                "gateway",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(
+                    [(
+                        "vendor--claude-opus-latest".to_string(),
+                        genehub_proto::ModelCapabilities {
+                            context_window: Some(200_000),
+                            max_tokens: Some(64_000),
+                            ..Default::default()
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                ),
+            )
+            .await
+            .unwrap();
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(paths.config_file()).unwrap()).unwrap();
+        let gateway = &written["agents"]["providers"]["gateway"];
+        for legacy in ["thinkingMode", "modelThinking", "modelInputs"] {
+            assert!(gateway.get(legacy).is_none(), "{legacy} written back");
+        }
+        assert_eq!(gateway["modelDefaults"]["thinking"], "adaptive");
+        assert_eq!(
+            gateway["modelCapabilities"]["legacy-model"]["inputs"][0],
+            "image"
+        );
+        assert_eq!(
+            gateway["modelCapabilities"]["vendor--claude-opus-latest"]["contextWindow"],
+            200_000
+        );
+        // The key stays: the endpoint did not change.
+        assert!(gateway["apiKey"].is_string());
+
+        // An empty entry hands the model back to discovery and the rules.
+        state
+            .set_provider(
+                "gateway",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(
+                    [(
+                        "vendor--claude-opus-latest".to_string(),
+                        genehub_proto::ModelCapabilities::default(),
+                    )]
+                    .into_iter()
+                    .collect(),
+                ),
+            )
+            .await
+            .unwrap();
+        let providers = state.providers().await;
+        assert!(!providers["gateway"]
+            .model_capabilities
+            .contains_key("vendor--claude-opus-latest"));
+    }
+
+    #[tokio::test]
+    async fn an_unusable_capability_is_refused_before_it_is_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _) = AppState::build(Paths::new(dir.path())).await.unwrap();
+        let result = state
+            .set_provider(
+                "anthropic",
+                Some("sk-test".into()),
+                None,
+                None,
+                None,
+                Some(vec!["claude-opus-5".into()]),
+                None,
+                Some(
+                    [(
+                        "claude-opus-5".to_string(),
+                        genehub_proto::ModelCapabilities {
+                            inputs: Some(vec!["video".into()]),
+                            ..Default::default()
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                ),
+            )
+            .await;
+        assert!(result.is_err());
+        assert!(!state
+            .config
+            .read()
+            .await
+            .agents
+            .providers
+            .contains_key("anthropic"));
+    }
+
+    /// Changing the address keeps what the user said about each model and
+    /// drops the key and everything discovery said — on both write paths.
+    #[test]
+    fn retargeting_keeps_user_capabilities_and_drops_the_rest() {
+        let mut entry = ProviderConfig {
+            api_key: Some("sk-old".into()),
+            ..Default::default()
+        };
+        entry.model_capabilities.insert(
+            "alias".into(),
+            genehub_proto::ModelCapabilities {
+                thinking: Some("adaptive".into()),
+                ..Default::default()
+            },
+        );
+        entry.discovered.insert(
+            "alias".into(),
+            genehub_proto::ModelCapabilities {
+                context_window: Some(1_000_000),
+                ..Default::default()
+            },
+        );
+        crate::capabilities::retarget(&mut entry);
+        assert!(entry.api_key.is_none());
+        assert!(entry.discovered.is_empty());
+        assert_eq!(
+            entry.model_capabilities["alias"].thinking.as_deref(),
+            Some("adaptive")
+        );
     }
 }

@@ -171,6 +171,195 @@ pub struct AgentInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub routes: Option<Vec<AgentRouteInfo>>,
+    /// Which directory layer a script Agent was loaded from. Absent for the
+    /// native built-in Agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub source: Option<AgentSource>,
+    /// What the Agent is, from its manifest; shown before it can run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub description: Option<String>,
+    /// The CLI version the script reported, for display only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub version: Option<String>,
+    /// The one explanatory line, written by the script or, when the script
+    /// itself cannot run, by the daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub message: Option<String>,
+    /// Actions the script declared right now. The platform knows none of
+    /// their names; it renders them as buttons and runs the one clicked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub actions: Option<Vec<AgentActionInfo>>,
+    /// The action currently running, or the last one that finished.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub job: Option<AgentJobInfo>,
+    /// Ids and titles of Agent-level user requests waiting for a person. The
+    /// full request travels only on `ServerFrame::AgentRequestOpened`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pending_requests: Option<Vec<AgentRequestSummary>>,
+    /// `data:` URL of the icon the Agent directory ships, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub icon: Option<String>,
+    /// Absolute path of the directory this script Agent was loaded from,
+    /// so a person or an Agent can find `builtin/<id>` and `user/<id>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub dir: Option<String>,
+    /// A local override whose built-in base has since been replaced by a
+    /// newer release. Shown so a person can choose to restore the built-in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub override_stale: Option<bool>,
+}
+
+/// Which layer of `<data>/agents` a script Agent was loaded from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum AgentSource {
+    /// Shipped with this daemon, materialized read-only.
+    Builtin,
+    /// A directory only the user layer has.
+    User,
+    /// A user directory that replaces a built-in one of the same id.
+    Override,
+}
+
+/// One button a script Agent offers. The id is opaque to the platform.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct AgentActionInfo {
+    pub id: String,
+    pub label: String,
+    /// The action to offer where the Agent is shown as unavailable.
+    #[serde(default)]
+    pub primary: bool,
+}
+
+/// Progress of one action run, as the script reported it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct AgentJobInfo {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub action: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub phase: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub percent: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub message: Option<String>,
+    /// The last few log lines, bounded by the daemon.
+    #[serde(default)]
+    pub log_tail: Vec<String>,
+    #[serde(default)]
+    pub done: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct AgentRequestSummary {
+    pub id: String,
+    pub title: String,
+}
+
+/// A decision an Agent's lifecycle needs from a person: a login, an install
+/// confirmation, an API key. Never part of a session timeline, never shown to
+/// a model and never written to a log.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct AgentUserRequest {
+    pub agent_id: String,
+    pub id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub detail: Option<String>,
+    #[serde(default)]
+    pub display: Vec<AgentRequestDisplay>,
+    #[serde(default)]
+    pub questions: Vec<AgentRequestQuestion>,
+    /// The final one-of-N choice. Always at least one.
+    pub options: Vec<crate::InteractionOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct AgentRequestDisplay {
+    pub kind: AgentRequestDisplayKind,
+    pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub label: Option<String>,
+    /// `qr` asks for the link to be drawn as a QR code as well.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub render: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum AgentRequestDisplayKind {
+    Link,
+    Code,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct AgentRequestQuestion {
+    pub id: String,
+    pub prompt: String,
+    #[serde(default)]
+    pub options: Vec<crate::InteractionOption>,
+    #[serde(default)]
+    pub allow_multiple: bool,
+    /// Present when the question takes typed input; `secret` is masked and
+    /// never echoed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub input: Option<AgentRequestInput>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum AgentRequestInput {
+    Text,
+    Secret,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(tag = "type", rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum AgentRequestOutcome {
+    #[serde(rename_all = "camelCase")]
+    Answered {
+        option_id: String,
+        #[serde(default)]
+        answers: Vec<crate::InteractionAnswer>,
+    },
+    Canceled,
 }
 
 /// One routable Agent + model pair as the tag router sees it.
@@ -2375,11 +2564,148 @@ pub struct ProviderInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub model_inputs: Option<std::collections::BTreeMap<String, Vec<String>>>,
+    /// Per-model capabilities after the four-layer merge, with where each value
+    /// came from. Absent from daemons that predate it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model_capabilities: Option<std::collections::BTreeMap<String, ModelCapabilityInfo>>,
     /// Why `models` is empty, in the provider's own words. The alternative is a
     /// picker that is empty for no stated reason, which sends people to the
     /// wrong place: a rejected key looks exactly like a bug in the app.
     #[ts(optional)]
     pub problem: Option<String>,
+}
+
+/// What one model can do. Every field is optional: unset means "not stated at
+/// this layer", so a user entry can override one value and inherit the rest.
+///
+/// Stored per model in `providers.<id>.modelCapabilities`, once per provider in
+/// `modelDefaults`, and produced by discovery and endpoint rules
+/// (`docs/builtin-agent-next-proposal.md` §3).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct ModelCapabilities {
+    /// Native media beyond text: `image`, `video`. Empty means text only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub inputs: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub context_window: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub max_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reasoning: Option<bool>,
+    /// `adaptive` | `budget` | `only` | `none`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub thinking: Option<String>,
+    /// Native effort levels, from `low` … `max`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub efforts: Option<Vec<String>>,
+    /// Endpoint request-shape quirks. Configuration-file only; the settings
+    /// page does not edit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub compat: Option<ModelCompat>,
+}
+
+impl ModelCapabilities {
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+
+    /// Field by field, `over` wins wherever it says something. Returns the
+    /// camelCase names of the fields `over` supplied, compat ones as
+    /// `compat.<name>`.
+    pub fn overlay(&mut self, over: &ModelCapabilities) -> Vec<&'static str> {
+        let mut set = Vec::new();
+        macro_rules! take {
+            ($field:ident, $name:literal) => {
+                if over.$field.is_some() {
+                    self.$field = over.$field.clone();
+                    set.push($name);
+                }
+            };
+        }
+        take!(inputs, "inputs");
+        take!(context_window, "contextWindow");
+        take!(max_tokens, "maxTokens");
+        take!(reasoning, "reasoning");
+        take!(thinking, "thinking");
+        take!(efforts, "efforts");
+        if let Some(over) = &over.compat {
+            let compat = self.compat.get_or_insert_with(Default::default);
+            macro_rules! compat {
+                ($field:ident, $name:literal) => {
+                    if over.$field.is_some() {
+                        compat.$field = over.$field.clone();
+                        set.push($name);
+                    }
+                };
+            }
+            compat!(max_tokens_field, "compat.maxTokensField");
+            compat!(supports_reasoning_effort, "compat.supportsReasoningEffort");
+            compat!(supports_developer_role, "compat.supportsDeveloperRole");
+            compat!(requires_reasoning_content, "compat.requiresReasoningContent");
+            compat!(thinking_format, "compat.thinkingFormat");
+            compat!(supports_cache_control, "compat.supportsCacheControl");
+            compat!(thinking_display, "compat.thinkingDisplay");
+        }
+        set
+    }
+}
+
+/// Mirrors the agent's `Compat` (`apps/agent/src/config.rs`), a subset of pi's
+/// `OpenAICompletionsCompat` / `AnthropicMessagesCompat`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct ModelCompat {
+    /// `max_tokens` | `max_completion_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub max_tokens_field: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub supports_reasoning_effort: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub supports_developer_role: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub requires_reasoning_content: Option<bool>,
+    /// `openai` | `deepseek` | `openrouter`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub thinking_format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub supports_cache_control: Option<bool>,
+    /// `summarized` | `omitted`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub thinking_display: Option<String>,
+}
+
+/// One model's merged capabilities as the settings page shows them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct ModelCapabilityInfo {
+    /// What the agent will be told.
+    pub effective: ModelCapabilities,
+    /// Exactly what the user wrote for this model, for editing.
+    pub user: ModelCapabilities,
+    /// Where each effective field came from, keyed by its camelCase name:
+    /// `rule` (dialect/endpoint rule), `discovered` (the provider's model list)
+    /// or `user`. A field with no entry is unknown and left to the agent's
+    /// conservative default.
+    pub sources: std::collections::BTreeMap<String, String>,
 }
 
 /// The end of one log file, and where it came from.

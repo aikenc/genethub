@@ -12,6 +12,7 @@ mod machines;
 pub mod output;
 mod place;
 mod process;
+mod provider;
 mod query;
 mod rpc;
 // The local CLI now calls the router in-process. Keep the loopback dialer in
@@ -211,6 +212,7 @@ async fn dispatch(args: Vec<String>) -> i32 {
             | None => Box::pin(query::run(&args, &selection)).await,
             Some(_) => Box::pin(converse::session(&args[1..], &selection)).await,
         },
+        Some("provider") => Box::pin(provider::run(&args[1..], &selection)).await,
         Some("agent") => Box::pin(converse::agent(&args[1..], &selection)).await,
         Some("shell") => Box::pin(shell::shell(&args[1..], &selection)).await,
         Some("file") => Box::pin(file::file(&args[1..], &selection)).await,

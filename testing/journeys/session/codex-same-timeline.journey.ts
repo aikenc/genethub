@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 
-import { BlockedError, defineJourney } from "../../framework/public.ts";
+import { BlockedError, defineJourney, seedScriptAgentRuntime } from "../../framework/public.ts";
 
 defineJourney(
   {
@@ -14,7 +14,7 @@ defineJourney(
     expectedDurationMs: 90_000,
     timeoutMs: 180_000,
     surfaces: ["daemon", "agent", "workbench-client"],
-    productInterfaces: ["@genehub/workbench/client"],
+    productInterfaces: ["@genehub/workbench/client", "agent-serve-protocol-1"],
   },
   async (t) => {
     const which = spawnSync("which", ["codex"], { encoding: "utf8" });
@@ -22,13 +22,12 @@ defineJourney(
       throw new BlockedError("codex is not on PATH");
     }
     t.flows.main.seedHostCodexLogin(t.env);
+    seedScriptAgentRuntime(t.env);
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
     try {
-      const agents = await opened.client.call({ type: "agent.refresh" });
-      const codex = agents?.type === "agents" ? agents.data.find((agent) => agent.id === "codex") : undefined;
-      if (!codex || codex.probe.state !== "ready") {
-        throw new BlockedError(`codex agent is not ready: ${JSON.stringify(codex?.probe)}`);
-      }
+      // Script Agents report state after start; a real CLI that never gets
+      // ready (absent login, slow probe) is an environment fact.
+      const codex = await t.flows.main.requireAgentReady(opened.client, "codex", 60_000);
       const modelId = codex.catalog.models[0]?.id ?? null;
       const created = await opened.client.call({
         type: "session.create",

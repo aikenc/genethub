@@ -1,0 +1,244 @@
+{
+ "description": "Interrupt wins over the CLI's label; a failure carries its reason; a silent failure gets codex.rs's sentence; a crash fails with agentCrashed; token counts ride along with completion.",
+ "thread": "root-thread",
+ "steps": [
+  {
+   "begin": "t1"
+  },
+  {
+   "frame": {
+    "method": "turn/started",
+    "params": {
+     "threadId": "root-thread",
+     "turn": {
+      "id": "u1",
+      "items": [],
+      "status": "inProgress"
+     }
+    }
+   }
+  },
+  {
+   "interrupt": true
+  },
+  {
+   "frame": {
+    "method": "turn/completed",
+    "params": {
+     "threadId": "root-thread",
+     "turn": {
+      "id": "u1",
+      "items": [],
+      "status": "completed"
+     }
+    }
+   }
+  },
+  {
+   "begin": "t2"
+  },
+  {
+   "frame": {
+    "method": "turn/started",
+    "params": {
+     "threadId": "root-thread",
+     "turn": {
+      "id": "u2",
+      "items": [],
+      "status": "inProgress"
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "turn/completed",
+    "params": {
+     "threadId": "root-thread",
+     "turn": {
+      "id": "u2",
+      "items": [],
+      "status": "failed",
+      "error": {
+       "message": "usage limit reached"
+      }
+     }
+    }
+   }
+  },
+  {
+   "begin": "t3"
+  },
+  {
+   "frame": {
+    "method": "turn/started",
+    "params": {
+     "threadId": "root-thread",
+     "turn": {
+      "id": "u3",
+      "items": [],
+      "status": "inProgress"
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "turn/completed",
+    "params": {
+     "threadId": "root-thread",
+     "turn": {
+      "id": "u3",
+      "items": [],
+      "status": "failed"
+     }
+    }
+   }
+  },
+  {
+   "begin": "t4"
+  },
+  {
+   "frame": {
+    "method": "turn/started",
+    "params": {
+     "threadId": "root-thread",
+     "turn": {
+      "id": "u4",
+      "items": [],
+      "status": "inProgress"
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "turn/completed",
+    "params": {
+     "threadId": "root-thread",
+     "turn": {
+      "id": "u4",
+      "items": [],
+      "status": "interrupted"
+     }
+    }
+   }
+  },
+  {
+   "begin": "t5"
+  },
+  {
+   "frame": {
+    "method": "turn/started",
+    "params": {
+     "threadId": "root-thread",
+     "turn": {
+      "id": "u5",
+      "items": [],
+      "status": "inProgress"
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "thread/tokenUsage/updated",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "u5",
+     "tokenUsage": {
+      "last": {
+       "inputTokens": 120,
+       "cachedInputTokens": 40,
+       "outputTokens": 7
+      }
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "turn/completed",
+    "params": {
+     "threadId": "root-thread",
+     "turn": {
+      "id": "u5",
+      "items": [],
+      "status": "completed"
+     }
+    }
+   }
+  },
+  {
+   "begin": "t6"
+  },
+  {
+   "frame": {
+    "method": "turn/started",
+    "params": {
+     "threadId": "root-thread",
+     "turn": {
+      "id": "u6",
+      "items": [],
+      "status": "inProgress"
+     }
+    }
+   }
+  },
+  {
+   "crash": "Codex 退出了（退出码 1）: boom"
+  }
+ ],
+ "ignoreTypes": [
+  "turnProgress"
+ ],
+ "events": [
+  {
+   "type": "turnCanceled",
+   "turnId": "t1"
+  },
+  {
+   "type": "turnFailed",
+   "turnId": "t2",
+   "error": {
+    "code": "upstream",
+    "message": "usage limit reached"
+   }
+  },
+  {
+   "type": "turnFailed",
+   "turnId": "t3",
+   "error": {
+    "code": "upstream",
+    "message": "Codex ended the turn without saying why. 日志里有它这一趟的全部输出。"
+   }
+  },
+  {
+   "type": "turnCanceled",
+   "turnId": "t4"
+  },
+  {
+   "type": "turnCompleted",
+   "turnId": "t5",
+   "usage": {
+    "inputTokens": 120,
+    "outputTokens": 7,
+    "cacheReadTokens": 40,
+    "cacheWriteTokens": 0,
+    "llmRounds": 1,
+    "toolOutputTokens": 0,
+    "compactionCount": 0,
+    "tokenUsageStatus": "reported"
+   },
+   "forkCheckpoint": "u5"
+  },
+  {
+   "type": "turnFailed",
+   "turnId": "t6",
+   "error": {
+    "code": "agentCrashed",
+    "message": "Codex 退出了（退出码 1）: boom"
+   }
+  }
+ ]
+}

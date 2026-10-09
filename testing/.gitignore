@@ -1,0 +1,2 @@
+# A fixture script run in place (python -m py_compile, an editor) leaves these.
+__pycache__/

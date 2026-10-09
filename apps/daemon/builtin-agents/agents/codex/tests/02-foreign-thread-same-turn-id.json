@@ -1,0 +1,67 @@
+{
+ "description": "Thread and turn ids are separate gates: a foreign thread reusing the root turn id is rejected, as is a frame without a thread.",
+ "thread": "root-thread",
+ "steps": [
+  {
+   "begin": "t1"
+  },
+  {
+   "frame": {
+    "method": "turn/started",
+    "params": {
+     "threadId": "root-thread",
+     "turn": {
+      "id": "root-turn",
+      "items": [],
+      "status": "inProgress"
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "item/completed",
+    "params": {
+     "threadId": "child-thread",
+     "turnId": "root-turn",
+     "item": {
+      "type": "agentMessage",
+      "id": "foreign",
+      "text": "not root"
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "turn/completed",
+    "params": {
+     "threadId": "child-thread",
+     "turn": {
+      "id": "root-turn",
+      "items": [],
+      "status": "completed"
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "turn/completed",
+    "params": {
+     "turn": {
+      "id": "root-turn",
+      "items": [],
+      "status": "completed"
+     }
+    }
+   }
+  }
+ ],
+ "state": {
+  "id": "t1",
+  "codexTurn": "root-turn",
+  "inputTokens": 0
+ },
+ "events": []
+}

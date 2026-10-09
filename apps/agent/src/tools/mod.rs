@@ -8,6 +8,7 @@ pub(crate) mod evidence;
 mod fs_tools;
 mod media;
 mod search;
+mod self_guard;
 
 use std::path::{Path, PathBuf};
 

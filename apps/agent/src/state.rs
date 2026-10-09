@@ -42,6 +42,58 @@ impl Abort {
     }
 }
 
+/// pi `settings.retry`.
+#[derive(Debug, Clone)]
+pub struct RetrySettings {
+    pub enabled: bool,
+    pub max_retries: u32,
+    pub base_delay_ms: u64,
+}
+
+impl Default for RetrySettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_retries: crate::recovery::DEFAULT_MAX_RETRIES,
+            base_delay_ms: crate::recovery::DEFAULT_RETRY_BASE_DELAY_MS,
+        }
+    }
+}
+
+/// pi `steeringQueue` / `followUpQueue`, both in one-at-a-time mode.
+/// Steering is taken after a turn's tool results, before the next model
+/// request; a follow-up only when the run would otherwise stop.
+#[derive(Debug, Default)]
+pub struct Queued {
+    pub steering: std::collections::VecDeque<Message>,
+    pub follow_up: std::collections::VecDeque<Message>,
+}
+
+impl Queued {
+    pub fn len(&self) -> usize {
+        self.steering.len() + self.follow_up.len()
+    }
+
+    /// The next message to inject. `stopping` admits follow-ups.
+    pub fn next(&mut self, stopping: bool) -> Option<Message> {
+        self.steering.pop_front().or_else(|| {
+            if stopping {
+                self.follow_up.pop_front()
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Everything still waiting, steering first.
+    pub fn drain(&mut self) -> Vec<Message> {
+        self.steering
+            .drain(..)
+            .chain(self.follow_up.drain(..))
+            .collect()
+    }
+}
+
 pub struct State {
     pub emitter: Emitter,
     pub session: Session,
@@ -60,6 +112,9 @@ pub struct State {
     pub abort: Arc<Abort>,
     /// The prompt currently being served, so shutdown can wait for it.
     pub running: Option<tokio::task::JoinHandle<()>>,
+    pub retry: RetrySettings,
+    /// Messages accepted while streaming (`steer`, `follow_up`).
+    pub queued: Queued,
 }
 
 impl State {
@@ -78,9 +133,11 @@ impl State {
             "isStreaming": self.streaming,
             "isCompacting": self.compacting,
             "autoCompactionEnabled": self.auto_compaction,
+            "autoArchiveEnabled": self.auto_compaction,
+            "autoRetryEnabled": self.retry.enabled,
             "sessionId": self.session.id,
             "messageCount": self.session.messages.len(),
-            "pendingMessageCount": 0,
+            "pendingMessageCount": self.queued.len(),
         });
         if let Some(file) = &self.session.file {
             value["sessionFile"] = json!(file.to_string_lossy());
@@ -140,6 +197,7 @@ impl State {
         value
     }
 
+    /// What the next request carries, not what the session has spent so far.
     /// Omitted entirely when no model or context window is known, which is what
     /// the daemon expects rather than nulls.
     fn context_usage(&self) -> Option<Value> {
@@ -147,7 +205,8 @@ impl State {
         if window == 0 {
             return None;
         }
-        let tokens = self.stats.input + self.stats.output;
+        let tokens =
+            crate::recovery::context_tokens(&self.session.messages, self.session.usage_floor, 0);
         Some(json!({
             "tokens": tokens,
             "contextWindow": window,
@@ -200,6 +259,8 @@ mod tests {
             models: Vec::new(),
             current_model: Some(ModelConfig {
                 thinking_mode: None,
+                thinking_efforts: Vec::new(),
+                compat: crate::config::Compat::default(),
                 provider: "fake".into(),
                 id: "echo".into(),
                 name: None,
@@ -224,6 +285,8 @@ mod tests {
             tools_enabled: true,
             abort: Arc::new(Abort::new()),
             running: None,
+            retry: RetrySettings::default(),
+            queued: Queued::default(),
         }
     }
 
@@ -294,6 +357,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn context_usage_reports_the_live_context_not_cumulative_spend() {
+        let mut state = state();
+        // Spend across many requests must not read as a full window.
+        state.stats.input = 50_000;
+        state.session.append_message(Message::user("hi"));
+        state.session.append_message(Message::Assistant {
+            content: vec![Content::text("hello")],
+            api: "fake".into(),
+            provider: "fake".into(),
+            model: "echo".into(),
+            usage: Usage {
+                token_usage_reported: true,
+                input: 300,
+                output: 20,
+                total_tokens: 320,
+                ..Usage::default()
+            },
+            stop_reason: crate::protocol::StopReason::Stop,
+            error_message: None,
+            timestamp: 0,
+        });
+        let value = state.state_value();
+        assert_eq!(value["contextUsage"]["tokens"], 320);
+        assert_eq!(value["contextUsage"]["percent"], 32.0);
+        assert_eq!(value["autoArchiveEnabled"], true);
+    }
+
+    #[tokio::test]
     async fn context_usage_is_omitted_without_a_context_window() {
         let mut state = state();
         state.current_model.as_mut().unwrap().context_window = None;
@@ -309,6 +400,7 @@ mod tests {
             file_path: PathBuf::from("/skills/demo/SKILL.md"),
             base_dir: PathBuf::from("/skills/demo"),
             disable_model_invocation: false,
+            paths: Vec::new(),
         });
         let value = state.commands_value();
         assert_eq!(value["commands"][0]["name"], "skill:demo");

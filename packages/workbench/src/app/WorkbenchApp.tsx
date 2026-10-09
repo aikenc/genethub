@@ -32,6 +32,7 @@ import { readRtcEnabled } from "../settings/rtc";
 import { Composer, resolveComposerPhase } from "../session/Composer";
 import { NewSessionPanel } from "../session/NewSessionPanel";
 import { PermissionCard } from "../session/Permission";
+import { ProviderConfigurationCard } from "../settings/ProviderConfigurationCard";
 import { TimelineView } from "../session/TimelineView";
 import { TaskProgress } from "../session/TaskProgress";
 import { InputDelivery } from "../session/InputDelivery";
@@ -62,6 +63,7 @@ import { TitleBar } from "../shell/TitleBar";
 import { useTheme } from "../theme/store";
 import { TerminalPanel } from "../terminal/TerminalPanel";
 import { UpdateToast } from "../updates/UpdateToast";
+import { AgentRequestDialog } from "../agents/AgentRequestDialog";
 import { OpenProject, type OpenWorkspaceHandle } from "../workspace/OpenProject";
 import { WorkspaceAffordance } from "../workspace/WorkspaceAffordance";
 import { WorkspaceIcon } from "../workspace/WorkspaceIcon";
@@ -988,7 +990,10 @@ export function App({
                     ) : workbench.timeline.pendingPermission ? (
                       <div className="z-20 min-h-0 shrink overflow-y-auto px-4 pb-4 pt-2">
                         <div className="mx-auto max-w-chat">
-                          <PermissionCard
+                          {workbench.timeline.pendingPermission.kind === "providerConfiguration" && session ? (
+                            <ProviderConfigurationCard key={`${session.id}:${workbench.timeline.pendingPermission.id}`}
+                              request={workbench.timeline.pendingPermission} sessionId={session.id} />
+                          ) : <PermissionCard
                             request={workbench.timeline.pendingPermission}
                             submitting={
                               workbench.timeline.permissionProgress?.requestId ===
@@ -998,7 +1003,7 @@ export function App({
                             onAnswer={(outcome) =>
                               void workbench.answerPermission(outcome)
                             }
-                          />
+                          />}
                         </div>
                       </div>
                     ) : null}
@@ -1184,6 +1189,8 @@ export function App({
       {/* Outside every tab, because a finished download is not about whichever
           panel happens to be open. */}
       <UpdateToast host={host} />
+      {/* An Agent-level request is for whoever is at this window, whatever tab. */}
+      <AgentRequestDialog />
       {workbench.previewFloat ? (
         <PreviewFloat
           source={workbench.previewFloat}

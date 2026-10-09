@@ -33,6 +33,9 @@ function stubDaemon(answers: Partial<Record<Request["type"], (payload: never) =>
     onNotice: () => () => {},
     onUpdateDownload: () => () => {},
     onBackgroundProcesses: () => () => {},
+    onAgents: () => () => {},
+    onAgentRequest: () => () => {},
+    onAgentRequestClosed: () => () => {},
     onStateChange: () => () => {},
     identity: {
       daemonVersion: "test",
@@ -640,6 +643,52 @@ describe("the settings panel", () => {
     expect(screen.getByTestId("rtc-status")).toHaveTextContent("1840ms");
   });
 
+  /**
+   * A gateway that insists on adaptive thinking is fixed from here: the row
+   * shows what the rules guessed and where it came from, and a choice sends
+   * the model's whole user entry.
+   */
+  it("lets the user correct how a model thinks, with the source shown", async () => {
+    const model = "claude-sonnet-4-5";
+    const configured = provider({
+      id: "gateway",
+      label: "Gateway",
+      hasApiKey: true,
+      custom: true,
+      dialect: "anthropic",
+      models: [model],
+      modelCapabilities: {
+        [model]: {
+          effective: { reasoning: true, thinking: "budget", contextWindow: 200000 },
+          user: { contextWindow: 200000 },
+          sources: { reasoning: "rule", thinking: "rule", contextWindow: "user" },
+        },
+      },
+    });
+    const { client, calls } = stubDaemon({
+      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, providers: [configured] } }),
+      "settings.setProvider": () => ({ type: "settings", data: { lanEnabled: false, providers: [configured] } }),
+      "agent.refresh": () => ({ type: "agents", data: [] }),
+      "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
+    });
+    install(client);
+
+    render(<SettingsPanel host={browserHost()} />);
+    const select = await screen.findByLabelText(`${model} 思考方式`);
+    expect(select).toHaveTextContent("自动（budget");
+    expect(screen.getAllByText("规则").length).toBeGreaterThan(0);
+    expect(screen.getByLabelText(`${model} 上下文窗口`)).toHaveValue("200000");
+
+    await userEvent.selectOptions(select, "adaptive");
+    await waitFor(() => {
+      const sent = calls.find((call) => call.type === "settings.setProvider");
+      expect(sent?.payload).toMatchObject({
+        providerId: "gateway",
+        modelCapabilities: { [model]: { thinking: "adaptive", reasoning: true, contextWindow: 200000 } },
+      });
+    });
+  });
+
   it("re-probes the agents after a key lands, so the list stops lying", async () => {
     const { client, calls } = stubDaemon({
       "settings.get": () => ({
@@ -1030,5 +1079,61 @@ describe("appearance on this client", () => {
     expect(localStorage.getItem(UI_SCALE_KEY)).toBe("large");
     expect(document.documentElement.dataset.uiScale).toBe("large");
     expect(useUiScale.getState().scale).toBe("large");
+  });
+});
+
+describe("the Agent list in settings", () => {
+  const agent = (id: string, extra: Record<string, unknown>) => ({
+    id,
+    label: id,
+    builtin: false,
+    probe: { state: "ready" },
+    catalog: { models: [], modes: [], commands: [] },
+    ...extra,
+  });
+
+  it("lists usable Agents first and explains, and offers repair for, only what the script cannot fix itself", async () => {
+    const { client } = stubDaemon({});
+    install(client);
+    useWorkbench.setState({
+      agents: [
+        agent("cursor", {
+          source: "builtin",
+          probe: { state: "unavailable", reason: "未安装 cursor-agent" },
+          message: "未安装 cursor-agent",
+          description: "Cursor 的命令行 Agent",
+          actions: [{ id: "install", label: "安装", primary: true }],
+        }),
+        agent("broken", {
+          source: "user",
+          probe: { state: "unavailable", reason: "agent.py 第 3 行语法错误" },
+          message: "agent.py 第 3 行语法错误",
+          actions: [],
+        }),
+        agent("starting", {
+          source: "builtin",
+          probe: { state: "unavailable", reason: "正在启动" },
+          message: "正在启动",
+          actions: [],
+        }),
+        agent("genet", { builtin: true, label: "GeneHub" }),
+      ] as never,
+    });
+    render(<SettingsPanel host={browserHost()} />);
+
+    const rows = screen.getAllByRole("listitem").filter((row) => row.closest("section")?.textContent?.startsWith("Agent"));
+    expect(rows[0]).toHaveTextContent("GeneHub");
+    expect(rows[0]).toHaveTextContent("内置");
+    const cursor = rows.find((row) => row.textContent?.includes("cursor"))!;
+    expect(cursor).toHaveTextContent("随附");
+    expect(cursor).toHaveTextContent("Cursor 的命令行 Agent");
+    // The reason is said once, under the name, not again as the status.
+    expect(cursor.textContent?.split("未安装 cursor-agent")).toHaveLength(2);
+
+    const repairs = screen.getAllByRole("button", { name: "让内置 Agent 修复" });
+    expect(repairs).toHaveLength(1);
+    expect(rows.find((row) => row.textContent?.includes("broken"))).toContainElement(repairs[0]!);
+    // A user-layer Agent takes edits on reload.
+    expect(screen.getAllByRole("button", { name: "重新加载" })).toHaveLength(1);
   });
 });

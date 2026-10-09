@@ -2,7 +2,7 @@ import { existsSync, readFileSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import type { SessionSnapshot, WorkflowRunStatus } from "@genehub/proto";
-import { BlockedError, connectProductClient, daemonEndpoint, defineJourney, runGenetAsync } from "../../framework/public.ts";
+import { BlockedError, connectProductClient, daemonEndpoint, defineJourney, runGenetAsync, seedScriptAgentRuntime } from "../../framework/public.ts";
 
 function field(value: unknown, key: string): unknown {
   if (typeof value === "string") {
@@ -28,6 +28,8 @@ for (const scenario of ["correction", "workflow-intent", "self-method"] as const
   surfaces: ["daemon", "agent", "genet-cli", "workbench-client", "git"],
   productInterfaces: ["session.send", "session.respondPermission", "genet workflow build", "genet space builder", "genet workflow", "workflow.history"],
 }, async t => {
+  // selectRealModel lists Agents, which starts the built-in script Agents.
+  seedScriptAgentRuntime(t.env);
   const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
   // The Agent's `git clone` step, performed by the fixture: a package is an
   // ordinary directory until `workflow build` authorizes its components.

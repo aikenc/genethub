@@ -65,6 +65,43 @@ pub enum Request {
     /// not have to restart anything.
     #[serde(rename = "agent.refresh")]
     AgentRefresh,
+    /// Runs one action a script Agent declared in its state. The platform
+    /// does not know what the action does.
+    #[serde(rename = "agent.action", rename_all = "camelCase")]
+    AgentAction { agent_id: String, action_id: String },
+    /// Re-reads a script Agent's directory and restarts it in a controlled
+    /// way. The only way an edit under `user/` takes effect.
+    #[serde(rename = "agent.reload", rename_all = "camelCase")]
+    AgentReload { agent_id: String },
+    /// Removes `user/<id>` and goes back to the built-in directory.
+    #[serde(rename = "agent.reset", rename_all = "camelCase")]
+    AgentReset { agent_id: String },
+    /// Runs the script's own acceptance tests and returns what they printed.
+    #[serde(rename = "agent.test", rename_all = "camelCase")]
+    AgentTest {
+        agent_id: String,
+        #[serde(default)]
+        live: bool,
+    },
+    /// The script process's recent stderr.
+    #[serde(rename = "agent.logs", rename_all = "camelCase")]
+    AgentLogs {
+        agent_id: String,
+        #[serde(default)]
+        #[ts(optional)]
+        lines: Option<u32>,
+    },
+    /// Agent-level user requests still waiting, in full. For a client that
+    /// connected after `agentRequest` was pushed.
+    #[serde(rename = "agent.requests")]
+    AgentRequests,
+    /// A person's answer to an Agent-level user request.
+    #[serde(rename = "agent.requestAnswer", rename_all = "camelCase")]
+    AgentRequestAnswer {
+        agent_id: String,
+        request_id: String,
+        outcome: AgentRequestOutcome,
+    },
 
     // -- sessions ----------------------------------------------------------
     #[serde(rename = "session.create", rename_all = "camelCase")]
@@ -712,6 +749,26 @@ pub enum Request {
         request_id: String,
         outcome: PermissionOutcome,
     },
+    /// Submit a non-secret conversation question and stop the current
+    /// execution. Answers arrive through the existing Human continuation.
+    #[serde(rename = "session.ask", rename_all = "camelCase")]
+    SessionAsk {
+        session_id: String,
+        request_id: String,
+        title: String,
+        questions: Vec<crate::InteractionQuestion>,
+    },
+
+    #[serde(rename = "caller.authority")]
+    CallerAuthority,
+    /// Non-secret provider metadata; available to session controllers.
+    #[serde(rename = "provider.list")]
+    ProviderList,
+    #[serde(rename = "provider.operation", rename_all = "camelCase")]
+    ProviderOperation {
+        session_id: String,
+        operation: crate::ProviderOperationCommand,
+    },
 
     // -- settings ----------------------------------------------------------
     #[serde(rename = "settings.get")]
@@ -723,7 +780,8 @@ pub enum Request {
     #[serde(rename = "settings.setProvider", rename_all = "camelCase")]
     SettingsSetProvider {
         provider_id: String,
-        /// `None` leaves the stored key alone; an empty string clears it.
+        /// `None` preserves the key only at the same endpoint/protocol; changing
+        /// either without a supplied key clears it. An empty string clears it.
         #[serde(default)]
         api_key: Option<String>,
         #[serde(default)]
@@ -742,6 +800,11 @@ pub enum Request {
         #[serde(default)]
         #[ts(optional)]
         model_inputs: Option<std::collections::BTreeMap<String, Vec<String>>>,
+        /// Replaces the user's entry for each named model; an empty object
+        /// removes it, returning that model to discovery and endpoint rules.
+        #[serde(default)]
+        #[ts(optional)]
+        model_capabilities: Option<std::collections::BTreeMap<String, crate::ModelCapabilities>>,
     },
 
     /// Replaces machine-global Agent/model tag, cost and remembered runtime
@@ -1098,6 +1161,16 @@ pub enum Reply {
         reset: bool,
     },
     Agents(Vec<AgentInfo>),
+    AgentRequests(Vec<AgentUserRequest>),
+    #[serde(rename_all = "camelCase")]
+    AgentTestResult {
+        passed: bool,
+        output: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    AgentLogs {
+        lines: Vec<String>,
+    },
     HubStatus(HubStatus),
     #[serde(rename_all = "camelCase")]
     HubClaim {
@@ -1115,6 +1188,9 @@ pub enum Reply {
     Claimed(DeviceCredential),
     RemoteAccess(RemoteAccess),
     Settings(Settings),
+    CallerAuthority(crate::CallerAuthority),
+    Providers(Vec<ProviderInfo>),
+    ProviderOperation(crate::ProviderOperationReceipt),
     SpeechCapabilities(SpeechCapabilities),
     SpeechRuntimeStatus(SpeechRuntimeStatus),
     SpeechContext(SpeechContextPack),
@@ -1380,6 +1456,19 @@ pub enum ServerFrame {
     /// "下载中" forever.
     #[serde(rename = "updateDownload", rename_all = "camelCase")]
     UpdateDownloadChanged { download: UpdateDownload },
+    /// Every Agent's current state, pushed whenever any of them changes: a
+    /// script reported a new state, a job made progress, a request opened.
+    #[serde(rename = "agents", rename_all = "camelCase")]
+    AgentsChanged { agents: Vec<AgentInfo> },
+    /// An Agent-level user request a person has to answer. Pushed only to
+    /// clients holding `settings`; never part of any timeline.
+    #[serde(rename = "agentRequest", rename_all = "camelCase")]
+    AgentRequestOpened { request: AgentUserRequest },
+    #[serde(rename = "agentRequestClosed", rename_all = "camelCase")]
+    AgentRequestClosed {
+        agent_id: String,
+        request_id: String,
+    },
     /// What is still running now that a turn has ended.
     ///
     /// Sampled at the end of a turn because that is the moment the question

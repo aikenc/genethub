@@ -15,6 +15,29 @@ pub async fn stream(
     request: Request,
     events: UnboundedSender<ProviderEvent>,
 ) -> anyhow::Result<()> {
+    // Failure scripts for the recovery paths. `*-once` fail the first request
+    // made from a working directory, so parallel tests do not share state.
+    let archived = request.messages.iter().any(|message| {
+        matches!(message, Message::User { content, .. } if content.contains("<genehub-compacted-context>"))
+    });
+    match model.id.as_str() {
+        "overflow-once" if !archived => {
+            anyhow::bail!(
+                "fake 400 Bad Request: prompt is too long: 250000 tokens > 200000 maximum"
+            )
+        }
+        "overflow-always" => {
+            anyhow::bail!(
+                "fake 400 Bad Request: prompt is too long: 250000 tokens > 200000 maximum"
+            )
+        }
+        "rate-limit-once" if first_request(&request) => {
+            return Err(http(429, "rate limit exceeded").into())
+        }
+        "rate-limit-always" => return Err(http(429, "rate limit exceeded").into()),
+        "auth-fail" => return Err(http(401, "invalid x-api-key").into()),
+        _ => {}
+    }
     if model.id == "reasoning-only-once" || model.id == "reasoning-only-always" {
         let _ = events.send(ProviderEvent::ThinkingStart);
         let _ = events.send(ProviderEvent::ThinkingDelta("checking".into()));
@@ -64,6 +87,7 @@ pub async fn stream(
     };
 
     let mut usage = Usage {
+        token_usage_reported: true,
         input: 10,
         ..Default::default()
     };
@@ -74,6 +98,24 @@ pub async fn stream(
     Ok(())
 }
 
+fn http(status: u16, detail: &str) -> super::HttpError {
+    super::HttpError {
+        status,
+        retry_after_ms: None,
+        message: format!("fake {status}: {detail}"),
+    }
+}
+
+fn first_request(request: &Request) -> bool {
+    static SEEN: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+    let mut seen = SEEN.lock().unwrap_or_else(|poison| poison.into_inner());
+    if seen.contains(&request.cwd) {
+        return false;
+    }
+    seen.push(request.cwd.clone());
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,6 +124,8 @@ mod tests {
     fn model() -> ModelConfig {
         ModelConfig {
             thinking_mode: None,
+            thinking_efforts: Vec::new(),
+            compat: crate::config::Compat::default(),
             provider: "fake".into(),
             id: "echo".into(),
             name: None,

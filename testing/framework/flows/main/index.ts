@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import path from "node:path";
@@ -62,7 +61,7 @@ export function seedHostBetaProviders(lease: EnvironmentLease): void {
 }
 
 /** Copies this account's Codex CLI login into the isolated lease home. */
-export function seedHostCodexLogin(lease: EnvironmentLease): void {
+export function seedHostCodexLogin(lease: EnvironmentLease, options: { includeMcpServers?: boolean } = {}): void {
   const home = hostHome();
   const auth = path.join(home, ".codex", "auth.json");
   if (!existsSync(auth)) {
@@ -72,115 +71,20 @@ export function seedHostCodexLogin(lease: EnvironmentLease): void {
   mkdirSync(dest, { recursive: true });
   copyFileSync(auth, path.join(dest, "auth.json"));
   const config = path.join(home, ".codex", "config.toml");
-  if (existsSync(config)) copyFileSync(config, path.join(dest, "config.toml"));
-}
-
-const DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic";
-const DEEPSEEK_OPENAI_BASE_URL = "https://api.deepseek.com/v1";
-const DEFAULT_BARE_MODEL = "deepseek-v4-flash";
-
-export type HostBuiltinLlm = {
-  apiKey: string;
-  openaiBaseUrl: string;
-  anthropicBaseUrl: string;
-  bareId: string;
-};
-
-/** Reads the machine's GeneHub-beta DeepSeek key at runtime. Never logs the value. */
-export function hostBuiltinLlm(): HostBuiltinLlm {
-  const betaConfig = path.join(hostHome(), ".local", "share", "GeneHub-beta", "config.json");
-  if (!existsSync(betaConfig)) {
-    throw new BlockedError("GeneHub-beta config.json is not on this machine");
-  }
-  const raw = JSON.parse(readFileSync(betaConfig, "utf8")) as {
-    agents?: { providers?: Record<string, { apiKey?: string; baseUrl?: string | null }> };
-  };
-  const deepseek = raw.agents?.providers?.deepseek;
-  const apiKey = deepseek?.apiKey?.trim();
-  if (!deepseek || !apiKey) {
-    throw new BlockedError("GeneHub-beta has no deepseek apiKey");
-  }
-  return {
-    apiKey,
-    openaiBaseUrl: deepseek.baseUrl?.trim() || DEEPSEEK_OPENAI_BASE_URL,
-    anthropicBaseUrl: DEEPSEEK_ANTHROPIC_BASE_URL,
-    bareId: DEFAULT_BARE_MODEL,
-  };
-}
-
-export function requireHostCli(name: string): string {
-  const which = spawnSync("which", [name], { encoding: "utf8" });
-  if (which.status !== 0) {
-    throw new BlockedError(`${name} is not on PATH`);
-  }
-  return which.stdout.trim();
-}
-
-export function prependHostCliPath(lease: EnvironmentLease, binary: string): void {
-  const resolved = requireHostCli(binary);
-  const binDir = path.dirname(resolved);
-  const current = lease.env.PATH ?? process.env.PATH ?? "";
-  if (!current.split(path.delimiter).includes(binDir)) {
-    lease.env.PATH = `${binDir}${path.delimiter}${current}`;
-  }
-}
-
-/**
- * Points the already-installed `claude` CLI at the configured host backend:
- * Claude Code's own documented environment variables, set on the daemon process
- * so the child it spawns inherits them.
- */
-export function pointClaudeAtBuiltinLlm(lease: EnvironmentLease): void {
-  prependHostCliPath(lease, "claude");
-  lease.env.IS_SANDBOX = "1";
-  const settings = path.join(hostHome(), ".claude", "settings.json");
-  if (existsSync(settings)) {
-    const env = (JSON.parse(readFileSync(settings, "utf8")) as { env?: Record<string, unknown> }).env;
-    if (typeof env?.ANTHROPIC_BASE_URL === "string" && env.ANTHROPIC_BASE_URL.trim()) {
-      for (const [key, value] of Object.entries(env)) {
-        if ((key.startsWith("ANTHROPIC_") || key.startsWith("CLAUDE_CODE_")) && typeof value === "string") lease.env[key] = value;
-      }
-      return;
+  if (existsSync(config)) {
+    if (options.includeMcpServers !== false) copyFileSync(config, path.join(dest, "config.toml"));
+    else {
+      // Preserve the real model/provider setup, without unrelated external
+      // connectors. This changes only the lease's copy, never the host config.
+      let mcpSection = false;
+      const lines = readFileSync(config, "utf8").split("\n").filter(line => {
+        const table = line.match(/^\s*\[+([^\]]+)\]+\s*(?:#.*)?$/);
+        if (table) mcpSection = /^mcp_servers(?:\.|$)/.test(table[1]!.replace(/["']/g, "").trim());
+        return !mcpSection && !/^\s*mcp_servers\s*=/.test(line);
+      });
+      writeFileSync(path.join(dest, "config.toml"), lines.join("\n"), { mode: 0o600 });
     }
   }
-  const llm = hostBuiltinLlm();
-  lease.env.ANTHROPIC_BASE_URL = llm.anthropicBaseUrl;
-  lease.env.ANTHROPIC_AUTH_TOKEN = llm.apiKey;
-  lease.env.ANTHROPIC_API_KEY = llm.apiKey;
-  // Claude Code refuses --dangerously-skip-permissions as uid 0 unless it
-  // believes it is already in a sandbox. This is the CLI's own documented
-  // container/CI switch, inherited by the child the daemon spawns.
-  lease.env.IS_SANDBOX = "1";
-  for (const key of [
-    "ANTHROPIC_MODEL",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-    "CLAUDE_CODE_SUBAGENT_MODEL",
-  ]) {
-    lease.env[key] = llm.bareId;
-  }
-}
-
-/** Configures the real OpenCode CLI against the same controlled LLM endpoint as the built-in agent. */
-export function writeOpencodeBuiltinConfig(lease: EnvironmentLease, mock: MockLlmHandle): string {
-  prependHostCliPath(lease, "opencode");
-  const config = {
-    $schema: "https://opencode.ai/config.json",
-    provider: {
-      journey: {
-        npm: "@ai-sdk/openai-compatible",
-        name: "Journey",
-        options: {
-          baseURL: mock.origin + "/v1",
-          apiKey: "sk-test",
-        },
-        models: { [DEFAULT_BARE_MODEL]: { name: "Journey" } },
-      },
-    },
-  };
-  writeFileSync(path.join(lease.workspace, "opencode.json"), `${JSON.stringify(config, null, 2)}\n`);
-  return `journey/${DEFAULT_BARE_MODEL}`;
 }
 
 export function sessionEventOf(entry: { raw: unknown }): { type?: string; [key: string]: unknown } | undefined {
@@ -601,17 +505,26 @@ export async function selectRealModel(
   return modelId;
 }
 
+/** Blocks when an Agent this machine is expected to provide is not ready.
+ * Script Agents report state after `agent.refresh` returns, so this keeps
+ * reading `agent.list` until the Agent is ready or the budget is spent. */
 export async function requireAgentReady(
   client: ProductSession["client"],
   agentId: string,
+  timeoutMs = 30_000,
 ): Promise<Extract<Reply, { type: "agents" }>["data"][number]> {
-  const agents = await client.call({ type: "agent.refresh" });
-  if (agents?.type !== "agents") throw new Error(`agent.refresh returned ${agents?.type}`);
-  const agent = agents.data.find((item) => item.id === agentId);
-  if (!agent || agent.probe.state !== "ready") {
-    throw new BlockedError(`${agentId} agent is not ready: ${JSON.stringify(agent?.probe)}`);
+  let reply = await client.call({ type: "agent.refresh" });
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (reply?.type !== "agents") throw new Error(`agent listing returned ${reply?.type}`);
+    const agent = reply.data.find((item) => item.id === agentId);
+    if (agent?.probe.state === "ready") return agent;
+    if (Date.now() >= deadline) {
+      throw new BlockedError(`${agentId} agent is not ready: ${JSON.stringify(agent?.probe)} ${agent?.message ?? ""}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    reply = await client.call({ type: "agent.list" });
   }
-  return agent;
 }
 
 export async function createAgentSession(
@@ -653,11 +566,16 @@ export async function sendPrompt(
   sessionId: string,
   text: string,
   continuesRound: string | null = null,
+  // Without a messageId this is the direct send: it is refused while a turn
+  // runs. Pass a stable id for the durable path the workbench uses, which
+  // queues instead and acknowledges before dispatch.
+  messageId: string | null = null,
 ): Promise<void> {
   await client.call({
     type: "session.send",
     payload: {
       sessionId,
+      ...(messageId ? { messageId } : {}),
       text,
       attachments: [],
       artifactPreviewBaseUrl: null,

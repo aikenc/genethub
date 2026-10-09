@@ -5,10 +5,26 @@ use ts_rs::TS;
 
 use crate::timeline::{TimelineItem, ToolCallDetail, ToolImage, ToolStatus};
 
+/// Availability of provider token accounting, independently of its numbers.
+/// Partial numbers are a known subtotal, not the complete cost of a turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum TokenUsageStatus {
+    Reported,
+    Partial,
+    Unavailable,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct Usage {
+    /// Absent on older adapters/logs: positive counts are known, while all
+    /// zero legacy counts cannot distinguish missing accounting from zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub token_usage_status: Option<TokenUsageStatus>,
     #[ts(type = "number")]
     pub input_tokens: u64,
     #[ts(type = "number")]
@@ -86,6 +102,22 @@ pub struct Usage {
     pub visible_output_chars: u64,
 }
 
+impl Usage {
+    pub fn token_status(&self) -> TokenUsageStatus {
+        self.token_usage_status.unwrap_or_else(|| {
+            if self.input_tokens > 0
+                || self.output_tokens > 0
+                || self.cache_read_tokens > 0
+                || self.cache_write_tokens > 0
+            {
+                TokenUsageStatus::Reported
+            } else {
+                TokenUsageStatus::Unavailable
+            }
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
@@ -157,6 +189,8 @@ pub enum PermissionRequestKind {
     Permission,
     Question,
     PlanApproval,
+    /// Daemon-owned configuration; secret is submitted through provider.operation.
+    ProviderConfiguration,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

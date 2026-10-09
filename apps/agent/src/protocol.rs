@@ -18,8 +18,22 @@ pub fn now_ms() -> i64 {
 pub enum Content {
     #[serde(rename = "text")]
     Text { text: String },
-    #[serde(rename = "thinking")]
-    Thinking { thinking: String },
+    /// `signature` is whatever the provider needs to accept this block back:
+    /// Anthropic's opaque signature (or the redacted payload when `redacted`),
+    /// or, for OpenAI-compatible replies, the field name the reasoning came in
+    /// (`reasoning_content`, `reasoning`, …). Older session files have neither.
+    #[serde(rename = "thinking", rename_all = "camelCase")]
+    Thinking {
+        thinking: String,
+        #[serde(
+            default,
+            rename = "thinkingSignature",
+            skip_serializing_if = "Option::is_none"
+        )]
+        signature: Option<String>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        redacted: bool,
+    },
     #[serde(rename = "toolCall")]
     ToolCall {
         id: String,
@@ -28,9 +42,21 @@ pub enum Content {
     },
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 impl Content {
     pub fn text(text: impl Into<String>) -> Self {
         Content::Text { text: text.into() }
+    }
+
+    pub fn thinking(thinking: impl Into<String>) -> Self {
+        Content::Thinking {
+            thinking: thinking.into(),
+            signature: None,
+            redacted: false,
+        }
     }
 }
 
@@ -38,6 +64,8 @@ impl Content {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Usage {
+    #[serde(default)]
+    pub token_usage_reported: bool,
     pub input: u64,
     pub output: u64,
     pub cache_read: u64,
@@ -58,6 +86,7 @@ pub struct Cost {
 
 impl Usage {
     pub fn add(&mut self, other: &Usage) {
+        self.token_usage_reported |= other.token_usage_reported;
         self.input += other.input;
         self.output += other.output;
         self.cache_read += other.cache_read;
@@ -381,6 +410,30 @@ mod tests {
         assert_eq!(failure["success"], false);
         assert_eq!(failure["error"], "boom");
         assert!(failure.get("id").is_none());
+    }
+
+    #[test]
+    fn thinking_signatures_round_trip_and_old_blocks_still_load() {
+        let block = Content::Thinking {
+            thinking: "plan".into(),
+            signature: Some("sig".into()),
+            redacted: false,
+        };
+        let value = serde_json::to_value(&block).unwrap();
+        assert_eq!(value["thinkingSignature"], "sig");
+        assert!(value.get("redacted").is_none());
+
+        let old: Content = serde_json::from_str(r#"{"type":"thinking","thinking":"x"}"#).unwrap();
+        let Content::Thinking {
+            signature,
+            redacted,
+            ..
+        } = old
+        else {
+            panic!("not thinking");
+        };
+        assert!(signature.is_none());
+        assert!(!redacted);
     }
 
     #[test]

@@ -8,6 +8,7 @@
 //! component (`apps/guest`).
 
 mod agent;
+mod archive;
 mod channel;
 mod cli;
 mod config;
@@ -17,8 +18,10 @@ mod os_process;
 mod prompt;
 mod protocol;
 mod provider;
+mod recovery;
 mod rpc;
 mod session;
+mod skill_guard;
 mod skills;
 mod state;
 mod tools;
@@ -41,13 +44,26 @@ const SKILL_COMMAND_PREFIX: &str = "/skill:";
 /// native shim or the wasm component's `agent-run` export — turns this into
 /// the process status.
 pub async fn run() -> i32 {
-    let args = match cli::parse(std::env::args().skip(1)) {
+    let mut args = match cli::parse(std::env::args().skip(1)) {
         Ok(args) => args,
         Err(err) => {
             eprintln!("genet-agent: {err}");
             return 2;
         }
     };
+    // Started before the session is opened: under `--configure-from-stdin`
+    // the first line says which session that is.
+    let mut commands = rpc::start_reader();
+    if args.configure_from_stdin {
+        let Some(line) = commands.recv().await else {
+            eprintln!("genet-agent: stdin closed before the configure command");
+            return 2;
+        };
+        if let Err(err) = apply_configure(&mut args, &line) {
+            eprintln!("genet-agent: {err}");
+            return 2;
+        }
+    }
 
     match args.mode.as_deref() {
         Some("rpc") => {}
@@ -106,9 +122,10 @@ pub async fn run() -> i32 {
         tools_enabled: true,
         abort: Arc::new(state::Abort::new()),
         running: None,
+        retry: state::RetrySettings::default(),
+        queued: state::Queued::default(),
     }));
 
-    let mut commands = rpc::start_reader();
     while let Some(line) = commands.recv().await {
         let emitter = { state.lock().await.emitter.clone() };
         match serde_json::from_str::<Command>(&line) {
@@ -132,6 +149,30 @@ pub async fn run() -> i32 {
     0
 }
 
+/// §6.1: `{"type":"configure","session":…,"genehubSessionId":…,
+/// "systemPrompts":[…]}`, the launch settings kept out of argv. Fields it
+/// leaves out keep what argv said.
+fn apply_configure(args: &mut cli::Args, line: &str) -> Result<(), String> {
+    let value: Value =
+        serde_json::from_str(line).map_err(|err| format!("invalid configure command: {err}"))?;
+    if value.get("type").and_then(Value::as_str) != Some("configure") {
+        return Err("--configure-from-stdin expects a configure command first".into());
+    }
+    let text = |key: &str| value.get(key).and_then(Value::as_str).map(str::to_string);
+    if let Some(session) = text("session") {
+        args.session = Some(session);
+    }
+    if let Some(id) = text("genehubSessionId") {
+        args.genehub_session_id = Some(id);
+    }
+    if let Some(prompts) = value.get("systemPrompts") {
+        let prompts: Vec<String> = serde_json::from_value(prompts.clone())
+            .map_err(|err| format!("configure.systemPrompts: {err}"))?;
+        args.add_system_prompt.extend(prompts);
+    }
+    Ok(())
+}
+
 async fn handle(state: &Arc<Mutex<State>>, command: Command) {
     let id = command.id.clone();
     let id = id.as_deref();
@@ -139,23 +180,34 @@ async fn handle(state: &Arc<Mutex<State>>, command: Command) {
     let emitter = { state.lock().await.emitter.clone() };
 
     match kind {
-        "prompt" => {
+        "prompt" | "steer" | "follow_up" => {
             let Some(message) = command.str_field("message") else {
-                emitter.send(error_response(id, kind, "prompt requires 'message'"));
-                return;
-            };
-
-            let busy = { state.lock().await.streaming };
-            if busy {
                 emitter.send(error_response(
                     id,
                     kind,
-                    "agent is streaming; queueing is not supported",
+                    format!("{kind} requires 'message'"),
                 ));
                 return;
-            }
-
-            let message = expand_skill_command(state, message).await;
+            };
+            // pi `prompt.streamingBehavior` is the same request as the
+            // dedicated commands, made while not knowing whether a run is on.
+            let queue = match kind {
+                "steer" => Some(Queue::Steer),
+                "follow_up" => Some(Queue::FollowUp),
+                _ => match command.str_field("streamingBehavior").as_deref() {
+                    None => None,
+                    Some("steer") => Some(Queue::Steer),
+                    Some("followUp") => Some(Queue::FollowUp),
+                    Some(other) => {
+                        emitter.send(error_response(
+                            id,
+                            kind,
+                            format!("unknown streamingBehavior '{other}'"),
+                        ));
+                        return;
+                    }
+                },
+            };
             let attachments = match serde_json::from_value::<Vec<protocol::MediaAttachment>>(
                 command
                     .rest
@@ -173,6 +225,49 @@ async fn handle(state: &Arc<Mutex<State>>, command: Command) {
                     return;
                 }
             };
+            let message = prepare_message(state, message).await;
+
+            // Admission and the run's own stop decision take the same lock, so
+            // a queued message is either seen by this run or refused here.
+            let mut guard = state.lock().await;
+            if guard.compacting {
+                // Compaction has no turn boundary to take a message at.
+                drop(guard);
+                emitter.send(error_response(id, kind, "agent is compacting"));
+                return;
+            }
+            if guard.streaming {
+                let Some(queue) = queue else {
+                    drop(guard);
+                    emitter.send(error_response(
+                        id,
+                        kind,
+                        "agent is streaming; send steer or follow_up to queue",
+                    ));
+                    return;
+                };
+                let message = protocol::Message::user_with_attachments(message, attachments);
+                match queue {
+                    Queue::Steer => guard.queued.steering.push_back(message),
+                    Queue::FollowUp => guard.queued.follow_up.push_back(message),
+                }
+                let pending = guard.queued.len();
+                drop(guard);
+                emitter.send(response(id, kind, Some(json!({ "queued": pending }))));
+                return;
+            }
+            if kind != "prompt" {
+                // Deliberately not pi's "queue for whenever the next prompt
+                // comes": the client learns nothing is running and sends the
+                // message as a prompt of its own.
+                drop(guard);
+                emitter.send(error_response(id, kind, "agent is not streaming"));
+                return;
+            }
+            // Claimed here, not in the spawned task, so a second prompt or a
+            // steer arriving before the run starts already sees it.
+            guard.streaming = true;
+            drop(guard);
             emitter.send(response(id, kind, Some(json!({ "agentInvoked": true }))));
 
             let spawned = state.clone();
@@ -262,9 +357,24 @@ async fn handle(state: &Arc<Mutex<State>>, command: Command) {
             guard.thinking_level = level;
             emitter.send(response(id, kind, None));
         }
-        "set_auto_compaction" => {
+        // GeneHub archives rather than compacts; the pi name stays for
+        // compatibility and both toggle the same switch.
+        "set_auto_compaction" | "set_auto_archive" => {
             let enabled = command.bool_field("enabled").unwrap_or(true);
             state.lock().await.auto_compaction = enabled;
+            emitter.send(response(id, kind, None));
+        }
+        "set_auto_retry" => {
+            let enabled = command.bool_field("enabled").unwrap_or(true);
+            state.lock().await.retry.enabled = enabled;
+            emitter.send(response(id, kind, None));
+        }
+        "abort_retry" => {
+            // pi aborts the backoff only; ours shares the run's abort.
+            let streaming = { state.lock().await.streaming };
+            if streaming {
+                state.lock().await.abort.request();
+            }
             emitter.send(response(id, kind, None));
         }
         "compact" => {
@@ -301,11 +411,6 @@ async fn handle(state: &Arc<Mutex<State>>, command: Command) {
     }
 }
 
-struct ContextMaterial {
-    text: String,
-    source_index: String,
-}
-
 async fn run_compaction(state: Arc<Mutex<State>>) {
     let emitter = { state.lock().await.emitter.clone() };
     emitter.send(json!({ "type": "agent_start" }));
@@ -338,10 +443,14 @@ async fn run_compaction(state: Arc<Mutex<State>>) {
     };
 
     let material = match session_id.as_deref() {
-        Some(session_id) => fetch_context_material(session_id)
-            .await
-            .unwrap_or_else(|error| fallback_context(session_id, &fallback_messages, &error)),
-        None => fallback_context(
+        Some(session_id) => {
+            archive::fetch_context_material(session_id, archive::MANUAL_PROJECTION_TOKENS)
+                .await
+                .unwrap_or_else(|error| {
+                    archive::fallback_context(session_id, &fallback_messages, &error)
+                })
+        }
+        None => archive::fallback_context(
             "unknown",
             &fallback_messages,
             "GeneHub session id is unavailable",
@@ -381,6 +490,11 @@ async fn run_compaction(state: Arc<Mutex<State>>) {
         tools_enabled: false,
         abort,
         running: None,
+        retry: state::RetrySettings {
+            enabled: false,
+            ..state::RetrySettings::default()
+        },
+        queued: state::Queued::default(),
     }));
     agent::run_prompt(child.clone(), prompt).await;
     let (model_summary, child_usage) = {
@@ -419,92 +533,6 @@ async fn run_compaction(state: Arc<Mutex<State>>) {
     emitter.send(json!({ "type": "agent_end", "messages": [] }));
 }
 
-async fn fetch_context_material(session_id: &str) -> Result<ContextMaterial, String> {
-    let binary = std::env::var_os("GENEHUB_CLI")
-        .map(PathBuf::from)
-        .ok_or_else(|| "GENEHUB_CLI is unavailable".to_string())?;
-    let output = crate::os_process::Command::new(binary)
-        .args(["session", "context", session_id, "--budget-tokens", "24000"])
-        .output()
-        .await
-        .map_err(|error| format!("could not invoke genet session context: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "genet session context exited with {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    let envelope: Value = serde_json::from_slice(&output.stdout)
-        .map_err(|error| format!("invalid genet session context output: {error}"))?;
-    let context = envelope
-        .pointer("/data/context")
-        .ok_or_else(|| "genet output has no data.context".to_string())?;
-    let text = context
-        .get("text")
-        .and_then(Value::as_str)
-        .filter(|text| !text.trim().is_empty())
-        .ok_or_else(|| "genet context text is empty".to_string())?
-        .to_string();
-    let source_index = format_source_index(session_id, context);
-    Ok(ContextMaterial { text, source_index })
-}
-
-fn format_source_index(session_id: &str, context: &Value) -> String {
-    let digest = context
-        .get("digest")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
-    let coverage = context.get("coverage").cloned().unwrap_or(Value::Null);
-    let references = context
-        .get("references")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|reference| reference.get("id").and_then(Value::as_str))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let commands = context
-        .get("retrievalCommands")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!(
-        "<genehub-source-index session-id=\"{session_id}\" digest=\"{digest}\">\n\
-         Coverage: {coverage}\n\
-         Durable references (resolve details instead of guessing):\n{references}\n\
-         Retrieval commands:\n{commands}\n\
-         </genehub-source-index>"
-    )
-}
-
-fn fallback_context(session_id: &str, messages: &[Message], error: &str) -> ContextMaterial {
-    let raw = serde_json::to_string(messages).unwrap_or_default();
-    let text = tail_chars(&raw, 96_000);
-    ContextMaterial {
-        text: format!(
-            "The deterministic context projection was unavailable ({error}). The following is a bounded tail of the built-in Agent's private context and may be incomplete:\n{text}"
-        ),
-        source_index: format!(
-            "<genehub-source-index session-id=\"{session_id}\" digest=\"unavailable\">\n\
-             Coverage: unavailable; do not infer omitted detail.\n\
-             Retrieval command: genet session inspect {session_id}\n\
-             </genehub-source-index>"
-        ),
-    }
-}
-
-fn tail_chars(value: &str, max_chars: usize) -> String {
-    let count = value.chars().count();
-    if count <= max_chars {
-        return value.to_string();
-    }
-    value.chars().skip(count - max_chars).collect()
-}
-
 fn last_successful_text(messages: &[Message]) -> Option<String> {
     messages.iter().rev().find_map(|message| {
         let Message::Assistant {
@@ -532,6 +560,32 @@ fn last_successful_text(messages: &[Message]) -> Option<String> {
 
 /// `/skill:name [args]` loads the skill file, with any arguments appended as a
 /// user line.
+enum Queue {
+    Steer,
+    FollowUp,
+}
+
+/// What the agent is given for a user message: a `/skill:` command expands to
+/// the file; otherwise a named but unread Skill gets a reminder (§6.4).
+async fn prepare_message(state: &Arc<Mutex<State>>, message: String) -> String {
+    match expand_skill_command(state, message.clone()).await {
+        // `/skill:` already put the file in the prompt.
+        expanded if expanded != message => expanded,
+        _ => {
+            let guard = state.lock().await;
+            match skill_guard::prompt_reminder(
+                &message,
+                &guard.skills,
+                &guard.session.messages,
+                &guard.cwd,
+            ) {
+                Some(reminder) => format!("{message}\n\n{reminder}"),
+                None => message,
+            }
+        }
+    }
+}
+
 async fn expand_skill_command(state: &Arc<Mutex<State>>, message: String) -> String {
     let Some(rest) = message.strip_prefix(SKILL_COMMAND_PREFIX) else {
         return message;
@@ -588,6 +642,8 @@ mod tests {
     fn model(provider: &str, id: &str) -> ModelConfig {
         ModelConfig {
             thinking_mode: None,
+            thinking_efforts: Vec::new(),
+            compat: crate::config::Compat::default(),
             provider: provider.into(),
             id: id.into(),
             name: None,
@@ -600,6 +656,27 @@ mod tests {
             reasoning: None,
             input_modalities: Vec::new(),
         }
+    }
+
+    #[test]
+    fn the_configure_command_carries_what_argv_no_longer_does() {
+        let mut args = cli::Args {
+            add_system_prompt: vec!["from argv".into()],
+            ..Default::default()
+        };
+        apply_configure(
+            &mut args,
+            r#"{"type":"configure","session":"/s/session.jsonl","genehubSessionId":"s_1","systemPrompts":["host rules"]}"#,
+        )
+        .unwrap();
+        assert_eq!(args.session.as_deref(), Some("/s/session.jsonl"));
+        assert_eq!(args.genehub_session_id.as_deref(), Some("s_1"));
+        assert_eq!(args.add_system_prompt, vec!["from argv", "host rules"]);
+
+        let mut args = cli::Args::default();
+        assert!(apply_configure(&mut args, r#"{"type":"prompt","message":"hi"}"#).is_err());
+        assert!(apply_configure(&mut args, "not json").is_err());
+        assert!(apply_configure(&mut args, r#"{"type":"configure","systemPrompts":"x"}"#).is_err());
     }
 
     #[test]
@@ -655,6 +732,8 @@ mod tests {
             tools_enabled: true,
             abort: Arc::new(state::Abort::new()),
             running: None,
+            retry: state::RetrySettings::default(),
+            queued: state::Queued::default(),
         }));
 
         run_compaction(state.clone()).await;
@@ -668,5 +747,86 @@ mod tests {
         assert!(raw.contains("\"type\":\"compaction\""));
         assert!(raw.contains("genehub-source-index"));
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    }
+
+    /// The admission half of steering: a running agent queues, an idle one
+    /// refuses so the client sends a prompt instead, and a bare prompt never
+    /// silently joins a run.
+    #[tokio::test]
+    async fn steering_is_admitted_only_while_a_run_is_on() {
+        let dir = std::env::temp_dir().join(format!("genet-admit-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (sink, mut frames) = tokio::sync::mpsc::unbounded_channel();
+        let state = Arc::new(Mutex::new(State {
+            emitter: rpc::Emitter::collector(sink),
+            session: Session::in_memory(dir.clone()),
+            models: Vec::new(),
+            current_model: None,
+            thinking_level: "off".into(),
+            auto_compaction: true,
+            genehub_session_id: None,
+            skills: Vec::new(),
+            additional_system_prompts: Vec::new(),
+            cwd: dir,
+            stats: Usage::default(),
+            streaming: false,
+            compacting: false,
+            tools_enabled: true,
+            abort: Arc::new(state::Abort::new()),
+            running: None,
+            retry: state::RetrySettings::default(),
+            queued: state::Queued::default(),
+        }));
+        let command = |value: Value| serde_json::from_value::<Command>(value).unwrap();
+        async fn reply(frames: &mut tokio::sync::mpsc::UnboundedReceiver<Value>) -> Value {
+            loop {
+                let frame = frames.recv().await.expect("a reply");
+                if frame["type"] == "response" {
+                    return frame;
+                }
+            }
+        }
+
+        handle(
+            &state,
+            command(json!({"id": "1", "type": "steer", "message": "x"})),
+        )
+        .await;
+        let idle = reply(&mut frames).await;
+        assert_eq!(idle["success"], false);
+        assert_eq!(idle["error"], "agent is not streaming");
+
+        state.lock().await.streaming = true;
+        handle(
+            &state,
+            command(json!({"id": "2", "type": "steer", "message": "a"})),
+        )
+        .await;
+        handle(
+            &state,
+            command(json!({"id": "3", "type": "follow_up", "message": "b"})),
+        )
+        .await;
+        handle(
+            &state,
+            command(json!({"id": "4", "type": "prompt", "message": "c", "streamingBehavior": "followUp"})),
+        )
+        .await;
+        for expected in [1, 2, 3] {
+            let frame = reply(&mut frames).await;
+            assert_eq!(frame["success"], true, "{frame}");
+            assert_eq!(frame["data"]["queued"], expected);
+        }
+        handle(
+            &state,
+            command(json!({"id": "5", "type": "prompt", "message": "d"})),
+        )
+        .await;
+        assert_eq!(reply(&mut frames).await["success"], false);
+
+        let guard = state.lock().await;
+        assert_eq!(guard.queued.steering.len(), 1);
+        assert_eq!(guard.queued.follow_up.len(), 2);
+        assert_eq!(guard.state_value()["pendingMessageCount"], 3);
     }
 }

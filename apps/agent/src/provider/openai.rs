@@ -8,9 +8,13 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedSender;
 
-use super::{media, reasoning_effort, ProviderEvent, Request, SseBuffer};
+use super::{
+    clamp_max_tokens_to_context, media, select_effort, transform, ProviderEvent, Request, SseBuffer,
+};
 use crate::config::ModelConfig;
 use crate::protocol::{Content, Message, StopReason, Usage};
+
+const REASONING_FIELDS: [&str; 3] = ["reasoning_content", "reasoning", "reasoning_text"];
 
 #[derive(Default, Clone)]
 struct PartialToolCall {
@@ -54,11 +58,9 @@ pub async fn stream(
         .await?;
 
     if !response.status().is_success() {
-        let status = response.status();
-        let detail = response.text().await.unwrap_or_default();
         // Named after the provider the user configured, not the dialect we
         // speak to it: "openai 401" is baffling when you typed a DeepSeek key.
-        anyhow::bail!("{} {status}: {detail}", model.provider);
+        return Err(super::http_error(&model.provider, response).await.into());
     }
 
     let mut usage = Usage::default();
@@ -84,15 +86,21 @@ pub async fn stream(
             let delta = &choice["delta"];
 
             // Reasoning arrives on a separate field and always precedes the
-            // answer. Providers disagree on the name, so accept both.
-            let reasoning = delta["reasoning_content"]
-                .as_str()
-                .or_else(|| delta["reasoning"].as_str())
-                .filter(|text| !text.is_empty());
-            if let Some(text) = reasoning {
+            // answer. Providers disagree on the name; like pi, take the first
+            // non-empty one and remember it as the block's signature, so the
+            // same field carries it back on replay (DeepSeek and Kimi reject
+            // a tool-call turn whose reasoning went missing).
+            let reasoning = REASONING_FIELDS.iter().find_map(|field| {
+                delta[*field]
+                    .as_str()
+                    .filter(|text| !text.is_empty())
+                    .map(|text| (*field, text))
+            });
+            if let Some((field, text)) = reasoning {
                 if !thinking_open {
                     thinking_open = true;
                     let _ = events.send(ProviderEvent::ThinkingStart);
+                    let _ = events.send(ProviderEvent::ThinkingSignature(field.into()));
                 }
                 let _ = events.send(ProviderEvent::ThinkingDelta(text.into()));
             }
@@ -178,7 +186,18 @@ fn build_body(model: &ModelConfig, request: &Request) -> anyhow::Result<Value> {
     });
 
     if let Some(max_tokens) = model.max_tokens {
-        body["max_tokens"] = json!(max_tokens);
+        // `max_completion_tokens` for OpenAI's own reasoning models, the older
+        // name for everyone else; the daemon decides per endpoint.
+        let field = model
+            .compat
+            .max_tokens_field
+            .as_deref()
+            .unwrap_or("max_tokens");
+        body[field] = json!(clamp_max_tokens_to_context(
+            model.context_window,
+            request,
+            max_tokens
+        ));
     }
 
     if !request.tools.is_empty() {
@@ -203,9 +222,33 @@ fn build_body(model: &ModelConfig, request: &Request) -> anyhow::Result<Value> {
     // Only to a model that reasons. OpenAI rejects the entire request with a 400
     // when a plain chat model is asked for an effort level, so asking everything
     // would break the models most people pick first.
-    if model.reasoning.unwrap_or(false) {
-        if let Some(effort) = reasoning_effort(&request.thinking_level) {
-            body["reasoning_effort"] = json!(effort);
+    if model.reasoning.unwrap_or(false) && model.thinking() != "none" {
+        let effort = select_effort(&request.thinking_level, &model.thinking_efforts);
+        let effort_accepted = model.compat.supports_reasoning_effort != Some(false);
+        match model.compat.thinking_format.as_deref() {
+            // pi `thinkingFormat: "deepseek"`: an explicit switch, plus the
+            // effort where the endpoint takes one.
+            Some("deepseek") => {
+                let kind = if effort.is_some() {
+                    "enabled"
+                } else {
+                    "disabled"
+                };
+                body["thinking"] = json!({ "type": kind });
+                if let (Some(effort), true) = (&effort, effort_accepted) {
+                    body["reasoning_effort"] = json!(effort);
+                }
+            }
+            // pi `thinkingFormat: "openrouter"`: one nested object for every
+            // upstream, `none` to switch it off.
+            Some("openrouter") => {
+                body["reasoning"] = json!({ "effort": effort.as_deref().unwrap_or("none") });
+            }
+            _ => {
+                if let (Some(effort), true) = (effort, effort_accepted) {
+                    body["reasoning_effort"] = json!(effort);
+                }
+            }
         }
     }
 
@@ -218,7 +261,14 @@ pub fn convert_messages(
     system_prompt: &str,
     messages: &[Message],
 ) -> anyhow::Result<Value> {
-    let mut out = vec![json!({ "role": "system", "content": system_prompt })];
+    let messages = transform::transform_messages(messages, model, transform::normalize_openai_id);
+    let mut out = Vec::new();
+    if !system_prompt.is_empty() {
+        let developer =
+            model.reasoning == Some(true) && model.compat.supports_developer_role == Some(true);
+        let role = if developer { "developer" } else { "system" };
+        out.push(json!({ "role": role, "content": system_prompt }));
+    }
     let latest_user = messages
         .iter()
         .rposition(|message| matches!(message, Message::User { .. }));
@@ -262,11 +312,31 @@ pub fn convert_messages(
                 let text = content
                     .iter()
                     .filter_map(|block| match block {
-                        Content::Text { text } => Some(text.clone()),
+                        Content::Text { text } if !text.trim().is_empty() => Some(text.clone()),
                         _ => None,
                     })
                     .collect::<Vec<_>>()
                     .join("");
+                // `transform_messages` already turned another model's thinking
+                // into text; what is left is this model's own, sent back on
+                // the field it arrived on (pi uses the signature for this).
+                let thinking: Vec<(&str, Option<&str>)> = content
+                    .iter()
+                    .filter_map(|block| match block {
+                        Content::Thinking {
+                            thinking,
+                            signature,
+                            redacted: false,
+                        } if !thinking.trim().is_empty() => {
+                            Some((thinking.as_str(), signature.as_deref()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let reasoning_field = thinking
+                    .first()
+                    .and_then(|(_, signature)| *signature)
+                    .filter(|field| REASONING_FIELDS.contains(field));
                 let calls: Vec<Value> = content
                     .iter()
                     .filter_map(|block| match block {
@@ -290,6 +360,20 @@ pub fn convert_messages(
                     continue;
                 }
                 let mut entry = json!({ "role": "assistant", "content": text });
+                if let Some(field) = reasoning_field {
+                    let joined = thinking
+                        .iter()
+                        .map(|(text, _)| *text)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    entry[field] = json!(joined);
+                }
+                if model.compat.requires_reasoning_content == Some(true)
+                    && model.reasoning == Some(true)
+                    && entry.get("reasoning_content").is_none()
+                {
+                    entry["reasoning_content"] = json!("");
+                }
                 if !calls.is_empty() {
                     entry["tool_calls"] = Value::Array(calls);
                 }
@@ -317,16 +401,17 @@ pub fn convert_messages(
     Ok(Value::Array(out))
 }
 
+/// pi `parseChunkUsage`: `prompt_tokens` already includes cache hits and
+/// writes, so `input` is what is left once they are taken out — otherwise
+/// `totalTokens` counts every cached token twice.
 fn apply_usage(usage: &mut Usage, value: &Value) {
     if value.is_null() {
         return;
     }
-    if let Some(input) = first_u64(
+    let prompt = first_u64(
         value,
         &["prompt_tokens", "input_tokens", "inputTokens", "input"],
-    ) {
-        usage.input = input;
-    }
+    );
     if let Some(output) = first_u64(
         value,
         &[
@@ -336,6 +421,7 @@ fn apply_usage(usage: &mut Usage, value: &Value) {
             "output",
         ],
     ) {
+        usage.token_usage_reported = true;
         usage.output = output;
     }
     if let Some(cached) = first_u64(
@@ -356,11 +442,19 @@ fn apply_usage(usage: &mut Usage, value: &Value) {
     }) {
         usage.cache_read = cached;
     }
-    if let Some(written) = first_u64(
-        value,
-        &["cache_creation_input_tokens", "cacheWrite", "cache_write"],
-    ) {
+    if let Some(written) = first_u64(&value["prompt_tokens_details"], &["cache_write_tokens"])
+        .or_else(|| {
+            first_u64(
+                value,
+                &["cache_creation_input_tokens", "cacheWrite", "cache_write"],
+            )
+        })
+    {
         usage.cache_write = written;
+    }
+    if let Some(prompt) = prompt {
+        usage.token_usage_reported = true;
+        usage.input = prompt.saturating_sub(usage.cache_read + usage.cache_write);
     }
 }
 
@@ -383,18 +477,12 @@ mod tests {
 
     fn model() -> ModelConfig {
         ModelConfig {
-            thinking_mode: None,
             provider: "openai".into(),
             id: "gpt-test".into(),
-            name: None,
             api: Some("openai".into()),
-            base_url: None,
             api_key: Some("k".into()),
-            api_key_env: None,
-            context_window: None,
             max_tokens: Some(512),
-            reasoning: None,
-            input_modalities: Vec::new(),
+            ..ModelConfig::default()
         }
     }
 
@@ -409,40 +497,167 @@ mod tests {
 
     #[test]
     fn tool_calls_serialise_arguments_as_a_string() {
-        let messages = vec![Message::Assistant {
-            content: vec![Content::ToolCall {
+        let messages = vec![assistant(
+            "gpt-test",
+            vec![Content::ToolCall {
                 id: "call_1".into(),
                 name: "ls".into(),
                 arguments: json!({"path": "src"}),
             }],
-            api: "openai".into(),
-            provider: "openai".into(),
-            model: "m".into(),
-            usage: Usage::default(),
-            stop_reason: StopReason::ToolUse,
-            error_message: None,
-            timestamp: 0,
-        }];
+        )];
         let converted = convert_messages(&model(), Path::new("."), "sys", &messages).unwrap();
         let call = &converted[1]["tool_calls"][0];
         assert_eq!(call["function"]["name"], "ls");
         assert_eq!(call["function"]["arguments"], r#"{"path":"src"}"#);
     }
 
+    fn assistant(model_id: &str, content: Vec<Content>) -> Message {
+        Message::Assistant {
+            content,
+            api: "openai".into(),
+            provider: "openai".into(),
+            model: model_id.into(),
+            usage: Usage::default(),
+            stop_reason: StopReason::ToolUse,
+            error_message: None,
+            timestamp: 0,
+        }
+    }
+
     #[test]
     fn tool_results_use_the_tool_role() {
-        let messages = vec![Message::ToolResult {
-            tool_call_id: "call_1".into(),
-            tool_name: "ls".into(),
-            content: vec![Content::text("a\nb")],
-            details: None,
-            is_error: false,
-            timestamp: 0,
-        }];
+        let messages = vec![
+            assistant(
+                "gpt-test",
+                vec![Content::ToolCall {
+                    id: "call_1".into(),
+                    name: "ls".into(),
+                    arguments: json!({}),
+                }],
+            ),
+            Message::ToolResult {
+                tool_call_id: "call_1".into(),
+                tool_name: "ls".into(),
+                content: vec![Content::text("a\nb")],
+                details: None,
+                is_error: false,
+                timestamp: 0,
+            },
+        ];
         let converted = convert_messages(&model(), Path::new("."), "sys", &messages).unwrap();
-        assert_eq!(converted[1]["role"], "tool");
-        assert_eq!(converted[1]["tool_call_id"], "call_1");
-        assert_eq!(converted[1]["content"], "a\nb");
+        assert_eq!(converted[2]["role"], "tool");
+        assert_eq!(converted[2]["tool_call_id"], "call_1");
+        assert_eq!(converted[2]["content"], "a\nb");
+    }
+
+    fn reasoner(compat: crate::config::Compat) -> ModelConfig {
+        ModelConfig {
+            reasoning: Some(true),
+            compat,
+            ..model()
+        }
+    }
+
+    fn thought(field: &str) -> Content {
+        Content::Thinking {
+            thinking: "plan".into(),
+            signature: Some(field.into()),
+            redacted: false,
+        }
+    }
+
+    #[test]
+    fn reasoning_goes_back_on_the_field_it_came_from() {
+        let call = Content::ToolCall {
+            id: "c".into(),
+            name: "ls".into(),
+            arguments: json!({}),
+        };
+        let messages = vec![
+            Message::user("go"),
+            assistant("gpt-test", vec![thought("reasoning_content"), call.clone()]),
+        ];
+        let converted = convert_messages(
+            &reasoner(Default::default()),
+            Path::new("."),
+            "sys",
+            &messages,
+        )
+        .unwrap();
+        assert_eq!(converted[2]["reasoning_content"], "plan");
+
+        // Another model's reasoning is only context: it becomes text.
+        let foreign = vec![
+            Message::user("go"),
+            assistant(
+                "other",
+                vec![thought("reasoning_content"), Content::text("hi")],
+            ),
+        ];
+        let converted = convert_messages(
+            &reasoner(Default::default()),
+            Path::new("."),
+            "sys",
+            &foreign,
+        )
+        .unwrap();
+        assert!(converted[2].get("reasoning_content").is_none());
+        assert_eq!(converted[2]["content"], "planhi");
+
+        // DeepSeek and Kimi insist on the field even when nothing was thought.
+        let strict = reasoner(crate::config::Compat {
+            requires_reasoning_content: Some(true),
+            ..Default::default()
+        });
+        let bare = vec![Message::user("go"), assistant("gpt-test", vec![call])];
+        let converted = convert_messages(&strict, Path::new("."), "sys", &bare).unwrap();
+        assert_eq!(converted[2]["reasoning_content"], "");
+    }
+
+    #[test]
+    fn compat_shapes_the_request() {
+        let developer = reasoner(crate::config::Compat {
+            supports_developer_role: Some(true),
+            max_tokens_field: Some("max_completion_tokens".into()),
+            ..Default::default()
+        });
+        let body = build_body(&developer, &asking("high")).unwrap();
+        assert_eq!(body["messages"][0]["role"], "developer");
+        assert_eq!(body["max_completion_tokens"], 512);
+        assert!(body.get("max_tokens").is_none());
+
+        let deepseek = reasoner(crate::config::Compat {
+            thinking_format: Some("deepseek".into()),
+            ..Default::default()
+        });
+        let body = build_body(&deepseek, &asking("high")).unwrap();
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["reasoning_effort"], "high");
+        let body = build_body(&deepseek, &asking("off")).unwrap();
+        assert_eq!(body["thinking"]["type"], "disabled");
+        assert!(body.get("reasoning_effort").is_none());
+
+        let openrouter = reasoner(crate::config::Compat {
+            thinking_format: Some("openrouter".into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            build_body(&openrouter, &asking("low")).unwrap()["reasoning"]["effort"],
+            "low"
+        );
+        assert_eq!(
+            build_body(&openrouter, &asking("off")).unwrap()["reasoning"]["effort"],
+            "none"
+        );
+
+        let no_effort = reasoner(crate::config::Compat {
+            supports_reasoning_effort: Some(false),
+            ..Default::default()
+        });
+        assert!(build_body(&no_effort, &asking("high"))
+            .unwrap()
+            .get("reasoning_effort")
+            .is_none());
     }
 
     fn asking(level: &str) -> Request {
@@ -516,7 +731,7 @@ mod tests {
                 "prompt_cache_hit_tokens": 7
             }),
         );
-        assert_eq!(usage.input, 11);
+        assert_eq!(usage.input, 4);
         assert_eq!(usage.output, 4);
         assert_eq!(usage.cache_read, 7);
 
@@ -528,7 +743,7 @@ mod tests {
                 "prompt_tokens_details": { "cached_tokens": 15 }
             }),
         );
-        assert_eq!(usage.input, 20);
+        assert_eq!(usage.input, 5);
         assert_eq!(usage.output, 6);
         assert_eq!(usage.cache_read, 15);
     }

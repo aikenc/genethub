@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 
-import { BlockedError, defineJourney } from "../../framework/public.ts";
+import { BlockedError, defineJourney, seedScriptAgentRuntime } from "../../framework/public.ts";
 
 defineJourney(
   {
@@ -14,7 +14,7 @@ defineJourney(
     expectedDurationMs: 90_000,
     timeoutMs: 180_000,
     surfaces: ["daemon", "agent", "workbench-client"],
-    productInterfaces: ["@genehub/workbench/client"],
+    productInterfaces: ["@genehub/workbench/client", "agent-serve-protocol-1"],
   },
   async (t) => {
     const which = spawnSync("which", ["cursor-agent"], { encoding: "utf8" });
@@ -22,14 +22,12 @@ defineJourney(
       throw new BlockedError("cursor-agent is not on PATH");
     }
     t.flows.main.seedHostCursorLogin(t.env);
+    seedScriptAgentRuntime(t.env);
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
     try {
-      const agents = await opened.client.call({ type: "agent.refresh" });
-      t.assertions.assert(agents?.type === "agents", `agent.refresh returned ${agents?.type}`);
-      const cursor = agents?.type === "agents" ? agents.data.find((agent) => agent.id === "cursor") : undefined;
-      if (!cursor || cursor.probe.state !== "ready") {
-        throw new BlockedError(`cursor agent is not ready: ${JSON.stringify(cursor?.probe)}`);
-      }
+      // Script Agents report state after start; a real CLI that never gets
+      // ready (absent login, slow probe) is an environment fact.
+      const cursor = await t.flows.main.requireAgentReady(opened.client, "cursor", 60_000);
       const modelId =
         cursor.catalog.models.find((model) => model.id.includes("composer-2.5[fast=true]"))?.id ??
         cursor.catalog.models[0]?.id ??

@@ -107,7 +107,7 @@ for (const scenario of ["plain", "multiple-repos", "own-worktree", "parent-repo"
     writeFileSync(path.join(source, "prompts/direct-worker.md"), "TRIAL_MATERIAL_WORKER: verify and write only in the assigned material, preserving its branches.");
     writeFileSync(path.join(source, "roles/worker.yaml"), JSON.stringify({ schema: "genehub.workflow.role.v1", id: "worker", agentId: "genet", modelId: "deepseek/deepseek-v4-flash", userInteraction: "readOnly", prompt: "prompts/direct-worker.md" }));
     if (scenario === "readonly-unsupported") {
-      writeFileSync(path.join(source, "roles/worker.yaml"), JSON.stringify({ schema: "genehub.workflow.role.v1", id: "worker", agentId: "tclaude", evidenceOnly: true, userInteraction: "readOnly", prompt: "prompts/direct-worker.md" }));
+      writeFileSync(path.join(source, "roles/worker.yaml"), JSON.stringify({ schema: "genehub.workflow.role.v1", id: "worker", agentId: "codex", evidenceOnly: true, userInteraction: "readOnly", prompt: "prompts/direct-worker.md" }));
     }
 
     writeFileSync(path.join(source, "flows/trial-data.yaml"), JSON.stringify({ schema: "genehub.workflow.definition.v2", id: "trial-data", version: 2,
@@ -177,7 +177,7 @@ for (const scenario of ["plain", "multiple-repos", "own-worktree", "parent-repo"
     if (scenario === "readonly-unsupported") {
       const node = run?.nodes.find(n => n.uses === "agent.session");
       t.assertions.assert(!!run && ["blocked", "failed"].includes(run.status)
-        && JSON.stringify(run).includes("evidenceOnlyUnsupported") && !node?.sessionId && seen.size === 0,
+        && JSON.stringify(run).includes("evidenceOnlyUnsupported: Agent 'codex'") && !node?.sessionId && seen.size === 0,
         `unsupported read-only adapter was started or refused without a capability reason: ${JSON.stringify(run)}`);
     } else if (good) {
       t.assertions.assert(run?.status === "completed" && run.workflowId === "trial-data" && run.dcgDigest === inspected.data.candidateDigest && run.executorWorkspaceId === executor.id && run.executionRoot === material, `material execution failed: ${JSON.stringify(run)}`);

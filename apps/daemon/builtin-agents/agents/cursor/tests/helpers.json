@@ -1,0 +1,221 @@
+{
+  "kind": "helpers",
+  "description": "cursor.rs parse/legacy/print_args/interrupted-note/guard tests and acp.rs status_json_and_text_agree_on_login",
+  "parse": [
+    [
+      "grok-4.7-medium-fast",
+      "grok-4.7",
+      "medium",
+      true
+    ],
+    [
+      "cursor-grok-4.6-high",
+      "cursor-grok-4.6",
+      "high",
+      false
+    ],
+    [
+      "claude-4.6-sonnet-medium-thinking-fast",
+      "claude-4.6-sonnet-thinking",
+      "medium",
+      true
+    ],
+    [
+      "composer-2.5-fast",
+      "composer-2.5",
+      null,
+      true
+    ]
+  ],
+  "legacyCatalog": [
+    {
+      "id": "grok-4.7",
+      "label": "Grok 4.7",
+      "reasoning": true,
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "supportsFast": true
+    },
+    {
+      "id": "cursor-grok-4.6",
+      "label": "Cursor Grok 4.6",
+      "reasoning": true,
+      "efforts": [
+        "high"
+      ],
+      "supportsFast": true
+    }
+  ],
+  "legacy": [
+    [
+      "grok-4.7",
+      [
+        "grok-4.7",
+        null,
+        null
+      ]
+    ],
+    [
+      "grok-4.7[effort=high,fast=true]",
+      [
+        "grok-4.7",
+        "high",
+        true
+      ]
+    ],
+    [
+      "grok-4.7[context=256k,reasoning_effort=high,fast=true]",
+      [
+        "grok-4.7",
+        "high",
+        true
+      ]
+    ],
+    [
+      "cursor-grok-4.6-high-fast",
+      [
+        "cursor-grok-4.6",
+        "high",
+        true
+      ]
+    ],
+    [
+      "nonexistent-model",
+      null
+    ]
+  ],
+  "printArgs": [
+    {
+      "slug": "grok-4.7-low-fast",
+      "chatId": "chat-1",
+      "mode": "plan",
+      "expect": [
+        "--print",
+        "--single-turn",
+        "--output-format",
+        "stream-json",
+        "--stream-partial-output",
+        "--force",
+        "--sandbox",
+        "disabled",
+        "--trust",
+        "--approve-mcps",
+        "--model",
+        "grok-4.7-low-fast",
+        "--resume",
+        "chat-1",
+        "--mode",
+        "plan"
+      ]
+    },
+    {
+      "slug": null,
+      "chatId": null,
+      "mode": "agent",
+      "expect": [
+        "--print",
+        "--single-turn",
+        "--output-format",
+        "stream-json",
+        "--stream-partial-output",
+        "--force",
+        "--sandbox",
+        "disabled",
+        "--trust",
+        "--approve-mcps"
+      ]
+    }
+  ],
+  "status": [
+    [
+      "{\"loggedIn\":false}",
+      false
+    ],
+    [
+      "{\"authenticated\":true}",
+      true
+    ],
+    [
+      "{\n  \"status\": \"authenticated\",\n  \"isAuthenticated\": true\n}",
+      true
+    ],
+    [
+      "Not authenticated",
+      false
+    ],
+    [
+      "Not logged in",
+      false
+    ],
+    [
+      "Logged in as user@example.com",
+      true
+    ],
+    [
+      "usage: cursor-agent",
+      null
+    ]
+  ],
+  "interruptedNote": [
+    {
+      "prompt": "refactor the parser",
+      "partial": "I started by",
+      "contains": [
+        "refactor the parser",
+        "I started by"
+      ]
+    },
+    {
+      "prompt": "just this",
+      "partial": "  ",
+      "contains": [
+        "just this"
+      ],
+      "lacks": [
+        "partial reply"
+      ]
+    }
+  ],
+  "loginUrls": [
+    {
+      "line": "\u001b[2mOpen https://cursor.com/loginDeepControl?challenge=abc&uuid=1-2&mode=login to sign in.\u001b[0m",
+      "url": "https://cursor.com/loginDeepControl?challenge=abc&uuid=1-2&mode=login"
+    },
+    {
+      "line": "Waiting for authentication...",
+      "url": null
+    }
+  ],
+  "guard": {
+    "before": {
+      "model": {
+        "modelId": "grok-4.7"
+      },
+      "selectedModel": {
+        "modelId": "grok-4.7"
+      },
+      "theme": "dark"
+    },
+    "during": {
+      "model": {
+        "modelId": "gpt-5.5"
+      },
+      "selectedModel": {
+        "modelId": "gpt-5.5"
+      },
+      "theme": "light"
+    },
+    "after": {
+      "model": {
+        "modelId": "grok-4.7"
+      },
+      "selectedModel": {
+        "modelId": "grok-4.7"
+      },
+      "theme": "light"
+    }
+  }
+}

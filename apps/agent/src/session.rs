@@ -19,6 +19,9 @@ pub struct Session {
     pub file: Option<PathBuf>,
     pub cwd: PathBuf,
     pub messages: Vec<Message>,
+    /// Messages before this index predate the latest archive or compaction.
+    /// Their reported usage describes a context that no longer exists.
+    pub usage_floor: usize,
     leaf_id: Option<String>,
     name: Option<String>,
 }
@@ -31,6 +34,7 @@ impl Session {
             file: None,
             cwd,
             messages: Vec::new(),
+            usage_floor: 0,
             leaf_id: None,
             name: None,
         }
@@ -43,6 +47,7 @@ impl Session {
             file: Some(path.clone()),
             cwd,
             messages: Vec::new(),
+            usage_floor: 0,
             leaf_id: None,
             name: None,
         };
@@ -88,6 +93,7 @@ impl Session {
             return;
         }
         self.messages.truncate(retain_messages);
+        self.usage_floor = self.usage_floor.min(retain_messages);
         self.append_entry(
             "failed_turn_rollback",
             json!({ "retainMessages": retain_messages }),
@@ -109,12 +115,41 @@ impl Session {
     /// append-only audit trail. Reopening the file replays the same reset at
     /// this entry; the private analysis session that produced it is never
     /// written here.
+    /// Archives everything except `kept` (ascending indices). The summary
+    /// opens the new context and the kept messages follow verbatim. On disk
+    /// this is a compaction entry followed by ordinary message entries, so an
+    /// older loader replays the same context.
+    pub fn replace_with_archive(&mut self, summary: String, reason: &str, kept: &[usize]) {
+        let message = Message::user(format!(
+            "<genehub-compacted-context>\n{summary}\n</genehub-compacted-context>"
+        ));
+        let kept: Vec<Message> = kept
+            .iter()
+            .filter_map(|index| self.messages.get(*index).cloned())
+            .collect();
+        self.messages.clear();
+        self.messages.push(message.clone());
+        self.append_entry(
+            "compaction",
+            json!({
+                "summary": summary,
+                "message": serde_json::to_value(message).unwrap_or(Value::Null),
+                "archive": { "reason": reason, "keptMessages": kept.len() },
+            }),
+        );
+        for message in kept {
+            self.append_message(message);
+        }
+        self.usage_floor = self.messages.len();
+    }
+
     pub fn replace_with_compaction(&mut self, summary: String) {
         let message = Message::user(format!(
             "<genehub-compacted-context>\n{summary}\n</genehub-compacted-context>"
         ));
         self.messages.clear();
         self.messages.push(message.clone());
+        self.usage_floor = 1;
         self.append_entry(
             "compaction",
             json!({
@@ -211,6 +246,10 @@ impl Session {
                     if let Some(message) = message {
                         self.messages.clear();
                         self.messages.push(message);
+                        self.usage_floor = 1 + entry
+                            .pointer("/archive/keptMessages")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0) as usize;
                     }
                 }
                 Some("failed_turn_rollback") => {
@@ -221,6 +260,7 @@ impl Session {
                         .filter(|retain| *retain <= self.messages.len())
                     {
                         self.messages.truncate(retain);
+                        self.usage_floor = self.usage_floor.min(retain);
                     }
                 }
                 Some("session_info") => {
@@ -330,6 +370,31 @@ mod tests {
         session.append_message(Message::user("hello"));
         assert!(session.file.is_none());
         assert_eq!(session.messages.len(), 1);
+    }
+
+    #[test]
+    fn archive_keeps_the_tail_verbatim_across_reopen() {
+        let dir = temp_dir("archive");
+        let file = dir.join("s.jsonl");
+        let mut session = Session::open(file.clone(), dir.clone());
+        session.append_message(Message::user("old detail"));
+        session.append_message(Message::user("kept one"));
+        session.append_message(Message::user("current prompt"));
+        session.replace_with_archive("projection".into(), "threshold", &[1, 2]);
+        assert_eq!(session.messages.len(), 3);
+        assert_eq!(session.usage_floor, 3);
+
+        let reopened = Session::open(file, dir);
+        assert_eq!(reopened.messages.len(), 3);
+        assert_eq!(reopened.usage_floor, 3);
+        assert!(matches!(
+            &reopened.messages[0],
+            Message::User { content, .. } if content.contains("projection")
+        ));
+        assert!(matches!(
+            &reopened.messages[2],
+            Message::User { content, .. } if content == "current prompt"
+        ));
     }
 
     #[test]

@@ -101,7 +101,7 @@ daemon 跑在 wasm component 里时，前两条由 guest 自己开 socket，`was
 1. `packages/proto`：会话协议定稿，生成两端类型
 2. `apps/daemon`：会话内核 + `genet` adapter + 本地 WS
 3. `packages/workbench`：工作台骨架（会话流、工具渲染、输入区）
-4. `apps/daemon`：`acp` 与 `opencode` adapter —— 用另外两种形状证伪抽象
+4. `apps/daemon`：脚本 Agent 层（`codex`、`cursor` 两种形状）—— 用另外两种形状证伪抽象
 5. `apps/relay` + 配对：出站长连接、票据、转发
 6. `apps/desktop`：Tauri 壳 + sidecar + 托盘
 7. 串联与验收：装 → 跑一条任务 → 换设备打开，按 [testing.md](./testing.md) 走集成与 E2E
