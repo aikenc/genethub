@@ -122,7 +122,7 @@ impl Registry {
 
     /// Starts every script Agent's process in the background the first time
     /// anyone asks what Agents exist. Not at daemon start: a daemon nobody is
-    /// looking at must not install a Python runtime or touch the network.
+    /// looking at has no reason to run Agent processes.
     fn warm(&self) {
         if self.warmed.swap(true, std::sync::atomic::Ordering::SeqCst) {
             return;
@@ -134,6 +134,13 @@ impl Registry {
 
     pub fn subscribe(&self) -> broadcast::Receiver<RegistryEvent> {
         self.events.subscribe()
+    }
+
+    /// The platform Python the installer recorded, in the daemon's own path
+    /// spelling, or `None` when none is installed.
+    pub fn python(&self) -> Option<std::path::PathBuf> {
+        let python = self.runtime.as_ref()?.python().ok()?;
+        Some(crate::guest_paths::guest_path(&python))
     }
 
     fn hosts(&self) -> Vec<Arc<AgentHost>> {

@@ -9,7 +9,7 @@ builtin/<id>/   shipped with GeneHub; rewritten on every start — do not edit
 user/<id>/      yours: a new Agent, or a copy of builtin/<id> that replaces it
 state/<id>/     the Agent's own state (caches, install prefix); kept on reset
 sdk/            boot.py and the genehub_agent package
-runtime/        the Python install scripts and the Python they installed
+runtime/        the platform Python the installer put there (python.json)
 ```
 
 ## Change an existing Agent
@@ -71,6 +71,8 @@ install, login, catalog, sessions and import.
 - Every request has a deadline. Missing it, exiting or breaking the pipe
   restarts the process, and live sessions are started again with the last
   value given to `ctx.set_persist`.
+- The Python is installed by the installers, never by the daemon
+  (`docs/python-runtime.md`). Missing, the Agent is unavailable with the reason.
 - Standard library only. The interpreter runs isolated (`-I`); nothing from the
   user's Python, site-packages or `PYTHON*` variables is visible, and this
   Python is never put on the `PATH` of the CLIs an Agent starts.

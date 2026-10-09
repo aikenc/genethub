@@ -57,6 +57,7 @@ class SessionConfig:
     additional_system_prompt: Optional[str] = None
     skills_dir: Optional[str] = None
     front_door_cli: Optional[str] = None
+    python: Optional[str] = None
     controller_token: Optional[str] = None
     resume: Any = None
 
@@ -74,6 +75,7 @@ class SessionConfig:
             additional_system_prompt=raw.get("additionalSystemPrompt"),
             skills_dir=raw.get("skillsDir"),
             front_door_cli=raw.get("frontDoorCli"),
+            python=raw.get("python"),
             controller_token=raw.get("controllerToken"),
             resume=raw.get("resume"),
         )
@@ -83,6 +85,8 @@ class SessionConfig:
         env = {"GENEHUB_SESSION_ID": self.session_id}
         if self.front_door_cli:
             env["GENEHUB_CLI"] = self.front_door_cli
+        if self.python:
+            env["GENEHUB_PYTHON"] = self.python
         if self.controller_token:
             env["GENEHUB_CONTROLLER_TOKEN"] = self.controller_token
         return env

@@ -37,6 +37,8 @@ case "$channel" in
     cli_binary=genet-dev
     host_binary=genehub-host-dev
     component=genehub_guest-dev.wasm
+    data_dir_name=GeneHub-dev
+    data_dir="${GENEHUB_DEV_DATA_DIR:-}"
     ;;
   beta)
     base="${GENEHUB_BETA_DOWNLOAD_BASE:-https://relay-beta.genethub.com/download/beta}"
@@ -45,6 +47,8 @@ case "$channel" in
     cli_binary=genet-beta
     host_binary=genehub-host-beta
     component=genehub_guest-beta.wasm
+    data_dir_name=GeneHub-beta
+    data_dir="${GENEHUB_BETA_DATA_DIR:-}"
     ;;
   stable)
     base="${GENEHUB_DOWNLOAD_BASE:-https://github.com/aikenc/genethub/releases/latest/download}"
@@ -53,6 +57,8 @@ case "$channel" in
     cli_binary=genet
     host_binary=genehub-host
     component=genehub_guest.wasm
+    data_dir_name=GeneHub
+    data_dir="${GENEHUB_DATA_DIR:-}"
     ;;
   *)
     # local: the tree's own state. There is no local artifact to download, so
@@ -70,6 +76,8 @@ case "$channel" in
     cli_binary=genet-local
     host_binary=genehub-host-local
     component=genehub_guest.wasm
+    data_dir_name=GeneHub-local
+    data_dir="${GENEHUB_LOCAL_DATA_DIR:-}"
     ;;
 esac
 
@@ -170,6 +178,25 @@ got="$(digest "$tmp/$asset")"
 say "==> installing into $bin_dir"
 mkdir -p "$tmp/unpacked" "$bin_dir"
 tar -xzf "$tmp/$asset" -C "$tmp/unpacked"
+
+# The platform Python: script Agents and the built-in Skills run on it. The
+# daemon never installs it, it only finds what this records, so an install is
+# not finished until it is in place — and it comes before anything on this
+# machine changes, so a failure here leaves the old version running. The
+# script travels in the tarball (already checked above); a release from before
+# it existed has none, and its daemon installs nothing either.
+python_script="$(find "$tmp/unpacked" -name install-python.sh -type f -print | head -n 1)"
+if [ -n "$python_script" ]; then
+  if [ -z "$data_dir" ]; then
+    case "$os" in
+      darwin) data_dir="$HOME/Library/Application Support/$data_dir_name" ;;
+      *) data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/$data_dir_name" ;;
+    esac
+  fi
+  say "==> installing the Python runtime"
+  sh "$python_script" "$data_dir/agents/runtime" \
+    || die "the Python runtime could not be installed. Nothing else was changed; run this installer again."
+fi
 if [ -z "$(find "$tmp/unpacked" -name "$component" -type f -print | head -n 1)" ]; then
   component="$shared_component"
   # A release from before per-channel names looks for the shared name, which

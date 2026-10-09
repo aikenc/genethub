@@ -124,6 +124,24 @@
   !insertmacro StopGeneHubProcesses
 !macroend
 
+!macro NSIS_HOOK_POSTINSTALL
+  ; The platform Python the script Agents and the built-in Skills run on. The
+  ; daemon never installs it: it only reads what this records, so an install is
+  ; finished when this is. The same script an update runs again, where it
+  ; finds the pinned build already there and downloads nothing. The target is
+  ; the data directory the shell's own daemon uses (see StopGeneHubProcesses).
+  DetailPrint "正在准备 Python 运行时…"
+  nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\bin\python-runtime\install-python.ps1" "$APPDATA\${GH_BUNDLE_ID}\${GH_DATA_DIR_NAME}\agents\runtime"'
+  Pop $0
+  StrCmp $0 "0" genehub_python_ready
+    DetailPrint "Python 运行时安装失败（退出码 $0）"
+    IfSilent +2
+      MessageBox MB_OK|MB_ICONSTOP "Python 运行时安装失败，详情见安装日志。请检查网络后重新运行安装程序。"
+    SetErrorLevel 2
+    Abort
+  genehub_python_ready:
+!macroend
+
 !macro NSIS_HOOK_PREUNINSTALL
   ; Same reason in reverse: an open file cannot be deleted, and an uninstall that
   ; leaves the daemon running leaves the machine reachable by an app that is no

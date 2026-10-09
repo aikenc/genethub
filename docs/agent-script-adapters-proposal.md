@@ -440,71 +440,35 @@ Agent 声明了这三者之外的设置项再加。
 - 物化出来的文件都不需要可执行权限：`.py` 由解释器读取，安装脚本由 `sh` 或 `powershell` 执行。
 - 体积：这些文件是几百 KB 量级的文本，远低于 host 对组件 64 MiB 的上限（`apps/host/src/update.rs`）。
 
-### 10.2 Python 运行时：每个平台一份安装脚本
+### 10.2 Python 运行时：安装程序交付，daemon 只读
 
-不要求各平台的安装方式一致，也不在官网托管 Python。每个平台一份安装脚本，随内置文件下发：
+交付方式、目录、脚本和失败处理见 [python-runtime.md](./python-runtime.md)。这里只留脚本 Agent 关心的几点：
 
-```
-<builtin>/runtime/
-  install-macos.sh       从上游下载并解压到目标目录
-  install-linux.sh
-  install-windows.ps1
-```
+- Python 由安装程序（`install.sh`、桌面安装器）和开发环境的 `devctl` 运行同一份脚本装好，写入
+  `<渠道数据目录>/agents/runtime/python.json`；daemon 不下载、不安装、不预热，只读这份记录。
+  找不到时，脚本 Agent 显示不可用，原因是「Python 运行时未安装」。
+- 版本和各平台 sha256 只在 `scripts/python-runtime/python.pin` 一处；三个平台都用 python-build-standalone。
+  换版本只随 App 版本升级，不支持 live 更新。官网不托管、也不重新打包任何 Python。
+- 哈希保证下载内容，所以上游地址和镜像都不需要可信：对不上哈希就换下一个地址。
 
-| 平台 | 上游 | 为什么选它 |
-|---|---|---|
-| Windows | python.org 官方的 embeddable zip | 官方提供，解压即用，不需要管理员权限 |
-| macOS | python-build-standalone 的 `install_only` 压缩包 | python.org 只有 `.pkg` 安装器，要管理员权限，装进系统目录，没法隔离 |
-| Linux | python-build-standalone 的 `install_only` 压缩包 | python.org 只提供源码 |
-
-python-build-standalone 是 GitHub 上的 `astral-sh/python-build-standalone`，现由 Astral 维护，uv、rye、mise、
-Bazel `rules_python` 都用它。
-
-脚本里写死四样东西：
-
-- 版本号。
-- 每个平台、每种架构的 sha256。
-- 下载地址，按顺序尝试：GitHub 或 python.org 原站，再到国内镜像（如阿里云的 GitHub release 镜像）。
-- 解压步骤：只用系统自带的工具，macOS / Linux 是 `curl` 或 `wget` 加 `tar`，Windows 是 PowerShell 的
-  `Invoke-WebRequest` 和 `Expand-Archive`。
-
-哈希写在签名的 wasm 里，所以镜像本身不需要可信，下载内容对不上哈希就换下一个地址。
-
-内核每次拉起 `serve` 前都执行一次本平台的安装脚本，取它最后一行输出的解释器绝对路径。脚本是幂等的：
-
-1. 已经装好，并且自检通过，就直接输出路径。自检见下面「隔离」第 5 条。
-2. 没装或版本不对，就下载、校验、解压、自检，按行输出 JSON 进度，内核把它显示成一个 job。
-3. 清理不是当前版本的旧目录。
-
-判断装没装、什么时候清理，全在脚本里，内核不需要知道。
-
-**升级 Python。** 改脚本里的版本和哈希，随下一次 Live 发布生效。Live 生效时所有 `serve` 重启，
-脚本装好新版本、删掉旧目录。官网不托管、也不重新打包任何 Python。
-
-**Windows 的伪终端。** embeddable zip 没有 pip，也装不了 pywinpty。SDK 改用标准库 `ctypes` 直接调用
-ConPTY 的系统 API，不需要额外的二进制模块。
+**Windows 的伪终端。** SDK 用标准库 `ctypes` 直接调用 ConPTY 的系统 API，不依赖额外的二进制模块（不需要 pywinpty）。
 
 **隔离。** 由平台强制，脚本无法改变：
 
-1. **只用绝对路径启动。** 用 `<渠道数据目录>/runtime/python-<版本>/bin/python3`，Windows 是 `python.exe`。
-   - 永远不在 `PATH` 里查找，也就碰不到系统 Python、用户的 venv 或 conda、Windows 应用商店的 `python.exe` 别名。
-   - 运行时目录只读，不允许往里 `pip install`。
+1. **只用绝对路径启动。** 读 `python.json` 里的绝对路径，永远不在 `PATH` 里查找，也就碰不到系统 Python、
+   用户的 venv 或 conda、Windows 应用商店的 `python.exe` 别名。
+   - 标准库目录里放有 `EXTERNALLY-MANAGED`（PEP 668）：往这份 Python 里全局 `pip install` 会直接失败，
+     并提示先建虚拟环境；虚拟环境本身不受影响。
 2. **用隔离模式启动**，命令是 `python -I -X utf8 <builtin>/sdk/boot.py <agent-dir>`。
    - `-I` 会忽略所有 `PYTHON*` 环境变量和用户自己的 site-packages，也不会把脚本所在目录加进搜索路径。
    - 搜索路径由 `boot.py` 精确指定，只有这四处：`<agent>/lib`、`<agent>`、SDK、运行时自带的标准库。
-     Windows embeddable 自带的 `._pth` 文件也同样限制搜索路径。
    - `.pyc` 缓存写到 `state/<id>/` 下。
 3. **反方向也要隔离。** 运行时目录绝不加进 Agent CLI 子进程的 `PATH`。
    - Agent 在用户项目里执行 `python`，用的仍然是用户系统里的 Python 或他的 venv、conda。
    - 脚本拉起 CLI 时传的是用户原本的环境，只去掉 GeneHub 自己注入的变量。
-4. **Skill 脚本只通过 `GENEHUB_PYTHON`（一个绝对路径）使用这份运行时**，启动时同样带 `-I`。
-5. **启用前先自检。** 安装脚本运行 `python -I -c "import sys; print(sys.version)"`，结果和脚本里写的版本对不上，
-   就报错，不输出路径。
-
-**时机。** 第一次需要拉起脚本时在后台安装。装完之前，列表照常显示清单里的信息，并标出「运行时准备中」。
-整个过程不需要用户确认，也不需要管理员权限，符合 B5。
-
-**待实测。** macOS 上解压出来的二进制不能带 quarantine 标记，否则会被 Gatekeeper 拦下。用 `curl` 下载一般不会带上，要实测确认。
+4. **平台自带 Python 通过 `GENEHUB_PYTHON`（一个绝对路径）暴露给会话**，Skill 脚本和 Agent 都可以用它运行脚本、
+   创建虚拟环境；它只读，不往里装包。
+5. **启用前先自检。** 安装脚本运行 `python -I -c ...`，版本和 `python.pin` 对不上就报错，不写 `python.json`。
 
 ### 10.3 SDK `genehub_agent`
 
@@ -635,7 +599,7 @@ SDK 提供以下几样：
 
 | # | 问题 | 决定 | 落在 |
 |---|---|---|---|
-| 1 | Python 运行时怎么交付 | 每个平台一份安装脚本，直接从上游下载（Windows 用 python.org 的 embeddable zip，macOS / Linux 用 python-build-standalone），版本和哈希写在脚本里；官网不托管；严格隔离系统 Python | §10.2 |
+| 1 | Python 运行时怎么交付 | 一份安装脚本（`scripts/python-runtime/`），由安装程序和开发工具运行，直接从上游下载 python-build-standalone（三个平台相同），版本和哈希写在 `python.pin`；daemon 只读 `python.json`；官网不托管；严格隔离系统 Python | §10.2、[python-runtime.md](./python-runtime.md) |
 | 2 | 用户层是否按渠道隔离 | 隔离 | §4.1 |
 | 3 | 在工作台终端里让用户自己登录的兜底原语 | 删除：它等于让用户执行 CLI | §7.5 |
 | 4 | 自动更新 | 跟随 daemon Live 更新，不单设开关 | §8.3 |

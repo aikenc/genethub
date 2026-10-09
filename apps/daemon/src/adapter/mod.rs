@@ -51,6 +51,9 @@ pub struct SessionConfig {
     /// Absolute front-door CLI selected by the channel launcher. Every Agent
     /// receives the same binding; absence is explicit and never guessed.
     pub front_door_cli: Option<PathBuf>,
+    /// The platform Python the installer put on this machine, when there is
+    /// one. Exported as GENEHUB_PYTHON next to GENEHUB_CLI.
+    pub python: Option<PathBuf>,
     /// Session-bound proof accepted only by this daemon's local CLI front.
     /// It lets an ordinary Agent act as a Workflow controller without turning
     /// that Agent or Session into a separate product type.
@@ -451,6 +454,14 @@ pub(super) fn apply_session_environment(
             command.env_remove("GENEHUB_CLI");
         }
     }
+    match &config.python {
+        Some(path) => {
+            command.env("GENEHUB_PYTHON", path);
+        }
+        None => {
+            command.env_remove("GENEHUB_PYTHON");
+        }
+    }
 }
 
 /// Starts a child process without giving it a console window.
@@ -690,7 +701,8 @@ mod tests {
         // Script processes are not sessions: they get the process group but
         // deliberately not the session binding (each session's CLI gets it
         // from the script).
-        for file in ["script/host.rs", "script/runtime.rs"] {
+        {
+            let file = "script/host.rs";
             let source = std::fs::read_to_string(here.join(file)).expect("read the adapter");
             assert!(
                 source.contains("owned_child"),
@@ -793,6 +805,7 @@ mod tests {
             additional_system_prompt: None,
             skills_dir: None,
             front_door_cli: Some(PathBuf::from("/opt/genehub/genet-beta")),
+            python: None,
             controller_token: Some("session-proof".into()),
             scratch_dir: PathBuf::from("/scratch"),
             providers: Default::default(),

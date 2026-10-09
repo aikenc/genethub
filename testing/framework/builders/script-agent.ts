@@ -23,7 +23,7 @@ import {
 
 const OPEN_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const FIXTURE = fileURLToPath(new URL("../../fixtures/script-agent/", import.meta.url));
-/** The pinned build the shipped install scripts install, read from them. */
+/** The pinned build the shipped install script installs, read from it. */
 export type PinnedScriptAgentRuntime = PinnedPythonRuntime;
 
 export function pinnedScriptAgentRuntime(openRoot = OPEN_ROOT): PinnedScriptAgentRuntime {
@@ -35,16 +35,6 @@ export function cachedScriptAgentRuntime(openRoot = OPEN_ROOT): string {
   return pinnedPythonRuntimeCache(openRoot).tree;
 }
 
-/**
- * A `GENEHUB_PYTHON_MIRRORS` value (a `file:` URL) that serves the pinned
- * archive from the host cache, for a daemon whose data directory a case
- * cannot seed (one a product package's own test suite creates). The shipped
- * installer still checks the hash and unpacks it; nothing is downloaded.
- */
-export function scriptAgentRuntimeMirror(openRoot = OPEN_ROOT): string {
-  return pinnedPythonRuntimeCache(openRoot).mirror;
-}
-
 export interface SeededScriptAgentRuntime {
   /** `<data>/agents/runtime/python-<version>-<release>`. */
   dir: string;
@@ -54,12 +44,11 @@ export interface SeededScriptAgentRuntime {
 }
 
 /**
- * Puts a private copy of the pinned build where the shipped, idempotent
- * install script looks for it, so its `usable` check passes and it reports
- * that path instead of downloading. Must run before the daemon starts: it
- * runs `install.sh` before every script Agent start. A copy, not a link:
- * the interpreter writes bytecode into its own tree, and the installer may
- * prune or replace it; neither may reach the shared cache.
+ * Puts a private copy of the pinned build where the installer would, and
+ * records it in `python.json` the way the installer does, so the daemon finds
+ * a platform Python without anything being downloaded. A copy, not a link:
+ * the interpreter writes bytecode into its own tree, and neither that nor a
+ * later installer run may reach the shared cache.
  */
 export function seedScriptAgentRuntime(lease: EnvironmentLease, openRoot = OPEN_ROOT): SeededScriptAgentRuntime {
   const pinned = pinnedScriptAgentRuntime(openRoot);
@@ -74,24 +63,28 @@ export function seedScriptAgentRuntime(lease: EnvironmentLease, openRoot = OPEN_
       mode: fsConstants.COPYFILE_FICLONE,
     });
   }
-  return { dir, python: path.join(dir, "bin", "python3"), identity: scriptAgentRuntimeIdentity(dir) };
+  const python = path.join(dir, "bin", "python3");
+  writeFileSync(path.join(path.dirname(dir), "python.json"), `${JSON.stringify({ python })}\n`);
+  return { dir, python, identity: scriptAgentRuntimeIdentity(dir) };
 }
 
 const unseeded = new Set<string>();
 let cacheUnavailable = false;
 
 /** For a case about the runtime install itself: daemons started on this
- * lease get no seeded runtime, so its data directory is a fresh machine's. */
+ * lease get no seeded runtime, so its data directory is a fresh machine's
+ * (no `python.json`). */
 export function keepScriptAgentRuntimeUnseeded(lease: EnvironmentLease): void {
   unseeded.add(path.resolve(lease.data));
 }
 
 /**
  * What `startDaemon` does for every lease: any daemon lists Agents as soon
- * as a client asks, which starts every script Agent and so the installer.
- * When the cache cannot be had (cold and offline) the lease stays as a fresh
- * machine would be; a case that needs a working runtime calls
- * `seedScriptAgentRuntime` itself and is blocked there.
+ * as a client asks, which starts every script Agent, and those need the
+ * platform Python the installer would have put there. When the cache cannot
+ * be had (cold and offline) the lease stays as a fresh machine would be; a
+ * case that needs a working runtime calls `seedScriptAgentRuntime` itself and
+ * is blocked there.
  */
 export function seedScriptAgentRuntimeByDefault(lease: EnvironmentLease, openRoot = OPEN_ROOT): void {
   if (cacheUnavailable || unseeded.has(path.resolve(lease.data))) return;
@@ -113,13 +106,6 @@ export function scriptAgentRuntimeIdentity(dir: string): string {
   } catch {
     return "missing";
   }
-}
-
-/** The lines the daemon adds to an Agent's `agent.logs` from the install
- * script's progress output (`host.rs` `runtime_progress`). The script only
- * reports progress when it downloads, unpacks and verifies a build. */
-export function runtimeInstallerLines(logs: string[]): string[] {
-  return logs.filter((line) => line.startsWith("[python-runtime]"));
 }
 
 /** What `testing/fixtures/script-agent/agent.py` reads from `control.json`. */

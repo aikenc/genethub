@@ -80,7 +80,9 @@ const LOCAL_RELEASE: ReleaseNames = {
   component: "genehub_guest.wasm",
 };
 
-function fakeRelease(names: ReleaseNames = LOCAL_RELEASE): string {
+/** `pythonInstaller`: the body of the `python-runtime/install-python.sh` the
+ * release carries next to its binaries, when it carries one. */
+function fakeRelease(names: ReleaseNames = LOCAL_RELEASE, pythonInstaller?: string): string {
   const dir = mkdtempSync(path.join(tmpdir(), "genehub-install-release-"));
   const staged = path.join(dir, "staged");
   mkdirSync(staged, { recursive: true });
@@ -94,10 +96,16 @@ function fakeRelease(names: ReleaseNames = LOCAL_RELEASE): string {
   writeFileSync(host, `#!/bin/sh\necho ${names.host}\n`);
   chmodSync(host, 0o755);
   writeFileSync(path.join(staged, names.component), names.guest);
+  const members = [names.cli, names.host, names.component];
+  if (pythonInstaller !== undefined) {
+    mkdirSync(path.join(staged, "python-runtime"), { recursive: true });
+    writeFileSync(path.join(staged, "python-runtime", "install-python.sh"), pythonInstaller);
+    members.push("python-runtime");
+  }
   const asset = assetName(names.prefix);
   const tar = spawnSync(
     "tar",
-    ["-czf", path.join(dir, asset), "-C", staged, names.cli, names.host, names.component],
+    ["-czf", path.join(dir, asset), "-C", staged, ...members],
     { encoding: "utf8" },
   );
   if (tar.status !== 0) throw new Error(`tar failed: ${tar.stderr}`);
@@ -181,6 +189,68 @@ defineSpecialty(
       t.assertions.assert(output.stdout.includes("genet-local daemon start"), `did not say what to run:\n${output.stdout}`);
     } finally {
       rmSync(release, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  },
+);
+
+defineSpecialty(
+  {
+    id: "specialty.install.python-runtime-before-anything-changes",
+    title: "Installing runs the release's Python installer first, and a failure leaves the installed version alone",
+    oracle:
+      "a release whose tarball carries python-runtime/install-python.sh has it run once with <channel data dir>/agents/runtime before any binary is replaced, and the install then completes; when that script fails the installer exits non-zero naming the Python runtime and the previously installed genet-local is byte-identical; a release without the script installs as before",
+    catches: [
+      "the Python runtime is never installed by the installer",
+      "the runtime goes to another channel's data directory",
+      "a failed runtime install still replaces the binaries and restarts the old daemon onto a half installation",
+    ],
+    tags: ["core", "install"],
+    expectedDurationMs: 10_000,
+    timeoutMs: 45_000,
+    surfaces: ["install"],
+  },
+  async (t) => {
+    if (installerUnsupported()) return;
+    const home = mkdtempSync(path.join(tmpdir(), "genehub-install-home-"));
+    const bin = path.join(home, "bin");
+    const data = path.join(home, "data");
+    const calls = path.join(home, "python-calls");
+    const releases: string[] = [];
+    try {
+      const succeeds = fakeRelease(LOCAL_RELEASE, `#!/bin/sh\nprintf '%s\\n' "$1" >> '${calls}'\nexit 0\n`);
+      releases.push(succeeds);
+      const first = runInstall(t.openRoot, succeeds, bin, { GENEHUB_LOCAL_DATA_DIR: data });
+      t.assertions.assert(first.status === 0, `install failed: ${first.stderr}`);
+      t.assertions.assert(first.stdout.includes("installing the Python runtime"), `no Python step in:\n${first.stdout}`);
+      t.assertions.assert(
+        existsSync(calls) && readFileSync(calls, "utf8") === `${path.join(data, "agents", "runtime")}\n`,
+        `the Python installer was called with ${existsSync(calls) ? readFileSync(calls, "utf8") : "nothing"}`,
+      );
+      t.assertions.assert(existsSync(path.join(bin, "genet-local")), "the binaries were not installed after the Python step");
+
+      const before = readFileSync(path.join(bin, "genet-local"), "utf8");
+      const fails = fakeRelease(
+        { ...LOCAL_RELEASE, guest: "new-guest" },
+        "#!/bin/sh\necho 'no network' >&2\nexit 1\n",
+      );
+      releases.push(fails);
+      const second = runInstall(t.openRoot, fails, bin, { GENEHUB_LOCAL_DATA_DIR: data });
+      t.assertions.assert(second.status !== 0, "the install succeeded although the Python runtime failed");
+      t.assertions.assert(second.stderr.includes("Python runtime"), `the failure does not name the Python runtime: ${second.stderr}`);
+      t.assertions.assert(readFileSync(path.join(bin, "genet-local"), "utf8") === before, "the installed CLI changed although the install failed");
+      t.assertions.assert(
+        readFileSync(path.join(bin, "genehub_guest.wasm"), "utf8") === "guest-component-fixture",
+        "the installed component changed although the install failed",
+      );
+
+      const without = fakeRelease();
+      releases.push(without);
+      const third = runInstall(t.openRoot, without, bin, { GENEHUB_LOCAL_DATA_DIR: data });
+      t.assertions.assert(third.status === 0, `a release without the Python installer failed: ${third.stderr}`);
+      t.assertions.assert(!third.stdout.includes("installing the Python runtime"), "a Python step ran for a release that has none");
+    } finally {
+      for (const release of releases) rmSync(release, { recursive: true, force: true });
       rmSync(home, { recursive: true, force: true });
     }
   },

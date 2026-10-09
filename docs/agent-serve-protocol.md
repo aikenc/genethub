@@ -13,7 +13,7 @@ subclasses `Agent` / `Session`.
   user/<id>/      user or Agent edits; replaces builtin/<id> as a whole
   state/<id>/     the script's own state; owner-only; survives reset
   sdk/            boot.py + genehub_agent/
-  runtime/        install*.sh / install-windows.ps1 + the installed Python
+  runtime/        the platform Python the installer put there, recorded in python.json
 ```
 
 `<id>` matches `^[a-z][a-z0-9-]{1,31}$`. A directory is an Agent when it has
@@ -43,8 +43,7 @@ Edits under `user/` take effect only on `genet agent reload <id>`.
   Agent code runs, so stray prints and child processes cannot corrupt them.
 - One process per Agent hosts every session of that Agent. Processes start
   the first time anyone asks for the Agent list or uses an Agent, not when
-  the daemon starts: an unwatched daemon never installs Python or touches the
-  network.
+  the daemon starts: an unwatched daemon runs no Agent processes.
 - The daemon only sends requests; the script only replies and notifies.
 - Every request has a deadline. A missed deadline, an exit or a broken pipe
   is handled the same way: controlled restart, then `session.start` again for
@@ -201,13 +200,16 @@ continuation obligation.
 
 ## 6. Python runtime
 
-Before every start the daemon runs, on macOS/Linux,
-`sh <data>/agents/runtime/install.sh <data>/agents/runtime`, and on Windows
-`powershell -NoProfile -ExecutionPolicy Bypass -File install-windows.ps1 <dir>`.
-The script is idempotent, prints `{"phase","message"}` progress lines and
-finishes with `{"python": "<absolute path>"}` (or `{"error"}` and a non-zero
-exit). Versions and SHA-256 are pinned inside the scripts.
-`GENEHUB_PYTHON_MIRRORS` (space-separated base URLs) is tried first.
+The daemon never installs Python. The installers and the dev tooling run
+`scripts/python-runtime/install-python.sh` (`install-python.ps1` on Windows),
+which unpacks the pinned build under `<data>/agents/runtime/` and records the
+interpreter in `<data>/agents/runtime/python.json` as `{"python": "<absolute
+path>"}`. Before every start the daemon reads that file and starts the script
+as `<python> -I -X utf8 sdk/boot.py <agent> serve`. When the file or the
+interpreter it names is missing, the Agent is unavailable with the reason
+"Python 运行时未安装" and nothing is downloaded. The version and SHA-256 are
+pinned in `scripts/python-runtime/python.pin`; see
+[python-runtime.md](./python-runtime.md).
 
 ## 7. Public conversation question entry
 

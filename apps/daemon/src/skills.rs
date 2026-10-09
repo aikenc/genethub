@@ -132,6 +132,7 @@ pub fn load(skills_root: &Path) -> Vec<Skill> {
 pub fn session_guidance(
     skills_root: Option<&Path>,
     front_door_cli: Option<&Path>,
+    python: Option<&Path>,
     host_form_paths: bool,
 ) -> String {
     let mut artifact = crate::session::artifact_links::guidance().to_string();
@@ -141,7 +142,7 @@ pub fn session_guidance(
     let Some(root) = skills_root else {
         return artifact;
     };
-    let catalog = format_catalog(&load(root), front_door_cli, host_form_paths);
+    let catalog = format_catalog(&load(root), front_door_cli, python, host_form_paths);
     if catalog.is_empty() {
         artifact
     } else {
@@ -152,6 +153,7 @@ pub fn session_guidance(
 pub fn format_catalog(
     skills: &[Skill],
     front_door_cli: Option<&Path>,
+    python: Option<&Path>,
     host_form_paths: bool,
 ) -> String {
     let visible: Vec<&Skill> = skills
@@ -180,8 +182,16 @@ pub fn format_catalog(
         },
         "Use exactly the GeneHub CLI path above. It is also exported to the Agent as GENEHUB_CLI. If unavailable, stop instead of guessing genet, genet-dev, genet-beta, or another command.".to_string(),
         String::new(),
-        "<available_skills>".to_string(),
     ];
+    if let Some(path) = python {
+        lines.push(format!(
+            "<genehub_python>{}</genehub_python>",
+            escape_xml(&spelled(path))
+        ));
+        lines.push("This is the Python that ships with GeneHub (also exported as GENEHUB_PYTHON). Use it for built-in Skill scripts. It is not on PATH and is read-only: do not install packages into it. Create a virtual environment with \"$GENEHUB_PYTHON\" -m venv <dir> and install there.".to_string());
+        lines.push(String::new());
+    }
+    lines.push("<available_skills>".to_string());
     for skill in visible {
         lines.push("  <skill>".to_string());
         lines.push(format!("    <name>{}</name>", escape_xml(&skill.name)));
@@ -538,7 +548,12 @@ mod tests {
             file_path: PathBuf::from("/data/skills/demo/SKILL.md"),
             disable_model_invocation: false,
         }];
-        let catalog = format_catalog(&skills, Some(Path::new("/opt/genehub/genet-dev")), false);
+        let catalog = format_catalog(
+            &skills,
+            Some(Path::new("/opt/genehub/genet-dev")),
+            None,
+            false,
+        );
         assert!(catalog.contains("<available_skills>"));
         assert!(catalog.contains("<genehub_cli>/opt/genehub/genet-dev</genehub_cli>"));
         assert!(catalog.contains("<name>demo</name>"));
@@ -559,7 +574,7 @@ mod tests {
             disable_model_invocation: false,
         }];
         let cli = Path::new("/e/opt/genehub/genet-beta");
-        let catalog = format_catalog(&skills, Some(cli), true);
+        let catalog = format_catalog(&skills, Some(cli), None, true);
         let spelled =
             |path: &Path| crate::guest_paths::host_form(&path.to_string_lossy()).into_owned();
         assert!(catalog.contains(&format!("<genehub_cli>{}</genehub_cli>", spelled(cli))));
@@ -575,6 +590,7 @@ mod tests {
         let prompt = session_guidance(
             Some(&root),
             Some(Path::new("/opt/genehub/genet-beta")),
+            None,
             false,
         );
         assert!(prompt.contains("index.html"));
@@ -589,15 +605,30 @@ mod tests {
 
     #[test]
     fn session_guidance_without_a_root_is_artifact_rules_only() {
-        let prompt = session_guidance(None, Some(Path::new("/opt/genehub/genet")), false);
+        let prompt = session_guidance(None, Some(Path::new("/opt/genehub/genet")), None, false);
         assert!(prompt.contains("index.html"));
         assert!(!prompt.contains("available_skills"));
     }
 
     #[test]
+    fn the_platform_python_is_named_only_when_one_is_installed() {
+        let root = temp_dir("python");
+        let python = Path::new("/data/agents/runtime/python-3.13.16-20261003/bin/python3");
+        let with = session_guidance(Some(&root), None, Some(python), false);
+        assert!(with.contains(&format!(
+            "<genehub_python>{}</genehub_python>",
+            python.display()
+        )));
+        assert!(with.contains("GENEHUB_PYTHON"));
+        assert!(with.contains("-m venv"));
+        let without = session_guidance(Some(&root), None, None, false);
+        assert!(!without.contains("genehub_python"));
+    }
+
+    #[test]
     fn missing_cli_binding_is_explicit_and_never_guessed() {
         let root = temp_dir("no-cli");
-        let prompt = session_guidance(Some(&root), None, false);
+        let prompt = session_guidance(Some(&root), None, None, false);
         assert!(prompt.contains("<genehub_cli unavailable=\"true\" />"));
         assert!(prompt.contains("stop instead of guessing"));
     }

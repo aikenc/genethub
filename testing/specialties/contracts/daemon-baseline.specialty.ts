@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import path from "node:path";
 import { promisify } from "node:util";
-import { defineSpecialty, scriptAgentRuntimeMirror } from "../../framework/public.ts";
+import { defineSpecialty } from "../../framework/public.ts";
 
 // Native-intrinsic properties stay in the owning crate. Actual Session/CLI/
 // browser journeys separately verify the external behavior of this change.
@@ -17,7 +17,7 @@ defineSpecialty({
 }, async t => {
   try {
     const { stdout } = await promisify(execFile)("cargo", ["test", "--profile", "iterate", "-p", "genet-daemon", "--lib"], {
-      cwd: t.openRoot, env: { ...process.env, GENEHUB_PYTHON_MIRRORS: scriptAgentRuntimeMirror(t.openRoot) },
+      cwd: t.openRoot,
       timeout: 280_000, maxBuffer: 4 * 1024 * 1024,
     });
     const result = stdout.match(/test result: ok\. ([1-9]\d*) passed; 0 failed/);

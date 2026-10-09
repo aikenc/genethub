@@ -80,7 +80,7 @@ Claude Code、TClaude、CodeBuddy、OpenCode 和 `agents.custom` 里声明的自
 
 ## 6. 起不来的时候
 
-- 列表里的说明文字来自脚本；脚本本身起不来时由 daemon 写明原因（Python 运行时、`agent.toml`、握手失败、
+- 列表里的说明文字来自脚本；脚本本身起不来时由 daemon 写明原因（Python 运行时未安装、`agent.toml`、握手失败、
   退出码和最后几行 stderr）。
 - `genet agent logs <id>` 给出脚本的 stderr 和 daemon 记下的协议问题（不合规的事件、超时重启）。
 - 工作台里不可用的脚本 Agent 有「让内置 Agent 修复」：开一个内置 Agent 会话，按上面的流程复制、修改、

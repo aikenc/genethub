@@ -6,7 +6,7 @@
 //!   user/<id>/      user or Agent edits; replaces builtin/<id> as a whole
 //!   state/<id>/     the script's own state; survives reset
 //!   sdk/            boot.py + genehub_agent/
-//!   runtime/        Python install scripts and the Python they install
+//!   runtime/        the platform Python the installer put there (python.json)
 //! ```
 //!
 //! The daemon reads manifests and fingerprints code for durable decisions;
@@ -101,8 +101,8 @@ impl Layout {
     }
 
     /// Writes the compiled-in tree and removes files a previous build shipped
-    /// that this one does not. `user/`, `state/` and the installed Python are
-    /// never touched.
+    /// that this one does not. `user/`, `state/` and `runtime/` (the installed
+    /// Python) are never touched.
     pub fn materialize(&self) -> Result<()> {
         let mut expected = BTreeSet::new();
         for file in BUILTIN_AGENT_FILES {
@@ -131,7 +131,7 @@ impl Layout {
     fn target_of(&self, relative: &str) -> Option<PathBuf> {
         match relative.split_once('/') {
             Some(("agents", rest)) => Some(self.builtin_dir().join(rest)),
-            Some(("sdk" | "runtime", _)) => Some(self.root.join(relative)),
+            Some(("sdk", _)) => Some(self.root.join(relative)),
             Some(_) => None,
             // Top-level files such as README.md sit next to the layers.
             None => Some(self.root.join(relative)),

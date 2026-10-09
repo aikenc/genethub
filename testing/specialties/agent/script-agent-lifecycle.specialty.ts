@@ -7,9 +7,9 @@
 // The fixture Agent (`testing/fixtures/script-agent`) is ordinary user-layer
 // content: what varies is only what a script is free to do. Codex is driven
 // through its built-in script against the declared app-server double
-// (`registerScriptedCodex`). The pinned Python the daemon would download is
-// copied from the test cache to where the shipped install script looks; the
-// download itself is covered by install-runtime.specialty.ts.
+// (`registerScriptedCodex`). The platform Python the installer would have put
+// there is copied from the test cache and recorded in `python.json`; the
+// install itself is covered by install-runtime.specialty.ts.
 
 import { createHash, randomBytes } from "node:crypto";
 import { copyFileSync, existsSync, readdirSync, readFileSync } from "node:fs";
@@ -26,7 +26,6 @@ import {
   pathWithout,
   readScriptAgentJournal,
   registerScriptedCodex,
-  runtimeInstallerLines,
   scriptAgentRuntimeIdentity,
   seedScriptAgentRuntime,
   type CaseContext,
@@ -146,12 +145,12 @@ async function assistantText(opened: Opened, sessionId: string): Promise<string>
 lifecycleCase(
   "builtin-listed-without-cli",
   "Built-in codex and cursor are listed and offer install when their CLI is absent",
-  "with neither CLI reachable, agent.list carries codex and cursor with source builtin, probe unavailable and a primary install action; the seeded pinned runtime is the same tree (inode) afterwards and neither Agent's agent.logs carries an install-script progress line, so nothing was downloaded",
+  "with neither CLI reachable, agent.list carries codex and cursor with source builtin, probe unavailable and a primary install action; the seeded pinned runtime is the same tree (inode) afterwards and the runtime directory holds only that tree and python.json, so the daemon neither installed nor replaced anything",
   [
     "built-in script Agents not materialized or not scanned",
     "an absent CLI reported as ready",
     "not-ready Agent offers no way forward",
-    "the runtime install script downloads although the pinned build is present",
+    "the daemon installs or replaces the platform Python itself",
   ],
   async (t) => {
     withoutThirdPartyClis(t);
@@ -169,18 +168,14 @@ lifecycleCase(
       const all = await t.flows.branches.listAgents(opened.client);
       const genet = all.find((agent) => agent.id === "genet");
       t.assertions.assert(genet?.builtin === true && genet.source === undefined, "the native built-in Agent changed shape");
-      // A download replaces the tree (rm + mv of a fresh unpack) and reports
-      // its phases, which the daemon writes to the Agent's logs.
+      // An install replaces the tree (rm + mv of a fresh unpack); the daemon
+      // only reads python.json.
       const runtime = readdirSync(path.join(t.env.data, "agents", "runtime"));
       t.assertions.assert(
         runtime.filter((name) => name.startsWith("python-") || name.startsWith(".staging")).length === 1,
         `runtime directory changed: ${runtime.join(",")}`,
       );
-      t.assertions.assert(scriptAgentRuntimeIdentity(seeded.dir) === seeded.identity, "the install script replaced the seeded runtime");
-      for (const id of ["codex", "cursor"]) {
-        const installer = runtimeInstallerLines(await t.flows.branches.agentLogs(opened.client, id, 200));
-        t.assertions.assert(installer.length === 0, `${id} ran an install: ${installer.join(" | ")}`);
-      }
+      t.assertions.assert(scriptAgentRuntimeIdentity(seeded.dir) === seeded.identity, "the seeded runtime was replaced");
       t.note(JSON.stringify([codex, cursor].map(t.flows.branches.summarizeAgent)));
     }, ["codex", "cursor"]);
   },

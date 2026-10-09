@@ -497,30 +497,14 @@ impl AgentHost {
             .rescan()
             .ok_or_else(|| anyhow!(self.problem_or("Agent 目录无效")))?;
 
-        let weak = Arc::downgrade(host);
-        let python = match self
-            .runtime
-            .python(&move |progress| {
-                if let Some(host) = weak.upgrade() {
-                    host.runtime_progress(progress);
-                }
-            })
-            .await
-        {
+        let python = match self.runtime.python() {
             Ok(python) => python,
             Err(error) => {
-                let message = format!("{error:#}");
-                self.logs.push(format!("[daemon] {message}"));
-                let mut snapshot = self.snapshot.lock().expect("never poisoned");
-                snapshot.runtime_failed = true;
-                if let Some(job) = snapshot.job.as_mut().filter(|job| job.id == "runtime") {
-                    job.done = true;
-                    job.error = Some(message);
-                }
+                self.logs.push(format!("[daemon] {error:#}"));
+                self.snapshot.lock().expect("never poisoned").runtime_failed = true;
                 return Err(error);
             }
         };
-        self.finish_runtime_job();
 
         let state_dir = self.layout.state_dir(&self.id);
         std::fs::create_dir_all(&state_dir)?;
@@ -672,40 +656,6 @@ impl AgentHost {
             String::new()
         } else {
             format!("（{}）", tail.join(" / "))
-        }
-    }
-
-    fn runtime_progress(&self, progress: super::runtime::Progress) {
-        if let Some(message) = progress.message.as_deref() {
-            self.logs.push(format!("[python-runtime] {message}"));
-        }
-        {
-            let mut snapshot = self.snapshot.lock().expect("never poisoned");
-            let job = snapshot.job.get_or_insert_with(|| AgentJobInfo {
-                id: "runtime".into(),
-                action: None,
-                phase: None,
-                percent: None,
-                message: None,
-                log_tail: Vec::new(),
-                done: false,
-                error: None,
-            });
-            if job.id != "runtime" {
-                return;
-            }
-            job.phase = progress.phase.or(Some("runtime".into()));
-            job.message = progress
-                .message
-                .map(|message| format!("Python 运行时准备中：{message}"));
-        }
-        self.changed();
-    }
-
-    fn finish_runtime_job(&self) {
-        let mut snapshot = self.snapshot.lock().expect("never poisoned");
-        if snapshot.job.as_ref().is_some_and(|job| job.id == "runtime") {
-            snapshot.job = None;
         }
     }
 
@@ -1218,7 +1168,7 @@ impl AgentHost {
             .resolve(&self.id, false)
             .ok_or_else(|| anyhow!("这个 Agent 的目录不存在"))?;
         layout::read_manifest(&resolved.dir)?;
-        let python = self.runtime.python(&|_| {}).await?;
+        let python = self.runtime.python()?;
         let state_dir = self.layout.state_dir(&self.id);
         std::fs::create_dir_all(&state_dir)?;
         let mut command = Command::new(&python);
@@ -1298,6 +1248,7 @@ impl AgentHost {
             "additionalSystemPrompt": config.additional_system_prompt,
             "skillsDir": config.skills_dir.as_deref().map(crate::guest_paths::host_path),
             "frontDoorCli": config.front_door_cli,
+            "python": config.python.as_deref().map(crate::guest_paths::host_path),
             "controllerToken": config.controller_token,
             "resume": config.resume.as_ref().map(|handle| handle.value.clone()),
         });

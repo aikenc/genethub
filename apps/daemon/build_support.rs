@@ -185,7 +185,7 @@ fn validate_skill_entrypoint(path: &Path, directory_name: &str) -> Result<(), St
     Ok(())
 }
 
-/// The script Agent tree: `agents/<id>/agent.toml`, `sdk/`, `runtime/`.
+/// The script Agent tree: `agents/<id>/agent.toml` and `sdk/`.
 ///
 /// Every regular file is embedded except interpreter caches, which a local
 /// `python -m py_compile` or `agent.py test` run may leave behind.
@@ -195,7 +195,7 @@ pub(crate) fn scan_agents_tree(root: &Path) -> Result<BuiltinTree, String> {
     if !root.is_dir() {
         return Err(format!("{} is not a directory", root.display()));
     }
-    for required in ["agents", "sdk", "runtime"] {
+    for required in ["agents", "sdk"] {
         if !root.join(required).is_dir() {
             return Err(format!("{} has no {required}/ directory", root.display()));
         }

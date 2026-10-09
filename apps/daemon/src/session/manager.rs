@@ -2750,6 +2750,7 @@ impl SessionManager {
         let mut additional_system_prompt = crate::skills::session_guidance(
             self.skills_dir.as_deref(),
             self.front_door_cli.as_deref(),
+            self.registry.python().as_deref(),
             host_paths,
         );
         let meta = live.meta.lock().await.clone();
@@ -3185,6 +3186,7 @@ impl SessionManager {
                     let mut guidance = crate::skills::session_guidance(
                         self.skills_dir.as_deref(),
                         self.front_door_cli.as_deref(),
+                        self.registry.python().as_deref(),
                         adapter.host_form_payloads(),
                     );
                     if let Some(managed) = meta.managed_system_prompt.as_deref() {
@@ -3208,6 +3210,7 @@ impl SessionManager {
             additional_system_prompt: additional_system_prompt.clone(),
             skills_dir: self.skills_dir.clone(),
             front_door_cli: self.front_door_cli.clone(),
+            python: self.registry.python(),
             controller_token: Some(self.controller_token(&meta.id)),
             scratch_dir: scratch.clone(),
             providers: providers.clone(),
