@@ -119,7 +119,7 @@ function seedStore(
   agents: AgentInfo[],
   preferences: AgentSelectionPreferences,
   callbacks: {
-    onSavePreferences(preferences: AgentSelectionPreferences): Promise<void>;
+    onSavePreferences(preferences: AgentSelectionPreferences): Promise<boolean>;
     onRefreshAgents(): void;
   },
 ) {
@@ -140,7 +140,7 @@ async function openAgentConfig(dialog: HTMLElement) {
 function controls(overrides: Partial<Parameters<typeof ComposerControls>[0]> = {}) {
   const callbacks = {
     onPickTarget: vi.fn(async () => {}),
-    onSavePreferences: vi.fn(async (_preferences: AgentSelectionPreferences) => {}),
+    onSavePreferences: vi.fn(async (_preferences: AgentSelectionPreferences) => true),
     onRefreshAgents: vi.fn(),
   };
   seedStore(overrides.agents ?? AGENTS, overrides.preferences ?? PREFERENCES, callbacks);
@@ -295,6 +295,34 @@ describe("the exact model composer control", () => {
     expect(saved.modelProfiles?.some((row) => row.agentId === "genet" && row.modelId === "extra"))
       .toBe(true);
     expect(saved.modelProfiles?.some((row) => row.modelId === "auto")).toBe(false);
+  });
+
+  it("closes the 模型与 Agent window once the machine has stored the edits", async () => {
+    const callbacks = controls();
+    const { dialog } = await openSettings();
+    await openAgentConfig(dialog);
+
+    await userEvent.click(screen.getByRole("button", { name: "保存到这台机器" }));
+
+    await waitFor(() => expect(callbacks.onSavePreferences).toHaveBeenCalledOnce());
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "模型与 Agent" })).not.toBeInTheDocument(),
+    );
+    // What was underneath is still there.
+    expect(screen.getByRole("dialog", { name: "模型选择" })).toBeInTheDocument();
+  });
+
+  it("keeps the window open, edits intact, when the machine refuses the save", async () => {
+    const callbacks = controls();
+    callbacks.onSavePreferences.mockResolvedValueOnce(false);
+    const { dialog } = await openSettings();
+    await openAgentConfig(dialog);
+
+    await userEvent.click(screen.getByRole("button", { name: "保存到这台机器" }));
+
+    await waitFor(() => expect(callbacks.onSavePreferences).toHaveBeenCalledOnce());
+    expect(screen.getByRole("dialog", { name: "模型与 Agent" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "保存到这台机器" })).toBeEnabled());
   });
 
   it("keeps unsaved model edits across a structurally identical Agent refresh", async () => {

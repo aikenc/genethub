@@ -1464,6 +1464,28 @@ describe("machine-global model selection", () => {
     });
   });
 
+  it("says whether the machine stored the preferences, and puts the old ones back when it did not", async () => {
+    const stored = { type: "settings", data: { presets: [], providers: [], lanEnabled: false, agentPreferences: preferences } };
+    let reply: unknown = stored;
+    const client = {
+      call: async (request: { type: string }) => {
+        if (request.type !== "settings.setAgentPreferences") return undefined;
+        if (reply === "refuse") throw new Error("机器拒绝了");
+        return reply;
+      },
+    } as unknown as Client;
+    const before = { presets: [], providers: [], lanEnabled: false, agentPreferences: { ...preferences, selectedTags: ["Max"] } };
+    useWorkbench.setState({ client, settings: before as never });
+
+    expect(await useWorkbench.getState().setAgentPreferences(preferences)).toBe(true);
+
+    reply = "refuse";
+    useWorkbench.setState({ settings: before as never });
+    const next = { ...preferences, selectedTags: ["Flash"] };
+    expect(await useWorkbench.getState().setAgentPreferences(next)).toBe(false);
+    expect(useWorkbench.getState().settings?.agentPreferences).toBe(before.agentPreferences);
+  });
+
   it("changes filter tags without silently replacing the draft model", async () => {
     const calls: Array<{ type: string; payload?: unknown }> = [];
     const client = {

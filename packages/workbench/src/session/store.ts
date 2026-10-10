@@ -517,7 +517,8 @@ interface WorkbenchState {
   setModel(modelId: string): Promise<void>;
   setAgentTarget(target: SessionAgentTarget, filterTags: string[]): Promise<void>;
   setTags(tags: string[]): Promise<void>;
-  setAgentPreferences(preferences: AgentSelectionPreferences): Promise<void>;
+  /** Resolves true once the machine has stored the preferences; false when it refused (the error is already shown). */
+  setAgentPreferences(preferences: AgentSelectionPreferences): Promise<boolean>;
   setMode(modeId: string): Promise<void>;
   setEffort(effortId: string): Promise<void>;
   setFast(fast: boolean): Promise<void>;
@@ -2285,6 +2286,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     } else if (before && stillCurrent) {
       set({ settings: before });
     }
+    return reply?.type === "settings";
   },
 
   async setMode(modeId) {
@@ -3377,7 +3379,7 @@ function rememberMachineRuntime(
     agentId,
     change,
   );
-  return state.setAgentPreferences(preferences);
+  return state.setAgentPreferences(preferences).then(() => undefined);
 }
 
 /**

@@ -188,7 +188,11 @@ function ModelList({ covered }: { covered: boolean }) {
             <RuntimeSettings
               agents={agents}
               preferences={preferences}
-              onSave={(next) => setAgentPreferences(next)}
+              onSave={async (next) => {
+                // Saving finishes the editing: a refused save stays open with
+                // its error, an accepted one returns to what was underneath.
+                if (await setAgentPreferences(next)) closeAgentConfig();
+              }}
               onConfigureAgent={(id) => openAgentConfig(id)}
             />
           ) : (
