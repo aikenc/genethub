@@ -136,6 +136,16 @@ with the rest) and the script may give the ready state its own `statusLabel`
 (for example "可用（Key 未核对）"); clients group and label by those fields
 and never read an Agent's ids or wording.
 
+### How a request reaches a person
+
+A request is durable: it survives a daemon restart and a page reload. A
+window that finds one waiting (on load or after a reconnect) does not cover the
+page with it; the request waits behind its Agent's card ("查看请求"). Only a
+request that arrives live, in answer to something done in that window, opens by
+itself. The card always has its own 取消请求, which answers `canceled`; an option
+with id `cancel` is not drawn a second time, so a script may keep listing one
+(the SDK default) and must treat `canceled` and `cancel` alike.
+
 ### Model providers
 
 A person configures model providers (address, protocol, key, models) once, in

@@ -132,6 +132,10 @@ export function AgentRequestCard({
         ...(question.input ? { freeformText: text } : {}),
       };
     });
+  // The card always has its own 取消请求, which answers "canceled". A script's
+  // own "cancel" option (the SDK default, so a request is never without one)
+  // would be a second button for the same thing.
+  const choices = request.options.filter((option) => option.id !== "cancel");
   const choose = (optionId: string) => send({ type: "answered", optionId, answers: answers() });
 
   return (
@@ -164,7 +168,7 @@ export function AgentRequestCard({
           onSubmit={(event) => {
             event.preventDefault();
             // Enter in a field means the first, offered choice.
-            const first = request.options[0];
+            const first = choices[0];
             if (first) choose(first.id);
           }}
         >
@@ -195,7 +199,7 @@ export function AgentRequestCard({
             >
               取消请求
             </button>
-            {request.options.map((option, index) => (
+            {choices.map((option, index) => (
               <button
                 key={option.id}
                 type={index === 0 ? "submit" : "button"}

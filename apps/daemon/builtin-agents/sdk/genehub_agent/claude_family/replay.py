@@ -667,7 +667,7 @@ async def _run_flow_step(world: _World, step: dict) -> Dict[str, Any]:
             if not held:
                 break
             params = held[0]
-            suspended.append({"step": params["step"], "title": params["request"]["title"], "questions": params["request"]["questions"], "options": [o["id"] for o in params["request"]["options"]]})
+            suspended.append({"step": params["step"], "title": params["request"]["title"], "detail": params["request"].get("detail"), "questions": params["request"]["questions"], "options": [o["id"] for o in params["request"]["options"]]})
             if not answers:
                 raise RuntimeError(f"the flow asked {params['step']!r} but the case has no answer left")
             raw = answers.pop(0)

@@ -111,10 +111,10 @@
           {
             "step": "provider.choose",
             "title": "让 Claude Code 使用哪个 provider？",
+            "detail": "Claude Code 会改用这个 provider 的地址、Key 和模型，不再用它自己的登录。Key 只在运行时交给 Agent，不会保存到别处。\n\n没有列出的：\n· DeepSeek：接口类型是 openai，Claude Code 只能用 anthropic 类型的\n· 没填 Key：还没有保存 Key",
             "options": [
               "p:kimi",
-              "p:anthropic",
-              "cancel"
+              "p:anthropic"
             ]
           }
         ],

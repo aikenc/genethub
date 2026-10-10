@@ -31,9 +31,9 @@
   "expect": {
     "result": "done",
     "offered": [
-      "p:deepseek",
-      "cancel"
+      "p:deepseek"
     ],
+    "detail": "Codex 会改用这个 provider 的地址、Key 和模型，不再用它自己的登录。Key 只在运行时交给 Agent，不会保存到别处。\n\n没有列出的：\n· Kimi (Anthropic)：接口类型是 anthropic，Codex 只能用 openai 类型的",
     "bound": "deepseek",
     "args": [
       "-c",

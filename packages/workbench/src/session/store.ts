@@ -2689,10 +2689,17 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       return;
     }
     const live = new Set(reply.data.map((entry) => agentRequestKey(entry.agentId, entry.id)));
-    set((state) => ({
-      agentRequests: reply.data,
-      hiddenAgentRequests: state.hiddenAgentRequests.filter((key) => live.has(key)),
-    }));
+    set((state) => {
+      // A request is durable: it is still there after a restart, a reload, a
+      // reconnect. Finding one that way is not the person doing something, so
+      // it must not take the screen — it waits behind its Agent's card
+      // ("查看请求"). Only a request pushed live, as the answer to something
+      // being done now, opens by itself.
+      const known = new Set(state.agentRequests.map((entry) => agentRequestKey(entry.agentId, entry.id)));
+      const hidden = new Set([...state.hiddenAgentRequests].filter((key) => live.has(key)));
+      for (const key of live) if (!known.has(key)) hidden.add(key);
+      return { agentRequests: reply.data, hiddenAgentRequests: [...hidden] };
+    });
   },
 
   hideAgentRequest(agentId, requestId) {

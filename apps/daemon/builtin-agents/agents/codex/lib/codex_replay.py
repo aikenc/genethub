@@ -137,8 +137,10 @@ def run_provider(case: dict, agent: Any) -> Optional[str]:
         return {"provider": dict(entry)}
 
     offered: List[str] = []
+    details: List[str] = []
 
     async def ask(job: Any, step: str, title: str, **kwargs: Any) -> Outcome:
+        details.append(str(kwargs.get("detail") or ""))
         offered.extend(option["id"] for option in kwargs.get("options") or [])
         return Outcome(canceled=False, option_id=case["choose"])
 
@@ -160,6 +162,8 @@ def run_provider(case: dict, agent: Any) -> Optional[str]:
         except RuntimeError as error:
             record["result"] = "error: " + str(error)
         record["offered"] = offered
+        if details:
+            record["detail"] = details[0]
         record["bound"] = providers.bound(ctx)
         record["args"] = agent.provider_args()
         record["keyInEnv"] = agent.env().get(codex_provider.KEY_VARIABLE)

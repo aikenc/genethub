@@ -122,6 +122,46 @@ describe("Agent-level user requests in the store", () => {
     expect(useWorkbench.getState().agentRequests.map((r) => r.id)).toEqual(["r_login"]);
   });
 
+  it("does not take the screen for a request that was already waiting when this window loaded", async () => {
+    const { client, listeners } = fakeClient({
+      "agent.requests": () => ({ type: "agentRequests", data: [INSTALL] }),
+    });
+    render(<AgentRequestDialog />);
+    await useWorkbench.getState().attach(client);
+    await waitFor(() => expect(useWorkbench.getState().agentRequests).toEqual([INSTALL]));
+
+    // It is kept, and waits behind its Agent's card; nothing covers the page.
+    expect(useWorkbench.getState().hiddenAgentRequests).toHaveLength(1);
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    // One found only after a reconnect is a request that was waiting too.
+    listeners.state?.("reconnecting");
+    listeners.state?.("ready");
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    // A request pushed now is the answer to something just done: it opens by itself.
+    act(() => listeners.request?.(LOGIN));
+    expect(await screen.findByRole("dialog")).toBeTruthy();
+    expect(useWorkbench.getState().hiddenAgentRequests).toHaveLength(1);
+  });
+
+  it("a request found on reconnect that was not there before stays out of the way too", async () => {
+    let held: AgentUserRequest[] = [];
+    const { client, listeners } = fakeClient({
+      "agent.requests": () => ({ type: "agentRequests", data: held }),
+    });
+    render(<AgentRequestDialog />);
+    await useWorkbench.getState().attach(client);
+    held = [LOGIN];
+    listeners.state?.("reconnecting");
+    listeners.state?.("ready");
+    await waitFor(() => expect(useWorkbench.getState().agentRequests).toEqual([LOGIN]));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    // The person can still bring it back.
+    useWorkbench.getState().showAgentRequest("codex", "r_login");
+    expect(await screen.findByRole("dialog")).toBeTruthy();
+  });
+
   it("asks again when an agents frame lists requests this window never heard of", async () => {
     let served: AgentUserRequest[] = [];
     const { client, listeners, calls } = fakeClient({
@@ -421,6 +461,12 @@ describe("AgentRequestCard", () => {
       fireEvent.click(screen.getByRole("button", { name: "取消请求" }));
     });
     expect(onAnswer).toHaveBeenCalledWith({ type: "canceled" });
+  });
+
+  it("offers one way to cancel even when the script also lists its own cancel option", () => {
+    render(<AgentRequestCard request={LOGIN} agentLabel="Codex" onAnswer={async () => true} onDismiss={() => {}} />);
+    expect(screen.getAllByRole("button", { name: /取消/ }).map((button) => button.textContent)).toEqual(["取消请求"]);
+    expect(screen.getByRole("button", { name: "继续" })).toBeTruthy();
   });
 
   it("keeps focus in the field while typing and sends the first choice on Enter", async () => {
