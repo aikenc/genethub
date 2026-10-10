@@ -1,3 +1,6 @@
+//! **DEPRECATED (2026-10-10)** — part of the Workflow subsystem being retired
+//! (see `docs/deprecated.md`). Frozen: no new features, no new dependents.
+//!
 //! A pure, versioned structured-workflow state machine.
 //!
 //! No storage, clocks, threads, process launching, leases or provider calls.

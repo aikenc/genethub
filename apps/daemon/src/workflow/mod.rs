@@ -1,3 +1,9 @@
+//! **DEPRECATED (2026-10-10)** — the Workflow subsystem is being retired
+//! (see `docs/deprecated.md`). It is frozen: no new features and no new
+//! dependents; only fixes that keep existing projects running. Nothing new may
+//! be built on `crate::workflow`, `workflow-engine` or the Workflow
+//! packages.
+//!
 //! Project-owned Workflow source and the deliberately small execution kernel.
 //!
 //! Business stages do not exist here. A project graph names generic capability

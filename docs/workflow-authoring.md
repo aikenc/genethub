@@ -1,5 +1,7 @@
 # Workflow authoring validation
 
+> **Deprecated (2026-10-10):** the Workflow subsystem is being retired. This document is kept for history and maintenance only and is not a basis for new design. See [deprecated.md](deprecated.md).
+
 The authored business method belongs to project/Pack YAML. The platform supplies one parser/compiler,
 bounded JSON data and deterministic execution; it does not implement a game pipeline or ask an LLM to validate YAML.
 

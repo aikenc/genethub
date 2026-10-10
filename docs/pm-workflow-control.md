@@ -1,5 +1,7 @@
 # PM input and workflow control
 
+> **Deprecated (2026-10-10):** the Workflow subsystem is being retired. This document is kept for history and maintenance only and is not a basis for new design. See [deprecated.md](deprecated.md).
+
 The domain model and the distinction between Workflow definitions, Executor
 carriers and test projects are documented in
 [Workflow and Executor](./workflow-executor-model.md).
