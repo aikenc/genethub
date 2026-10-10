@@ -1,0 +1,63 @@
+{
+  "kind": "session",
+  "description": "a second prompt while a turn runs is refused, not queued behind it",
+  "launch": {
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "models": [
+      "sonnet",
+      "opus"
+    ],
+    "efforts": [
+      "low",
+      "high"
+    ],
+    "defaultModel": "sonnet"
+  },
+  "cli": {
+    "turns": [
+      {
+        "hang": true,
+        "emit": [
+          {
+            "type": "system",
+            "subtype": "init",
+            "session_id": "sess-1"
+          }
+        ]
+      }
+    ],
+    "onInterrupt": [
+      {
+        "type": "result",
+        "subtype": "error_during_execution",
+        "is_error": true
+      }
+    ]
+  },
+  "steps": [
+    {
+      "send": "one",
+      "wait": false
+    },
+    {
+      "sleep": 0.2
+    },
+    {
+      "send": "two",
+      "expectError": "还在处理上一轮"
+    },
+    {
+      "interrupt": true
+    },
+    {
+      "waitTerminal": 1
+    }
+  ],
+  "expect": {
+    "terminals": [
+      {
+        "type": "turnCanceled"
+      }
+    ]
+  }
+}

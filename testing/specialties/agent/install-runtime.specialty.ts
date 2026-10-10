@@ -34,7 +34,7 @@ import {
 type Opened = Awaited<ReturnType<CaseContext["flows"]["main"]["openWorkspace"]>>;
 type AgentInfo = Awaited<ReturnType<CaseContext["flows"]["branches"]["listAgents"]>>[number];
 
-const BUILTIN_SCRIPT_AGENTS = ["codex", "cursor"];
+const BUILTIN_SCRIPT_AGENTS = ["codex", "cursor", "claude", "codebuddy"];
 
 const mirrorDouble = {
   component: "python-mirror",
@@ -295,7 +295,7 @@ installCase(
   {
     title: "The install script downloads the pinned Python from its built-in URLs, protects it from global installs, and every script Agent runs on it",
     oracle:
-      "on a fresh data dir the daemon has installed nothing; running install-python.sh with no configured mirror downloads from one of its built-in URLs, leaves only python-<version>-<release> and python.json whose interpreter reports the pinned version in -I mode, a global pip install on it is refused with the platform's own text while a venv made from it is not, a second run downloads nothing and keeps the same inode; a daemon started on that data dir settles built-in codex and cursor with source builtin and every serve process was started as that bin/python3 and executes a binary inside that tree, and after a daemon restart the tree is unchanged and the serve processes run on it again",
+      "on a fresh data dir the daemon has installed nothing; running install-python.sh with no configured mirror downloads from one of its built-in URLs, leaves only python-<version>-<release> and python.json whose interpreter reports the pinned version in -I mode, a global pip install on it is refused with the platform's own text while a venv made from it is not, a second run downloads nothing and keeps the same inode; a daemon started on that data dir settles every built-in script Agent (codex, cursor, claude, codebuddy) with source builtin and every serve process was started as that bin/python3 and executes a binary inside that tree, and after a daemon restart the tree is unchanged and the serve processes run on it again",
     catches: [
       "the default download URLs or checksum pin are broken for this platform",
       "the daemon installs the runtime itself instead of reading python.json",
@@ -413,7 +413,7 @@ installCase(
   {
     title: "When no mirror yields the pinned archive the installer fails clearly, and script Agents say the runtime is not installed",
     oracle:
-      "with GENEHUB_PYTHON_MIRRORS = a counterfeit-archive mirror and a 404 mirror and every built-in host refused, install-python.sh exits non-zero naming Python and the pinned version, every built-in host was attempted, the second configured mirror was tried, nothing is installed or staged, python.json does not exist and the counterfeit never ran; a daemon started on that data dir lists built-in codex and cursor unavailable with a message saying the Python runtime is not installed, agent.list keeps answering within 3s with native genet still listed, no installer runs and no serve process starts",
+      "with GENEHUB_PYTHON_MIRRORS = a counterfeit-archive mirror and a 404 mirror and every built-in host refused, install-python.sh exits non-zero naming Python and the pinned version, every built-in host was attempted, the second configured mirror was tried, nothing is installed or staged, python.json does not exist and the counterfeit never ran; a daemon started on that data dir lists the built-in script Agents (codex, cursor, claude, codebuddy) unavailable with a message saying the Python runtime is not installed, agent.list keeps answering within 3s with native genet still listed, no installer runs and no serve process starts",
     catches: [
       "a failed runtime install leaves a half-installed tree or a stale python.json",
       "a failure is shown without a reason",

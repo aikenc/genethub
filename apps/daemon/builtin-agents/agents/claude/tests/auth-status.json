@@ -1,0 +1,34 @@
+{
+  "kind": "status",
+  "description": "claude auth status --json decides logged in; anything else is unknown, never a guess",
+  "outputs": [
+    {
+      "text": "{\"loggedIn\": true, \"authMethod\": \"claude.ai\"}",
+      "expect": true
+    },
+    {
+      "text": "{\"loggedIn\": false}",
+      "expect": false
+    },
+    {
+      "text": "noise\n{\"loggedIn\": true}\n",
+      "expect": true
+    },
+    {
+      "text": "{\"loggedIn\": \"yes\"}",
+      "expect": null
+    },
+    {
+      "text": "Not logged in",
+      "expect": null
+    },
+    {
+      "text": "{broken",
+      "expect": null
+    },
+    {
+      "text": "[1]",
+      "expect": null
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "kind": "args",
+  "description": "the permission prompt tool flag is passed only by a CLI that has it",
+  "launches": [
+    {
+      "launch": {},
+      "mode": "default",
+      "lacks": [
+        "--permission-prompt-tool"
+      ]
+    }
+  ]
+}

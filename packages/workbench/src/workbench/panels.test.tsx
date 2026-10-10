@@ -1,9 +1,10 @@
 import type { Reply, Request } from "@genehub/proto";
 import type { ProviderInfo } from "@genehub/proto";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { AgentConfigDialog } from "../agents/AgentConfigDialog";
 import { ChangesPanel } from "../changes/ChangesPanel";
 import { FilesPanel } from "../files/FilesPanel";
 import { LogsPanel } from "../logs/LogsPanel";
@@ -426,6 +427,12 @@ function provider(over: Partial<ProviderInfo> & { id: string }): ProviderInfo {
   };
 }
 
+/** The model keys live in the one Agent 配置 dialog, on their own tab. */
+function renderKeys() {
+  useWorkbench.getState().openAgentConfig("keys");
+  render(<AgentConfigDialog />);
+}
+
 describe("the settings panel", () => {
   it("sends a key without ever showing one back", async () => {
     let stored = false;
@@ -456,7 +463,7 @@ describe("the settings panel", () => {
     });
     install(client);
 
-    render(<SettingsPanel host={browserHost()} />);
+    renderKeys();
     const field = await screen.findByLabelText("DeepSeek API Key");
     expect(field).toHaveAttribute("type", "password");
 
@@ -497,7 +504,7 @@ describe("the settings panel", () => {
     });
     install(client);
 
-    render(<SettingsPanel host={browserHost()} />);
+    renderKeys();
     expect(await screen.findByText(/2 个模型可选/)).toHaveTextContent("deepseek-v4-flash");
     // And where the key is going, which is the part that was wrong: a DeepSeek
     // key with an empty address used to be sent to OpenAI.
@@ -532,7 +539,7 @@ describe("the settings panel", () => {
     });
     install(client);
 
-    render(<SettingsPanel host={browserHost()} />);
+    renderKeys();
     expect(await screen.findByRole("alert")).toHaveTextContent("401");
   });
 
@@ -552,7 +559,7 @@ describe("the settings panel", () => {
     });
     install(client);
 
-    render(<SettingsPanel host={browserHost()} />);
+    renderKeys();
     await userEvent.click(await screen.findByRole("button", { name: "添加自定义 provider" }));
 
     const add = screen.getByTestId("add-provider");
@@ -658,12 +665,14 @@ describe("the settings panel", () => {
     });
     install(client);
 
-    render(<SettingsPanel host={browserHost()} />);
+    renderKeys();
     await userEvent.type(await screen.findByLabelText("OpenAI API Key"), "sk-1");
+    // Opening the dialog already probed once; the save must probe again.
+    const before = calls.filter((call) => call.type === "agent.refresh").length;
     await userEvent.click(screen.getByTestId("save-openai"));
 
     await waitFor(() => {
-      expect(calls.some((call) => call.type === "agent.refresh")).toBe(true);
+      expect(calls.filter((call) => call.type === "agent.refresh").length).toBeGreaterThan(before);
     });
   });
 });
@@ -1036,7 +1045,7 @@ describe("appearance on this client", () => {
   });
 });
 
-describe("the Agent list in settings", () => {
+describe("the Agent list in the Agent 配置 dialog", () => {
   const agent = (id: string, extra: Record<string, unknown>) => ({
     id,
     label: id,
@@ -1073,9 +1082,10 @@ describe("the Agent list in settings", () => {
         agent("genet", { builtin: true, label: "GeneHub" }),
       ] as never,
     });
-    render(<SettingsPanel host={browserHost()} />);
+    useWorkbench.getState().openAgentConfig();
+    render(<AgentConfigDialog />);
 
-    const rows = screen.getAllByRole("listitem").filter((row) => row.closest("section")?.textContent?.startsWith("Agent"));
+    const rows = within(screen.getByRole("list", { name: "Agent 列表" })).getAllByRole("listitem");
     expect(rows[0]).toHaveTextContent("GeneHub");
     expect(rows[0]).toHaveTextContent("内置");
     const cursor = rows.find((row) => row.textContent?.includes("cursor"))!;
@@ -1084,6 +1094,8 @@ describe("the Agent list in settings", () => {
     // The reason is said once, under the name, not again as the status.
     expect(cursor.textContent?.split("未安装 cursor-agent")).toHaveLength(2);
 
+    // Repair and reload are tucked under 更多 on the card that can use them.
+    await userEvent.click(screen.getByRole("button", { name: "broken 更多" }));
     const repairs = screen.getAllByRole("button", { name: "让内置 Agent 修复" });
     expect(repairs).toHaveLength(1);
     expect(rows.find((row) => row.textContent?.includes("broken"))).toContainElement(repairs[0]!);

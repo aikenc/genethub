@@ -1,0 +1,10 @@
+{
+  "kind": "initialize",
+  "description": "a CLI that answers initialize with an error gives no answer rather than a half one",
+  "cli": {
+    "control": {
+      "initialize": "error:not supported"
+    }
+  },
+  "expect": {}
+}

@@ -41,7 +41,6 @@ function composer(overrides: Partial<Parameters<typeof Composer>[0]> = {}) {
       commands={COMMANDS}
       onSend={onSend}
       onInterrupt={vi.fn()}
-      onSavePreferences={vi.fn()}
       {...overrides}
     />,
   );

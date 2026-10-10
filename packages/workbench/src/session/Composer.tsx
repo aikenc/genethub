@@ -173,8 +173,6 @@ export function Composer({
   onUpdateDraft,
   onInterrupt,
   onPickTarget,
-  onSavePreferences,
-  onRefreshAgents,
   onHeightChange,
   onRestoreDraft,
   onInsertDraft,
@@ -230,8 +228,6 @@ export function Composer({
   onUpdateDraft?(draft: SessionDraft, videoFiles?: File[]): Promise<boolean>;
   onInterrupt(): void;
   onPickTarget?(target: SessionAgentTarget, filterTags: string[]): Promise<void> | void;
-  onSavePreferences(preferences: AgentSelectionPreferences): Promise<void> | void;
-  onRefreshAgents?(): void;
   /** Reports the complete overlay height in unzoomed layout pixels. */
   onHeightChange?(height: number): void;
   /** Acknowledges that `restoreDraft` has been taken into the field. */
@@ -1114,8 +1110,6 @@ export function Composer({
               busy={phase !== "idle"}
               onOpenChange={setSettingsOpen}
               onPickTarget={onPickTarget}
-              onSavePreferences={onSavePreferences}
-              onRefreshAgents={onRefreshAgents}
             />
           </div>
           <div

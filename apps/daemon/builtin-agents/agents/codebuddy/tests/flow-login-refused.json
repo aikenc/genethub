@@ -1,0 +1,53 @@
+{
+  "kind": "agent",
+  "description": "an authorization the service refuses is reported with its reason; the card is closed",
+  "cli": {
+    "hello": {
+      "currentModelId": "glm",
+      "models": [
+        {
+          "id": "glm",
+          "name": "GLM"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": false,
+    "version": "2.5.0",
+    "logEnv": [
+      "CODEBUDDY_INTERNET_ENVIRONMENT"
+    ],
+    "acp": {
+      "url": "https://www.codebuddy.ai/auth?state=abc123",
+      "hold": 0.4,
+      "verdict": "error:授权被拒绝"
+    }
+  },
+  "steps": [
+    {
+      "run": "login",
+      "answers": [
+        {
+          "type": "answered",
+          "optionId": "external"
+        }
+      ],
+      "expect": {
+        "result": "error: 登录没有成功：授权被拒绝",
+        "cards": [
+          {
+            "display": [
+              {
+                "kind": "link"
+              }
+            ]
+          }
+        ],
+        "state": {
+          "ready": false
+        }
+      }
+    }
+  ]
+}

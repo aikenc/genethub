@@ -19,7 +19,7 @@
 - **用户不执行 CLI。** 安装、登录、更新都是脚本声明的动作，在工作台点按钮完成；需要人决定或输入的内容
   （确认安装、登录链接、设备码、API key）通过 Agent 级用户请求只交给人，不进时间线、不进模型、不进日志。
 
-**持久动作入口：** 安装确认及 Codex API Key 输入已使用 `ctx.ask`：先保存非秘密准备记录、取得短确认，再结束当前动作并确认其进程组及孙进程退出，之后展示请求。回答通过新执行恢复；停止中断和外部结果未知保留记录，不盲目重放。旧 `ctx.request` 保留内存式兼容，用户脚本需迁移。当前 Codex/Cursor 账号授权无法停止后续接，界面明确说明工作台账号登录尚不支持，提供取消或外部凭据检查，不保活 CLI，也不引入终端登录兜底。参见 [线协议](./agent-serve-protocol.md) 和提案 §16.7。
+**持久动作入口：** 安装确认及 Codex API Key 输入已使用 `ctx.ask`：先保存非秘密准备记录、取得短确认，再结束当前动作并确认其进程组及孙进程退出，之后展示请求。回答通过新执行恢复；停止中断和外部结果未知保留记录，不盲目重放。旧 `ctx.request` 保留内存式兼容，用户脚本需迁移。账号授权是「活」卡片：Agent 用 SDK 的 `login.link_login` 启动登录进程，卡片显示授权链接，授权完成、取消、10 分钟超时或 Agent/daemon 退出时进程和卡片一起结束，不留过期链接；API Key 走持久密码卡片，用 `credentials` 保存并以环境变量交给 CLI。参见 [线协议](./agent-serve-protocol.md) 和提案 §16.7。
 
 ## 2. 目录
 
@@ -42,10 +42,16 @@
 
 | id | 会话协议 | 安装 | 登录 | 默认放权 |
 |---|---|---|---|---|
-| `codex` | `codex app-server` JSON-RPC，每个会话一个 app-server | npm 装进 `state/codex/npm` | API Key 通过持久输入卡片；账号 OAuth/设备码暂停恢复尚不支持 | `approval_policy="never"` + `sandbox_mode="danger-full-access"` |
-| `cursor` | 每轮一个 `cursor-agent` print 进程，stream-json | 官方安装脚本（curl / irm） | `cursor-agent login`，链接以二维码显示 | `--force --sandbox disabled --trust --approve-mcps` |
+| `codex` | `codex app-server` JSON-RPC，每个会话一个 app-server | npm 装进 `state/codex/npm` | 账号：卡片显示授权链接（设备码一并显示），在自己的浏览器完成；也可用 API Key（密码框） | `approval_policy="never"` + `sandbox_mode="danger-full-access"` |
+| `cursor` | 每轮一个 `cursor-agent` print 进程，stream-json | 官方安装脚本（curl / irm） | 账号：卡片显示授权链接；也可用 API Key（密码框） | `--force --sandbox disabled --trust --approve-mcps` |
+| `claude` | Claude 协议 stream-json，每个会话一个常驻 `claude` 进程（`claude_family`） | npm 装进 `state/claude/npm` | 账号：选 Claude 订阅或 Console，卡片显示授权链接并有授权码输入框；也可用 API Key（密码框） | `--allow-dangerously-skip-permissions` + 关闭 CLI 沙箱，默认 bypassPermissions，也可切换 |
+| `codebuddy` | 同上（`cbc`），权限问答走 `can_use_tool` | npm 装进 `state/codebuddy/npm` | 账号：选 Google/GitHub、微信或 iOA，卡片显示授权链接，授权后自动变成已登录；也可用 API Key（密码框，可选服务区域） | `--dangerously-skip-permissions` + `CODEBUDDY_IS_SANDBOX=1`，默认 bypassPermissions，也可切换 |
 
-两者都会：
+所有登录入口统一在「Agent 配置」里：卡片只给链接和输入框，不出现命令行。登录进程只保留一个，由 daemon 管理，
+授权完成自动变成「已登录」；daemon 重启、10 分钟超时或用户取消都会结束它，卡片提示「登录已中断，请重新点登录」，
+不留过期链接。链接、授权码、Key 和 token 不写日志，也不经过任何模型。
+
+四者都会：
 
 - 先推送 `state/<id>` 里缓存的模型目录，再探测，探测失败时界面不会变空；
 - 在 `serve` 启动时检查并更新由 GeneHub 安装的 CLI（每 24 小时最多一次）；
@@ -58,7 +64,7 @@ Codex 另外监视 `auth.json`（`CODEX_HOME` 或 `~/.codex`），以及 app-ser
 
 ## 4. 已移除、待以脚本重新接入的 Agent
 
-Claude Code、TClaude、CodeBuddy、OpenCode 和 `agents.custom` 里声明的自定义 ACP Agent 的 Rust 适配器已删除。
+TClaude、OpenCode 和 `agents.custom` 里声明的自定义 ACP Agent 的 Rust 适配器已删除。
 重新接入之前：
 
 - 它们的历史会话仍可只读查看；
@@ -70,7 +76,7 @@ Claude Code、TClaude、CodeBuddy、OpenCode 和 `agents.custom` 里声明的自
 ## 5. 写一个新的 Agent
 
 看 `<渠道数据目录>/agents/README.md`（源码：`apps/daemon/builtin-agents/README.md`）。最小的 Agent 是一个
-`agent.toml` 加二十几行 `agent.py`；`codex/` 和 `cursor/` 是完整示例。验收：
+`agent.toml` 加二十几行 `agent.py`；`codex/`、`cursor/` 是完整示例，`claude/`、`codebuddy/` 展示了怎样复用 SDK 里的 `claude_family`（两个用同一套 stream-json 协议的 CLI 只写各自不同的几十行）。验收：
 
 ```bash
 "$GENEHUB_CLI" agent test <id> [--live]

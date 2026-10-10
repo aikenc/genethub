@@ -1,0 +1,47 @@
+{
+  "kind": "content",
+  "description": "a pasted image is an inline base64 block; a file with no inline data and no path is dropped, not guessed at; a pasted text file is spilled under the scratch dir and named",
+  "text": "look",
+  "attachments": [
+    {
+      "name": "a.png",
+      "mime": "image/png",
+      "dataBase64": "AA AA\n"
+    },
+    {
+      "name": "ghost.bin",
+      "mime": "application/octet-stream"
+    },
+    {
+      "name": "n.txt",
+      "mime": "text/plain",
+      "dataBase64": "aGk="
+    },
+    {
+      "name": "disk.pdf",
+      "mime": "application/pdf",
+      "path": "/w/disk.pdf"
+    }
+  ],
+  "expect": {
+    "blocks": [
+      {
+        "type": "text"
+      },
+      {
+        "type": "image",
+        "source": {
+          "type": "base64",
+          "media_type": "image/png",
+          "data": "AAAA"
+        }
+      }
+    ],
+    "textContains": [
+      "Attached files",
+      "n.txt",
+      "/w/disk.pdf"
+    ],
+    "spilledFiles": 1
+  }
+}

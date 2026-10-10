@@ -1,0 +1,30 @@
+{
+  "kind": "agent",
+  "description": "update asks before installing its own copy and rolls back if the new one does not start",
+  "cli": {
+    "hello": {
+      "model": "sonnet",
+      "models": [
+        {
+          "value": "sonnet",
+          "displayName": "Sonnet"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": true,
+    "version": "2.1.0 (Claude Code)",
+    "latest": "2.2.0"
+  },
+  "steps": [
+    {
+      "refresh": true,
+      "expect": {
+        "state": {
+          "ready": true
+        }
+      }
+    }
+  ]
+}

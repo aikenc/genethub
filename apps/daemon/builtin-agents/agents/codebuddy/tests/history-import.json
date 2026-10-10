@@ -1,0 +1,111 @@
+{
+  "kind": "history",
+  "description": "past conversations are listed newest first with the first question as title; opening one gives the user and assistant text only, in order, with the resumable session id; side-chain, tool and unparsable lines are skipped; a path-like id is refused",
+  "sessions": [
+    {
+      "id": "sess-old",
+      "lines": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": "Old one"
+          }
+        }
+      ]
+    },
+    {
+      "id": "sess-a",
+      "lines": [
+        {
+          "type": "message",
+          "role": "user",
+          "sessionId": "sess-a",
+          "timestamp": "2026-01-01T00:00:00Z",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "First question"
+            }
+          ]
+        },
+        {
+          "type": "message",
+          "role": "assistant",
+          "timestamp": "2026-01-01T00:00:05Z",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "First answer"
+            }
+          ]
+        },
+        {
+          "type": "function_call",
+          "name": "x"
+        },
+        "not json at all",
+        {
+          "type": "message",
+          "role": "user",
+          "timestamp": "2026-01-01T00:01:00Z",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "Second question"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "limit": 10,
+  "expect": {
+    "list": [
+      {
+        "sourceId": "sess-a",
+        "title": "First question",
+        "preview": "First question",
+        "continuation": "native"
+      },
+      {
+        "sourceId": "sess-old",
+        "title": "Old one"
+      }
+    ],
+    "show": {
+      "sess-a": {
+        "createdAtMs": 1767225600000,
+        "updatedAtMs": 1767225660000,
+        "persist": {
+          "sessionId": "sess-a"
+        },
+        "continuation": "native",
+        "title": "First question",
+        "warnings": [],
+        "items": [
+          {
+            "type": "userMessage",
+            "text": "First question",
+            "attachments": []
+          },
+          {
+            "type": "assistantMessage",
+            "text": "First answer"
+          },
+          {
+            "type": "userMessage",
+            "text": "Second question",
+            "attachments": []
+          }
+        ]
+      }
+    },
+    "rejected": [
+      "../etc/passwd",
+      "a/b",
+      "",
+      "nope-missing"
+    ]
+  }
+}

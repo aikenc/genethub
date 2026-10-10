@@ -1,0 +1,41 @@
+{
+  "kind": "agent",
+  "description": "update to a newer version of GeneHub's own copy needs no question and shows the new version",
+  "cli": {
+    "hello": {
+      "model": "sonnet",
+      "models": [
+        {
+          "value": "sonnet",
+          "displayName": "Sonnet"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": true,
+    "version": "2.1.0",
+    "latest": "2.2.0"
+  },
+  "steps": [
+    {
+      "refresh": true,
+      "expect": {
+        "state": {
+          "version": "2.1.0"
+        }
+      }
+    },
+    {
+      "run": "update",
+      "expect": {
+        "result": "done: 已更新到 2.2.0",
+        "suspended": [],
+        "state": {
+          "ready": true,
+          "version": "2.2.0"
+        }
+      }
+    }
+  ]
+}

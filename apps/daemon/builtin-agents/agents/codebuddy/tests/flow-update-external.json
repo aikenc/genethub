@@ -1,0 +1,47 @@
+{
+  "kind": "agent",
+  "description": "a CodeBuddy GeneHub did not install is replaced only after asking",
+  "installed": false,
+  "external": true,
+  "cli": {
+    "hello": {
+      "currentModelId": "glm",
+      "models": [
+        {
+          "id": "glm",
+          "name": "GLM"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": true,
+    "version": "2.5.0",
+    "logEnv": [
+      "CODEBUDDY_INTERNET_ENVIRONMENT"
+    ],
+    "latest": "2.6.0"
+  },
+  "steps": [
+    {
+      "run": "update",
+      "answers": [
+        {
+          "type": "answered",
+          "optionId": "run"
+        }
+      ],
+      "expect": {
+        "result": "done: 已更新到 2.6.0",
+        "suspended": [
+          {
+            "step": "install.confirm"
+          }
+        ],
+        "state": {
+          "version": "2.6.0"
+        }
+      }
+    }
+  ]
+}

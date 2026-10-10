@@ -1,0 +1,76 @@
+{
+  "kind": "session",
+  "description": "in bypassPermissions a tool prompt that still arrives is answered without bothering the person",
+  "launch": {
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "models": [
+      "sonnet",
+      "opus"
+    ],
+    "efforts": [
+      "low",
+      "high"
+    ]
+  },
+  "config": {
+    "modeId": "bypassPermissions"
+  },
+  "cli": {
+    "turns": [
+      {
+        "emit": [
+          {
+            "type": "system",
+            "subtype": "init",
+            "session_id": "sess-1"
+          },
+          {
+            "type": "control_request",
+            "request_id": "r1",
+            "request": {
+              "subtype": "can_use_tool",
+              "tool_name": "Bash",
+              "input": {
+                "command": "ls"
+              },
+              "tool_use_id": "tu1"
+            }
+          }
+        ],
+        "await": "r1",
+        "then": [
+          {
+            "type": "result",
+            "subtype": "success",
+            "is_error": false
+          }
+        ]
+      }
+    ]
+  },
+  "steps": [
+    {
+      "send": "go"
+    }
+  ],
+  "expect": {
+    "types": [
+      "turnCompleted"
+    ],
+    "received": [
+      {
+        "type": "user"
+      },
+      {
+        "type": "control_response",
+        "response": {
+          "request_id": "r1",
+          "response": {
+            "behavior": "allow",
+            "allowed": true
+          }
+        }
+      }
+    ]
+  }
+}

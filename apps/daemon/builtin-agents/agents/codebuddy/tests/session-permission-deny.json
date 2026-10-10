@@ -1,0 +1,170 @@
+{
+  "kind": "session",
+  "description": "denying answers with a message and both reply shapes",
+  "launch": {
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "models": [
+      "sonnet",
+      "opus"
+    ],
+    "efforts": [
+      "low",
+      "high"
+    ]
+  },
+  "config": {
+    "modeId": "default"
+  },
+  "cli": {
+    "turns": [
+      {
+        "emit": [
+          {
+            "type": "system",
+            "subtype": "init",
+            "session_id": "sess-1"
+          },
+          {
+            "type": "assistant",
+            "message": {
+              "id": "m1",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "tool_use",
+                  "id": "tu1",
+                  "name": "Bash",
+                  "input": {
+                    "command": "rm x"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "type": "control_request",
+            "request_id": "r1",
+            "request": {
+              "subtype": "can_use_tool",
+              "tool_name": "Bash",
+              "input": {
+                "command": "rm x"
+              },
+              "tool_use_id": "tu1"
+            }
+          }
+        ],
+        "await": "r1",
+        "thenAllow": [
+          {
+            "type": "user",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "tool_result",
+                  "tool_use_id": "tu1",
+                  "content": "removed"
+                }
+              ]
+            }
+          },
+          {
+            "type": "assistant",
+            "message": {
+              "id": "m2",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "removed"
+                }
+              ]
+            }
+          },
+          {
+            "type": "result",
+            "subtype": "success",
+            "is_error": false
+          }
+        ],
+        "thenDeny": [
+          {
+            "type": "user",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "tool_result",
+                  "tool_use_id": "tu1",
+                  "content": "denied",
+                  "is_error": true
+                }
+              ]
+            }
+          },
+          {
+            "type": "assistant",
+            "message": {
+              "id": "m3",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok not removed"
+                }
+              ]
+            }
+          },
+          {
+            "type": "result",
+            "subtype": "success",
+            "is_error": false
+          }
+        ]
+      }
+    ]
+  },
+  "steps": [
+    {
+      "send": "remove it",
+      "wait": false
+    },
+    {
+      "waitFor": "permissionRequested"
+    },
+    {
+      "respond": {
+        "outcome": "selected",
+        "optionId": "deny"
+      }
+    },
+    {
+      "waitTerminal": 1
+    }
+  ],
+  "expect": {
+    "received": [
+      {
+        "type": "user"
+      },
+      {
+        "type": "control_response",
+        "response": {
+          "request_id": "r1",
+          "response": {
+            "behavior": "deny",
+            "allowed": false,
+            "message": "Denied by the user.",
+            "reason": "Denied by the user."
+          }
+        }
+      }
+    ],
+    "terminals": [
+      {
+        "type": "turnCompleted"
+      }
+    ]
+  }
+}

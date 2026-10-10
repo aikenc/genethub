@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import path from "node:path";
@@ -84,6 +85,93 @@ export function seedHostCodexLogin(lease: EnvironmentLease, options: { includeMc
       });
       writeFileSync(path.join(dest, "config.toml"), lines.join("\n"), { mode: 0o600 });
     }
+  }
+}
+
+const DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic";
+const DEEPSEEK_OPENAI_BASE_URL = "https://api.deepseek.com/v1";
+const DEFAULT_BARE_MODEL = "deepseek-v4-flash";
+
+export type HostBuiltinLlm = {
+  apiKey: string;
+  openaiBaseUrl: string;
+  anthropicBaseUrl: string;
+  bareId: string;
+};
+
+/** Reads the machine's GeneHub-beta DeepSeek key at runtime. Never logs the value. */
+export function hostBuiltinLlm(): HostBuiltinLlm {
+  const betaConfig = path.join(hostHome(), ".local", "share", "GeneHub-beta", "config.json");
+  if (!existsSync(betaConfig)) {
+    throw new BlockedError("GeneHub-beta config.json is not on this machine");
+  }
+  const raw = JSON.parse(readFileSync(betaConfig, "utf8")) as {
+    agents?: { providers?: Record<string, { apiKey?: string; baseUrl?: string | null }> };
+  };
+  const deepseek = raw.agents?.providers?.deepseek;
+  const apiKey = deepseek?.apiKey?.trim();
+  if (!deepseek || !apiKey) {
+    throw new BlockedError("GeneHub-beta has no deepseek apiKey");
+  }
+  return {
+    apiKey,
+    openaiBaseUrl: deepseek.baseUrl?.trim() || DEEPSEEK_OPENAI_BASE_URL,
+    anthropicBaseUrl: DEEPSEEK_ANTHROPIC_BASE_URL,
+    bareId: DEFAULT_BARE_MODEL,
+  };
+}
+
+export function requireHostCli(name: string): string {
+  const which = spawnSync("which", [name], { encoding: "utf8" });
+  if (which.status !== 0) {
+    throw new BlockedError(`${name} is not on PATH`);
+  }
+  return which.stdout.trim();
+}
+
+export function prependHostCliPath(lease: EnvironmentLease, binary: string): void {
+  const resolved = requireHostCli(binary);
+  const binDir = path.dirname(resolved);
+  const current = lease.env.PATH ?? process.env.PATH ?? "";
+  if (!current.split(path.delimiter).includes(binDir)) {
+    lease.env.PATH = `${binDir}${path.delimiter}${current}`;
+  }
+}
+
+/**
+ * Points the already-installed `claude` CLI at the configured host backend:
+ * Claude Code's own documented environment variables, set on the daemon process
+ * so the child it spawns inherits them.
+ */
+export function pointClaudeAtBuiltinLlm(lease: EnvironmentLease): void {
+  prependHostCliPath(lease, "claude");
+  lease.env.IS_SANDBOX = "1";
+  const settings = path.join(hostHome(), ".claude", "settings.json");
+  if (existsSync(settings)) {
+    const env = (JSON.parse(readFileSync(settings, "utf8")) as { env?: Record<string, unknown> }).env;
+    if (typeof env?.ANTHROPIC_BASE_URL === "string" && env.ANTHROPIC_BASE_URL.trim()) {
+      for (const [key, value] of Object.entries(env)) {
+        if ((key.startsWith("ANTHROPIC_") || key.startsWith("CLAUDE_CODE_")) && typeof value === "string") lease.env[key] = value;
+      }
+      return;
+    }
+  }
+  const llm = hostBuiltinLlm();
+  lease.env.ANTHROPIC_BASE_URL = llm.anthropicBaseUrl;
+  lease.env.ANTHROPIC_AUTH_TOKEN = llm.apiKey;
+  lease.env.ANTHROPIC_API_KEY = llm.apiKey;
+  // Claude Code refuses --dangerously-skip-permissions as uid 0 unless it
+  // believes it is already in a sandbox. This is the CLI's own documented
+  // container/CI switch, inherited by the child the daemon spawns.
+  lease.env.IS_SANDBOX = "1";
+  for (const key of [
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+  ]) {
+    lease.env[key] = llm.bareId;
   }
 }
 

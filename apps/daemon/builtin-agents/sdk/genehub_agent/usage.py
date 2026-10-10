@@ -1,5 +1,5 @@
 """Token and timing accounting for one turn, ported from the daemon's
-`adapter/usage.rs` (only what the Cursor print adapter used).
+`adapter/usage.rs`, shared by the script Agents that count tokens themselves.
 
 The timing fields never go on the wire; `to_wire` produces the `Usage`
 object exactly as `genehub_proto` serializes it.

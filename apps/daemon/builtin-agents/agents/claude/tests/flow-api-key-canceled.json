@@ -1,0 +1,60 @@
+{
+  "kind": "agent",
+  "description": "cancelling the key box saves nothing",
+  "cli": {
+    "hello": {
+      "model": "sonnet",
+      "models": [
+        {
+          "value": "sonnet",
+          "displayName": "Sonnet"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": false,
+    "version": "2.1.0"
+  },
+  "steps": [
+    {
+      "run": "login-api-key",
+      "answers": [
+        {
+          "type": "answered",
+          "optionId": "cancel"
+        }
+      ],
+      "expect": {
+        "result": "done: 已取消登录",
+        "credentials": false,
+        "env": {
+          "ANTHROPIC_API_KEY": null
+        },
+        "state": {
+          "ready": false
+        }
+      }
+    },
+    {
+      "run": "login-api-key",
+      "answers": [
+        {
+          "type": "answered",
+          "optionId": "save",
+          "answers": [
+            {
+              "questionId": "key",
+              "selectedOptionIds": [],
+              "freeformText": "   "
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "result": "done: 已取消登录",
+        "credentials": false
+      }
+    }
+  ]
+}

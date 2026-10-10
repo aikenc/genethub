@@ -1,0 +1,35 @@
+{
+  "kind": "catalog",
+  "description": "a build that spells the ask mode default is asked for default",
+  "hello": null,
+  "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+  "expect": {
+    "catalog": {
+      "modes": [
+        {
+          "id": "bypassPermissions"
+        },
+        {
+          "id": "default",
+          "label": "Default"
+        },
+        {
+          "id": "acceptEdits"
+        },
+        {
+          "id": "plan"
+        }
+      ]
+    }
+  },
+  "initialMode": [
+    {
+      "requested": "manual",
+      "expect": "default"
+    },
+    {
+      "requested": "default",
+      "expect": "default"
+    }
+  ]
+}

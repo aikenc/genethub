@@ -1,0 +1,47 @@
+{
+  "kind": "catalog",
+  "description": "only modes this build lists are offered, read from the flag that lists them; the ask mode is spelled the way the build spells it; an unlisted or unknown request falls back to bypass",
+  "hello": null,
+  "help": "Usage: cli\n  --mode <x>  Use \"plan\" for planning (default: plan)\n  --permission-mode <mode> Permission mode (choices: \"manual\", \"acceptEdits\", \"bypassPermissions\")",
+  "expect": {
+    "catalog": {
+      "modes": [
+        {
+          "id": "bypassPermissions"
+        },
+        {
+          "id": "manual"
+        },
+        {
+          "id": "acceptEdits"
+        }
+      ]
+    }
+  },
+  "initialMode": [
+    {
+      "requested": null,
+      "expect": "bypassPermissions"
+    },
+    {
+      "requested": "default",
+      "expect": "manual"
+    },
+    {
+      "requested": "manual",
+      "expect": "manual"
+    },
+    {
+      "requested": "plan",
+      "expect": "plan"
+    },
+    {
+      "requested": "acceptEdits",
+      "expect": "acceptEdits"
+    },
+    {
+      "requested": "auto",
+      "expect": "bypassPermissions"
+    }
+  ]
+}

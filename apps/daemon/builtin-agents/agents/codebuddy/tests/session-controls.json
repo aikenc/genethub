@@ -1,0 +1,112 @@
+{
+  "kind": "session",
+  "description": "model, effort and mode are checked against this install's lists; once the process runs the change goes to the CLI and is waited for; a model it does not list is refused without asking the CLI",
+  "launch": {
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "models": [
+      "sonnet",
+      "opus"
+    ],
+    "efforts": [
+      "low",
+      "high"
+    ],
+    "defaultModel": "sonnet"
+  },
+  "cli": {
+    "turns": [
+      {
+        "emit": [
+          {
+            "type": "system",
+            "subtype": "init",
+            "session_id": "sess-1"
+          },
+          {
+            "type": "assistant",
+            "message": {
+              "id": "m-done",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "done"
+                }
+              ]
+            }
+          },
+          {
+            "type": "result",
+            "subtype": "success",
+            "is_error": false
+          }
+        ]
+      }
+    ]
+  },
+  "steps": [
+    {
+      "setModel": "nope",
+      "expectError": "不是这个"
+    },
+    {
+      "setEffort": "turbo",
+      "expectError": "不是这个"
+    },
+    {
+      "setMode": "nonsense",
+      "expectError": "未知"
+    },
+    {
+      "send": "hi"
+    },
+    {
+      "setModel": "opus"
+    },
+    {
+      "setEffort": "high"
+    },
+    {
+      "setMode": "plan"
+    },
+    {
+      "setMode": "default"
+    }
+  ],
+  "receivedTypes": [
+    "control_request"
+  ],
+  "expect": {
+    "sessionState": {
+      "modelId": "opus",
+      "effortId": "high",
+      "mode": "default"
+    },
+    "received": [
+      {
+        "request": {
+          "subtype": "set_model",
+          "model": "opus"
+        }
+      },
+      {
+        "request": {
+          "subtype": "set_model",
+          "effort": "high"
+        }
+      },
+      {
+        "request": {
+          "subtype": "set_permission_mode",
+          "mode": "plan"
+        }
+      },
+      {
+        "request": {
+          "subtype": "set_permission_mode",
+          "mode": "default"
+        }
+      }
+    ]
+  }
+}

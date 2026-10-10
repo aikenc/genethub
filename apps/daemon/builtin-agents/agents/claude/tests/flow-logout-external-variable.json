@@ -1,0 +1,41 @@
+{
+  "kind": "agent",
+  "description": "a login that comes from a variable set outside GeneHub is not ours to remove, and the person is told so rather than shown logged out",
+  "cli": {
+    "hello": {
+      "model": "sonnet",
+      "models": [
+        {
+          "value": "sonnet",
+          "displayName": "Sonnet"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": false,
+    "version": "2.1.0"
+  },
+  "steps": [
+    {
+      "setEnv": {
+        "ANTHROPIC_API_KEY": "outside"
+      },
+      "refresh": true,
+      "expect": {
+        "state": {
+          "ready": true
+        }
+      }
+    },
+    {
+      "run": "logout",
+      "expect": {
+        "result": "error: 已经退出了 GeneHub 保存的登录",
+        "env": {
+          "ANTHROPIC_API_KEY": "outside"
+        }
+      }
+    }
+  ]
+}

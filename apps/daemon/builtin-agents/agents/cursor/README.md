@@ -6,11 +6,10 @@ everywhere; never print to stdout (use `ctx.log`).
 
 | file | what lives there |
 |---|---|
-| `agent.py` | `CursorAgent`: state/refresh, catalog cache, actions (install, login, logout, update), background update check, sessions, import, `replay` hook |
+| `agent.py` | `CursorAgent`: state/refresh, catalog cache, actions (install, login, login-api-key, logout, update), background update check, sessions, import, `replay` hook |
 | `cursor_print.py` | one print-mode process per turn: flags, prompt composition, attachments, stream-json → `SessionEvent`, interrupt note, `~/.cursor/cli-config.json` model guard, `CursorSession` |
 | `models.py` | `--list-models` parsing, grouping into base model + efforts + Fast, `launch_slug`, legacy model id mapping |
-| `usage.py` | token/TTFT/output-rate accounting (port of the daemon's `usage.rs` subset) |
-| `lifecycle.py` | binary discovery, `status` login check, version/help probes, bounded streamed commands, login URL parsing |
+| `lifecycle.py` | binary discovery, `status` login check, version/help probes, bounded streamed commands |
 | `acp_import.py` | minimal ACP client (`initialize`, `session/list`, `session/load|resume`) used only for history import |
 | `replay.py`, `tests/*.json` | offline acceptance run by `boot.py <dir> test` |
 
@@ -22,7 +21,8 @@ everywhere; never print to stdout (use `ctx.log`).
 - The kernel passes saved selections through unchanged. `CursorSession._normalize_selection` migrates ids saved by the old ACP adapter (`grok-4.7[effort=high,fast=true]`, raw slugs), replaces unknown models/modes with the defaults, drops efforts and Fast the model lacks, and reports each change as `modelChanged`/`modeChanged`/`effortChanged`/`fastChanged` right after `session.start`.
 - A canceled run is not in Cursor's history, so the next prompt carries an `<genehub_interrupted_turn>` note.
 - The whole process group of a run is ended when the turn ends; a run still holding stdout 5 s after its `result` is ended too.
-- Login links go only into the request card (`render="qr"`), never into job or stderr logs.
+- Account login is the SDK's `login.link_login`: `cursor-agent login` runs under the Agent while an ephemeral card shows the link ("打开授权页"). Only that one login process exists; it ends when the person authorizes, cancels, 10 minutes pass, or the daemon restarts. A restart leaves a marker, and the next state says the login was interrupted. The link never reaches job or stderr logs.
+- API-key login (`login-api-key`) is a durable card with a password box. The key goes into the Agent's state dir (`credentials.json`, owner-only) and is exported as `CURSOR_API_KEY` to every child process; it is checked with `--list-models`, and `logout` forgets it.
 - Background updates only apply to a cursor-agent GeneHub installed; one the user installed is only updated by the explicit `update` action.
 - `state.json` in the state directory holds the found program path, the last state, the last update check and `installedByGenehub` (set by the install action; only such a CLI is updated in the background — one the user installed is never auto-updated); `catalog.json` the last good model list.
 
@@ -33,5 +33,7 @@ GENEHUB_AGENT_STATE=$(mktemp -d) python3 -I <sdk>/boot.py <this dir> test       
 GENEHUB_AGENT_STATE=$(mktemp -d) python3 -I <sdk>/boot.py <this dir> test --live   # also probes the real CLI (read-only)
 ```
 
-Add a `tests/*.json` case (`kind`: `translate`, `models` or `helpers`; see
+Add a `tests/*.json` case (`kind`: `translate`, `models`, `helpers`, `normalize`, `login` or `credentials`; see
 `replay.py`) for every stream-json shape you start handling.
+
+Token/TTFT/output-rate accounting is the SDK's `genehub_agent.usage`.

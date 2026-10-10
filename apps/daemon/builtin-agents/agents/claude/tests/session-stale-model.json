@@ -1,0 +1,75 @@
+{
+  "kind": "session",
+  "description": "a stored model the install does not list is replaced by its default and the change is reported",
+  "launch": {
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "models": [
+      "sonnet",
+      "opus"
+    ],
+    "efforts": [
+      "low",
+      "high"
+    ],
+    "defaultModel": "sonnet"
+  },
+  "config": {
+    "modelId": "gone-1"
+  },
+  "cli": {
+    "turns": [
+      {
+        "emit": [
+          {
+            "type": "system",
+            "subtype": "init",
+            "session_id": "sess-1"
+          },
+          {
+            "type": "assistant",
+            "message": {
+              "id": "m-done",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "done"
+                }
+              ]
+            }
+          },
+          {
+            "type": "result",
+            "subtype": "success",
+            "is_error": false
+          }
+        ]
+      }
+    ]
+  },
+  "steps": [
+    {
+      "send": "hi"
+    }
+  ],
+  "expect": {
+    "sessionState": {
+      "modelId": "sonnet"
+    },
+    "runs": [
+      {
+        "has": [
+          [
+            "--model",
+            "sonnet"
+          ]
+        ]
+      }
+    ],
+    "types": [
+      "modelChanged",
+      "item",
+      "turnCompleted"
+    ]
+  }
+}

@@ -6,7 +6,7 @@ defineJourney(
     // The id is kept for its legacy parity row; the contract changed with
     // script Agents: an unready one is listed on purpose, with a way forward.
     title: "Unready Agents are listed with a reason and a way forward, never as ready",
-    oracle: "genet is builtin and Ready with models; every Ready agent has a label; the shipped codex and cursor script Agents are listed with source builtin, and once settled every unready script Agent carries a message and a primary action",
+    oracle: "genet is builtin and Ready with models; every Ready agent has a label; the shipped codex, cursor, claude and codebuddy script Agents are listed with source builtin, and once settled every unready script Agent carries a message and a primary action",
     catches: [
       "ghost rows in the agent picker",
       "a shipped script Agent missing from agent.list",
@@ -44,7 +44,7 @@ defineJourney(
       // left "starting" and is not running a job, then read what it says.
       const settled = (agent: { message?: string; job?: { done: boolean } }) =>
         agent.message !== "正在启动" && !(agent.job && !agent.job.done);
-      for (const id of ["codex", "cursor"]) {
+      for (const id of ["codex", "cursor", "claude", "codebuddy"]) {
         const agent = await t.flows.branches.waitForAgent(opened.client, id, settled, { what: "settled" });
         t.assertions.assert(agent.source === "builtin" && !agent.builtin, `${id} listed as ${JSON.stringify(t.flows.branches.summarizeAgent(agent))}`);
       }

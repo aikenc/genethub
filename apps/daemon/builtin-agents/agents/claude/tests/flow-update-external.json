@@ -1,0 +1,54 @@
+{
+  "kind": "agent",
+  "description": "a CLI GeneHub did not install is never replaced silently: update asks first and then installs its own copy that is used from then on",
+  "installed": false,
+  "external": true,
+  "cli": {
+    "hello": {
+      "model": "sonnet",
+      "models": [
+        {
+          "value": "sonnet",
+          "displayName": "Sonnet"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": true,
+    "version": "2.1.0",
+    "latest": "2.2.0"
+  },
+  "steps": [
+    {
+      "refresh": true,
+      "expect": {
+        "state": {
+          "ready": true,
+          "version": "2.1.0"
+        }
+      }
+    },
+    {
+      "run": "update",
+      "answers": [
+        {
+          "type": "answered",
+          "optionId": "run"
+        }
+      ],
+      "expect": {
+        "result": "done: 已更新到 2.2.0",
+        "suspended": [
+          {
+            "step": "install.confirm",
+            "title": "由 GeneHub 管理 Claude Code 更新"
+          }
+        ],
+        "state": {
+          "version": "2.2.0"
+        }
+      }
+    }
+  ]
+}

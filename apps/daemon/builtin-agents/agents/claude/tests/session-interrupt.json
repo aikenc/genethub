@@ -1,0 +1,126 @@
+{
+  "kind": "session",
+  "description": "Stop sends an interrupt; the CLI's own interrupted result ends the turn as canceled and the process stays for the next prompt",
+  "launch": {
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "models": [
+      "sonnet",
+      "opus"
+    ],
+    "efforts": [
+      "low",
+      "high"
+    ],
+    "defaultModel": "sonnet"
+  },
+  "cli": {
+    "turns": [
+      {
+        "hang": true,
+        "emit": [
+          {
+            "type": "system",
+            "subtype": "init",
+            "session_id": "sess-1"
+          }
+        ]
+      },
+      {
+        "emit": [
+          {
+            "type": "system",
+            "subtype": "init",
+            "session_id": "sess-1"
+          },
+          {
+            "type": "assistant",
+            "message": {
+              "id": "m-after",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "after"
+                }
+              ]
+            }
+          },
+          {
+            "type": "result",
+            "subtype": "success",
+            "is_error": false
+          }
+        ]
+      }
+    ],
+    "onInterrupt": [
+      {
+        "type": "user",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "[Request interrupted by user]"
+            }
+          ]
+        }
+      },
+      {
+        "type": "result",
+        "subtype": "error_during_execution",
+        "is_error": true
+      }
+    ]
+  },
+  "steps": [
+    {
+      "send": "long job",
+      "wait": false
+    },
+    {
+      "sleep": 0.3
+    },
+    {
+      "interrupt": true
+    },
+    {
+      "waitTerminal": 1
+    },
+    {
+      "send": "next"
+    }
+  ],
+  "receivedTypes": [
+    "control_request",
+    "user"
+  ],
+  "expect": {
+    "terminals": [
+      {
+        "type": "turnCanceled",
+        "turnId": "turn_0"
+      },
+      {
+        "type": "turnCompleted",
+        "turnId": "turn_4"
+      }
+    ],
+    "runs": [
+      {}
+    ],
+    "received": [
+      {
+        "type": "user"
+      },
+      {
+        "request": {
+          "subtype": "interrupt"
+        }
+      },
+      {
+        "type": "user"
+      }
+    ]
+  }
+}

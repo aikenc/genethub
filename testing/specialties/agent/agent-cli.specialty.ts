@@ -444,7 +444,7 @@ const failLine = (name: string) => new RegExp(`^FAIL\\s+${literal(name)}:`, "m")
 
 cliCase(
   "builtin-agent-tests",
-  "agent test runs the built-in codex and cursor adapters' own replay tests and they pass",
+  "agent test runs the built-in codex, cursor, claude and codebuddy adapters' own replay tests and they pass",
   "with neither CLI installed, `agent test codex` and `agent test cursor` each exit 0 with passed:true and an `ok` line for every tests/*.json the daemon materialized under agents/builtin/<id>/, which is the same set as the source tree ships",
   [
     "a built-in adapter regression its own recorded transcripts would catch",
@@ -454,7 +454,7 @@ cliCase(
   async (t) => {
     seedScriptAgentRuntime(t.env);
     await withDaemon(t, [], async (opened, cli) => {
-      for (const id of ["codex", "cursor"]) {
+      for (const id of ["codex", "cursor", "claude", "codebuddy"]) {
         await t.flows.branches.waitForAgent(opened.client, id, (info) => info.source === "builtin" && primary(info) === "install", { what: "built-in, not installed" });
         const shipped = shippedTests(path.join(t.env.data, "agents", "builtin", id));
         const source = shippedTests(path.join(t.openRoot, "apps", "daemon", "builtin-agents", "agents", id));

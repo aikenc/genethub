@@ -1,0 +1,53 @@
+{
+  "kind": "history",
+  "description": "the list honours its limit",
+  "sessions": [
+    {
+      "id": "s1",
+      "lines": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": "one"
+          }
+        }
+      ]
+    },
+    {
+      "id": "s2",
+      "lines": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": "two"
+          }
+        }
+      ]
+    },
+    {
+      "id": "s3",
+      "lines": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": "three"
+          }
+        }
+      ]
+    }
+  ],
+  "limit": 2,
+  "expect": {
+    "list": [
+      {
+        "sourceId": "s3"
+      },
+      {
+        "sourceId": "s2"
+      }
+    ]
+  }
+}

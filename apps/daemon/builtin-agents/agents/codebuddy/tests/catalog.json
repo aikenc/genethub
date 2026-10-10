@@ -1,0 +1,88 @@
+{
+  "kind": "catalog",
+  "description": "models are the aliases the CLI itself listed, with its own names and only the effort levels it says each takes; commands lose their slash and duplicates; the current model is the CLI's own",
+  "hello": {
+    "currentModelId": "gpt-5",
+    "models": [
+      {
+        "id": "gpt-5",
+        "name": "GPT-5",
+        "supportsEffort": true,
+        "supportedEffortLevels": [
+          "low",
+          "high"
+        ]
+      },
+      {
+        "id": "glm",
+        "name": "GLM"
+      },
+      {
+        "id": ""
+      }
+    ],
+    "commands": [
+      {
+        "name": "/review",
+        "description": "Reviews the changes on this branch. It reads every changed file and writes findings grouped by severity. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. ",
+        "argumentHint": "[branch]"
+      },
+      {
+        "name": "help"
+      },
+      {
+        "name": "review"
+      },
+      {
+        "name": "/"
+      }
+    ]
+  },
+  "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+  "expect": {
+    "catalog": {
+      "models": [
+        {
+          "id": "gpt-5",
+          "label": "GPT-5",
+          "reasoning": true,
+          "efforts": [
+            "low",
+            "high"
+          ]
+        },
+        {
+          "id": "glm",
+          "label": "GLM",
+          "reasoning": false,
+          "efforts": []
+        }
+      ],
+      "defaultModel": "gpt-5",
+      "commands": [
+        {
+          "name": "review",
+          "argumentHint": "[branch]"
+        },
+        {
+          "name": "help"
+        }
+      ],
+      "defaultMode": "bypassPermissions",
+      "modes": [
+        {
+          "id": "bypassPermissions"
+        },
+        {
+          "id": "default"
+        },
+        {
+          "id": "acceptEdits"
+        },
+        {
+          "id": "plan"
+        }
+      ]
+    }
+  }
+}

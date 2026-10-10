@@ -310,6 +310,11 @@ class AgentContext:
             self._last_state = state
             self._channel.notify("state", state)
 
+    def add_secret(self, value: str) -> None:
+        """Masks ``value`` in every log from now on (a key the Agent loaded
+        or saved; a value typed into a secret field is masked already)."""
+        self._mask.add(value)
+
     @staticmethod
     def action(action_id: str, label: str, primary: bool = False) -> dict:
         return {"id": action_id, "label": label, "primary": primary}

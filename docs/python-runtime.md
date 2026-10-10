@@ -1,6 +1,6 @@
 # 平台 Python 运行时
 
-脚本 Agent（codex、cursor）和内置 Skill 的脚本都跑在同一份 GeneHub 自带的 Python 上。它由安装程序装好，
+脚本 Agent（codex、cursor、claude、codebuddy）和内置 Skill 的脚本都跑在同一份 GeneHub 自带的 Python 上。它由安装程序装好，
 daemon 只读、不安装。
 
 ## 1. 谁来装

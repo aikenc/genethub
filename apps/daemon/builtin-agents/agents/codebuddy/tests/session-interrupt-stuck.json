@@ -1,0 +1,102 @@
+{
+  "kind": "session",
+  "description": "a CLI that ignores the interrupt is ended after the grace period; the turn is canceled and the next prompt starts a new process that resumes the session",
+  "launch": {
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "models": [
+      "sonnet",
+      "opus"
+    ],
+    "efforts": [
+      "low",
+      "high"
+    ],
+    "defaultModel": "sonnet"
+  },
+  "interruptGrace": 0.5,
+  "cli": {
+    "turns": [
+      {
+        "hang": true,
+        "emit": [
+          {
+            "type": "system",
+            "subtype": "init",
+            "session_id": "keep-me"
+          }
+        ]
+      },
+      {
+        "emit": [
+          {
+            "type": "system",
+            "subtype": "init",
+            "session_id": "keep-me"
+          },
+          {
+            "type": "assistant",
+            "message": {
+              "id": "m-after",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "after"
+                }
+              ]
+            }
+          },
+          {
+            "type": "result",
+            "subtype": "success",
+            "is_error": false
+          }
+        ]
+      }
+    ],
+    "onInterrupt": []
+  },
+  "steps": [
+    {
+      "send": "long job",
+      "wait": false
+    },
+    {
+      "sleep": 0.3
+    },
+    {
+      "interrupt": true
+    },
+    {
+      "waitTerminal": 1
+    },
+    {
+      "send": "next"
+    }
+  ],
+  "expect": {
+    "terminals": [
+      {
+        "type": "turnCanceled"
+      },
+      {
+        "type": "turnCompleted"
+      }
+    ],
+    "runs": [
+      {
+        "lacks": [
+          "--resume"
+        ]
+      },
+      {
+        "has": [
+          [
+            "--resume",
+            "keep-me"
+          ]
+        ]
+      }
+    ]
+  }
+}

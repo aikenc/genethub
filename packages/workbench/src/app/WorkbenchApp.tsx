@@ -63,6 +63,7 @@ import { TitleBar } from "../shell/TitleBar";
 import { useTheme } from "../theme/store";
 import { TerminalPanel } from "../terminal/TerminalPanel";
 import { UpdateToast } from "../updates/UpdateToast";
+import { AgentConfigDialog } from "../agents/AgentConfigDialog";
 import { AgentRequestDialog } from "../agents/AgentRequestDialog";
 import { OpenProject, type OpenWorkspaceHandle } from "../workspace/OpenProject";
 import { WorkspaceAffordance } from "../workspace/WorkspaceAffordance";
@@ -1102,10 +1103,6 @@ export function App({
                         onPickTarget={(target, tags) =>
                           workbench.setAgentTarget(target, tags)
                         }
-                        onSavePreferences={(preferences) =>
-                          workbench.setAgentPreferences(preferences)
-                        }
-                        onRefreshAgents={() => void workbench.refreshAgents()}
                       />
                     ) : null}
                   </>
@@ -1113,7 +1110,7 @@ export function App({
                   <FirstRun
                     host={host}
                     endpoint={endpoint}
-                    onOpenSettings={() => workbench.openTab("settings")}
+                    onOpenAgentConfig={() => workbench.openAgentConfig("keys")}
                   />
                 )
               ) : null}
@@ -1190,6 +1187,7 @@ export function App({
           panel happens to be open. */}
       <UpdateToast host={host} />
       {/* An Agent-level request is for whoever is at this window, whatever tab. */}
+      <AgentConfigDialog />
       <AgentRequestDialog />
       {workbench.previewFloat ? (
         <PreviewFloat
@@ -1277,11 +1275,11 @@ function dialOf(endpoint: Endpoint): ProtocolDial {
 function FirstRun({
   host,
   endpoint,
-  onOpenSettings,
+  onOpenAgentConfig,
 }: {
   host: Host;
   endpoint: Endpoint;
-  onOpenSettings(): void;
+  onOpenAgentConfig(): void;
 }) {
   const {
     workspaces,
@@ -1350,7 +1348,7 @@ function FirstRun({
         <button
           type="button"
           className="rounded-md bg-accent px-3 py-1.5 text-xs text-white"
-          onClick={onOpenSettings}
+          onClick={onOpenAgentConfig}
         >
           去填密钥
         </button>

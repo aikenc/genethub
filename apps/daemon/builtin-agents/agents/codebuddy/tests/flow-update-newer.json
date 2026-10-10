@@ -1,0 +1,43 @@
+{
+  "kind": "agent",
+  "description": "update to a newer version of GeneHub's own copy",
+  "cli": {
+    "hello": {
+      "currentModelId": "glm",
+      "models": [
+        {
+          "id": "glm",
+          "name": "GLM"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": true,
+    "version": "2.5.0",
+    "logEnv": [
+      "CODEBUDDY_INTERNET_ENVIRONMENT"
+    ],
+    "latest": "2.6.0"
+  },
+  "steps": [
+    {
+      "refresh": true,
+      "expect": {
+        "state": {
+          "version": "2.5.0"
+        }
+      }
+    },
+    {
+      "run": "update",
+      "expect": {
+        "result": "done: 已更新到 2.6.0",
+        "state": {
+          "ready": true,
+          "version": "2.6.0"
+        }
+      }
+    }
+  ]
+}

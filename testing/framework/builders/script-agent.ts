@@ -239,7 +239,7 @@ export function readScriptAgentJournal(handle: { journalPath: string }): ScriptA
 }
 
 /** The third-party CLIs the built-in script Agents look for on PATH. */
-export const HOST_AGENT_CLIS = ["codex", "cursor-agent"];
+export const HOST_AGENT_CLIS = ["codex", "cursor-agent", "claude", "cbc", "codebuddy"];
 
 /**
  * Keeps this machine's own Agent CLIs away from the daemon a case starts.

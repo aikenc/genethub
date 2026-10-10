@@ -1,0 +1,40 @@
+{
+  "kind": "agent",
+  "description": "the account the CLI reports carries a bearer token; only whether there is one is used, and nothing of it reaches the state or the log",
+  "cli": {
+    "hello": {
+      "currentModelId": "glm",
+      "models": [
+        {
+          "id": "glm",
+          "name": "GLM"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": true,
+    "version": "2.5.0",
+    "logEnv": [
+      "CODEBUDDY_INTERNET_ENVIRONMENT"
+    ],
+    "account": {
+      "token": "secret-token-value",
+      "bearerToken": "secret-token-value"
+    }
+  },
+  "neverLogged": [
+    "secret-token-value"
+  ],
+  "steps": [
+    {
+      "refresh": true,
+      "expect": {
+        "state": {
+          "ready": true,
+          "message": null
+        }
+      }
+    }
+  ]
+}

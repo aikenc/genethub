@@ -30,8 +30,6 @@ export function ComposerControls({
   busy,
   onOpenChange,
   onPickTarget,
-  onSavePreferences,
-  onRefreshAgents,
 }: {
   agents: AgentInfo[];
   preferences: AgentSelectionPreferences;
@@ -48,8 +46,6 @@ export function ComposerControls({
   busy?: boolean;
   onOpenChange?(open: boolean): void;
   onPickTarget?(target: SessionAgentTarget, filterTags: string[]): Promise<void> | void;
-  onSavePreferences(preferences: AgentSelectionPreferences): Promise<void> | void;
-  onRefreshAgents?(): void;
 }) {
   const [open, setOpen] = useState(false);
   const generatedId = useId();
@@ -183,8 +179,6 @@ export function ComposerControls({
           onPickTarget={async (target, filters) => {
             await onPickTarget?.(target, filters);
           }}
-          onSavePreferences={onSavePreferences}
-          onRefreshAgents={onRefreshAgents}
         />
       ) : null}
     </>

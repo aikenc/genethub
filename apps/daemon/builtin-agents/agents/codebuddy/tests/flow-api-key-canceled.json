@@ -1,0 +1,67 @@
+{
+  "kind": "agent",
+  "description": "cancelling or an empty key saves nothing",
+  "cli": {
+    "hello": {
+      "currentModelId": "glm",
+      "models": [
+        {
+          "id": "glm",
+          "name": "GLM"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": false,
+    "version": "2.5.0",
+    "logEnv": [
+      "CODEBUDDY_INTERNET_ENVIRONMENT"
+    ]
+  },
+  "steps": [
+    {
+      "run": "login-api-key",
+      "answers": [
+        {
+          "type": "answered",
+          "optionId": "cancel"
+        }
+      ],
+      "expect": {
+        "result": "done: 已取消登录",
+        "credentials": false,
+        "state": {
+          "ready": false
+        }
+      }
+    },
+    {
+      "run": "login-api-key",
+      "answers": [
+        {
+          "type": "answered",
+          "optionId": "save",
+          "answers": [
+            {
+              "questionId": "key",
+              "selectedOptionIds": [],
+              "freeformText": "  "
+            },
+            {
+              "questionId": "region",
+              "selectedOptionIds": [
+                "default"
+              ],
+              "freeformText": ""
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "result": "done: 已取消登录",
+        "credentials": false
+      }
+    }
+  ]
+}

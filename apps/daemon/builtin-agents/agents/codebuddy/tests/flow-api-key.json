@@ -1,0 +1,93 @@
+{
+  "kind": "agent",
+  "description": "an API key goes to the daemon only through the password box, with the service it belongs to; it is saved owner-only, never logged, and logging out forgets both",
+  "cli": {
+    "hello": {
+      "currentModelId": "glm",
+      "models": [
+        {
+          "id": "glm",
+          "name": "GLM"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": false,
+    "version": "2.5.0",
+    "logEnv": [
+      "CODEBUDDY_INTERNET_ENVIRONMENT"
+    ]
+  },
+  "neverLogged": [
+    "ck-secret-1"
+  ],
+  "steps": [
+    {
+      "run": "login-api-key",
+      "answers": [
+        {
+          "type": "answered",
+          "optionId": "save",
+          "answers": [
+            {
+              "questionId": "key",
+              "selectedOptionIds": [],
+              "freeformText": "ck-secret-1"
+            },
+            {
+              "questionId": "region",
+              "selectedOptionIds": [
+                "internal"
+              ],
+              "freeformText": ""
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "result": "done: 已用 API Key 登录",
+        "suspended": [
+          {
+            "step": "login.api-key",
+            "title": "用 API Key 登录 CodeBuddy",
+            "questions": [
+              {
+                "id": "key",
+                "input": "secret"
+              },
+              {
+                "id": "region"
+              }
+            ]
+          }
+        ],
+        "env": {
+          "CODEBUDDY_API_KEY": "ck-secret-1",
+          "CODEBUDDY_INTERNET_ENVIRONMENT": "internal"
+        },
+        "credentials": true,
+        "state": {
+          "ready": true
+        },
+        "neverLogged": [
+          "ck-secret-1"
+        ]
+      }
+    },
+    {
+      "run": "logout",
+      "expect": {
+        "result": "done: 已退出登录",
+        "env": {
+          "CODEBUDDY_API_KEY": null,
+          "CODEBUDDY_INTERNET_ENVIRONMENT": null
+        },
+        "credentials": false,
+        "state": {
+          "ready": false
+        }
+      }
+    }
+  ]
+}

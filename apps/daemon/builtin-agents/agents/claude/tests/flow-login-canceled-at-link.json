@@ -1,0 +1,66 @@
+{
+  "kind": "agent",
+  "description": "cancelling on the link card ends the login process and leaves nothing open",
+  "cli": {
+    "hello": {
+      "model": "sonnet",
+      "models": [
+        {
+          "value": "sonnet",
+          "displayName": "Sonnet"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": false,
+    "version": "2.1.0",
+    "authLogin": {
+      "print": [
+        "Visit https://claude.ai/oauth/authorize?code=true&client_id=abc to sign in"
+      ],
+      "hold": 30
+    }
+  },
+  "timeout": 60,
+  "steps": [
+    {
+      "run": "login",
+      "answers": [
+        {
+          "type": "answered",
+          "optionId": "claudeai"
+        }
+      ],
+      "live": [
+        {
+          "type": "answered",
+          "optionId": "cancel"
+        }
+      ],
+      "expect": {
+        "result": "done: 已取消登录",
+        "cards": [
+          {
+            "display": [
+              {
+                "kind": "link"
+              }
+            ]
+          }
+        ],
+        "state": {
+          "ready": false,
+          "actions": [
+            {
+              "id": "login"
+            },
+            {
+              "id": "login-api-key"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

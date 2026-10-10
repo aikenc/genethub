@@ -1,0 +1,36 @@
+{
+  "kind": "agent",
+  "description": "a CLI that refuses to log out says why and the card stays honest",
+  "cli": {
+    "hello": {
+      "currentModelId": "glm",
+      "models": [
+        {
+          "id": "glm",
+          "name": "GLM"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": true,
+    "version": "2.5.0",
+    "logEnv": [
+      "CODEBUDDY_INTERNET_ENVIRONMENT"
+    ],
+    "control": {
+      "logout": "error:session busy"
+    }
+  },
+  "steps": [
+    {
+      "run": "logout",
+      "expect": {
+        "result": "error: CodeBuddy 退出登录失败：session busy",
+        "state": {
+          "ready": true
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "kind": "initialize",
+  "description": "a CLI that never answers is given up on",
+  "cli": {
+    "control": {
+      "initialize": "silent"
+    }
+  },
+  "timeout": 0.5,
+  "expect": {}
+}

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import glob
 import os
+import shutil
 from typing import Dict, List, Optional
 
 from . import process
@@ -34,10 +35,16 @@ def npm_prefix(ctx: AgentContext) -> str:
     return os.path.join(ctx.state_dir, "npm")
 
 
-def npm_bin(ctx: AgentContext, name: str) -> Optional[str]:
+def npm_bin_dir(ctx: AgentContext) -> str:
     prefix = npm_prefix(ctx)
-    directory = prefix if os.name == "nt" else os.path.join(prefix, "bin")
-    return find_executable(name, [directory]) if os.path.isdir(directory) else None
+    return prefix if os.name == "nt" else os.path.join(prefix, "bin")
+
+
+def npm_bin(ctx: AgentContext, name: str) -> Optional[str]:
+    """``name`` inside GeneHub's own prefix only: a copy elsewhere on PATH is
+    not the one install and update manage."""
+    directory = npm_bin_dir(ctx)
+    return shutil.which(name, path=directory) if os.path.isdir(directory) else None
 
 
 NO_NODE = (
@@ -110,14 +117,14 @@ async def npm_install(ctx: AgentContext, job: Job, package: str, timeout: float 
     if npm is None:
         raise RuntimeError(NO_NODE)
     command = [npm, "install", "-g", "--prefix", npm_prefix(ctx), package]
-    job.progress(phase="install", message=f"npm install {package}")
+    job.progress(phase="install", message=f"正在下载并安装 {package}")
     code = await _stream(command, job, timeout, env=node_env(npm))
     if code != 0:
         raise RuntimeError(f"npm 安装失败（退出码 {code}），详情见日志")
 
 
 async def run_logged(job: Job, command: List[str], phase: str, timeout: float = INSTALL_TIMEOUT) -> None:
-    job.progress(phase=phase, message=" ".join(command))
+    job.progress(phase=phase, message=f"正在运行 {os.path.basename(command[0])}")
     code = await _stream(command, job, timeout)
     if code != 0:
         raise RuntimeError(f"{os.path.basename(command[0])} 退出码 {code}，详情见日志")

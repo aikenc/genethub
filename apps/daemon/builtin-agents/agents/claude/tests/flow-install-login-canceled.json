@@ -1,0 +1,62 @@
+{
+  "kind": "agent",
+  "description": "a login cancelled right after installing keeps the install and says how to continue",
+  "installed": false,
+  "cli": {
+    "hello": {
+      "model": "sonnet",
+      "models": [
+        {
+          "value": "sonnet",
+          "displayName": "Sonnet"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": false,
+    "version": "2.1.0",
+    "authLogin": {
+      "print": [
+        "Visit https://claude.ai/oauth/authorize?code=true&client_id=abc to sign in"
+      ],
+      "hold": 30
+    }
+  },
+  "timeout": 90,
+  "steps": [
+    {
+      "run": "install",
+      "answers": [
+        {
+          "type": "answered",
+          "optionId": "run"
+        },
+        {
+          "type": "answered",
+          "optionId": "claudeai"
+        }
+      ],
+      "live": [
+        {
+          "type": "answered",
+          "optionId": "cancel"
+        }
+      ],
+      "expect": {
+        "result": "done: 已取消登录",
+        "state": {
+          "ready": false,
+          "actions": [
+            {
+              "id": "login"
+            },
+            {
+              "id": "login-api-key"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

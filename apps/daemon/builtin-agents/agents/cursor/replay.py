@@ -15,50 +15,8 @@ from typing import Any, List, Optional
 import cursor_print
 import lifecycle
 import models as cursor_models
-
-
-def subset(expected: Any, actual: Any, path: str = "$") -> Optional[str]:
-    if isinstance(expected, dict):
-        if not isinstance(actual, dict):
-            return f"{path}: expected an object, got {json.dumps(actual, ensure_ascii=False)}"
-        for key, value in expected.items():
-            if value == "<absent>":
-                if key in actual:
-                    return f"{path}.{key}: expected absent, got {json.dumps(actual[key], ensure_ascii=False)}"
-                continue
-            if key not in actual:
-                return f"{path}.{key}: missing"
-            problem = subset(value, actual[key], f"{path}.{key}")
-            if problem:
-                return problem
-        return None
-    if isinstance(expected, list):
-        if not isinstance(actual, list) or len(actual) != len(expected):
-            return f"{path}: expected {len(expected)} entries, got {json.dumps(actual, ensure_ascii=False)[:400]}"
-        for index, (want, got) in enumerate(zip(expected, actual)):
-            problem = subset(want, got, f"{path}[{index}]")
-            if problem:
-                return problem
-        return None
-    if isinstance(expected, str) and expected.startswith("<contains>"):
-        needle = expected[len("<contains>") :]
-        return None if isinstance(actual, str) and needle in actual else f"{path}: {actual!r} lacks {needle!r}"
-    if expected != actual or type(expected) is not type(actual):
-        return f"{path}: expected {json.dumps(expected, ensure_ascii=False)}, got {json.dumps(actual, ensure_ascii=False)}"
-    return None
-
-
-def assistant_texts(emitted: List[dict]) -> List[str]:
-    texts: List[List[str]] = []
-    for event in emitted:
-        if event.get("type") == "item" and event["item"].get("type") == "assistantMessage":
-            texts.append([event["item"]["id"], event["item"]["text"]])
-        elif event.get("type") == "itemDelta" and event["delta"].get("kind") == "text":
-            for entry in reversed(texts):
-                if entry[0] == event["itemId"]:
-                    entry[1] += event["delta"]["delta"]
-                    break
-    return [text for _, text in texts]
+from genehub_agent import login
+from genehub_agent.testing import assistant_texts, subset
 
 
 def run_translate(case: dict) -> Optional[str]:
@@ -147,10 +105,10 @@ def run_helpers(case: dict) -> Optional[str]:
             if needle in note:
                 return f"interrupted note should not contain {needle!r}"
     for entry in case.get("loginUrls", []):
-        got = lifecycle.find_login_url(entry["line"])
+        got = login.find_url(entry["line"])
         if got != entry["url"]:
-            return f"find_login_url({entry['line']!r}) = {got!r}"
-        if entry["url"] and entry["url"] in lifecycle.hide_urls(entry["line"]):
+            return f"find_url({entry['line']!r}) = {got!r}"
+        if entry["url"] and entry["url"] in login.hide_urls(entry["line"]):
             return "hide_urls left the login link in the log line"
     guard = case.get("guard")
     if guard:
@@ -223,6 +181,112 @@ def run_normalize(case: dict) -> Optional[str]:
     return None
 
 
+def run_login(case: dict) -> Optional[str]:
+    """The shared live login (SDK `login.link_login`) against a fake CLI that
+    prints a link: the card it opens, how it ends, and that nothing leaks."""
+    import asyncio
+    import sys
+
+    from genehub_agent.testing import scratch_context
+
+    if case.get("interrupted"):
+        # A daemon that died mid-login leaves the marker; the next start says
+        # so once, and a login that never started says nothing.
+        ctx, _, _ = scratch_context("cursor")
+        if login.take_interrupted(ctx) is not None:
+            return "interrupted: reported without a marker"
+        login._write_marker(ctx, "login")
+        if login.take_interrupted(ctx) != login.INTERRUPTED:
+            return "interrupted: marker not reported"
+        if login.take_interrupted(ctx) is not None:
+            return "interrupted: reported twice"
+    for flow in case["flows"]:
+        ctx, channel, job = scratch_context("cursor")
+
+        async def drive() -> str:
+            async def answer() -> None:
+                for _ in range(300):
+                    await asyncio.sleep(0.05)
+                    opened = [m["params"] for m in channel.messages if m["method"] == "request.open"]
+                    if opened and flow.get("answer") is not None:
+                        ctx._answer(opened[0]["id"], flow["answer"])
+                        return
+
+            responder = asyncio.ensure_future(answer())
+            options = dict(flow.get("options") or {})
+            try:
+                return await login.link_login(
+                    ctx, job, [sys.executable, "-c", flow["script"]],
+                    env=dict(os.environ), title="登录", detail="d", **options,
+                )
+            except RuntimeError as error:
+                return f"error: {error}"
+            finally:
+                responder.cancel()
+
+        loop = asyncio.new_event_loop()
+        try:
+            result = loop.run_until_complete(drive())
+        finally:
+            loop.close()
+        opened = [m["params"] for m in channel.messages if m["method"] == "request.open"]
+        closed = [m for m in channel.messages if m["method"] == "request.close"]
+        name = flow["name"]
+        expect = flow["expect"]
+        if "result" in expect and not result.startswith(expect["result"]):
+            return f"{name}: result {result!r}, expected {expect['result']!r}"
+        if "cards" in expect and len(opened) != expect["cards"]:
+            return f"{name}: {len(opened)} cards, expected {expect['cards']}"
+        if opened and "display" in expect:
+            got = [item["kind"] for item in opened[0].get("display", [])]
+            if got != expect["display"]:
+                return f"{name}: card shows {got}, expected {expect['display']}"
+        if opened and len(closed) < len(opened):
+            return f"{name}: the card was left open"
+        if os.path.exists(os.path.join(ctx.state_dir, login.MARKER)):
+            return f"{name}: the pending-login marker was left behind"
+        logs = json.dumps([m["params"] for m in channel.messages if m["method"] == "job.progress"], ensure_ascii=False)
+        for secret in expect.get("neverLogged", []):
+            if secret in logs:
+                return f"{name}: {secret!r} reached the job log"
+    return None
+
+
+def run_credentials(case: dict) -> Optional[str]:
+    """A stored API key: owner-only file, exported to children, masked, and
+    forgotten without disturbing what the environment held before."""
+    import stat
+
+    from genehub_agent import credentials
+    from genehub_agent.testing import scratch_context
+
+    name = case["env"]
+    ctx, _, _ = scratch_context("cursor")
+    os.environ[name] = "outer-value"
+    try:
+        credentials.save(ctx, {name: "  stored-value \n"})
+        path = os.path.join(ctx.state_dir, credentials.FILE)
+        if os.environ.get(name) != "stored-value":
+            return f"credentials: the child environment holds {os.environ.get(name)!r}"
+        if os.name == "posix" and stat.S_IMODE(os.stat(path).st_mode) != 0o600:
+            return "credentials: the file is not owner-only"
+        if not credentials.has(ctx):
+            return "credentials: has() is false after save"
+        if "stored-value" not in ctx._mask.secrets:
+            return "credentials: the stored value is not masked in logs"
+        credentials.save(ctx, {name: "second-value"})
+        if os.environ.get(name) != "second-value":
+            return "credentials: replacing did not take effect"
+        credentials.clear(ctx)
+        if os.environ.get(name) != "outer-value":
+            return f"credentials: clear left {os.environ.get(name)!r} in the environment"
+        if credentials.has(ctx) or os.path.exists(path):
+            return "credentials: the file survived clear"
+    finally:
+        os.environ.pop(name, None)
+    return None
+
+
 def run(case: dict) -> Optional[str]:
     kind = case.get("kind")
     if kind == "translate":
@@ -233,4 +297,8 @@ def run(case: dict) -> Optional[str]:
         return run_helpers(case)
     if kind == "normalize":
         return run_normalize(case)
+    if kind == "login":
+        return run_login(case)
+    if kind == "credentials":
+        return run_credentials(case)
     return f"unknown case kind {kind!r}"

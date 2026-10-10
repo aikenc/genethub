@@ -222,6 +222,14 @@ export type CompletionNotice = {
 
 let composerDraftInsertSequence = 0;
 
+/** The tabs of the Agent 配置 dialog. */
+export type AgentConfigTab = "agents" | "models" | "keys";
+
+export interface AgentConfigState {
+  open: boolean;
+  tab: AgentConfigTab;
+}
+
 interface WorkbenchState {
   client: Client | null;
   connection: ConnectionState;
@@ -232,6 +240,11 @@ interface WorkbenchState {
   hiddenAgentRequests: string[];
   /** Agents a "让内置 Agent 修复" session was opened for in this window. */
   repairingAgentIds: string[];
+  /**
+   * The one "Agent 配置" dialog. `null` until it was first opened; afterwards
+   * `open` says whether it is on screen and `tab` is the tab it showed last.
+   */
+  agentConfig: AgentConfigState | null;
   workspaces: WorkspaceInfo[];
   activeWorkspaceId: string | null;
   sessions: SessionSummary[];
@@ -521,6 +534,9 @@ interface WorkbenchState {
   /** Sets a request aside on this window only; another device may answer it. */
   hideAgentRequest(agentId: string, requestId: string): void;
   showAgentRequest(agentId: string, requestId: string): void;
+  /** Opens the Agent 配置 dialog (default tab: the Agent list). */
+  openAgentConfig(tab?: AgentConfigTab): void;
+  closeAgentConfig(): void;
   /** Restarts a script Agent from its directory after an edit under `user/`. */
   reloadAgent(agentId: string): Promise<void>;
   /** Drops a local override so the built-in script Agent takes over again. */
@@ -786,6 +802,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   agents: [],
   agentRequests: [],
   hiddenAgentRequests: [],
+  agentConfig: null,
   repairingAgentIds: [],
   backgroundProcesses: [],
   workspaces: [],
@@ -839,7 +856,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     // before a machine switch ends up with no live stream at all.
     set({ client, notice: null, subscribedSessionIds: [], subscriptionOwner: null,
       sessions: [], sessionsLoaded: false, sessionsError: false,
-      agentRequests: [], hiddenAgentRequests: [], repairingAgentIds: [] });
+      agentRequests: [], hiddenAgentRequests: [], repairingAgentIds: [], agentConfig: null });
     let wasReady = false;
     client.onStateChange((connection) => {
       if (get().client !== client) return;
@@ -2686,6 +2703,14 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     set((state) => ({
       hiddenAgentRequests: state.hiddenAgentRequests.filter((entry) => entry !== key),
     }));
+  },
+
+  openAgentConfig(tab = "agents") {
+    set({ agentConfig: { open: true, tab } });
+  },
+
+  closeAgentConfig() {
+    set((state) => (state.agentConfig?.open ? { agentConfig: { ...state.agentConfig, open: false } } : {}));
   },
 
   async reloadAgent(agentId) {

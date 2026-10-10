@@ -1,0 +1,557 @@
+{
+  "kind": "translate",
+  "description": "a tool_use snapshot opens one running card (a repeat adds none), its result closes the same card; each tool maps to its own detail",
+  "frames": [
+    {
+      "type": "system",
+      "subtype": "init",
+      "session_id": "sess-1"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "id": "m1",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "t1",
+            "name": "Bash",
+            "input": {
+              "command": "ls",
+              "description": "List files"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "id": "m1",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "t1",
+            "name": "Bash",
+            "input": {
+              "command": "ls",
+              "description": "List files"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "user",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "t1",
+            "content": "a.txt\nb.txt"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "id": "m2",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "t2",
+            "name": "Read",
+            "input": {
+              "file_path": "/w/a.txt"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "user",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "t2",
+            "content": [
+              {
+                "type": "text",
+                "text": "hello"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "id": "m3",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "t3",
+            "name": "Write",
+            "input": {
+              "file_path": "/w/n.txt",
+              "content": "x"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "user",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "t3",
+            "content": "ok"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "id": "m4",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "t4",
+            "name": "Edit",
+            "input": {
+              "file_path": "/w/a.txt",
+              "old_string": "one\ntwo",
+              "new_string": "one\n2"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "user",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "t4",
+            "content": "done"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "id": "m5",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "t5",
+            "name": "Grep",
+            "input": {
+              "pattern": "beta"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "user",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "t5",
+            "content": "none",
+            "is_error": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "id": "m6",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "t6",
+            "name": "WebFetch",
+            "input": {
+              "url": "https://example.test"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "user",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "t6",
+            "content": "page"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "id": "m7",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "t7",
+            "name": "WebSearch",
+            "input": {
+              "query": "q"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "id": "m8",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "t8",
+            "name": "ExitPlanMode",
+            "input": {
+              "plan": "# Plan\n- a"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "id": "m9",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "t9",
+            "name": "Task",
+            "input": {
+              "subagent_type": "Explore",
+              "prompt": "look around"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "id": "m10",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "t10",
+            "name": "mcp__files__list",
+            "input": {
+              "path": "/"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "user",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "t10",
+            "content": "x"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "id": "m11",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "t11",
+            "name": "Mystery",
+            "input": {
+              "a": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "id": "m12",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "t12",
+            "name": "AskUserQuestion",
+            "input": {
+              "questions": [
+                {
+                  "question": "Red or blue?",
+                  "header": "Color",
+                  "options": [
+                    {
+                      "label": "Red"
+                    },
+                    {
+                      "label": "Blue"
+                    }
+                  ],
+                  "multiSelect": false
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "user",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "t12",
+            "content": "User has answered: Blue"
+          }
+        ]
+      }
+    },
+    {
+      "type": "result",
+      "subtype": "success",
+      "is_error": false
+    }
+  ],
+  "expect": {
+    "events": [
+      {
+        "item": {
+          "type": "toolCall",
+          "id": "turn_1-1",
+          "name": "Bash",
+          "status": "running",
+          "detail": {
+            "kind": "overview",
+            "toolKind": "shell",
+            "overview": "List files",
+            "input": "ls",
+            "output": ""
+          }
+        }
+      },
+      {
+        "item": {
+          "id": "turn_1-1",
+          "status": "ok",
+          "detail": {
+            "output": "a.txt\nb.txt"
+          }
+        }
+      },
+      {
+        "item": {
+          "name": "Read",
+          "status": "running",
+          "detail": {
+            "kind": "read",
+            "path": "/w/a.txt"
+          }
+        }
+      },
+      {
+        "item": {
+          "name": "Read",
+          "status": "ok",
+          "detail": {
+            "content": "hello"
+          }
+        }
+      },
+      {
+        "item": {
+          "name": "Write",
+          "detail": {
+            "kind": "write",
+            "path": "/w/n.txt",
+            "content": "x"
+          }
+        }
+      },
+      {
+        "item": {
+          "name": "Write",
+          "status": "ok"
+        }
+      },
+      {
+        "item": {
+          "name": "Edit",
+          "detail": {
+            "kind": "edit",
+            "path": "/w/a.txt",
+            "diff": "<contains>-two"
+          }
+        }
+      },
+      {
+        "item": {
+          "name": "Edit",
+          "status": "ok"
+        }
+      },
+      {
+        "item": {
+          "name": "Grep",
+          "detail": {
+            "kind": "search",
+            "query": "beta"
+          }
+        }
+      },
+      {
+        "item": {
+          "name": "Grep",
+          "status": "error"
+        }
+      },
+      {
+        "item": {
+          "name": "WebFetch",
+          "detail": {
+            "kind": "fetch",
+            "url": "https://example.test"
+          }
+        }
+      },
+      {
+        "item": {
+          "name": "WebFetch",
+          "detail": {
+            "summary": "page"
+          }
+        }
+      },
+      {
+        "item": {
+          "name": "WebSearch",
+          "detail": {
+            "kind": "fetch",
+            "url": "q"
+          }
+        }
+      },
+      {
+        "item": {
+          "name": "ExitPlanMode",
+          "detail": {
+            "kind": "plan",
+            "markdown": "# Plan\n- a"
+          }
+        }
+      },
+      {
+        "item": {
+          "name": "Task",
+          "detail": {
+            "kind": "subAgent",
+            "agent": "Explore",
+            "prompt": "look around"
+          }
+        }
+      },
+      {
+        "item": {
+          "name": "mcp__files__list",
+          "detail": {
+            "kind": "overview",
+            "toolKind": "mcp",
+            "overview": "files: list"
+          }
+        }
+      },
+      {
+        "item": {
+          "name": "mcp__files__list",
+          "status": "ok"
+        }
+      },
+      {
+        "item": {
+          "name": "Mystery",
+          "detail": {
+            "kind": "unknown",
+            "raw": {
+              "name": "Mystery",
+              "input": {
+                "a": 1
+              }
+            }
+          }
+        }
+      },
+      {
+        "item": {
+          "name": "AskUserQuestion",
+          "detail": {
+            "kind": "overview",
+            "overview": "向你提问",
+            "input": "Red or blue?"
+          }
+        }
+      },
+      {
+        "item": {
+          "name": "AskUserQuestion",
+          "detail": {
+            "output": "User has answered: Blue"
+          }
+        }
+      },
+      {
+        "type": "turnCompleted"
+      }
+    ]
+  }
+}

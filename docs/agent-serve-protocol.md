@@ -170,12 +170,27 @@ credentials. No model, timeline, log or CLI command receives the answer.
 **ephemeral** interfaces. They keep an in-memory Future and do not satisfy the
 long Human-pause contract. Custom scripts need to migrate to `ctx.ask` before
 claiming durable interaction support. Built-in installation confirmation and
-Codex API-key entry now use that durable path. Account OAuth/device login in
-current Codex/Cursor cannot resume a stopped upstream CLI: the card explicitly
-reports that workbench account login is unsupported, and offers cancellation
-or a recheck of externally obtained local credentials. It never retains a login
-CLI and does not introduce a terminal-login fallback. This is a capability gap,
-not a passed account-authorization journey.
+API-key entry (Codex, Cursor, Claude Code, CodeBuddy) use that durable path.
+
+**Account login is a live card, on purpose.** Upstream account authorization
+(device code, OAuth link) cannot be resumed after its CLI stops, so it is not
+durable. The SDK's `login.link_login` runs it: the Agent starts the login CLI,
+reads the authorization link (and a one-time code, if the CLI prints one) from
+its output, and opens one ephemeral request that shows the link ("打开授权页")
+— and, where the CLI asks for it, a box to paste the code the page shows. Only
+that one login process exists, owned by the Agent, never by the person. It ends
+when the person authorizes (the CLI exits, or the protocol answers), cancels the
+card, ten minutes pass, or the Agent process or daemon goes away; the card is
+closed with it, so no expired link is left behind. A marker in the state
+directory makes the next start say "登录已中断，请重新点「登录」"
+(`login.take_interrupted`). Links, codes and keys never reach job or stderr
+logs. Card text and Skills never tell a person to use a terminal.
+
+API keys: `credentials.save` keeps the key owner-only in the Agent's state
+directory and `credentials.apply` exports it as the environment variable the
+CLI documents to every process the Agent starts; `credentials.clear` forgets it
+on logout. The key is masked in every log from the moment it is held
+(`ctx.add_secret`).
 
 Who may do what: `agent.logs`, `agent.test` and `agent.reload` need the
 Session capability. Agent-list replies and pushes to Read-only peers omit CLI

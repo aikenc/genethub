@@ -1,0 +1,140 @@
+{
+  "kind": "translate",
+  "description": "a CLI that does not stream partial messages: the snapshot's text is shown once, a repeated snapshot adds nothing, and a streamed message's snapshot adds nothing",
+  "frames": [
+    {
+      "type": "system",
+      "subtype": "init",
+      "session_id": "sess-1"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "id": "a",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "plan"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "id": "a",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "Answer"
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "id": "a",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "Answer"
+          }
+        ]
+      }
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "message_start",
+        "message": {
+          "id": "b"
+        }
+      }
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+          "type": "text"
+        }
+      }
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": "Streamed"
+        }
+      }
+    },
+    {
+      "type": "stream_event",
+      "event": {
+        "type": "content_block_stop",
+        "index": 0
+      }
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "id": "b",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "Streamed"
+          }
+        ]
+      }
+    },
+    {
+      "type": "result",
+      "subtype": "success",
+      "is_error": false
+    }
+  ],
+  "expect": {
+    "assistantTexts": [
+      "Answer",
+      "Streamed"
+    ],
+    "events": [
+      {
+        "item": {
+          "type": "reasoning",
+          "text": "plan"
+        }
+      },
+      {
+        "item": {
+          "type": "assistantMessage",
+          "text": "Answer"
+        }
+      },
+      {
+        "item": {
+          "type": "assistantMessage",
+          "text": ""
+        }
+      },
+      {
+        "item": {
+          "type": "assistantMessage",
+          "text": "Streamed"
+        }
+      },
+      {
+        "type": "turnCompleted"
+      }
+    ]
+  }
+}

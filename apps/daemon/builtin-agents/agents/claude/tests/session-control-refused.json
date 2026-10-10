@@ -1,0 +1,73 @@
+{
+  "kind": "session",
+  "description": "a CLI that answers a control with an error leaves the choice unchanged and says why; accept-edits survives a CLI too old for the request",
+  "launch": {
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "models": [
+      "sonnet",
+      "opus"
+    ],
+    "efforts": [
+      "low",
+      "high"
+    ],
+    "defaultModel": "sonnet"
+  },
+  "cli": {
+    "turns": [
+      {
+        "emit": [
+          {
+            "type": "system",
+            "subtype": "init",
+            "session_id": "sess-1"
+          },
+          {
+            "type": "assistant",
+            "message": {
+              "id": "m-done",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "done"
+                }
+              ]
+            }
+          },
+          {
+            "type": "result",
+            "subtype": "success",
+            "is_error": false
+          }
+        ]
+      }
+    ],
+    "control": {
+      "set_model": "error:unknown model",
+      "set_permission_mode": "error:no such request"
+    }
+  },
+  "steps": [
+    {
+      "send": "hi"
+    },
+    {
+      "setModel": "opus",
+      "expectError": "unknown model"
+    },
+    {
+      "setMode": "plan",
+      "expectError": "no such request"
+    },
+    {
+      "setMode": "acceptEdits"
+    }
+  ],
+  "expect": {
+    "sessionState": {
+      "modelId": null,
+      "mode": "acceptEdits"
+    }
+  }
+}

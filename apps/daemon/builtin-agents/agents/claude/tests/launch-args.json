@@ -1,0 +1,107 @@
+{
+  "kind": "args",
+  "description": "the session command line: stream-json both ways, partial messages, the bypass flag this CLI knows, unrestricted settings; model/effort only when listed; guidance and resume when given",
+  "launches": [
+    {
+      "launch": {
+        "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+        "models": [
+          "a",
+          "b"
+        ],
+        "efforts": [
+          "low"
+        ]
+      },
+      "mode": "bypassPermissions",
+      "has": [
+        "--print",
+        [
+          "--input-format",
+          "stream-json"
+        ],
+        [
+          "--output-format",
+          "stream-json"
+        ],
+        "--verbose",
+        "--include-partial-messages",
+        "--allow-dangerously-skip-permissions",
+        [
+          "--permission-mode",
+          "bypassPermissions"
+        ],
+        "--settings"
+      ],
+      "lacks": [
+        "--model",
+        "--effort",
+        "--resume",
+        "--append-system-prompt"
+      ]
+    },
+    {
+      "launch": {
+        "models": [
+          "a",
+          "b"
+        ],
+        "efforts": [
+          "low"
+        ]
+      },
+      "mode": "plan",
+      "model": "b",
+      "effort": "low",
+      "guidance": "Be brief",
+      "resume": "s-1",
+      "has": [
+        [
+          "--model",
+          "b"
+        ],
+        [
+          "--effort",
+          "low"
+        ],
+        [
+          "--append-system-prompt",
+          "Be brief"
+        ],
+        [
+          "--resume",
+          "s-1"
+        ],
+        [
+          "--permission-mode",
+          "plan"
+        ]
+      ]
+    },
+    {
+      "launch": {
+        "models": [
+          "a"
+        ],
+        "efforts": [
+          "low"
+        ]
+      },
+      "mode": "default",
+      "model": "zzz",
+      "effort": "max",
+      "guidance": "   ",
+      "has": [
+        [
+          "--permission-mode",
+          "default"
+        ]
+      ],
+      "lacks": [
+        "--model",
+        "--effort",
+        "--append-system-prompt"
+      ]
+    }
+  ]
+}

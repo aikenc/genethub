@@ -36,6 +36,7 @@ const INSTALL_TITLE = "安装 Cursor CLI";
  * every process of it runs from the install's own directory. */
 const LOGIN_PROCESS = /cursor-agent\S*(\s\S+)*\slogin(\s|$)/;
 const LOGIN_TITLE = "登录 Cursor";
+const API_KEY_TITLE = "用 API Key 登录 Cursor";
 
 function cursorCase(
   id: string,
@@ -122,22 +123,26 @@ async function noLeftovers(t: CaseContext, what: RegExp, label: string): Promise
     .catch(() => { throw new Error(`${label} still running: ${leftovers(t, what).join(" | ").slice(0, 400)}`); });
 }
 
-/** Upstream account login cannot survive a stopped CLI. The durable card
- * records the obligation and limit, never an expiring authorization URL. */
+/** The account login card carries the authorization link; the one login
+ * process behind it is the Agent's, and it ends with the card. */
 function assertLoginRequest(t: CaseContext, request: AgentRequest): void {
-  t.assertions.assert(request.display.length === 0 && (request.detail ?? "").includes("此版本不能在工作台完成账号登录"), "login must explain upstream pause limitation without an expiring URL");
-  t.assertions.assert(["check", "cancel"].every(id => request.options.some(option => option.id === id)), "login has no check/cancel actions");
+  const link = request.display.find((item) => item.kind === "link");
+  t.assertions.assert(link !== undefined && /^https:\/\//.test(link.value), `login card shows ${JSON.stringify(request.display.map((item) => item.kind))}, not an authorization link`);
+  t.assertions.assert(!(request.detail ?? "").includes("此版本不能在工作台完成账号登录"), "the login card still says the workbench cannot log in");
+  t.assertions.assert(request.options.some((option) => option.id === "cancel"), "login has no cancel action");
+  t.assertions.assert(leftovers(t, LOGIN_PROCESS).length > 0, "no login process stands behind the shown link");
 }
 
 cursorCase(
   "cursor-official-installer-then-login-request",
-  "Install asks first, runs Cursor's official installer, then stops at a durable account-login instruction; a restart updates only that copy",
-  "with no cursor-agent anywhere, built-in cursor offers install; the install action raises \"安装 Cursor CLI\" naming cursor.com/install while AgentInfo.job already shows the install job (done false) waiting on it, and runs nothing until answered; `run` installs the real CLI into the lease home (~/.local/bin link into ~/.local/share/cursor-agent/versions) and state.json records installedByGenehub; the same job then raises \"登录 Cursor\" with a durable account-login capability limitation, no expiring link and no live login process; cancel ends the job without error, leaves no `cursor-agent login` process and the Agent offering login; the login action asks again and its cancel ends done; after a daemon restart a background `update` job runs and finishes without error, stamps lastUpdateCheckMs, and the CLI still answers",
+  "Install asks first, runs Cursor's official installer, then shows the account login link while one login process waits for authorization; a restart updates only that copy",
+  "with no cursor-agent anywhere, built-in cursor offers install; the install action raises \"安装 Cursor CLI\" naming cursor.com/install while AgentInfo.job already shows the install job (done false) waiting on it, and runs nothing until answered; `run` installs the real CLI into the lease home (~/.local/bin link into ~/.local/share/cursor-agent/versions) and state.json records installedByGenehub; the same job then raises \"登录 Cursor\" showing the authorization link with one live login process behind it; cancel ends the job without error, leaves no `cursor-agent login` process and the Agent offering login and 用 API Key 登录; the login action shows a fresh link and its cancel ends done; a wrong API Key answered to login-api-key is rejected without the key reaching the Agent's log, agent.list or state and leaves the Agent not logged in; after a daemon restart a background `update` job runs and finishes without error, stamps lastUpdateCheckMs, and the CLI still answers",
   [
     "the installer runs without asking, or does not show what it will run",
     "install succeeds but the CLI is not found where the official installer puts it",
     "a GeneHub install is not recorded, so it is never kept up to date",
-    "no durable login obligation after install",
+    "no authorization link on the login card after install",
+    "a rejected API key stored or logged",
     "the login link written into the Agent's log",
     "a canceled login leaves cursor-agent login running or the job failed",
     "the background update breaks the installed CLI",
@@ -172,7 +177,6 @@ cursorCase(
         assertLoginRequest(t, login);
         const logs = await t.flows.branches.agentLogs(opened.client, "cursor");
         t.assertions.assert(!logs.join("\n").includes("loginDeepControl"), "a temporary login link leaked");
-        t.assertions.assert(leftovers(t, LOGIN_PROCESS).length === 0, "cursor-agent login retained during Human pause");
 
         await choose(t, opened.client, pushes, login, "cancel");
         const afterInstall = await t.flows.branches.waitForAgent(opened.client, "cursor",
@@ -190,6 +194,26 @@ cursorCase(
           (info) => info.job?.action === "login" && info.job.done === true, { what: "login job finished" });
         t.assertions.assert(!canceled.job?.error, `canceled login ended in error: ${canceled.job?.error}`);
         await noLeftovers(t, LOGIN_PROCESS, "cursor-agent login");
+
+        // A wrong API key is refused where it is checked, and goes nowhere else.
+        const wrongKey = "crsr_genehub_wrong_key_0123456789abcdef0123456789abcdef";
+        const keyRun = await t.flows.branches.agentControl(opened.client, { type: "agent.action", payload: { agentId: "cursor", actionId: "login-api-key" } });
+        t.assertions.assert(keyRun.ok, `login-api-key action: ${keyRun.ok ? "" : keyRun.error}`);
+        const keyAsk = await nextRequest(t, pushes, API_KEY_TITLE, pushes.requests.indexOf(second) + 1, 30_000);
+        t.assertions.assert(keyAsk.questions.find((item) => item.id === "key")?.input === "secret", "the API key question is not a password box");
+        await t.flows.branches.answerAgentRequest(opened.client, {
+          agentId: "cursor", requestId: keyAsk.id,
+          outcome: { type: "answered", optionId: "save", answers: [{ questionId: "key", selectedOptionIds: [], freeformText: wrongKey }] },
+        });
+        const rejected = await t.flows.branches.waitForAgent(opened.client, "cursor",
+          (info) => info.job?.action === "login-api-key" && info.job.done === true, { timeoutMs: 120_000, what: "API key check finished" });
+        t.assertions.assert((rejected.job?.error ?? "").includes("不接受"), `a wrong key ended ${JSON.stringify(rejected.job)}`);
+        const keyLogs = (await t.flows.branches.agentLogs(opened.client, "cursor")).join("\n");
+        const listed = JSON.stringify(await t.flows.branches.listAgents(opened.client));
+        t.assertions.assert(!keyLogs.includes(wrongKey) && !listed.includes(wrongKey) && !JSON.stringify(cursorScriptState(t.env)).includes(wrongKey),
+          "the API key reached a log, agent.list or the Agent's state");
+        t.assertions.assert(!existsSync(path.join(t.env.data, "agents", "state", "cursor", "credentials.json")), "a rejected API key stayed stored");
+        await t.flows.branches.waitForAgent(opened.client, "cursor", notLoggedIn, { what: "still not logged in after a wrong key" });
       } finally {
         pushes.stop();
       }

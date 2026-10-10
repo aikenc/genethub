@@ -1,0 +1,46 @@
+{
+  "kind": "agent",
+  "description": "cancelling the account choice starts no login process",
+  "cli": {
+    "hello": {
+      "currentModelId": "glm",
+      "models": [
+        {
+          "id": "glm",
+          "name": "GLM"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": false,
+    "version": "2.5.0",
+    "logEnv": [
+      "CODEBUDDY_INTERNET_ENVIRONMENT"
+    ],
+    "acp": {
+      "url": "https://www.codebuddy.ai/auth?state=abc123",
+      "hold": 0.4,
+      "verdict": "ok"
+    }
+  },
+  "steps": [
+    {
+      "run": "login",
+      "answers": [
+        {
+          "type": "answered",
+          "optionId": "cancel"
+        }
+      ],
+      "expect": {
+        "result": "done: 已取消登录",
+        "cards": [],
+        "acpEnv": "<no login process>",
+        "state": {
+          "ready": false
+        }
+      }
+    }
+  ]
+}

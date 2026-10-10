@@ -1,0 +1,23 @@
+{
+  "kind": "catalog",
+  "description": "a paragraph-long command description is cut at a sentence",
+  "hello": {
+    "commands": [
+      {
+        "name": "review",
+        "description": "Reviews the changes on this branch. It reads every changed file and writes findings grouped by severity. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. "
+      }
+    ]
+  },
+  "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+  "expect": {
+    "catalog": {
+      "commands": [
+        {
+          "name": "review",
+          "description": "Reviews the changes on this branch. It reads every changed file and writes findings grouped by severity. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text.…"
+        }
+      ]
+    }
+  }
+}

@@ -2107,7 +2107,6 @@ function composerProps(overrides: Partial<ComponentProps<typeof Composer>> = {})
     modeId: null,
     onSend: () => {},
     onInterrupt: () => {},
-    onSavePreferences: () => {},
     ...overrides,
   };
 }

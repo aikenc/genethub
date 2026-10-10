@@ -13,7 +13,7 @@ import os
 import time
 from typing import Any, List, Optional
 
-from genehub_agent import Agent, AgentContext, Job, Session, SessionContext, option, serve
+from genehub_agent import Agent, AgentContext, Job, Session, SessionContext, credentials, login, option, secret_question, serve
 from genehub_agent import install as sdk_install
 from genehub_agent.process import child_environment, run
 
@@ -39,6 +39,7 @@ class CursorAgent(Agent):
         self._listing: Optional[asyncio.Lock] = None
         self._supports_update: Optional[bool] = None
         self._help_for: Optional[str] = None
+        self._interrupted: Optional[str] = None
 
     # -- small persistence --------------------------------------------------
 
@@ -119,6 +120,8 @@ class CursorAgent(Agent):
     async def start(self, ctx: AgentContext) -> None:
         self._refreshing = asyncio.Lock()
         self._listing = asyncio.Lock()
+        credentials.apply(ctx)
+        self._interrupted = login.take_interrupted(ctx)
         cached = self._read_json(ctx, CATALOG_CACHE)
         if isinstance(cached.get("raw"), list) and cached["raw"]:
             self.listed = cursor_print.Listed(cached["raw"], cached.get("default"))
@@ -146,14 +149,25 @@ class CursorAgent(Agent):
         else:
             logged = await lifecycle.logged_in(program)
         if logged is False:
-            self._report(ctx, False, "找到了 Cursor，但它还没登录", version, [ctx.action("login", "登录", primary=True)])
+            message = "找到了 Cursor，但它还没登录"
+            if self._interrupted:
+                message = self._interrupted
+            self._report(
+                ctx,
+                False,
+                message,
+                version,
+                [ctx.action("login", "登录", primary=True), ctx.action("login-api-key", "用 API Key 登录")],
+            )
             return
+        self._interrupted = None
         await self._list_models(ctx, program)
         actions = []
         message = None
         if logged is None:
             message = "未能确认登录状态"
             actions.append(ctx.action("login", "登录"))
+        actions.append(ctx.action("login-api-key", "换一个 API Key" if credentials.has(ctx) else "用 API Key 登录"))
         actions.append(ctx.action("logout", "退出登录"))
         if await self._supports(program):
             actions.append(ctx.action("update", "更新"))
@@ -172,6 +186,9 @@ class CursorAgent(Agent):
             await self._install(ctx, job)
         elif action == "login":
             if await self._login(ctx, job) == "canceled":
+                job.done("已取消登录")
+        elif action == "login-api-key":
+            if await self._login_api_key(ctx, job) == "canceled":
                 job.done("已取消登录")
         elif action == "logout":
             await self._logout(ctx, job)
@@ -213,28 +230,66 @@ class CursorAgent(Agent):
             await self.refresh(ctx)
 
     async def _login(self, ctx: AgentContext, job: Job) -> str:
-        if self._find(ctx) is None:
+        """Account login: `cursor-agent login` prints a link and waits until the
+        person has authorized in any browser. That one process is kept alive
+        for the card; if it or this daemon goes away the card closes and the
+        person starts again."""
+        program = self._find(ctx)
+        if program is None:
             raise RuntimeError("未安装 Cursor CLI")
-        job.progress(phase="login", message="当前账号授权不支持停止后恢复")
-        outcome = await ctx.ask(
-            job, "login.external", "登录 Cursor",
-            detail=("Cursor 当前的账号授权不能跨停止恢复。此版本不能在工作台完成账号登录；"
-                    "GeneHub 已停止这个动作，不会保留登录进程或过期链接。"
-                    "如果已通过外部方式获得本机登录凭据，可点「检查登录」核查状态；也可取消此事项。"),
-            options=[option("check", "检查登录"), option("cancel", "取消")],
+        result = await login.link_login(
+            ctx,
+            job,
+            [program, "login"],
+            env=child_environment(),
+            title="登录 Cursor",
+            detail="在浏览器里打开下面的链接，用你的 Cursor 账号完成授权。授权页可以在任何一台设备的浏览器里打开。",
         )
         await self.refresh(ctx)
-        if outcome.canceled or outcome.option_id != "check":
+        if result == "canceled":
             return "canceled"
-        if not os.environ.get("CURSOR_API_KEY") and await lifecycle.logged_in(self._find(ctx)) is not True:
-            raise RuntimeError("Cursor 仍然报告未登录，请完成本机登录后重新检查")
+        if not os.environ.get("CURSOR_API_KEY") and await lifecycle.logged_in(self._find(ctx) or program) is not True:
+            raise RuntimeError("授权已结束，但 Cursor 仍然报告未登录，请重新点「登录」")
         job.done("已登录")
         return "ok"
 
+    async def _login_api_key(self, ctx: AgentContext, job: Job) -> str:
+        program = self._find(ctx)
+        if program is None:
+            raise RuntimeError("未安装 Cursor CLI")
+        outcome = await ctx.ask(
+            job, "login.api-key", "用 API Key 登录 Cursor",
+            detail="粘贴一个 Cursor API Key（在 cursor.com/dashboard 的 Integrations 里创建）。"
+                   "它只保存在这台机器上 GeneHub 的 Cursor 配置目录里，不经过任何模型，退出登录时一并删除。",
+            questions=[secret_question("key", "Cursor API Key")],
+            options=[option("save", "保存"), option("cancel", "取消")],
+        )
+        key = (outcome.value("key") or "").strip()
+        if outcome.canceled or outcome.option_id != "save" or not key:
+            return "canceled"
+        job.progress(phase="login", message="正在核对 API Key")
+        previous = credentials.load(ctx)
+        credentials.save(ctx, {"CURSOR_API_KEY": key})
+        if await lifecycle.list_raw_models(program) is None:
+            # Not accepted: put back what was there before.
+            credentials.clear(ctx)
+            if previous:
+                credentials.save(ctx, previous)
+            await self.refresh(ctx)
+            raise RuntimeError("Cursor 不接受这个 API Key，请检查后重新输入")
+        await self.refresh(ctx)
+        job.done("已用 API Key 登录")
+        return "ok"
+
     async def resume_action(self, ctx: AgentContext, action: str, step: str, job: Job) -> None:
-        if step == "login.external":
+        if step == "login.api-key":
+            if await self._login_api_key(ctx, job) == "canceled":
+                job.done("已取消登录")
+        elif step == "login.external":
+            # A card saved by an older build: a login link cannot be resumed,
+            # so this starts a fresh one.
             if await self._login(ctx, job) == "canceled":
-                job.done("已安装；登录已取消" if action == "install" else "已取消登录")
+                job.done("已取消登录")
         else:
             await self.run_action(ctx, action, job)
 
@@ -242,7 +297,9 @@ class CursorAgent(Agent):
         program = self._find(ctx)
         if program is None:
             raise RuntimeError("未安装 Cursor CLI")
-        job.progress(phase="logout", message="cursor-agent logout")
+        job.progress(phase="logout", message="正在退出登录")
+        # A key GeneHub saved goes first, so the status below is the account's.
+        credentials.clear(ctx)
         try:
             done = await run([program, "logout"], env=child_environment(), timeout=lifecycle.LOGOUT_TIMEOUT)
         finally:
@@ -251,22 +308,22 @@ class CursorAgent(Agent):
             if line.strip():
                 job.log(lifecycle.strip_ansi(line))
         if not done.ok:
-            raise RuntimeError(f"cursor-agent logout 退出码 {done.code}，详情见日志")
+            raise RuntimeError(f"Cursor 退出登录失败（退出码 {done.code}），详情见日志")
 
     async def _update(self, ctx: AgentContext, job: Job) -> None:
         program = self._find(ctx)
         if program is None:
             raise RuntimeError("未安装 Cursor CLI")
         if not await self._supports(program):
-            raise RuntimeError("这个版本的 cursor-agent 没有 update 子命令；请重新运行安装")
+            raise RuntimeError("这个版本的 Cursor 不支持直接更新；请点「安装」重新安装")
         self._update_state_file(ctx, lastUpdateCheckMs=_now_ms())
         before = await lifecycle.version(program)
-        job.progress(phase="update", message="cursor-agent update")
+        job.progress(phase="update", message="正在更新 Cursor")
         code = await lifecycle.stream_logged([program, "update"], job.log, lifecycle.UPDATE_TIMEOUT)
         self._supports_update = None
         await self.refresh(ctx)
         if code != 0:
-            raise RuntimeError(f"cursor-agent update 退出码 {code}，详情见日志")
+            raise RuntimeError(f"Cursor 更新失败（退出码 {code}），详情见日志")
         # Quick self-check: the updated CLI must still start. Cursor's updater
         # cannot go back to a given version, so a failure is reported, not
         # rolled back.

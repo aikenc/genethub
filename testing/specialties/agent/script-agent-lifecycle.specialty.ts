@@ -144,8 +144,8 @@ async function assistantText(opened: Opened, sessionId: string): Promise<string>
 
 lifecycleCase(
   "builtin-listed-without-cli",
-  "Built-in codex and cursor are listed and offer install when their CLI is absent",
-  "with neither CLI reachable, agent.list carries codex and cursor with source builtin, probe unavailable and a primary install action; the seeded pinned runtime is the same tree (inode) afterwards and the runtime directory holds only that tree and python.json, so the daemon neither installed nor replaced anything",
+  "Built-in codex, cursor, claude and codebuddy are listed and offer install when their CLI is absent",
+  "with neither CLI reachable, agent.list carries codex, cursor, claude and codebuddy with source builtin, probe unavailable and a primary install action; the seeded pinned runtime is the same tree (inode) afterwards and the runtime directory holds only that tree and python.json, so the daemon neither installed nor replaced anything",
   [
     "built-in script Agents not materialized or not scanned",
     "an absent CLI reported as ready",
@@ -157,9 +157,11 @@ lifecycleCase(
     const seeded = seedScriptAgentRuntime(t.env);
     await withWorkspace(t, async (opened) => {
       const settled = (agent: AgentInfo) => agent.probe.state !== "ready" && primary(agent) !== undefined;
-      const codex = await t.flows.branches.waitForAgent(opened.client, "codex", settled, { what: "settled without a CLI" });
-      const cursor = await t.flows.branches.waitForAgent(opened.client, "cursor", settled, { what: "settled without a CLI" });
-      for (const agent of [codex, cursor]) {
+      const shipped: AgentInfo[] = [];
+      for (const id of ["codex", "cursor", "claude", "codebuddy"]) {
+        shipped.push(await t.flows.branches.waitForAgent(opened.client, id, settled, { what: "settled without a CLI" }));
+      }
+      for (const agent of shipped) {
         t.assertions.assert(agent.source === "builtin", `${agent.id} source ${agent.source}`);
         t.assertions.assert(agent.probe.state === "unavailable", `${agent.id} probe ${JSON.stringify(agent.probe)}`);
         t.assertions.assert(primary(agent) === "install", `${agent.id} primary action ${primary(agent)}`);
@@ -176,8 +178,8 @@ lifecycleCase(
         `runtime directory changed: ${runtime.join(",")}`,
       );
       t.assertions.assert(scriptAgentRuntimeIdentity(seeded.dir) === seeded.identity, "the seeded runtime was replaced");
-      t.note(JSON.stringify([codex, cursor].map(t.flows.branches.summarizeAgent)));
-    }, ["codex", "cursor"]);
+      t.note(JSON.stringify(shipped.map(t.flows.branches.summarizeAgent)));
+    }, ["codex", "cursor", "claude", "codebuddy"]);
   },
 );
 

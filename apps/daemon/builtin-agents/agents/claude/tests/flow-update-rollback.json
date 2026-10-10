@@ -1,0 +1,43 @@
+{
+  "kind": "agent",
+  "description": "a new version that does not start is rolled back and the failure is said",
+  "cli": {
+    "hello": {
+      "model": "sonnet",
+      "models": [
+        {
+          "value": "sonnet",
+          "displayName": "Sonnet"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": true,
+    "version": "2.1.0",
+    "latest": "2.2.0",
+    "brokenVersions": [
+      "2.2.0"
+    ]
+  },
+  "steps": [
+    {
+      "refresh": true,
+      "expect": {
+        "state": {
+          "version": "2.1.0"
+        }
+      }
+    },
+    {
+      "run": "update",
+      "expect": {
+        "result": "error: 新版本 Claude Code 无法启动，已回到 2.1.0",
+        "state": {
+          "ready": true,
+          "version": "2.1.0"
+        }
+      }
+    }
+  ]
+}

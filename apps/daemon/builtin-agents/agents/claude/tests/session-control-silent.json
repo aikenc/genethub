@@ -1,0 +1,66 @@
+{
+  "kind": "session",
+  "description": "a CLI that never answers a control request is not waited for forever",
+  "launch": {
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "models": [
+      "sonnet",
+      "opus"
+    ],
+    "efforts": [
+      "low",
+      "high"
+    ],
+    "defaultModel": "sonnet"
+  },
+  "cli": {
+    "turns": [
+      {
+        "emit": [
+          {
+            "type": "system",
+            "subtype": "init",
+            "session_id": "sess-1"
+          },
+          {
+            "type": "assistant",
+            "message": {
+              "id": "m-done",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "done"
+                }
+              ]
+            }
+          },
+          {
+            "type": "result",
+            "subtype": "success",
+            "is_error": false
+          }
+        ]
+      }
+    ],
+    "control": {
+      "set_model": "silent"
+    }
+  },
+  "timeout": 30,
+  "controlTimeout": 0.5,
+  "steps": [
+    {
+      "send": "hi"
+    },
+    {
+      "setModel": "opus",
+      "expectError": "没有回应"
+    }
+  ],
+  "expect": {
+    "sessionState": {
+      "modelId": null
+    }
+  }
+}

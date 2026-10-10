@@ -1,0 +1,141 @@
+{
+  "kind": "session",
+  "description": "Always Allow is remembered for that tool only: the second Bash is answered without asking, an Edit still asks",
+  "launch": {
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "models": [
+      "sonnet",
+      "opus"
+    ],
+    "efforts": [
+      "low",
+      "high"
+    ]
+  },
+  "config": {
+    "modeId": "default"
+  },
+  "cli": {
+    "turns": [
+      {
+        "emit": [
+          {
+            "type": "system",
+            "subtype": "init",
+            "session_id": "sess-1"
+          },
+          {
+            "type": "assistant",
+            "message": {
+              "id": "m1",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "tool_use",
+                  "id": "tu1",
+                  "name": "Bash",
+                  "input": {
+                    "command": "a"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "type": "control_request",
+            "request_id": "r1",
+            "request": {
+              "subtype": "can_use_tool",
+              "tool_name": "Bash",
+              "input": {
+                "command": "a"
+              },
+              "tool_use_id": "tu1"
+            }
+          }
+        ],
+        "await": "r1",
+        "then": [
+          {
+            "type": "control_request",
+            "request_id": "r2",
+            "request": {
+              "subtype": "can_use_tool",
+              "tool_name": "Bash",
+              "input": {
+                "command": "b"
+              },
+              "tool_use_id": "tu2"
+            }
+          }
+        ],
+        "__": 0
+      },
+      {
+        "emit": [
+          {
+            "type": "control_request",
+            "request_id": "r3",
+            "request": {
+              "subtype": "can_use_tool",
+              "tool_name": "Edit",
+              "input": {
+                "file_path": "/w/a"
+              },
+              "tool_use_id": "tu3"
+            }
+          }
+        ],
+        "await": "r3",
+        "then": [
+          {
+            "type": "result",
+            "subtype": "success",
+            "is_error": false
+          }
+        ]
+      }
+    ]
+  },
+  "steps": [
+    {
+      "send": "go",
+      "wait": false
+    },
+    {
+      "waitFor": "permissionRequested"
+    },
+    {
+      "respond": {
+        "outcome": "selected",
+        "optionId": "allow_always"
+      }
+    },
+    {
+      "sleep": 0.5
+    }
+  ],
+  "expect": {
+    "received": [
+      {
+        "type": "user"
+      },
+      {
+        "type": "control_response",
+        "response": {
+          "request_id": "r1"
+        }
+      },
+      {
+        "type": "control_response",
+        "response": {
+          "request_id": "r2",
+          "response": {
+            "behavior": "allow",
+            "allowed": true
+          }
+        }
+      }
+    ]
+  }
+}

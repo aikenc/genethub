@@ -154,7 +154,6 @@ describe("Composer segmented speech review", () => {
         modeId={null}
         onSend={vi.fn()}
         onInterrupt={vi.fn()}
-        onSavePreferences={vi.fn()}
       />,
     );
 

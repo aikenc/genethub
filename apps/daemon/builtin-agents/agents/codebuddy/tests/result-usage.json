@@ -1,0 +1,75 @@
+{
+  "kind": "translate",
+  "description": "without a result total, the per-message usage counts once per message and rounds are counted; progress is reported",
+  "frames": [
+    {
+      "type": "assistant",
+      "message": {
+        "id": "m1",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "a"
+          }
+        ],
+        "usage": {
+          "input_tokens": 3,
+          "output_tokens": 4
+        }
+      }
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "id": "m1",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "a2"
+          }
+        ],
+        "usage": {
+          "input_tokens": 3,
+          "output_tokens": 4
+        }
+      }
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "id": "m2",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "b"
+          }
+        ],
+        "usage": {
+          "input_tokens": 5,
+          "output_tokens": 6,
+          "cache_read_input_tokens": 1
+        }
+      }
+    },
+    {
+      "type": "result",
+      "subtype": "success",
+      "is_error": false
+    }
+  ],
+  "expect": {
+    "progressEvents": 2,
+    "terminal": {
+      "type": "turnCompleted",
+      "usage": {
+        "inputTokens": 8,
+        "outputTokens": 10,
+        "cacheReadTokens": 1,
+        "llmRounds": 2
+      }
+    }
+  }
+}

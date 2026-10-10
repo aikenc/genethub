@@ -57,8 +57,10 @@ serve(MyAgent())
 ```
 
 then `"$GENEHUB_CLI" agent reload <id>`. The built-in `codex` (JSON-RPC
-app-server) and `cursor` (print mode + stream-json) are complete examples of
-install, login, catalog, sessions and import.
+app-server), `cursor` (print mode + stream-json) and `claude` / `codebuddy`
+(one long-lived stream-json process per session, built on the SDK's
+`claude_family`) are complete examples of install, login, catalog, sessions
+and import.
 
 ## Rules the daemon enforces
 

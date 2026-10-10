@@ -10,6 +10,22 @@
       "startWithoutModelCatalog": false
     },
     {
+      "ids": ["claude"],
+      "label": "Claude Code",
+      "canonicalLabel": true,
+      "glyph": "✱",
+      "modeKind": "permission",
+      "startWithoutModelCatalog": true
+    },
+    {
+      "ids": ["codebuddy"],
+      "label": "CodeBuddy",
+      "canonicalLabel": true,
+      "glyph": "B",
+      "modeKind": "permission",
+      "startWithoutModelCatalog": true
+    },
+    {
       "ids": ["codex"],
       "label": "Codex",
       "glyph": "C",

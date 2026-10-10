@@ -28,10 +28,10 @@ import uuid
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from genehub_agent import Session, SessionContext, events
+from genehub_agent import usage as usage_mod
 from genehub_agent.process import WINDOWS, child_environment, kill_tree, spawn
 
 import models as cursor_models
-import usage as usage_mod
 
 LABEL = "Cursor"
 # Keys every print run writes into `cli-config.json`.

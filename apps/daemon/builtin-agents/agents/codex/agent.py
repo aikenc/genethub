@@ -19,7 +19,7 @@ import time
 import uuid
 from typing import Any, Dict, Iterable, List, Optional, Set
 
-from genehub_agent import Agent, AgentContext, Job, SessionContext, install, process, serve
+from genehub_agent import Agent, AgentContext, Job, SessionContext, install, login, process, serve
 
 import codex_login
 from codex_appserver import (
@@ -150,6 +150,7 @@ class CodexAgent(Agent):
         self.hello: Optional[dict] = None
         # True / False / None (could not tell).
         self.logged_in: Optional[bool] = None
+        self._interrupted: Optional[str] = None
         self.sessions: set = set()
         # codex.exe paths found behind an npm shim (see `vendored_codex`).
         self._vendored: Set[str] = set()
@@ -307,6 +308,7 @@ class CodexAgent(Agent):
                 catalog=self.catalog(),
             )
         ctx.spawn(self._watch_auth())
+        self._interrupted = login.take_interrupted(ctx)
         await self.refresh(ctx)
         if self.installed_by_genehub(self.program):
             ctx.spawn(self._maybe_auto_update())
@@ -336,7 +338,7 @@ class CodexAgent(Agent):
         if self.logged_in is False:
             self._push(
                 False,
-                NOT_LOGGED_IN,
+                self._interrupted or NOT_LOGGED_IN,
                 [
                     AgentContext.action("login", "登录", primary=True),
                     AgentContext.action("login-api-key", "用 API Key 登录"),
@@ -451,6 +453,7 @@ class CodexAgent(Agent):
         return program
 
     async def _login(self, ctx: AgentContext, job: Job) -> None:
+        self._interrupted = None
         result = await codex_login.interactive_login(ctx, job, self._require_program(), self.env())
         self._mark_sessions_stale("auth")
         await self.refresh(ctx)
@@ -474,12 +477,12 @@ class CodexAgent(Agent):
 
     async def _logout(self, ctx: AgentContext, job: Job) -> None:
         program = self._require_program()
-        job.progress(phase="logout", message="codex logout")
+        job.progress(phase="logout", message="正在退出登录")
         result = await process.run([program, "logout"], env=self.env(), timeout=30)
         self._mark_sessions_stale("auth")
         await self.refresh(ctx)
         if not result.ok:
-            raise RuntimeError(f"codex logout 退出码 {result.code}")
+            raise RuntimeError(f"Codex 退出登录失败（退出码 {result.code}）")
         job.done("已退出登录")
 
     async def _latest_version(self) -> Optional[str]:

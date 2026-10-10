@@ -1,39 +1,40 @@
-"""Durable account-login instructions and a secret API-key checkpoint.
+"""Codex logins: an account login kept alive for its card, and an API key.
 
-Codex has no public command for resuming a stopped device/OAuth CLI attempt.
-GeneHub records the capability limit and a local-login recheck obligation
-without a CLI, expiring authorization material, or an in-memory wait.
+`codex login --device-auth` prints a link and a one-time code, then waits
+until the person has entered the code in any browser. That one process lives
+for as long as the card does (`genehub_agent.login`); if it or the daemon
+goes away the card closes and the person starts again. The API-key login
+hands the key straight to `codex login --with-api-key` and keeps nothing.
 """
 
 from __future__ import annotations
 
 from typing import Dict
 
-from genehub_agent import AgentContext, Job, option, process, secret_question
+from genehub_agent import AgentContext, Job, login, option, process, secret_question
+
+# "https://auth.openai.com/codex/device" then, on its own line, "ABCD-12345".
+CODE_PATTERN = r"\b([A-Z0-9]{4}-[A-Z0-9]{4,6})\b"
+
 
 async def interactive_login(ctx: AgentContext, job: Job, program: str, env: Dict[str, str]) -> str:
-    """The upstream CLI cannot resume a stopped OAuth/device-login attempt.
-
-    Keep a durable login obligation, not an expiring code backed by a live
-    CLI. The card states the limitation; checking an externally acquired
-    local login is a fresh action. API-key login stays native in GeneHub.
-    """
-    job.progress(phase="login", message="当前账号授权不支持停止后恢复")
-    outcome = await ctx.ask(
-        job, "login.external", "登录 Codex",
-        detail=("Codex 当前的账号授权需要登录进程持续运行，不能跨停止恢复。"
-                "此版本不能在工作台完成账号登录；GeneHub 已停止这个动作，不会保活登录进程。"
-                "可取消后改用「用 API Key 登录」。如果已通过外部方式完成账号授权，可点「检查登录」核查本地状态。"),
-        options=[option("check", "检查登录"), option("cancel", "取消")],
+    return await login.link_login(
+        ctx,
+        job,
+        [program, "login", "--device-auth"],
+        env=env,
+        title="登录 Codex",
+        detail="在浏览器里打开下面的链接，输入一次性授权码，用你的 ChatGPT 账号完成授权。授权页可以在任何一台设备的浏览器里打开。",
+        code_pattern=CODE_PATTERN,
+        code_label="一次性授权码",
     )
-    return "canceled" if outcome.canceled or outcome.option_id != "check" else "ok"
 
 
 async def api_key_login(ctx: AgentContext, job: Job, program: str, env: Dict[str, str]) -> str:
     outcome = await ctx.ask(
         job, "login.api-key",
         "用 API Key 登录 Codex",
-        detail="粘贴一个 OpenAI API Key。它只交给本机的 codex login --with-api-key 保存，GeneHub 不留存。",
+        detail="粘贴一个 OpenAI API Key。它只交给这台机器上的 Codex 保存，GeneHub 不留存。",
         questions=[secret_question("key", "OpenAI API Key")],
         options=[option("save", "保存"), option("cancel", "取消")],
     )
@@ -43,5 +44,5 @@ async def api_key_login(ctx: AgentContext, job: Job, program: str, env: Dict[str
     job.progress(phase="login", message="正在保存 API Key")
     result = await process.run([program, "login", "--with-api-key"], env=env, timeout=60, input_text=key + "\n")
     if not result.ok:
-        raise RuntimeError(f"codex login --with-api-key 失败（退出码 {result.code}）")
+        raise RuntimeError(f"Codex 没有接受这个 API Key（退出码 {result.code}），请检查后重新输入")
     return "ok"

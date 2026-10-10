@@ -1,0 +1,67 @@
+{
+  "kind": "agent",
+  "description": "a wrong code is the CLI's refusal, said in the person's words; the card is not left open",
+  "cli": {
+    "hello": {
+      "model": "sonnet",
+      "models": [
+        {
+          "value": "sonnet",
+          "displayName": "Sonnet"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": false,
+    "version": "2.1.0",
+    "authLogin": {
+      "print": [
+        "Visit https://claude.ai/oauth/authorize?code=true&client_id=abc to sign in"
+      ],
+      "code": "right"
+    }
+  },
+  "steps": [
+    {
+      "run": "login",
+      "answers": [
+        {
+          "type": "answered",
+          "optionId": "claudeai"
+        }
+      ],
+      "live": [
+        {
+          "type": "answered",
+          "optionId": "submit",
+          "answers": [
+            {
+              "questionId": "code",
+              "selectedOptionIds": [],
+              "freeformText": "wrong"
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "result": "error: 登录没有成功",
+        "cards": [
+          {
+            "display": [
+              {
+                "kind": "link"
+              }
+            ]
+          }
+        ],
+        "state": {
+          "ready": false
+        },
+        "neverLogged": [
+          "wrong"
+        ]
+      }
+    }
+  ]
+}

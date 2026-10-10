@@ -259,7 +259,7 @@ installCase(
   {
     id: "codex-node-found-after-start-then-install-and-api-key-login",
     title: "Codex installs once Node.js appears, logs in with an API key and talks to the model with the current key",
-    oracle: "with no Node.js reachable the codex Agent offers install with the Node guidance and an install job fails leaving no npm prefix; after nvm-style Node appears under the lease home (daemon not restarted) install asks first with its job already shown (not done), shows the npm prefix under state/codex, runs the real npm install, offers a durable account-login capability limitation without an expiring link or running login process whose cancel still ends the job done with codex under the prefix and login/login-api-key offered; with Codex's own config pointed at the mock, an API key answer makes it ready with models, a session turn completes with the mock's text over exactly one Responses call bearing sha256(Bearer key); after switching to a second key with login-api-key (no logout) both the same and a new session reach the mock with the second key, and after a third key is saved by `codex login --with-api-key` outside GeneHub the same session's next turn carries the third; update reports the registry's version and stays ready; the first session's thread (once closed) and a `codex exec` thread the user ran in a terminal in the workspace are each listed by session.importList, session.import gives a native codex session whose timeline holds that prompt then the mock's reply, the thread is not offered again, and the imported session completes a turn with the current key; no key appears in agent.logs, agent.list, Agent pushes or the daemon log; logout leaves it not logged in; a /proc census that saw the app-server and the script finds no lease process after the daemon stops",
+    oracle: "with no Node.js reachable the codex Agent offers install with the Node guidance and an install job fails leaving no npm prefix; after nvm-style Node appears under the lease home (daemon not restarted) install asks first with its job already shown (not done), shows the npm prefix under state/codex, runs the real npm install, raises an account login card showing the authorization link with one live login process behind it, whose cancel ends that process, keeps the link out of the log and still ends the job done with codex under the prefix and login/login-api-key offered; with Codex's own config pointed at the mock, an API key answer makes it ready with models, a session turn completes with the mock's text over exactly one Responses call bearing sha256(Bearer key); after switching to a second key with login-api-key (no logout) both the same and a new session reach the mock with the second key, and after a third key is saved by `codex login --with-api-key` outside GeneHub the same session's next turn carries the third; update reports the registry's version and stays ready; the first session's thread (once closed) and a `codex exec` thread the user ran in a terminal in the workspace are each listed by session.importList, session.import gives a native codex session whose timeline holds that prompt then the mock's reply, the thread is not offered again, and the imported session completes a turn with the current key; no key appears in agent.logs, agent.list, Agent pushes or the daemon log; logout leaves it not logged in; a /proc census that saw the app-server and the script finds no lease process after the daemon stops",
     catches: [
       "Node.js installed after daemon start is not found without a restart",
       "install runs without asking, or outside the Agent's own prefix",
@@ -316,12 +316,18 @@ installCase(
         await t.flows.branches.answerAgentRequest(opened.client, { agentId: CODEX, requestId: confirm.id, outcome: choose("run") });
 
         const login = await nextRequest(t, pushes, LOGIN_TITLE, seen, NPM_TIMEOUT_MS);
-        t.assertions.assert(login.display.length === 0 && (login.detail ?? "").includes("此版本不能在工作台完成账号登录"), "no durable account-login instruction");
-        t.assertions.assert(login.options.some(o => o.id === "check") && login.options.some(o => o.id === "cancel"), "no login check/cancel actions");
-        t.assertions.assert(!leaseProcesses(t.env).some(p => /codex.*\blogin\b/.test(p.cmd)), "login CLI retained during Human pause");
+        const shown = login.display.map((item) => item.kind);
+        t.assertions.assert(shown.includes("link"), `the account login card shows ${JSON.stringify(shown)}, not an authorization link`);
+        t.assertions.assert(!(login.detail ?? "").includes("此版本不能在工作台完成账号登录"), "the login card still says the workbench cannot log in");
+        t.assertions.assert(login.options.some(o => o.id === "cancel"), "no cancel action on the login card");
+        t.assertions.assert(leaseProcesses(t.env).some(p => /codex.*\blogin\b/.test(p.cmd)), "no login process stands behind the shown link");
         t.assertions.assert(existsSync(codexBin), "the login request came before codex was under the npm prefix");
         await t.flows.branches.answerAgentRequest(opened.client, { agentId: CODEX, requestId: login.id, outcome: choose("cancel") });
         await requestClosed(t, pushes, login.id);
+        await t.tools.waitUntil(() => !leaseProcesses(t.env).some(p => /codex.*\blogin\b/.test(p.cmd)), 10_000)
+          .catch(() => { throw new Error("the login process outlived its canceled card"); });
+        const loginLogs = (await t.flows.branches.agentLogs(opened.client, CODEX)).join("\n");
+        t.assertions.assert(!/https:\/\/\S*auth\.openai\.com/.test(loginLogs), "the authorization link reached the Agent's log");
 
         const job = await jobEnd(t, opened, started);
         const phases = phasesOf(pushes, job.id);
