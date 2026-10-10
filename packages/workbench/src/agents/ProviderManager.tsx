@@ -1,15 +1,9 @@
-import type { ProviderInfo } from "@genehub/proto";
+import type { ProviderInfo, ProviderPreset } from "@genehub/proto";
 import { Plus } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { useWorkbench } from "../session/store";
-import {
-  configuredProviders,
-  DIALECT_LABEL,
-  PROVIDER_PRESETS,
-  presetsToAdd,
-  type ProviderPreset,
-} from "./providers";
+import { configuredProviders, DIALECT_LABEL, presetsToAdd } from "./providers";
 
 const FIELD =
   "rounded border border-line bg-bg px-2 py-1 text-xs outline-none focus:border-accent";
@@ -26,6 +20,7 @@ const FIELD =
  */
 export function ProviderManager() {
   const providers = useWorkbench((state) => state.settings?.providers);
+  const shipped = useWorkbench((state) => state.settings?.presets);
   const setProvider = useWorkbench((state) => state.setProvider);
   const forgetProvider = useWorkbench((state) => state.forgetProvider);
   const configured = configuredProviders(providers);
@@ -58,7 +53,7 @@ export function ProviderManager() {
       {showForm ? (
         <AddProvider
           taken={(providers ?? []).filter((entry) => entry.custom || entry.hasApiKey).map((entry) => entry.id)}
-          presets={presetsToAdd(providers)}
+          presets={presetsToAdd(providers, shipped)}
           onAdd={async (input) => {
             await setProvider(input);
             setAdding(false);
@@ -295,7 +290,7 @@ function AddProvider({
 
   const pick = (next: string) => {
     setChoice(next);
-    const preset = PROVIDER_PRESETS.find((entry) => entry.id === next);
+    const preset = presets.find((entry) => entry.id === next);
     setId(preset?.id ?? "");
     setLabel(preset?.label ?? "");
     setBaseUrl(preset?.baseUrl ?? "");

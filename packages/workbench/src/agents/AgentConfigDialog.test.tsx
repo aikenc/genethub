@@ -33,22 +33,32 @@ function agent(id: string, extra: Partial<AgentInfo> = {}): AgentInfo {
   } as AgentInfo;
 }
 
-const READY = agent("codex", { label: "Codex", actions: [{ id: "logout", label: "退出登录", primary: false }] });
+const READY = agent("codex", { label: "Codex", actions: [{ id: "logout", label: "退出登录", primary: false, group: "account" }] });
 const NEEDS_LOGIN = agent("claude", {
   label: "Claude Code",
   probe: { state: "unavailable", reason: "找到了 Claude Code，但它还没登录" },
   message: "找到了 Claude Code，但它还没登录：点「登录」，或者用 API Key 登录。",
   actions: [
-    { id: "login", label: "登录", primary: true },
-    { id: "login-api-key", label: "用 API Key 登录", primary: false },
+    { id: "login", label: "登录", primary: true, group: "account" },
+    { id: "login-api-key", label: "用 API Key 登录", primary: false, group: "account" },
   ],
 });
 const NOT_INSTALLED = agent("codebuddy", {
   label: "CodeBuddy",
   probe: { state: "notInstalled" },
   message: "未安装 CodeBuddy",
-  actions: [{ id: "install", label: "安装", primary: true }],
+  actions: [{ id: "install", label: "安装", primary: true, group: "install" }],
 });
+
+/** What the daemon ships an address for (`settings.presets`). */
+const SHIPPED = [
+  { id: "kimi", label: "Kimi", baseUrl: "https://api.moonshot.cn/v1", dialect: "openai" },
+  { id: "minimax", label: "MiniMax", baseUrl: "https://api.minimax.io/v1", dialect: "openai" },
+  { id: "qwen", label: "千问", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", dialect: "openai" },
+  { id: "deepseek", label: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", dialect: "openai" },
+  { id: "openai", label: "OpenAI", baseUrl: "https://api.openai.com/v1", dialect: "openai" },
+  { id: "anthropic", label: "Anthropic", baseUrl: "https://api.anthropic.com", dialect: "anthropic" },
+];
 
 function stub(providers: ProviderInfo[] = []) {
   const calls: Request[] = [];
@@ -64,7 +74,7 @@ function stub(providers: ProviderInfo[] = []) {
     call: async (request: Request): Promise<Reply | undefined> => {
       calls.push(request);
       if (request.type === "settings.get") {
-        return { type: "settings", data: { lanEnabled: false, providers } } as Reply;
+        return { type: "settings", data: { lanEnabled: false, presets: SHIPPED, providers } } as Reply;
       }
       return undefined;
     },
@@ -157,8 +167,8 @@ describe("the 模型与 Agent dialog", () => {
       agent("claude", {
         label: "Claude Code",
         actions: [
-          { id: "logout", label: "退出登录", primary: false },
-          { id: "space-own", label: "使用独立空间", primary: false },
+          { id: "logout", label: "退出登录", primary: false, group: "account" },
+          { id: "space-own", label: "使用独立空间", primary: false, group: "advanced" },
         ],
       }),
     ]);
@@ -177,7 +187,7 @@ describe("the 模型与 Agent dialog", () => {
   });
 
   it("does not call a key green that nobody could check", () => {
-    const unchecked = { ...READY, message: "没能核对：CodeBuddy 的 Key 没有不发模型请求就能核对的办法。" };
+    const unchecked = { ...READY, statusLabel: "可用（Key 未核对）" };
     expect(agentStatus(unchecked)).toEqual({ kind: "ready", label: "可用（Key 未核对）" });
     expect(agentStatus(READY).label).toBe("可用");
   });
@@ -350,18 +360,23 @@ describe("模型与 Agent presentation rules", () => {
     expect(agentConfigSummary([READY, NEEDS_LOGIN, NOT_INSTALLED])).toBe("1 个可用 · 1 个需要登录 · 1 个需要处理");
 
     const groups = groupAgentActions([
-      { id: "space-own", label: "使用独立空间", primary: false },
-      { id: "update", label: "更新", primary: false },
-      { id: "login-api-key", label: "用 API Key 登录", primary: false },
-      { id: "login", label: "登录", primary: true },
+      { id: "space-own", label: "使用独立空间", primary: false, group: "advanced" },
+      { id: "update", label: "更新", primary: false, group: "install" },
+      { id: "login-api-key", label: "用 API Key 登录", primary: false, group: "account" },
+      { id: "login", label: "登录", primary: true, group: "account" },
       { id: "mystery", label: "别的", primary: false },
+      { id: "elsewhere", label: "另一处", primary: false, group: "not-a-group" },
     ]);
     expect(groups.map((group) => [group.id, group.actions.map((action) => action.id)])).toEqual([
       ["account", ["login", "login-api-key"]],
       ["install", ["update"]],
-      ["other", ["mystery"]],
+      ["other", ["mystery", "elsewhere"]],
       ["advanced", ["space-own"]],
     ]);
+    // The group, not the name, decides: an Agent's own words for signing in work.
+    const SIGN_IN = { ...NEEDS_LOGIN, actions: [{ id: "enter-with-account", label: "用账号进入", primary: true, group: "account" }] };
+    expect(agentStatus(SIGN_IN).kind).toBe("needsLogin");
+    expect(agentStatus({ ...READY, statusLabel: "可用（连着自选 provider）" }).label).toBe("可用（连着自选 provider）");
     expect(isDestructiveAction({ id: "logout", label: "退出登录" })).toBe(true);
     expect(isDestructiveAction({ id: "login", label: "登录" })).toBe(false);
   });

@@ -126,7 +126,7 @@ beforeEach(() => {
     sessions: [session("s1", "源会话"), session("s2", "既有会话")],
     activeSessionId: "s1",
     activeWorkspaceId: "w1",
-    settings: { providers: [], lanEnabled: false, agentPreferences: preferences("codex") },
+    settings: { presets: [], providers: [], lanEnabled: false, agentPreferences: preferences("codex") },
     draft: null,
     tabs: [],
     activeTabId: null,

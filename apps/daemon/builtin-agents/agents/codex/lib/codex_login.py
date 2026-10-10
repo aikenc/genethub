@@ -32,6 +32,23 @@ async def interactive_login(ctx: AgentContext, job: Job, program: str, env: Dict
     )
 
 
+async def browser_login(ctx: AgentContext, job: Job, program: str, env: Dict[str, str]) -> str:
+    """``codex login`` (the "Sign in with ChatGPT" flow): the authorization
+    page sends the person back to a port on the machine Codex runs on, so the
+    browser that opens the link has to be on that machine (or reach it)."""
+    return await login.link_login(
+        ctx,
+        job,
+        [program, "login"],
+        env=env,
+        title="登录 Codex（这台机器的浏览器）",
+        detail=(
+            "在这台机器的浏览器里打开下面的链接，用你的 ChatGPT 账号完成授权，授权后页面会自动回到这台机器。"
+            "如果你是在别的设备上操作，这个链接完成不了，请改用「登录」（一次性授权码）。"
+        ),
+    )
+
+
 def custom_provider(env: Dict[str, str]) -> bool:
     """Whether Codex is set up to talk to a service other than OpenAI, whose
     keys OpenAI's model list would not know."""

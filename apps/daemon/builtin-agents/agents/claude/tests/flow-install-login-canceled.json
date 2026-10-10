@@ -55,6 +55,9 @@
               "id": "login-api-key"
             },
             {
+              "id": "provider-use"
+            },
+            {
               "id": "space-own"
             }
           ]

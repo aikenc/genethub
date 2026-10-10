@@ -8,7 +8,13 @@ export type AgentActionInfo = { id: string, label: string,
 /**
  * The action to offer where the Agent is shown as unavailable.
  */
-primary: boolean, };
+primary: boolean, 
+/**
+ * Where a client files the button (`account`, `install`, `advanced`, ...).
+ * The script decides; the platform and clients only group by it, and an
+ * unknown or absent group is shown with the rest.
+ */
+group?: string, };
 
 export type AgentCapability = "planning" | "coding" | "multimodal";
 
@@ -73,6 +79,12 @@ version?: string,
  * itself cannot run, by the daemon.
  */
 message?: string, 
+/**
+ * What the script wants the ready state to be called on screen, when the
+ * plain "ready" would claim more than it checked (for example a saved key
+ * nobody could ask the service about).
+ */
+statusLabel?: string, 
 /**
  * Actions the script declared right now. The platform knows none of
  * their names; it renders them as buttons and runs the one clicked.
@@ -1120,6 +1132,15 @@ export type ProviderOperationReceipt = { actionId: string, sessionId: string, dr
  */
 state: string, keyRequired: boolean, replacesEndpoint: boolean, validation: ProviderValidation, updatedAtMs: number, };
 
+/**
+ * A provider we ship the address of.
+ */
+export type ProviderPreset = { id: string, label: string, baseUrl: string, 
+/**
+ * `openai` | `anthropic`.
+ */
+dialect: string, };
+
 export type ProviderValidation = { 
 /**
  * unverified | missingCredential | authenticationFailed | modelUnavailable |
@@ -1711,6 +1732,11 @@ executing?: number, running: number, stopping: number, blocked: number, tasks: A
  * The machine-level settings a client may see and change.
  */
 export type Settings = { providers: Array<ProviderInfo>, 
+/**
+ * Providers GeneHub ships an address for. Choosing one only fills in the
+ * id, address and protocol of the add form; it is not a permission.
+ */
+presets: Array<ProviderPreset>, 
 /**
  * Whether the daemon accepts connections from the local network.
  */

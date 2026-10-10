@@ -10,6 +10,7 @@
 pub mod host;
 pub mod layout;
 mod pending;
+pub mod providers;
 pub mod rpc;
 pub mod runtime;
 

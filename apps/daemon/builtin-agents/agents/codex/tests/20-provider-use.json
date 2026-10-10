@@ -1,0 +1,64 @@
+{
+  "kind": "provider",
+  "description": "choosing a GeneHub provider binds it: only usable OpenAI-protocol providers are offered, Codex gets the provider settings as app-server overrides (never a config file), the key only through the environment variable the provider table names, the picker shows the provider's models, and leaving restores Codex's own login",
+  "providers": [
+    {
+      "id": "deepseek",
+      "label": "DeepSeek",
+      "dialect": "openai",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "apiKey": "sk-ds-secret",
+      "models": [
+        "deepseek-chat",
+        "deepseek-reasoner"
+      ],
+      "hasApiKey": true
+    },
+    {
+      "id": "kimi-claude",
+      "label": "Kimi (Anthropic)",
+      "dialect": "anthropic",
+      "baseUrl": "https://x.example/anthropic",
+      "apiKey": "sk-k",
+      "models": [
+        "k2"
+      ],
+      "hasApiKey": true
+    }
+  ],
+  "choose": "p:deepseek",
+  "thenLeave": true,
+  "expect": {
+    "result": "done",
+    "offered": [
+      "p:deepseek",
+      "cancel"
+    ],
+    "bound": "deepseek",
+    "args": [
+      "-c",
+      "model_provider=\"genehub\"",
+      "-c",
+      "model_providers.genehub.name=\"DeepSeek\"",
+      "-c",
+      "model_providers.genehub.base_url=\"https://api.deepseek.com/v1\"",
+      "-c",
+      "model_providers.genehub.env_key=\"GENEHUB_PROVIDER_API_KEY\"",
+      "-c",
+      "model_providers.genehub.wire_api=\"responses\"",
+      "-c",
+      "model=\"deepseek-chat\""
+    ],
+    "keyInEnv": "sk-ds-secret",
+    "keyInArgs": false,
+    "models": [
+      "deepseek-chat",
+      "deepseek-reasoner"
+    ],
+    "defaultModel": "deepseek-chat",
+    "keyReachedLogs": false,
+    "boundAfterLeave": null,
+    "argsAfterLeave": [],
+    "keyAfterLeave": null
+  }
+}

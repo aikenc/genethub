@@ -21,7 +21,7 @@ import collections
 import json
 import os
 import subprocess
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from genehub_agent import process
 
@@ -39,9 +39,9 @@ HANDSHAKE_TIMEOUT = 30.0
 AUTH_FAILURE_MARKERS = ("token_revoked", "401 Unauthorized")
 
 
-def app_server_args() -> List[str]:
+def app_server_args(extra: Sequence[str] = ()) -> List[str]:
     return ["app-server", "-c", APPROVAL_CONFIG, "-c", SANDBOX_CONFIG,
-            "-c", "features.default_mode_request_user_input=true"]
+            "-c", "features.default_mode_request_user_input=true", *extra]
 
 
 def client_info() -> dict:
@@ -209,7 +209,9 @@ class AppServer:
         on_exit: Optional[Callable[["AppServer"], None]] = None,
         on_auth_failure: Optional[Callable[[], None]] = None,
         log_stderr: bool = True,
+        extra_args: Sequence[str] = (),
     ) -> None:
+        self.extra_args = list(extra_args)
         self.program = program
         self.cwd = cwd
         self.env = env
@@ -240,7 +242,7 @@ class AppServer:
 
     async def start(self) -> None:
         self.process = await process.spawn(
-            [self.program] + app_server_args(),
+            [self.program] + app_server_args(self.extra_args),
             cwd=self.cwd,
             env=self.env,
             stdin=subprocess.PIPE,

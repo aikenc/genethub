@@ -4,9 +4,11 @@ import { canStartAgent } from "../presentation/catalog/resolve";
 import { orderedAgentActions, primaryAgentAction } from "./AgentLifecycle";
 
 /**
- * Pure presentation helpers of the 模型与 Agent surface. The platform knows no
- * action names beyond the grouping hints below: an unknown id still renders
- * as a button, it just lands in the default group.
+ * Pure presentation helpers of the 模型与 Agent surface. Nothing here knows an
+ * Agent's action names or reads its wording: an action says which group it
+ * belongs to (`account`, `install`, `advanced`), an Agent says what its ready
+ * state is called (`statusLabel`), and an unknown group still renders as a
+ * button in the default one.
  */
 
 export type AgentStatusKind = "ready" | "needsLogin" | "notInstalled" | "busy" | "unavailable";
@@ -17,12 +19,8 @@ export interface AgentStatus {
   label: string;
 }
 
-const LOGIN_ACTIONS = ["login", "login-api-key", "logout"];
-const INSTALL_ACTIONS = ["install", "update"];
-/** Choices most people never need: kept out of the way, behind "高级". */
-const ADVANCED_ACTIONS = ["space-own", "space-shared"];
-/** What an Agent says when it could not tell whether a saved key works. */
-const UNVERIFIED = /没能核对/;
+/** Groups an Agent's actions may name. Anything else lands in "其他". */
+const GROUPS = ["account", "install", "advanced"] as const;
 
 export function isAgentBusy(agent: Pick<AgentInfo, "job">): boolean {
   return Boolean(agent.job && !agent.job.done);
@@ -30,19 +28,20 @@ export function isAgentBusy(agent: Pick<AgentInfo, "job">): boolean {
 
 /** probe.state + message + job → the one line a person reads first. */
 export function agentStatus(
-  agent: Pick<AgentInfo, "id" | "probe" | "catalog" | "source" | "message" | "job" | "actions">,
+  agent: Pick<AgentInfo, "id" | "probe" | "catalog" | "source" | "message" | "job" | "actions"> &
+    Partial<Pick<AgentInfo, "statusLabel">>,
 ): AgentStatus {
   if (isAgentBusy(agent)) return { kind: "busy", label: "正在处理…" };
   if (agent.probe.state === "ready") {
     if (!canStartAgent(agent)) return { kind: "unavailable", label: "不可用" };
-    // Green must not claim more than was checked: a key nobody could ask the
-    // service about is saved, not known to work.
-    return { kind: "ready", label: agent.message && UNVERIFIED.test(agent.message) ? "可用（Key 未核对）" : "可用" };
+    // Green must not claim more than was checked: an Agent that could not ask
+    // the service about a saved key says so in its own label.
+    return { kind: "ready", label: agent.statusLabel || "可用" };
   }
   if (agent.probe.state === "notInstalled") return { kind: "notInstalled", label: "未安装" };
   const primary = primaryAgentAction(agent);
-  if (primary && LOGIN_ACTIONS.includes(primary.id)) return { kind: "needsLogin", label: "需要登录" };
-  if (primary && primary.id === "install") return { kind: "notInstalled", label: "未安装" };
+  if (primary?.group === "account") return { kind: "needsLogin", label: "需要登录" };
+  if (primary?.group === "install") return { kind: "notInstalled", label: "未安装" };
   if (agent.message && /登录|授权|未登录/.test(agent.message)) {
     return { kind: "needsLogin", label: "需要登录" };
   }
@@ -79,10 +78,8 @@ export interface ActionGroup {
 }
 
 function groupOf(action: AgentActionInfo): ActionGroupId {
-  if (LOGIN_ACTIONS.includes(action.id)) return "account";
-  if (INSTALL_ACTIONS.includes(action.id)) return "install";
-  if (ADVANCED_ACTIONS.includes(action.id)) return "advanced";
-  return "other";
+  const group = GROUPS.find((known) => known === action.group);
+  return group ?? "other";
 }
 
 const GROUP_TITLES: Record<ActionGroupId, string> = {

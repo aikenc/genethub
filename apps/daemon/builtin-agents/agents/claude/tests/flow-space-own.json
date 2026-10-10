@@ -34,6 +34,9 @@
               "id": "login-api-key"
             },
             {
+              "id": "provider-use"
+            },
+            {
               "id": "space-own"
             }
           ]
@@ -71,6 +74,9 @@
               "id": "login-api-key"
             },
             {
+              "id": "provider-use"
+            },
+            {
               "id": "space-shared"
             }
           ]
@@ -98,6 +104,9 @@
             },
             {
               "id": "login-api-key"
+            },
+            {
+              "id": "provider-use"
             },
             {
               "id": "space-own"

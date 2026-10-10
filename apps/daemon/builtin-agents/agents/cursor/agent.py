@@ -141,7 +141,7 @@ class CursorAgent(Agent):
     async def _refresh(self, ctx: AgentContext) -> None:
         program = self._find(ctx)
         if program is None:
-            self._report(ctx, False, "未安装 Cursor CLI", None, [ctx.action("install", "安装", primary=True)])
+            self._report(ctx, False, "未安装 Cursor CLI", None, [ctx.action("install", "安装", primary=True, group="install")])
             return
         version = await lifecycle.version(program)
         if os.environ.get("CURSOR_API_KEY"):
@@ -157,7 +157,7 @@ class CursorAgent(Agent):
                 False,
                 message,
                 version,
-                [ctx.action("login", "登录", primary=True), ctx.action("login-api-key", "用 API Key 登录")],
+                [ctx.action("login", "登录", primary=True, group="account"), ctx.action("login-api-key", "用 API Key 登录", group="account")],
             )
             return
         self._interrupted = None
@@ -166,11 +166,11 @@ class CursorAgent(Agent):
         message = None
         if logged is None:
             message = "未能确认登录状态"
-            actions.append(ctx.action("login", "登录"))
-        actions.append(ctx.action("login-api-key", "换一个 API Key" if credentials.has(ctx) else "用 API Key 登录"))
-        actions.append(ctx.action("logout", "退出登录"))
+            actions.append(ctx.action("login", "登录", group="account"))
+        actions.append(ctx.action("login-api-key", "换一个 API Key" if credentials.has(ctx) else "用 API Key 登录", group="account"))
+        actions.append(ctx.action("logout", "退出登录", group="account"))
         if await self._supports(program):
-            actions.append(ctx.action("update", "更新"))
+            actions.append(ctx.action("update", "更新", group="install"))
         self._report(ctx, True, message, version, actions)
 
     def _report(self, ctx: AgentContext, ready: bool, message: Optional[str], version: Optional[str], actions: List[dict]) -> None:

@@ -63,6 +63,8 @@ const EVENT_CAPACITY: usize = 1024;
 pub struct HostEnv {
     pub channel: String,
     pub front_door_cli: Option<std::path::PathBuf>,
+    /// The providers a person configured, for the scripts that ask by id.
+    pub providers: super::providers::ProviderSource,
 }
 
 /// The last `state` notification, with defaults for what it left out.
@@ -70,6 +72,7 @@ pub struct HostEnv {
 struct ScriptState {
     ready: bool,
     message: Option<String>,
+    status_label: Option<String>,
     version: Option<String>,
     actions: Vec<AgentActionInfo>,
     capabilities: Capabilities,
@@ -387,6 +390,7 @@ impl AgentHost {
                 .as_ref()
                 .and_then(|manifest| manifest.description.clone()),
             message,
+            status_label: state.status_label,
             actions: Some(state.actions),
             job: snapshot.job.clone(),
             pending_requests: Some(
@@ -1343,6 +1347,36 @@ impl AgentHost {
 
     // -- notifications -------------------------------------------------------------
 
+    /// A script asks for the providers a person configured. The answer goes
+    /// back on the same private pipe; neither the question nor the answer
+    /// (which may carry a key) is logged.
+    fn on_provider_request(&self, params: Value) {
+        let Some(host) = self.arc() else {
+            return;
+        };
+        let id = params
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .chars()
+            .take(80)
+            .collect::<String>();
+        if id.is_empty() {
+            return;
+        }
+        let op = params.get("op").and_then(Value::as_str).unwrap_or_default().to_string();
+        let provider = params.get("provider").and_then(Value::as_str).map(str::to_string);
+        tokio::spawn(async move {
+            let answer = match host.env.providers.all().await {
+                Some(all) => super::providers::answer(&op, provider.as_deref(), &all),
+                None => Err("模型 provider 暂时不可用，请稍后再试".to_string()),
+            };
+            let _ = host
+                .call("provider.reply", super::providers::reply(&id, answer), SHORT)
+                .await;
+        });
+    }
+
     fn on_notification(&self, method: &str, params: Value) {
         match method {
             "state" => {
@@ -1351,6 +1385,7 @@ impl AgentHost {
                 self.changed();
             }
             "job.progress" => self.on_job(&params),
+            "provider.request" => self.on_provider_request(params),
             "request.open" => self.on_request_open(params),
             "request.prepare" => {
                 let id = params
@@ -1693,6 +1728,11 @@ fn parse_state(params: &Value) -> ScriptState {
             .get("message")
             .and_then(Value::as_str)
             .map(|message| bounded(message, TEXT_LIMIT)),
+        status_label: params
+            .get("statusLabel")
+            .and_then(Value::as_str)
+            .map(|label| bounded(label, LABEL_LIMIT))
+            .filter(|label| !label.is_empty()),
         version: params
             .get("version")
             .and_then(Value::as_str)
@@ -1706,6 +1746,10 @@ fn parse_state(params: &Value) -> ScriptState {
             .take(ACTIONS_LIMIT)
             .map(|mut action| {
                 action.label = bounded(&action.label, LABEL_LIMIT);
+                action.group = action
+                    .group
+                    .map(|group| bounded(&group, LABEL_LIMIT))
+                    .filter(|group| !group.is_empty());
                 action
             })
             .collect(),
@@ -1826,4 +1870,43 @@ fn request_within_bounds(request: &AgentUserRequest) -> std::result::Result<(), 
         return Err("选项过长");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+
+    #[test]
+    fn an_action_names_its_own_group_and_an_agent_names_its_ready_state() {
+        let state = parse_state(&json!({
+            "ready": true,
+            "statusLabel": "可用（Key 未核对）",
+            "actions": [
+                {"id": "login", "label": "登录", "primary": true, "group": "account"},
+                {"id": "x", "label": "别的"},
+                {"id": "blank", "label": "空组", "group": ""},
+            ],
+        }));
+        assert_eq!(state.status_label.as_deref(), Some("可用（Key 未核对）"));
+        let groups: Vec<_> = state.actions.iter().map(|action| action.group.as_deref()).collect();
+        assert_eq!(groups, vec![Some("account"), None, None]);
+    }
+
+    #[test]
+    fn a_label_or_group_cannot_be_used_to_flood_a_screen() {
+        let long = "长".repeat(10_000);
+        let state = parse_state(&json!({
+            "ready": true,
+            "statusLabel": long,
+            "actions": [{"id": "a", "label": "a", "group": long}],
+        }));
+        assert!(state.status_label.unwrap().chars().count() <= LABEL_LIMIT + 1);
+        assert!(state.actions[0].group.as_ref().unwrap().chars().count() <= LABEL_LIMIT + 1);
+    }
+
+    #[test]
+    fn no_label_means_the_plain_ready_state() {
+        assert_eq!(parse_state(&json!({"ready": true})).status_label, None);
+        assert_eq!(parse_state(&json!({"ready": true, "statusLabel": ""})).status_label, None);
+    }
 }

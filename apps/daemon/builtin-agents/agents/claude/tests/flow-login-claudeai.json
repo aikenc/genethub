@@ -42,6 +42,9 @@
               "id": "login-api-key"
             },
             {
+              "id": "provider-use"
+            },
+            {
               "id": "space-own"
             }
           ]
@@ -101,6 +104,9 @@
             },
             {
               "id": "logout"
+            },
+            {
+              "id": "provider-use"
             },
             {
               "id": "update"

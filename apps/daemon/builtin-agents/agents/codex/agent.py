@@ -19,9 +19,10 @@ import time
 import uuid
 from typing import Any, Dict, Iterable, List, Optional, Set
 
-from genehub_agent import Agent, AgentContext, Job, SessionContext, install, login, process, serve, space
+from genehub_agent import Agent, AgentContext, Job, SessionContext, install, login, process, providers, serve, space
 
 import codex_login
+import codex_provider
 from codex_appserver import (
     CALL_TIMEOUT,
     DEFAULT_MODE,
@@ -160,6 +161,10 @@ class CodexAgent(Agent):
         # npm's `codex` launcher needs it.
         self._npm: Optional[str] = None
         self._refresh_queued = False
+        # The GeneHub provider Codex runs on, when one was chosen; in memory
+        # only, fetched again whenever it is needed.
+        self._provider: Optional[providers.Provider] = None
+        self._provider_problem: Optional[str] = None
 
     # -- helpers ------------------------------------------------------------------
 
@@ -174,6 +179,8 @@ class CodexAgent(Agent):
         program: Optional[str] = None,
     ) -> dict:
         env = process.child_environment(extra, remove)
+        if self._provider is not None:
+            env.update(codex_provider.environment(self._provider))
         if self._npm and process.find_executable("node") is None:
             env = install.node_env(self._npm, env)
         program = program or self.program
@@ -184,6 +191,10 @@ class CodexAgent(Agent):
             if os.path.isdir(helpers):
                 env["PATH"] = helpers + os.pathsep + env.get("PATH", "")
         return env
+
+    def provider_args(self) -> List[str]:
+        """What a new app-server needs to run on the chosen provider."""
+        return codex_provider.arguments(self._provider) if self._provider is not None else []
 
     def program_path(self) -> Optional[str]:
         """GeneHub's own npm prefix first (what install/update manage), then
@@ -202,8 +213,15 @@ class CodexAgent(Agent):
         prefix = os.path.realpath(install.npm_prefix(self.ctx))
         return os.path.realpath(program).startswith(prefix + os.sep)
 
+    def effective_hello(self) -> dict:
+        """The model table the picker and the sessions use: the provider's
+        own when Codex runs on one, otherwise what Codex listed."""
+        if self._provider is not None:
+            return codex_provider.hello(self._provider)
+        return self.hello or {}
+
     def catalog(self) -> dict:
-        hello = self.hello or {}
+        hello = self.effective_hello()
         catalog = {
             "models": list(hello.get("models") or []),
             "modes": catalog_modes(),
@@ -332,37 +350,54 @@ class CodexAgent(Agent):
             self.logged_in = None
             self.version = None
             message = NOT_INSTALLED if self._npm else NOT_INSTALLED + "。" + install.NO_NODE
-            self._push(False, message, [AgentContext.action("install", "安装", primary=True)])
+            self._push(False, message, [AgentContext.action("install", "安装", primary=True, group="install")])
             return
+        await self._load_provider()
         self.version = await self._version(program) or self.version
-        self.logged_in = await self._login_status(program)
+        if self._provider is not None:
+            # Running on a GeneHub provider: Codex's own login is not what
+            # authorizes it.
+            self.logged_in = True
+        else:
+            self.logged_in = await self._login_status(program)
         if self.logged_in is False:
             self._push(
                 False,
-                " ".join(filter(None, [self._interrupted or NOT_LOGGED_IN, self._space_note()])),
+                " ".join(filter(None, [self._provider_problem or self._interrupted or NOT_LOGGED_IN, self._space_note()])),
                 [
-                    AgentContext.action("login", "登录", primary=True),
-                    AgentContext.action("login-api-key", "用 API Key 登录"),
+                    AgentContext.action("login", "登录", primary=True, group="account"),
+                    *self._account_choices(),
+                    AgentContext.action("login-api-key", "用 API Key 登录", group="account"),
+                    *self._provider_actions(),
                     space.action(self.ctx),  # type: ignore[arg-type]
                 ],
             )
             return
         assert self.ctx is not None
-        hello = await discover(program, self.ctx.state_dir, self.env(), self.log)
         notes = []
-        if hello is not None:
+        if self._provider is not None:
+            notes.append(providers.note("Codex", self._provider))
+        elif (hello := await discover(program, self.ctx.state_dir, self.env(), self.log)) is not None:
             self.hello = hello
         elif self.hello:
             notes.append("Codex 没有及时返回模型列表，先显示上次的列表。")
         else:
             notes.append("Codex 没有返回模型列表，稍后刷新再试。")
         # Switching to another key needs no logout first.
-        actions = [
-            AgentContext.action("login-api-key", "换一个 API Key"),
-            AgentContext.action("logout", "退出登录"),
-            AgentContext.action("update", "更新"),
-            space.action(self.ctx),  # type: ignore[arg-type]
-        ]
+        if self._provider is not None:
+            actions = [
+                *self._provider_actions(),
+                AgentContext.action("update", "更新", group="install"),
+                space.action(self.ctx),  # type: ignore[arg-type]
+            ]
+        else:
+            actions = [
+                AgentContext.action("login-api-key", "换一个 API Key", group="account"),
+                AgentContext.action("logout", "退出登录", group="account"),
+                *self._provider_actions(),
+                AgentContext.action("update", "更新", group="install"),
+                space.action(self.ctx),  # type: ignore[arg-type]
+            ]
         space_note = self._space_note()
         if space_note:
             notes.append(space_note)
@@ -370,8 +405,53 @@ class CodexAgent(Agent):
             # A slow or unusual `login status` is not a reason to hide a CLI
             # that is sitting right there — but say so, and offer login.
             notes.append("未能确认 Codex 的登录状态。")
-            actions.insert(0, AgentContext.action("login", "登录"))
+            actions.insert(0, AgentContext.action("login", "登录", group="account"))
         self._push(True, " ".join(notes) or None, actions)
+
+    # -- a GeneHub provider (advanced) -------------------------------------------------
+
+    def _provider_actions(self) -> List[dict]:
+        if self.ctx is None:
+            return []
+        return providers.actions(self.ctx, "Codex")
+
+    def _account_choices(self) -> List[dict]:
+        """The other way to sign in with an account: the browser flow, which
+        sends the person back to a local address on this machine."""
+        return [AgentContext.action("login-browser", "登录（这台机器的浏览器）", group="account")]
+
+    async def _load_provider(self) -> None:
+        self._provider = None
+        self._provider_problem = None
+        if self.ctx is None:
+            return
+        chosen = providers.bound(self.ctx)
+        if not chosen:
+            return
+        try:
+            self._provider = await providers.fetch(self.ctx, chosen, codex_provider.DIALECTS)
+        except RuntimeError as error:
+            self._provider_problem = f"选定的 provider 现在不能用：{error}。可以换一个 provider，或者改用 Codex 自己的登录。"
+
+    async def _use_provider(self, ctx: AgentContext, job: Job) -> None:
+        chosen = await providers.choose(ctx, job, "Codex", codex_provider.DIALECTS)
+        if chosen is None:
+            job.done("已取消")
+            return
+        job.progress(phase="provider", message="正在读取 provider 配置")
+        provider = await providers.fetch(ctx, chosen, codex_provider.DIALECTS)
+        providers.bind(ctx, chosen)
+        self._provider = provider
+        self._mark_sessions_stale("provider")
+        await self.refresh(ctx)
+        job.done(f"已改用 provider「{provider.label}」")
+
+    async def _leave_provider(self, ctx: AgentContext, job: Job) -> None:
+        providers.bind(ctx, None)
+        self._provider = None
+        self._mark_sessions_stale("provider")
+        await self.refresh(ctx)
+        job.done("已改回 Codex 自己的登录")
 
     async def run_action(self, ctx: AgentContext, action: str, job: Job) -> None:
         self.ctx = ctx
@@ -379,6 +459,12 @@ class CodexAgent(Agent):
             await self._install(ctx, job)
         elif action == "login":
             await self._login(ctx, job)
+        elif action == "login-browser":
+            await self._login(ctx, job, browser=True)
+        elif action == "provider-use":
+            await self._use_provider(ctx, job)
+        elif action == "provider-leave":
+            await self._leave_provider(ctx, job)
         elif action == "login-api-key":
             await self._login_api_key(ctx, job)
         elif action == "logout":
@@ -393,6 +479,10 @@ class CodexAgent(Agent):
     async def open_session(self, ctx: SessionContext) -> CodexSession:
         if not self.program_path():
             raise RuntimeError(NOT_INSTALLED)
+        # The provider's key may have changed since the last refresh.
+        await self._load_provider()
+        if self._provider_problem:
+            raise RuntimeError(self._provider_problem)
         session = CodexSession(ctx, self)
         await session.start()
         self.sessions.add(session)
@@ -405,6 +495,8 @@ class CodexAgent(Agent):
         if step == "login.external":
             # Installation has completed; never replay npm for a login answer.
             await self._login(ctx, job)
+        elif step == "provider.choose":
+            await self._use_provider(ctx, job)
         elif step == "login.api-key":
             await self._login_api_key(ctx, job)
         else:
@@ -460,9 +552,10 @@ class CodexAgent(Agent):
             raise RuntimeError(NOT_INSTALLED)
         return program
 
-    async def _login(self, ctx: AgentContext, job: Job) -> None:
+    async def _login(self, ctx: AgentContext, job: Job, browser: bool = False) -> None:
         self._interrupted = None
-        result = await codex_login.interactive_login(ctx, job, self._require_program(), self.env())
+        method = codex_login.browser_login if browser else codex_login.interactive_login
+        result = await method(ctx, job, self._require_program(), self.env())
         self._mark_sessions_stale("auth")
         await self.refresh(ctx)
         if result == "canceled":
@@ -708,9 +801,11 @@ class CodexAgent(Agent):
 
     def replay(self, case: dict) -> Optional[str]:
         kind = case.get("kind", "frames")
-        if kind in ("apiKeyLogin", "space"):
+        if kind in ("apiKeyLogin", "space", "provider"):
             import codex_replay
 
+            if kind == "provider":
+                return codex_replay.run_provider(case, self)
             return codex_replay.run_api_key_login(case) if kind == "apiKeyLogin" else codex_replay.run_space(case)
         if kind == "catalog":
             got = hello_from(case["listed"])

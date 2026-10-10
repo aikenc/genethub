@@ -1,0 +1,23 @@
+{
+  "kind": "provider",
+  "description": "with only providers of another protocol, choosing explains what to add and saves nothing",
+  "providers": [
+    {
+      "id": "kimi-claude",
+      "label": "Kimi (Anthropic)",
+      "dialect": "anthropic",
+      "baseUrl": "https://x.example/anthropic",
+      "apiKey": "sk-k",
+      "models": [
+        "k2"
+      ],
+      "hasApiKey": true
+    }
+  ],
+  "choose": "cancel",
+  "expect": {
+    "result": "error: 还没有 Codex 能用的 provider：需要先在「模型与 Agent」里「添加 provider」，填好 Key，接口类型选 openai。",
+    "bound": null,
+    "args": []
+  }
+}

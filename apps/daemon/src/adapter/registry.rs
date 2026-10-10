@@ -64,6 +64,7 @@ impl Registry {
             env: HostEnv {
                 channel: crate::channel::CHANNEL.to_string(),
                 front_door_cli,
+                providers: Default::default(),
             },
             events,
             warmed: Default::default(),
@@ -72,6 +73,11 @@ impl Registry {
             registry.add_script(&id);
         }
         registry
+    }
+
+    /// Where script Agents get the configured model providers from.
+    pub fn set_provider_lookup(&self, lookup: super::script::providers::Lookup) {
+        self.env.providers.set(lookup);
     }
 
     /// Exactly these native adapters and no script Agents, for tests that
@@ -88,6 +94,7 @@ impl Registry {
             env: HostEnv {
                 channel: "test".into(),
                 front_door_cli: None,
+                providers: Default::default(),
             },
             events,
             warmed: Default::default(),
@@ -411,6 +418,7 @@ fn native_info(
         actions: None,
         job: None,
         pending_requests: None,
+        status_label: None,
         icon: None,
         dir: None,
         override_stale: None,

@@ -68,6 +68,7 @@ Edits under `user/` take effect only on `genet agent reload <id>`.
 | `action.resume` | `{job, action, step, outcome, secretIds}` | `{job}`; starts a fresh job execution | 10 s |
 | `request.prepared` | `{id, error?}`; acknowledgment of committed preparation | `{}` | 10 s |
 | `request.answer` | `{id, outcome}` | `{}` | 10 s |
+| `provider.reply` | `{id, result?, error?}`; the answer to a `provider.request` | `{}` | 10 s |
 | `session.start` | `{sessionId, config}` | `{}` | 120 s |
 | `session.send` | `{sessionId, turnId, text, attachments}` | `{}` | 30 s |
 | `session.interrupt` / `session.close` | `{sessionId}` | `{}` | 15 s |
@@ -112,12 +113,13 @@ seeds GeneHub's own log into the first prompt instead.
 
 | method | params |
 |---|---|
-| `state` | `{ready, message?, version?, actions: [{id, label, primary?}], capabilities: Capabilities, catalog: Catalog}` |
+| `state` | `{ready, message?, statusLabel?, version?, actions: [{id, label, primary?, group?}], capabilities: Capabilities, catalog: Catalog}` |
 | `job.progress` | `{job, action?, phase?, percent?, message?, log?, done?, error?}` |
 | `request.open` | `{id, title, detail?, display: [{kind: link\|code, value, label?, render?}], questions: [{id, prompt, options?, allowMultiple?, input?: text\|secret}], options: [{id, label}]}` |
 | `request.close` | `{id}`; closes legacy ephemeral requests only |
 | `request.prepare` | `{request: AgentUserRequest (no display), job, action, step}`; saves a stopped:false obligation before unwinding |
 | `request.suspend` | `{request: AgentUserRequest (no display), job, action, step}`; action has unwound and owned children have stopped |
+| `provider.request` | `{id, op: list\|get, provider?}`; ask the daemon about the model providers a person configured (see below) |
 | `session.event` | `{sessionId, event: SessionEvent}` |
 | `session.persist` | `{sessionId, value}` — returned later as `config.resume` |
 | `session.pid` | `{sessionId, pid \| null}` — the CLI's native pid |
@@ -128,7 +130,31 @@ one that does not fit is dropped and logged.
 
 Only `ready: true` Agents can be picked or routed to. When not ready, the
 action marked `primary` is offered next to `message`. The platform knows no
-action names — install, update and login are all ordinary actions.
+action names — install, update and login are all ordinary actions. An action
+may carry a `group` (`account`, `install`, `advanced`; anything else is shown
+with the rest) and the script may give the ready state its own `statusLabel`
+(for example "可用（Key 未核对）"); clients group and label by those fields
+and never read an Agent's ids or wording.
+
+### Model providers
+
+A person configures model providers (address, protocol, key, models) once, in
+the workbench. A script Agent that can run its CLI on a custom endpoint asks
+for them on its private pipe: `provider.request {id, op: "list"}` answers
+every provider without keys (`{providers: [{id, label, dialect, baseUrl,
+models, hasApiKey, usable, problem}]}`); `{op: "get", provider}` answers one
+with its `apiKey`. The daemon replies with `provider.reply {id, result}` or
+`{id, error}` (an error is a sentence for the person: no such provider, no
+key, no usable address). Resolution is the daemon's: an address is filled in
+for shipped providers, and a provider without a usable address has none.
+
+The pipe, not a command: a command can be run by any process on the
+machine, including a model's shell tool, and a key a command can print can
+reach a model. The key is held in memory by the script, masked in its logs,
+and handed to the CLI only through that CLI's environment or per-process
+arguments. What the CLI needs is the script's business: `genehub_agent.providers`
+remembers which provider (an id, never the key) and `claude_family` /
+`codex_provider.py` show two ways to assemble it.
 
 ## 5. Agent-level requests
 

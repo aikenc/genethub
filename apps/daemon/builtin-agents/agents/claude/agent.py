@@ -9,9 +9,11 @@ and the two ways to log in. See README.md.
 from __future__ import annotations
 
 import os
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
-from genehub_agent import AgentContext, Job, keycheck, login, option, process, serve
+from urllib.parse import urlparse
+
+from genehub_agent import AgentContext, Job, keycheck, login, option, process, providers, serve
 from genehub_agent.claude_family import FamilyAgent, Flavor
 
 from spec import CLAUDE, LOGOUT_TIMEOUT, STATUS_TIMEOUT, has_credential_variable, status_from_output
@@ -23,6 +25,29 @@ class ClaudeAgent(FamilyAgent):
     api_key_title = "用 API Key 登录 Claude Code"
     api_key_detail = "粘贴一个 Anthropic API Key（在 console.anthropic.com 的 API Keys 里创建）。GeneHub 会先向 Anthropic 核对它是否有效（不发模型请求）；它只保存在这台机器上，不经过任何模型，退出登录时一并删除。"
     api_key_prompt = "Anthropic API Key"
+    # Claude Code speaks Anthropic's protocol; a provider on that protocol
+    # (Anthropic itself, or any service that copies it) can stand in.
+    provider_dialects = ("anthropic",)
+
+    def provider_environment(self, provider: providers.Provider) -> Dict[str, str]:
+        """Points Claude Code at ``provider``: its address, its key and its
+        models. Every model slot is pinned to one of the provider's models,
+        because Claude Code's own background model names mean nothing to
+        another service. The key travels in the header the service expects:
+        Anthropic's own address takes an API key, a copy of it a bearer token."""
+        model = provider.models[0]
+        own_service = (urlparse(provider.base_url).hostname or "").lower() == "api.anthropic.com"
+        return {
+            "ANTHROPIC_BASE_URL": provider.base_url,
+            "ANTHROPIC_API_KEY": provider.api_key if own_service else "",
+            "ANTHROPIC_AUTH_TOKEN": "" if own_service else provider.api_key,
+            "ANTHROPIC_MODEL": model,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": model,
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": model,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": model,
+            "ANTHROPIC_SMALL_FAST_MODEL": model,
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        }
 
     async def verify_key(self, key: str) -> keycheck.Verdict:
         return await keycheck.anthropic(key, self.env())

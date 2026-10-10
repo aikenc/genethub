@@ -83,8 +83,8 @@ def note(label: str) -> str:
 
 def action(ctx: AgentContext) -> dict:
     if own(ctx):
-        return AgentContext.action("space-shared", "改回沿用本机")
-    return AgentContext.action("space-own", "使用独立空间")
+        return AgentContext.action("space-shared", "改回沿用本机", group="advanced")
+    return AgentContext.action("space-own", "使用独立空间", group="advanced")
 
 
 async def confirm(ctx: AgentContext, job: Job, label: str, to_own: bool) -> bool:

@@ -657,6 +657,7 @@ mod tests {
             actions: None,
             job: None,
             pending_requests: None,
+            status_label: None,
             icon: None,
             dir: None,
             override_stale: None,

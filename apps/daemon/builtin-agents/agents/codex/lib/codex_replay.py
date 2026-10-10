@@ -13,7 +13,8 @@ import tempfile
 from typing import Any, Dict, List, Optional
 
 import codex_login
-from genehub_agent import keycheck, space
+import codex_provider
+from genehub_agent import keycheck, providers, space
 from genehub_agent.serve import Outcome
 from genehub_agent.testing import scratch_context, subset
 
@@ -112,4 +113,76 @@ def run_space(case: dict) -> Optional[str]:
         os.environ.clear()
         os.environ.update(saved)
         space._SHADOWED.clear()
+        shutil.rmtree(ctx.state_dir, ignore_errors=True)
+
+
+def run_provider(case: dict, agent: Any) -> Optional[str]:
+    """Codex on a GeneHub provider: choosing one binds it, the app-server gets
+    the provider's settings as overrides and the key only through the
+    environment, the picker shows the provider's models, and a provider that
+    stops being usable is reported instead of being ignored."""
+    ctx, channel, job = scratch_context("codex")
+    saved_refresh = agent.refresh
+    available: List[dict] = [dict(entry) for entry in case["providers"]]
+    secret = case["providers"][0].get("apiKey", "\0")
+
+    async def provider_call(op: str, provider: Optional[str] = None) -> dict:
+        if op == "list":
+            return {"providers": [{**{k: v for k, v in e.items() if k != "apiKey"}, "usable": bool(e.get("apiKey")) and bool(e.get("baseUrl"))} for e in available]}
+        entry = next((e for e in available if e["id"] == provider), None)
+        if entry is None:
+            raise RuntimeError(f"没有名为 {provider} 的 provider")
+        if not entry.get("apiKey"):
+            raise RuntimeError(f"{entry.get('label', provider)} 还没有保存 API Key")
+        return {"provider": dict(entry)}
+
+    offered: List[str] = []
+
+    async def ask(job: Any, step: str, title: str, **kwargs: Any) -> Outcome:
+        offered.extend(option["id"] for option in kwargs.get("options") or [])
+        return Outcome(canceled=False, option_id=case["choose"])
+
+    async def no_refresh(_ctx: Any) -> None:
+        return None
+
+    ctx.provider_call = provider_call  # type: ignore[method-assign]
+    ctx.ask = ask  # type: ignore[method-assign]
+    agent.ctx = ctx
+    agent.refresh = no_refresh  # type: ignore[method-assign]
+    agent._provider = None
+    agent.hello = None
+    loop = asyncio.new_event_loop()
+    try:
+        record: Dict[str, Any] = {}
+        try:
+            loop.run_until_complete(agent._use_provider(ctx, job))
+            record["result"] = "done"
+        except RuntimeError as error:
+            record["result"] = "error: " + str(error)
+        record["offered"] = offered
+        record["bound"] = providers.bound(ctx)
+        record["args"] = agent.provider_args()
+        record["keyInEnv"] = agent.env().get(codex_provider.KEY_VARIABLE)
+        record["keyInArgs"] = any(secret in value for value in agent.provider_args())
+        record["models"] = [m["id"] for m in (agent.effective_hello().get("models") or [])]
+        record["defaultModel"] = agent.effective_hello().get("defaultModel")
+        if case.get("thenRemoveKey"):
+            for entry in available:
+                if entry["id"] == case["thenRemoveKey"]:
+                    entry["apiKey"] = ""
+            loop.run_until_complete(agent._load_provider())
+            record["problem"] = agent._provider_problem
+            record["providerAfterLoss"] = agent._provider is not None
+        if case.get("thenLeave"):
+            loop.run_until_complete(agent._leave_provider(ctx, job))
+            record["boundAfterLeave"] = providers.bound(ctx)
+            record["argsAfterLeave"] = agent.provider_args()
+            record["keyAfterLeave"] = agent.env().get(codex_provider.KEY_VARIABLE)
+        shown = json.dumps([m["params"] for m in channel.messages], ensure_ascii=False)
+        record["keyReachedLogs"] = secret in shown
+        return subset(case["expect"], json.loads(json.dumps(record)), "provider")
+    finally:
+        loop.close()
+        agent.refresh = saved_refresh  # type: ignore[method-assign]
+        agent._provider = None
         shutil.rmtree(ctx.state_dir, ignore_errors=True)

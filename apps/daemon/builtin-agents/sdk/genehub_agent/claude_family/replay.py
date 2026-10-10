@@ -19,13 +19,14 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import stat
 import sys
 import tempfile
 from typing import Any, Dict, List, Optional
 
 from .. import events, keycheck
-from ..serve import SessionConfig
+from ..serve import AgentContext, SessionConfig
 from ..testing import assistant_texts, subset
 from . import catalog, history, translate
 from .flavor import Flavor, managed_bin_for
@@ -539,6 +540,25 @@ class _World:
 
         keycheck.fetch = fetch  # type: ignore[assignment]
         self.ctx, self.channel, _ = scratch_context(flavor.id)
+        # The providers the daemon would hand out, in the wire shape of
+        # `provider.reply` (the daemon's own answer logic has Rust tests).
+        self.providers: List[dict] = [dict(entry) for entry in case.get("providers") or []]
+        self.provider_calls: List[str] = []
+        world_ref = self
+
+        async def provider_call(op: str, provider: Optional[str] = None) -> dict:
+            world_ref.provider_calls.append(f"{op}:{provider or ''}")
+            if op == "list":
+                return {"providers": [{k: v for k, v in entry.items() if k != "apiKey"} | {"usable": bool(entry.get("apiKey")) and bool(entry.get("baseUrl"))} for entry in world_ref.providers]}
+            entry = next((e for e in world_ref.providers if e["id"] == provider), None)
+            if entry is None:
+                raise RuntimeError(f"没有名为 {provider} 的 provider")
+            if not entry.get("apiKey"):
+                raise RuntimeError(f"{entry.get('label', provider)} 还没有保存 API Key")
+            self.ctx._mask.add(entry["apiKey"])
+            return {"provider": dict(entry)}
+
+        self.ctx.provider_call = provider_call  # type: ignore[method-assign]
         self.agent = agent_cls()
         bin_dir = install.npm_bin_dir(self.ctx)
         name = flavor.binaries[0]
@@ -647,7 +667,7 @@ async def _run_flow_step(world: _World, step: dict) -> Dict[str, Any]:
             if not held:
                 break
             params = held[0]
-            suspended.append({"step": params["step"], "title": params["request"]["title"], "questions": params["request"]["questions"]})
+            suspended.append({"step": params["step"], "title": params["request"]["title"], "questions": params["request"]["questions"], "options": [o["id"] for o in params["request"]["options"]]})
             if not answers:
                 raise RuntimeError(f"the flow asked {params['step']!r} but the case has no answer left")
             raw = answers.pop(0)
@@ -690,6 +710,8 @@ async def _drive_agent(case: dict, world: _World) -> Optional[str]:
             world.key_verdict = _verdict(step["setKeyCheck"])
         if "setRejectKeys" in step:
             world.reject_keys = list(step["setRejectKeys"])
+        if "setProviders" in step:
+            world.providers = [dict(entry) for entry in step["setProviders"]]
         if step.get("forgetKeys"):
             agent._keys.forget()
         for name, value in (step.get("setEnv") or {}).items():
@@ -708,6 +730,10 @@ async def _drive_agent(case: dict, world: _World) -> Optional[str]:
         record["env"] = {name: os.environ.get(name) for name in expect.get("env", {})}
         record["runs"] = [" ".join(argv) for argv in world.fake.runs()]
         record["keyChecks"] = list(world.key_urls)
+        from .. import providers as _providers
+
+        record["provider"] = _providers.bound(ctx)
+        record["models"] = [model["id"] for model in ((world.state() or {}).get("catalog") or {}).get("models") or []]
         from .. import space
 
         runs = [entry for entry in world.fake.log() if "argv" in entry]
@@ -813,6 +839,51 @@ def run_keycheck(case: dict, flavor: Flavor) -> Optional[str]:
     return subset(case["expect"], record, "keycheck")
 
 
+def run_provider_channel(case: dict, flavor: Flavor) -> Optional[str]:
+    """The script side of "ask the daemon about providers": the question goes
+    out as a notification, the reply that carries its id settles it, a refusal
+    becomes a sentence for the person, a key in an answer is masked from then
+    on, and a daemon that never answers does not hang the Agent."""
+    from ..testing import scratch_context
+
+    serve = sys.modules[AgentContext.__module__]
+    ctx, channel, _job = scratch_context(flavor.id)
+    record: Dict[str, Any] = {}
+
+    async def drive() -> None:
+        async def answer_with(reply: Optional[dict]) -> None:
+            while not [m for m in channel.messages if m["method"] == "provider.request"]:
+                await asyncio.sleep(0.01)
+            asked = [m for m in channel.messages if m["method"] == "provider.request"][-1]["params"]
+            record.setdefault("asked", []).append({"op": asked["op"], "provider": asked["provider"]})
+            if reply is not None:
+                ctx._provider_reply({"id": asked["id"], **reply})
+
+        for number, step in enumerate(case["calls"]):
+            channel.messages.clear()
+            call = asyncio.ensure_future(ctx.provider_call(step["op"], step.get("provider")))
+            helper = asyncio.ensure_future(answer_with(step.get("reply")))
+            outcome: Any
+            try:
+                outcome = await asyncio.wait_for(call, step.get("timeout", 5.0))
+            except RuntimeError as error:
+                outcome = "error: " + str(error)
+            await helper
+            record.setdefault("outcomes", []).append(outcome)
+        record["masked"] = ctx._mask.apply("x sk-live-secret y")
+
+    loop = asyncio.new_event_loop()
+    saved = serve.PROVIDER_TIMEOUT
+    serve.PROVIDER_TIMEOUT = case.get("timeout", 0.2)
+    try:
+        loop.run_until_complete(asyncio.wait_for(drive(), 30.0))
+    finally:
+        serve.PROVIDER_TIMEOUT = saved
+        loop.close()
+        shutil.rmtree(ctx.state_dir, ignore_errors=True)
+    return subset(case["expect"], json.loads(json.dumps(record)), "channel")
+
+
 def run_agent(case: dict, flavor: Flavor, agent_cls: Any) -> Optional[str]:
     if os.name == "nt":
         return None
@@ -840,6 +911,7 @@ def run(case: dict, flavor: Flavor, extra: Optional[Dict[str, Any]] = None, agen
         "initialize": run_initialize,
         "session": run_session,
         "keycheck": run_keycheck,
+        "providerChannel": run_provider_channel,
     }
     handlers.update(extra or {})
     handler = handlers.get(kind)

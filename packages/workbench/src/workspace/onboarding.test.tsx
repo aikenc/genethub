@@ -558,7 +558,7 @@ describe("the first run", () => {
       }),
       "session.list": () => ({ type: "sessions", data: [] }),
       "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
-      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, providers: [] } }),
+      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, presets: [], providers: [] } }),
     });
     await start(client, hostWith());
 

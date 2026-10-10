@@ -61,6 +61,18 @@ daemon 把该 CLI 文档化的配置目录变量（`CODEX_HOME`、`CLAUDE_CONFIG
 所以 git、ssh 等照常用真实的家目录。切换要 Agent 自己弹确认卡；退回「沿用本机」不删独立空间里的内容。本机原来的登录不会被带进来、也不会被改动。
 Cursor 不做：Linux 上它的登录只能靠 `XDG_CONFIG_HOME` 搬走，而那会同时改掉它启动的 git、gh 的配置，代价不可控。
 
+**登录的几种形式。** 账号登录一律是“点登录 → 卡片显示链接（有的还有一次性授权码）→ 在任何设备的浏览器里完成”。Codex 有两个账号入口：
+「登录」走设备码（授权页可以在任何设备打开），「登录（这台机器的浏览器）」走 ChatGPT 的浏览器回调（授权后页面要跳回这台机器的本地端口，
+所以只在浏览器和 daemon 在同一台机器时可用，卡片里已写明）。登录流程全部在适配脚本里，daemon 只管卡片、进程生命周期和存档，不认识任何 Agent 的登录方式。
+
+**复用内置 provider（高级）。** 在「模型与 Agent」里添加的 provider（地址、接口类型、Key、模型）可以直接给 Claude Code 和 Codex 用，不必在每个 Agent
+里再填一遍 Key 和 base URL：Agent 卡片的“使用已配置的 provider”列出接口类型对得上、已有 Key 的 provider，选定后 Agent 的模型列表就是这个 provider 的模型，
+不再用它自己的登录；“改用 … 自己的登录”随时改回。平台只提供一个接口——脚本在自己的私有管道上向 daemon 要某个 provider 的完整配置（含 Key），
+拼配置是脚本的事：Claude Code 得到 `ANTHROPIC_BASE_URL`、Key 和各个模型位的环境变量；Codex 得到 `app-server -c model_provider…` 覆盖项，Key 走环境变量，
+不改用户的 `config.toml`。Key 只在内存里，不落盘、不进日志、不经过模型；脚本只记住选了哪个 provider 的 id，每次启动会话时重新取，换 Key 立即生效。
+接口类型要对得上：Claude Code 只接 `anthropic` 类型的 provider，Codex 只接 `openai` 类型（并且服务要支持 Responses 接口，不支持的服务选了也用不了，
+这一点需要用真实服务确认）。CodeBuddy 和 Cursor 没有这个入口。
+
 四者都会：
 
 - 先推送 `state/<id>` 里缓存的模型目录，再探测，探测失败时界面不会变空；

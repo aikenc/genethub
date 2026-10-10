@@ -1270,7 +1270,7 @@ describe("opening a new conversation", () => {
       activeSessionId: "s1",
       activeWorkspaceId: "w1",
       settings: {
-        providers: [],
+        presets: [], providers: [],
         lanEnabled: false,
         agentPreferences: {
           selectedTags: ["Flash"],
@@ -1442,7 +1442,7 @@ describe("machine-global model selection", () => {
       agents: [claude, codex],
       sessions: [],
       workspaces: [],
-      settings: { providers: [], lanEnabled: false, agentPreferences: preferences },
+      settings: { presets: [], providers: [], lanEnabled: false, agentPreferences: preferences },
     });
   });
 
@@ -1473,7 +1473,7 @@ describe("machine-global model selection", () => {
           return {
             type: "settings",
             data: {
-              providers: [],
+              presets: [], providers: [],
               lanEnabled: false,
               agentPreferences: (request.payload as { preferences: AgentSelectionPreferences })
                 .preferences,
@@ -1509,7 +1509,7 @@ describe("machine-global model selection", () => {
           return {
             type: "settings",
             data: {
-              providers: [],
+              presets: [], providers: [],
               lanEnabled: false,
               agentPreferences: request.payload?.preferences,
             },
@@ -1620,7 +1620,7 @@ describe("machine-global model selection", () => {
     useWorkbench.setState({
       client,
       settings: {
-        providers: [],
+        presets: [], providers: [],
         lanEnabled: false,
         agentPreferences: preferences,
       },
@@ -1690,7 +1690,7 @@ describe("machine-global model selection", () => {
           return {
             type: "settings",
             data: {
-              providers: [],
+              presets: [], providers: [],
               lanEnabled: false,
               agentPreferences: (request.payload as { preferences: AgentSelectionPreferences })
                 .preferences,
@@ -1747,7 +1747,7 @@ describe("machine-global model selection", () => {
           return {
             type: "settings",
             data: {
-              providers: [],
+              presets: [], providers: [],
               lanEnabled: false,
               agentPreferences: (request.payload as { preferences: AgentSelectionPreferences })
                 .preferences,
@@ -1772,7 +1772,7 @@ describe("machine-global model selection", () => {
       activeWorkspaceId: "w1",
       draft: null,
       settings: {
-        providers: [],
+        presets: [], providers: [],
         lanEnabled: false,
         agentPreferences: { selectedTags: [], runtimes: {} },
       },

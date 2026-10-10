@@ -567,7 +567,7 @@ describe("switching from the sidebar", () => {
               return {
                 type: "settings",
                 data: {
-                  providers: [],
+                  presets: [], providers: [],
                   lanEnabled: false,
                   agentPreferences: preferencesFor(remote ? "claude" : "codex"),
                 },
@@ -770,7 +770,7 @@ describe("switching from the sidebar", () => {
             return {
               type: "settings",
               data: {
-                providers: [],
+                presets: [], providers: [],
                 lanEnabled: false,
                 agentPreferences: preferencesFor("cursor"),
               },

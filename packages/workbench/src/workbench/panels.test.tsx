@@ -86,6 +86,15 @@ beforeEach(() => {
   });
 });
 
+const PRESETS = [
+  { id: "kimi", label: "Kimi", baseUrl: "https://api.moonshot.cn/v1", dialect: "openai" },
+  { id: "minimax", label: "MiniMax", baseUrl: "https://api.minimax.io/v1", dialect: "openai" },
+  { id: "qwen", label: "千问", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", dialect: "openai" },
+  { id: "deepseek", label: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", dialect: "openai" },
+  { id: "openai", label: "OpenAI", baseUrl: "https://api.openai.com/v1", dialect: "openai" },
+  { id: "anthropic", label: "Anthropic", baseUrl: "https://api.anthropic.com", dialect: "anthropic" },
+];
+
 describe("the log panel", () => {
   /// The point of reading logs over the connection: the machine's path is no use
   /// to the phone that is holding the error.
@@ -438,13 +447,14 @@ describe("the settings panel", () => {
     const { client, calls } = stubDaemon({
       "settings.get": () => ({
         type: "settings",
-        data: { lanEnabled: false, providers: [provider({ id: "deepseek", hasApiKey: true })] },
+        data: { lanEnabled: false, presets: PRESETS, providers: [provider({ id: "deepseek", hasApiKey: true })] },
       }),
       "settings.setProvider": () => {
         return {
           type: "settings",
           data: {
             lanEnabled: false,
+            presets: PRESETS,
             providers: [
               provider({
                 id: "deepseek",
@@ -488,6 +498,7 @@ describe("the settings panel", () => {
         type: "settings",
         data: {
           lanEnabled: false,
+          presets: PRESETS,
           providers: [
             provider({
               id: "deepseek",
@@ -523,6 +534,7 @@ describe("the settings panel", () => {
         type: "settings",
         data: {
           lanEnabled: false,
+          presets: PRESETS,
           providers: [
             provider({
               id: "deepseek",
@@ -544,11 +556,12 @@ describe("the settings panel", () => {
   /** Somewhere else to send requests, with an address that is not optional. */
   it("takes a provider of the user's own, address and all", async () => {
     const { client, calls } = stubDaemon({
-      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, providers: [] } }),
+      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, presets: PRESETS, providers: [] } }),
       "settings.setProvider": () => ({
         type: "settings",
         data: {
           lanEnabled: false,
+          presets: PRESETS,
           providers: [provider({ id: "kimi", label: "Kimi", hasApiKey: true, custom: true })],
         },
       }),
@@ -581,7 +594,7 @@ describe("the settings panel", () => {
 
   it("shows the fingerprint of the machine that answered", async () => {
     const { client } = stubDaemon({
-      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, providers: [] } }),
+      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, presets: PRESETS, providers: [] } }),
       "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
     });
     (client as { identity?: unknown }).identity = {
@@ -604,7 +617,7 @@ describe("the settings panel", () => {
    */
   it("warns when the connection's fingerprint is not the one this machine has", async () => {
     const { client } = stubDaemon({
-      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, providers: [] } }),
+      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, presets: PRESETS, providers: [] } }),
       "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
     });
     (client as { identity?: unknown }).identity = {
@@ -627,7 +640,7 @@ describe("the settings panel", () => {
 
   it("shows the RTC failure phase instead of a single 直连失败 sentence", async () => {
     const { client } = stubDaemon({
-      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, providers: [] } }),
+      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, presets: PRESETS, providers: [] } }),
       "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
     });
     Object.assign(client, {
@@ -651,11 +664,11 @@ describe("the settings panel", () => {
     const { client, calls } = stubDaemon({
       "settings.get": () => ({
         type: "settings",
-        data: { lanEnabled: false, providers: [] },
+        data: { lanEnabled: false, presets: PRESETS, providers: [] },
       }),
       "settings.setProvider": () => ({
         type: "settings",
-        data: { lanEnabled: false, providers: [provider({ id: "openai", hasApiKey: true })] },
+        data: { lanEnabled: false, presets: PRESETS, providers: [provider({ id: "openai", hasApiKey: true })] },
       }),
       "agent.refresh": () => ({ type: "agents", data: [] }),
       "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
@@ -695,13 +708,13 @@ describe("speech settings", () => {
     const { client, calls } = stubDaemon({
       "settings.get": () => ({
         type: "settings",
-        data: { lanEnabled: false, providers: [], speech: speech() },
+        data: { lanEnabled: false, presets: PRESETS, providers: [], speech: speech() },
       }),
       "speech.settings.setQwen3": () => {
         correctionWorkspaces = ["w1"];
         return {
           type: "settings",
-          data: { lanEnabled: false, providers: [], speech: speech() },
+          data: { lanEnabled: false, presets: PRESETS, providers: [], speech: speech() },
         };
       },
       "speech.runtime.probe": () => ({ type: "speechRuntimeStatus", data: { state: "ready" } }),
@@ -761,7 +774,7 @@ describe("the version section", () => {
 
   function connected(answers: Parameters<typeof stubDaemon>[0]) {
     const stub = stubDaemon({
-      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, providers: [] } }),
+      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, presets: PRESETS, providers: [] } }),
       "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
       ...answers,
     });
@@ -898,7 +911,7 @@ describe("the version section", () => {
    */
   it("calls an unreleased build what it is, and does not tell it to upgrade", async () => {
     const stub = stubDaemon({
-      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, providers: [] } }),
+      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, presets: PRESETS, providers: [] } }),
       "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
       "update.check": () => ({
         type: "update",
@@ -928,7 +941,7 @@ describe("the version section", () => {
   it("does not treat a local source build as a named Dev slot", async () => {
     vi.stubEnv("VITE_GENEHUB_DEV_NAME", "dev-ui");
     const stub = stubDaemon({
-      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, providers: [] } }),
+      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, presets: PRESETS, providers: [] } }),
       "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
     });
     (stub.client as { identity?: unknown }).identity = {

@@ -1,35 +1,4 @@
-import type { ProviderInfo } from "@genehub/proto";
-
-/**
- * A starting point for "添加 provider": it fills in the id, the address and the
- * protocol so nobody has to look them up, and that is all it does. What the
- * provider is stays the daemon's answer (`settings.providers`); any other id
- * works too, with an address the person types.
- *
- * Mirrors the providers the daemon ships an address for (`provider.rs`). A
- * provider added from here is sent with the same address the daemon would have
- * used, so the two cannot disagree about where a key goes.
- */
-export interface ProviderPreset {
-  id: string;
-  label: string;
-  baseUrl: string;
-  dialect: "openai" | "anthropic";
-}
-
-export const PROVIDER_PRESETS: ProviderPreset[] = [
-  { id: "kimi", label: "Kimi", baseUrl: "https://api.moonshot.cn/v1", dialect: "openai" },
-  { id: "minimax", label: "MiniMax", baseUrl: "https://api.minimax.io/v1", dialect: "openai" },
-  {
-    id: "qwen",
-    label: "千问",
-    baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    dialect: "openai",
-  },
-  { id: "deepseek", label: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", dialect: "openai" },
-  { id: "openai", label: "OpenAI", baseUrl: "https://api.openai.com/v1", dialect: "openai" },
-  { id: "anthropic", label: "Anthropic", baseUrl: "https://api.anthropic.com", dialect: "anthropic" },
-];
+import type { ProviderInfo, ProviderPreset } from "@genehub/proto";
 
 export const DIALECT_LABEL: Record<string, string> = {
   openai: "OpenAI 兼容",
@@ -49,8 +18,15 @@ export function configuredProviders(providers: readonly ProviderInfo[] | undefin
   return (providers ?? []).filter(isConfiguredProvider);
 }
 
-/** The presets not already in the list. */
-export function presetsToAdd(providers: readonly ProviderInfo[] | undefined): ProviderPreset[] {
+/**
+ * The presets not already in the list. The presets themselves come from the
+ * daemon (`settings.presets`): choosing one only fills in the add form, and
+ * the address it fills in is the one the daemon would have used anyway.
+ */
+export function presetsToAdd(
+  providers: readonly ProviderInfo[] | undefined,
+  presets: readonly ProviderPreset[] | undefined,
+): ProviderPreset[] {
   const taken = new Set(configuredProviders(providers).map((provider) => provider.id));
-  return PROVIDER_PRESETS.filter((preset) => !taken.has(preset.id));
+  return (presets ?? []).filter((preset) => !taken.has(preset.id));
 }

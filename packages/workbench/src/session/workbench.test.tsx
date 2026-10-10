@@ -3309,7 +3309,7 @@ describe("a whole turn as the timeline sees it", () => {
         agent({ id: "claude", label: "Claude Code" }),
       ],
       settings: {
-        providers: [],
+        presets: [], providers: [],
         lanEnabled: false,
         agentPreferences: {
           selectedTags: ["Pro"],
@@ -3409,7 +3409,7 @@ describe("a whole turn as the timeline sees it", () => {
         }),
       ],
       settings: {
-        providers: [],
+        presets: [], providers: [],
         lanEnabled: false,
         agentPreferences: {
           selectedTags: ["Flash"],

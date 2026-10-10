@@ -14,9 +14,9 @@ import os
 import re
 import tempfile
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
-from .. import credentials, install, keycheck, login, process, space
+from .. import credentials, install, keycheck, login, process, providers, space
 from ..serve import Agent, AgentContext, Job, Session, SessionContext, option, secret_question
 from . import catalog, history
 from .flavor import Flavor
@@ -63,6 +63,9 @@ class FamilyAgent(Agent):
     api_key_title: str = ""
     api_key_detail: str = ""
     api_key_prompt: str = ""
+    # The wire protocols of the GeneHub providers this CLI can be pointed at.
+    # Empty: it cannot, and no provider action is offered.
+    provider_dialects: Sequence[str] = ()
 
     def __init__(self) -> None:
         self.ctx: Optional[AgentContext] = None
@@ -83,6 +86,10 @@ class FamilyAgent(Agent):
         self._npm_lock: Optional[asyncio.Lock] = None
         self._force_probe = False
         self._keys = keycheck.Memory()
+        # The GeneHub provider this Agent runs on, when one was chosen; kept
+        # in memory only, fetched again whenever the Agent needs it.
+        self._provider: Optional[providers.Provider] = None
+        self._provider_problem: Optional[str] = None
 
     # -- what a concrete Agent supplies ------------------------------------------------
 
@@ -100,6 +107,10 @@ class FamilyAgent(Agent):
         raise NotImplementedError
 
     async def logout(self, ctx: AgentContext, job: Job, program: str) -> None:
+        raise NotImplementedError
+
+    def provider_environment(self, provider: providers.Provider) -> Dict[str, str]:
+        """The environment that points the CLI at ``provider``."""
         raise NotImplementedError
 
     def api_key_questions(self) -> List[dict]:
@@ -127,6 +138,8 @@ class FamilyAgent(Agent):
         env = process.child_environment()
         if self._npm and process.find_executable("node") is None:
             env = install.node_env(self._npm, env)
+        if self._provider is not None:
+            env.update(self.provider_environment(self._provider))
         return env
 
     def find_program(self) -> Optional[str]:
@@ -171,14 +184,23 @@ class FamilyAgent(Agent):
         except OSError as error:
             self.log(f"could not cache the {self.label} catalog: {error}")
 
-    def catalog(self) -> dict:
-        return catalog.build_catalog(self.hello, self.help_text)
+    def effective_hello(self) -> Optional[dict]:
+        """What the CLI says about itself — except the model table, which is
+        the provider's own when the Agent runs on one."""
+        if self._provider is None:
+            return self.hello
+        models = [{"value": model, "displayName": model} for model in self._provider.models]
+        return {**(self.hello or {}), "models": models, "model": models[0]["value"], "currentModelId": models[0]["value"]}
 
-    def _push(self, ready: bool, message: Optional[str], actions: List[dict]) -> None:
+    def catalog(self) -> dict:
+        return catalog.build_catalog(self.effective_hello(), self.help_text)
+
+    def _push(self, ready: bool, message: Optional[str], actions: List[dict], status_label: Optional[str] = None) -> None:
         assert self.ctx is not None
         self.ctx.set_state(
             ready=ready,
             message=message,
+            status_label=status_label,
             version=self.version,
             actions=actions,
             capabilities=CAPABILITIES,
@@ -269,15 +291,22 @@ class FamilyAgent(Agent):
             self.logged_in = None
             self.version = None
             message = self.not_installed() if self._npm else self.not_installed() + "。" + install.NO_NODE
-            self._push(False, message, [AgentContext.action("install", "安装", primary=True)])
+            self._push(False, message, [AgentContext.action("install", "安装", primary=True, group="install")])
             return
+        await self._load_provider()
         self.version = await self._version(program) or self.version
         await self._help(program)
         await self._probe(program, force)
-        self.logged_in = await self.login_state(program, self.account)
+        if self._provider is not None:
+            # Running on a GeneHub provider: the CLI's own login is not what
+            # authorizes it, and the provider's key was checked when it was
+            # saved there.
+            self.logged_in = True
+        else:
+            self.logged_in = await self.login_state(program, self.account)
         key_note: Optional[str] = None
         rejected: Optional[str] = None
-        if self.logged_in is not False and self.api_key_in_force():
+        if self._provider is None and self.logged_in is not False and self.api_key_in_force():
             # A key sitting in the environment counts as a login only if the
             # service knows it.
             verdict = await self._check_key()
@@ -290,10 +319,11 @@ class FamilyAgent(Agent):
         if self.logged_in is False:
             self._push(
                 False,
-                " ".join(filter(None, [rejected or self._interrupted or self.not_logged_in(), self._space_note()])),
+                " ".join(filter(None, [self._provider_problem or rejected or self._interrupted or self.not_logged_in(), self._space_note()])),
                 [
-                    AgentContext.action("login", "登录", primary=True),
-                    AgentContext.action("login-api-key", "用 API Key 登录"),
+                    AgentContext.action("login", "登录", primary=True, group="account"),
+                    AgentContext.action("login-api-key", "用 API Key 登录", group="account"),
+                    *self._provider_actions(),
                     space_action,
                 ],
             )
@@ -304,21 +334,78 @@ class FamilyAgent(Agent):
             notes.append(f"{self.label} 没有返回模型列表，稍后刷新再试。")
         if key_note:
             notes.append(key_note + "。")
+        if self._provider is not None:
+            notes.append(providers.note(self.label, self._provider))
         space_note = self._space_note()
         if space_note:
             notes.append(space_note)
-        actions = [
-            AgentContext.action("login-api-key", "换一个 API Key" if credentials.has(self.ctx) else "用 API Key 登录"),
-            AgentContext.action("logout", "退出登录"),
-            AgentContext.action("update", "更新"),
-            space_action,
-        ]
+        if self._provider is not None:
+            actions = [
+                *self._provider_actions(),
+                AgentContext.action("update", "更新", group="install"),
+                space_action,
+            ]
+        else:
+            actions = [
+                AgentContext.action("login-api-key", "换一个 API Key" if credentials.has(self.ctx) else "用 API Key 登录", group="account"),
+                AgentContext.action("logout", "退出登录", group="account"),
+                *self._provider_actions(),
+                AgentContext.action("update", "更新", group="install"),
+                space_action,
+            ]
         if self.logged_in is None:
             # A status call that told us nothing is not a reason to hide a CLI
             # that is sitting right there — but say so, and offer login.
             notes.append(f"未能确认 {self.label} 的登录状态。")
-            actions.insert(0, AgentContext.action("login", "登录"))
-        self._push(True, " ".join(notes) or None, actions)
+            actions.insert(0, AgentContext.action("login", "登录", group="account"))
+        # Ready, but a saved key nobody could ask the service about is saved,
+        # not known to work: say so where the state is named.
+        self._push(True, " ".join(notes) or None, actions, status_label="可用（Key 未核对）" if key_note else None)
+
+    # -- a GeneHub provider (advanced) ----------------------------------------------------
+
+    def _provider_actions(self) -> List[dict]:
+        if self.ctx is None:
+            return []
+        return providers.actions(self.ctx, self.label, available=bool(self.provider_dialects))
+
+    async def _load_provider(self) -> None:
+        """Fetches the chosen provider's current configuration, or notes why it
+        cannot be had. A provider that went away or lost its key leaves the
+        Agent needing a login, with the reason on its card."""
+        self._provider = None
+        self._provider_problem = None
+        if self.ctx is None or not self.provider_dialects:
+            return
+        chosen = providers.bound(self.ctx)
+        if not chosen:
+            return
+        try:
+            self._provider = await providers.fetch(self.ctx, chosen, self.provider_dialects)
+        except RuntimeError as error:
+            self._provider_problem = f"选定的 provider 现在不能用：{error}。可以换一个 provider，或者改用 {self.label} 自己的登录。"
+
+    async def _use_provider(self, ctx: AgentContext, job: Job) -> None:
+        chosen = await providers.choose(ctx, job, self.label, self.provider_dialects)
+        if chosen is None:
+            job.done("已取消")
+            return
+        job.progress(phase="provider", message="正在读取 provider 配置")
+        provider = await providers.fetch(ctx, chosen, self.provider_dialects)
+        providers.bind(ctx, chosen)
+        self._keys.forget()
+        self.hello = None
+        self._recycle_sessions()
+        await self._refresh_now(ctx)
+        job.done(f"已改用 provider「{provider.label}」")
+
+    async def _leave_provider(self, ctx: AgentContext, job: Job) -> None:
+        providers.bind(ctx, None)
+        self.hello = None
+        self.account = None
+        self._recycle_sessions()
+        await self._refresh_now(ctx)
+        job.done(f"已改回 {self.label} 自己的登录")
 
     # -- API key check -----------------------------------------------------------------------
 
@@ -374,6 +461,10 @@ class FamilyAgent(Agent):
             await self._logout(ctx, job)
         elif action == "update":
             await self._update(ctx, job, explicit=True)
+        elif action == "provider-use" and self.provider_dialects:
+            await self._use_provider(ctx, job)
+        elif action == "provider-leave" and self.provider_dialects:
+            await self._leave_provider(ctx, job)
         elif action in ("space-own", "space-shared"):
             await self._switch_space(ctx, job, action == "space-own")
         else:
@@ -386,6 +477,8 @@ class FamilyAgent(Agent):
             await self._login(ctx, job)
         elif step == "login.api-key":
             await self._login_api_key(ctx, job)
+        elif step == "provider.choose":
+            await self._use_provider(ctx, job)
         else:
             await self.run_action(ctx, action, job)
 
@@ -404,17 +497,22 @@ class FamilyAgent(Agent):
         if program is None or ctx is None:
             raise RuntimeError(self.not_installed())
         self.program = program
+        # The provider's key may have changed since the last refresh.
+        await self._load_provider()
+        if self._provider_problem:
+            raise RuntimeError(self._provider_problem)
         if not self.hello:
             await self._probe(program, force=True)
         if not self.help_text:
             await self._help(program)
-        models = catalog.models_in(self.hello)
+        hello = self.effective_hello()
+        models = catalog.models_in(hello)
         return Launch(
             program=program,
             help_text=self.help_text,
             models=[model["id"] for model in models],
             efforts=catalog.efforts_of(models),
-            default_model=catalog.reported_model(self.hello) or (models[0]["id"] if models else None),
+            default_model=catalog.reported_model(hello) or (models[0]["id"] if models else None),
             env=self.env(),
         )
 
