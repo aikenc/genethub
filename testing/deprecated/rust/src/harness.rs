@@ -202,8 +202,6 @@ impl Journey {
         config.agents.providers.insert(
             provider_id.to_string(),
             ProviderConfig {
-                thinking_mode: None,
-                model_thinking: std::collections::BTreeMap::new(),
                 api_key: Some(model.api_key.clone()),
                 base_url: Some(model.base_url.clone()),
                 dialect: model.dialect.clone(),

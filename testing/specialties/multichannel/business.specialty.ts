@@ -62,7 +62,8 @@ defineSpecialty(meta("saturated-capacity-releases-slot", "Closing a client relea
     const peers: Client[] = [];
     let refusal = "";
     try {
-      for (let n = 0; n < 16; n++) {
+      // Past the daemon's 32-peer cap (logical_registry.rs MAX_CONNECTIONS), so the loop must end in a refusal.
+      for (let n = 0; n < 40; n++) {
         try { peers.push(await connect(t, o)); } catch (error) { refusal = String(error); break; }
       }
       t.assertions.assert(peers.length > 0 && /ResourceExhausted/.test(refusal), `admission was not demonstrably saturated: admitted=${peers.length}; ${refusal}`);

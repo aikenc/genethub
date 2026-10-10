@@ -23,7 +23,10 @@ defineSpecialty(
       "concurrency.rs",
       "command.rs",
       "authorization.rs",
+      // Suspended under L13, not retired: their rows claim source-retained.
+      "claude.rs",
       "cursor.rs",
+      "opencode.rs",
       "install.rs",
       "supply_chain.rs",
     ]) {

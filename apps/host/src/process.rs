@@ -396,8 +396,14 @@ mod exit_word_tests {
     fn a_signal_is_carried_in_its_own_band() {
         use std::os::unix::process::ExitStatusExt;
         // Raw wait statuses: a signal is the low 7 bits, an exit code byte 2.
-        assert_eq!(exit_word(&std::process::ExitStatus::from_raw(9)), SIGNALED | 9);
-        assert_eq!(exit_word(&std::process::ExitStatus::from_raw(15)), SIGNALED | 15);
+        assert_eq!(
+            exit_word(&std::process::ExitStatus::from_raw(9)),
+            SIGNALED | 9
+        );
+        assert_eq!(
+            exit_word(&std::process::ExitStatus::from_raw(15)),
+            SIGNALED | 15
+        );
         assert_eq!(exit_word(&std::process::ExitStatus::from_raw(3 << 8)), 3);
         assert_eq!(exit_word(&std::process::ExitStatus::from_raw(0)), 0);
     }

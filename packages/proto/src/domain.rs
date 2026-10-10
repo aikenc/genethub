@@ -2651,7 +2651,10 @@ impl ModelCapabilities {
             compat!(max_tokens_field, "compat.maxTokensField");
             compat!(supports_reasoning_effort, "compat.supportsReasoningEffort");
             compat!(supports_developer_role, "compat.supportsDeveloperRole");
-            compat!(requires_reasoning_content, "compat.requiresReasoningContent");
+            compat!(
+                requires_reasoning_content,
+                "compat.requiresReasoningContent"
+            );
             compat!(thinking_format, "compat.thinkingFormat");
             compat!(supports_cache_control, "compat.supportsCacheControl");
             compat!(thinking_display, "compat.thinkingDisplay");

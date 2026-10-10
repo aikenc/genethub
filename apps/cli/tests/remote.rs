@@ -211,8 +211,6 @@ fn write_provider_config(data: &Path, model_base_url: &str) {
     config.agents.providers.insert(
         "deepseek".to_string(),
         ProviderConfig {
-            thinking_mode: None,
-            model_thinking: std::collections::BTreeMap::new(),
             api_key: Some("sk-mock".to_string()),
             base_url: Some(model_base_url.to_string()),
             ..Default::default()

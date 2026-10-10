@@ -262,6 +262,7 @@ async fn a_provider_the_user_adds_works_like_the_ones_we_ship() {
             dialect: Some("openai".into()),
             models: None,
             model_inputs: None,
+            model_capabilities: None,
         })
         .await
     {
@@ -335,6 +336,7 @@ async fn models_written_by_hand_need_no_list_call() {
             dialect: None,
             models: Some(vec!["qwen3-32b".into()]),
             model_inputs: None,
+            model_capabilities: None,
         })
         .await
     {
@@ -674,6 +676,7 @@ async fn a_key_entered_in_settings_makes_the_very_next_task_work() {
             dialect: None,
             models: None,
             model_inputs: None,
+            model_capabilities: None,
         })
         .await
     {
@@ -757,6 +760,7 @@ async fn a_key_the_provider_will_not_accept_says_that_and_not_add_a_key() {
             dialect: None,
             models: None,
             model_inputs: None,
+            model_capabilities: None,
         })
         .await
         .expect("the key is stored");
@@ -815,6 +819,7 @@ async fn a_real_provider_that_rejects_our_key_says_so_instead_of_hanging() {
             dialect: journey.model.dialect.clone(),
             models: None,
             model_inputs: None,
+            model_capabilities: None,
         })
         .await
     {

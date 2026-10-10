@@ -2830,10 +2830,11 @@ async fn dispatch(
                 Ok(kind) => kind,
                 Err(error) => return failed(error),
             };
-            if kind == Some(genehub_proto::PermissionRequestKind::ProviderConfiguration) {
-                if caller.session_controller_id().is_some() || !matches!(outcome, genehub_proto::PermissionOutcome::Canceled) {
-                    return Handled::err(ErrorCode::Forbidden, "provider 配置须由 Human 通过专用提交入口确认；普通会话答案不能保存密钥或授予配置权限");
-                }
+            if kind == Some(genehub_proto::PermissionRequestKind::ProviderConfiguration)
+                && (caller.session_controller_id().is_some()
+                    || !matches!(outcome, genehub_proto::PermissionOutcome::Canceled))
+            {
+                return Handled::err(ErrorCode::Forbidden, "provider 配置须由 Human 通过专用提交入口确认；普通会话答案不能保存密钥或授予配置权限");
             }
             // A question in the caller's own Session is addressed to its
             // Human. Answering another Session's question (a PM deciding a
