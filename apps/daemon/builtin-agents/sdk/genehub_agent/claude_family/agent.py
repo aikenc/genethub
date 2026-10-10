@@ -16,7 +16,7 @@ import tempfile
 import time
 from typing import Any, Dict, List, Optional
 
-from .. import credentials, install, login, process
+from .. import credentials, install, keycheck, login, process, space
 from ..serve import Agent, AgentContext, Job, Session, SessionContext, option, secret_question
 from . import catalog, history
 from .flavor import Flavor
@@ -82,6 +82,7 @@ class FamilyAgent(Agent):
         self._refresh_lock: Optional[asyncio.Lock] = None
         self._npm_lock: Optional[asyncio.Lock] = None
         self._force_probe = False
+        self._keys = keycheck.Memory()
 
     # -- what a concrete Agent supplies ------------------------------------------------
 
@@ -106,6 +107,11 @@ class FamilyAgent(Agent):
 
     def api_key_values(self, key: str, outcome: Any) -> Dict[str, str]:
         return {self.api_key_env: key}
+
+    async def verify_key(self, key: str) -> keycheck.Verdict:
+        """Asks the service whether it accepts ``key``, without a model
+        request. A service that has no such question answers UNKNOWN."""
+        return keycheck.Verdict(keycheck.UNKNOWN, f"没能核对：{self.label} 的 Key 没有不发模型请求就能核对的办法，第一次对话时才知道它是否有效")
 
     # -- helpers -------------------------------------------------------------------------------
 
@@ -221,6 +227,7 @@ class FamilyAgent(Agent):
         self._refresh_lock = asyncio.Lock()
         self._npm_lock = asyncio.Lock()
         credentials.apply(ctx)
+        space.apply(ctx, self.flavor.config_dir_env)
         self._interrupted = login.take_interrupted(ctx)
         cached = self._load_cache()
         if cached:
@@ -268,21 +275,43 @@ class FamilyAgent(Agent):
         await self._help(program)
         await self._probe(program, force)
         self.logged_in = await self.login_state(program, self.account)
+        key_note: Optional[str] = None
+        rejected: Optional[str] = None
+        if self.logged_in is not False and self.api_key_in_force():
+            # A key sitting in the environment counts as a login only if the
+            # service knows it.
+            verdict = await self._check_key()
+            if verdict.rejected:
+                self.logged_in = False
+                rejected = f"{self.label} 的 API Key 已经失效：{verdict.detail}。请重新输入，或换用账号登录。"
+            elif not verdict.ok:
+                key_note = verdict.detail
+        space_action = self._space_action()
         if self.logged_in is False:
             self._push(
                 False,
-                self._interrupted or self.not_logged_in(),
-                [AgentContext.action("login", "登录", primary=True), AgentContext.action("login-api-key", "用 API Key 登录")],
+                " ".join(filter(None, [rejected or self._interrupted or self.not_logged_in(), self._space_note()])),
+                [
+                    AgentContext.action("login", "登录", primary=True),
+                    AgentContext.action("login-api-key", "用 API Key 登录"),
+                    space_action,
+                ],
             )
             return
         self._interrupted = None
         notes: List[str] = []
         if not (self.hello or {}).get("models"):
             notes.append(f"{self.label} 没有返回模型列表，稍后刷新再试。")
+        if key_note:
+            notes.append(key_note + "。")
+        space_note = self._space_note()
+        if space_note:
+            notes.append(space_note)
         actions = [
             AgentContext.action("login-api-key", "换一个 API Key" if credentials.has(self.ctx) else "用 API Key 登录"),
             AgentContext.action("logout", "退出登录"),
             AgentContext.action("update", "更新"),
+            space_action,
         ]
         if self.logged_in is None:
             # A status call that told us nothing is not a reason to hide a CLI
@@ -290,6 +319,48 @@ class FamilyAgent(Agent):
             notes.append(f"未能确认 {self.label} 的登录状态。")
             actions.insert(0, AgentContext.action("login", "登录"))
         self._push(True, " ".join(notes) or None, actions)
+
+    # -- API key check -----------------------------------------------------------------------
+
+    def api_key_in_force(self) -> bool:
+        return bool(self.api_key_env and os.environ.get(self.api_key_env, "").strip())
+
+    async def _check_key(self, force: bool = False) -> keycheck.Verdict:
+        key = os.environ.get(self.api_key_env, "").strip()
+        if not force:
+            seen = self._keys.get(key)
+            if seen is not None:
+                return seen
+        try:
+            verdict = await self.verify_key(key)
+        except Exception as error:  # a check that breaks is a check that did not run
+            self.log(f"{self.flavor.id} key check failed: {error.__class__.__name__}")
+            verdict = keycheck.Verdict(keycheck.UNKNOWN, "没能核对")
+        self._keys.put(key, verdict)
+        return verdict
+
+    # -- an own space (advanced) ----------------------------------------------------------
+
+    def _space_action(self) -> dict:
+        return space.action(self.ctx)  # type: ignore[arg-type]
+
+    def _space_note(self) -> Optional[str]:
+        if self.ctx is not None and space.own(self.ctx):
+            return space.note(self.label)
+        return None
+
+    async def _switch_space(self, ctx: AgentContext, job: Job, own: bool) -> None:
+        if not await space.confirm(ctx, job, self.label, own):
+            job.done("已取消")
+            return
+        job.progress(phase="space", message="正在切换")
+        space.switch(ctx, self.flavor.config_dir_env, own)
+        self._keys.forget()
+        self.hello = None
+        self.account = None
+        self._recycle_sessions()
+        await self._refresh_now(ctx)
+        job.done("已切换到独立空间" if own else "已改回沿用本机")
 
     async def run_action(self, ctx: AgentContext, action: str, job: Job) -> None:
         self.ctx = ctx
@@ -303,6 +374,8 @@ class FamilyAgent(Agent):
             await self._logout(ctx, job)
         elif action == "update":
             await self._update(ctx, job, explicit=True)
+        elif action in ("space-own", "space-shared"):
+            await self._switch_space(ctx, job, action == "space-own")
         else:
             raise RuntimeError(f"unknown action {action!r}")
 
@@ -437,21 +510,34 @@ class FamilyAgent(Agent):
         if outcome.canceled or outcome.option_id != "save" or not key:
             job.done("已取消登录")
             return
-        job.progress(phase="login", message="正在保存 API Key")
+        job.progress(phase="login", message="正在核对 API Key")
+        previous = credentials.load(ctx)
         credentials.save(ctx, self.api_key_values(key, outcome))
+        verdict = await self._check_key(force=True)
+        if verdict.rejected:
+            # A key the service does not know must not replace one that worked.
+            credentials.clear(ctx)
+            if previous:
+                credentials.save(ctx, previous)
+            self._keys.forget()
+            await self._refresh_now(ctx)
+            raise RuntimeError(f"{verdict.detail}，没有保存。请检查后重新输入。")
         self._recycle_sessions()
         await self._refresh_now(ctx)
         if self.logged_in is False:
             credentials.clear(ctx)
+            if previous:
+                credentials.save(ctx, previous)
             await self._refresh_now(ctx)
             raise RuntimeError(f"API Key 没有生效：{self.label} 仍然报告未登录")
-        job.done("已用 API Key 登录")
+        job.done("已用 API Key 登录" if verdict.ok else f"已保存 API Key，但{verdict.detail}")
 
     async def _logout(self, ctx: AgentContext, job: Job) -> None:
         program = self._require_program()
         job.progress(phase="logout", message="正在退出登录")
         # A key GeneHub saved goes first, so the state below is the account's.
         credentials.clear(ctx)
+        self._keys.forget()
         try:
             await self.logout(ctx, job, program)
         finally:

@@ -11,7 +11,7 @@ import { LogsPanel } from "../logs/LogsPanel";
 import type { Client } from "../protocol/client";
 import { SettingsPanel } from "../settings/SettingsPanel";
 import { CHANNEL, type BuildIdentity } from "../channel";
-import { useWorkbench } from "../session/store";
+import { PROVIDERS_TARGET, useWorkbench } from "../session/store";
 import { UI_SCALE_KEY, useUiScale } from "../theme/scale";
 import { browserHost } from "../host";
 
@@ -427,22 +427,20 @@ function provider(over: Partial<ProviderInfo> & { id: string }): ProviderInfo {
   };
 }
 
-/** The model keys live in the one Agent 配置 dialog, on their own tab. */
+/** The model providers live in a window of the one 模型与 Agent dialog. */
 function renderKeys() {
-  useWorkbench.getState().openAgentConfig("keys");
+  useWorkbench.getState().openAgentConfig(PROVIDERS_TARGET);
   render(<AgentConfigDialog />);
 }
 
 describe("the settings panel", () => {
   it("sends a key without ever showing one back", async () => {
-    let stored = false;
     const { client, calls } = stubDaemon({
       "settings.get": () => ({
         type: "settings",
-        data: { lanEnabled: false, providers: [provider({ id: "deepseek", hasApiKey: stored })] },
+        data: { lanEnabled: false, providers: [provider({ id: "deepseek", hasApiKey: true })] },
       }),
       "settings.setProvider": () => {
-        stored = true;
         return {
           type: "settings",
           data: {
@@ -560,8 +558,7 @@ describe("the settings panel", () => {
     install(client);
 
     renderKeys();
-    await userEvent.click(await screen.findByRole("button", { name: "添加自定义 provider" }));
-
+    // Nothing is set up yet, so the form is the page.
     const add = screen.getByTestId("add-provider");
     await userEvent.type(screen.getByLabelText("provider id"), "kimi");
     // Nowhere to send it yet, so there is nothing to save.
@@ -666,10 +663,11 @@ describe("the settings panel", () => {
     install(client);
 
     renderKeys();
-    await userEvent.type(await screen.findByLabelText("OpenAI API Key"), "sk-1");
+    await userEvent.click(await screen.findByRole("radio", { name: "OpenAI" }));
+    await userEvent.type(screen.getByLabelText("provider API Key"), "sk-1");
     // Opening the dialog already probed once; the save must probe again.
     const before = calls.filter((call) => call.type === "agent.refresh").length;
-    await userEvent.click(screen.getByTestId("save-openai"));
+    await userEvent.click(screen.getByTestId("add-provider"));
 
     await waitFor(() => {
       expect(calls.filter((call) => call.type === "agent.refresh").length).toBeGreaterThan(before);
@@ -1045,7 +1043,7 @@ describe("appearance on this client", () => {
   });
 });
 
-describe("the Agent list in the Agent 配置 dialog", () => {
+describe("the Agent windows of the 模型与 Agent dialog", () => {
   const agent = (id: string, extra: Record<string, unknown>) => ({
     id,
     label: id,
@@ -1055,7 +1053,7 @@ describe("the Agent list in the Agent 配置 dialog", () => {
     ...extra,
   });
 
-  it("lists usable Agents first and explains, and offers repair for, only what the script cannot fix itself", async () => {
+  it("lists what cannot be used yet below the models, and keeps repair inside the Agent's own window", async () => {
     const { client } = stubDaemon({});
     install(client);
     useWorkbench.setState({
@@ -1079,26 +1077,31 @@ describe("the Agent list in the Agent 配置 dialog", () => {
           message: "正在启动",
           actions: [],
         }),
-        agent("genet", { builtin: true, label: "GeneHub" }),
       ] as never,
     });
     useWorkbench.getState().openAgentConfig();
     render(<AgentConfigDialog />);
 
-    const rows = within(screen.getByRole("list", { name: "Agent 列表" })).getAllByRole("listitem");
-    expect(rows[0]).toHaveTextContent("GeneHub");
-    expect(rows[0]).toHaveTextContent("内置");
-    const cursor = rows.find((row) => row.textContent?.includes("cursor"))!;
-    expect(cursor).toHaveTextContent("随附");
-    expect(cursor).toHaveTextContent("Cursor 的命令行 Agent");
+    const rows = within(screen.getByRole("region", { name: "还不能用的 Agent" })).getAllByRole("listitem");
+    expect(rows.map((row) => row.getAttribute("data-agent-id"))).toEqual(["cursor", "broken", "starting"]);
+    // The list is a list: the card with its buttons is one click down.
+    expect(screen.queryByRole("button", { name: "让内置 Agent 修复" })).toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: "配置 cursor" }));
+    const window = screen.getByRole("dialog", { name: "cursor" });
+    expect(window).toHaveTextContent("随附");
+    expect(window).toHaveTextContent("Cursor 的命令行 Agent");
     // The reason is said once, under the name, not again as the status.
-    expect(cursor.textContent?.split("未安装 cursor-agent")).toHaveLength(2);
+    expect(window.textContent?.split("未安装 cursor-agent")).toHaveLength(2);
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog", { name: "cursor" })).toBeNull();
+    // Escape closed the window only; the list is still there.
+    expect(screen.getByRole("dialog", { name: "模型与 Agent" })).toBeInTheDocument();
 
     // Repair and reload are tucked under 更多 on the card that can use them.
+    await userEvent.click(screen.getByRole("button", { name: "配置 broken" }));
     await userEvent.click(screen.getByRole("button", { name: "broken 更多" }));
-    const repairs = screen.getAllByRole("button", { name: "让内置 Agent 修复" });
-    expect(repairs).toHaveLength(1);
-    expect(rows.find((row) => row.textContent?.includes("broken"))).toContainElement(repairs[0]!);
+    expect(screen.getAllByRole("button", { name: "让内置 Agent 修复" })).toHaveLength(1);
     // A user-layer Agent takes edits on reload.
     expect(screen.getAllByRole("button", { name: "重新加载" })).toHaveLength(1);
   });

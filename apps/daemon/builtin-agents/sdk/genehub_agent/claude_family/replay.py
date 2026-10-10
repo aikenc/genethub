@@ -9,6 +9,7 @@ Every ``tests/*.json`` case has a ``kind``:
 ``history``    project keys and session-file import under a temporary config dir
 ``initialize`` ``catalog.initialize`` and the Agent's own state against a fake CLI
 ``session``    a real ``FamilySession`` driving ``fakecli.py``
+``keycheck``   the real model-list check against a local HTTP server
 
 Expected values are subsets (see ``testing.subset``).
 """
@@ -23,7 +24,7 @@ import sys
 import tempfile
 from typing import Any, Dict, List, Optional
 
-from .. import events
+from .. import events, keycheck
 from ..serve import SessionConfig
 from ..testing import assistant_texts, subset
 from . import catalog, history, translate
@@ -501,6 +502,10 @@ CREDENTIAL_VARIABLES = (
 )
 
 
+def _verdict(spec: dict) -> keycheck.Verdict:
+    return keycheck.Verdict(spec["status"], spec.get("detail", ""))
+
+
 class _World:
     """A throwaway state directory, a fake CLI (and optionally a fake npm that
     installs it) and the environment variables a flow may touch."""
@@ -517,6 +522,22 @@ class _World:
         for name in ("CLAUDE_CONFIG_DIR", "CODEBUDDY_CONFIG_DIR"):
             os.environ.pop(name, None)
         self.install = install
+        # The service's answer to "do you know this key?" and what was asked.
+        self.key_verdict = _verdict(case.get("keyCheck") or {"status": "ok"})
+        self.key_urls: List[str] = []
+        # Keys the service rejects whatever the general answer is.
+        self.reject_keys: List[str] = list(case.get("rejectKeys") or [])
+        self._real_fetch = keycheck.fetch
+        world = self
+
+        async def fetch(url: str, headers: Any, timeout: float = 0) -> keycheck.Verdict:
+            world.key_urls.append(url)
+            sent = {value.replace("Bearer ", "") for value in headers.values()}
+            if sent & set(world.reject_keys):
+                return keycheck.Verdict(keycheck.REJECTED, "服务拒绝了这个 API Key（HTTP 401）")
+            return world.key_verdict
+
+        keycheck.fetch = fetch  # type: ignore[assignment]
         self.ctx, self.channel, _ = scratch_context(flavor.id)
         self.agent = agent_cls()
         bin_dir = install.npm_bin_dir(self.ctx)
@@ -559,6 +580,11 @@ class _World:
         install.find_npm = find_npm  # type: ignore[assignment]
 
     def close(self) -> None:
+        from .. import credentials, space
+
+        keycheck.fetch = self._real_fetch  # type: ignore[assignment]
+        space._SHADOWED.clear()
+        credentials._SHADOWED.clear()
         self.install.find_npm = self._real_find_npm  # type: ignore[assignment]
         self.fake.close()
         os.environ.clear()
@@ -660,6 +686,12 @@ async def _drive_agent(case: dict, world: _World) -> Optional[str]:
     await agent.start(ctx)
     for number, step in enumerate(case["steps"]):
         label = f"step {number} {json.dumps({k: v for k, v in step.items() if k in ('run', 'refresh', 'setEnv')}, ensure_ascii=False)}"
+        if "setKeyCheck" in step:
+            world.key_verdict = _verdict(step["setKeyCheck"])
+        if "setRejectKeys" in step:
+            world.reject_keys = list(step["setRejectKeys"])
+        if step.get("forgetKeys"):
+            agent._keys.forget()
         for name, value in (step.get("setEnv") or {}).items():
             if value is None:
                 os.environ.pop(name, None)
@@ -675,6 +707,15 @@ async def _drive_agent(case: dict, world: _World) -> Optional[str]:
         record["credentials"] = credentials.has(ctx)
         record["env"] = {name: os.environ.get(name) for name in expect.get("env", {})}
         record["runs"] = [" ".join(argv) for argv in world.fake.runs()]
+        record["keyChecks"] = list(world.key_urls)
+        from .. import space
+
+        runs = [entry for entry in world.fake.log() if "argv" in entry]
+        mine = space.directory(ctx)
+        record["lastRunEnv"] = {
+            name: ("<space>" if value == mine else value) for name, value in ((runs[-1].get("env") if runs else None) or {}).items()
+        }
+        record["space"] = space.own(ctx)
         record["stdin"] = world.fake.stdin_lines()
         # The environment variable that picks CodeBuddy's service, as the last
         # `--acp` login process saw it.
@@ -716,6 +757,62 @@ async def _drive_agent(case: dict, world: _World) -> Optional[str]:
     return None
 
 
+def run_keycheck(case: dict, flavor: Flavor) -> Optional[str]:
+    """The real check (``keycheck.anthropic`` / ``openai``) against a local
+    server that answers what the case says."""
+    import http.server
+    import threading
+
+    seen: List[dict] = []
+    spec = case.get("server") or {}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            seen.append({"path": self.path, "headers": {name.lower(): value for name, value in self.headers.items()}})
+            if self.path.startswith("/elsewhere"):
+                self.send_response(200)
+                self.end_headers()
+                return
+            self.send_response(spec.get("status", 200))
+            if spec.get("redirect"):
+                self.send_header("Location", spec["redirect"])
+            self.end_headers()
+
+        def log_message(self, *_args: Any) -> None:
+            return None
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    if spec.get("closed"):
+        server.shutdown()
+        server.server_close()
+    base = f"http://127.0.0.1:{port}"
+    env = {name: value.replace("<base>", base) for name, value in (case.get("env") or {}).items()}
+    key = case.get("key", "sk-probe-key")
+    check = keycheck.anthropic if case.get("service") == "anthropic" else keycheck.openai
+    loop = asyncio.new_event_loop()
+    try:
+        verdict = loop.run_until_complete(check(key, env))
+    finally:
+        loop.close()
+        if not spec.get("closed"):
+            server.shutdown()
+            server.server_close()
+    first = seen[0] if seen else {"path": None, "headers": {}}
+    record = {
+        "status": verdict.status,
+        "detail": verdict.detail,
+        "path": first["path"],
+        "requests": len(seen),
+        "headers": {name: ("<key>" if value in (key, "Bearer " + key) else value) for name, value in first["headers"].items() if name in ("x-api-key", "authorization", "anthropic-version")},
+        "keyInDetail": key in verdict.detail,
+        "followedRedirect": any(entry["path"].startswith("/elsewhere") for entry in seen),
+    }
+    return subset(case["expect"], record, "keycheck")
+
+
 def run_agent(case: dict, flavor: Flavor, agent_cls: Any) -> Optional[str]:
     if os.name == "nt":
         return None
@@ -742,6 +839,7 @@ def run(case: dict, flavor: Flavor, extra: Optional[Dict[str, Any]] = None, agen
         "history": run_history,
         "initialize": run_initialize,
         "session": run_session,
+        "keycheck": run_keycheck,
     }
     handlers.update(extra or {})
     handler = handlers.get(kind)

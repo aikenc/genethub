@@ -1,0 +1,14 @@
+{
+  "kind": "keycheck",
+  "description": "HTTP 403 may be a region block, not a wrong key: unknown, not rejected",
+  "service": "anthropic",
+  "server": {
+    "status": 403
+  },
+  "env": {
+    "ANTHROPIC_BASE_URL": "<base>"
+  },
+  "expect": {
+    "status": "unknown"
+  }
+}

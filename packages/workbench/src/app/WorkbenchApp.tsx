@@ -1110,7 +1110,7 @@ export function App({
                   <FirstRun
                     host={host}
                     endpoint={endpoint}
-                    onOpenAgentConfig={() => workbench.openAgentConfig("keys")}
+                    onOpenAgentConfig={() => workbench.openAgentConfig()}
                   />
                 )
               ) : null}
@@ -1341,16 +1341,16 @@ function FirstRun({
   if (!hasUsableAgent) {
     return (
       <Splash>
-        <p className="text-sm">还差一个模型密钥。</p>
+        <p className="text-sm">还没有可用的模型。</p>
         <p className="mb-3 text-xs text-muted">
-          密钥只保存在这台机器上，填好之后这里会直接可用。
+          添加一个模型 provider，或者登录一个 Agent；密钥和账号只保存在这台机器上。
         </p>
         <button
           type="button"
           className="rounded-md bg-accent px-3 py-1.5 text-xs text-white"
           onClick={onOpenAgentConfig}
         >
-          去填密钥
+          去配置
         </button>
       </Splash>
     );
@@ -1363,7 +1363,7 @@ function FirstRun({
         <span>{workspace.name} 已就绪。</span>
       </p>
       <p className="mb-3 text-xs text-muted">
-        {route ? "开一个会话，直接说你想做什么。" : "当前标签没有匹配项；进入会话后可编辑这台机器的 Agent 配置。"}
+        {route ? "开一个会话，直接说你想做什么。" : "当前标签没有匹配项；进入会话后可编辑这台机器的模型与 Agent。"}
       </p>
       <button
         type="button"

@@ -64,6 +64,9 @@
             },
             {
               "id": "update"
+            },
+            {
+              "id": "space-own"
             }
           ]
         },
@@ -88,6 +91,9 @@
             },
             {
               "id": "login-api-key"
+            },
+            {
+              "id": "space-own"
             }
           ]
         },

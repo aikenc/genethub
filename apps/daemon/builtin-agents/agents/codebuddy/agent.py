@@ -35,7 +35,7 @@ class CodeBuddyAgent(FamilyAgent):
     flavor = CODEBUDDY
     api_key_env = API_KEY_VARIABLE
     api_key_title = "用 API Key 登录 CodeBuddy"
-    api_key_detail = "粘贴一个 CodeBuddy API Key。它只保存在这台机器上 GeneHub 的 CodeBuddy 配置目录里，不经过任何模型，退出登录时一并删除。"
+    api_key_detail = "粘贴一个 CodeBuddy API Key。它只保存在这台机器上，不经过任何模型，退出登录时一并删除。CodeBuddy 没有不发模型请求就能核对 Key 的办法，所以保存后要到第一次对话才知道它是否有效。"
     api_key_prompt = "CodeBuddy API Key"
 
     def api_key_questions(self) -> List[dict]:

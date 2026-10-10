@@ -1,0 +1,14 @@
+{
+  "kind": "apiKeyLogin",
+  "description": "canceling the card checks and saves nothing",
+  "key": "",
+  "canceled": true,
+  "verdict": {
+    "status": "rejected"
+  },
+  "expect": {
+    "result": "canceled",
+    "ran": false,
+    "fetched": []
+  }
+}

@@ -4,7 +4,7 @@ import { canStartAgent } from "../presentation/catalog/resolve";
 import { orderedAgentActions, primaryAgentAction } from "./AgentLifecycle";
 
 /**
- * Pure presentation helpers of the Agent 配置 surface. The platform knows no
+ * Pure presentation helpers of the 模型与 Agent surface. The platform knows no
  * action names beyond the grouping hints below: an unknown id still renders
  * as a button, it just lands in the default group.
  */
@@ -19,6 +19,10 @@ export interface AgentStatus {
 
 const LOGIN_ACTIONS = ["login", "login-api-key", "logout"];
 const INSTALL_ACTIONS = ["install", "update"];
+/** Choices most people never need: kept out of the way, behind "高级". */
+const ADVANCED_ACTIONS = ["space-own", "space-shared"];
+/** What an Agent says when it could not tell whether a saved key works. */
+const UNVERIFIED = /没能核对/;
 
 export function isAgentBusy(agent: Pick<AgentInfo, "job">): boolean {
   return Boolean(agent.job && !agent.job.done);
@@ -30,9 +34,10 @@ export function agentStatus(
 ): AgentStatus {
   if (isAgentBusy(agent)) return { kind: "busy", label: "正在处理…" };
   if (agent.probe.state === "ready") {
-    return canStartAgent(agent)
-      ? { kind: "ready", label: "可用" }
-      : { kind: "unavailable", label: "不可用" };
+    if (!canStartAgent(agent)) return { kind: "unavailable", label: "不可用" };
+    // Green must not claim more than was checked: a key nobody could ask the
+    // service about is saved, not known to work.
+    return { kind: "ready", label: agent.message && UNVERIFIED.test(agent.message) ? "可用（Key 未核对）" : "可用" };
   }
   if (agent.probe.state === "notInstalled") return { kind: "notInstalled", label: "未安装" };
   const primary = primaryAgentAction(agent);
@@ -64,7 +69,7 @@ export function agentConfigSummary(agents: readonly AgentInfo[]): string {
   return parts.join(" · ");
 }
 
-export type ActionGroupId = "account" | "install" | "other";
+export type ActionGroupId = "account" | "install" | "other" | "advanced";
 
 export interface ActionGroup {
   id: ActionGroupId;
@@ -76,6 +81,7 @@ export interface ActionGroup {
 function groupOf(action: AgentActionInfo): ActionGroupId {
   if (LOGIN_ACTIONS.includes(action.id)) return "account";
   if (INSTALL_ACTIONS.includes(action.id)) return "install";
+  if (ADVANCED_ACTIONS.includes(action.id)) return "advanced";
   return "other";
 }
 
@@ -83,16 +89,17 @@ const GROUP_TITLES: Record<ActionGroupId, string> = {
   account: "账号",
   install: "安装与更新",
   other: "其他",
+  advanced: "高级",
 };
 
 /** Declared actions in display groups; the primary one leads its group. */
 export function groupAgentActions(actions: AgentActionInfo[] | undefined): ActionGroup[] {
   const ordered = orderedAgentActions(actions);
-  const order: ActionGroupId[] = ["account", "install", "other"];
+  const order: ActionGroupId[] = ["account", "install", "other", "advanced"];
   const groups = order
     .map((id) => ({ id, actions: ordered.filter((action) => groupOf(action) === id) }))
     .filter((group) => group.actions.length > 0);
-  const labelled = groups.some((group) => group.id !== "other");
+  const labelled = groups.some((group) => group.id !== "other" && group.id !== "advanced");
   return groups.map((group) => ({
     ...group,
     title: group.id === "other" && !labelled ? null : GROUP_TITLES[group.id],

@@ -31,19 +31,12 @@ const DOT: Record<AgentStatusKind, string> = {
 };
 
 /**
- * One Agent in the Agent 配置 dialog: what it is, where it stands, and the
+ * One Agent in the 模型与 Agent dialog: what it is, where it stands, and the
  * buttons its script declared. The platform renders and runs them; what a
  * button leads to (a login link, an install confirmation) arrives as an Agent
  * request card and never passes through a model.
  */
-export function AgentCard({
-  agent,
-  onOpenKeys,
-}: {
-  agent: AgentInfo;
-  /** Jumps to the model key tab; offered for the built-in Agent that cannot start yet. */
-  onOpenKeys?(): void;
-}) {
+export function AgentCard({ agent }: { agent: AgentInfo }) {
   const runAgentAction = useWorkbench((state) => state.runAgentAction);
   const resetAgent = useWorkbench((state) => state.resetAgent);
   const reloadAgent = useWorkbench((state) => state.reloadAgent);
@@ -73,7 +66,6 @@ export function AgentCard({
   const resettable = agent.source === "override";
   const repairable = agentNeedsRepair(agent);
   const hasMore = reloadable || resettable || repairable;
-  const keysHint = Boolean(onOpenKeys) && agent.builtin && status.kind === "unavailable";
 
   const run = (work: () => Promise<unknown>) => {
     setBusy(true);
@@ -124,7 +116,7 @@ export function AgentCard({
       ) : null}
       {job ? <AgentJobProgress job={job} /> : null}
 
-      {hiddenRequest || keysHint || groups.length > 0 ? (
+      {hiddenRequest || groups.length > 0 ? (
         <div className="flex flex-col gap-2">
           {hiddenRequest ? (
             <div className="flex flex-wrap gap-2">
@@ -137,21 +129,8 @@ export function AgentCard({
               </button>
             </div>
           ) : null}
-          {keysHint ? (
-            <div className="flex flex-wrap gap-2">
-              <button type="button" className={QUIET_BUTTON} onClick={onOpenKeys}>
-                配置模型密钥
-              </button>
-            </div>
-          ) : null}
-          {groups.map((group) => (
-            <div
-              key={group.id}
-              role="group"
-              aria-label={group.title ? `${agent.label} ${group.title}` : `${agent.label} 操作`}
-              className="flex flex-col gap-1"
-            >
-              {group.title ? <span className="text-[11px] text-faint">{group.title}</span> : null}
+          {groups.map((group) => {
+            const buttons = (
               <div className="flex flex-wrap items-center gap-2">
                 {group.actions.map((action) =>
                   confirming === action.id ? (
@@ -177,8 +156,28 @@ export function AgentCard({
                   ),
                 )}
               </div>
-            </div>
-          ))}
+            );
+            // Choices most people never need stay folded; the Agent's own
+            // confirmation card still stands between a click and the change.
+            return group.id === "advanced" ? (
+              <details key={group.id} className="text-xs" aria-label={`${agent.label} ${group.title ?? "高级"}`}>
+                <summary className="min-h-9 cursor-pointer py-2 text-[11px] text-faint hover:text-fg">
+                  {group.title ?? "高级"}
+                </summary>
+                <div className="mt-1">{buttons}</div>
+              </details>
+            ) : (
+              <div
+                key={group.id}
+                role="group"
+                aria-label={group.title ? `${agent.label} ${group.title}` : `${agent.label} 操作`}
+                className="flex flex-col gap-1"
+              >
+                {group.title ? <span className="text-[11px] text-faint">{group.title}</span> : null}
+                {buttons}
+              </div>
+            );
+          })}
         </div>
       ) : null}
 

@@ -12,7 +12,7 @@ See ``docs/agent-serve-protocol.md`` for the wire protocol and the README in
 the agents directory for how to write or modify an Agent.
 """
 
-from . import credentials, events, login, process
+from . import credentials, events, keycheck, login, process, space
 from .serve import (
     Agent,
     AgentContext,
@@ -46,11 +46,13 @@ __all__ = [
     "code",
     "credentials",
     "events",
+    "keycheck",
     "link",
     "login",
     "option",
     "process",
     "secret_question",
     "serve",
+    "space",
     "text_question",
 ]

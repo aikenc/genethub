@@ -69,7 +69,7 @@ export function RuntimeSettingsPanel({
   useEffect(() => {
     const dismiss = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
-      // The Agent 配置 dialog opens above this panel and takes Escape first.
+      // The 模型与 Agent dialog opens above this panel and takes Escape first.
       if (useWorkbench.getState().agentConfig?.open) return;
       event.preventDefault();
       onClose();

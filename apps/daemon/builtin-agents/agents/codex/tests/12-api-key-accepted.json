@@ -1,0 +1,20 @@
+{
+  "kind": "apiKeyLogin",
+  "description": "a key OpenAI's model list accepts is handed to Codex, after the check, and the check asked the default OpenAI address with the key in a header",
+  "key": "sk-test-1",
+  "verdict": {
+    "status": "ok"
+  },
+  "expect": {
+    "result": "ok",
+    "unchecked": null,
+    "ran": true,
+    "stdin": "sk-test-1\n",
+    "fetched": [
+      {
+        "url": "https://api.openai.com/v1/models",
+        "sentKey": true
+      }
+    ]
+  }
+}

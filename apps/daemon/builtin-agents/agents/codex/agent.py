@@ -19,7 +19,7 @@ import time
 import uuid
 from typing import Any, Dict, Iterable, List, Optional, Set
 
-from genehub_agent import Agent, AgentContext, Job, SessionContext, install, login, process, serve
+from genehub_agent import Agent, AgentContext, Job, SessionContext, install, login, process, serve, space
 
 import codex_login
 from codex_appserver import (
@@ -307,6 +307,7 @@ class CodexAgent(Agent):
                 capabilities=CAPABILITIES,
                 catalog=self.catalog(),
             )
+        space.apply(ctx, "CODEX_HOME")
         ctx.spawn(self._watch_auth())
         self._interrupted = login.take_interrupted(ctx)
         await self.refresh(ctx)
@@ -338,10 +339,11 @@ class CodexAgent(Agent):
         if self.logged_in is False:
             self._push(
                 False,
-                self._interrupted or NOT_LOGGED_IN,
+                " ".join(filter(None, [self._interrupted or NOT_LOGGED_IN, self._space_note()])),
                 [
                     AgentContext.action("login", "登录", primary=True),
                     AgentContext.action("login-api-key", "用 API Key 登录"),
+                    space.action(self.ctx),  # type: ignore[arg-type]
                 ],
             )
             return
@@ -359,7 +361,11 @@ class CodexAgent(Agent):
             AgentContext.action("login-api-key", "换一个 API Key"),
             AgentContext.action("logout", "退出登录"),
             AgentContext.action("update", "更新"),
+            space.action(self.ctx),  # type: ignore[arg-type]
         ]
+        space_note = self._space_note()
+        if space_note:
+            notes.append(space_note)
         if self.logged_in is None:
             # A slow or unusual `login status` is not a reason to hide a CLI
             # that is sitting right there — but say so, and offer login.
@@ -379,6 +385,8 @@ class CodexAgent(Agent):
             await self._logout(ctx, job)
         elif action == "update":
             await self._update(ctx, job, explicit=True)
+        elif action in ("space-own", "space-shared"):
+            await self._switch_space(ctx, job, action == "space-own")
         else:
             raise RuntimeError(f"unknown action {action!r}")
 
@@ -465,7 +473,7 @@ class CodexAgent(Agent):
             job.done("已登录")
 
     async def _login_api_key(self, ctx: AgentContext, job: Job) -> None:
-        result = await codex_login.api_key_login(ctx, job, self._require_program(), self.env())
+        result, unchecked = await codex_login.api_key_login(ctx, job, self._require_program(), self.env())
         self._mark_sessions_stale("auth")
         await self.refresh(ctx)
         if result == "canceled":
@@ -473,7 +481,23 @@ class CodexAgent(Agent):
         elif self.logged_in is False:
             raise RuntimeError("API Key 没有生效：Codex 仍然报告未登录")
         else:
-            job.done("已登录")
+            job.done(f"已保存 API Key，但{unchecked}" if unchecked else "已登录")
+
+    def _space_note(self) -> Optional[str]:
+        if self.ctx is not None and space.own(self.ctx):
+            return space.note("Codex")
+        return None
+
+    async def _switch_space(self, ctx: AgentContext, job: Job, own: bool) -> None:
+        if not await space.confirm(ctx, job, "Codex", own):
+            job.done("已取消")
+            return
+        job.progress(phase="space", message="正在切换")
+        space.switch(ctx, "CODEX_HOME", own)
+        self.hello = None
+        self._mark_sessions_stale("auth")
+        await self.refresh(ctx)
+        job.done("已切换到独立空间" if own else "已改回沿用本机")
 
     async def _logout(self, ctx: AgentContext, job: Job) -> None:
         program = self._require_program()
@@ -583,10 +607,12 @@ class CodexAgent(Agent):
         last = file_stamp(path)
         while True:
             await asyncio.sleep(AUTH_POLL_SECONDS)
-            current = file_stamp(path)
-            if current == last:
+            # The file moves when the Agent switches to or from its own space.
+            moved = auth_file()
+            current = file_stamp(moved)
+            if moved == path and current == last:
                 continue
-            last = current
+            path, last = moved, current
             self.log("Codex auth file changed; refreshing, sessions restart at their next turn")
             self._mark_sessions_stale("auth")
             if self.ctx is not None:
@@ -682,6 +708,10 @@ class CodexAgent(Agent):
 
     def replay(self, case: dict) -> Optional[str]:
         kind = case.get("kind", "frames")
+        if kind in ("apiKeyLogin", "space"):
+            import codex_replay
+
+            return codex_replay.run_api_key_login(case) if kind == "apiKeyLogin" else codex_replay.run_space(case)
         if kind == "catalog":
             got = hello_from(case["listed"])
             return _diff([got], [case["expect"]])

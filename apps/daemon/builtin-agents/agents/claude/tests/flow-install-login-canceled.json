@@ -53,6 +53,9 @@
             },
             {
               "id": "login-api-key"
+            },
+            {
+              "id": "space-own"
             }
           ]
         }

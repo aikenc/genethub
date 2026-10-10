@@ -23,7 +23,7 @@ const SPEECH_ADAPTER_DOCS =
 
 /**
  * Machine, appearance, speech, remote access and version. Agents — logins,
- * built-in Agent configuration and model keys — live in the one Agent 配置
+ * built-in Agent configuration and model providers — live in the one 模型与 Agent
  * dialog this page only links to.
  */
 export function SettingsPanel({ host, endpoint }: { host: Host; endpoint?: Endpoint | null }) {

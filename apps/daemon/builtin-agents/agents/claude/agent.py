@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 from typing import Any, Optional
 
-from genehub_agent import AgentContext, Job, login, option, process, serve
+from genehub_agent import AgentContext, Job, keycheck, login, option, process, serve
 from genehub_agent.claude_family import FamilyAgent, Flavor
 
 from spec import CLAUDE, LOGOUT_TIMEOUT, STATUS_TIMEOUT, has_credential_variable, status_from_output
@@ -21,8 +21,11 @@ class ClaudeAgent(FamilyAgent):
     flavor = CLAUDE
     api_key_env = "ANTHROPIC_API_KEY"
     api_key_title = "用 API Key 登录 Claude Code"
-    api_key_detail = "粘贴一个 Anthropic API Key（在 console.anthropic.com 的 API Keys 里创建）。它只保存在这台机器上 GeneHub 的 Claude Code 配置目录里，不经过任何模型，退出登录时一并删除。"
+    api_key_detail = "粘贴一个 Anthropic API Key（在 console.anthropic.com 的 API Keys 里创建）。GeneHub 会先向 Anthropic 核对它是否有效（不发模型请求）；它只保存在这台机器上，不经过任何模型，退出登录时一并删除。"
     api_key_prompt = "Anthropic API Key"
+
+    async def verify_key(self, key: str) -> keycheck.Verdict:
+        return await keycheck.anthropic(key, self.env())
 
     async def login_state(self, program: str, account: Optional[dict]) -> Optional[bool]:
         if has_credential_variable():

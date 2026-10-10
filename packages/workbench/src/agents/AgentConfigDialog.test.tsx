@@ -1,4 +1,4 @@
-import type { AgentInfo, Reply, Request } from "@genehub/proto";
+import type { AgentInfo, ProviderInfo, Reply, Request } from "@genehub/proto";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { Client } from "../protocol/client";
 import { SettingsPanel } from "../settings/SettingsPanel";
 import { browserHost } from "../host";
-import { useWorkbench } from "../session/store";
+import { PROVIDERS_TARGET, useWorkbench } from "../session/store";
 import { AgentConfigDialog } from "./AgentConfigDialog";
 import { AgentConfigEntry } from "./AgentConfigEntry";
 import { agentConfigSummary, agentStatus, groupAgentActions, isDestructiveAction } from "./agentConfig";
@@ -50,7 +50,7 @@ const NOT_INSTALLED = agent("codebuddy", {
   actions: [{ id: "install", label: "安装", primary: true }],
 });
 
-function stub() {
+function stub(providers: ProviderInfo[] = []) {
   const calls: Request[] = [];
   const client = {
     identity: { machineId: "m_test" },
@@ -64,7 +64,7 @@ function stub() {
     call: async (request: Request): Promise<Reply | undefined> => {
       calls.push(request);
       if (request.type === "settings.get") {
-        return { type: "settings", data: { lanEnabled: false, providers: [] } } as Reply;
+        return { type: "settings", data: { lanEnabled: false, providers } } as Reply;
       }
       return undefined;
     },
@@ -72,10 +72,22 @@ function stub() {
   return { client, calls };
 }
 
-function open(agents: AgentInfo[], tab?: "agents" | "models" | "keys") {
-  const { client, calls } = stub();
+function provider(over: Partial<ProviderInfo> & { id: string }): ProviderInfo {
+  return {
+    hasApiKey: true,
+    label: over.id,
+    dialect: "openai",
+    custom: false,
+    models: [],
+    modelInputs: {},
+    ...over,
+  } as ProviderInfo;
+}
+
+function open(agents: AgentInfo[], target?: string | null, providers: ProviderInfo[] = []) {
+  const { client, calls } = stub(providers);
   useWorkbench.setState({ client, agents, settings: null, agentConfig: null });
-  useWorkbench.getState().openAgentConfig(tab);
+  useWorkbench.getState().openAgentConfig(target);
   render(<AgentConfigDialog />);
   return calls;
 }
@@ -84,22 +96,34 @@ beforeEach(() => {
   useWorkbench.setState({ client: null, agents: [], settings: null, agentConfig: null });
 });
 
-describe("the Agent 配置 dialog", () => {
-  it("shows one card per Agent, usable ones first, with a text status", async () => {
+describe("the 模型与 Agent dialog", () => {
+  it("is a model list: usable Agents' models first, what cannot be used yet below, no cards", async () => {
     open([NOT_INSTALLED, NEEDS_LOGIN, READY]);
-    const dialog = screen.getByRole("dialog", { name: "Agent 配置" });
-    const cards = within(within(dialog).getByRole("list", { name: "Agent 列表" })).getAllByRole("listitem");
+    const dialog = screen.getByRole("dialog", { name: "模型与 Agent" });
 
-    expect(cards.map((card) => card.getAttribute("data-agent-id"))).toEqual(["codex", "codebuddy", "claude"]); // usable first, the rest as the machine listed them
-    expect(within(cards[0]!).getByText("可用")).toBeInTheDocument();
-    expect(within(cards[1]!).getByText("未安装")).toBeInTheDocument();
-    expect(within(cards[2]!).getByText("需要登录")).toBeInTheDocument();
+    // The usable Agent is a heading with its models, and the way into its window.
+    expect(within(dialog).getByRole("button", { name: "配置 Codex" })).toBeInTheDocument();
+    const waiting = within(within(dialog).getByRole("region", { name: "还不能用的 Agent" })).getAllByRole("listitem");
+    expect(waiting.map((row) => row.getAttribute("data-agent-id"))).toEqual(["codebuddy", "claude"]); // as the machine listed them
+    expect(within(waiting[0]!).getByText("未安装")).toBeInTheDocument();
+    expect(within(waiting[1]!).getByText("需要登录")).toBeInTheDocument();
+    // The Agent's own buttons are one window down, not on the list.
+    expect(within(dialog).queryByRole("button", { name: "Claude Code 登录" })).toBeNull();
+    expect(within(dialog).queryByRole("button", { name: "Codex 退出登录" })).toBeNull();
   });
 
-  it("offers the buttons the Agent declared and runs them on the daemon", async () => {
-    const calls = open([NEEDS_LOGIN]);
-    await userEvent.click(screen.getByRole("button", { name: "Claude Code 登录" }));
+  it("says what to do when no model can be used yet", async () => {
+    open([NEEDS_LOGIN]);
+    expect(screen.getByText("还没有可用的模型。登录或安装下面的 Agent，或者添加一个模型 provider。")).toBeInTheDocument();
+  });
 
+  it("opens an Agent's window with the buttons it declared and runs them on the daemon", async () => {
+    const calls = open([NEEDS_LOGIN]);
+    await userEvent.click(screen.getByRole("button", { name: "配置 Claude Code" }));
+    const window = screen.getByRole("dialog", { name: "Claude Code" });
+    expect(within(window).getByText("需要登录")).toBeInTheDocument();
+
+    await userEvent.click(within(window).getByRole("button", { name: "Claude Code 登录" }));
     await waitFor(() =>
       expect(calls).toContainEqual({
         type: "agent.action",
@@ -107,11 +131,12 @@ describe("the Agent 配置 dialog", () => {
       }),
     );
     // The API-key door is next to it, not hidden behind a terminal.
-    expect(screen.getByRole("button", { name: "Claude Code 用 API Key 登录" })).toBeInTheDocument();
+    expect(within(window).getByRole("button", { name: "Claude Code 用 API Key 登录" })).toBeInTheDocument();
   });
 
   it("asks before logging out and does nothing when declined", async () => {
     const calls = open([READY]);
+    await userEvent.click(screen.getByRole("button", { name: "配置 Codex" }));
     await userEvent.click(screen.getByRole("button", { name: "Codex 退出登录" }));
 
     expect(screen.getByText("确认退出？")).toBeInTheDocument();
@@ -127,6 +152,36 @@ describe("the Agent 配置 dialog", () => {
     );
   });
 
+  it("keeps the own-space choice folded under 高级 and leaves the confirmation to the Agent", async () => {
+    const calls = open([
+      agent("claude", {
+        label: "Claude Code",
+        actions: [
+          { id: "logout", label: "退出登录", primary: false },
+          { id: "space-own", label: "使用独立空间", primary: false },
+        ],
+      }),
+    ]);
+    await userEvent.click(screen.getByRole("button", { name: "配置 Claude Code" }));
+    const window = screen.getByRole("dialog", { name: "Claude Code" });
+    const advanced = within(window).getByText("高级").closest("details")!;
+    expect(advanced).not.toHaveAttribute("open");
+    expect(advanced).toContainElement(within(window).getByRole("button", { name: "Claude Code 使用独立空间", hidden: true }));
+
+    advanced.setAttribute("open", "");
+    await userEvent.click(within(window).getByRole("button", { name: "Claude Code 使用独立空间" }));
+    // No second confirmation here: the Agent asks, in its own card, what the switch does.
+    await waitFor(() =>
+      expect(calls).toContainEqual({ type: "agent.action", payload: { agentId: "claude", actionId: "space-own" } }),
+    );
+  });
+
+  it("does not call a key green that nobody could check", () => {
+    const unchecked = { ...READY, message: "没能核对：CodeBuddy 的 Key 没有不发模型请求就能核对的办法。" };
+    expect(agentStatus(unchecked)).toEqual({ kind: "ready", label: "可用（Key 未核对）" });
+    expect(agentStatus(READY).label).toBe("可用");
+  });
+
   it("re-checks the machine when it opens, and again on request", async () => {
     const calls = open([READY]);
     await waitFor(() => expect(calls.filter((call) => call.type === "agent.refresh")).toHaveLength(1));
@@ -134,51 +189,117 @@ describe("the Agent 配置 dialog", () => {
     await waitFor(() => expect(calls.filter((call) => call.type === "agent.refresh")).toHaveLength(2));
   });
 
-  it("moves between the three tabs without leaving the dialog", async () => {
-    open([READY]);
-    expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["Agent", "模型与标签", "模型密钥"]);
-    expect(screen.getByRole("tab", { name: "Agent" })).toHaveAttribute("aria-selected", "true");
-
-    await userEvent.click(screen.getByRole("tab", { name: "模型密钥" }));
-    expect(screen.getByRole("tab", { name: "模型密钥" })).toHaveAttribute("aria-selected", "true");
-    expect(await screen.findByLabelText("DeepSeek API Key")).toHaveAttribute("type", "password");
-
-    await userEvent.click(screen.getByRole("tab", { name: "模型与标签" }));
-    expect(screen.getByRole("button", { name: "保存到这台机器" })).toBeInTheDocument();
-
-    // Arrow keys move along the tabs too.
-    screen.getByRole("tab", { name: "模型与标签" }).focus();
-    await userEvent.keyboard("{ArrowLeft}");
-    expect(screen.getByRole("tab", { name: "Agent" })).toHaveAttribute("aria-selected", "true");
+  it("opens straight into the providers window when asked to", () => {
+    open([READY], PROVIDERS_TARGET);
+    expect(screen.getByRole("dialog", { name: "模型 provider" })).toBeInTheDocument();
   });
 
-  it("opens on the key tab when asked to", () => {
-    open([READY], "keys");
-    expect(screen.getByRole("tab", { name: "模型密钥" })).toHaveAttribute("aria-selected", "true");
+  it("opens straight into an Agent's window when asked to", () => {
+    open([READY], "codex");
+    expect(screen.getByRole("dialog", { name: "Codex" })).toBeInTheDocument();
   });
 
-  it("closes on Escape and on the close button, and says what to do when there is nothing", async () => {
+  it("closes the window on Escape first, then the list, and returns to the list on ×", async () => {
     open([]);
-    expect(screen.getByText("这台机器上还没有可配置的 Agent。")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "添加 provider" }));
+    expect(screen.getByRole("dialog", { name: "模型 provider" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "关闭模型 provider" }));
+    expect(screen.queryByRole("dialog", { name: "模型 provider" })).toBeNull();
+    expect(screen.getByRole("dialog", { name: "模型与 Agent" })).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "添加 provider" }));
     await userEvent.keyboard("{Escape}");
-    expect(screen.queryByRole("dialog", { name: "Agent 配置" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "模型 provider" })).toBeNull();
+    expect(screen.getByRole("dialog", { name: "模型与 Agent" })).toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog", { name: "模型与 Agent" })).toBeNull();
 
     useWorkbench.getState().openAgentConfig();
-    expect(await screen.findByRole("dialog", { name: "Agent 配置" })).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "关闭 Agent 配置" }));
-    expect(screen.queryByRole("dialog", { name: "Agent 配置" })).toBeNull();
+    expect(await screen.findByRole("dialog", { name: "模型与 Agent" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "关闭模型与 Agent" }));
+    expect(screen.queryByRole("dialog", { name: "模型与 Agent" })).toBeNull();
   });
 
   it("does not take focus away from a box someone is already typing in", async () => {
-    open([READY], "keys");
-    const field = await screen.findByLabelText("DeepSeek API Key");
+    open([READY], PROVIDERS_TARGET);
+    const field = await screen.findByLabelText("provider API Key");
     field.focus();
     await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
     expect(field).toHaveFocus();
   });
 });
 
-describe("the two doors into Agent 配置", () => {
+describe("model providers", () => {
+  it("lists only the providers that are set up", async () => {
+    open([READY], PROVIDERS_TARGET, [
+      provider({ id: "deepseek", label: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", models: ["deepseek-chat"] }),
+      // A shipped provider whose key was cleared is not "set up".
+      provider({ id: "kimi", label: "Kimi", hasApiKey: false }),
+      provider({ id: "inhouse", label: "公司网关", custom: true, hasApiKey: false }),
+    ]);
+    const list = await screen.findByRole("list", { name: "已配置的 provider" });
+    expect(within(list).getAllByRole("listitem").map((row) => row.getAttribute("data-provider-id"))).toEqual([
+      "deepseek",
+      "inhouse",
+    ]);
+    expect(screen.queryByLabelText("OpenAI API Key")).toBeNull();
+  });
+
+  it("offers the shipped providers only under 添加 provider, where they fill in the form", async () => {
+    const calls = open([READY], PROVIDERS_TARGET, [provider({ id: "deepseek", label: "DeepSeek" })]);
+    await userEvent.click(await screen.findByRole("button", { name: "添加 provider" }));
+    const form = screen.getByRole("group", { name: "添加 provider" });
+
+    const choices = within(form).getAllByRole("radio").map((radio) => radio.textContent);
+    // DeepSeek is already set up; everything else we ship is on offer, then 自定义.
+    expect(choices).toEqual(["Kimi", "MiniMax", "千问", "OpenAI", "Anthropic", "自定义"]);
+
+    await userEvent.click(within(form).getByRole("radio", { name: "Anthropic" }));
+    expect(within(form).getByLabelText("provider id")).toHaveValue("anthropic");
+    expect(within(form).getByLabelText("provider 接口地址")).toHaveValue("https://api.anthropic.com");
+    expect(within(form).getByLabelText("接口协议")).toHaveValue("anthropic");
+
+    // Nothing to save without a key: a shipped provider with none would not even be listed.
+    expect(within(form).getByTestId("add-provider")).toBeDisabled();
+    await userEvent.type(within(form).getByLabelText("provider API Key"), "sk-ant-1");
+    await userEvent.click(within(form).getByTestId("add-provider"));
+    await waitFor(() =>
+      expect(calls.find((call) => call.type === "settings.setProvider")?.payload).toMatchObject({
+        providerId: "anthropic",
+        baseUrl: "https://api.anthropic.com",
+        dialect: "anthropic",
+        apiKey: "sk-ant-1",
+      }),
+    );
+  });
+
+  it("removes a custom provider, and only empties the key of a shipped one, after asking", async () => {
+    const calls = open([READY], PROVIDERS_TARGET, [
+      provider({ id: "deepseek", label: "DeepSeek" }),
+      provider({ id: "inhouse", label: "公司网关", custom: true }),
+    ]);
+    await userEvent.click(await screen.findByRole("button", { name: "移除 DeepSeek" }));
+    await userEvent.click(screen.getByRole("button", { name: "取消移除 DeepSeek" }));
+    expect(calls.some((call) => call.type === "settings.setProvider" || call.type === "settings.forgetProvider")).toBe(false);
+
+    await userEvent.click(screen.getByRole("button", { name: "移除 DeepSeek" }));
+    await userEvent.click(screen.getByRole("button", { name: "确认移除 DeepSeek" }));
+    await waitFor(() =>
+      expect(calls.find((call) => call.type === "settings.setProvider")?.payload).toMatchObject({
+        providerId: "deepseek",
+        apiKey: "",
+      }),
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "移除 公司网关" }));
+    await userEvent.click(screen.getByRole("button", { name: "确认移除 公司网关" }));
+    await waitFor(() =>
+      expect(calls).toContainEqual({ type: "settings.forgetProvider", payload: { providerId: "inhouse" } }),
+    );
+  });
+});
+
+describe("the two doors into 模型与 Agent", () => {
   it("system settings has one row that opens the same dialog", async () => {
     const { client } = stub();
     useWorkbench.setState({ client, agents: [READY, NEEDS_LOGIN], settings: null, agentConfig: null });
@@ -189,14 +310,14 @@ describe("the two doors into Agent 配置", () => {
       </>,
     );
 
-    const doors = screen.getAllByRole("button", { name: "Agent 配置" });
+    const doors = screen.getAllByRole("button", { name: "模型与 Agent" });
     expect(doors).toHaveLength(1);
     expect(doors[0]).toHaveTextContent("1 个可用 · 1 个需要登录");
     // Nothing of the old per-Agent or key forms is left on the settings page.
     expect(screen.queryByLabelText("DeepSeek API Key")).toBeNull();
 
     await userEvent.click(doors[0]!);
-    expect(await screen.findByRole("dialog", { name: "Agent 配置" })).toBeInTheDocument();
+    expect(await screen.findByRole("dialog", { name: "模型与 Agent" })).toBeInTheDocument();
   });
 
   it("the link variant opens it too", async () => {
@@ -207,12 +328,12 @@ describe("the two doors into Agent 配置", () => {
         <AgentConfigDialog />
       </>,
     );
-    await userEvent.click(screen.getByRole("button", { name: "Agent 配置" }));
-    expect(await screen.findByRole("dialog", { name: "Agent 配置" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "模型与 Agent" }));
+    expect(await screen.findByRole("dialog", { name: "模型与 Agent" })).toBeInTheDocument();
   });
 });
 
-describe("Agent 配置 presentation rules", () => {
+describe("模型与 Agent presentation rules", () => {
   it("never names a terminal: an install or login problem only ever offers buttons", () => {
     for (const entry of [NEEDS_LOGIN, NOT_INSTALLED]) {
       const text = `${entry.message ?? ""} ${(entry.actions ?? []).map((action) => action.label).join(" ")}`;
@@ -229,6 +350,7 @@ describe("Agent 配置 presentation rules", () => {
     expect(agentConfigSummary([READY, NEEDS_LOGIN, NOT_INSTALLED])).toBe("1 个可用 · 1 个需要登录 · 1 个需要处理");
 
     const groups = groupAgentActions([
+      { id: "space-own", label: "使用独立空间", primary: false },
       { id: "update", label: "更新", primary: false },
       { id: "login-api-key", label: "用 API Key 登录", primary: false },
       { id: "login", label: "登录", primary: true },
@@ -238,6 +360,7 @@ describe("Agent 配置 presentation rules", () => {
       ["account", ["login", "login-api-key"]],
       ["install", ["update"]],
       ["other", ["mystery"]],
+      ["advanced", ["space-own"]],
     ]);
     expect(isDestructiveAction({ id: "logout", label: "退出登录" })).toBe(true);
     expect(isDestructiveAction({ id: "login", label: "登录" })).toBe(false);

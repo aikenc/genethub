@@ -1,0 +1,14 @@
+{
+  "kind": "keycheck",
+  "description": "a gateway without a model list (404) cannot tell a good key from a bad one: unknown",
+  "service": "anthropic",
+  "server": {
+    "status": 404
+  },
+  "env": {
+    "ANTHROPIC_BASE_URL": "<base>"
+  },
+  "expect": {
+    "status": "unknown"
+  }
+}

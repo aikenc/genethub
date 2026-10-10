@@ -222,12 +222,16 @@ export type CompletionNotice = {
 
 let composerDraftInsertSequence = 0;
 
-/** The tabs of the Agent 配置 dialog. */
-export type AgentConfigTab = "agents" | "models" | "keys";
+/** What the second-level window of the 模型与 Agent dialog shows besides one Agent. */
+export const PROVIDERS_TARGET = "providers";
 
 export interface AgentConfigState {
   open: boolean;
-  tab: AgentConfigTab;
+  /**
+   * The window opened over the model list: an Agent's id, `PROVIDERS_TARGET`
+   * for the model providers, or null for the list alone.
+   */
+  target: string | null;
 }
 
 interface WorkbenchState {
@@ -241,8 +245,8 @@ interface WorkbenchState {
   /** Agents a "让内置 Agent 修复" session was opened for in this window. */
   repairingAgentIds: string[];
   /**
-   * The one "Agent 配置" dialog. `null` until it was first opened; afterwards
-   * `open` says whether it is on screen and `tab` is the tab it showed last.
+   * The one "模型与 Agent" dialog. `null` until it was first opened; afterwards
+   * `open` says whether it is on screen and `target` which window sits over it.
    */
   agentConfig: AgentConfigState | null;
   workspaces: WorkspaceInfo[];
@@ -428,7 +432,7 @@ interface WorkbenchState {
     workspaceId?: string;
   }): Promise<void>;
   probeSpeechRuntime(): Promise<SpeechRuntimeStatus | null>;
-  /** Removes a provider the user added. */
+  /** Removes a provider the user added (a shipped one is cleared with an empty key). */
   forgetProvider(providerId: string): Promise<void>;
   /**
    * Opens an empty conversation. Writes nothing until the first message.
@@ -534,8 +538,10 @@ interface WorkbenchState {
   /** Sets a request aside on this window only; another device may answer it. */
   hideAgentRequest(agentId: string, requestId: string): void;
   showAgentRequest(agentId: string, requestId: string): void;
-  /** Opens the Agent 配置 dialog (default tab: the Agent list). */
-  openAgentConfig(tab?: AgentConfigTab): void;
+  /** Opens the dialog; `target` also opens that Agent's (or the providers') window over it. */
+  openAgentConfig(target?: string | null): void;
+  /** Closes the window over the list, keeping the list. */
+  closeAgentConfigTarget(): void;
   closeAgentConfig(): void;
   /** Restarts a script Agent from its directory after an edit under `user/`. */
   reloadAgent(agentId: string): Promise<void>;
@@ -2705,12 +2711,16 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     }));
   },
 
-  openAgentConfig(tab = "agents") {
-    set({ agentConfig: { open: true, tab } });
+  openAgentConfig(target = null) {
+    set({ agentConfig: { open: true, target } });
+  },
+
+  closeAgentConfigTarget() {
+    set((state) => (state.agentConfig?.target ? { agentConfig: { ...state.agentConfig, target: null } } : {}));
   },
 
   closeAgentConfig() {
-    set((state) => (state.agentConfig?.open ? { agentConfig: { ...state.agentConfig, open: false } } : {}));
+    set((state) => (state.agentConfig?.open ? { agentConfig: { open: false, target: null } } : {}));
   },
 
   async reloadAgent(agentId) {

@@ -47,9 +47,19 @@
 | `claude` | Claude 协议 stream-json，每个会话一个常驻 `claude` 进程（`claude_family`） | npm 装进 `state/claude/npm` | 账号：选 Claude 订阅或 Console，卡片显示授权链接并有授权码输入框；也可用 API Key（密码框） | `--allow-dangerously-skip-permissions` + 关闭 CLI 沙箱，默认 bypassPermissions，也可切换 |
 | `codebuddy` | 同上（`cbc`），权限问答走 `can_use_tool` | npm 装进 `state/codebuddy/npm` | 账号：选 Google/GitHub、微信或 iOA，卡片显示授权链接，授权后自动变成已登录；也可用 API Key（密码框，可选服务区域） | `--dangerously-skip-permissions` + `CODEBUDDY_IS_SANDBOX=1`，默认 bypassPermissions，也可切换 |
 
-所有登录入口统一在「Agent 配置」里：卡片只给链接和输入框，不出现命令行。登录进程只保留一个，由 daemon 管理，
+所有登录入口统一在「模型与 Agent」里（主界面是模型列表，每个 Agent 的「配置」打开它自己的窗口）：卡片只给链接和输入框，不出现命令行。登录进程只保留一个，由 daemon 管理，
 授权完成自动变成「已登录」；daemon 重启、10 分钟超时或用户取消都会结束它，卡片提示「登录已中断，请重新点登录」，
 不留过期链接。链接、授权码、Key 和 token 不写日志，也不经过任何模型。
+
+**API Key 要核对，而且不发模型请求。** 保存前向服务商问一次模型列表（Claude 问 `/v1/models`，Codex 问 OpenAI 或 `OPENAI_BASE_URL` 的 `/models`；Cursor 本来就拉模型列表）：
+401 才算「Key 无效」，不保存、不覆盖原来能用的 Key；403、404、没有网络、没有模型列表接口只算「没能核对」，Key 照存，卡片明说没核对，
+状态是「可用（Key 未核对）」而不是纯绿。已保存的 Key 之后被服务商拒绝，卡片回到「需要登录」。Codex 配置里用了自定义 `model_provider` 时不拿 OpenAI 的列表核对。
+CodeBuddy 没有不发模型请求就能核对 Key 的办法，所以始终是「未核对」，第一次对话才知道。
+
+**独立空间（高级，默认沿用本机）。** Codex、Claude Code、CodeBuddy 的卡片「高级」里可以让 GeneHub 里的这个 Agent 改用自己的一套登录、配置和历史：
+daemon 把该 CLI 文档化的配置目录变量（`CODEX_HOME`、`CLAUDE_CONFIG_DIR`、`CODEBUDDY_CONFIG_DIR`）指向 `state/<id>/space`，**不改 `HOME`**，
+所以 git、ssh 等照常用真实的家目录。切换要 Agent 自己弹确认卡；退回「沿用本机」不删独立空间里的内容。本机原来的登录不会被带进来、也不会被改动。
+Cursor 不做：Linux 上它的登录只能靠 `XDG_CONFIG_HOME` 搬走，而那会同时改掉它启动的 git、gh 的配置，代价不可控。
 
 四者都会：
 

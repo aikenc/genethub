@@ -1,0 +1,64 @@
+{
+  "kind": "agent",
+  "cli": {
+    "hello": {
+      "model": "sonnet",
+      "models": [
+        {
+          "value": "sonnet",
+          "displayName": "Sonnet"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": false,
+    "version": "2.1.0",
+    "logEnv": [
+      "CLAUDE_CONFIG_DIR",
+      "ANTHROPIC_API_KEY"
+    ]
+  },
+  "description": "a key that stops being accepted turns the card back to needing a login, not green; an outside variable is held to the same standard",
+  "steps": [
+    {
+      "setEnv": {
+        "ANTHROPIC_API_KEY": "sk-ant-outside"
+      },
+      "refresh": true,
+      "expect": {
+        "state": {
+          "ready": true
+        },
+        "keyChecks": [
+          "https://api.anthropic.com/v1/models?limit=1"
+        ]
+      }
+    },
+    {
+      "setKeyCheck": {
+        "status": "rejected",
+        "detail": "服务拒绝了这个 API Key（HTTP 401）"
+      },
+      "forgetKeys": true,
+      "refresh": true,
+      "expect": {
+        "state": {
+          "ready": false,
+          "message": "Claude Code 的 API Key 已经失效：服务拒绝了这个 API Key（HTTP 401）。请重新输入，或换用账号登录。",
+          "actions": [
+            {
+              "id": "login"
+            },
+            {
+              "id": "login-api-key"
+            },
+            {
+              "id": "space-own"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

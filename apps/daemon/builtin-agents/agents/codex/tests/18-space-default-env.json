@@ -1,0 +1,15 @@
+{
+  "kind": "space",
+  "description": "switching to its own space points CODEX_HOME at a private directory under the Agent's state, survives a restart, and switching back removes the pointer but keeps the directory",
+  "expect": {
+    "initial": false,
+    "own": true,
+    "insideIsSpace": true,
+    "private": "0o700",
+    "restarted": true,
+    "restartedIsSpace": true,
+    "ownAfter": false,
+    "after": null,
+    "kept": true
+  }
+}

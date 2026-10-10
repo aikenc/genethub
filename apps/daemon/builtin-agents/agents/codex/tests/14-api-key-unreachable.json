@@ -1,0 +1,15 @@
+{
+  "kind": "apiKeyLogin",
+  "description": "when the service cannot be asked the key is still saved, and the person is told it was not checked",
+  "key": "sk-test-2",
+  "verdict": {
+    "status": "unknown",
+    "detail": "没能核对：连不上服务"
+  },
+  "expect": {
+    "result": "ok",
+    "unchecked": "没能核对：连不上服务",
+    "ran": true,
+    "stdin": "sk-test-2\n"
+  }
+}

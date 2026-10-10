@@ -111,7 +111,7 @@ const PREFERENCES: AgentSelectionPreferences = {
 };
 
 /**
- * The model panel's "Agent 配置" opens the app-wide dialog, so these tests
+ * The model panel's "模型与 Agent" opens the app-wide dialog, so these tests
  * mount it next to the controls and let it save through the store the way the
  * app does.
  */
@@ -133,8 +133,8 @@ function seedStore(
 }
 
 async function openAgentConfig(dialog: HTMLElement) {
-  await userEvent.click(within(dialog).getByRole("button", { name: "Agent 配置" }));
-  await userEvent.click(await screen.findByRole("tab", { name: "模型与标签" }));
+  await userEvent.click(within(dialog).getByRole("button", { name: "模型与 Agent" }));
+  await screen.findByRole("dialog", { name: "模型与 Agent" });
 }
 
 function controls(overrides: Partial<Parameters<typeof ComposerControls>[0]> = {}) {
@@ -238,7 +238,7 @@ describe("the exact model composer control", () => {
     expect(dialog).toHaveClass("h-[min(88dvh,52rem)]");
     await openAgentConfig(dialog);
 
-    expect(screen.getByRole("dialog", { name: "Agent 配置" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "模型与 Agent" })).toBeInTheDocument();
     expect(screen.getAllByRole("listitem")).toHaveLength(4);
     const cost = screen.getByLabelText("Genet DeepSeek V4 成本");
     const row = cost.closest("article")!;
@@ -250,7 +250,7 @@ describe("the exact model composer control", () => {
     await userEvent.selectOptions(cost, "veryHigh");
     // The model picker's own filter buttons sit underneath; this is the editor's.
     await userEvent.click(
-      within(screen.getByRole("dialog", { name: "Agent 配置" })).getAllByRole("button", { name: "Max" })[0]!,
+      within(screen.getByRole("dialog", { name: "模型与 Agent" })).getAllByRole("button", { name: "Max" })[0]!,
     );
     const custom = screen.getByLabelText("Genet DeepSeek V4 自定义标签");
     await userEvent.type(custom, "私有{Enter}");
@@ -377,7 +377,11 @@ describe("the exact model composer control", () => {
     const { dialog } = await openSettings();
     await openAgentConfig(dialog);
 
-    expect(screen.queryByText("Inactive Agent")).not.toBeInTheDocument();
+    // It has no models to edit; it is listed with what it needs instead.
+    expect(screen.queryByRole("heading", { name: "Inactive Agent" })).not.toBeInTheDocument();
+    const waiting = within(screen.getByRole("region", { name: "还不能用的 Agent" }));
+    expect(waiting.getByText("Inactive Agent")).toBeInTheDocument();
+    expect(waiting.getByText("未安装")).toBeInTheDocument();
   });
 
   it("keeps same-Agent runtime picks live while a turn runs", async () => {

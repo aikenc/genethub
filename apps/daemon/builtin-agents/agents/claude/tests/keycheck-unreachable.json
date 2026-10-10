@@ -1,0 +1,16 @@
+{
+  "kind": "keycheck",
+  "description": "no network is unknown, never rejected, and says nothing of the key",
+  "service": "anthropic",
+  "server": {
+    "closed": true
+  },
+  "env": {
+    "ANTHROPIC_BASE_URL": "<base>"
+  },
+  "expect": {
+    "status": "unknown",
+    "detail": "没能核对：连不上服务",
+    "keyInDetail": false
+  }
+}

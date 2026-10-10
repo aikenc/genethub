@@ -43,7 +43,7 @@
         }
       ],
       "expect": {
-        "result": "done: 已用 API Key 登录",
+        "result": "done: 已保存 API Key，但没能核对",
         "env": {
           "CODEBUDDY_API_KEY": "ck-secret-2",
           "CODEBUDDY_INTERNET_ENVIRONMENT": null
