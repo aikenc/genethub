@@ -11,6 +11,18 @@ export {
   timeControlCall,
   type ControlledAgentSession,
 } from "./controlled-agent.ts";
+export {
+  agentControl,
+  agentLogs,
+  agentReady,
+  answerAgentRequest,
+  listAgents,
+  recordAgentPushes,
+  summarizeAgent,
+  waitForAgent,
+  type AgentInfo,
+  type AgentPushes,
+} from "./script-agent.ts";
 
 export async function reconnectAfterStop(input: {
   openRoot: string;

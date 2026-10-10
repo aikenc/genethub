@@ -5,13 +5,9 @@
 //! into `SessionEvent` and accept a fixed set of commands; the session kernel
 //! and every transport above it see only those.
 
-pub mod acp;
-pub mod claude;
-pub mod codex;
-pub mod cursor;
 pub mod genet;
-pub mod opencode;
 pub mod registry;
+pub mod script;
 pub mod stdio;
 pub mod usage;
 
@@ -133,6 +129,14 @@ pub trait AgentAdapter: Send + Sync {
     }
 
     fn capabilities(&self) -> Capabilities;
+
+    /// True when the Agent itself migrates a stored model, mode, effort or
+    /// runtime value its current catalog no longer offers. The session layer
+    /// then passes the stored choice through instead of replacing it with
+    /// the catalog default, and follows the Agent's `*Changed` events.
+    fn owns_runtime_selection(&self) -> bool {
+        false
+    }
 
     /// Can enforce the host-provided read-only paths and bounded Session set.
     /// A prompt or an Agent's generic plan mode is not an evidence boundary.
@@ -524,6 +528,20 @@ async fn kill_tree_checked(child: &mut crate::os_process::Child) -> Result<()> {
             .kill_on_drop(true);
         let _ = tokio::time::timeout(Duration::from_secs(2), command.status()).await;
     }
+    // The guest holds no pid it may signal; the shell ends the group. Polite
+    // first, so a child that cleans up on SIGTERM (a script Agent ending the
+    // CLIs it started) gets to.
+    #[cfg(target_family = "wasm")]
+    {
+        let _ = child.terminate();
+        let deadline = tokio::time::Instant::now() + crate::process::GRACE;
+        while tokio::time::Instant::now() < deadline && child.group_alive() {
+            if child.try_wait()?.is_some() && !child.group_alive() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
     if child.try_wait()?.is_some() {
         return Ok(());
     }
@@ -669,7 +687,22 @@ mod tests {
     #[test]
     fn every_agent_is_started_as_a_child_this_daemon_can_account_for() {
         let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/adapter");
-        for file in ["claude.rs", "codex.rs", "opencode.rs", "acp.rs", "genet.rs"] {
+        // Script processes are not sessions: they get the process group but
+        // deliberately not the session binding (each session's CLI gets it
+        // from the script).
+        for file in ["script/host.rs", "script/runtime.rs"] {
+            let source = std::fs::read_to_string(here.join(file)).expect("read the adapter");
+            assert!(
+                source.contains("owned_child"),
+                "{file} starts a program without preparing it to be owned"
+            );
+            assert!(
+                !source.contains("without_a_window"),
+                "{file} skips the process group"
+            );
+        }
+        {
+            let file = "genet.rs";
             let source = std::fs::read_to_string(here.join(file)).expect("read the adapter");
             assert!(
                 source.contains("owned_child"),

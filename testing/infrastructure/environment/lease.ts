@@ -1,6 +1,8 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
+import { registerLease } from "./ownership.ts";
 
 export interface EnvironmentLease {
   id: string;
@@ -15,6 +17,8 @@ export interface EnvironmentLease {
 
 export function createLease(prefix = "genehub-env-"): EnvironmentLease {
   const root = mkdtempSync(path.join(tmpdir(), prefix));
+  const id = path.basename(root) + "-" + randomUUID();
+  registerLease(root, id);
   const home = path.join(root, "home");
   const data = path.join(root, "data");
   const workspace = path.join(root, "workspace");
@@ -45,7 +49,7 @@ export function createLease(prefix = "genehub-env-"): EnvironmentLease {
     RUSTUP_TOOLCHAIN: process.env.RUSTUP_TOOLCHAIN ?? "1.95.0",
   };
   return {
-    id: path.basename(root),
+    id,
     root,
     home,
     data,

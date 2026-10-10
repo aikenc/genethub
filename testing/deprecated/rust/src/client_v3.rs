@@ -190,7 +190,10 @@ impl Client {
                             let _ = notice_tx.send(message);
                         }
                         ServerFrame::UpdateDownloadChanged { .. }
-                        | ServerFrame::BackgroundProcesses { .. } => {}
+                        | ServerFrame::BackgroundProcesses { .. }
+                        | ServerFrame::AgentsChanged { .. }
+                        | ServerFrame::AgentRequestOpened { .. }
+                        | ServerFrame::AgentRequestClosed { .. } => {}
                         ServerFrame::Desync { session_id, missed } => {
                             panic!("the daemon dropped {missed} events for {session_id}");
                         }

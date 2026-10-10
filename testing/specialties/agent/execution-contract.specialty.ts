@@ -30,7 +30,7 @@ function contractCase(
     timeoutMs: 100_000,
     resources: { environments: 1, cpu: 1, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
     surfaces: ["daemon", "agent-adapter", "workbench-client"],
-    productInterfaces: ["@genehub/workbench/client", "daemon-protocol", "agents.custom"],
+    productInterfaces: ["@genehub/workbench/client", "daemon-protocol", "agent-serve-protocol-1"],
   }, async (t) => {
     const session = await t.flows.branches.openControlledAgentSession({
       openRoot: t.openRoot, lease: t.env, agent,
@@ -158,10 +158,12 @@ contractCase(
     let sendFinished = false;
     const pending = t.flows.main.sendPrompt(session.client, session.sessionId, "Stop before startup finishes.")
       .then(() => { sendFinished = true; }, () => { sendFinished = true; });
+    // The script's CLI for this session, which it reported through
+    // session.pid; the serve process itself hosts every session and stays.
     const starting = () => session.journal().slice(journalBefore).find((entry) =>
-      entry.event === "withholding-session-new" && t.flows.branches.processAlive(Number(entry.pid)));
+      entry.event === "withholding-session-new" && t.flows.branches.processAlive(Number(entry.cliPid)));
     await t.tools.waitUntil(() => Boolean(starting()), 45_000);
-    const pid = Number(starting()!.pid);
+    const pid = Number(starting()!.cliPid);
     t.assertions.assert(t.flows.branches.processAlive(pid), "the startup process was never alive");
     await session.client.call({ type: "session.interrupt", payload: { sessionId: session.sessionId } });
     await t.tools.waitUntil(() => sendFinished && !t.flows.branches.processAlive(pid), 12_000)

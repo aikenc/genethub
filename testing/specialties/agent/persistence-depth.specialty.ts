@@ -271,7 +271,7 @@ persistenceCase(
 // actually closes the window: an answer is arriving, it is taking a while, and
 // they quit. Whatever was already on screen was, as far as they know, said.
 //
-// The agent is a real external ACP CLI that speaks once and then stops
+// The agent is a real user-layer script Agent that speaks once and then stops
 // talking, so the quit lands with narrative delivered and the round still
 // open — no product internal is stubbed to arrange it.
 
@@ -308,7 +308,7 @@ function midTurnDurabilityCase(
       timeoutMs: 160_000,
       resources: { environments: 1, cpu: 2, memoryMb: 1024, io: 2, browser: 0, pool: "standard" },
       surfaces: ["daemon", "agent-adapter", "workbench-client"],
-      productInterfaces: ["@genehub/workbench/client", "daemon-protocol", "agents.custom"],
+      productInterfaces: ["@genehub/workbench/client", "daemon-protocol", "agent-serve-protocol-1"],
     },
     async (t) => {
       const session = await t.flows.branches.openControlledAgentSession({

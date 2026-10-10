@@ -287,13 +287,15 @@ defineSpecialty(
       writeFileSync(workflowFile, validSource);
       const roleFile = path.join(packageRoot, "roles/worker.yaml");
       const roleBefore = readFileSync(roleFile, "utf8");
-      const role = { schema: "genehub.workflow.role.v1", id: "worker", agentId: "tclaude", evidenceOnly: true, userInteraction: "readOnly", prompt: "prompts/direct-worker.md" };
+      const role = { schema: "genehub.workflow.role.v1", id: "worker", agentId: "codex", evidenceOnly: true, userInteraction: "readOnly", prompt: "prompts/direct-worker.md" };
       writeFileSync(roleFile, JSON.stringify(role));
       const unsupported = await cli(["workflow", "check", "--draft"]);
       const roleDiagnostic = diagnosticFrom(parseJson(unsupported.stdout) as CliEnvelope);
       t.assertions.assert(unsupported.code !== 0 && roleDiagnostic.code === "WF_ROLE_CAPABILITY"
         && roleDiagnostic.file === "roles/worker.yaml" && roleDiagnostic.path === "/agentId"
-        && roleDiagnostic.actual === "tclaude" && roleDiagnostic.hint.includes("evidenceOnly"),
+        && roleDiagnostic.actual === "codex" && roleDiagnostic.hint.includes("evidenceOnly")
+        // The capability refusal itself, not an unknown or unready Agent.
+        && roleDiagnostic.message.includes("evidenceOnlyUnsupported") && roleDiagnostic.message.includes("'codex'"),
         `unsupported read-only adapter has no actionable authoring diagnostic: ${unsupported.stdout}`);
       writeFileSync(roleFile, JSON.stringify({ ...role, agentId: "genet" }));
       const supported = await cli(["workflow", "check", "--draft"]);

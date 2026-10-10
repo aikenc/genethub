@@ -24,6 +24,9 @@ export function selectForGate(
   // proven. Some of those cases use a real provider, so this obligation must
   // take precedence over the normal release-only real-provider policy.
   if (item.runner === "rust-legacy") {
+    if (item.tags.includes("legacy-suspended")) {
+      return { include: false, reason: "L13 suspended: product capability removed by Human decision; see rust-parity.json suspension" };
+    }
     return { include: true, reason: "L13: frozen legacy required until verified parity" };
   }
   if (item.llm.default === "real" && gate !== "beta" && gate !== "stable") {

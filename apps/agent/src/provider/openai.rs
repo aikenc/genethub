@@ -325,6 +325,7 @@ fn apply_usage(usage: &mut Usage, value: &Value) {
         value,
         &["prompt_tokens", "input_tokens", "inputTokens", "input"],
     ) {
+        usage.token_usage_reported = true;
         usage.input = input;
     }
     if let Some(output) = first_u64(
@@ -336,6 +337,7 @@ fn apply_usage(usage: &mut Usage, value: &Value) {
             "output",
         ],
     ) {
+        usage.token_usage_reported = true;
         usage.output = output;
     }
     if let Some(cached) = first_u64(

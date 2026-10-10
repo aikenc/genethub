@@ -1,0 +1,31 @@
+{
+  "kind": "translate",
+  "description": "a run that ends without a result is a crash; a canceled run is canceled",
+  "turnId": "turn_2",
+  "lines": [
+    {
+      "type": "assistant",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "partial"
+          }
+        ]
+      },
+      "session_id": "chat-9",
+      "timestamp_ms": 1
+    }
+  ],
+  "expect": {
+    "partial": "partial",
+    "final": {
+      "type": "turnFailed",
+      "error": {
+        "code": "agentCrashed",
+        "message": "<contains>退出码 1"
+      }
+    }
+  }
+}

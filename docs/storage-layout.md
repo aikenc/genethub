@@ -26,6 +26,7 @@ agent CLI 自己的线程库（`~/.codex/` 之类）不归我们管，只在会�
   .gitignore                  内容为 *，整个目录自我忽略
   sessions/<会话>/            一段对话，内部布局见 session-storage.md
     components/<组件>/        组件实例的会话级存储
+    provider-operations/      本会话 provider 草案、无密钥决定与配置/验证回执
   components/<组件>/          组件实例的 Space 级存储
   tombstones/<会话>.json      会话删除墓碑
   workflows/<包>/             Workflow 包源（仅项目根）；手写，可自带 git

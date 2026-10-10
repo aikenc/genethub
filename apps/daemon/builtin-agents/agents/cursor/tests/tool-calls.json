@@ -1,0 +1,281 @@
+{
+  "kind": "translate",
+  "description": "cursor.rs tool_calls_map_to_typed_details_and_todos, plus an unknown tool and a glob",
+  "turnId": "turn_1",
+  "lines": [
+    {
+      "type": "tool_call",
+      "subtype": "started",
+      "call_id": "call-1\nfc_1",
+      "tool_call": {
+        "shellToolCall": {
+          "args": {
+            "command": "ls"
+          }
+        }
+      },
+      "timestamp_ms": 1
+    },
+    {
+      "type": "tool_call",
+      "subtype": "completed",
+      "call_id": "call-1\nfc_1",
+      "tool_call": {
+        "shellToolCall": {
+          "args": {
+            "command": "ls"
+          },
+          "result": {
+            "success": {
+              "exitCode": 0,
+              "stdout": "a.txt\n",
+              "stderr": ""
+            }
+          }
+        }
+      },
+      "timestamp_ms": 1
+    },
+    {
+      "type": "tool_call",
+      "subtype": "completed",
+      "call_id": "call-2",
+      "tool_call": {
+        "grepToolCall": {
+          "args": {
+            "pattern": "beta",
+            "path": "/w"
+          },
+          "result": {
+            "success": {
+              "workspaceResults": {
+                "/w": {
+                  "content": {
+                    "matches": [
+                      {
+                        "file": "notes.txt",
+                        "matches": [
+                          {
+                            "lineNumber": 2,
+                            "content": "beta"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "timestamp_ms": 2
+    },
+    {
+      "type": "tool_call",
+      "subtype": "completed",
+      "call_id": "call-3",
+      "tool_call": {
+        "readToolCall": {
+          "args": {
+            "path": "/w/missing"
+          },
+          "result": {
+            "error": {
+              "message": "not found"
+            }
+          }
+        }
+      },
+      "timestamp_ms": 3
+    },
+    {
+      "type": "tool_call",
+      "subtype": "started",
+      "call_id": "call-4",
+      "tool_call": {
+        "updateTodosToolCall": {
+          "args": {
+            "todos": [
+              {
+                "id": "1",
+                "content": "First",
+                "status": "TODO_STATUS_COMPLETED"
+              },
+              {
+                "id": "2",
+                "content": "Second",
+                "status": "TODO_STATUS_PENDING"
+              }
+            ]
+          }
+        }
+      },
+      "timestamp_ms": 4
+    },
+    {
+      "type": "tool_call",
+      "subtype": "completed",
+      "call_id": "call-5",
+      "tool_call": {
+        "webFetchToolCall": {
+          "args": {
+            "url": "https://example.com"
+          },
+          "result": {
+            "success": {
+              "markdown": "hi"
+            }
+          }
+        }
+      },
+      "timestamp_ms": 5
+    },
+    {
+      "type": "tool_call",
+      "subtype": "completed",
+      "call_id": "call-6",
+      "tool_call": {
+        "globToolCall": {
+          "args": {
+            "globPattern": "*.md"
+          },
+          "result": {
+            "success": {
+              "files": [
+                "a.md",
+                "b.md"
+              ]
+            }
+          }
+        }
+      },
+      "timestamp_ms": 6
+    }
+  ],
+  "expect": {
+    "events": [
+      {
+        "type": "item",
+        "item": {
+          "type": "toolCall",
+          "id": "call-1:fc_1",
+          "name": "Shell",
+          "status": "running",
+          "detail": {
+            "kind": "shell",
+            "command": "ls",
+            "output": "",
+            "exitCode": "<absent>"
+          }
+        }
+      },
+      {
+        "type": "item",
+        "item": {
+          "type": "toolCall",
+          "id": "call-1:fc_1",
+          "name": "Shell",
+          "status": "ok",
+          "detail": {
+            "kind": "shell",
+            "command": "ls",
+            "output": "a.txt\n",
+            "exitCode": 0
+          }
+        }
+      },
+      {
+        "type": "item",
+        "item": {
+          "type": "toolCall",
+          "id": "call-2",
+          "name": "Grep",
+          "status": "ok",
+          "detail": {
+            "kind": "search",
+            "query": "beta",
+            "matches": [
+              {
+                "path": "notes.txt",
+                "line": 2,
+                "preview": "beta"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "type": "item",
+        "item": {
+          "type": "toolCall",
+          "id": "call-3",
+          "name": "Read",
+          "status": "error",
+          "detail": {
+            "kind": "read",
+            "path": "/w/missing",
+            "content": "<contains>not found",
+            "truncated": false
+          }
+        }
+      },
+      {
+        "type": "item",
+        "item": {
+          "type": "todo",
+          "id": "turn_1-1",
+          "items": [
+            {
+              "text": "First",
+              "status": "completed"
+            },
+            {
+              "text": "Second",
+              "status": "pending"
+            }
+          ]
+        }
+      },
+      {
+        "type": "item",
+        "item": {
+          "type": "toolCall",
+          "id": "call-5",
+          "name": "webFetch",
+          "status": "ok",
+          "detail": {
+            "kind": "overview",
+            "toolKind": "fetch",
+            "overview": "webFetch",
+            "input": "{\"url\":\"https://example.com\"}",
+            "output": "{\"markdown\":\"hi\"}"
+          }
+        }
+      },
+      {
+        "type": "item",
+        "item": {
+          "type": "toolCall",
+          "id": "call-6",
+          "name": "Glob",
+          "status": "ok",
+          "detail": {
+            "kind": "search",
+            "query": "*.md",
+            "matches": [
+              {
+                "path": "a.md",
+                "preview": ""
+              },
+              {
+                "path": "b.md",
+                "preview": ""
+              }
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

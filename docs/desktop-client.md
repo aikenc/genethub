@@ -150,7 +150,7 @@ GeneHub **不要**复制 cc-switch 的业务逻辑，只复用桌面壳模式。
 | 构建期工具链（Vite / tsc / tauri-cli） | 允许 | 只在开发机和 CI 上跑，产物是纯静态文件，不进安装包 |
 | 用户自己装的外部 agent | 不归我们管 | 某些 agent 自带运行时，那是它自己的安装，我们既不打包也不代劳 |
 
-**不打包**：任何外部 agent 的 SDK 或运行时。用户想用 Claude Code、Cursor、OpenCode，daemon 检测本机已装的即可（[architecture.md](./architecture.md) §3.3）——把别人的 CLI 塞进我们的安装包既臃肿又有授权麻烦，还会把它的运行时依赖变成我们的。
+**不打包**：任何外部 agent 的 SDK 或运行时。用户想用 Codex、Cursor，在工作台点「安装」，由该 Agent 的脚本按 CLI 自己的官方方式装进用户目录（[third-party-agents.md](./third-party-agents.md)）——把别人的 CLI 塞进我们的安装包既臃肿又有授权麻烦，还会把它的运行时依赖变成我们的。
 
 **这条约束的顺带好处**：桌面端 UI 和浏览器工作台是**同一套前端代码**（`packages/workbench`），一次实现两处运行，差异只有一层薄薄的能力适配（见 §4.2）。
 
@@ -187,7 +187,7 @@ GeneHub **不要**复制 cc-switch 的业务逻辑，只复用桌面壳模式。
 - MVP 能力：Agent Loop、provider（Anthropic + OpenAI 兼容）、SKILL 机制、session 持久化、7 个核心工具。
 - 模型凭证：用户在设置里填 API Key；未填时首条任务给出明确提示而不是静默失败。
 
-**它在 UI 里和其他 agent 平级**：设置页检测本机已装的 Claude Code / Cursor / Codex，装了就出现在 agent 选择器里，没装就不显示（不要弹安装指引打断新用户）。内置 agent 只是默认选中的那一个，不是唯一的那一个。
+**它在 UI 里和其他 agent 平级**：设置页列出所有脚本 Agent；可用的出现在 agent 选择器里，不可用的显示原因和脚本给的主动作（安装、登录），不主动弹窗打断新用户。内置 agent 只是默认选中的那一个，不是唯一的那一个。
 
 ---
 

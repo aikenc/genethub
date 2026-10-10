@@ -1,7 +1,10 @@
 import type { AgentInfo, AgentSelectionPreferences } from "@genehub/proto";
 
+import { AgentUnavailableRow, primaryAgentAction } from "../agents/AgentLifecycle";
 import { AgentMark } from "../presentation/AgentMark";
 import {
+  canStartAgent,
+  resolveAgentAvailability,
   resolveAgentPresentation,
   resolveModelPresentation,
 } from "../presentation/catalog/resolve";
@@ -32,6 +35,7 @@ export function ModelPicker({
   pinnedAgentId = null,
   onFilterTags,
   onSelect,
+  onRunAgentAction,
 }: {
   agents: AgentInfo[];
   preferences: AgentSelectionPreferences;
@@ -47,6 +51,12 @@ export function ModelPicker({
   pinnedAgentId?: string | null;
   onFilterTags(tags: string[]): void;
   onSelect(route: ConfiguredModelRoute): void;
+  /**
+   * Runs a not-yet-usable Agent's primary action. Only a picker whose Agents
+   * belong to this window's own machine passes it; without it those Agents
+   * are simply not offered.
+   */
+  onRunAgentAction?(agentId: string, actionId: string): void;
 }) {
   const filters = normalizeGroupedTags(filterTags, preferences);
   const automatic = normalizeTags(automaticTags);
@@ -61,6 +71,11 @@ export function ModelPicker({
   const grouped = new Set(groups.flatMap((group) => group.tags.map(tagKey)));
   const independent = available.filter((tag) => !grouped.has(tagKey(tag)));
   const routes = matchingTagRoutes(preferences, required, agents);
+  // Agents without declared actions (the native built-in) keep their old
+  // behaviour: not offered until they can start.
+  const actionable = onRunAgentAction
+    ? agents.filter((agent) => !canStartAgent(agent) && primaryAgentAction(agent))
+    : [];
 
   const tagButton = (tag: string, grouped = false) => {
     const checked = required.some((candidate) => sameTag(candidate, tag));
@@ -158,6 +173,19 @@ export function ModelPicker({
           </p>
         ) : null}
       </div>
+
+      {actionable.length > 0 ? (
+        <div role="list" aria-label="尚不可用的 Agent" className="space-y-1 rounded-xl border border-line p-1">
+          {actionable.map((agent) => (
+            <AgentUnavailableRow
+              key={agent.id}
+              agent={agent}
+              reason={resolveAgentAvailability(agent)?.fullLabel ?? "不可用"}
+              onRun={(agentId, actionId) => onRunAgentAction?.(agentId, actionId)}
+            />
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }

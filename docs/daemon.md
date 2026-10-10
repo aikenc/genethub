@@ -51,8 +51,8 @@ apps/daemon/src/
 ├── adapter/
 │   ├── mod.rs        AgentAdapter / AgentSession trait + 注册表
 │   ├── registry.rs   发现、probe、catalog 缓存
-│   ├── genet/        内置 agent（stdio JSONL）
-│   └── acp/          通用 ACP（stdio NDJSON）
+│   ├── genet.rs      内置 agent（stdio JSONL）
+│   └── script/       第三方脚本 Agent：目录、serve 进程托管、JSON-RPC、Python 运行时
 ├── workspace.rs      项目与工作区
 ├── files.rs          目录树、精确 Preview 读取、写入
 ├── git.rs            status / diff / commit（调 git 命令，不引 libgit2）
@@ -124,7 +124,7 @@ DataEndpoint method 只有四个：
 | 域 | 方法 |
 |----|------|
 | 连接/订阅 | `connection.identity`、`subscribe` / `unsubscribe` |
-| Agent | `agent.list`（含 probe 状态与 catalog）、`agent.refresh` |
+| Agent | `agent.list`（含 probe 状态与 catalog）、`agent.refresh`；脚本 Agent 的 `agent.action` / `reload` / `reset` / `test` / `logs`，Agent 级请求的 `agent.requests` / `agent.requestAnswer`（能力分级与推送帧 `agents` / `agentRequest` / `agentRequestClosed` 见 [agent-serve-protocol.md](./agent-serve-protocol.md)） |
 | 会话 | `session.create` / `list` / `get` / `send` / `interrupt` / `close` / `archive` / `rename` / `delete` |
 | 会话配置 | `session.setModel` / `setMode` / `respondPermission` |
 | 设备 | `device.list` / `invite` / `claim` / `revoke` / `remoteAttach` / `remoteDetach` |
@@ -311,3 +311,22 @@ Linux 的 `genet update` 同样失败关闭。`scripts/install.sh` 只保留为�
 4. 重启后能加载既有会话并继续对话
 5. 拔网线再插回，客户端事件不丢不重
 6. 全新数据目录启动一次，`workspace.list` 就已经有一个存在于磁盘上的工作区
+
+会话内非秘密输入与选项使用 `session.ask`（Session 能力），CLI 为 `genet session ask <id> --request-id <id> --question <text> [--choice <label>]...`。SessionController 只能在自己的活动会话内提问，不能替 Human 答题。请求通过现有持久暂停点先保存、停止执行与子进程，再展示；Human 回答启动新执行。Agent 级持久动作协议参见 [agent-serve-protocol.md](./agent-serve-protocol.md) 的 `request.suspend` / `action.resume`。
+
+## Provider 会话配置接口
+
+`provider.list` 返回不含密钥的配置字段；`caller.authority` 返回经过鉴权的调用身份、有效 grants 和配置请求入口。
+`provider.operation {sessionId, operation}` 的 prepare/get/verify 可由普通会话通过 CLI 使用；会话只能操作自己
+的请求。submit 要 Settings 权限，工作台直接提交 Human 的批准与可选 apiKey；普通 session.respondPermission
+不能冒充配置批准。取消原会话会撤销未提交请求的执行资格。
+
+CLI：`provider list`、`provider configure <id> --session <id> --action <stable-id> --base-url <url>
+--dialect <openai|anthropic> --label <name> [--model <id>]`、`provider get/verify <action-id> --session <id>`。
+CLI 不接受密钥参数。静态 schema/capabilities 描述语法，context.authority 描述实际权限；新 daemon 在 identity
+声明 `provider.configuration.v1`。现有薄 CLI 的通用 argv 转发支持这组命令，无需新增原生业务入口。
+
+草案与无密钥回执在原 Session 的 provider-operations/ 下保存，数量有界。同一 action ID 不得改变草案；
+配置指纹不符会报告 stale，更换地址或协议要求新密钥。applying 中断后只比较已保存配置指纹，不能盲目重放。
+验证执行实际最小模型请求；saved 与 validation.status=ready 分开，失败只返回类别和可操作说明。
+验证被中断时记 interrupted，需显式 verify。保存/拒绝决定后按原权限模式恢复原 Session，重复提交不重复配置。

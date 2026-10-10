@@ -2262,6 +2262,9 @@ function TurnFooter({
     usage?.toolOutputTokens ||
     (liveItems ? estimateToolOutputTokens(liveItems) : 0);
   const rounds = usage?.llmRounds ?? 0;
+  const tokenStatus = usage?.tokenUsageStatus ?? (usage && (usage.inputTokens || usage.outputTokens || usage.cacheReadTokens || usage.cacheWriteTokens) ? "reported" : "unavailable");
+  const tokenLabel = tokenStatus === "unavailable" ? "未提供 token 统计"
+    : `${formatTokens(usage!.outputTokens)} 输出 tokens${tokenStatus === "partial" ? "（部分统计）" : ""}`;
   const forkTitle = canFork
     ? live
       ? "从当前进行中的内容重建分支"
@@ -2281,8 +2284,8 @@ function TurnFooter({
           aria-expanded={details}
           onClick={() => setDetails((value) => !value)}
         >
-          {usage ? `${formatTokens(usage.outputTokens)} 输出 tokens` : "— 输出 tokens"}
-          {details ? " ▴" : " ▾"}
+          {tokenLabel}
+          <span aria-hidden="true">{details ? " ▴" : " ▾"}</span>
         </button>
         <button
           type="button"
@@ -2313,7 +2316,7 @@ function TurnFooter({
           )}
           <span data-testid="usage-summary">
             {usage
-              ? `本 Turn · input(cached:${reportedTokens(usage.cacheReadTokens)}, uncached:${reportedTokens(uncachedTokens(usage))}) output ${reportedTokens(usage.outputTokens)} · 工具 ${tools} 次 · 模型 ${rounds} 轮 · 工具输出约 ${reportedTokens(toolOut)} tokens`
+              ? `本 Turn · input(cached:${tokenStatus === "unavailable" ? "—" : formatTokens(usage.cacheReadTokens)}, uncached:${tokenStatus === "unavailable" ? "—" : formatTokens(uncachedTokens(usage))}) output ${tokenStatus === "unavailable" ? "—" : formatTokens(usage.outputTokens)}${tokenStatus === "partial" ? "（部分统计）" : ""} · 工具 ${tools} 次 · 模型 ${rounds} 轮 · 工具输出约 ${reportedTokens(toolOut)} tokens`
               : "—"}
           </span>
           {usage && usage.compactionCount > 0 ? (

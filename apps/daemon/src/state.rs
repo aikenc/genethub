@@ -36,6 +36,8 @@ pub struct AppState {
     pub workflow_tasks: crate::adapter::SessionTasks,
     pub workspaces: Workspaces,
     pub project_control: crate::project_control::Broker,
+    pub(crate) provider_operations:
+        std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Weak<Mutex<()>>>>,
     pub terminals: Arc<Terminals>,
     /// What each session's agent has left running.
     pub processes: Arc<crate::processes::Processes>,
@@ -127,12 +129,6 @@ impl AppState {
         let machine = MachineState::load_or_create(&paths.state_file())?;
         let devices = Devices::load(paths.devices_file());
 
-        let registry = Arc::new(Registry::new(&config.agents.custom));
-        // Sessions are stored inside their workspace, so the store reaches disk
-        // only through what the workspace registry has published.
-        let homes = WorkspaceHomes::default();
-        let store = Store::new(homes.clone());
-        let diagnostics = Arc::new(crate::diagnostics::Diagnostics::new());
         // The front door owns the shared data layout; the daemon owns the
         // product Skill subtree and the exact CLI binding exposed to Agents.
         let skills_dir = crate::skills::builtin_skills_dir(&paths.root);
@@ -143,6 +139,12 @@ impl AppState {
                 "GENEHUB_CLI is unavailable or not absolute; Agent sessions will not guess a channel command"
             );
         }
+        let registry = Arc::new(Registry::new(&paths.root, front_door_cli.clone()));
+        // Sessions are stored inside their workspace, so the store reaches disk
+        // only through what the workspace registry has published.
+        let homes = WorkspaceHomes::default();
+        let store = Store::new(homes.clone());
+        let diagnostics = Arc::new(crate::diagnostics::Diagnostics::new());
         let project_control = crate::project_control::Broker::new(&paths.root)?;
         let sessions = SessionManager::new_with_diagnostics(
             store,
@@ -181,6 +183,7 @@ impl AppState {
             workflow_tasks: Default::default(),
             workspaces,
             project_control,
+            provider_operations: Default::default(),
             terminals,
             processes,
             diagnostics,
@@ -508,6 +511,8 @@ impl AppState {
                 .get(provider_id)
                 .cloned()
                 .unwrap_or_default();
+            let old_endpoint = crate::provider::resolve(provider_id, &entry);
+            let supplied_key = api_key.is_some();
             if let Some(key) = api_key {
                 entry.api_key = (!key.is_empty()).then_some(key);
             }
@@ -534,6 +539,14 @@ impl AppState {
                     }
                     entry.model_inputs.insert(model, inputs);
                 }
+            }
+            let new_endpoint = crate::provider::resolve(provider_id, &entry);
+            if !supplied_key
+                && (new_endpoint.base_url != old_endpoint.base_url
+                    || new_endpoint.dialect != old_endpoint.dialect)
+            {
+                // A metadata-only update must never move an existing key to another endpoint.
+                entry.api_key = None;
             }
             if crate::provider::resolve(provider_id, &entry).dialect
                 == crate::provider::Dialect::Anthropic

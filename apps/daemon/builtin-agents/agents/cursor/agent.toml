@@ -1,0 +1,5 @@
+protocol    = 1
+label       = "Cursor"
+description = "Cursor CLI (cursor-agent)，每轮以 print 模式运行"
+entry       = "agent.py"
+icon        = "icon.svg"

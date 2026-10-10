@@ -146,7 +146,9 @@ describe("the E2EE data endpoint", () => {
 
   it("runs independent streaming exchanges over one carrier", async () => {
     const stack = await endpoints();
+    let serverDone!: Promise<void>;
     stack.server.onIncoming((stream) => {
+      serverDone = stream.done;
       handlerTasks.push((async () => {
         const request = await collectBody(stream.body(), 3 * 1024 * 1024);
         await stream.respond({
@@ -159,14 +161,19 @@ describe("the E2EE data endpoint", () => {
       })());
     });
 
-    const source = new Uint8Array(2 * 1024 * 1024);
+    // Several frames, still inside the initial window. A 2MiB echo is the
+    // same path but spends tens of seconds in AES when the suite is beside
+    // cargo, so this stays multi-frame without depending on a quiet machine.
+    const source = new Uint8Array(256 * 1024);
     source.forEach((_, index) => (source[index] = index % 251));
     const response = await exchange(stack.client, head("echo", source.byteLength), source);
     expect(response.head).toMatchObject({ status: 200, metadata: { method: "echo" } });
     expect(await collectBody(response.body, source.byteLength)).toEqual(source);
     await response.stream.done;
     expect(stack.client.activeStreamCount).toBe(0);
-    await waitFor(() => stack.server.activeStreamCount === 0);
+    // Client completion does not acknowledge the peer's own FIN.
+    await serverDone;
+    expect(stack.server.activeStreamCount).toBe(0);
   }, 20_000);
 
   it("round-robins bounded data frames from concurrent writers", async () => {

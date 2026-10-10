@@ -1,0 +1,24 @@
+{
+  "kind": "translate",
+  "description": "cursor.rs an_error_result_fails_the_turn_with_cursors_message",
+  "turnId": "turn_1",
+  "lines": [
+    {
+      "type": "result",
+      "subtype": "error",
+      "is_error": true,
+      "result": "model unavailable"
+    }
+  ],
+  "expect": {
+    "events": [],
+    "final": {
+      "type": "turnFailed",
+      "turnId": "turn_1",
+      "error": {
+        "code": "upstream",
+        "message": "model unavailable"
+      }
+    }
+  }
+}

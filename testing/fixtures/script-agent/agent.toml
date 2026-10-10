@@ -1,0 +1,4 @@
+protocol = 1
+label = "Fixture Agent"
+description = "testctl fixture: a user-layer script Agent whose behaviour control.json chooses"
+entry = "agent.py"

@@ -1,7 +1,9 @@
 #!/usr/bin/env node
+import { recoverAbandonedLeases } from "../infrastructure/environment/ownership.ts";
 import { watchInputs } from "../infrastructure/engine/input-watch.ts";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { catalogDigest, loadCatalog } from "../infrastructure/engine/catalog.ts";
@@ -57,8 +59,9 @@ function valuesOf(args: string[], name: string): string[] {
 }
 
 function usage(): string {
-  return `testctl <capabilities|lint|governance|plan|run|inspect|compare|list|prune> [options]
+  return `testctl <capabilities|generate-proto|lint|governance|plan|run|inspect|compare|list|prune> [options]
   capabilities
+  generate-proto [--open <path>]  regenerate the Rust-owned TypeScript projection; no gate qualification
   lint [--open <path>] [--cloud <path>]
   governance check [--open <path>] [--cloud <path>]
   plan --gate <gate> [--open <path>] [--cloud <path>] [--tags <tag>] [--case <id>] [--reason <scope explanation>]
@@ -98,6 +101,17 @@ async function main(): Promise<number> {
   }
   const openRoot = flag(args, "--open", OPEN_DEFAULT);
   const cloudRoot = flag(args, "--cloud") || undefined;
+
+  if (command === "generate-proto") {
+    const output = path.join(path.resolve(openRoot), "packages/proto/bindings");
+    // This is the owning package's code generator, before any run captures
+    // its input identity. Verification remains in the independent contracts.
+    execFileSync("cargo", ["test", "--profile", "iterate", "-p", "genehub-proto", "--lib", "export_bindings"], {
+      cwd: openRoot, env: { ...process.env, TS_RS_EXPORT_DIR: output }, stdio: "inherit", timeout: 300_000,
+    });
+    process.stdout.write(JSON.stringify({ generated: "packages/proto/bindings", qualification: null }) + "\n");
+    return 0;
+  }
 
   if (command === "capabilities") {
     process.stdout.write(`${JSON.stringify({ schema: "genehub.test-capabilities.v1", runnerVersion: RUNNER_VERSION,
@@ -188,7 +202,10 @@ async function main(): Promise<number> {
       process.stderr.write(`${productPreflight.refusals.join("\n")}\n`);
       return 2;
     }
+    const leaseRecovery = await recoverAbandonedLeases();
+    if (leaseRecovery.recovered.length || leaseRecovery.retained.length) process.stderr.write(`[testctl] lease recovery: recovered=${leaseRecovery.recovered.length}, retained=${leaseRecovery.retained.length} (unverified owners are preserved)\n`);
     const store = createRunStore(space, topic);
+    writeFileSync(path.join(store.dir, "lease-recovery.json"), JSON.stringify(leaseRecovery, null, 2));
     const startedAt = new Date();
     const results: UnitResult[] = [];
     const active = new Map<string, number>();

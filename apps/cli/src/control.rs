@@ -472,10 +472,22 @@ fn stop_verified(paths: &Paths) -> Result<bool, String> {
     let endpoint = read_endpoint(paths).ok_or_else(|| {
         "refusing to stop an unverified pid: endpoint.json is missing or unreadable".to_string()
     })?;
-    if endpoint.pid != lock || !health(&endpoint) {
+    if endpoint.pid != lock {
         return Err(format!(
             "refusing to stop pid {lock}: its private endpoint identity could not be verified"
         ));
+    }
+    // A listener that answers without our proof may belong to a reused pid.
+    // A port that never answers, while this pid still holds daemon.lock, is
+    // our daemon with a dead listener: stop does not need its cooperation.
+    match identify(&endpoint) {
+        Identity::Proven => {}
+        Identity::ForeignListener => {
+            return Err(format!(
+                "refusing to stop pid {lock}: its private endpoint identity could not be verified"
+            ));
+        }
+        Identity::NoListener => return stop_locked_process(paths, lock),
     }
 
     ask_to_stop(&endpoint);
@@ -533,6 +545,83 @@ fn wait_stopped(paths: &Paths, pid: u32) -> Result<bool, String> {
     }
 }
 
+enum Identity {
+    Proven,
+    /// Something accepted and answered, and it was not this daemon.
+    ForeignListener,
+    /// Nothing accepted across the probes.
+    NoListener,
+}
+
+/// One foreign answer is enough to refuse: that listener may die after a
+/// single accept, and a later refused connect must not be read as "ours, but
+/// silent". Repeated refusals are a dead listener.
+fn identify(endpoint: &Endpoint) -> Identity {
+    for attempt in 0..3 {
+        match probe(endpoint) {
+            Identity::Proven => return Identity::Proven,
+            Identity::ForeignListener => return Identity::ForeignListener,
+            Identity::NoListener if attempt + 1 < 3 => {
+                std::thread::sleep(Duration::from_millis(150));
+            }
+            Identity::NoListener => {}
+        }
+    }
+    Identity::NoListener
+}
+
+fn probe(endpoint: &Endpoint) -> Identity {
+    let Ok(address) = format!("127.0.0.1:{}", endpoint.port).parse() else {
+        return Identity::NoListener;
+    };
+    let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(500)) else {
+        return Identity::NoListener;
+    };
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(1000)));
+    let challenge = health_challenge();
+    let request = format!(
+        "GET /health?challenge={challenge} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+    );
+    if stream.write_all(request.as_bytes()).is_err() {
+        return Identity::ForeignListener;
+    }
+    let mut answer = Vec::new();
+    if stream.read_to_end(&mut answer).is_err() && answer.is_empty() {
+        return Identity::ForeignListener;
+    }
+    if health_body_matches(endpoint, &challenge, &answer) {
+        Identity::Proven
+    } else {
+        Identity::ForeignListener
+    }
+}
+
+/// Ends the process that still holds `daemon.lock` after its listener is gone.
+fn stop_locked_process(paths: &Paths, lock: u32) -> Result<bool, String> {
+    lifecycle::terminate(lock);
+    if wait_dead(lock, Duration::from_secs(3)) {
+        return wait_stopped(paths, lock);
+    }
+    lifecycle::force_kill(lock);
+    if wait_dead(lock, Duration::from_secs(3)) {
+        wait_stopped(paths, lock)?;
+        return Ok(true);
+    }
+    Err(format!("the daemon (pid {lock}) would not stop"))
+}
+
+fn wait_dead(pid: u32, within: Duration) -> bool {
+    let deadline = Instant::now() + within;
+    while Instant::now() < deadline {
+        if !lifecycle::pid_alive(pid) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    !lifecycle::pid_alive(pid)
+}
+
 fn wait_unhealthy(endpoint: &Endpoint, within: Duration) -> bool {
     let deadline = Instant::now() + within;
     while Instant::now() < deadline {
@@ -546,26 +635,11 @@ fn wait_unhealthy(endpoint: &Endpoint, within: Duration) -> bool {
 
 /// Whether the exact daemon described by endpoint.json owns this listener.
 fn health(endpoint: &Endpoint) -> bool {
-    let challenge = health_challenge();
-    let Ok(address) = format!("127.0.0.1:{}", endpoint.port).parse() else {
-        return false;
-    };
-    let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(500)) else {
-        return false;
-    };
-    let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(1000)));
-    let request = format!(
-        "GET /health?challenge={challenge} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
-    );
-    if stream.write_all(request.as_bytes()).is_err() {
-        return false;
-    }
-    let mut answer = Vec::new();
-    if stream.read_to_end(&mut answer).is_err() && answer.is_empty() {
-        return false;
-    }
-    let Some(body) = http_ok_body(&answer) else {
+    matches!(probe(endpoint), Identity::Proven)
+}
+
+fn health_body_matches(endpoint: &Endpoint, challenge: &str, answer: &[u8]) -> bool {
+    let Some(body) = http_ok_body(answer) else {
         return false;
     };
     let Ok(found) = serde_json::from_slice::<Health>(body) else {
@@ -573,7 +647,7 @@ fn health(endpoint: &Endpoint) -> bool {
     };
     let expected = genet_frontdoor::proof::health_proof(
         &endpoint.token,
-        &challenge,
+        challenge,
         endpoint.pid,
         &endpoint.machine_id,
         &endpoint.fingerprint,
@@ -696,6 +770,21 @@ mod tests {
         // Reaching this line proves the stale pid (the test runner itself) was
         // never signalled merely because something answered 200.
         assert!(lifecycle::pid_alive(std::process::id()));
+    }
+
+    #[test]
+    fn a_closed_endpoint_port_is_not_a_foreign_listener() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let endpoint = Endpoint {
+            port,
+            token: "private-token".into(),
+            machine_id: "expected-machine".into(),
+            fingerprint: "expected-fingerprint".into(),
+            pid: std::process::id(),
+        };
+        assert!(matches!(identify(&endpoint), Identity::NoListener));
     }
 
     #[test]

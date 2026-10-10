@@ -20,6 +20,9 @@ function stubDaemon(answers: Partial<Record<Request["type"], (payload: never) =>
     onNotice: () => () => {},
     onUpdateDownload: () => () => {},
     onBackgroundProcesses: () => () => {},
+    onAgents: () => () => {},
+    onAgentRequest: () => () => {},
+    onAgentRequestClosed: () => () => {},
     onStateChange: () => () => {},
   } as unknown as Client;
   return { client, calls };

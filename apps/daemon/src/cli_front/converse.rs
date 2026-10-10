@@ -70,7 +70,36 @@ pub struct Run {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     AgentList,
+    AgentShow {
+        agent_id: String,
+    },
+    AgentAction {
+        agent_id: String,
+        action_id: String,
+    },
+    AgentReload {
+        agent_id: String,
+    },
+    AgentReset {
+        agent_id: String,
+    },
+    AgentTest {
+        agent_id: String,
+        live: bool,
+    },
+    AgentLogs {
+        agent_id: String,
+        lines: Option<u32>,
+    },
     Run(Box<Run>),
+    Ask {
+        session_id: String,
+        request_id: String,
+        title: String,
+        question: String,
+        choices: Vec<String>,
+        freeform: bool,
+    },
     Respond {
         session_id: String,
         request_id: String,
@@ -140,10 +169,56 @@ fn parse_agent(args: &[String], selection: &Selection) -> Result<Command, CliFai
             }
             Ok(Command::Run(Box::new(run)))
         }
+        Some("show") => Ok(Command::AgentShow {
+            agent_id: agent_id_arg(args, "show")?,
+        }),
+        Some("action") => {
+            let agent_id = agent_id_arg(args, "action")?;
+            let action_id = args
+                .get(2)
+                .filter(|id| !id.trim().is_empty() && !id.starts_with('-'))
+                .cloned()
+                .ok_or_else(|| {
+                    CliFailure::invalid_args("usage: genet agent action <id> <action>")
+                })?;
+            Ok(Command::AgentAction {
+                agent_id,
+                action_id,
+            })
+        }
+        Some("reload") => Ok(Command::AgentReload {
+            agent_id: agent_id_arg(args, "reload")?,
+        }),
+        Some("reset") => Ok(Command::AgentReset {
+            agent_id: agent_id_arg(args, "reset")?,
+        }),
+        Some("test") => Ok(Command::AgentTest {
+            agent_id: agent_id_arg(args, "test")?,
+            live: args[2..].iter().any(|arg| arg == "--live"),
+        }),
+        Some("logs") => {
+            let agent_id = agent_id_arg(args, "logs")?;
+            let lines = match args.iter().position(|arg| arg == "--lines") {
+                Some(index) => Some(
+                    args.get(index + 1)
+                        .and_then(|raw| raw.parse().ok())
+                        .ok_or_else(|| CliFailure::invalid_args("--lines needs a whole number"))?,
+                ),
+                None => None,
+            };
+            Ok(Command::AgentLogs { agent_id, lines })
+        }
         _ => Err(CliFailure::invalid_args(
-            "usage: genet agent list | genet agent run --agent <id> \"<prompt>\"",
+            "usage: genet agent list | show <id> | action <id> <action> | reload <id> | reset <id> | test <id> [--live] | logs <id> [--lines N] | run --agent <id> \"<prompt>\"",
         )),
     }
+}
+
+fn agent_id_arg(args: &[String], verb: &str) -> Result<String, CliFailure> {
+    args.get(1)
+        .filter(|id| !id.trim().is_empty() && !id.starts_with('-'))
+        .cloned()
+        .ok_or_else(|| CliFailure::invalid_args(format!("genet agent {verb} needs an Agent id")))
 }
 
 fn parse_session(args: &[String], selection: &Selection) -> Result<Command, CliFailure> {
@@ -156,6 +231,46 @@ fn parse_session(args: &[String], selection: &Selection) -> Result<Command, CliF
             CliFailure::invalid_args(format!("genet session {verb} needs a session id"))
         })?;
     match verb {
+        "ask" => {
+            let usage = "genet session ask <id> --question <text> [--choice <label>]... [--request-id <id>] [--title <text>] [--no-text]";
+            let (mut question, mut request_id, mut title) = (None, None, None);
+            let mut choices = Vec::new();
+            let mut freeform = true;
+            let mut index = 2;
+            while index < args.len() {
+                let flag = args[index].as_str();
+                if flag == "--no-text" {
+                    freeform = false;
+                    index += 1;
+                    continue;
+                }
+                let value = args
+                    .get(index + 1)
+                    .filter(|v| !v.trim().is_empty())
+                    .ok_or_else(|| CliFailure::invalid_args(usage))?
+                    .clone();
+                match flag {
+                    "--question" if question.is_none() => question = Some(value),
+                    "--request-id" if request_id.is_none() => request_id = Some(value),
+                    "--title" if title.is_none() => title = Some(value),
+                    "--choice" => choices.push(value),
+                    _ => return Err(CliFailure::invalid_args(usage)),
+                }
+                index += 2;
+            }
+            if choices.len() > 8 || (!freeform && choices.is_empty()) {
+                return Err(CliFailure::invalid_args(usage));
+            }
+            Ok(Command::Ask {
+                session_id,
+                request_id: request_id
+                    .unwrap_or_else(|| format!("cli-question-{}", uuid::Uuid::new_v4().simple())),
+                title: title.unwrap_or_else(|| "需要你的回答".into()),
+                question: question.ok_or_else(|| CliFailure::invalid_args(usage))?,
+                choices,
+                freeform,
+            })
+        }
         "send" => {
             let options = Options::parse(&args[2..], selection)?;
             let mut run = options.into_run(None)?;
@@ -335,7 +450,100 @@ async fn execute(command: Command, selection: &Selection) -> i32 {
             output::succeed("agent.list", data);
             EXIT_OK
         }),
+        Command::AgentShow { agent_id } => agent_list(&rpc).await.and_then(|data| {
+            let agent = data["agents"]
+                .as_array()
+                .and_then(|agents| agents.iter().find(|agent| agent["id"] == agent_id.as_str()))
+                .cloned()
+                .ok_or_else(|| CliFailure::business("targetNotFound", format!("没有名为 {agent_id} 的 Agent"), None))?;
+            output::succeed("agent.show", json!({ "agent": agent }));
+            Ok(EXIT_OK)
+        }),
+        Command::AgentAction {
+            agent_id,
+            action_id,
+        } => agents_reply(
+            &rpc,
+            Request::AgentAction {
+                agent_id: agent_id.clone(),
+                action_id: action_id.clone(),
+            },
+            "agent.action",
+            // A request the action opens is answered by a person in the
+            // workbench; its contents are never printed here.
+            json!({ "agentId": agent_id, "actionId": action_id, "note": "如果这个动作需要人确认或输入，请在 GeneHub 工作台里完成" }),
+        )
+        .await,
+        Command::AgentReload { agent_id } => agents_reply(
+            &rpc,
+            Request::AgentReload {
+                agent_id: agent_id.clone(),
+            },
+            "agent.reload",
+            json!({ "agentId": agent_id }),
+        )
+        .await,
+        Command::AgentReset { agent_id } => agents_reply(
+            &rpc,
+            Request::AgentReset {
+                agent_id: agent_id.clone(),
+            },
+            "agent.reset",
+            json!({ "agentId": agent_id }),
+        )
+        .await,
+        Command::AgentTest { agent_id, live } => match rpc
+            .call(Request::AgentTest {
+                agent_id: agent_id.clone(),
+                live,
+            })
+            .await
+            .map_err(query::rpc_error)
+        {
+            Ok(Reply::AgentTestResult { passed, output }) => {
+                output::succeed(
+                    "agent.test",
+                    json!({ "agentId": agent_id, "passed": passed, "output": output }),
+                );
+                Ok(if passed { EXIT_OK } else { EXIT_FAILED })
+            }
+            Ok(other) => Err(query::unexpected_reply("agent test result", &other)),
+            Err(error) => Err(error),
+        },
+        Command::AgentLogs { agent_id, lines } => match rpc
+            .call(Request::AgentLogs {
+                agent_id: agent_id.clone(),
+                lines,
+            })
+            .await
+            .map_err(query::rpc_error)
+        {
+            Ok(Reply::AgentLogs { lines }) => {
+                output::succeed("agent.logs", json!({ "agentId": agent_id, "lines": lines }));
+                Ok(EXIT_OK)
+            }
+            Ok(other) => Err(query::unexpected_reply("agent logs", &other)),
+            Err(error) => Err(error),
+        },
         Command::Run(run) => run_conversation(&rpc, *run, selection.machine.is_none()).await,
+        Command::Ask { session_id, request_id, title, question, choices, freeform } => {
+            let request = Request::SessionAsk { session_id: session_id.clone(), request_id: request_id.clone(), title,
+                questions: vec![genehub_proto::InteractionQuestion {
+                    id: "question".into(), prompt: question, allow_multiple: false, allow_freeform: freeform,
+                    options: choices.into_iter().enumerate().map(|(i, label)| genehub_proto::InteractionOption {
+                        id: format!("choice-{i}"), label,
+                    }).collect(),
+                }],
+            };
+            match rpc.call(request).await.map_err(query::rpc_error) {
+                Ok(Reply::Ack) => {
+                    output::succeed("session.ask", json!({ "sessionId": session_id, "requestId": request_id, "accepted": true }));
+                    Ok(EXIT_OK)
+                }
+                Ok(other) => Err(query::unexpected_reply("ack", &other)),
+                Err(error) => Err(error),
+            }
+        }
         Command::Respond {
             session_id,
             request_id,
@@ -414,13 +622,43 @@ async fn label(
     }
 }
 
+async fn agents_reply(
+    rpc: &Rpc,
+    request: Request,
+    kind: &str,
+    mut data: Value,
+) -> Result<i32, CliFailure> {
+    match rpc.call(request).await.map_err(query::rpc_error)? {
+        Reply::Agents(agents) => {
+            let id = data["agentId"].as_str().unwrap_or_default().to_string();
+            data["agent"] = agents
+                .into_iter()
+                .find(|agent| agent.id == id)
+                .map(|mut agent| {
+                    agent.icon = None;
+                    serde_json::to_value(agent).unwrap_or(Value::Null)
+                })
+                .unwrap_or(Value::Null);
+            output::succeed(kind, data);
+            Ok(EXIT_OK)
+        }
+        other => Err(query::unexpected_reply("agents", &other)),
+    }
+}
+
 async fn agent_list(rpc: &Rpc) -> Result<Value, CliFailure> {
     match rpc
         .call(Request::AgentList)
         .await
         .map_err(query::rpc_error)?
     {
-        Reply::Agents(agents) => Ok(json!({"agents": agents})),
+        Reply::Agents(mut agents) => {
+            // A terminal has no use for a base64 image.
+            for agent in &mut agents {
+                agent.icon = None;
+            }
+            Ok(json!({"agents": agents}))
+        }
         other => Err(query::unexpected_reply("agents", &other)),
     }
 }

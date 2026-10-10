@@ -65,6 +65,9 @@ function stubClient() {
     onNotice: () => () => {},
     onUpdateDownload: () => () => {},
     onBackgroundProcesses: () => () => {},
+    onAgents: () => () => {},
+    onAgentRequest: () => () => {},
+    onAgentRequestClosed: () => () => {},
     onEvent: () => () => {},
     onPty: () => () => {},
     call: async () => null,
@@ -493,6 +496,7 @@ describe("switching from the sidebar", () => {
       id,
       label: id === "codex" ? "Codex" : "Claude Code",
       builtin: false,
+      source: "user",
       probe: { state: "ready" },
       capabilities: {
         interrupt: false,
@@ -547,6 +551,9 @@ describe("switching from the sidebar", () => {
         onNotice: () => () => {},
         onUpdateDownload: () => () => {},
         onBackgroundProcesses: () => () => {},
+        onAgents: () => () => {},
+        onAgentRequest: () => () => {},
+        onAgentRequestClosed: () => () => {},
         onEvent: () => () => {},
         onPty: () => () => {},
         call: async (request: Request): Promise<Reply | null> => {
@@ -747,6 +754,9 @@ describe("switching from the sidebar", () => {
       onNotice: () => () => {},
       onUpdateDownload: () => () => {},
       onBackgroundProcesses: () => () => {},
+      onAgents: () => () => {},
+      onAgentRequest: () => () => {},
+      onAgentRequestClosed: () => () => {},
       onEvent: () => () => {},
       onPty: () => () => {},
       call: async (request: Request): Promise<Reply | null> => {

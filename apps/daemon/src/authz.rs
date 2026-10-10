@@ -253,6 +253,20 @@ impl Principal {
         }
     }
 
+    pub fn authority(&self) -> genehub_proto::CallerAuthority {
+        genehub_proto::CallerAuthority {
+            principal_type: match self {
+                Self::LocalUser => "localUser", Self::SessionController { .. } => "sessionController",
+                Self::Device { .. } => "pairedDevice", Self::Channel => "channel",
+                Self::PreviewShare { .. } => "previewShare", Self::Pairing => "pairing",
+            }.into(),
+            session_id: self.session_controller_id().map(str::to_owned),
+            grants: Capability::ALL.into_iter().filter(|c| self.allows(*c)).map(|c| c.as_str().into()).collect(),
+            provider_operations: self.allows(Capability::Session),
+            provider_request_command: "provider configure <id> --session <id> --action <stable-id> --base-url <url> --dialect <openai|anthropic> --label <name> [--model <id>]".into(),
+        }
+    }
+
     pub fn device_id(&self) -> Option<&str> {
         match self {
             Principal::Device { id, .. } => Some(id),
@@ -338,6 +352,12 @@ impl StreamMethod {
 /// authority it needs, which is the one moment when the answer is obvious.
 pub fn required(request: &Request) -> Capability {
     match request {
+        Request::CallerAuthority | Request::ProviderList => Capability::Read,
+        Request::ProviderOperation { operation, .. } => match operation {
+            genehub_proto::ProviderOperationCommand::Submit { .. } => Capability::Settings,
+            genehub_proto::ProviderOperationCommand::Get { .. } => Capability::Read,
+            _ => Capability::Session,
+        },
         Request::PreviewFeedback(request) => match request.operation {
             genehub_proto::PreviewFeedbackOperation::Read { .. } => Capability::Read,
             _ => Capability::Files,
@@ -411,6 +431,12 @@ pub fn required(request: &Request) -> Capability {
         | Request::WorkflowRecoveryReset { .. }
         | Request::WorkflowBudget { .. }
         | Request::SessionSend { .. }
+        // Repairing a script Agent from a session: read what it said, run its
+        // own tests, load an edited directory. Installing, logging in,
+        // resetting and answering requests stay with Settings.
+        | Request::AgentLogs { .. }
+        | Request::AgentTest { .. }
+        | Request::AgentReload { .. }
         | Request::SessionArtifactBegin { .. }
         | Request::SessionArtifactChunk { .. }
         | Request::SessionArtifactFinish { .. }
@@ -439,7 +465,8 @@ pub fn required(request: &Request) -> Capability {
         | Request::SessionSetEffort { .. }
         | Request::SessionSetFast { .. }
         | Request::SessionSetRuntimeAxis { .. }
-        | Request::SessionRespondPermission { .. } => Capability::Session,
+        | Request::SessionRespondPermission { .. }
+        | Request::SessionAsk { .. } => Capability::Session,
 
         Request::SpeechContextPreview { .. } | Request::SpeechFeedbackRecord { .. } => {
             Capability::Speech
@@ -470,6 +497,12 @@ pub fn required(request: &Request) -> Capability {
         | Request::WorkspaceRename { .. }
         | Request::WorkspaceRemove { .. }
         | Request::SettingsGet
+        // Script Agent lifecycle: actions install and log in software, and a
+        // request answer may carry a credential. Machine configuration.
+        | Request::AgentAction { .. }
+        | Request::AgentReset { .. }
+        | Request::AgentRequests
+        | Request::AgentRequestAnswer { .. }
         | Request::SettingsSetProvider { .. }
         | Request::SettingsSetAgentPreferences { .. }
         | Request::SettingsForgetProvider { .. }

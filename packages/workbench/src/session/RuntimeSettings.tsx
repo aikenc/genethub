@@ -305,7 +305,7 @@ export function RuntimeSettings({
           const catalogModels = agent.catalog.models.filter((model) => !isAutoModel(model));
           const availableModels: Array<ModelInfo | null> = catalogModels.length > 0
             ? catalogModels
-            : resolveAgentProfile(agent.id).startWithoutModelCatalog
+            : resolveAgentProfile(agent).startWithoutModelCatalog
               ? [null]
               : [];
           const remaining = availableModels.filter(

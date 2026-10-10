@@ -1,0 +1,5 @@
+# Copied over agent.toml by a case that needs a manifest the daemon refuses:
+# a protocol this GeneHub does not speak.
+protocol = 99
+label = "Fixture Agent (invalid)"
+entry = "agent.py"

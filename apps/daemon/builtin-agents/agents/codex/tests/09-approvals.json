@@ -1,0 +1,507 @@
+{
+ "description": "Command/file approvals become permission cards answered with a decision; a question keeps the labels it sends back; unrenderable and foreign requests still get least-authority replies.",
+ "thread": "root-thread",
+ "steps": [
+  {
+   "begin": "t1"
+  },
+  {
+   "frame": {
+    "method": "turn/started",
+    "params": {
+     "threadId": "root-thread",
+     "turn": {
+      "id": "root-turn",
+      "items": [],
+      "status": "inProgress"
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "id": 7,
+    "method": "item/commandExecution/requestApproval",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "itemId": "call-1",
+     "command": [
+      "/bin/bash",
+      "-lc",
+      "git status"
+     ],
+     "reason": "  needs the repo  "
+    }
+   }
+  },
+  {
+   "respond": {
+    "requestId": "7",
+    "outcome": {
+     "outcome": "selected",
+     "optionId": "allow"
+    }
+   }
+  },
+  {
+   "frame": {
+    "id": "abc",
+    "method": "item/fileChange/requestApproval",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "itemId": "edit-1"
+    }
+   }
+  },
+  {
+   "respond": {
+    "requestId": "string:abc",
+    "outcome": {
+     "outcome": "canceled"
+    }
+   }
+  },
+  {
+   "frame": {
+    "id": 8,
+    "method": "item/commandExecution/requestApproval",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn"
+    }
+   }
+  },
+  {
+   "respond": {
+    "requestId": "8",
+    "outcome": {
+     "outcome": "selected",
+     "optionId": "deny"
+    }
+   }
+  },
+  {
+   "frame": {
+    "id": 9,
+    "method": "item/tool/requestUserInput",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "itemId": "ask-1",
+     "questions": [
+      {
+       "id": "q1",
+       "header": "Which database?",
+       "question": "Pick one to migrate first.",
+       "options": [
+        {
+         "label": "Postgres"
+        },
+        {
+         "label": "SQLite"
+        }
+       ]
+      },
+      {
+       "id": "q",
+       "header": "h",
+       "question": "free text?"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "respond": {
+    "requestId": "9",
+    "outcome": {
+     "outcome": "answered",
+     "answers": [
+      {
+       "questionId": "q1",
+       "selectedOptionIds": [
+        "1"
+       ]
+      },
+      {
+       "questionId": "q",
+       "selectedOptionIds": [],
+       "freeformText": " Use the existing cluster "
+      }
+     ]
+    }
+   }
+  },
+  {
+   "frame": {
+    "id": 10,
+    "method": "tool/requestUserInput",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "questions": [
+      {
+       "id": "x",
+       "question": "no header"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "frame": {
+    "id": 11,
+    "method": "mcpServer/elicitation/request",
+    "params": {
+     "threadId": "root-thread"
+    }
+   }
+  },
+  {
+   "frame": {
+    "id": 12,
+    "method": "something/new",
+    "params": {}
+   }
+  },
+  {
+   "frame": {
+    "id": 13,
+    "method": "item/commandExecution/requestApproval",
+    "params": {
+     "threadId": "child-thread",
+     "turnId": "root-turn",
+     "command": "rm -rf /"
+    }
+   }
+  },
+  {
+   "frame": {
+    "id": 14,
+    "method": "item/tool/requestUserInput",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "stale-turn",
+     "questions": [
+      {
+       "id": "q1",
+       "header": "Which database?",
+       "question": "Pick one to migrate first.",
+       "options": [
+        {
+         "label": "Postgres"
+        },
+        {
+         "label": "SQLite"
+        }
+       ]
+      }
+     ]
+    }
+   }
+  },
+  {
+   "frame": {
+    "id": null,
+    "method": "x"
+   }
+  },
+  {
+   "frame": {
+    "id": 15,
+    "method": "item/fileChange/requestApproval",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn"
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "serverRequest/resolved",
+    "params": {
+     "threadId": "child-thread",
+     "requestId": 15
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "serverRequest/resolved",
+    "params": {
+     "threadId": "root-thread",
+     "requestId": 15
+    }
+   }
+  },
+  {
+   "frame": {
+    "id": true,
+    "method": "item/fileChange/requestApproval",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn"
+    }
+   }
+  }
+ ],
+ "replies": [
+  {
+   "jsonrpc": "2.0",
+   "id": 7,
+   "result": {
+    "decision": "accept"
+   }
+  },
+  {
+   "jsonrpc": "2.0",
+   "id": "abc",
+   "result": {
+    "decision": "cancel"
+   }
+  },
+  {
+   "jsonrpc": "2.0",
+   "id": 8,
+   "result": {
+    "decision": "decline"
+   }
+  },
+  {
+   "jsonrpc": "2.0",
+   "id": 9,
+   "result": {
+    "answers": {
+     "q1": {
+      "answers": [
+       "SQLite"
+      ]
+     },
+     "q": {
+      "answers": [
+       "Use the existing cluster"
+      ]
+     }
+    }
+   }
+  },
+  {
+   "jsonrpc": "2.0",
+   "id": 10,
+   "result": {
+    "answers": {}
+   }
+  },
+  {
+   "jsonrpc": "2.0",
+   "id": 11,
+   "result": {
+    "action": "decline",
+    "content": null,
+    "_meta": null
+   }
+  },
+  {
+   "jsonrpc": "2.0",
+   "id": 12,
+   "error": {
+    "code": -32601,
+    "message": "GeneHub does not answer this request"
+   }
+  },
+  {
+   "jsonrpc": "2.0",
+   "id": 13,
+   "result": {
+    "decision": "decline"
+   }
+  },
+  {
+   "jsonrpc": "2.0",
+   "id": 14,
+   "result": {
+    "answers": {}
+   }
+  },
+  {
+   "jsonrpc": "2.0",
+   "id": true,
+   "error": {
+    "code": -32600,
+    "message": "Invalid Codex request id"
+   }
+  }
+ ],
+ "events": [
+  {
+   "type": "permissionRequested",
+   "request": {
+    "id": "7",
+    "kind": "permission",
+    "title": "Run `git status`?",
+    "options": [
+     {
+      "id": "allow",
+      "label": "Allow",
+      "kind": "allowOnce"
+     },
+     {
+      "id": "deny",
+      "label": "Deny",
+      "kind": "reject"
+     }
+    ],
+    "detail": "needs the repo",
+    "toolCallId": "call-1"
+   }
+  },
+  {
+   "type": "permissionResolved",
+   "requestId": "7",
+   "outcome": {
+    "outcome": "selected",
+    "optionId": "allow"
+   }
+  },
+  {
+   "type": "permissionRequested",
+   "request": {
+    "id": "string:abc",
+    "kind": "permission",
+    "title": "Apply file changes?",
+    "options": [
+     {
+      "id": "allow",
+      "label": "Allow",
+      "kind": "allowOnce"
+     },
+     {
+      "id": "deny",
+      "label": "Deny",
+      "kind": "reject"
+     }
+    ],
+    "toolCallId": "edit-1"
+   }
+  },
+  {
+   "type": "permissionResolved",
+   "requestId": "string:abc",
+   "outcome": {
+    "outcome": "canceled"
+   }
+  },
+  {
+   "type": "permissionRequested",
+   "request": {
+    "id": "8",
+    "kind": "permission",
+    "title": "Run a command?",
+    "options": [
+     {
+      "id": "allow",
+      "label": "Allow",
+      "kind": "allowOnce"
+     },
+     {
+      "id": "deny",
+      "label": "Deny",
+      "kind": "reject"
+     }
+    ]
+   }
+  },
+  {
+   "type": "permissionResolved",
+   "requestId": "8",
+   "outcome": {
+    "outcome": "selected",
+    "optionId": "deny"
+   }
+  },
+  {
+   "type": "permissionRequested",
+   "request": {
+    "id": "9",
+    "kind": "question",
+    "title": "Which database?",
+    "options": [],
+    "toolCallId": "ask-1",
+    "questions": [
+     {
+      "id": "q1",
+      "prompt": "Pick one to migrate first.",
+      "allowMultiple": false,
+      "allowFreeform": true,
+      "options": [
+       {
+        "id": "0",
+        "label": "Postgres"
+       },
+       {
+        "id": "1",
+        "label": "SQLite"
+       }
+      ]
+     },
+     {
+      "id": "q",
+      "prompt": "free text?",
+      "allowMultiple": false,
+      "allowFreeform": true,
+      "options": []
+     }
+    ]
+   }
+  },
+  {
+   "type": "permissionResolved",
+   "requestId": "9",
+   "outcome": {
+    "outcome": "answered",
+    "answers": [
+     {
+      "questionId": "q1",
+      "selectedOptionIds": [
+       "1"
+      ]
+     },
+     {
+      "questionId": "q",
+      "selectedOptionIds": [],
+      "freeformText": " Use the existing cluster "
+     }
+    ]
+   }
+  },
+  {
+   "type": "permissionRequested",
+   "request": {
+    "id": "15",
+    "kind": "permission",
+    "title": "Apply file changes?",
+    "options": [
+     {
+      "id": "allow",
+      "label": "Allow",
+      "kind": "allowOnce"
+     },
+     {
+      "id": "deny",
+      "label": "Deny",
+      "kind": "reject"
+     }
+    ]
+   }
+  },
+  {
+   "type": "permissionResolved",
+   "requestId": "15",
+   "outcome": {
+    "outcome": "canceled"
+   }
+  }
+ ]
+}

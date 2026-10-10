@@ -416,7 +416,7 @@ for (const path of ["fabric", "rtc"] as const) defineSpecialty({
   t.env.env.GENEHUB_LOCAL_LOG = "warn,genet_daemon::dataplane=debug";
   const stack = await openMultichannelBrowser(t);
   try {
-    await t.flows.main.requireAgentReady(stack.opened.client, agent.agentId);
+    await t.flows.branches.waitForAgent(stack.opened.client, agent.agentId, t.flows.branches.agentReady, { timeoutMs: 45_000, what: "ready" });
     const sessionId = await t.flows.main.createAgentSession(stack.opened.client, {
       workspaceId: stack.opened.workspaceId, agentId: agent.agentId, modelId: null,
     });

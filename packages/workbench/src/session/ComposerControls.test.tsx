@@ -60,8 +60,8 @@ const AGENTS: AgentInfo[] = [
     },
   },
   {
-    id: "claude",
-    label: "Claude Code",
+    id: "codex",
+    label: "Codex",
     builtin: false,
     probe: { state: "ready" },
     capabilities: {
@@ -100,11 +100,11 @@ const PREFERENCES: AgentSelectionPreferences = {
       tags: ["Pro", "图片理解", "视频理解"],
       cost: "veryHigh",
     },
-    { agentId: "claude", tags: ["Flash"], cost: "low" },
+    { agentId: "codex", tags: ["Flash"], cost: "low" },
   ],
   runtimes: {
     genet: { effortId: "high", runtimeValues: {} },
-    claude: { modeId: "bypassPermissions", runtimeValues: {} },
+    codex: { modeId: "bypassPermissions", runtimeValues: {} },
   },
 };
 
@@ -184,17 +184,17 @@ describe("the exact model composer control", () => {
 
     const coding = controls({
       tags: ["Flash"],
-      agentId: "claude",
+      agentId: "codex",
       modelId: null,
       modeId: "bypassPermissions",
       effortId: null,
     });
-    opened = await openSettings(/模型：Claude/);
+    opened = await openSettings(/模型：Codex/);
     expect(within(opened.dialog).getByLabelText("权限")).toHaveValue("bypassPermissions");
     await userEvent.selectOptions(within(opened.dialog).getByLabelText("权限"), "default");
     await userEvent.click(within(opened.dialog).getByRole("button", { name: "使用此模型" }));
     expect(coding.onPickTarget).toHaveBeenCalledWith(
-      expect.objectContaining({ agentId: "claude", modeId: "default" }),
+      expect.objectContaining({ agentId: "codex", modeId: "default" }),
       ["Flash"],
     );
   });
@@ -319,14 +319,14 @@ describe("the exact model composer control", () => {
     const { dialog } = await openSettings();
     await userEvent.click(within(dialog).getByRole("button", { name: "Agent 配置" }));
 
-    await userEvent.click(screen.getByRole("button", { name: "移除 Claude Agent 默认" }));
-    expect(screen.queryByRole("button", { name: "移除 Claude Agent 默认" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "移除 Codex Agent 默认" }));
+    expect(screen.queryByRole("button", { name: "移除 Codex Agent 默认" })).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "保存到这台机器" }));
 
     await waitFor(() => expect(callbacks.onSavePreferences).toHaveBeenCalledOnce());
     const saved = callbacks.onSavePreferences.mock.calls[0]![0];
-    expect(saved.disabledAgentIds).toContain("claude");
-    expect(saved.modelProfiles?.some((profile) => profile.agentId === "claude")).toBe(false);
+    expect(saved.disabledAgentIds).toContain("codex");
+    expect(saved.modelProfiles?.some((profile) => profile.agentId === "codex")).toBe(false);
   });
 
   it("shows a custom model name in the picker", async () => {
@@ -379,15 +379,15 @@ describe("the exact model composer control", () => {
         ...PREFERENCES,
         modelProfiles: [
           ...PREFERENCES.modelProfiles!,
-          { agentId: "claude", tags: ["Pro"], cost: "low" },
+          { agentId: "codex", tags: ["Pro"], cost: "low" },
         ],
       },
     });
     const { dialog } = await openSettings();
 
-    const claudeRoute = within(dialog).getByRole("option", { name: /Claude · Agent 默认/ });
-    expect(claudeRoute).toBeDisabled();
-    expect(claudeRoute).toHaveAttribute("title", "会话进行中，本轮结束后才能切换 Agent");
+    const codexRoute = within(dialog).getByRole("option", { name: /Codex · Agent 默认/ });
+    expect(codexRoute).toBeDisabled();
+    expect(codexRoute).toHaveAttribute("title", "会话进行中，本轮结束后才能切换 Agent");
     expect(within(dialog).getByRole("option", { name: /Genet · DeepSeek/ })).toBeEnabled();
   });
 
@@ -398,13 +398,13 @@ describe("the exact model composer control", () => {
         ...PREFERENCES,
         modelProfiles: [
           ...PREFERENCES.modelProfiles!,
-          { agentId: "claude", tags: ["Pro"], cost: "low" },
+          { agentId: "codex", tags: ["Pro"], cost: "low" },
         ],
       },
     });
     const { dialog } = await openSettings();
 
-    expect(within(dialog).getByRole("option", { name: /Claude · Agent 默认/ })).toBeEnabled();
+    expect(within(dialog).getByRole("option", { name: /Codex · Agent 默认/ })).toBeEnabled();
     expect(within(dialog).queryByText(/会话进行中/)).not.toBeInTheDocument();
   });
 

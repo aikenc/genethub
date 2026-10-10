@@ -32,7 +32,7 @@ const modelFamilies = (modelConfig.families ?? []) as ModelFamilyRule[];
 const ignorePrefixes = (modelConfig.ignorePrefixes ?? []) as string[];
 
 export function resolveAgentPresentation(
-  agent: Pick<AgentInfo, "id" | "label">,
+  agent: Pick<AgentInfo, "id" | "label"> & Partial<Pick<AgentInfo, "icon">>,
 ): AgentPresentation {
   const rule = agentRules.find((candidate) => candidate.ids.includes(agent.id));
   // Known product names are deliberately canonical across channel-specific
@@ -40,6 +40,10 @@ export function resolveAgentPresentation(
   const label = rule?.canonicalLabel
     ? rule.label
     : agent.label.trim() || rule?.label || agent.id;
+  // A script Agent ships its own icon; the bundled map is only the fallback.
+  if (agent.icon?.startsWith("data:image/")) {
+    return { kind: "icon", label, asset: { default: agent.icon } };
+  }
   if (rule?.assetId && isAssetId(rule.assetId)) {
     return { kind: "icon", label, asset: agentAssets[rule.assetId] };
   }
@@ -48,24 +52,27 @@ export function resolveAgentPresentation(
 }
 
 /** Runtime behavior that cannot be inferred safely from the generic capability
- * flags. ACP's `permissions` flag says it can ask permission; it does not make
- * Cursor's `agent / plan / ask` workflow selector a permission policy. */
-export function resolveAgentProfile(agentId: string): {
+ * flags. A `permissions` flag says an Agent can ask permission; it does not
+ * make Cursor's `agent / plan / ask` workflow selector a permission policy. */
+export function resolveAgentProfile(
+  agent: string | (Pick<AgentInfo, "id"> & Partial<Pick<AgentInfo, "source">>),
+): {
   modeKind: AgentModeKind;
   startWithoutModelCatalog: boolean;
 } {
-  const rule = agentRules.find((candidate) => candidate.ids.includes(agentId));
+  const id = typeof agent === "string" ? agent : agent.id;
+  const rule = agentRules.find((candidate) => candidate.ids.includes(id));
   return {
     modeKind: rule?.modeKind ?? "unknown",
-    // Every configured ACP Agent owns its runtime defaults even when discovery
-    // returned no catalog. Unknown non-ACP Agents remain conservative.
+    // A script Agent (any `source`) owns its runtime defaults even when it
+    // reported no catalog. Unknown native Agents remain conservative.
     startWithoutModelCatalog:
-      rule?.startWithoutModelCatalog ?? agentId.startsWith("acp:"),
+      rule?.startWithoutModelCatalog ?? (typeof agent !== "string" && agent.source != null),
   };
 }
 
 export function resolveAgentAvailability(
-  agent: Pick<AgentInfo, "id" | "probe" | "catalog">,
+  agent: Pick<AgentInfo, "id" | "probe" | "catalog"> & Partial<Pick<AgentInfo, "source">>,
 ): AgentAvailability | null {
   if (agent.probe.state === "ready") {
     return canStartAgent(agent)
@@ -85,11 +92,11 @@ export function resolveAgentAvailability(
 /** A ready probe means the executable exists. Starting a turn additionally
  * needs either a concrete catalog or an Agent whose own runtime owns defaults. */
 export function canStartAgent(
-  agent: Pick<AgentInfo, "id" | "probe" | "catalog">,
+  agent: Pick<AgentInfo, "id" | "probe" | "catalog"> & Partial<Pick<AgentInfo, "source">>,
 ): boolean {
   return (
     agent.probe.state === "ready" &&
-    (agent.catalog.models.length > 0 || resolveAgentProfile(agent.id).startWithoutModelCatalog)
+    (agent.catalog.models.length > 0 || resolveAgentProfile(agent).startWithoutModelCatalog)
   );
 }
 

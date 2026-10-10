@@ -2994,7 +2994,7 @@ impl SessionManager {
             .ok_or_else(|| anyhow!("this handover no longer owns the session"))?;
         execution.turn_id = Some(turn_id.clone());
         execution.phase = ExecutionPhase::Running;
-        if execution.consultation {
+        if execution.consultation || execution.human_request_id.is_some() {
             live.continue_round(&turn_id).await;
         } else {
             if let Some(superseded) = live
@@ -3120,7 +3120,7 @@ impl SessionManager {
             self.registry.require(&meta.agent_id)?
         };
         let offered = adapter.catalog(providers).await;
-        if normalize_runtime_selection(&mut meta, &offered) {
+        if !adapter.owns_runtime_selection() && normalize_runtime_selection(&mut meta, &offered) {
             tracing::warn!(
                 agent = %meta.agent_id,
                 session = %meta.id,
@@ -3328,7 +3328,17 @@ impl SessionManager {
         let _interaction = live.interaction_lock.lock().await;
         // Fieldless clients retain their historical stop-waiting contract.
         // A durable-input PM instead preserves the Human card during a stop.
-        if live.meta.lock().await.inbox.entries.is_empty() {
+        let provider_interaction = {
+            let meta = live.meta.lock().await;
+            meta.pending_permission
+                .as_ref()
+                .is_some_and(|request| request.kind == PermissionRequestKind::ProviderConfiguration)
+                || meta.human_continuation.as_ref().is_some_and(|decision| {
+                    !decision.completed
+                        && decision.request.kind == PermissionRequestKind::ProviderConfiguration
+                })
+        };
+        if provider_interaction || live.meta.lock().await.inbox.entries.is_empty() {
             let had_interaction = {
                 let meta = live.meta.lock().await;
                 meta.pending_permission.is_some()
@@ -4040,6 +4050,7 @@ impl SessionManager {
                 {
                     bail!("this interaction already has a different Human decision");
                 }
+                self.record_human_response(&live, &previous).await?;
                 if !previous.completed && *live.status.lock().await == SessionStatus::Failed {
                     let mut meta = live.meta.lock().await;
                     let mut next = meta.clone();
@@ -4064,7 +4075,9 @@ impl SessionManager {
 
         if matches!(
             request.kind,
-            PermissionRequestKind::PlanApproval | PermissionRequestKind::Question
+            PermissionRequestKind::PlanApproval
+                | PermissionRequestKind::Question
+                | PermissionRequestKind::ProviderConfiguration
         ) || request.id.starts_with("workflow-human-")
             || !live.meta.lock().await.inbox.entries.is_empty()
         {
@@ -4080,6 +4093,15 @@ impl SessionManager {
             }
             let mut meta = live.meta.lock().await;
             let mut next = meta.clone();
+            // Validate the answer before acknowledging it. A cancellation
+            // retires the sent originals, without dropping new queued input.
+            if continuation_for(&request, &outcome)?.is_none() {
+                for entry in &mut next.inbox.entries {
+                    if entry.state == "sent" {
+                        entry.state = "handled".into();
+                    }
+                }
+            }
             next.format = SESSION_FORMAT;
             next.human_continuation = Some(HumanContinuation {
                 request: request.clone(),
@@ -4093,7 +4115,12 @@ impl SessionManager {
             next.pending_project_approval = false;
             self.store.save_meta(&next)?;
             *meta = next;
+            let decision = meta
+                .human_continuation
+                .clone()
+                .expect("saved Human response");
             drop(meta);
+            self.record_human_response(&live, &decision).await?;
             live.continuation_dispatched.store(false, Ordering::SeqCst);
             let resolved = SessionEvent::PermissionResolved {
                 request_id: request_id.into(),
@@ -4117,6 +4144,18 @@ impl SessionManager {
         }
 
         let continuation = continuation_for(&request, &outcome)?;
+        self.record_human_response(
+            &live,
+            &HumanContinuation {
+                request: request.clone(),
+                outcome: outcome.clone(),
+                decided_at_ms: now_ms(),
+                project_approval: false,
+                grant_recorded: false,
+                completed: false,
+            },
+        )
+        .await?;
         if let Some(continuation) = continuation {
             self.continue_after_human_response(&live, providers, continuation, None)
                 .await?;
@@ -4153,6 +4192,57 @@ impl SessionManager {
                 status: SessionStatus::Idle,
             })
             .await;
+        }
+        Ok(())
+    }
+
+    /// Decisions are conversation history as well as execution obligations.
+    /// The stable item id repairs an interrupted append and deduplicates an
+    /// ACK retry. This item is never admitted into the input queue.
+    async fn record_human_response(
+        &self,
+        live: &Arc<Live>,
+        decision: &HumanContinuation,
+    ) -> Result<()> {
+        let request = &decision.request;
+        let body = match &decision.outcome {
+            PermissionOutcome::Answered { .. } => {
+                question_answer(request, &decision.outcome)?.unwrap_or_default()
+            }
+            PermissionOutcome::Selected { .. } => selected_option(request, &decision.outcome)?
+                .map(|option| option.label.clone())
+                .unwrap_or_default(),
+            PermissionOutcome::Canceled => "已取消".into(),
+            PermissionOutcome::TimedOut { .. } => "确认已过期".into(),
+        };
+        let item = TimelineItem::UserMessage {
+            id: format!("u_answer_{:x}", Sha256::digest(request.id.as_bytes())),
+            text: format!("回答「{}」\n{}", request.title, body),
+            attachments: Vec::new(),
+            origin: None,
+        };
+        let meta = live.meta.lock().await.clone();
+        let chat = self.store.load_chat(&meta.workspace_id, &meta.id)?;
+        if !chat.items.iter().any(|old| old.id() == item.id()) {
+            self.store.append_chat_items(
+                &meta.workspace_id,
+                &meta.id,
+                std::slice::from_ref(&item),
+            )?;
+        }
+        let missing = !live
+            .items
+            .lock()
+            .await
+            .iter()
+            .any(|old| old.id() == item.id());
+        if missing {
+            let event = SessionEvent::Item {
+                turn_id: String::new(),
+                item,
+            };
+            apply(live, &event).await;
+            live.publish(event).await;
         }
         Ok(())
     }
@@ -4282,29 +4372,87 @@ impl SessionManager {
         session_id: &str,
         request: PermissionRequest,
     ) -> Result<()> {
-        if request.kind != PermissionRequestKind::Question {
-            bail!("expected a Workflow question");
+        self.request_question(session_id, request, false).await
+    }
+
+    pub(crate) async fn request_conversation_question(
+        &self,
+        session_id: &str,
+        request: PermissionRequest,
+    ) -> Result<()> {
+        let label = |s: &str| !s.trim().is_empty() && s.chars().count() <= 200;
+        anyhow::ensure!(
+            label(&request.id) && label(&request.title),
+            "问题标识或标题不合规"
+        );
+        let questions = request.questions.as_deref().unwrap_or_default();
+        anyhow::ensure!(
+            !questions.is_empty() && questions.len() <= 8,
+            "需要1到8个问题"
+        );
+        let mut ids = std::collections::BTreeSet::new();
+        for question in questions {
+            anyhow::ensure!(
+                label(&question.id) && ids.insert(&question.id),
+                "问题标识无效或重复"
+            );
+            anyhow::ensure!(
+                !question.prompt.trim().is_empty() && question.prompt.chars().count() <= 2048,
+                "问题内容不合规"
+            );
+            anyhow::ensure!(
+                question.options.len() <= 8
+                    && (question.allow_freeform || !question.options.is_empty()),
+                "问题没有可用的回答方式"
+            );
+            let mut options = std::collections::BTreeSet::new();
+            for option in &question.options {
+                anyhow::ensure!(
+                    label(&option.id) && label(&option.label) && options.insert(&option.id),
+                    "问题选项无效或重复"
+                );
+            }
+        }
+        self.request_question(session_id, request, true).await
+    }
+
+    async fn request_question(
+        &self,
+        session_id: &str,
+        request: PermissionRequest,
+        require_running: bool,
+    ) -> Result<()> {
+        if !matches!(
+            request.kind,
+            PermissionRequestKind::Question | PermissionRequestKind::ProviderConfiguration
+        ) {
+            bail!("expected a Human question or provider configuration");
         }
         let live = self.live(session_id).await?;
         let _interaction = live.interaction_lock.lock().await;
         {
             let pending = live.pending_permissions.lock().await;
-            if pending.iter().any(|item| item.id == request.id) {
+            if let Some(existing) = pending.iter().find(|item| item.id == request.id) {
+                anyhow::ensure!(*existing == request, "同一请求标识不能改写问题");
                 return Ok(());
             }
             if !pending.is_empty() {
-                bail!("answer the current Human interaction before this Workflow question");
+                bail!("answer the current Human interaction before asking another question");
             }
         }
-        if live
-            .meta
-            .lock()
-            .await
-            .human_continuation
-            .as_ref()
-            .is_some_and(|decision| decision.request.id == request.id)
         {
-            return Ok(());
+            let meta = live.meta.lock().await;
+            if let Some(decision) = meta
+                .human_continuation
+                .as_ref()
+                .filter(|decision| decision.request.id == request.id)
+            {
+                anyhow::ensure!(decision.request == request, "同一请求标识不能改写问题");
+                return Ok(());
+            }
+        }
+        if require_running && live.execution.lock().await.is_none() {
+            bail!("只能在当前执行中发起会话提问");
         }
         if let Err(error) = stop_agent_for_interaction(&live, &self.store, &request, false).await {
             let message = format!("{error:#}");
@@ -4545,6 +4693,56 @@ impl SessionManager {
                 tracing::error!(%save_error, "could not persist continuation failure");
             }
         }
+    }
+
+    pub(crate) async fn apply_provider_confirmation<T>(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        operation: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        let live = self.live(session_id).await?;
+        let _interaction = live.interaction_lock.lock().await;
+        anyhow::ensure!(
+            !live.closing.load(Ordering::SeqCst),
+            "original Session is closing"
+        );
+        anyhow::ensure!(
+            !live.meta.lock().await.inbox.paused,
+            "original Session was explicitly stopped; submit a new goal before configuring it"
+        );
+        anyhow::ensure!(
+            live.pending_permissions
+                .lock()
+                .await
+                .iter()
+                .any(|request| request.id == request_id
+                    && request.kind == PermissionRequestKind::ProviderConfiguration),
+            "original Session stopped or no longer holds this configuration request"
+        );
+        operation.await
+    }
+
+    pub(crate) async fn provider_operation_path(
+        &self,
+        session_id: &str,
+        action_id: &str,
+    ) -> Result<std::path::PathBuf> {
+        let live = self.live(session_id).await?;
+        let meta = live.meta.lock().await;
+        Ok(self
+            .store
+            .session_dir(&meta.workspace_id, &meta.id)?
+            .join("provider-operations")
+            .join(format!("{action_id}.json")))
+    }
+
+    pub(crate) async fn request_provider_configuration(
+        &self,
+        session_id: &str,
+        request: PermissionRequest,
+    ) -> Result<()> {
+        self.request_question(session_id, request, false).await
     }
 
     pub(crate) async fn pending_questions(
@@ -5859,6 +6057,15 @@ fn continuation_for(
                 ),
             }))
         }
+        PermissionRequestKind::ProviderConfiguration => {
+            let Some(option) = selected_option(request, outcome)? else {
+                return Ok(None);
+            };
+            Ok(Some(Continuation {
+                elevated: false,
+                prompt: format!("GeneHub provider operation {} was {}. The daemon has the durable receipt. Inspect it through provider get using the original Session and action ID before reporting success. Secrets were submitted directly to the daemon and are not part of this conversation. Do not repeat the mutation. Continue the original goal with the unchanged permission mode.", request.id, if option.kind == PermissionOptionKind::Reject { "rejected" } else { "saved; verification must be checked" }),
+            }))
+        }
         PermissionRequestKind::Question => {
             let answer = question_answer(request, outcome)?;
             let Some(answer) = answer else {
@@ -6908,16 +7115,23 @@ async fn pump_events(
             item.inherit_and_stamp_received_at(previous.as_ref(), now_ms());
         }
 
-        let retire = matches!(
-            event,
-            SessionEvent::TurnCanceled { .. } | SessionEvent::TurnFailed { .. }
-        );
-        let settle = matches!(
+        // A consultation stays open across the events of its turn. Retiring on
+        // the first of them (turnStarted) drops the rest, including the
+        // terminal, so the Session CLI is never closed and the pause never
+        // returns to Waiting. Only a terminal ends this execution.
+        let terminal = matches!(
             event,
             SessionEvent::TurnCompleted { .. }
                 | SessionEvent::TurnFailed { .. }
                 | SessionEvent::TurnCanceled { .. }
         );
+        let retire = terminal
+            && (consultation
+                || matches!(
+                    event,
+                    SessionEvent::TurnCanceled { .. } | SessionEvent::TurnFailed { .. }
+                ));
+        let settle = terminal;
         if settle {
             if let Some(execution) = owner
                 .as_ref()
@@ -7021,12 +7235,15 @@ fn turn_summary(
                 if usage.llm_rounds == 0 {
                     usage.llm_rounds = tracked.llm_rounds;
                 }
-                if usage.input_tokens == 0 && usage.output_tokens == 0 {
+                if usage.token_status() == genehub_proto::TokenUsageStatus::Unavailable {
                     usage.input_tokens = tracked.input_tokens;
                     usage.output_tokens = tracked.output_tokens;
                     usage.cache_read_tokens = tracked.cache_read_tokens;
                     usage.cache_write_tokens = tracked.cache_write_tokens;
                     usage.cost_usd = tracked.cost_usd.or(usage.cost_usd);
+                    if tracked.token_status() != genehub_proto::TokenUsageStatus::Unavailable {
+                        usage.token_usage_status = Some(genehub_proto::TokenUsageStatus::Partial);
+                    }
                 }
                 // The adapter's final event is authoritative for the rate
                 // stats, but a provider that reports usage only in a trailing
@@ -7060,6 +7277,13 @@ fn turn_summary(
         ),
         _ => return None,
     };
+    usage.token_usage_status = Some(match (outcome, usage.token_status()) {
+        (
+            TurnOutcome::Canceled | TurnOutcome::Failed,
+            genehub_proto::TokenUsageStatus::Reported,
+        ) => genehub_proto::TokenUsageStatus::Partial,
+        (_, status) => status,
+    });
     let start = items
         .iter()
         .rposition(|item| {
@@ -7488,27 +7712,12 @@ fn normalize_runtime_selection(meta: &mut SessionMeta, catalog: &Catalog) -> boo
             .as_ref()
             .is_some_and(|id| !catalog.models.iter().any(|model| &model.id == id))
     {
-        let migrated = meta
-            .model_id
-            .as_deref()
-            .filter(|_| meta.agent_id == "cursor")
-            .and_then(|id| crate::adapter::cursor::resolve_legacy_cursor_model(id, catalog));
-        if let Some((migrated_model, migrated_effort, migrated_fast)) = migrated {
-            meta.model_id = Some(migrated_model);
-            if meta.effort_id.is_none() && migrated_effort.is_some() {
-                meta.effort_id = migrated_effort;
-            }
-            if meta.fast.is_none() && migrated_fast.is_some() {
-                meta.fast = migrated_fast;
-            }
-        } else {
-            meta.model_id = catalog
-                .default_model
-                .as_ref()
-                .filter(|id| catalog.models.iter().any(|model| &model.id == *id))
-                .cloned()
-                .or_else(|| catalog.models.first().map(|model| model.id.clone()));
-        }
+        meta.model_id = catalog
+            .default_model
+            .as_ref()
+            .filter(|id| catalog.models.iter().any(|model| &model.id == *id))
+            .cloned()
+            .or_else(|| catalog.models.first().map(|model| model.id.clone()));
     }
     if !catalog.modes.is_empty()
         && meta
@@ -7702,11 +7911,7 @@ mod tests {
     /// A manager over a throwaway directory. Neither rename nor delete asks the
     /// registry anything, so an empty one is enough to exercise both.
     fn manager(root: &std::path::Path) -> SessionManager {
-        SessionManager::new(
-            test_store(root),
-            Arc::new(Registry::new(&std::collections::BTreeMap::new())),
-            16,
-        )
+        SessionManager::new(test_store(root), Arc::new(Registry::builtin_only()), 16)
     }
 
     #[tokio::test]
@@ -7882,11 +8087,8 @@ mod tests {
             homes.clone(),
         );
         let info = spaces.open(&project, None).await.unwrap();
-        let sessions = SessionManager::new(
-            Store::new(homes),
-            Arc::new(Registry::new(&std::collections::BTreeMap::new())),
-            16,
-        );
+        let sessions =
+            SessionManager::new(Store::new(homes), Arc::new(Registry::builtin_only()), 16);
         let mut owned = meta();
         owned.workspace_id = info.id.clone();
         sessions.store.save_meta(&owned).unwrap();
@@ -13109,7 +13311,7 @@ mod tests {
                 homes.attach("w_other", workspace.path());
                 Store::new(homes)
             },
-            Arc::new(Registry::new(&std::collections::BTreeMap::new())),
+            Arc::new(Registry::builtin_only()),
             16,
         );
 
@@ -13327,92 +13529,6 @@ mod tests {
         assert_eq!(session.model_id, before.model_id);
         assert_eq!(session.effort_id, before.effort_id);
         assert_eq!(session.runtime_values, before.runtime_values);
-    }
-
-    #[test]
-    fn legacy_cursor_model_ids_are_migrated_without_resetting_to_default_model() {
-        let mut session = meta();
-        session.agent_id = "cursor".into();
-        session.model_id = Some("cursor-grok-4.6-high-fast".into());
-        session.effort_id = None;
-        session.fast = None;
-
-        let catalog = Catalog {
-            models: vec![
-                genehub_proto::ModelInfo {
-                    id: "cursor-grok-4.6".into(),
-                    label: "Cursor Grok 4.6".into(),
-                    context_window: None,
-                    reasoning: true,
-                    efforts: vec!["high".into()],
-                    supports_fast: true,
-                    input_modalities: None,
-                },
-                genehub_proto::ModelInfo {
-                    id: "auto".into(),
-                    label: "Auto".into(),
-                    context_window: None,
-                    reasoning: false,
-                    efforts: vec![],
-                    supports_fast: false,
-                    input_modalities: None,
-                },
-            ],
-            modes: vec![],
-            commands: vec![],
-            runtime_axes: None,
-            default_model: Some("auto".into()),
-            default_mode: None,
-            default_effort: None,
-        };
-
-        assert!(normalize_runtime_selection(&mut session, &catalog));
-        assert_eq!(session.model_id.as_deref(), Some("cursor-grok-4.6"));
-        assert_eq!(session.effort_id.as_deref(), Some("high"));
-        assert_eq!(session.fast, Some(true));
-    }
-
-    #[test]
-    fn legacy_opaque_cursor_model_ids_are_migrated_without_resetting() {
-        let mut session = meta();
-        session.agent_id = "cursor".into();
-        session.model_id = Some("grok-4.7[effort=high,fast=true]".into());
-        session.effort_id = None;
-        session.fast = None;
-
-        let catalog = Catalog {
-            models: vec![
-                genehub_proto::ModelInfo {
-                    id: "grok-4.7".into(),
-                    label: "Grok 4.7".into(),
-                    context_window: None,
-                    reasoning: true,
-                    efforts: vec!["low".into(), "medium".into(), "high".into()],
-                    supports_fast: true,
-                    input_modalities: None,
-                },
-                genehub_proto::ModelInfo {
-                    id: "auto".into(),
-                    label: "Auto".into(),
-                    context_window: None,
-                    reasoning: false,
-                    efforts: vec![],
-                    supports_fast: false,
-                    input_modalities: None,
-                },
-            ],
-            modes: vec![],
-            commands: vec![],
-            runtime_axes: None,
-            default_model: Some("auto".into()),
-            default_mode: None,
-            default_effort: Some("medium".into()),
-        };
-
-        assert!(normalize_runtime_selection(&mut session, &catalog));
-        assert_eq!(session.model_id.as_deref(), Some("grok-4.7"));
-        assert_eq!(session.effort_id.as_deref(), Some("high"));
-        assert_eq!(session.fast, Some(true));
     }
 
     #[tokio::test]

@@ -40,3 +40,8 @@ and reads the bytes again at completion. Environment values are fingerprinted, n
 
 Full gates with a filtered selection stay unqualified and return nonzero; `dev-feedback` cannot stand in for a complete gate.
 For user-facing feedback, record the distinction between function-level checks and an actual user interaction through recovery.
+
+Protocol projections are generated before capturing a run identity with
+`testctl generate-proto --open <absolute-open-root>`. This invokes the Rust-owned
+exporter and provides no gate qualification. Existing protocol contracts compare
+a fresh projection from the owning types with the checked-in bytes.

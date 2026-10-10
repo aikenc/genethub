@@ -1,4 +1,6 @@
 import type {
+  AgentInfo,
+  AgentUserRequest,
   AssetPreviewError,
   AssetPreviewMetadata,
   AssetPreviewRepresentation,
@@ -304,6 +306,9 @@ export class Client {
   private readonly noticeListeners = new Set<(level: string, message: string) => void>();
   private readonly downloadListeners = new Set<(download: UpdateDownload) => void>();
   private readonly processListeners = new Set<(processes: BackgroundProcess[]) => void>();
+  private readonly agentsListeners = new Set<(agents: AgentInfo[]) => void>();
+  private readonly agentRequestListeners = new Set<(request: AgentUserRequest) => void>();
+  private readonly agentRequestClosedListeners = new Set<(agentId: string, requestId: string) => void>();
   private state: ConnectionState = "connecting";
   private stopped = false;
   private attempt = 0;
@@ -420,6 +425,21 @@ export class Client {
   onBackgroundProcesses(listener: (processes: BackgroundProcess[]) => void): () => void {
     this.processListeners.add(listener);
     return () => this.processListeners.delete(listener);
+  }
+
+  onAgents(listener: (agents: AgentInfo[]) => void): () => void {
+    this.agentsListeners.add(listener);
+    return () => this.agentsListeners.delete(listener);
+  }
+
+  onAgentRequest(listener: (request: AgentUserRequest) => void): () => void {
+    this.agentRequestListeners.add(listener);
+    return () => this.agentRequestListeners.delete(listener);
+  }
+
+  onAgentRequestClosed(listener: (agentId: string, requestId: string) => void): () => void {
+    this.agentRequestClosedListeners.add(listener);
+    return () => this.agentRequestClosedListeners.delete(listener);
   }
 
   connect(): void {
@@ -1413,6 +1433,16 @@ export class Client {
         return;
       case "updateDownload":
         for (const listener of this.downloadListeners) this.callListener(() => listener(frame.download));
+        return;
+      case "agents":
+        for (const listener of this.agentsListeners) this.callListener(() => listener(frame.agents));
+        return;
+      case "agentRequest":
+        for (const listener of this.agentRequestListeners) this.callListener(() => listener(frame.request));
+        return;
+      case "agentRequestClosed":
+        for (const listener of this.agentRequestClosedListeners)
+          this.callListener(() => listener(frame.agentId, frame.requestId));
         return;
       case "desync":
         void this.fillGap(frame.sessionId);

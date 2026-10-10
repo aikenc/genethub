@@ -1,6 +1,12 @@
 import { readdirSync, readFileSync, readlinkSync } from "node:fs";
+import { redactText } from "../evidence/redact.ts";
 
-export interface ResourceCensus { processes: number | null; ports: number | null }
+export interface ResourceCensus {
+  processes: number | null;
+  ports: number | null;
+  /** Present only in a leak report: which processes were still alive. */
+  leaked?: Array<{ pid: number; cmd: string }>;
+}
 interface Identity { pid: number; birth: string; parent: number; state: string }
 function identity(pid: number): Identity | undefined {
   try {
@@ -65,14 +71,34 @@ export function trackResources(owner: string, rootPid: number) {
   const timer = supported ? setInterval(scan, 500) : undefined;
   timer?.unref();
   scan();
+  function describe(result: ResourceCensus): ResourceCensus {
+    // A leak report without the process identity cannot be diagnosed later.
+    if ((result.processes ?? 0) <= 0) return result;
+    const leaked = scan().map(p => {
+      let cmd = "";
+      try { cmd = readFileSync(`/proc/${p.pid}/cmdline`, "utf8").split("\0").join(" "); } catch { /* Exited during sampling. */ }
+      return { pid: p.pid, cmd: redactText(cmd).slice(0, 160) };
+    });
+    return { ...result, leaked };
+  }
   return {
     census,
     async finish() {
       if (timer) clearInterval(timer);
-      // Let normal child shutdown settle before recording a leak.
+      // Let normal child shutdown settle before recording a leak. A survivor
+      // that is on its way out (a third-party CLI's detached self-cleanup)
+      // gets room as long as the set of survivors keeps shrinking; a set that
+      // stops changing for a few seconds is stuck, not settling.
       let before = census();
-      const deadline = Date.now() + 1500;
-      while ((before.processes ?? 0) > 0 && Date.now() < deadline) { await pause(100); before = census(); }
+      let stable = 0;
+      const settleDeadline = Date.now() + 10_000;
+      while ((before.processes ?? 0) > 0 && Date.now() < settleDeadline && stable < 3_000) {
+        await pause(250);
+        const next = census();
+        stable = next.processes === before.processes ? stable + 250 : 0;
+        before = next;
+      }
+      before = describe(before);
       for (const signal of ["SIGTERM", "SIGKILL"] as const) {
         for (const p of scan()) {
           if (p.pid !== process.pid && identity(p.pid)?.birth === p.birth) {

@@ -25,9 +25,19 @@ export {
   agentHostProcesses,
 } from "./drivers/cli.ts";
 
+export { cliEnvelope, localGenetCli, type CliEnvelope, type GenetCliResult } from "./drivers/genet-cli.ts";
+export {
+  CURSOR_INSTALL_URL,
+  cursorInstall,
+  cursorScriptState,
+  installCursorAsUser,
+  isolateFromHostCursor,
+  type CursorInstall,
+} from "./builders/cursor-cli.ts";
 export type { CaseContext } from "./context.ts";
 export { openBrowser, openWorkbenchPage } from "./drivers/browser.ts";
 export { assertions } from "./assertions/index.ts";
+export { startMockLlm } from "../infrastructure/public.ts";
 export { connectProductClient } from "./drivers/client.ts";
 export type { ClientDiagnosticEvent } from "@genehub/workbench/client";
 export { createLatencyInjector, type LatencyInjector, type LatencyStats } from "./drivers/latency.ts";
@@ -75,7 +85,18 @@ export function defineE2e(input: DefineInput, run: (ctx: CaseContext) => Promise
   defineE2eBase(input, (ctx) => run(ctx as CaseContext), callerFile());
 }
 
-export { registerScriptedCodex } from "./builders/codex.ts";
+export { CODEX_NPM_PACKAGE, codexNpmPrefix, pointCodexAtMockLlm, registerScriptedCodex } from "./builders/codex.ts";
+export {
+  hostNode,
+  installNodeLikeNvm,
+  leaseProcesses,
+  NODE_CLIS,
+  requireHttpsReachable,
+  requireNpmPackage,
+  withoutNodeOrAgentClis,
+  type HostNode,
+  type LeaseProcess,
+} from "./builders/agent-cli-install.ts";
 
 export { allocatePort } from "../infrastructure/public.ts";
 export { openPreviewBrowser } from './drivers/preview-browser.ts';
@@ -89,8 +110,34 @@ export { redactText, redactValue, watchInputs } from "../infrastructure/public.t
 export { waitForExit, collectOutput } from "../infrastructure/public.ts";
 
 export { runNodeUnit } from "../infrastructure/public.ts";
-export { registerControlledAgent, readControlledAgentJournal } from "../infrastructure/public.ts";
+export {
+  breakScriptAgentManifest,
+  cachedScriptAgentRuntime,
+  HOST_AGENT_CLIS,
+  hideHostAgentClis,
+  installScriptAgent,
+  keepScriptAgentRuntimeUnseeded,
+  pathWithout,
+  pinnedScriptAgentRuntime,
+  readControlledAgentJournal,
+  readScriptAgentJournal,
+  registerControlledAgent,
+  runtimeInstallerLines,
+  scriptAgentRuntimeIdentity,
+  scriptAgentRuntimeMirror,
+  seedScriptAgentRuntime,
+  writeScriptAgentControl,
+  type PinnedScriptAgentRuntime,
+  type ScriptAgentControl,
+  type ScriptAgentHandle,
+  type ScriptAgentJournalEntry,
+  type SeededScriptAgentRuntime,
+} from "./builders/script-agent.ts";
 
 export { createScheduler, defaultBudget, claimNext, completeUnit, hasClaimable } from "../infrastructure/public.ts";
 
 export { selectForGate } from "../policies/gates.ts";
+
+export { recoverAbandonedLeases, registerLeaseWorker } from "../infrastructure/public.ts";
+
+export { openProviderSession } from "./flows/branches/provider.ts";

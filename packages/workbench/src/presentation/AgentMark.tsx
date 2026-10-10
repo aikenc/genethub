@@ -10,7 +10,7 @@ export function AgentMark({
   glyphClassName = "text-lg",
   fallbackToText = true,
 }: {
-  agent: Pick<AgentInfo, "id" | "label">;
+  agent: Pick<AgentInfo, "id" | "label"> & Partial<Pick<AgentInfo, "icon">>;
   className?: string;
   textClassName?: string;
   glyphClassName?: string;
@@ -67,9 +67,9 @@ export function AgentMark({
 /**
  * The Agent's initial, for the ones this build has no mark for.
  *
- * Copilot, Gemini and every locally configured ACP Agent have no
- * bundled icon — their vendors' marks are trademarks we do not redistribute —
- * and in a row of tabs that showed as an empty gap where the others have a
+ * A user-layer script Agent that ships no icon has no bundled mark either —
+ * other vendors' marks are trademarks we do not redistribute — and in a row
+ * of tabs that showed as an empty gap where the others have a
  * logo. A letter is not a brand and does not claim to be one; it just keeps
  * the row aligned and gives the Agent a constant place to look.
  */

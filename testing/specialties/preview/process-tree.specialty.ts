@@ -3,11 +3,11 @@ import { defineSpecialty } from "../../framework/public.ts";
 defineSpecialty({
   id:"specialty.processes.stop-subtree-keeps-agent",
   title:"Ending one agent-owned subtree preserves its sibling and the agent itself",
-  oracle:"Real ACP agent spawns child/grandchild/sibling; process.kill removes only child/grandchild, then the same agent answers another prompt",
+  oracle:"A script Agent's session CLI spawns child/grandchild/sibling; process.kill removes only child/grandchild, then the same agent answers another prompt",
   catches:["WASM process census always empty","killing whole agent group","orphan grandchild","process snapshot loses workspace"],
   tags: ["network-risk-v2", "core","processes"],llm:{default:"none"},expectedDurationMs:15000,timeoutMs:90000,
   resources:{environments:1,cpu:2,memoryMb:768,io:1,browser:0,pool:"standard"},
-  surfaces:["daemon","agent","workbench"],productInterfaces:["@genehub/workbench/client"],requiredArtifacts:["genehub-host-local","genehub_guest.wasm"],
+  surfaces:["daemon","agent","workbench"],productInterfaces:["@genehub/workbench/client","agent-serve-protocol-1"],requiredArtifacts:["genehub-host-local","genehub_guest.wasm"],
 },async t=>{
   const opened=await t.flows.branches.openControlledAgentSession({openRoot:t.openRoot,lease:t.env,agent:{profile:"normal",processTree:true}});
   try{

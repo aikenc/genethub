@@ -18,15 +18,13 @@ export { defineE2e, defineJourney, defineSpecialty, getRegisteredCase } from "./
 export type { DefineInput } from "./engine/registry.ts";
 export { createLease, releaseLease, type EnvironmentLease } from "./environment/lease.ts";
 export { allocatePort } from "./environment/ports.ts";
-export { startMockLlm, type MockLlmHandle } from "./services/mock-llm/index.ts";
 export {
-  registerControlledAgent,
-  readControlledAgentJournal,
-  type ControlledAgentHandle,
-  type ControlledAgentJournalEntry,
-  type ControlledAgentOptions,
-  type ControlledAgentProfile,
-} from "./agents/index.ts";
+  pinnedPythonRuntimeCache,
+  readPinnedPythonRuntime,
+  type PinnedPythonRuntime,
+  type PinnedPythonRuntimeCache,
+} from "./environment/pinned-runtime.ts";
+export { startMockLlm, type MockLlmHandle } from "./services/mock-llm/index.ts";
 
 export { repoIdentity } from "./engine/git.ts";
 export { trackResources } from "./environment/resource-census.ts";
@@ -38,3 +36,5 @@ export { waitForExit, collectOutput } from "./process/wait.ts";
 export { createScheduler, defaultBudget, claimNext, completeUnit, hasClaimable } from "./engine/scheduler.ts";
 
 export { runNodeUnit } from "./adapters/node.ts";
+
+export { recoverAbandonedLeases, registerLeaseWorker } from "./environment/ownership.ts";

@@ -1,6 +1,5 @@
 import { createRequire } from "node:module";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -8,6 +7,7 @@ const require = createRequire(import.meta.url);
 
 import type { UnitResult, WorkUnit } from "../types.ts";
 import { createLease, releaseLease } from "../environment/lease.ts";
+import { registerLeaseWorker } from "../environment/ownership.ts";
 import { trackResources } from "../environment/resource-census.ts";
 import { killProcessGroup } from "../environment/cleanup.ts";
 import { spawnGroup } from "../process/group.ts";
@@ -22,7 +22,8 @@ export async function runNodeUnit(unit: WorkUnit, extraEnv: Record<string, strin
   const startedMs = Date.now();
   const startedAt = new Date(startedMs).toISOString();
   const lease = createLease();
-  const resultDir = mkdtempSync(path.join(tmpdir(), "testctl-result-"));
+  const resultDir = path.join(lease.root, "result");
+  mkdirSync(resultDir);
   const resultPath = path.join(resultDir, "result.json");
   const tsxLoader = pathToFileURL(require.resolve("tsx")).href;
   const child = spawnGroup(process.execPath, ["--import", tsxLoader, WORKER], {
@@ -40,6 +41,7 @@ export async function runNodeUnit(unit: WorkUnit, extraEnv: Record<string, strin
       TESTCTL_RESOURCE_OWNER: lease.id,
     },
   });
+  if (child.pid) registerLeaseWorker(lease.root, child.pid);
   const resources = trackResources(lease.id, child.pid ?? -1);
   let result: UnitResult | undefined;
   let stderrTail = "";
@@ -90,7 +92,7 @@ export async function runNodeUnit(unit: WorkUnit, extraEnv: Record<string, strin
       }
     }
     if (child.pid) killProcessGroup(child.pid);
-    releaseLease(lease);
+    if (cleanup.after.processes === 0) releaseLease(lease);
     rmSync(resultDir, { recursive: true, force: true });
   }
 }

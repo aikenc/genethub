@@ -134,7 +134,10 @@ pub fn session_guidance(
     front_door_cli: Option<&Path>,
     host_form_paths: bool,
 ) -> String {
-    let artifact = crate::session::artifact_links::guidance().to_string();
+    let mut artifact = crate::session::artifact_links::guidance().to_string();
+    if front_door_cli.is_some() {
+        artifact.push_str("\n\nGeneHub conversation interactions: for a non-secret input box or choices in this conversation, use the native request_user_input tool if available, or the platform CLI: \"$GENEHUB_CLI\" session ask \"$GENEHUB_SESSION_ID\" --request-id <stable-question-id> --question <prompt> --choice <label> --choice <label>. Text input is enabled by default. This saves the question and stops the current execution; do not poll or wait for the answer. The Human answer resumes a new execution in the same Session. Reuse an id only for the identical question. An HTML preview page does not submit conversation answers. Do not request API keys, device codes or credentials here. For GeneHub model providers, use provider list and provider configure with --session $GENEHUB_SESSION_ID, --action <stable-id>, --base-url, --dialect and --label; use --model for gateways without discovery. This creates a workbench configuration card and stops the execution. The Human enters credentials directly to the daemon, then the original Session resumes. Use provider get and provider verify to inspect the durable receipt, never read config.json or modify unrelated Claude/Codex settings. context.authority reports actual permissions; a sessionController can prepare the operation without Settings. Confirm availability through the bound CLI's capabilities/schema; never invent a missing command. Read-only Workflow child sessions use the existing Workflow Human exit instead.");
+    }
     let Some(root) = skills_root else {
         return artifact;
     };

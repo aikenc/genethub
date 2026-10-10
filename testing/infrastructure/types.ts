@@ -206,4 +206,4 @@ export const DEFAULT_RESOURCES: CaseResources = {
 };
 
 export const RUNNER_VERSION = "testctl.v2";
-export const POLICY_VERSION = "gates.v2";
+export const POLICY_VERSION = "gates.v3";

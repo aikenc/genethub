@@ -38,6 +38,8 @@ impl Content {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Usage {
+    #[serde(default)]
+    pub token_usage_reported: bool,
     pub input: u64,
     pub output: u64,
     pub cache_read: u64,
@@ -58,6 +60,7 @@ pub struct Cost {
 
 impl Usage {
     pub fn add(&mut self, other: &Usage) {
+        self.token_usage_reported |= other.token_usage_reported;
         self.input += other.input;
         self.output += other.output;
         self.cache_read += other.cache_read;

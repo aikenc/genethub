@@ -169,8 +169,11 @@ for (const scenario of ["zero", "repair", "limit", "zero-limit", "if-true", "if-
     await t.tools.waitUntil(async()=>{
       const reply = await opened.client.call({type:"workflow.history",payload:{workspaceId:opened.workspaceId,limit:10}});
       if (reply?.type !== "workflowRuns") return false;
-      t.assertions.assert(reply.data.length <= 1,"loop created another Run");
-      run = reply.data[0];
+      // A blocked Run is handed to the built-in recovery flow, which is a
+      // separate Run that names it in `handles`; it must name this one.
+      const business = t.assertions.businessRuns(reply.data);
+      t.assertions.assert(business.length <= 1,"loop created another Run");
+      run = business[0];
       return !!run && ["completed","blocked","failed","cancelled"].includes(run.status);
     },90_000);
     t.assertions.assert(run?.status === (scenario === "cancel" ? "cancelled" : blocked ? "blocked" : "completed"),`unexpected terminal state: ${JSON.stringify(run)}`);

@@ -4,6 +4,7 @@
 import { readFileSync, appendFileSync } from "node:fs";
 import readline from "node:readline";
 if (process.argv.includes("login")) { console.log("Logged in"); process.exit(0); }
+if (process.argv.includes("--version")) { console.log("codex-cli 0.0.0-scripted"); process.exit(0); }
 const script = JSON.parse(readFileSync(process.env.GENEHUB_TEST_CODEX_SCRIPT, "utf8"));
 let turn = 0;
 let thread = "scripted-thread";

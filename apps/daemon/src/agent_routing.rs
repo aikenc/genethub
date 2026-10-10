@@ -576,32 +576,22 @@ fn unrestricted_mode(agent: &AgentInfo) -> Option<String> {
     if !agent.capabilities.permissions {
         return None;
     }
-    let known = match agent.id.as_str() {
-        "codex" | "acp:codex" | "acp:codex-acp" => &["full-access"][..],
-        "claude" | "tclaude" | "acp:claude" | "acp:claude-code" => &["bypassPermissions"][..],
-        _ => &[][..],
-    };
-    known
+    // No Agent is named here: the most permissive mode is recognised by how
+    // Agents commonly call it.
+    agent
+        .catalog
+        .modes
         .iter()
-        .find_map(|id| {
-            agent
-                .catalog
-                .modes
-                .iter()
-                .find(|mode| mode.id.eq_ignore_ascii_case(id))
-        })
-        .or_else(|| {
-            agent.catalog.modes.iter().find(|mode| {
-                let id = mode.id.to_ascii_lowercase();
-                let label = mode.label.to_ascii_lowercase();
-                matches!(
-                    id.as_str(),
-                    "full-access" | "full_access" | "unrestricted" | "bypasspermissions"
-                ) || label.contains("full access")
-                    || label.contains("unrestricted")
-                    || mode.label.contains("完全")
-                    || mode.label.contains("全开")
-            })
+        .find(|mode| {
+            let id = mode.id.to_ascii_lowercase();
+            let label = mode.label.to_ascii_lowercase();
+            matches!(
+                id.as_str(),
+                "full-access" | "full_access" | "unrestricted" | "bypasspermissions"
+            ) || label.contains("full access")
+                || label.contains("unrestricted")
+                || mode.label.contains("完全")
+                || mode.label.contains("全开")
         })
         .map(|mode| mode.id.clone())
 }
@@ -660,6 +650,16 @@ mod tests {
             },
             builtin: true,
             routes: None,
+            source: None,
+            version: None,
+            description: None,
+            message: None,
+            actions: None,
+            job: None,
+            pending_requests: None,
+            icon: None,
+            dir: None,
+            override_stale: None,
         }
     }
 

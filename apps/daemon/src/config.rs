@@ -102,9 +102,6 @@ impl Default for Config {
 pub struct AgentsConfig {
     /// Credentials for the built-in agent's providers, keyed by provider id.
     pub providers: std::collections::BTreeMap<String, ProviderConfig>,
-    /// Extra agents declared by the user. `extends` names a built-in adapter
-    /// shape, so adding a new ACP-speaking CLI needs no code change.
-    pub custom: std::collections::BTreeMap<String, CustomAgent>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,15 +171,6 @@ pub struct ProviderConfig {
     pub models: Vec<String>,
     /// Explicit per-model media support; entries override provider discovery.
     pub model_inputs: std::collections::BTreeMap<String, Vec<String>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CustomAgent {
-    pub extends: String,
-    pub command: Vec<String>,
-    #[serde(default)]
-    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

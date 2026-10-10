@@ -1,0 +1,598 @@
+{
+ "description": "Every item kind codex.rs renders, plus an unknown one and the user echo that must be dropped.",
+ "thread": "root-thread",
+ "steps": [
+  {
+   "begin": "t1"
+  },
+  {
+   "frame": {
+    "method": "turn/started",
+    "params": {
+     "threadId": "root-thread",
+     "turn": {
+      "id": "root-turn",
+      "items": [],
+      "status": "inProgress"
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "item/completed",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "item": {
+      "type": "userMessage",
+      "id": "echo",
+      "content": [
+       {
+        "type": "text",
+        "text": "hi"
+       }
+      ]
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "item/completed",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "item": {
+      "type": "commandExecution",
+      "id": "call-1",
+      "status": "completed",
+      "command": [
+       "ls",
+       "-a"
+      ],
+      "aggregatedOutput": "README.md\n",
+      "exitCode": 0
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "item/completed",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "item": {
+      "type": "commandExecution",
+      "id": "approval-command",
+      "status": "inProgress",
+      "command": [
+       "genet",
+       "space",
+       "approval",
+       "request"
+      ],
+      "aggregatedOutput": "",
+      "exitCode": null
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "item/started",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "item": {
+      "type": "commandExecution",
+      "id": "call-2",
+      "status": "inProgress",
+      "command": "/bin/bash -lc \"sed -n '1,20p' README.md\""
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "item/completed",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "item": {
+      "type": "fileChange",
+      "id": "edit-1",
+      "status": "completed",
+      "changes": [
+       {
+        "path": "src/main.rs",
+        "unifiedDiff": "@@ -1 +1 @@\n-a\n+b\n"
+       }
+      ]
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "item/completed",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "item": {
+      "type": "fileChange",
+      "id": "edit-2",
+      "status": "failed",
+      "changes": [
+       {
+        "note": "who knows"
+       }
+      ]
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "item/completed",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "item": {
+      "type": "mcpToolCall",
+      "id": "mcp-1",
+      "server": "shot",
+      "tool": "screenshot",
+      "status": "completed",
+      "result": {
+       "content": [
+        {
+         "type": "text",
+         "text": "ok"
+        },
+        {
+         "type": "image",
+         "data": "aGk=",
+         "mimeType": "image/png"
+        }
+       ]
+      }
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "item/completed",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "item": {
+      "type": "imageView",
+      "id": "view-1",
+      "path": "assets/logo.png"
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "item/completed",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "item": {
+      "type": "imageGeneration",
+      "id": "exec-1",
+      "status": "completed",
+      "result": "iVBORw0KGgoAAAANSUhEUg==",
+      "revisedPrompt": "a landscape",
+      "savedPath": "/root/.codex/generated_images/t/exec-1"
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "item/completed",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "item": {
+      "type": "webSearch",
+      "id": "ws-1",
+      "query": "codex app-server"
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "item/started",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "item": {
+      "type": "collabAgentToolCall",
+      "id": "collab-1",
+      "tool": "spawn_agent",
+      "prompt": "audit the code"
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "item/completed",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "item": {
+      "type": "subAgentActivity",
+      "id": "return-to-root",
+      "agentThreadId": "child-thread",
+      "agentPath": "/root",
+      "kind": "interacted"
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "item/started",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "item": {
+      "type": "subAgentActivity",
+      "id": "child-run",
+      "agentPath": "/root/auditor",
+      "kind": "interrupted"
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "item/completed",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "item": {
+      "type": "reasoning",
+      "id": "r-1",
+      "summary": [
+       {
+        "text": "First."
+       },
+       "Second."
+      ]
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "item/completed",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "item": {
+      "type": "error",
+      "id": "err-1",
+      "message": "stream disconnected"
+     }
+    }
+   }
+  },
+  {
+   "frame": {
+    "method": "item/completed",
+    "params": {
+     "threadId": "root-thread",
+     "turnId": "root-turn",
+     "item": {
+      "type": "somethingNew",
+      "id": "x1",
+      "note": "hello"
+     }
+    }
+   }
+  }
+ ],
+ "events": [
+  {
+   "type": "item",
+   "turnId": "t1",
+   "item": {
+    "type": "toolCall",
+    "id": "call-1",
+    "name": "Shell",
+    "status": "ok",
+    "detail": {
+     "kind": "shell",
+     "command": "ls -a",
+     "output": "README.md\n",
+     "exitCode": 0
+    },
+    "images": []
+   }
+  },
+  {
+   "type": "item",
+   "turnId": "t1",
+   "item": {
+    "type": "toolCall",
+    "id": "approval-command",
+    "name": "Shell",
+    "status": "ok",
+    "detail": {
+     "kind": "shell",
+     "command": "genet space approval request",
+     "output": ""
+    },
+    "images": []
+   }
+  },
+  {
+   "type": "item",
+   "turnId": "t1",
+   "item": {
+    "type": "toolCall",
+    "id": "call-2",
+    "name": "Shell",
+    "status": "running",
+    "detail": {
+     "kind": "shell",
+     "command": "sed -n '1,20p' README.md",
+     "output": ""
+    },
+    "images": []
+   }
+  },
+  {
+   "type": "item",
+   "turnId": "t1",
+   "item": {
+    "type": "toolCall",
+    "id": "edit-1",
+    "name": "Edit",
+    "status": "ok",
+    "detail": {
+     "kind": "edit",
+     "path": "src/main.rs",
+     "diff": "@@ -1 +1 @@\n-a\n+b\n"
+    },
+    "images": []
+   }
+  },
+  {
+   "type": "item",
+   "turnId": "t1",
+   "item": {
+    "type": "toolCall",
+    "id": "edit-2",
+    "name": "Edit",
+    "status": "error",
+    "detail": {
+     "kind": "unknown",
+     "raw": {
+      "type": "fileChange",
+      "id": "edit-2",
+      "status": "failed",
+      "changes": [
+       {
+        "note": "who knows"
+       }
+      ]
+     }
+    },
+    "images": []
+   }
+  },
+  {
+   "type": "item",
+   "turnId": "t1",
+   "item": {
+    "type": "toolCall",
+    "id": "mcp-1",
+    "name": "shot.screenshot",
+    "status": "ok",
+    "detail": {
+     "kind": "unknown",
+     "raw": {
+      "type": "mcpToolCall",
+      "id": "mcp-1",
+      "server": "shot",
+      "tool": "screenshot",
+      "status": "completed",
+      "result": {
+       "content": [
+        {
+         "type": "text",
+         "text": "ok"
+        },
+        {
+         "type": "image",
+         "data": "aGk=",
+         "mimeType": "image/png"
+        }
+       ]
+      }
+     }
+    },
+    "images": [
+     {
+      "alt": "shot.screenshot",
+      "mime": "image/png",
+      "dataBase64": "aGk="
+     }
+    ]
+   }
+  },
+  {
+   "type": "item",
+   "turnId": "t1",
+   "item": {
+    "type": "toolCall",
+    "id": "view-1",
+    "name": "View image",
+    "status": "ok",
+    "detail": {
+     "kind": "overview",
+     "toolKind": "read",
+     "overview": "assets/logo.png",
+     "input": "assets/logo.png",
+     "output": ""
+    },
+    "images": [
+     {
+      "alt": "View image: assets/logo.png",
+      "mime": "image/png",
+      "path": "assets/logo.png"
+     }
+    ]
+   }
+  },
+  {
+   "type": "item",
+   "turnId": "t1",
+   "item": {
+    "type": "toolCall",
+    "id": "exec-1",
+    "name": "Generate image",
+    "status": "ok",
+    "detail": {
+     "kind": "unknown",
+     "raw": {
+      "type": "imageGeneration",
+      "id": "exec-1",
+      "status": "completed",
+      "result": "iVBORw0KGgoAAAANSUhEUg==",
+      "revisedPrompt": "a landscape",
+      "savedPath": "/root/.codex/generated_images/t/exec-1"
+     }
+    },
+    "images": [
+     {
+      "alt": "a landscape",
+      "mime": "image/png",
+      "dataBase64": "iVBORw0KGgoAAAANSUhEUg=="
+     }
+    ]
+   }
+  },
+  {
+   "type": "item",
+   "turnId": "t1",
+   "item": {
+    "type": "toolCall",
+    "id": "ws-1",
+    "name": "Web search",
+    "status": "ok",
+    "detail": {
+     "kind": "search",
+     "query": "codex app-server",
+     "matches": []
+    },
+    "images": []
+   }
+  },
+  {
+   "type": "item",
+   "turnId": "t1",
+   "item": {
+    "type": "toolCall",
+    "id": "collab-1",
+    "name": "Sub-agent",
+    "status": "running",
+    "detail": {
+     "kind": "subAgent",
+     "agent": "spawn_agent",
+     "prompt": "audit the code",
+     "items": []
+    },
+    "images": []
+   }
+  },
+  {
+   "type": "item",
+   "turnId": "t1",
+   "item": {
+    "type": "toolCall",
+    "id": "return-to-root",
+    "name": "Main agent",
+    "status": "ok",
+    "detail": {
+     "kind": "unknown",
+     "raw": {
+      "type": "subAgentActivity",
+      "id": "return-to-root",
+      "agentThreadId": "child-thread",
+      "agentPath": "/root",
+      "kind": "interacted"
+     }
+    },
+    "images": []
+   }
+  },
+  {
+   "type": "item",
+   "turnId": "t1",
+   "item": {
+    "type": "toolCall",
+    "id": "child-run",
+    "name": "/root/auditor",
+    "status": "canceled",
+    "detail": {
+     "kind": "unknown",
+     "raw": {
+      "type": "subAgentActivity",
+      "id": "child-run",
+      "agentPath": "/root/auditor",
+      "kind": "interrupted"
+     }
+    },
+    "images": []
+   }
+  },
+  {
+   "type": "item",
+   "turnId": "t1",
+   "item": {
+    "type": "reasoning",
+    "id": "r-1",
+    "text": "First.\n\nSecond."
+   }
+  },
+  {
+   "type": "item",
+   "turnId": "t1",
+   "item": {
+    "type": "error",
+    "id": "err-1",
+    "message": "stream disconnected"
+   }
+  },
+  {
+   "type": "item",
+   "turnId": "t1",
+   "item": {
+    "type": "toolCall",
+    "id": "x1",
+    "name": "somethingNew",
+    "status": "ok",
+    "detail": {
+     "kind": "unknown",
+     "raw": {
+      "type": "somethingNew",
+      "id": "x1",
+      "note": "hello"
+     }
+    },
+    "images": []
+   }
+  }
+ ]
+}

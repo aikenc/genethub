@@ -171,6 +171,195 @@ pub struct AgentInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub routes: Option<Vec<AgentRouteInfo>>,
+    /// Which directory layer a script Agent was loaded from. Absent for the
+    /// native built-in Agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub source: Option<AgentSource>,
+    /// What the Agent is, from its manifest; shown before it can run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub description: Option<String>,
+    /// The CLI version the script reported, for display only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub version: Option<String>,
+    /// The one explanatory line, written by the script or, when the script
+    /// itself cannot run, by the daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub message: Option<String>,
+    /// Actions the script declared right now. The platform knows none of
+    /// their names; it renders them as buttons and runs the one clicked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub actions: Option<Vec<AgentActionInfo>>,
+    /// The action currently running, or the last one that finished.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub job: Option<AgentJobInfo>,
+    /// Ids and titles of Agent-level user requests waiting for a person. The
+    /// full request travels only on `ServerFrame::AgentRequestOpened`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pending_requests: Option<Vec<AgentRequestSummary>>,
+    /// `data:` URL of the icon the Agent directory ships, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub icon: Option<String>,
+    /// Absolute path of the directory this script Agent was loaded from,
+    /// so a person or an Agent can find `builtin/<id>` and `user/<id>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub dir: Option<String>,
+    /// A local override whose built-in base has since been replaced by a
+    /// newer release. Shown so a person can choose to restore the built-in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub override_stale: Option<bool>,
+}
+
+/// Which layer of `<data>/agents` a script Agent was loaded from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum AgentSource {
+    /// Shipped with this daemon, materialized read-only.
+    Builtin,
+    /// A directory only the user layer has.
+    User,
+    /// A user directory that replaces a built-in one of the same id.
+    Override,
+}
+
+/// One button a script Agent offers. The id is opaque to the platform.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct AgentActionInfo {
+    pub id: String,
+    pub label: String,
+    /// The action to offer where the Agent is shown as unavailable.
+    #[serde(default)]
+    pub primary: bool,
+}
+
+/// Progress of one action run, as the script reported it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct AgentJobInfo {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub action: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub phase: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub percent: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub message: Option<String>,
+    /// The last few log lines, bounded by the daemon.
+    #[serde(default)]
+    pub log_tail: Vec<String>,
+    #[serde(default)]
+    pub done: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct AgentRequestSummary {
+    pub id: String,
+    pub title: String,
+}
+
+/// A decision an Agent's lifecycle needs from a person: a login, an install
+/// confirmation, an API key. Never part of a session timeline, never shown to
+/// a model and never written to a log.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct AgentUserRequest {
+    pub agent_id: String,
+    pub id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub detail: Option<String>,
+    #[serde(default)]
+    pub display: Vec<AgentRequestDisplay>,
+    #[serde(default)]
+    pub questions: Vec<AgentRequestQuestion>,
+    /// The final one-of-N choice. Always at least one.
+    pub options: Vec<crate::InteractionOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct AgentRequestDisplay {
+    pub kind: AgentRequestDisplayKind,
+    pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub label: Option<String>,
+    /// `qr` asks for the link to be drawn as a QR code as well.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub render: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum AgentRequestDisplayKind {
+    Link,
+    Code,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct AgentRequestQuestion {
+    pub id: String,
+    pub prompt: String,
+    #[serde(default)]
+    pub options: Vec<crate::InteractionOption>,
+    #[serde(default)]
+    pub allow_multiple: bool,
+    /// Present when the question takes typed input; `secret` is masked and
+    /// never echoed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub input: Option<AgentRequestInput>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum AgentRequestInput {
+    Text,
+    Secret,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(tag = "type", rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum AgentRequestOutcome {
+    #[serde(rename_all = "camelCase")]
+    Answered {
+        option_id: String,
+        #[serde(default)]
+        answers: Vec<crate::InteractionAnswer>,
+    },
+    Canceled,
 }
 
 /// One routable Agent + model pair as the tag router sees it.

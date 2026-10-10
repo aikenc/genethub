@@ -137,7 +137,8 @@ defineSpecialty({
     t.assertions.assert(!initial.includes('"error"'), `owner could not start the candidate: ${initial}`);
     await t.tools.waitUntil(async () => (await history()).some(run => run.status === "blocked"), 35_000)
       .catch(async error => { throw new Error(`${error}; initial=${initial}; runs=${JSON.stringify(await history())}; workerCalls=${workerCalls}`); });
-    const original = (await history())[0]!;
+    // The blocked Run may already have its recovery Run next to it.
+    const original = (await history()).find(run => run.taskId === "original")!;
     const worker = original.nodes.find(node => node.sessionId)?.sessionId!;
     const stopped = await runCommand(other, "u_exception_worker", `"$GENEHUB_CLI" session interrupt ${worker}`);
     t.assertions.assert(!stopped.includes("forbidden"), "exception PM cannot control project-managed execution");

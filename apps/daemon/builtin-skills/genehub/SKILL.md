@@ -63,3 +63,24 @@ GeneHub 是端侧多机器 Agent 的 hub：每台机器上的 daemon 持有自�
 所有命令使用 `GENEHUB_CLI` 的绝对路径，沿用渠道；缺绑定就停止，不猜可执行名。先用 `capabilities`、
 `schema <命令>` 核对实际语法，`context` 核对目标机器。`--help` 与 schema 只说明语法，不授予权限。
 按会话提供的内置 Skill 目录定位文件，不硬编码安装目录；只读取与任务相关的引用，不必一次读完。
+
+## 配置 GeneHub 模型 Provider
+
+这是 GeneHub 机器配置，与 Claude Code/Codex 自己的配置分开。使用绑定的 CLI：
+
+```bash
+"$GENEHUB_CLI" context
+"$GENEHUB_CLI" provider list
+"$GENEHUB_CLI" provider configure <provider-id> --session "$GENEHUB_SESSION_ID" \
+  --action <stable-action-id> --base-url <https-url> --dialect anthropic \
+  --label <display-name> --model <model-id>
+"$GENEHUB_CLI" provider get <stable-action-id> --session "$GENEHUB_SESSION_ID"
+"$GENEHUB_CLI" provider verify <stable-action-id> --session "$GENEHUB_SESSION_ID"
+```
+
+`--model` 可重复；不指定时先发现模型。同一 action ID 只能对应完全相同草案。configure 保存请求，
+工作台呈现具体配置和密钥输入；等待前停止当前执行，Human 提交后恢复原会话。CLI 不接受密钥参数。
+当前身份与有效权限看 `context.authority`；普通会话可准备请求，不能自行批准或取得整个 Settings 权限。
+不要读取机器 config.json、请求用户把密钥发进对话、修改其他 Agent 配置或轮询等待。
+续跑时先读回执：saved 表示配置保存，validation.status=ready 才表示模型调用通过；其余状态按 detail 处理。
+stale 需取消旧请求并用新 action ID 重建；unknown 不得重放配置。验证中断可显式 verify；已完成配置不可重复执行。

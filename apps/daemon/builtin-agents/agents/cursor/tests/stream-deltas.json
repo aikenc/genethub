@@ -1,0 +1,131 @@
+{
+  "kind": "translate",
+  "description": "cursor.rs stream_json_deltas_become_one_item_each_and_the_recap_is_skipped",
+  "turnId": "turn_1",
+  "lines": [
+    {
+      "type": "system",
+      "subtype": "init",
+      "session_id": "chat-9",
+      "model": "Grok 4.7 Low Fast"
+    },
+    {
+      "type": "thinking",
+      "subtype": "delta",
+      "text": "plan",
+      "session_id": "chat-9",
+      "timestamp_ms": 1
+    },
+    {
+      "type": "thinking",
+      "subtype": "completed",
+      "session_id": "chat-9",
+      "timestamp_ms": 2
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "Hel"
+          }
+        ]
+      },
+      "session_id": "chat-9",
+      "timestamp_ms": 3
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "lo"
+          }
+        ]
+      },
+      "session_id": "chat-9",
+      "timestamp_ms": 4
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "Hello"
+          }
+        ]
+      },
+      "session_id": "chat-9"
+    },
+    {
+      "type": "result",
+      "subtype": "success",
+      "is_error": false,
+      "result": "Hello",
+      "session_id": "chat-9",
+      "usage": {
+        "inputTokens": 10,
+        "outputTokens": 2,
+        "cacheReadTokens": 5,
+        "cacheWriteTokens": 0
+      }
+    }
+  ],
+  "expect": {
+    "chatId": "chat-9",
+    "partial": "Hello",
+    "assistantTexts": [
+      "Hello"
+    ],
+    "progressEvents": 3,
+    "events": [
+      {
+        "type": "item",
+        "turnId": "turn_1",
+        "item": {
+          "type": "reasoning",
+          "id": "turn_1-1",
+          "text": "plan"
+        }
+      },
+      {
+        "type": "item",
+        "turnId": "turn_1",
+        "item": {
+          "type": "assistantMessage",
+          "id": "turn_1-2",
+          "text": "Hel"
+        }
+      },
+      {
+        "type": "itemDelta",
+        "turnId": "turn_1",
+        "itemId": "turn_1-2",
+        "delta": {
+          "kind": "text",
+          "delta": "lo"
+        }
+      }
+    ],
+    "final": {
+      "type": "turnCompleted",
+      "turnId": "turn_1",
+      "usage": {
+        "inputTokens": 10,
+        "outputTokens": 2,
+        "cacheReadTokens": 5,
+        "cacheWriteTokens": 0,
+        "llmRounds": 1,
+        "toolOutputTokens": 0,
+        "compactionCount": 0,
+        "outputRateEstimated": false
+      }
+    }
+  }
+}

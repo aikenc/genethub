@@ -6,7 +6,9 @@
 
 use std::collections::HashSet;
 
-use genehub_proto::{ItemDelta, SessionEvent, TimelineItem, ToolCallDetail, ToolStatus, Usage};
+use genehub_proto::{
+    ItemDelta, SessionEvent, TimelineItem, TokenUsageStatus, ToolCallDetail, ToolStatus, Usage,
+};
 use serde_json::Value;
 use tokio::sync::broadcast;
 
@@ -189,7 +191,8 @@ pub fn add_usage(total: &mut Usage, value: &Value) {
         .cloned()
         .unwrap_or(Value::Null);
 
-    if let Some(input) = first_u64(
+    let previous = total.token_usage_status;
+    let input = first_u64(
         value,
         &[
             "input",
@@ -199,11 +202,11 @@ pub fn add_usage(total: &mut Usage, value: &Value) {
             "promptTokens",
         ],
     )
-    .or_else(|| first_u64(tokens, &["input", "input_tokens", "inputTokens"]))
-    {
+    .or_else(|| first_u64(tokens, &["input", "input_tokens", "inputTokens"]));
+    if let Some(input) = input {
         total.input_tokens += input;
     }
-    if let Some(output) = first_u64(
+    let output = first_u64(
         value,
         &[
             "output",
@@ -213,10 +216,28 @@ pub fn add_usage(total: &mut Usage, value: &Value) {
             "completionTokens",
         ],
     )
-    .or_else(|| first_u64(tokens, &["output", "output_tokens", "outputTokens"]))
-    {
+    .or_else(|| first_u64(tokens, &["output", "output_tokens", "outputTokens"]));
+    if let Some(output) = output {
         total.output_tokens += output;
     }
+    let incoming = match value.get("tokenUsageReported").and_then(Value::as_bool) {
+        Some(false) => TokenUsageStatus::Unavailable,
+        _ => match (input, output) {
+            (Some(_), Some(_)) => TokenUsageStatus::Reported,
+            (None, None) => TokenUsageStatus::Unavailable,
+            _ => TokenUsageStatus::Partial,
+        },
+    };
+    total.token_usage_status = Some(match (previous, incoming) {
+        (None, status) => status,
+        (Some(TokenUsageStatus::Reported), TokenUsageStatus::Reported) => {
+            TokenUsageStatus::Reported
+        }
+        (Some(TokenUsageStatus::Unavailable), TokenUsageStatus::Unavailable) => {
+            TokenUsageStatus::Unavailable
+        }
+        _ => TokenUsageStatus::Partial,
+    });
     if let Some(cached) = first_u64(
         value,
         &[
@@ -273,6 +294,16 @@ pub fn add_usage(total: &mut Usage, value: &Value) {
 /// Prefer the incoming running totals; keep a field the incoming side left at
 /// zero so a later daemon estimate is not wiped.
 pub fn merge_progress(tracked: &mut Usage, incoming: &Usage) {
+    let status = incoming.token_status();
+    tracked.token_usage_status = Some(
+        if status == TokenUsageStatus::Unavailable
+            && tracked.token_status() != TokenUsageStatus::Unavailable
+        {
+            TokenUsageStatus::Partial
+        } else {
+            status
+        },
+    );
     if incoming.input_tokens > 0 {
         tracked.input_tokens = incoming.input_tokens;
     }

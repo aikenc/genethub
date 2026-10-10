@@ -288,7 +288,15 @@ async fn authorize_session_request(
             return Err("feedback belongs to another workspace".into());
         }
     }
+    if let (Some(controller), Request::ProviderOperation { session_id, .. }) =
+        (caller.session_controller_id(), request)
+    {
+        if controller != session_id {
+            return Err("provider operation belongs to another Session".into());
+        }
+    }
     let target = match request {
+        Request::ProviderOperation { session_id, .. } => Some(session_id.as_str()),
         Request::SessionSend { session_id, .. }
         | Request::SessionArtifactBegin { session_id, .. }
         | Request::SessionArtifactChunk { session_id, .. }
@@ -313,6 +321,7 @@ async fn authorize_session_request(
         | Request::SessionSetFast { session_id, .. }
         | Request::SessionSetRuntimeAxis { session_id, .. }
         | Request::SessionRespondPermission { session_id, .. }
+        | Request::SessionAsk { session_id, .. }
         | Request::ProcessKill { session_id, .. }
         | Request::ProcessKillAll { session_id } => Some(session_id.as_str()),
         _ => None,
@@ -844,6 +853,43 @@ async fn guard_agent_space_mutation(
     Ok(())
 }
 
+/// An id the registry has never heard of is `notFound`, so a caller can tell
+/// a typo from an Agent that refused or failed.
+fn agent_failure(state: &Shared, agent_id: &str, error: anyhow::Error) -> Handled {
+    if state.registry.get(agent_id).is_none() && state.registry.host(agent_id).is_none() {
+        return Handled::err(ErrorCode::NotFound, format!("没有名为 {agent_id} 的 Agent"));
+    }
+    Handled::err(ErrorCode::BadRequest, format!("{error:#}"))
+}
+
+/// Every Agent with its routes. Routes depend on the Human-edited tag/cost
+/// configuration, so they are attached per call and never cached.
+pub(crate) async fn agent_infos(state: &Shared, refresh: bool) -> Vec<genehub_proto::AgentInfo> {
+    let providers = state.providers().await;
+    let mut agents = if refresh {
+        state.registry.refresh(&providers).await
+    } else {
+        state.registry.list(&providers).await
+    };
+    let preferences = state
+        .config
+        .read()
+        .await
+        .agent_preferences
+        .clone()
+        .unwrap_or_default();
+    for agent in &mut agents {
+        if matches!(agent.probe, genehub_proto::ProbeState::Ready) {
+            agent.routes = Some(crate::agent_routing::route_infos(
+                &preferences,
+                agent,
+                &state.registry,
+            ));
+        }
+    }
+    agents
+}
+
 async fn dispatch(
     state: &Shared,
     transport: TransportKind,
@@ -893,6 +939,7 @@ async fn dispatch(
                     "workflow.control.v1".to_string(),
                     "agentSpace.builderPlans.v1".to_string(),
                     "session.input.v1".to_string(),
+                    "provider.configuration.v1".to_string(),
                     "session.previewAnnotations.v1".to_string(),
                     "preview.feedback.v1".to_string(),
                     "session.switch-agent.v1".to_string(),
@@ -945,29 +992,81 @@ async fn dispatch(
         }).await,
 
         Request::AgentList => Box::pin(async move {
-            let providers = state.providers().await;
-            let mut agents = state.registry.list(&providers).await;
-            // Routes depend on the Human-edited tag/cost configuration, so
-            // they are attached per request and never enter the catalog cache.
-            let preferences = state
-                .config
-                .read()
-                .await
-                .agent_preferences
-                .clone()
-                .unwrap_or_default();
-            for agent in &mut agents {
-                if matches!(agent.probe, genehub_proto::ProbeState::Ready) {
-                    agent.routes =
-                        Some(crate::agent_routing::route_infos(&preferences, agent, &state.registry));
-                }
-            }
-            Handled::ok(Reply::Agents(agents))
+            Handled::ok(Reply::Agents(agent_infos(state, false).await))
         }).await,
 
         Request::AgentRefresh => Box::pin(async move {
-            let providers = state.providers().await;
-            Handled::ok(Reply::Agents(state.registry.refresh(&providers).await))
+            Handled::ok(Reply::Agents(agent_infos(state, true).await))
+        }).await,
+
+        Request::AgentAction { agent_id, action_id } => Box::pin(async move {
+            match state.registry.run_action(&agent_id, &action_id).await {
+                Ok(_) => Handled::ok(Reply::Agents(agent_infos(state, false).await)),
+                Err(error) => agent_failure(state, &agent_id, error),
+            }
+        }).await,
+
+        Request::AgentReload { agent_id } => Box::pin(async move {
+            // Detached: a restart outlives a caller whose own deadline
+            // (30 s for a CLI call) is shorter than a restart can take.
+            let registry = state.registry.clone();
+            let id = agent_id.clone();
+            match tokio::spawn(async move { registry.reload(&id).await }).await {
+                Ok(Ok(())) => Handled::ok(Reply::Agents(agent_infos(state, false).await)),
+                Ok(Err(error)) => agent_failure(state, &agent_id, error),
+                Err(error) => Handled::err(ErrorCode::Internal, format!("{error}")),
+            }
+        }).await,
+
+        Request::AgentReset { agent_id } => Box::pin(async move {
+            // Detached: a restart outlives a caller whose own deadline
+            // (30 s for a CLI call) is shorter than a restart can take.
+            let registry = state.registry.clone();
+            let id = agent_id.clone();
+            match tokio::spawn(async move { registry.reset(&id).await }).await {
+                Ok(Ok(())) => Handled::ok(Reply::Agents(agent_infos(state, false).await)),
+                Ok(Err(error)) => agent_failure(state, &agent_id, error),
+                Err(error) => Handled::err(ErrorCode::Internal, format!("{error}")),
+            }
+        }).await,
+
+        Request::AgentTest { agent_id, live } => Box::pin(async move {
+            match state.registry.test(&agent_id, live).await {
+                Ok((passed, output)) => Handled::ok(Reply::AgentTestResult { passed, output }),
+                Err(error) => agent_failure(state, &agent_id, error),
+            }
+        }).await,
+
+        Request::AgentLogs { agent_id, lines } => Box::pin(async move {
+            let lines = lines.unwrap_or(200).clamp(1, 500) as usize;
+            match state.registry.logs(&agent_id, lines) {
+                Ok(lines) => Handled::ok(Reply::AgentLogs { lines }),
+                Err(error) => agent_failure(state, &agent_id, error),
+            }
+        }).await,
+
+        // Only a person answers these, so neither verb is offered to a
+        // session-bound CLI caller. Their contents never leave this reply
+        // path and the `agentRequest` push.
+        Request::AgentRequests => Box::pin(async move {
+            if matches!(caller, crate::authz::Principal::SessionController { .. }) {
+                return Handled::err(ErrorCode::Forbidden, "Agent 级请求只给人看，不给会话里的 Agent");
+            }
+            Handled::ok(Reply::AgentRequests(state.registry.requests()))
+        }).await,
+
+        Request::AgentRequestAnswer {
+            agent_id,
+            request_id,
+            outcome,
+        } => Box::pin(async move {
+            if matches!(caller, crate::authz::Principal::SessionController { .. }) {
+                return Handled::err(ErrorCode::Forbidden, "Agent 级请求只能由人回答");
+            }
+            match state.registry.answer(&agent_id, &request_id, outcome).await {
+                Ok(()) => Handled::ok(Reply::Ack),
+                Err(error) => agent_failure(state, &agent_id, error),
+            }
         }).await,
 
         Request::WorkflowInspect {
@@ -2700,6 +2799,24 @@ async fn dispatch(
             }
         }).await,
 
+        Request::SessionAsk { session_id, request_id, title, questions } => Box::pin(async move {
+            if caller.session_controller_id().is_some_and(|id| id != session_id) {
+                return Handled::err(ErrorCode::Forbidden, "会话里的 Agent 只能为自己的会话提问");
+            }
+            let request = genehub_proto::PermissionRequest {
+                id: request_id, title, kind: genehub_proto::PermissionRequestKind::Question,
+                detail: None, tool_call_id: None, options: vec![], questions: Some(questions),
+            };
+            let owned = state.clone();
+            // Stopping the caller's CLI may disconnect its RPC. The saved
+            // obligation and cleanup must outlive that connection.
+            match tokio::spawn(async move { owned.sessions.request_conversation_question(&session_id, request).await }).await {
+                Ok(Ok(())) => Handled::ok(Reply::Ack),
+                Ok(Err(error)) => failed(error),
+                Err(_) => Handled::err(ErrorCode::Internal, "提问操作意外中止"),
+            }
+        }).await,
+
         Request::SessionRespondPermission {
             session_id,
             request_id,
@@ -2713,14 +2830,24 @@ async fn dispatch(
                 Ok(kind) => kind,
                 Err(error) => return failed(error),
             };
+            if kind == Some(genehub_proto::PermissionRequestKind::ProviderConfiguration)
+                && (caller.session_controller_id().is_some()
+                    || !matches!(outcome, genehub_proto::PermissionOutcome::Canceled))
+            {
+                return Handled::err(ErrorCode::Forbidden, "provider 配置须由 Human 通过专用提交入口确认；普通会话答案不能保存密钥或授予配置权限");
+            }
+            // A question in the caller's own Session is addressed to its
+            // Human. Answering another Session's question (a PM deciding a
+            // reviewer's recovery choice) stays an Agent-to-Agent path.
             if (kind == Some(genehub_proto::PermissionRequestKind::PlanApproval)
                 || (kind == Some(genehub_proto::PermissionRequestKind::Question)
-                    && request_id.starts_with("workflow-human-")))
+                    && (request_id.starts_with("workflow-human-")
+                        || caller.session_controller_id() == Some(session_id.as_str()))))
                 && matches!(caller, crate::authz::Principal::SessionController { .. })
             {
                 return Handled::err(
                     ErrorCode::Forbidden,
-                    "Agent/CLI 不能替用户响应 Workflow 人工出口或计划确认",
+                    "Agent/CLI 不能替用户回答问题或确认计划",
                 );
             }
             let providers = state.providers().await;
@@ -2731,6 +2858,34 @@ async fn dispatch(
             {
                 Ok(()) => Handled::ok(Reply::Ack),
                 Err(error) => failed(error),
+            }
+        }).await,
+
+        Request::CallerAuthority => Handled::ok(Reply::CallerAuthority(caller.authority())),
+        Request::ProviderList => {
+            let config = state.config.read().await;
+            let providers = config.agents.providers.iter().map(|(id, provider)| {
+                let resolved = crate::provider::resolve(id, provider);
+                genehub_proto::ProviderInfo {
+                    id: id.clone(), has_api_key: provider.api_key.as_deref().is_some_and(|key| !key.is_empty()),
+                    base_url: resolved.base_url, label: resolved.label, dialect: resolved.dialect.as_str().into(),
+                    custom: resolved.custom, models: provider.models.clone(), model_inputs: Some(provider.model_inputs.clone()), problem: None,
+                }
+            }).collect();
+            Handled::ok(Reply::Providers(providers))
+        },
+        Request::ProviderOperation { session_id, operation } => Box::pin(async move {
+            // Preparation stops its calling execution; do not tie it to the old CLI future.
+            let state = state.clone();
+            match tokio::spawn(async move { crate::provider_control::execute(&state, &session_id, operation).await }).await {
+                Ok(Ok(receipt)) => Handled::ok(Reply::ProviderOperation(receipt)),
+                Ok(Err(error)) => {
+                    if error.is::<crate::session::manager::SessionMissing>() { failed(error) }
+                    else if error.root_cause().is::<std::io::Error>() || error.root_cause().is::<serde_json::Error>() {
+                        Handled::err(ErrorCode::Internal, "配置操作存储不可用；请检查原操作回执后重试，不会盲目重复保存")
+                    } else { Handled::err(ErrorCode::BadRequest, error.to_string()) }
+                },
+                Err(_) => Handled::err(ErrorCode::Internal, "配置请求处理意外中止；请读取原操作回执"),
             }
         }).await,
 
@@ -3933,6 +4088,11 @@ async fn dispatch(
 fn diagnostic_operation(request: &Request) -> Option<&'static str> {
     match request {
         Request::AgentRefresh => Some("agent.refresh"),
+        Request::AgentAction { .. } => Some("agent.action"),
+        Request::AgentReload { .. } => Some("agent.reload"),
+        Request::AgentReset { .. } => Some("agent.reset"),
+        Request::AgentTest { .. } => Some("agent.test"),
+        Request::AgentRequestAnswer { .. } => Some("agent.requestAnswer"),
         Request::SessionCreate { .. } | Request::SessionCreateRouted { .. } => {
             Some("session.create")
         }
@@ -3969,7 +4129,9 @@ fn diagnostic_operation(request: &Request) -> Option<&'static str> {
         Request::SessionSwitchAgent { .. } => Some("session.switchAgent"),
         Request::SessionRoute { .. } => Some("session.route"),
         Request::SessionRespondPermission { .. } => Some("session.respondPermission"),
+        Request::SessionAsk { .. } => Some("session.ask"),
         Request::SettingsSetProvider { .. } => Some("settings.setProvider"),
+        Request::ProviderOperation { .. } => Some("provider.operation"),
         Request::SettingsSetAgentPreferences { .. } => Some("settings.setAgentPreferences"),
         Request::SettingsForgetProvider { .. } => Some("settings.forgetProvider"),
         Request::HubPair { .. } => Some("hub.pair"),

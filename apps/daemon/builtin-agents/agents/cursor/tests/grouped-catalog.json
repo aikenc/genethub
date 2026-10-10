@@ -1,0 +1,44 @@
+{
+  "kind": "models",
+  "description": "cursor.rs group_cli_models_groups_efforts_and_fast and cursor_cli_model_list_parses_ids_and_the_default_marker",
+  "cliList": "Available models\n\nauto - Auto (default)\ngrok-4.7-low - Grok 4.7  Low\ngrok-4.7-low-fast - Grok 4.7  Low Fast​​\ngrok-4.7-medium - Grok 4.7  Medium\ngrok-4.7-medium-fast - Grok 4.7  Medium Fast\ncomposer-2.5 - Composer 2.5\ncomposer-2.5-fast - Composer 2.5 Fast\n",
+  "expect": {
+    "rawIds": [
+      "auto",
+      "grok-4.7-low",
+      "grok-4.7-low-fast",
+      "grok-4.7-medium",
+      "grok-4.7-medium-fast",
+      "composer-2.5",
+      "composer-2.5-fast"
+    ],
+    "rawDefault": "auto",
+    "groupedDefault": "auto",
+    "grouped": [
+      {
+        "id": "grok-4.7",
+        "label": "Grok 4.7",
+        "supportsFast": true,
+        "reasoning": true,
+        "efforts": [
+          "low",
+          "medium"
+        ]
+      },
+      {
+        "id": "composer-2.5",
+        "label": "Composer 2.5",
+        "supportsFast": true,
+        "reasoning": false,
+        "efforts": []
+      },
+      {
+        "id": "auto",
+        "label": "Auto",
+        "supportsFast": false,
+        "reasoning": false,
+        "efforts": []
+      }
+    ]
+  }
+}
