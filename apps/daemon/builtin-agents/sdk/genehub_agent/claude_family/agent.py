@@ -348,7 +348,7 @@ class FamilyAgent(Agent):
         else:
             actions = [
                 AgentContext.action("login-api-key", "换一个 API Key" if credentials.has(self.ctx) else "用 API Key 登录", group="account"),
-                AgentContext.action("logout", "退出登录", group="account"),
+                AgentContext.action("logout", "退出登录", group="account", confirm="确认退出登录？"),
                 *self._provider_actions(),
                 AgentContext.action("update", "更新", group="install"),
                 space_action,

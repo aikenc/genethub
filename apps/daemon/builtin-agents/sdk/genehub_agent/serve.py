@@ -325,12 +325,18 @@ class AgentContext:
         self._mask.add(value)
 
     @staticmethod
-    def action(action_id: str, label: str, primary: bool = False, group: Optional[str] = None) -> dict:
+    def action(action_id: str, label: str, primary: bool = False, group: Optional[str] = None,
+               confirm: Optional[str] = None) -> dict:
         """One button. ``group`` files it on the card (``account``, ``install``,
-        ``advanced``; anything else lands with the rest)."""
+        ``advanced``; anything else lands with the rest). ``confirm`` is the
+        question to ask before running an action that ends something the
+        person set up (signing out, uninstalling); without it the button runs
+        at once."""
         value = {"id": action_id, "label": label, "primary": primary}
         if group:
             value["group"] = group
+        if confirm:
+            value["confirm"] = confirm
         return value
 
     # -- the providers a person configured in GeneHub -------------------------

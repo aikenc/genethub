@@ -14,7 +14,14 @@ primary: boolean,
  * The script decides; the platform and clients only group by it, and an
  * unknown or absent group is shown with the rest.
  */
-group?: string, };
+group?: string, 
+/**
+ * Set when running the action ends something a person set up (signing
+ * out, uninstalling): the question to ask first. The script decides which
+ * actions need it; clients only ask what it says and never guess from an
+ * action's id or wording.
+ */
+confirm?: string, };
 
 export type AgentCapability = "planning" | "coding" | "multimodal";
 

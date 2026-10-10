@@ -33,7 +33,7 @@ function agent(id: string, extra: Partial<AgentInfo> = {}): AgentInfo {
   } as AgentInfo;
 }
 
-const READY = agent("codex", { label: "Codex", actions: [{ id: "logout", label: "退出登录", primary: false, group: "account" }] });
+const READY = agent("codex", { label: "Codex", actions: [{ id: "logout", label: "退出登录", primary: false, group: "account", confirm: "确认退出登录？" }] });
 const NEEDS_LOGIN = agent("claude", {
   label: "Claude Code",
   probe: { state: "unavailable", reason: "找到了 Claude Code，但它还没登录" },
@@ -149,10 +149,10 @@ describe("the 模型与 Agent dialog", () => {
     await userEvent.click(screen.getByRole("button", { name: "配置 Codex" }));
     await userEvent.click(screen.getByRole("button", { name: "Codex 退出登录" }));
 
-    expect(screen.getByText("确认退出？")).toBeInTheDocument();
+    expect(screen.getByText("确认退出登录？")).toBeInTheDocument();
     expect(calls.some((call) => call.type === "agent.action")).toBe(false);
     await userEvent.click(screen.getByRole("button", { name: "Codex 取消退出登录" }));
-    expect(screen.queryByText("确认退出？")).toBeNull();
+    expect(screen.queryByText("确认退出登录？")).toBeNull();
     expect(calls.some((call) => call.type === "agent.action")).toBe(false);
 
     await userEvent.click(screen.getByRole("button", { name: "Codex 退出登录" }));
@@ -162,12 +162,23 @@ describe("the 模型与 Agent dialog", () => {
     );
   });
 
+  it("never decides on its own that an action needs confirming: an action named logout without the script's word runs at once", async () => {
+    const plain = agent("codex", { label: "Codex", actions: [{ id: "logout", label: "退出登录", primary: false, group: "account" }] });
+    const calls = open([plain]);
+    await userEvent.click(screen.getByRole("button", { name: "配置 Codex" }));
+    await userEvent.click(screen.getByRole("button", { name: "Codex 退出登录" }));
+    await waitFor(() =>
+      expect(calls).toContainEqual({ type: "agent.action", payload: { agentId: "codex", actionId: "logout" } }),
+    );
+    expect(screen.queryByRole("group", { name: /确认/ })).toBeNull();
+  });
+
   it("keeps the own-space choice folded under 高级 and leaves the confirmation to the Agent", async () => {
     const calls = open([
       agent("claude", {
         label: "Claude Code",
         actions: [
-          { id: "logout", label: "退出登录", primary: false, group: "account" },
+          { id: "logout", label: "退出登录", primary: false, group: "account", confirm: "确认退出登录？" },
           { id: "space-own", label: "使用独立空间", primary: false, group: "advanced" },
         ],
       }),
@@ -377,7 +388,9 @@ describe("模型与 Agent presentation rules", () => {
     const SIGN_IN = { ...NEEDS_LOGIN, actions: [{ id: "enter-with-account", label: "用账号进入", primary: true, group: "account" }] };
     expect(agentStatus(SIGN_IN).kind).toBe("needsLogin");
     expect(agentStatus({ ...READY, statusLabel: "可用（连着自选 provider）" }).label).toBe("可用（连着自选 provider）");
-    expect(isDestructiveAction({ id: "logout", label: "退出登录" })).toBe(true);
-    expect(isDestructiveAction({ id: "login", label: "登录" })).toBe(false);
+    // Only the script's own word makes an action need confirming: neither an id
+    // called "logout" nor the wording "退出登录" does.
+    expect(isDestructiveAction({ confirm: "确认退出登录？" })).toBe(true);
+    expect(isDestructiveAction({})).toBe(false);
   });
 });

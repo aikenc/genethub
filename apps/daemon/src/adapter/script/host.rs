@@ -1750,6 +1750,10 @@ fn parse_state(params: &Value) -> ScriptState {
                     .group
                     .map(|group| bounded(&group, LABEL_LIMIT))
                     .filter(|group| !group.is_empty());
+                action.confirm = action
+                    .confirm
+                    .map(|question| bounded(&question, LABEL_LIMIT))
+                    .filter(|question| !question.is_empty());
                 action
             })
             .collect(),
@@ -1890,6 +1894,25 @@ mod state_tests {
         assert_eq!(state.status_label.as_deref(), Some("可用（Key 未核对）"));
         let groups: Vec<_> = state.actions.iter().map(|action| action.group.as_deref()).collect();
         assert_eq!(groups, vec![Some("account"), None, None]);
+    }
+
+    #[test]
+    fn an_action_says_for_itself_that_it_needs_confirming() {
+        let state = parse_state(&json!({
+            "ready": true,
+            "actions": [
+                {"id": "logout", "label": "退出登录", "confirm": "确认退出登录？"},
+                {"id": "login", "label": "登录"},
+                {"id": "blank", "label": "空", "confirm": ""},
+            ],
+        }));
+        let asked: Vec<_> = state.actions.iter().map(|action| action.confirm.as_deref()).collect();
+        assert_eq!(asked, vec![Some("确认退出登录？"), None, None]);
+        let flood = parse_state(&json!({
+            "ready": true,
+            "actions": [{"id": "a", "label": "a", "confirm": "长".repeat(10_000)}],
+        }));
+        assert!(flood.actions[0].confirm.as_ref().unwrap().chars().count() <= LABEL_LIMIT + 1);
     }
 
     #[test]

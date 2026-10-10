@@ -103,12 +103,15 @@ export function groupAgentActions(actions: AgentActionInfo[] | undefined): Actio
   }));
 }
 
-/** Actions that end something a person set up must be confirmed first. */
-export function isDestructiveAction(action: Pick<AgentActionInfo, "id" | "label">): boolean {
-  return action.id === "logout" || /退出登录|卸载/.test(action.label);
+/**
+ * An action that ends something a person set up is confirmed first, and only
+ * when its script says so (`confirm` is the question to ask). Nothing here
+ * guesses from an action's id or wording.
+ */
+export function isDestructiveAction(action: Pick<AgentActionInfo, "confirm">): boolean {
+  return Boolean(action.confirm);
 }
 
-export function confirmQuestion(action: Pick<AgentActionInfo, "id" | "label">): string {
-  if (action.id === "logout" || action.label.includes("退出登录")) return "确认退出？";
-  return `确认${action.label}？`;
+export function confirmQuestion(action: Pick<AgentActionInfo, "confirm">): string {
+  return action.confirm ?? "确认？";
 }

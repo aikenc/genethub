@@ -168,7 +168,7 @@ class CursorAgent(Agent):
             message = "未能确认登录状态"
             actions.append(ctx.action("login", "登录", group="account"))
         actions.append(ctx.action("login-api-key", "换一个 API Key" if credentials.has(ctx) else "用 API Key 登录", group="account"))
-        actions.append(ctx.action("logout", "退出登录", group="account"))
+        actions.append(ctx.action("logout", "退出登录", group="account", confirm="确认退出登录？"))
         if await self._supports(program):
             actions.append(ctx.action("update", "更新", group="install"))
         self._report(ctx, True, message, version, actions)

@@ -256,7 +256,7 @@ fn collect_candidates(
         }
 
         if agent.catalog.models.is_empty() {
-            if can_start_without_model_catalog(&agent.id) {
+            if !registry.get(&agent.id).is_some_and(|adapter| adapter.needs_model_catalog()) {
                 candidates.push(candidate_for(preferences, agent, None));
             }
         } else {
@@ -594,10 +594,6 @@ fn unrestricted_mode(agent: &AgentInfo) -> Option<String> {
                 || mode.label.contains("全开")
         })
         .map(|mode| mode.id.clone())
-}
-
-fn can_start_without_model_catalog(agent_id: &str) -> bool {
-    agent_id != "genet"
 }
 
 fn cost_rank(cost: AgentCostLevel) -> u8 {

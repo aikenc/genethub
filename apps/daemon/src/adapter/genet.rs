@@ -118,6 +118,10 @@ impl AgentAdapter for GenetAdapter {
         true
     }
 
+    fn needs_model_catalog(&self) -> bool {
+        true
+    }
+
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             interrupt: true,

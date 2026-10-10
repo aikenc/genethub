@@ -254,6 +254,13 @@ pub struct AgentActionInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub group: Option<String>,
+    /// Set when running the action ends something a person set up (signing
+    /// out, uninstalling): the question to ask first. The script decides which
+    /// actions need it; clients only ask what it says and never guess from an
+    /// action's id or wording.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub confirm: Option<String>,
 }
 
 /// Progress of one action run, as the script reported it.

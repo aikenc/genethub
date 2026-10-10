@@ -147,6 +147,13 @@ pub trait AgentAdapter: Send + Sync {
         false
     }
 
+    /// Without a model catalog this Agent has nothing to run: it is only
+    /// offered to routing once its catalog lists a model. Most Agents choose
+    /// their own default and do not need one.
+    fn needs_model_catalog(&self) -> bool {
+        false
+    }
+
     /// Is it installed and does it answer? Never an error: "not installed" is a
     /// normal state that simply hides the agent from the picker.
     async fn probe(&self) -> ProbeState;

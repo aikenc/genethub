@@ -103,7 +103,8 @@
               "id": "login-api-key"
             },
             {
-              "id": "logout"
+              "id": "logout",
+              "confirm": "确认退出登录？"
             },
             {
               "id": "provider-use"
