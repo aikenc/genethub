@@ -47,6 +47,7 @@ GeneHub 是端侧多机器 Agent 的 hub：每台机器上的 daemon 持有自�
 | daemon 启动、停止、重启、环境生效、离线恢复 | [daemon.md](references/daemon.md)，重启前必读 [daemon-restart.md](references/daemon-restart.md) |
 | 实时联调页面：白屏、DOM、交互、截图、移动端复现 | [client-debug.md](references/client-debug.md) |
 | 本地语音识别 runtime：测试、安装、登记、诊断、移除 | [speech-runtime.md](references/speech-runtime.md) |
+| 把一棵 Space 树（`agent-space.genet.json`、Skill、定时 hook）生成成 Agent 读的规则与 Skill 文件 | [spacebuilder.md](references/spacebuilder.md) |
 | 静态 H5、站点、相册，或影视/DCC/引擎的创作过程预览 | Skill `genehub-preview` |
 | 会话历史、转发会话、来源引用 | Skill `genehub-introspect` |
 | 产品反馈修复或 Beta 发布 | 当前 Space 选中的领域 Skill；没有时说明缺口，不凭本文执行发布 |
