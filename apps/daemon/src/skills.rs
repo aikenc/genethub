@@ -18,6 +18,19 @@ include!(concat!(env!("OUT_DIR"), "/builtin_skills.rs"));
 
 pub const ENTRYPOINT_MANIFEST: &str = ".entrypoints";
 
+/// The built-in files under `prefix`, with the prefix removed. Lets the product
+/// copy a template that ships inside a built-in Skill without reading it back
+/// from disk, where it could have been edited.
+pub fn builtin_files_under(
+    prefix: &str,
+) -> impl Iterator<Item = (&'static str, &'static [u8])> + '_ {
+    BUILTIN_FILES.iter().filter_map(move |file| {
+        file.relative_path
+            .strip_prefix(prefix)
+            .map(|relative| (relative, file.contents))
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Skill {
     pub name: String,

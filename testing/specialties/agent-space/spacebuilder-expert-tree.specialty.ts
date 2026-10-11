@@ -164,3 +164,33 @@ treeCase(
     }
   },
 );
+
+treeCase(
+  "a-space-may-be-named-in-any-language",
+  "a Space's name is for people, so a non-ASCII name builds and verifies, and an unsafe one is refused",
+  "a root named 办公室-Mac 管理员 builds, verifies and cleans; a name with a slash, a backslash, a newline, or longer than 64 characters fails with SB002",
+  [
+    "the built-in administrator, named after the machine, failing to build",
+    "a name that cannot be put safely in a path or a line being accepted",
+  ],
+  (t, root, build) => {
+    const rename = (name: string): void => {
+      const descriptor = JSON.parse(readFileSync(path.join(root, "agent-space.genet.json"), "utf8"));
+      descriptor.name = name;
+      writeFileSync(path.join(root, "agent-space.genet.json"), JSON.stringify(descriptor));
+    };
+    rename("办公室-Mac 管理员");
+    const built = build("build");
+    t.assertions.assert(built.code === 0, `build with a Chinese name: ${JSON.stringify(built.report.diagnostics)}`);
+    t.assertions.assert(build("verify").code === 0, "verify with a Chinese name");
+    t.assertions.assert(build("clean").code === 0, "clean with a Chinese name");
+    for (const bad of ["a/b", "a\\b", "a\nb", "x".repeat(65), " padded"]) {
+      rename(bad);
+      const refused = build("build");
+      t.assertions.assert(
+        refused.code !== 0 && refused.report.diagnostics.some((item) => item.code === "SB002"),
+        `name ${JSON.stringify(bad)} was accepted: ${JSON.stringify(refused.report)}`,
+      );
+    }
+  },
+);

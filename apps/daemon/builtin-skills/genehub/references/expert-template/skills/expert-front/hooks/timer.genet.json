@@ -1,0 +1,8 @@
+{
+  "schema": "genet.hook.v1",
+  "event": "timer",
+  "every": "5s",
+  "exec": ["${GENEHUB_PYTHON}", "tools/expert.py", "hook"],
+  "cwd": ".",
+  "timeout": 25
+}

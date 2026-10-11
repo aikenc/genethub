@@ -141,6 +141,27 @@ async fn a_hook_gets_the_envelope_the_platform_variables_and_open_env() {
 }
 
 #[tokio::test]
+async fn the_python_placeholder_falls_back_to_python3_when_no_platform_python_is_installed() {
+    let root = project();
+    write_hook(
+        root.path(),
+        "py.timer",
+        serde_json::json!({
+            "event": "timer", "every": "1s",
+            "exec": ["sh", "-c", "echo \"$0|${GENEHUB_PYTHON-unset}\" > py.txt", "${GENEHUB_PYTHON}"],
+        }),
+    );
+    let hooks = Hooks::new(None);
+    let hook = until_runs(&hooks, root.path(), "py.timer", 1).await;
+    assert_eq!(hook.consecutive_failures, 0, "{hook:?}");
+    assert_eq!(
+        read(root.path(), "py.txt").trim(),
+        "python3|unset",
+        "the argument is runnable, but the variable is not claimed to exist"
+    );
+}
+
+#[tokio::test]
 async fn a_failing_hook_is_recorded_never_disabled_and_recovers_when_fixed() {
     let root = project();
     write_hook(

@@ -9,6 +9,7 @@ pub mod agent_space;
 pub mod agent_space_builder;
 pub mod authz;
 pub(crate) mod blocking;
+pub mod builtin_expert;
 pub mod capabilities;
 pub mod channel_auth;
 pub mod cli_front;
@@ -86,6 +87,8 @@ impl Daemon {
         state
             .diagnostics
             .record("daemon", "lifecycle", "started", None);
+        // The machine's administrator is a Space on disk like any other; put it there first.
+        builtin_expert::ensure_admin(&state).await;
         // Spaces already on disk are projects from the first moment.
         state
             .workspaces

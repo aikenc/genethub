@@ -1,0 +1,10 @@
+{
+  "schema": "agent-space.v1",
+  "name": "think",
+  "description": "专家的思考会话：默认思考与专项思考。",
+  "tags": [],
+  "agents": ["codex", "claude-code", "codebuddy"],
+  "skills": ["expert-core", "expert-think"],
+  "skillProviders": [{"type": "folder", "path": "../../skills"}],
+  "folders": [{"path": "."}]
+}

@@ -1,0 +1,12 @@
+{
+  "schema": "agent-space.v1",
+  "name": "expert",
+  "description": "一位专家：前台直接和用户对话，后台由思考会话与工作会话完成长任务。",
+  "tags": ["expert"],
+  "agents": ["codex", "claude-code", "codebuddy"],
+  "skills": ["expert-core", "expert-front"],
+  "skillProviders": [{"type": "folder", "path": "skills"}],
+  "agentCwd": "front",
+  "folders": [{"path": "."}],
+  "children": {"scanDepth": 2}
+}

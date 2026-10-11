@@ -211,6 +211,18 @@ daemon 解析 `schema`（缺省可）、`event`（只能是 `timer`）、`every`
 
 **会话发起的会话带标签 `系统发起`。** `session.create` 的调用方是会话自己的校验身份（不是它声明的）时，daemon 给新会话加这个标签；工作台默认列表把带它的会话当作子会话藏起来，但处于 `waiting` / `failed` 的永远显示——卡住的正是人要看见的。没有自己会话的脚本（定时 hook）不会被识别，需要时自己加标签。
 
+### 内置管理员
+
+每台机器有一位随产品发布的专家：`<data>/spaces/admin/`，名字是"<机器名>管理员"（机器名取自 `GENEHUB_LOCAL_MACHINE_NAME`，没有则主机名；去掉控制字符与路径分隔符，整体不超过 64 个字符，被截短的只会是机器名）。它就是一个普通 Space：用的是和任何专家同一份模板（`builtin-skills/genehub/references/expert-template/`），只多一份 `expert-admin` Skill，由扫描登记、由 SpaceBuilder 构建，daemon 里没有给它的特殊路径。
+
+daemon 每次启动，在扫描之前做三件事：
+
+1. 用户移除过它就什么都不做——移除是决定，不被重建。
+2. 把产品自带的文件写进去（只在内容不同时写）：描述文件（名字按机器改写、加上 `expert-admin`）、`skills/`、`tools/`、think 与 work 的描述文件。`soul.md`、`memory.md` 只在缺失时创建，之后归专家自己；目录里的其他文件一概不碰。
+3. 有文件变了、或还没有构建锁，就用平台 Python（没有则 PATH 里的 `python3`）运行内置的 SpaceBuilder `build`，限时 60 秒。失败只记警告，daemon 照常启动，下次启动再试。
+
+已经从模板复制出去的专家不随模板升级。模板里 hook 的命令用 `${GENEHUB_PYTHON}`：定时 hook 展开它时，没有安装平台 Python 就退回 `python3`（环境变量本身只在真有平台 Python 时才导出）。
+
 `session.delete` 是真删：时间线、meta、以及那个会话的 scratch 目录一起没。scratch 里放的是 adapter 存的「CLI 自己那份对话」（`--resume` id、线程文件），留着它等于「删掉的对话在 agent 那边还在」，那不叫删除。没有回收站，也没有撤销——想删掉的对话，通常正是不希望留副本的那种。删一个已经不在的会话不算失败：调用方要的是「它不存在」，而它确实不存在，两个窗口点同一行不该有一个看到报错。
 
 ### 4.2 工作区与默认工作目录

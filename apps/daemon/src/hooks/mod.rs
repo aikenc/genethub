@@ -266,7 +266,13 @@ impl Hooks {
         if let Some(python) = python {
             platform.push(("GENEHUB_PYTHON", python.to_string_lossy().into_owned()));
         }
-        let expand = |argument: &str| expand_platform(argument, &platform);
+        // `${GENEHUB_PYTHON}` always expands to something runnable: the platform Python when one is
+        // installed, otherwise `python3` from PATH. The variable itself is only exported when it is real.
+        let mut expansions = platform.clone();
+        if python.is_none() {
+            expansions.push(("GENEHUB_PYTHON", "python3".to_string()));
+        }
+        let expand = |argument: &str| expand_platform(argument, &expansions);
         let program = expand(&spec.exec[0]);
         let arguments: Vec<String> = spec.exec[1..].iter().map(|a| expand(a)).collect();
         let cwd = match &spec.cwd {

@@ -418,6 +418,17 @@ impl Workspaces {
         Ok(registered)
     }
 
+    /// Whether the user removed the project that lives at `dir`. A removal is a
+    /// decision, so anything that would put a project there again must ask first.
+    pub async fn was_removed(&self, dir: &Path) -> bool {
+        let Ok(source) = crate::guest_paths::guest_path(dir).canonicalize() else {
+            return false;
+        };
+        let entries = self.entries.read().await;
+        let candidate = folder_workspace(source, None);
+        existing_project(&entries, &candidate).is_some_and(|entry| entry.removed)
+    }
+
     /// Where a session in this project starts when nothing says otherwise: the
     /// descriptor's `agentCwd` if it names a real directory in the project,
     /// else the project root.

@@ -717,8 +717,8 @@ def load_manifest(root: Path) -> Manifest:
     if raw.get("schema") != SPACE_SCHEMA:
         fail("SB001", f"manifest.schema must be {SPACE_SCHEMA}", sources=(path.as_posix(),))
     name = raw.get("name")
-    if not isinstance(name, str) or not NAME_RE.fullmatch(name):
-        fail("SB002", "manifest.name must match ^[a-z][a-z0-9-]*$", sources=(path.as_posix(),))
+    if not valid_space_name(name):
+        fail("SB002", "manifest.name must be one line of at most 64 characters with no slash, backslash or control characters", sources=(path.as_posix(),))
     agents = require_string_list(raw.get("agents"), "agents", nonempty=True)
     unknown_agents = [agent for agent in agents if agent not in AGENTS]
     if unknown_agents:
@@ -846,6 +846,19 @@ def load_manifest(root: Path) -> Manifest:
     agent_cwd = validate_agent_cwd(raw.get("agentCwd"), path)
     folders = validate_manifest_folders(raw.get("folders"), path)
     return Manifest(path, name, description, agents, skills, tags, providers, scan_depth, agent_cwd, folders)
+
+
+def valid_space_name(name: Any) -> bool:
+    """A Space's name is what people see, so it may be in any language; it only has to be safe to put in a path and a line."""
+    return (
+        isinstance(name, str)
+        and name == name.strip()
+        and 0 < len(name) <= 64
+        and "/" not in name
+        and "\\" not in name
+        and not any(ord(character) < 32 or ord(character) == 127 for character in name)
+        and name not in {".", ".."}
+    )
 
 
 def validate_agent_cwd(value: Any, path: Path) -> str:
