@@ -1,0 +1,18 @@
+{
+  "kind": "keycheck",
+  "description": "OpenAI-style services are asked at <base>/models with a bearer token",
+  "service": "openai",
+  "server": {
+    "status": 200
+  },
+  "env": {
+    "OPENAI_BASE_URL": "<base>/v1"
+  },
+  "expect": {
+    "status": "ok",
+    "path": "/v1/models",
+    "headers": {
+      "authorization": "<key>"
+    }
+  }
+}

@@ -64,6 +64,7 @@ impl Registry {
             env: HostEnv {
                 channel: crate::channel::CHANNEL.to_string(),
                 front_door_cli,
+                providers: Default::default(),
             },
             events,
             warmed: Default::default(),
@@ -72,6 +73,11 @@ impl Registry {
             registry.add_script(&id);
         }
         registry
+    }
+
+    /// Where script Agents get the configured model providers from.
+    pub fn set_provider_lookup(&self, lookup: super::script::providers::Lookup) {
+        self.env.providers.set(lookup);
     }
 
     /// Exactly these native adapters and no script Agents, for tests that
@@ -88,6 +94,7 @@ impl Registry {
             env: HostEnv {
                 channel: "test".into(),
                 front_door_cli: None,
+                providers: Default::default(),
             },
             events,
             warmed: Default::default(),
@@ -122,7 +129,7 @@ impl Registry {
 
     /// Starts every script Agent's process in the background the first time
     /// anyone asks what Agents exist. Not at daemon start: a daemon nobody is
-    /// looking at must not install a Python runtime or touch the network.
+    /// looking at has no reason to run Agent processes.
     fn warm(&self) {
         if self.warmed.swap(true, std::sync::atomic::Ordering::SeqCst) {
             return;
@@ -134,6 +141,13 @@ impl Registry {
 
     pub fn subscribe(&self) -> broadcast::Receiver<RegistryEvent> {
         self.events.subscribe()
+    }
+
+    /// The platform Python the installer recorded, in the daemon's own path
+    /// spelling, or `None` when none is installed.
+    pub fn python(&self) -> Option<std::path::PathBuf> {
+        let python = self.runtime.as_ref()?.python().ok()?;
+        Some(crate::guest_paths::guest_path(&python))
     }
 
     fn hosts(&self) -> Vec<Arc<AgentHost>> {
@@ -404,6 +418,7 @@ fn native_info(
         actions: None,
         job: None,
         pending_requests: None,
+        status_label: None,
         icon: None,
         dir: None,
         override_stale: None,

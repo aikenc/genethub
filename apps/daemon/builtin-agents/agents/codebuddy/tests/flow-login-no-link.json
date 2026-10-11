@@ -1,0 +1,44 @@
+{
+  "kind": "agent",
+  "description": "a CLI that never sends a link fails with a message, not a blank card",
+  "cli": {
+    "hello": {
+      "currentModelId": "glm",
+      "models": [
+        {
+          "id": "glm",
+          "name": "GLM"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": false,
+    "version": "2.5.0",
+    "logEnv": [
+      "CODEBUDDY_INTERNET_ENVIRONMENT"
+    ],
+    "acp": {
+      "hold": 0,
+      "verdict": "error:no browser"
+    }
+  },
+  "steps": [
+    {
+      "run": "login",
+      "answers": [
+        {
+          "type": "answered",
+          "optionId": "external"
+        }
+      ],
+      "expect": {
+        "result": "error: 登录没有成功：no browser",
+        "cards": [],
+        "state": {
+          "ready": false
+        }
+      }
+    }
+  ]
+}

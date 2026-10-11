@@ -256,7 +256,10 @@ fn collect_candidates(
         }
 
         if agent.catalog.models.is_empty() {
-            if can_start_without_model_catalog(&agent.id) {
+            if !registry
+                .get(&agent.id)
+                .is_some_and(|adapter| adapter.needs_model_catalog())
+            {
                 candidates.push(candidate_for(preferences, agent, None));
             }
         } else {
@@ -596,10 +599,6 @@ fn unrestricted_mode(agent: &AgentInfo) -> Option<String> {
         .map(|mode| mode.id.clone())
 }
 
-fn can_start_without_model_catalog(agent_id: &str) -> bool {
-    agent_id != "genet"
-}
-
 fn cost_rank(cost: AgentCostLevel) -> u8 {
     match cost {
         AgentCostLevel::VeryLow => 0,
@@ -657,6 +656,7 @@ mod tests {
             actions: None,
             job: None,
             pending_requests: None,
+            status_label: None,
             icon: None,
             dir: None,
             override_stale: None,

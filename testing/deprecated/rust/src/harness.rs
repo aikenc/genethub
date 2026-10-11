@@ -214,6 +214,7 @@ impl Journey {
         );
         adjust(&mut config);
         config.save(&data_dir.join("config.json"))?;
+        seed_script_agent_runtime(&data_dir)?;
 
         // The daemon finds the agent next to its own binary in production; in a
         // test it lives in the cargo target directory instead. Both the binary
@@ -660,4 +661,37 @@ macro_rules! mock_only {
             return;
         }
     };
+}
+
+/// What the installer leaves on a real machine: a platform Python under
+/// `<data>/agents/runtime` and its `python.json`. The daemon never fetches one,
+/// and the script Agents (codex, cursor, ...) cannot start without it. testctl
+/// hands over its cached copy through `TESTCTL_PYTHON_RUNTIME_TREE`; without
+/// it (cold and offline) the data directory stays a fresh machine's.
+fn seed_script_agent_runtime(data_dir: &Path) -> Result<()> {
+    let Some(tree) = std::env::var_os("TESTCTL_PYTHON_RUNTIME_TREE").map(PathBuf::from) else {
+        return Ok(());
+    };
+    let runtime = data_dir.join("agents").join("runtime");
+    std::fs::create_dir_all(&runtime)?;
+    let name = tree
+        .file_name()
+        .context("the Python runtime tree has no name")?;
+    let private = runtime.join(name);
+    // A copy, not a link: the interpreter writes bytecode into its own tree and
+    // that must not reach the shared cache.
+    let copied = std::process::Command::new("cp")
+        .arg("-a")
+        .arg("--reflink=auto")
+        .arg(&tree)
+        .arg(&private)
+        .status()
+        .context("copying the Python runtime")?;
+    anyhow::ensure!(copied.success(), "copying the Python runtime failed");
+    let python = private.join("bin").join("python3");
+    std::fs::write(
+        runtime.join("python.json"),
+        format!("{}\n", serde_json::json!({ "python": python })),
+    )?;
+    Ok(())
 }

@@ -1,0 +1,19 @@
+{
+  "kind": "apiKeyLogin",
+  "description": "OPENAI_BASE_URL decides where the key is checked",
+  "key": "sk-test-4",
+  "env": {
+    "OPENAI_BASE_URL": "https://gateway.example/v1/"
+  },
+  "verdict": {
+    "status": "ok"
+  },
+  "expect": {
+    "result": "ok",
+    "fetched": [
+      {
+        "url": "https://gateway.example/v1/models"
+      }
+    ]
+  }
+}

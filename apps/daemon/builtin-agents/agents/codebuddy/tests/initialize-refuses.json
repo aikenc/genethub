@@ -1,0 +1,11 @@
+{
+  "kind": "initialize",
+  "description": "a CLI that exits at once gives no answer",
+  "cli": {
+    "exitOnStart": {
+      "code": 2,
+      "stderr": "nope"
+    }
+  },
+  "expect": {}
+}

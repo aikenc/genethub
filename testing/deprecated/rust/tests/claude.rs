@@ -121,18 +121,8 @@ async fn the_model_and_mode_pickers_offer_what_this_cli_actually_accepts() {
     needs_claude!(journey);
     configure_claude_backend();
 
-    let Reply::Agents(agents) = journey
-        .client
-        .call(Request::AgentList)
-        .await
-        .expect("the agent list is served")
-    else {
-        panic!("expected the agent list");
-    };
-    let claude = agents
-        .iter()
-        .find(|agent| agent.id == "claude")
-        .expect("claude is registered");
+    let claude = ready_claude(&journey).await;
+    let claude = &claude;
 
     assert!(
         claude.capabilities.set_model,
@@ -343,24 +333,12 @@ async fn denying_a_permission_request_stops_the_tool_without_touching_disk() {
         .session_with_model("claude", "default")
         .await
         .expect("a session opens on Claude Code");
-    let Reply::Agents(agents) = journey
-        .client
-        .call(Request::AgentList)
+    let asking = ready_claude(&journey)
         .await
-        .expect("installed agent catalog")
-    else {
-        panic!("expected agents")
-    };
-    let asking = agents
+        .catalog
+        .modes
         .iter()
-        .find(|agent| agent.id == "claude")
-        .and_then(|agent| {
-            agent
-                .catalog
-                .modes
-                .iter()
-                .find(|mode| mode.id == "manual" || mode.id == "default")
-        })
+        .find(|mode| mode.id == "manual" || mode.id == "default")
         .expect("the installed CLI exposes an asking mode")
         .id
         .clone();
@@ -608,6 +586,23 @@ async fn a_sub_agents_work_stays_inside_the_call_that_dispatched_it() {
     );
 
     journey.finish().await;
+}
+
+/// Claude's script Agent answers with its catalog only once it has started
+/// and asked its CLI, which happens after the daemon is up: a list taken right
+/// away shows it not ready. Refresh until the model list is there.
+async fn ready_claude(journey: &Journey) -> genehub_proto::AgentInfo {
+    for _ in 0..60 {
+        if let Ok(Reply::Agents(agents)) = journey.client.call(Request::AgentRefresh).await {
+            if let Some(claude) = agents.into_iter().find(|agent| agent.id == "claude") {
+                if !claude.catalog.models.is_empty() {
+                    return claude;
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    panic!("Claude Code never listed its models");
 }
 
 /// Reuses existing host backend configuration in the isolated test process.

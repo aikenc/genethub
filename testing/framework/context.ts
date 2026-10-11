@@ -4,7 +4,7 @@ import { BlockedError, createLease, releaseLease, type CaseMeta, type Environmen
 
 import { assertions } from "./assertions/index.ts";
 import { data } from "./builders/index.ts";
-import { clonePackage, seedWorkflowPackage, seedDirectChangePackage, completeVerifiableTask, handshakeAndList, startLocalEnvironment, openWorkspace, createBuiltinSession, createAgentSession, requireAgentReady, selectRealModel, configureMockProvider, sendPrompt, attachEventLog, openSecondClient, pairDevice, connectDevice, claimDeviceInvite, daemonWsUrl, connectWithoutAdmission, seedHostCursorLogin, seedHostBetaProviders, seedHostCodexLogin, sessionEventOf, startShell, runShell, shellText, shellExit, shellTimedOut } from "./flows/main/index.ts";
+import { clonePackage, seedWorkflowPackage, seedDirectChangePackage, completeVerifiableTask, handshakeAndList, startLocalEnvironment, openWorkspace, createBuiltinSession, createAgentSession, requireAgentReady, selectRealModel, configureMockProvider, sendPrompt, attachEventLog, openSecondClient, pairDevice, connectDevice, claimDeviceInvite, daemonWsUrl, connectWithoutAdmission, seedHostCursorLogin, seedHostBetaProviders, seedHostCodexLogin, pointClaudeAtBuiltinLlm, sessionEventOf, startShell, runShell, shellText, shellExit, shellTimedOut } from "./flows/main/index.ts";
 import { agentControl, agentLogs, agentReady, answerAgentRequest, leftoverProcesses, listAgents, openControlledAgentSession, processAlive, reconnectAfterStop, recordAgentPushes, summarizeAgent, timeControlCall, waitForAgent } from "./flows/branches/index.ts";
 import { waitUntil } from "./tools/wait.ts";
 
@@ -45,6 +45,7 @@ export interface CaseContext {
       seedHostCursorLogin: typeof seedHostCursorLogin;
       seedHostBetaProviders: typeof seedHostBetaProviders;
       seedHostCodexLogin: typeof seedHostCodexLogin;
+      pointClaudeAtBuiltinLlm: typeof pointClaudeAtBuiltinLlm;
       clonePackage: typeof clonePackage;
       seedWorkflowPackage: typeof seedWorkflowPackage;
       seedDirectChangePackage: typeof seedDirectChangePackage;
@@ -156,6 +157,7 @@ export async function createCaseContext(meta: CaseMeta): Promise<CaseContext> {
         seedHostCursorLogin,
         seedHostBetaProviders,
         seedHostCodexLogin,
+        pointClaudeAtBuiltinLlm,
         clonePackage,
         seedWorkflowPackage,
         seedDirectChangePackage,

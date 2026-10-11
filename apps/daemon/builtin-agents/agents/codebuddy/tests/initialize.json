@@ -1,0 +1,61 @@
+{
+  "kind": "initialize",
+  "description": "initialize asks the CLI once with the unrestricted settings and its own skip flag and returns its answer",
+  "cli": {
+    "hello": {
+      "currentModelId": "gpt-5",
+      "models": [
+        {
+          "id": "gpt-5",
+          "name": "GPT-5",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "high"
+          ]
+        },
+        {
+          "id": "glm",
+          "name": "GLM"
+        },
+        {
+          "id": ""
+        }
+      ],
+      "commands": [
+        {
+          "name": "/review",
+          "description": "Reviews the changes on this branch. It reads every changed file and writes findings grouped by severity. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. ",
+          "argumentHint": "[branch]"
+        },
+        {
+          "name": "help"
+        },
+        {
+          "name": "review"
+        },
+        {
+          "name": "/"
+        }
+      ]
+    }
+  },
+  "expect": {
+    "answer": {
+      "models": [
+        {},
+        {},
+        {}
+      ]
+    },
+    "argvHas": [
+      "--print",
+      "--dangerously-skip-permissions",
+      "--settings"
+    ],
+    "argvLacks": [
+      "--resume",
+      "--model"
+    ]
+  }
+}

@@ -189,6 +189,12 @@ pub struct AgentInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub message: Option<String>,
+    /// What the script wants the ready state to be called on screen, when the
+    /// plain "ready" would claim more than it checked (for example a saved key
+    /// nobody could ask the service about).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub status_label: Option<String>,
     /// Actions the script declared right now. The platform knows none of
     /// their names; it renders them as buttons and runs the one clicked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -242,6 +248,19 @@ pub struct AgentActionInfo {
     /// The action to offer where the Agent is shown as unavailable.
     #[serde(default)]
     pub primary: bool,
+    /// Where a client files the button (`account`, `install`, `advanced`, ...).
+    /// The script decides; the platform and clients only group by it, and an
+    /// unknown or absent group is shown with the rest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub group: Option<String>,
+    /// Set when running the action ends something a person set up (signing
+    /// out, uninstalling): the question to ask first. The script decides which
+    /// actions need it; clients only ask what it says and never guess from an
+    /// action's id or wording.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub confirm: Option<String>,
 }
 
 /// Progress of one action run, as the script reported it.
@@ -2521,6 +2540,10 @@ pub struct AgentSelectionPreferences {
 #[ts(export, export_to = "index.ts")]
 pub struct Settings {
     pub providers: Vec<ProviderInfo>,
+    /// Providers GeneHub ships an address for. Choosing one only fills in the
+    /// id, address and protocol of the add form; it is not a permission.
+    #[serde(default)]
+    pub presets: Vec<ProviderPreset>,
     /// Whether the daemon accepts connections from the local network.
     pub lan_enabled: bool,
     /// Qwen3 speech is independent of LLM providers. GeneHub exposes prompt,
@@ -2574,6 +2597,18 @@ pub struct ProviderInfo {
     /// wrong place: a rejected key looks exactly like a bug in the app.
     #[ts(optional)]
     pub problem: Option<String>,
+}
+
+/// A provider we ship the address of.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct ProviderPreset {
+    pub id: String,
+    pub label: String,
+    pub base_url: String,
+    /// `openai` | `anthropic`.
+    pub dialect: String,
 }
 
 /// What one model can do. Every field is optional: unset means "not stated at

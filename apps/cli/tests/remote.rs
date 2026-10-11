@@ -675,6 +675,19 @@ async fn the_same_command_returns_the_same_bytes_from_here_and_from_there() {
 
     // The same binary, one installation on the machine and one anywhere else.
     let here = Cli::on(data.path());
+    // The first agent listing starts the script Agents. On a machine with no
+    // installer-placed Python they report "starting" once and then "runtime
+    // not installed", so ask until the answer stops changing: what is compared
+    // below is the same settled state, not a start-up moment.
+    let mut settled = String::new();
+    for _ in 0..50 {
+        let (answer, _) = here.raw(&["agent", "list"]);
+        if answer == settled {
+            break;
+        }
+        settled = answer;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
     for command in [
         vec!["workspace", "list"],
         vec!["session", "list"],

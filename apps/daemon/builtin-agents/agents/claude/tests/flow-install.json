@@ -1,0 +1,87 @@
+{
+  "kind": "agent",
+  "description": "install: a confirm card first, then npm into GeneHub's own prefix, then straight into login on the same job; the CLI is found afterwards",
+  "installed": false,
+  "cli": {
+    "hello": {
+      "model": "sonnet",
+      "models": [
+        {
+          "value": "sonnet",
+          "displayName": "Sonnet"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": false,
+    "version": "2.1.0",
+    "authLogin": {
+      "print": [
+        "Visit https://claude.ai/oauth/authorize?code=true&client_id=abc to sign in"
+      ],
+      "code": "ok-code"
+    }
+  },
+  "steps": [
+    {
+      "refresh": true,
+      "expect": {
+        "state": {
+          "ready": false,
+          "message": "未安装 Claude Code",
+          "actions": [
+            {
+              "id": "install"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "run": "install",
+      "answers": [
+        {
+          "type": "answered",
+          "optionId": "run"
+        },
+        {
+          "type": "answered",
+          "optionId": "claudeai"
+        }
+      ],
+      "live": [
+        {
+          "type": "answered",
+          "optionId": "submit",
+          "answers": [
+            {
+              "questionId": "code",
+              "selectedOptionIds": [],
+              "freeformText": "ok-code"
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "result": "done: 已登录",
+        "suspended": [
+          {
+            "step": "install.confirm",
+            "title": "安装 Claude Code"
+          },
+          {
+            "step": "login.method"
+          }
+        ],
+        "state": {
+          "ready": true,
+          "version": "2.1.0"
+        },
+        "stdin": [
+          "ok-code"
+        ]
+      }
+    }
+  ]
+}

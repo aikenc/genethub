@@ -24,7 +24,7 @@ export {
   type PinnedPythonRuntime,
   type PinnedPythonRuntimeCache,
 } from "./environment/pinned-runtime.ts";
-export { startMockLlm, type MockLlmHandle } from "./services/mock-llm/index.ts";
+export { BUILTIN_AGENT_ATTEMPTS, startMockLlm, type MockLlmHandle } from "./services/mock-llm/index.ts";
 
 export { repoIdentity } from "./engine/git.ts";
 export { trackResources } from "./environment/resource-census.ts";

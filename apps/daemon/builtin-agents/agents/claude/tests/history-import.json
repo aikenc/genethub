@@ -1,0 +1,144 @@
+{
+  "kind": "history",
+  "description": "past conversations are listed newest first with the first question as title; opening one gives the user and assistant text only, in order, with the resumable session id; side-chain, tool and unparsable lines are skipped; a path-like id is refused",
+  "sessions": [
+    {
+      "id": "sess-old",
+      "lines": [
+        {
+          "type": "user",
+          "message": {
+            "role": "user",
+            "content": "Old one"
+          }
+        }
+      ]
+    },
+    {
+      "id": "sess-a",
+      "lines": [
+        {
+          "type": "summary",
+          "summary": "ignored"
+        },
+        {
+          "type": "user",
+          "sessionId": "sess-a",
+          "timestamp": "2026-01-01T00:00:00Z",
+          "message": {
+            "role": "user",
+            "content": "First question"
+          }
+        },
+        {
+          "type": "assistant",
+          "timestamp": "2026-01-01T00:00:05Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "thinking",
+                "thinking": "hm"
+              },
+              {
+                "type": "text",
+                "text": "First answer"
+              },
+              {
+                "type": "tool_use",
+                "id": "t",
+                "name": "Bash",
+                "input": {}
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "timestamp": "2026-01-01T00:00:06Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "t",
+                "content": "x"
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "isSidechain": true,
+          "message": {
+            "role": "user",
+            "content": "sub-agent chatter"
+          }
+        },
+        "not json at all",
+        {
+          "type": "user",
+          "timestamp": "2026-01-01T00:01:00Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Second question"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "limit": 10,
+  "expect": {
+    "list": [
+      {
+        "sourceId": "sess-a",
+        "title": "First question",
+        "preview": "First question",
+        "continuation": "native"
+      },
+      {
+        "sourceId": "sess-old",
+        "title": "Old one"
+      }
+    ],
+    "show": {
+      "sess-a": {
+        "createdAtMs": 1767225600000,
+        "updatedAtMs": 1767225660000,
+        "persist": {
+          "sessionId": "sess-a"
+        },
+        "continuation": "native",
+        "title": "First question",
+        "warnings": [],
+        "items": [
+          {
+            "type": "userMessage",
+            "text": "First question",
+            "attachments": []
+          },
+          {
+            "type": "assistantMessage",
+            "text": "First answer"
+          },
+          {
+            "type": "userMessage",
+            "text": "Second question",
+            "attachments": []
+          }
+        ]
+      }
+    },
+    "rejected": [
+      "../etc/passwd",
+      "a/b",
+      "",
+      "nope-missing"
+    ]
+  }
+}

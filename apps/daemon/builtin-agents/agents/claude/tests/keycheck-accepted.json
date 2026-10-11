@@ -1,0 +1,19 @@
+{
+  "kind": "keycheck",
+  "description": "a key the service accepts is OK, asked of the model list with the key in a header and nowhere else",
+  "service": "anthropic",
+  "server": {
+    "status": 200
+  },
+  "env": {
+    "ANTHROPIC_BASE_URL": "<base>"
+  },
+  "expect": {
+    "status": "ok",
+    "path": "/v1/models?limit=1",
+    "headers": {
+      "x-api-key": "<key>"
+    },
+    "keyInDetail": false
+  }
+}

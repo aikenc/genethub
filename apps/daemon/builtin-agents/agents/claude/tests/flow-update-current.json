@@ -1,0 +1,31 @@
+{
+  "kind": "agent",
+  "description": "update with nothing newer says so and installs nothing",
+  "cli": {
+    "hello": {
+      "model": "sonnet",
+      "models": [
+        {
+          "value": "sonnet",
+          "displayName": "Sonnet"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": true,
+    "version": "2.1.0",
+    "latest": "2.1.0"
+  },
+  "steps": [
+    {
+      "run": "update",
+      "expect": {
+        "result": "done: 已是最新版本 2.1.0",
+        "state": {
+          "version": "2.1.0"
+        }
+      }
+    }
+  ]
+}

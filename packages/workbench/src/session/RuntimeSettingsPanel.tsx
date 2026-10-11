@@ -3,14 +3,14 @@ import type {
   AgentSelectionPreferences,
   SessionAgentTarget,
 } from "@genehub/proto";
-import { ChevronLeft, Settings2 } from "lucide-react";
 import type { RefObject } from "react";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
+import { AgentConfigEntry } from "../agents/AgentConfigEntry";
 import { definedRuntimeValues, normalizeGroupedTags, routeTarget } from "./capability-preferences";
 import { ModelPicker } from "./ModelPicker";
-import { CompactRuntimeControls, RuntimeSettings } from "./RuntimeSettings";
+import { CompactRuntimeControls } from "./RuntimeSettings";
 import { resolveRuntimeSelection, type RuntimeSelection } from "./runtime-selection";
 import { useWorkbench } from "./store";
 
@@ -26,8 +26,6 @@ export function RuntimeSettingsPanel({
   returnFocusRef,
   onClose,
   onPickTarget,
-  onSavePreferences,
-  onRefreshAgents,
 }: {
   id: string;
   selection: RuntimeSelection;
@@ -41,12 +39,9 @@ export function RuntimeSettingsPanel({
   returnFocusRef: RefObject<HTMLButtonElement>;
   onClose(): void;
   onPickTarget(target: SessionAgentTarget, filterTags: string[]): Promise<void> | void;
-  onSavePreferences(preferences: AgentSelectionPreferences): Promise<void> | void;
-  onRefreshAgents?(): void;
 }) {
   const panel = useRef<HTMLElement>(null);
   const close = useRef<HTMLButtonElement>(null);
-  const [view, setView] = useState<"quick" | "preferences">("quick");
   const [filters, setFilters] = useState(() => normalizeGroupedTags(tags, preferences));
   const [target, setTarget] = useState<SessionAgentTarget | null>(() => targetFrom(selection));
   const [saving, setSaving] = useState(false);
@@ -74,9 +69,10 @@ export function RuntimeSettingsPanel({
   useEffect(() => {
     const dismiss = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
+      // The 模型与 Agent dialog opens above this panel and takes Escape first.
+      if (useWorkbench.getState().agentConfig?.open) return;
       event.preventDefault();
-      if (view === "preferences") setView("quick");
-      else onClose();
+      onClose();
     };
     document.addEventListener("keydown", dismiss);
     const frame = window.requestAnimationFrame(() => close.current?.focus());
@@ -85,7 +81,7 @@ export function RuntimeSettingsPanel({
       window.cancelAnimationFrame(frame);
       returnFocusRef.current?.focus();
     };
-  }, [onClose, returnFocusRef, view]);
+  }, [onClose, returnFocusRef]);
 
   if (typeof document === "undefined") return null;
 
@@ -108,18 +104,8 @@ export function RuntimeSettingsPanel({
         }}
       >
         <header className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-2">
-          {view === "preferences" ? (
-            <button
-              type="button"
-              aria-label="返回模型选择"
-              className="flex h-8 w-8 items-center justify-center rounded-full text-muted hover:bg-raised hover:text-fg"
-              onClick={() => setView("quick")}
-            >
-              <ChevronLeft size={17} />
-            </button>
-          ) : null}
           <h2 id={`${id}-title`} className="min-w-0 flex-1 truncate text-sm font-medium text-fg">
-            {view === "quick" ? "模型选择" : "Agent 配置"}
+            模型选择
           </h2>
           <button
             ref={close}
@@ -133,8 +119,7 @@ export function RuntimeSettingsPanel({
         </header>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
-          {view === "quick" ? (
-            <div className="space-y-3">
+          <div className="space-y-3">
               <ModelPicker
                 agents={agents}
                 preferences={preferences}
@@ -177,16 +162,7 @@ export function RuntimeSettingsPanel({
                 </p>
               ) : null}
               <div className="flex items-center justify-between border-t border-line pt-2">
-                <button
-                  type="button"
-                  className="flex h-9 items-center gap-1.5 rounded-lg px-2.5 text-xs text-accent hover:bg-raised"
-                  onClick={() => {
-                    onRefreshAgents?.();
-                    setView("preferences");
-                  }}
-                >
-                  <Settings2 size={14} /> Agent 配置
-                </button>
+                <AgentConfigEntry variant="link" />
                 <button
                   type="button"
                   disabled={disabled || saving || !target || runtimeLocked}
@@ -202,19 +178,7 @@ export function RuntimeSettingsPanel({
                   {saving ? "切换中…" : "使用此模型"}
                 </button>
               </div>
-            </div>
-          ) : (
-            <RuntimeSettings
-              agents={agents}
-              preferences={preferences}
-              disabled={disabled}
-              onSave={async (next) => {
-                await onSavePreferences(next);
-                setFilters(normalizeGroupedTags(filters, next));
-                setView("quick");
-              }}
-            />
-          )}
+          </div>
         </div>
       </section>
     </div>,

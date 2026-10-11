@@ -1,0 +1,118 @@
+{
+  "kind": "login",
+  "description": "SDK link login: the card shows the link (and a one-time code), cancel/timeout/exit end it, nothing stays open or leaks",
+  "flows": [
+    {
+      "name": "cancel",
+      "script": "print(\"Open https://example.test/auth?x=1 to sign in\", flush=True)\nimport time; time.sleep(30)",
+      "answer": {
+        "type": "answered",
+        "optionId": "cancel"
+      },
+      "expect": {
+        "result": "canceled",
+        "cards": 1,
+        "display": [
+          "link"
+        ],
+        "neverLogged": [
+          "https://example.test"
+        ]
+      }
+    },
+    {
+      "name": "authorized-by-exit",
+      "script": "print(\"Open https://example.test/auth?x=1 to sign in\", flush=True)\nprint('Code ABCD-12345', flush=True)\nimport time; time.sleep(1)",
+      "options": {
+        "code_pattern": "\\b([A-Z0-9]{4}-[A-Z0-9]{4,6})\\b"
+      },
+      "expect": {
+        "result": "ok",
+        "cards": 1,
+        "display": [
+          "link",
+          "code"
+        ],
+        "neverLogged": [
+          "https://example.test",
+          "ABCD-12345"
+        ]
+      }
+    },
+    {
+      "name": "timeout",
+      "script": "print(\"Open https://example.test/auth?x=1 to sign in\", flush=True)\nimport time; time.sleep(30)",
+      "options": {
+        "timeout": 1.0
+      },
+      "expect": {
+        "result": "error: 登录超时",
+        "cards": 1
+      }
+    },
+    {
+      "name": "process-fails",
+      "script": "print(\"Open https://example.test/auth?x=1 to sign in\", flush=True)\nimport sys; print('Login failed: denied'); sys.exit(3)",
+      "expect": {
+        "result": "error: 登录没有成功：Login failed: denied",
+        "cards": 1
+      }
+    },
+    {
+      "name": "paste-good",
+      "script": "print(\"Open https://example.test/auth?x=1 to sign in\", flush=True)\nimport sys\nline = sys.stdin.readline().strip()\nsys.exit(0 if line == 'good' else 1)",
+      "options": {
+        "paste_prompt": "粘贴授权码"
+      },
+      "answer": {
+        "type": "answered",
+        "optionId": "submit",
+        "answers": [
+          {
+            "questionId": "code",
+            "selectedOptionIds": [],
+            "freeformText": "good"
+          }
+        ]
+      },
+      "expect": {
+        "result": "ok",
+        "cards": 1,
+        "display": [
+          "link"
+        ]
+      }
+    },
+    {
+      "name": "paste-bad",
+      "script": "print(\"Open https://example.test/auth?x=1 to sign in\", flush=True)\nimport sys\nline = sys.stdin.readline().strip()\nsys.exit(0 if line == 'good' else 1)",
+      "options": {
+        "paste_prompt": "粘贴授权码"
+      },
+      "answer": {
+        "type": "answered",
+        "optionId": "submit",
+        "answers": [
+          {
+            "questionId": "code",
+            "selectedOptionIds": [],
+            "freeformText": "bad"
+          }
+        ]
+      },
+      "expect": {
+        "result": "error: 登录没有成功",
+        "cards": 1
+      }
+    },
+    {
+      "name": "already-logged-in",
+      "script": "print('Already logged in')",
+      "expect": {
+        "result": "ok",
+        "cards": 0
+      }
+    }
+  ],
+  "interrupted": true
+}

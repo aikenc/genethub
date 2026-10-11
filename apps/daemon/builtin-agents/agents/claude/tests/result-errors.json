@@ -1,0 +1,23 @@
+{
+  "kind": "translate",
+  "description": "a failed result we never asked to cancel is a real failure; the message decides the code",
+  "frames": [
+    {
+      "type": "result",
+      "subtype": "error_during_execution",
+      "is_error": true,
+      "errors": [
+        "Request failed with status code 429"
+      ]
+    }
+  ],
+  "expect": {
+    "terminal": {
+      "type": "turnFailed",
+      "error": {
+        "code": "rateLimited",
+        "message": "<contains>429"
+      }
+    }
+  }
+}

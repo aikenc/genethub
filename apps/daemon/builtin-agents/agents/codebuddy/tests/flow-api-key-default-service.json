@@ -1,0 +1,54 @@
+{
+  "kind": "agent",
+  "description": "the default service sets no service variable",
+  "cli": {
+    "hello": {
+      "currentModelId": "glm",
+      "models": [
+        {
+          "id": "glm",
+          "name": "GLM"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": false,
+    "version": "2.5.0",
+    "logEnv": [
+      "CODEBUDDY_INTERNET_ENVIRONMENT"
+    ]
+  },
+  "steps": [
+    {
+      "run": "login-api-key",
+      "answers": [
+        {
+          "type": "answered",
+          "optionId": "save",
+          "answers": [
+            {
+              "questionId": "key",
+              "selectedOptionIds": [],
+              "freeformText": "ck-secret-2"
+            },
+            {
+              "questionId": "region",
+              "selectedOptionIds": [
+                "default"
+              ],
+              "freeformText": ""
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "result": "done: 已保存 API Key，但没能核对",
+        "env": {
+          "CODEBUDDY_API_KEY": "ck-secret-2",
+          "CODEBUDDY_INTERNET_ENVIRONMENT": null
+        }
+      }
+    }
+  ]
+}

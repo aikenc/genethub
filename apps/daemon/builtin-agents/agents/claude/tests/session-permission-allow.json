@@ -1,0 +1,211 @@
+{
+  "kind": "session",
+  "description": "in the ask mode a tool prompt reaches the person; allowing it answers the CLI with both reply shapes and the turn goes on",
+  "launch": {
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "models": [
+      "sonnet",
+      "opus"
+    ],
+    "efforts": [
+      "low",
+      "high"
+    ]
+  },
+  "config": {
+    "modeId": "default"
+  },
+  "cli": {
+    "turns": [
+      {
+        "emit": [
+          {
+            "type": "system",
+            "subtype": "init",
+            "session_id": "sess-1"
+          },
+          {
+            "type": "assistant",
+            "message": {
+              "id": "m1",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "tool_use",
+                  "id": "tu1",
+                  "name": "Bash",
+                  "input": {
+                    "command": "rm x"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "type": "control_request",
+            "request_id": "r1",
+            "request": {
+              "subtype": "can_use_tool",
+              "tool_name": "Bash",
+              "input": {
+                "command": "rm x"
+              },
+              "tool_use_id": "tu1"
+            }
+          }
+        ],
+        "await": "r1",
+        "thenAllow": [
+          {
+            "type": "user",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "tool_result",
+                  "tool_use_id": "tu1",
+                  "content": "removed"
+                }
+              ]
+            }
+          },
+          {
+            "type": "assistant",
+            "message": {
+              "id": "m2",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "removed"
+                }
+              ]
+            }
+          },
+          {
+            "type": "result",
+            "subtype": "success",
+            "is_error": false
+          }
+        ],
+        "thenDeny": [
+          {
+            "type": "user",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "tool_result",
+                  "tool_use_id": "tu1",
+                  "content": "denied",
+                  "is_error": true
+                }
+              ]
+            }
+          },
+          {
+            "type": "assistant",
+            "message": {
+              "id": "m3",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "ok not removed"
+                }
+              ]
+            }
+          },
+          {
+            "type": "result",
+            "subtype": "success",
+            "is_error": false
+          }
+        ]
+      }
+    ]
+  },
+  "steps": [
+    {
+      "send": "remove it",
+      "wait": false
+    },
+    {
+      "waitFor": "permissionRequested"
+    },
+    {
+      "respond": {
+        "outcome": "selected",
+        "optionId": "allow"
+      }
+    },
+    {
+      "waitTerminal": 1
+    }
+  ],
+  "expect": {
+    "asked": [
+      {
+        "type": "permissionRequested",
+        "request": {
+          "id": "r1",
+          "kind": "permission",
+          "title": "Allow Bash?",
+          "toolCallId": "turn_0-1",
+          "options": [
+            {
+              "id": "allow",
+              "kind": "allowOnce"
+            },
+            {
+              "id": "allow_always",
+              "kind": "allowAlways"
+            },
+            {
+              "id": "deny",
+              "kind": "reject"
+            }
+          ]
+        }
+      },
+      {
+        "type": "permissionResolved",
+        "requestId": "r1"
+      }
+    ],
+    "runs": [
+      {
+        "has": [
+          [
+            "--permission-mode",
+            "default"
+          ]
+        ]
+      }
+    ],
+    "received": [
+      {
+        "type": "user"
+      },
+      {
+        "type": "control_response",
+        "response": {
+          "request_id": "r1",
+          "subtype": "success",
+          "response": {
+            "behavior": "allow",
+            "allowed": true,
+            "updatedInput": {
+              "command": "rm x"
+            }
+          }
+        }
+      }
+    ],
+    "terminals": [
+      {
+        "type": "turnCompleted"
+      }
+    ]
+  }
+}

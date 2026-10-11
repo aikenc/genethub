@@ -1,0 +1,119 @@
+{
+  "kind": "agent",
+  "cli": {
+    "hello": {
+      "model": "sonnet",
+      "models": [
+        {
+          "value": "sonnet",
+          "displayName": "Sonnet"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": false,
+    "version": "2.1.0",
+    "logEnv": [
+      "CLAUDE_CONFIG_DIR",
+      "ANTHROPIC_API_KEY"
+    ]
+  },
+  "description": "an own space is an advanced, confirmed switch: the CLI then runs with its configuration directory inside GeneHub's, the card says so, and switching back points it at the machine again",
+  "steps": [
+    {
+      "refresh": true,
+      "expect": {
+        "state": {
+          "ready": false,
+          "actions": [
+            {
+              "id": "login"
+            },
+            {
+              "id": "login-api-key"
+            },
+            {
+              "id": "provider-use"
+            },
+            {
+              "id": "space-own"
+            }
+          ]
+        },
+        "space": false
+      }
+    },
+    {
+      "run": "space-own",
+      "answers": [
+        {
+          "type": "answered",
+          "optionId": "switch"
+        }
+      ],
+      "expect": {
+        "result": "done: 已切换到独立空间",
+        "suspended": [
+          {
+            "step": "space.confirm",
+            "title": "让 Claude Code 使用独立空间？"
+          }
+        ],
+        "space": true,
+        "lastRunEnv": {
+          "CLAUDE_CONFIG_DIR": "<space>"
+        },
+        "state": {
+          "message": "找到了 Claude Code，但它还没登录：点「登录」，或者用 API Key 登录。 现在用的是独立空间：登录、配置和历史都放在 GeneHub 自己的目录里，和这台机器上的 Claude Code 分开。",
+          "actions": [
+            {
+              "id": "login"
+            },
+            {
+              "id": "login-api-key"
+            },
+            {
+              "id": "provider-use"
+            },
+            {
+              "id": "space-shared"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "run": "space-shared",
+      "answers": [
+        {
+          "type": "answered",
+          "optionId": "switch"
+        }
+      ],
+      "expect": {
+        "result": "done: 已改回沿用本机",
+        "space": false,
+        "lastRunEnv": {
+          "CLAUDE_CONFIG_DIR": null
+        },
+        "state": {
+          "actions": [
+            {
+              "id": "login"
+            },
+            {
+              "id": "login-api-key"
+            },
+            {
+              "id": "provider-use"
+            },
+            {
+              "id": "space-own"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

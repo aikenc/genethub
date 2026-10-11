@@ -41,11 +41,17 @@ describe("Agent presentation catalog", () => {
       glyph: "C",
     });
     expect(resolveAgentPresentation({ id: "cursor", label: "Cursor" }).kind).toBe("icon");
-    // Removed native adapters keep no bundled mark; a script Agent of that
-    // name is shown by its own icon or its label.
+    // Claude Code and CodeBuddy are script Agents again; they keep a glyph
+    // unless the script ships its own icon.
     expect(resolveAgentPresentation({ id: "claude", label: "Claude Code" })).toEqual({
-      kind: "text",
+      kind: "glyph",
       label: "Claude Code",
+      glyph: "✱",
+    });
+    expect(resolveAgentPresentation({ id: "codebuddy", label: "CodeBuddy" })).toEqual({
+      kind: "glyph",
+      label: "CodeBuddy",
+      glyph: "B",
     });
   });
 
@@ -261,6 +267,24 @@ describe("runtime badges", () => {
       modeKind: "unknown",
       startWithoutModelCatalog: false,
     });
+  });
+
+  it("describes Claude Code and CodeBuddy as permission Agents with their mode badges", () => {
+    for (const agentId of ["claude", "codebuddy"]) {
+      expect(resolveAgentProfile(agentId)).toEqual({
+        modeKind: "permission",
+        startWithoutModelCatalog: true,
+      });
+      expect(
+        resolveModeBadge({ agentId, permissions: true, modeId: "plan", modeLabel: "Plan" }),
+      ).toMatchObject({ risk: "restricted", fullLabel: "规划模式" });
+      expect(
+        resolveModeBadge({ agentId, permissions: true, modeId: "acceptEdits", modeLabel: "Accept" }),
+      ).toMatchObject({ risk: "write" });
+      expect(
+        resolveModeBadge({ agentId, permissions: true, modeId: "bypassPermissions", modeLabel: "Bypass" }),
+      ).toMatchObject({ risk: "unrestricted" });
+    }
   });
 
   it("lets any script Agent start without a model catalog, and no unknown native one", () => {

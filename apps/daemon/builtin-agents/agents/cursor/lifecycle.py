@@ -23,8 +23,6 @@ LIST_MODELS_TIMEOUT = 15.0
 LOGOUT_TIMEOUT = 30.0
 INSTALL_TIMEOUT = 15 * 60.0
 UPDATE_TIMEOUT = 10 * 60.0
-LOGIN_URL_TIMEOUT = 60.0
-LOGIN_TIMEOUT = 10 * 60.0
 
 if WINDOWS:
     INSTALL_SOURCE = "https://cursor.com/install?win32=true"
@@ -36,7 +34,6 @@ else:
     INSTALL_ARGV = ["sh", "-c", INSTALL_LINE]
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07")
-_URL = re.compile(r"https://[^\s\"'<>\x1b]+")
 
 
 # -- discovery -----------------------------------------------------------------
@@ -197,16 +194,6 @@ async def stream_logged(
 
 def strip_ansi(text: str) -> str:
     return _ANSI.sub("", text)
-
-
-def find_login_url(line: str) -> Optional[str]:
-    found = _URL.search(strip_ansi(line))
-    return found.group(0).rstrip(".,);") if found else None
-
-
-def hide_urls(line: str) -> str:
-    """Login links belong in the request card only, never in a log."""
-    return _URL.sub("<登录链接见请求卡片>", strip_ansi(line))
 
 
 def _log(message: str) -> None:

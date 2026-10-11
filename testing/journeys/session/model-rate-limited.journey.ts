@@ -1,15 +1,15 @@
-import { defineJourney } from "../../framework/public.ts";
+import { BUILTIN_AGENT_ATTEMPTS, defineJourney } from "../../framework/public.ts";
 
 defineJourney(
   {
     id: "journey.session.model-rate-limited",
     title: "Model failures surface as actionable errors",
-    oracle: "HTTP 429 from the mock LLM becomes turnFailed rateLimited",
+    oracle: "HTTP 429 that outlasts the Agent's retries becomes turnFailed rateLimited",
     catches: ["hang on 429", "generic internal"],
     tags: ["core", "session", "parity"],
     llm: { default: "mock" },
     resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
-    expectedDurationMs: 25_000,
+    expectedDurationMs: 35_000,
     timeoutMs: 75_000,
     surfaces: ["daemon", "agent", "workbench-client"],
     productInterfaces: ["@genehub/workbench/client"],
@@ -18,7 +18,8 @@ defineJourney(
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
     try {
       await t.flows.main.configureMockProvider(opened.client, opened.mock);
-      opened.mock.script({ status: 429 });
+      // The Agent retries a 429 (2s, 4s, 8s backoff) before it gives up.
+      opened.mock.script({ status: 429, repeat: BUILTIN_AGENT_ATTEMPTS });
       const sessionId = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
       const events = await t.flows.main.attachEventLog(opened.client, sessionId);
       await t.flows.main.sendPrompt(opened.client, sessionId, "Go.");

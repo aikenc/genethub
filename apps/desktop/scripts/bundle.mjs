@@ -10,7 +10,7 @@
 // (`docs/desktop-client.md` §4.1).
 
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -105,6 +105,12 @@ cpSync(
   preparedGuest ?? join(repo, "target/wasm32-wasip2", guestProfile, "genehub_guest.wasm"),
   join(binDir, COMPONENT_FILE),
 );
+// The installer runs this once the files are in place (`installer.nsh`,
+// NSIS_HOOK_POSTINSTALL); the daemon only reads what it records.
+for (const file of ["python.pin", "install-python.ps1"]) {
+  mkdirSync(join(binDir, "python-runtime"), { recursive: true });
+  cpSync(join(repo, "scripts/python-runtime", file), join(binDir, "python-runtime", file));
+}
 
 console.log(`==> building the installer (${bundles})`);
 run("npm", ["--prefix", join(here, ".."), "run", "build", "--", "--bundles", bundles], { shell: process.platform === "win32" });

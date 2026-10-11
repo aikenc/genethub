@@ -13,7 +13,7 @@ subclasses `Agent` / `Session`.
   user/<id>/      user or Agent edits; replaces builtin/<id> as a whole
   state/<id>/     the script's own state; owner-only; survives reset
   sdk/            boot.py + genehub_agent/
-  runtime/        install*.sh / install-windows.ps1 + the installed Python
+  runtime/        the platform Python the installer put there, recorded in python.json
 ```
 
 `<id>` matches `^[a-z][a-z0-9-]{1,31}$`. A directory is an Agent when it has
@@ -43,8 +43,7 @@ Edits under `user/` take effect only on `genet agent reload <id>`.
   Agent code runs, so stray prints and child processes cannot corrupt them.
 - One process per Agent hosts every session of that Agent. Processes start
   the first time anyone asks for the Agent list or uses an Agent, not when
-  the daemon starts: an unwatched daemon never installs Python or touches the
-  network.
+  the daemon starts: an unwatched daemon runs no Agent processes.
 - The daemon only sends requests; the script only replies and notifies.
 - Every request has a deadline. A missed deadline, an exit or a broken pipe
   is handled the same way: controlled restart, then `session.start` again for
@@ -69,6 +68,7 @@ Edits under `user/` take effect only on `genet agent reload <id>`.
 | `action.resume` | `{job, action, step, outcome, secretIds}` | `{job}`; starts a fresh job execution | 10 s |
 | `request.prepared` | `{id, error?}`; acknowledgment of committed preparation | `{}` | 10 s |
 | `request.answer` | `{id, outcome}` | `{}` | 10 s |
+| `provider.reply` | `{id, result?, error?}`; the answer to a `provider.request` | `{}` | 10 s |
 | `session.start` | `{sessionId, config}` | `{}` | 120 s |
 | `session.send` | `{sessionId, turnId, text, attachments}` | `{}` | 30 s |
 | `session.interrupt` / `session.close` | `{sessionId}` | `{}` | 15 s |
@@ -113,12 +113,13 @@ seeds GeneHub's own log into the first prompt instead.
 
 | method | params |
 |---|---|
-| `state` | `{ready, message?, version?, actions: [{id, label, primary?}], capabilities: Capabilities, catalog: Catalog}` |
+| `state` | `{ready, message?, statusLabel?, version?, actions: [{id, label, primary?, group?}], capabilities: Capabilities, catalog: Catalog}` |
 | `job.progress` | `{job, action?, phase?, percent?, message?, log?, done?, error?}` |
 | `request.open` | `{id, title, detail?, display: [{kind: link\|code, value, label?, render?}], questions: [{id, prompt, options?, allowMultiple?, input?: text\|secret}], options: [{id, label}]}` |
 | `request.close` | `{id}`; closes legacy ephemeral requests only |
 | `request.prepare` | `{request: AgentUserRequest (no display), job, action, step}`; saves a stopped:false obligation before unwinding |
 | `request.suspend` | `{request: AgentUserRequest (no display), job, action, step}`; action has unwound and owned children have stopped |
+| `provider.request` | `{id, op: list\|get, provider?}`; ask the daemon about the model providers a person configured (see below) |
 | `session.event` | `{sessionId, event: SessionEvent}` |
 | `session.persist` | `{sessionId, value}` — returned later as `config.resume` |
 | `session.pid` | `{sessionId, pid \| null}` — the CLI's native pid |
@@ -129,7 +130,41 @@ one that does not fit is dropped and logged.
 
 Only `ready: true` Agents can be picked or routed to. When not ready, the
 action marked `primary` is offered next to `message`. The platform knows no
-action names — install, update and login are all ordinary actions.
+action names — install, update and login are all ordinary actions. An action
+may carry a `group` (`account`, `install`, `advanced`; anything else is shown
+with the rest) and the script may give the ready state its own `statusLabel`
+(for example "可用（Key 未核对）"); clients group and label by those fields
+and never read an Agent's ids or wording.
+
+### How a request reaches a person
+
+A request is durable: it survives a daemon restart and a page reload. A
+window that finds one waiting (on load or after a reconnect) does not cover the
+page with it; the request waits behind its Agent's card ("查看请求"). Only a
+request that arrives live, in answer to something done in that window, opens by
+itself. The card always has its own 取消请求, which answers `canceled`; an option
+with id `cancel` is not drawn a second time, so a script may keep listing one
+(the SDK default) and must treat `canceled` and `cancel` alike.
+
+### Model providers
+
+A person configures model providers (address, protocol, key, models) once, in
+the workbench. A script Agent that can run its CLI on a custom endpoint asks
+for them on its private pipe: `provider.request {id, op: "list"}` answers
+every provider without keys (`{providers: [{id, label, dialect, baseUrl,
+models, hasApiKey, usable, problem}]}`); `{op: "get", provider}` answers one
+with its `apiKey`. The daemon replies with `provider.reply {id, result}` or
+`{id, error}` (an error is a sentence for the person: no such provider, no
+key, no usable address). Resolution is the daemon's: an address is filled in
+for shipped providers, and a provider without a usable address has none.
+
+The pipe, not a command: a command can be run by any process on the
+machine, including a model's shell tool, and a key a command can print can
+reach a model. The key is held in memory by the script, masked in its logs,
+and handed to the CLI only through that CLI's environment or per-process
+arguments. What the CLI needs is the script's business: `genehub_agent.providers`
+remembers which provider (an id, never the key) and `claude_family` /
+`codex_provider.py` show two ways to assemble it.
 
 ## 5. Agent-level requests
 
@@ -171,12 +206,27 @@ credentials. No model, timeline, log or CLI command receives the answer.
 **ephemeral** interfaces. They keep an in-memory Future and do not satisfy the
 long Human-pause contract. Custom scripts need to migrate to `ctx.ask` before
 claiming durable interaction support. Built-in installation confirmation and
-Codex API-key entry now use that durable path. Account OAuth/device login in
-current Codex/Cursor cannot resume a stopped upstream CLI: the card explicitly
-reports that workbench account login is unsupported, and offers cancellation
-or a recheck of externally obtained local credentials. It never retains a login
-CLI and does not introduce a terminal-login fallback. This is a capability gap,
-not a passed account-authorization journey.
+API-key entry (Codex, Cursor, Claude Code, CodeBuddy) use that durable path.
+
+**Account login is a live card, on purpose.** Upstream account authorization
+(device code, OAuth link) cannot be resumed after its CLI stops, so it is not
+durable. The SDK's `login.link_login` runs it: the Agent starts the login CLI,
+reads the authorization link (and a one-time code, if the CLI prints one) from
+its output, and opens one ephemeral request that shows the link ("打开授权页")
+— and, where the CLI asks for it, a box to paste the code the page shows. Only
+that one login process exists, owned by the Agent, never by the person. It ends
+when the person authorizes (the CLI exits, or the protocol answers), cancels the
+card, ten minutes pass, or the Agent process or daemon goes away; the card is
+closed with it, so no expired link is left behind. A marker in the state
+directory makes the next start say "登录已中断，请重新点「登录」"
+(`login.take_interrupted`). Links, codes and keys never reach job or stderr
+logs. Card text and Skills never tell a person to use a terminal.
+
+API keys: `credentials.save` keeps the key owner-only in the Agent's state
+directory and `credentials.apply` exports it as the environment variable the
+CLI documents to every process the Agent starts; `credentials.clear` forgets it
+on logout. The key is masked in every log from the moment it is held
+(`ctx.add_secret`).
 
 Who may do what: `agent.logs`, `agent.test` and `agent.reload` need the
 Session capability. Agent-list replies and pushes to Read-only peers omit CLI
@@ -201,13 +251,16 @@ continuation obligation.
 
 ## 6. Python runtime
 
-Before every start the daemon runs, on macOS/Linux,
-`sh <data>/agents/runtime/install.sh <data>/agents/runtime`, and on Windows
-`powershell -NoProfile -ExecutionPolicy Bypass -File install-windows.ps1 <dir>`.
-The script is idempotent, prints `{"phase","message"}` progress lines and
-finishes with `{"python": "<absolute path>"}` (or `{"error"}` and a non-zero
-exit). Versions and SHA-256 are pinned inside the scripts.
-`GENEHUB_PYTHON_MIRRORS` (space-separated base URLs) is tried first.
+The daemon never installs Python. The installers and the dev tooling run
+`scripts/python-runtime/install-python.sh` (`install-python.ps1` on Windows),
+which unpacks the pinned build under `<data>/agents/runtime/` and records the
+interpreter in `<data>/agents/runtime/python.json` as `{"python": "<absolute
+path>"}`. Before every start the daemon reads that file and starts the script
+as `<python> -I -X utf8 sdk/boot.py <agent> serve`. When the file or the
+interpreter it names is missing, the Agent is unavailable with the reason
+"Python 运行时未安装" and nothing is downloaded. The version and SHA-256 are
+pinned in `scripts/python-runtime/python.pin`; see
+[python-runtime.md](./python-runtime.md).
 
 ## 7. Public conversation question entry
 

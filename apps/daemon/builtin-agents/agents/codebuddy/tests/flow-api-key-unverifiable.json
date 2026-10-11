@@ -1,0 +1,61 @@
+{
+  "kind": "agent",
+  "description": "CodeBuddy has no way to check a key without a model request, so the card never calls a key valid and never asks the network about it",
+  "cli": {
+    "hello": {
+      "currentModelId": "glm",
+      "models": [
+        {
+          "id": "glm",
+          "name": "GLM"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": false,
+    "version": "2.5.0",
+    "logEnv": [
+      "CODEBUDDY_CONFIG_DIR"
+    ]
+  },
+  "neverLogged": [
+    "ck-secret-9"
+  ],
+  "steps": [
+    {
+      "run": "login-api-key",
+      "answers": [
+        {
+          "type": "answered",
+          "optionId": "save",
+          "answers": [
+            {
+              "questionId": "key",
+              "selectedOptionIds": [],
+              "freeformText": "ck-secret-9"
+            },
+            {
+              "questionId": "region",
+              "selectedOptionIds": [
+                "default"
+              ],
+              "freeformText": ""
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "result": "done: 已保存 API Key，但没能核对",
+        "env": {
+          "CODEBUDDY_API_KEY": "ck-secret-9"
+        },
+        "keyChecks": [],
+        "state": {
+          "ready": true,
+          "message": "没能核对：CodeBuddy 的 Key 没有不发模型请求就能核对的办法，第一次对话时才知道它是否有效。"
+        }
+      }
+    }
+  ]
+}

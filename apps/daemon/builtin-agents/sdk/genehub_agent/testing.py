@@ -27,6 +27,74 @@ class _RecordingChannel:
         self.messages.append({"method": method, "params": params or {}})
 
 
+def scratch_context(agent_id: str = "test"):
+    """An ``AgentContext`` on a throwaway state directory and a channel that
+    records what the Agent sent, for replay hooks that drive real flows
+    (a login with a fake CLI) instead of one translation function."""
+    from .serve import AgentContext, Job, _SecretMask
+
+    channel = _RecordingChannel()
+    ctx = AgentContext(
+        channel,  # type: ignore[arg-type]
+        {"agentId": agent_id, "stateDir": tempfile.mkdtemp(prefix="genehub-agent-test-")},
+        _SecretMask(sys.stderr),
+    )
+    return ctx, channel, Job(channel, "job-test", "test", ctx._mask)  # type: ignore[arg-type]
+
+
+# -- helpers for replay hooks -----------------------------------------------------------
+
+
+def subset(expected: Any, actual: Any, path: str = "$") -> Optional[str]:
+    if isinstance(expected, dict):
+        if not isinstance(actual, dict):
+            return f"{path}: expected an object, got {json.dumps(actual, ensure_ascii=False)}"
+        for key, value in expected.items():
+            if value == "<absent>":
+                if key in actual:
+                    return f"{path}.{key}: expected absent, got {json.dumps(actual[key], ensure_ascii=False)}"
+                continue
+            if key not in actual:
+                return f"{path}.{key}: missing"
+            problem = subset(value, actual[key], f"{path}.{key}")
+            if problem:
+                return problem
+        return None
+    if isinstance(expected, list):
+        if not isinstance(actual, list) or len(actual) != len(expected):
+            return f"{path}: expected {len(expected)} entries, got {json.dumps(actual, ensure_ascii=False)[:400]}"
+        for index, (want, got) in enumerate(zip(expected, actual)):
+            problem = subset(want, got, f"{path}[{index}]")
+            if problem:
+                return problem
+        return None
+    if isinstance(expected, str) and expected.startswith("<contains>"):
+        needle = expected[len("<contains>") :]
+        return None if isinstance(actual, str) and needle in actual else f"{path}: {actual!r} lacks {needle!r}"
+    if expected != actual or type(expected) is not type(actual):
+        return f"{path}: expected {json.dumps(expected, ensure_ascii=False)}, got {json.dumps(actual, ensure_ascii=False)}"
+    return None
+
+
+def assistant_texts(emitted: List[dict]) -> List[str]:
+    texts: List[List[str]] = []
+    for event in emitted:
+        if event.get("type") == "item" and event["item"].get("type") == "assistantMessage":
+            # An item event with a known id replaces that item, as the daemon does.
+            for entry in texts:
+                if entry[0] == event["item"]["id"]:
+                    entry[1] = event["item"]["text"]
+                    break
+            else:
+                texts.append([event["item"]["id"], event["item"]["text"]])
+        elif event.get("type") == "itemDelta" and event["delta"].get("kind") == "text":
+            for entry in reversed(texts):
+                if entry[0] == event["itemId"]:
+                    entry[1] += event["delta"]["delta"]
+                    break
+    return [text for _, text in texts]
+
+
 def _check_state(state: dict) -> List[str]:
     problems = []
     if not isinstance(state.get("ready"), bool):

@@ -1,9 +1,11 @@
 import type { AgentInfo, AgentSelectionPreferences } from "@genehub/proto";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
+import { AgentConfigDialog } from "../agents/AgentConfigDialog";
 import { ComposerControls } from "./ComposerControls";
+import { useWorkbench } from "./store";
 
 const AGENTS: AgentInfo[] = [
   {
@@ -108,13 +110,43 @@ const PREFERENCES: AgentSelectionPreferences = {
   },
 };
 
+/**
+ * The model panel's "模型与 Agent" opens the app-wide dialog, so these tests
+ * mount it next to the controls and let it save through the store the way the
+ * app does.
+ */
+function seedStore(
+  agents: AgentInfo[],
+  preferences: AgentSelectionPreferences,
+  callbacks: {
+    onSavePreferences(preferences: AgentSelectionPreferences): Promise<boolean>;
+    onRefreshAgents(): void;
+  },
+) {
+  useWorkbench.setState({
+    agents,
+    settings: { agentPreferences: preferences } as never,
+    agentConfig: null,
+    setAgentPreferences: callbacks.onSavePreferences,
+    refreshAgents: async () => callbacks.onRefreshAgents(),
+  });
+}
+
+async function openAgentConfig(dialog: HTMLElement) {
+  await userEvent.click(within(dialog).getByRole("button", { name: "模型与 Agent" }));
+  await screen.findByRole("dialog", { name: "模型与 Agent" });
+}
+
 function controls(overrides: Partial<Parameters<typeof ComposerControls>[0]> = {}) {
   const callbacks = {
     onPickTarget: vi.fn(async () => {}),
-    onSavePreferences: vi.fn(async (_preferences: AgentSelectionPreferences) => {}),
+    onSavePreferences: vi.fn(async (_preferences: AgentSelectionPreferences) => true),
     onRefreshAgents: vi.fn(),
   };
+  seedStore(overrides.agents ?? AGENTS, overrides.preferences ?? PREFERENCES, callbacks);
   render(
+    <>
+    <AgentConfigDialog />
     <ComposerControls
       agents={AGENTS}
       preferences={PREFERENCES}
@@ -123,9 +155,10 @@ function controls(overrides: Partial<Parameters<typeof ComposerControls>[0]> = {
       modelId="deepseek/v4"
       modeId={null}
       effortId="high"
-      {...callbacks}
+      onPickTarget={callbacks.onPickTarget}
       {...overrides}
-    />,
+    />
+    </>,
   );
   return callbacks;
 }
@@ -203,9 +236,9 @@ describe("the exact model composer control", () => {
     const callbacks = controls();
     const { dialog } = await openSettings();
     expect(dialog).toHaveClass("h-[min(88dvh,52rem)]");
-    await userEvent.click(within(dialog).getByRole("button", { name: "Agent 配置" }));
+    await openAgentConfig(dialog);
 
-    expect(screen.getByRole("dialog", { name: "Agent 配置" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "模型与 Agent" })).toBeInTheDocument();
     expect(screen.getAllByRole("listitem")).toHaveLength(4);
     const cost = screen.getByLabelText("Genet DeepSeek V4 成本");
     const row = cost.closest("article")!;
@@ -215,7 +248,10 @@ describe("the exact model composer control", () => {
     expect(within(row).getByRole("button", { name: "Pro" }).className).toBe(selectedClass);
     await userEvent.click(within(row).getByRole("button", { name: "图片理解" }));
     await userEvent.selectOptions(cost, "veryHigh");
-    await userEvent.click(screen.getAllByRole("button", { name: "Max" })[0]!);
+    // The model picker's own filter buttons sit underneath; this is the editor's.
+    await userEvent.click(
+      within(screen.getByRole("dialog", { name: "模型与 Agent" })).getAllByRole("button", { name: "Max" })[0]!,
+    );
     const custom = screen.getByLabelText("Genet DeepSeek V4 自定义标签");
     await userEvent.type(custom, "私有{Enter}");
     await userEvent.click(screen.getByRole("button", { name: "重命名 Genet DeepSeek V4" }));
@@ -247,7 +283,7 @@ describe("the exact model composer control", () => {
   it("hides auto and adds later catalog models on demand", async () => {
     const callbacks = controls();
     const { dialog } = await openSettings();
-    await userEvent.click(within(dialog).getByRole("button", { name: "Agent 配置" }));
+    await openAgentConfig(dialog);
 
     expect(screen.queryByText("Auto")).not.toBeInTheDocument();
     await userEvent.click(screen.getAllByRole("button", { name: "添加模型" })[0]!);
@@ -261,24 +297,38 @@ describe("the exact model composer control", () => {
     expect(saved.modelProfiles?.some((row) => row.modelId === "auto")).toBe(false);
   });
 
+  it("closes the 模型与 Agent window once the machine has stored the edits", async () => {
+    const callbacks = controls();
+    const { dialog } = await openSettings();
+    await openAgentConfig(dialog);
+
+    await userEvent.click(screen.getByRole("button", { name: "保存到这台机器" }));
+
+    await waitFor(() => expect(callbacks.onSavePreferences).toHaveBeenCalledOnce());
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "模型与 Agent" })).not.toBeInTheDocument(),
+    );
+    // What was underneath is still there.
+    expect(screen.getByRole("dialog", { name: "模型选择" })).toBeInTheDocument();
+  });
+
+  it("keeps the window open, edits intact, when the machine refuses the save", async () => {
+    const callbacks = controls();
+    callbacks.onSavePreferences.mockResolvedValueOnce(false);
+    const { dialog } = await openSettings();
+    await openAgentConfig(dialog);
+
+    await userEvent.click(screen.getByRole("button", { name: "保存到这台机器" }));
+
+    await waitFor(() => expect(callbacks.onSavePreferences).toHaveBeenCalledOnce());
+    expect(screen.getByRole("dialog", { name: "模型与 Agent" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "保存到这台机器" })).toBeEnabled());
+  });
+
   it("keeps unsaved model edits across a structurally identical Agent refresh", async () => {
-    const callbacks = {
-      onPickTarget: vi.fn(async () => {}),
-      onSavePreferences: vi.fn(async (_preferences: AgentSelectionPreferences) => {}),
-      onRefreshAgents: vi.fn(),
-    };
-    const props = {
-      preferences: PREFERENCES,
-      tags: ["Pro"],
-      agentId: "genet",
-      modelId: "deepseek/v4",
-      modeId: null,
-      effortId: "high",
-      ...callbacks,
-    };
-    const rendered = render(<ComposerControls agents={AGENTS} {...props} />);
-    await openSettings();
-    await userEvent.click(screen.getByRole("button", { name: "Agent 配置" }));
+    controls();
+    const { dialog } = await openSettings();
+    await openAgentConfig(dialog);
     await userEvent.click(screen.getByRole("button", { name: "移除 Genet Omni" }));
     await userEvent.click(screen.getByRole("button", { name: "添加模型" }));
     await userEvent.click(screen.getByRole("button", { name: "Extra" }));
@@ -298,13 +348,13 @@ describe("the exact model composer control", () => {
       })),
       runtimes: { ...PREFERENCES.runtimes },
     };
-    rendered.rerender(
-      <ComposerControls
-        agents={refreshedAgents}
-        {...props}
-        preferences={refreshedPreferences}
-      />,
-    );
+    // The daemon answers a refresh with equal data in new objects.
+    act(() => {
+      useWorkbench.setState({
+        agents: refreshedAgents,
+        settings: { agentPreferences: refreshedPreferences } as never,
+      });
+    });
 
     expect(screen.queryByRole("button", { name: "移除 Genet Omni" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "移除 Genet Extra" })).toBeInTheDocument();
@@ -317,7 +367,7 @@ describe("the exact model composer control", () => {
   it("allows removing the last model to disable an Agent", async () => {
     const callbacks = controls();
     const { dialog } = await openSettings();
-    await userEvent.click(within(dialog).getByRole("button", { name: "Agent 配置" }));
+    await openAgentConfig(dialog);
 
     await userEvent.click(screen.getByRole("button", { name: "移除 Codex Agent 默认" }));
     expect(screen.queryByRole("button", { name: "移除 Codex Agent 默认" })).not.toBeInTheDocument();
@@ -353,9 +403,13 @@ describe("the exact model composer control", () => {
     };
     controls({ agents: [...AGENTS, inactive] });
     const { dialog } = await openSettings();
-    await userEvent.click(within(dialog).getByRole("button", { name: "Agent 配置" }));
+    await openAgentConfig(dialog);
 
-    expect(screen.queryByText("Inactive Agent")).not.toBeInTheDocument();
+    // It has no models to edit; it is listed with what it needs instead.
+    expect(screen.queryByRole("heading", { name: "Inactive Agent" })).not.toBeInTheDocument();
+    const waiting = within(screen.getByRole("region", { name: "还不能用的 Agent" }));
+    expect(waiting.getByText("Inactive Agent")).toBeInTheDocument();
+    expect(waiting.getByText("未安装")).toBeInTheDocument();
   });
 
   it("keeps same-Agent runtime picks live while a turn runs", async () => {

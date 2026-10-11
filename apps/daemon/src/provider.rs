@@ -186,9 +186,18 @@ fn credential_origin(url: &crate::http::Url) -> (&str, Option<&str>, Option<u16>
     (url.scheme(), url.host_str(), url.port_or_known_default())
 }
 
-/// The providers a fresh install offers to fill in, in the order shown.
-pub fn known() -> Vec<(&'static str, &'static str)> {
-    KNOWN.iter().map(|(id, label, ..)| (*id, *label)).collect()
+/// The providers a fresh install offers to fill in, in the order shown. The
+/// clients get this list from the daemon instead of keeping a copy of it.
+pub fn presets() -> Vec<genehub_proto::ProviderPreset> {
+    KNOWN
+        .iter()
+        .map(|(id, label, url, dialect)| genehub_proto::ProviderPreset {
+            id: (*id).to_string(),
+            label: (*label).to_string(),
+            base_url: (*url).to_string(),
+            dialect: dialect.as_str().to_string(),
+        })
+        .collect()
 }
 
 /// One model a provider says this key can use, and whatever the list itself
@@ -633,6 +642,27 @@ fn usable_for_chat(id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_presets_clients_are_given_are_exactly_what_the_daemon_would_use() {
+        let presets = presets();
+        assert!(
+            presets.len() >= 6,
+            "kimi, minimax, qwen, deepseek, openai, anthropic"
+        );
+        for preset in presets {
+            let resolved = resolve(&preset.id, &ProviderConfig::default());
+            assert_eq!(
+                resolved.base_url.as_deref(),
+                Some(preset.base_url.as_str()),
+                "{}",
+                preset.id
+            );
+            assert_eq!(resolved.dialect.as_str(), preset.dialect, "{}", preset.id);
+            assert_eq!(resolved.label, preset.label, "{}", preset.id);
+            assert!(!resolved.custom, "{} is shipped, not custom", preset.id);
+        }
+    }
 
     #[test]
     fn provider_keys_require_tls_except_on_exact_ip_loopback() {

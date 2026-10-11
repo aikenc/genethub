@@ -199,6 +199,18 @@ impl AppState {
             shutdown: Arc::new(tokio::sync::Notify::new()),
             reload: Arc::new(tokio::sync::Notify::new()),
         });
+        // Script Agents ask for the providers a person configured by id; the
+        // daemon answers from its own state, never from a copy.
+        let weak = Arc::downgrade(&state);
+        state.registry.set_provider_lookup(Arc::new(move || {
+            let weak = weak.clone();
+            Box::pin(async move {
+                match weak.upgrade() {
+                    Some(state) => state.providers().await,
+                    None => Default::default(),
+                }
+            })
+        }));
         Ok((state, pty_rx))
     }
 
@@ -295,6 +307,7 @@ impl AppState {
         };
         let discovered = self.discover(&stored).await;
         Settings {
+            presets: crate::provider::presets(),
             providers: stored
                 .iter()
                 .map(|(id, provider)| {

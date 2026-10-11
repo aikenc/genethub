@@ -1,0 +1,34 @@
+{
+  "kind": "agent",
+  "description": "a daemon that restarted during a login tells the card so once",
+  "interruptedLogin": true,
+  "cli": {
+    "hello": {
+      "currentModelId": "glm",
+      "models": [
+        {
+          "id": "glm",
+          "name": "GLM"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": false,
+    "version": "2.5.0",
+    "logEnv": [
+      "CODEBUDDY_INTERNET_ENVIRONMENT"
+    ]
+  },
+  "steps": [
+    {
+      "refresh": true,
+      "expect": {
+        "state": {
+          "ready": false,
+          "message": "登录已中断，请重新点「登录」"
+        }
+      }
+    }
+  ]
+}

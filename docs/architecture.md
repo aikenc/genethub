@@ -95,7 +95,7 @@ Normalizer      ── 把它的事件翻成 GeneHub 的 TimelineItem
 ```rust
 #[async_trait]
 pub trait AgentAdapter: Send + Sync {
-    fn id(&self) -> &str;                       // "genet" / "codex" / "cursor"
+    fn id(&self) -> &str;                       // "genet" / "codex" / "cursor" / "claude" / "codebuddy"
     fn capabilities(&self) -> Capabilities;     // 支不支持中断、切模型、审批、恢复
 
     async fn probe(&self) -> Probe;             // 二进制在不在、能不能握手
@@ -115,7 +115,7 @@ pub trait AgentAdapter: Send + Sync {
 | adapter | 传输 | 覆盖 |
 |---------|------|------|
 | `genet` | 子进程 + stdio JSONL | 自研内置 agent，装完即可跑；原生实现，不走脚本层 |
-| `script` | 每个 Agent 一个常驻 `serve` 进程 + stdio JSON-RPC | 所有第三方 Agent；第一期内置 `codex`、`cursor` |
+| `script` | 每个 Agent 一个常驻 `serve` 进程 + stdio JSON-RPC | 所有第三方 Agent；内置 `codex`、`cursor`、`claude`、`codebuddy` |
 
 第三方 Agent 的全部知识——安装、登录、登录态、CLI 参数、协议翻译、历史导入——都在
 `<数据目录>/agents/<layer>/<id>/` 的 Python 里，daemon 只认目录规范和
@@ -124,7 +124,8 @@ pub trait AgentAdapter: Send + Sync {
 现状见 [third-party-agents.md](./third-party-agents.md)。
 
 B3「两种形状截然不同的 agent」由 `codex`（JSON-RPC app-server，每会话一个常驻进程）与 `cursor`
-（每轮一个 print 进程，stream-json）在脚本层继续证伪抽象。
+（每轮一个 print 进程，stream-json）在脚本层继续证伪抽象；`claude` 与 `codebuddy` 说同一套 stream-json 协议，
+共用 SDK 里的 `claude_family`，各自只写登录等不同的部分。
 
 ### 3.4 Agent 权限与暂停恢复
 

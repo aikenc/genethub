@@ -1,0 +1,43 @@
+{
+  "kind": "agent",
+  "description": "a CLI that prints no link fails with a message, not a blank card",
+  "cli": {
+    "hello": {
+      "model": "sonnet",
+      "models": [
+        {
+          "value": "sonnet",
+          "displayName": "Sonnet"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": false,
+    "version": "2.1.0",
+    "authLogin": {
+      "print": [
+        "Something went wrong"
+      ],
+      "exit": 1
+    }
+  },
+  "steps": [
+    {
+      "run": "login",
+      "answers": [
+        {
+          "type": "answered",
+          "optionId": "claudeai"
+        }
+      ],
+      "expect": {
+        "result": "error: 没有拿到授权链接",
+        "cards": [],
+        "state": {
+          "ready": false
+        }
+      }
+    }
+  ]
+}

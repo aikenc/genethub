@@ -175,7 +175,8 @@ persistenceCase(
   async (t, harness) => {
     let opened = await harness.boot();
     const sessionId = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
-    opened.mock.script({ status: 500 }, { text: "recovered" });
+    // A rejected request (400) fails the round at once; a 5xx would be retried by the Agent.
+    opened.mock.script({ status: 400 }, { text: "recovered" });
     const events = await t.flows.main.attachEventLog(opened.client, sessionId);
     await t.flows.main.sendPrompt(opened.client, sessionId, "Fail this durable round.");
     await t.tools.waitUntil(() => terminalCount(events) === 1, 45_000);

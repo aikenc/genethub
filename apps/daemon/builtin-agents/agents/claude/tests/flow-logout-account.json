@@ -1,0 +1,42 @@
+{
+  "kind": "agent",
+  "description": "logging out of an account asks the CLI and the card goes back to logged out",
+  "cli": {
+    "hello": {
+      "model": "sonnet",
+      "models": [
+        {
+          "value": "sonnet",
+          "displayName": "Sonnet"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": true,
+    "version": "2.1.0"
+  },
+  "steps": [
+    {
+      "refresh": true,
+      "expect": {
+        "state": {
+          "ready": true,
+          "message": null
+        }
+      }
+    },
+    {
+      "run": "logout",
+      "expect": {
+        "result": "done: 已退出登录",
+        "state": {
+          "ready": false
+        },
+        "runsInclude": [
+          "auth logout"
+        ]
+      }
+    }
+  ]
+}

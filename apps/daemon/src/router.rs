@@ -107,7 +107,6 @@ fn failed(error: anyhow::Error) -> Handled {
         || message.contains("是内置的")
         || message.contains("只能清空")
         || message.contains("this agent offers")
-        || message.contains("Claude Code offers")
         || message.contains("unknown thinking level")
     {
         ErrorCode::BadRequest
@@ -4597,7 +4596,7 @@ mod tests {
                 ErrorCode::Forbidden,
             ),
             (
-                "'not-a-model-this-cli-has' is not a model this Claude Code offers (default, opus, sonnet, haiku)",
+                "'not-a-model-this-cli-has' is not a model this agent offers (default, opus, sonnet, haiku)",
                 ErrorCode::BadRequest,
             ),
         ] {

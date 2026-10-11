@@ -1,0 +1,87 @@
+{
+  "kind": "session",
+  "description": "a pasted image goes inline in the user frame; a pasted text file is spilled and named",
+  "launch": {
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "models": [
+      "sonnet",
+      "opus"
+    ],
+    "efforts": [
+      "low",
+      "high"
+    ],
+    "defaultModel": "sonnet"
+  },
+  "cli": {
+    "turns": [
+      {
+        "emit": [
+          {
+            "type": "system",
+            "subtype": "init",
+            "session_id": "sess-1"
+          },
+          {
+            "type": "assistant",
+            "message": {
+              "id": "m-done",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "done"
+                }
+              ]
+            }
+          },
+          {
+            "type": "result",
+            "subtype": "success",
+            "is_error": false
+          }
+        ]
+      }
+    ]
+  },
+  "steps": [
+    {
+      "send": "look",
+      "attachments": [
+        {
+          "name": "a.png",
+          "mime": "image/png",
+          "dataBase64": "AAAA"
+        },
+        {
+          "name": "n.txt",
+          "mime": "text/plain",
+          "dataBase64": "aGk="
+        }
+      ]
+    }
+  ],
+  "expect": {
+    "received": [
+      {
+        "type": "user",
+        "message": {
+          "content": [
+            {
+              "type": "text",
+              "text": "<contains>n.txt"
+            },
+            {
+              "type": "image",
+              "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": "AAAA"
+              }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

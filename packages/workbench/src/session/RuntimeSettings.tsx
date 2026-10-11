@@ -160,11 +160,14 @@ export function RuntimeSettings({
   preferences,
   disabled,
   onSave,
+  onConfigureAgent,
 }: {
   agents: AgentInfo[];
   preferences: AgentSelectionPreferences;
   disabled?: boolean;
   onSave(preferences: AgentSelectionPreferences): Promise<void> | void;
+  /** Adds a "配置" button to each Agent's heading that opens that Agent's own window. */
+  onConfigureAgent?(agentId: string): void;
 }) {
   const [draft, setDraft] = useState(() => normalizeAgentPreferences(preferences, agents));
   const [customTag, setCustomTag] = useState<Record<string, string>>({});
@@ -323,8 +326,25 @@ export function RuntimeSettings({
                   <AgentMark agent={agent} className="h-5 w-5" fallbackToText={false} />
                   <h3 className="truncate text-xs font-medium text-fg">{agentLabel}</h3>
                 </div>
-                <span className="text-[10px] text-faint">{agentRows.length} 个模型</span>
+                <div className="flex shrink-0 items-center gap-2">
+                  <span className="text-[10px] text-faint">{agentRows.length} 个模型</span>
+                  {onConfigureAgent ? (
+                    <button
+                      type="button"
+                      aria-label={`配置 ${agentLabel}`}
+                      className="min-h-8 rounded-lg border border-line px-2.5 text-[11px] text-muted hover:border-accent hover:text-fg"
+                      onClick={() => onConfigureAgent(agent.id)}
+                    >
+                      配置
+                    </button>
+                  ) : null}
+                </div>
               </div>
+              {agent.message ? (
+                <p className="px-1 text-[11px] text-muted" title={agent.message}>
+                  {agent.message}
+                </p>
+              ) : null}
               <div role="list" className="space-y-2">
                 {agentRows.map((profile) => {
                   const key = `${profile.agentId}\u0000${profile.modelId ?? ""}`;

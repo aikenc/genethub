@@ -1,0 +1,13 @@
+{
+  "kind": "space",
+  "description": "a CODEX_HOME the person set is given back when the space is left",
+  "before": "/somewhere/else/.codex",
+  "expect": {
+    "initial": false,
+    "own": true,
+    "insideIsSpace": true,
+    "ownAfter": false,
+    "after": "/somewhere/else/.codex",
+    "kept": true
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "kind": "session",
+  "description": "a CLI that refuses to start reaches the person with its own reason",
+  "launch": {
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "models": [
+      "sonnet",
+      "opus"
+    ],
+    "efforts": [
+      "low",
+      "high"
+    ],
+    "defaultModel": "sonnet"
+  },
+  "cli": {
+    "exitOnStart": {
+      "code": 1,
+      "stderr": "error: unknown option '--include-partial-messages'"
+    }
+  },
+  "steps": [
+    {
+      "send": "hi"
+    }
+  ],
+  "expect": {
+    "terminals": [
+      {
+        "type": "turnFailed",
+        "error": {
+          "code": "agentCrashed",
+          "message": "<contains>unknown option"
+        }
+      }
+    ]
+  }
+}

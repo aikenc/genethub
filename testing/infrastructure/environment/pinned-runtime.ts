@@ -1,22 +1,22 @@
-// The pinned CPython the product's own install scripts install, cached once
+// The pinned CPython the product's own install script installs, cached once
 // per machine for every test process: the archive (checked against the
 // script's pin) and the tree the shipped installer unpacks from it. Nothing
 // here knows any case; callers decide what to seed or point at the mirror.
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { machine, userInfo } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { BlockedError } from "../types.ts";
 
-const RUNTIME_SCRIPTS = "apps/daemon/builtin-agents/runtime";
-/** The shipped installer's own budget (`runtime.rs` `INSTALL_BUDGET`). */
+const RUNTIME_SCRIPTS = "scripts/python-runtime";
+/** The installer scripts' own download budget. */
 const INSTALL_BUDGET_MS = 15 * 60_000;
 
-/** The pinned build the shipped install scripts install, read from them. */
+/** The pinned build the shipped install script installs, read from it. */
 export interface PinnedPythonRuntime {
   version: string;
   release: string;
@@ -32,37 +32,40 @@ export interface PinnedPythonRuntime {
   dirName: string;
 }
 
-/** The shipped scripts are the source of truth; this only reads them. */
-export function readPinnedPythonRuntime(openRoot: string): PinnedPythonRuntime {
-  const script = process.platform === "darwin" ? "install-macos.sh" : process.platform === "linux" ? "install-linux.sh" : null;
-  if (!script) throw new BlockedError(`the pinned Python runtime is not cached on ${process.platform}`);
-  const dir = path.join(openRoot, RUNTIME_SCRIPTS);
-  const text = readFileSync(path.join(dir, script), "utf8");
-  const common = readFileSync(path.join(dir, "install-common.sh"), "utf8");
-  const version = /^VERSION=([^\s#]+)\s*$/m.exec(text)?.[1];
-  const release = /^RELEASE=([^\s#]+)\s*$/m.exec(text)?.[1];
-  if (!version || !release) throw new Error(`${script} no longer pins VERSION= and RELEASE=`);
+/** This host's build triple, in the names `python.pin` uses. */
+function hostTriple(): string {
   const cpu = machine();
-  let triple: string | undefined;
-  let sha256: string | undefined;
-  for (const block of text.matchAll(/^\s*([^\n()]+)\)\s*\n\s*TRIPLE=(\S+)\s*\n\s*SHA256=([0-9a-f]{64})\s*$/gm)) {
-    if (block[1]!.split("|").map((item) => item.trim()).includes(cpu)) {
-      triple = block[2];
-      sha256 = block[3];
-      break;
-    }
+  const arm = cpu === "arm64" || cpu === "aarch64";
+  if (process.platform === "linux" && (arm || cpu === "x86_64")) return arm ? "aarch64-unknown-linux-gnu" : "x86_64-unknown-linux-gnu";
+  if (process.platform === "darwin" && (arm || cpu === "x86_64")) return arm ? "aarch64-apple-darwin" : "x86_64-apple-darwin";
+  throw new BlockedError(`the pinned Python runtime is not cached on ${process.platform}/${cpu}`);
+}
+
+/** The shipped pin and script are the source of truth; this only reads them. */
+export function readPinnedPythonRuntime(openRoot: string): PinnedPythonRuntime {
+  const dir = path.join(openRoot, RUNTIME_SCRIPTS);
+  const pin: Record<string, string> = {};
+  for (const line of readFileSync(path.join(dir, "python.pin"), "utf8").split("\n")) {
+    const match = /^([^#=\s][^=]*)=(\S+)\s*$/.exec(line);
+    if (match) pin[match[1]!.trim()] = match[2]!;
   }
-  if (!triple || !sha256) throw new BlockedError(`${script} pins no Python build for CPU ${cpu}`);
-  const fileTemplate = /^\s*file="([^"]+)"\s*$/m.exec(common)?.[1];
-  const mirrorTemplate = /urls="\$urls \$\{base%\/\}\/([^"\s]+)"/.exec(common)?.[1];
-  const upstreamTemplates = [...common.matchAll(/urls="\$urls (https:\/\/[^"\s]+)"/g)].map((match) => match[1]!);
+  const triple = hostTriple();
+  const version = pin.version;
+  const release = pin.release;
+  const sha256 = pin[`sha256.${triple}`];
+  if (!version || !release) throw new Error("python.pin no longer pins version= and release=");
+  if (!sha256 || !/^[0-9a-f]{64}$/.test(sha256)) throw new BlockedError(`python.pin pins no Python build for ${triple}`);
+  const script = readFileSync(path.join(dir, "install-python.sh"), "utf8");
+  const fileTemplate = /^\s*file="([^"]+)"\s*$/m.exec(script)?.[1];
+  const mirrorTemplate = /urls="\$urls \$\{base%\/\}\/([^"\s]+)"/.exec(script)?.[1];
+  const upstreamTemplates = [...script.matchAll(/urls="\$urls (https:\/\/[^"\s]+)"/g)].map((match) => match[1]!);
   if (!fileTemplate || !mirrorTemplate || upstreamTemplates.length === 0) {
-    throw new Error("install-common.sh no longer builds its download URLs the way this reader expects");
+    throw new Error("install-python.sh no longer builds its download URLs the way this reader expects");
   }
-  const vars: Record<string, string> = { VERSION: version, RELEASE: release, TRIPLE: triple };
+  const vars: Record<string, string> = { version, release, triple };
   const expand = (template: string) => template.replace(/\$(\w+)/g, (_, name: string) => {
     const value = vars[name];
-    if (value === undefined) throw new Error(`install-common.sh URL uses an unknown variable $${name}`);
+    if (value === undefined) throw new Error(`install-python.sh URL uses an unknown variable $${name}`);
     return value;
   });
   vars.file = expand(fileTemplate);
@@ -188,32 +191,41 @@ export function pinnedPythonRuntimeCache(
   const python = path.join(tree, "bin", "python3");
   const mirror = path.join(cache, "mirror");
   const archive = path.join(mirror, ...decodeURIComponent(pinned.mirrorPath).split("/"));
-  const ready = () => sha256File(archive) === pinned.sha256 && runsPinned(python, pinned.version);
+  // The installer also marks the tree as not a place to install packages
+  // into; a tree an older script unpacked lacks the marker and is rebuilt.
+  const marked = () => {
+    try {
+      return readdirSync(path.join(tree, "lib")).some((entry) =>
+        /^python3\.\d+$/.test(entry) && existsSync(path.join(tree, "lib", entry, "EXTERNALLY-MANAGED")));
+    } catch {
+      return false;
+    }
+  };
+  const ready = () => sha256File(archive) === pinned.sha256 && runsPinned(python, pinned.version) && marked();
   if (!ready()) {
     if (options.build === false) throw new BlockedError(`the pinned Python runtime cache ${cache} is not complete`);
     mkdirSync(cache, { recursive: true });
     withFileLock(path.join(cache, ".lock"), INSTALL_BUDGET_MS, () => {
       if (sha256File(archive) !== pinned.sha256) fetchPinnedArchive(pinned, archive);
-      if (runsPinned(python, pinned.version)) return;
+      if (runsPinned(python, pinned.version) && marked()) return;
       const scratch = mkdtempSync(path.join(cache, ".install-"));
       try {
-        const run = spawnSync("sh", [path.join(openRoot, RUNTIME_SCRIPTS, "install.sh"), scratch], {
+        const run = spawnSync("sh", [path.join(openRoot, RUNTIME_SCRIPTS, "install-python.sh"), scratch], {
           encoding: "utf8",
           timeout: INSTALL_BUDGET_MS,
           maxBuffer: 1 << 20,
           env: { ...process.env, GENEHUB_PYTHON_MIRRORS: pathToFileURL(mirror).href },
         });
-        const lines = (run.stdout ?? "").trim().split("\n");
-        let reported: { python?: string; error?: string } = {};
+        const installed = path.join(scratch, pinned.dirName);
+        let recorded: string | undefined;
         try {
-          reported = JSON.parse(lines.at(-1) ?? "{}");
+          recorded = (JSON.parse(readFileSync(path.join(scratch, "python.json"), "utf8")) as { python?: string }).python;
         } catch {
           // reported below as the exit status
         }
-        const installed = path.join(scratch, pinned.dirName);
-        if (run.status !== 0 || reported.python !== path.join(installed, "bin", "python3")) {
+        if (run.status !== 0 || recorded !== path.join(installed, "bin", "python3")) {
           throw new Error(`the shipped installer could not install Python ${pinned.version} from the cached archive: ${
-            reported.error ?? run.error?.message ?? `exit ${run.status}`}`);
+            run.stderr?.trim() || run.error?.message || `exit ${run.status}`}`);
         }
         rmSync(tree, { recursive: true, force: true });
         renameSync(installed, tree);

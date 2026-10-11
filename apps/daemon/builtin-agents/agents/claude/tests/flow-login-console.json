@@ -1,0 +1,61 @@
+{
+  "kind": "agent",
+  "description": "the Console choice runs the console login",
+  "cli": {
+    "hello": {
+      "model": "sonnet",
+      "models": [
+        {
+          "value": "sonnet",
+          "displayName": "Sonnet"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": false,
+    "version": "2.1.0",
+    "authLogin": {
+      "print": [
+        "Visit https://claude.ai/oauth/authorize?code=true&client_id=abc to sign in"
+      ],
+      "code": "c-1"
+    }
+  },
+  "steps": [
+    {
+      "run": "login",
+      "answers": [
+        {
+          "type": "answered",
+          "optionId": "console"
+        }
+      ],
+      "live": [
+        {
+          "type": "answered",
+          "optionId": "submit",
+          "answers": [
+            {
+              "questionId": "code",
+              "selectedOptionIds": [],
+              "freeformText": "c-1"
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "result": "done: 已登录",
+        "runsInclude": [
+          "auth login --console"
+        ],
+        "runsExclude": [
+          "--claudeai"
+        ],
+        "state": {
+          "ready": true
+        }
+      }
+    }
+  ]
+}

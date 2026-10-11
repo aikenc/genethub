@@ -1,0 +1,221 @@
+{
+  "kind": "agent",
+  "cli": {
+    "hello": {
+      "model": "sonnet",
+      "models": [
+        {
+          "value": "sonnet",
+          "displayName": "Sonnet"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": false,
+    "version": "2.1.0",
+    "logEnv": [
+      "ANTHROPIC_BASE_URL",
+      "ANTHROPIC_AUTH_TOKEN",
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_MODEL",
+      "ANTHROPIC_SMALL_FAST_MODEL"
+    ]
+  },
+  "providers": [
+    {
+      "id": "kimi",
+      "label": "Kimi",
+      "dialect": "anthropic",
+      "baseUrl": "https://anthropic-compatible.example/anthropic",
+      "apiKey": "sk-kimi-secret",
+      "models": [
+        "kimi-k2",
+        "kimi-k2-turbo"
+      ],
+      "hasApiKey": true
+    },
+    {
+      "id": "anthropic",
+      "label": "Anthropic",
+      "dialect": "anthropic",
+      "baseUrl": "https://api.anthropic.com",
+      "apiKey": "sk-ant-own",
+      "models": [
+        "claude-sonnet-x"
+      ],
+      "hasApiKey": true
+    },
+    {
+      "id": "deepseek",
+      "label": "DeepSeek",
+      "dialect": "openai",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "apiKey": "sk-ds-secret",
+      "models": [
+        "deepseek-chat"
+      ],
+      "hasApiKey": true
+    },
+    {
+      "id": "nokey",
+      "label": "没填 Key",
+      "dialect": "anthropic",
+      "baseUrl": "https://nokey.example",
+      "models": [
+        "m"
+      ],
+      "hasApiKey": false
+    }
+  ],
+  "description": "a chosen provider that loses its key is not silently ignored: the card says why, offers another provider or the CLI's own login, and getting the key back restores it without choosing again",
+  "neverLogged": [
+    "sk-kimi-secret"
+  ],
+  "steps": [
+    {
+      "run": "provider-use",
+      "answers": [
+        {
+          "type": "answered",
+          "optionId": "p:kimi"
+        }
+      ],
+      "expect": {
+        "state": {
+          "ready": true
+        },
+        "provider": "kimi"
+      }
+    },
+    {
+      "setProviders": [
+        {
+          "id": "kimi",
+          "label": "Kimi",
+          "dialect": "anthropic",
+          "baseUrl": "https://anthropic-compatible.example/anthropic",
+          "apiKey": "",
+          "models": [
+            "kimi-k2",
+            "kimi-k2-turbo"
+          ],
+          "hasApiKey": true
+        },
+        {
+          "id": "anthropic",
+          "label": "Anthropic",
+          "dialect": "anthropic",
+          "baseUrl": "https://api.anthropic.com",
+          "apiKey": "sk-ant-own",
+          "models": [
+            "claude-sonnet-x"
+          ],
+          "hasApiKey": true
+        },
+        {
+          "id": "deepseek",
+          "label": "DeepSeek",
+          "dialect": "openai",
+          "baseUrl": "https://api.deepseek.com/v1",
+          "apiKey": "sk-ds-secret",
+          "models": [
+            "deepseek-chat"
+          ],
+          "hasApiKey": true
+        },
+        {
+          "id": "nokey",
+          "label": "没填 Key",
+          "dialect": "anthropic",
+          "baseUrl": "https://nokey.example",
+          "models": [
+            "m"
+          ],
+          "hasApiKey": false
+        }
+      ],
+      "refresh": true,
+      "expect": {
+        "state": {
+          "ready": false,
+          "message": "<contains>选定的 provider 现在不能用：Kimi 还没有保存 API Key",
+          "actions": [
+            {
+              "id": "login"
+            },
+            {
+              "id": "login-api-key"
+            },
+            {
+              "id": "provider-use"
+            },
+            {
+              "id": "provider-leave"
+            },
+            {
+              "id": "space-own"
+            }
+          ]
+        },
+        "provider": "kimi"
+      }
+    },
+    {
+      "setProviders": [
+        {
+          "id": "kimi",
+          "label": "Kimi",
+          "dialect": "anthropic",
+          "baseUrl": "https://anthropic-compatible.example/anthropic",
+          "apiKey": "sk-kimi-secret",
+          "models": [
+            "kimi-k2",
+            "kimi-k2-turbo"
+          ],
+          "hasApiKey": true
+        },
+        {
+          "id": "anthropic",
+          "label": "Anthropic",
+          "dialect": "anthropic",
+          "baseUrl": "https://api.anthropic.com",
+          "apiKey": "sk-ant-own",
+          "models": [
+            "claude-sonnet-x"
+          ],
+          "hasApiKey": true
+        },
+        {
+          "id": "deepseek",
+          "label": "DeepSeek",
+          "dialect": "openai",
+          "baseUrl": "https://api.deepseek.com/v1",
+          "apiKey": "sk-ds-secret",
+          "models": [
+            "deepseek-chat"
+          ],
+          "hasApiKey": true
+        },
+        {
+          "id": "nokey",
+          "label": "没填 Key",
+          "dialect": "anthropic",
+          "baseUrl": "https://nokey.example",
+          "models": [
+            "m"
+          ],
+          "hasApiKey": false
+        }
+      ],
+      "refresh": true,
+      "expect": {
+        "state": {
+          "ready": true,
+          "message": "现在用的是 provider「Kimi」，不用 Claude Code 自己的登录。"
+        },
+        "provider": "kimi"
+      }
+    }
+  ]
+}

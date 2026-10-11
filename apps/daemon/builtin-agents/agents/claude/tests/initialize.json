@@ -1,0 +1,59 @@
+{
+  "kind": "initialize",
+  "description": "initialize asks the CLI once with the unrestricted settings and its own skip flag and returns its answer",
+  "cli": {
+    "hello": {
+      "model": "default",
+      "models": [
+        {
+          "value": "default",
+          "displayName": "Default (recommended)",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high"
+          ]
+        },
+        {
+          "value": "haiku",
+          "displayName": "Haiku",
+          "description": "fast"
+        },
+        {
+          "value": "sonnet[1m]",
+          "displayName": "Sonnet (1M)",
+          "supportsAdaptiveThinking": true
+        }
+      ],
+      "commands": [
+        {
+          "name": "review",
+          "description": "Reviews the changes on this branch. It reads every changed file and writes findings grouped by severity. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. More text. ",
+          "argumentHint": "[branch]"
+        },
+        {
+          "name": "help"
+        }
+      ]
+    }
+  },
+  "expect": {
+    "answer": {
+      "models": [
+        {},
+        {},
+        {}
+      ]
+    },
+    "argvHas": [
+      "--print",
+      "--allow-dangerously-skip-permissions",
+      "--settings"
+    ],
+    "argvLacks": [
+      "--resume",
+      "--model"
+    ]
+  }
+}

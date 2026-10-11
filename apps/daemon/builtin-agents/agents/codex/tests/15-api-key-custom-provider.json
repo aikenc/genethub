@@ -1,0 +1,15 @@
+{
+  "kind": "apiKeyLogin",
+  "description": "with a custom model service in config.toml the OpenAI list is not asked (it would not know that key) and the key is saved unchecked",
+  "key": "sk-test-3",
+  "config": "model_provider = \"azure\"\n",
+  "verdict": {
+    "status": "rejected",
+    "detail": "must not be asked"
+  },
+  "expect": {
+    "result": "ok",
+    "ran": true,
+    "fetched": []
+  }
+}

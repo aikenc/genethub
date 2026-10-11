@@ -558,15 +558,18 @@ describe("the first run", () => {
       }),
       "session.list": () => ({ type: "sessions", data: [] }),
       "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
-      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, providers: [] } }),
+      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, presets: [], providers: [] } }),
     });
     await start(client, hostWith());
 
-    expect(await screen.findByText("还差一个模型密钥。")).toBeInTheDocument();
+    expect(await screen.findByText("还没有可用的模型。")).toBeInTheDocument();
     expect(calls.some((call) => call.type === "session.create")).toBe(false);
 
-    await userEvent.click(screen.getByRole("button", { name: "去填密钥" }));
-    expect(await screen.findByLabelText("DeepSeek API Key")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "去配置" }));
+    // The built-in Agent's own window is where a provider is added.
+    expect(await screen.findByRole("dialog", { name: "模型与 Agent" })).toBeInTheDocument();
+    await userEvent.click(await screen.findByRole("button", { name: /^配置 / }));
+    expect(await screen.findByLabelText("provider API Key")).toHaveAttribute("type", "password");
   });
 
   it("does not misdiagnose an empty OpenCode catalog as a missing GeneHub key", async () => {
@@ -596,7 +599,7 @@ describe("the first run", () => {
     await start(client, hostWith());
 
     expect(await screen.findByPlaceholderText(/描述任务/)).toBeInTheDocument();
-    expect(screen.queryByText("还差一个模型密钥。")).not.toBeInTheDocument();
+    expect(screen.queryByText("还没有可用的模型。")).not.toBeInTheDocument();
     expect(useWorkbench.getState().draft?.agentId).toBe("opencode");
   });
 

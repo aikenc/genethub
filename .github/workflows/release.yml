@@ -567,9 +567,12 @@ jobs:
           # whatever name it finds, so an older tarball keeps working with it.
           cp "${{ runner.temp }}/guest-wasm/genehub_guest.wasm" \
             "$GITHUB_WORKSPACE/target/wasm32-wasip2/release/$COMPONENT_FILE"
+          # The Python installer travels with the binaries: install.sh runs it
+          # from the unpacked tarball, so it is covered by the same SHA256SUMS.
           tar -czf "$GITHUB_WORKSPACE/dist/$TARBALL_PREFIX-${{ matrix.platform }}.tar.gz" \
             -C "$GITHUB_WORKSPACE/target/${{ matrix.target }}/release" "$CLI_BINARY" "$HOST_BINARY" \
-            -C "$GITHUB_WORKSPACE/target/wasm32-wasip2/release" "$COMPONENT_FILE"
+            -C "$GITHUB_WORKSPACE/target/wasm32-wasip2/release" "$COMPONENT_FILE" \
+            -C "$GITHUB_WORKSPACE/scripts" python-runtime
           ls -la dist
       # What the Linux tarball promises: binaries that run on a machine with no
       # graphical session and nothing else installed — including no particular

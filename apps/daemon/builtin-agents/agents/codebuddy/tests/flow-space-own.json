@@ -1,0 +1,56 @@
+{
+  "kind": "agent",
+  "description": "CodeBuddy's own space points CODEBUDDY_CONFIG_DIR into GeneHub's directory and back",
+  "cli": {
+    "hello": {
+      "currentModelId": "glm",
+      "models": [
+        {
+          "id": "glm",
+          "name": "GLM"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": false,
+    "version": "2.5.0",
+    "logEnv": [
+      "CODEBUDDY_CONFIG_DIR"
+    ]
+  },
+  "steps": [
+    {
+      "run": "space-own",
+      "answers": [
+        {
+          "type": "answered",
+          "optionId": "switch"
+        }
+      ],
+      "expect": {
+        "result": "done: 已切换到独立空间",
+        "space": true,
+        "lastRunEnv": {
+          "CODEBUDDY_CONFIG_DIR": "<space>"
+        }
+      }
+    },
+    {
+      "run": "space-shared",
+      "answers": [
+        {
+          "type": "answered",
+          "optionId": "switch"
+        }
+      ],
+      "expect": {
+        "result": "done: 已改回沿用本机",
+        "space": false,
+        "lastRunEnv": {
+          "CODEBUDDY_CONFIG_DIR": null
+        }
+      }
+    }
+  ]
+}

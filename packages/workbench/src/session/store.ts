@@ -223,6 +223,18 @@ export type CompletionNotice = {
 
 let composerDraftInsertSequence = 0;
 
+/** What the second-level window of the 模型与 Agent dialog shows besides one Agent. */
+export const PROVIDERS_TARGET = "providers";
+
+export interface AgentConfigState {
+  open: boolean;
+  /**
+   * The window opened over the model list: an Agent's id, `PROVIDERS_TARGET`
+   * for the model providers, or null for the list alone.
+   */
+  target: string | null;
+}
+
 interface WorkbenchState {
   client: Client | null;
   connection: ConnectionState;
@@ -233,6 +245,11 @@ interface WorkbenchState {
   hiddenAgentRequests: string[];
   /** Agents a "让内置 Agent 修复" session was opened for in this window. */
   repairingAgentIds: string[];
+  /**
+   * The one "模型与 Agent" dialog. `null` until it was first opened; afterwards
+   * `open` says whether it is on screen and `target` which window sits over it.
+   */
+  agentConfig: AgentConfigState | null;
   workspaces: WorkspaceInfo[];
   activeWorkspaceId: string | null;
   sessions: SessionSummary[];
@@ -421,7 +438,7 @@ interface WorkbenchState {
     workspaceId?: string;
   }): Promise<void>;
   probeSpeechRuntime(): Promise<SpeechRuntimeStatus | null>;
-  /** Removes a provider the user added. */
+  /** Removes a provider the user added (a shipped one is cleared with an empty key). */
   forgetProvider(providerId: string): Promise<void>;
   /**
    * Opens an empty conversation. Writes nothing until the first message.
@@ -506,7 +523,8 @@ interface WorkbenchState {
   setModel(modelId: string): Promise<void>;
   setAgentTarget(target: SessionAgentTarget, filterTags: string[]): Promise<void>;
   setTags(tags: string[]): Promise<void>;
-  setAgentPreferences(preferences: AgentSelectionPreferences): Promise<void>;
+  /** Resolves true once the machine has stored the preferences; false when it refused (the error is already shown). */
+  setAgentPreferences(preferences: AgentSelectionPreferences): Promise<boolean>;
   setMode(modeId: string): Promise<void>;
   setEffort(effortId: string): Promise<void>;
   setFast(fast: boolean): Promise<void>;
@@ -527,6 +545,11 @@ interface WorkbenchState {
   /** Sets a request aside on this window only; another device may answer it. */
   hideAgentRequest(agentId: string, requestId: string): void;
   showAgentRequest(agentId: string, requestId: string): void;
+  /** Opens the dialog; `target` also opens that Agent's (or the providers') window over it. */
+  openAgentConfig(target?: string | null): void;
+  /** Closes the window over the list, keeping the list. */
+  closeAgentConfigTarget(): void;
+  closeAgentConfig(): void;
   /** Restarts a script Agent from its directory after an edit under `user/`. */
   reloadAgent(agentId: string): Promise<void>;
   /** Drops a local override so the built-in script Agent takes over again. */
@@ -792,6 +815,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   agents: [],
   agentRequests: [],
   hiddenAgentRequests: [],
+  agentConfig: null,
   repairingAgentIds: [],
   backgroundProcesses: [],
   workspaces: [],
@@ -845,7 +869,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     // before a machine switch ends up with no live stream at all.
     set({ client, notice: null, subscribedSessionIds: [], subscriptionOwner: null,
       sessions: [], sessionsLoaded: false, sessionsError: false,
-      agentRequests: [], hiddenAgentRequests: [], repairingAgentIds: [] });
+      agentRequests: [], hiddenAgentRequests: [], repairingAgentIds: [], agentConfig: null });
     let wasReady = false;
     client.onStateChange((connection) => {
       if (get().client !== client) return;
@@ -2268,6 +2292,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     } else if (before && stillCurrent) {
       set({ settings: before });
     }
+    return reply?.type === "settings";
   },
 
   async setMode(modeId) {
@@ -2682,10 +2707,17 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       return;
     }
     const live = new Set(reply.data.map((entry) => agentRequestKey(entry.agentId, entry.id)));
-    set((state) => ({
-      agentRequests: reply.data,
-      hiddenAgentRequests: state.hiddenAgentRequests.filter((key) => live.has(key)),
-    }));
+    set((state) => {
+      // A request is durable: it is still there after a restart, a reload, a
+      // reconnect. Finding one that way is not the person doing something, so
+      // it must not take the screen — it waits behind its Agent's card
+      // ("查看请求"). Only a request pushed live, as the answer to something
+      // being done now, opens by itself.
+      const known = new Set(state.agentRequests.map((entry) => agentRequestKey(entry.agentId, entry.id)));
+      const hidden = new Set([...state.hiddenAgentRequests].filter((key) => live.has(key)));
+      for (const key of live) if (!known.has(key)) hidden.add(key);
+      return { agentRequests: reply.data, hiddenAgentRequests: [...hidden] };
+    });
   },
 
   hideAgentRequest(agentId, requestId) {
@@ -2702,6 +2734,18 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     set((state) => ({
       hiddenAgentRequests: state.hiddenAgentRequests.filter((entry) => entry !== key),
     }));
+  },
+
+  openAgentConfig(target = null) {
+    set({ agentConfig: { open: true, target } });
+  },
+
+  closeAgentConfigTarget() {
+    set((state) => (state.agentConfig?.target ? { agentConfig: { ...state.agentConfig, target: null } } : {}));
+  },
+
+  closeAgentConfig() {
+    set((state) => (state.agentConfig?.open ? { agentConfig: { open: false, target: null } } : {}));
   },
 
   async reloadAgent(agentId) {
@@ -3351,7 +3395,7 @@ function rememberMachineRuntime(
     agentId,
     change,
   );
-  return state.setAgentPreferences(preferences);
+  return state.setAgentPreferences(preferences).then(() => undefined);
 }
 
 /**

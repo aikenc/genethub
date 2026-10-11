@@ -1,0 +1,20 @@
+{
+  "kind": "translate",
+  "description": "an error subtype without is_error is still a failure, with a message of its own",
+  "frames": [
+    {
+      "type": "result",
+      "subtype": "error_max_turns",
+      "is_error": false
+    }
+  ],
+  "expect": {
+    "terminal": {
+      "type": "turnFailed",
+      "error": {
+        "code": "upstream",
+        "message": "<contains>最大轮数"
+      }
+    }
+  }
+}

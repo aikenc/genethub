@@ -1,0 +1,50 @@
+{
+  "kind": "agent",
+  "cli": {
+    "hello": {
+      "model": "sonnet",
+      "models": [
+        {
+          "value": "sonnet",
+          "displayName": "Sonnet"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": false,
+    "version": "2.1.0",
+    "logEnv": [
+      "CLAUDE_CONFIG_DIR",
+      "ANTHROPIC_API_KEY"
+    ]
+  },
+  "description": "refreshing again within the cache window does not ask the service again",
+  "steps": [
+    {
+      "setEnv": {
+        "ANTHROPIC_API_KEY": "sk-ant-outside"
+      },
+      "refresh": true,
+      "expect": {
+        "state": {
+          "ready": true
+        },
+        "keyChecks": [
+          "https://api.anthropic.com/v1/models?limit=1"
+        ]
+      }
+    },
+    {
+      "refresh": true,
+      "expect": {
+        "state": {
+          "ready": true
+        },
+        "keyChecks": [
+          "https://api.anthropic.com/v1/models?limit=1"
+        ]
+      }
+    }
+  ]
+}

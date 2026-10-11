@@ -1,16 +1,17 @@
 import type { Reply, Request } from "@genehub/proto";
 import type { ProviderInfo } from "@genehub/proto";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { AgentConfigDialog } from "../agents/AgentConfigDialog";
 import { ChangesPanel } from "../changes/ChangesPanel";
 import { FilesPanel } from "../files/FilesPanel";
 import { LogsPanel } from "../logs/LogsPanel";
 import type { Client } from "../protocol/client";
 import { SettingsPanel } from "../settings/SettingsPanel";
 import { CHANNEL, type BuildIdentity } from "../channel";
-import { useWorkbench } from "../session/store";
+import { PROVIDERS_TARGET, useWorkbench } from "../session/store";
 import { UI_SCALE_KEY, useUiScale } from "../theme/scale";
 import { browserHost } from "../host";
 
@@ -84,6 +85,15 @@ beforeEach(() => {
     previewFloat: null,
   });
 });
+
+const PRESETS = [
+  { id: "kimi", label: "Kimi", baseUrl: "https://api.moonshot.cn/v1", dialect: "openai" },
+  { id: "minimax", label: "MiniMax", baseUrl: "https://api.minimax.io/v1", dialect: "openai" },
+  { id: "qwen", label: "千问", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", dialect: "openai" },
+  { id: "deepseek", label: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", dialect: "openai" },
+  { id: "openai", label: "OpenAI", baseUrl: "https://api.openai.com/v1", dialect: "openai" },
+  { id: "anthropic", label: "Anthropic", baseUrl: "https://api.anthropic.com", dialect: "anthropic" },
+];
 
 describe("the log panel", () => {
   /// The point of reading logs over the connection: the machine's path is no use
@@ -426,20 +436,25 @@ function provider(over: Partial<ProviderInfo> & { id: string }): ProviderInfo {
   };
 }
 
+/** The model providers live in a window of the one 模型与 Agent dialog. */
+function renderKeys() {
+  useWorkbench.getState().openAgentConfig(PROVIDERS_TARGET);
+  render(<AgentConfigDialog />);
+}
+
 describe("the settings panel", () => {
   it("sends a key without ever showing one back", async () => {
-    let stored = false;
     const { client, calls } = stubDaemon({
       "settings.get": () => ({
         type: "settings",
-        data: { lanEnabled: false, providers: [provider({ id: "deepseek", hasApiKey: stored })] },
+        data: { lanEnabled: false, presets: PRESETS, providers: [provider({ id: "deepseek", hasApiKey: true })] },
       }),
       "settings.setProvider": () => {
-        stored = true;
         return {
           type: "settings",
           data: {
             lanEnabled: false,
+            presets: PRESETS,
             providers: [
               provider({
                 id: "deepseek",
@@ -456,7 +471,7 @@ describe("the settings panel", () => {
     });
     install(client);
 
-    render(<SettingsPanel host={browserHost()} />);
+    renderKeys();
     const field = await screen.findByLabelText("DeepSeek API Key");
     expect(field).toHaveAttribute("type", "password");
 
@@ -483,6 +498,7 @@ describe("the settings panel", () => {
         type: "settings",
         data: {
           lanEnabled: false,
+          presets: PRESETS,
           providers: [
             provider({
               id: "deepseek",
@@ -497,7 +513,7 @@ describe("the settings panel", () => {
     });
     install(client);
 
-    render(<SettingsPanel host={browserHost()} />);
+    renderKeys();
     expect(await screen.findByText(/2 个模型可选/)).toHaveTextContent("deepseek-v4-flash");
     // And where the key is going, which is the part that was wrong: a DeepSeek
     // key with an empty address used to be sent to OpenAI.
@@ -518,6 +534,7 @@ describe("the settings panel", () => {
         type: "settings",
         data: {
           lanEnabled: false,
+          presets: PRESETS,
           providers: [
             provider({
               id: "deepseek",
@@ -532,18 +549,19 @@ describe("the settings panel", () => {
     });
     install(client);
 
-    render(<SettingsPanel host={browserHost()} />);
+    renderKeys();
     expect(await screen.findByRole("alert")).toHaveTextContent("401");
   });
 
   /** Somewhere else to send requests, with an address that is not optional. */
   it("takes a provider of the user's own, address and all", async () => {
     const { client, calls } = stubDaemon({
-      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, providers: [] } }),
+      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, presets: PRESETS, providers: [] } }),
       "settings.setProvider": () => ({
         type: "settings",
         data: {
           lanEnabled: false,
+          presets: PRESETS,
           providers: [provider({ id: "kimi", label: "Kimi", hasApiKey: true, custom: true })],
         },
       }),
@@ -552,9 +570,8 @@ describe("the settings panel", () => {
     });
     install(client);
 
-    render(<SettingsPanel host={browserHost()} />);
-    await userEvent.click(await screen.findByRole("button", { name: "添加自定义 provider" }));
-
+    renderKeys();
+    // Nothing is set up yet, so the form is the page.
     const add = screen.getByTestId("add-provider");
     await userEvent.type(screen.getByLabelText("provider id"), "kimi");
     // Nowhere to send it yet, so there is nothing to save.
@@ -577,7 +594,7 @@ describe("the settings panel", () => {
 
   it("shows the fingerprint of the machine that answered", async () => {
     const { client } = stubDaemon({
-      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, providers: [] } }),
+      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, presets: PRESETS, providers: [] } }),
       "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
     });
     (client as { identity?: unknown }).identity = {
@@ -600,7 +617,7 @@ describe("the settings panel", () => {
    */
   it("warns when the connection's fingerprint is not the one this machine has", async () => {
     const { client } = stubDaemon({
-      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, providers: [] } }),
+      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, presets: PRESETS, providers: [] } }),
       "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
     });
     (client as { identity?: unknown }).identity = {
@@ -623,7 +640,7 @@ describe("the settings panel", () => {
 
   it("shows the RTC failure phase instead of a single 直连失败 sentence", async () => {
     const { client } = stubDaemon({
-      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, providers: [] } }),
+      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, presets: PRESETS, providers: [] } }),
       "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
     });
     Object.assign(client, {
@@ -643,73 +660,30 @@ describe("the settings panel", () => {
     expect(screen.getByTestId("rtc-status")).toHaveTextContent("1840ms");
   });
 
-  /**
-   * A gateway that insists on adaptive thinking is fixed from here: the row
-   * shows what the rules guessed and where it came from, and a choice sends
-   * the model's whole user entry.
-   */
-  it("lets the user correct how a model thinks, with the source shown", async () => {
-    const model = "claude-sonnet-4-5";
-    const configured = provider({
-      id: "gateway",
-      label: "Gateway",
-      hasApiKey: true,
-      custom: true,
-      dialect: "anthropic",
-      models: [model],
-      modelCapabilities: {
-        [model]: {
-          effective: { reasoning: true, thinking: "budget", contextWindow: 200000 },
-          user: { contextWindow: 200000 },
-          sources: { reasoning: "rule", thinking: "rule", contextWindow: "user" },
-        },
-      },
-    });
-    const { client, calls } = stubDaemon({
-      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, providers: [configured] } }),
-      "settings.setProvider": () => ({ type: "settings", data: { lanEnabled: false, providers: [configured] } }),
-      "agent.refresh": () => ({ type: "agents", data: [] }),
-      "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
-    });
-    install(client);
-
-    render(<SettingsPanel host={browserHost()} />);
-    const select = await screen.findByLabelText(`${model} 思考方式`);
-    expect(select).toHaveTextContent("自动（budget");
-    expect(screen.getAllByText("规则").length).toBeGreaterThan(0);
-    expect(screen.getByLabelText(`${model} 上下文窗口`)).toHaveValue("200000");
-
-    await userEvent.selectOptions(select, "adaptive");
-    await waitFor(() => {
-      const sent = calls.find((call) => call.type === "settings.setProvider");
-      expect(sent?.payload).toMatchObject({
-        providerId: "gateway",
-        modelCapabilities: { [model]: { thinking: "adaptive", reasoning: true, contextWindow: 200000 } },
-      });
-    });
-  });
-
   it("re-probes the agents after a key lands, so the list stops lying", async () => {
     const { client, calls } = stubDaemon({
       "settings.get": () => ({
         type: "settings",
-        data: { lanEnabled: false, providers: [] },
+        data: { lanEnabled: false, presets: PRESETS, providers: [] },
       }),
       "settings.setProvider": () => ({
         type: "settings",
-        data: { lanEnabled: false, providers: [provider({ id: "openai", hasApiKey: true })] },
+        data: { lanEnabled: false, presets: PRESETS, providers: [provider({ id: "openai", hasApiKey: true })] },
       }),
       "agent.refresh": () => ({ type: "agents", data: [] }),
       "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
     });
     install(client);
 
-    render(<SettingsPanel host={browserHost()} />);
-    await userEvent.type(await screen.findByLabelText("OpenAI API Key"), "sk-1");
-    await userEvent.click(screen.getByTestId("save-openai"));
+    renderKeys();
+    await userEvent.click(await screen.findByRole("radio", { name: "OpenAI" }));
+    await userEvent.type(screen.getByLabelText("provider API Key"), "sk-1");
+    // Opening the dialog already probed once; the save must probe again.
+    const before = calls.filter((call) => call.type === "agent.refresh").length;
+    await userEvent.click(screen.getByTestId("add-provider"));
 
     await waitFor(() => {
-      expect(calls.some((call) => call.type === "agent.refresh")).toBe(true);
+      expect(calls.filter((call) => call.type === "agent.refresh").length).toBeGreaterThan(before);
     });
   });
 });
@@ -734,13 +708,13 @@ describe("speech settings", () => {
     const { client, calls } = stubDaemon({
       "settings.get": () => ({
         type: "settings",
-        data: { lanEnabled: false, providers: [], speech: speech() },
+        data: { lanEnabled: false, presets: PRESETS, providers: [], speech: speech() },
       }),
       "speech.settings.setQwen3": () => {
         correctionWorkspaces = ["w1"];
         return {
           type: "settings",
-          data: { lanEnabled: false, providers: [], speech: speech() },
+          data: { lanEnabled: false, presets: PRESETS, providers: [], speech: speech() },
         };
       },
       "speech.runtime.probe": () => ({ type: "speechRuntimeStatus", data: { state: "ready" } }),
@@ -800,7 +774,7 @@ describe("the version section", () => {
 
   function connected(answers: Parameters<typeof stubDaemon>[0]) {
     const stub = stubDaemon({
-      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, providers: [] } }),
+      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, presets: PRESETS, providers: [] } }),
       "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
       ...answers,
     });
@@ -937,7 +911,7 @@ describe("the version section", () => {
    */
   it("calls an unreleased build what it is, and does not tell it to upgrade", async () => {
     const stub = stubDaemon({
-      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, providers: [] } }),
+      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, presets: PRESETS, providers: [] } }),
       "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
       "update.check": () => ({
         type: "update",
@@ -967,7 +941,7 @@ describe("the version section", () => {
   it("does not treat a local source build as a named Dev slot", async () => {
     vi.stubEnv("VITE_GENEHUB_DEV_NAME", "dev-ui");
     const stub = stubDaemon({
-      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, providers: [] } }),
+      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, presets: PRESETS, providers: [] } }),
       "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
     });
     (stub.client as { identity?: unknown }).identity = {
@@ -1082,7 +1056,7 @@ describe("appearance on this client", () => {
   });
 });
 
-describe("the Agent list in settings", () => {
+describe("the Agent windows of the 模型与 Agent dialog", () => {
   const agent = (id: string, extra: Record<string, unknown>) => ({
     id,
     label: id,
@@ -1092,7 +1066,7 @@ describe("the Agent list in settings", () => {
     ...extra,
   });
 
-  it("lists usable Agents first and explains, and offers repair for, only what the script cannot fix itself", async () => {
+  it("lists what cannot be used yet below the models, and keeps repair inside the Agent's own window", async () => {
     const { client } = stubDaemon({});
     install(client);
     useWorkbench.setState({
@@ -1116,23 +1090,31 @@ describe("the Agent list in settings", () => {
           message: "正在启动",
           actions: [],
         }),
-        agent("genet", { builtin: true, label: "GeneHub" }),
       ] as never,
     });
-    render(<SettingsPanel host={browserHost()} />);
+    useWorkbench.getState().openAgentConfig();
+    render(<AgentConfigDialog />);
 
-    const rows = screen.getAllByRole("listitem").filter((row) => row.closest("section")?.textContent?.startsWith("Agent"));
-    expect(rows[0]).toHaveTextContent("GeneHub");
-    expect(rows[0]).toHaveTextContent("内置");
-    const cursor = rows.find((row) => row.textContent?.includes("cursor"))!;
-    expect(cursor).toHaveTextContent("随附");
-    expect(cursor).toHaveTextContent("Cursor 的命令行 Agent");
+    const rows = within(screen.getByRole("region", { name: "还不能用的 Agent" })).getAllByRole("listitem");
+    expect(rows.map((row) => row.getAttribute("data-agent-id"))).toEqual(["cursor", "broken", "starting"]);
+    // The list is a list: the card with its buttons is one click down.
+    expect(screen.queryByRole("button", { name: "让内置 Agent 修复" })).toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: "配置 cursor" }));
+    const window = screen.getByRole("dialog", { name: "cursor" });
+    expect(window).toHaveTextContent("随附");
+    expect(window).toHaveTextContent("Cursor 的命令行 Agent");
     // The reason is said once, under the name, not again as the status.
-    expect(cursor.textContent?.split("未安装 cursor-agent")).toHaveLength(2);
+    expect(window.textContent?.split("未安装 cursor-agent")).toHaveLength(2);
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog", { name: "cursor" })).toBeNull();
+    // Escape closed the window only; the list is still there.
+    expect(screen.getByRole("dialog", { name: "模型与 Agent" })).toBeInTheDocument();
 
-    const repairs = screen.getAllByRole("button", { name: "让内置 Agent 修复" });
-    expect(repairs).toHaveLength(1);
-    expect(rows.find((row) => row.textContent?.includes("broken"))).toContainElement(repairs[0]!);
+    // Repair and reload are tucked under 更多 on the card that can use them.
+    await userEvent.click(screen.getByRole("button", { name: "配置 broken" }));
+    await userEvent.click(screen.getByRole("button", { name: "broken 更多" }));
+    expect(screen.getAllByRole("button", { name: "让内置 Agent 修复" })).toHaveLength(1);
     // A user-layer Agent takes edits on reload.
     expect(screen.getAllByRole("button", { name: "重新加载" })).toHaveLength(1);
   });

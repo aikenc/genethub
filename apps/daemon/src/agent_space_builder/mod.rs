@@ -1,3 +1,9 @@
+//! **DEPRECATED (2026-10-10)** — this Rust PipeBuilder port is being retired
+//! (see `docs/deprecated.md`). Frozen: no new features, and no new Agent
+//! layouts are to be added to it. It is deliberately not reworked to read
+//! per-Agent layout data, because it is going away; the tables of Agent names
+//! inside it stay until it is removed.
+//!
 //! Deterministic, local-only Agent Space projections.
 //!
 //! Agent Space intentionally uses the PipeBuilder v1 source contract and

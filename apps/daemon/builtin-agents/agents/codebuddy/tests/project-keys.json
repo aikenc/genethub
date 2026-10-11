@@ -1,0 +1,36 @@
+{
+  "kind": "history",
+  "description": "project keys are made exactly as each CLI makes them, so a session started in a terminal is found from GeneHub",
+  "claudeKeys": [
+    [
+      "/data/work/my-proj",
+      "-data-work-my-proj"
+    ],
+    [
+      "/home/u/中文 dir/a_b.c",
+      "-home-u----dir-a-b-c"
+    ],
+    [
+      "/a/b",
+      "-a-b"
+    ]
+  ],
+  "codebuddyKeys": [
+    [
+      "/data/work/my-proj",
+      "data-work-my-proj"
+    ],
+    [
+      "/home/u/中文 dir/a_b.c",
+      "home-u-中文 dir-a_b.c"
+    ],
+    [
+      "C:\\Users\\me\\proj",
+      "C-Users-me-proj"
+    ],
+    [
+      "//a///b//",
+      "a-b"
+    ]
+  ]
+}

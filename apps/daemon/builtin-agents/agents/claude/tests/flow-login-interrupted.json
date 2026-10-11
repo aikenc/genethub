@@ -1,0 +1,54 @@
+{
+  "kind": "agent",
+  "description": "a daemon that restarted during a login tells the card so once, without a stale link",
+  "interruptedLogin": true,
+  "cli": {
+    "hello": {
+      "model": "sonnet",
+      "models": [
+        {
+          "value": "sonnet",
+          "displayName": "Sonnet"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": false,
+    "version": "2.1.0"
+  },
+  "steps": [
+    {
+      "refresh": true,
+      "expect": {
+        "state": {
+          "ready": false,
+          "message": "登录已中断，请重新点「登录」"
+        }
+      }
+    },
+    {
+      "refresh": true,
+      "expect": {
+        "state": {
+          "message": "登录已中断，请重新点「登录」"
+        }
+      }
+    },
+    {
+      "run": "login",
+      "answers": [
+        {
+          "type": "answered",
+          "optionId": "cancel"
+        }
+      ],
+      "expect": {
+        "result": "done: 已取消登录",
+        "state": {
+          "message": "<contains>还没登录"
+        }
+      }
+    }
+  ]
+}

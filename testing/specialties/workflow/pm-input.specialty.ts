@@ -49,7 +49,11 @@ for (const scenario of ["busy", "restart", "manual-stop", "human", "human-contin
       const respond = () => {
         const call = calls++;
         if (scenario.startsWith("human") && call === 0) return { tool: { name: "request_user_input", arguments: { questions: [{ id: "color", header: "颜色", question: "选择颜色", options: [{ label: "蓝色", description: "使用蓝色" }, { label: "绿色", description: "使用绿色" }] }] } } };
-        if ((scenario === "human" && call === 1) || (scenario === "human-continuation" && call === 2) || ((scenario === "busy" || scenario === "manual-stop") && call === 0)) return { hang: true as const };
+        // A busy PM's running turn takes new input in (steering): it joins that turn after the model
+        // answers instead of stopping it, so the first answer is slow but finishes. Only an explicit
+        // stop needs a turn that never ends on its own.
+        if (scenario === "busy" && call === 0) return { text: "PM_INPUT_FIRST_PASS: 正在处理。", delayMs: 4_000 };
+        if ((scenario === "human" && call === 1) || (scenario === "human-continuation" && call === 2) || (scenario === "manual-stop" && call === 0)) return { hang: true as const };
         return { text: "PM_INPUT_ANSWER: 已核对当前问题和已有执行结果。" };
       };
       opened.mock.script(...Array.from({ length: 12 }, () => ({ respond })));

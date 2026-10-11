@@ -80,7 +80,8 @@ lifecycleCase(
   "the first turn fails and a second prompt on the same session completes",
   ["turn failure poisons session", "failed child is reused", "later completion attributed to failed turn"],
   async (t, opened) => {
-    opened.mock.script({ status: 500 }, { text: "same session recovered" });
+    // A rejected request (400) fails the turn at once; a 5xx would be retried by the Agent.
+    opened.mock.script({ status: 400 }, { text: "same session recovered" });
     const sessionId = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
     const events = await t.flows.main.attachEventLog(opened.client, sessionId);
     await t.flows.main.sendPrompt(opened.client, sessionId, "Fail this turn.");

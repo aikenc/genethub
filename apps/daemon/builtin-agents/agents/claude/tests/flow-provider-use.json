@@ -1,0 +1,203 @@
+{
+  "kind": "agent",
+  "cli": {
+    "hello": {
+      "model": "sonnet",
+      "models": [
+        {
+          "value": "sonnet",
+          "displayName": "Sonnet"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": false,
+    "version": "2.1.0",
+    "logEnv": [
+      "ANTHROPIC_BASE_URL",
+      "ANTHROPIC_AUTH_TOKEN",
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_MODEL",
+      "ANTHROPIC_SMALL_FAST_MODEL"
+    ]
+  },
+  "providers": [
+    {
+      "id": "kimi",
+      "label": "Kimi",
+      "dialect": "anthropic",
+      "baseUrl": "https://anthropic-compatible.example/anthropic",
+      "apiKey": "sk-kimi-secret",
+      "models": [
+        "kimi-k2",
+        "kimi-k2-turbo"
+      ],
+      "hasApiKey": true
+    },
+    {
+      "id": "anthropic",
+      "label": "Anthropic",
+      "dialect": "anthropic",
+      "baseUrl": "https://api.anthropic.com",
+      "apiKey": "sk-ant-own",
+      "models": [
+        "claude-sonnet-x"
+      ],
+      "hasApiKey": true
+    },
+    {
+      "id": "deepseek",
+      "label": "DeepSeek",
+      "dialect": "openai",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "apiKey": "sk-ds-secret",
+      "models": [
+        "deepseek-chat"
+      ],
+      "hasApiKey": true
+    },
+    {
+      "id": "nokey",
+      "label": "没填 Key",
+      "dialect": "anthropic",
+      "baseUrl": "https://nokey.example",
+      "models": [
+        "m"
+      ],
+      "hasApiKey": false
+    }
+  ],
+  "description": "a GeneHub provider stands in for Claude Code's own login: only usable providers of Claude's protocol are offered, the CLI is pointed at its address with the key in the bearer slot and every model slot pinned to the provider's, the picker shows the provider's models, and the key reaches no log",
+  "neverLogged": [
+    "sk-kimi-secret",
+    "sk-ds-secret"
+  ],
+  "steps": [
+    {
+      "refresh": true,
+      "expect": {
+        "state": {
+          "ready": false,
+          "actions": [
+            {
+              "id": "login"
+            },
+            {
+              "id": "login-api-key"
+            },
+            {
+              "id": "provider-use"
+            },
+            {
+              "id": "space-own"
+            }
+          ]
+        },
+        "provider": null
+      }
+    },
+    {
+      "run": "provider-use",
+      "answers": [
+        {
+          "type": "answered",
+          "optionId": "p:kimi"
+        }
+      ],
+      "expect": {
+        "result": "done: 已改用 provider「Kimi」",
+        "suspended": [
+          {
+            "step": "provider.choose",
+            "title": "让 Claude Code 使用哪个 provider？",
+            "detail": "Claude Code 会改用这个 provider 的地址、Key 和模型，不再用它自己的登录。Key 只在运行时交给 Agent，不会保存到别处。\n\n没有列出的：\n· DeepSeek：接口类型是 openai，Claude Code 只能用 anthropic 类型的\n· 没填 Key：还没有保存 Key",
+            "options": [
+              "p:kimi",
+              "p:anthropic"
+            ]
+          }
+        ],
+        "provider": "kimi",
+        "models": [
+          "kimi-k2",
+          "kimi-k2-turbo"
+        ],
+        "state": {
+          "ready": true,
+          "message": "现在用的是 provider「Kimi」，不用 Claude Code 自己的登录。",
+          "actions": [
+            {
+              "id": "provider-use"
+            },
+            {
+              "id": "provider-leave"
+            },
+            {
+              "id": "update"
+            },
+            {
+              "id": "space-own"
+            }
+          ],
+          "catalog": {
+            "defaultModel": "kimi-k2"
+          }
+        },
+        "lastRunEnv": {
+          "ANTHROPIC_BASE_URL": "https://anthropic-compatible.example/anthropic",
+          "ANTHROPIC_AUTH_TOKEN": "sk-kimi-secret",
+          "ANTHROPIC_API_KEY": "",
+          "ANTHROPIC_MODEL": "kimi-k2",
+          "ANTHROPIC_SMALL_FAST_MODEL": "kimi-k2"
+        }
+      }
+    },
+    {
+      "run": "provider-use",
+      "answers": [
+        {
+          "type": "answered",
+          "optionId": "p:anthropic"
+        }
+      ],
+      "expect": {
+        "result": "done: 已改用 provider「Anthropic」",
+        "provider": "anthropic",
+        "lastRunEnv": {
+          "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+          "ANTHROPIC_API_KEY": "sk-ant-own",
+          "ANTHROPIC_AUTH_TOKEN": ""
+        }
+      }
+    },
+    {
+      "run": "provider-leave",
+      "expect": {
+        "result": "done: 已改回 Claude Code 自己的登录",
+        "provider": null,
+        "state": {
+          "ready": false,
+          "actions": [
+            {
+              "id": "login"
+            },
+            {
+              "id": "login-api-key"
+            },
+            {
+              "id": "provider-use"
+            },
+            {
+              "id": "space-own"
+            }
+          ]
+        },
+        "lastRunEnv": {
+          "ANTHROPIC_BASE_URL": null,
+          "ANTHROPIC_AUTH_TOKEN": null
+        }
+      }
+    }
+  ]
+}

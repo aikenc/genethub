@@ -1,0 +1,61 @@
+{
+  "kind": "agent",
+  "cli": {
+    "hello": {
+      "model": "sonnet",
+      "models": [
+        {
+          "value": "sonnet",
+          "displayName": "Sonnet"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": false,
+    "version": "2.1.0",
+    "logEnv": [
+      "ANTHROPIC_BASE_URL",
+      "ANTHROPIC_AUTH_TOKEN",
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_MODEL",
+      "ANTHROPIC_SMALL_FAST_MODEL"
+    ]
+  },
+  "providers": [
+    {
+      "id": "deepseek",
+      "label": "DeepSeek",
+      "dialect": "openai",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "apiKey": "sk-ds-secret",
+      "models": [
+        "deepseek-chat"
+      ],
+      "hasApiKey": true
+    },
+    {
+      "id": "nokey",
+      "label": "没填 Key",
+      "dialect": "anthropic",
+      "baseUrl": "https://nokey.example",
+      "models": [
+        "m"
+      ],
+      "hasApiKey": false
+    }
+  ],
+  "description": "with no provider of Claude's protocol that has a key, choosing one explains what to add instead of showing an empty list, and nothing is saved",
+  "steps": [
+    {
+      "run": "provider-use",
+      "expect": {
+        "result": "error: 还没有 Claude Code 能用的 provider",
+        "provider": null,
+        "state": {
+          "ready": false
+        }
+      }
+    }
+  ]
+}

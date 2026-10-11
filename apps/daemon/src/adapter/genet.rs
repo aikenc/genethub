@@ -119,6 +119,10 @@ impl AgentAdapter for GenetAdapter {
         true
     }
 
+    fn needs_model_catalog(&self) -> bool {
+        true
+    }
+
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             interrupt: true,
@@ -1526,6 +1530,7 @@ mod tests {
             controller_token: None,
             scratch_dir: scratch,
             providers: Default::default(),
+            python: None,
             resume: None,
         })
         .await
@@ -1589,6 +1594,7 @@ mod tests {
                 controller_token: None,
                 scratch_dir: scratch.clone(),
                 providers: Default::default(),
+                python: None,
                 resume: None,
             })
             .await

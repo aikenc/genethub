@@ -134,7 +134,7 @@ class CodexSession(Session):
     # -- catalog checks (against the current catalog, not a snapshot) ---------
 
     def _hello(self) -> dict:
-        return self.runtime.hello or {}
+        return self.runtime.effective_hello()
 
     @property
     def models(self) -> List[str]:
@@ -193,6 +193,7 @@ class CodexSession(Session):
             on_request=self._on_request,
             on_exit=self._on_exit,
             on_auth_failure=self._on_auth_failure,
+            extra_args=self.runtime.provider_args(),
         )
         try:
             await server.start()

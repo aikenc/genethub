@@ -1,0 +1,147 @@
+{
+  "kind": "acp",
+  "description": "the account login speaks ACP: initialize then authenticate with the chosen method; only the authenticate answer is a verdict; protocol lines reach the log as fixed summaries and nothing that could carry a credential does",
+  "scripts": [
+    "external",
+    "internal",
+    "iOA"
+  ],
+  "verdicts": [
+    {
+      "line": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": {}
+      },
+      "expect": "ok"
+    },
+    {
+      "line": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "error": {
+          "code": -32000,
+          "message": "Auth failed",
+          "data": {
+            "details": "授权超时"
+          }
+        }
+      },
+      "expect": "error: 授权超时"
+    },
+    {
+      "line": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "error": {
+          "code": -32000,
+          "message": "Auth failed"
+        }
+      },
+      "expect": "error: Auth failed"
+    },
+    {
+      "line": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "error": {}
+      },
+      "expect": "error: 授权没有成功"
+    },
+    {
+      "line": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+          "account": {
+            "token": "secret-token"
+          }
+        }
+      },
+      "expect": null
+    },
+    {
+      "line": {
+        "jsonrpc": "2.0",
+        "method": "_codebuddy.ai/authUrl",
+        "params": {
+          "authUrl": "https://example.test/auth?s=1"
+        }
+      },
+      "expect": null
+    },
+    {
+      "line": "plain text",
+      "expect": null
+    },
+    {
+      "line": "{broken",
+      "expect": null
+    }
+  ],
+  "redacted": [
+    {
+      "line": {
+        "jsonrpc": "2.0",
+        "method": "_codebuddy.ai/authUrl",
+        "params": {
+          "authUrl": "https://example.test/auth?s=1"
+        }
+      },
+      "expect": "收到授权链接（见请求卡片）",
+      "never": [
+        "example.test"
+      ]
+    },
+    {
+      "line": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": {
+          "token": "secret-token"
+        }
+      },
+      "expect": "授权完成",
+      "never": [
+        "secret-token"
+      ]
+    },
+    {
+      "line": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "error": {
+          "message": "denied"
+        }
+      },
+      "expect": "授权失败：denied"
+    },
+    {
+      "line": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+          "account": {
+            "bearerToken": "secret-token"
+          }
+        }
+      },
+      "expect": "",
+      "never": [
+        "secret-token"
+      ]
+    },
+    {
+      "line": "Authorization: Bearer abc.def",
+      "expect": ""
+    },
+    {
+      "line": "api_key=zzz",
+      "expect": ""
+    },
+    {
+      "line": "\u001b[32mStarting login\u001b[0m see https://example.test/x?code=1",
+      "expect": "Starting login see <授权链接见请求卡片>"
+    }
+  ]
+}

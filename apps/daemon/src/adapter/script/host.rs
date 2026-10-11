@@ -63,6 +63,8 @@ const EVENT_CAPACITY: usize = 1024;
 pub struct HostEnv {
     pub channel: String,
     pub front_door_cli: Option<std::path::PathBuf>,
+    /// The providers a person configured, for the scripts that ask by id.
+    pub providers: super::providers::ProviderSource,
 }
 
 /// The last `state` notification, with defaults for what it left out.
@@ -70,6 +72,7 @@ pub struct HostEnv {
 struct ScriptState {
     ready: bool,
     message: Option<String>,
+    status_label: Option<String>,
     version: Option<String>,
     actions: Vec<AgentActionInfo>,
     capabilities: Capabilities,
@@ -387,6 +390,7 @@ impl AgentHost {
                 .as_ref()
                 .and_then(|manifest| manifest.description.clone()),
             message,
+            status_label: state.status_label,
             actions: Some(state.actions),
             job: snapshot.job.clone(),
             pending_requests: Some(
@@ -497,30 +501,14 @@ impl AgentHost {
             .rescan()
             .ok_or_else(|| anyhow!(self.problem_or("Agent 目录无效")))?;
 
-        let weak = Arc::downgrade(host);
-        let python = match self
-            .runtime
-            .python(&move |progress| {
-                if let Some(host) = weak.upgrade() {
-                    host.runtime_progress(progress);
-                }
-            })
-            .await
-        {
+        let python = match self.runtime.python() {
             Ok(python) => python,
             Err(error) => {
-                let message = format!("{error:#}");
-                self.logs.push(format!("[daemon] {message}"));
-                let mut snapshot = self.snapshot.lock().expect("never poisoned");
-                snapshot.runtime_failed = true;
-                if let Some(job) = snapshot.job.as_mut().filter(|job| job.id == "runtime") {
-                    job.done = true;
-                    job.error = Some(message);
-                }
+                self.logs.push(format!("[daemon] {error:#}"));
+                self.snapshot.lock().expect("never poisoned").runtime_failed = true;
                 return Err(error);
             }
         };
-        self.finish_runtime_job();
 
         let state_dir = self.layout.state_dir(&self.id);
         std::fs::create_dir_all(&state_dir)?;
@@ -673,40 +661,6 @@ impl AgentHost {
             String::new()
         } else {
             format!("（{}）", tail.join(" / "))
-        }
-    }
-
-    fn runtime_progress(&self, progress: super::runtime::Progress) {
-        if let Some(message) = progress.message.as_deref() {
-            self.logs.push(format!("[python-runtime] {message}"));
-        }
-        {
-            let mut snapshot = self.snapshot.lock().expect("never poisoned");
-            let job = snapshot.job.get_or_insert_with(|| AgentJobInfo {
-                id: "runtime".into(),
-                action: None,
-                phase: None,
-                percent: None,
-                message: None,
-                log_tail: Vec::new(),
-                done: false,
-                error: None,
-            });
-            if job.id != "runtime" {
-                return;
-            }
-            job.phase = progress.phase.or(Some("runtime".into()));
-            job.message = progress
-                .message
-                .map(|message| format!("Python 运行时准备中：{message}"));
-        }
-        self.changed();
-    }
-
-    fn finish_runtime_job(&self) {
-        let mut snapshot = self.snapshot.lock().expect("never poisoned");
-        if snapshot.job.as_ref().is_some_and(|job| job.id == "runtime") {
-            snapshot.job = None;
         }
     }
 
@@ -1234,7 +1188,7 @@ impl AgentHost {
             .resolve(&self.id, false)
             .ok_or_else(|| anyhow!("这个 Agent 的目录不存在"))?;
         layout::read_manifest(&resolved.dir)?;
-        let python = self.runtime.python(&|_| {}).await?;
+        let python = self.runtime.python()?;
         let state_dir = self.layout.state_dir(&self.id);
         std::fs::create_dir_all(&state_dir)?;
         let mut command = Command::new(&python);
@@ -1314,6 +1268,7 @@ impl AgentHost {
             "additionalSystemPrompt": config.additional_system_prompt,
             "skillsDir": config.skills_dir.as_deref().map(crate::guest_paths::host_path),
             "frontDoorCli": config.front_door_cli,
+            "python": config.python.as_deref().map(crate::guest_paths::host_path),
             "controllerToken": config.controller_token,
             "resume": config.resume.as_ref().map(|handle| handle.value.clone()),
         });
@@ -1408,6 +1363,47 @@ impl AgentHost {
 
     // -- notifications -------------------------------------------------------------
 
+    /// A script asks for the providers a person configured. The answer goes
+    /// back on the same private pipe; neither the question nor the answer
+    /// (which may carry a key) is logged.
+    fn on_provider_request(&self, params: Value) {
+        let Some(host) = self.arc() else {
+            return;
+        };
+        let id = params
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .chars()
+            .take(80)
+            .collect::<String>();
+        if id.is_empty() {
+            return;
+        }
+        let op = params
+            .get("op")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let provider = params
+            .get("provider")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        tokio::spawn(async move {
+            let answer = match host.env.providers.all().await {
+                Some(all) => super::providers::answer(&op, provider.as_deref(), &all),
+                None => Err("模型 provider 暂时不可用，请稍后再试".to_string()),
+            };
+            let _ = host
+                .call(
+                    "provider.reply",
+                    super::providers::reply(&id, answer),
+                    SHORT,
+                )
+                .await;
+        });
+    }
+
     fn on_notification(&self, method: &str, params: Value) {
         match method {
             "state" => {
@@ -1416,6 +1412,7 @@ impl AgentHost {
                 self.changed();
             }
             "job.progress" => self.on_job(&params),
+            "provider.request" => self.on_provider_request(params),
             "request.open" => self.on_request_open(params),
             "request.prepare" => {
                 let id = params
@@ -1758,6 +1755,11 @@ fn parse_state(params: &Value) -> ScriptState {
             .get("message")
             .and_then(Value::as_str)
             .map(|message| bounded(message, TEXT_LIMIT)),
+        status_label: params
+            .get("statusLabel")
+            .and_then(Value::as_str)
+            .map(|label| bounded(label, LABEL_LIMIT))
+            .filter(|label| !label.is_empty()),
         version: params
             .get("version")
             .and_then(Value::as_str)
@@ -1771,6 +1773,14 @@ fn parse_state(params: &Value) -> ScriptState {
             .take(ACTIONS_LIMIT)
             .map(|mut action| {
                 action.label = bounded(&action.label, LABEL_LIMIT);
+                action.group = action
+                    .group
+                    .map(|group| bounded(&group, LABEL_LIMIT))
+                    .filter(|group| !group.is_empty());
+                action.confirm = action
+                    .confirm
+                    .map(|question| bounded(&question, LABEL_LIMIT))
+                    .filter(|question| !question.is_empty());
                 action
             })
             .collect(),
@@ -1891,4 +1901,73 @@ fn request_within_bounds(request: &AgentUserRequest) -> std::result::Result<(), 
         return Err("选项过长");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+
+    #[test]
+    fn an_action_names_its_own_group_and_an_agent_names_its_ready_state() {
+        let state = parse_state(&json!({
+            "ready": true,
+            "statusLabel": "可用（Key 未核对）",
+            "actions": [
+                {"id": "login", "label": "登录", "primary": true, "group": "account"},
+                {"id": "x", "label": "别的"},
+                {"id": "blank", "label": "空组", "group": ""},
+            ],
+        }));
+        assert_eq!(state.status_label.as_deref(), Some("可用（Key 未核对）"));
+        let groups: Vec<_> = state
+            .actions
+            .iter()
+            .map(|action| action.group.as_deref())
+            .collect();
+        assert_eq!(groups, vec![Some("account"), None, None]);
+    }
+
+    #[test]
+    fn an_action_says_for_itself_that_it_needs_confirming() {
+        let state = parse_state(&json!({
+            "ready": true,
+            "actions": [
+                {"id": "logout", "label": "退出登录", "confirm": "确认退出登录？"},
+                {"id": "login", "label": "登录"},
+                {"id": "blank", "label": "空", "confirm": ""},
+            ],
+        }));
+        let asked: Vec<_> = state
+            .actions
+            .iter()
+            .map(|action| action.confirm.as_deref())
+            .collect();
+        assert_eq!(asked, vec![Some("确认退出登录？"), None, None]);
+        let flood = parse_state(&json!({
+            "ready": true,
+            "actions": [{"id": "a", "label": "a", "confirm": "长".repeat(10_000)}],
+        }));
+        assert!(flood.actions[0].confirm.as_ref().unwrap().chars().count() <= LABEL_LIMIT + 1);
+    }
+
+    #[test]
+    fn a_label_or_group_cannot_be_used_to_flood_a_screen() {
+        let long = "长".repeat(10_000);
+        let state = parse_state(&json!({
+            "ready": true,
+            "statusLabel": long,
+            "actions": [{"id": "a", "label": "a", "group": long}],
+        }));
+        assert!(state.status_label.unwrap().chars().count() <= LABEL_LIMIT + 1);
+        assert!(state.actions[0].group.as_ref().unwrap().chars().count() <= LABEL_LIMIT + 1);
+    }
+
+    #[test]
+    fn no_label_means_the_plain_ready_state() {
+        assert_eq!(parse_state(&json!({"ready": true})).status_label, None);
+        assert_eq!(
+            parse_state(&json!({"ready": true, "statusLabel": ""})).status_label,
+            None
+        );
+    }
 }

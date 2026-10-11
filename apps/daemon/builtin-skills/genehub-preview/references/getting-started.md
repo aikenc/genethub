@@ -18,10 +18,10 @@ GeneHub 本体不要求 Node 或 Python。外部程序可按[语言无关接入�
 
 ## Python 路径：无需 Node 或产品源码
 
-把整个 `assets/python-adapter/` 复制成工作区的 `preview-adapter/`，将示例 HTML 复制成工作区 `index.html`。在用户认可的 Python 环境中安装依赖；推荐项目独立虚拟环境。
+把整个 `assets/python-adapter/` 复制成工作区的 `preview-adapter/`，将示例 HTML 复制成工作区 `index.html`。在用户认可的 Python 环境中安装依赖；推荐项目独立虚拟环境，并用 GeneHub 自带的 Python（`$GENEHUB_PYTHON`，没有时回落到系统 `python3`）创建它；这份自带 Python 只读，不要往里装包。
 
 ```sh
-python3 -m venv .venv
+"${GENEHUB_PYTHON:-python3}" -m venv .venv
 .venv/bin/python -m pip install -r preview-adapter/requirements.txt
 .venv/bin/python preview-adapter/app.py --entry /实际工作区/index.html --daemon-root /实际目标数据目录
 ```

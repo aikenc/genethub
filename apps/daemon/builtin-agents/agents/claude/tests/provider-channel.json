@@ -1,0 +1,82 @@
+{
+  "kind": "providerChannel",
+  "description": "asking the daemon about providers: the id on the question settles the right answer, a listing and a single provider come back as sent, a refusal is a sentence, a key in an answer is masked afterwards, and a daemon that stays silent ends in an error instead of a hang",
+  "timeout": 0.2,
+  "calls": [
+    {
+      "op": "list",
+      "reply": {
+        "result": {
+          "providers": [
+            {
+              "id": "kimi",
+              "usable": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "op": "get",
+      "provider": "kimi",
+      "reply": {
+        "result": {
+          "provider": {
+            "id": "kimi",
+            "apiKey": "sk-live-secret"
+          }
+        }
+      }
+    },
+    {
+      "op": "get",
+      "provider": "gone",
+      "reply": {
+        "error": "没有名为 gone 的 provider"
+      }
+    },
+    {
+      "op": "get",
+      "provider": "kimi"
+    }
+  ],
+  "expect": {
+    "asked": [
+      {
+        "op": "list",
+        "provider": null
+      },
+      {
+        "op": "get",
+        "provider": "kimi"
+      },
+      {
+        "op": "get",
+        "provider": "gone"
+      },
+      {
+        "op": "get",
+        "provider": "kimi"
+      }
+    ],
+    "outcomes": [
+      {
+        "providers": [
+          {
+            "id": "kimi",
+            "usable": true
+          }
+        ]
+      },
+      {
+        "provider": {
+          "id": "kimi",
+          "apiKey": "sk-live-secret"
+        }
+      },
+      "error: 没有名为 gone 的 provider",
+      "error: 没有在限定时间内取到模型 provider，请稍后再试"
+    ],
+    "masked": "x *** y"
+  }
+}

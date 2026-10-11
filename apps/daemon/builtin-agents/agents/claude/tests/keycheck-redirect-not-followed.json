@@ -1,0 +1,17 @@
+{
+  "kind": "keycheck",
+  "description": "a redirect is not followed, so the key header never reaches another address",
+  "service": "anthropic",
+  "server": {
+    "status": 302,
+    "redirect": "/elsewhere"
+  },
+  "env": {
+    "ANTHROPIC_BASE_URL": "<base>"
+  },
+  "expect": {
+    "status": "unknown",
+    "followedRedirect": false,
+    "requests": 1
+  }
+}

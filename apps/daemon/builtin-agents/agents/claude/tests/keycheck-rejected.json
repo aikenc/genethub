@@ -1,0 +1,16 @@
+{
+  "kind": "keycheck",
+  "description": "HTTP 401 is the service saying the key is wrong",
+  "service": "anthropic",
+  "server": {
+    "status": 401
+  },
+  "env": {
+    "ANTHROPIC_BASE_URL": "<base>"
+  },
+  "expect": {
+    "status": "rejected",
+    "detail": "服务拒绝了这个 API Key（HTTP 401）",
+    "keyInDetail": false
+  }
+}

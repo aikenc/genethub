@@ -1,5 +1,7 @@
 # Windows Workflow / WR audit (2026-09-16)
 
+> **Deprecated (2026-10-10):** the Workflow subsystem is being retired. This document is kept for history and maintenance only and is not a basis for new design. See [deprecated.md](deprecated.md).
+
 Scope: the WR startup fix, Workflow carrier/material resolution, project setup,
 restricted evidence tools, and the native process boundary. This is **not a
 Windows release qualification**. The available test host is Linux; no Windows

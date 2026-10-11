@@ -1,0 +1,39 @@
+{
+  "kind": "translate",
+  "description": "the interrupt sentinel is never a message; a failed result after our own interrupt is canceled",
+  "interruptRequested": true,
+  "frames": [
+    {
+      "type": "system",
+      "subtype": "init",
+      "session_id": "sess-1"
+    },
+    {
+      "type": "user",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "[Request interrupted by user]"
+          }
+        ]
+      }
+    },
+    {
+      "type": "result",
+      "subtype": "error_during_execution",
+      "is_error": true,
+      "result": "interrupted"
+    }
+  ],
+  "expect": {
+    "assistantTexts": [],
+    "events": [
+      {
+        "type": "turnCanceled",
+        "turnId": "turn_1"
+      }
+    ]
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "kind": "provider",
+  "description": "a chosen provider that loses its key is reported with the reason and Codex does not start on it",
+  "providers": [
+    {
+      "id": "deepseek",
+      "label": "DeepSeek",
+      "dialect": "openai",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "apiKey": "sk-ds-secret",
+      "models": [
+        "deepseek-chat",
+        "deepseek-reasoner"
+      ],
+      "hasApiKey": true
+    },
+    {
+      "id": "kimi-claude",
+      "label": "Kimi (Anthropic)",
+      "dialect": "anthropic",
+      "baseUrl": "https://x.example/anthropic",
+      "apiKey": "sk-k",
+      "models": [
+        "k2"
+      ],
+      "hasApiKey": true
+    }
+  ],
+  "choose": "p:deepseek",
+  "thenRemoveKey": "deepseek",
+  "expect": {
+    "bound": "deepseek",
+    "problem": "选定的 provider 现在不能用：DeepSeek 还没有保存 API Key。可以换一个 provider，或者改用 Codex 自己的登录。",
+    "providerAfterLoss": false
+  }
+}

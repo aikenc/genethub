@@ -52,7 +52,7 @@ apps/daemon/src/
 │   ├── mod.rs        AgentAdapter / AgentSession trait + 注册表
 │   ├── registry.rs   发现、probe、catalog 缓存
 │   ├── genet.rs      内置 agent（stdio JSONL）
-│   └── script/       第三方脚本 Agent：目录、serve 进程托管、JSON-RPC、Python 运行时
+│   └── script/       第三方脚本 Agent：目录、serve 进程托管、JSON-RPC、读取安装器记录的 Python（runtime.rs）
 ├── workspace.rs      项目与工作区
 ├── files.rs          目录树、精确 Preview 读取、写入
 ├── git.rs            status / diff / commit（调 git 命令，不引 libgit2）

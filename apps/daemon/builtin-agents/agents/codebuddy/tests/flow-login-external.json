@@ -1,0 +1,104 @@
+{
+  "kind": "agent",
+  "description": "login: choose an account type, one authorization link is shown, the person authorizes in their own browser and the card turns into logged in by itself; neither the link nor the token is logged",
+  "cli": {
+    "hello": {
+      "currentModelId": "glm",
+      "models": [
+        {
+          "id": "glm",
+          "name": "GLM"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": false,
+    "version": "2.5.0",
+    "logEnv": [
+      "CODEBUDDY_INTERNET_ENVIRONMENT"
+    ],
+    "acp": {
+      "url": "https://www.codebuddy.ai/auth?state=abc123",
+      "hold": 0.4,
+      "verdict": "ok"
+    }
+  },
+  "neverLogged": [
+    "secret-token-value",
+    "abc123"
+  ],
+  "steps": [
+    {
+      "refresh": true,
+      "expect": {
+        "state": {
+          "ready": false,
+          "message": "<contains>还没登录",
+          "actions": [
+            {
+              "id": "login"
+            },
+            {
+              "id": "login-api-key"
+            },
+            {
+              "id": "space-own"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "run": "login",
+      "answers": [
+        {
+          "type": "answered",
+          "optionId": "external"
+        }
+      ],
+      "expect": {
+        "result": "done: 已登录",
+        "suspended": [
+          {
+            "step": "login.method",
+            "title": "登录 CodeBuddy",
+            "questions": []
+          }
+        ],
+        "cards": [
+          {
+            "display": [
+              {
+                "kind": "link"
+              }
+            ],
+            "questions": []
+          }
+        ],
+        "state": {
+          "ready": true,
+          "actions": [
+            {
+              "id": "login-api-key"
+            },
+            {
+              "id": "logout"
+            },
+            {
+              "id": "update"
+            },
+            {
+              "id": "space-own"
+            }
+          ]
+        },
+        "acpEnv": null,
+        "neverLogged": [
+          "secret-token-value",
+          "abc123"
+        ]
+      }
+    }
+  ]
+}

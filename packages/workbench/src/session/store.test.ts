@@ -1270,7 +1270,7 @@ describe("opening a new conversation", () => {
       activeSessionId: "s1",
       activeWorkspaceId: "w1",
       settings: {
-        providers: [],
+        presets: [], providers: [],
         lanEnabled: false,
         agentPreferences: {
           selectedTags: ["Flash"],
@@ -1442,7 +1442,7 @@ describe("machine-global model selection", () => {
       agents: [claude, codex],
       sessions: [],
       workspaces: [],
-      settings: { providers: [], lanEnabled: false, agentPreferences: preferences },
+      settings: { presets: [], providers: [], lanEnabled: false, agentPreferences: preferences },
     });
   });
 
@@ -1464,6 +1464,28 @@ describe("machine-global model selection", () => {
     });
   });
 
+  it("says whether the machine stored the preferences, and puts the old ones back when it did not", async () => {
+    const stored = { type: "settings", data: { presets: [], providers: [], lanEnabled: false, agentPreferences: preferences } };
+    let reply: unknown = stored;
+    const client = {
+      call: async (request: { type: string }) => {
+        if (request.type !== "settings.setAgentPreferences") return undefined;
+        if (reply === "refuse") throw new Error("机器拒绝了");
+        return reply;
+      },
+    } as unknown as Client;
+    const before = { presets: [], providers: [], lanEnabled: false, agentPreferences: { ...preferences, selectedTags: ["Max"] } };
+    useWorkbench.setState({ client, settings: before as never });
+
+    expect(await useWorkbench.getState().setAgentPreferences(preferences)).toBe(true);
+
+    reply = "refuse";
+    useWorkbench.setState({ settings: before as never });
+    const next = { ...preferences, selectedTags: ["Flash"] };
+    expect(await useWorkbench.getState().setAgentPreferences(next)).toBe(false);
+    expect(useWorkbench.getState().settings?.agentPreferences).toBe(before.agentPreferences);
+  });
+
   it("changes filter tags without silently replacing the draft model", async () => {
     const calls: Array<{ type: string; payload?: unknown }> = [];
     const client = {
@@ -1473,7 +1495,7 @@ describe("machine-global model selection", () => {
           return {
             type: "settings",
             data: {
-              providers: [],
+              presets: [], providers: [],
               lanEnabled: false,
               agentPreferences: (request.payload as { preferences: AgentSelectionPreferences })
                 .preferences,
@@ -1509,7 +1531,7 @@ describe("machine-global model selection", () => {
           return {
             type: "settings",
             data: {
-              providers: [],
+              presets: [], providers: [],
               lanEnabled: false,
               agentPreferences: request.payload?.preferences,
             },
@@ -1620,7 +1642,7 @@ describe("machine-global model selection", () => {
     useWorkbench.setState({
       client,
       settings: {
-        providers: [],
+        presets: [], providers: [],
         lanEnabled: false,
         agentPreferences: preferences,
       },
@@ -1690,7 +1712,7 @@ describe("machine-global model selection", () => {
           return {
             type: "settings",
             data: {
-              providers: [],
+              presets: [], providers: [],
               lanEnabled: false,
               agentPreferences: (request.payload as { preferences: AgentSelectionPreferences })
                 .preferences,
@@ -1747,7 +1769,7 @@ describe("machine-global model selection", () => {
           return {
             type: "settings",
             data: {
-              providers: [],
+              presets: [], providers: [],
               lanEnabled: false,
               agentPreferences: (request.payload as { preferences: AgentSelectionPreferences })
                 .preferences,
@@ -1772,7 +1794,7 @@ describe("machine-global model selection", () => {
       activeWorkspaceId: "w1",
       draft: null,
       settings: {
-        providers: [],
+        presets: [], providers: [],
         lanEnabled: false,
         agentPreferences: { selectedTags: [], runtimes: {} },
       },

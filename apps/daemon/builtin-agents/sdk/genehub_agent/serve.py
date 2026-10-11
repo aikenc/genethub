@@ -27,6 +27,9 @@ from . import _boot
 from . import process as _process
 from .rpc import Channel
 
+# How long the daemon gets to answer a question about model providers.
+PROVIDER_TIMEOUT = 15.0
+
 
 # --------------------------------------------------------------------------
 # Data handed to the Agent
@@ -57,6 +60,7 @@ class SessionConfig:
     additional_system_prompt: Optional[str] = None
     skills_dir: Optional[str] = None
     front_door_cli: Optional[str] = None
+    python: Optional[str] = None
     controller_token: Optional[str] = None
     resume: Any = None
 
@@ -74,6 +78,7 @@ class SessionConfig:
             additional_system_prompt=raw.get("additionalSystemPrompt"),
             skills_dir=raw.get("skillsDir"),
             front_door_cli=raw.get("frontDoorCli"),
+            python=raw.get("python"),
             controller_token=raw.get("controllerToken"),
             resume=raw.get("resume"),
         )
@@ -83,6 +88,8 @@ class SessionConfig:
         env = {"GENEHUB_SESSION_ID": self.session_id}
         if self.front_door_cli:
             env["GENEHUB_CLI"] = self.front_door_cli
+        if self.python:
+            env["GENEHUB_PYTHON"] = self.python
         if self.controller_token:
             env["GENEHUB_CONTROLLER_TOKEN"] = self.controller_token
         return env
@@ -273,6 +280,7 @@ class AgentContext:
         self.front_door_cli: Optional[str] = init.get("frontDoorCli")
         self._last_state: Optional[dict] = None
         self._background: Set[asyncio.Task] = set()
+        self._provider_calls: Dict[str, asyncio.Future] = {}
 
     def _track(self, task: asyncio.Task) -> asyncio.Task:
         self._background.add(task)
@@ -292,11 +300,16 @@ class AgentContext:
         actions: Optional[List[dict]] = None,
         capabilities: Optional[dict] = None,
         catalog: Optional[dict] = None,
+        status_label: Optional[str] = None,
     ) -> None:
-        """Replaces this Agent's whole state on every screen at once."""
+        """Replaces this Agent's whole state on every screen at once.
+
+        ``status_label`` is what the ready state is called on screen when the
+        plain word would claim more than was checked."""
         state = {
             "ready": bool(ready),
             "message": self._mask.apply(message) if message else message,
+            "statusLabel": status_label or None,
             "version": version,
             "actions": actions or [],
             "capabilities": capabilities or {},
@@ -306,9 +319,54 @@ class AgentContext:
             self._last_state = state
             self._channel.notify("state", state)
 
+    def add_secret(self, value: str) -> None:
+        """Masks ``value`` in every log from now on (a key the Agent loaded
+        or saved; a value typed into a secret field is masked already)."""
+        self._mask.add(value)
+
     @staticmethod
-    def action(action_id: str, label: str, primary: bool = False) -> dict:
-        return {"id": action_id, "label": label, "primary": primary}
+    def action(action_id: str, label: str, primary: bool = False, group: Optional[str] = None,
+               confirm: Optional[str] = None) -> dict:
+        """One button. ``group`` files it on the card (``account``, ``install``,
+        ``advanced``; anything else lands with the rest). ``confirm`` is the
+        question to ask before running an action that ends something the
+        person set up (signing out, uninstalling); without it the button runs
+        at once."""
+        value = {"id": action_id, "label": label, "primary": primary}
+        if group:
+            value["group"] = group
+        if confirm:
+            value["confirm"] = confirm
+        return value
+
+    # -- the providers a person configured in GeneHub -------------------------
+
+    async def provider_call(self, op: str, provider: Optional[str] = None) -> dict:
+        """Asks the daemon about the configured model providers: ``list``
+        (everything but keys) or ``get`` one by id (everything, key included).
+        Raises with a sentence for the person when the daemon refuses."""
+        request_id = "p_" + uuid.uuid4().hex
+        waiting = asyncio.get_event_loop().create_future()
+        self._provider_calls[request_id] = waiting
+        try:
+            self._channel.notify("provider.request", {"id": request_id, "op": op, "provider": provider})
+            reply = await asyncio.wait_for(waiting, timeout=PROVIDER_TIMEOUT)
+        except asyncio.TimeoutError:
+            raise RuntimeError("没有在限定时间内取到模型 provider，请稍后再试") from None
+        finally:
+            self._provider_calls.pop(request_id, None)
+        if reply.get("error"):
+            raise RuntimeError(str(reply["error"]))
+        result = reply.get("result")
+        provider_info = result.get("provider") if isinstance(result, dict) else None
+        if isinstance(provider_info, dict) and isinstance(provider_info.get("apiKey"), str):
+            self._mask.add(provider_info["apiKey"])
+        return result if isinstance(result, dict) else {}
+
+    def _provider_reply(self, params: dict) -> None:
+        waiting = self._provider_calls.get(str(params.get("id", "")))
+        if waiting is not None and not waiting.done():
+            waiting.set_result(params)
 
     # -- requests ------------------------------------------------------
 
@@ -644,6 +702,9 @@ class _Server:
                     waiting.set_exception(RuntimeError(str(params["error"])))
                 else:
                     waiting.set_result(None)
+            return {}
+        if method == "provider.reply":
+            ctx._provider_reply(params)
             return {}
         if method == "request.answer":
             ctx._answer(params.get("id", ""), params.get("outcome") or {})

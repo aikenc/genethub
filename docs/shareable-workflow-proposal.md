@@ -1,5 +1,7 @@
 # 可分享 Workflow 包设计提案
 
+> **已废弃（2026-10-10）**：Workflow 子系统正在退役，本文仅作历史与维护参考，不再作为新设计依据。见 [deprecated.md](deprecated.md)。
+
 > 状态：已实现。设计与决策记录保留在本文；当前实现见 [package.rs](../apps/daemon/src/workflow/package.rs)、
 > [build.rs](../apps/daemon/src/workflow/build.rs) 与随产品发布的内置包
 > [game-delivery](../apps/daemon/workflow-packages/game-delivery/workflow.md)。<br>

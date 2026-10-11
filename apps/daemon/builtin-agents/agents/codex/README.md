@@ -15,7 +15,7 @@ print to stdout).
 | `lib/codex_appserver.py` | spawning `codex app-server`, the JSON-RPC client (`AppServer`), modes → `approvalPolicy` / `sandbox(Policy)`, `model/list` parsing, one-shot queries (catalog, import) |
 | `lib/codex_translate.py` | pure frame → `SessionEvent` translation: `Translator` (turn state, items, deltas, usage, plan, compaction, thread/turn filtering against sub-agent threads) and `AskBook` (approvals and questions from the CLI, and the replies they need) |
 | `lib/codex_session.py` | `CodexSession`: one conversation on one app-server; thread start/resume/unarchive/fork, `turn/start`, interrupt (incl. the rotated-turn retry), attachments → `localImage`, restart + `thread/resume` at the next turn boundary |
-| `lib/codex_login.py` | device-code login (browser fallback with paste-back of the callback address), API-key login; all through Agent-level requests |
+| `lib/codex_login.py` | device-code login through the SDK's `login.link_login` (one live `codex login --device-auth` process while a card shows the link and the one-time code; it ends on authorization, cancel, 10 minutes or a daemon restart, which leaves an "interrupted" note on the next state), and API-key login (durable password card) |
 | `lib/codex_usage.py` | token / TTFT / output-rate accounting for one turn |
 | `tests/*.json` | recorded app-server frame sequences and the events they must produce |
 

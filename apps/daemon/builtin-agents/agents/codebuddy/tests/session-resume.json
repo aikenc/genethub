@@ -1,0 +1,84 @@
+{
+  "kind": "session",
+  "description": "a stored session id and model are passed on start; a model this install no longer lists is replaced and reported",
+  "launch": {
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "models": [
+      "sonnet",
+      "opus"
+    ],
+    "efforts": [
+      "low",
+      "high"
+    ],
+    "defaultModel": "sonnet"
+  },
+  "config": {
+    "resume": {
+      "sessionId": "old-9"
+    },
+    "modelId": "opus",
+    "effortId": "high"
+  },
+  "cli": {
+    "turns": [
+      {
+        "emit": [
+          {
+            "type": "system",
+            "subtype": "init",
+            "session_id": "sess-1"
+          },
+          {
+            "type": "assistant",
+            "message": {
+              "id": "m-done",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "done"
+                }
+              ]
+            }
+          },
+          {
+            "type": "result",
+            "subtype": "success",
+            "is_error": false
+          }
+        ]
+      }
+    ]
+  },
+  "steps": [
+    {
+      "send": "hi"
+    }
+  ],
+  "expect": {
+    "runs": [
+      {
+        "has": [
+          [
+            "--resume",
+            "old-9"
+          ],
+          [
+            "--model",
+            "opus"
+          ],
+          [
+            "--effort",
+            "high"
+          ]
+        ]
+      }
+    ],
+    "terminals": [
+      {
+        "type": "turnCompleted"
+      }
+    ]
+  }
+}

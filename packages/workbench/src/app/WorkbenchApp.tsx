@@ -63,6 +63,7 @@ import { TitleBar } from "../shell/TitleBar";
 import { useTheme } from "../theme/store";
 import { TerminalPanel } from "../terminal/TerminalPanel";
 import { UpdateToast } from "../updates/UpdateToast";
+import { AgentConfigDialog } from "../agents/AgentConfigDialog";
 import { AgentRequestDialog } from "../agents/AgentRequestDialog";
 import { OpenProject, type OpenWorkspaceHandle } from "../workspace/OpenProject";
 import { WorkspaceAffordance } from "../workspace/WorkspaceAffordance";
@@ -1102,10 +1103,6 @@ export function App({
                         onPickTarget={(target, tags) =>
                           workbench.setAgentTarget(target, tags)
                         }
-                        onSavePreferences={(preferences) =>
-                          workbench.setAgentPreferences(preferences)
-                        }
-                        onRefreshAgents={() => void workbench.refreshAgents()}
                       />
                     ) : null}
                   </>
@@ -1113,7 +1110,7 @@ export function App({
                   <FirstRun
                     host={host}
                     endpoint={endpoint}
-                    onOpenSettings={() => workbench.openTab("settings")}
+                    onOpenAgentConfig={() => workbench.openAgentConfig()}
                   />
                 )
               ) : null}
@@ -1190,6 +1187,7 @@ export function App({
           panel happens to be open. */}
       <UpdateToast host={host} />
       {/* An Agent-level request is for whoever is at this window, whatever tab. */}
+      <AgentConfigDialog />
       <AgentRequestDialog />
       {workbench.previewFloat ? (
         <PreviewFloat
@@ -1277,11 +1275,11 @@ function dialOf(endpoint: Endpoint): ProtocolDial {
 function FirstRun({
   host,
   endpoint,
-  onOpenSettings,
+  onOpenAgentConfig,
 }: {
   host: Host;
   endpoint: Endpoint;
-  onOpenSettings(): void;
+  onOpenAgentConfig(): void;
 }) {
   const {
     workspaces,
@@ -1343,16 +1341,16 @@ function FirstRun({
   if (!hasUsableAgent) {
     return (
       <Splash>
-        <p className="text-sm">还差一个模型密钥。</p>
+        <p className="text-sm">还没有可用的模型。</p>
         <p className="mb-3 text-xs text-muted">
-          密钥只保存在这台机器上，填好之后这里会直接可用。
+          添加一个模型 provider，或者登录一个 Agent；密钥和账号只保存在这台机器上。
         </p>
         <button
           type="button"
           className="rounded-md bg-accent px-3 py-1.5 text-xs text-white"
-          onClick={onOpenSettings}
+          onClick={onOpenAgentConfig}
         >
-          去填密钥
+          去配置
         </button>
       </Splash>
     );
@@ -1365,7 +1363,7 @@ function FirstRun({
         <span>{workspace.name} 已就绪。</span>
       </p>
       <p className="mb-3 text-xs text-muted">
-        {route ? "开一个会话，直接说你想做什么。" : "当前标签没有匹配项；进入会话后可编辑这台机器的 Agent 配置。"}
+        {route ? "开一个会话，直接说你想做什么。" : "当前标签没有匹配项；进入会话后可编辑这台机器的模型与 Agent。"}
       </p>
       <button
         type="button"

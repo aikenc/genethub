@@ -1,0 +1,97 @@
+{
+  "kind": "session",
+  "description": "a CLI that dies mid-turn fails the turn with its exit code and last words; the next prompt starts it again with --resume",
+  "launch": {
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "models": [
+      "sonnet",
+      "opus"
+    ],
+    "efforts": [
+      "low",
+      "high"
+    ],
+    "defaultModel": "sonnet"
+  },
+  "cli": {
+    "turns": [
+      {
+        "emit": [
+          {
+            "type": "system",
+            "subtype": "init",
+            "session_id": "crashy"
+          }
+        ],
+        "exit": {
+          "code": 3,
+          "stderr": "boom: out of memory"
+        }
+      },
+      {
+        "emit": [
+          {
+            "type": "system",
+            "subtype": "init",
+            "session_id": "crashy"
+          },
+          {
+            "type": "assistant",
+            "message": {
+              "id": "m-alive",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "alive"
+                }
+              ]
+            }
+          },
+          {
+            "type": "result",
+            "subtype": "success",
+            "is_error": false
+          }
+        ]
+      }
+    ]
+  },
+  "steps": [
+    {
+      "send": "first"
+    },
+    {
+      "send": "second"
+    }
+  ],
+  "expect": {
+    "terminals": [
+      {
+        "type": "turnFailed",
+        "error": {
+          "code": "agentCrashed",
+          "message": "<contains>退出码 3"
+        }
+      },
+      {
+        "type": "turnCompleted"
+      }
+    ],
+    "runs": [
+      {
+        "lacks": [
+          "--resume"
+        ]
+      },
+      {
+        "has": [
+          [
+            "--resume",
+            "crashy"
+          ]
+        ]
+      }
+    ]
+  }
+}

@@ -51,6 +51,9 @@ pub struct SessionConfig {
     /// Absolute front-door CLI selected by the channel launcher. Every Agent
     /// receives the same binding; absence is explicit and never guessed.
     pub front_door_cli: Option<PathBuf>,
+    /// The platform Python the installer put on this machine, when there is
+    /// one. Exported as GENEHUB_PYTHON next to GENEHUB_CLI.
+    pub python: Option<PathBuf>,
     /// Session-bound proof accepted only by this daemon's local CLI front.
     /// It lets an ordinary Agent act as a Workflow controller without turning
     /// that Agent or Session into a separate product type.
@@ -141,6 +144,13 @@ pub trait AgentAdapter: Send + Sync {
     /// Can enforce the host-provided read-only paths and bounded Session set.
     /// A prompt or an Agent's generic plan mode is not an evidence boundary.
     fn supports_evidence_scope(&self) -> bool {
+        false
+    }
+
+    /// Without a model catalog this Agent has nothing to run: it is only
+    /// offered to routing once its catalog lists a model. Most Agents choose
+    /// their own default and do not need one.
+    fn needs_model_catalog(&self) -> bool {
         false
     }
 
@@ -514,6 +524,14 @@ pub(super) fn apply_session_environment(
             command.env_remove("GENEHUB_CLI");
         }
     }
+    match &config.python {
+        Some(path) => {
+            command.env("GENEHUB_PYTHON", path);
+        }
+        None => {
+            command.env_remove("GENEHUB_PYTHON");
+        }
+    }
 }
 
 /// §6.3: the pids an agent must never end, as a contract it can rely on.
@@ -801,7 +819,8 @@ mod tests {
         // Script processes are not sessions: they get the process group but
         // deliberately not the session binding (each session's CLI gets it
         // from the script).
-        for file in ["script/host.rs", "script/runtime.rs"] {
+        {
+            let file = "script/host.rs";
             let source = std::fs::read_to_string(here.join(file)).expect("read the adapter");
             assert!(
                 source.contains("owned_child"),
@@ -882,6 +901,7 @@ mod tests {
             additional_system_prompt: None,
             skills_dir: None,
             front_door_cli: Some(PathBuf::from("/opt/genehub/genet-beta")),
+            python: None,
             controller_token: Some("session-proof".into()),
             scratch_dir: PathBuf::from("/scratch"),
             providers: Default::default(),

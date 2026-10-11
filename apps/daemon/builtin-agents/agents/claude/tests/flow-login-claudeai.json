@@ -1,0 +1,133 @@
+{
+  "kind": "agent",
+  "description": "login: the card offers the account choice, then shows one authorization link with a paste box; the pasted code goes to the CLI only through its stdin; the card turns into logged in; nothing secret is logged",
+  "cli": {
+    "hello": {
+      "model": "sonnet",
+      "models": [
+        {
+          "value": "sonnet",
+          "displayName": "Sonnet"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": false,
+    "version": "2.1.0",
+    "authLogin": {
+      "print": [
+        "Visit https://claude.ai/oauth/authorize?code=true&client_id=abc to sign in"
+      ],
+      "code": "good-code"
+    }
+  },
+  "neverLogged": [
+    "good-code",
+    "claude.ai/oauth"
+  ],
+  "steps": [
+    {
+      "refresh": true,
+      "expect": {
+        "state": {
+          "ready": false,
+          "message": "<contains>还没登录",
+          "version": "2.1.0",
+          "actions": [
+            {
+              "id": "login"
+            },
+            {
+              "id": "login-api-key"
+            },
+            {
+              "id": "provider-use"
+            },
+            {
+              "id": "space-own"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "run": "login",
+      "answers": [
+        {
+          "type": "answered",
+          "optionId": "claudeai"
+        }
+      ],
+      "live": [
+        {
+          "type": "answered",
+          "optionId": "submit",
+          "answers": [
+            {
+              "questionId": "code",
+              "selectedOptionIds": [],
+              "freeformText": "good-code"
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "result": "done: 已登录",
+        "suspended": [
+          {
+            "step": "login.method",
+            "title": "登录 Claude Code",
+            "questions": []
+          }
+        ],
+        "cards": [
+          {
+            "display": [
+              {
+                "kind": "link"
+              }
+            ],
+            "questions": [
+              {
+                "id": "code",
+                "input": "text"
+              }
+            ]
+          }
+        ],
+        "state": {
+          "ready": true,
+          "actions": [
+            {
+              "id": "login-api-key"
+            },
+            {
+              "id": "logout",
+              "confirm": "确认退出登录？"
+            },
+            {
+              "id": "provider-use"
+            },
+            {
+              "id": "update"
+            },
+            {
+              "id": "space-own"
+            }
+          ]
+        },
+        "runsInclude": [
+          "auth login --claudeai"
+        ],
+        "stdin": [
+          "good-code"
+        ],
+        "neverLogged": [
+          "good-code",
+          "claude.ai/oauth"
+        ]
+      }
+    }
+  ]
+}

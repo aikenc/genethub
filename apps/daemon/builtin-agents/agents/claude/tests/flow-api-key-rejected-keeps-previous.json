@@ -1,0 +1,84 @@
+{
+  "kind": "agent",
+  "cli": {
+    "hello": {
+      "model": "sonnet",
+      "models": [
+        {
+          "value": "sonnet",
+          "displayName": "Sonnet"
+        }
+      ],
+      "commands": []
+    },
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "loggedIn": false,
+    "version": "2.1.0",
+    "logEnv": [
+      "CLAUDE_CONFIG_DIR",
+      "ANTHROPIC_API_KEY"
+    ]
+  },
+  "description": "a rejected new key leaves the key that worked in place",
+  "neverLogged": [
+    "sk-ant-good",
+    "sk-ant-typo"
+  ],
+  "steps": [
+    {
+      "run": "login-api-key",
+      "answers": [
+        {
+          "type": "answered",
+          "optionId": "save",
+          "answers": [
+            {
+              "questionId": "key",
+              "selectedOptionIds": [],
+              "freeformText": "sk-ant-good"
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "result": "done: 已用 API Key 登录",
+        "env": {
+          "ANTHROPIC_API_KEY": "sk-ant-good"
+        },
+        "credentials": true,
+        "state": {
+          "ready": true
+        }
+      }
+    },
+    {
+      "run": "login-api-key",
+      "answers": [
+        {
+          "type": "answered",
+          "optionId": "save",
+          "answers": [
+            {
+              "questionId": "key",
+              "selectedOptionIds": [],
+              "freeformText": "sk-ant-typo"
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "result": "error: 服务拒绝了这个 API Key（HTTP 401），没有保存",
+        "env": {
+          "ANTHROPIC_API_KEY": "sk-ant-good"
+        },
+        "credentials": true,
+        "state": {
+          "ready": true
+        }
+      }
+    }
+  ],
+  "rejectKeys": [
+    "sk-ant-typo"
+  ]
+}
