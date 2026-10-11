@@ -39,7 +39,17 @@ for (const scenario of ["unicode", "long", "config-override"] as const) defineSp
       // sign-in). That is this machine's prerequisite, not a history result.
       throw new BlockedError("the installed CBC did not call the isolated mock LLM; it cannot write a history fixture on this machine");
     }
-    const listing = await opened.client.call({ type: "session.importList", payload: { workspaceId: opened.workspaceId, limit: 20 } });
+    // A script Agent reads history only once its process is up, and it is started by the first
+    // listing, not by the daemon: ask for it, then list until CodeBuddy answers as a source.
+    // Being signed in is not needed to read what the CLI already wrote to disk.
+    await opened.client.call({ type: "agent.refresh" });
+    let listing = await opened.client.call({ type: "session.importList", payload: { workspaceId: opened.workspaceId, limit: 20 } });
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      const source = listing?.type === "sessionImports" ? listing.data.sources.find(item => item.agentId === "codebuddy") : undefined;
+      if (source?.supported) break;
+      await new Promise(resolve => setTimeout(resolve, 250));
+      listing = await opened.client.call({ type: "session.importList", payload: { workspaceId: opened.workspaceId, limit: 20 } });
+    }
     t.assertions.assert(listing?.type === "sessionImports", "History discovery did not return a listing");
     const candidate = listing?.type === "sessionImports"
       ? listing.data.sources.find(source => source.agentId === "codebuddy")?.candidates.find(item => item.title === prompt)

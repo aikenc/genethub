@@ -37,7 +37,7 @@ export {
 export type { CaseContext } from "./context.ts";
 export { openBrowser, openWorkbenchPage } from "./drivers/browser.ts";
 export { assertions } from "./assertions/index.ts";
-export { startMockLlm } from "../infrastructure/public.ts";
+export { BUILTIN_AGENT_ATTEMPTS, startMockLlm } from "../infrastructure/public.ts";
 export { connectProductClient } from "./drivers/client.ts";
 export type { ClientDiagnosticEvent } from "@genehub/workbench/client";
 export { createLatencyInjector, type LatencyInjector, type LatencyStats } from "./drivers/latency.ts";

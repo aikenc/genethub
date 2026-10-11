@@ -2,13 +2,28 @@ import { createHash } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import * as zlib from "node:zlib";
 
+/**
+ * Requests the built-in Agent sends for one prompt whose provider keeps
+ * failing transiently: the first attempt plus its default 3 retries
+ * (`DEFAULT_MAX_RETRIES` in apps/agent/src/recovery.rs), spaced 2s, 4s, 8s.
+ */
+export const BUILTIN_AGENT_ATTEMPTS = 4;
+
 export interface ScriptedTurn {
   text?: string;
   /** OpenAI-compatible reasoning stream; omit text to end without a visible answer. */
   reasoning?: string;
   tool?: { name: string; arguments: Record<string, unknown> };
   tools?: Array<{ name: string; arguments: Record<string, unknown> }>;
+  /**
+   * Fail the request with this HTTP status. The built-in Agent retries
+   * transient failures (408/409/425/429/5xx) up to `BUILTIN_AGENT_ATTEMPTS`
+   * requests in total, so a case that needs the turn to FAIL on such a status
+   * must repeat it; any other status is rejected on the first request.
+   */
   status?: number;
+  /** Serve this same turn this many times in a row (default 1). */
+  repeat?: number;
   delayMs?: number;
   hang?: boolean;
   /** OpenAI-compatible streams may repeat an empty id on argument deltas. */
@@ -267,8 +282,11 @@ export async function startMockLlm(): Promise<MockLlmHandle> {
     if (turn.hang) return;
     if (turn.delayMs) await new Promise((resolve) => setTimeout(resolve, turn.delayMs));
     if (turn.status && turn.status >= 400) {
+      // A real provider names a rejected request as the caller's fault; the
+      // Agent also classifies by this text, so a 4xx must not read as a server error.
+      const transient = [408, 409, 425, 429].includes(turn.status) || turn.status >= 500;
       response.writeHead(turn.status, { "content-type": "application/json" }).end(
-        JSON.stringify({ error: { message: "injected mock failure", type: "server_error" } }),
+        JSON.stringify({ error: { message: "injected mock failure", type: transient ? "server_error" : "invalid_request_error" } }),
       );
       return;
     }
@@ -307,7 +325,9 @@ export async function startMockLlm(): Promise<MockLlmHandle> {
     inboundHeaders,
     calls,
     script: (...turns) => {
-      queue.push(...turns);
+      for (const turn of turns) {
+        for (let copy = 0; copy < (turn.repeat ?? 1); copy += 1) queue.push(turn);
+      }
     },
     stop: () =>
       new Promise<void>((resolve) => {

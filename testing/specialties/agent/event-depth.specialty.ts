@@ -94,7 +94,8 @@ eventCase("multiline-reply-persists", "Multiline model output remains multiline"
 });
 
 eventCase("three-failures-then-success", "A session recovers after three consecutive provider failures", "three failed terminals are followed by exactly one completion", ["retry state leaks forever", "failure count corrupts session"], async (t, opened) => {
-  opened.mock.script({ status: 500 }, { status: 500 }, { status: 500 }, { text: "recovered-fourth" });
+  // A rejected request (400) fails at once; a 5xx would be retried by the Agent instead.
+  opened.mock.script({ status: 400 }, { status: 400 }, { status: 400 }, { text: "recovered-fourth" });
   const { id, events } = await create(opened, t);
   for (let index = 0; index < 4; index += 1) {
     await t.flows.main.sendPrompt(opened.client, id, `Attempt ${index}`);
@@ -105,7 +106,7 @@ eventCase("three-failures-then-success", "A session recovers after three consecu
 });
 
 eventCase("failure-snapshot-readable", "A failed turn leaves a readable session snapshot", "session.get returns the same id after the terminal failure", ["failure deletes session", "failed ledger cannot hydrate"], async (t, opened) => {
-  opened.mock.script({ status: 500 });
+  opened.mock.script({ status: 400 });
   const { id, events } = await create(opened, t);
   await t.flows.main.sendPrompt(opened.client, id, "Fail but persist.");
   await t.tools.waitUntil(() => terminals(events).length === 1, 60_000);

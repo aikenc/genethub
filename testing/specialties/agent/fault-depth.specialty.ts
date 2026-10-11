@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 
-import { defineSpecialty, hideHostAgentClis, seedScriptAgentRuntime, type CaseContext } from "../../framework/public.ts";
+import { BUILTIN_AGENT_ATTEMPTS, defineSpecialty, hideHostAgentClis, seedScriptAgentRuntime, type CaseContext } from "../../framework/public.ts";
 
 type Opened = Awaited<ReturnType<CaseContext["flows"]["main"]["openWorkspace"]>>;
 
@@ -68,7 +68,7 @@ agentCase(
   ["agent failure crashes daemon", "failed turn never terminates", "connection pool remains poisoned"],
   async (t) => {
     await withAgent(t, async (opened) => {
-      opened.mock.script({ status: 500 });
+      opened.mock.script({ status: 500, repeat: BUILTIN_AGENT_ATTEMPTS });
       const sessionId = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
       const events = await t.flows.main.attachEventLog(opened.client, sessionId);
       await t.flows.main.sendPrompt(opened.client, sessionId, "Trigger a controlled provider failure.");
@@ -86,13 +86,34 @@ agentCase(
 );
 
 agentCase(
+  "specialty.agent.transient-500-is-retried-to-completion",
+  "A transient provider 500 is retried inside the same turn",
+  "two 500 responses are followed by a good one and the turn completes once, without ever failing",
+  ["transient provider error fails the turn", "retry replays the request with lost context", "retry loop never terminates"],
+  async (t) => {
+    await withAgent(t, async (opened) => {
+      opened.mock.script({ status: 500 }, { status: 500 }, { text: "recovered after retries" });
+      const sessionId = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
+      const events = await t.flows.main.attachEventLog(opened.client, sessionId);
+      await t.flows.main.sendPrompt(opened.client, sessionId, "Survive two provider hiccups.");
+      await t.tools.waitUntil(() => terminal(events), 45_000);
+      t.assertions.assert(!events.some((item) => item.type === "turnFailed"), `turn failed despite retries: ${events.map((item) => item.type)}`);
+      t.assertions.assert(events.filter((item) => item.type === "turnCompleted").length === 1, "turn did not complete exactly once");
+      t.assertions.assert(opened.mock.requests.length === 3, `expected 3 provider requests, saw ${opened.mock.requests.length}`);
+      const last = JSON.stringify(opened.mock.requests[2]);
+      t.assertions.assert(last.includes("Survive two provider hiccups.") && last === JSON.stringify(opened.mock.requests[0]), "a retry did not replay the same request");
+    });
+  },
+);
+
+agentCase(
   "specialty.agent.failure-does-not-poison-next-turn",
   "A failed provider request does not poison the next session",
-  "a 500 turn fails, then a new session completes using the next scripted response",
+  "a 500 that outlasts the retries fails the turn, then a new session completes using the next scripted response",
   ["failure state shared across sessions", "mock/provider transport cannot recover", "agent child remains wedged"],
   async (t) => {
     await withAgent(t, async (opened) => {
-      opened.mock.script({ status: 500 }, { text: "recovered" });
+      opened.mock.script({ status: 500, repeat: BUILTIN_AGENT_ATTEMPTS }, { text: "recovered" });
       const failedId = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
       const failedEvents = await t.flows.main.attachEventLog(opened.client, failedId);
       await t.flows.main.sendPrompt(opened.client, failedId, "First request.");

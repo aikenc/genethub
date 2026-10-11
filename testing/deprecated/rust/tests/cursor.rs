@@ -32,6 +32,13 @@ fn seed_cursor_login() {
     let origin =
         std::path::PathBuf::from(std::env::var("TESTCTL_HOST_HOME").expect("testctl origin home"));
     let target = std::path::PathBuf::from(std::env::var("HOME").expect("isolated test home"));
+    // Copying a file onto itself empties it. Run by hand with the real HOME,
+    // this seeding wiped the machine's own Cursor login, so refuse instead.
+    assert_ne!(
+        std::fs::canonicalize(&origin).expect("origin home exists"),
+        std::fs::canonicalize(&target).expect("test home exists"),
+        "HOME is the real home: run through testctl, which isolates it"
+    );
     let relative = ".config/cursor/auth.json";
     assert!(
         origin.join(relative).is_file(),
@@ -48,31 +55,40 @@ fn seed_cursor_login() {
     }
 }
 
+/// Cursor's script Agent launches only a model its own listing offers, so the
+/// pick has to come from that listing: a hard-coded id the account does not
+/// list is refused before any turn. The login is seeded after the daemon is up,
+/// so the first listing can be empty; refresh until the CLI answers.
 async fn pick_a_cursor_model(journey: &Journey, session: &str) {
-    let Ok(Reply::Agents(agents)) = journey.client.call(Request::AgentList).await else {
-        return;
-    };
-    let Some(cursor) = agents.into_iter().find(|agent| agent.id == "cursor") else {
-        return;
-    };
-    let model_id = cursor
-        .catalog
-        .models
-        .iter()
-        .find(|model| model.id.contains("composer-2.5[fast=true]"))
-        .or_else(|| cursor.catalog.models.first())
-        .map(|model| model.id.clone())
-        .unwrap_or_else(|| "composer-2.5[fast=true]".into());
-    if let Err(error) = journey
+    let mut model_id = None;
+    let mut seen = String::from("no Cursor Agent in the list");
+    for _ in 0..30 {
+        if let Ok(Reply::Agents(agents)) = journey.client.call(Request::AgentRefresh).await {
+            let cursor = agents.into_iter().find(|agent| agent.id == "cursor");
+            if let Some(agent) = &cursor {
+                seen = format!("{:?}: {:?}", agent.probe, agent.message);
+            }
+            let models = cursor.map(|agent| agent.catalog.models).unwrap_or_default();
+            model_id = models
+                .iter()
+                .find(|model| model.id.contains("composer-2.5"))
+                .or_else(|| models.first())
+                .map(|model| model.id.clone());
+            if model_id.is_some() {
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    journey
         .client
         .call(Request::SessionSetModel {
             session_id: session.to_string(),
-            model_id,
+            model_id: model_id
+                .unwrap_or_else(|| panic!("Cursor lists no model for this login ({seen})")),
         })
         .await
-    {
-        eprintln!("cursor set_model failed in this environment: {error}");
-    }
+        .expect("a listed Cursor model is accepted");
 }
 
 #[tokio::test]
