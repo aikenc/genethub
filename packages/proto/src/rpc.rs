@@ -1133,6 +1133,10 @@ pub enum Request {
     /// navigated away from is the one most worth showing.
     #[serde(rename = "process.list")]
     ProcessList,
+    /// The timer hooks in a project's `.genethub/hooks/`, read fresh from the
+    /// files, with how each last ran.
+    #[serde(rename = "hook.list", rename_all = "camelCase")]
+    HookList { workspace_id: String },
     #[serde(rename = "process.workspaceList", rename_all = "camelCase")]
     ProcessWorkspaceList { workspace_id: String },
     /// Authenticated application shutdown; never signals a caller-supplied PID.
@@ -1260,6 +1264,7 @@ pub enum Reply {
         pty_id: String,
     },
     Processes(Vec<BackgroundProcess>),
+    Hooks(crate::HookList),
     /// Nothing to return, but the call succeeded.
     Ack,
 }

@@ -41,6 +41,9 @@ pub struct AppState {
     pub terminals: Arc<Terminals>,
     /// What each session's agent has left running.
     pub processes: Arc<crate::processes::Processes>,
+    /// Timer hooks: how each project's hook files last ran. The files are the
+    /// registry; this only remembers outcomes, in memory.
+    pub hooks: Arc<crate::hooks::Hooks>,
     /// Bounded categorical facts safe for explicit feedback attachment.
     pub diagnostics: Arc<crate::diagnostics::Diagnostics>,
     pub version: String,
@@ -152,7 +155,7 @@ impl AppState {
             config.replay_window,
             diagnostics.clone(),
         )
-        .with_builtin_skills(skills_dir, front_door_cli)
+        .with_builtin_skills(skills_dir, front_door_cli.clone())
         .with_project_control(project_control.clone());
 
         let config = Arc::new(RwLock::new(config));
@@ -186,6 +189,7 @@ impl AppState {
             provider_operations: Default::default(),
             terminals,
             processes,
+            hooks: crate::hooks::Hooks::new(front_door_cli),
             diagnostics,
             client_debug: crate::client_debug::Broker::default(),
             version: crate::version::product_version(),

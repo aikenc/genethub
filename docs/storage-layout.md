@@ -33,6 +33,8 @@ agent CLI 自己的线程库（`~/.codex/` 之类）不归我们管，只在会�
   preview-feedback/           文件与版本绑定的反馈草稿、证据、提交回执与限时分享范围
   speech/                     项目级语音偏好与学习词表（仅项目根）
   temp/                       普通临时材料，例如 Workflow 试验材料 temp/exp/<testname>/
+  hooks/<id>.genet.json       定时 hook：一个文件一个 hook，目录就是注册表（见 daemon.md「定时 hook」）
+  open.env                    项目的本机环境变量，KEY=VALUE；注入 hook 命令的环境
   owner.lock                  滚动升级期间的旧版兼容锁
 ```
 
@@ -57,6 +59,7 @@ agent CLI 自己的线程库（`~/.codex/` 之类）不归我们管，只在会�
 | --- | --- |
 | `sessions/`、`components/`、`tombstones/`、`preview-feedback/` | 只由 daemon 写。Agent 不直接改写 |
 | `workflows/`、`temp/` | 普通目录，Agent 按任务需要编辑 |
+| `hooks/`、`open.env` | 普通文件，Agent 与脚本直接写（先写临时文件再 `rename`）。daemon 只读，运行记录只在内存里 |
 
 "只由 daemon 写"是**纪律，不是强制**：任何有项目写权限的 Agent 技术上都能写，放进 `<data>` 也挡不住。
 越权写入会在会话记录里留痕，由复查发现。不要为此设计额外的防篡改机制。

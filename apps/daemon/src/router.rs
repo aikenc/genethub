@@ -4059,6 +4059,15 @@ async fn dispatch(
             }
         }).await,
 
+        Request::HookList { workspace_id } => Box::pin(async move {
+            match state.workspaces.get(&workspace_id).await {
+                Ok(entry) => Handled::ok(Reply::Hooks(
+                    state.hooks.list(&workspace_id, std::path::Path::new(&entry.root)),
+                )),
+                Err(error) => failed(error),
+            }
+        }).await,
+
         Request::ProcessList => Box::pin(async move {
             match crate::dataplane::service_preview::process_snapshot(state, caller, None).await {
                 Ok(rows) => Handled::ok(Reply::Processes(rows)),

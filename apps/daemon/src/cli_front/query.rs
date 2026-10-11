@@ -16,7 +16,7 @@ use super::output::{self, CliFailure, CLI_SCHEMA};
 use super::rpc::{ConnectError, Refusal, Rpc, RpcError};
 use super::target::{self, Routing, Selection};
 
-const COMMAND_NAMES: [&str; 84] = [
+const COMMAND_NAMES: [&str; 85] = [
     "schema",
     "context",
     "capabilities",
@@ -29,6 +29,7 @@ const COMMAND_NAMES: [&str; 84] = [
     "file.transfer.status",
     "file.transfer.cancel",
     "process.list",
+    "hook.list",
     "process.kill",
     "process.killAll",
     "workspace.list",
@@ -1335,6 +1336,17 @@ fn command_schema(name: &str) -> Value {
             true,
             object_input(json!({"transferId": {"type": "string", "minLength": 1}}), &["transferId"]),
         ),
+        "hook.list" => (
+            "genet hook list [--workspace <id>]",
+            true,
+            object_input(
+                json!({
+                    "workspaceId": {"type": ["string", "null"], "minLength": 1,
+                        "description": "--workspace; defaults to the project the working directory is in"},
+                }),
+                &[],
+            ),
+        ),
         "process.list" => (
             "genet process list [--machine <id>]",
             true,
@@ -2131,6 +2143,7 @@ pub fn reply_kind(reply: &Reply) -> &'static str {
         Reply::GitCommit { .. } => "git commit",
         Reply::Pty { .. } => "pty",
         Reply::Processes(_) => "background processes",
+        Reply::Hooks(_) => "hooks",
         Reply::PreviewFeedback(_) => "preview feedback",
         Reply::Ack => "ack",
     }

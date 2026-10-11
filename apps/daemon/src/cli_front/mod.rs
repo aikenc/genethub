@@ -6,6 +6,7 @@
 mod converse;
 mod desktop;
 mod file;
+mod hook;
 mod hub;
 mod machine;
 mod machines;
@@ -221,6 +222,7 @@ async fn dispatch(args: Vec<String>) -> i32 {
         Some("workflow") => Box::pin(workflow::workflow(&args[1..], &selection)).await,
         Some("space") => Box::pin(space::space(&args[1..], &selection)).await,
         Some("process") => Box::pin(process::process(&args[1..], &selection)).await,
+        Some("hook") => Box::pin(hook::hook(&args[1..], &selection)).await,
         Some("machine") => Box::pin(machine::machine(&args[1..])).await,
         Some("device") => Box::pin(machine::device(&args[1..], &selection)).await,
         Some("hub") => Box::pin(hub::hub(&args[1..])).await,

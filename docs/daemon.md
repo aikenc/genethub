@@ -180,6 +180,25 @@ DataEndpoint method 只有四个：
 
 `session.send` 的 `system: true`（CLI 是 `--queue`）把文本作为 `system` 来源的通知排进队列：它由脚本写，不是人的要求，也不是别的 Agent 的请求。三条规则：**不打断**（只有 `conversational` 来源，即 `user` 与 `agent`，才会在会话忙时触发中途引导或打断）；**不解除暂停**（用户 `interrupt` 或一个 round 失败后会话暂停，只有 `conversational` 输入能解除，所以暂停期间通知安静地排着，不是被丢掉）；**不冒充人类批准**（说明句写明它是脚本发出的系统消息）。它自己是一条投递通道，优先级在 Human 与 Workflow 之后：一个 turn 只带一种通道，所以通知不会和人的话混在同一批里。通知必须带稳定的 `messageId`（只允许字母、数字、`_`、`-`、`.`，至多 128 字符），重发同一 id 与同一内容被确认且不重复入队，同一 id 不同内容被拒；不带 `taskRunId`。通知占用和其他输入一样的待处理名额（32 条）。会话摘要的 `inputSummary.pending` 列出每条未处理输入的来源、状态（`receiving` / `queued` / `sent`）和到达时间，`limit` 给出名额，所以发送方可以在发送前判断是否会被拒。
 
+### 定时 hook
+
+项目可以让 daemon 按间隔运行自己的命令。**只有一个事件，`timer`。** 一个 Session 完成了、停在等人、被暂停、一条通知卡在队列里——这些都是持久状态里的事实，周期性运行的命令自己去读就行，所以 daemon 不广播会话生命周期事件，也就不存在"漏掉一条广播"。
+
+**目录就是注册表。** hook 是 `<项目>/.genethub/hooks/<id>.genet.json`，一个文件一个 hook：
+
+```json
+{"schema":"genet.hook.v1","event":"timer","every":"5s","exec":["python3","tools/expert.py","hook"],
+ "cwd":".","timeout":20,"enabled":true,"owner":"…","payload":{}}
+```
+
+daemon 解析 `schema`（缺省可）、`event`（只能是 `timer`）、`every`（`5s`/`1m`/`2h`，1 秒到 24 小时）、`exec`（argv，不经 shell）、`cwd`、`timeout`（1–300 秒，缺省 30）、`enabled`；`owner` 与 `payload` 原样保留、原样转交。没有"注册"这一步，也没有 CLI 去写或删——写文件、删文件就是全部；daemon 每个 tick（1 秒）重新读目录，所以新增、修改、停用、删除下一个 tick 就生效，不用重启。读不了的文件（坏 JSON、缺字段、符号链接、过大、大小写不同的重名）**被列出并写明原因，不会被忽略**，也不会运行。
+
+**命令的运行**：作为独立进程组启动，超时则整组结束；同一 hook 同一时刻最多一个，跑得比间隔久时下一次至少隔 1 秒；全局最多 8 个同时跑；daemon 启动后每个 hook 立即补跑一次（运行记录只在内存里，命令必须幂等）。stdin 是一行 JSON：`event`、`hook`、`firedAtMs`、`space.dir`、`payload`、`openEnvProblems`。环境变量：`GENEHUB_HOOK_ID`、`GENEHUB_HOOK_EVENT`、`GENEHUB_SPACE_DIR`、`GENEHUB_CLI`、`GENEHUB_PYTHON`，加项目 `open.env` 里的变量；GeneHub 自己的名字不能被 `open.env` 改写（以 `GENEHUB_` 开头的行被拒并写进 `openEnvProblems`）。`exec` 与 `cwd` 里的 `${GENEHUB_SPACE_DIR}`、`${GENEHUB_PYTHON}`、`${GENEHUB_CLI}` 会被展开，别的 `${X}` 原样保留。
+
+**失败只记录，不自愈，也不停用。** 失败（非零退出、超时、被信号结束、起不来）记入内存里的运行记录：连续失败数、最后一次退出码、stderr 末尾 2 KiB。hook 永远不会因为失败被停用——"被停用"是第二份需要有人发现并撤销的状态。`timer` 不由会话事件触发，所以 hook 发出的消息不可能再触发 hook，不会有循环。`genet hook list [--workspace <id>]`（`hook.list`）读目录并合并运行记录，是脚本发现"某个 hook 坏了"的办法。
+
+`open.env` 是 `<项目>/.genethub/open.env`：`KEY=VALUE`，`#` 注释行，值可用一对引号；不支持多行、命令替换、嵌套引用。读不了的行被报告并跳过，不影响其余行。
+
 `session.delete` 是真删：时间线、meta、以及那个会话的 scratch 目录一起没。scratch 里放的是 adapter 存的「CLI 自己那份对话」（`--resume` id、线程文件），留着它等于「删掉的对话在 agent 那边还在」，那不叫删除。没有回收站，也没有撤销——想删掉的对话，通常正是不希望留副本的那种。删一个已经不在的会话不算失败：调用方要的是「它不存在」，而它确实不存在，两个窗口点同一行不该有一个看到报错。
 
 ### 4.2 工作区与默认工作目录

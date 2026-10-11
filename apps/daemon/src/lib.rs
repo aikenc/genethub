@@ -21,6 +21,7 @@ pub mod files;
 pub(crate) mod fs_cap;
 pub mod git;
 pub(crate) mod guest_paths;
+pub mod hooks;
 pub mod host_pid;
 pub(crate) mod host_update;
 pub(crate) mod http;
@@ -74,6 +75,7 @@ pub struct Daemon {
     listener: tokio::task::JoinHandle<()>,
     session_deliveries: tokio::task::JoinHandle<()>,
     workflow_control: tokio::task::JoinHandle<()>,
+    hook_timer: tokio::task::JoinHandle<()>,
     agent_pushes: tokio::task::JoinHandle<()>,
 }
 
@@ -126,10 +128,12 @@ impl Daemon {
                 }
             }
         });
+        let hook_timer = tokio::spawn(hooks::run_timer(state.clone()));
         let agent_pushes = tokio::spawn(push_agent_changes(state.clone()));
         Ok(Daemon {
             session_deliveries,
             workflow_control,
+            hook_timer,
             agent_pushes,
             state,
             port: listener.port,
@@ -160,6 +164,8 @@ impl Daemon {
         let _ = self.session_deliveries.await;
         self.workflow_control.abort();
         let _ = self.workflow_control.await;
+        self.hook_timer.abort();
+        let _ = self.hook_timer.await;
         self.state.workflow_tasks.stop().await;
         self.agent_pushes.abort();
         let _ = self.agent_pushes.await;
