@@ -306,6 +306,7 @@ async fn authorize_session_request(
         | Request::SessionArchive { session_id, .. }
         | Request::SessionRename { session_id, .. }
         | Request::SessionLabel { session_id, .. }
+        | Request::SessionDescribe { session_id, .. }
         | Request::SessionDrafts { session_id }
         | Request::SessionDraftsReplace { session_id, .. }
         | Request::SessionPreviewAnnotationsGet { session_id }
@@ -2216,9 +2217,25 @@ async fn dispatch(
             artifact_preview_base_url,
             continues_round,
             origin,
+            system,
         } => Box::pin(async move {
             if text.trim().is_empty() && attachments.is_empty() {
                 return Handled::err(ErrorCode::BadRequest, "there is nothing to send");
+            }
+            // A system notice is durable or it is nothing: the sender retries
+            // it, and only a stable messageId makes a retry safe. It is not a
+            // Run's notice either, so it carries no task.
+            if system && message_id.is_none() {
+                return Handled::err(
+                    ErrorCode::BadRequest,
+                    "a system notice requires a stable messageId",
+                );
+            }
+            if system && task_run_id.is_some() {
+                return Handled::err(
+                    ErrorCode::BadRequest,
+                    "a system notice cannot carry a taskRunId",
+                );
             }
             // A local Agent caller is attributed by its verified identity, not
             // by what it declares. Any other caller already acts as the owner,
@@ -2247,7 +2264,16 @@ async fn dispatch(
                         text,
                         attachments,
                         task_run_id,
-                        if origin.is_some() { "agent" } else { "user" },
+                        // `system` is a statement about the text, not about the
+                        // caller: a script's notice keeps its origin when it has
+                        // one, but is never read as the Agent's own request.
+                        if system {
+                            "system"
+                        } else if origin.is_some() {
+                            "agent"
+                        } else {
+                            "user"
+                        },
                         origin,
                     )
                     .await
@@ -2655,6 +2681,13 @@ async fn dispatch(
 
         Request::SessionLabel { session_id, add, remove } => Box::pin(async move {
             match state.sessions.label(&session_id, &add, &remove).await {
+                Ok(summary) => Handled::ok(Reply::Session(summary)),
+                Err(error) => failed(error),
+            }
+        }).await,
+
+        Request::SessionDescribe { session_id, text } => Box::pin(async move {
+            match state.sessions.describe(&session_id, &text).await {
                 Ok(summary) => Handled::ok(Reply::Session(summary)),
                 Err(error) => failed(error),
             }

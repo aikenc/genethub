@@ -1374,13 +1374,21 @@ continuesRound: string | null,
  * when it forwards the send to another machine. A local Agent caller's
  * own identity replaces whatever it declares here.
  */
-origin?: InputOrigin, } } | { "type": "session.artifact.begin", "payload": { sessionId: string, files: Array<SessionArtifactFile>, metadata: JsonValue, } } | { "type": "session.artifact.chunk", "payload": { sessionId: string, uploadId: string, fileIndex: number, offset: number, dataBase64: string, } } | { "type": "session.artifact.finish", "payload": { sessionId: string, uploadId: string, } } | { "type": "session.artifact.abort", "payload": { sessionId: string, uploadId: string, } } | { "type": "session.fork", "payload": { sessionId: string, turnId: string, 
+origin?: InputOrigin, 
+/**
+ * Queues the text as a `system` notice written by a script, not by
+ * the Human and not by another Agent's request. It waits for the
+ * current round instead of interrupting it, never lifts a pause the
+ * Human set, and is never a Human approval. Needs a stable
+ * `messageId`: a notice that cannot be retried safely is not durable.
+ */
+system?: boolean, } } | { "type": "session.artifact.begin", "payload": { sessionId: string, files: Array<SessionArtifactFile>, metadata: JsonValue, } } | { "type": "session.artifact.chunk", "payload": { sessionId: string, uploadId: string, fileIndex: number, offset: number, dataBase64: string, } } | { "type": "session.artifact.finish", "payload": { sessionId: string, uploadId: string, } } | { "type": "session.artifact.abort", "payload": { sessionId: string, uploadId: string, } } | { "type": "session.fork", "payload": { sessionId: string, turnId: string, 
 /**
  * Absent is the legacy native-only request. New clients send an
  * explicit target to opt into provider-agnostic reconstruction when
  * any destination dimension changes or a native checkpoint cannot be used.
  */
-target?: ForkTarget, } } | { "type": "session.forkRouted", "payload": { sessionId: string, turnId: string, workspaceId: string, tags: Array<string>, } } | { "type": "session.forkExport", "payload": { sessionId: string, turnId: string, } } | { "type": "session.forkImport", "payload": { transfer: ForkTransfer, target: ForkTarget, } } | { "type": "session.forkImportRouted", "payload": { transfer: ForkTransfer, workspaceId: string, tags: Array<string>, } } | { "type": "session.importList", "payload": { workspaceId: string, limit: number | null, } } | { "type": "session.import", "payload": { workspaceId: string, candidateId: string, } } | { "type": "session.interrupt", "payload": { sessionId: string, } } | { "type": "session.close", "payload": { sessionId: string, } } | { "type": "session.archive", "payload": { sessionId: string, archived: boolean, } } | { "type": "session.rename", "payload": { sessionId: string, title: string, } } | { "type": "session.label", "payload": { sessionId: string, add: Array<string>, remove: Array<string>, } } | { "type": "session.delete", "payload": { sessionId: string, } } | { "type": "session.setModel", "payload": { sessionId: string, modelId: string, } } | { "type": "session.switchAgent", "payload": { sessionId: string, target: SessionAgentTarget, } } | { "type": "session.route", "payload": { sessionId: string, tags: Array<string>, mediaTags: Array<string>, } } | { "type": "session.setMode", "payload": { sessionId: string, modeId: string, } } | { "type": "session.setEffort", "payload": { sessionId: string, effortId: string, } } | { "type": "session.setFast", "payload": { sessionId: string, fast: boolean, } } | { "type": "session.setRuntimeAxis", "payload": { sessionId: string, axisId: string, valueId: string, } } | { "type": "session.respondPermission", "payload": { sessionId: string, requestId: string, outcome: PermissionOutcome, } } | { "type": "session.ask", "payload": { sessionId: string, requestId: string, title: string, questions: Array<InteractionQuestion>, } } | { "type": "caller.authority" } | { "type": "provider.list" } | { "type": "provider.operation", "payload": { sessionId: string, operation: ProviderOperationCommand, } } | { "type": "settings.get" } | { "type": "settings.setProvider", "payload": { providerId: string, 
+target?: ForkTarget, } } | { "type": "session.forkRouted", "payload": { sessionId: string, turnId: string, workspaceId: string, tags: Array<string>, } } | { "type": "session.forkExport", "payload": { sessionId: string, turnId: string, } } | { "type": "session.forkImport", "payload": { transfer: ForkTransfer, target: ForkTarget, } } | { "type": "session.forkImportRouted", "payload": { transfer: ForkTransfer, workspaceId: string, tags: Array<string>, } } | { "type": "session.importList", "payload": { workspaceId: string, limit: number | null, } } | { "type": "session.import", "payload": { workspaceId: string, candidateId: string, } } | { "type": "session.interrupt", "payload": { sessionId: string, } } | { "type": "session.close", "payload": { sessionId: string, } } | { "type": "session.archive", "payload": { sessionId: string, archived: boolean, } } | { "type": "session.rename", "payload": { sessionId: string, title: string, } } | { "type": "session.label", "payload": { sessionId: string, add: Array<string>, remove: Array<string>, } } | { "type": "session.describe", "payload": { sessionId: string, text: string, } } | { "type": "session.delete", "payload": { sessionId: string, } } | { "type": "session.setModel", "payload": { sessionId: string, modelId: string, } } | { "type": "session.switchAgent", "payload": { sessionId: string, target: SessionAgentTarget, } } | { "type": "session.route", "payload": { sessionId: string, tags: Array<string>, mediaTags: Array<string>, } } | { "type": "session.setMode", "payload": { sessionId: string, modeId: string, } } | { "type": "session.setEffort", "payload": { sessionId: string, effortId: string, } } | { "type": "session.setFast", "payload": { sessionId: string, fast: boolean, } } | { "type": "session.setRuntimeAxis", "payload": { sessionId: string, axisId: string, valueId: string, } } | { "type": "session.respondPermission", "payload": { sessionId: string, requestId: string, outcome: PermissionOutcome, } } | { "type": "session.ask", "payload": { sessionId: string, requestId: string, title: string, questions: Array<InteractionQuestion>, } } | { "type": "caller.authority" } | { "type": "provider.list" } | { "type": "provider.operation", "payload": { sessionId: string, operation: ProviderOperationCommand, } } | { "type": "settings.get" } | { "type": "settings.setProvider", "payload": { providerId: string, 
 /**
  * `None` preserves the key only at the same endpoint/protocol; changing
  * either without a supplied key clears it. An empty string clears it.
@@ -1641,7 +1649,18 @@ coverage?: HistoryCoverage, };
  */
 export type SessionImportSource = { agentId: string, label: string, supported: boolean, candidates: Array<SessionImportCandidate>, error?: string, };
 
-export type SessionInputSummary = { pendingMessageIds: Array<string>, paused: boolean, error?: string, };
+export type SessionInputSummary = { pendingMessageIds: Array<string>, paused: boolean, error?: string, 
+/**
+ * The same unhandled inputs as `pending_message_ids`, with what a sender
+ * needs to judge them: where each came from, whether it is still waiting
+ * or already being worked on, and how long ago it arrived.
+ */
+pending?: Array<SessionPendingInput>, 
+/**
+ * How many unhandled inputs a session accepts before refusing more.
+ * Zero from a daemon that does not say.
+ */
+limit: number, };
 
 /**
  * A small structural entry point. It deliberately contains no free-form
@@ -1671,6 +1690,19 @@ export type SessionMessagePreview = { itemId: string, text: string, atMs: number
  * A recent-first page of narrative items, returned in chronological order.
  */
 export type SessionNarrativePage = { source: SessionReadSource, items: Array<TimelineItem>, nextCursor?: string, };
+
+/**
+ * One unhandled input in a session's queue.
+ */
+export type SessionPendingInput = { messageId: string, 
+/**
+ * `user`, `agent`, `system` or `workflow`.
+ */
+source: string, 
+/**
+ * `receiving`, `queued` or `sent` (delivered to the Agent, not yet settled).
+ */
+state: string, receivedAtMs: number, };
 
 /**
  * Stable identity and waterline shared by every read-only session page.
@@ -1772,7 +1804,12 @@ title?: string,
 /**
  * Short labels set with `session.label`, in the order they were added.
  */
-labels?: Array<string>, status: SessionStatus, modelId?: string, modeId?: string, effortId?: string, fast?: boolean, runtimeValues?: { [key in string]?: string }, createdAtMs: number, updatedAtMs: number, archived: boolean, 
+labels?: Array<string>, 
+/**
+ * One line, written like a Skill description, saying what this session is
+ * for and when to ask it. Set with `session.describe`; absent until then.
+ */
+description?: string, status: SessionStatus, modelId?: string, modeId?: string, effortId?: string, fast?: boolean, runtimeValues?: { [key in string]?: string }, createdAtMs: number, updatedAtMs: number, archived: boolean, 
 /**
  * Set when this session cannot be opened here. It is still listed: the
  * conversation is in the user's own project folder, and an unexplained

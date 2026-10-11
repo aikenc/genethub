@@ -57,7 +57,7 @@ pub const RESERVED: [&str; 20] = [
     "provider",
 ];
 
-pub(crate) const ROUTABLE: [&str; 45] = [
+pub(crate) const ROUTABLE: [&str; 46] = [
     "context",
     "provider.list",
     "provider.configure",
@@ -81,6 +81,7 @@ pub(crate) const ROUTABLE: [&str; 45] = [
     "session.interrupt",
     "session.close",
     "session.label",
+    "session.describe",
     "agent.list",
     "agent.run",
     "agent.show",

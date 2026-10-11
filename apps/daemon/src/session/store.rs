@@ -243,6 +243,10 @@ pub struct SessionMeta {
     /// See [`apply_session_labels`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
+    /// See [`normalize_session_description`]. Metas written before this
+    /// existed read back as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub cwd: PathBuf,
     pub model_id: Option<String>,
     pub mode_id: Option<String>,
@@ -374,6 +378,7 @@ impl SessionMeta {
             title: header.title,
             title_locked: false,
             labels: Vec::new(),
+            description: None,
             cwd,
             model_id: None,
             mode_id: None,
@@ -431,6 +436,19 @@ impl SessionMeta {
                         .collect(),
                     paused: self.inbox.paused,
                     error: self.inbox.error.clone(),
+                    pending: self
+                        .inbox
+                        .entries
+                        .iter()
+                        .filter(|entry| entry.state != "handled")
+                        .map(|entry| genehub_proto::SessionPendingInput {
+                            message_id: entry.message_id.clone(),
+                            source: entry.source.clone(),
+                            state: entry.state.clone(),
+                            received_at_ms: entry.received_at_ms,
+                        })
+                        .collect(),
+                    limit: MAX_PENDING_INPUTS as u32,
                 }
             }),
             work_summary: None,
@@ -445,6 +463,7 @@ impl SessionMeta {
             managed: self.managed.clone(),
             title: self.title.clone(),
             labels: self.labels.clone(),
+            description: self.description.clone(),
             status,
             model_id: self.model_id.clone(),
             mode_id: self.mode_id.clone(),
@@ -2011,6 +2030,34 @@ pub fn normalize_session_title(title: &str) -> Option<String> {
     Some(trimmed.chars().take(120).collect())
 }
 
+/// How many unhandled inputs a session accepts before it refuses more.
+pub const MAX_PENDING_INPUTS: usize = 32;
+
+/// A description is read by other Agents to decide whom to ask, so it stays one
+/// short line: roughly what a Skill description is.
+pub const MAX_SESSION_DESCRIPTION_BYTES: usize = 300;
+
+/// Trims a description and checks it is one short line. Empty clears it.
+///
+/// The bound is in bytes, like the other Agent-facing text limits, so a line of
+/// Chinese gets about a hundred characters rather than three hundred.
+pub fn normalize_session_description(text: &str) -> Result<Option<String>, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    if text.len() > MAX_SESSION_DESCRIPTION_BYTES {
+        return Err(format!(
+            "a session description is at most {MAX_SESSION_DESCRIPTION_BYTES} bytes; this one is {}",
+            text.len()
+        ));
+    }
+    if text.chars().any(char::is_control) {
+        return Err("a session description is one line without control characters".into());
+    }
+    Ok(Some(text.to_string()))
+}
+
 pub const MAX_SESSION_LABEL_CHARS: usize = 10;
 pub const MAX_SESSION_LABELS: usize = 16;
 
@@ -2205,6 +2252,7 @@ mod project_home_tests {
             title: Some(id.into()),
             title_locked: false,
             labels: Vec::new(),
+            description: None,
             cwd: cwd.to_path_buf(),
             model_id: None,
             mode_id: None,

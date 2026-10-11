@@ -780,6 +780,7 @@ async fn run_turn_phase(
                     artifact_preview_base_url: None,
                     continues_round: None,
                     origin: None,
+                    system: false,
                 })
                 .await;
             (started.elapsed(), reply)

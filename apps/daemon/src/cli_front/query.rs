@@ -16,7 +16,7 @@ use super::output::{self, CliFailure, CLI_SCHEMA};
 use super::rpc::{ConnectError, Refusal, Rpc, RpcError};
 use super::target::{self, Routing, Selection};
 
-const COMMAND_NAMES: [&str; 83] = [
+const COMMAND_NAMES: [&str; 84] = [
     "schema",
     "context",
     "capabilities",
@@ -59,6 +59,7 @@ const COMMAND_NAMES: [&str; 83] = [
     "session.interrupt",
     "session.close",
     "session.label",
+    "session.describe",
     "workflow.list",
     "workflow.build",
     "workflow.inspect",
@@ -140,6 +141,7 @@ fn mutates(name: &str) -> bool {
             | "session.interrupt"
             | "session.close"
             | "session.label"
+            | "session.describe"
             | "workflow.build"
             | "workflow.activate"
             | "workflow.dispatch"
@@ -1409,8 +1411,8 @@ fn command_schema(name: &str) -> Value {
         "agent.run" => (
             "genet agent run --agent <id> \"<prompt>\" [--cwd <dir> | --workspace <id>] \
              [--session <id>] [--model <id>] [--mode <id>] [--effort <id>] [--title <t>] \
-             [--label <label>]... [--wait|--no-wait] [--since-seq <n>] [--auto-approve] [--timeout <s>] \
-             [--open-workspace]",
+             [--label <label>]... [--description <text>] [--wait|--no-wait] [--since-seq <n>] \
+             [--auto-approve] [--timeout <s>] [--open-workspace]",
             true,
             object_input(
                 json!({
@@ -1424,6 +1426,8 @@ fn command_schema(name: &str) -> Value {
                     "title": {"type": ["string", "null"], "minLength": 1},
                     "labels": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 10},
                         "description": "--label, repeatable; added to the session before the prompt is sent"},
+                    "description": {"type": ["string", "null"], "minLength": 1, "maxLength": 300,
+                        "description": "--description; one line, like a Skill description: what this session does and when to ask it. Set before the prompt is sent, at most 300 bytes"},
                     "wait": {"type": "boolean", "default": true},
                     "sinceSeq": {"type": ["integer", "null"], "minimum": 0},
                     "autoApprove": {"type": "boolean", "default": false},
@@ -1446,7 +1450,7 @@ fn command_schema(name: &str) -> Value {
             }), &["sessionId", "question"]),
         ),
         "session.send" => (
-            "genet session send <id> \"<text>\" [--message-id <id> [--task-run <run>]] [--wait|--no-wait] [--timeout <s>]",
+            "genet session send <id> \"<text>\" [--message-id <id> [--task-run <run>]] [--queue] [--wait|--no-wait] [--timeout <s>]",
             true,
             object_input(
                 json!({
@@ -1456,6 +1460,8 @@ fn command_schema(name: &str) -> Value {
                         "description": "--message-id; stable receipt ID, requires session.input.v1; returns acceptance"},
                     "taskRunId": {"type": "string", "minLength": 1,
                         "description": "--task-run; optional related Run owned by this PM; requires messageId"},
+                    "queue": {"type": "boolean", "default": false,
+                        "description": "--queue; send as a system notice written by a script: it waits for the current round instead of interrupting it, never lifts a pause the Human set, and is never a Human approval; requires messageId, excludes taskRunId"},
                     "wait": {"type": "boolean",
                         "description": "defaults to false with messageId, true otherwise; --wait is incompatible with messageId"},
                     "timeout": {"type": ["integer", "null"], "minimum": 1},
@@ -1591,6 +1597,18 @@ fn command_schema(name: &str) -> Value {
                         "description": "--remove, repeatable; applied before --add, so --remove old --add new renames atomically"},
                 }),
                 &["sessionId"],
+            ),
+        ),
+        "session.describe" => (
+            "genet session describe <id> \"<text>\"",
+            true,
+            object_input(
+                json!({
+                    "sessionId": {"type": "string", "minLength": 1},
+                    "text": {"type": "string", "maxLength": 300,
+                        "description": "one line, like a Skill description: what this session does and when to ask it; at most 300 bytes; an empty string clears it"},
+                }),
+                &["sessionId", "text"],
             ),
         ),
         "session.interrupt" | "session.close" => (
@@ -2453,6 +2471,7 @@ mod tests {
             media_tags: Vec::new(),
             title: None,
             labels: Vec::new(),
+            description: None,
             status: SessionStatus::Idle,
             model_id: None,
             mode_id: None,

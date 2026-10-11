@@ -60,6 +60,9 @@ pub struct Run {
     pub effort_id: Option<String>,
     pub title: Option<String>,
     pub labels: Vec<String>,
+    pub description: Option<String>,
+    /// Send as a `system` notice (`--queue`) instead of a request.
+    pub queue: bool,
     pub wait: bool,
     pub since_seq: Option<u64>,
     pub auto_approve: bool,
@@ -115,6 +118,10 @@ pub enum Command {
         session_id: String,
         add: Vec<String>,
         remove: Vec<String>,
+    },
+    Describe {
+        session_id: String,
+        text: String,
     },
 }
 
@@ -292,6 +299,18 @@ fn parse_session(args: &[String], selection: &Selection) -> Result<Command, CliF
         }
         "interrupt" => Ok(Command::Interrupt { session_id }),
         "close" => Ok(Command::Close { session_id }),
+        "describe" => {
+            let usage = "usage: genet session describe <id> \"<text>\"";
+            let [_, _, text] = args else {
+                return Err(CliFailure::invalid_args(usage));
+            };
+            crate::session::store::normalize_session_description(text)
+                .map_err(CliFailure::invalid_args)?;
+            Ok(Command::Describe {
+                session_id,
+                text: text.clone(),
+            })
+        }
         "label" => {
             let usage = "usage: genet session label <id> [--add <label>]... [--remove <label>]...";
             let (mut add, mut remove) = (Vec::new(), Vec::new());
@@ -333,6 +352,8 @@ struct Options {
     effort: Option<String>,
     title: Option<String>,
     labels: Vec<String>,
+    description: Option<String>,
+    queue: bool,
     request: Option<String>,
     choose: Option<String>,
     since_seq: Option<u64>,
@@ -371,6 +392,7 @@ impl Options {
                 "--effort" => options.effort = Some(value()?),
                 "--title" => options.title = Some(value()?),
                 "--label" => options.labels.push(value()?),
+                "--description" => options.description = Some(value()?),
                 "--message" => options.positional.push(value()?),
                 "--request" => options.request = Some(value()?),
                 "--choose" => options.choose = Some(value()?),
@@ -378,6 +400,7 @@ impl Options {
                 "--timeout" => options.timeout = Some(number(&value()?, "--timeout")?),
                 "--wait" => options.wait = Some(true),
                 "--no-wait" => options.wait = Some(false),
+                "--queue" => options.queue = true,
                 "--auto-approve" => options.auto_approve = true,
                 "--open-workspace" => options.open_workspace = true,
                 other if other.starts_with('-') => {
@@ -412,6 +435,20 @@ impl Options {
         // new session behind without its prompt.
         crate::session::store::apply_session_labels(&[], &self.labels, &[])
             .map_err(CliFailure::invalid_args)?;
+        if self.queue && self.message_id.is_none() {
+            return Err(CliFailure::invalid_args(
+                "--queue requires --message-id: a notice that cannot be retried safely is not durable",
+            ));
+        }
+        if self.queue && self.task_run_id.is_some() {
+            return Err(CliFailure::invalid_args(
+                "--queue cannot carry --task-run: a system notice is not a Run's notice",
+            ));
+        }
+        if let Some(description) = &self.description {
+            crate::session::store::normalize_session_description(description)
+                .map_err(CliFailure::invalid_args)?;
+        }
         let wait = self.wait.unwrap_or(self.message_id.is_none());
         Ok(Run {
             message_id: self.message_id,
@@ -426,6 +463,8 @@ impl Options {
             effort_id: self.effort,
             title: self.title,
             labels: self.labels,
+            description: self.description,
+            queue: self.queue,
             wait,
             since_seq: self.since_seq,
             auto_approve: self.auto_approve,
@@ -573,6 +612,12 @@ async fn execute(command: Command, selection: &Selection) -> i32 {
             output::succeed("session.label", json!({"session": session}));
             EXIT_OK
         }),
+        Command::Describe { session_id, text } => {
+            describe(&rpc, &session_id, &text).await.map(|session| {
+                output::succeed("session.describe", json!({"session": session}));
+                EXIT_OK
+            })
+        }
         Command::Close { session_id } => {
             acknowledge(
                 &rpc,
@@ -613,6 +658,20 @@ async fn label(
             session_id: session_id.to_string(),
             add,
             remove,
+        })
+        .await
+        .map_err(query::rpc_error)?
+    {
+        Reply::Session(summary) => Ok(summary),
+        other => Err(query::unexpected_reply("session", &other)),
+    }
+}
+
+async fn describe(rpc: &Rpc, session_id: &str, text: &str) -> Result<SessionSummary, CliFailure> {
+    match rpc
+        .call(Request::SessionDescribe {
+            session_id: session_id.to_string(),
+            text: text.to_string(),
         })
         .await
         .map_err(query::rpc_error)?
@@ -682,12 +741,23 @@ async fn respond(
 }
 
 async fn run_conversation(rpc: &Rpc, run: Run, here: bool) -> Result<i32, CliFailure> {
+    // Checked before anything is created: a notice has a recipient, and
+    // creating a session just to leave a notice in it would be an odd way to
+    // find that out.
+    if run.queue && run.session_id.is_none() {
+        return Err(CliFailure::invalid_args(
+            "--queue sends to an existing session: use genet session send <id> ... --queue",
+        ));
+    }
     let mut session = match run.session_id.as_deref() {
         Some(session_id) => attach(rpc, session_id, run.agent_id.as_deref()).await?,
         None => create(rpc, &run, here).await?,
     };
     if !run.labels.is_empty() {
         session = label(rpc, &session.id, run.labels.clone(), Vec::new()).await?;
+    }
+    if let Some(text) = run.description.as_deref() {
+        session = describe(rpc, &session.id, text).await?;
     }
 
     // Subscribing before sending is what makes the stream gap-free: a turn that
@@ -775,6 +845,7 @@ async fn run_conversation(rpc: &Rpc, run: Run, here: bool) -> Result<i32, CliFai
         artifact_preview_base_url: None,
         continues_round: None,
         origin: caller_origin(),
+        system: run.queue,
     })
     .await
     .map_err(query::rpc_error)?;
@@ -1219,6 +1290,126 @@ mod tests {
                 .code,
             "invalidArgs"
         );
+    }
+
+    #[test]
+    fn session_describe_takes_exactly_one_line_and_agent_run_takes_a_description() {
+        assert_eq!(
+            parse_session(
+                &words(&[
+                    "describe",
+                    "s_1",
+                    "评审 Rust 改动；要找人看 daemon 代码时来问我"
+                ]),
+                &selection(None)
+            )
+            .unwrap(),
+            Command::Describe {
+                session_id: "s_1".into(),
+                text: "评审 Rust 改动；要找人看 daemon 代码时来问我".into(),
+            }
+        );
+        // An empty line clears it, so it is a valid argument.
+        assert_eq!(
+            parse_session(&words(&["describe", "s_1", ""]), &selection(None)).unwrap(),
+            Command::Describe {
+                session_id: "s_1".into(),
+                text: String::new(),
+            }
+        );
+        let too_long = "x".repeat(301);
+        for bad in [
+            &["describe", "s_1"][..],
+            &["describe", "s_1", "a", "b"],
+            &["describe", "s_1", "two\nlines"],
+            &["describe", "s_1", too_long.as_str()],
+        ] {
+            assert_eq!(
+                parse_session(&words(bad), &selection(None))
+                    .unwrap_err()
+                    .code,
+                "invalidArgs",
+                "{bad:?}"
+            );
+        }
+        let run = run_of(
+            parse_agent(
+                &words(&[
+                    "run",
+                    "--agent",
+                    "codex",
+                    "--description",
+                    "跑评审的会话",
+                    "hi",
+                ]),
+                &selection(Some("/s")),
+            )
+            .unwrap(),
+        );
+        assert_eq!(run.description.as_deref(), Some("跑评审的会话"));
+        let error = parse_agent(
+            &words(&[
+                "run",
+                "--agent",
+                "codex",
+                "--description",
+                &"x".repeat(301),
+                "hi",
+            ]),
+            &selection(Some("/s")),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.code, "invalidArgs",
+            "checked before a session is created"
+        );
+    }
+
+    #[test]
+    fn queue_marks_a_durable_notice_and_nothing_else_may_carry_it() {
+        let run = run_of(
+            parse_session(
+                &words(&[
+                    "send",
+                    "s_1",
+                    "done",
+                    "--message-id",
+                    "s_9.r1.done",
+                    "--queue",
+                ]),
+                &selection(None),
+            )
+            .unwrap(),
+        );
+        assert!(run.queue);
+        assert_eq!(run.session_id.as_deref(), Some("s_1"));
+        assert!(!run.wait, "a durable send returns acceptance");
+        let plain =
+            run_of(parse_session(&words(&["send", "s_1", "hello"]), &selection(None)).unwrap());
+        assert!(!plain.queue, "a notice is only ever asked for");
+        for bad in [
+            // A notice that cannot be retried safely is not durable.
+            &["send", "s_1", "done", "--queue"][..],
+            // And it is not a Run's notice.
+            &[
+                "send",
+                "s_1",
+                "done",
+                "--message-id",
+                "m",
+                "--task-run",
+                "r",
+                "--queue",
+            ],
+        ] {
+            assert_eq!(
+                parse_session(&words(bad), &selection(None))
+                    .unwrap_err()
+                    .code,
+                "invalidArgs",
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]

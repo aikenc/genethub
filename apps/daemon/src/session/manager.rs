@@ -560,6 +560,7 @@ impl SessionManager {
             title,
             title_locked: false,
             labels: Vec::new(),
+            description: None,
             cwd,
             model_id,
             mode_id,
@@ -733,6 +734,7 @@ impl SessionManager {
             title,
             title_locked: false,
             labels: Vec::new(),
+            description: None,
             cwd,
             model_id,
             mode_id,
@@ -989,6 +991,7 @@ impl SessionManager {
             title,
             title_locked: source_meta.title_locked,
             labels: Vec::new(),
+            description: None,
             cwd: source_meta.cwd,
             model_id,
             mode_id,
@@ -1252,6 +1255,7 @@ impl SessionManager {
                 .and_then(|title| title_from(&format!("{title} · 分支"))),
             title_locked: false,
             labels: Vec::new(),
+            description: None,
             cwd,
             model_id,
             mode_id: target.mode_id,
@@ -1471,6 +1475,7 @@ impl SessionManager {
             title: history.title.or(Some(candidate.title)),
             title_locked: false,
             labels: Vec::new(),
+            description: None,
             cwd,
             model_id: None,
             mode_id: None,
@@ -4860,6 +4865,24 @@ impl SessionManager {
         Ok(meta.summary(status))
     }
 
+    /// Sets, replaces or clears the one-line description under the meta lock.
+    ///
+    /// Bumps `updated_at_ms` like a label change does: a client that refreshes
+    /// summaries by that stamp would otherwise keep showing the old line.
+    pub async fn describe(&self, session_id: &str, text: &str) -> Result<SessionSummary> {
+        let description = super::store::normalize_session_description(text)
+            .map_err(|error| anyhow!("invalid session description: {error}"))?;
+        let live = self.live(session_id).await?;
+        let mut meta = live.meta.lock().await;
+        if description != meta.description {
+            meta.description = description;
+            meta.updated_at_ms = now_ms();
+            self.store.save_meta(&meta)?;
+        }
+        let status = *live.status.lock().await;
+        Ok(meta.summary(status))
+    }
+
     /// Erases a session: timeline, metadata and scratch space.
     ///
     /// Deleting one that is already gone succeeds. The caller asked for it not
@@ -7828,6 +7851,7 @@ mod tests {
             title: None,
             title_locked: false,
             labels: Vec::new(),
+            description: None,
             cwd: PathBuf::from("/tmp"),
             model_id: None,
             mode_id: None,
@@ -10135,6 +10159,266 @@ mod tests {
             words(&["pm", "评审", "4090"]),
             "a refused change must leave the labels untouched"
         );
+    }
+
+    #[tokio::test]
+    async fn a_description_is_one_short_line_and_survives_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = manager(dir.path());
+        sessions.store.save_meta(&meta()).unwrap();
+
+        let summary = sessions
+            .describe("s1", "  评审 Rust 改动；要找人看 daemon 代码时来问我  ")
+            .await
+            .unwrap();
+        assert_eq!(
+            summary.description.as_deref(),
+            Some("评审 Rust 改动；要找人看 daemon 代码时来问我"),
+            "the line is trimmed"
+        );
+        assert_eq!(
+            manager(dir.path())
+                .store
+                .load_meta("w1", "s1")
+                .unwrap()
+                .description
+                .as_deref(),
+            Some("评审 Rust 改动；要找人看 daemon 代码时来问我"),
+            "the description only reached the copy in memory, so it is lost on restart"
+        );
+
+        // A refused change leaves the line as it was.
+        let too_long = "x".repeat(super::super::store::MAX_SESSION_DESCRIPTION_BYTES + 1);
+        for bad in [too_long.as_str(), "two\nlines", "tab\there"] {
+            let error = sessions.describe("s1", bad).await.unwrap_err();
+            assert!(format!("{error:#}").contains("invalid session description"));
+        }
+        // The bound is in bytes: exactly at it is fine.
+        let at_limit = "y".repeat(super::super::store::MAX_SESSION_DESCRIPTION_BYTES);
+        sessions.describe("s1", &at_limit).await.unwrap();
+        sessions
+            .describe("s1", "back to a short one")
+            .await
+            .unwrap();
+        assert_eq!(
+            sessions.summary("s1").await.unwrap().description.as_deref(),
+            Some("back to a short one")
+        );
+
+        // Empty clears it, and clearing is not an error.
+        let cleared = sessions.describe("s1", "   ").await.unwrap();
+        assert_eq!(cleared.description, None);
+        assert_eq!(sessions.describe("s1", "").await.unwrap().description, None);
+    }
+
+    #[tokio::test]
+    async fn describing_a_session_that_is_not_there_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = manager(dir.path());
+        assert!(sessions.describe("nope", "anything").await.is_err());
+    }
+
+    /// The reason the `system` source exists. A script's notice is queued and
+    /// acknowledged like any input, but it cannot do what only a person or
+    /// another Agent's request may: lift the pause a Human put on the session,
+    /// or retire the inputs that failed before it.
+    #[tokio::test]
+    async fn a_system_notice_queues_without_lifting_a_pause_or_retiring_failed_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = manager(dir.path());
+        let mut paused = meta();
+        paused.inbox.paused = true;
+        paused.inbox.error = Some("本轮失败，已接收消息保留；发送新消息后核对并继续。".into());
+        paused
+            .inbox
+            .entries
+            .push(crate::session::store::InboxEntry {
+                message_id: "m_failed".into(),
+                received_at_ms: 1,
+                digest: String::new(),
+                source: "user".into(),
+                task_run_id: None,
+                state: "sent".into(),
+                turn_id: Some("t1".into()),
+            });
+        sessions.store.save_meta(&paused).unwrap();
+
+        sessions
+            .accept_input(
+                "s1",
+                "m_sys".into(),
+                "子会话 s_9 已完成".into(),
+                vec![],
+                None,
+                "system",
+                None,
+            )
+            .await
+            .unwrap();
+        let after = sessions.store.load_meta("w1", "s1").unwrap();
+        assert!(
+            after.inbox.paused,
+            "a script must not lift the Human's pause"
+        );
+        assert!(after.inbox.error.is_some());
+        let by_id = |id: &str| {
+            after
+                .inbox
+                .entries
+                .iter()
+                .find(|e| e.message_id == id)
+                .unwrap()
+        };
+        assert_eq!(by_id("m_sys").source, "system");
+        assert_eq!(
+            by_id("m_sys").state,
+            "queued",
+            "it waits, it is not dropped"
+        );
+        assert_eq!(
+            by_id("m_failed").state,
+            "sent",
+            "a failed Human input is retired by a Human, not by a notice"
+        );
+
+        // A person speaking is what lifts the pause and retires the failure.
+        sessions
+            .accept_input(
+                "s1",
+                "m_user".into(),
+                "继续".into(),
+                vec![],
+                None,
+                "user",
+                None,
+            )
+            .await
+            .unwrap();
+        let resumed = sessions.store.load_meta("w1", "s1").unwrap();
+        assert!(!resumed.inbox.paused);
+        let by_id = |id: &str| {
+            resumed
+                .inbox
+                .entries
+                .iter()
+                .find(|e| e.message_id == id)
+                .unwrap()
+        };
+        assert_eq!(by_id("m_failed").state, "handled");
+        assert_eq!(
+            by_id("m_sys").state,
+            "queued",
+            "the notice is still waiting its turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_system_notice_is_idempotent_by_message_id_and_refuses_other_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = manager(dir.path());
+        sessions.store.save_meta(&meta()).unwrap();
+        let send = |text: &str| {
+            sessions.accept_input(
+                "s1",
+                "s9.r1.done".into(),
+                text.into(),
+                vec![],
+                None,
+                "system",
+                None,
+            )
+        };
+        send("done").await.unwrap();
+        // Two channels, or a retry after a crash, send the same notice again.
+        send("done")
+            .await
+            .expect("the same notice is acknowledged again");
+        assert!(
+            send("something else").await.is_err(),
+            "another body under the same id is a collision, not a retry"
+        );
+        let entries = sessions.store.load_meta("w1", "s1").unwrap().inbox.entries;
+        assert_eq!(entries.len(), 1, "a retry must not queue a second copy");
+    }
+
+    #[tokio::test]
+    async fn the_input_summary_says_where_each_pending_input_came_from() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = manager(dir.path());
+        sessions.store.save_meta(&meta()).unwrap();
+        for (id, source) in [("m_a", "user"), ("m_b", "system"), ("m_c", "agent")] {
+            sessions
+                .accept_input("s1", id.into(), "hi".into(), vec![], None, source, None)
+                .await
+                .unwrap();
+        }
+        let summary = sessions.summary("s1").await.unwrap();
+        let input = summary.input_summary.expect("there are pending inputs");
+        assert_eq!(input.pending_message_ids, ["m_a", "m_b", "m_c"]);
+        assert_eq!(
+            input
+                .pending
+                .iter()
+                .map(|p| (p.message_id.as_str(), p.source.as_str(), p.state.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("m_a", "user", "queued"),
+                ("m_b", "system", "queued"),
+                ("m_c", "agent", "queued"),
+            ]
+        );
+        assert!(input.pending.iter().all(|p| p.received_at_ms > 0));
+        assert_eq!(
+            input.limit as usize,
+            super::super::store::MAX_PENDING_INPUTS
+        );
+
+        // Handled inputs leave both lists together.
+        let mut meta = sessions.store.load_meta("w1", "s1").unwrap();
+        meta.inbox.entries[0].state = "handled".into();
+        sessions.store.save_meta(&meta).unwrap();
+        let reloaded = manager(dir.path()).summary("s1").await.unwrap();
+        let input = reloaded.input_summary.unwrap();
+        assert_eq!(input.pending_message_ids, ["m_b", "m_c"]);
+        assert_eq!(input.pending.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn the_pending_queue_is_full_at_the_limit_for_system_notices_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = manager(dir.path());
+        sessions.store.save_meta(&meta()).unwrap();
+        let limit = super::super::store::MAX_PENDING_INPUTS;
+        for n in 0..limit {
+            sessions
+                .accept_input(
+                    "s1",
+                    format!("m_{n}"),
+                    "notice".into(),
+                    vec![],
+                    None,
+                    "system",
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        let error = sessions
+            .accept_input(
+                "s1",
+                "m_over".into(),
+                "one too many".into(),
+                vec![],
+                None,
+                "system",
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("pending queue is full"));
+        // A sender can see this coming before it sends.
+        let input = sessions.summary("s1").await.unwrap().input_summary.unwrap();
+        assert_eq!(input.pending.len(), input.limit as usize);
     }
 
     #[tokio::test]

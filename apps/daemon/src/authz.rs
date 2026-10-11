@@ -452,6 +452,7 @@ pub fn required(request: &Request) -> Capability {
         | Request::SessionArchive { .. }
         | Request::SessionRename { .. }
         | Request::SessionLabel { .. }
+        | Request::SessionDescribe { .. }
         | Request::SessionDrafts { .. }
         | Request::SessionDraftsReplace { .. }
         | Request::SessionPreviewAnnotationsGet { .. }

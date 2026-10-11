@@ -1165,6 +1165,11 @@ pub struct SessionSummary {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[ts(optional, as = "Option<_>")]
     pub labels: Vec<String>,
+    /// One line, written like a Skill description, saying what this session is
+    /// for and when to ask it. Set with `session.describe`; absent until then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub description: Option<String>,
     pub status: crate::event::SessionStatus,
     #[ts(optional)]
     pub model_id: Option<String>,
@@ -1284,6 +1289,30 @@ pub struct SessionInputSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub error: Option<String>,
+    /// The same unhandled inputs as `pending_message_ids`, with what a sender
+    /// needs to judge them: where each came from, whether it is still waiting
+    /// or already being worked on, and how long ago it arrived.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<_>")]
+    pub pending: Vec<SessionPendingInput>,
+    /// How many unhandled inputs a session accepts before refusing more.
+    /// Zero from a daemon that does not say.
+    #[serde(default)]
+    pub limit: u32,
+}
+
+/// One unhandled input in a session's queue.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionPendingInput {
+    pub message_id: String,
+    /// `user`, `agent`, `system` or `workflow`.
+    pub source: String,
+    /// `receiving`, `queued` or `sent` (delivered to the Agent, not yet settled).
+    pub state: String,
+    #[ts(type = "number")]
+    pub received_at_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

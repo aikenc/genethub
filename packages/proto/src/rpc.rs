@@ -586,6 +586,14 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         origin: Option<crate::timeline::InputOrigin>,
+        /// Queues the text as a `system` notice written by a script, not by
+        /// the Human and not by another Agent's request. It waits for the
+        /// current round instead of interrupting it, never lifts a pause the
+        /// Human set, and is never a Human approval. Needs a stable
+        /// `messageId`: a notice that cannot be retried safely is not durable.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        #[ts(optional, as = "Option<_>")]
+        system: bool,
     },
     /// Starts a daemon-owned runtime artifact bundle inside this session.
     ///
@@ -699,6 +707,12 @@ pub enum Request {
         #[serde(default)]
         remove: Vec<String>,
     },
+    /// Sets the one-line description other Sessions and Agents read to decide
+    /// whether to talk to this one: what it does and when to ask it, written
+    /// like a Skill description. Not the title, which names the conversation
+    /// for a person. An empty text clears it.
+    #[serde(rename = "session.describe", rename_all = "camelCase")]
+    SessionDescribe { session_id: String, text: String },
     /// Erases a session: its timeline, its metadata and its scratch space.
     ///
     /// Not `archive`, which only hides. There is no undo and no bin — a
