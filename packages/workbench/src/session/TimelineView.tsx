@@ -1041,9 +1041,43 @@ function ForwardedHistoryCard({ text, info }: { text: string; info: ForwardEnvel
   );
 }
 
+/** What a script queued with `session send --queue`. It is not something the person said, so it is a
+ * small collapsed strip on the left rather than the person's bubble on the right. */
+function SystemNotice({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  const lines = text.split("\n");
+  const headline = (lines.find((line) => line.trim() !== "") ?? "").trim();
+  return (
+    <div data-testid="system-notice" className="max-w-[80%] rounded-lg border border-line bg-surface px-3 py-1.5">
+      <button
+        type="button"
+        className="flex w-full items-center gap-2 text-left text-xs text-muted hover:text-fg"
+        onClick={() => setOpen((current) => !current)}
+        aria-expanded={open}
+      >
+        <span aria-hidden>⚙</span>
+        <span className="min-w-0 flex-1 truncate">系统消息 · {headline}</span>
+        <span className="shrink-0 text-faint">{open ? "收起" : "展开"}</span>
+      </button>
+      {open ? (
+        <pre className="mt-2 max-h-72 overflow-auto rounded-lg border border-line bg-raised/50 p-2 font-mono text-[11px] whitespace-pre-wrap text-muted">
+          {text}
+        </pre>
+      ) : null}
+    </div>
+  );
+}
+
 function Item({ item }: { item: TimelineItem }) {
   switch (item.type) {
     case "userMessage": {
+      if (item.system) {
+        return (
+          <div className="flex flex-col items-start">
+            <SystemNotice text={item.text} />
+          </div>
+        );
+      }
       const forwardedParts = splitForwardMessage(item.text);
       const forwarded = forwardedParts.some((part) => part.kind === "forward");
       return (

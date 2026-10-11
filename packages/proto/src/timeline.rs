@@ -380,6 +380,12 @@ pub enum TimelineItem {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         origin: Option<InputOrigin>,
+        /// A notice a script queued (`session send --queue`), not something a
+        /// person typed. Clients show it as a notice, never as the person's own
+        /// bubble.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        #[ts(optional, as = "Option<_>")]
+        system: bool,
     },
     #[serde(rename_all = "camelCase")]
     AssistantMessage {

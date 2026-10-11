@@ -2394,6 +2394,7 @@ mod project_home_tests {
                 "s1",
                 &[TimelineItem::UserMessage {
                     origin: None,
+                    system: false,
                     id: "u1".into(),
                     text: "genet-beta 更新到最新".into(),
                     attachments: vec![],

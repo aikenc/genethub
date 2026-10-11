@@ -410,6 +410,7 @@ mod tests {
     fn user(id: &str, text: &str) -> TimelineItem {
         TimelineItem::UserMessage {
             origin: None,
+            system: false,
             id: id.into(),
             text: text.into(),
             attachments: Vec::new(),

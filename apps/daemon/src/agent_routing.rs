@@ -872,6 +872,7 @@ mod tests {
     fn portable_history_adds_image_and_video_requirements() {
         let items = vec![TimelineItem::UserMessage {
             origin: None,
+            system: false,
             id: "u1".into(),
             text: "看看这些".into(),
             attachments: vec![

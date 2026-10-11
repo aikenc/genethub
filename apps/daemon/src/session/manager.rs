@@ -2926,6 +2926,7 @@ impl SessionManager {
                 text: text.clone(),
                 attachments: attachments.clone(),
                 origin: origin.clone(),
+                system: false,
             };
             {
                 let mut items = live.items.lock().await;
@@ -4250,6 +4251,7 @@ impl SessionManager {
             text: format!("回答「{}」\n{}", request.title, body),
             attachments: Vec::new(),
             origin: None,
+            system: false,
         };
         let meta = live.meta.lock().await.clone();
         let chat = self.store.load_chat(&meta.workspace_id, &meta.id)?;
@@ -7905,12 +7907,14 @@ mod tests {
         let items = vec![
             TimelineItem::UserMessage {
                 origin: None,
+                system: false,
                 id: "handled".into(),
                 text: "already delivered".into(),
                 attachments: Vec::new(),
             },
             TimelineItem::UserMessage {
                 origin: None,
+                system: false,
                 id: "queued".into(),
                 text: "deliver exactly once".into(),
                 attachments: Vec::new(),
@@ -8320,6 +8324,7 @@ mod tests {
                 updated_at_ms: 20,
                 items: vec![TimelineItem::UserMessage {
                     origin: None,
+                    system: false,
                     id: "import-user".into(),
                     text: "first prompt".into(),
                     attachments: Vec::new(),
@@ -8550,6 +8555,7 @@ mod tests {
         vec![
             TimelineItem::UserMessage {
                 origin: None,
+                system: false,
                 id: "user-1".into(),
                 text: "Investigate the failing deploy".into(),
                 attachments: Vec::new(),
@@ -9789,6 +9795,7 @@ mod tests {
         *source_live.items.lock().await = vec![
             TimelineItem::UserMessage {
                 origin: None,
+                system: false,
                 id: "user-live".into(),
                 text: "What can you help with?".into(),
                 attachments: Vec::new(),
@@ -10501,6 +10508,7 @@ mod tests {
                 "s1",
                 &[TimelineItem::UserMessage {
                     origin: None,
+                    system: false,
                     id: "u1".into(),
                     text: "genet-beta 更新到最新".into(),
                     attachments: vec![],
@@ -11357,6 +11365,7 @@ mod tests {
             let live = Arc::new(Live::new(record, sessions.store.clone()));
             live.items.lock().await.push(TimelineItem::UserMessage {
                 origin: None,
+                system: false,
                 id: "m_more".into(),
                 text: "also cover the docs".into(),
                 attachments: Vec::new(),
@@ -11669,6 +11678,7 @@ mod tests {
                 turn_id: "t".into(),
                 item: TimelineItem::UserMessage {
                     origin: None,
+                    system: false,
                     id: "u".into(),
                     text: "hi".into(),
                     attachments: vec![],

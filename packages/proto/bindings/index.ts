@@ -2183,7 +2183,13 @@ export type TimelineItem = { "type": "userMessage", id: string, text: string, at
  * Present when another Agent Session wrote this message; absent means
  * the Human typed it (or an older daemon did not say).
  */
-origin?: InputOrigin, } | { "type": "assistantMessage", id: string, text: string, 
+origin?: InputOrigin, 
+/**
+ * A notice a script queued (`session send --queue`), not something a
+ * person typed. Clients show it as a notice, never as the person's own
+ * bubble.
+ */
+system?: boolean, } | { "type": "assistantMessage", id: string, text: string, 
 /**
  * When the daemon first saw this item. Drives batch/trunk timing for
  * items that carry no tool timestamps of their own.

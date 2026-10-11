@@ -26,7 +26,7 @@ const TEMPLATE = "apps/daemon/builtin-skills/genehub/references/expert-template"
 const BUILDER = "apps/daemon/builtin-skills/genehub/references/spacebuilder/spacebuilder.py";
 
 type Info = { id: string; name: string; agentSpace?: { parentWorkspaceId?: string } };
-type Item = { type?: string; text?: string };
+type Item = { type?: string; text?: string; system?: boolean };
 
 defineJourney(
   {
@@ -119,7 +119,13 @@ defineJourney(
         started.length === 1 && started[0]!.description === "write the quarterly report" && started[0]!.labels?.includes("工作") && started[0]!.labels?.includes("系统发起"),
         `work session ${JSON.stringify(started)}`,
       );
-      const resultsIn = async () => (await itemsOf(front)).filter((item) => (item.text ?? "").includes("用途: result") && (item.text ?? "").includes("chunk-0 chunk-1"));
+      // A notice a script queued is marked, so clients never show it as the person's own message.
+      const resultsIn = async () =>
+        (await itemsOf(front)).filter((item) => item.system === true && (item.text ?? "").includes("用途: result") && (item.text ?? "").includes("chunk-0 chunk-1"));
+      t.assertions.assert(
+        (await itemsOf(front)).every((item) => item.type !== "userMessage" || item.system !== true || (item.text ?? "").includes("用途:")),
+        "an unexpected system-marked message",
+      );
       await t.tools.waitUntil(async () => (await resultsIn()).length >= 1, 40_000);
       await new Promise((resolve) => setTimeout(resolve, 4_000)); // several more timer runs
       t.assertions.assert((await resultsIn()).length === 1, `the result was delivered ${(await resultsIn()).length} times`);

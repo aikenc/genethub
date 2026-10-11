@@ -564,6 +564,7 @@ mod tests {
             &[
                 TimelineItem::UserMessage {
                     origin: None,
+                    system: false,
                     id: "u".into(),
                     text: "abcd".into(),
                     attachments: Vec::new(),

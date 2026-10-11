@@ -314,6 +314,35 @@ describe("what the user sees in a session", () => {
     expect(screen.getByTestId("turn-footer")).not.toHaveTextContent("耗时");
   });
 
+  it("shows a script's queued notice as a collapsed system strip, never as the person's bubble", () => {
+    let state = emptyTimeline();
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: { type: "userMessage", id: "u1", text: "帮我看看", attachments: [] },
+    });
+    state = apply(state, {
+      type: "item",
+      turnId: "t2",
+      item: {
+        type: "userMessage",
+        id: "x1",
+        text: "用途: result\n发送方: s_7\n\n报告已写完",
+        attachments: [],
+        system: true,
+      },
+    });
+
+    render(<TimelineView state={state} />);
+    const notice = screen.getByTestId("system-notice");
+    expect(notice).toHaveTextContent("系统消息 · 用途: result");
+    expect(notice).not.toHaveTextContent("报告已写完");
+    fireEvent.click(within(notice).getByRole("button"));
+    expect(notice).toHaveTextContent("报告已写完");
+    // The person's own message is still a bubble; the notice is not.
+    expect(screen.getByText("帮我看看").closest("[data-testid=system-notice]")).toBe(null);
+  });
+
   it("occupies a process card as soon as a live request exists, before any tool arrives", () => {
     let state = emptyTimeline();
     state = apply(state, {
