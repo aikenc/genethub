@@ -444,6 +444,29 @@ fn agent_space_requires_project_control(space: &crate::config::AgentSpaceEntry) 
 /// break first (`exception_authority`). A no-op when the workspace is not
 /// PM-managed or was never bound: rebind only carries an existing grant
 /// forward, it never creates one.
+/// A session created by another session is the other session's work, not
+/// something a person started, so it carries the label that lets the default
+/// list leave it out. The caller is the session's own verified identity, never
+/// what it declares. A script with no session of its own (a timer hook) is not
+/// recognised here and labels what it creates itself.
+async fn mark_if_started_by_a_session(
+    state: &Shared,
+    caller: &crate::authz::Principal,
+    summary: genehub_proto::SessionSummary,
+) -> genehub_proto::SessionSummary {
+    if caller.session_controller_id().is_none() {
+        return summary;
+    }
+    let label = crate::session::store::SESSION_STARTED_LABEL.to_string();
+    match state.sessions.label(&summary.id, &[label], &[]).await {
+        Ok(labelled) => labelled,
+        Err(error) => {
+            tracing::warn!(session = %summary.id, %error, "labelling a session started by a session failed");
+            summary
+        }
+    }
+}
+
 async fn rebind_project_control_if_pm(
     state: &Shared,
     summary: &genehub_proto::SessionSummary,
@@ -1875,7 +1898,7 @@ async fn dispatch(
                         None => return failed(anyhow::anyhow!("cwd {cwd} escapes the workspace")),
                     }
                 }
-                None => workspace.root,
+                None => state.workspaces.default_cwd(&workspace),
             };
             match state
                 .sessions
@@ -1893,7 +1916,9 @@ async fn dispatch(
                 .await
             {
                 Ok(summary) => match rebind_project_control_if_pm(state, &summary).await {
-                    Ok(()) => Handled::ok(Reply::Session(summary)),
+                    Ok(()) => Handled::ok(Reply::Session(
+                        mark_if_started_by_a_session(state, caller, summary).await,
+                    )),
                     Err(error) => failed(error),
                 },
                 Err(error) => failed(error),
@@ -1927,7 +1952,7 @@ async fn dispatch(
                         None => return failed(anyhow::anyhow!("cwd {cwd} escapes the workspace")),
                     }
                 }
-                None => workspace.root,
+                None => state.workspaces.default_cwd(&workspace),
             };
             let routing_tags = match crate::agent_routing::validate_selected_tags(tags) {
                 Ok(tags) => tags,
@@ -1963,7 +1988,9 @@ async fn dispatch(
                 .await
             {
                 Ok(summary) => match rebind_project_control_if_pm(state, &summary).await {
-                    Ok(()) => Handled::ok(Reply::Session(summary)),
+                    Ok(()) => Handled::ok(Reply::Session(
+                        mark_if_started_by_a_session(state, caller, summary).await,
+                    )),
                     Err(error) => failed(error),
                 },
                 Err(error) => failed(error),
@@ -3315,6 +3342,12 @@ async fn dispatch(
         }).await,
 
         Request::WorkspaceList => Box::pin(async move {
+            // Spaces written into <data>/spaces/ become projects the next time
+            // anyone looks; throttled, and a no-op when there is nothing there.
+            state
+                .workspaces
+                .scan_spaces(&state.paths.root.join("spaces"), false)
+                .await;
             Handled::ok(Reply::Workspaces(state.workspaces.list().await))
         }).await,
 

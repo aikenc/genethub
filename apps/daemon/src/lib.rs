@@ -55,6 +55,7 @@ pub mod router;
 pub mod run;
 pub mod session;
 pub mod skills;
+pub mod space_descriptor;
 pub mod speech;
 pub mod state;
 pub mod transfer;
@@ -85,6 +86,11 @@ impl Daemon {
         state
             .diagnostics
             .record("daemon", "lifecycle", "started", None);
+        // Spaces already on disk are projects from the first moment.
+        state
+            .workspaces
+            .scan_spaces(&state.paths.root.join("spaces"), true)
+            .await;
         let pty = transport::local::pty_fanout(pty_rx);
         // The same channel every client already listens on, handed to the state
         // so anything the machine wants to volunteer — download progress, for

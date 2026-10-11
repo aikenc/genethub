@@ -46,6 +46,30 @@ pub struct Workspaces {
     /// anything until it is told where each workspace is. Registration happens
     /// wherever an entry does, so the two can never disagree.
     homes: WorkspaceHomes,
+    /// When the last scan for Spaces on disk began; only a throttle, not state.
+    scanned_at: std::sync::Mutex<Option<tokio::time::Instant>>,
+}
+
+/// A scan looks at two directory levels, so asking more than this often only
+/// repeats the answer.
+const SCAN_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// What one scan changed.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ScanReport {
+    /// Projects opened because a descriptor was found for them.
+    pub opened: usize,
+    /// Parent links registered.
+    pub linked: usize,
+}
+
+/// How a scan found a Space's directory in the registry.
+enum Scanned {
+    Id(String),
+    /// The user removed it. Removal is a decision, and a scan is not allowed to
+    /// undo it.
+    Removed,
+    Failed,
 }
 
 #[derive(Debug, Clone)]
@@ -261,7 +285,144 @@ impl Workspaces {
             config_path,
             config,
             homes,
+            scanned_at: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Opens the Spaces that have an `agent-space.genet.json` under
+    /// `spaces_root` and registers the parent links their directories declare.
+    ///
+    /// This is the only way a Session that is not the user can end up with a
+    /// tree: changing a Space's parent through the usual route needs a project
+    /// control binding that only a Workflow takeover grants, and a Session
+    /// opening a workspace needs the Settings capability. A scan needs neither,
+    /// because it does not take instructions from anyone: it reads files and
+    /// registers what they say, and nothing else.
+    ///
+    /// Three rules keep it from surprising anyone. A Space the user removed
+    /// stays removed. A registration that already exists is never overwritten,
+    /// so a parent the user chose by hand survives. And the parent links come
+    /// from the directory layout alone: `<root>/spaces/<name>` is a child of
+    /// `<root>`, which must itself be a Space. `force` skips the throttle.
+    pub async fn scan_spaces(&self, spaces_root: &Path, force: bool) -> ScanReport {
+        {
+            let mut at = self.scanned_at.lock().expect("never poisoned");
+            let now = tokio::time::Instant::now();
+            if !force && at.is_some_and(|last| now.duration_since(last) < SCAN_EVERY) {
+                return ScanReport::default();
+            }
+            *at = Some(now);
+        }
+        let discovery = crate::space_descriptor::discover(spaces_root);
+        for problem in &discovery.problems {
+            tracing::warn!(%problem, "a Space descriptor cannot be used");
+        }
+        let mut report = ScanReport::default();
+        let mut links: Vec<(String, Option<String>)> = Vec::new();
+        for root in &discovery.roots {
+            Box::pin(self.scan_tree(root, None, &mut links, &mut report)).await;
+        }
+        if !links.is_empty() {
+            match self.register_scanned_parents(&links).await {
+                Ok(linked) => report.linked = linked,
+                Err(error) => tracing::warn!(%error, "registering scanned Spaces failed"),
+            }
+        }
+        report
+    }
+
+    async fn scan_tree(
+        &self,
+        found: &crate::space_descriptor::Found,
+        parent: Option<&str>,
+        links: &mut Vec<(String, Option<String>)>,
+        report: &mut ScanReport,
+    ) {
+        let id = match self.scanned_workspace(found, report).await {
+            Scanned::Id(id) => id,
+            Scanned::Removed | Scanned::Failed => return,
+        };
+        // A root with no children stays an ordinary project, with no
+        // registration of its own.
+        if parent.is_some() || !found.children.is_empty() {
+            links.push((id.clone(), parent.map(str::to_string)));
+        }
+        for child in &found.children {
+            Box::pin(self.scan_tree(child, Some(&id), links, report)).await;
+        }
+    }
+
+    async fn scanned_workspace(
+        &self,
+        found: &crate::space_descriptor::Found,
+        report: &mut ScanReport,
+    ) -> Scanned {
+        let Ok(source) = crate::guest_paths::guest_path(&found.dir).canonicalize() else {
+            return Scanned::Failed;
+        };
+        {
+            let entries = self.entries.read().await;
+            let candidate = folder_workspace(source.clone(), None);
+            if let Some(existing) = existing_project(&entries, &candidate) {
+                return if existing.removed {
+                    Scanned::Removed
+                } else {
+                    Scanned::Id(existing.id.clone())
+                };
+            }
+        }
+        match self.open(&source, found.descriptor.name.clone()).await {
+            Ok(info) => {
+                report.opened += 1;
+                Scanned::Id(info.id)
+            }
+            Err(error) => {
+                tracing::warn!(dir = %found.dir.display(), %error, "opening a scanned Space failed");
+                Scanned::Failed
+            }
+        }
+    }
+
+    /// Registers parent links for Spaces that have no registration yet, parents
+    /// first, in one config write. An existing registration is left exactly as
+    /// it is; a link the tree rules refuse is skipped, not forced.
+    ///
+    /// Such a registration has no Builder lock to verify, so its digest is
+    /// empty and its health is not judged against one (`apply_space_health`).
+    async fn register_scanned_parents(&self, links: &[(String, Option<String>)]) -> Result<usize> {
+        let mut config = self.config.write().await;
+        let mut next = config.clone();
+        let mut registered = 0;
+        for (workspace_id, parent) in links {
+            if next
+                .agent_spaces
+                .iter()
+                .any(|space| space.workspace_id == *workspace_id && space.revision > 0)
+            {
+                continue;
+            }
+            let mut proposed = existing_or_unregistered(&next, workspace_id);
+            proposed.parent_workspace_id = parent.clone();
+            proposed.revision = 1;
+            if let Err(error) = crate::agent_space::check_tree(&next.agent_spaces, &proposed) {
+                tracing::warn!(%workspace_id, %error, "a scanned Space link was refused");
+                continue;
+            }
+            next.agent_spaces.push(proposed);
+            registered += 1;
+        }
+        if registered > 0 {
+            next.save(&self.config_path)?;
+            *config = next;
+        }
+        Ok(registered)
+    }
+
+    /// Where a session in this project starts when nothing says otherwise: the
+    /// descriptor's `agentCwd` if it names a real directory in the project,
+    /// else the project root.
+    pub fn default_cwd(&self, entry: &WorkspaceEntry) -> PathBuf {
+        crate::space_descriptor::agent_cwd(&entry.root).unwrap_or_else(|| entry.root.clone())
     }
 
     pub async fn load(&self) {
@@ -1304,6 +1465,12 @@ fn apply_space_health(info: &mut WorkspaceInfo, entry: &WorkspaceEntry, config: 
     else {
         return;
     };
+    // A registration made by a scan has no Builder lock, so there is nothing to
+    // drift from: judging it against a lock that never existed would report a
+    // healthy Space as broken.
+    if space.builder_lock_digest.is_empty() {
+        return;
+    }
     let mut reasons = Vec::new();
     let mut seen = HashSet::new();
     let mut cursor = space;
@@ -3072,6 +3239,221 @@ mod tests {
         assert!(
             error.to_string().contains("drifted"),
             "the lock is re-verified on every change, not only at registration: {error}"
+        );
+    }
+
+    // -- Spaces found on disk -------------------------------------------------
+
+    fn descriptor(dir: &Path, body: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(crate::space_descriptor::FILE), body).unwrap();
+    }
+
+    fn scan_fixture() -> (tempfile::TempDir, PathBuf, Workspaces, Arc<RwLock<Config>>) {
+        let dir = tempfile::tempdir().unwrap();
+        let spaces_root = dir.path().join("spaces");
+        descriptor(
+            &spaces_root.join("admin"),
+            r#"{"name":"管理员","tags":["expert"],"agentCwd":"front"}"#,
+        );
+        descriptor(
+            &spaces_root.join("admin/spaces/think"),
+            r#"{"name":"管理员·思考"}"#,
+        );
+        descriptor(
+            &spaces_root.join("admin/spaces/work"),
+            r#"{"name":"管理员·工作"}"#,
+        );
+        let config = Arc::new(RwLock::new(Config::default()));
+        let spaces = Workspaces::new(
+            config.clone(),
+            dir.path().join("config.json"),
+            WorkspaceHomes::default(),
+        );
+        (dir, spaces_root, spaces, config)
+    }
+
+    async fn named(spaces: &Workspaces, name: &str) -> WorkspaceInfo {
+        spaces
+            .list()
+            .await
+            .into_iter()
+            .find(|workspace| workspace.name == name)
+            .unwrap_or_else(|| panic!("no project named {name}"))
+    }
+
+    #[tokio::test]
+    async fn a_scan_opens_spaces_and_links_children_to_the_root_they_sit_in() {
+        let (_dir, root, spaces, _config) = scan_fixture();
+        let report = spaces.scan_spaces(&root, true).await;
+        assert_eq!(
+            report,
+            ScanReport {
+                opened: 3,
+                linked: 3
+            }
+        );
+
+        let admin = named(&spaces, "管理员").await;
+        let think = named(&spaces, "管理员·思考").await;
+        let work = named(&spaces, "管理员·工作").await;
+        let registration = |info: &WorkspaceInfo| info.agent_space.clone().expect("registered");
+        assert_eq!(
+            registration(&admin).parent_workspace_id,
+            None,
+            "the root is a project entry"
+        );
+        assert_eq!(
+            registration(&think).parent_workspace_id.as_deref(),
+            Some(admin.id.as_str())
+        );
+        assert_eq!(
+            registration(&work).parent_workspace_id.as_deref(),
+            Some(admin.id.as_str())
+        );
+        assert!(
+            registration(&think).health.is_none() && registration(&admin).health.is_none(),
+            "a scan makes no Builder lock, so health is not judged against one"
+        );
+
+        // Nothing to do the second time, and nothing is duplicated.
+        assert_eq!(spaces.scan_spaces(&root, true).await, ScanReport::default());
+        assert_eq!(spaces.list().await.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_space_the_user_removed_stays_removed() {
+        let (_dir, root, spaces, _config) = scan_fixture();
+        spaces.scan_spaces(&root, true).await;
+        let think = named(&spaces, "管理员·思考").await;
+        spaces.remove(&think.id).await.unwrap();
+
+        let report = spaces.scan_spaces(&root, true).await;
+        assert_eq!(
+            report,
+            ScanReport::default(),
+            "removal is a decision a scan may not undo"
+        );
+        assert!(spaces
+            .list()
+            .await
+            .iter()
+            .all(|workspace| workspace.id != think.id));
+    }
+
+    #[tokio::test]
+    async fn an_existing_registration_is_never_overwritten() {
+        let (_dir, root, spaces, config) = scan_fixture();
+        // The user already registered `work` under nothing, at a revision the
+        // scan must respect.
+        let work = spaces
+            .open(&root.join("admin/spaces/work"), None)
+            .await
+            .unwrap();
+        config
+            .write()
+            .await
+            .agent_spaces
+            .push(crate::config::AgentSpaceEntry {
+                workspace_id: work.id.clone(),
+                parent_workspace_id: None,
+                revision: 5,
+                lifecycle: "pooled".into(),
+                builder_lock_digest: "kept".into(),
+                components: Vec::new(),
+                guidance: Vec::new(),
+            });
+        spaces.scan_spaces(&root, true).await;
+        let kept = config
+            .read()
+            .await
+            .agent_spaces
+            .iter()
+            .find(|space| space.workspace_id == work.id)
+            .cloned()
+            .unwrap();
+        assert_eq!(
+            (
+                kept.revision,
+                kept.parent_workspace_id,
+                kept.lifecycle.as_str(),
+                kept.builder_lock_digest.as_str()
+            ),
+            (5, None, "pooled", "kept"),
+            "a parent chosen by hand survives a scan"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_root_with_no_children_is_a_project_with_no_registration() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("spaces");
+        descriptor(&root.join("solo"), r#"{"name":"独行"}"#);
+        let config = Arc::new(RwLock::new(Config::default()));
+        let spaces = Workspaces::new(
+            config.clone(),
+            dir.path().join("config.json"),
+            WorkspaceHomes::default(),
+        );
+        assert_eq!(
+            spaces.scan_spaces(&root, true).await,
+            ScanReport {
+                opened: 1,
+                linked: 0
+            }
+        );
+        assert!(config.read().await.agent_spaces.is_empty());
+        assert!(named(&spaces, "独行").await.agent_space.is_none());
+    }
+
+    #[tokio::test]
+    async fn the_scan_is_throttled_unless_forced_and_costs_nothing_without_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("spaces");
+        let config = Arc::new(RwLock::new(Config::default()));
+        let spaces = Workspaces::new(
+            config,
+            dir.path().join("config.json"),
+            WorkspaceHomes::default(),
+        );
+        assert_eq!(
+            spaces.scan_spaces(&root, true).await,
+            ScanReport::default(),
+            "no spaces/ directory is not an error"
+        );
+
+        descriptor(&root.join("late"), r#"{"name":"晚到"}"#);
+        assert_eq!(
+            spaces.scan_spaces(&root, false).await,
+            ScanReport::default(),
+            "asked again at once, the scan has nothing new to say"
+        );
+        assert_eq!(spaces.scan_spaces(&root, true).await.opened, 1);
+    }
+
+    #[tokio::test]
+    async fn a_session_starts_in_agent_cwd_when_it_names_a_real_directory() {
+        let (_dir, root, spaces, _config) = scan_fixture();
+        spaces.scan_spaces(&root, true).await;
+        let admin = spaces
+            .get(&named(&spaces, "管理员").await.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            spaces.default_cwd(&admin),
+            admin.root,
+            "front/ does not exist yet"
+        );
+        std::fs::create_dir(root.join("admin/front")).unwrap();
+        assert_eq!(spaces.default_cwd(&admin), admin.root.join("front"));
+        let think = spaces
+            .get(&named(&spaces, "管理员·思考").await.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            spaces.default_cwd(&think),
+            think.root,
+            "no agentCwd, the project root"
         );
     }
 }

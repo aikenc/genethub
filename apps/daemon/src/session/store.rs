@@ -2058,6 +2058,11 @@ pub fn normalize_session_description(text: &str) -> Result<Option<String>, Strin
     Ok(Some(text.to_string()))
 }
 
+/// The label on a session that another session created. Four characters, well
+/// inside the label limit; the default conversation list reads it to leave such
+/// sessions out.
+pub const SESSION_STARTED_LABEL: &str = "系统发起";
+
 pub const MAX_SESSION_LABEL_CHARS: usize = 10;
 pub const MAX_SESSION_LABELS: usize = 16;
 
