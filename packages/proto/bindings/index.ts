@@ -940,6 +940,71 @@ role: string, userInteraction: SessionUserInteraction, evidenceScope?: SessionEv
 
 export type ModeInfo = { id: string, label: string, description?: string, };
 
+/**
+ * What one model can do. Every field is optional: unset means "not stated at
+ * this layer", so a user entry can override one value and inherit the rest.
+ *
+ * Stored per model in `providers.<id>.modelCapabilities`, once per provider in
+ * `modelDefaults`, and produced by discovery and endpoint rules
+ * (`docs/builtin-agent-next-proposal.md` §3).
+ */
+export type ModelCapabilities = { 
+/**
+ * Native media beyond text: `image`, `video`. Empty means text only.
+ */
+inputs?: Array<string>, contextWindow?: number, maxTokens?: number, reasoning?: boolean, 
+/**
+ * `adaptive` | `budget` | `only` | `none`.
+ */
+thinking?: string, 
+/**
+ * Native effort levels, from `low` … `max`.
+ */
+efforts?: Array<string>, 
+/**
+ * Endpoint request-shape quirks. Configuration-file only; the settings
+ * page does not edit it.
+ */
+compat?: ModelCompat, };
+
+/**
+ * One model's merged capabilities as the settings page shows them.
+ */
+export type ModelCapabilityInfo = { 
+/**
+ * What the agent will be told.
+ */
+effective: ModelCapabilities, 
+/**
+ * Exactly what the user wrote for this model, for editing.
+ */
+user: ModelCapabilities, 
+/**
+ * Where each effective field came from, keyed by its camelCase name:
+ * `rule` (dialect/endpoint rule), `discovered` (the provider's model list)
+ * or `user`. A field with no entry is unknown and left to the agent's
+ * conservative default.
+ */
+sources: { [key in string]?: string }, };
+
+/**
+ * Mirrors the agent's `Compat` (`apps/agent/src/config.rs`), a subset of pi's
+ * `OpenAICompletionsCompat` / `AnthropicMessagesCompat`.
+ */
+export type ModelCompat = { 
+/**
+ * `max_tokens` | `max_completion_tokens`.
+ */
+maxTokensField?: string, supportsReasoningEffort?: boolean, supportsDeveloperRole?: boolean, requiresReasoningContent?: boolean, 
+/**
+ * `openai` | `deepseek` | `openrouter`.
+ */
+thinkingFormat?: string, supportsCacheControl?: boolean, 
+/**
+ * `summarized` | `omitted`.
+ */
+thinkingDisplay?: string, };
+
 export type ModelInfo = { id: string, label: string, contextWindow?: number, reasoning: boolean, 
 /**
  * The thinking levels this model accepts, in the order it named them —
@@ -1091,7 +1156,12 @@ export type ProtocolError = { code: ErrorCode, message: string, };
  */
 export type ProtocolIdentity = { webProtocol: number, };
 
-export type ProviderDraft = { providerId: string, label: string, baseUrl: string, dialect: string, models: Array<string>, };
+export type ProviderDraft = { providerId: string, label: string, baseUrl: string, dialect: string, models: Array<string>, 
+/**
+ * Capability values the Agent proposes per model. Shown to the Human
+ * before anything is written; once approved they count as user values.
+ */
+modelCapabilities?: { [key in string]?: ModelCapabilities }, };
 
 /**
  * A provider's configuration, minus the secret.
@@ -1125,6 +1195,11 @@ models: Array<string>,
  */
 modelInputs?: { [key in string]?: Array<string> }, 
 /**
+ * Per-model capabilities after the four-layer merge, with where each value
+ * came from. Absent from daemons that predate it.
+ */
+modelCapabilities?: { [key in string]?: ModelCapabilityInfo }, 
+/**
  * Why `models` is empty, in the provider's own words. The alternative is a
  * picker that is empty for no stated reason, which sends people to the
  * wrong place: a rejected key looks exactly like a bug in the app.
@@ -1151,7 +1226,9 @@ dialect: string, };
 export type ProviderValidation = { 
 /**
  * unverified | missingCredential | authenticationFailed | modelUnavailable |
- * unreachable | invalidResponse | ready. No remote body/credential is returned.
+ * unreachable | invalidResponse | thinkingRejected | ready. `thinkingRejected`
+ * means a plain call worked but the thinking a session would send did not.
+ * No remote body/credential is returned.
  */
 status: string, detail: string, model?: string, };
 
@@ -1325,7 +1402,12 @@ models: Array<string> | null,
 /**
  * Explicit input support by model id. Entries override discovery.
  */
-modelInputs?: { [key in string]?: Array<string> }, } } | { "type": "settings.setAgentPreferences", "payload": { preferences: AgentSelectionPreferences, } } | { "type": "settings.forgetProvider", "payload": { providerId: string, } } | { "type": "speech.capabilities" } | { "type": "speech.settings.setQwen3", "payload": { 
+modelInputs?: { [key in string]?: Array<string> }, 
+/**
+ * Replaces the user's entry for each named model; an empty object
+ * removes it, returning that model to discovery and endpoint rules.
+ */
+modelCapabilities?: { [key in string]?: ModelCapabilities }, } } | { "type": "settings.setAgentPreferences", "payload": { preferences: AgentSelectionPreferences, } } | { "type": "settings.forgetProvider", "payload": { providerId: string, } } | { "type": "speech.capabilities" } | { "type": "speech.settings.setQwen3", "payload": { 
 /**
  * Selects the deterministic no-model protocol Stub. Optional so an
  * older client changing prompt terms does not change runtime mode.

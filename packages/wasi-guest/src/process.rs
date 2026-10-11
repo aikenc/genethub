@@ -86,12 +86,29 @@ fn read_once(id: u64, pipe: Pipe, max: u32) -> io::Result<Option<Vec<u8>>> {
     result.map_err(io::Error::other)
 }
 
+/// What `try-wait` reports; see `exit_word` in `apps/host/src/process.rs`.
+/// `SIGNALED | signo` is a child killed by that signal. `u32::MAX` is how a
+/// host from before the signal band said "killed by some signal".
+const SIGNALED: u32 = 0xFFFF_FF00;
+const SIGNALED_UNKNOWN: u32 = u32::MAX;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ExitStatus(u32);
 
 impl ExitStatus {
+    /// `None` when a signal ended it, as `std::process::ExitStatus` on Unix.
     pub fn code(&self) -> Option<i32> {
-        Some(self.0 as i32)
+        (!self.signaled()).then_some(self.0 as i32)
+    }
+
+    /// The signal number, as `ExitStatusExt::signal` on Unix. `None` for a
+    /// plain exit, and for an older host that could not say which signal.
+    pub fn signal(&self) -> Option<i32> {
+        (self.signaled() && self.0 != SIGNALED_UNKNOWN).then_some((self.0 & 0xFF) as i32)
+    }
+
+    fn signaled(&self) -> bool {
+        self.0 & SIGNALED == SIGNALED
     }
 
     pub fn success(&self) -> bool {
@@ -101,7 +118,11 @@ impl ExitStatus {
 
 impl fmt::Display for ExitStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "exit status: {}", self.0)
+        match (self.code(), self.signal()) {
+            (Some(code), _) => write!(f, "exit status: {code}"),
+            (None, Some(signal)) => write!(f, "signal: {signal}"),
+            (None, None) => f.write_str("signal: unknown"),
+        }
     }
 }
 

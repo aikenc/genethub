@@ -18,7 +18,18 @@ pub fn enabled() -> bool {
     std::env::var_os("GENEHUB_EVIDENCE_SCOPE").is_some()
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Tests inject the scope per thread. Setting the process-wide variable
+    /// would enable the evidence tools for every test running in parallel.
+    static TEST_SCOPE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
 fn scope() -> Result<Scope, String> {
+    #[cfg(test)]
+    if let Some(raw) = TEST_SCOPE.with(|scope| scope.borrow().clone()) {
+        return serde_json::from_str(&raw).map_err(|e| format!("invalid evidence scope: {e}"));
+    }
     serde_json::from_str(&std::env::var("GENEHUB_EVIDENCE_SCOPE").map_err(|e| e.to_string())?)
         .map_err(|e| format!("invalid evidence scope: {e}"))
 }
@@ -165,15 +176,10 @@ async fn run_inner(args: &Value, cwd: &Path) -> Result<ToolResult, String> {
 mod tests {
     use super::*;
 
-    /// Serialises the tests that share the process-wide scope variable.
-    static SCOPE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     fn with_scope<T>(scope: &str, body: impl FnOnce() -> T) -> T {
-        let guard = SCOPE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("GENEHUB_EVIDENCE_SCOPE", scope);
+        TEST_SCOPE.with(|slot| *slot.borrow_mut() = Some(scope.to_string()));
         let result = body();
-        std::env::remove_var("GENEHUB_EVIDENCE_SCOPE");
-        drop(guard);
+        TEST_SCOPE.with(|slot| *slot.borrow_mut() = None);
         result
     }
 

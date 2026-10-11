@@ -99,6 +99,10 @@ def end_all_now() -> None:
 
 def child_environment(extra: Optional[Dict[str, str]] = None, remove: Iterable[str] = ()) -> Dict[str, str]:
     env = {key: value for key, value in os.environ.items() if key not in GENEHUB_PRIVATE}
+    # The pid an Agent CLI must never kill (its prompt says so), alongside the
+    # daemon's GENEHUB_HOST_PID. This script is that process: ending it ends
+    # every session it serves.
+    env["GENEHUB_AGENT_PID"] = str(os.getpid())
     for key in remove:
         env.pop(key, None)
     if extra:

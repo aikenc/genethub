@@ -12,6 +12,11 @@ pub struct ProviderDraft {
     pub dialect: String,
     #[serde(default)]
     pub models: Vec<String>,
+    /// Capability values the Agent proposes per model. Shown to the Human
+    /// before anything is written; once approved they count as user values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model_capabilities: Option<std::collections::BTreeMap<String, crate::ModelCapabilities>>,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -42,7 +47,9 @@ pub enum ProviderOperationCommand {
 #[ts(export, export_to = "index.ts")]
 pub struct ProviderValidation {
     /// unverified | missingCredential | authenticationFailed | modelUnavailable |
-    /// unreachable | invalidResponse | ready. No remote body/credential is returned.
+    /// unreachable | invalidResponse | thinkingRejected | ready. `thinkingRejected`
+    /// means a plain call worked but the thinking a session would send did not.
+    /// No remote body/credential is returned.
     pub status: String,
     pub detail: String,
     #[ts(optional)]

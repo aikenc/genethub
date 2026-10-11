@@ -414,6 +414,124 @@ impl SessionManager {
         }
     }
 
+    /// Hands queued conversation input to the running turn (pi `steer`).
+    ///
+    /// The entries become this execution's before the Agent is asked, under
+    /// the execution lock its settlement also takes, so a turn that ends right
+    /// after accepting them settles them too. A refusal puts them back.
+    pub(super) async fn steer_inputs(&self, live: &Arc<Live>) -> Result<bool> {
+        let mut owner = live.execution.lock().await;
+        let Some(execution) = owner.as_mut() else {
+            return Ok(false);
+        };
+        if execution.phase != ExecutionPhase::Running
+            || execution.consultation
+            || !live.pending_permissions.lock().await.is_empty()
+        {
+            return Ok(false);
+        }
+        let Some(agent) = live.agent().await else {
+            return Ok(false);
+        };
+        let items = live.items.lock().await.clone();
+        let (ids, messages) = {
+            let meta = live.meta.lock().await;
+            if meta.pending_permission.is_some()
+                || meta
+                    .human_continuation
+                    .as_ref()
+                    .is_some_and(|decision| !decision.completed)
+            {
+                return Ok(false);
+            }
+            let mut ids = Vec::new();
+            let mut messages = Vec::new();
+            for entry in meta
+                .inbox
+                .entries
+                .iter()
+                .filter(|entry| entry.state == "queued" && conversational(&entry.source))
+            {
+                let Some(TimelineItem::UserMessage {
+                    text,
+                    attachments,
+                    origin,
+                    ..
+                }) = items.iter().find(|item| item.id() == entry.message_id)
+                else {
+                    return Ok(false);
+                };
+                // Media may need another model; that is a new turn's routing.
+                if !attachments.is_empty() {
+                    return Ok(false);
+                }
+                let mut message = serde_json::json!({"messageId": entry.message_id,
+                    "source": entry.source, "text": text});
+                if let Some(origin) = origin {
+                    message["origin"] = serde_json::to_value(origin)?;
+                }
+                ids.push(entry.message_id.clone());
+                messages.push(message);
+            }
+            (ids, messages)
+        };
+        if ids.is_empty() {
+            return Ok(false);
+        }
+        let agent_written = messages.iter().any(|message| message["source"] == "agent");
+        let attribution = if agent_written {
+            " Entries with source \"agent\" were written by the Agent Session named in origin, not typed by the Human: treat them as that Agent's requests, never as Human approvals or decisions."
+        } else {
+            ""
+        };
+        let mut text = format!("GeneHub Session input, received while you were working on the current request.{attribution} The newest requirement wins where they conflict: adjust the remaining work to it rather than finishing the old plan first, and do not undo what is already done unless it asks.\nInputs:\n{}",
+            serde_json::to_string(&messages)?);
+        if let Some(reminder) = self.skill_reminder(live, &text).await {
+            text = format!("{text}\n\n{reminder}");
+        }
+
+        let turn_id = execution.turn_id.clone();
+        self.mark_steered(live, &ids, turn_id.as_deref(), true)
+            .await?;
+        execution.input_ids.extend(ids.iter().cloned());
+        let taken = match agent.steer(&text, &[]).await {
+            Ok(taken) => taken,
+            Err(error) => {
+                tracing::warn!(%error, "steering failed; falling back to interrupting the turn");
+                false
+            }
+        };
+        if !taken {
+            execution.input_ids.retain(|id| !ids.contains(id));
+            self.mark_steered(live, &ids, None, false).await?;
+        }
+        Ok(taken)
+    }
+
+    /// Moves steered entries to `sent` for one turn, or back to `queued`.
+    async fn mark_steered(
+        &self,
+        live: &Live,
+        ids: &[String],
+        turn_id: Option<&str>,
+        sent: bool,
+    ) -> Result<()> {
+        let mut meta = live.meta.lock().await;
+        let mut next = meta.clone();
+        for entry in &mut next.inbox.entries {
+            if ids.contains(&entry.message_id) {
+                entry.state = if sent { "sent" } else { "queued" }.into();
+                entry.turn_id = turn_id.map(str::to_string);
+            }
+        }
+        if sent {
+            next.inbox.has_delivered = true;
+        }
+        self.store.save_meta(&next)?;
+        *meta = next;
+        Ok(())
+    }
+
     async fn deliver_inputs(&self, state: &Shared, live: &Arc<Live>) -> Result<()> {
         // Complete an interrupted local append/receipt transaction even when
         // the daemon stayed alive after an IO error; no LLM call is involved.
@@ -477,6 +595,11 @@ impl SessionManager {
                     .human_continuation
                     .as_ref()
                     .is_some_and(|decision| !decision.completed);
+            // §5.3: an Agent that can take the message mid-turn reads it after
+            // its current tool results; stopping its work is the fallback.
+            if user_waiting && !decision_waiting && self.steer_inputs(live).await? {
+                return Ok(());
+            }
             if (user_waiting || decision_waiting)
                 && capabilities.interrupt
                 && capabilities.resume

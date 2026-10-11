@@ -53,7 +53,9 @@ daemon ──spawn──> $GENEHUB_CLI agent-serve --mode rpc [--model M] [--thi
 
 ### 2.3 明确不做（MVP）
 
-TUI、subagents、extensions、MCP、fork / branch / tree / rewind、steering 与 follow-up 队列、auto-retry、prompt templates、导出 HTML、直连 `bash` RPC 命令、telemetry 与成本统计、远程模型目录、project trust。
+TUI、subagents、extensions、MCP、fork / branch / tree / rewind、prompt templates、导出 HTML、直连 `bash` RPC 命令、telemetry 与成本统计、远程模型目录、project trust。
+
+steering / follow-up 队列与 auto-retry 已按 [builtin-agent-next-proposal.md](builtin-agent-next-proposal.md) §5 落地，见 §3.3、§3.4。
 
 对应的 RPC 命令一律返回结构合法的空值或 `success: false`，**不允许静默不回**——挂起的请求会让 daemon 侧 30s 超时。
 
@@ -74,19 +76,32 @@ Genet Agent **不是给人直接用的 CLI**：没有交互式界面、没有 pr
 `genet` adapter 拼出的命令行（可执行文件路径由 `GENET_AGENT_COMMAND` 覆盖，便于开发时指向本地构建）：
 
 ```
-genet agent-serve --mode rpc
+genet agent-serve --mode rpc --configure-from-stdin
             [--model <provider/id>] [--thinking <level>]
+```
+
+daemon 只在 argv 里放模式、模型和思考档位。会话文件、公开会话 id 和附加系统提示词走 stdin 第一行的 `configure` 命令：
+
+```json
+{"type":"configure","session":"<file>","genehubSessionId":"<public-session-id>","systemPrompts":["..."]}
+```
+
+原因是 argv 对同机所有进程可见：长提示词放在 argv 里，Agent 自己用 `ps`/`grep` 查进程时几乎会匹配到任何关键词（提案 §6.1）。`configure` 只在 `--configure-from-stdin` 下读取一次，必须是第一行，否则以非 0 退出；没给的字段保留 argv 的值。
+
+独立调用时下面这些 argv 参数仍然可用，效果与 `configure` 字段相同：
+
+```
             [--no-session | --session <file>]
             [--genehub-session-id <public-session-id>]
             [--add-system-prompt <text>]...
             [--mcp-config <path>] [--extension <path>]...
 ```
 
-后两个参数 MVP 内接受并忽略（记一行 stderr 日志），**不能因为不认识而退出**——这样 adapter 可以对所有后端统一拼参数，不必为内置 agent 特判。
+`--mcp-config` 与 `--extension` 接受并忽略（记一行 stderr 日志），**不能因为不认识而退出**。
 
-`--add-system-prompt` 可重复，每项作为独立的 `<additional_system_prompt>` 块放在项目 context/skills 之后、当前工作目录之前。它不是 RPC 命令，也不会成为 user message；daemon 当前用它注入动态 Asset Preview 产物链接规范。参数值直接作为一个 argv 传入，不经 shell 拼接。独立调用者能使用这个参数，因此 Agent CLI 提供的是通用“追加系统上下文”能力，不认识 domain、channel、device 或 workspace。
+附加系统提示词（`systemPrompts` 或可重复的 `--add-system-prompt`）每项作为独立的 `<additional_system_prompt>` 块放在项目 context/skills 之后、当前工作目录之前。它不是 user message；daemon 当前用它注入动态 Asset Preview 产物链接规范。Agent CLI 提供的是通用“追加系统上下文”能力，不认识 domain、channel、device 或 workspace。
 
-`--genehub-session-id` 是 daemon 传入的公开会话 id，和 `--session` 指向的 Agent 私有 JSONL 不同。daemon 同时设置 `GENEHUB_SESSION_ID` 与指向当前构建的 `GENEHUB_CLI`；内置 Skill 和压缩子会话由此调用通用、只读的 `genet session` 接口，不解析产品目录。
+`genehubSessionId` 是 daemon 传入的公开会话 id，和 `session` 指向的 Agent 私有 JSONL 不同。daemon 同时设置 `GENEHUB_SESSION_ID` 与指向当前构建的 `GENEHUB_CLI`；内置 Skill 和归档子会话由此调用通用、只读的 `genet session` 接口，不解析产品目录。
 
 ### 3.2 帧格式
 
@@ -102,19 +117,26 @@ genet agent-serve --mode rpc
 
 | 命令 | 行为 | 响应 `data` |
 |------|------|-------------|
-| `prompt` | 接受即回，执行异步走事件流 | `{agentInvoked: bool}` |
+| `configure` | 仅在 `--configure-from-stdin` 下作为第一行读取一次（§3.1），不回响应 | — |
+| `prompt` | 接受即回，执行异步走事件流。运行中再发 `prompt` 会被拒绝，除非带 `streamingBehavior: "steer" \| "followUp"`，此时等同下面两条命令 | `{agentInvoked: bool}` 或 `{queued: n}` |
+| `steer` | 运行中排入 steering 队列：当前工具批次结束后、下一次模型请求前注入为 user message | `{queued: n}` |
+| `follow_up` | 运行中排入 follow-up 队列：模型本该停下时才注入，并让这次运行继续 | `{queued: n}` |
 | `abort` | 中止当前 loop | 无 |
-| `get_state` | 会话状态 | `SessionState`（cwd、模型、思考档位、会话文件、消息数） |
+| `get_state` | 会话状态 | `SessionState`（cwd、模型、思考档位、会话文件、消息数、`pendingMessageCount`） |
 | `get_messages` | 全量消息 | `{messages: [...]}` |
 | `get_available_models` | 已配置模型 | `{models: [...]}` |
 | `set_model` | 切模型 | 完整 `Model` 对象 |
 | `set_thinking_level` | 记录思考档位 | 无 |
-
-思考档位在协议里走的是 effort 轴（`ModelInfo.efforts` + `session.setEffort`），不是 `mode`——`mode` 留给「动手前问不问」那类策略，而这个 agent 没有审批流程，也就没有模式可选。旧会话把档位记在 `mode` 上，启动时仍然认这个名字，重开一个旧会话不会悄悄掉回默认档。
 | `get_session_stats` | token / 成本 | `{tokens, cost}` |
 | `get_commands` | 斜杠命令（Skills 与 compact） | `{commands: [...]}` |
-| `set_auto_compaction` | 记录开关 | 无 |
+| `set_auto_compaction` / `set_auto_archive` | 记录自动归档开关（两个名字控制同一开关） | 无 |
+| `set_auto_retry` | 记录自动重试开关 | 无 |
+| `abort_retry` | 中止重试退避；与运行共用一个 abort | 无 |
 | `compact` | 用 `genet session context` 取得确定性投影，在禁用工具的纯内存子会话中生成带引用摘要，再以 append-only compaction entry 替换活跃模型上下文 | `{agentInvoked: true}` |
+
+思考档位在协议里走的是 effort 轴（`ModelInfo.efforts` + `session.setEffort`），不是 `mode`——`mode` 留给「动手前问不问」那类策略，而这个 agent 没有审批流程，也就没有模式可选。旧会话把档位记在 `mode` 上，启动时仍然认这个名字，重开一个旧会话不会悄悄掉回默认档。
+
+`steer` / `follow_up` 的接纳与运行的停止判断在同一把锁下完成，被接纳的消息不会滞留：运行提前结束时，队列里剩下的消息仍写入会话（运行被回滚到 prompt 之前时除外）。不在运行中时两条命令返回 `success: false`（"agent is not streaming"）；归档进行中返回 "agent is compacting"。daemon 在运行中收到用户输入时先尝试 `steer`，Agent 拒绝、超时或输入带附件时回退到原来的中断再投递。
 
 `prompt` 可带 `attachments` 数组，元素含 `name`、`mime`，以及 `dataBase64`（小图片）或工作区相对 `path`（会话上传的视频）。User message 持久化附件引用；模型继续支持该媒体时，后续轮次继续传递原生内容。切换到不支持该媒体的模型后，历史附件会变成文字说明，本轮新附件仍会被拒绝。所选模型的 `inputModalities` 声明 `image` / `video` 后才允许发送；OpenAI 兼容接口使用 `image_url` / `video_url` 内容块，Anthropic Messages 接口使用原生图片块。视频先经 `session.artifact.*` 分块上传，再由 Agent 从工作区读取并内联到模型请求；应用单视频上限 64 MiB，服务商可能有更低的请求上限。
 
@@ -223,7 +245,7 @@ GeneHub 产品内置 Skill 的目录、构建期扫描、打包和新增流程�
 
 返回的列表会滤掉不能对话的东西——OpenAI 会把 embeddings、语音、图像、审核模型一起给出来，六十行里五十行选了没用。滤是按名字猜的，认不出来的名字保留。
 
-列表里只有 id。上下文窗口和"会不会思考"不在任何 provider 的返回里，所以不再声称知道:上下文窗口留空，「是否推理模型」按 id 猜，而它只决定一件事——请求里要不要带 `reasoning_effort`。这件事必须猜对方向:OpenAI 对一个普通对话模型收到 effort 参数的反应是整个请求 400，而思考档位默认是 medium，所以过去每一次发给 `gpt-4o` 的请求都是失败的。
+模型能力（上下文窗口、最大输出、思考方式与 effort 档位、输入模态）按 [builtin-agent-next-proposal.md](builtin-agent-next-proposal.md) §3 的四层逐字段合并：兜底默认 → 方言与端点规则 → 远程发现 → 用户配置（`modelDefaults`、`modelCapabilities.<id>`）。Anthropic 等服务的列表会返回窗口和思考能力，只给 id 的网关就落到前两层，由用户在设置页补全；每个值都标出来源。合并结果随 `models.json` 下发，Agent 不再按 id 猜能力。猜错方向的代价仍然要记住：OpenAI 对普通对话模型收到 effort 参数会整个请求 400，所以规则层按 id 猜「是否推理模型」时偏保守（`capabilities.rs` 的 `reasons`），认不出的名字不发 effort，由发现层或用户纠正。
 
 不能列出自己模型的地址(裸 llama.cpp、只转发 completions 的网关)照样能用:在设置里手写模型 id，写了就不问。
 
@@ -240,7 +262,7 @@ GeneHub 产品内置 Skill 的目录、构建期扫描、打包和新增流程�
 | 阶段 | 内容 |
 |------|------|
 | **A（MVP，本次）** | 本文 §2.1 + §2.2 全部；能被真实 daemon 拉起并跑完一轮带工具调用的任务 |
-| **B** | 图片输入、steering/follow-up 队列、auto-retry、更完整的模型目录 |
+| **B** | 已完成（[提案](builtin-agent-next-proposal.md) M1+M2）：图片/视频输入、模型能力四层合并、Anthropic adaptive 思考与 prompt cache、上下文归档、steering/follow-up 队列、auto-retry、附加提示词改走 `configure`、Skill 加载守卫。仍不做：远程模型目录 |
 | **C** | subagents、extensions、MCP、fork/branch/tree |
 
 阶段 B/C 的取舍视桌面端实际使用反馈决定，不预先承诺。

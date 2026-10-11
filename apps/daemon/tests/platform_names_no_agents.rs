@@ -23,7 +23,11 @@ const ALLOWED: [(&str, &str); 4] = [
 
 /// Whole lines that are model or provider identifiers, not Agent logic.
 fn is_model_identifier(line: &str) -> bool {
-    line.contains("claude-sonnet") || line.contains("claude-opus") || line.contains("claude-haiku")
+    // `claude-3-7` and friends are model-family substrings in the capability
+    // rules (`capabilities.rs`), not the Claude Code Agent.
+    ["claude-sonnet", "claude-opus", "claude-haiku", "claude-3"]
+        .iter()
+        .any(|model| line.contains(model))
 }
 
 fn source_files(dir: &Path, out: &mut Vec<PathBuf>) {

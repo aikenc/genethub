@@ -800,6 +800,11 @@ pub enum Request {
         #[serde(default)]
         #[ts(optional)]
         model_inputs: Option<std::collections::BTreeMap<String, Vec<String>>>,
+        /// Replaces the user's entry for each named model; an empty object
+        /// removes it, returning that model to discovery and endpoint rules.
+        #[serde(default)]
+        #[ts(optional)]
+        model_capabilities: Option<std::collections::BTreeMap<String, crate::ModelCapabilities>>,
     },
 
     /// Replaces machine-global Agent/model tag, cost and remembered runtime

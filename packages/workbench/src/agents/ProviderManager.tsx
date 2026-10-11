@@ -1,4 +1,4 @@
-import type { ProviderInfo, ProviderPreset } from "@genehub/proto";
+import type { ModelCapabilities, ProviderInfo, ProviderPreset } from "@genehub/proto";
 import { Plus } from "lucide-react";
 import { useEffect, useState } from "react";
 
@@ -77,6 +77,7 @@ interface Edit {
   apiKey?: string;
   baseUrl?: string;
   modelInputs?: Record<string, string[]>;
+  modelCapabilities?: Record<string, ModelCapabilities>;
 }
 
 function ProviderRow({
@@ -189,36 +190,177 @@ function ProviderRow({
       <ModelsFound provider={provider} />
       {provider.models.length > 0 ? (
         <details className="text-xs text-muted">
-          <summary className="cursor-pointer">配置模型图片 / 视频输入</summary>
-          <div className="mt-2 max-h-52 space-y-1 overflow-y-auto">
+          <summary className="cursor-pointer">配置模型能力（输入 / 思考 / 上下文）</summary>
+          <div className="mt-2 max-h-72 space-y-1 overflow-y-auto">
             {provider.models.map((model) => (
-              <div key={model} className="flex flex-wrap items-center gap-3 rounded border border-line px-2 py-1">
-                <span className="min-w-40 flex-1 break-all text-fg">{model}</span>
-                {(["image", "video"] as const).map((kind) => (
-                  <label key={kind} className="flex items-center gap-1">
-                    <input
-                      type="checkbox"
-                      aria-label={`${model} ${kind === "image" ? "图片" : "视频"}输入`}
-                      checked={(provider.modelInputs?.[model] ?? []).includes(kind)}
-                      disabled={busy || (kind === "video" && provider.dialect === "anthropic")}
-                      onChange={(event) => {
-                        const current = provider.modelInputs?.[model] ?? [];
-                        const next = event.target.checked
-                          ? [...current, kind]
-                          : current.filter((input) => input !== kind);
-                        setBusy(true);
-                        void onSave({ modelInputs: { [model]: next } }).finally(() => setBusy(false));
-                      }}
-                    />
-                    {kind === "image" ? "图片" : "视频"}
-                  </label>
-                ))}
-              </div>
+              <ModelCapabilityRow
+                key={model}
+                model={model}
+                provider={provider}
+                busy={busy}
+                onSave={(user) => {
+                  setBusy(true);
+                  return onSave({ modelCapabilities: { [model]: user } }).finally(() => setBusy(false));
+                }}
+              />
             ))}
           </div>
         </details>
       ) : null}
     </li>
+  );
+}
+
+const THINKING_LABELS: Record<string, string> = {
+  adaptive: "adaptive（模型自定思考量）",
+  budget: "budget（固定思考预算）",
+  only: "始终思考（不可关闭）",
+  none: "不思考",
+};
+
+const SOURCE_LABELS: Record<string, string> = {
+  rule: "规则",
+  discovered: "服务商",
+  user: "手动",
+};
+
+/** Where a value came from, next to it, so a wrong guess can be traced. */
+function SourceTag({ source }: { source?: string }) {
+  if (!source) return null;
+  return <span className="rounded border border-line px-1 text-[10px] text-faint">{SOURCE_LABELS[source] ?? source}</span>;
+}
+
+/**
+ * One model's capabilities: what the agent will be told, where each part came
+ * from, and the user's override of it. Each edit sends the model's whole user
+ * entry, so clearing a field hands it back to discovery and the rules.
+ */
+function ModelCapabilityRow({
+  model,
+  provider,
+  busy,
+  onSave,
+}: {
+  model: string;
+  provider: ProviderInfo;
+  busy: boolean;
+  onSave(user: ModelCapabilities): Promise<void>;
+}) {
+  const info = provider.modelCapabilities?.[model];
+  const effective = info?.effective ?? { inputs: provider.modelInputs?.[model] };
+  const user = info?.user ?? {};
+  const sources = info?.sources ?? {};
+  const save = (change: Partial<ModelCapabilities>) => {
+    const next: ModelCapabilities = { ...user, ...change };
+    for (const field of Object.keys(next) as (keyof ModelCapabilities)[]) {
+      if (next[field] === undefined) delete next[field];
+    }
+    return onSave(next);
+  };
+  const number = (field: "contextWindow" | "maxTokens", label: string) => (
+    <NumberField
+      label={`${model} ${label}`}
+      placeholder={effective[field] === undefined ? "未知" : String(effective[field])}
+      value={user[field]}
+      disabled={busy}
+      onCommit={(value) => void save({ [field]: value })}
+    />
+  );
+  return (
+    <div className="flex flex-col gap-1 rounded border border-line px-2 py-1">
+      <span className="break-all text-fg">{model}</span>
+      <div className="flex flex-wrap items-center gap-3">
+        {(["image", "video"] as const).map((kind) => (
+          <label key={kind} className="flex items-center gap-1">
+            <input
+              type="checkbox"
+              aria-label={`${model} ${kind === "image" ? "图片" : "视频"}输入`}
+              checked={(effective.inputs ?? []).includes(kind)}
+              disabled={busy || (kind === "video" && provider.dialect === "anthropic")}
+              onChange={(event) => {
+                const current = effective.inputs ?? [];
+                const next = event.target.checked
+                  ? [...current, kind]
+                  : current.filter((input) => input !== kind);
+                void save({ inputs: next });
+              }}
+            />
+            {kind === "image" ? "图片" : "视频"}
+          </label>
+        ))}
+        <SourceTag source={sources.inputs} />
+        <label className="flex items-center gap-1">
+          思考
+          <select
+            aria-label={`${model} 思考方式`}
+            className="rounded border border-line bg-bg px-1 py-0.5"
+            disabled={busy}
+            value={user.thinking ?? ""}
+            onChange={(event) => {
+              const thinking = event.target.value || undefined;
+              // Choosing a way to think says the model reasons; "none" says it does not.
+              void save({
+                thinking,
+                reasoning: thinking === undefined ? undefined : thinking !== "none",
+              });
+            }}
+          >
+            <option value="">
+              自动（{effective.thinking ? THINKING_LABELS[effective.thinking] ?? effective.thinking : effective.reasoning ? "budget" : "未知"}）
+            </option>
+            {Object.entries(THINKING_LABELS).map(([mode, label]) => (
+              <option key={mode} value={mode}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <SourceTag source={sources.thinking ?? sources.reasoning} />
+      </div>
+      <div className="flex flex-wrap items-center gap-3">
+        {number("contextWindow", "上下文窗口")}
+        <SourceTag source={sources.contextWindow} />
+        {number("maxTokens", "最大输出")}
+        <SourceTag source={sources.maxTokens} />
+      </div>
+    </div>
+  );
+}
+
+/** A token count, saved when the box loses focus; empty means automatic. */
+function NumberField({
+  label,
+  placeholder,
+  value,
+  disabled,
+  onCommit,
+}: {
+  label: string;
+  placeholder: string;
+  value?: number;
+  disabled: boolean;
+  onCommit(value: number | undefined): void;
+}) {
+  const [text, setText] = useState(value === undefined ? "" : String(value));
+  useEffect(() => setText(value === undefined ? "" : String(value)), [value]);
+  const short = label.slice(label.lastIndexOf(" ") + 1);
+  return (
+    <label className="flex items-center gap-1">
+      {short}
+      <input
+        aria-label={label}
+        inputMode="numeric"
+        className="w-28 rounded border border-line bg-bg px-1 py-0.5 outline-none focus:border-accent"
+        placeholder={placeholder}
+        value={text}
+        disabled={disabled}
+        onChange={(event) => setText(event.target.value.replace(/[^0-9]/g, ""))}
+        onBlur={() => {
+          const next = text === "" ? undefined : Number(text);
+          if (next !== value) onCommit(next);
+        }}
+      />
+    </label>
   );
 }
 

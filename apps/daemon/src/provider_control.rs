@@ -132,7 +132,63 @@ fn validate(draft: &ProviderDraft) -> Result<()> {
                 && !m.chars().any(char::is_control)),
         "model list is invalid"
     );
+    let dialect = if draft.dialect == "anthropic" {
+        crate::provider::Dialect::Anthropic
+    } else {
+        crate::provider::Dialect::OpenAi
+    };
+    if let Some(capabilities) = &draft.model_capabilities {
+        ensure!(
+            capabilities.len() <= 64,
+            "too many model capability entries"
+        );
+        for (model, caps) in capabilities {
+            ensure!(!caps.is_empty(), "capability entry for {model} is empty");
+            crate::capabilities::validate(model, caps, dialect)?;
+        }
+    }
     Ok(())
+}
+
+/// One line per proposed capability, for the Human to read before approving.
+fn describe_capabilities(draft: &ProviderDraft) -> String {
+    let Some(capabilities) = draft.model_capabilities.as_ref().filter(|c| !c.is_empty()) else {
+        return String::new();
+    };
+    let mut lines = vec!["模型能力（批准后按用户配置保存）：".to_string()];
+    for (model, caps) in capabilities {
+        let mut parts = Vec::new();
+        if let Some(thinking) = &caps.thinking {
+            parts.push(format!("思考方式={thinking}"));
+        }
+        if let Some(window) = caps.context_window {
+            parts.push(format!("上下文窗口={window}"));
+        }
+        if let Some(max) = caps.max_tokens {
+            parts.push(format!("最大输出={max}"));
+        }
+        if let Some(reasoning) = caps.reasoning {
+            parts.push(format!("推理={reasoning}"));
+        }
+        if let Some(efforts) = &caps.efforts {
+            parts.push(format!("档位={}", efforts.join("/")));
+        }
+        if let Some(inputs) = &caps.inputs {
+            parts.push(format!(
+                "输入={}",
+                if inputs.is_empty() {
+                    "仅文本".to_string()
+                } else {
+                    inputs.join("/")
+                }
+            ));
+        }
+        if caps.compat.is_some() {
+            parts.push("compat".into());
+        }
+        lines.push(format!("- {model}：{}", parts.join("，")));
+    }
+    format!("\n{}", lines.join("\n"))
 }
 fn request(record: &Record) -> PermissionRequest {
     let r = &record.receipt;
@@ -141,7 +197,7 @@ fn request(record: &Record) -> PermissionRequest {
         kind: PermissionRequestKind::ProviderConfiguration,
         title: format!("配置模型服务：{}", r.draft.label),
         detail: Some(format!(
-            "目标：当前连接的机器\nProvider：{}\n协议：{}\n地址：{}\n模型：{}\n{}",
+            "目标：当前连接的机器\nProvider：{}\n协议：{}\n地址：{}\n模型：{}{}\n{}",
             r.draft.provider_id,
             r.draft.dialect,
             r.draft.base_url,
@@ -150,6 +206,7 @@ fn request(record: &Record) -> PermissionRequest {
             } else {
                 r.draft.models.join(", ")
             },
+            describe_capabilities(&r.draft),
             if r.replaces_endpoint {
                 "将更换地址或协议，需要输入新密钥；原密钥不会发送到新地址。"
             } else if r.key_required {
@@ -454,8 +511,7 @@ pub(crate) async fn execute(
                     let mut entry = original.unwrap_or_default();
                     let draft = &record.receipt.draft;
                     if record.receipt.replaces_endpoint {
-                        entry.api_key = None;
-                        entry.model_inputs.clear();
+                        crate::capabilities::retarget(&mut entry);
                     }
                     if let Some(key) = api_key {
                         entry.api_key = (!key.is_empty()).then_some(key);
@@ -468,6 +524,15 @@ pub(crate) async fn execute(
                     entry.label = Some(draft.label.clone());
                     entry.dialect = Some(draft.dialect.clone());
                     entry.models = draft.models.clone();
+                    // Approved by the Human, so these are the user's values now;
+                    // fields the draft does not name keep what was there.
+                    for (model, caps) in draft.model_capabilities.iter().flatten() {
+                        entry
+                            .model_capabilities
+                            .entry(model.clone())
+                            .or_default()
+                            .overlay(caps);
+                    }
                     record.credential_fingerprint = entry
                         .api_key
                         .as_ref()

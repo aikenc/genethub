@@ -194,6 +194,8 @@ struct Live {
     /// for an in-process Agent restart but not persisted: the next browser send
     /// recomposes domain/channel/workspace from its actual address.
     additional_system_prompt: Mutex<Option<String>>,
+    /// Built-in Skills already pointed at in this process (proposal §6.4).
+    reminded_skills: Mutex<HashSet<String>>,
     pending_permissions: Mutex<Vec<PermissionRequest>>,
     /// Serializes presentation, Human decisions and continuation dispatch.
     interaction_lock: Mutex<()>,
@@ -2888,10 +2890,16 @@ impl SessionManager {
             .as_ref()
             .map(|origin| format!("{}{text}", agent_input_preamble(origin)));
         let text_for_agent = attributed.as_ref().unwrap_or(&text);
-        let agent_text = applying_seed
+        let mut agent_text = applying_seed
             .as_ref()
             .map(|seed| prompt_with_seed(&seed.text, text_for_agent))
             .unwrap_or_else(|| text_for_agent.clone());
+        // §6.4: imported history counts, which is why this reads the text
+        // with its seed. Only what reaches the Agent carries it; the timeline
+        // keeps what the person wrote.
+        if let Some(reminder) = self.skill_reminder(live, &agent_text).await {
+            agent_text = format!("{agent_text}\n\n{reminder}");
+        }
 
         let item = if let Some((item, ids)) = &prepared {
             let mut meta = live.meta.lock().await;
@@ -3372,6 +3380,20 @@ impl SessionManager {
             }
         }
         self.interrupt_execution(&live).await
+    }
+
+    /// §6.4: a built-in Skill this text names, pointed at once per session.
+    async fn skill_reminder(&self, live: &Live, text: &str) -> Option<String> {
+        let root = self.skills_dir.as_deref()?;
+        let host_paths = {
+            let agent_id = live.meta.lock().await.agent_id.clone();
+            self.registry
+                .get(&agent_id)
+                .map(|adapter| adapter.host_form_payloads())
+                .unwrap_or(true)
+        };
+        let mut reminded = live.reminded_skills.lock().await;
+        crate::skills::mention_reminder(root, text, &mut reminded, host_paths)
     }
 
     async fn interrupt_execution(&self, live: &Arc<Live>) -> Result<()> {
@@ -5406,6 +5428,7 @@ impl Live {
             events,
             agent: Mutex::new(None),
             additional_system_prompt: Mutex::new(None),
+            reminded_skills: Mutex::new(HashSet::new()),
             pending_permissions: Mutex::new(pending.into_iter().collect()),
             interaction_lock: Mutex::new(()),
             continuation_dispatched: std::sync::atomic::AtomicBool::new(false),
@@ -10976,6 +10999,120 @@ mod tests {
             _outcome: PermissionOutcome,
         ) -> Result<()> {
             anyhow::bail!("CLI approval is resolved by its daemon waiter")
+        }
+    }
+
+    struct SteeringSession {
+        events: broadcast::Sender<SessionEvent>,
+        takes: bool,
+        steered: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl AgentSession for SteeringSession {
+        fn events(&self) -> broadcast::Receiver<SessionEvent> {
+            self.events.subscribe()
+        }
+
+        async fn send(&self, _input: PromptInput) -> Result<String> {
+            anyhow::bail!("not used")
+        }
+
+        async fn interrupt(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn close(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn set_model(&self, _model_id: &str) -> Result<()> {
+            anyhow::bail!("not used")
+        }
+
+        async fn set_mode(&self, _mode_id: &str) -> Result<()> {
+            anyhow::bail!("not used")
+        }
+
+        async fn steer(&self, text: &str, _attachments: &[Attachment]) -> Result<bool> {
+            self.steered.lock().unwrap().push(text.to_string());
+            Ok(self.takes)
+        }
+
+        async fn respond_permission(
+            &self,
+            _request_id: &str,
+            _outcome: PermissionOutcome,
+        ) -> Result<()> {
+            anyhow::bail!("not used")
+        }
+    }
+
+    /// §5.3: what a person types during a run joins that run instead of
+    /// stopping it, and belongs to its turn from that moment, so the turn's
+    /// completion settles it. A refusal leaves it queued for its own turn.
+    #[tokio::test]
+    async fn input_typed_during_a_run_is_steered_into_it_or_left_queued() {
+        for takes in [true, false] {
+            let workspace = tempfile::tempdir().unwrap();
+            let sessions = manager(workspace.path());
+            let mut record = meta();
+            record
+                .inbox
+                .entries
+                .push(crate::session::store::InboxEntry {
+                    message_id: "m_more".into(),
+                    received_at_ms: 0,
+                    digest: String::new(),
+                    source: "user".into(),
+                    task_run_id: None,
+                    state: "queued".into(),
+                    turn_id: None,
+                });
+            sessions.store.save_meta(&record).unwrap();
+            let live = Arc::new(Live::new(record, sessions.store.clone()));
+            live.items.lock().await.push(TimelineItem::UserMessage {
+                origin: None,
+                id: "m_more".into(),
+                text: "also cover the docs".into(),
+                attachments: Vec::new(),
+            });
+            let mut execution = live.claim_execution(false).await.unwrap();
+            execution.turn_id = Some("t_running".into());
+            execution.phase = ExecutionPhase::Running;
+            *live.execution.lock().await = Some(execution);
+            let steered = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (events, _) = broadcast::channel(4);
+            *live.agent.lock().await = Some(Arc::new(SteeringSession {
+                events,
+                takes,
+                steered: steered.clone(),
+            }));
+
+            assert_eq!(sessions.steer_inputs(&live).await.unwrap(), takes);
+
+            let steered = steered.lock().unwrap().clone();
+            assert_eq!(steered.len(), 1);
+            assert!(steered[0].contains("also cover the docs"));
+            assert!(steered[0].contains("\"messageId\":\"m_more\""));
+            let entry = sessions.store.load_meta("w1", "s1").unwrap().inbox.entries[0].clone();
+            let owned = live
+                .execution
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .input_ids
+                .clone();
+            if takes {
+                assert_eq!(entry.state, "sent");
+                assert_eq!(entry.turn_id.as_deref(), Some("t_running"));
+                assert_eq!(owned, ["m_more"]);
+            } else {
+                assert_eq!(entry.state, "queued");
+                assert_eq!(entry.turn_id, None);
+                assert!(owned.is_empty());
+            }
         }
     }
 

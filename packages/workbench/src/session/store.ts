@@ -19,6 +19,7 @@ import type {
   HubClaim,
   HubStatus,
   LogTail,
+  ModelCapabilities,
   RemoteAccess,
   PermissionOutcome,
   BlobPayload,
@@ -422,6 +423,11 @@ interface WorkbenchState {
     /** Written by hand, for an endpoint that cannot list its own models. */
     models?: string[];
     modelInputs?: Record<string, string[]>;
+    /**
+     * Per model, the whole of what the user sets for it; it replaces the
+     * stored entry, and an empty object removes it.
+     */
+    modelCapabilities?: Record<string, ModelCapabilities>;
   }): Promise<void>;
   setSpeechQwen3(input: {
     stubEnabled: boolean;
@@ -2572,7 +2578,16 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     if (reply?.type === "updateDownload") set({ download: reply.data });
   },
 
-  async setProvider({ providerId, apiKey, baseUrl, label, dialect, models, modelInputs }) {
+  async setProvider({
+    providerId,
+    apiKey,
+    baseUrl,
+    label,
+    dialect,
+    models,
+    modelInputs,
+    modelCapabilities,
+  }) {
     set({ notice: null });
     const reply = await asked(set, () =>
       require_(get().client).call({
@@ -2585,6 +2600,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
           dialect: dialect ?? null,
           models: models ?? null,
           ...(modelInputs ? { modelInputs } : {}),
+          ...(modelCapabilities ? { modelCapabilities } : {}),
         },
       }),
     );

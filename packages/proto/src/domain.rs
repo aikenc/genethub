@@ -2587,6 +2587,11 @@ pub struct ProviderInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub model_inputs: Option<std::collections::BTreeMap<String, Vec<String>>>,
+    /// Per-model capabilities after the four-layer merge, with where each value
+    /// came from. Absent from daemons that predate it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model_capabilities: Option<std::collections::BTreeMap<String, ModelCapabilityInfo>>,
     /// Why `models` is empty, in the provider's own words. The alternative is a
     /// picker that is empty for no stated reason, which sends people to the
     /// wrong place: a rejected key looks exactly like a bug in the app.
@@ -2604,6 +2609,141 @@ pub struct ProviderPreset {
     pub base_url: String,
     /// `openai` | `anthropic`.
     pub dialect: String,
+}
+
+/// What one model can do. Every field is optional: unset means "not stated at
+/// this layer", so a user entry can override one value and inherit the rest.
+///
+/// Stored per model in `providers.<id>.modelCapabilities`, once per provider in
+/// `modelDefaults`, and produced by discovery and endpoint rules
+/// (`docs/builtin-agent-next-proposal.md` §3).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct ModelCapabilities {
+    /// Native media beyond text: `image`, `video`. Empty means text only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub inputs: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub context_window: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub max_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reasoning: Option<bool>,
+    /// `adaptive` | `budget` | `only` | `none`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub thinking: Option<String>,
+    /// Native effort levels, from `low` … `max`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub efforts: Option<Vec<String>>,
+    /// Endpoint request-shape quirks. Configuration-file only; the settings
+    /// page does not edit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub compat: Option<ModelCompat>,
+}
+
+impl ModelCapabilities {
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+
+    /// Field by field, `over` wins wherever it says something. Returns the
+    /// camelCase names of the fields `over` supplied, compat ones as
+    /// `compat.<name>`.
+    pub fn overlay(&mut self, over: &ModelCapabilities) -> Vec<&'static str> {
+        let mut set = Vec::new();
+        macro_rules! take {
+            ($field:ident, $name:literal) => {
+                if over.$field.is_some() {
+                    self.$field = over.$field.clone();
+                    set.push($name);
+                }
+            };
+        }
+        take!(inputs, "inputs");
+        take!(context_window, "contextWindow");
+        take!(max_tokens, "maxTokens");
+        take!(reasoning, "reasoning");
+        take!(thinking, "thinking");
+        take!(efforts, "efforts");
+        if let Some(over) = &over.compat {
+            let compat = self.compat.get_or_insert_with(Default::default);
+            macro_rules! compat {
+                ($field:ident, $name:literal) => {
+                    if over.$field.is_some() {
+                        compat.$field = over.$field.clone();
+                        set.push($name);
+                    }
+                };
+            }
+            compat!(max_tokens_field, "compat.maxTokensField");
+            compat!(supports_reasoning_effort, "compat.supportsReasoningEffort");
+            compat!(supports_developer_role, "compat.supportsDeveloperRole");
+            compat!(
+                requires_reasoning_content,
+                "compat.requiresReasoningContent"
+            );
+            compat!(thinking_format, "compat.thinkingFormat");
+            compat!(supports_cache_control, "compat.supportsCacheControl");
+            compat!(thinking_display, "compat.thinkingDisplay");
+        }
+        set
+    }
+}
+
+/// Mirrors the agent's `Compat` (`apps/agent/src/config.rs`), a subset of pi's
+/// `OpenAICompletionsCompat` / `AnthropicMessagesCompat`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct ModelCompat {
+    /// `max_tokens` | `max_completion_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub max_tokens_field: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub supports_reasoning_effort: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub supports_developer_role: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub requires_reasoning_content: Option<bool>,
+    /// `openai` | `deepseek` | `openrouter`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub thinking_format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub supports_cache_control: Option<bool>,
+    /// `summarized` | `omitted`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub thinking_display: Option<String>,
+}
+
+/// One model's merged capabilities as the settings page shows them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct ModelCapabilityInfo {
+    /// What the agent will be told.
+    pub effective: ModelCapabilities,
+    /// Exactly what the user wrote for this model, for editing.
+    pub user: ModelCapabilities,
+    /// Where each effective field came from, keyed by its camelCase name:
+    /// `rule` (dialect/endpoint rule), `discovered` (the provider's model list)
+    /// or `user`. A field with no entry is unknown and left to the agent's
+    /// conservative default.
+    pub sources: std::collections::BTreeMap<String, String>,
 }
 
 /// The end of one log file, and where it came from.

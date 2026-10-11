@@ -294,6 +294,45 @@ describe("model providers", () => {
     );
   });
 
+  /**
+   * A gateway that insists on adaptive thinking is fixed from here: the row
+   * shows what the rules guessed and where it came from, and a choice sends
+   * the model's whole user entry.
+   */
+  it("lets the user correct how a model thinks, with the source shown", async () => {
+    const model = "claude-sonnet-4-5";
+    const calls = open([READY], PROVIDERS_TARGET, [
+      provider({
+        id: "gateway",
+        label: "Gateway",
+        custom: true,
+        dialect: "anthropic",
+        models: [model],
+        modelCapabilities: {
+          [model]: {
+            effective: { reasoning: true, thinking: "budget", contextWindow: 200000 },
+            user: { contextWindow: 200000 },
+            sources: { reasoning: "rule", thinking: "rule", contextWindow: "user" },
+          },
+        },
+      }),
+    ]);
+    await userEvent.click(await screen.findByText("配置模型能力（输入 / 思考 / 上下文）"));
+    const select = await screen.findByLabelText(`${model} 思考方式`);
+    expect(select).toHaveTextContent("自动（budget");
+    expect(screen.getAllByText("规则").length).toBeGreaterThan(0);
+    expect(screen.getByLabelText(`${model} 上下文窗口`)).toHaveValue("200000");
+
+    await userEvent.selectOptions(select, "adaptive");
+    await waitFor(() => {
+      const sent = calls.find((call) => call.type === "settings.setProvider");
+      expect(sent?.payload).toMatchObject({
+        providerId: "gateway",
+        modelCapabilities: { [model]: { thinking: "adaptive", reasoning: true, contextWindow: 200000 } },
+      });
+    });
+  });
+
   it("removes a custom provider, and only empties the key of a shipped one, after asking", async () => {
     const calls = open([READY], PROVIDERS_TARGET, [
       provider({ id: "deepseek", label: "DeepSeek" }),

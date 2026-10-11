@@ -49,6 +49,8 @@ fn parse(args: &[String]) -> Result<Request, CliFailure> {
     }
     let mut flags = std::collections::BTreeMap::new();
     let mut models = Vec::new();
+    let mut capabilities =
+        std::collections::BTreeMap::<String, genehub_proto::ModelCapabilities>::new();
     let allowed: &[&str] = if verb == "configure" {
         &[
             "--session",
@@ -57,6 +59,7 @@ fn parse(args: &[String]) -> Result<Request, CliFailure> {
             "--dialect",
             "--label",
             "--model",
+            "--capability",
         ]
     } else {
         &["--session"]
@@ -76,6 +79,9 @@ fn parse(args: &[String]) -> Result<Request, CliFailure> {
             .clone();
         if name == "--model" {
             models.push(value);
+        } else if name == "--capability" {
+            let (model, caps) = parse_capability(&value)?;
+            capabilities.entry(model).or_default().overlay(&caps);
         } else if flags.insert(name.as_str(), value).is_some() {
             return Err(CliFailure::invalid_args(format!(
                 "{name} may appear only once"
@@ -98,6 +104,7 @@ fn parse(args: &[String]) -> Result<Request, CliFailure> {
                 dialect: required("--dialect")?,
                 label: required("--label")?,
                 models,
+                model_capabilities: (!capabilities.is_empty()).then_some(capabilities),
             },
         }
     } else if verb == "verify" {
@@ -114,6 +121,108 @@ fn parse(args: &[String]) -> Result<Request, CliFailure> {
         operation,
     })
 }
+/// `<model>:<field>=<value>`, e.g. `claude-opus-5-5:thinking=adaptive`. The
+/// model id may itself contain `:` (OpenRouter's `:free`), so the field is
+/// whatever follows the last `:` before the `=`.
+fn parse_capability(spec: &str) -> Result<(String, genehub_proto::ModelCapabilities), CliFailure> {
+    let invalid = |why: &str| {
+        CliFailure::invalid_args(format!(
+            "--capability {spec}: {why}; expected <model>:<thinking|context-window|max-tokens|reasoning|efforts|inputs>=<value>"
+        ))
+    };
+    let (head, value) = spec.split_once('=').ok_or_else(|| invalid("missing ="))?;
+    let (model, field) = head
+        .rsplit_once(':')
+        .ok_or_else(|| invalid("missing <model>:"))?;
+    if model.is_empty() {
+        return Err(invalid("empty model"));
+    }
+    let number = || value.parse::<u64>().map_err(|_| invalid("not a number"));
+    let list = || -> Vec<String> {
+        value
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty() && *item != "text")
+            .map(str::to_string)
+            .collect()
+    };
+    let mut caps = genehub_proto::ModelCapabilities::default();
+    match field {
+        "thinking" => caps.thinking = Some(value.to_string()),
+        "context-window" | "contextWindow" => caps.context_window = Some(number()?),
+        "max-tokens" | "maxTokens" => caps.max_tokens = Some(number()?),
+        "reasoning" => caps.reasoning = Some(value.parse().map_err(|_| invalid("not true/false"))?),
+        "efforts" => caps.efforts = Some(list()),
+        "inputs" => caps.inputs = Some(list()),
+        _ => return Err(invalid("unknown field")),
+    }
+    Ok((model.to_string(), caps))
+}
+
 fn usage() -> CliFailure {
-    CliFailure::invalid_args("provider list | configure <id> --session <id> --action <stable-id> --base-url <url> --dialect <openai|anthropic> --label <name> [--model <id>] | get <action-id> --session <id> | verify <action-id> --session <id>")
+    CliFailure::invalid_args("provider list | configure <id> --session <id> --action <stable-id> --base-url <url> --dialect <openai|anthropic> --label <name> [--model <id>] [--capability <model>:<field>=<value>] | get <action-id> --session <id> | verify <action-id> --session <id>")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn capability_flags_become_one_entry_per_model() {
+        let request = parse(&args(&[
+            "configure",
+            "aiclick",
+            "--session",
+            "s",
+            "--action",
+            "a",
+            "--base-url",
+            "https://gateway.example",
+            "--dialect",
+            "anthropic",
+            "--label",
+            "AI",
+            "--capability",
+            "claude-opus-5-5:thinking=adaptive",
+            "--capability",
+            "claude-opus-5-5:context-window=200000",
+            "--capability",
+            "vendor/model:free:inputs=text,image",
+        ]))
+        .unwrap();
+        let Request::ProviderOperation {
+            operation: ProviderOperationCommand::Prepare { draft, .. },
+            ..
+        } = request
+        else {
+            panic!("not a prepare");
+        };
+        let caps = draft.model_capabilities.unwrap();
+        assert_eq!(
+            caps["claude-opus-5-5"].thinking.as_deref(),
+            Some("adaptive")
+        );
+        assert_eq!(caps["claude-opus-5-5"].context_window, Some(200_000));
+        assert_eq!(
+            caps["vendor/model:free"].inputs,
+            Some(vec!["image".to_string()])
+        );
+    }
+
+    #[test]
+    fn a_malformed_capability_is_an_argument_error() {
+        for bad in [
+            "opus",
+            "opus:thinking",
+            "opus:colour=red",
+            "opus:max-tokens=lots",
+            ":thinking=none",
+        ] {
+            assert!(parse_capability(bad).is_err(), "{bad} accepted");
+        }
+    }
 }

@@ -18,7 +18,17 @@ pub async fn run(args: &Value, cwd: &Path) -> ToolResult {
         return ToolResult::error("bash: 'command' is required");
     };
 
+    if let Some(refusal) =
+        super::self_guard::refuses(&command_text, &super::self_guard::protected())
+    {
+        return ToolResult::error(refusal);
+    }
+
     let mut command = Command::new(shell());
+    // §6.3: the pid this command must spare, as the prompt promises.
+    if let Some(pid) = super::self_guard::agent_pid() {
+        command.env("GENEHUB_AGENT_PID", pid.to_string());
+    }
     command
         .arg(shell_flag())
         .arg(&command_text)
@@ -423,6 +433,25 @@ mod tests {
         let result = run(&json!({"command": "sleep 5", "timeout": 1}), Path::new(".")).await;
         assert!(result.is_error);
         assert_eq!(result.text, "Command timed out after 1 seconds");
+    }
+
+    /// §7: the agent asked to kill itself is told no, and is not killed.
+    #[tokio::test]
+    async fn a_command_that_would_kill_the_agent_is_refused() {
+        let me = std::process::id();
+        let result = run(&json!({"command": format!("kill -9 {me}")}), Path::new(".")).await;
+        assert!(result.is_error);
+        assert!(result.text.starts_with("Refused"), "{}", result.text);
+    }
+
+    #[tokio::test]
+    async fn the_command_is_told_which_pid_to_spare() {
+        let result = run(
+            &json!({"command": "echo $GENEHUB_AGENT_PID"}),
+            Path::new("."),
+        )
+        .await;
+        assert_eq!(result.text.trim(), std::process::id().to_string());
     }
 
     #[tokio::test]

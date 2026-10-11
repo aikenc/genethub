@@ -2868,7 +2868,11 @@ async fn dispatch(
                 genehub_proto::ProviderInfo {
                     id: id.clone(), has_api_key: provider.api_key.as_deref().is_some_and(|key| !key.is_empty()),
                     base_url: resolved.base_url, label: resolved.label, dialect: resolved.dialect.as_str().into(),
-                    custom: resolved.custom, models: provider.models.clone(), model_inputs: Some(provider.model_inputs.clone()), problem: None,
+                    custom: resolved.custom, models: provider.models.clone(),
+                    model_inputs: Some(provider.model_capabilities.iter().filter_map(|(model, caps)| Some((model.clone(), caps.inputs.clone()?))).collect()),
+                    model_capabilities: Some(provider.models.iter().chain(provider.model_capabilities.keys())
+                        .map(|model| (model.clone(), crate::capabilities::info(id, provider, model))).collect()),
+                    problem: None,
                 }
             }).collect();
             Handled::ok(Reply::Providers(providers))
@@ -3000,6 +3004,7 @@ async fn dispatch(
             dialect,
             models,
             model_inputs,
+            model_capabilities,
         } => Box::pin(async move {
             match state
                 .set_provider(
@@ -3010,6 +3015,7 @@ async fn dispatch(
                     dialect,
                     models,
                     model_inputs,
+                    model_capabilities,
                 )
                 .await
             {

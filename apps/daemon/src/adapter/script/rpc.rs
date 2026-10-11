@@ -189,6 +189,11 @@ impl Peer {
             .remove(&id);
     }
 
+    /// How the process ended, once it has; `None` while it still runs.
+    pub async fn ending(&self) -> Option<crate::adapter::Ending> {
+        crate::adapter::ending(&self.child).await
+    }
+
     /// Ends the process and everything it started. The readers are given a
     /// moment to see end-of-file, so the owner still hears about the exit.
     pub async fn kill(&self) {

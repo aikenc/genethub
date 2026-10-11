@@ -540,6 +540,7 @@ impl AgentHost {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        crate::adapter::apply_process_identity(&mut command);
         match &self.env.front_door_cli {
             Some(cli) => {
                 command.env("GENEHUB_CLI", cli);
@@ -740,12 +741,27 @@ impl AgentHost {
                 None => None,
             }
         };
+        let mut ending = None;
         if let Some(peer) = gone {
+            // How it ended first: a signal from outside reads differently
+            // from the script's own exit (§6.2).
+            ending = peer.ending().await;
             // Stdout closed, but the process (or what it started) may still
             // be there.
             peer.kill().await;
         }
-        let why = format!("Agent 脚本退出了{}", self.log_hint());
+        // A stop the platform asked for ends in its own SIGTERM; that is
+        // recorded in `stopping` before it is sent, and is not "external".
+        let ours = self.stopping.load(Ordering::SeqCst);
+        let why = match ending {
+            Some(ending) if ending.by_signal() && !ours => {
+                format!("{}{}", ending.describe("Agent 脚本"), self.log_hint())
+            }
+            Some(crate::adapter::Ending::Code(code)) if code != 0 => {
+                format!("Agent 脚本退出了（退出码 {code}）{}", self.log_hint())
+            }
+            _ => format!("Agent 脚本退出了{}", self.log_hint()),
+        };
         self.process_gone(&why);
         if self.stopping.load(Ordering::SeqCst) {
             self.changed();

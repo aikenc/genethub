@@ -169,8 +169,48 @@ pub struct ProviderConfig {
     /// a gateway that only proxies — this is the only way to have anything in
     /// the picker. Non-empty means we do not ask.
     pub models: Vec<String>,
-    /// Explicit per-model media support; entries override provider discovery.
-    pub model_inputs: std::collections::BTreeMap<String, Vec<String>>,
+    /// Capabilities the user stated for every model of this provider; a
+    /// per-model entry overrides it field by field.
+    #[serde(skip_serializing_if = "genehub_proto::ModelCapabilities::is_empty")]
+    pub model_defaults: genehub_proto::ModelCapabilities,
+    /// Capabilities the user stated per model. They win over discovery and
+    /// endpoint rules (`crate::capabilities`). A gateway that only proxies
+    /// reports nothing about the model behind it, so this is the only way to
+    /// name a requirement the id does not reveal.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub model_capabilities: std::collections::BTreeMap<String, genehub_proto::ModelCapabilities>,
+    /// What the provider's own model list said, per model. Filled in by
+    /// `AppState::providers()` from the discovery cache; never stored, because
+    /// it belongs to one endpoint and goes stale when the endpoint changes.
+    #[serde(skip)]
+    pub discovered: std::collections::BTreeMap<String, genehub_proto::ModelCapabilities>,
+    /// Read-only predecessors of `model_capabilities`: `modelInputs` (per-model
+    /// media), `thinkingMode` (provider-wide) and `modelThinking` (per model).
+    /// `migrate` folds them in on load; they are never written back.
+    #[serde(skip_serializing, rename = "modelInputs")]
+    pub legacy_model_inputs: std::collections::BTreeMap<String, Vec<String>>,
+    #[serde(skip_serializing, rename = "thinkingMode")]
+    pub legacy_thinking_mode: Option<String>,
+    #[serde(skip_serializing, rename = "modelThinking")]
+    pub legacy_model_thinking: std::collections::BTreeMap<String, String>,
+}
+
+impl ProviderConfig {
+    /// Moves the pre-§3 fields into `model_defaults`/`model_capabilities`.
+    /// An explicit new-style value wins over the legacy one it would replace.
+    pub fn migrate(&mut self) {
+        for (model, inputs) in std::mem::take(&mut self.legacy_model_inputs) {
+            let entry = self.model_capabilities.entry(model).or_default();
+            entry.inputs.get_or_insert(inputs);
+        }
+        for (model, thinking) in std::mem::take(&mut self.legacy_model_thinking) {
+            let entry = self.model_capabilities.entry(model).or_default();
+            entry.thinking.get_or_insert(thinking);
+        }
+        if let Some(thinking) = self.legacy_thinking_mode.take() {
+            self.model_defaults.thinking.get_or_insert(thinking);
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -292,6 +332,9 @@ impl Config {
                     .with_context(|| format!("parsing {}", path.display()))?;
                 config.normalize_workspace_paths();
                 config.adopt_legacy_pipe_spaces();
+                for provider in config.agents.providers.values_mut() {
+                    provider.migrate();
+                }
                 Ok(config)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
