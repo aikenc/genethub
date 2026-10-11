@@ -11,13 +11,29 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const NAMES: [&str; 6] = ["codex", "claude", "codebuddy", "opencode", "tclaude", "cursor-agent"];
+const NAMES: [&str; 6] = [
+    "codex",
+    "claude",
+    "codebuddy",
+    "opencode",
+    "tclaude",
+    "cursor-agent",
+];
 
 /// Source paths (relative to the repository root) that may still name Agents.
 const ALLOWED: [(&str, &str); 4] = [
-    ("apps/daemon/src/agent_space_builder/", "deprecated; removed with the subsystem (docs/deprecated.md)"),
-    ("apps/daemon/src/workflow/", "deprecated; removed with the subsystem (docs/deprecated.md)"),
-    ("packages/workflow-engine/", "deprecated; removed with the subsystem (docs/deprecated.md)"),
+    (
+        "apps/daemon/src/agent_space_builder/",
+        "deprecated; removed with the subsystem (docs/deprecated.md)",
+    ),
+    (
+        "apps/daemon/src/workflow/",
+        "deprecated; removed with the subsystem (docs/deprecated.md)",
+    ),
+    (
+        "packages/workflow-engine/",
+        "deprecated; removed with the subsystem (docs/deprecated.md)",
+    ),
     ("apps/daemon/src/speech/", "speech models, not Agents"),
 ];
 
@@ -31,20 +47,31 @@ fn is_model_identifier(line: &str) -> bool {
 }
 
 fn source_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
         if path.is_dir() {
             if matches!(
                 name.as_str(),
-                "node_modules" | "target" | "bindings" | "deprecated" | "tests" | "builtin-agents" | "dist" | "fixtures"
+                "node_modules"
+                    | "target"
+                    | "bindings"
+                    | "deprecated"
+                    | "tests"
+                    | "builtin-agents"
+                    | "dist"
+                    | "fixtures"
             ) {
                 continue;
             }
             source_files(&path, out);
-        } else if matches!(path.extension().and_then(|e| e.to_str()), Some("rs" | "ts" | "tsx"))
-            && !name.contains("test")
+        } else if matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("rs" | "ts" | "tsx")
+        ) && !name.contains("test")
             && !name.ends_with(".d.ts")
         {
             out.push(path);
@@ -74,21 +101,33 @@ fn the_platform_source_names_no_agent() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut files = Vec::new();
     for base in ["apps", "packages"] {
-        let Ok(children) = fs::read_dir(root.join(base)) else { continue };
+        let Ok(children) = fs::read_dir(root.join(base)) else {
+            continue;
+        };
         for child in children.flatten() {
             source_files(&child.path().join("src"), &mut files);
         }
     }
-    assert!(files.len() > 100, "the scan found only {} files; the layout changed", files.len());
+    assert!(
+        files.len() > 100,
+        "the scan found only {} files; the layout changed",
+        files.len()
+    );
 
     let mut found = Vec::new();
     for file in files {
-        let relative = file.strip_prefix(&root).unwrap_or(&file).to_string_lossy().replace('\\', "/");
+        let relative = file
+            .strip_prefix(&root)
+            .unwrap_or(&file)
+            .to_string_lossy()
+            .replace('\\', "/");
         let relative = relative.trim_start_matches("../").to_string();
         if ALLOWED.iter().any(|(prefix, _)| relative.contains(prefix)) {
             continue;
         }
-        let Ok(text) = fs::read_to_string(&file) else { continue };
+        let Ok(text) = fs::read_to_string(&file) else {
+            continue;
+        };
         for (number, line) in production_lines(&text) {
             let lowered = line.to_lowercase();
             if is_model_identifier(&lowered) {

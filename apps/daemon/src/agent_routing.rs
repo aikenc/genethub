@@ -256,7 +256,10 @@ fn collect_candidates(
         }
 
         if agent.catalog.models.is_empty() {
-            if !registry.get(&agent.id).is_some_and(|adapter| adapter.needs_model_catalog()) {
+            if !registry
+                .get(&agent.id)
+                .is_some_and(|adapter| adapter.needs_model_catalog())
+            {
                 candidates.push(candidate_for(preferences, agent, None));
             }
         } else {

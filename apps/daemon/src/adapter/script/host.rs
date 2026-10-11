@@ -1380,15 +1380,26 @@ impl AgentHost {
         if id.is_empty() {
             return;
         }
-        let op = params.get("op").and_then(Value::as_str).unwrap_or_default().to_string();
-        let provider = params.get("provider").and_then(Value::as_str).map(str::to_string);
+        let op = params
+            .get("op")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let provider = params
+            .get("provider")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         tokio::spawn(async move {
             let answer = match host.env.providers.all().await {
                 Some(all) => super::providers::answer(&op, provider.as_deref(), &all),
                 None => Err("模型 provider 暂时不可用，请稍后再试".to_string()),
             };
             let _ = host
-                .call("provider.reply", super::providers::reply(&id, answer), SHORT)
+                .call(
+                    "provider.reply",
+                    super::providers::reply(&id, answer),
+                    SHORT,
+                )
                 .await;
         });
     }
@@ -1908,7 +1919,11 @@ mod state_tests {
             ],
         }));
         assert_eq!(state.status_label.as_deref(), Some("可用（Key 未核对）"));
-        let groups: Vec<_> = state.actions.iter().map(|action| action.group.as_deref()).collect();
+        let groups: Vec<_> = state
+            .actions
+            .iter()
+            .map(|action| action.group.as_deref())
+            .collect();
         assert_eq!(groups, vec![Some("account"), None, None]);
     }
 
@@ -1922,7 +1937,11 @@ mod state_tests {
                 {"id": "blank", "label": "空", "confirm": ""},
             ],
         }));
-        let asked: Vec<_> = state.actions.iter().map(|action| action.confirm.as_deref()).collect();
+        let asked: Vec<_> = state
+            .actions
+            .iter()
+            .map(|action| action.confirm.as_deref())
+            .collect();
         assert_eq!(asked, vec![Some("确认退出登录？"), None, None]);
         let flood = parse_state(&json!({
             "ready": true,
@@ -1946,6 +1965,9 @@ mod state_tests {
     #[test]
     fn no_label_means_the_plain_ready_state() {
         assert_eq!(parse_state(&json!({"ready": true})).status_label, None);
-        assert_eq!(parse_state(&json!({"ready": true, "statusLabel": ""})).status_label, None);
+        assert_eq!(
+            parse_state(&json!({"ready": true, "statusLabel": ""})).status_label,
+            None
+        );
     }
 }

@@ -646,10 +646,18 @@ mod tests {
     #[test]
     fn the_presets_clients_are_given_are_exactly_what_the_daemon_would_use() {
         let presets = presets();
-        assert!(presets.len() >= 6, "kimi, minimax, qwen, deepseek, openai, anthropic");
+        assert!(
+            presets.len() >= 6,
+            "kimi, minimax, qwen, deepseek, openai, anthropic"
+        );
         for preset in presets {
             let resolved = resolve(&preset.id, &ProviderConfig::default());
-            assert_eq!(resolved.base_url.as_deref(), Some(preset.base_url.as_str()), "{}", preset.id);
+            assert_eq!(
+                resolved.base_url.as_deref(),
+                Some(preset.base_url.as_str()),
+                "{}",
+                preset.id
+            );
             assert_eq!(resolved.dialect.as_str(), preset.dialect, "{}", preset.id);
             assert_eq!(resolved.label, preset.label, "{}", preset.id);
             assert!(!resolved.custom, "{} is shipped, not custom", preset.id);

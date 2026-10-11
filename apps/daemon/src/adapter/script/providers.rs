@@ -69,7 +69,9 @@ pub fn answer(op: &str, provider: Option<&str>, all: &Providers) -> Result<Value
             }
             if config.base_url.as_deref().unwrap_or("").is_empty() {
                 return Err(match config.problem.as_deref() {
-                    Some(problem) if !problem.is_empty() => format!("{label} 的地址不可用：{problem}"),
+                    Some(problem) if !problem.is_empty() => {
+                        format!("{label} 的地址不可用：{problem}")
+                    }
                     _ => format!("{label} 没有可用的接口地址"),
                 });
             }
@@ -115,7 +117,10 @@ mod tests {
 
     fn all() -> Providers {
         let mut all = Providers::new();
-        all.insert("deepseek".into(), config(Some("sk-secret"), Some("https://api.deepseek.com/v1")));
+        all.insert(
+            "deepseek".into(),
+            config(Some("sk-secret"), Some("https://api.deepseek.com/v1")),
+        );
         all.insert("nokey".into(), config(None, Some("https://example.com/v1")));
         all.insert("noaddress".into(), config(Some("sk-x"), None));
         all
@@ -128,8 +133,14 @@ mod tests {
         let first = &listed["providers"][0];
         assert_eq!(first["id"], "deepseek");
         assert_eq!(first["usable"], true);
-        assert_eq!(listed["providers"][1]["usable"], false, "no key, not usable");
-        assert_eq!(listed["providers"][2]["usable"], false, "no address, not usable");
+        assert_eq!(
+            listed["providers"][1]["usable"], false,
+            "no key, not usable"
+        );
+        assert_eq!(
+            listed["providers"][2]["usable"], false,
+            "no address, not usable"
+        );
     }
 
     #[test]
@@ -144,9 +155,15 @@ mod tests {
     #[test]
     fn what_cannot_be_used_is_refused_with_a_reason() {
         let providers = all();
-        assert!(answer("get", Some("missing"), &providers).unwrap_err().contains("没有名为 missing"));
-        assert!(answer("get", Some("nokey"), &providers).unwrap_err().contains("API Key"));
-        assert!(answer("get", Some("noaddress"), &providers).unwrap_err().contains("地址"));
+        assert!(answer("get", Some("missing"), &providers)
+            .unwrap_err()
+            .contains("没有名为 missing"));
+        assert!(answer("get", Some("nokey"), &providers)
+            .unwrap_err()
+            .contains("API Key"));
+        assert!(answer("get", Some("noaddress"), &providers)
+            .unwrap_err()
+            .contains("地址"));
         assert!(answer("get", None, &providers).is_err());
         assert!(answer("rotate", None, &providers).is_err());
     }
@@ -161,7 +178,13 @@ mod tests {
 
     #[test]
     fn a_reply_frame_is_either_a_result_or_an_error() {
-        assert_eq!(reply("r1", Ok(json!({"a": 1}))), json!({"id": "r1", "result": {"a": 1}}));
-        assert_eq!(reply("r1", Err("没有".into())), json!({"id": "r1", "error": "没有"}));
+        assert_eq!(
+            reply("r1", Ok(json!({"a": 1}))),
+            json!({"id": "r1", "result": {"a": 1}})
+        );
+        assert_eq!(
+            reply("r1", Err("没有".into())),
+            json!({"id": "r1", "error": "没有"})
+        );
     }
 }
