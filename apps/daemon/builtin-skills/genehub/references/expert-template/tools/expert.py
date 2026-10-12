@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """expert.py: how one expert's sessions talk to each other. Everything it knows is in files and in `genet`.
 
-  send --to <session id | EXPERT:default> [--kind TEXT] TEXT   queue a system notice to a session
-  spawn --kind topic|work --desc TEXT [--dir PATH] TASK        start a background session and watch it
+  send --to <session id | EXPERT:default> [--kind TEXT] [--tier T | --model ID] TEXT
+                                                               queue a system notice to a session
+  spawn --kind topic|work --desc TEXT [--dir PATH] [--tier T | --model ID] [--media image|video] TASK
+                                                               start a background session and watch it
   directory [--expert NAME]                                    list experts and their live sessions
   mount PATH | unmount PATH                                    claim / release a business directory
   hook                                                         run by the daemon's timer; not for Agents
@@ -13,6 +15,7 @@ Failure modes (each error says what happened, the state now, and what to do next
   spawn  writer lock held by a live one -> error text, no session created       -> wait for it, or pick another directory
   hook   `genet` fails or session gone  -> reported to the front once, record kept or moved to done/
   hook   unhandled exception            -> system message to the front, exit 1; the next tick retries
+  spawn  no route has the medium / tier -> error text, no session created       -> `genet agent list --routes`, pick a --tier or --model
 Every action is idempotent: message ids are derived from what is being said, so a repeat is dropped by the daemon.
 """
 import argparse
@@ -174,16 +177,85 @@ def session_summary(session_id):
     return genet("session", "get", session_id).get("session", {}).get("summary", {})
 
 
-def agent_for(root):
-    configured = open_env(root).get("EXPERT_AGENT")
-    if configured:
-        return configured
+COST_RANK = {"veryLow": 0, "low": 1, "medium": 2, "high": 3, "veryHigh": 4}
+TIERS = ("Max", "Pro", "Flash")
+MEDIA_TAGS = {"image": "图片理解", "video": "视频理解"}
+
+
+def requester_summary(root):
+    """The session this one is started on behalf of: the caller, or, from the timer, the expert's front."""
     current = os.environ.get("GENEHUB_SESSION_ID")
     if current:
-        agent = session_summary(current).get("agentId")
-        if agent:
-            return agent
-    raise ExpertError("不知道用哪个 Agent 开会话", "没有创建任何会话", "在 .genethub/open.env 里写 EXPERT_AGENT=<agent id>，或从一个会话里运行")
+        return session_summary(current)
+    front = front_session(root, me(root)[1]["spaces"])
+    return session_summary(front) if front else {}
+
+
+def routes(*filters):
+    return genet("agent", "list", "--routes", *filters).get("routes", [])
+
+
+def pick_equivalent(inherited, everything, with_medium):
+    """The route that does what the inherited one does and also understands the medium: same tier tags,
+    cost level nearest to the inherited one, the cheaper on a tie. None when there is no such route."""
+    mine = next((r for r in everything if r["agentId"] == inherited["agentId"] and r.get("modelId") == inherited.get("modelId")), None)
+    if mine is None:
+        return None
+    tiers = [tag for tag in mine["tags"] if tag in TIERS]
+    cost = COST_RANK.get(mine["cost"], 2)
+    fits = [r for r in with_medium if r.get("modelId") and all(tag in r["tags"] for tag in tiers)]
+    return min(fits, key=lambda r: (abs(COST_RANK.get(r["cost"], 2) - cost), COST_RANK.get(r["cost"], 2), r["agentId"], r["modelId"]), default=None)
+
+
+def choose(root, model_key, tier=None, model=None, media=None):
+    """The `agent run` arguments that pick the Agent and model, and one line saying why.
+    Order: asked for explicitly, then this machine's own override, then what the requester runs on."""
+    if tier and model:
+        raise ExpertError("--tier 和 --model 不能同时给", "没有创建任何会话", "只留一个：档位让平台选，模型是点名")
+    env = open_env(root)
+    if tier:
+        if tier not in TIERS:
+            raise ExpertError("档位 %r 不是 Max / Pro / Flash" % tier, "没有创建任何会话", "用 `genet agent list --routes` 看可用的档位")
+        tags = [tier] + ([MEDIA_TAGS[media]] if media else [])
+        args = ["--tag", tier] + (["--media", media] if media else [])
+        if not routes(*sum((["--tag", tag] for tag in tags if tag in TIERS), []), *(["--media", media] if media else [])):
+            raise ExpertError("本机没有同时满足 %s 的路由" % " + ".join(tags), "没有创建任何会话", "换一个档位，或让用户在设置里给模型加上对应标签")
+        return args, "档位 %s%s" % (tier, " + " + media if media else "")
+    agent = env.get("EXPERT_AGENT")
+    if model:
+        agent = agent or requester_summary(root).get("agentId")
+        if not agent:
+            raise ExpertError("不知道用哪个 Agent 开会话", "没有创建任何会话", "在 .genethub/open.env 里写 EXPERT_AGENT=<agent id>，或从一个会话里运行")
+        return ["--agent", agent, "--model", model], "点名模型 %s" % model
+    override = env.get(model_key)
+    inherited = requester_summary(root)
+    if not agent:
+        agent = inherited.get("agentId")
+    if not agent:
+        raise ExpertError("不知道用哪个 Agent 开会话", "没有创建任何会话", "在 .genethub/open.env 里写 EXPERT_AGENT=<agent id>，或从一个会话里运行")
+    if override:
+        return ["--agent", agent, "--model", override], "本机覆盖 %s=%s" % (model_key, override)
+    args, why = ["--agent", agent], "Agent %s，模型用它自己的默认" % agent
+    if inherited.get("agentId") == agent and inherited.get("modelId"):
+        route = {"agentId": agent, "modelId": inherited["modelId"]}
+        why = "沿用请求方的 %s/%s" % (agent, inherited["modelId"])
+        if media:
+            fits = routes("--media", media)
+            if not any(r["agentId"] == agent and r.get("modelId") == inherited["modelId"] for r in fits):
+                route = pick_equivalent(route, routes(), fits)
+                if route is None:
+                    raise ExpertError("请求方的模型 %s/%s 看不了%s，本机也没有同档位、能看%s的模型" % (agent, inherited["modelId"], media, media),
+                                      "没有创建任何会话", "告诉用户这件事需要能看%s的模型；或用 --tier 指定一个有对应标签的档位" % media)
+                agent = route["agentId"]
+                why = "请求方的模型看不了%s，换成同档位、成本最接近的 %s/%s" % (media, agent, route["modelId"])
+        args = ["--agent", agent, "--model", route["modelId"]]
+        if inherited.get("effortId") and route["modelId"] == inherited["modelId"] and route["agentId"] == inherited["agentId"]:
+            args += ["--effort", inherited["effortId"]]
+    elif media:
+        fits = routes("--media", media)
+        raise ExpertError("请求方没有记录模型，无法判断它能不能看%s" % media, "没有创建任何会话",
+                          "用 --tier 指定档位%s" % ("（本机有 %d 条能看%s的路由）" % (len(fits), media) if fits else "；本机没有能看%s的路由" % media))
+    return args, why
 
 
 def front_session(root, spaces):
@@ -191,14 +263,12 @@ def front_session(root, spaces):
     return max(candidates, key=lambda item: item.get("updatedAtMs", 0))["id"] if candidates else None
 
 
-def start(root, workspace_id, role, desc, text, model_key):
-    env = open_env(root)
-    args = ["agent", "run", "--agent", agent_for(root), text, "--workspace", workspace_id, "--label", ROLE_LABELS[role],
+def start(root, workspace_id, role, desc, text, model_key, tier=None, model=None, media=None):
+    """Starts the session and returns (its id, why this Agent and model)."""
+    picked, why = choose(root, model_key, tier, model, media)
+    args = ["agent", "run", *picked, text, "--workspace", workspace_id, "--label", ROLE_LABELS[role],
             "--label", SYSTEM_LABEL, "--description", desc[:300], "--no-wait"]
-    model = env.get(model_key)
-    if model:
-        args += ["--model", model]
-    return genet(*args).get("sessionId")
+    return genet(*args).get("sessionId"), why
 
 
 def clip(text):
@@ -237,9 +307,9 @@ def cmd_send(args):
             raise ExpertError("没有专家 %r，或它没有 think 空间" % expert_name, "没有排入任何消息", "用 `directory` 查看有哪些专家")
         existing = [item for item in live_sessions(expert["spaces"]["think"]) if ROLE_LABELS["default"] in (item.get("labels") or [])]
         if not existing:
-            created = start(expert["root"], expert["spaces"]["think"], "default", "%s 的默认思考会话：分诊请求、整理记忆" % expert_name,
-                            clip("用途: %s\n发送方: %s\n\n%s" % (args.kind, sender, text)), "EXPERT_MODEL_THINK")
-            print("已创建 %s 的默认思考会话 %s 并交给它" % (expert_name, created))
+            created, why = start(expert["root"], expert["spaces"]["think"], "default", "%s 的默认思考会话：分诊请求、整理记忆" % expert_name,
+                                 clip("用途: %s\n发送方: %s\n\n%s" % (args.kind, sender, text)), "EXPERT_MODEL_THINK", args.tier, args.model)
+            print("已创建 %s 的默认思考会话 %s 并交给它（%s）" % (expert_name, created, why))
             return
         target = existing[0]["id"]
     notice(target, args.kind, sender, text, text)
@@ -290,13 +360,19 @@ def cmd_spawn(args):
         lock = marker
         task += "\n\n业务目录: %s（你是这个目录唯一的写会话）" % path
     requester = os.environ.get("GENEHUB_SESSION_ID")
-    session_id = start(root, workspace_id, role, args.desc, clip(task), "EXPERT_MODEL_WORK" if role == "work" else "EXPERT_MODEL_THINK")
+    try:
+        session_id, why = start(root, workspace_id, role, args.desc, clip(task), "EXPERT_MODEL_WORK" if role == "work" else "EXPERT_MODEL_THINK",
+                                args.tier, args.model, args.media)
+    except ExpertError:
+        if lock:
+            os.remove(lock)  # no session will ever hold this directory
+        raise
     if lock:
         write_json(lock, {"session": session_id, "expert": name, "at": now_ms()})
     write_json(state_dir(root, "pending", session_id + ".json"), {
         "sessionId": session_id, "requester": requester, "kind": args.kind, "desc": args.desc, "createdAtMs": now_ms(),
-        "baseline": None, "notified": [], "lock": lock})
-    print("已开始 %s 会话 %s；完成后会有系统消息" % (args.kind, session_id))
+        "baseline": None, "notified": [], "lock": lock, "route": why})
+    print("已开始 %s 会话 %s（%s）；完成后会有系统消息" % (args.kind, session_id, why))
 
 
 def session_missing(session_id):
@@ -495,11 +571,16 @@ def main(argv):
     send = sub.add_parser("send")
     send.add_argument("--to", required=True)
     send.add_argument("--kind", default="note")
+    send.add_argument("--tier", help="only when this creates the default thinking session: Max, Pro or Flash")
+    send.add_argument("--model", help="only when this creates the default thinking session: an exact model id")
     send.add_argument("text", nargs="+")
     spawn = sub.add_parser("spawn")
     spawn.add_argument("--kind", choices=["topic", "work"], required=True)
     spawn.add_argument("--desc", required=True)
     spawn.add_argument("--dir")
+    spawn.add_argument("--tier", help="Max, Pro or Flash; the platform picks the cheapest live model with it")
+    spawn.add_argument("--model", help="an exact model id on the expert's Agent")
+    spawn.add_argument("--media", choices=sorted(MEDIA_TAGS), help="the task has images or video: the model must understand them")
     spawn.add_argument("task", nargs="+")
     directory = sub.add_parser("directory")
     directory.add_argument("--expert")

@@ -61,6 +61,11 @@ pub struct Run {
     pub title: Option<String>,
     pub labels: Vec<String>,
     pub description: Option<String>,
+    /// `--tag`: resolve the Agent and model from machine routing at creation
+    /// instead of naming them. Empty means a concrete `--agent`.
+    pub tags: Vec<String>,
+    /// `--media`: the daemon's own media tags (`图片理解`, `视频理解`).
+    pub media_tags: Vec<String>,
     /// Send as a `system` notice (`--queue`) instead of a request.
     pub queue: bool,
     pub wait: bool,
@@ -73,6 +78,11 @@ pub struct Run {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     AgentList,
+    /// `genet agent list --routes`: only the routable Agent/model pairs.
+    AgentRoutes {
+        tags: Vec<String>,
+        media_tags: Vec<String>,
+    },
     AgentShow {
         agent_id: String,
     },
@@ -123,6 +133,15 @@ pub enum Command {
         session_id: String,
         text: String,
     },
+    /// `genet session model`: pin a model or effort on a concrete session, or
+    /// move a session to other tiers.
+    Model {
+        session_id: String,
+        model_id: Option<String>,
+        effort_id: Option<String>,
+        tags: Vec<String>,
+        media_tags: Vec<String>,
+    },
 }
 
 /// `genet agent …` and the `genet <agentId> …` sugar.
@@ -151,27 +170,25 @@ pub async fn sugar(agent_id: &str, args: &[String], selection: &Selection) -> i3
         },
         Err(error) => return output::fail(error),
     };
+    if !run.tags.is_empty() {
+        return output::fail(CliFailure::invalid_args(
+            "--tag lets routing choose the Agent: use genet agent run --tag, not genet <agentId>",
+        ));
+    }
     run.agent_id = Some(agent_id.to_string());
     execute(Command::Run(Box::new(run)), selection).await
 }
 
 fn parse_agent(args: &[String], selection: &Selection) -> Result<Command, CliFailure> {
     match args.first().map(String::as_str) {
-        Some("list") => {
-            if args.len() > 1 {
-                return Err(CliFailure::invalid_args(
-                    "genet agent list takes no arguments",
-                ));
-            }
-            Ok(Command::AgentList)
-        }
+        Some("list") => parse_agent_list(&args[1..]),
         Some("run") => {
             let options = Options::parse(&args[1..], selection)?;
             let agent_id = options.agent.clone();
             let run = options.into_run(agent_id)?;
-            if run.agent_id.is_none() && run.session_id.is_none() {
+            if run.agent_id.is_none() && run.session_id.is_none() && run.tags.is_empty() {
                 return Err(CliFailure::invalid_args(
-                    "genet agent run needs --agent <id>, or --session <id> to continue one",
+                    "genet agent run needs --agent <id>, --tag <tier> to let routing choose, or --session <id> to continue one",
                 ));
             }
             Ok(Command::Run(Box::new(run)))
@@ -216,9 +233,84 @@ fn parse_agent(args: &[String], selection: &Selection) -> Result<Command, CliFai
             Ok(Command::AgentLogs { agent_id, lines })
         }
         _ => Err(CliFailure::invalid_args(
-            "usage: genet agent list | show <id> | action <id> <action> | reload <id> | reset <id> | test <id> [--live] | logs <id> [--lines N] | run --agent <id> \"<prompt>\"",
+            "usage: genet agent list [--routes [--tag <tier>]... [--media image|video]] | show <id> | action <id> <action> | reload <id> | reset <id> | test <id> [--live] | logs <id> [--lines N] | run --agent <id> \"<prompt>\"",
         )),
     }
+}
+
+/// The one place a `--media` word becomes the daemon's media tag, so
+/// `agent list`, `agent run` and `session model` cannot disagree on it.
+fn media_tag(word: &str) -> Result<String, CliFailure> {
+    match word {
+        "image" => Ok(crate::agent_routing::TAG_IMAGE.to_string()),
+        "video" => Ok(crate::agent_routing::TAG_VIDEO.to_string()),
+        other => Err(CliFailure::invalid_args(format!(
+            "--media takes image or video, got {other}"
+        ))),
+    }
+}
+
+/// `--media` may name both media, but not the same one twice.
+fn media_tags(words: &[String]) -> Result<Vec<String>, CliFailure> {
+    let mut tags = Vec::new();
+    for word in words {
+        let tag = media_tag(word)?;
+        if tags.contains(&tag) {
+            return Err(CliFailure::invalid_args(format!(
+                "--media {word} was given twice"
+            )));
+        }
+        tags.push(tag);
+    }
+    Ok(tags)
+}
+
+/// Tiers are checked here with the daemon's own rules, before anything is
+/// created, so a bad tier cannot leave a session behind.
+fn tiers(tags: &[String]) -> Result<Vec<String>, CliFailure> {
+    crate::agent_routing::validate_selected_tags(tags.to_vec())
+        .map_err(|error| CliFailure::invalid_args(error.to_string()))
+}
+
+fn parse_agent_list(args: &[String]) -> Result<Command, CliFailure> {
+    let usage = "usage: genet agent list [--routes [--tag <tier>]... [--media image|video]]";
+    let mut routes = false;
+    let (mut tags, mut media) = (Vec::new(), Vec::new());
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--routes" => routes = true,
+            flag @ ("--tag" | "--media") => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| CliFailure::invalid_args(format!("{flag} needs a value")))?
+                    .clone();
+                if flag == "--tag" {
+                    tags.push(value);
+                } else {
+                    media.push(value);
+                }
+            }
+            _ => return Err(CliFailure::invalid_args(usage)),
+        }
+        index += 1;
+    }
+    if !routes {
+        if !tags.is_empty() || !media.is_empty() {
+            return Err(CliFailure::invalid_args(
+                "--tag and --media filter the routes: add --routes",
+            ));
+        }
+        return Ok(Command::AgentList);
+    }
+    // No tiers lists every route; the ones given must be valid.
+    let tags = if tags.is_empty() { tags } else { tiers(&tags)? };
+    Ok(Command::AgentRoutes {
+        tags,
+        media_tags: media_tags(&media)?,
+    })
 }
 
 fn agent_id_arg(args: &[String], verb: &str) -> Result<String, CliFailure> {
@@ -311,6 +403,42 @@ fn parse_session(args: &[String], selection: &Selection) -> Result<Command, CliF
                 text: text.clone(),
             })
         }
+        "model" => {
+            let usage = "usage: genet session model <id> (--model <id> [--effort <level>] | --effort <level> | --tag <tier>... [--media image|video])";
+            let (mut model, mut effort) = (None, None);
+            let (mut tags, mut media) = (Vec::new(), Vec::new());
+            let mut index = 2;
+            while index < args.len() {
+                let flag = args[index].as_str();
+                let value = args
+                    .get(index + 1)
+                    .filter(|v| !v.trim().is_empty())
+                    .ok_or_else(|| CliFailure::invalid_args(usage))?
+                    .clone();
+                match flag {
+                    "--model" if model.is_none() => model = Some(value),
+                    "--effort" if effort.is_none() => effort = Some(value),
+                    "--tag" => tags.push(value),
+                    "--media" => media.push(value),
+                    _ => return Err(CliFailure::invalid_args(usage)),
+                }
+                index += 2;
+            }
+            let routed = !tags.is_empty();
+            if (routed && (model.is_some() || effort.is_some()))
+                || (!routed && model.is_none() && effort.is_none())
+                || (!routed && !media.is_empty())
+            {
+                return Err(CliFailure::invalid_args(usage));
+            }
+            Ok(Command::Model {
+                session_id,
+                model_id: model,
+                effort_id: effort,
+                tags: if routed { tiers(&tags)? } else { tags },
+                media_tags: media_tags(&media)?,
+            })
+        }
         "label" => {
             let usage = "usage: genet session label <id> [--add <label>]... [--remove <label>]...";
             let (mut add, mut remove) = (Vec::new(), Vec::new());
@@ -353,6 +481,8 @@ struct Options {
     title: Option<String>,
     labels: Vec<String>,
     description: Option<String>,
+    tags: Vec<String>,
+    media: Vec<String>,
     queue: bool,
     request: Option<String>,
     choose: Option<String>,
@@ -393,6 +523,8 @@ impl Options {
                 "--title" => options.title = Some(value()?),
                 "--label" => options.labels.push(value()?),
                 "--description" => options.description = Some(value()?),
+                "--tag" => options.tags.push(value()?),
+                "--media" => options.media.push(value()?),
                 "--message" => options.positional.push(value()?),
                 "--request" => options.request = Some(value()?),
                 "--choose" => options.choose = Some(value()?),
@@ -449,6 +581,26 @@ impl Options {
             crate::session::store::normalize_session_description(description)
                 .map_err(CliFailure::invalid_args)?;
         }
+        let media_tags = media_tags(&self.media)?;
+        let tags = if self.tags.is_empty() {
+            Vec::new()
+        } else {
+            if agent_id.is_some()
+                || self.model.is_some()
+                || self.mode.is_some()
+                || self.session.is_some()
+            {
+                return Err(CliFailure::invalid_args(
+                    "--tag lets routing choose the Agent and model: it cannot be combined with --agent, --model, --mode or --session",
+                ));
+            }
+            tiers(&self.tags)?
+        };
+        if tags.is_empty() && !media_tags.is_empty() {
+            return Err(CliFailure::invalid_args(
+                "--media narrows a --tag route: give --tag too, or name the model yourself",
+            ));
+        }
         let wait = self.wait.unwrap_or(self.message_id.is_none());
         Ok(Run {
             message_id: self.message_id,
@@ -464,6 +616,8 @@ impl Options {
             title: self.title,
             labels: self.labels,
             description: self.description,
+            tags,
+            media_tags,
             queue: self.queue,
             wait,
             since_seq: self.since_seq,
@@ -487,6 +641,10 @@ async fn execute(command: Command, selection: &Selection) -> i32 {
     let result = match command {
         Command::AgentList => agent_list(&rpc).await.map(|data| {
             output::succeed("agent.list", data);
+            EXIT_OK
+        }),
+        Command::AgentRoutes { tags, media_tags } => agent_list(&rpc).await.map(|data| {
+            output::succeed("agent.list", routes_of(&data, &tags, &media_tags));
             EXIT_OK
         }),
         Command::AgentShow { agent_id } => agent_list(&rpc).await.and_then(|data| {
@@ -618,6 +776,18 @@ async fn execute(command: Command, selection: &Selection) -> i32 {
                 EXIT_OK
             })
         }
+        Command::Model {
+            session_id,
+            model_id,
+            effort_id,
+            tags,
+            media_tags,
+        } => set_model(&rpc, &session_id, model_id, effort_id, tags, media_tags)
+            .await
+            .map(|data| {
+                output::succeed("session.model", data);
+                EXIT_OK
+            }),
         Command::Close { session_id } => {
             acknowledge(
                 &rpc,
@@ -679,6 +849,123 @@ async fn describe(rpc: &Rpc, session_id: &str, text: &str) -> Result<SessionSumm
         Reply::Session(summary) => Ok(summary),
         other => Err(query::unexpected_reply("session", &other)),
     }
+}
+
+/// One line per route, in the shape the router uses, so an Agent can choose
+/// without reading every model of every Agent. `default` marks the model an
+/// Agent starts with when nobody names one.
+fn routes_of(data: &Value, tags: &[String], media_tags: &[String]) -> Value {
+    let required = crate::agent_routing::normalize_tags(tags.iter().chain(media_tags).cloned());
+    let mut routes = Vec::new();
+    for agent in data["agents"].as_array().into_iter().flatten() {
+        let default_model = agent["catalog"]["defaultModel"].as_str();
+        for route in agent["routes"].as_array().into_iter().flatten() {
+            let offered: Vec<&str> = route["tags"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            if !required
+                .iter()
+                .all(|need| offered.iter().any(|tag| tag.eq_ignore_ascii_case(need)))
+            {
+                continue;
+            }
+            let model = route["modelId"].as_str();
+            routes.push(json!({
+                "agentId": agent["id"],
+                "modelId": route["modelId"],
+                "tags": route["tags"],
+                "cost": route["cost"],
+                "default": model.is_some() && model == default_model,
+            }));
+        }
+    }
+    json!({ "routes": routes })
+}
+
+/// `genet session model`. A concrete model is pinned on the session's own
+/// Agent; a routed session is refused, because its model is decided again at
+/// every send and the pin would be undone by the next one.
+async fn set_model(
+    rpc: &Rpc,
+    session_id: &str,
+    model_id: Option<String>,
+    effort_id: Option<String>,
+    tags: Vec<String>,
+    media_tags: Vec<String>,
+) -> Result<Value, CliFailure> {
+    if !tags.is_empty() {
+        let Reply::Session(summary) = rpc
+            .call(Request::SessionRoute {
+                session_id: session_id.to_string(),
+                tags,
+                media_tags,
+            })
+            .await
+            .map_err(query::rpc_error)?
+        else {
+            return Err(CliFailure::protocol(
+                "the daemon answered session.route with something other than a session",
+            ));
+        };
+        return Ok(model_view(&summary));
+    }
+    let current = session_summary(rpc, session_id).await?;
+    if !current.routing_tags.is_empty() {
+        return Err(CliFailure::business(
+            "sessionRouted",
+            format!(
+                "会话 {session_id} 由标签 {} 路由，每次发送都会重新选择模型，直接指定的模型会被下一次发送覆盖；要换档位请用 --tag，要固定模型请新建会话",
+                current.routing_tags.join(" + ")
+            ),
+            Some(json!({"sessionId": session_id, "routingTags": current.routing_tags})),
+        ));
+    }
+    if let Some(model_id) = model_id {
+        rpc.call(Request::SessionSetModel {
+            session_id: session_id.to_string(),
+            model_id,
+        })
+        .await
+        .map_err(query::rpc_error)?;
+    }
+    if let Some(effort_id) = effort_id {
+        rpc.call(Request::SessionSetEffort {
+            session_id: session_id.to_string(),
+            effort_id,
+        })
+        .await
+        .map_err(query::rpc_error)?;
+    }
+    Ok(model_view(&session_summary(rpc, session_id).await?))
+}
+
+async fn session_summary(rpc: &Rpc, session_id: &str) -> Result<SessionSummary, CliFailure> {
+    match rpc
+        .call(Request::SessionGet {
+            recent_rounds: Some(0),
+            before_item_id: None,
+            session_id: session_id.to_string(),
+        })
+        .await
+        .map_err(query::rpc_error)?
+    {
+        Reply::Snapshot(snapshot) => Ok(snapshot.summary),
+        other => Err(query::unexpected_reply("session snapshot", &other)),
+    }
+}
+
+fn model_view(summary: &SessionSummary) -> Value {
+    json!({
+        "sessionId": summary.id,
+        "agentId": summary.agent_id,
+        "modelId": summary.model_id,
+        "effortId": summary.effort_id,
+        "routingTags": summary.routing_tags,
+        "mediaTags": summary.media_tags,
+    })
 }
 
 async fn agents_reply(
@@ -810,6 +1097,7 @@ async fn run_conversation(rpc: &Rpc, run: Run, here: bool) -> Result<i32, CliFai
                 "sessionId": session.id,
                 "workspaceId": session.workspace_id,
                 "agentId": session.agent_id,
+                "modelId": session.model_id,
             }),
         );
     }
@@ -889,6 +1177,7 @@ fn opened(session: &SessionSummary, snapshot: &SessionSnapshot, attached: bool) 
             "sessionId": session.id,
             "workspaceId": session.workspace_id,
             "agentId": session.agent_id,
+            "modelId": session.model_id,
             "status": snapshot.summary.status,
             "seq": snapshot.seq,
             "pendingPermissions": snapshot.pending_permissions,
@@ -927,6 +1216,25 @@ async fn attach(
 }
 
 async fn create(rpc: &Rpc, run: &Run, here: bool) -> Result<SessionSummary, CliFailure> {
+    if !run.tags.is_empty() {
+        let (workspace_id, cwd) = resolve_workspace(rpc, run, here).await?;
+        let Reply::Session(summary) = rpc
+            .call(Request::SessionCreateRouted {
+                workspace_id,
+                tags: run.tags.clone(),
+                media_tags: run.media_tags.clone(),
+                title: run.title.clone(),
+                cwd,
+            })
+            .await
+            .map_err(query::rpc_error)?
+        else {
+            return Err(CliFailure::protocol(
+                "the daemon answered session.createRouted with something other than a session",
+            ));
+        };
+        return Ok(summary);
+    }
     let agent_id = run
         .agent_id
         .clone()
@@ -1549,5 +1857,187 @@ mod tests {
         // A dropped connection is retryable infrastructure, not a verdict on
         // the turn, so it keeps the unreachable code.
         assert_eq!(report("s_1", Outcome::Disconnected), EXIT_UNREACHABLE);
+    }
+
+    #[test]
+    fn agent_list_routes_takes_tiers_and_media_and_plain_list_takes_nothing() {
+        assert_eq!(
+            parse_agent(&words(&["list"]), &selection(None)).unwrap(),
+            Command::AgentList
+        );
+        assert_eq!(
+            parse_agent(&words(&["list", "--routes"]), &selection(None)).unwrap(),
+            Command::AgentRoutes {
+                tags: vec![],
+                media_tags: vec![]
+            }
+        );
+        assert_eq!(
+            parse_agent(
+                &words(&["list", "--routes", "--tag", "pro", "--tag", "Max", "--media", "image"]),
+                &selection(None)
+            )
+            .unwrap(),
+            Command::AgentRoutes {
+                tags: vec!["Pro".into(), "Max".into()],
+                media_tags: vec!["图片理解".into()],
+            }
+        );
+        for bad in [
+            &["list", "--tag", "Pro"][..],
+            &["list", "--media", "image"],
+            &["list", "--routes", "--media", "audio"],
+            &["list", "--routes", "--media", "image", "--media", "image"],
+            &["list", "--routes", "--tag", "Pro", "--tag", "Pro"],
+            &["list", "extra"],
+        ] {
+            assert_eq!(
+                parse_agent(&words(bad), &selection(None)).unwrap_err().code,
+                "invalidArgs",
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_run_with_tiers_lets_routing_choose_and_refuses_what_would_override_it() {
+        let run = run_of(
+            parse_agent(
+                &words(&[
+                    "run",
+                    "--tag",
+                    "Max",
+                    "--media",
+                    "video",
+                    "--no-wait",
+                    "--message-id",
+                    "m1",
+                    "look",
+                ]),
+                &selection(Some("/s")),
+            )
+            .unwrap(),
+        );
+        assert_eq!(run.agent_id, None);
+        assert_eq!(run.tags, vec!["Max".to_string()]);
+        assert_eq!(run.media_tags, vec!["视频理解".to_string()]);
+        for bad in [
+            &["run", "--tag", "Max", "--agent", "codex", "hi"][..],
+            &["run", "--tag", "Max", "--model", "m", "hi"],
+            &["run", "--tag", "Max", "--mode", "x", "hi"],
+            &["run", "--tag", "Max", "--session", "s_1", "hi"],
+            &["run", "--media", "image", "--agent", "codex", "hi"],
+            &["run", "--tag", "Fast", "--tag", "Fast", "hi"],
+        ] {
+            assert_eq!(
+                parse_agent(&words(bad), &selection(Some("/s")))
+                    .unwrap_err()
+                    .code,
+                "invalidArgs",
+                "{bad:?}"
+            );
+        }
+        // The `genet <agentId>` shorthand names an Agent, so it cannot also ask routing to.
+        assert!(run_of(
+            parse_agent(
+                &words(&["run", "--agent", "codex", "hi"]),
+                &selection(Some("/s"))
+            )
+            .unwrap()
+        )
+        .tags
+        .is_empty());
+    }
+
+    #[test]
+    fn session_model_is_either_a_pinned_model_or_a_tier_move_never_both() {
+        assert_eq!(
+            parse_session(
+                &words(&["model", "s_1", "--model", "gpt-6-luna", "--effort", "high"]),
+                &selection(None)
+            )
+            .unwrap(),
+            Command::Model {
+                session_id: "s_1".into(),
+                model_id: Some("gpt-6-luna".into()),
+                effort_id: Some("high".into()),
+                tags: vec![],
+                media_tags: vec![],
+            }
+        );
+        assert_eq!(
+            parse_session(
+                &words(&["model", "s_1", "--effort", "low"]),
+                &selection(None)
+            )
+            .unwrap(),
+            Command::Model {
+                session_id: "s_1".into(),
+                model_id: None,
+                effort_id: Some("low".into()),
+                tags: vec![],
+                media_tags: vec![],
+            }
+        );
+        assert_eq!(
+            parse_session(
+                &words(&["model", "s_1", "--tag", "flash", "--media", "image"]),
+                &selection(None)
+            )
+            .unwrap(),
+            Command::Model {
+                session_id: "s_1".into(),
+                model_id: None,
+                effort_id: None,
+                tags: vec!["Flash".into()],
+                media_tags: vec!["图片理解".into()],
+            }
+        );
+        for bad in [
+            &["model", "s_1"][..],
+            &["model", "s_1", "--tag", "Pro", "--model", "m"],
+            &["model", "s_1", "--tag", "Pro", "--effort", "low"],
+            &["model", "s_1", "--media", "image"],
+            &["model", "s_1", "--model"],
+            &["model", "s_1", "--model", "a", "--model", "b"],
+            &["model", "s_1", "--bogus", "x"],
+        ] {
+            assert_eq!(
+                parse_session(&words(bad), &selection(None))
+                    .unwrap_err()
+                    .code,
+                "invalidArgs",
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn route_lines_are_filtered_by_every_tier_and_mark_the_agents_default() {
+        let data = json!({"agents": [
+            {"id": "codex", "catalog": {"defaultModel": "gpt-6.1-sol"}, "routes": [
+                {"modelId": "gpt-6.1-sol", "tags": ["Max", "图片理解"], "cost": "medium"},
+                {"modelId": "gpt-6-luna", "tags": ["Flash", "图片理解"], "cost": "veryLow"},
+            ]},
+            {"id": "tclaude", "catalog": {"defaultModel": null}, "routes": [
+                {"modelId": "glm-5.3", "tags": ["Pro"], "cost": "medium"},
+                {"tags": ["Flash"], "cost": "low"},
+            ]},
+        ]});
+        let all = routes_of(&data, &[], &[]);
+        assert_eq!(all["routes"].as_array().unwrap().len(), 4);
+        assert_eq!(all["routes"][0]["default"], json!(true));
+        assert_eq!(all["routes"][1]["default"], json!(false));
+        // A route without a model id is never "the default model".
+        assert_eq!(all["routes"][3]["default"], json!(false));
+
+        let flash_image = routes_of(&data, &["flash".into()], &["图片理解".into()]);
+        let lines = flash_image["routes"].as_array().unwrap();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["modelId"], json!("gpt-6-luna"));
+        assert_eq!(lines[0]["cost"], json!("veryLow"));
+
+        let none = routes_of(&data, &["Max".into()], &["视频理解".into()]);
+        assert!(none["routes"].as_array().unwrap().is_empty());
     }
 }

@@ -3141,6 +3141,27 @@ impl SessionManager {
             self.registry.require(&meta.agent_id)?
         };
         let offered = adapter.catalog(providers).await;
+        // A session that named no model still runs on one. Record which, so
+        // `session list/get`, the review of a conversation and anyone asking
+        // "what is this running on" read the same answer the Agent was started
+        // with. Not while a migration seed is waiting for this exact route:
+        // the seed was cut for the model the switch named, and a recorded
+        // default would stop it matching.
+        if !self.has_pending_migration_seed(&meta)? {
+            let pinned = {
+                let mut shared = live.meta.lock().await;
+                if pin_default_model(&mut shared, &offered) {
+                    self.store.save_meta(&shared)?;
+                    meta.model_id = shared.model_id.clone();
+                    shared.model_id.clone()
+                } else {
+                    None
+                }
+            };
+            if let Some(model_id) = pinned {
+                live.publish(SessionEvent::ModelChanged { model_id }).await;
+            }
+        }
         if !adapter.owns_runtime_selection() && normalize_runtime_selection(&mut meta, &offered) {
             tracing::warn!(
                 agent = %meta.agent_id,
@@ -7823,6 +7844,23 @@ fn listed<'a>(axis: &str, value: &str, offered: impl Iterator<Item = &'a str>) -
 
 /// Reconcile durable choices with what this Agent offers *now*.
 /// Catalog-less Agents remain opaque; declared catalogs are authoritative.
+/// Records the catalog's default model on a session that named none. Only a
+/// model the catalog actually lists is recorded; an Agent that reports no
+/// default (or none it lists) keeps the session unpinned. Returns whether
+/// anything changed.
+fn pin_default_model(meta: &mut SessionMeta, catalog: &Catalog) -> bool {
+    if meta.model_id.is_some() {
+        return false;
+    }
+    let Some(default) = catalog.default_model.as_ref().filter(|id| {
+        catalog.models.is_empty() || catalog.models.iter().any(|model| &model.id == *id)
+    }) else {
+        return false;
+    };
+    meta.model_id = Some(default.clone());
+    true
+}
+
 fn normalize_runtime_selection(meta: &mut SessionMeta, catalog: &Catalog) -> bool {
     let before = (
         meta.model_id.clone(),
@@ -8066,6 +8104,69 @@ mod tests {
         let history = migration_seed_history(&session, &items);
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].id(), "handled");
+    }
+
+    fn catalog_with(default_model: Option<&str>, models: &[&str]) -> Catalog {
+        Catalog {
+            models: models
+                .iter()
+                .map(|id| genehub_proto::ModelInfo {
+                    id: (*id).into(),
+                    label: (*id).into(),
+                    context_window: None,
+                    reasoning: false,
+                    efforts: vec![],
+                    input_modalities: None,
+                    supports_fast: false,
+                })
+                .collect(),
+            default_model: default_model.map(str::to_string),
+            ..Catalog::default()
+        }
+    }
+
+    #[test]
+    fn a_session_that_named_no_model_records_the_agents_default() {
+        let mut session = meta();
+        session.model_id = None;
+        assert!(pin_default_model(
+            &mut session,
+            &catalog_with(Some("m1"), &["m0", "m1"])
+        ));
+        assert_eq!(session.model_id.as_deref(), Some("m1"));
+    }
+
+    #[test]
+    fn a_named_model_is_never_replaced_by_the_default() {
+        let mut session = meta();
+        session.model_id = Some("chosen".into());
+        assert!(!pin_default_model(
+            &mut session,
+            &catalog_with(Some("m1"), &["m1"])
+        ));
+        assert_eq!(session.model_id.as_deref(), Some("chosen"));
+    }
+
+    #[test]
+    fn a_default_the_catalog_does_not_list_is_not_recorded() {
+        let mut session = meta();
+        session.model_id = None;
+        assert!(!pin_default_model(
+            &mut session,
+            &catalog_with(Some("ghost"), &["m1"])
+        ));
+        assert_eq!(session.model_id, None);
+        assert!(!pin_default_model(
+            &mut session,
+            &catalog_with(None, &["m1"])
+        ));
+        assert_eq!(session.model_id, None);
+        // An Agent that lists nothing but still reports the model it will use.
+        assert!(pin_default_model(
+            &mut session,
+            &catalog_with(Some("only"), &[])
+        ));
+        assert_eq!(session.model_id.as_deref(), Some("only"));
     }
 
     #[test]

@@ -16,7 +16,7 @@ use super::output::{self, CliFailure, CLI_SCHEMA};
 use super::rpc::{ConnectError, Refusal, Rpc, RpcError};
 use super::target::{self, Routing, Selection};
 
-const COMMAND_NAMES: [&str; 85] = [
+const COMMAND_NAMES: [&str; 86] = [
     "schema",
     "context",
     "capabilities",
@@ -61,6 +61,7 @@ const COMMAND_NAMES: [&str; 85] = [
     "session.close",
     "session.label",
     "session.describe",
+    "session.model",
     "workflow.list",
     "workflow.build",
     "workflow.inspect",
@@ -143,6 +144,7 @@ fn mutates(name: &str) -> bool {
             | "session.close"
             | "session.label"
             | "session.describe"
+            | "session.model"
             | "workflow.build"
             | "workflow.activate"
             | "workflow.dispatch"
@@ -1376,7 +1378,21 @@ fn command_schema(name: &str) -> Value {
                 &["sessionId"],
             ),
         ),
-        "agent.list" => ("genet agent list", true, object_input(json!({}), &[])),
+        "agent.list" => (
+            "genet agent list [--routes [--tag <tier>]... [--media image|video]]",
+            true,
+            object_input(
+                json!({
+                    "routes": {"type": "boolean", "default": false,
+                        "description": "--routes; print only the routable Agent/model pairs, one per line: agentId, modelId, tags, cost, default. This is what `agent run --tag` chooses from"},
+                    "tags": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 40}, "maxItems": 4,
+                        "description": "--tag, repeatable, only with --routes; keep routes whose tags contain every one (Max, Pro, Flash, 图片理解, 视频理解, or a Human-defined tag)"},
+                    "media": {"type": "array", "items": {"enum": ["image", "video"]}, "maxItems": 2,
+                        "description": "--media, only with --routes; keep routes that understand the medium"},
+                }),
+                &[],
+            ),
+        ),
         "agent.show" | "agent.reload" | "agent.reset" => (
             match name {
                 "agent.show" => "genet agent show <id>",
@@ -1421,14 +1437,19 @@ fn command_schema(name: &str) -> Value {
             ),
         ),
         "agent.run" => (
-            "genet agent run --agent <id> \"<prompt>\" [--cwd <dir> | --workspace <id>] \
+            "genet agent run (--agent <id> | --tag <tier>... [--media image|video]) \"<prompt>\" [--cwd <dir> | --workspace <id>] \
              [--session <id>] [--model <id>] [--mode <id>] [--effort <id>] [--title <t>] \
              [--label <label>]... [--description <text>] [--wait|--no-wait] [--since-seq <n>] \
              [--auto-approve] [--timeout <s>] [--open-workspace]",
             true,
             object_input(
                 json!({
-                    "agentId": {"type": "string", "minLength": 1},
+                    "agentId": {"type": "string", "minLength": 1,
+                        "description": "required unless --tag is given; with --tag routing chooses the Agent and model"},
+                    "tags": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 40}, "minItems": 0, "maxItems": 4,
+                        "description": "--tag, repeatable; resolve the Agent and model from machine routing at creation (cheapest live route whose tags contain every one: Max, Pro, Flash, 图片理解, 视频理解). Exclusive with --agent, --model, --mode, --session. Fails with agentTagRouteUnavailable and creates nothing when no route matches"},
+                    "media": {"type": "array", "items": {"enum": ["image", "video"]}, "maxItems": 2,
+                        "description": "--media, only with --tag; the task contains images or video, so the route must understand them"},
                     "prompt": {"type": "string", "minLength": 1},
                     "sessionId": {"type": ["string", "null"], "minLength": 1},
                     "workspaceId": {"type": ["string", "null"], "minLength": 1},
@@ -1621,6 +1642,24 @@ fn command_schema(name: &str) -> Value {
                         "description": "one line, like a Skill description: what this session does and when to ask it; at most 300 bytes; an empty string clears it"},
                 }),
                 &["sessionId", "text"],
+            ),
+        ),
+        "session.model" => (
+            "genet session model <id> (--model <id> [--effort <level>] | --effort <level> | --tag <tier>... [--media image|video])",
+            true,
+            object_input(
+                json!({
+                    "sessionId": {"type": "string", "minLength": 1},
+                    "modelId": {"type": ["string", "null"], "minLength": 1,
+                        "description": "--model; pin a model the session's own Agent offers. Refused with sessionRouted when the session follows tag routing"},
+                    "effortId": {"type": ["string", "null"], "minLength": 1,
+                        "description": "--effort; the thinking level, a level the current model offers"},
+                    "tags": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 40}, "maxItems": 4,
+                        "description": "--tag, repeatable; move the session to the cheapest live route with every tier. The session then follows routing at each send; an Agent change keeps the visible history and starts a new native thread. Exclusive with --model and --effort"},
+                    "media": {"type": "array", "items": {"enum": ["image", "video"]}, "maxItems": 2,
+                        "description": "--media, only with --tag"},
+                }),
+                &["sessionId"],
             ),
         ),
         "session.interrupt" | "session.close" => (
@@ -2149,9 +2188,29 @@ pub fn reply_kind(reply: &Reply) -> &'static str {
     }
 }
 
+/// The routing failures the router names at the front of its message.
+fn routing_failure_name(message: &str) -> Option<&'static str> {
+    let (name, _) = message.split_once(": ")?;
+    match name {
+        "agentTagRouteUnavailable" => Some("agentTagRouteUnavailable"),
+        "agentTagInvalid" => Some("agentTagInvalid"),
+        _ => None,
+    }
+}
+
 pub fn rpc_error(error: RpcError) -> CliFailure {
     match error {
         RpcError::Transport(message) => CliFailure::daemon_unavailable(message),
+        // The router names its own failures (`agentTagRouteUnavailable: …`,
+        // `agentTagInvalid: …`) at the front of the message. A script that has
+        // to tell "no such route" from "the daemon broke" reads the code, not
+        // the prose, so that name becomes the code.
+        RpcError::Remote(ProtocolError { code: _, message })
+            if routing_failure_name(&message).is_some() =>
+        {
+            let name = routing_failure_name(&message).unwrap_or("internal");
+            CliFailure::business(name, message, None)
+        }
         RpcError::Remote(ProtocolError { code, message }) => match code {
             ErrorCode::BadRequest => CliFailure::business("invalidInput", message, None),
             ErrorCode::Unauthorized => CliFailure::business("unauthenticated", message, None),
@@ -2178,6 +2237,20 @@ mod tests {
 
     fn words(input: &[&str]) -> Vec<String> {
         input.iter().map(|word| (*word).to_string()).collect()
+    }
+
+    #[test]
+    fn a_route_failure_keeps_the_name_the_router_gave_it() {
+        let failure = rpc_error(RpcError::Remote(ProtocolError {
+            code: ErrorCode::Internal,
+            message: "agentTagRouteUnavailable: no route matches Max".into(),
+        }));
+        assert_eq!(failure.code, "agentTagRouteUnavailable");
+        let other = rpc_error(RpcError::Remote(ProtocolError {
+            code: ErrorCode::Internal,
+            message: "something else: broke".into(),
+        }));
+        assert_eq!(other.code, "internal");
     }
 
     #[test]
