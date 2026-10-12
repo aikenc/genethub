@@ -172,6 +172,10 @@ async function main() {
       root,
       channel,
       publicOrigin,
+      // A development slot publishes to its own Control on a literal loopback address,
+      // which is plain http. The publisher accepts that only when asked, and only the
+      // dev channel asks: beta and stable keep publishing to https origins alone.
+      allowHttpLoopback: channel === "dev",
       githubUrl,
       source,
       runner,
