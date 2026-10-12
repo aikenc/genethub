@@ -425,7 +425,9 @@ impl SessionMeta {
                 .openable()
                 .then(|| interaction_summary(self.pending_permission.iter())),
             latest_reply: self.latest_reply.clone(),
-            input_summary: (!self.inbox.entries.is_empty()).then(|| {
+            // A pause is state a script needs to see even when nothing is queued: an
+            // interrupted session otherwise looks exactly like one that finished.
+            input_summary: (!self.inbox.entries.is_empty() || self.inbox.paused).then(|| {
                 genehub_proto::SessionInputSummary {
                     pending_message_ids: self
                         .inbox

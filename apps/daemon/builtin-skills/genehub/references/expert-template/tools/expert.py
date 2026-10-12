@@ -212,7 +212,7 @@ def notice(session_id, purpose, sender, text, *id_parts):
     """Queue a system notice. Idempotent: the id comes from what is said, so a repeat is dropped."""
     summary = session_summary(session_id)
     inputs = summary.get("inputSummary") or {}
-    if inputs.get("pending", 0) >= inputs.get("limit", 32):
+    if len(inputs.get("pending") or []) >= inputs.get("limit", 32):
         raise ExpertError("目标 %s 的队列已满（%s 条）" % (session_id, inputs.get("limit", 32)), "没有排入任何消息", "等它处理完，或改发给别的会话")
     if summary.get("archived"):
         raise ExpertError("目标 %s 已归档" % session_id, "没有排入任何消息", "用 `directory` 找现在的会话，或发给 EXPERT:default")
@@ -399,11 +399,16 @@ def reconcile(root, name, mine):
                 said.append(key)
                 write_json(path, record)
             continue
-        if (inputs.get("paused") or status == "failed") and "stop" not in said:
-            if front:
-                notice(front, "report", "%s:hook" % name, "会话 %s（%s）%s：%s" % (session_id, record["desc"], "已失败" if status == "failed" else "被暂停", inputs.get("error") or "无附加信息"), session_id, "stop")
-            said.append("stop")
-            write_json(path, record)
+        if inputs.get("paused") or status == "failed":
+            # Told once. An interrupted session's partial reply is not a result, so it is not delivered as one;
+            # a paused record stays until the person resumes it, a failed one is closed.
+            if "stop" not in said:
+                if front:
+                    notice(front, "report", "%s:hook" % name, "会话 %s（%s）%s：%s" % (session_id, record["desc"], "已失败" if status == "failed" else "被暂停", inputs.get("error") or "无附加信息"), session_id, "stop")
+                said.append("stop")
+                write_json(path, record)
+            if status == "failed":
+                finish()
             continue
         if status == "idle" and reply and reply != record.get("baseline"):
             text = last_reply_text(session_id, reply) or (summary.get("messagePreview") or {}).get("text", "")

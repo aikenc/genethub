@@ -4917,7 +4917,13 @@ impl SessionManager {
         let Some(workspace_id) = workspace_id else {
             return Ok(());
         };
-        self.store.delete(&workspace_id, session_id)
+        self.store.delete(&workspace_id, session_id)?;
+        // Anything that read the session between the removal above and the tombstone (a script
+        // polling it, say) rehydrated it from the files that were still there, and that copy
+        // would otherwise answer for a deleted session until the daemon restarted. A reader
+        // arriving after the tombstone finds nothing to rehydrate, so this closes the window.
+        self.sessions.write().await.remove(session_id);
+        Ok(())
     }
 
     pub(crate) async fn fence_execution(&self, session_id: &str) -> Result<()> {
@@ -10426,6 +10432,32 @@ mod tests {
         // A sender can see this coming before it sends.
         let input = sessions.summary("s1").await.unwrap().input_summary.unwrap();
         assert_eq!(input.pending.len(), input.limit as usize);
+    }
+
+    #[tokio::test]
+    async fn a_pause_is_in_the_summary_even_when_nothing_is_queued() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = manager(dir.path());
+        sessions.store.save_meta(&meta()).unwrap();
+        assert!(
+            sessions
+                .summary("s1")
+                .await
+                .unwrap()
+                .input_summary
+                .is_none(),
+            "an untouched session has nothing to say about its inputs"
+        );
+        let mut paused = meta();
+        paused.inbox.paused = true;
+        sessions.store.save_meta(&paused).unwrap();
+        let input = manager(dir.path())
+            .summary("s1")
+            .await
+            .unwrap()
+            .input_summary
+            .expect("a paused session must say so, or it looks like one that finished");
+        assert!(input.paused && input.pending.is_empty());
     }
 
     #[tokio::test]
