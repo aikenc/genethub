@@ -18,6 +18,7 @@ import collections
 import json
 import os
 import subprocess
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Deque, Dict, List, Optional
@@ -33,6 +34,10 @@ CONTROL_TIMEOUT = 30.0
 # How long an interrupt gets before the process is ended; the next prompt
 # starts a fresh one with the same session.
 INTERRUPT_GRACE = 15.0
+# How long a prompt may go with the CLI saying nothing at all. A turn that
+# never gets a first frame is not a slow turn: nothing is coming, and without
+# this the turn stays open forever — no answer, no error, nothing to retry.
+FIRST_FRAME_TIMEOUT = 90.0
 CHATTER_LINES = 20
 PIPE_SETTLE = 1.0
 
@@ -139,6 +144,7 @@ class FamilySession(Session):
         self._control_counter = 0
         self._tasks: List["asyncio.Future"] = []
         self._watchdog: Optional["asyncio.Future"] = None
+        self._stall: Optional["asyncio.Future"] = None
         self._launching: Optional[asyncio.Lock] = None
         self._chatter: Optional["asyncio.Future"] = None
         self._recycle = False
@@ -224,6 +230,7 @@ class FamilySession(Session):
             raise RuntimeError(f"没能启动 {self.flavor.label}：{error}") from error
         self.process = process
         self.ctx.set_pid(process.pid)
+        self.ctx.agent.log(f"{self.flavor.id} process pid={process.pid} cwd={cwd or '(default)'} argv={len(argv)}")
         reader = asyncio.ensure_future(self._read(process))
         chatter = asyncio.ensure_future(self._watch_stderr(process))
         self._tasks.extend([reader, chatter])
@@ -304,6 +311,18 @@ class FamilySession(Session):
         kind = frame.get("type")
         state = self.turn
         emit = self.ctx.emit
+        # Any frame about the turn: the CLI is there and the turn is its to
+        # finish, not this watch's. A control reply is the answer to something
+        # this side asked (initialize, a model switch), not to the prompt, so it
+        # proves nothing about the turn and must not end the watch: it arrives
+        # at an unpredictable moment around the prompt, and letting it cancel
+        # the watch made a stalled turn stay open about one time in three.
+        about_the_turn = kind != "control_response"
+        if about_the_turn:
+            self._stop_stall_watch()
+        if about_the_turn and state is not None and state.sent_at is not None and not state.first_frame_logged:
+            state.first_frame_logged = True
+            self.ctx.agent.log(f"{self.flavor.id} first frame {kind} after {(time.monotonic() - state.sent_at) * 1000:.0f}ms (turn {state.id})")
         if kind == "system":
             found = translate.translate_system(frame, state, emit)
             if found and found != self.session_id:
@@ -322,6 +341,8 @@ class FamilySession(Session):
         elif kind == "user":
             translate.translate_user(frame, state, emit)
         elif kind == "result":
+            waited = f" after {(time.monotonic() - state.sent_at) * 1000:.0f}ms" if state.sent_at is not None else ""
+            self.ctx.agent.log(f"{self.flavor.id} result {frame.get('subtype')} (turn {state.id}){waited}")
             self.turn = None
             self._stop_watchdog()
             translate.translate_result(frame, state, emit, self.flavor.label)
@@ -336,6 +357,7 @@ class FamilySession(Session):
             self.ctx.emit(events.permission_resolved(request_id, {"outcome": "canceled"}))
 
     async def _ended(self, process: asyncio.subprocess.Process) -> None:
+        self._stop_stall_watch()
         if self.process is not process:
             return
         why = await self._stopped(process)
@@ -448,6 +470,10 @@ class FamilySession(Session):
                 return
             usage_mod.record_round_start(state.usage)
             await self._write({"type": "user", "message": {"role": "user", "content": blocks}})
+            state.sent_at = time.monotonic()
+            self.ctx.agent.log(f"{self.flavor.id} prompt written (turn {state.id})")
+            self._stop_stall_watch()
+            self._stall = asyncio.ensure_future(self._stall_guard(state))
         except BaseException:
             if self.turn is state:
                 self.turn = None
@@ -477,8 +503,43 @@ class FamilySession(Session):
         if watchdog is not None and not watchdog.done() and watchdog is not asyncio.current_task():
             watchdog.cancel()
 
+    async def _stall_guard(self, state: translate.TurnState) -> None:
+        """A prompt the CLI never answered. Long enough that a cold start and a
+        queued first token fit inside it; after that the turn is ended rather
+        than left open, so the person gets an error they can act on."""
+        try:
+            await asyncio.sleep(FIRST_FRAME_TIMEOUT)
+        except asyncio.CancelledError:
+            return
+        if self.turn is not state:
+            return
+        process = self.process
+        # This watch is firing, so it is no longer something to stop. Ending the
+        # process makes the reader see EOF, and the reader's own cleanup stops
+        # "the stall watch": left registered, that cancelled this very task in
+        # the middle of the kill, and the turn then never got its ending.
+        self._stall = None
+        self.turn = None
+        self._stop_watchdog()
+        self._drop_pending()
+        why = f"{self.flavor.label} 在 {FIRST_FRAME_TIMEOUT:g} 秒内没有任何回应，本轮已结束。可以重试，或换一个 Agent。"
+        self.ctx.agent.log(why)
+        self.process = None
+        self.ctx.set_pid(None)
+        try:
+            if process is not None and process.returncode is None:
+                await proc.kill_tree(process)
+        finally:
+            self.ctx.emit(events.turn_failed(state.id, why, "timeout"))
+
+    def _stop_stall_watch(self) -> None:
+        stall, self._stall = self._stall, None
+        if stall is not None and not stall.done() and stall is not asyncio.current_task():
+            stall.cancel()
+
     async def close(self) -> None:
         self._stop_watchdog()
+        self._stop_stall_watch()
         process = self.process
         self.process = None
         if process is not None:

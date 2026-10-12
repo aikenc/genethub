@@ -406,9 +406,14 @@ def run_session(case: dict, flavor: Flavor) -> Optional[str]:
         return None
     import genehub_agent.claude_family.session as session_module
 
-    original = (session_module.INTERRUPT_GRACE, session_module.CONTROL_TIMEOUT)
+    original = (
+        session_module.INTERRUPT_GRACE,
+        session_module.CONTROL_TIMEOUT,
+        session_module.FIRST_FRAME_TIMEOUT,
+    )
     session_module.INTERRUPT_GRACE = case.get("interruptGrace", original[0])
     session_module.CONTROL_TIMEOUT = case.get("controlTimeout", original[1])
+    session_module.FIRST_FRAME_TIMEOUT = case.get("firstFrameTimeout", original[2])
     fake = Fake(case["cli"])
     workspace = tempfile.mkdtemp(prefix="genehub-fake-ws-")
     try:
@@ -474,7 +479,11 @@ def run_session(case: dict, flavor: Flavor) -> Optional[str]:
                     return f"the log lacks {needle!r}"
         return None
     finally:
-        session_module.INTERRUPT_GRACE, session_module.CONTROL_TIMEOUT = original
+        (
+            session_module.INTERRUPT_GRACE,
+            session_module.CONTROL_TIMEOUT,
+            session_module.FIRST_FRAME_TIMEOUT,
+        ) = original
         fake.close()
 
 

@@ -1,0 +1,38 @@
+{
+ "kind": "session",
+ "description": "A prompt the CLI never answers ends the turn with a timeout instead of staying open forever, so the person can retry or pick another Agent",
+ "firstFrameTimeout": 0.5,
+ "timeout": 30.0,
+ "launch": {
+  "help": "--permission-mode <mode> Permission mode (choices: \"bypassPermissions\")",
+  "models": ["sonnet"],
+  "defaultModel": "sonnet"
+ },
+ "cli": {
+  "turns": [
+   {
+    "hang": true
+   }
+  ]
+ },
+ "steps": [
+  {
+   "send": "hello",
+   "wait": false
+  },
+  {
+   "waitTerminal": 1
+  }
+ ],
+ "expect": {
+  "terminals": [
+   {
+    "type": "turnFailed",
+    "turnId": "turn_0",
+    "error": {
+     "code": "timeout"
+    }
+   }
+  ]
+ }
+}

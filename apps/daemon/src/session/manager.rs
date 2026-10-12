@@ -36,7 +36,8 @@ use super::rounds::{self, RoundOutcome, RoundRecord, TrunkBuilder, TrunkItem, Tr
 use super::store::{
     self, agent_title_fits_current, apply_catalog_title_repair, is_catalog_noise_title,
     normalize_session_title, now_ms, prompt_title, title_from, ChatLog, ContextSeed,
-    ContextSeedState, HumanContinuation, ImportedSessionMeta, SessionMeta, Store, SESSION_FORMAT,
+    ContextSeedState, HumanContinuation, ImportedSessionMeta, OpenTurnMarker, SessionMeta, Store,
+    SESSION_FORMAT,
 };
 use crate::adapter::registry::Registry;
 use crate::adapter::usage::{self as token_usage};
@@ -546,6 +547,7 @@ impl SessionManager {
             activity: Default::default(),
             message_preview: None,
             latest_reply: None,
+            open_turn: None,
             drafts: vec![],
             effort_id,
             fast,
@@ -720,6 +722,7 @@ impl SessionManager {
             activity: Default::default(),
             message_preview: None,
             latest_reply: None,
+            open_turn: None,
             drafts: vec![],
             effort_id,
             fast: None,
@@ -979,6 +982,7 @@ impl SessionManager {
             activity: Default::default(),
             message_preview: None,
             latest_reply: None,
+            open_turn: None,
             drafts: vec![],
             runtime_values: target.runtime_values,
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
@@ -1240,6 +1244,7 @@ impl SessionManager {
             activity: Default::default(),
             message_preview: None,
             latest_reply: None,
+            open_turn: None,
             drafts: vec![],
             runtime_values: target.runtime_values,
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
@@ -1464,6 +1469,7 @@ impl SessionManager {
             activity: Default::default(),
             message_preview: None,
             latest_reply: None,
+            open_turn: None,
             drafts: vec![],
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
             workspace_id: workspace_id.to_string(),
@@ -6576,6 +6582,23 @@ struct TrackedTurn {
     model_id: Option<String>,
 }
 
+/// The turn an event is about, when it names one. The ledger follows only
+/// these: an event that says something about a turn is what tells a turn that
+/// is producing output from one that is not.
+fn event_turn_id(event: &SessionEvent) -> Option<&str> {
+    let turn_id = match event {
+        SessionEvent::TurnStarted { turn_id, .. }
+        | SessionEvent::TurnProgress { turn_id, .. }
+        | SessionEvent::TurnCompleted { turn_id, .. }
+        | SessionEvent::TurnFailed { turn_id, .. }
+        | SessionEvent::TurnCanceled { turn_id }
+        | SessionEvent::Item { turn_id, .. }
+        | SessionEvent::ItemDelta { turn_id, .. } => turn_id,
+        _ => return None,
+    };
+    Some(turn_id.as_str())
+}
+
 async fn pump_events(
     live: Arc<Live>,
     mut receiver: broadcast::Receiver<SessionEvent>,
@@ -6857,6 +6880,52 @@ async fn pump_events(
                     agent_id,
                     model_id,
                 });
+            // Nothing has been produced yet, and that is the point: a turn
+            // that never answers used to leave no trace at all.
+            let mut meta = live.meta.lock().await;
+            meta.open_turn = Some(OpenTurnMarker {
+                turn_id: turn_id.clone(),
+                agent_id: meta.agent_id.clone(),
+                model_id: meta.model_id.clone(),
+                started_at_ms: *started_at_ms,
+                first_event_at_ms: None,
+            });
+            if let Err(error) = store.save_meta(&meta) {
+                tracing::warn!("could not record the open turn {turn_id}: {error}");
+            }
+        }
+
+        // The first thing the agent says about this turn, whenever that is,
+        // and the turn's ending: both belong beside the conversation, not only
+        // in a log that a later rotation can take away.
+        if let Some(turn_id) = event_turn_id(&event) {
+            let mut meta = live.meta.lock().await;
+            let open = meta
+                .open_turn
+                .as_mut()
+                .filter(|open| open.turn_id == turn_id);
+            if let Some(open) = open {
+                if open.first_event_at_ms.is_none() {
+                    open.first_event_at_ms = Some(now_ms());
+                }
+            }
+            let ended = matches!(
+                &event,
+                SessionEvent::TurnCompleted { .. }
+                    | SessionEvent::TurnFailed { .. }
+                    | SessionEvent::TurnCanceled { .. }
+            );
+            if ended
+                && meta
+                    .open_turn
+                    .as_ref()
+                    .is_some_and(|open| open.turn_id == turn_id)
+            {
+                meta.open_turn = None;
+            }
+            if let Err(error) = store.save_meta(&meta) {
+                tracing::warn!("could not update the open turn {turn_id}: {error}");
+            }
         }
         if let SessionEvent::Item { turn_id, item } = &event {
             let (agent_id, model_id) = {
@@ -7846,6 +7915,7 @@ mod tests {
             activity: Default::default(),
             message_preview: None,
             latest_reply: None,
+            open_turn: None,
             drafts: vec![],
             effort_id: None,
             fast: None,
@@ -7885,6 +7955,72 @@ mod tests {
             text: text.into(),
             received_at_ms: None,
         }
+    }
+
+    /// A turn that never ended is the one case the conversation file used to
+    /// have nothing to say about: content only lands once something is
+    /// produced, so a stuck turn looked like no turn at all.
+    #[test]
+    fn an_open_turn_is_written_into_the_session_file_and_a_missing_one_is_none() {
+        let mut session = meta();
+        session.open_turn = Some(OpenTurnMarker {
+            turn_id: "turn-9".into(),
+            agent_id: "codebuddy".into(),
+            model_id: Some("hy4-preview-ioa".into()),
+            started_at_ms: 1_000,
+            first_event_at_ms: None,
+        });
+        let raw = serde_json::to_string(&session).expect("serialize the session");
+        assert!(
+            raw.contains("\"openTurn\""),
+            "the open turn should sit in the session file: {raw}"
+        );
+        let back: SessionMeta = serde_json::from_str(&raw).expect("read the session back");
+        assert_eq!(
+            back.open_turn, session.open_turn,
+            "the open turn lost its facts"
+        );
+        let written_before_the_marker: SessionMeta =
+            serde_json::from_str(&raw.replace("\"openTurn\"", "\"openTurnIgnored\""))
+                .expect("a session file written before the marker still opens");
+        assert!(
+            written_before_the_marker.open_turn.is_none(),
+            "a session file without the marker has no open turn"
+        );
+    }
+
+    #[test]
+    fn the_ledger_follows_the_events_that_are_about_a_turn() {
+        assert_eq!(
+            event_turn_id(&SessionEvent::TurnStarted {
+                turn_id: "t1".into(),
+                started_at_ms: 0
+            }),
+            Some("t1")
+        );
+        assert_eq!(
+            event_turn_id(&SessionEvent::Item {
+                turn_id: "t1".into(),
+                item: item("i1", "hi")
+            }),
+            Some("t1")
+        );
+        assert_eq!(
+            event_turn_id(&SessionEvent::TurnCanceled {
+                turn_id: "t1".into()
+            }),
+            Some("t1")
+        );
+        assert_eq!(
+            event_turn_id(&SessionEvent::TurnFailed {
+                turn_id: "t1".into(),
+                error: TurnError {
+                    code: TurnErrorCode::Timeout,
+                    message: "gone".into()
+                },
+            }),
+            Some("t1")
+        );
     }
 
     #[test]
@@ -10481,6 +10617,7 @@ mod tests {
             activity: Default::default(),
             message_preview: None,
             latest_reply: None,
+            open_turn: None,
             drafts: vec![],
             title: Some("Fix the login redirect".into()),
             ..meta()
@@ -10570,6 +10707,7 @@ mod tests {
             activity: Default::default(),
             message_preview: None,
             latest_reply: None,
+            open_turn: None,
             drafts: vec![],
             title: Some("生成三张风景画，简笔风".into()),
             ..meta()

@@ -56,6 +56,11 @@ class TurnState:
         # not shown twice.
         self.streamed: set = set()
         self.snapshot_text: set = set()
+        # When the prompt reached the CLI, and whether its first frame has been
+        # logged: the two timestamps are what tell a CLI that never answered
+        # from one whose answer never arrived.
+        self.sent_at: Optional[float] = None
+        self.first_frame_logged: bool = False
         self.partial = ""
 
     def next_item_id(self) -> str:

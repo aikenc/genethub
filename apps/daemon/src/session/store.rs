@@ -187,6 +187,26 @@ pub struct InboxEntry {
     pub turn_id: Option<String>,
 }
 
+/// A turn that started and has not ended yet.
+///
+/// Written the moment a turn starts and cleared when it ends, so that a turn
+/// which never answered leaves a durable trace instead of an absence:
+/// `chat.jsonl` and the round trunks only keep turns that produced something,
+/// which is exactly what a stuck turn does not do. `first_event_at_ms` is
+/// absent while the agent has not said anything at all about this turn — the
+/// one fact that separates a silent CLI from an answer that never arrived.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenTurnMarker {
+    pub turn_id: String,
+    pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    pub started_at_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_event_at_ms: Option<i64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionMeta {
@@ -202,6 +222,10 @@ pub struct SessionMeta {
     pub message_preview: Option<genehub_proto::SessionMessagePreview>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_reply: Option<genehub_proto::SessionReplyCursor>,
+    /// The turn this conversation is still owed an ending for; see
+    /// [`OpenTurnMarker`]. Absent whenever no turn is open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_turn: Option<OpenTurnMarker>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub drafts: Vec<genehub_proto::SessionDraft>,
     pub id: String,
@@ -367,6 +391,7 @@ impl SessionMeta {
             activity: Default::default(),
             message_preview: None,
             latest_reply: None,
+            open_turn: None,
             drafts: vec![],
             id,
             workspace_id,
@@ -2248,6 +2273,7 @@ mod project_home_tests {
             activity: Default::default(),
             message_preview: None,
             latest_reply: None,
+            open_turn: None,
             drafts: vec![],
             id: id.into(),
             workspace_id: workspace_id.into(),
