@@ -5,9 +5,16 @@ import { walkCaseFiles } from "../engine/catalog.ts";
 
 const IMPORT = /from\s+["']([^"']+)["']/g;
 
+// What belongs to a development slot rather than to a test: its runtime directory, its
+// machine configuration and its environment variables. A case that reads them passes or
+// fails with whatever the slot happens to have installed, and cannot run anywhere else.
+// Cases about installing are the one exception: the slot's install is what they exercise.
+const SLOT_ENVIRONMENT = /\.dev-runtime|\bdev\.env\b|GENEHUB_DEV_/;
+const INSTALL_CASE = /tags:\s*\[[^\]]*["']install["']/;
+
 export interface LintFinding {
   file: string;
-  rule: "L03" | "L04" | "L16";
+  rule: "L03" | "L04" | "L16" | "slot-env";
   message: string;
 }
 
@@ -42,6 +49,9 @@ export function lintLayers(openRoot: string, extraRoot?: string): LintFinding[] 
   for (const file of files) {
     const source = readFileSync(file, "utf8");
     const layer = layerOf(file, openRoot);
+    if (layer === "business" && SLOT_ENVIRONMENT.test(source) && !INSTALL_CASE.test(source)) {
+      findings.push({ file, rule: "slot-env", message: "a case reads a development slot's runtime, dev.env or GENEHUB_DEV_ variables; use the lease's own environment" });
+    }
     for (const match of source.matchAll(IMPORT)) {
       const spec = match[1] ?? "";
       if (layer === "infrastructure" && (spec.includes("/framework/") || spec.includes("journeys/") || spec.includes("specialties/") || spec.includes("/e2e/"))) {
