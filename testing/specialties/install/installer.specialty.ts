@@ -1,4 +1,5 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import http from "node:http";
 import {
   chmodSync,
   existsSync,
@@ -549,8 +550,8 @@ defineSpecialty(
   {
     id: "specialty.install.unsafe-bases-refused",
     title: "Unsafe download bases are refused before fetching",
-    oracle: "http, file, credentials, query and fragment bases fail with download base",
-    catches: ["file:// install", "http fallback"],
+    oracle: "http (other than a literal loopback address with a port), file, credentials, query and fragment bases fail with download base",
+    catches: ["file:// install", "http fallback", "a name that merely starts like a loopback address being treated as one"],
     tags: ["core", "install", "parity"],
     expectedDurationMs: 3_000,
     timeoutMs: 15_000,
@@ -563,6 +564,15 @@ defineSpecialty(
       "https://user:secret@downloads.example.invalid",
       "https://downloads.example.invalid/release?channel=dev",
       "https://downloads.example.invalid/release#asset",
+      // Only a literal loopback address with a numeric port is plain http.
+      "http://localhost:8080",
+      "http://127.0.0.1",
+      "http://127.0.0.1:",
+      "http://127.0.0.1:8080:9",
+      "http://127.0.0.1:80@evil.example",
+      "http://user@127.0.0.1:8080",
+      "http://127.0.0.1.evil.example:80",
+      "http://127.0.0.2:8080",
     ]) {
       const output = spawnSync("sh", [scriptPath(t.openRoot)], {
         encoding: "utf8",
@@ -573,6 +583,83 @@ defineSpecialty(
         (output.stderr ?? "").includes("download base"),
         `unsafe base ${base} had an unhelpful refusal: ${output.stderr}`,
       );
+    }
+  },
+);
+
+defineSpecialty(
+  {
+    id: "specialty.install.loopback-http",
+    title: "A literal loopback http address installs with the real curl, and is never redirected",
+    oracle:
+      "against a real http server on 127.0.0.1 the unmodified install.sh, with the real curl, downloads, verifies and installs a release; when that server answers every request with a redirect the install fails naming the download and installs nothing",
+    catches: [
+      "the loopback exception not working, so a checkout cannot install its own build",
+      "the loopback exception following a redirect off the machine",
+    ],
+    tags: ["core", "install"],
+    expectedDurationMs: 6_000,
+    timeoutMs: 30_000,
+    surfaces: ["install"],
+  },
+  async (t) => {
+    if (installerUnsupported()) return;
+    const release = fakeRelease();
+    const home = mkdtempSync(path.join(tmpdir(), "genehub-install-home-"));
+    let redirect = false;
+    const server = http.createServer((request, response) => {
+      const name = path.basename(request.url ?? "");
+      // Redirected requests land on a copy that works, so an installer that follows the redirect
+      // would succeed — which is exactly what this case must tell apart from one that refuses.
+      if (redirect && !(request.url ?? "").startsWith("/moved/")) {
+        response.statusCode = 302;
+        response.setHeader("Location", `/moved/${name}`);
+        response.end();
+        return;
+      }
+      const file = path.join(release, name);
+      if (existsSync(file)) response.end(readFileSync(file));
+      else {
+        response.statusCode = 404;
+        response.end();
+      }
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as { port: number }).port;
+    // Async: the server above lives in this process, so a blocking spawn would starve it.
+    const install = (bin: string) =>
+      new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve) => {
+        const child = spawn("sh", [scriptPath(t.openRoot)], {
+          env: {
+            PATH: process.env.PATH ?? "",
+            HOME: home,
+            GENEHUB_LOCAL_DOWNLOAD_BASE: `http://127.0.0.1:${port}`,
+            GENEHUB_LOCAL_BIN_DIR: bin,
+            GENEHUB_NO_SERVICE: "1",
+          },
+        });
+        let stdout = "";
+        let stderr = "";
+        child.stdout.on("data", (chunk) => (stdout += chunk));
+        child.stderr.on("data", (chunk) => (stderr += chunk));
+        child.on("close", (status) => resolve({ status, stdout, stderr }));
+      });
+    try {
+      const good = path.join(home, "bin-good");
+      const installed = await install(good);
+      t.assertions.assert(installed.status === 0, `install over loopback http failed: ${installed.stderr}`);
+      t.assertions.assert(existsSync(path.join(good, "genet-local")), "genet-local was not installed over loopback http");
+
+      redirect = true;
+      const refused = path.join(home, "bin-refused");
+      const bounced = await install(refused);
+      t.assertions.assert(bounced.status !== 0, "an install that was redirected succeeded");
+      t.assertions.assert(bounced.stderr.includes("could not download"), `the failure does not name the download: ${bounced.stderr}`);
+      t.assertions.assert(!existsSync(path.join(refused, "genet-local")), "something was installed from a redirected download");
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      rmSync(release, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
     }
   },
 );

@@ -97,19 +97,39 @@ shared_component=genehub_guest.wasm
 # explicit installer into an HTTP, local-file or credential-bearing fetch. A
 # query or fragment is unnecessary for the fixed release layout and makes URL
 # review/logging ambiguous, so those are rejected too.
+#
+# One address is allowed to be plain http: a literal loopback host with a port,
+# http://127.0.0.1:<port> or http://[::1]:<port>. Nothing off this machine can
+# answer it, so there is no network path to tamper with, and it is what lets a
+# development checkout install its own build without a certificate. It is
+# decided by the address alone — there is no switch for it — and `localhost` is
+# not accepted because it goes through name resolution. Redirects are refused
+# outright for it.
+loopback=0
 case "$base" in
   https://*) ;;
-  *) die "download base must use https://" ;;
+  http://127.0.0.1:* | http://\[::1\]:*) loopback=1 ;;
+  *) die "download base must use https:// (or a literal loopback address with a port)" ;;
 esac
 case "$base" in
   *\?* | *\#*) die "download base must not contain a query or fragment" ;;
 esac
-authority="${base#https://}"
+authority="${base#*://}"
 authority="${authority%%/*}"
 [ -n "$authority" ] || die "download base has no host"
 case "$authority" in
   *@*) die "download base must not contain credentials" ;;
 esac
+if [ "$loopback" = 1 ]; then
+  case "$authority" in
+    127.0.0.1:*) port="${authority#127.0.0.1:}" ;;
+    \[::1\]:*) port="${authority#\[::1\]:}" ;;
+    *) die "download base is not a literal loopback address" ;;
+  esac
+  case "$port" in
+    '' | *[!0-9]*) die "download base needs a numeric port on a loopback address" ;;
+  esac
+fi
 
 case "$(uname -s)" in
   Linux) os=linux ;;
@@ -139,11 +159,19 @@ asset="$tarball_prefix-$os-$arch.tar.gz"
 
 if command -v curl >/dev/null 2>&1; then
   fetch() {
-    curl --proto '=https' --proto-redir '=https' --max-redirs 5 --globoff -fsSL "$1" -o "$2"
+    if [ "$loopback" = 1 ]; then
+      curl --proto '=http' --max-redirs 0 --globoff -fsSL "$1" -o "$2"
+    else
+      curl --proto '=https' --proto-redir '=https' --max-redirs 5 --globoff -fsSL "$1" -o "$2"
+    fi
   }
 elif command -v wget >/dev/null 2>&1; then
   fetch() {
-    wget --https-only --max-redirect=5 -qO "$2" "$1"
+    if [ "$loopback" = 1 ]; then
+      wget --max-redirect=0 -qO "$2" "$1"
+    else
+      wget --https-only --max-redirect=5 -qO "$2" "$1"
+    fi
   }
 else
   die "need curl or wget"
