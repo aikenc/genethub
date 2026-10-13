@@ -416,6 +416,10 @@ def run_session(case: dict, flavor: Flavor) -> Optional[str]:
     session_module.FIRST_FRAME_TIMEOUT = case.get("firstFrameTimeout", original[2])
     fake = Fake(case["cli"])
     workspace = tempfile.mkdtemp(prefix="genehub-fake-ws-")
+    # What the daemon itself was started with: a case can pretend its launcher
+    # left variables behind, and then look at what the CLI was handed.
+    inherited = {name: os.environ.get(name) for name in case.get("setEnv", {})}
+    os.environ.update(case.get("setEnv", {}))
     try:
         loop = asyncio.new_event_loop()
         try:
@@ -477,6 +481,13 @@ def run_session(case: dict, flavor: Flavor) -> Optional[str]:
             for needle in expect["logged"]:
                 if not any(needle in line for line in result["agent"].logged):
                     return f"the log lacks {needle!r}"
+        if "cliEnv" in expect:
+            starts = [entry["env"] for entry in fake.log() if "argv" in entry]
+            if not starts:
+                return "cliEnv: the CLI was never started"
+            for name, want in expect["cliEnv"].items():
+                if starts[0].get(name) != want:
+                    return f"cliEnv: the CLI saw {name}={starts[0].get(name)!r}, expected {want!r}"
         return None
     finally:
         (
@@ -484,6 +495,11 @@ def run_session(case: dict, flavor: Flavor) -> Optional[str]:
             session_module.CONTROL_TIMEOUT,
             session_module.FIRST_FRAME_TIMEOUT,
         ) = original
+        for name, before in inherited.items():
+            if before is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = before
         fake.close()
 
 

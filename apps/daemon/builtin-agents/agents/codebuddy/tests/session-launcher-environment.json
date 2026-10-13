@@ -1,0 +1,78 @@
+{
+  "kind": "session",
+  "description": "A daemon is often started from inside another Agent's session and inherits what that Agent exports for its own shell: its HTTP endpoint (SERVER__PORT, which the launching CLI is itself listening on, so every CLI started with it fails to bind and never answers), its session and request identity, its trace context. None of that may reach the CLI a session starts; ordinary settings (internet environment, proxies) still do",
+  "setEnv": {
+    "SERVER__PORT": "58417",
+    "SERVER__HOST": "127.0.0.1",
+    "CODEBUDDY_SERVICE_PROXY_URL": "http://127.0.0.1:58417/internal/hooks/services/invoke",
+    "CODEBUDDY_SESSION_ID": "launching-session",
+    "CODEBUDDY_ROOT_REQUEST_ID": "launching-request",
+    "CODEBUDDY_PROJECT_DIR": "/somewhere/else",
+    "CLAUDE_SESSION_ID": "launching-session",
+    "CURSOR_AGENT": "1",
+    "TRACEPARENT": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+    "CODEBUDDY_INTERNET_ENVIRONMENT": "internal",
+    "HTTPS_PROXY": "http://proxy.invalid:3128"
+  },
+  "launch": {
+    "help": "--permission-mode <mode> Permission mode (choices: \"bypassPermissions\")",
+    "models": ["sonnet"],
+    "defaultModel": "sonnet"
+  },
+  "cli": {
+    "logEnv": [
+      "SERVER__PORT",
+      "SERVER__HOST",
+      "CODEBUDDY_SERVICE_PROXY_URL",
+      "CODEBUDDY_SESSION_ID",
+      "CODEBUDDY_ROOT_REQUEST_ID",
+      "CODEBUDDY_PROJECT_DIR",
+      "CLAUDE_SESSION_ID",
+      "CURSOR_AGENT",
+      "TRACEPARENT",
+      "CODEBUDDY_INTERNET_ENVIRONMENT",
+      "HTTPS_PROXY"
+    ],
+    "turns": [
+      {
+        "emit": [
+          {
+            "type": "system",
+            "subtype": "init",
+            "session_id": "sess-1"
+          },
+          {
+            "type": "result",
+            "subtype": "success",
+            "is_error": false
+          }
+        ]
+      }
+    ]
+  },
+  "steps": [
+    {
+      "send": "hello"
+    }
+  ],
+  "expect": {
+    "cliEnv": {
+      "SERVER__PORT": null,
+      "SERVER__HOST": null,
+      "CODEBUDDY_SERVICE_PROXY_URL": null,
+      "CODEBUDDY_SESSION_ID": null,
+      "CODEBUDDY_ROOT_REQUEST_ID": null,
+      "CODEBUDDY_PROJECT_DIR": null,
+      "CLAUDE_SESSION_ID": null,
+      "CURSOR_AGENT": null,
+      "TRACEPARENT": null,
+      "CODEBUDDY_INTERNET_ENVIRONMENT": "internal",
+      "HTTPS_PROXY": "http://proxy.invalid:3128"
+    },
+    "terminals": [
+      {
+        "type": "turnCompleted"
+      }
+    ]
+  }
+}

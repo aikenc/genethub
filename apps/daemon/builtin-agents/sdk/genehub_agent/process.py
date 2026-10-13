@@ -31,6 +31,50 @@ GENEHUB_PRIVATE = (
     "GENEHUB_CONTROLLER_TOKEN",
 )
 
+# What *another* Agent exports for the shell it gives its own tools: its HTTP
+# endpoint, its session and request identity, its trace context. A daemon is
+# often started or restarted from inside such a shell and keeps all of it, so
+# every CLI this Agent starts would inherit a stranger's state. The endpoint is
+# the one that breaks things: CodeBuddy's ``cbc`` binds ``SERVER__PORT`` before
+# it answers anything, the launching ``cbc`` is still listening there, and the
+# bind failure leaves a CLI that is alive and silent forever.
+#
+# The shell scrubs the same names from the daemon's own environment when it
+# starts (``apps/host/src/main.rs``, ``LAUNCHING_AGENT_SESSION``); a unit test
+# there keeps the two lists equal. Settings a person chose on purpose
+# (``CODEBUDDY_INTERNET_ENVIRONMENT``, API keys, proxies) are not in it.
+LAUNCHING_AGENT_SESSION = (
+    "SERVER__PORT",
+    "SERVER__HOST",
+    "CODEBUDDY_SERVICE_PROXY_URL",
+    "CODEBUDDY_SESSION_ID",
+    "CODEBUDDY_ROOT_REQUEST_ID",
+    "CODEBUDDY_CONVERSATION_REQUEST_ID",
+    "CODEBUDDY_CONVERSATION_MESSAGE_ID",
+    "CODEBUDDY_ARTIFACTS",
+    "CODEBUDDY_PROJECT_DIR",
+    "CODEBUDDY_CURRENT_MODEL_ID",
+    "CODEBUDDY_SESSION_KIND",
+    "CODEBUDDY_SESSION_NAME",
+    "CODEBUDDY_SESSION_LOG",
+    "CODEBUDDY_OWNER_KEY",
+    "CODEBUDDY_TEAMMATE_OWNER_KEY",
+    "CODEBUDDY_GATEWAY_AUTH",
+    "CLAUDE_SESSION_ID",
+    "CLAUDE_PROJECT_DIR",
+    "CURSOR_AGENT",
+    "CURSOR_CONVERSATION_ID",
+    "CURSOR_INVOKED_AS",
+    "CURSOR_LAYOUT",
+    "__CURSOR_SANDBOX_ENV_RESTORE",
+    "CODEX_CI",
+    "CODEX_THREAD_ID",
+    "CODEX_SESSION_ID",
+    "TRACEPARENT",
+    "TRACESTATE",
+    "BAGGAGE",
+)
+
 
 # Which session a process belongs to, so closing the session (or this process
 # going away) ends what was started for it. Set by the serve loop around every
@@ -98,7 +142,7 @@ def end_all_now() -> None:
 
 
 def child_environment(extra: Optional[Dict[str, str]] = None, remove: Iterable[str] = ()) -> Dict[str, str]:
-    env = {key: value for key, value in os.environ.items() if key not in GENEHUB_PRIVATE}
+    env = {key: value for key, value in os.environ.items() if key not in GENEHUB_PRIVATE and key not in LAUNCHING_AGENT_SESSION}
     # The pid an Agent CLI must never kill (its prompt says so), alongside the
     # daemon's GENEHUB_HOST_PID. This script is that process: ending it ends
     # every session it serves.
