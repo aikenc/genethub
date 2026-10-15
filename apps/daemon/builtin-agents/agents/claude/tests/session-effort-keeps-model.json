@@ -1,0 +1,108 @@
+{
+  "kind": "session",
+  "description": "on a build that refuses flag settings the level rides inside the model frame, and that frame still names the model: a `set_model` frame with no model is read by the CLI as \"default\" and silently moves the session onto its own (dearest) default while this side keeps reporting the model it asked for",
+  "launch": {
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "models": [
+      "sonnet",
+      "opus"
+    ],
+    "efforts": [
+      "low",
+      "high"
+    ],
+    "defaultModel": "sonnet"
+  },
+  "cli": {
+    "turns": [
+      {
+        "emit": [
+          {
+            "type": "system",
+            "subtype": "init",
+            "session_id": "sess-1"
+          },
+          {
+            "type": "assistant",
+            "message": {
+              "id": "m-done",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "done"
+                }
+              ]
+            }
+          },
+          {
+            "type": "result",
+            "subtype": "success",
+            "is_error": false
+          }
+        ]
+      }
+    ],
+    "control": {
+      "apply_flag_settings": "error:Unsupported control request subtype: apply_flag_settings"
+    }
+  },
+  "steps": [
+    {
+      "send": "hi"
+    },
+    {
+      "setEffort": "high"
+    },
+    {
+      "setModel": "opus"
+    },
+    {
+      "setEffort": "low"
+    }
+  ],
+  "receivedTypes": [
+    "control_request"
+  ],
+  "expect": {
+    "sessionState": {
+      "modelId": "opus",
+      "effortId": "low"
+    },
+    "received": [
+      {
+        "request": {
+          "subtype": "apply_flag_settings",
+          "settings": {
+            "effortLevel": "high"
+          }
+        }
+      },
+      {
+        "request": {
+          "subtype": "set_model",
+          "model": "opus",
+          "effort": "high"
+        }
+      },
+      {
+        "request": {
+          "subtype": "apply_flag_settings",
+          "settings": {
+            "effortLevel": "low"
+          }
+        }
+      },
+      {
+        "request": {
+          "subtype": "set_model",
+          "model": "opus",
+          "effort": "low"
+        }
+      }
+    ],
+    "logged": [
+      "has no flag settings"
+    ]
+  }
+}

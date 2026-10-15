@@ -1,0 +1,67 @@
+{
+  "kind": "session",
+  "description": "a model the CLI names in its answers and the one this session asked for are not the same thing, and the difference is said out loud: it is the only witness of a switch this side never asked for, which a control frame the CLI read differently can bring about while answering success",
+  "launch": {
+    "help": "--permission-mode <mode> Permission mode (choices: \"acceptEdits\", \"bypassPermissions\", \"default\", \"plan\")",
+    "models": [
+      "sonnet",
+      "opus"
+    ],
+    "efforts": [
+      "low",
+      "high"
+    ],
+    "defaultModel": "sonnet"
+  },
+  "cli": {
+    "turns": [
+      {
+        "emit": [
+          {
+            "type": "system",
+            "subtype": "init",
+            "session_id": "sess-1"
+          },
+          {
+            "type": "assistant",
+            "message": {
+              "id": "m-done",
+              "role": "assistant",
+              "model": "a-model-nobody-asked-for",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "done"
+                }
+              ]
+            }
+          },
+          {
+            "type": "result",
+            "subtype": "success",
+            "is_error": false
+          }
+        ]
+      }
+    ]
+  },
+  "steps": [
+    {
+      "send": "hi"
+    },
+    {
+      "setModel": "opus"
+    },
+    {
+      "send": "again"
+    }
+  ],
+  "expect": {
+    "sessionState": {
+      "modelId": "opus"
+    },
+    "logged": [
+      "is answering with a-model-nobody-asked-for, but this session asked for opus"
+    ]
+  }
+}

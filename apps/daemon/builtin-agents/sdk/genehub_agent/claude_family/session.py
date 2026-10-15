@@ -133,6 +133,9 @@ class FamilySession(Session):
         self.session_id: Optional[str] = found if isinstance(found, str) and found else None
         self.model_id: Optional[str] = config.model_id
         self.effort_id: Optional[str] = config.effort_id
+        # A model the CLI answered with that this session has already been
+        # warned about, so one foreign model is said once and not every frame.
+        self.warned_model: Optional[str] = None
         self.mode = catalog.initial_permission_mode(config.mode_id, launch.help_text)
         self.process: Optional[asyncio.subprocess.Process] = None
         self.turn: Optional[translate.TurnState] = None
@@ -323,6 +326,8 @@ class FamilySession(Session):
         if about_the_turn and state is not None and state.sent_at is not None and not state.first_frame_logged:
             state.first_frame_logged = True
             self.ctx.agent.log(f"{self.flavor.id} first frame {kind} after {(time.monotonic() - state.sent_at) * 1000:.0f}ms (turn {state.id})")
+        if kind == "assistant":
+            self._note_reported_model(frame)
         if kind == "system":
             found = translate.translate_system(frame, state, emit)
             if found and found != self.session_id:
@@ -349,6 +354,44 @@ class FamilySession(Session):
             self._drop_pending()
             if self._recycle:
                 self._recycle_now()
+        elif kind == "error":
+            self._turn_error(frame, state)
+
+    def _note_reported_model(self, frame: dict) -> None:
+        """The model the CLI says answered, against the one this session asked
+        for. A control the CLI read differently — a `set_model` frame missing
+        its model, most of all — moves the session onto another model and
+        answers success, and the frames are the only place that says so."""
+        message = frame.get("message")
+        reported = message.get("model") if isinstance(message, dict) else None
+        if not isinstance(reported, str) or not reported:
+            return
+        if not self.model_id or reported == self.model_id or reported == self.warned_model:
+            return
+        self.warned_model = reported
+        self.ctx.agent.log(f"{self.flavor.id} is answering with {reported}, but this session asked for {self.model_id}")
+
+    def _turn_error(self, frame: dict, state: translate.TurnState) -> None:
+        raw = frame.get("error")
+        if isinstance(raw, dict):
+            text = raw.get("message") or json.dumps(raw, ensure_ascii=False)
+        elif isinstance(raw, str) and raw.strip():
+            text = raw.strip()
+        else:
+            text = "没有说明原因"
+        lost = "No conversation found" in text
+        if lost:
+            self.session_id = None
+            self.ctx.set_persist({})
+        self.turn = None
+        self._stop_watchdog()
+        self._stop_stall_watch()
+        self._drop_pending()
+        why = f"{self.flavor.label} 报错：{text}"
+        if lost:
+            why += "。它找不到这个会话的上一次对话，下一条消息会开新的对话（之前的上下文不会带上）。"
+        self.ctx.emit(events.turn_failed(state.id, why, "upstream"))
+        self._recycle_now()
 
     def _drop_pending(self) -> None:
         """A turn that ended leaves nothing for the person to answer."""
@@ -574,6 +617,23 @@ class FamilySession(Session):
         finally:
             self.awaiting.pop(request_id, None)
 
+    def _selection(self, **overrides: Optional[str]) -> Dict[str, str]:
+        """The whole selection, not only the field being changed.
+
+        The CLI reads a ``set_model`` frame field by field and takes a model it
+        was not given as "default": its own default, which in an install nobody
+        pinned is the dearest one it has. A frame that carries only the level
+        therefore moves the session onto a model nobody chose, answers success,
+        and leaves this side reporting the model it asked for. Every frame
+        carries what this session believes, so nothing can be defaulted."""
+        body: Dict[str, str] = {}
+        if self.model_id:
+            body["model"] = self.model_id
+        if self.effort_id:
+            body["effort"] = self.effort_id
+        body.update({key: value for key, value in overrides.items() if value})
+        return body
+
     async def set_model(self, model_id: str) -> None:
         # The CLI does not check this for us: asked for a model it has never
         # heard of it answers success and carries on with the one it had, so
@@ -583,7 +643,7 @@ class FamilySession(Session):
             raise RuntimeError(f"'{model_id}' 不是这个 {self.flavor.label} 提供的模型（{listed}）")
         if self._alive():
             try:
-                await self._ask("set_model", {"model": model_id})
+                await self._ask("set_model", self._selection(model=model_id))
             except RuntimeError as error:
                 raise RuntimeError(f"{self.flavor.label} 没有切换到 '{model_id}'：{error}") from error
         self.model_id = model_id
@@ -594,12 +654,32 @@ class FamilySession(Session):
             raise RuntimeError(f"'{effort_id}' 不是这个 {self.flavor.label} 提供的思考强度（{listed}）")
         if self._alive():
             try:
-                # No model in the request: the level applies to whichever
-                # model is in play, which can change under us.
-                await self._ask("set_model", {"effort": effort_id})
+                await self._level(effort_id)
             except RuntimeError as error:
                 raise RuntimeError(f"{self.flavor.label} 没有切换到 '{effort_id}' 档：{error}") from error
         self.effort_id = effort_id
+
+    async def _level(self, effort_id: str) -> None:
+        """Where the thinking level lives depends on the build: recent ones
+        take it as a flag setting and ignore a level sent inside the model
+        frame, older ones only knew the model frame. Both are offered, newest
+        first, and a build that refuses the newer one says so — an error that
+        names it, which is worth more than a success that changed nothing."""
+        try:
+            await self._ask("apply_flag_settings", {"settings": {"effortLevel": effort_id}})
+            return
+        except RuntimeError as error:
+            if "apply_flag_settings" not in str(error):
+                raise
+            self.ctx.agent.log(f"{self.flavor.id} has no flag settings ({error}); sending the level with the model")
+        selection = self._selection(effort=effort_id)
+        if "model" not in selection:
+            # Nothing to hold the frame to, and a model frame without a model
+            # is how a session ends up on the CLI's own default. The level
+            # waits for the next process, which starts with --effort.
+            self.ctx.agent.log(f"{self.flavor.id} keeps effort {effort_id} for the next process: no model to send with it")
+            return
+        await self._ask("set_model", selection)
 
     async def set_mode(self, mode_id: str) -> None:
         if not catalog.is_known_mode(mode_id):
