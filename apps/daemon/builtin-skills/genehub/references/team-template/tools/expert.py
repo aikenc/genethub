@@ -1152,6 +1152,11 @@ def cmd_spawn(args):
     name, mine = me(target_root)
     role = getattr(args, "space", None) or args.kind
     workspace_id = mine["spaces"].get(role)
+    if not workspace_id and role == "work" and not getattr(args, "space", None):
+        # A team has no generic `work` Space: the role that does the work is its leader, which is how a
+        # 1+0 team (front + leader + qa + research + team-reflect) takes a plain `--kind work` task.
+        role = "leader"
+        workspace_id = mine["spaces"].get(role)
     if not workspace_id:
         raise ExpertError("专家 %s 没有 %s 空间" % (name, role), "没有创建会话", "确认专家目录里有 spaces/%s/agent-space.genet.json" % role)
     requester = os.environ.get("GENEHUB_SESSION_ID")
