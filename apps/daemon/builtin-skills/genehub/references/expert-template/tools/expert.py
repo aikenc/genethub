@@ -59,6 +59,10 @@ STUCK_AFTER_S = int(os.environ.get("EXPERT_STUCK_AFTER", "300"))
 # The daemon's own wording for a turn that died (`apps/daemon/src/session/inbox.rs:808`); it pauses the session
 # with this message, which is the only way to tell a dead turn from a pause the person asked for.
 TURN_FAILED_ERROR = "本轮失败，已接收消息保留"
+# Patience for one member of a batch whose siblings are already finished: a leader driving 5-10 workers must
+# not wait the single-task threshold for a member that has gone quiet, or every finished result waits with it.
+# This never shortens a member that is still doing something; only its own silence ends the wait.
+BATCH_STUCK_AFTER_S = int(os.environ.get("EXPERT_BATCH_STUCK_AFTER", "90"))
 WATCHDOG_AFTER_S = int(os.environ.get("EXPERT_WATCHDOG_AFTER", "15"))
 WATCHDOG_MAX_WAKES = int(os.environ.get("EXPERT_WATCHDOG_MAX_WAKES", "3"))
 # When the timer wakes the reflect session. Each can be overridden by the environment or `.genethub/open.env`.
@@ -3213,13 +3217,17 @@ def reconcile(root, name, mine):
         if record:
             records.append((path, record))
     batch_counts = {}
+    batch_has_done = set()
     for _, rec in records:
         bkey = rec.get("batch") or rec["sessionId"]
         batch_counts[bkey] = batch_counts.get(bkey, 0) + 1
+        if rec.get("done"):
+            batch_has_done.add(bkey)
     closed = set()
     stopped_after = setting(root, "EXPERT_STOPPED_AFTER", STOPPED_AFTER_S)
     giveup_after = setting(root, "EXPERT_GIVEUP_AFTER", GIVEUP_AFTER_S)
     stuck_after = setting(root, "EXPERT_STUCK_AFTER", STUCK_AFTER_S)
+    batch_stuck_after = setting(root, "EXPERT_BATCH_STUCK_AFTER", BATCH_STUCK_AFTER_S)
     for path, record in records:
         session_id = record["sessionId"]
         bkey = record.get("batch") or session_id
@@ -3348,12 +3356,14 @@ def reconcile(root, name, mine):
                     update_pending(root, path, record)
         elif status == "running":
             last_active = summary.get("lastActivityAtMs") or summary.get("updatedAtMs") or now_ms()
-            if (now_ms() - last_active) / 1000 > stuck_after:
+            # A member holding up finished siblings gets less patience than one running on its own.
+            patience = min(stuck_after, batch_stuck_after) if bkey in batch_has_done else stuck_after
+            if (now_ms() - last_active) / 1000 > patience:
                 if "stuck" not in said:
                     if to:
-                        deliver_or_notice(root, to, "report", "%s:hook" % name, "会话 %s（%s）超过 %d 秒没有进展，可能卡住了。" % (session_id, record["desc"], stuck_after), session_id, "stuck")
+                        deliver_or_notice(root, to, "report", "%s:hook" % name, "会话 %s（%s）超过 %d 秒没有进展，可能卡住了。" % (session_id, record["desc"], patience), session_id, "stuck")
                     if record.get("kind") not in ("reflect", "team-reflect"):
-                        add_note(root, {"kind": "anomaly", "session": session_id, "turn": latest_round(session_id), "ref": None, "from": "%s:hook" % name, "quote": "无", "context": "会话 %s（%s）超过 %d 秒没有进展，可能卡住了" % (session_id, record["desc"], stuck_after), "text": record["desc"]}, "anomaly", session_id, "stuck")
+                        add_note(root, {"kind": "anomaly", "session": session_id, "turn": latest_round(session_id), "ref": None, "from": "%s:hook" % name, "quote": "无", "context": "会话 %s（%s）超过 %d 秒没有进展，可能卡住了" % (session_id, record["desc"], patience), "text": record["desc"]}, "anomaly", session_id, "stuck")
                     said.append("stuck")
                     update_pending(root, path, record)
                 if is_multi_batch and not record.get("done"):
@@ -3361,7 +3371,7 @@ def reconcile(root, name, mine):
                         "outcome": "stuck",
                         "reply": "stuck:%s" % session_id,
                         "ref": "ghref:session:%s" % session_id,
-                        "text": "⚠️ 会话超过 %d 秒没有进展（已熔断，不阻塞同批次其他子任务）。" % stuck_after,
+                        "text": "⚠️ 会话超过 %d 秒没有进展（已熔断，不阻塞同批次其他子任务）。" % patience,
                     }
                     update_pending(root, path, record)
     batches = {}

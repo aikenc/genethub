@@ -119,6 +119,10 @@ impl Daemon {
                 if let Err(error) = state.sessions.recover_deliveries().await {
                     tracing::error!(%error, "recovering accepted messages failed");
                 }
+                // Warm every Agent before the first dispatch: the first tick comes 250ms after a restart,
+                // and a route lookup that beats a script's first `state` frame marks the Session paused
+                // with `agentTagRouteUnavailable` for a problem that does not exist.
+                let _ = state.registry.list(&state.providers().await).await;
                 let mut ticks = tokio::time::interval(std::time::Duration::from_millis(250));
                 loop {
                     ticks.tick().await;

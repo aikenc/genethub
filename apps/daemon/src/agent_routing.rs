@@ -211,17 +211,54 @@ pub(crate) fn select_tag_route_excluding(
 ) -> Result<ResolvedAgentRoute> {
     let required = normalize_tags(required_tags.iter().cloned());
     let mut candidates = collect_candidates(preferences, agents, registry, evidence_only);
+    let mut dropped = Vec::new();
     candidates.retain(|candidate| {
-        !excluded.contains(&(
+        if excluded.contains(&(
             candidate.route.agent_id.clone(),
             candidate.route.model_id.clone(),
-        )) && required.iter().all(|required| {
-            candidate
-                .tags
-                .iter()
-                .any(|offered| tags_equal(offered, required))
-        })
+        )) {
+            dropped.push(format!(
+                "{}: 本机刚刚在这条路由上失败过，本次重试已排除",
+                candidate.route.agent_id
+            ));
+            return false;
+        }
+        let missing: Vec<&str> = required
+            .iter()
+            .filter(|required| {
+                !candidate
+                    .tags
+                    .iter()
+                    .any(|offered| tags_equal(offered, required))
+            })
+            .map(String::as_str)
+            .collect();
+        if missing.is_empty() {
+            return true;
+        }
+        dropped.push(format!(
+            "{}/{}: 不带标签 {}",
+            candidate.route.agent_id,
+            candidate.route.model_id.as_deref().unwrap_or("默认模型"),
+            missing.join("、")
+        ));
+        false
     });
+    // An Agent that never became a candidate is the other half of the answer: "配错了" and
+    // "暂时挤不进去" look identical from the error alone.
+    for agent in agents {
+        if candidates.iter().any(|candidate| candidate.route.agent_id == agent.id)
+            || dropped.iter().any(|reason| reason.starts_with(&format!("{}/", agent.id)) || reason.starts_with(&format!("{}:", agent.id)))
+        {
+            continue;
+        }
+        let why = match &agent.probe {
+            ProbeState::Ready => "未给出可用模型",
+            ProbeState::NotInstalled => "未安装",
+            ProbeState::Unavailable { reason } => reason.as_str(),
+        };
+        dropped.push(format!("{}: {}", agent.id, why));
+    }
     candidates.sort_by(|left, right| {
         cost_rank(left.cost)
             .cmp(&cost_rank(right.cost))
@@ -238,8 +275,13 @@ pub(crate) fn select_tag_route_excluding(
             } else {
                 required.join(" + ")
             };
+            let because = if dropped.is_empty() {
+                " 本机当前没有任何 Agent 处于就绪状态。".to_string()
+            } else {
+                format!(" 被排除的候选：{}。", dropped.join("；"))
+            };
             anyhow!(RouteUnavailable(format!(
-                "agentTagRouteUnavailable: 没有可用的 Agent 与模型同时匹配「{label}」；交给 PM 核对替代路由或机器全局配置，需要安装、登录时再向人提出暂停点"
+                "agentTagRouteUnavailable: 没有可用的 Agent 与模型同时匹配「{label}」；{because}交给 PM 核对替代路由或机器全局配置，需要安装、登录时再向人提出暂停点"
             )))
         })
 }
@@ -1090,6 +1132,41 @@ mod tests {
     }
 
     #[test]
+    fn a_route_with_no_candidate_says_why_each_one_was_dropped() {
+        let ready = agent("codebuddy", "hy4-preview-ioa", None);
+        let mut not_ready = agent("codex", "gpt-6", None);
+        not_ready.probe = ProbeState::Unavailable {
+            reason: "正在启动".into(),
+        };
+        let registry = Registry::of(Vec::new());
+        let preferences = AgentSelectionPreferences {
+            model_profiles: vec![AgentModelProfile {
+                agent_id: "codebuddy".into(),
+                model_id: Some("hy4-preview-ioa".into()),
+                display_name: None,
+                tags: vec![TAG_FLASH.into()],
+                cost: Some(AgentCostLevel::VeryLow),
+            }],
+            ..Default::default()
+        };
+        let error = select_tag_route_excluding(
+            &preferences,
+            &[TAG_PRO.into()],
+            &[ready, not_ready],
+            &registry,
+            false,
+            &BTreeSet::new(),
+        )
+        .unwrap_err()
+        .to_string();
+        // "配错了" and "Agent 还没起来" must be told apart from the error alone: both look like
+        // `agentTagRouteUnavailable` without this.
+        assert!(error.contains("agentTagRouteUnavailable"));
+        assert!(error.contains("codebuddy/hy4-preview-ioa"), "{error}");
+        assert!(error.contains("不带标签"), "{error}");
+        assert!(error.contains("codex: 正在启动"), "{error}");
+    }
+
     fn disabled_agents_and_removed_models_are_excluded_from_routes_and_concrete_selection() {
         let mut claude = agent("claude", "opus", None);
         claude.catalog.models.push(ModelInfo {

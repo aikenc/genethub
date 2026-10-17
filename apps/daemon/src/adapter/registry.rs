@@ -23,7 +23,7 @@ use super::genet::GenetAdapter;
 use super::script::host::{AgentHost, HostEnv};
 use super::script::layout::{self, Layout};
 use super::script::runtime::Runtime;
-use super::script::{RegistryEvent, ScriptAdapter};
+use super::script::{RegistryEvent, ScriptAdapter, SCRIPT_SETTLE_BUDGET};
 use super::{ImportCandidate, ImportedHistory, ProviderMap, SharedAdapter};
 
 /// How long one native adapter may take to answer `probe` + `catalog`.
@@ -212,10 +212,16 @@ impl Registry {
         Ok(adapter)
     }
 
-    /// Every Agent as it stands now. Never waits on a script; waits on a
-    /// native adapter only the first time, bounded by its own deadline.
+    /// Every Agent as it stands now. Waits on a native adapter only the first
+    /// time, bounded by its own deadline, and on a script only until it has
+    /// said something at all — an Agent that has not sent its first `state`
+    /// frame yet would otherwise be listed as unavailable.
     pub async fn list(&self, providers: &ProviderMap) -> Vec<AgentInfo> {
         self.warm();
+        futures_util::future::join_all(self.hosts().into_iter().map(|host| async move {
+            host.ensure_settled(SCRIPT_SETTLE_BUDGET).await;
+        }))
+        .await;
         let missing = {
             let cache = self.native_cache.read().await;
             self.native

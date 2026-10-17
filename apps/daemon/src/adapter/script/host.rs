@@ -437,6 +437,47 @@ impl AgentHost {
             .map(|(_, peer)| peer.clone())
     }
 
+    /// Waits until the host's snapshot says something, so a caller that reads it never sees an empty one.
+    ///
+    /// A script Agent finishes its `initialize` handshake before it sends the first `state` frame, and
+    /// between those two moments every non-blocking read reports it as "正在启动" — which is how a route
+    /// lookup right after a daemon restart ends up as `agentTagRouteUnavailable`. Settled hosts return
+    /// without touching the runtime at all.
+    pub async fn ensure_settled(&self, budget: Duration) {
+        if self.settled() {
+            return;
+        }
+        let mut events = self.events.subscribe();
+        if self.ensure_running().await.is_err() {
+            return;
+        }
+        if self.settled() {
+            return;
+        }
+        let deadline = Instant::now() + budget;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return;
+            }
+            match tokio::time::timeout(remaining, events.recv()).await {
+                Ok(Ok(_)) => {
+                    if self.settled() {
+                        return;
+                    }
+                }
+                // The sender is gone or the budget ran out: callers read whatever is known, which is
+                // exactly what they did before this existed.
+                Ok(Err(_)) | Err(_) => return,
+            }
+        }
+    }
+
+    fn settled(&self) -> bool {
+        let snapshot = self.snapshot.lock().expect("never poisoned");
+        snapshot.state.is_some() || snapshot.problem.is_some()
+    }
+
     /// Starts the process if it is not running. Concurrent callers wait for
     /// the same start.
     pub async fn ensure_running(&self) -> Result<Arc<Peer>> {

@@ -36,6 +36,9 @@ use super::{
 pub(crate) const SESSION_START: Duration = Duration::from_secs(120);
 /// Shorter than the session layer's own handover budget, so a script that
 /// stopped reading is restarted before the user's send gives up.
+/// How long a read waits for a script Agent's first `state` frame. Once every host is warm the wait is
+/// zero, so this only ever costs time in the window it exists to cover.
+pub(crate) const SCRIPT_SETTLE_BUDGET: Duration = Duration::from_secs(5);
 const SEND: Duration = Duration::from_secs(30);
 const CONTROL: Duration = Duration::from_secs(15);
 const IMPORT_LIST: Duration = Duration::from_secs(15);
@@ -95,10 +98,14 @@ impl AgentAdapter for ScriptAdapter {
     }
 
     async fn probe(&self) -> ProbeState {
+        // The first `state` frame arrives after the handshake; without this a probe during that window
+        // reports 正在启动 even though the Agent is fine.
+        self.host.ensure_settled(SCRIPT_SETTLE_BUDGET).await;
         self.host.info().probe
     }
 
     async fn catalog(&self, _providers: &ProviderMap) -> Catalog {
+        self.host.ensure_settled(SCRIPT_SETTLE_BUDGET).await;
         self.host.catalog()
     }
 
@@ -126,6 +133,7 @@ impl AgentAdapter for ScriptAdapter {
         cwd: &Path,
         limit: usize,
     ) -> Result<Option<Vec<ImportCandidate>>> {
+        self.host.ensure_settled(SCRIPT_SETTLE_BUDGET).await;
         if !self.host.ready() {
             return Ok(None);
         }
