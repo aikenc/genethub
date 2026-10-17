@@ -1307,10 +1307,11 @@ impl Workspaces {
                 return Ok(self.describe_with_space(&existing, &config));
             }
 
+            // Refreshing the roots of a project it already knows is not a catalogue change: the identity is
+            // unchanged, so clients do not need to re-list their workspaces.
             let catalog_changed = existing.removed
                 || existing.name != updated.name
-                || existing.is_git_repo != updated.is_git_repo
-                || existing.folders != updated.folders;
+                || existing.is_git_repo != updated.is_git_repo;
             let saved = next
                 .workspaces
                 .iter_mut()

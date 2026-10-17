@@ -166,7 +166,7 @@ pub async fn session(args: &[String], selection: &Selection) -> i32 {
 /// neither a reserved subcommand nor a flag.
 pub async fn sugar(agent_id: &str, args: &[String], selection: &Selection) -> i32 {
     let mut run = match Options::parse(args, selection) {
-        Ok(options) => match options.into_run(None) {
+        Ok(options) => match options.into_run(None, true) {
             Ok(run) => run,
             Err(error) => return output::fail(error),
         },
@@ -187,7 +187,7 @@ fn parse_agent(args: &[String], selection: &Selection) -> Result<Command, CliFai
         Some("run") => {
             let options = Options::parse(&args[1..], selection)?;
             let agent_id = options.agent.clone();
-            let run = options.into_run(agent_id)?;
+            let run = options.into_run(agent_id, true)?;
             if run.agent_id.is_none() && run.session_id.is_none() && run.tags.is_empty() {
                 return Err(CliFailure::invalid_args(
                     "genet agent run needs --agent <id>, --tag <tier> to let routing choose, or --session <id> to continue one",
@@ -374,7 +374,7 @@ fn parse_session(args: &[String], selection: &Selection) -> Result<Command, CliF
         }
         "send" => {
             let options = Options::parse(&args[2..], selection)?;
-            let mut run = options.into_run(None)?;
+            let mut run = options.into_run(None, false)?;
             run.session_id = Some(session_id);
             Ok(Command::Run(Box::new(run)))
         }
@@ -547,6 +547,9 @@ impl Options {
                 "--no-wait" => options.wait = Some(false),
                 "--auto-approve" => options.auto_approve = true,
                 "--open-workspace" => options.open_workspace = true,
+                // `--queue` is gone: a notice is delivered on the session's own queue and never interrupts.
+                // Scripts written against the old flag keep working instead of failing their timer hook.
+                "--queue" => {}
                 other if other.starts_with('-') => {
                     return Err(CliFailure::invalid_args(format!("unknown option: {other}")))
                 }
@@ -557,7 +560,7 @@ impl Options {
         Ok(options)
     }
 
-    fn into_run(self, agent_id: Option<String>) -> Result<Run, CliFailure> {
+    fn into_run(mut self, agent_id: Option<String>, creates_session: bool) -> Result<Run, CliFailure> {
         if self.workspace.is_some() && self.cwd.is_some() {
             return Err(CliFailure::invalid_args(
                 "--workspace and --cwd are two answers to the same question; give one",
@@ -581,9 +584,20 @@ impl Options {
             .map_err(CliFailure::invalid_args)?;
         let system_notice = prompt.starts_with("用途: ");
         if system_notice && self.message_id.is_none() {
-            return Err(CliFailure::invalid_args(
-                "a system notice (用途: ...) requires --message-id: a notice that cannot be retried safely is not durable",
-            ));
+            // A notice into a live session must carry a stable id: the sender may retry and the notice must
+            // not be delivered twice. Creating a session is different: there is nothing to retry against, and
+            // older scripts start their background sessions without an id, so derive one from the content.
+            if !creates_session {
+                return Err(CliFailure::invalid_args(
+                    "a system notice (用途: ...) requires --message-id: a notice that cannot be retried safely is not durable",
+                ));
+            }
+            self.message_id = Some(derived_message_id(&[
+                self.agent.as_deref().unwrap_or(""),
+                self.workspace.as_deref().unwrap_or(""),
+                self.cwd.as_deref().unwrap_or(""),
+                &prompt,
+            ]));
         }
         if system_notice && self.task_run_id.is_some() {
             return Err(CliFailure::invalid_args(
@@ -638,6 +652,16 @@ impl Options {
             timeout: self.timeout,
         })
     }
+}
+
+/// A stable id for a notice nobody named: the same words to the same target always collide and are dropped,
+/// so a retried start cannot deliver the same first turn twice.
+fn derived_message_id(parts: &[&str]) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for part in parts {
+        std::hash::Hash::hash(part, &mut hasher);
+    }
+    format!("x.{:016x}", std::hash::Hasher::finish(&hasher))
 }
 
 fn number(raw: &str, flag: &str) -> Result<u64, CliFailure> {
@@ -1754,6 +1778,57 @@ mod tests {
                 "{bad:?}"
             );
         }
+    }
+
+    #[test]
+    fn older_scripts_still_start_a_notice_session_and_may_ask_for_the_old_queue() {
+        // A Space created before the queue was removed still runs its own copy of expert.py: it starts
+        // background sessions with a `用途: ` envelope, no --message-id, and a --queue flag that no longer
+        // exists. Refusing either would fail its timer hook forever, so it could never upgrade itself.
+        let run = run_of(
+            parse_agent(
+                &words(&[
+                    "run",
+                    "--agent",
+                    "codex",
+                    "--workspace",
+                    "w_1",
+                    "--queue",
+                    "--message",
+                    "用途: reflect\n\nreflect now",
+                ]),
+                &selection(None),
+            )
+            .unwrap(),
+        );
+        assert!(run.prompt.starts_with("用途: "));
+        let derived = run.message_id.clone().expect("a created session's notice gets a derived id");
+        assert!(derived.starts_with("x."), "{derived}");
+        // The same words to the same target derive the same id, so a retried start cannot double-deliver.
+        let again = run_of(
+            parse_agent(
+                &words(&[
+                    "run",
+                    "--agent",
+                    "codex",
+                    "--workspace",
+                    "w_1",
+                    "--queue",
+                    "--message",
+                    "用途: reflect\n\nreflect now",
+                ]),
+                &selection(None),
+            )
+            .unwrap(),
+        );
+        assert_eq!(again.message_id.as_deref(), Some(derived.as_str()));
+        // A notice into a live session is different: it can be retried, so it still needs a named id.
+        assert_eq!(
+            parse_session(&words(&["send", "s_1", "--queue", "--message", "用途: result\n\ndone"]), &selection(None))
+                .unwrap_err()
+                .code,
+            "invalidArgs"
+        );
     }
 
     #[test]

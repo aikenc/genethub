@@ -56,6 +56,9 @@ BODY_LIMIT = 8 * 1024
 STOPPED_AFTER_S = int(os.environ.get("EXPERT_STOPPED_AFTER", "60"))
 GIVEUP_AFTER_S = int(os.environ.get("EXPERT_GIVEUP_AFTER", "1800"))
 STUCK_AFTER_S = int(os.environ.get("EXPERT_STUCK_AFTER", "300"))
+# The daemon's own wording for a turn that died (`apps/daemon/src/session/inbox.rs:808`); it pauses the session
+# with this message, which is the only way to tell a dead turn from a pause the person asked for.
+TURN_FAILED_ERROR = "本轮失败，已接收消息保留"
 WATCHDOG_AFTER_S = int(os.environ.get("EXPERT_WATCHDOG_AFTER", "15"))
 WATCHDOG_MAX_WAKES = int(os.environ.get("EXPERT_WATCHDOG_MAX_WAKES", "3"))
 # When the timer wakes the reflect session. Each can be overridden by the environment or `.genethub/open.env`.
@@ -3264,18 +3267,24 @@ def reconcile(root, name, mine):
                 said.append(key)
                 update_pending(root, path, record)
             continue
-        if inputs.get("paused") or status == "failed":
+        paused = bool(inputs.get("paused"))
+        # The kernel pauses a session for two different reasons: the person stopped it (`interrupt`,
+        # `session/manager.rs:3362`, no error) and a turn that died (`session/inbox.rs:808`, this message).
+        # Only the second is a failure. Reporting the person's own stop as a failure hides who is holding it up.
+        stopped_by_person = paused and TURN_FAILED_ERROR not in (inputs.get("error") or "")
+        if paused or status == "failed":
             # Told once. An interrupted session's partial reply is not a result, so it is not delivered as one;
             # a paused record stays until the person resumes it, a failed one is closed (or converted to a bounded
             # terminal batch item so it never hangs sibling tasks in the same batch).
+            verdict = "已失败" if (status == "failed" and not stopped_by_person) else "被暂停"
             if "stop" not in said:
                 if to:
-                    deliver_or_notice(root, to, "report", "%s:hook" % name, "会话 %s（%s）%s：%s" % (session_id, record["desc"], "已失败" if status == "failed" else "被暂停", inputs.get("error") or "无附加信息"), session_id, "stop", unpause=(status == "failed" and to != front))
+                    deliver_or_notice(root, to, "report", "%s:hook" % name, "会话 %s（%s）%s：%s" % (session_id, record["desc"], verdict, inputs.get("error") or "无附加信息"), session_id, "stop", unpause=(status == "failed" and not paused and to != front))
                 if (status == "failed" or inputs.get("error")) and record.get("kind") not in ("reflect", "team-reflect"):
-                    add_note(root, {"kind": "anomaly", "session": session_id, "turn": latest_round(session_id), "ref": "ghref:item:%s:%s" % (session_id, reply) if reply else None, "from": "%s:hook" % name, "quote": "无", "context": "会话 %s（%s）%s：%s" % (session_id, record["desc"], "已失败" if status == "failed" else "被暂停", inputs.get("error") or "无附加信息"), "text": record["desc"]}, "anomaly", session_id, "stop")
+                    add_note(root, {"kind": "anomaly", "session": session_id, "turn": latest_round(session_id), "ref": "ghref:item:%s:%s" % (session_id, reply) if reply else None, "from": "%s:hook" % name, "quote": "无", "context": "会话 %s（%s）%s：%s" % (session_id, record["desc"], verdict, inputs.get("error") or "无附加信息"), "text": record["desc"]}, "anomaly", session_id, "stop")
                 said.append("stop")
                 update_pending(root, path, record)
-            if status == "failed" and not has_children:
+            if status == "failed" and not paused and not has_children:
                 if is_multi_batch and not record.get("quiet"):
                     if not record.get("done"):
                         record["done"] = {
