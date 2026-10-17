@@ -10,7 +10,7 @@ import { join } from "node:path";
 
 import { defineSpecialty, type CaseContext } from "../../framework/public.ts";
 
-const TEMPLATE = "apps/daemon/builtin-skills/genehub/references/expert-template";
+const TEMPLATE = "apps/daemon/builtin-skills/genehub/references/team-template";
 
 const FAKE_GENET = `#!/usr/bin/env python3
 import json, os, sys, time
@@ -50,8 +50,7 @@ if args[:2] == ["session", "narrative"]:
 if args[:3] == ["agent", "list", "--routes"]:
     out({"routes": state.get("routes", [{"agentId": "ctl-normal", "modelId": "m1", "tags": ["Flash"], "cost": "low", "default": True}])})
 if args[:2] == ["space", "open"]:
-    log()
-    out({})
+    out({})  # registering a workspace is not an action these cases record
 if args[:2] == ["session", "send"]:
     log()
     out({})
@@ -109,7 +108,7 @@ S = {
 shutil.rmtree(expert.state_dir(root), ignore_errors=True)
 if os.path.exists(log_path):
     os.remove(log_path)
-workspaces = {"w_root": root, "w_research": os.path.join(root, "spaces/research"), "w_work": os.path.join(root, "spaces/work"), "w_reflect": os.path.join(root, "spaces/reflect")}
+workspaces = {"w_root": root, "w_research": os.path.join(root, "spaces/research"), "w_work": os.path.join(root, "spaces/leader"), "w_reflect": os.path.join(root, "spaces/team-reflect")}
 if S.get("no_reflect"):
     del workspaces["w_reflect"]
 summaries = {"s_front": {"agentId": "ctl-normal", "modelId": "m1", "status": "idle"}}

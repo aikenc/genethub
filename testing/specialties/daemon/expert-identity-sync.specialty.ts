@@ -39,7 +39,7 @@ defineSpecialty(
     const expert = join(data, "spaces", "expert");
     mkdirSync(join(data, "builtin-skills", "genehub", "references"), { recursive: true });
     symlinkSync(join(t.openRoot, GENEHUB, "references", "spacebuilder"), join(data, "builtin-skills", "genehub", "references", "spacebuilder"));
-    cpSync(join(t.openRoot, GENEHUB, "references", "expert-template"), expert, { recursive: true });
+    cpSync(join(t.openRoot, GENEHUB, "references", "team-template"), expert, { recursive: true });
 
     const sync = (extraEnv: Record<string, string> = {}) =>
       spawnSync("python3", ["tools/expert.py", "sync-identity"], {

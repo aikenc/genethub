@@ -29,7 +29,7 @@ import {
   seedScriptAgentRuntime,
 } from "../../framework/public.ts";
 
-const TEMPLATE = "apps/daemon/builtin-skills/genehub/references/expert-template";
+const TEMPLATE = "apps/daemon/builtin-skills/genehub/references/team-template";
 const BUILDER = "apps/daemon/builtin-skills/genehub/references/spacebuilder/spacebuilder.py";
 
 type Info = { id: string; name: string; agentSpace?: { parentWorkspaceId?: string } };
@@ -70,7 +70,7 @@ defineJourney(
     const hookPath = path.join(alice, "skills/expert-front/hooks/timer.genet.json");
     writeFileSync(hookPath, JSON.stringify({ ...JSON.parse(readFileSync(hookPath, "utf8")), every: "1s" }));
     mkdirSync(path.join(alice, ".genethub"), { recursive: true });
-    writeFileSync(path.join(alice, ".genethub", "open.env"), "EXPERT_AGENT=ctl-normal\nEXPERT_WAKE_ROUNDS=100000\nEXPERT_NOTE_QUIET=100000\n");
+    writeFileSync(path.join(alice, ".genethub", "open.env"), "EXPERT_AGENT=ctl-normal\nEXPERT_BOARD_PORT=0\nEXPERT_WAKE_ROUNDS=100000\nEXPERT_NOTE_QUIET=100000\n");
     const built = spawnSync("python3", [path.join(t.openRoot, BUILDER), "build", alice, "--format", "json"], { encoding: "utf8" });
     t.assertions.assert(built.status === 0, `SpaceBuilder build alice: ${built.stdout.slice(-500)}`);
 
@@ -124,7 +124,7 @@ defineJourney(
       const inited = expert(alice, "init", "bob", "--desc", "QA与协作专家", "--soul", "负责跨专家验收与回合制回归验证");
       t.assertions.assert(inited.code === 0 && inited.out.includes("已创建并初始化专家 bob") && inited.out.includes("已打开空间"), `init bob: ${inited.out} ${inited.err}`);
       const bob = path.join(t.env.data, "spaces", "bob");
-      writeFileSync(path.join(bob, ".genethub", "open.env"), "EXPERT_AGENT=ctl-normal\nEXPERT_WAKE_ROUNDS=100000\nEXPERT_NOTE_QUIET=100000\n");
+      writeFileSync(path.join(bob, ".genethub", "open.env"), "EXPERT_AGENT=ctl-normal\nEXPERT_BOARD_PORT=0\nEXPERT_WAKE_ROUNDS=100000\nEXPERT_NOTE_QUIET=100000\n");
       const bobSoul = readFileSync(path.join(bob, "soul.md"), "utf8");
       t.assertions.assert(
         bobSoul.includes("我做的一切只有一个目的：让用户满意") && bobSoul.includes("## 我是谁（bob）") && bobSoul.includes("负责跨专家验收与回合制回归验证") && bobSoul.includes("（以下由反思会话按证据维护"),
@@ -134,7 +134,7 @@ defineJourney(
       listed = await spaces();
       const bobRoot = listed.find((space) => space.name === "bob");
       t.assertions.assert(bobRoot !== undefined, `bob root not registered: ${JSON.stringify(listed.map((s) => s.name))}`);
-      for (const child of ["research", "work", "reflect"]) {
+      for (const child of ["leader", "qa", "research", "team-reflect"]) {
         t.assertions.assert(
           listed.some((space) => space.name === child && space.agentSpace?.parentWorkspaceId === bobRoot!.id),
           `bob/${child} not registered after init`,
@@ -144,11 +144,11 @@ defineJourney(
       // 1. Asynchronous `spawn` → result reaches the front via timer hook, once.
       const spawned = expert(alice, "spawn", "--kind", "work", "--desc", "write the quarterly report", "Write the quarterly report.");
       t.assertions.assert(spawned.code === 0, `spawn: ${spawned.err || spawned.out}`);
-      const work = listed.find((space) => space.name === "work" && space.agentSpace?.parentWorkspaceId === root!.id);
+      const work = listed.find((space) => space.name === "leader" && space.agentSpace?.parentWorkspaceId === root!.id);
       t.assertions.assert(work, "alice's work Space is not registered");
       const started = await sessionsOf(work!.id);
       t.assertions.assert(
-        started.length === 1 && started[0]!.description === "write the quarterly report" && started[0]!.title === "write the quarterly report" && started[0]!.labels?.includes("工作") && started[0]!.labels?.includes("系统发起"),
+        started.length === 1 && started[0]!.description === "write the quarterly report" && started[0]!.title === "write the quarterly report" && started[0]!.labels?.includes("组长") && started[0]!.labels?.includes("系统发起"),
         `work session ${JSON.stringify(started)}`,
       );
       const resultsIn = async () =>
@@ -213,7 +213,7 @@ defineJourney(
       const project = path.join(t.env.root, "project");
       mkdirSync(project, { recursive: true });
       spawnSync("git", ["init", "-q", project]);
-      writeFileSync(path.join(alice, ".genethub", "open.env"), "EXPERT_AGENT=ctl-silent\nEXPERT_WAKE_ROUNDS=100000\nEXPERT_NOTE_QUIET=100000\n");
+      writeFileSync(path.join(alice, ".genethub", "open.env"), "EXPERT_AGENT=ctl-silent\nEXPERT_BOARD_PORT=0\nEXPERT_WAKE_ROUNDS=100000\nEXPERT_NOTE_QUIET=100000\n");
       const holderSpawn = expert(alice, "spawn", "--kind", "work", "--dir", project, "--desc", "long writer", "Hold the writer lock.");
       const holderSid = /(s_[0-9a-f]+)/.exec(holderSpawn.out)?.[1]!;
       t.assertions.assert(holderSpawn.code === 0 && holderSid, `holderSpawn: ${holderSpawn.out} ${holderSpawn.err}`);
@@ -224,7 +224,7 @@ defineJourney(
       // A second `work` session on the same directory is refused while `holderSid` is running, but `research` is allowed.
       const contestedWork = expert(alice, "spawn", "--kind", "work", "--dir", project, "--desc", "second writer", "Should be refused.");
       t.assertions.assert(contestedWork.code !== 0 && contestedWork.err.includes("已有写会话") && contestedWork.err.includes(holderSid), `contested writer lock: ${contestedWork.out} ${contestedWork.err}`);
-      writeFileSync(path.join(alice, ".genethub", "open.env"), "EXPERT_AGENT=ctl-normal\nEXPERT_WAKE_ROUNDS=100000\nEXPERT_NOTE_QUIET=100000\n");
+      writeFileSync(path.join(alice, ".genethub", "open.env"), "EXPERT_AGENT=ctl-normal\nEXPERT_BOARD_PORT=0\nEXPERT_WAKE_ROUNDS=100000\nEXPERT_NOTE_QUIET=100000\n");
       const allowedResearch = expert(alice, "spawn", "--kind", "research", "--dir", project, "--desc", "parallel reader", "Read-only inspection.");
       const researchSid = /(s_[0-9a-f]+)/.exec(allowedResearch.out)?.[1]!;
       t.assertions.assert(allowedResearch.code === 0 && researchSid, `research alongside writer lock failed: ${allowedResearch.err}`);
@@ -242,14 +242,19 @@ defineJourney(
       const toBob = expert(alice, "note", "--session", front, "--expert", "bob", "please look at the review habit");
       t.assertions.assert(toBob.code === 0, `note --expert: ${toBob.err || toBob.out}`);
       const bobNotes = readdirSync(path.join(bob, ".genethub/expert/notes"));
-      t.assertions.assert(bobNotes.length === 1 && JSON.parse(readFileSync(path.join(bob, ".genethub/expert/notes", bobNotes[0]!), "utf8")).from === "alice", `bob's notes ${bobNotes}`);
-      const reflectSpace = listed.find((entry) => entry.name === "reflect" && entry.agentSpace?.parentWorkspaceId === root!.id)!;
+      const bobRead = bobNotes.map((file) => JSON.parse(readFileSync(path.join(bob, ".genethub/expert/notes", file), "utf8")) as { from?: string; kind?: string; context?: string });
+      const fromAlice = bobRead.filter((note) => note.from === "alice");
+      t.assertions.assert(
+        fromAlice.length === 1 && fromAlice[0]!.context === "please look at the review habit",
+        `the note for bob did not land there exactly once: ${JSON.stringify(bobRead)}`,
+      );
+      const reflectSpace = listed.find((entry) => entry.name === "team-reflect" && entry.agentSpace?.parentWorkspaceId === root!.id)!;
       t.assertions.assert((await sessionsOf(reflectSpace.id)).length === 0, "a note created a reflect session");
 
       // 6. `directory` shows who is who.
       const directory = expert(alice, "directory");
       t.assertions.assert(
-        directory.code === 0 && directory.out.includes("write the quarterly report") && directory.out.includes("alice/work") && directory.out.includes("alice/root") && directory.out.includes("bob/work"),
+        directory.code === 0 && directory.out.includes("write the quarterly report") && directory.out.includes("alice/leader") && directory.out.includes("alice/root") && directory.out.includes("bob/leader"),
         `directory: ${directory.out}`,
       );
 

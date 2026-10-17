@@ -57,11 +57,11 @@ function adminCase(
 
 adminCase(
   "is-built-and-registered-on-first-start",
-  "a fresh machine has an administrator named after it, built, registered with its children, with the timer hook in place",
-  "after the first start workspace.list holds <机器名>管理员 with research, work and reflect under it, the root has no rules while front/ does, the hook list shows expert-front.timer valid and owned by SpaceBuilder, and every Skill is under 40 lines",
+  "a fresh machine has an administrator named after it, built, registered as one Space, with the timer hook in place",
+  "after the first start workspace.list holds <机器名>管理员 with no child Spaces under it (the administrator is one Space plus expert-admin), the root has no rules while front/ does, the hook list shows expert-front.timer valid and owned by SpaceBuilder, and every Skill is under 40 lines",
   [
     "no administrator on a new machine",
-    "the administrator's rules written at its root, so its research, work and reflect Spaces read the front desk's rules",
+    "the administrator carrying child Spaces it never uses",
     "the timer hook missing, so nothing is ever reconciled",
     "the machine name not reaching the Space name",
   ],
@@ -71,19 +71,14 @@ adminCase(
       const spaces = await list(opened);
       const root = spaces.find((space) => space.name === NAME);
       t.assertions.assert(root, `no ${NAME} in ${JSON.stringify(spaces.map((s) => s.name))}`);
-      for (const child of ["research", "work", "reflect"]) {
-        const found = spaces.find((space) => space.name === child && space.agentSpace?.parentWorkspaceId === root!.id);
-        t.assertions.assert(found, `${child} is not registered under the administrator`);
-      }
+      const children = spaces.filter((space) => space.agentSpace?.parentWorkspaceId === root!.id);
+      t.assertions.assert(children.length === 0, `the administrator has child Spaces: ${JSON.stringify(children.map((s) => s.name))}`);
       t.assertions.assert(existsSync(path.join(admin, "front", "AGENTS.md")), "front/AGENTS.md was not built");
       t.assertions.assert(existsSync(path.join(admin, "front/.agents/skills/expert-admin/SKILL.md")), "the administrator's own Skill is not in front/");
       t.assertions.assert(!existsSync(path.join(admin, "AGENTS.md")) && !existsSync(path.join(admin, ".agents")), "rules were written at the root");
-      t.assertions.assert(existsSync(path.join(admin, "spaces/research/.agents/skills/expert-research/SKILL.md")), "research has no Skill");
-      t.assertions.assert(existsSync(path.join(admin, "spaces/reflect/.agents/skills/expert-reflect/SKILL.md")), "reflect has no Skill");
-      t.assertions.assert(!existsSync(path.join(admin, "spaces/research/.agents/skills/expert-admin")), "research got the administrator's Skill");
-      t.assertions.assert(!existsSync(path.join(admin, "spaces/work/.agents/skills/expert-reflect")), "work got the reflect Skill");
-      const reflectRules = readFileSync(path.join(admin, "spaces/reflect/AGENTS.md"), "utf8");
-      t.assertions.assert(reflectRules.includes("我做的一切只有一个目的：让用户满意"), "the reflect Space's rules do not carry the soul");
+      t.assertions.assert(!existsSync(path.join(admin, "spaces")), "the administrator was given the team's child Spaces");
+      const frontRules = readFileSync(path.join(admin, "front", "AGENTS.md"), "utf8");
+      t.assertions.assert(frontRules.includes("我做的一切只有一个目的：让用户满意"), "the administrator's rules do not carry the soul");
       for (const skill of ["expert-core", "expert-front", "expert-research", "expert-reflect", "expert-work", "expert-admin"]) {
         const file = path.join(admin, "skills", skill, "SKILL.md");
         const lines = readFileSync(file, "utf8").trimEnd().split("\n").length;
@@ -120,7 +115,7 @@ adminCase(
     const originalSoul = readFileSync(soul, "utf8");
     writeFileSync(soul, "my own soul\n");
     writeFileSync(script, "# damaged\n");
-    const stale = path.join(admin, "spaces", "reflect", "soul.mirror.md");
+    const stale = path.join(admin, "front", "soul.mirror.md");
     writeFileSync(stale, "stale mirror\n");
     mkdirSync(path.join(admin, "posts"), { recursive: true });
     const post = path.join(admin, "posts", "keep.md");
@@ -148,7 +143,7 @@ adminCase(
     opened = await open();
     try {
       const after = await list(opened);
-      t.assertions.assert(!after.some((space) => space.name === NAME || space.name === "research" || space.name === "reflect" || space.name === "work"), `the removed administrator came back: ${JSON.stringify(after.map((s) => s.name))}`);
+      t.assertions.assert(!after.some((space) => space.name === NAME || space.name === "research" || space.name === "reflect" || space.name === "work" || space.name === "leader"), `the removed administrator came back: ${JSON.stringify(after.map((s) => s.name))}`);
       t.assertions.assert(readFileSync(script, "utf8") === "# left alone because the user removed it\n", "files of a removed administrator were rewritten");
     } finally {
       await stop(opened);

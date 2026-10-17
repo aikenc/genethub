@@ -55,8 +55,8 @@ defineSpecialty(
     const references = join(data, "builtin-skills", "genehub", "references");
     mkdirSync(references, { recursive: true });
     symlinkSync(join(t.openRoot, GENEHUB, "references", "spacebuilder"), join(references, "spacebuilder"));
-    cpSync(join(t.openRoot, GENEHUB, "references", "expert-template"), join(references, "expert-template"), { recursive: true });
-    const template = join(references, "expert-template");
+    cpSync(join(t.openRoot, GENEHUB, "references", "team-template"), join(references, "team-template"), { recursive: true });
+    const template = join(references, "team-template");
     const env = { PATH: process.env.PATH ?? "", HOME: data };
     const read = (dir: string, file: string) => readFileSync(join(dir, file), "utf8");
     const templateText = (file: string) => readFileSync(join(template, file), "utf8");

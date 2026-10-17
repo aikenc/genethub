@@ -25,7 +25,7 @@ import {
   seedScriptAgentRuntime,
 } from "../../framework/public.ts";
 
-const TEMPLATE = "apps/daemon/builtin-skills/genehub/references/expert-template";
+const TEMPLATE = "apps/daemon/builtin-skills/genehub/references/team-template";
 const BUILDER = "apps/daemon/builtin-skills/genehub/references/spacebuilder/spacebuilder.py";
 
 type Info = { id: string; name: string; agentSpace?: { parentWorkspaceId?: string } };
@@ -67,7 +67,7 @@ defineJourney(
     mkdirSync(path.join(alice, ".genethub"), { recursive: true });
     writeFileSync(
       path.join(alice, ".genethub", "open.env"),
-      "EXPERT_AGENT=ctl-normal\nEXPERT_WAKE_QUIET=2\nEXPERT_NOTE_QUIET=2\nEXPERT_WAKE_GAP=15\nEXPERT_WAKE_CHECK=1\n",
+      "EXPERT_AGENT=ctl-normal\nEXPERT_BOARD_PORT=0\nEXPERT_WAKE_QUIET=2\nEXPERT_NOTE_QUIET=2\nEXPERT_WAKE_GAP=15\nEXPERT_WAKE_CHECK=1\n",
     );
     const built = spawnSync("python3", [path.join(t.openRoot, BUILDER), "build", alice, "--format", "json"], { encoding: "utf8" });
     t.assertions.assert(built.status === 0, `SpaceBuilder build: ${built.stdout.slice(-500)}`);
@@ -81,7 +81,7 @@ defineJourney(
       })();
       const root = listed.find((space) => space.name === "alice");
       t.assertions.assert(root, `alice is not registered: ${JSON.stringify(listed.map((s) => s.name))}`);
-      const reflectSpace = listed.find((space) => space.name === "reflect" && space.agentSpace?.parentWorkspaceId === root!.id);
+      const reflectSpace = listed.find((space) => space.name === "team-reflect" && space.agentSpace?.parentWorkspaceId === root!.id);
       t.assertions.assert(reflectSpace, "alice's reflect Space is not registered");
       const sessionsOf = async (workspaceId: string): Promise<Listed[]> => {
         const reply = await opened.client.call({ type: "session.list", payload: { workspaceId, includeArchived: false } });

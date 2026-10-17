@@ -24,7 +24,7 @@ import {
   seedScriptAgentRuntime,
 } from "../../framework/public.ts";
 
-const TEMPLATE = "apps/daemon/builtin-skills/genehub/references/expert-template";
+const TEMPLATE = "apps/daemon/builtin-skills/genehub/references/team-template";
 const BUILDER = "apps/daemon/builtin-skills/genehub/references/spacebuilder/spacebuilder.py";
 
 type Info = { id: string; name: string; agentSpace?: { parentWorkspaceId?: string } };
@@ -66,7 +66,7 @@ defineJourney(
     const hookPath = path.join(alice, "skills/expert-front/hooks/timer.genet.json");
     writeFileSync(hookPath, JSON.stringify({ ...JSON.parse(readFileSync(hookPath, "utf8")), every: "1s" }));
     const setEnv = (agent: string): void =>
-      writeFileSync(path.join(alice, ".genethub", "open.env"), `EXPERT_AGENT=${agent}\nEXPERT_STUCK_AFTER=4\nEXPERT_STOPPED_AFTER=3600\n`);
+      writeFileSync(path.join(alice, ".genethub", "open.env"), `EXPERT_AGENT=${agent}\nEXPERT_BOARD_PORT=0\nEXPERT_STUCK_AFTER=4\nEXPERT_STOPPED_AFTER=3600\n`);
     mkdirSync(path.join(alice, ".genethub"), { recursive: true });
     setEnv("ctl-normal");
     const built = spawnSync("python3", [path.join(t.openRoot, BUILDER), "build", alice, "--format", "json"], { encoding: "utf8" });
@@ -81,7 +81,7 @@ defineJourney(
       })();
       const spaces = await listed;
       const root = spaces.find((space) => space.name === "alice")!;
-      const work = spaces.find((space) => space.name === "work" && space.agentSpace?.parentWorkspaceId === root.id)!;
+      const work = spaces.find((space) => space.name === "leader" && space.agentSpace?.parentWorkspaceId === root.id)!;
       t.assertions.assert(root && work, "alice is not registered with its work Space");
 
       const created = await opened.client.call({
@@ -157,7 +157,7 @@ defineJourney(
 
       // quiet reflect failure: a background reflect session (quiet=true, requester=null) that dies must close its
       // pending record silently and NEVER send a report notice to the front.
-      const reflectSpace = spaces.find((space) => space.name === "reflect" && space.agentSpace?.parentWorkspaceId === root.id)!;
+      const reflectSpace = spaces.find((space) => space.name === "team-reflect" && space.agentSpace?.parentWorkspaceId === root.id)!;
       const badReflectCreated = await opened.client.call({
         type: "session.create",
         payload: { workspaceId: reflectSpace.id, agentId: "ctl-exit-without-terminal", modelId: null, modeId: null, title: "反思：测试静默失败", cwd: null },

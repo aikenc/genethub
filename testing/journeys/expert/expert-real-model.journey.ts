@@ -17,7 +17,7 @@ import path from "node:path";
 
 import { defineJourney, seedScriptAgentRuntime } from "../../framework/public.ts";
 
-const TEMPLATE = "apps/daemon/builtin-skills/genehub/references/expert-template";
+const TEMPLATE = "apps/daemon/builtin-skills/genehub/references/team-template";
 const BUILDER = "apps/daemon/builtin-skills/genehub/references/spacebuilder/spacebuilder.py";
 /**
  * A cheap, non-reasoning "flash" model from the Beta provider configuration. Never a Claude or GPT model: the
@@ -67,7 +67,7 @@ defineJourney(
     cpSync(path.join(t.openRoot, TEMPLATE), alice, { recursive: true });
     const descriptorPath = path.join(alice, "agent-space.genet.json");
     writeFileSync(descriptorPath, JSON.stringify({ ...JSON.parse(readFileSync(descriptorPath, "utf8")), name: "alice", agents: ["codex"] }));
-    for (const child of ["research", "work", "reflect"]) {
+    for (const child of ["leader", "qa", "research", "team-reflect"]) {
       const file = path.join(alice, "spaces", child, "agent-space.genet.json");
       writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), agents: ["codex"] }));
     }
@@ -76,7 +76,7 @@ defineJourney(
     mkdirSync(path.join(alice, ".genethub"), { recursive: true });
     writeFileSync(
       path.join(alice, ".genethub", "open.env"),
-      `EXPERT_AGENT=genet\nEXPERT_MODEL_WORK=${MODEL}\nEXPERT_MODEL_RESEARCH=${MODEL}\nEXPERT_MODEL_REFLECT=${MODEL}\nEXPERT_WAKE_ROUNDS=100000\nEXPERT_NOTE_QUIET=100000\n`,
+      `EXPERT_AGENT=genet\nEXPERT_BOARD_PORT=0\nEXPERT_MODEL_WORK=${MODEL}\nEXPERT_MODEL_RESEARCH=${MODEL}\nEXPERT_MODEL_REFLECT=${MODEL}\nEXPERT_WAKE_ROUNDS=100000\nEXPERT_NOTE_QUIET=100000\n`,
     );
     const built = spawnSync("python3", [path.join(t.openRoot, BUILDER), "build", alice, "--format", "json"], { encoding: "utf8" });
     t.assertions.assert(built.status === 0, `SpaceBuilder build: ${built.stdout.slice(-500)}`);
@@ -87,7 +87,7 @@ defineJourney(
       if (listReply?.type !== "workspaces") throw new Error(`workspace.list returned ${listReply?.type}`);
       const spaces = listReply.data as unknown as Info[];
       const root = spaces.find((space) => space.name === "alice")!;
-      const work = spaces.find((space) => space.name === "work" && space.agentSpace?.parentWorkspaceId === root?.id)!;
+      const work = spaces.find((space) => space.name === "leader" && space.agentSpace?.parentWorkspaceId === root?.id)!;
       t.assertions.assert(root && work, "alice is not registered with its work Space");
 
       const sessionsOf = async (workspaceId: string) => {
@@ -165,7 +165,7 @@ defineJourney(
       const workerModel = (await snapshot(worker.id)).summary as unknown as { modelId?: string | null };
       if (workerModel.modelId !== MODEL) await fail(`the background session is on ${String(workerModel.modelId)}, not ${MODEL}`, [front, worker.id]);
       metrics.delegated = { afterMs: Date.now() - started2, description: worker.description, labels: worker.labels, frontUsageBeforeResult: await usage(front) };
-      if (!worker.description || !worker.labels?.includes("系统发起") || !worker.labels?.includes("工作")) {
+      if (!worker.description || !worker.labels?.includes("系统发起") || !worker.labels?.includes("组长")) {
         await fail(`the background session is not labelled and described by expert.py: ${JSON.stringify(worker)}`, [front, worker.id]);
       }
 
@@ -175,7 +175,7 @@ defineJourney(
       } catch {
         await fail("the finished background session was never reported to the front", [front, worker.id]);
       }
-      const written = path.join(alice, "spaces", "work", "hello.txt");
+      const written = path.join(alice, "spaces", "leader", "hello.txt");
       const wrote = existsSync(written) ? readFileSync(written, "utf8").trim() : null;
       metrics.work = { ms: Date.now() - started2, usage: await usage(worker.id), file: wrote };
       if (wrote === null) {

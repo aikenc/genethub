@@ -652,7 +652,7 @@ mod tests {
         let root = temp_dir("stale");
         load(&root);
         let current = BUILTIN_FILES[0].relative_path;
-        let stale_file = root.join("genehub/references/expert-template/spaces/think/agent-space.genet.json");
+        let stale_file = root.join("genehub/references/team-template/spaces/think/agent-space.genet.json");
         let retired_skill = root.join("genehub-html-preview/SKILL.md");
         let in_flight = root.join("genehub/.SKILL.md.1234.tmp");
         for path in [&stale_file, &retired_skill, &in_flight] {

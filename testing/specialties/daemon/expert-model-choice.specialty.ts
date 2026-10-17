@@ -15,7 +15,7 @@ import {
   seedScriptAgentRuntime,
 } from "../../framework/public.ts";
 
-const TOOL = "apps/daemon/builtin-skills/genehub/references/expert-template/tools/expert.py";
+const TOOL = "apps/daemon/builtin-skills/genehub/references/team-template/tools/expert.py";
 
 // The stand-in CLI: the answer is the last stdout line, as the real one's is.
 const FAKE_GENET = `#!/usr/bin/env python3

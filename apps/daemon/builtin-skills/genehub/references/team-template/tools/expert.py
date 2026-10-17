@@ -186,7 +186,7 @@ def find_root(start=None):
     cwd_root = _walk_expert_root(os.getcwd())
     env_root = _walk_expert_root(os.environ.get("GENEHUB_SPACE_DIR")) if os.environ.get("GENEHUB_SPACE_DIR") else None
     if script_root and not script_root.replace(os.sep, "/").endswith(
-        ("/builtin-skills/genehub/references/expert-template", "/builtin-skills/genehub/references/team-template")
+        "/builtin-skills/genehub/references/team-template"
     ):
         if cwd_root and cwd_root != env_root:
             return cwd_root
@@ -941,6 +941,9 @@ def resolve_send_target(root, target_spec, kind, text, sender):
             )
     _, target_mine = me(target_root)
     spaces = target_mine.get("spaces") or {}
+    # A team has no generic `work` Space: the role that does the work is the leader.
+    if role_spec == "work" and "work" not in spaces and "leader" in spaces:
+        role_spec = "leader"
     if role_spec in ("default", "root", "front"):
         front = front_session(target_root, spaces) if "root" in spaces else None
         if front:
@@ -958,7 +961,7 @@ def resolve_send_target(root, target_spec, kind, text, sender):
             if existing:
                 return max(existing, key=lambda item: item.get("updatedAtMs", 0))["id"], False, target_root, "leader"
         else:
-            role = "work" if kind == "task" else "research"
+            role = ("leader" if "leader" in spaces else "work") if kind == "task" else "research"
             if kind not in ("task", "question", "request") and "root" in spaces:
                 front = front_session(target_root, spaces)
                 if front:
@@ -1318,7 +1321,10 @@ def refresh_live_status(root, force=False):
             if spec and spec.loader:
                 mod = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(mod)
-                mod.ensure_team_board(root, start_service=(os.environ.get("EXPERT_BOARD_PORT") != "0"), force_sync=force)
+                # The board is a standing service; EXPERT_BOARD_PORT=0 turns it off, from the process or from
+                # this Space's own open.env, so a Space that does not want one (a test, a headless run) says so once.
+                board_off = os.environ.get("EXPERT_BOARD_PORT") == "0" or open_env(root).get("EXPERT_BOARD_PORT") == "0"
+                mod.ensure_team_board(root, start_service=not board_off, force_sync=force)
     except Exception:
         pass
 
@@ -1545,8 +1551,10 @@ def cmd_init(args):
                 "没有重复创建专家目录",
                 "请直接复用现有团队 %s（在 %s 下操作或用 expert.py send --to %s）；若确需另建独立副本请显式加 --force" % (existing_name, existing_dir, existing_name),
             )
-    is_team = bool(getattr(args, "team", False) or getattr(args, "members", None))
-    template = template_dir(root, team=is_team)
+    # Every thing a person builds is a team: a 1+0 team (front + leader + qa + research + team-reflect)
+    # is the smallest one, and `--team` / `--member` are accepted but no longer change the shape.
+    is_team = True
+    template = template_dir(root, team=True)
     staging = os.path.join(base, ".init-%s-%d" % (new_name, os.getpid()))
     if os.path.exists(staging):
         shutil.rmtree(staging, ignore_errors=True)
@@ -2336,10 +2344,10 @@ def is_team_root(root):
 
 
 def template_dir(root, team=None):
-    """The template experts/teams are made from ships in the data directory next to `spaces/`;
-    EXPERT_TEMPLATE / EXPERT_TEAM_TEMPLATE override."""
-    use_team = is_team_root(root) if team is None else bool(team)
-    tpl_name = "team-template" if use_team else "expert-template"
+    """The template teams are made from ships in the data directory next to `spaces/`;
+    EXPERT_TEMPLATE / EXPERT_TEAM_TEMPLATE override. There is one template: a team."""
+    use_team = True
+    tpl_name = "team-template"
     if use_team and os.environ.get("EXPERT_TEAM_TEMPLATE"):
         path = os.path.realpath(os.environ["EXPERT_TEAM_TEMPLATE"])
         if os.path.isdir(path):
@@ -2358,7 +2366,7 @@ def template_dir(root, team=None):
             cand = os.path.join(cur, "builtin-skills", "genehub", "references", tpl_name)
             if os.path.isdir(cand):
                 return os.path.realpath(cand)
-            if os.path.basename(cur) in ("expert-template", "team-template") and os.path.basename(os.path.dirname(cur)) == "references":
+            if os.path.basename(cur) == "team-template" and os.path.basename(os.path.dirname(cur)) == "references":
                 cand2 = os.path.join(os.path.dirname(cur), tpl_name)
                 if os.path.isdir(cand2):
                     return os.path.realpath(cand2)

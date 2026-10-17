@@ -5,7 +5,9 @@
 //! the rest of the daemon: the scan registers it like any Space, and SpaceBuilder builds it like any Space.
 //!
 //! The built-in administrator is stateless product-owned bootstrap material:
-//!   - rewritten on every start if it differs: every file from `expert-template/` and `expert-admin-skill/`;
+//!   - rewritten on every start if it differs: every file from `team-template/` (except its child Spaces —
+//!     the administrator is one Space plus `expert-admin`, with no background Spaces of its own) and
+//!     `expert-admin-skill/`;
 //!   - stale template files not in the current shipment are pruned;
 //!   - runtime and build-output paths (`.genethub/`, `.spacebuilder/`, `temp/`, `datas/`, `posts/`, and SpaceBuilder
 //!     target files) are preserved.
@@ -20,7 +22,7 @@ use serde_json::{json, Value};
 
 use crate::state::Shared;
 
-const TEMPLATE: &str = "genehub/references/expert-template/";
+const TEMPLATE: &str = "genehub/references/team-template/";
 const ADMIN_SKILL: &str = "genehub/references/expert-admin-skill/";
 const BUILDER: &str = "genehub/references/spacebuilder/spacebuilder.py";
 const BUILD_TIMEOUT: Duration = Duration::from_secs(60);
@@ -94,6 +96,11 @@ pub fn refresh(admin: &Path, name: &str) -> std::io::Result<bool> {
         Ok(())
     };
     for (relative, contents) in crate::skills::builtin_files_under(TEMPLATE) {
+        // The administrator is one Space plus one Skill: it answers the person itself and never runs
+        // background Spaces, so the team's child Spaces are not part of it.
+        if relative.starts_with("spaces/") {
+            continue;
+        }
         if relative == "agent-space.genet.json" {
             put(relative, &admin_descriptor(contents, name))?;
         } else {
@@ -209,6 +216,8 @@ fn admin_descriptor(template: &[u8], name: &str) -> Vec<u8> {
     if let Some(skills) = descriptor["skills"].as_array_mut() {
         skills.push(json!("expert-admin"));
     }
+    // One Space, no children: nothing scans under the administrator for role Spaces that do not exist.
+    descriptor["children"] = json!({ "scanDepth": 0 });
     let mut bytes = serde_json::to_vec_pretty(&descriptor).expect("a JSON value serializes");
     bytes.push(b'\n');
     bytes

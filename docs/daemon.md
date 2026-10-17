@@ -215,7 +215,7 @@ daemon 解析 `schema`（缺省可）、`event`（只能是 `timer`）、`every`
 
 ### 内置管理员
 
-每台机器有一位随产品发布的专家：`<data>/spaces/admin/`，名字是"<机器名>管理员"（机器名取自 `GENEHUB_LOCAL_MACHINE_NAME`，没有则主机名；去掉控制字符与路径分隔符，整体不超过 64 个字符，被截短的只会是机器名）。它就是一个普通 Space：用的是和任何专家同一份模板（`builtin-skills/genehub/references/expert-template/`），只多一份 `expert-admin` Skill，由扫描登记、由 SpaceBuilder 构建，daemon 里没有给它的特殊路径。
+每台机器有一位随产品发布的专家：`<data>/spaces/admin/`，名字是"<机器名>管理员"（机器名取自 `GENEHUB_LOCAL_MACHINE_NAME`，没有则主机名；去掉控制字符与路径分隔符，整体不超过 64 个字符，被截短的只会是机器名）。它就是一个普通 Space：用的是团队模板 `builtin-skills/genehub/references/team-template/` 的同一份文件（不含团队的子 Space），只多一份 `expert-admin` Skill，由扫描登记、由 SpaceBuilder 构建，daemon 里没有给它的特殊路径。
 
 daemon 每次启动，在扫描之前做三件事：
 

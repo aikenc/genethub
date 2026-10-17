@@ -10,7 +10,7 @@ import { join } from "node:path";
 
 import { defineSpecialty, type CaseContext } from "../../framework/public.ts";
 
-const TEMPLATE = "apps/daemon/builtin-skills/genehub/references/expert-template";
+const TEMPLATE = "apps/daemon/builtin-skills/genehub/references/team-template";
 const DAY = 86400;
 
 const DRIVER = `
@@ -288,6 +288,6 @@ defineSpecialty(
       qaSoul.includes("我做的一切只有一个目的：让用户满意") && qaSoul.includes("使用Playwright真实操作与截图核验") && qaSoul.includes("（以下由反思会话按证据维护"),
       `qaSoul: ${qaSoul}`,
     );
-    t.assertions.assert(existsSync(join(qaDir, ".git")) && existsSync(join(qaDir, "front", "AGENTS.md")) && existsSync(join(qaDir, "spaces", "work", "AGENTS.md")), "qaDir git or compiled AGENTS.md missing");
+    t.assertions.assert(existsSync(join(qaDir, ".git")) && existsSync(join(qaDir, "front", "AGENTS.md")) && existsSync(join(qaDir, "spaces", "leader", "AGENTS.md")), "qaDir git or compiled AGENTS.md missing");
   },
 );

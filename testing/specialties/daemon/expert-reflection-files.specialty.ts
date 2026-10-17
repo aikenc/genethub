@@ -73,8 +73,8 @@ function rig(t: CaseContext, name: string, build = false): Rig {
   const references = join(data, "builtin-skills", "genehub", "references");
   mkdirSync(references, { recursive: true });
   symlinkSync(join(t.openRoot, GENEHUB, "references", "spacebuilder"), join(references, "spacebuilder"));
-  const template = join(references, "expert-template");
-  cpSync(join(t.openRoot, GENEHUB, "references", "expert-template"), template, { recursive: true });
+  const template = join(references, "team-template");
+  cpSync(join(t.openRoot, GENEHUB, "references", "team-template"), template, { recursive: true });
   const expert = join(data, "spaces", "alice");
   cpSync(template, expert, { recursive: true });
   const fake = join(data, "genet");
@@ -141,17 +141,17 @@ defineSpecialty(
     }
     mkdirSync(join(r.expert, "tools/__pycache__"), { recursive: true }); // what importing the script leaves behind
     writeFileSync(join(r.expert, "tools/__pycache__/expert.cpython-39.pyc"), "x");
-    // Runtime work artifacts inside spaces/work/ stay out of git too.
-    mkdirSync(join(r.expert, "spaces/work/qa-shots"), { recursive: true });
-    writeFileSync(join(r.expert, "spaces/work/index.html"), "<html>game</html>");
-    writeFileSync(join(r.expert, "spaces/work/qa-shots/shot.png"), "png");
+    // Runtime work artifacts inside spaces/leader/ stay out of git too.
+    mkdirSync(join(r.expert, "spaces/leader/qa-shots"), { recursive: true });
+    writeFileSync(join(r.expert, "spaces/leader/index.html"), "<html>game</html>");
+    writeFileSync(join(r.expert, "spaces/leader/qa-shots/shot.png"), "png");
     const second = r.cli(["snapshot"]);
     t.assertions.assert(second.err === "" && second.out.includes("没有需要提交"), `snapshot with nested repositories: ${second.out} ${second.err}`);
     const tracked = r.git("ls-files").split("\n");
-    for (const forbidden of ["datas/", "temp/", ".genethub/", ".spacebuilder/", "front/AGENTS.md", "spaces/work/AGENTS.md", "spaces/work/index.html", "spaces/work/qa-shots/", "tools/__pycache__/"]) {
+    for (const forbidden of ["datas/", "temp/", ".genethub/", ".spacebuilder/", "front/AGENTS.md", "spaces/leader/AGENTS.md", "spaces/leader/index.html", "spaces/leader/qa-shots/", "tools/__pycache__/"]) {
       t.assertions.assert(!tracked.some((file) => file.startsWith(forbidden)), `${forbidden} is tracked: ${tracked.filter((f) => f.startsWith(forbidden)).slice(0, 3)}`);
     }
-    t.assertions.assert(tracked.includes("skills/expert-core/SKILL.md") && tracked.includes("spaces/reflect/agent-space.genet.json") && tracked.includes("soul.md"), "own files are not tracked");
+    t.assertions.assert(tracked.includes("skills/expert-core/SKILL.md") && tracked.includes("spaces/leader/agent-space.genet.json") && tracked.includes("soul.md"), "own files are not tracked");
 
     // Drift: empty, then the edited platform file; the expert's own files are not drift.
     t.assertions.assert(r.cli(["drift"]).out === "平台文件与 platform 分支一致", `fresh drift: ${r.cli(["drift"]).out}`);
@@ -300,20 +300,20 @@ defineSpecialty(
   {
     ...base,
     id: "specialty.daemon.expert-soul-mirror",
-    title: "All four Spaces compile soul.md and memory.md directly without a mirror copy, plus their own style.md and index.md",
+    title: "Every Space compiles soul.md and memory.md directly without a mirror copy, plus its own style.md and index.md",
     oracle:
-      "the template has no spaces/reflect/soul.mirror.md; after the first build front/, research/, work/ and reflect/ all carry the soul, memory and their own style; after sync-identity with an edited soul.md and spaces/work/index.md, all four Spaces carry the new soul and work/ carries its index; with no change the next sync reports unchanged",
+      "the template has no spaces/team-reflect/soul.mirror.md; after the first build front/ and every Space under spaces/ all carry the soul, memory and their own style; after sync-identity with an edited soul.md and spaces/leader/index.md, every Space carries the new soul and leader/ carries its index; with no change the next sync reports unchanged",
     catches: [
       "a child Space that does not know who the expert is or misses the shared memory",
-      "a stale mirror copy left in spaces/reflect/",
+      "a stale mirror copy left in spaces/team-reflect/",
       "a Space's own style.md or index.md not compiled into its instruction file",
       "an unchanged identity rebuilding on every tick",
     ],
   },
   async (t) => {
     const r = rig(t, "soul-mirror", true);
-    t.assertions.assert(!existsSync(join(r.template, "spaces/reflect/soul.mirror.md")), "spaces/reflect/soul.mirror.md still exists in the template");
-    for (const dir of ["front", "spaces/research", "spaces/work", "spaces/reflect"]) {
+    t.assertions.assert(!existsSync(join(r.template, "spaces/team-reflect/soul.mirror.md")), "spaces/team-reflect/soul.mirror.md still exists in the template");
+    for (const dir of ["front", "spaces/leader", "spaces/qa", "spaces/research", "spaces/team-reflect"]) {
       const agents = readFileSync(join(r.expert, dir, "AGENTS.md"), "utf8");
       t.assertions.assert(agents.includes("我做的一切只有一个目的：让用户满意"), `${dir}/AGENTS.md does not carry the soul after the first build`);
       t.assertions.assert(agents.includes("全局核心记忆与铁律"), `${dir}/AGENTS.md does not carry memory.md after the first build`);
@@ -322,14 +322,14 @@ defineSpecialty(
     t.assertions.assert(r.cli(["sync-identity"]).out === "unchanged", "an unchanged identity rebuilt");
 
     writeFileSync(join(r.expert, "soul.md"), "# 灵魂\n\n我叫小满，只说方言。\n");
-    writeFileSync(join(r.expert, "spaces/work/index.md"), "# 行动经验索引\n\n- 改前先跑测试\n");
+    writeFileSync(join(r.expert, "spaces/leader/index.md"), "# 行动经验索引\n\n- 改前先跑测试\n");
     const synced = r.cli(["sync-identity"]);
     t.assertions.assert(synced.out === "rebuilt", `sync after an edit: ${synced.out} ${synced.err}`);
-    for (const dir of ["front", "spaces/research", "spaces/work", "spaces/reflect"]) {
+    for (const dir of ["front", "spaces/leader", "spaces/qa", "spaces/research", "spaces/team-reflect"]) {
       t.assertions.assert(readFileSync(join(r.expert, dir, "AGENTS.md"), "utf8").includes("只说方言"), `the new soul did not reach ${dir}/AGENTS.md`);
     }
-    t.assertions.assert(readFileSync(join(r.expert, "spaces/work/AGENTS.md"), "utf8").includes("改前先跑测试"), "work/index.md did not reach spaces/work/AGENTS.md");
-    t.assertions.assert(!readFileSync(join(r.expert, "spaces/research/AGENTS.md"), "utf8").includes("改前先跑测试"), "work/index.md leaked into spaces/research/AGENTS.md");
+    t.assertions.assert(readFileSync(join(r.expert, "spaces/leader/AGENTS.md"), "utf8").includes("改前先跑测试"), "leader/index.md did not reach spaces/leader/AGENTS.md");
+    t.assertions.assert(!readFileSync(join(r.expert, "spaces/research/AGENTS.md"), "utf8").includes("改前先跑测试"), "leader/index.md leaked into spaces/research/AGENTS.md");
   },
 );
 
