@@ -1092,9 +1092,11 @@ async fn run_conversation(rpc: &Rpc, run: Run, here: bool) -> Result<i32, CliFai
     // Checked before anything is created: a notice has a recipient, and
     // creating a session just to leave a notice in it would be an odd way to
     // find that out.
-    if run.prompt.starts_with("用途: ") && run.session_id.is_none() {
+    // A notice with a stable id may also be the first message of a session this command creates; scripts
+    // written before notices needed an id start their background sessions exactly that way.
+    if run.prompt.starts_with("用途: ") && run.session_id.is_none() && run.message_id.is_none() {
         return Err(CliFailure::invalid_args(
-            "a system notice (用途: ...) sends to an existing session: use genet session send <id> ...",
+            "a system notice (用途: ...) sends to an existing session: use genet session send <id> ..., or give it a --message-id to open one with it",
         ));
     }
     let mut session = match run.session_id.as_deref() {
@@ -1829,6 +1831,17 @@ mod tests {
                 .code,
             "invalidArgs"
         );
+        // A notice may also be the first message of a session this command opens, and it is durable once it
+        // carries an id — which is why `run_conversation` only refuses a notice with neither a recipient nor an id.
+        assert!(run_of(
+            parse_agent(
+                &words(&["run", "--agent", "codex", "--workspace", "w_1", "--message", "用途: reflect\n\nhi"]),
+                &selection(None),
+            )
+            .unwrap()
+        )
+        .message_id
+        .is_some());
     }
 
     #[test]
