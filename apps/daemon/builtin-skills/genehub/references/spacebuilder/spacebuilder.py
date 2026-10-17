@@ -1031,8 +1031,8 @@ def load_workspace(root: Path, manifest: Manifest) -> Workspace:
     if not isinstance(raw, dict) or not isinstance(raw.get("folders"), list) or not raw["folders"]:
         fail("SB004", "workspace.folders must be a non-empty array", sources=(path.as_posix(),))
     folders: list[WorkspaceFolder] = []
-    names: set[str] = set()
-    resolved_keys: set[str] = set()
+    names: dict[str, str] = {}
+    resolved_keys: dict[str, str] = {}
     for index, item in enumerate(raw["folders"]):
         if not isinstance(item, dict):
             fail("SB004", f"workspace.folders[{index}] must be an object", sources=(path.as_posix(),))
@@ -1059,12 +1059,20 @@ def load_workspace(root: Path, manifest: Manifest) -> Workspace:
             if not isinstance(name, str) or not name.strip():
                 fail("SB004", f"workspace.folders[{index}].name must be non-empty", sources=(path.as_posix(),))
         if name in names:
-            fail("SB004", f"Duplicate workspace folder name: {name}", sources=(path.as_posix(),))
+            fail(
+                "SB004",
+                f"Duplicate workspace folder name: {name} (folders: {names[name]} and {configured})",
+                sources=(path.as_posix(), names[name], configured),
+            )
         key = os.path.normcase(str(resolved))
         if key in resolved_keys:
-            fail("SB004", f"Duplicate resolved workspace folder path: {configured}", sources=(path.as_posix(),))
-        names.add(name)
-        resolved_keys.add(key)
+            fail(
+                "SB004",
+                f"Duplicate resolved workspace folder path: {configured} (already used by {resolved_keys[key]})",
+                sources=(path.as_posix(), resolved_keys[key], configured),
+            )
+        names[name] = configured
+        resolved_keys[key] = configured
         folders.append(WorkspaceFolder(name, Path(configured).as_posix(), resolved))
     return Workspace(path, folders)
 

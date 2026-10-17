@@ -580,7 +580,8 @@ def start(root, workspace_id, role, desc, text, model_key, tier=None, model=None
     auto_archive = open_env(root).get("EXPERT_ARCHIVE_OLD_SESSIONS") == "1"
     old_candidates = list(live_sessions(workspace_id)) if (auto_archive and role not in ("root", "front")) else []
     args = ["agent", "run", *picked, text, "--workspace", workspace_id, "--title", desc[:80], "--label", role_label,
-            "--label", SYSTEM_LABEL, "--description", desc[:300], "--no-wait"]
+            "--label", SYSTEM_LABEL, "--description", desc[:300],
+            "--message-id", message_id("start", workspace_id, role, desc, text), "--no-wait"]
     new_sid = genet(*args).get("sessionId")
     clear_sessions_cache()
     if new_sid and old_candidates:
@@ -3549,12 +3550,41 @@ def identity_inputs_digest(root):
     return hasher.hexdigest(), label
 
 
+def heal_identity_aliases(root):
+    """A Space built from an older template may declare `style.md` while only `role.md` exists on disk (or the other
+    way round). Copy whichever exists onto the missing name so a template upgrade cannot break `spacebuilder.py build`."""
+    def spaces():
+        yield os.path.join(root, "front")
+        base = os.path.join(root, "spaces")
+        if os.path.isdir(base):
+            for entry in sorted(os.listdir(base)):
+                if os.path.isdir(os.path.join(base, entry)):
+                    yield os.path.join(base, entry)
+
+    healed = []
+    for role_dir in spaces():
+        desc = read_json(os.path.join(role_dir, ROOT_DESCRIPTOR))
+        if not desc:
+            continue
+        declared = {os.path.basename(str(item)) for item in (desc.get("identity") or [])}
+        style = os.path.join(role_dir, "style.md")
+        role = os.path.join(role_dir, "role.md")
+        if "style.md" in declared and not os.path.isfile(style) and os.path.isfile(role):
+            shutil.copyfile(role, style)
+            healed.append(style)
+        elif "role.md" in declared and not os.path.isfile(role) and os.path.isfile(style):
+            shutil.copyfile(style, role)
+            healed.append(role)
+    return healed
+
+
 def sync_identity(root):
     """Identity files and Skills are compiled into the instruction files Agents read natively; when any of them changes, compile again.
 
     Returns "none" (the expert declares no identity), "unchanged", or "rebuilt". A failed build is remembered by the
     digest it failed on so the five-second tick does not rerun it more than once a minute.
     """
+    heal_identity_aliases(root)
     digest, label = identity_inputs_digest(root)
     if not digest:
         return "none"
