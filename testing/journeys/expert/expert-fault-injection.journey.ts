@@ -28,7 +28,8 @@ const TEMPLATE = "apps/daemon/builtin-skills/genehub/references/expert-template"
 const BUILDER = "apps/daemon/builtin-skills/genehub/references/spacebuilder/spacebuilder.py";
 
 type Info = { id: string; name: string; agentSpace?: { parentWorkspaceId?: string } };
-type Item = { type?: string; text?: string; system?: boolean };
+type Item = { type?: string; text?: string; system?: boolean; origin?: { sessionId?: string } };
+const isSystem = (item: Item): boolean => item.system === true || item.origin?.sessionId === "system" || (item.text ?? "").startsWith("用途: ");
 
 defineJourney(
   {
@@ -96,7 +97,7 @@ defineJourney(
         return (reply.data as unknown as { items: Item[] }).items;
       };
       const notices = async (needle: string, kind: RegExp): Promise<Item[]> =>
-        (await itemsOf(front)).filter((item) => item.system === true && (item.text ?? "").includes(needle) && kind.test(item.text ?? ""));
+        (await itemsOf(front)).filter((item) => isSystem(item) && (item.text ?? "").includes(needle) && kind.test(item.text ?? ""));
 
       const genet = locateGenet(t.openRoot);
       const env = { ...genetEnv(t.openRoot, { ...t.env.env, GENEHUB_LOCAL_DATA_DIR: t.env.data }), GENEHUB_CLI: genet };
@@ -117,7 +118,7 @@ defineJourney(
         try {
           await t.tools.waitUntil(async () => (await notices(needle, kind)).length >= 1, 40_000);
         } catch {
-          const texts = (await itemsOf(front)).filter((item) => item.system === true).map((item) => (item.text ?? "").slice(0, 160));
+          const texts = (await itemsOf(front)).filter((item) => isSystem(item)).map((item) => (item.text ?? "").slice(0, 160));
           t.assertions.assert(false, `${what}: no notice for ${needle} ${kind}; the front has ${JSON.stringify(texts)}; pending ${JSON.stringify(pendingIds())}`);
         }
         await settle(4_000); // several more timer runs
@@ -139,13 +140,61 @@ defineJourney(
       await opened.client.call({ type: "session.interrupt", payload: { sessionId: paused } });
       await exactlyOnce(paused, /被暂停/, "paused");
 
-      // failed: the Agent process dies mid-turn.
+      // failed: the Agent process dies mid-turn -> reported once to front AND recorded as an anomaly note for reflect.
       const failed = await spawnWith("ctl-exit-without-terminal", "dies in the middle");
       await exactlyOnce(failed, /已失败/, "failed");
+      const notesDir = path.join(alice, ".genethub/expert/notes");
+      const anomalyNotes = () =>
+        existsSync(notesDir)
+          ? readdirSync(notesDir)
+              .filter((f) => f.endsWith(".json"))
+              .map((f) => JSON.parse(readFileSync(path.join(notesDir, f), "utf8")) as { kind?: string; session?: string })
+          : [];
+      t.assertions.assert(
+        anomalyNotes().some((n) => n.kind === "anomaly" && n.session === failed),
+        `failed session ${failed} did not leave a kind=anomaly note: ${JSON.stringify(anomalyNotes())}`,
+      );
+
+      // quiet reflect failure: a background reflect session (quiet=true, requester=null) that dies must close its
+      // pending record silently and NEVER send a report notice to the front.
+      const reflectSpace = spaces.find((space) => space.name === "reflect" && space.agentSpace?.parentWorkspaceId === root.id)!;
+      const badReflectCreated = await opened.client.call({
+        type: "session.create",
+        payload: { workspaceId: reflectSpace.id, agentId: "ctl-exit-without-terminal", modelId: null, modeId: null, title: "反思：测试静默失败", cwd: null },
+      });
+      if (badReflectCreated?.type !== "session") throw new Error(`session.create returned ${badReflectCreated?.type}`);
+      const badReflectId = (badReflectCreated.data as unknown as { id: string }).id;
+      writeFileSync(
+        path.join(alice, ".genethub/expert/pending", `${badReflectId}.json`),
+        JSON.stringify({
+          sessionId: badReflectId,
+          requester: null,
+          kind: "reflect",
+          desc: "反思：测试静默失败",
+          createdAtMs: Date.now(),
+          baseline: null,
+          notified: [],
+          lock: null,
+          route: "ctl-exit-without-terminal",
+          quiet: true,
+        }),
+      );
+      await t.flows.main.sendPrompt(opened.client, badReflectId, "trigger reflect failure", null, `u_bad_ref_${Date.now()}`);
+      await t.tools.waitUntil(async () => !pendingIds().includes(badReflectId), 30_000);
+      await settle(2_500);
+      const leakedReflectNotices = await notices(badReflectId, /已失败|已停止|已不存在/);
+      t.assertions.assert(
+        leakedReflectNotices.length === 0,
+        `quiet reflect session ${badReflectId} leaked a failure report to front: ${JSON.stringify(leakedReflectNotices)}`,
+      );
 
       // stuck: running, silent, past the threshold (4 s in this lease).
       const stuck = await spawnWith("ctl-accept-then-silent", "makes no progress");
       await exactlyOnce(stuck, /没有进展/, "stuck");
+      t.assertions.assert(
+        anomalyNotes().some((n) => n.kind === "anomaly" && n.session === stuck),
+        `stuck session ${stuck} did not leave a kind=anomaly note: ${JSON.stringify(anomalyNotes())}`,
+      );
 
       // gone: deleted behind the hook's back, after it has already reported the pause.
       const gone = await spawnWith("ctl-accept-then-silent", "will be deleted");
@@ -173,7 +222,7 @@ defineJourney(
         return reply?.type === "snapshot" && (reply.data as unknown as { summary: { status: string } }).summary.status === "running";
       }, 30_000);
       for (let n = 0; n < 40; n += 1) {
-        spawnSync(genet, ["session", "send", target, `filler ${n}`, "--message-id", `fill.${n}`, "--queue", "--no-wait"], { env, encoding: "utf8" });
+        spawnSync(genet, ["session", "send", target, `用途: notice\n\nfiller ${n}`, "--message-id", `fill.${n}`, "--no-wait"], { env, encoding: "utf8" });
       }
       const refused = expert("send", "--to", target, "one too many");
       t.assertions.assert(

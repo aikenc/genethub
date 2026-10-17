@@ -33,9 +33,11 @@ type Item = {
   text?: string;
   message?: string;
   system?: boolean;
+  origin?: { sessionId?: string };
   name?: string;
   stats?: { usage?: { llmRounds?: number; inputTokens?: number; outputTokens?: number }; durationMs?: number };
 };
+const isSystem = (item: Item): boolean => item.system === true || item.origin?.sessionId === "system" || (item.text ?? "").startsWith("用途: ");
 
 defineJourney(
   {
@@ -65,7 +67,7 @@ defineJourney(
     cpSync(path.join(t.openRoot, TEMPLATE), alice, { recursive: true });
     const descriptorPath = path.join(alice, "agent-space.genet.json");
     writeFileSync(descriptorPath, JSON.stringify({ ...JSON.parse(readFileSync(descriptorPath, "utf8")), name: "alice", agents: ["codex"] }));
-    for (const child of ["think", "work"]) {
+    for (const child of ["research", "work", "reflect"]) {
       const file = path.join(alice, "spaces", child, "agent-space.genet.json");
       writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), agents: ["codex"] }));
     }
@@ -74,7 +76,7 @@ defineJourney(
     mkdirSync(path.join(alice, ".genethub"), { recursive: true });
     writeFileSync(
       path.join(alice, ".genethub", "open.env"),
-      `EXPERT_AGENT=genet\nEXPERT_MODEL_WORK=${MODEL}\nEXPERT_MODEL_THINK=${MODEL}\n`,
+      `EXPERT_AGENT=genet\nEXPERT_MODEL_WORK=${MODEL}\nEXPERT_MODEL_RESEARCH=${MODEL}\nEXPERT_MODEL_REFLECT=${MODEL}\nEXPERT_WAKE_ROUNDS=100000\nEXPERT_NOTE_QUIET=100000\n`,
     );
     const built = spawnSync("python3", [path.join(t.openRoot, BUILDER), "build", alice, "--format", "json"], { encoding: "utf8" });
     t.assertions.assert(built.status === 0, `SpaceBuilder build: ${built.stdout.slice(-500)}`);
@@ -115,7 +117,7 @@ defineJourney(
         const dump: Record<string, unknown> = {};
         for (const id of sessionIds) {
           const items = (await snapshot(id)).items;
-          dump[id] = items.map((item) => `${item.type}${item.system ? "(system)" : ""}: ${(item.text ?? item.message ?? item.name ?? "").slice(0, 400)}`);
+          dump[id] = items.map((item) => `${item.type}${isSystem(item) ? "(system)" : ""}: ${(item.text ?? item.message ?? item.name ?? "").slice(0, 400)}`);
         }
         throw new Error(`${message}\n${JSON.stringify({ metrics, dump }, null, 1).slice(0, 6000)}`);
       };
@@ -167,7 +169,7 @@ defineJourney(
         await fail(`the background session is not labelled and described by expert.py: ${JSON.stringify(worker)}`, [front, worker.id]);
       }
 
-      const results = async () => (await snapshot(front)).items.filter((item) => item.system === true && (item.text ?? "").includes("用途: result"));
+      const results = async () => (await snapshot(front)).items.filter((item) => isSystem(item) && (item.text ?? "").includes("用途: result"));
       try {
         await t.tools.waitUntil(async () => (await results()).length >= 1, 240_000);
       } catch {

@@ -1,0 +1,39 @@
+{
+  "schema": "agent-space.v1",
+  "name": "team-reflect",
+  "description": "团队自省与进化专家（跨角色会话复盘、二级记忆提炼、Skill 与流程持续调优）",
+  "tags": [],
+  "agents": [
+    "codex",
+    "claude-code",
+    "codebuddy",
+    "cursor"
+  ],
+  "skills": [
+    "expert-core",
+    "expert-reflect"
+  ],
+  "skillProviders": [
+    {
+      "type": "folder",
+      "path": "../../skills"
+    }
+  ],
+  "identity": [
+    "../../soul.md",
+    "../../memory.md",
+    "style.md",
+    "index.md"
+  ],
+  "folders": [
+    {
+      "path": "."
+    },
+    {
+      "path": "../../datas"
+    },
+    {
+      "path": "../../temp"
+    }
+  ]
+}

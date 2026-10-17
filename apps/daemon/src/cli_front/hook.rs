@@ -7,7 +7,6 @@
 //! already does. What a script cannot see by looking at the files is how a hook
 //! last ran and whether a file is broken, and that is all this prints.
 
-use genehub_proto::{Reply, Request};
 use serde_json::json;
 
 use super::output::{self, CliFailure};
@@ -61,14 +60,24 @@ async fn list(
 ) -> Result<serde_json::Value, CliFailure> {
     let rpc = query::connect_selected(selection).await?;
     let workspace_id = resolve_workspace(&rpc, workspace).await?;
-    match rpc
-        .call(Request::HookList { workspace_id })
-        .await
-        .map_err(query::rpc_error)?
-    {
-        Reply::Hooks(list) => Ok(json!(list)),
-        other => Err(query::unexpected_reply("hooks", &other)),
-    }
+    let list = if let Ok(state) = super::local_state() {
+        let entry = state
+            .workspaces
+            .get(&workspace_id)
+            .await
+            .map_err(|_| CliFailure::target_not_found("workspace", &workspace_id))?;
+        state
+            .hooks
+            .list(&workspace_id, std::path::Path::new(&entry.root))
+    } else {
+        let known = query::list_workspaces(&rpc).await?;
+        let info = known
+            .into_iter()
+            .find(|w| w.id == workspace_id)
+            .ok_or_else(|| CliFailure::target_not_found("workspace", &workspace_id))?;
+        crate::hooks::list_on_disk(&info.id, std::path::Path::new(&info.root))
+    };
+    Ok(json!(list))
 }
 
 #[cfg(test)]

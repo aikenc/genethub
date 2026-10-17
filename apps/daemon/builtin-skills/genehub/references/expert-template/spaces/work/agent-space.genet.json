@@ -3,8 +3,9 @@
   "name": "work",
   "description": "专家的工作会话：执行具体任务。",
   "tags": [],
-  "agents": ["codex", "claude-code", "codebuddy"],
+  "agents": ["codex", "claude-code", "codebuddy", "cursor"],
   "skills": ["expert-core", "expert-work"],
   "skillProviders": [{"type": "folder", "path": "../../skills"}],
-  "folders": [{"path": "."}]
+  "identity": ["../../soul.md", "../../memory.md", "style.md", "index.md"],
+  "folders": [{"path": "."}, {"path": "../../datas"}, {"path": "../../temp"}]
 }

@@ -156,6 +156,7 @@ pub fn usage() -> i32 {
   genet capabilities                static read-only capability surface
   genet workspace list              list local daemon workspaces
   genet workspace show <id>         show one workspace by exact id
+  genet space open <dir>            open a Space directory or agent-space.genet.json
   genet session list [--workspace <id>]
                                     list local daemon sessions
   genet session get <id>            get one session snapshot

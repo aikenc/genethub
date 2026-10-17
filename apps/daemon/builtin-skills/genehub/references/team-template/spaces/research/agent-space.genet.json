@@ -1,0 +1,39 @@
+{
+  "schema": "agent-space.v1",
+  "name": "research",
+  "description": "数值与玩法研究专家（战斗公式推演、关卡节奏设计、竞品与机制调研）",
+  "tags": [],
+  "agents": [
+    "codex",
+    "claude-code",
+    "codebuddy",
+    "cursor"
+  ],
+  "skills": [
+    "expert-core",
+    "expert-research"
+  ],
+  "skillProviders": [
+    {
+      "type": "folder",
+      "path": "../../skills"
+    }
+  ],
+  "identity": [
+    "../../soul.md",
+    "../../memory.md",
+    "style.md",
+    "index.md"
+  ],
+  "folders": [
+    {
+      "path": "."
+    },
+    {
+      "path": "../../datas"
+    },
+    {
+      "path": "../../temp"
+    }
+  ]
+}

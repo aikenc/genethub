@@ -29,11 +29,53 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use genehub_proto::{HookInfo, HookList};
 use tokio::io::AsyncReadExt;
 use tokio::time::Instant;
 
 use crate::state::Shared;
+
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HookInfo {
+    pub id: String,
+    #[serde(default)]
+    pub valid: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub every_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exec: Vec<String>,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    #[serde(default)]
+    pub running: bool,
+    #[serde(default)]
+    pub runs: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_started_at_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_exit_code: Option<i32>,
+    #[serde(default)]
+    pub last_timed_out: bool,
+    #[serde(default)]
+    pub consecutive_failures: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HookList {
+    pub workspace_id: String,
+    pub directory: String,
+    #[serde(default)]
+    pub hooks: Vec<HookInfo>,
+}
 
 /// How many hook commands run at the same time, across every project.
 pub const MAX_CONCURRENT: usize = 8;
@@ -49,16 +91,26 @@ const STDERR_TAIL: usize = 2048;
 /// is far more expensive than listing a directory.
 const ROSTER_EVERY: Duration = Duration::from_secs(5);
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Run {
+    #[serde(default)]
     running: bool,
+    #[serde(default)]
     runs: u64,
+    #[serde(skip)]
     last_started: Option<Instant>,
+    #[serde(skip)]
     last_finished: Option<Instant>,
+    #[serde(default)]
     last_started_at_ms: Option<i64>,
+    #[serde(default)]
     last_exit_code: Option<i32>,
+    #[serde(default)]
     last_timed_out: bool,
+    #[serde(default)]
     consecutive_failures: u32,
+    #[serde(default)]
     last_error: Option<String>,
 }
 
@@ -97,43 +149,11 @@ impl Hooks {
     pub fn list(&self, workspace_id: &str, project_root: &Path) -> HookList {
         let directory = hooks_dir(project_root);
         let runs = self.runs.lock().expect("never poisoned");
-        let hooks = file::snapshot(&directory)
-            .into_iter()
-            .map(|entry| {
-                let run = runs
-                    .get(&(workspace_id.to_string(), entry.id().to_string()))
-                    .cloned()
-                    .unwrap_or_default();
-                let mut info = HookInfo {
-                    id: entry.id().to_string(),
-                    running: run.running,
-                    runs: run.runs,
-                    last_started_at_ms: run.last_started_at_ms,
-                    last_exit_code: run.last_exit_code,
-                    last_timed_out: run.last_timed_out,
-                    consecutive_failures: run.consecutive_failures,
-                    last_error: run.last_error,
-                    ..HookInfo::default()
-                };
-                match entry {
-                    file::Entry::Valid { spec, .. } => {
-                        info.valid = true;
-                        info.event = Some(file::EVENT_TIMER.into());
-                        info.every_seconds = Some(spec.every.as_secs());
-                        info.exec = spec.exec;
-                        info.enabled = spec.enabled;
-                        info.owner = spec.owner;
-                    }
-                    file::Entry::Invalid { problem, .. } => info.problem = Some(problem),
-                }
-                info
-            })
-            .collect();
-        HookList {
-            workspace_id: workspace_id.to_string(),
-            directory: directory.to_string_lossy().into_owned(),
-            hooks,
-        }
+        build_hook_list(workspace_id, &directory, |id| {
+            runs.get(&(workspace_id.to_string(), id.to_string()))
+                .cloned()
+                .unwrap_or_default()
+        })
     }
 
     /// Starts every hook of one project that is due. Cheap when the project has
@@ -146,12 +166,12 @@ impl Hooks {
     ) {
         let directory = hooks_dir(project_root);
         if !directory.is_dir() {
-            self.forget_project(workspace_id, &HashSet::new());
+            self.forget_project(workspace_id, project_root, &HashSet::new());
             return;
         }
         let entries = file::snapshot(&directory);
         let present: HashSet<String> = entries.iter().map(|e| e.id().to_string()).collect();
-        self.forget_project(workspace_id, &present);
+        self.forget_project(workspace_id, project_root, &present);
         let now = Instant::now();
         for entry in entries {
             let file::Entry::Valid { id, spec } = entry else {
@@ -181,11 +201,15 @@ impl Hooks {
 
     /// Drops run records for hooks of this project that no longer have a file.
     /// A hook that is mid-run keeps its record until it finishes.
-    fn forget_project(&self, workspace_id: &str, present: &HashSet<String>) {
+    fn forget_project(&self, workspace_id: &str, project_root: &Path, present: &HashSet<String>) {
         let mut runs = self.runs.lock().expect("never poisoned");
+        let before = runs.len();
         runs.retain(|(workspace, id), run| {
             workspace != workspace_id || present.contains(id) || run.running
         });
+        if runs.len() != before {
+            write_status_file(workspace_id, project_root, &runs);
+        }
     }
 
     fn forget_projects_except(&self, workspace_ids: &HashSet<String>) {
@@ -210,6 +234,7 @@ impl Hooks {
                 run.last_started = Some(started);
                 run.last_started_at_ms = Some(started_at_ms);
             }
+            write_status_file(&key.0, &project_root, &runs);
         }
         let outcome = self
             .execute(&id, &spec, &project_root, python.as_deref())
@@ -244,6 +269,7 @@ impl Hooks {
                 run.last_error = Some(error);
             }
         }
+        write_status_file(&key.0, &project_root, &runs);
     }
 
     async fn execute(
@@ -436,6 +462,82 @@ fn expand_platform(text: &str, vars: &[(&str, String)]) -> String {
 
 fn hooks_dir(project_root: &Path) -> PathBuf {
     project_root.join(".genethub").join("hooks")
+}
+
+/// Reads hook files and their persisted run records from `<project>/.genethub/hooks/`.
+pub fn list_on_disk(workspace_id: &str, project_root: &Path) -> HookList {
+    let directory = hooks_dir(project_root);
+    let runs = read_status_file(&directory);
+    build_hook_list(workspace_id, &directory, |id| {
+        runs.get(id).cloned().unwrap_or_default()
+    })
+}
+
+fn build_hook_list(
+    workspace_id: &str,
+    directory: &Path,
+    mut run_of: impl FnMut(&str) -> Run,
+) -> HookList {
+    let hooks = file::snapshot(directory)
+        .into_iter()
+        .map(|entry| {
+            let run = run_of(entry.id());
+            let mut info = HookInfo {
+                id: entry.id().to_string(),
+                running: run.running,
+                runs: run.runs,
+                last_started_at_ms: run.last_started_at_ms,
+                last_exit_code: run.last_exit_code,
+                last_timed_out: run.last_timed_out,
+                consecutive_failures: run.consecutive_failures,
+                last_error: run.last_error,
+                ..HookInfo::default()
+            };
+            match entry {
+                file::Entry::Valid { spec, .. } => {
+                    info.valid = true;
+                    info.event = Some(file::EVENT_TIMER.into());
+                    info.every_seconds = Some(spec.every.as_secs());
+                    info.exec = spec.exec;
+                    info.enabled = spec.enabled;
+                    info.owner = spec.owner;
+                }
+                file::Entry::Invalid { problem, .. } => info.problem = Some(problem),
+            }
+            info
+        })
+        .collect();
+    HookList {
+        workspace_id: workspace_id.to_string(),
+        directory: directory.to_string_lossy().into_owned(),
+        hooks,
+    }
+}
+
+fn read_status_file(directory: &Path) -> HashMap<String, Run> {
+    let path = directory.join(".status.json");
+    std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn write_status_file(workspace_id: &str, project_root: &Path, runs: &HashMap<Key, Run>) {
+    let directory = hooks_dir(project_root);
+    if !directory.is_dir() {
+        return;
+    }
+    let map: HashMap<&str, &Run> = runs
+        .iter()
+        .filter_map(|((ws, id), run)| (ws == workspace_id).then_some((id.as_str(), run)))
+        .collect();
+    if let Ok(bytes) = serde_json::to_vec(&map) {
+        let tmp = directory.join(".status.json.tmp");
+        let dst = directory.join(".status.json");
+        if std::fs::write(&tmp, bytes).is_ok() {
+            let _ = std::fs::rename(&tmp, &dst);
+        }
+    }
 }
 
 fn now_ms() -> i64 {

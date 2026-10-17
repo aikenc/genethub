@@ -414,7 +414,7 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
             Ok(Command::RequestApproval { challenge_id })
         }
         _ => Err(CliFailure::invalid_args(
-            "usage: genet space inspect|children|component set|component remove|parent set|lifecycle set|builder|approval request ...",
+            "usage: genet space open <dir>|inspect|children|component set|component remove|parent set|lifecycle set|builder|approval request ...",
         )),
     }
 }

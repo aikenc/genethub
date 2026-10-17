@@ -659,10 +659,21 @@ function polledTurnFinished(
   current: SessionSummary[],
 ): boolean {
   const currentById = new Map(current.map((session) => [session.id, session]));
-  return previous.some((session) => {
-    if (session.status !== "running" && session.status !== "waiting") return false;
-    const next = currentById.get(session.id);
-    return !next || (next.status !== "running" && next.status !== "waiting");
+  if (
+    previous.some((session) => {
+      if (session.status !== "running" && session.status !== "waiting") return false;
+      const next = currentById.get(session.id);
+      return !next || (next.status !== "running" && next.status !== "waiting");
+    })
+  ) {
+    return true;
+  }
+  if (previous.length === 0) return false;
+  const previousById = new Map(previous.map((session) => [session.id, session]));
+  return current.some((next) => {
+    if (next.status === "running" || next.status === "waiting") return false;
+    const prev = previousById.get(next.id);
+    return !prev || next.updatedAtMs > prev.updatedAtMs;
   });
 }
 
@@ -1004,16 +1015,23 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     const client = require_(get().client);
     const reply = await client.call({ type: "workspace.open", payload: { root } });
     if (reply?.type !== "workspace") return;
+    const opened = reply.data;
     set((state) => ({
-      workspaces: upsertBy(state.workspaces, reply.data, (w) => w.id),
-      activeWorkspaceId: reply.data.id,
+      workspaces: upsertBy(state.workspaces, opened, (w) => w.id),
+      activeWorkspaceId: opened.id,
       activeSessionId: null,
       sessionDrafts: [],
       previewReview: null,
       timeline: emptyTimeline(),
     }));
+    const catalog = await client.call({ type: "workspace.list" }).catch(() => null);
+    if (get().client === client && catalog?.type === "workspaces" && catalog.data.length > 0) {
+      set({
+        workspaces: upsertBy(catalog.data, opened, (w) => w.id),
+      });
+    }
     await loadSessions(client, set);
-    get().newSession(reply.data.id, null, { addressScope: "workspace" });
+    get().newSession(opened.id, null, { addressScope: "workspace" });
   },
 
   async selectWorkspace(workspaceId) {

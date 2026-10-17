@@ -294,3 +294,59 @@ describe("the strip along the top", () => {
     expect(screen.getByRole("menuitem", { name: "显示左栏" })).toBeInTheDocument();
   });
 });
+
+describe("project team grouping in the conversation panel", () => {
+  it("groups 1+N project teams into front entry, core members, and collapsible reflect/history with permanent board entry", async () => {
+    const openPreviewFloat = vi.fn();
+    const teamRoot: WorkspaceInfo = {
+      ...workspace("w_team", "taixu-team"),
+      folders: [{ name: "taixu-team", root: "/home/me/taixu-team", rootHandle: "r_team" }],
+    };
+    const childWs = (id: string, role: string): WorkspaceInfo => ({
+      ...workspace(id, role),
+      agentSpace: { parentWorkspaceId: "w_team" } as WorkspaceInfo["agentSpace"],
+    });
+    useWorkbench.setState({
+      openPreviewFloat,
+      workspaces: [
+        teamRoot,
+        childWs("w_leader", "leader"),
+        childWs("w_skill", "skill-lead"),
+        childWs("w_qa", "qa"),
+        childWs("w_reflect", "team-reflect"),
+      ],
+      sessions: [
+        session("s_front", "w_team", "版本诉求沟通"),
+        {
+          ...session("s_leader", "w_leader", "推进 v1.1 里程碑并完成闭环", true),
+          description: "统筹 v1.3 太虚剑冢与剑傀研发闭环",
+        },
+        session("s_skill", "w_skill", "太虚剑意功法研发"),
+        session("s_qa", "w_qa", "无头浏览器实操验收"),
+        session("s_reflect", "w_reflect", "二级记忆提炼"),
+      ],
+      activeSessionId: "s_front",
+    });
+
+    sidebar();
+
+    expect(screen.getByLabelText("项目团队分组 taixu-team")).toBeInTheDocument();
+    expect(screen.getByText("版本诉求沟通")).toBeInTheDocument();
+    expect(screen.getByText("统筹 v1.3 太虚剑冢与剑傀研发闭环")).toBeInTheDocument();
+    expect(screen.queryByText("推进 v1.1 里程碑并完成闭环")).not.toBeInTheDocument();
+    expect(screen.getByText("太虚剑意功法研发")).toBeInTheDocument();
+    expect(screen.getByText("无头浏览器实操验收")).toBeInTheDocument();
+    expect(screen.queryByText("二级记忆提炼")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: /后台自省与历史子任务/ }));
+    expect(screen.getByText("二级记忆提炼")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "打开 taixu-team 团队看板" }));
+    expect(openPreviewFloat).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceHandle: "w_team",
+        path: "r_team/datas/board/index.html",
+      }),
+    );
+  });
+});

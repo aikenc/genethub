@@ -1,0 +1,100 @@
+{
+  "kind": "session",
+  "description": "an error frame from the CLI ends the turn instead of leaving it open forever, and clears a missing conversation id so the next turn starts fresh",
+  "firstFrameTimeout": 0.5,
+  "timeout": 5.0,
+  "launch": {
+    "help": "--permission-mode <mode> Permission mode (choices: \"bypassPermissions\")",
+    "models": [
+      "sonnet"
+    ],
+    "defaultModel": "sonnet"
+  },
+  "config": {
+    "resume": {
+      "sessionId": "missing-session"
+    }
+  },
+  "cli": {
+    "turns": [
+      {
+        "emit": [
+          {
+            "type": "error",
+            "error": "No conversation found with session ID: missing-session"
+          }
+        ],
+        "hang": true
+      },
+      {
+        "emit": [
+          {
+            "type": "system",
+            "subtype": "init",
+            "session_id": "fresh-session"
+          },
+          {
+            "type": "assistant",
+            "message": {
+              "id": "m-ok",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "recovered"
+                }
+              ]
+            }
+          },
+          {
+            "type": "result",
+            "subtype": "success",
+            "is_error": false
+          }
+        ]
+      }
+    ]
+  },
+  "steps": [
+    {
+      "send": "first",
+      "wait": false
+    },
+    {
+      "waitTerminal": 1
+    },
+    {
+      "send": "second"
+    }
+  ],
+  "expect": {
+    "runs": [
+      {
+        "has": [
+          [
+            "--resume",
+            "missing-session"
+          ]
+        ]
+      },
+      {
+        "lacks": [
+          "--resume"
+        ]
+      }
+    ],
+    "terminals": [
+      {
+        "type": "turnFailed",
+        "turnId": "turn_0",
+        "error": {
+          "code": "upstream"
+        }
+      },
+      {
+        "type": "turnCompleted",
+        "turnId": "turn_2"
+      }
+    ]
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "schema": "agent-space.v1",
+  "name": "reflect",
+  "description": "专家的反思会话：回看会话与留言，改进自己的 soul、Skill 与脚本，升级平台文件，上报外部问题。",
+  "tags": [],
+  "agents": ["codex", "claude-code", "codebuddy", "cursor"],
+  "skills": ["expert-core", "expert-reflect"],
+  "skillProviders": [{"type": "folder", "path": "../../skills"}],
+  "identity": ["../../soul.md", "../../memory.md", "style.md", "index.md"],
+  "folders": [{"path": "."}, {"path": "../.."}]
+}

@@ -167,7 +167,6 @@ impl SessionManager {
                     text: text.clone(),
                     attachments: attachments.clone(),
                     origin,
-                    system: source == "system",
                 };
                 Ok(serde_json::to_value(existing)? == serde_json::to_value(expected)?)
             };
@@ -234,7 +233,6 @@ impl SessionManager {
             text: text.clone(),
             attachments,
             origin,
-            system: source == "system",
         };
         let workspace_id = live.meta.lock().await.workspace_id.clone();
         // A previous append may have succeeded even when its caller saw an IO error.

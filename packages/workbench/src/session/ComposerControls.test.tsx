@@ -359,9 +359,11 @@ describe("the exact model composer control", () => {
     expect(screen.queryByRole("button", { name: "移除 Genet Omni" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "移除 Genet Extra" })).toBeInTheDocument();
     const group = screen.getAllByRole("group", { name: "智能档位" })[0]!;
+    expect(within(group).getByText("Ultra")).toBeInTheDocument();
     expect(within(group).getByText("Max")).toBeInTheDocument();
     expect(within(group).getByText("Pro")).toBeInTheDocument();
     expect(within(group).getByText("Flash")).toBeInTheDocument();
+    expect(within(group).getByText("Mini")).toBeInTheDocument();
   });
 
   it("allows removing the last model to disable an Agent", async () => {

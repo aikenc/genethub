@@ -191,6 +191,7 @@ pub async fn handle(
                 authorize_pm_space_open(state, caller, session_id, root)
                     .await
                     .is_ok()
+                    || authorize_managed_space_open(state, root).is_ok()
             }
             _ => false,
         }
@@ -259,6 +260,36 @@ async fn authorize_pm_space_open(
     let verified = crate::agent_space_builder::verify_space(&project.root, &space_root)?;
     if requested.is_file() && requested != verified.workspace_path.canonicalize()? {
         anyhow::bail!("open the Builder-verified workspace entry");
+    }
+    Ok(())
+}
+
+/// Opening an already-built Space directory (or its `agent-space.genet.json`)
+/// inside `<data>/spaces/` only registers what `scan_spaces` would register on
+/// the next unthrottled `workspace.list`, so an Agent session (such as the
+/// built-in Admin or `expert.py`) may invoke `genet space open` without
+/// machine-wide `settings` authority.
+fn authorize_managed_space_open(state: &Shared, root: &str) -> anyhow::Result<()> {
+    let requested = crate::guest_paths::inbound_absolute(root)
+        .ok_or_else(|| anyhow::anyhow!("Space path must be absolute"))?
+        .canonicalize()?;
+    let space_root = if requested.is_dir() {
+        requested
+    } else {
+        requested
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Space file has no parent"))?
+            .to_path_buf()
+    };
+    let spaces = state.paths.root.join("spaces").canonicalize()?;
+    if !space_root.starts_with(&spaces) || space_root == spaces {
+        anyhow::bail!("Space must be inside the daemon spaces directory");
+    }
+    if crate::space_descriptor::discover_root(&space_root)
+        .map_err(anyhow::Error::msg)?
+        .is_none()
+    {
+        anyhow::bail!("directory does not contain a valid agent-space.genet.json");
     }
     Ok(())
 }
@@ -1900,6 +1931,16 @@ async fn dispatch(
                 }
                 None => state.workspaces.default_cwd(&workspace),
             };
+            let model_id = match crate::agent_routing::ensure_concrete_route_allowed(
+                state,
+                &agent_id,
+                model_id,
+            )
+            .await
+            {
+                Ok(model_id) => model_id,
+                Err(error) => return failed(error),
+            };
             match state
                 .sessions
                 .create(
@@ -2244,11 +2285,14 @@ async fn dispatch(
             artifact_preview_base_url,
             continues_round,
             origin,
-            system,
         } => Box::pin(async move {
             if text.trim().is_empty() && attachments.is_empty() {
                 return Handled::err(ErrorCode::BadRequest, "there is nothing to send");
             }
+            let system = origin
+                .as_ref()
+                .is_some_and(|o| o.session_id == "system")
+                || text.starts_with("用途: ");
             // A system notice is durable or it is nothing: the sender retries
             // it, and only a stable messageId makes a retry safe. It is not a
             // Run's notice either, so it carries no task.
@@ -2267,18 +2311,38 @@ async fn dispatch(
             // A local Agent caller is attributed by its verified identity, not
             // by what it declares. Any other caller already acts as the owner,
             // so a declared origin can only mark its text as Agent-written.
-            let origin = match caller.session_controller_id() {
-                Some(session_id) => Some(genehub_proto::InputOrigin {
+            let origin = if system {
+                Some(genehub_proto::InputOrigin {
                     machine_id: state.machine.machine_id.clone(),
                     machine_name: Some(crate::link::default_display_name()),
-                    session_id: session_id.to_string(),
-                }),
-                None => origin,
+                    session_id: "system".to_string(),
+                })
+            } else {
+                match caller.session_controller_id() {
+                    Some(session_id) => Some(genehub_proto::InputOrigin {
+                        machine_id: state.machine.machine_id.clone(),
+                        machine_name: Some(crate::link::default_display_name()),
+                        session_id: session_id.to_string(),
+                    }),
+                    None => origin,
+                }
             };
             if let Some(message_id) = message_id {
                 if let Some(run_id) = task_run_id.as_deref() {
                     if let Err(error) =
                         crate::workflow::validate_input_target(state, &session_id, run_id).await
+                    {
+                        return failed(error);
+                    }
+                } else {
+                    let media_tags = crate::agent_routing::media_tags_for_mimes(
+                        attachments
+                            .iter()
+                            .map(|attachment| attachment.mime.as_str()),
+                    );
+                    if let Err(error) =
+                        crate::agent_routing::route_session(state, &session_id, None, media_tags)
+                            .await
                     {
                         return failed(error);
                     }
@@ -2760,6 +2824,19 @@ async fn dispatch(
             session_id,
             model_id,
         } => Box::pin(async move {
+            let summary = match state.sessions.summary(&session_id).await {
+                Ok(summary) => summary,
+                Err(error) => return failed(error),
+            };
+            if let Err(error) = crate::agent_routing::ensure_concrete_route_allowed(
+                state,
+                &summary.agent_id,
+                Some(model_id.clone()),
+            )
+            .await
+            {
+                return failed(error);
+            }
             let providers = state.providers().await;
             match state
                 .sessions
@@ -2771,7 +2848,17 @@ async fn dispatch(
             }
         }).await,
 
-        Request::SessionSwitchAgent { session_id, target } => Box::pin(async move {
+        Request::SessionSwitchAgent { session_id, mut target } => Box::pin(async move {
+            target.model_id = match crate::agent_routing::ensure_concrete_route_allowed(
+                state,
+                &target.agent_id,
+                target.model_id,
+            )
+            .await
+            {
+                Ok(model_id) => model_id,
+                Err(error) => return failed(error),
+            };
             let providers = state.providers().await;
             match state
                 .sessions
@@ -3352,7 +3439,7 @@ async fn dispatch(
         }).await,
 
         Request::WorkspaceOpen { root } => Box::pin(async move {
-            match state.workspaces.open(Path::new(&root), None).await {
+            match state.workspaces.open_with_children(Path::new(&root)).await {
                 Ok(workspace) => Handled::ok(Reply::Workspace(workspace)),
                 Err(error) => failed(error),
             }
@@ -4088,15 +4175,6 @@ async fn dispatch(
         Request::PtyClose { pty_id } => Box::pin(async move {
             match state.terminals.close(&pty_id).await {
                 Ok(()) => Handled::ok(Reply::Ack),
-                Err(error) => failed(error),
-            }
-        }).await,
-
-        Request::HookList { workspace_id } => Box::pin(async move {
-            match state.workspaces.get(&workspace_id).await {
-                Ok(entry) => Handled::ok(Reply::Hooks(
-                    state.hooks.list(&workspace_id, std::path::Path::new(&entry.root)),
-                )),
                 Err(error) => failed(error),
             }
         }).await,

@@ -25,13 +25,12 @@ export function matchesConversation(
     session.labels?.includes(SYSTEM_STARTED_LABEL),
   );
   const needsAttention = ["waiting", "failed"].includes(session.status);
-  // Internal conversations stay out of the default list, except when they are stuck:
-  // a waiting or failed one is exactly what the person has to see.
+  // Internal conversations stay out of the default primary list.
   const owned =
     filter.ownership === "all" ||
     (filter.ownership === "children"
       ? child
-      : needsAttention || (Boolean(workspace) && !child));
+      : Boolean(workspace) && !child);
   return (
     owned &&
     Boolean(session.archived) === filter.archived &&

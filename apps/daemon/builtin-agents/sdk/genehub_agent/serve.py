@@ -86,6 +86,8 @@ class SessionConfig:
     def session_environment(self) -> Dict[str, str]:
         """The GeneHub bindings every live Agent CLI process receives."""
         env = {"GENEHUB_SESSION_ID": self.session_id}
+        if self.cwd:
+            env["GENEHUB_SESSION_CWD"] = self.cwd
         if self.front_door_cli:
             env["GENEHUB_CLI"] = self.front_door_cli
         if self.python:

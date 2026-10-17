@@ -16,7 +16,7 @@ use super::output::{self, CliFailure, CLI_SCHEMA};
 use super::rpc::{ConnectError, Refusal, Rpc, RpcError};
 use super::target::{self, Routing, Selection};
 
-const COMMAND_NAMES: [&str; 86] = [
+const COMMAND_NAMES: [&str; 87] = [
     "schema",
     "context",
     "capabilities",
@@ -59,6 +59,7 @@ const COMMAND_NAMES: [&str; 86] = [
     "session.respond",
     "session.interrupt",
     "session.close",
+    "session.archive",
     "session.label",
     "session.describe",
     "session.model",
@@ -142,6 +143,7 @@ fn mutates(name: &str) -> bool {
             | "session.respond"
             | "session.interrupt"
             | "session.close"
+            | "session.archive"
             | "session.label"
             | "session.describe"
             | "session.model"
@@ -183,6 +185,8 @@ enum Query {
     SessionList {
         workspace_id: Option<String>,
         labels: Vec<String>,
+        source_kind: Option<String>,
+        include_archived: bool,
     },
     SessionGet {
         session_id: String,
@@ -327,6 +331,8 @@ fn parse_session(args: &[String]) -> Result<Query, CliFailure> {
         "list" => {
             let mut workspace_id = None;
             let mut labels = Vec::new();
+            let mut source_kind = None;
+            let mut include_archived = false;
             let mut index = 1;
             while index < args.len() {
                 match args[index].as_str() {
@@ -355,6 +361,24 @@ fn parse_session(args: &[String]) -> Result<Query, CliFailure> {
                             .ok_or_else(|| CliFailure::invalid_args("--label needs a label"))?;
                         labels.push(value.trim().to_string());
                     }
+                    "--source-kind" => {
+                        if source_kind.is_some() {
+                            return Err(CliFailure::invalid_args(
+                                "--source-kind may be supplied only once",
+                            ));
+                        }
+                        index += 1;
+                        let value = args
+                            .get(index)
+                            .filter(|value| !value.trim().is_empty())
+                            .ok_or_else(|| {
+                                CliFailure::invalid_args("--source-kind needs a value")
+                            })?;
+                        source_kind = Some(value.trim().to_string());
+                    }
+                    "--include-archived" => {
+                        include_archived = true;
+                    }
                     other => {
                         return Err(CliFailure::invalid_args(format!(
                             "unknown session list argument: {other}"
@@ -366,6 +390,8 @@ fn parse_session(args: &[String]) -> Result<Query, CliFailure> {
             Ok(Query::SessionList {
                 workspace_id,
                 labels,
+                source_kind,
+                include_archived,
             })
         }
         "get" => match &args[1..] {
@@ -631,6 +657,8 @@ async fn execute(
         Query::SessionList {
             workspace_id,
             labels,
+            source_kind,
+            include_archived,
         } => {
             let rpc = connect_selected(selection).await?;
             if let Some(id) = workspace_id.as_deref() {
@@ -643,12 +671,20 @@ async fn execute(
             let mut sessions = sessions(
                 rpc.call(Request::SessionList {
                     workspace_id: workspace_id.clone(),
-                    include_archived: false,
+                    include_archived,
                 })
                 .await
                 .map_err(rpc_error)?,
             )?;
-            sessions.retain(|session| labels.iter().all(|label| session.labels.contains(label)));
+            sessions.retain(|session| {
+                labels.iter().all(|label| session.labels.contains(label))
+                    && source_kind.as_deref().is_none_or(|kind| {
+                        crate::session::store::derived_source_kind_for(
+                            &session.labels,
+                            session.managed.is_some(),
+                        ) == kind
+                    })
+            });
             Ok((
                 "session.list",
                 json!({"workspaceId": workspace_id, "sessions": sessions}),
@@ -1228,13 +1264,16 @@ fn command_schema(name: &str) -> Value {
             ),
         ),
         "session.list" => (
-            "genet session list [--workspace <id>] [--label <label>]...",
+            "genet session list [--workspace <id>] [--label <label>]... [--source-kind <kind>] [--include-archived]",
             true,
             object_input(
                 json!({
                     "workspaceId": {"type": ["string", "null"], "minLength": 1},
                     "labels": {"type": "array", "items": {"type": "string", "minLength": 1},
                         "description": "--label, repeatable; keeps sessions carrying every given label"},
+                    "sourceKind": {"type": ["string", "null"], "minLength": 1,
+                        "description": "--source-kind; keeps sessions matching the given sourceKind (human, system, patrol, expert, reflect)"},
+                    "includeArchived": {"type": "boolean", "description": "--include-archived; include archived sessions"},
                 }),
                 &[],
             ),
@@ -1386,7 +1425,7 @@ fn command_schema(name: &str) -> Value {
                     "routes": {"type": "boolean", "default": false,
                         "description": "--routes; print only the routable Agent/model pairs, one per line: agentId, modelId, tags, cost, default. This is what `agent run --tag` chooses from"},
                     "tags": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 40}, "maxItems": 4,
-                        "description": "--tag, repeatable, only with --routes; keep routes whose tags contain every one (Max, Pro, Flash, 图片理解, 视频理解, or a Human-defined tag)"},
+                        "description": "--tag, repeatable, only with --routes; keep routes whose tags contain every one (Ultra, Max, Pro, Flash, Mini, 图片理解, 视频理解, or a Human-defined tag)"},
                     "media": {"type": "array", "items": {"enum": ["image", "video"]}, "maxItems": 2,
                         "description": "--media, only with --routes; keep routes that understand the medium"},
                 }),
@@ -1447,7 +1486,7 @@ fn command_schema(name: &str) -> Value {
                     "agentId": {"type": "string", "minLength": 1,
                         "description": "required unless --tag is given; with --tag routing chooses the Agent and model"},
                     "tags": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 40}, "minItems": 0, "maxItems": 4,
-                        "description": "--tag, repeatable; resolve the Agent and model from machine routing at creation (cheapest live route whose tags contain every one: Max, Pro, Flash, 图片理解, 视频理解). Exclusive with --agent, --model, --mode, --session. Fails with agentTagRouteUnavailable and creates nothing when no route matches"},
+                        "description": "--tag, repeatable; resolve the Agent and model from machine routing at creation (cheapest live route whose tags contain every one: Ultra, Max, Pro, Flash, Mini, 图片理解, 视频理解). Exclusive with --agent, --model, --mode, --session. Fails with agentTagRouteUnavailable and creates nothing when no route matches"},
                     "media": {"type": "array", "items": {"enum": ["image", "video"]}, "maxItems": 2,
                         "description": "--media, only with --tag; the task contains images or video, so the route must understand them"},
                     "prompt": {"type": "string", "minLength": 1},
@@ -1483,7 +1522,7 @@ fn command_schema(name: &str) -> Value {
             }), &["sessionId", "question"]),
         ),
         "session.send" => (
-            "genet session send <id> \"<text>\" [--message-id <id> [--task-run <run>]] [--queue] [--wait|--no-wait] [--timeout <s>]",
+            "genet session send <id> \"<text>\" [--message-id <id> [--task-run <run>]] [--wait|--no-wait] [--timeout <s>]",
             true,
             object_input(
                 json!({
@@ -1493,8 +1532,6 @@ fn command_schema(name: &str) -> Value {
                         "description": "--message-id; stable receipt ID, requires session.input.v1; returns acceptance"},
                     "taskRunId": {"type": "string", "minLength": 1,
                         "description": "--task-run; optional related Run owned by this PM; requires messageId"},
-                    "queue": {"type": "boolean", "default": false,
-                        "description": "--queue; send as a system notice written by a script: it waits for the current round instead of interrupting it, never lifts a pause the Human set, and is never a Human approval; requires messageId, excludes taskRunId"},
                     "wait": {"type": "boolean",
                         "description": "defaults to false with messageId, true otherwise; --wait is incompatible with messageId"},
                     "timeout": {"type": ["integer", "null"], "minimum": 1},
@@ -1658,6 +1695,17 @@ fn command_schema(name: &str) -> Value {
                         "description": "--tag, repeatable; move the session to the cheapest live route with every tier. The session then follows routing at each send; an Agent change keeps the visible history and starts a new native thread. Exclusive with --model and --effort"},
                     "media": {"type": "array", "items": {"enum": ["image", "video"]}, "maxItems": 2,
                         "description": "--media, only with --tag"},
+                }),
+                &["sessionId"],
+            ),
+        ),
+        "session.archive" => (
+            "genet session archive <id> [--unarchive]",
+            true,
+            object_input(
+                json!({
+                    "sessionId": {"type": "string", "minLength": 1},
+                    "archived": {"type": "boolean", "default": true, "description": "--unarchive sets archived=false"},
                 }),
                 &["sessionId"],
             ),
@@ -2182,7 +2230,6 @@ pub fn reply_kind(reply: &Reply) -> &'static str {
         Reply::GitCommit { .. } => "git commit",
         Reply::Pty { .. } => "pty",
         Reply::Processes(_) => "background processes",
-        Reply::Hooks(_) => "hooks",
         Reply::PreviewFeedback(_) => "preview feedback",
         Reply::Ack => "ack",
     }
@@ -2357,7 +2404,9 @@ mod tests {
             parse(&words(&["session", "list"])).unwrap(),
             Query::SessionList {
                 workspace_id: None,
-                labels: Vec::new()
+                labels: Vec::new(),
+                source_kind: None,
+                include_archived: false,
             }
         );
         assert_eq!(
@@ -2369,12 +2418,17 @@ mod tests {
                 "--label",
                 "4090",
                 "--label",
-                "pm"
+                "pm",
+                "--source-kind",
+                "system",
+                "--include-archived"
             ]))
             .unwrap(),
             Query::SessionList {
                 workspace_id: Some("w_1".into()),
-                labels: vec!["4090".into(), "pm".into()]
+                labels: vec!["4090".into(), "pm".into()],
+                source_kind: Some("system".into()),
+                include_archived: true,
             }
         );
         let duplicate = parse(&words(&[

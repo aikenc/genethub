@@ -1,4 +1,4 @@
-import { useMemo, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import type { WorkspaceInfo, SessionSummary } from "@genehub/proto";
 import { WorkspaceRow } from "../shell/ConversationRows";
 import {
@@ -42,6 +42,13 @@ export function AgentList({
   const tree = useMemo(() => buildAgentSpaceTree(workspaces), [workspaces]);
   const wb = useWorkbench();
   const activity = useAgentActivities();
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  const toggleExpand = (id: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
   const recent = (id: string) => activity.agents?.get(id)?.recent ?? sessions.reduce((at, s) => s.workspaceId === id ? Math.max(at, s.messagePreview?.atMs ?? s.updatedAtMs) : at, 0);
   const sorted = (nodes: AgentSpaceTreeNode[]) => [...nodes].sort((a, b) => recent(b.workspace.id) - recent(a.workspace.id) || a.workspace.name.localeCompare(b.workspace.name, "zh-CN") || a.workspace.id.localeCompare(b.workspace.id));
   const matching = (node: AgentSpaceTreeNode): AgentSpaceTreeNode[] => [
@@ -54,7 +61,8 @@ export function AgentList({
         .flatMap(matching)
         .filter((node) => rootIds.includes(node.workspace.id))
     : allRoots;
-  const visible = query.trim() || memberIds
+  const flatSearch = Boolean(query.trim() || memberIds);
+  const visible = flatSearch
     ? roots
         .flatMap(matching)
         .filter((n) => (!memberIds || memberIds.includes(n.workspace.id)) &&
@@ -63,39 +71,49 @@ export function AgentList({
             .includes(query.trim().toLowerCase()),
         )
     : roots;
-  const row = (node: AgentSpaceTreeNode): ReactNode => (
-    <WorkspaceRow
-      key={node.workspace.id}
-      workspace={node.workspace}
-      workspaces={workspaces}
-      breadcrumb={node.breadcrumb}
-      projectWorkspaceId={
-        tree.projectRootById[node.workspace.id] ?? node.workspace.id
-      }
-      relationAnomaly={tree.anomalies.includes(node)}
-      running={
-        sessions.filter(
-          (s) =>
-            s.workspaceId === node.workspace.id &&
-            ["running", "waiting"].includes(s.status),
-        ).length
-      }
-      shut
-      browse
-      active={selectedId === node.workspace.id}
-      deviceName={deviceName}
-      onToggle={() => onPick(node.workspace.id)}
-      onPick={() => onPick(node.workspace.id)}
-      onRename={(name) => void wb.renameWorkspace(node.workspace.id, name).catch(() => { /* Store already displays the request failure. */ })}
-      onRemove={() => wb.removeWorkspace(node.workspace.id)}
-      density={density}
-      actions={actions}
-      pick={pick}
-      childCount={0}
-    >
-      {null}
-    </WorkspaceRow>
-  );
+  const row = (node: AgentSpaceTreeNode): ReactNode => {
+    const hasChildren = !flatSearch && node.children.length > 0;
+    const isExpanded = expanded.has(node.workspace.id);
+    return (
+      <WorkspaceRow
+        key={node.workspace.id}
+        workspace={node.workspace}
+        workspaces={workspaces}
+        breadcrumb={node.breadcrumb}
+        projectWorkspaceId={
+          tree.projectRootById[node.workspace.id] ?? node.workspace.id
+        }
+        relationAnomaly={tree.anomalies.includes(node)}
+        running={
+          sessions.filter(
+            (s) =>
+              s.workspaceId === node.workspace.id &&
+              ["running", "waiting"].includes(s.status),
+          ).length
+        }
+        shut
+        browse
+        active={selectedId === node.workspace.id}
+        deviceName={deviceName}
+        onToggle={() => onPick(node.workspace.id)}
+        onPick={() => onPick(node.workspace.id)}
+        onRename={(name) => void wb.renameWorkspace(node.workspace.id, name).catch(() => { /* Store already displays the request failure. */ })}
+        onRemove={() => wb.removeWorkspace(node.workspace.id)}
+        density={density}
+        actions={actions}
+        pick={pick}
+        childCount={hasChildren ? node.children.length : 0}
+        expanded={isExpanded}
+        onExpand={hasChildren ? () => toggleExpand(node.workspace.id) : undefined}
+      >
+        {hasChildren && isExpanded ? (
+          <ul className="mt-1 space-y-1 border-l border-line/60 pl-3">
+            {sorted(node.children).map((child) => row(child))}
+          </ul>
+        ) : null}
+      </WorkspaceRow>
+    );
+  };
   return (
     <ul
       data-density={density}

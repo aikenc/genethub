@@ -343,4 +343,26 @@ describe("machine-global Agent tag routing", () => {
     expect(preferences.selectedTags).toEqual(["Max", "私有"]);
     expect(availableAgentTags(preferences)).toContain("私有");
   });
+
+  it("supports Ultra and Mini intelligence tiers in Ultra/Max/Pro/Flash/Mini order while keeping existing settings intact", () => {
+    const existing: AgentSelectionPreferences = {
+      selectedTags: ["Pro"],
+      modelProfiles: [
+        { agentId: "codex", modelId: "text", tags: ["Pro"], cost: "medium" },
+      ],
+    };
+    const normalized = normalizeAgentPreferences(existing, [agent()]);
+    expect(normalized.selectedTags).toEqual(["Pro"]);
+    expect(normalized.modelProfiles?.[0]?.tags).toEqual(["Pro"]);
+    expect(availableAgentTags(normalized).slice(0, 5)).toEqual([
+      "Ultra",
+      "Max",
+      "Pro",
+      "Flash",
+      "Mini",
+    ]);
+    expect(toggleGroupedTag(["Pro"], "Ultra", normalized)).toEqual(["Ultra"]);
+    expect(toggleGroupedTag(["Ultra"], "Mini", normalized)).toEqual(["Mini"]);
+    expect(normalizeGroupedTags(["ultra", "mini"], normalized)).toEqual(["Ultra"]);
+  });
 });

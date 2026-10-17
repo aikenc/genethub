@@ -175,6 +175,7 @@ struct Live {
     /// by the blob writer, consumed when the trunk is written, then dropped
     /// with the trunk's items.
     blob_refs: Mutex<HashMap<String, BlobRef>>,
+    blob_hints: Mutex<HashMap<String, rounds::BlobSearchHint>>,
     seq: AtomicU64,
     /// When this session last published anything.
     ///
@@ -2932,7 +2933,6 @@ impl SessionManager {
                 text: text.clone(),
                 attachments: attachments.clone(),
                 origin: origin.clone(),
-                system: false,
             };
             {
                 let mut items = live.items.lock().await;
@@ -4149,11 +4149,22 @@ impl SessionManager {
                     outcome = validated_project_approval_outcome(outcome, validation);
                 }
             }
+            let decision = HumanContinuation {
+                request: request.clone(),
+                outcome: outcome.clone(),
+                decided_at_ms: now_ms(),
+                project_approval,
+                grant_recorded: false,
+                completed: false,
+            };
+            // Validate the answer and record it in the trunk before clearing
+            // `pending_permission` in `meta`, so an invalid response or trunk
+            // write failure never leaves `meta` mutated without a recorded event.
+            let has_continuation = continuation_for(&request, &outcome)?.is_some();
+            self.record_human_response(&live, &decision).await?;
             let mut meta = live.meta.lock().await;
             let mut next = meta.clone();
-            // Validate the answer before acknowledging it. A cancellation
-            // retires the sent originals, without dropping new queued input.
-            if continuation_for(&request, &outcome)?.is_none() {
+            if !has_continuation {
                 for entry in &mut next.inbox.entries {
                     if entry.state == "sent" {
                         entry.state = "handled".into();
@@ -4161,24 +4172,12 @@ impl SessionManager {
                 }
             }
             next.format = SESSION_FORMAT;
-            next.human_continuation = Some(HumanContinuation {
-                request: request.clone(),
-                outcome: outcome.clone(),
-                decided_at_ms: now_ms(),
-                project_approval,
-                grant_recorded: false,
-                completed: false,
-            });
+            next.human_continuation = Some(decision);
             next.pending_permission = None;
             next.pending_project_approval = false;
             self.store.save_meta(&next)?;
             *meta = next;
-            let decision = meta
-                .human_continuation
-                .clone()
-                .expect("saved Human response");
             drop(meta);
-            self.record_human_response(&live, &decision).await?;
             live.continuation_dispatched.store(false, Ordering::SeqCst);
             let resolved = SessionEvent::PermissionResolved {
                 request_id: request_id.into(),
@@ -4267,6 +4266,9 @@ impl SessionManager {
             PermissionOutcome::Answered { .. } => {
                 question_answer(request, &decision.outcome)?.unwrap_or_default()
             }
+            PermissionOutcome::Selected { .. } if request.options.is_empty() => {
+                question_answer(request, &decision.outcome)?.unwrap_or_default()
+            }
             PermissionOutcome::Selected { .. } => selected_option(request, &decision.outcome)?
                 .map(|option| option.label.clone())
                 .unwrap_or_default(),
@@ -4278,7 +4280,6 @@ impl SessionManager {
             text: format!("回答「{}」\n{}", request.title, body),
             attachments: Vec::new(),
             origin: None,
-            system: false,
         };
         let meta = live.meta.lock().await.clone();
         let chat = self.store.load_chat(&meta.workspace_id, &meta.id)?;
@@ -5480,6 +5481,7 @@ impl Live {
             unsaved_rounds: Mutex::new(Vec::new()),
             inherited_rounds: Mutex::new(None),
             blob_refs: Mutex::new(HashMap::new()),
+            blob_hints: Mutex::new(HashMap::new()),
             seq: AtomicU64::new(0),
             last_activity_ms: AtomicI64::new(0),
             replay: Mutex::new(VecDeque::new()),
@@ -5640,6 +5642,14 @@ impl Live {
         index: u32,
         finished_at_ms: Option<i64>,
     ) -> Option<RoundTrunk> {
+        Some(self.build_open_trunk_with_hints(index, finished_at_ms).await?.0)
+    }
+
+    async fn build_open_trunk_with_hints(
+        &self,
+        index: u32,
+        finished_at_ms: Option<i64>,
+    ) -> Option<(RoundTrunk, HashMap<String, rounds::BlobSearchHint>)> {
         let ids = self.open_trunk_items.lock().await.clone();
         if ids.is_empty() {
             return None;
@@ -5652,6 +5662,25 @@ impl Live {
                 .filter_map(|id| by_id.get(id.as_str()).map(|item| (*item).clone()))
                 .collect::<Vec<_>>()
         };
+        let saved_hints = self.blob_hints.lock().await;
+        let hints: HashMap<String, rounds::BlobSearchHint> = items
+            .iter()
+            .filter_map(|item| {
+                let fallback = rounds::blob_search_hint(item);
+                let merged = match (saved_hints.get(item.id()), fallback) {
+                    (Some(saved), Some(fb)) => Some(rounds::BlobSearchHint {
+                        overview: saved.overview.clone().or(fb.overview),
+                        input: saved.input.clone().or(fb.input),
+                        output: saved.output.clone().or(fb.output),
+                    }),
+                    (Some(saved), None) => Some(saved.clone()),
+                    (None, Some(fb)) => Some(fb),
+                    (None, None) => None,
+                };
+                merged.map(|hint| (item.id().to_string(), hint))
+            })
+            .collect();
+        drop(saved_hints);
         let (round_deltas, blocked_intervals) = {
             let active = self.active_round.lock().await;
             let round = active.as_ref()?;
@@ -5671,7 +5700,7 @@ impl Live {
                 blob.blob = refs.get(&blob.item_id).cloned();
             }
         }
-        Some(trunk)
+        Some((trunk, hints))
     }
 
     /// Writes the trunk that just closed and lets go of it.
@@ -5681,19 +5710,28 @@ impl Live {
     /// references are dropped. What stays behind is one summary line per
     /// closed trunk, which is what the round layer pages over.
     async fn finish_trunk(&self, finished_at_ms: Option<i64>) {
-        let (ord, index) = {
+        let (ord, round_id, index) = {
             let active = self.active_round.lock().await;
             let Some(round) = active.as_ref() else { return };
-            (round.ord, round.closed_trunks.len() as u32)
+            (
+                round.ord,
+                round.round_id.clone(),
+                round.closed_trunks.len() as u32,
+            )
         };
-        let Some(trunk) = self.build_open_trunk(index, finished_at_ms).await else {
+        let Some((trunk, hints)) = self.build_open_trunk_with_hints(index, finished_at_ms).await
+        else {
             return;
         };
         let meta = self.meta.lock().await.clone();
-        if let Err(error) = self
-            .store
-            .write_trunk(&meta.workspace_id, &meta.id, ord, &trunk)
-        {
+        if let Err(error) = self.store.write_trunk_for_round(
+            &meta.workspace_id,
+            &meta.id,
+            ord,
+            Some(&round_id),
+            &hints,
+            &trunk,
+        ) {
             // Keeping the items in memory would not save them — the next
             // trunk close would drop them anyway — and refusing to advance
             // would wedge the round. The trunk is lost; the round is not.
@@ -5705,6 +5743,11 @@ impl Live {
             refs.remove(id);
         }
         drop(refs);
+        let mut hints = self.blob_hints.lock().await;
+        for id in &ids {
+            hints.remove(id);
+        }
+        drop(hints);
         self.items
             .lock()
             .await
@@ -5786,19 +5829,27 @@ impl Live {
     /// Rewrites the open trunk so a crash cannot cost more than the turn in
     /// progress — the same durability boundary the flat log had.
     async fn persist_open_trunk(&self) {
-        let (ord, index) = {
+        let (ord, round_id, index) = {
             let active = self.active_round.lock().await;
             let Some(round) = active.as_ref() else { return };
-            (round.ord, round.closed_trunks.len() as u32)
+            (
+                round.ord,
+                round.round_id.clone(),
+                round.closed_trunks.len() as u32,
+            )
         };
-        let Some(trunk) = self.build_open_trunk(index, None).await else {
+        let Some((trunk, hints)) = self.build_open_trunk_with_hints(index, None).await else {
             return;
         };
         let meta = self.meta.lock().await.clone();
-        if let Err(error) = self
-            .store
-            .write_trunk(&meta.workspace_id, &meta.id, ord, &trunk)
-        {
+        if let Err(error) = self.store.write_trunk_for_round(
+            &meta.workspace_id,
+            &meta.id,
+            ord,
+            Some(&round_id),
+            &hints,
+            &trunk,
+        ) {
             tracing::warn!("could not persist the open trunk of {}: {error}", meta.id);
         }
     }
@@ -5844,6 +5895,7 @@ impl Live {
         }
         self.open_trunk_items.lock().await.clear();
         self.blob_refs.lock().await.clear();
+        self.blob_hints.lock().await.clear();
         self.llm_rounds.lock().await.clear();
 
         let superseded = self
@@ -5877,6 +5929,18 @@ impl Live {
     /// Writes a round's current state to `chat.jsonl` and to the in-memory
     /// list the session layer answers from. Last write per round wins in both.
     async fn record_round(&self, round: &ActiveRound) {
+        let user_preview = if let Some(user_id) = round.user_item_id.as_deref() {
+            let items = self.items.lock().await;
+            items.iter().find_map(|item| match item {
+                TimelineItem::UserMessage { id, text, .. } if id == user_id => {
+                    let single = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                    (!single.is_empty()).then(|| overview::clip(&single, 100))
+                }
+                _ => None,
+            })
+        } else {
+            None
+        };
         let record = RoundRecord {
             schema_version: rounds::SCHEMA_VERSION,
             round_id: round.round_id.clone(),
@@ -5889,6 +5953,7 @@ impl Live {
             blocked_ms: round.blocked_ms,
             synthesized: false,
             trunk_count: round.closed_trunks.len() as u32,
+            user_preview,
         };
         {
             let mut rounds = self.rounds.lock().await;
@@ -6008,6 +6073,7 @@ impl Live {
         }
         self.open_trunk_items.lock().await.clear();
         self.blob_refs.lock().await.clear();
+        self.blob_hints.lock().await.clear();
         self.llm_rounds.lock().await.clear();
         self.active_round.lock().await.clone()
     }
@@ -6973,6 +7039,17 @@ async fn pump_events(
                 ..
             } => {
                 raw_thinking.insert(id.clone(), text.clone());
+                let shortened = overview::shorten(text, overview::TRUNK_REASONING_CHARS);
+                if !shortened.is_empty() {
+                    live.blob_hints.lock().await.insert(
+                        id.clone(),
+                        rounds::BlobSearchHint {
+                            overview: Some(shortened),
+                            input: None,
+                            output: None,
+                        },
+                    );
+                }
                 true
             }
             SessionEvent::ItemDelta {
@@ -6980,10 +7057,21 @@ async fn pump_events(
                 delta: ItemDelta::Text { delta },
                 ..
             } if raw_thinking.contains_key(item_id) => {
-                raw_thinking
+                let text = raw_thinking
                     .get_mut(item_id)
-                    .expect("checked against the same map")
-                    .push_str(delta);
+                    .expect("checked against the same map");
+                text.push_str(delta);
+                let shortened = overview::shorten(text, overview::TRUNK_REASONING_CHARS);
+                if !shortened.is_empty() {
+                    live.blob_hints.lock().await.insert(
+                        item_id.clone(),
+                        rounds::BlobSearchHint {
+                            overview: Some(shortened),
+                            input: None,
+                            output: None,
+                        },
+                    );
+                }
                 true
             }
             _ => false,
@@ -6997,6 +7085,9 @@ async fn pump_events(
                 ..
             } => {
                 raw_tools.insert(id.clone(), item.clone());
+                if let Some(hint) = rounds::blob_search_hint(item) {
+                    live.blob_hints.lock().await.insert(id.clone(), hint);
+                }
                 preserve_tool_blob(&blob_sender, item);
             }
             SessionEvent::ItemDelta {
@@ -7024,6 +7115,9 @@ async fn pump_events(
                         if !images.is_empty() {
                             *raw_images = images.clone();
                         }
+                    }
+                    if let Some(hint) = rounds::blob_search_hint(item) {
+                        live.blob_hints.lock().await.insert(item_id.clone(), hint);
                     }
                     preserve_tool_blob(&blob_sender, item);
                 }
@@ -8087,14 +8181,12 @@ mod tests {
         let items = vec![
             TimelineItem::UserMessage {
                 origin: None,
-                system: false,
                 id: "handled".into(),
                 text: "already delivered".into(),
                 attachments: Vec::new(),
             },
             TimelineItem::UserMessage {
                 origin: None,
-                system: false,
                 id: "queued".into(),
                 text: "deliver exactly once".into(),
                 attachments: Vec::new(),
@@ -8567,7 +8659,6 @@ mod tests {
                 updated_at_ms: 20,
                 items: vec![TimelineItem::UserMessage {
                     origin: None,
-                    system: false,
                     id: "import-user".into(),
                     text: "first prompt".into(),
                     attachments: Vec::new(),
@@ -8798,7 +8889,6 @@ mod tests {
         vec![
             TimelineItem::UserMessage {
                 origin: None,
-                system: false,
                 id: "user-1".into(),
                 text: "Investigate the failing deploy".into(),
                 attachments: Vec::new(),
@@ -10038,7 +10128,6 @@ mod tests {
         *source_live.items.lock().await = vec![
             TimelineItem::UserMessage {
                 origin: None,
-                system: false,
                 id: "user-live".into(),
                 text: "What can you help with?".into(),
                 attachments: Vec::new(),
@@ -10605,32 +10694,14 @@ mod tests {
         let summary = sessions.summary("s1").await.unwrap();
         let input = summary.input_summary.expect("there are pending inputs");
         assert_eq!(input.pending_message_ids, ["m_a", "m_b", "m_c"]);
-        assert_eq!(
-            input
-                .pending
-                .iter()
-                .map(|p| (p.message_id.as_str(), p.source.as_str(), p.state.as_str()))
-                .collect::<Vec<_>>(),
-            [
-                ("m_a", "user", "queued"),
-                ("m_b", "system", "queued"),
-                ("m_c", "agent", "queued"),
-            ]
-        );
-        assert!(input.pending.iter().all(|p| p.received_at_ms > 0));
-        assert_eq!(
-            input.limit as usize,
-            super::super::store::MAX_PENDING_INPUTS
-        );
 
-        // Handled inputs leave both lists together.
+        // Handled inputs leave pending_message_ids.
         let mut meta = sessions.store.load_meta("w1", "s1").unwrap();
         meta.inbox.entries[0].state = "handled".into();
         sessions.store.save_meta(&meta).unwrap();
         let reloaded = manager(dir.path()).summary("s1").await.unwrap();
         let input = reloaded.input_summary.unwrap();
         assert_eq!(input.pending_message_ids, ["m_b", "m_c"]);
-        assert_eq!(input.pending.len(), 2);
     }
 
     #[tokio::test]
@@ -10668,7 +10739,7 @@ mod tests {
         assert!(format!("{error:#}").contains("pending queue is full"));
         // A sender can see this coming before it sends.
         let input = sessions.summary("s1").await.unwrap().input_summary.unwrap();
-        assert_eq!(input.pending.len(), input.limit as usize);
+        assert_eq!(input.pending_message_ids.len(), limit);
     }
 
     #[tokio::test]
@@ -10694,7 +10765,7 @@ mod tests {
             .unwrap()
             .input_summary
             .expect("a paused session must say so, or it looks like one that finished");
-        assert!(input.paused && input.pending.is_empty());
+        assert!(input.paused && input.pending_message_ids.is_empty());
     }
 
     #[tokio::test]
@@ -10778,7 +10849,6 @@ mod tests {
                 "s1",
                 &[TimelineItem::UserMessage {
                     origin: None,
-                    system: false,
                     id: "u1".into(),
                     text: "genet-beta 更新到最新".into(),
                     attachments: vec![],
@@ -11636,7 +11706,6 @@ mod tests {
             let live = Arc::new(Live::new(record, sessions.store.clone()));
             live.items.lock().await.push(TimelineItem::UserMessage {
                 origin: None,
-                system: false,
                 id: "m_more".into(),
                 text: "also cover the docs".into(),
                 attachments: Vec::new(),
@@ -11949,7 +12018,6 @@ mod tests {
                 turn_id: "t".into(),
                 item: TimelineItem::UserMessage {
                     origin: None,
-                    system: false,
                     id: "u".into(),
                     text: "hi".into(),
                     attachments: vec![],
@@ -12160,7 +12228,7 @@ mod tests {
         assert_eq!(persisted.kind, genehub_proto::BlobKind::Reasoning);
         assert_eq!(
             persisted.overview.chars().count(),
-            overview::REASONING_CHARS
+            overview::TRUNK_REASONING_CHARS
         );
     }
 
@@ -13356,6 +13424,7 @@ mod tests {
                     blocked_ms: 0,
                     synthesized: false,
                     trunk_count: 25,
+                    user_preview: None,
                 },
             )
             .unwrap();
@@ -13424,6 +13493,7 @@ mod tests {
                     blocked_ms: 0,
                     synthesized: false,
                     trunk_count: 3,
+                    user_preview: None,
                 },
             )
             .unwrap();

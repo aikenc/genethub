@@ -89,6 +89,11 @@ pub struct RoundRecord {
     /// stops a day-long round from writing a quarter-megabyte line.
     #[serde(default)]
     pub trunk_count: u32,
+    /// Optional single-line preview of the user message that opened this round,
+    /// so Agents searching `chat.jsonl` with `rg` can match user intent to `roundId`
+    /// on the same line without changing the schema version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_preview: Option<String>,
 }
 
 pub type TrunkSummary = RoundTrunkSummary;
@@ -656,6 +661,108 @@ pub fn trunks_from_items_with_rounds(
         trunks.push(RoundTrunk { summary, batches });
     }
     trunks
+}
+
+/// Search-friendly overview, input (up to 160 chars preserving head/tail), and output tail (up to 2x80 chars) for on-disk `t-NNNN.jsonl` rows.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BlobSearchHint {
+    pub overview: Option<String>,
+    pub input: Option<String>,
+    pub output: Option<String>,
+}
+
+pub fn smart_clip_input(text: &str, max: usize) -> String {
+    let clean = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let count = clean.chars().count();
+    if count <= max {
+        return clean;
+    }
+    if max <= 3 {
+        return overview::clip(&clean, max);
+    }
+    let head_len = (max - 3) / 2;
+    let tail_len = max - 3 - head_len;
+    let head: String = clean.chars().take(head_len).collect();
+    let tail: String = clean.chars().skip(count - tail_len).collect();
+    format!("{head} … {tail}")
+}
+
+pub fn tail_excerpt_output(text: &str) -> Option<String> {
+    let lines: Vec<String> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            !line.is_empty() && !(line.starts_with("… 已省略 ") && line.ends_with(" 行 …"))
+        })
+        .map(|line| overview::clip(line, 80))
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    let start = lines.len().saturating_sub(2);
+    Some(lines[start..].join(" | "))
+}
+
+pub fn blob_search_hint(item: &TimelineItem) -> Option<BlobSearchHint> {
+    match item {
+        TimelineItem::Reasoning { text, .. } => {
+            let shortened = overview::shorten(text, overview::TRUNK_REASONING_CHARS);
+            (!shortened.is_empty()).then_some(BlobSearchHint {
+                overview: Some(shortened),
+                input: None,
+                output: None,
+            })
+        }
+        TimelineItem::ToolCall { detail, .. } => {
+            let (raw_input, raw_output): (String, String) = match detail {
+                ToolCallDetail::Overview { input, output, .. } => (input.clone(), output.clone()),
+                ToolCallDetail::Shell {
+                    command, output, ..
+                } => (command.clone(), output.clone()),
+                ToolCallDetail::Read { path, content, .. } => (path.clone(), content.clone()),
+                ToolCallDetail::Write { path, content } => (path.clone(), content.clone()),
+                ToolCallDetail::Edit { path, diff } => (path.clone(), diff.clone()),
+                ToolCallDetail::Search { query, matches } => (
+                    query.clone(),
+                    matches
+                        .iter()
+                        .map(|found| {
+                            let line = found
+                                .line
+                                .map(|line| format!(":{line}"))
+                                .unwrap_or_default();
+                            format!("{}{line} {}", found.path, found.preview)
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                ToolCallDetail::Fetch { url, summary } => (url.clone(), summary.clone()),
+                ToolCallDetail::Plan { markdown } => (markdown.clone(), String::new()),
+                ToolCallDetail::SubAgent { prompt, .. } => (prompt.clone(), String::new()),
+                ToolCallDetail::Unknown { raw } => (
+                    if raw.is_null() {
+                        String::new()
+                    } else {
+                        raw.to_string()
+                    },
+                    String::new(),
+                ),
+            };
+            let clean_input = smart_clip_input(&raw_input, 160);
+            let clean_input = (!clean_input.is_empty()).then_some(clean_input);
+            let clean_output = tail_excerpt_output(&raw_output);
+            if clean_input.is_none() && clean_output.is_none() {
+                None
+            } else {
+                Some(BlobSearchHint {
+                    overview: None,
+                    input: clean_input,
+                    output: clean_output,
+                })
+            }
+        }
+        _ => None,
+    }
 }
 
 /// The compact rows for one work item: one for the work itself, plus one per
@@ -1434,5 +1541,45 @@ mod tests {
         let first = trunks_from_items(&items)[0].batches.clone();
         let second = split_produced_image_batches(first.clone());
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn blob_search_hint_preserves_long_path_tail_error_output_and_120_char_reasoning() {
+        let deep_path = format!(
+            "/data/workspace/{}/apps/daemon/src/session/store.rs",
+            "very-deep-segment/".repeat(8)
+        );
+        assert!(deep_path.chars().count() > 160);
+        let tool = TimelineItem::ToolCall {
+            id: "tc1".into(),
+            name: "Shell".into(),
+            status: genehub_proto::ToolStatus::Error,
+            detail: genehub_proto::ToolCallDetail::Shell {
+                command: format!("cargo test --manifest-path {deep_path}"),
+                output: "compiling...\nline 2\nerror[E0308]: mismatched types\nFAILED: session::store::tests".into(),
+                exit_code: Some(101),
+            },
+            images: vec![],
+            started_at_ms: None,
+            finished_at_ms: None,
+        };
+        let hint = blob_search_hint(&tool).expect("tool search hint");
+        let input = hint.input.expect("input hint");
+        assert!(input.chars().count() <= 160);
+        assert!(input.starts_with("cargo test --manifest-path"));
+        assert!(input.ends_with("apps/daemon/src/session/store.rs"));
+        let output = hint.output.expect("output hint");
+        assert!(output.contains("error[E0308]: mismatched types"));
+        assert!(output.contains("FAILED: session::store::tests"));
+
+        let reasoning = TimelineItem::Reasoning {
+            id: "r1".into(),
+            text: "这是一段超过二十四个字符但不到一百二十个字符的思考摘要，用于验证 t-NNNN.jsonl 中的 reasoning 行不会被截断成半句话。".into(),
+            received_at_ms: None,
+        };
+        let r_hint = blob_search_hint(&reasoning).expect("reasoning search hint");
+        let overview = r_hint.overview.expect("reasoning overview");
+        assert!(overview.chars().count() > 24 && overview.chars().count() <= 120);
+        assert!(overview.contains("不会被截断成半句话"));
     }
 }

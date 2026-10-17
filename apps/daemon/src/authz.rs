@@ -482,10 +482,7 @@ pub fn required(request: &Request) -> Capability {
         // driving that session, not a separate power: whoever may send a turn
         // may already start these processes, so withholding the ability to
         // stop them would only mean they accumulate.
-        // Hook files name commands and their last error text: as much as the
-        // processes a session left running, so the same capability.
-        Request::HookList { .. }
-        | Request::ProcessList
+        Request::ProcessList
         | Request::ProcessWorkspaceList { .. }
         | Request::ProcessServiceStop { .. }
         | Request::ProcessKill { .. }

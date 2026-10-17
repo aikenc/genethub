@@ -28,6 +28,9 @@ pub struct Descriptor {
     /// Space. Always a safe relative path: absolute paths and `..` are refused
     /// when the file is read.
     pub agent_cwd: Option<String>,
+    /// Optional path to the Space's own SpaceBuilder script, relative to the
+    /// Space root. Always a safe relative path with no `..`.
+    pub space_builder: Option<String>,
 }
 
 /// The descriptor in `dir`: `Ok(None)` when there is none, `Err` with what to
@@ -82,19 +85,43 @@ pub fn parse(text: &str) -> Result<Descriptor, String> {
     };
     let agent_cwd = text_of("agentCwd")?;
     if let Some(cwd) = &agent_cwd {
-        safe_relative(cwd)?;
+        safe_relative_key("agentCwd", cwd)?;
+    }
+    let space_builder = text_of("spaceBuilder")?;
+    if let Some(builder) = &space_builder {
+        safe_relative_key("spaceBuilder", builder)?;
     }
     Ok(Descriptor {
         name: text_of("name")?,
         description: text_of("description")?,
         tags,
         agent_cwd,
+        space_builder,
     })
+}
+
+/// The `folders` the descriptor declares, exactly as written (`{"path": …, "name": …}` objects), or `None` when
+/// there is no usable descriptor or it declares none. This is the descriptor's replacement for a `.code-workspace`
+/// file: the daemon opens the Space with these directories as its roots, in this order. Entries are not judged
+/// here; the caller drops the ones this machine cannot use.
+pub fn declared_folders(dir: &Path) -> Option<Vec<serde_json::Value>> {
+    let path = dir.join(FILE);
+    let meta = std::fs::symlink_metadata(&path).ok()?;
+    if meta.file_type().is_symlink() || !meta.is_file() || meta.len() > MAX_BYTES {
+        return None;
+    }
+    let value: serde_json::Value = json5::from_str(&std::fs::read_to_string(&path).ok()?).ok()?;
+    let folders = value.get("folders")?.as_array()?;
+    (!folders.is_empty()).then(|| folders.clone())
 }
 
 /// A relative path that stays inside where it is joined: no root, no prefix, no
 /// `..`. `.` segments are harmless and dropped.
 fn safe_relative(text: &str) -> Result<PathBuf, String> {
+    safe_relative_key("agentCwd", text)
+}
+
+fn safe_relative_key(key: &str, text: &str) -> Result<PathBuf, String> {
     let mut clean = PathBuf::new();
     for component in Path::new(text).components() {
         match component {
@@ -102,13 +129,13 @@ fn safe_relative(text: &str) -> Result<PathBuf, String> {
             Component::CurDir => {}
             _ => {
                 return Err(format!(
-                    "\"agentCwd\" `{text}` must be a relative path inside the Space, with no `..`"
+                    "\"{key}\" `{text}` must be a relative path inside the Space, with no `..`"
                 ))
             }
         }
     }
     if clean.as_os_str().is_empty() {
-        return Err("\"agentCwd\" names the Space itself; leave it out instead".into());
+        return Err(format!("\"{key}\" names the Space itself; leave it out instead"));
     }
     Ok(clean)
 }
@@ -127,6 +154,17 @@ pub fn agent_cwd(root: &Path) -> Option<PathBuf> {
     (real.is_dir() && real.starts_with(&base)).then_some(candidate)
 }
 
+/// The Space's own `spaceBuilder` script when it names a real file inside the
+/// Space, otherwise `None` and the caller falls back to the bundled script.
+pub fn space_builder(root: &Path) -> Option<PathBuf> {
+    let descriptor = read(root).ok()??;
+    let relative = safe_relative_key("spaceBuilder", descriptor.space_builder.as_deref()?).ok()?;
+    let candidate = root.join(relative);
+    let real = candidate.canonicalize().ok()?;
+    let base = root.canonicalize().ok()?;
+    (real.is_file() && real.starts_with(&base)).then_some(candidate)
+}
+
 /// One Space found on disk, with the Spaces nested under it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Found {
@@ -142,6 +180,25 @@ pub struct Discovery {
     /// whose descriptor is broken is not a Space, and saying why beats
     /// silently not finding it.
     pub problems: Vec<String>,
+}
+
+/// Reads `dir` as a Space root and discovers any child Spaces nested under
+/// `dir/spaces/*` (up to `MAX_NESTING`). Returns `Ok(None)` when `dir` has no
+/// `agent-space.genet.json`.
+pub fn discover_root(dir: &Path) -> Result<Option<Found>, String> {
+    let Some(descriptor) = read(dir)? else {
+        return Ok(None);
+    };
+    let mut problems = Vec::new();
+    let children = children_of(dir, 1, &mut problems);
+    for problem in &problems {
+        tracing::warn!(%problem, "a child Space descriptor cannot be used");
+    }
+    Ok(Some(Found {
+        dir: dir.to_path_buf(),
+        descriptor,
+        children,
+    }))
 }
 
 /// Every root Space under `spaces_root`, and the Spaces nested in each.
@@ -245,7 +302,8 @@ mod tests {
             r#"{
               // json5: comments and trailing commas are fine
               "name": "办公室-Mac 管理员", "description": "介绍专家", "tags": ["expert"],
-              "agentCwd": "./front/", "agents": ["codex"], "skills": ["x"], "children": {"scanDepth": 2},
+              "agentCwd": "./front/", "spaceBuilder": "tools/spacebuilder.py",
+              "agents": ["codex"], "skills": ["x"], "children": {"scanDepth": 2},
             }"#,
         )
         .unwrap();
@@ -253,6 +311,7 @@ mod tests {
         assert_eq!(d.description.as_deref(), Some("介绍专家"));
         assert_eq!(d.tags, ["expert"]);
         assert_eq!(d.agent_cwd.as_deref(), Some("./front/"));
+        assert_eq!(d.space_builder.as_deref(), Some("tools/spacebuilder.py"));
         assert_eq!(parse("{}").unwrap(), Descriptor::default());
     }
 

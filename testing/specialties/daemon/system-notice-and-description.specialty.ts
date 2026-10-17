@@ -5,7 +5,7 @@
 // whom to ask). These cases drive the shipped `genet` against a real daemon and
 // a real script Agent; nothing in the product is replaced.
 //
-//   - `session send --queue` queues a `system` notice behind a running round;
+//   - `session send` with a `用途: ...` notice envelope queues a `system` notice behind a running round;
 //   - a notice never lifts a pause, and a person's message still does;
 //   - a notice is idempotent by messageId, and the CLI refuses what is not
 //     durable;
@@ -26,7 +26,6 @@ type Agent = Parameters<CaseContext["flows"]["branches"]["openControlledAgentSes
 type Cli = ReturnType<typeof localGenetCli>;
 
 const SCHEMA = "genet.cli/v1";
-const LIMIT = 32;
 
 function noticeCase(
   name: string,
@@ -110,11 +109,11 @@ const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 noticeCase(
   "does-not-interrupt-and-waits-behind-a-person",
   "a system notice sent to a busy Session waits for the round and behind a person's message",
-  "while a round is running, `genet session send --queue` is accepted and the Agent is NOT interrupted (no cancel reaches it, the turn stays open); the same send without --queue from a person does interrupt; and once the person's turn is delivered the notice is still queued, reported by the Session summary with source system, state queued, and the queue limit",
+  "while a round is running, `genet session send` with a `用途: ...` notice envelope is accepted and the Agent is NOT interrupted (no cancel reaches it, the turn stays open); the same send from a person does interrupt; and once the person's turn is delivered the notice is still queued in pendingMessageIds",
   [
     "a script's notice cancelling the work it was meant to inform",
     "a notice delivered ahead of the person who is waiting",
-    "the queue summary hiding where a pending input came from or whether it was delivered",
+    "the queue summary hiding whether a pending input is still waiting",
     "the notice dropped instead of waiting",
   ],
   { profile: "accept-then-silent" },
@@ -125,11 +124,11 @@ noticeCase(
 
     succeeded(
       t,
-      cli(["session", "send", session.sessionId, "子会话 s_9 已完成", "--message-id", "s9.r1.done", "--queue", "--no-wait"]),
+      cli(["session", "send", session.sessionId, "用途: result\n\n子会话 s_9 已完成", "--message-id", "s9.r1.done", "--no-wait"]),
       "session.result",
     );
     await t.tools.waitUntil(
-      async () => (await snapshot(session)).summary.inputSummary?.pending?.some((p) => p.messageId === "s9.r1.done") === true,
+      async () => (await snapshot(session)).summary.inputSummary?.pendingMessageIds.includes("s9.r1.done") === true,
       10_000,
     );
     await pause(1_500); // many 250 ms delivery ticks: an interrupt would have happened by now
@@ -151,19 +150,13 @@ noticeCase(
 
     // The person's turn took the lane; the notice is still waiting behind it.
     const input = (await snapshot(session)).summary.inputSummary;
-    const byId = (id: string) => input?.pending?.find((p) => p.messageId === id);
     t.assertions.assert(
-      byId("s9.r1.done")?.source === "system" && byId("s9.r1.done")?.state === "queued",
-      `the notice should still be queued as system: ${JSON.stringify(input)}`,
+      input?.pendingMessageIds.includes("s9.r1.done") === true,
+      `the notice should still be pending: ${JSON.stringify(input)}`,
     );
     t.assertions.assert(
-      byId("u.one")?.source === "user" && byId("u.one")?.state === "sent",
-      `the person's message should be delivered: ${JSON.stringify(input)}`,
-    );
-    t.assertions.assert(input?.limit === LIMIT, `queue limit ${input?.limit}`);
-    t.assertions.assert(
-      (byId("s9.r1.done")?.receivedAtMs ?? 0) > 0 && input?.pendingMessageIds.includes("s9.r1.done") === true,
-      "pending must carry the arrival time and agree with pendingMessageIds",
+      input?.pendingMessageIds.includes("u.one") === true,
+      `the person's message should be in pendingMessageIds until round finishes: ${JSON.stringify(input)}`,
     );
     t.assertions.assert(prompts(session) === 2, "the notice was delivered ahead of, or together with, the person's message");
   },
@@ -173,7 +166,7 @@ noticeCase(
 noticeCase(
   "never-lifts-a-pause-a-person-speaking-does",
   "a system notice sent to an interrupted Session stays queued; only a person's message lifts the pause",
-  "after the person interrupts a Session, a `--queue` notice is accepted but no turn starts, the summary stays paused and shows the notice queued; a person's next message lifts the pause and starts a turn",
+  "after the person interrupts a Session, a `用途: ...` notice is accepted but no turn starts, the summary stays paused and shows the notice queued; a person's next message lifts the pause and starts a turn",
   [
     "a script silently undoing the person's interrupt by waking the Session",
     "a paused Session reported as running its queue",
@@ -189,11 +182,11 @@ noticeCase(
 
     succeeded(
       t,
-      cli(["session", "send", session.sessionId, "后台任务 s_7 已完成", "--message-id", "s7.r2.done", "--queue", "--no-wait"]),
+      cli(["session", "send", session.sessionId, "用途: result\n\n后台任务 s_7 已完成", "--message-id", "s7.r2.done", "--no-wait"]),
       "session.result",
     );
     await t.tools.waitUntil(
-      async () => (await snapshot(session)).summary.inputSummary?.pending?.some((p) => p.messageId === "s7.r2.done") === true,
+      async () => (await snapshot(session)).summary.inputSummary?.pendingMessageIds.includes("s7.r2.done") === true,
       10_000,
     );
     await pause(2_000);
@@ -205,7 +198,7 @@ noticeCase(
       `the pause was lifted by a system notice: ${JSON.stringify(waiting.inputSummary)}`,
     );
     t.assertions.assert(
-      waiting.inputSummary?.pending?.find((p) => p.messageId === "s7.r2.done")?.state === "queued",
+      waiting.inputSummary?.pendingMessageIds.includes("s7.r2.done") === true,
       "the notice should be waiting, not dropped or delivered",
     );
 
@@ -226,21 +219,21 @@ noticeCase(
 noticeCase(
   "is-idempotent-and-the-cli-refuses-what-is-not-durable",
   "a system notice is acknowledged again, not queued twice, and the CLI refuses a notice that cannot be retried",
-  "the same notice sent twice leaves one message and is delivered and handled; the same id with other text is refused; --queue without --message-id, with --task-run, or on `agent run` exits 2 before anything is created",
+  "the same notice sent twice leaves one message and is delivered and handled; the same id with other text is refused; a system notice without --message-id, with --task-run, or on `agent run` exits 2 before anything is created",
   [
     "two channels or a retry delivering the same notice twice",
     "an id reused for different content silently overwriting a notice",
     "a notice without a stable id accepted",
-    "`agent run --queue` creating a Session just to leave a notice in it",
+    "`agent run` with a system notice creating a Session just to leave a notice in it",
   ],
   { profile: "normal" },
   async (t, session, cli) => {
     const id = session.sessionId;
     const send = (text: string) =>
-      cli(["session", "send", id, text, "--message-id", "s9.r1.done", "--queue", "--no-wait"]);
-    succeeded(t, send("子会话 s_9 已完成"), "session.result");
-    succeeded(t, send("子会话 s_9 已完成"), "session.result");
-    const other = send("another body under the same id");
+      cli(["session", "send", id, text, "--message-id", "s9.r1.done", "--no-wait"]);
+    succeeded(t, send("用途: result\n\n子会话 s_9 已完成"), "session.result");
+    succeeded(t, send("用途: result\n\n子会话 s_9 已完成"), "session.result");
+    const other = send("用途: result\n\nanother body under the same id");
     t.assertions.assert(
       other.code !== 0 && other.envelope?.type === "error",
       `the same id with other text must be refused: ${brief(other)}`,
@@ -250,7 +243,7 @@ noticeCase(
     await t.tools.waitUntil(async () => {
       const summary = (await snapshot(session)).summary;
       // An empty queue is omitted from the summary, not sent as [].
-      return summary.status === "idle" && (summary.inputSummary?.pending?.length ?? 0) === 0;
+      return summary.status === "idle" && (summary.inputSummary?.pendingMessageIds.length ?? 0) === 0;
     }, 20_000);
     const copies = (await snapshot(session)).items.filter(
       (item) => item.type === "userMessage" && item.id === "s9.r1.done",
@@ -258,20 +251,20 @@ noticeCase(
     t.assertions.assert(copies.length === 1, `the retried notice appeared ${copies.length} times in the timeline`);
     t.assertions.assert(prompts(session) === 1, `the notice ran ${prompts(session)} turns`);
 
-    refusedWithUsage(t, cli(["session", "send", id, "x", "--queue", "--no-wait"]), "--queue without --message-id");
+    refusedWithUsage(t, cli(["session", "send", id, "用途: result\n\nx", "--no-wait"]), "system notice without --message-id");
     refusedWithUsage(
       t,
-      cli(["session", "send", id, "x", "--message-id", "q.1", "--task-run", "r1", "--queue", "--no-wait"]),
-      "--queue with --task-run",
+      cli(["session", "send", id, "用途: result\n\nx", "--message-id", "q.1", "--task-run", "r1", "--no-wait"]),
+      "system notice with --task-run",
     );
     const before = await sessionIds(session);
     refusedWithUsage(
       t,
-      cli(["agent", "run", "--agent", session.agent.agentId, "--workspace", session.workspaceId, "--queue", "--message-id", "q.2", "--no-wait", "x"]),
-      "agent run --queue",
+      cli(["agent", "run", "--agent", session.agent.agentId, "--workspace", session.workspaceId, "--message-id", "q.2", "--no-wait", "用途: result\n\nx"]),
+      "agent run system notice",
     );
     const after = await sessionIds(session);
-    t.assertions.assert(after.length === before.length, "`agent run --queue` created a Session before refusing");
+    t.assertions.assert(after.length === before.length, "`agent run` with system notice created a Session before refusing");
   },
 );
 

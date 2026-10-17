@@ -66,8 +66,6 @@ pub struct Run {
     pub tags: Vec<String>,
     /// `--media`: the daemon's own media tags (`图片理解`, `视频理解`).
     pub media_tags: Vec<String>,
-    /// Send as a `system` notice (`--queue`) instead of a request.
-    pub queue: bool,
     pub wait: bool,
     pub since_seq: Option<u64>,
     pub auto_approve: bool,
@@ -123,6 +121,10 @@ pub enum Command {
     },
     Close {
         session_id: String,
+    },
+    Archive {
+        session_id: String,
+        archived: bool,
     },
     Label {
         session_id: String,
@@ -391,6 +393,18 @@ fn parse_session(args: &[String], selection: &Selection) -> Result<Command, CliF
         }
         "interrupt" => Ok(Command::Interrupt { session_id }),
         "close" => Ok(Command::Close { session_id }),
+        "archive" => {
+            let usage = "usage: genet session archive <id> [--unarchive]";
+            let archived = match &args[2..] {
+                [] => true,
+                [flag] if flag == "--unarchive" => false,
+                _ => return Err(CliFailure::invalid_args(usage)),
+            };
+            Ok(Command::Archive {
+                session_id,
+                archived,
+            })
+        }
         "describe" => {
             let usage = "usage: genet session describe <id> \"<text>\"";
             let [_, _, text] = args else {
@@ -483,7 +497,6 @@ struct Options {
     description: Option<String>,
     tags: Vec<String>,
     media: Vec<String>,
-    queue: bool,
     request: Option<String>,
     choose: Option<String>,
     since_seq: Option<u64>,
@@ -532,7 +545,6 @@ impl Options {
                 "--timeout" => options.timeout = Some(number(&value()?, "--timeout")?),
                 "--wait" => options.wait = Some(true),
                 "--no-wait" => options.wait = Some(false),
-                "--queue" => options.queue = true,
                 "--auto-approve" => options.auto_approve = true,
                 "--open-workspace" => options.open_workspace = true,
                 other if other.starts_with('-') => {
@@ -567,14 +579,15 @@ impl Options {
         // new session behind without its prompt.
         crate::session::store::apply_session_labels(&[], &self.labels, &[])
             .map_err(CliFailure::invalid_args)?;
-        if self.queue && self.message_id.is_none() {
+        let system_notice = prompt.starts_with("用途: ");
+        if system_notice && self.message_id.is_none() {
             return Err(CliFailure::invalid_args(
-                "--queue requires --message-id: a notice that cannot be retried safely is not durable",
+                "a system notice (用途: ...) requires --message-id: a notice that cannot be retried safely is not durable",
             ));
         }
-        if self.queue && self.task_run_id.is_some() {
+        if system_notice && self.task_run_id.is_some() {
             return Err(CliFailure::invalid_args(
-                "--queue cannot carry --task-run: a system notice is not a Run's notice",
+                "a system notice (用途: ...) cannot carry --task-run: a system notice is not a Run's notice",
             ));
         }
         if let Some(description) = &self.description {
@@ -618,7 +631,6 @@ impl Options {
             description: self.description,
             tags,
             media_tags,
-            queue: self.queue,
             wait,
             since_seq: self.since_seq,
             auto_approve: self.auto_approve,
@@ -799,10 +811,35 @@ async fn execute(command: Command, selection: &Selection) -> i32 {
             )
             .await
         }
+        Command::Archive {
+            session_id,
+            archived,
+        } => archive(&rpc, &session_id, archived).await.map(|session| {
+            output::succeed("session.archive", json!({"session": session}));
+            EXIT_OK
+        }),
     };
     match result {
         Ok(code) => code,
         Err(error) => output::fail(error),
+    }
+}
+
+async fn archive(
+    rpc: &Rpc,
+    session_id: &str,
+    archived: bool,
+) -> Result<SessionSummary, CliFailure> {
+    match rpc
+        .call(Request::SessionArchive {
+            session_id: session_id.to_string(),
+            archived,
+        })
+        .await
+        .map_err(query::rpc_error)?
+    {
+        Reply::Session(summary) => Ok(summary),
+        other => Err(query::unexpected_reply("session", &other)),
     }
 }
 
@@ -1031,9 +1068,9 @@ async fn run_conversation(rpc: &Rpc, run: Run, here: bool) -> Result<i32, CliFai
     // Checked before anything is created: a notice has a recipient, and
     // creating a session just to leave a notice in it would be an odd way to
     // find that out.
-    if run.queue && run.session_id.is_none() {
+    if run.prompt.starts_with("用途: ") && run.session_id.is_none() {
         return Err(CliFailure::invalid_args(
-            "--queue sends to an existing session: use genet session send <id> ... --queue",
+            "a system notice (用途: ...) sends to an existing session: use genet session send <id> ...",
         ));
     }
     let mut session = match run.session_id.as_deref() {
@@ -1133,7 +1170,6 @@ async fn run_conversation(rpc: &Rpc, run: Run, here: bool) -> Result<i32, CliFai
         artifact_preview_base_url: None,
         continues_round: None,
         origin: caller_origin(),
-        system: run.queue,
     })
     .await
     .map_err(query::rpc_error)?;
@@ -1674,40 +1710,40 @@ mod tests {
     }
 
     #[test]
-    fn queue_marks_a_durable_notice_and_nothing_else_may_carry_it() {
+    fn system_notice_envelope_requires_message_id_and_forbids_task_run() {
         let run = run_of(
             parse_session(
                 &words(&[
                     "send",
                     "s_1",
-                    "done",
+                    "--message",
+                    "用途: result\n\ndone",
                     "--message-id",
                     "s_9.r1.done",
-                    "--queue",
                 ]),
                 &selection(None),
             )
             .unwrap(),
         );
-        assert!(run.queue);
+        assert!(run.prompt.starts_with("用途: "));
         assert_eq!(run.session_id.as_deref(), Some("s_1"));
         assert!(!run.wait, "a durable send returns acceptance");
         let plain =
             run_of(parse_session(&words(&["send", "s_1", "hello"]), &selection(None)).unwrap());
-        assert!(!plain.queue, "a notice is only ever asked for");
+        assert!(!plain.prompt.starts_with("用途: "));
         for bad in [
             // A notice that cannot be retried safely is not durable.
-            &["send", "s_1", "done", "--queue"][..],
+            &["send", "s_1", "--message", "用途: result\n\ndone"][..],
             // And it is not a Run's notice.
             &[
                 "send",
                 "s_1",
-                "done",
+                "--message",
+                "用途: result\n\ndone",
                 "--message-id",
                 "m",
                 "--task-run",
                 "r",
-                "--queue",
             ],
         ] {
             assert_eq!(

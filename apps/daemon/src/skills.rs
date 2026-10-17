@@ -90,7 +90,44 @@ pub fn materialize(root: &Path) -> Option<PathBuf> {
             return None;
         }
     }
+    prune_stale(root, root, &|relative| {
+        relative == ENTRYPOINT_MANIFEST || BUILTIN_FILES.iter().any(|file| file.relative_path == relative)
+    });
     Some(root.to_path_buf())
+}
+
+/// Remove what an older daemon materialized and this one no longer ships. The directory is
+/// product-owned, and a file left behind is not harmless: a Skill's template is copied from it,
+/// so a retired part of the template would be copied into every new expert. Another process's
+/// in-flight temporary file (`.name.<pid>.tmp`) is left alone.
+fn prune_stale(root: &Path, directory: &Path, shipped: &dyn Fn(&str) -> bool) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_dir() {
+            prune_stale(root, &path, shipped);
+            let _ = std::fs::remove_dir(&path); // only succeeds when nothing is left in it
+            continue;
+        }
+        let Ok(relative) = path.strip_prefix(root) else {
+            continue;
+        };
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        let in_flight = relative
+            .rsplit('/')
+            .next()
+            .is_some_and(|name| name.starts_with('.') && name.ends_with(".tmp"));
+        if !in_flight && !shipped(&relative) {
+            if let Err(error) = std::fs::remove_file(&path) {
+                tracing::warn!(path = %relative, %error, "could not remove a stale built-in skill file");
+            }
+        }
+    }
 }
 
 fn install_file(target: &Path, contents: &[u8]) -> std::io::Result<()> {
@@ -608,6 +645,26 @@ mod tests {
         assert!(body.contains("change only the intelligence tag"));
         assert!(body.contains("Do not pin `agentId` or `modelId`"));
         assert!(body.contains("`Flush` is not a tag"));
+    }
+
+    #[test]
+    fn files_an_older_daemon_left_behind_are_removed_and_current_ones_kept() {
+        let root = temp_dir("stale");
+        load(&root);
+        let current = BUILTIN_FILES[0].relative_path;
+        let stale_file = root.join("genehub/references/expert-template/spaces/think/agent-space.genet.json");
+        let retired_skill = root.join("genehub-html-preview/SKILL.md");
+        let in_flight = root.join("genehub/.SKILL.md.1234.tmp");
+        for path in [&stale_file, &retired_skill, &in_flight] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "old").unwrap();
+        }
+        let skills = load(&root);
+        assert!(!stale_file.exists() && !stale_file.parent().unwrap().exists(), "a retired template part is gone with its directory");
+        assert!(!retired_skill.exists() && !retired_skill.parent().unwrap().exists());
+        assert!(in_flight.exists(), "another process's temporary file is not touched");
+        assert!(root.join(current).is_file() && root.join(ENTRYPOINT_MANIFEST).is_file());
+        assert_eq!(skills.len(), BUILTIN_ENTRYPOINTS.len());
     }
 
     #[test]

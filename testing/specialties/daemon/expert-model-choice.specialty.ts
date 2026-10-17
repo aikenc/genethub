@@ -8,7 +8,12 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { defineSpecialty } from "../../framework/public.ts";
+import {
+  defineSpecialty,
+  hideHostAgentClis,
+  registerControlledAgent,
+  seedScriptAgentRuntime,
+} from "../../framework/public.ts";
 
 const TOOL = "apps/daemon/builtin-skills/genehub/references/expert-template/tools/expert.py";
 
@@ -33,6 +38,7 @@ else:
 
 const DRIVER = `
 import json, os, sys
+sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.environ["EXPERT_TOOL"]))
 import expert
 cases = json.loads(os.environ["CASES"])
@@ -62,11 +68,10 @@ defineSpecialty(
       "an equivalent that is a different tier or the far end of the cost scale",
     ],
     tags: ["core", "expert", "session-model", "genet-cli"],
-    expectedDurationMs: 4_000,
-    timeoutMs: 60_000,
-    requiredArtifacts: [],
+    expectedDurationMs: 15_000,
+    timeoutMs: 90_000,
     resources: { environments: 1, cpu: 1 },
-    surfaces: ["tools/expert.py", "genet-cli"],
+    surfaces: ["tools/expert.py", "genet-cli", "daemon"],
   },
   async (t) => {
     const dir = join(t.env.root, "expert-model-choice");
@@ -143,5 +148,59 @@ defineSpecialty(
     same(override?.args, ["--agent", "codex", "--model", "gpt-6-terra"], "the machine's override beats inheritance");
     const [pinnedAgent] = run([{ kwargs: {} }], "EXPERT_AGENT=codex\n");
     same(pinnedAgent?.args, ["--agent", "codex", "--model", "gpt-6-luna", "--effort", "high"], "a configured Agent equal to the requester's still inherits its model");
+
+    // Daemon RPC boundary: sending an image attachment to a session bound to a concrete model without `图片理解` returns `agentMediaUnsupported`.
+    hideHostAgentClis(t.env);
+    seedScriptAgentRuntime(t.env);
+    registerControlledAgent(t.env, { profile: "normal", id: "ctl-normal", chunks: 1 });
+    const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
+    try {
+      const savedPrefs = await opened.client.call({
+        type: "settings.setAgentPreferences",
+        payload: {
+          preferences: {
+            runtimes: {},
+            selectedTags: ["Flash"],
+            disabledAgentIds: [],
+            modelProfiles: [
+              { agentId: "ctl-normal", modelId: "text-only-m", displayName: "TextOnly", tags: ["Pro"], cost: "low" },
+              { agentId: "ctl-normal", modelId: "vision-m", displayName: "Vision", tags: ["Flash", "图片理解"], cost: "low" },
+            ],
+            tagGroups: [],
+          },
+        },
+      });
+      t.assertions.assert(savedPrefs?.type === "settings", `settings.setAgentPreferences: ${JSON.stringify(savedPrefs)}`);
+      const created = await opened.client.call({
+        type: "session.create",
+        payload: { workspaceId: opened.workspaceId, agentId: "ctl-normal", modelId: "text-only-m", modeId: null, title: "no-vision-front", cwd: null },
+      });
+      if (created?.type !== "session") throw new Error(`session.create returned ${created?.type}`);
+      const sid = (created.data as unknown as { id: string }).id;
+      let errMsg = "";
+      try {
+        await opened.client.call({
+          type: "session.send",
+          payload: {
+            sessionId: sid,
+            text: "请看这张图",
+            attachments: [{ name: "test.png", mime: "image/png", dataBase64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" }],
+            artifactPreviewBaseUrl: null,
+            continuesRound: null,
+            messageId: "u_img_reject_1",
+          },
+        });
+      } catch (error) {
+        errMsg = String(error);
+      }
+      t.assertions.assert(
+        errMsg.includes("agentMediaUnsupported") && errMsg.includes("图片理解"),
+        `expected agentMediaUnsupported for concrete non-vision model, got: ${errMsg}`,
+      );
+    } finally {
+      opened.client.close();
+      opened.daemon.stop();
+      await opened.mock.stop();
+    }
   },
 );

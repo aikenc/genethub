@@ -3,7 +3,7 @@
 // ordinary scan. These cases start the shipped daemon on an empty data directory and look at what is there.
 // No model is involved.
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { defineSpecialty, localGenetCli, type CaseContext } from "../../framework/public.ts";
@@ -58,10 +58,10 @@ function adminCase(
 adminCase(
   "is-built-and-registered-on-first-start",
   "a fresh machine has an administrator named after it, built, registered with its children, with the timer hook in place",
-  "after the first start workspace.list holds <机器名>管理员 with think and work under it, the root has no rules while front/ does, the hook list shows expert-front.timer valid and owned by SpaceBuilder, and every Skill is under 40 lines",
+  "after the first start workspace.list holds <机器名>管理员 with research, work and reflect under it, the root has no rules while front/ does, the hook list shows expert-front.timer valid and owned by SpaceBuilder, and every Skill is under 40 lines",
   [
     "no administrator on a new machine",
-    "the administrator's rules written at its root, so its think and work Spaces read the front desk's rules",
+    "the administrator's rules written at its root, so its research, work and reflect Spaces read the front desk's rules",
     "the timer hook missing, so nothing is ever reconciled",
     "the machine name not reaching the Space name",
   ],
@@ -71,16 +71,20 @@ adminCase(
       const spaces = await list(opened);
       const root = spaces.find((space) => space.name === NAME);
       t.assertions.assert(root, `no ${NAME} in ${JSON.stringify(spaces.map((s) => s.name))}`);
-      for (const child of ["think", "work"]) {
+      for (const child of ["research", "work", "reflect"]) {
         const found = spaces.find((space) => space.name === child && space.agentSpace?.parentWorkspaceId === root!.id);
         t.assertions.assert(found, `${child} is not registered under the administrator`);
       }
       t.assertions.assert(existsSync(path.join(admin, "front", "AGENTS.md")), "front/AGENTS.md was not built");
       t.assertions.assert(existsSync(path.join(admin, "front/.agents/skills/expert-admin/SKILL.md")), "the administrator's own Skill is not in front/");
       t.assertions.assert(!existsSync(path.join(admin, "AGENTS.md")) && !existsSync(path.join(admin, ".agents")), "rules were written at the root");
-      t.assertions.assert(existsSync(path.join(admin, "spaces/think/.agents/skills/expert-think/SKILL.md")), "think has no Skill");
-      t.assertions.assert(!existsSync(path.join(admin, "spaces/think/.agents/skills/expert-admin")), "think got the administrator's Skill");
-      for (const skill of ["expert-core", "expert-front", "expert-think", "expert-work", "expert-admin"]) {
+      t.assertions.assert(existsSync(path.join(admin, "spaces/research/.agents/skills/expert-research/SKILL.md")), "research has no Skill");
+      t.assertions.assert(existsSync(path.join(admin, "spaces/reflect/.agents/skills/expert-reflect/SKILL.md")), "reflect has no Skill");
+      t.assertions.assert(!existsSync(path.join(admin, "spaces/research/.agents/skills/expert-admin")), "research got the administrator's Skill");
+      t.assertions.assert(!existsSync(path.join(admin, "spaces/work/.agents/skills/expert-reflect")), "work got the reflect Skill");
+      const reflectRules = readFileSync(path.join(admin, "spaces/reflect/AGENTS.md"), "utf8");
+      t.assertions.assert(reflectRules.includes("我做的一切只有一个目的：让用户满意"), "the reflect Space's rules do not carry the soul");
+      for (const skill of ["expert-core", "expert-front", "expert-research", "expert-reflect", "expert-work", "expert-admin"]) {
         const file = path.join(admin, "skills", skill, "SKILL.md");
         const lines = readFileSync(file, "utf8").trimEnd().split("\n").length;
         t.assertions.assert(lines <= 40, `${skill}/SKILL.md has ${lines} lines`);
@@ -99,28 +103,36 @@ adminCase(
 );
 
 adminCase(
-  "a-restart-keeps-the-experts-files-and-a-removal-is-final",
-  "a restart restores what the product owns but never the expert's files, and a removed administrator is not put back",
-  "after a restart an edited tools/expert.py is restored while soul.md, memory.md and posts/ keep the expert's edits; after the user removes the administrator and restarts, it is not registered again and its files are left exactly as they were",
+  "a-restart-rewrites-admin-files-prunes-stale-ones-and-a-removal-is-final",
+  "a restart rewrites what the product owns and prunes stale template files on the stateless administrator, and a removed administrator is not put back",
+  "after a restart an edited tools/expert.py or soul.md in the built-in admin is restored to the template, a stale file from an older template is pruned while posts/ and datas/ stay, and after the user removes the administrator and restarts, it is not registered again and its files are left exactly as they were",
   [
-    "the expert's memory overwritten by an upgrade",
+    "the built-in administrator left on an old template after an upgrade",
+    "stale files from a retired template version remaining in admin/",
     "a damaged product script never repaired",
     "an administrator the user removed coming back on every start",
   ],
   async (t, open, admin) => {
     let opened = await open();
     const script = path.join(admin, "tools", "expert.py");
-    const original = readFileSync(script, "utf8");
-    writeFileSync(path.join(admin, "soul.md"), "my own soul\n");
-    writeFileSync(path.join(admin, "memory.md"), "my memory\n");
+    const soul = path.join(admin, "soul.md");
+    const originalScript = readFileSync(script, "utf8");
+    const originalSoul = readFileSync(soul, "utf8");
+    writeFileSync(soul, "my own soul\n");
     writeFileSync(script, "# damaged\n");
+    const stale = path.join(admin, "spaces", "reflect", "soul.mirror.md");
+    writeFileSync(stale, "stale mirror\n");
+    mkdirSync(path.join(admin, "posts"), { recursive: true });
+    const post = path.join(admin, "posts", "keep.md");
+    writeFileSync(post, "keep me\n");
     await stop(opened);
 
     opened = await open();
     try {
-      t.assertions.assert(readFileSync(script, "utf8") === original, "the damaged product script was not restored");
-      t.assertions.assert(readFileSync(path.join(admin, "soul.md"), "utf8") === "my own soul\n", "soul.md was overwritten");
-      t.assertions.assert(readFileSync(path.join(admin, "memory.md"), "utf8") === "my memory\n", "memory.md was overwritten");
+      t.assertions.assert(readFileSync(script, "utf8") === originalScript, "the damaged product script was not restored");
+      t.assertions.assert(readFileSync(soul, "utf8") === originalSoul, "the built-in admin's soul.md was not restored to the template");
+      t.assertions.assert(!existsSync(stale), "a stale file from an older template was not pruned");
+      t.assertions.assert(readFileSync(post, "utf8") === "keep me\n", "posts/ was pruned");
       const root = (await list(opened)).find((space) => space.name === NAME);
       t.assertions.assert(root, "the administrator is gone after a restart");
       // Children go first: a Space with members cannot be removed.
@@ -136,7 +148,7 @@ adminCase(
     opened = await open();
     try {
       const after = await list(opened);
-      t.assertions.assert(!after.some((space) => space.name === NAME || space.name === "think" || space.name === "work"), `the removed administrator came back: ${JSON.stringify(after.map((s) => s.name))}`);
+      t.assertions.assert(!after.some((space) => space.name === NAME || space.name === "research" || space.name === "reflect" || space.name === "work"), `the removed administrator came back: ${JSON.stringify(after.map((s) => s.name))}`);
       t.assertions.assert(readFileSync(script, "utf8") === "# left alone because the user removed it\n", "files of a removed administrator were rewritten");
     } finally {
       await stop(opened);

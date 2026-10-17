@@ -16,12 +16,23 @@ use genehub_proto::{
 use crate::adapter::{registry::Registry, ProviderMap};
 use crate::state::Shared;
 
+pub const TAG_ULTRA: &str = "Ultra";
 pub const TAG_MAX: &str = "Max";
 pub const TAG_PRO: &str = "Pro";
 pub const TAG_FLASH: &str = "Flash";
+pub const TAG_MINI: &str = "Mini";
 pub const TAG_VIDEO: &str = "视频理解";
 pub const TAG_IMAGE: &str = "图片理解";
-pub const BUILTIN_TAGS: [&str; 5] = [TAG_MAX, TAG_PRO, TAG_FLASH, TAG_VIDEO, TAG_IMAGE];
+pub const INTELLIGENCE_TAGS: [&str; 5] = [TAG_ULTRA, TAG_MAX, TAG_PRO, TAG_FLASH, TAG_MINI];
+pub const BUILTIN_TAGS: [&str; 7] = [
+    TAG_ULTRA,
+    TAG_MAX,
+    TAG_PRO,
+    TAG_FLASH,
+    TAG_MINI,
+    TAG_VIDEO,
+    TAG_IMAGE,
+];
 
 #[derive(Debug)]
 pub(crate) struct RouteUnavailable(pub String);
@@ -242,8 +253,17 @@ fn collect_candidates(
     registry: &Registry,
     evidence_only: bool,
 ) -> Vec<Candidate> {
+    let disabled: BTreeSet<String> = preferences
+        .disabled_agent_ids
+        .iter()
+        .map(|id| id.trim().to_ascii_lowercase())
+        .filter(|id| !id.is_empty())
+        .collect();
     let mut candidates = Vec::new();
     for agent in agents {
+        if disabled.contains(&agent.id.to_ascii_lowercase()) {
+            continue;
+        }
         if !matches!(agent.probe, ProbeState::Ready) {
             continue;
         }
@@ -365,11 +385,129 @@ pub(crate) async fn resolve_live_route_excluding(
     Ok((route, providers))
 }
 
+/// Validates a concrete `(agent_id, model_id)` selection against the machine's
+/// configured `AgentSelectionPreferences`.
+///
+/// - Any Agent listed in `disabled_agent_ids` is rejected.
+/// - When `model_profiles` configures explicit models for `agent_id`, only
+///   those models are allowed; an omitted `model_id` resolves to the lowest-cost
+///   configured model for that Agent instead of falling back to an unconfigured
+///   catalog default.
+/// - When `agent_id` is neither disabled nor explicitly configured in
+///   `model_profiles`, `model_id` is passed through unchanged.
+pub(crate) fn ensure_concrete_route_allowed_in_preferences(
+    preferences: &AgentSelectionPreferences,
+    agent_id: &str,
+    model_id: Option<String>,
+) -> Result<Option<String>> {
+    if preferences
+        .disabled_agent_ids
+        .iter()
+        .any(|disabled| disabled.trim().eq_ignore_ascii_case(agent_id))
+    {
+        anyhow::bail!(RouteUnavailable(format!(
+            "agentRouteDisabled: Agent「{agent_id}」已在模型配置中停用，无法发起或继续会话"
+        )));
+    }
+    let configured_for_agent = preferences
+        .model_profiles
+        .iter()
+        .any(|profile| profile.agent_id == agent_id);
+    if !configured_for_agent {
+        return Ok(model_id);
+    }
+    let mut configured_profiles: Vec<&AgentModelProfile> = preferences
+        .model_profiles
+        .iter()
+        .filter(|profile| profile.agent_id == agent_id)
+        .collect();
+    if let Some(requested) = model_id {
+        if configured_profiles
+            .iter()
+            .any(|profile| profile.model_id.as_deref() == Some(requested.as_str()))
+        {
+            return Ok(Some(requested));
+        }
+        anyhow::bail!(RouteUnavailable(format!(
+            "agentRouteDisabled: 模型「{agent_id}/{requested}」不在当前允许的模型配置中，无法发起或继续会话"
+        )));
+    }
+    if configured_profiles
+        .iter()
+        .any(|profile| profile.model_id.is_none())
+    {
+        return Ok(None);
+    }
+    configured_profiles.sort_by(|left, right| {
+        cost_rank(left.cost.unwrap_or_default())
+            .cmp(&cost_rank(right.cost.unwrap_or_default()))
+            .then_with(|| left.model_id.cmp(&right.model_id))
+    });
+    if let Some(model) = configured_profiles
+        .into_iter()
+        .find_map(|profile| profile.model_id.clone())
+    {
+        return Ok(Some(model));
+    }
+    anyhow::bail!(RouteUnavailable(format!(
+        "agentRouteDisabled: Agent「{agent_id}」没有配置可用的模型"
+    )))
+}
+
+pub(crate) fn ensure_concrete_route_supports_media_in_preferences(
+    preferences: &AgentSelectionPreferences,
+    agent_id: &str,
+    model_id: Option<&str>,
+    incoming_media_tags: &[String],
+) -> Result<()> {
+    let required = normalize_tags(incoming_media_tags.iter().cloned());
+    if required.is_empty() {
+        return Ok(());
+    }
+    let Some(profile) = preferences.model_profiles.iter().find(|profile| {
+        profile.agent_id == agent_id && profile.model_id.as_deref() == model_id
+    }) else {
+        return Ok(());
+    };
+    if profile.tags.is_empty() {
+        return Ok(());
+    }
+    let missing: Vec<String> = required
+        .into_iter()
+        .filter(|need| !profile.tags.iter().any(|offered| tags_equal(offered, need)))
+        .collect();
+    if !missing.is_empty() {
+        let model_label = match model_id {
+            Some(model) => format!("{agent_id}/{model}"),
+            None => agent_id.to_string(),
+        };
+        let missing_label = missing.join(" + ");
+        anyhow::bail!(RouteUnavailable(format!(
+            "agentMediaUnsupported: 当前会话使用的模型「{model_label}」不支持「{missing_label}」，请切换支持图片/视频理解的模型后再发送"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) async fn ensure_concrete_route_allowed(
+    state: &Shared,
+    agent_id: &str,
+    model_id: Option<String>,
+) -> Result<Option<String>> {
+    let preferences = state
+        .config
+        .read()
+        .await
+        .agent_preferences
+        .clone()
+        .unwrap_or_default();
+    ensure_concrete_route_allowed_in_preferences(&preferences, agent_id, model_id)
+}
+
 fn validate_exclusive_tags(tags: &[String], preferences: &AgentSelectionPreferences) -> Result<()> {
     let mut claimed = BTreeSet::new();
     for tag in normalize_tags(tags.iter().cloned()) {
-        let key = tag_key(&tag);
-        let group = if [tag_key(TAG_MAX), tag_key(TAG_PRO), tag_key(TAG_FLASH)].contains(&key) {
+        let group = if INTELLIGENCE_TAGS.iter().any(|tier| tags_equal(tier, &tag)) {
             Some("builtin-intelligence")
         } else {
             preferences.tag_groups.iter().find_map(|group| {
@@ -406,7 +544,38 @@ pub(crate) async fn route_session(
     // `session.route` opts the conversation into this router; media then adds
     // mandatory tags only inside that routed conversation.
     if selected_tags.is_none() && !routing_enabled {
-        return state.sessions.summary(session_id).await;
+        let summary = state.sessions.summary(session_id).await?;
+        if summary.managed.is_none() {
+            let resolved_model =
+                ensure_concrete_route_allowed(state, &summary.agent_id, summary.model_id.clone())
+                    .await?;
+            if !incoming_media_tags.is_empty() {
+                let preferences = state
+                    .config
+                    .read()
+                    .await
+                    .agent_preferences
+                    .clone()
+                    .unwrap_or_default();
+                ensure_concrete_route_supports_media_in_preferences(
+                    &preferences,
+                    &summary.agent_id,
+                    resolved_model.as_deref(),
+                    &incoming_media_tags,
+                )?;
+            }
+            if summary.model_id != resolved_model {
+                if let Some(model_id) = resolved_model.as_deref() {
+                    let providers = state.providers().await;
+                    state
+                        .sessions
+                        .set_model(session_id, model_id, &providers)
+                        .await?;
+                    return state.sessions.summary(session_id).await;
+                }
+            }
+        }
+        return Ok(summary);
     }
     let routing_tags = normalize_tags(selected_tags.unwrap_or(stored_tags));
     let media_tags = normalize_tags(stored_media.into_iter().chain(incoming_media_tags));
@@ -872,7 +1041,6 @@ mod tests {
     fn portable_history_adds_image_and_video_requirements() {
         let items = vec![TimelineItem::UserMessage {
             origin: None,
-            system: false,
             id: "u1".into(),
             text: "看看这些".into(),
             attachments: vec![
@@ -919,5 +1087,134 @@ mod tests {
             finished_at_ms: None,
         }];
         assert_eq!(media_tags_for_timeline(&items), vec![TAG_IMAGE.to_string()]);
+    }
+
+    #[test]
+    fn disabled_agents_and_removed_models_are_excluded_from_routes_and_concrete_selection() {
+        let mut claude = agent("claude", "opus", None);
+        claude.catalog.models.push(ModelInfo {
+            id: "sonnet".into(),
+            label: "sonnet".into(),
+            context_window: None,
+            reasoning: true,
+            efforts: vec!["medium".into()],
+            input_modalities: None,
+            supports_fast: false,
+        });
+        let mut codebuddy = agent("codebuddy", "claude-sonnet-5.5", None);
+        codebuddy.catalog.default_model = Some("claude-sonnet-5.5".into());
+        codebuddy.catalog.models.push(ModelInfo {
+            id: "hy4-preview-ioa".into(),
+            label: "hy4-preview-ioa".into(),
+            context_window: None,
+            reasoning: false,
+            efforts: Vec::new(),
+            input_modalities: None,
+            supports_fast: false,
+        });
+        codebuddy.catalog.models.push(ModelInfo {
+            id: "gpt-6-luna".into(),
+            label: "gpt-6-luna".into(),
+            context_window: None,
+            reasoning: false,
+            efforts: Vec::new(),
+            input_modalities: Some(vec!["image".into()]),
+            supports_fast: false,
+        });
+        let registry = Registry::of(Vec::new());
+        let preferences = AgentSelectionPreferences {
+            disabled_agent_ids: vec!["claude".into()],
+            model_profiles: vec![
+                AgentModelProfile {
+                    agent_id: "codebuddy".into(),
+                    model_id: Some("hy4-preview-ioa".into()),
+                    display_name: None,
+                    tags: vec![TAG_PRO.into()],
+                    cost: Some(AgentCostLevel::VeryLow),
+                },
+                AgentModelProfile {
+                    agent_id: "codebuddy".into(),
+                    model_id: Some("gpt-6-luna".into()),
+                    display_name: None,
+                    tags: vec![TAG_FLASH.into(), TAG_IMAGE.into()],
+                    cost: Some(AgentCostLevel::Low),
+                },
+            ],
+            ..Default::default()
+        };
+
+        assert!(
+            route_infos(&preferences, &claude, &registry).is_empty(),
+            "disabled agent must not fall back to default first three models"
+        );
+        let codebuddy_routes = route_infos(&preferences, &codebuddy, &registry);
+        assert_eq!(
+            codebuddy_routes
+                .iter()
+                .filter_map(|route| route.model_id.clone())
+                .collect::<Vec<_>>(),
+            vec!["hy4-preview-ioa".to_string(), "gpt-6-luna".to_string()]
+        );
+
+        assert!(
+            ensure_concrete_route_allowed_in_preferences(&preferences, "claude", Some("opus".into()))
+                .is_err()
+        );
+        assert!(ensure_concrete_route_allowed_in_preferences(
+            &preferences,
+            "codebuddy",
+            Some("claude-sonnet-5.5".into())
+        )
+        .is_err());
+        assert_eq!(
+            ensure_concrete_route_allowed_in_preferences(
+                &preferences,
+                "codebuddy",
+                Some("hy4-preview-ioa".into())
+            )
+            .unwrap(),
+            Some("hy4-preview-ioa".into())
+        );
+        assert_eq!(
+            ensure_concrete_route_allowed_in_preferences(&preferences, "codebuddy", None).unwrap(),
+            Some("hy4-preview-ioa".into()),
+            "omitted model resolves to lowest-cost configured model instead of deleted catalog default"
+        );
+        let err = ensure_concrete_route_supports_media_in_preferences(
+            &preferences,
+            "codebuddy",
+            Some("hy4-preview-ioa"),
+            &[TAG_IMAGE.into()],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("agentMediaUnsupported"));
+        assert!(err.contains("图片理解"));
+        assert!(ensure_concrete_route_supports_media_in_preferences(
+            &preferences,
+            "codebuddy",
+            Some("gpt-6-luna"),
+            &[TAG_IMAGE.into()],
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn ultra_and_mini_tiers_normalize_and_share_exclusive_intelligence_group() {
+        assert_eq!(
+            BUILTIN_TAGS,
+            ["Ultra", "Max", "Pro", "Flash", "Mini", "视频理解", "图片理解"]
+        );
+        assert_eq!(
+            normalize_tags(vec!["ultra".into(), "mini".into()]),
+            vec!["Ultra".to_string(), "Mini".to_string()]
+        );
+        let preferences = AgentSelectionPreferences::default();
+        assert!(validate_exclusive_tags(&["Ultra".into()], &preferences).is_ok());
+        assert!(validate_exclusive_tags(&["Mini".into()], &preferences).is_ok());
+        let err = validate_exclusive_tags(&["Ultra".into(), "Mini".into()], &preferences)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("agentTagInvalid"));
     }
 }

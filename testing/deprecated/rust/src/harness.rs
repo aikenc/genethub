@@ -381,7 +381,6 @@ impl Journey {
                 artifact_preview_base_url: None,
                 continues_round: continues_round.map(str::to_string),
                 origin: None,
-                system: false,
             })
             .await?;
         Ok(())

@@ -1,0 +1,39 @@
+{
+  "schema": "agent-space.v1",
+  "name": "leader",
+  "description": "研发组长（里程碑规划与版本可达性评估、并发派单、预检合入、QA 验收与版本发布）",
+  "tags": [],
+  "agents": [
+    "codex",
+    "claude-code",
+    "codebuddy",
+    "cursor"
+  ],
+  "skills": [
+    "expert-core",
+    "expert-work"
+  ],
+  "skillProviders": [
+    {
+      "type": "folder",
+      "path": "../../skills"
+    }
+  ],
+  "identity": [
+    "../../soul.md",
+    "../../memory.md",
+    "style.md",
+    "index.md"
+  ],
+  "folders": [
+    {
+      "path": "."
+    },
+    {
+      "path": "../../datas"
+    },
+    {
+      "path": "../../temp"
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "schema": "agent-space.v1",
+  "name": "qa",
+  "description": "QA 验收测试专家（无头浏览器真实按键巡检、截图取证、数值平衡断言）",
+  "tags": [],
+  "agents": [
+    "codex",
+    "claude-code",
+    "codebuddy",
+    "cursor"
+  ],
+  "skills": [
+    "expert-core",
+    "expert-work"
+  ],
+  "skillProviders": [
+    {
+      "type": "folder",
+      "path": "../../skills"
+    }
+  ],
+  "identity": [
+    "../../soul.md",
+    "../../memory.md",
+    "style.md",
+    "index.md"
+  ],
+  "folders": [
+    {
+      "path": "."
+    },
+    {
+      "path": "../../datas"
+    },
+    {
+      "path": "../../temp"
+    }
+  ]
+}

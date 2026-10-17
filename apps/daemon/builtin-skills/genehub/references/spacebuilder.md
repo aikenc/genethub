@@ -16,6 +16,7 @@
 |---|---|
 | `schema` `name` `agents` `skills` `tags` `skillProviders` | 必填。`name` 小写 kebab-case |
 | `agentCwd` | 可选，相对 Space 根的目录。规则（`AGENTS.md` 等）与 Skill 副本写到这里而不是根，daemon 也让这个 Space 的新会话从这里开始。不得绝对、不得含 `..`、不得是 `.`、`.spacebuilder`、`.genethub` |
+| `identity` | 可选，相对 Space 根的文件（如 `soul.md`）。内容被**整份复制**编译进各声明 Agent 自己默认读取的指令文件：`claude-code` → `CLAUDE.md`，其余 → `AGENTS.md`（都在 `agentCwd` 下，且排在最前）。含 Codex 时合成后的 `AGENTS.md` 超过 32 KiB 报 SB019。改了源文件要重新 `build` |
 | `folders` | 可选，`[{"path": "."}]`。有它就不再需要 `<name>.code-workspace`；含 `${VAR}`、绝对路径或不存在的项被跳过，全跳过时退回 `.` |
 | `children.scanDepth` | 往下找子 Space 的层数 |
 

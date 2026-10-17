@@ -12,7 +12,6 @@ import { useWorkbench } from "../session/store";
 import { SessionProcessesDialog } from "../processes/SessionProcessesDialog";
 import { relativeTime } from "../ui/relativeTime";
 import { useAgentActivity } from "../workspace/useAgentActivity";
-import { inAgentGroup, useAgentGroups } from "../workspace/agentGroups";
 import { AgentDetailsDialog, AgentDetailsEnvironment } from "../workspace/AgentDetails";
 import { AgentAvatar } from "../workspace/AgentAvatar";
 import { SessionStatusIcon } from "./SessionStatusIcon";
@@ -299,6 +298,7 @@ export function RecentSessions({
   activeSessionId,
   density = "auto",
   pick = false,
+  groupByTeam = false,
   listLabel = "最近会话",
   ...actions
 }: {
@@ -308,34 +308,319 @@ export function RecentSessions({
   activeSessionId: string | null;
   /** Same rows as the sidebar, used only to choose a conversation. */
   pick?: boolean;
+  /** Group conversations by project & 1+N project team with three-tier team organization. */
+  groupByTeam?: boolean;
   listLabel?: string;
 } & RowActions) {
-  const machine = useWorkbench((s) => s.client?.identity?.machineId ?? "");
-  const { groups } = useAgentGroups(machine);
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
+  const [expandedHistory, setExpandedHistory] = useState<Record<string, boolean>>({});
+  const deviceHandle = useWorkbench((s) => s.client?.identity?.machineId ?? "local");
+  const openPreviewFloat = useWorkbench((s) => s.openPreviewFloat);
+
+  const sortedSessions = [...sessions].sort(
+    (left, right) =>
+      (right.messagePreview?.atMs ?? right.updatedAtMs) -
+      (left.messagePreview?.atMs ?? left.updatedAtMs),
+  );
+
+  if (!groupByTeam || pick) {
+    return (
+      <ul
+        data-density={density}
+        className={`entity-list conversation-list w-full min-w-0 max-w-full space-y-1 ${pick ? "overflow-hidden" : ""}`}
+        role={pick ? "listbox" : undefined}
+        aria-label={listLabel}
+      >
+        {sortedSessions.map((session) => {
+          const project = workspaces.find(({ id }) => id === session.workspaceId);
+          const parentProject = project?.agentSpace?.parentWorkspaceId
+            ? workspaces.find(({ id }) => id === project.agentSpace?.parentWorkspaceId)
+            : undefined;
+          return (
+            <SessionRow
+              key={session.id}
+              session={session}
+              pick={pick}
+              active={session.id === activeSessionId}
+              project={project}
+              parentProject={parentProject}
+              {...actions}
+            />
+          );
+        })}
+      </ul>
+    );
+  }
+
+  const byId = new Map(workspaces.map((w) => [w.id, w]));
+  const childrenByRoot = new Map<string, WorkspaceInfo[]>();
+  for (const w of workspaces) {
+    const pid = w.agentSpace?.parentWorkspaceId;
+    if (pid && byId.has(pid)) {
+      childrenByRoot.set(pid, [...(childrenByRoot.get(pid) ?? []), w]);
+    }
+  }
+  const isProjectTeamRoot = (rootId: string): boolean => {
+    const kids = childrenByRoot.get(rootId) ?? [];
+    return kids.some(
+      (k) =>
+        k.name === "leader" ||
+        k.name === "team-reflect" ||
+        k.name === "qa" ||
+        k.name.endsWith("-lead"),
+    );
+  };
+
+  const groupsMap = new Map<string, ListedSession[]>();
+  for (const session of sortedSessions) {
+    const ws = byId.get(session.workspaceId);
+    const rootId = ws?.agentSpace?.parentWorkspaceId && byId.has(ws.agentSpace.parentWorkspaceId)
+      ? ws.agentSpace.parentWorkspaceId
+      : session.workspaceId;
+    groupsMap.set(rootId, [...(groupsMap.get(rootId) ?? []), session]);
+  }
+
+  const rolePriority = (roleName: string): number => {
+    if (roleName === "leader") return 1;
+    if (roleName.endsWith("-lead")) return 2;
+    if (roleName === "qa") return 3;
+    if (roleName === "research") return 4;
+    return 5;
+  };
+
   return (
     <ul
       data-density={density}
-      className={`entity-list conversation-list w-full min-w-0 max-w-full space-y-1 ${pick ? "overflow-hidden" : ""}`}
-      role={pick ? "listbox" : undefined}
+      className="entity-list conversation-list w-full min-w-0 max-w-full space-y-2"
       aria-label={listLabel}
     >
-      {[...sessions]
-        .sort(
-          (left, right) =>
-            (right.messagePreview?.atMs ?? right.updatedAtMs) -
-            (left.messagePreview?.atMs ?? left.updatedAtMs),
-        )
-        .map((session) => (
-          <SessionRow
-            key={session.id}
-            session={session}
-            pick={pick}
-            groupNames={groups.filter((g) => inAgentGroup(session, g)).map((g) => g.name)}
-            active={session.id === activeSessionId}
-            project={workspaces.find(({ id }) => id === session.workspaceId)}
-            {...actions}
-          />
-        ))}
+      {[...groupsMap.entries()].map(([rootId, groupSessions]) => {
+        const rootWs = byId.get(rootId);
+        const isTeam = isProjectTeamRoot(rootId);
+        const collapsed = Boolean(collapsedGroups[rootId]);
+        const runningCount = groupSessions.filter(
+          (s) => s.status === "running" || s.status === "waiting",
+        ).length;
+        const rootHandle = rootWs?.folders?.[0]?.rootHandle;
+
+        if (!isTeam) {
+          return (
+            <li key={rootId} className="project-session-group space-y-1">
+              {rootWs && groupsMap.size > 1 && (
+                <div className="flex items-center justify-between px-2 py-1 text-xs text-muted">
+                  <button
+                    type="button"
+                    aria-label={`${collapsed ? "展开" : "折叠"}项目分组 ${rootWs.name}`}
+                    aria-expanded={!collapsed}
+                    onClick={() => setCollapsedGroups((prev) => ({ ...prev, [rootId]: !prev[rootId] }))}
+                    className="flex min-w-0 flex-1 items-center gap-1.5 text-left font-medium text-muted hover:text-fg"
+                  >
+                    <span aria-hidden className="text-[10px]">{collapsed ? "▸" : "▾"}</span>
+                    <AgentAvatar id={rootWs.id} name={rootWs.name} size="small" />
+                    <span className="truncate">{rootWs.name}</span>
+                    <span className="shrink-0 text-[11px] text-faint">({groupSessions.length})</span>
+                  </button>
+                </div>
+              )}
+              {!collapsed && (
+                <ul className="space-y-1">
+                  {groupSessions.map((session) => {
+                    const project = byId.get(session.workspaceId);
+                    const parentProject = project?.agentSpace?.parentWorkspaceId
+                      ? byId.get(project.agentSpace.parentWorkspaceId)
+                      : undefined;
+                    return (
+                      <SessionRow
+                        key={session.id}
+                        session={session}
+                        active={session.id === activeSessionId}
+                        project={project}
+                        parentProject={parentProject}
+                        {...actions}
+                      />
+                    );
+                  })}
+                </ul>
+              )}
+            </li>
+          );
+        }
+
+        // 1+N Project Team three-tier organization:
+        // Tier 1: Root (Front / Patrol) primary sessions
+        // Tier 2: Core Member Spaces (leader, *-lead, qa, research) -> latest session per member space
+        // Tier 3: Background & historical sub-sessions (team-reflect, reflect, work, or older member sessions)
+        const frontSessions: ListedSession[] = [];
+        const latestByMember = new Map<string, ListedSession>();
+        const historyAndReflect: ListedSession[] = [];
+
+        for (const session of groupSessions) {
+          if (session.workspaceId === rootId) {
+            frontSessions.push(session);
+            continue;
+          }
+          const memberWs = byId.get(session.workspaceId);
+          const roleName = memberWs?.name ?? "";
+          if (roleName === "team-reflect" || roleName === "reflect" || roleName === "work") {
+            historyAndReflect.push(session);
+            continue;
+          }
+          if (!latestByMember.has(session.workspaceId)) {
+            latestByMember.set(session.workspaceId, session);
+          } else {
+            historyAndReflect.push(session);
+          }
+        }
+
+        const memberSessions = [...latestByMember.values()].sort((a, b) => {
+          const wa = byId.get(a.workspaceId)?.name ?? "";
+          const wbName = byId.get(b.workspaceId)?.name ?? "";
+          const diff = rolePriority(wa) - rolePriority(wbName);
+          return diff !== 0 ? diff : wa.localeCompare(wbName);
+        });
+
+        const showHistory = Boolean(expandedHistory[rootId]);
+
+        return (
+          <li
+            key={rootId}
+            aria-label={`项目团队分组 ${rootWs?.name ?? rootId}`}
+            className="team-session-group rounded-xl border border-line bg-surface/60 p-1.5"
+          >
+            <div className="space-y-1 px-1.5 py-1">
+              <button
+                type="button"
+                aria-label={`${collapsed ? "展开" : "折叠"}团队分组 ${rootWs?.name ?? rootId}`}
+                aria-expanded={!collapsed}
+                onClick={() => setCollapsedGroups((prev) => ({ ...prev, [rootId]: !prev[rootId] }))}
+                className="flex w-full min-w-0 items-center gap-1.5 text-left text-xs font-semibold text-fg hover:text-accent"
+              >
+                <span aria-hidden className="text-[10px] text-muted">{collapsed ? "▸" : "▾"}</span>
+                <AgentAvatar id={rootId} name={rootWs?.name ?? "团队"} size="small" />
+                <span className="min-w-0 flex-1 truncate" title={rootWs?.name ?? "项目团队"}>
+                  {rootWs?.name ?? "项目团队"}
+                </span>
+                <span className="shrink-0 rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-medium text-accent">
+                  项目团队
+                </span>
+                {runningCount > 0 && (
+                  <span className="shrink-0 rounded bg-ok/15 px-1.5 py-0.5 text-[10px] font-medium text-ok">
+                    {runningCount} 运行中
+                  </span>
+                )}
+              </button>
+              {rootWs && rootHandle && (
+                <div className="flex items-center gap-1.5 pl-4">
+                  <button
+                    type="button"
+                    aria-label={`打开 ${rootWs.name} 团队看板`}
+                    title="打开常驻实时团队作战看板 (datas/board/index.html)"
+                    className="rounded border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-[10px] font-medium text-accent hover:bg-accent/20"
+                    onClick={() =>
+                      openPreviewFloat({
+                        deviceHandle,
+                        workspaceHandle: rootWs.id,
+                        path: `${rootHandle}/datas/board/index.html`,
+                        sessionId: activeSessionId,
+                      })
+                    }
+                  >
+                    📊 看板
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={`打开 ${rootWs.name} 最新试玩`}
+                    title="打开团队最新可玩版本 (datas/releases/index.html)"
+                    className="rounded border border-ok/30 bg-ok/10 px-1.5 py-0.5 text-[10px] font-medium text-ok hover:bg-ok/20"
+                    onClick={() =>
+                      openPreviewFloat({
+                        deviceHandle,
+                        workspaceHandle: rootWs.id,
+                        path: `${rootHandle}/datas/releases/index.html`,
+                        sessionId: activeSessionId,
+                      })
+                    }
+                  >
+                    🎮 试玩
+                  </button>
+                </div>
+              )}
+            </div>
+            {!collapsed && (
+              <div className="mt-1 space-y-1">
+                {frontSessions.length > 0 && (
+                  <div className="space-y-0.5">
+                    <div className="px-2 pt-0.5 text-[10px] font-medium text-muted">📌 主入口（巡查）</div>
+                    <ul className="space-y-1">
+                      {frontSessions.map((session) => (
+                        <SessionRow
+                          key={session.id}
+                          session={session}
+                          active={session.id === activeSessionId}
+                          project={rootWs}
+                          {...actions}
+                        />
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {memberSessions.length > 0 && (
+                  <div className="space-y-0.5">
+                    <div className="px-2 pt-1 text-[10px] font-medium text-muted">
+                      🧭 组长与团队成员 ({memberSessions.length})
+                    </div>
+                    <ul className="space-y-1 border-l-2 border-line pl-1.5 ml-2">
+                      {memberSessions.map((session) => {
+                        const project = byId.get(session.workspaceId);
+                        return (
+                          <SessionRow
+                            key={session.id}
+                            session={session}
+                            active={session.id === activeSessionId}
+                            project={project}
+                            parentProject={rootWs}
+                            {...actions}
+                          />
+                        );
+                      })}
+                    </ul>
+                  </div>
+                )}
+                {historyAndReflect.length > 0 && (
+                  <div className="pt-1">
+                    <button
+                      type="button"
+                      aria-expanded={showHistory}
+                      onClick={() => setExpandedHistory((prev) => ({ ...prev, [rootId]: !prev[rootId] }))}
+                      className="flex w-full items-center gap-1 rounded px-2 py-1 text-left text-[11px] text-muted hover:bg-raised hover:text-fg"
+                    >
+                      <span aria-hidden>{showHistory ? "▾" : "▸"}</span>
+                      <span>后台自省与历史子任务 ({historyAndReflect.length})</span>
+                    </button>
+                    {showHistory && (
+                      <ul className="mt-1 space-y-1 border-l border-line pl-1.5 ml-2">
+                        {historyAndReflect.map((session) => {
+                          const project = byId.get(session.workspaceId);
+                          return (
+                            <SessionRow
+                              key={session.id}
+                              session={session}
+                              active={session.id === activeSessionId}
+                              project={project}
+                              parentProject={rootWs}
+                              {...actions}
+                            />
+                          );
+                        })}
+                      </ul>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </li>
+        );
+      })}
     </ul>
   );
 }
@@ -344,7 +629,7 @@ function SessionRow({
   session,
   active,
   project,
-  groupNames,
+  parentProject,
   pick = false,
   onPickSession,
   onRename,
@@ -354,7 +639,7 @@ function SessionRow({
   session: ListedSession;
   active: boolean;
   project?: WorkspaceInfo;
-  groupNames: string[];
+  parentProject?: WorkspaceInfo;
   pick?: boolean;
 } & RowActions) {
   const [menu, setMenu] = useState<"shut" | "open" | "confirming">("shut");
@@ -371,6 +656,7 @@ function SessionRow({
   );
   const unsupported = session.unsupported;
   const managedReadOnly = session.managed?.userInteraction === "readOnly";
+  const displayTitle = title(session, Boolean(parentProject));
 
   if (editing) {
     return (
@@ -390,7 +676,7 @@ function SessionRow({
   return (
     <li className={`conversation-row group relative w-full min-w-0 max-w-full ${pick ? "overflow-hidden" : ""}`}>
       <div className="flex w-full min-w-0 items-center">
-        {selection && <input type="checkbox" aria-label={`选择 ${title(session)}`} checked={selection.ids.has(session.id)} disabled={selection.disabled} onChange={() => selection.toggle(session.id)} className="ml-2 h-5 w-5 shrink-0 accent-[rgb(var(--accent))]" />}
+        {selection && <input type="checkbox" aria-label={`选择 ${displayTitle}`} checked={selection.ids.has(session.id)} disabled={selection.disabled} onChange={() => selection.toggle(session.id)} className="ml-2 h-5 w-5 shrink-0 accent-[rgb(var(--accent))]" />}
         <div className="relative min-w-0 flex-1">
           <button
             type="button"
@@ -411,11 +697,11 @@ function SessionRow({
             <span className="entity-copy block min-w-0">
               <span className="entity-title flex min-w-0 items-center gap-1.5 text-sm font-medium leading-5 text-fg">
                 {session.unread && <span role="img" aria-label="有未读新回复" title="有未读新回复" className="block h-2 w-2 shrink-0 rounded-full bg-accent" />}
-                <span className="truncate">{title(session)}</span>
+                <span className="truncate" title={displayTitle}>{displayTitle}</span>
               </span>
-              <span className={`conversation-facts entity-secondary flex min-w-0 items-center gap-1 text-xs font-normal leading-4 text-muted ${!selection && !pick ? "conversation-row-meta" : ""}`} title={`${messageDate.toLocaleString()} · ${project?.name ?? "项目"}${groupNames.length ? " · " + groupNames.join("、") : ""}`}>
+              <span className={`conversation-facts entity-secondary flex min-w-0 items-center gap-1 text-xs font-normal leading-4 text-muted ${!selection && !pick ? "conversation-row-meta" : ""}`} title={`${messageDate.toLocaleString()} · ${parentProject && project ? `${parentProject.name} / ${project.name}` : (project?.name ?? "项目")}`}>
                 <AgentAvatar id={session.workspaceId} name={project?.name ?? "项目"} size="small" />
-                <span className="min-w-0 truncate"><time dateTime={messageDate.toISOString()}>{relativeTime(messageDate.getTime())}</time> · {project?.name ?? "项目"}{groupNames.length ? ` · ${groupNames.join("、")}` : ""}{session.draftCount ? ` · ${session.draftCount} 个草稿` : ""}{managedReadOnly ? " · 只读" : ""}{session.archived ? " · 已归档" : ""}{unsupported ? " · 需升级" : ""}</span>
+                <span className="min-w-0 truncate"><time dateTime={messageDate.toISOString()}>{relativeTime(messageDate.getTime())}</time> · {parentProject && project ? `${parentProject.name} / ${project.name}` : (project?.name ?? "项目")}{session.draftCount ? ` · ${session.draftCount} 个草稿` : ""}{managedReadOnly ? " · 只读" : ""}{session.archived ? " · 已归档" : ""}{unsupported ? " · 需升级" : ""}</span>
               </span>
               <span className={`conversation-marks entity-secondary flex min-h-3.5 min-w-0 items-center gap-1 text-[10px] font-normal leading-[14px] ${!selection && !pick ? "conversation-row-meta" : ""}`}>
                 {(facts.kind || stale) && <SessionStatusIcon session={session} sessions={summaries} stale={stale} />}
@@ -426,7 +712,7 @@ function SessionRow({
 
           {!selection && !pick && <button
             type="button"
-            aria-label={`${title(session)} 的更多操作`}
+            aria-label={`${displayTitle} 的更多操作`}
             aria-expanded={menu !== "shut"}
             // Always there on a touch screen: hover is the one interaction a phone
             // cannot perform, and hiding the only way to delete a conversation
@@ -740,8 +1026,9 @@ function LabelEditor({
   );
 }
 
-/** The daemon names a session from its first message; until then this stands in. */
-const title = (session: SessionSummary) => session.title || "新会话";
+/** The daemon names a session from its first message; long-lived team role sessions update `description` as milestones advance. */
+const title = (session: SessionSummary, preferDescription = false) =>
+  (preferDescription && session.description?.trim()) || session.title || "新会话";
 
 /**
  * Why a conversation sitting in this workspace cannot be opened by this build.

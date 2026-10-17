@@ -329,7 +329,7 @@ describe("what the user sees in a session", () => {
         id: "x1",
         text: "用途: result\n发送方: s_7\n\n报告已写完",
         attachments: [],
-        system: true,
+        origin: { machineId: "m1", sessionId: "system" },
       },
     });
 

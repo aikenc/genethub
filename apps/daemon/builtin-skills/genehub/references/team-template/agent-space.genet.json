@@ -1,0 +1,40 @@
+{
+  "schema": "agent-space.v1",
+  "name": "team",
+  "description": "一支 1+N 项目团队：主入口巡查（前台接待台）直接与用户沟通，研发组长统筹里程碑与并发派单，专项管线组员在独立工位开发，QA 实操验收，研究专家推演数值，团队自省持续进化。",
+  "tags": [
+    "expert",
+    "team"
+  ],
+  "agents": [
+    "codex",
+    "claude-code",
+    "codebuddy",
+    "cursor"
+  ],
+  "skills": [
+    "expert-core",
+    "expert-front"
+  ],
+  "skillProviders": [
+    {
+      "type": "folder",
+      "path": "skills"
+    }
+  ],
+  "agentCwd": "front",
+  "identity": [
+    "soul.md",
+    "memory.md",
+    "front/style.md",
+    "front/index.md"
+  ],
+  "folders": [
+    {
+      "path": "."
+    }
+  ],
+  "children": {
+    "scanDepth": 2
+  }
+}

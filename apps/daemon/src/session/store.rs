@@ -431,6 +431,10 @@ impl SessionMeta {
         self.format <= SESSION_FORMAT
     }
 
+    pub fn derived_source_kind(&self) -> Option<String> {
+        Some(derived_source_kind_for(&self.labels, self.managed.is_some()).to_string())
+    }
+
     pub fn summary(&self, status: SessionStatus) -> SessionSummary {
         self.summary_with_activity(status, None)
     }
@@ -463,19 +467,6 @@ impl SessionMeta {
                         .collect(),
                     paused: self.inbox.paused,
                     error: self.inbox.error.clone(),
-                    pending: self
-                        .inbox
-                        .entries
-                        .iter()
-                        .filter(|entry| entry.state != "handled")
-                        .map(|entry| genehub_proto::SessionPendingInput {
-                            message_id: entry.message_id.clone(),
-                            source: entry.source.clone(),
-                            state: entry.state.clone(),
-                            received_at_ms: entry.received_at_ms,
-                        })
-                        .collect(),
-                    limit: MAX_PENDING_INPUTS as u32,
                 }
             }),
             work_summary: None,
@@ -515,6 +506,34 @@ impl SessionMeta {
     }
 }
 
+pub fn derived_source_kind_for(labels: &[String], managed: bool) -> &'static str {
+    if labels.iter().any(|l| {
+        l == "自省" || l == "反思" || l.eq_ignore_ascii_case("reflect")
+    }) {
+        "reflect"
+    } else if labels.iter().any(|l| {
+        l == "巡查" || l == "建议" || l.eq_ignore_ascii_case("patrol")
+    }) {
+        "patrol"
+    } else if labels.iter().any(|l| {
+        l == "专家" || l == "研究" || l.eq_ignore_ascii_case("expert")
+    }) {
+        "expert"
+    } else if managed
+        || labels.iter().any(|l| {
+            l == SESSION_STARTED_LABEL
+                || l == "后台"
+                || l == "内部"
+                || l == "组长"
+                || l.eq_ignore_ascii_case("system")
+        })
+    {
+        "system"
+    } else {
+        "human"
+    }
+}
+
 /// Everything `chat.jsonl` holds, already folded.
 #[derive(Debug, Clone, Default)]
 pub struct ChatLog {
@@ -542,6 +561,8 @@ enum TrunkRow {
         blob_count: u32,
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        round_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         monologue: Option<String>,
         /// Compaction reason when the batch is a context-compaction marker.
         /// Rows written before this field existed read as `None`.
@@ -561,6 +582,10 @@ enum TrunkRow {
         item_id: String,
         kind: BlobKind,
         overview: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         blob: Option<BlobRef>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1145,13 +1170,23 @@ impl Store {
     /// thing a user sees after their first message is their own `git status`
     /// full of session files.
     fn establish_home(&self, home: &Path) -> Result<()> {
-        if home.exists() {
-            return Ok(());
+        if !home.exists() {
+            fs::create_dir_all(home).with_context(|| format!("creating {}", home.display()))?;
+            crate::config::restrict_dir_to_owner(home)?;
         }
-        fs::create_dir_all(home).with_context(|| format!("creating {}", home.display()))?;
-        crate::config::restrict_dir_to_owner(home)?;
         let ignore = home.join(".gitignore");
-        fs::write(&ignore, "*\n").with_context(|| format!("writing {}", ignore.display()))
+        if !ignore.exists() {
+            fs::write(&ignore, "*\n").with_context(|| format!("writing {}", ignore.display()))?;
+        }
+        let rgignore = home.join(".rgignore");
+        if !rgignore.exists() {
+            fs::write(
+                &rgignore,
+                "!sessions/**\nsessions/*/blobs/\nsessions/*/state/\nsessions/*/images/\nsessions/*/artifacts/\nsessions/*/preview-review-images/\n",
+            )
+            .with_context(|| format!("writing {}", rgignore.display()))?;
+        }
+        Ok(())
     }
 
     // -- meta ---------------------------------------------------------------
@@ -1257,6 +1292,11 @@ impl Store {
         for (workspaces, sessions) in self.homes.all_sessions_dirs() {
             if let Some((workspace_id, _)) = workspaces.first() {
                 self.reap_tombstoned_sessions(workspace_id, &sessions);
+            }
+            if let Some(home) = sessions.parent() {
+                if home.exists() {
+                    let _ = self.establish_home(home);
+                }
             }
             let Ok(entries) = fs::read_dir(&sessions) else {
                 continue;
@@ -1578,6 +1618,18 @@ impl Store {
         ord: u32,
         trunk: &RoundTrunk,
     ) -> Result<()> {
+        self.write_trunk_for_round(workspace_id, session_id, ord, None, &HashMap::new(), trunk)
+    }
+
+    pub fn write_trunk_for_round(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+        ord: u32,
+        round_id: Option<&str>,
+        blob_search_hints: &HashMap<String, super::rounds::BlobSearchHint>,
+        trunk: &RoundTrunk,
+    ) -> Result<()> {
         let dir = self.round_dir(workspace_id, session_id, ord)?;
         self.prepare_write(workspace_id, session_id, &dir)?;
         let mut body = Vec::new();
@@ -1590,6 +1642,7 @@ impl Store {
                     first_item_id: batch.summary.first_item_id.clone(),
                     blob_count: batch.summary.blob_count,
                     text: batch.summary.text.clone(),
+                    round_id: round_id.map(str::to_string),
                     monologue: batch.monologue.clone(),
                     marker: batch.summary.marker.clone(),
                     llm_rounds: batch.summary.llm_rounds,
@@ -1599,13 +1652,21 @@ impl Store {
                 })?
             )?;
             for blob in &batch.blobs {
+                let hint = blob_search_hints.get(&blob.item_id);
+                let overview = hint
+                    .and_then(|h| h.overview.clone())
+                    .unwrap_or_else(|| blob.overview.clone());
+                let input = hint.and_then(|h| h.input.clone());
+                let output = hint.and_then(|h| h.output.clone());
                 writeln!(
                     body,
                     "{}",
                     serde_json::to_string(&TrunkRow::Blob {
                         item_id: blob.item_id.clone(),
                         kind: blob.kind,
-                        overview: blob.overview.clone(),
+                        overview,
+                        input,
+                        output,
                         blob: blob.blob.clone(),
                         thumb: blob.thumb.clone(),
                         path: blob.path.clone(),
@@ -1619,7 +1680,7 @@ impl Store {
         }
         let path = self.trunk_path(workspace_id, session_id, ord, trunk.summary.index)?;
         crate::config::save_private(&path, &body)?;
-        self.append_trunk_summary(workspace_id, session_id, ord, &trunk.summary)
+        self.append_trunk_summary(workspace_id, session_id, ord, round_id, &trunk.summary)
     }
 
     fn append_trunk_summary(
@@ -1627,6 +1688,7 @@ impl Store {
         workspace_id: &str,
         session_id: &str,
         ord: u32,
+        round_id: Option<&str>,
         summary: &RoundTrunkSummary,
     ) -> Result<()> {
         let path = self.trunk_index_path(workspace_id, session_id, ord)?;
@@ -1635,9 +1697,16 @@ impl Store {
             session_id,
             path.parent().expect("index.jsonl always has a parent"),
         )?;
+        let mut value = serde_json::to_value(summary)?;
+        if let (Some(round_id), Some(obj)) = (round_id, value.as_object_mut()) {
+            obj.insert(
+                "roundId".to_string(),
+                serde_json::Value::String(round_id.to_string()),
+            );
+        }
         let mut file = crate::config::open_append(&path)?;
         crate::config::restrict_to_owner(&path)?;
-        writeln!(file, "{}", serde_json::to_string(summary)?)?;
+        writeln!(file, "{}", serde_json::to_string(&value)?)?;
         file.flush()?;
         Ok(())
     }
@@ -1709,6 +1778,7 @@ impl Store {
                     first_item_id,
                     blob_count,
                     text,
+                    round_id: _,
                     monologue,
                     marker,
                     llm_rounds,
@@ -1734,6 +1804,8 @@ impl Store {
                     item_id,
                     kind,
                     overview,
+                    input: _,
+                    output: _,
                     blob,
                     thumb,
                     path,
@@ -2422,7 +2494,6 @@ mod project_home_tests {
                 "s1",
                 &[TimelineItem::UserMessage {
                     origin: None,
-                    system: false,
                     id: "u1".into(),
                     text: "genet-beta 更新到最新".into(),
                     attachments: vec![],

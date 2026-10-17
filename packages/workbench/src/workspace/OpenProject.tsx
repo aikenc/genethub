@@ -409,13 +409,15 @@ export const OpenProject = forwardRef<
                     >
                       <WorkspaceKindIcon kind="workspace" />
                       <span className="min-w-0 flex-1 truncate">{workspace.name}</span>
-                      <span className="shrink-0 text-[10px] text-faint">Workspace</span>
+                      <span className="shrink-0 text-[10px] text-faint">
+                        {workspace.name === "agent-space.genet.json" ? "AgentSpace" : "Workspace"}
+                      </span>
                     </button>
                   ))}
                   {picker.directories.length === 0 &&
                   (picker.workspaceFiles ?? []).length === 0 ? (
                     <p className="px-3 py-8 text-center text-xs text-faint">
-                      {picker.roots ? "没有可访问的磁盘" : "这里没有子文件夹或 .code-workspace"}
+                      {picker.roots ? "没有可访问的磁盘" : "这里没有子文件夹、agent-space.genet.json 或 .code-workspace"}
                     </p>
                   ) : null}
                 </div>
@@ -541,7 +543,13 @@ function rememberPickerDirectory(endpoint: Endpoint, directory?: string): void {
 }
 
 function isWorkspaceFile(path: string): boolean {
-  return path.toLowerCase().endsWith(".code-workspace");
+  const lower = path.toLowerCase();
+  return (
+    lower.endsWith(".code-workspace") ||
+    lower.endsWith("/agent-space.genet.json") ||
+    lower.endsWith("\\agent-space.genet.json") ||
+    lower === "agent-space.genet.json"
+  );
 }
 
 /** Handles both daemon path families without asking the browser which OS owns them. */

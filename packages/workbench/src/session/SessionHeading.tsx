@@ -8,6 +8,26 @@ import { useWorkbench } from "./store";
 export function SessionHeading({ session, workspace, onOpenExpert, onReportSession }: {
   session: SessionSummary; workspace?: WorkspaceInfo; onOpenExpert(id: string): void; onReportSession?(id: string): void;
 }) {
+  const workspaces = useWorkbench((s) => s.workspaces);
+  const deviceHandle = useWorkbench((s) => s.client?.identity?.machineId ?? "");
+  const openPreviewFloat = useWorkbench((s) => s.openPreviewFloat);
+  const parent = workspace?.agentSpace?.parentWorkspaceId
+    ? workspaces.find((w) => w.id === workspace.agentSpace?.parentWorkspaceId)
+    : undefined;
+  const candidateRoot = parent ?? workspace;
+  const isTeamRoot = Boolean(
+    candidateRoot &&
+      workspaces.some(
+        (w) =>
+          w.agentSpace?.parentWorkspaceId === candidateRoot.id &&
+          (w.name === "leader" ||
+            w.name === "team-reflect" ||
+            w.name === "qa" ||
+            w.name.endsWith("-lead")),
+      ),
+  );
+  const teamRoot = isTeamRoot ? candidateRoot : undefined;
+  const teamRootHandle = teamRoot?.folders?.[0]?.rootHandle;
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState("");
   const [busy, setBusy] = useState(false);
@@ -28,12 +48,37 @@ export function SessionHeading({ session, workspace, onOpenExpert, onReportSessi
       <h1 aria-label={session.title || "未命名会话"} className="gh-session-title truncate font-medium"><button type="button" aria-label="修改会话标题"
         title="点击修改会话标题" className="block min-w-0 max-w-full truncate rounded text-left hover:text-accent focus-visible:outline-accent"
         onClick={() => { setTitle(session.title ?? ""); setError(""); setEditing(true); }}>{session.title || "未命名会话"}</button></h1>
-      {workspace ? <button type="button" aria-label="当前项目" title={`进入项目：${workspace.name}`}
+      {workspace ? <div className="flex min-w-0 max-w-full flex-wrap items-center gap-1.5"><button type="button" aria-label="当前项目" title={`进入项目：${parent ? `${parent.name} / ${workspace.name}` : workspace.name}`}
         className="gh-session-expert flex min-w-0 max-w-full items-center gap-1 rounded text-muted hover:bg-raised hover:text-accent focus-visible:outline-accent"
         onClick={() => onOpenExpert(workspace.id)}>
         <AgentAvatar id={workspace.id} name={workspace.name} size="small" />
-        <span className="truncate">{workspace.name}</span><ChevronRight size={12} className="shrink-0" />
-      </button> : <p className="gh-session-expert text-muted">会话</p>}
+        <span className="truncate">{parent ? `${parent.name} / ${workspace.name}` : workspace.name}</span><ChevronRight size={12} className="shrink-0" />
+      </button>{teamRoot && teamRootHandle && <>
+        <button
+          type="button"
+          aria-label="打开团队看板"
+          title="打开常驻实时团队作战看板 (datas/board/index.html)"
+          className="shrink-0 rounded border border-accent/30 bg-accent/10 px-2 py-0.5 text-[11px] font-medium text-accent hover:bg-accent/20"
+          onClick={() => openPreviewFloat({
+            deviceHandle: deviceHandle || "local",
+            workspaceHandle: teamRoot.id,
+            path: `${teamRootHandle}/datas/board/index.html`,
+            sessionId: session.id,
+          })}
+        >📊 团队看板</button>
+        <button
+          type="button"
+          aria-label="打开最新试玩"
+          title="打开团队最新可玩版本 (datas/releases/index.html)"
+          className="shrink-0 rounded border border-ok/30 bg-ok/10 px-2 py-0.5 text-[11px] font-medium text-ok hover:bg-ok/20"
+          onClick={() => openPreviewFloat({
+            deviceHandle: deviceHandle || "local",
+            workspaceHandle: teamRoot.id,
+            path: `${teamRootHandle}/datas/releases/index.html`,
+            sessionId: session.id,
+          })}
+        >🎮 最新试玩</button>
+      </>}{session.labels?.map((label) => <span key={label} className="shrink-0 rounded bg-accent/10 px-1.5 py-0.5 text-[10px] font-normal text-accent">{label}</span>)}</div> : <p className="gh-session-expert text-muted">会话</p>}
     </div>
     {onReportSession && <div ref={menu} className="relative shrink-0">
       <button ref={menuButton} type="button" aria-label="会话菜单" aria-expanded={menuOpen}

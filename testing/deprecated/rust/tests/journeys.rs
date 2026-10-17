@@ -2130,7 +2130,6 @@ async fn an_empty_prompt_is_refused_before_it_reaches_the_model() {
             artifact_preview_base_url: None,
             continues_round: None,
             origin: None,
-            system: false,
         })
         .await;
     assert!(error.contains("BadRequest"), "got: {error}");

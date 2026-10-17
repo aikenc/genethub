@@ -1041,7 +1041,7 @@ function ForwardedHistoryCard({ text, info }: { text: string; info: ForwardEnvel
   );
 }
 
-/** What a script queued with `session send --queue`. It is not something the person said, so it is a
+/** What a script queued as a system notice. It is not something the person said, so it is a
  * small collapsed strip on the left rather than the person's bubble on the right. */
 function SystemNotice({ text }: { text: string }) {
   const [open, setOpen] = useState(false);
@@ -1071,7 +1071,7 @@ function SystemNotice({ text }: { text: string }) {
 function Item({ item }: { item: TimelineItem }) {
   switch (item.type) {
     case "userMessage": {
-      if (item.system) {
+      if (item.origin?.sessionId === "system" || item.text.startsWith("用途: ")) {
         return (
           <div className="flex flex-col items-start">
             <SystemNotice text={item.text} />

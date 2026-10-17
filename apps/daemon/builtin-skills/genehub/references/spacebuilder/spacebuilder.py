@@ -131,6 +131,7 @@ LOCK_SCHEMA = "spacebuilder-lock.v1"
 SPACE_SCHEMA = "agent-space.v1"
 TREE_LOCK_SCHEMA = "spacebuilder-tree-lock.v1"
 DEFAULT_CHILD_SCAN_DEPTH = 3
+CODEX_INSTRUCTION_LIMIT = 32 * 1024
 MAX_CHILD_SCAN_DEPTH = 32
 AGENTS = ("codex", "cursor", "codebuddy", "claude-code")
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
@@ -207,6 +208,7 @@ DIAGNOSTIC_ACTIONS = {
     "SB016": "For a Skill Builder, run the declared args from the Provider source root and inspect the reported output; for a legacy post command, correct its cwd/runtime, then rebuild.",
     "SB017": "Correct nested Space inputs or the recorded hierarchy state and retry.",
     "SB018": "Review Provider post commands, then remove the fail-closed flag only when their side effects are approved.",
+    "SB019": "Fix the identity file named by manifest.identity: it must exist, be UTF-8 text, and fit the instruction size limit of every declared Agent.",
     "PBW001": "Review the selected Provider and shadowed Skill candidates.",
     "PBW002": "Prefer a standard Skill for new Claude Code workflows.",
     "PBW003": "Review the generated platform security surface before use.",
@@ -533,6 +535,8 @@ class Manifest:
     child_scan_depth: int
     agent_cwd: str = ""
     folders: list[dict[str, Any]] | None = None
+    identity: list[str] = dataclasses.field(default_factory=list)
+    space_builder: str = ""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -709,7 +713,7 @@ def load_manifest(root: Path) -> Manifest:
         fail("SB001", "agent-space.genet.json must contain a JSON object", sources=(path.as_posix(),))
     required = {"schema", "name", "agents", "skills", "tags", "skillProviders"}
     missing = sorted(required - raw.keys())
-    unknown = sorted(raw.keys() - required - {"description", "children", "agentCwd", "folders"})
+    unknown = sorted(raw.keys() - required - {"description", "children", "agentCwd", "folders", "identity", "spaceBuilder"})
     if missing:
         fail("SB001", "Missing manifest fields: " + ", ".join(missing), sources=(path.as_posix(),))
     if unknown:
@@ -845,7 +849,9 @@ def load_manifest(root: Path) -> Manifest:
         )
     agent_cwd = validate_agent_cwd(raw.get("agentCwd"), path)
     folders = validate_manifest_folders(raw.get("folders"), path)
-    return Manifest(path, name, description, agents, skills, tags, providers, scan_depth, agent_cwd, folders)
+    identity = validate_identity(raw.get("identity"), path)
+    space_builder = validate_space_builder(raw.get("spaceBuilder"), path)
+    return Manifest(path, name, description, agents, skills, tags, providers, scan_depth, agent_cwd, folders, identity, space_builder)
 
 
 def valid_space_name(name: Any) -> bool:
@@ -877,6 +883,77 @@ def validate_agent_cwd(value: Any, path: Path) -> str:
     if normalized == "." or normalized.split("/", 1)[0] in {".spacebuilder", ".genethub"}:
         fail("SB001", "manifest.agentCwd must name a directory other than the Space root, .spacebuilder or .genethub", sources=(path.as_posix(),), semantic_key="agentCwd")
     return normalized
+
+
+def enclosing_space_root(space_dir: Path) -> Path:
+    """The highest enclosing Space root if this Space is nested inside a parent Space Tree."""
+    base = space_dir.resolve()
+    current = base
+    for _ in range(MAX_CHILD_SCAN_DEPTH + 1):
+        parent = current.parent
+        if parent == current:
+            break
+        manifest_path = parent / "agent-space.genet.json"
+        if manifest_path.is_file() and not manifest_path.is_symlink():
+            base = parent
+        current = parent
+    return base
+
+
+def validate_identity(value: Any, path: Path) -> list[str]:
+    """The file or list of files whose text is compiled into every declared Agent's own instruction file."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        items = [value]
+    elif isinstance(value, list) and value and all(isinstance(item, str) for item in value):
+        items = list(value)
+    else:
+        fail("SB001", "manifest.identity must be a non-empty relative POSIX file path or array of paths", sources=(path.as_posix(),), semantic_key="identity")
+    space_dir = path.parent.resolve()
+    boundary = enclosing_space_root(space_dir)
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        if (
+            not item.strip()
+            or "\\" in item
+            or Path(item).is_absolute()
+            or any(part in {"", "."} for part in item.split("/"))
+        ):
+            fail("SB001", "manifest.identity must be a relative POSIX file path", sources=(path.as_posix(),), semantic_key="identity")
+        if any(part in {".spacebuilder", ".genethub"} for part in item.split("/")):
+            fail("SB001", "manifest.identity must not point into .spacebuilder or .genethub", sources=(path.as_posix(),), semantic_key="identity")
+        if ".." in item.split("/"):
+            candidate = Path(os.path.normpath(space_dir / item))
+            try:
+                inside_boundary = candidate.is_relative_to(boundary)
+            except AttributeError:
+                inside_boundary = str(candidate) == str(boundary) or str(candidate).startswith(str(boundary) + os.sep)
+            if not inside_boundary or candidate == boundary:
+                fail("SB001", "manifest.identity must stay within the enclosing Space root", sources=(path.as_posix(),), semantic_key="identity")
+        if item in seen:
+            fail("SB001", f"Duplicate manifest.identity entry: {item}", sources=(path.as_posix(),), semantic_key="identity")
+        seen.add(item)
+        result.append(item)
+    return result
+
+
+def validate_space_builder(value: Any, path: Path) -> str:
+    """Optional Space-local SpaceBuilder script path relative to the Space root."""
+    if value is None:
+        return ""
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or "\\" in value
+        or Path(value).is_absolute()
+        or any(part in {"", ".", ".."} for part in value.split("/"))
+    ):
+        fail("SB001", "manifest.spaceBuilder must be a relative POSIX file path with no '..'", sources=(path.as_posix(),), semantic_key="spaceBuilder")
+    if value.split("/", 1)[0] in {".spacebuilder", ".genethub"}:
+        fail("SB001", "manifest.spaceBuilder must not point into .spacebuilder or .genethub", sources=(path.as_posix(),), semantic_key="spaceBuilder")
+    return value
 
 
 def validate_manifest_folders(value: Any, path: Path) -> list[dict[str, Any]] | None:
@@ -1652,6 +1729,7 @@ def resolve_skills(providers: list[Provider], manifest: Manifest, warnings: list
 
 
 def workspace_rule(manifest: Manifest, workspace: Workspace) -> str:
+    declared = workspace.path.name == "agent-space.genet.json"
     lines = [
         "# SpaceBuilder Workspace",
         "",
@@ -1660,15 +1738,22 @@ def workspace_rule(manifest: Manifest, workspace: Workspace) -> str:
         "",
         "## Folders (declared order)",
         "",
+        "This Space is one workspace made of the directories below, all real directories on this machine. "
+        "Read, search and manage across them as the task needs.",
+        "",
     ]
     for folder in workspace.folders:
-        topology = "same directory as Space" if folder.path == "." else "directory-decoupled"
-        lines.append(f"- `{folder.name}`: `{folder.path}` ({topology})")
+        lines.append(f"- `{folder.name}`: `{folder.resolved}` (declared as `{folder.path}`)")
+    source = (
+        "The `folders` of agent-space.genet.json (paths relative to the Space directory) are the source of truth"
+        if declared
+        else "The .code-workspace file is the source of truth"
+    )
     lines.extend(
         [
             "",
             "Folder order does not imply primary/reference, writable/read-only, validation, or commit boundaries.",
-            "The .code-workspace file is the source of truth; this file is a generated projection.",
+            f"{source}; this file is a generated projection of them for this machine.",
             "SpaceBuilder platform targets and generated state are build outputs; do not edit them directly.",
             "Edit `.spacebuilder/agents`, `.spacebuilder/skills`, or the selected Skill's `.space-agents` source, then run `spacebuilder build` and `spacebuilder verify`.",
             "If a write is denied or output drifts, use `spacebuilder explain` to locate the source and continue; this is not a Human blocker.",
@@ -1702,6 +1787,7 @@ class Planner:
     def build(self) -> list[Operation]:
         rule = workspace_rule(self.manifest, self.workspace).encode()
         self.add(Contribution(".spacebuilder/generated/workspace-rule.md", rule, "core:workspace", "workspace-rule"))
+        self.add_identity()
         for agent in self.manifest.agents:
             self.install_common_skills(agent)
             self.add_workspace_projection(agent, rule)
@@ -1720,6 +1806,61 @@ class Planner:
                 self.scan_agent_source(agent, source_root, source_id)
         self.add_timer_hooks()
         return self.finalize()
+
+    def add_identity(self) -> None:
+        """Compile manifest.identity into the instruction file each declared Agent reads on its own.
+
+        Claude Code reads CLAUDE.md and ignores AGENTS.md; Codex, Cursor and CodeBuddy read AGENTS.md. Each gets a full
+        copy (never an import of the other file, which would pull in text meant for a different Agent). The identity is
+        added before any other contribution so it leads the document.
+        """
+        if not self.manifest.identity:
+            return
+        boundary = enclosing_space_root(self.root)
+        parts: list[str] = []
+        for rel in self.manifest.identity:
+            source = self.root / rel
+            try:
+                resolved = source.resolve()
+                inside = resolved.is_relative_to(boundary)
+            except AttributeError:  # Python < 3.9
+                resolved = source.resolve()
+                inside = str(resolved).startswith(str(boundary) + os.sep)
+            if source.is_symlink() or not source.is_file() or not inside:
+                fail(
+                    "SB019",
+                    f"manifest.identity is not a regular file inside the Space: {rel}",
+                    sources=(source.as_posix(),),
+                    semantic_key="identity",
+                )
+            raw_bytes = source.read_bytes()
+            try:
+                text = raw_bytes.decode()
+            except UnicodeDecodeError:
+                fail("SB019", f"manifest.identity must be UTF-8 text: {rel}", sources=(source.as_posix(),), semantic_key="identity")
+            if text.strip():
+                parts.append(text.rstrip("\n"))
+        content = ("\n\n".join(parts) + "\n").encode() if parts else b"\n"
+        if any(agent != "claude-code" for agent in self.manifest.agents):
+            self.add(Contribution("AGENTS.md", content, "core:identity", "project-instructions", "concat"))
+        if "claude-code" in self.manifest.agents:
+            self.add(Contribution("CLAUDE.md", content, "core:identity", "project-instructions", "concat"))
+
+    def check_instruction_limit(self, target: str, content: bytes) -> None:
+        """Codex stops reading project instructions at 32 KiB; refuse to build a file that would be cut in the middle."""
+        if not self.manifest.identity or "codex" not in self.manifest.agents:
+            return
+        if strip_agent_cwd(self.manifest.agent_cwd, target) != "AGENTS.md" and target != "AGENTS.md":
+            return
+        if len(content) > CODEX_INSTRUCTION_LIMIT:
+            joined = ", ".join(self.manifest.identity)
+            fail(
+                "SB019",
+                f"{target} is {len(content)} bytes, over the {CODEX_INSTRUCTION_LIMIT}-byte limit Codex reads; shorten {joined}",
+                sources=tuple((self.root / rel).as_posix() for rel in self.manifest.identity),
+                target=target,
+                semantic_key="identity",
+            )
 
     def add_timer_hooks(self) -> None:
         """A Skill's hooks/<name>.genet.json becomes this Space's .genethub/hooks/<skill>.<name>.genet.json.
@@ -1878,6 +2019,7 @@ class Planner:
                 operation = "copy" if not contributions[0].source.startswith("core:") else "render"
             elif merge == "concat":
                 content = render_instruction_document(target, contributions)
+                self.check_instruction_limit(target, content)
                 operation = "merge-document"
             elif merge == "json":
                 merged: Any = {}
@@ -2745,6 +2887,11 @@ def make_lock(
     }
     if manifest.agent_cwd:
         space_record["agentCwd"] = manifest.agent_cwd
+    if manifest.identity:
+        space_record["identity"] = [
+            {"path": rel, "digest": sha256_file((root / rel).resolve())}
+            for rel in manifest.identity
+        ]
     return {
         "schema": LOCK_SCHEMA,
         "builder": {"version": VERSION, "digest": sha256_file(script)},
@@ -3390,12 +3537,25 @@ def verify_member_state(member: TreeMember) -> tuple[dict[str, Any], str]:
     manifest = load_manifest(member.root)
     workspace = load_workspace(member.root, manifest)
     space = lock.get("space", {})
+    expected_identity = None
+    if manifest.identity:
+        expected_identity = []
+        for rel in manifest.identity:
+            source = member.root / rel
+            if source.is_symlink() or not source.is_file():
+                fail(
+                    "SB017",
+                    f"Space identity input is missing or unsafe: {member.path}/{rel}",
+                    sources=(source.as_posix(), lock_path.as_posix()),
+                )
+            expected_identity.append({"path": rel, "digest": sha256_file(source.resolve())})
     if (
         manifest.name != member.expect_name
         or space.get("name") != member.expect_name
         or space.get("manifestDigest") != sha256_file(manifest.path)
         or space.get("workspace") != workspace.path.name
         or space.get("workspaceDigest") != sha256_file(workspace.path)
+        or space.get("identity") != expected_identity
     ):
         fail(
             "SB017",

@@ -17,10 +17,11 @@ defineJourney(
     productInterfaces: ["@genehub/workbench/client"],
   },
   async (t) => {
-    const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
+      const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
     try {
       await t.flows.main.configureMockProvider(opened.client, opened.mock);
-      opened.mock.script({ text: "ok" });
+      const longReasoning = "thinking about hello in detail so the trunk reasoning overview retains up to one hundred twenty characters for rg";
+      opened.mock.script({ reasoning: longReasoning, text: "ok" });
       const sessionId = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
       const chat = path.join(opened.workspaceRoot, ".genethub", "sessions", sessionId, "chat.jsonl");
       t.assertions.assert(!existsSync(chat) || !readFileSync(chat, "utf8").includes('"t":"round"'), "ledgered before any prompt");
@@ -42,8 +43,17 @@ defineJourney(
       const rounds = foldRounds(readFileSync(chat, "utf8"));
       t.assertions.assert(rounds.length === 1, `expected one round, got ${rounds.length}`);
       t.assertions.assert(rounds[0]?.outcome === "completed", `outcome ${String(rounds[0]?.outcome)}`);
+      t.assertions.assert(rounds[0]?.userPreview === "hello", `userPreview ${String(rounds[0]?.userPreview)}`);
       const roundId = rounds[0]?.roundId;
       t.assertions.assert(Boolean(roundId), "the completed round has no id");
+      const rgignore = path.join(opened.workspaceRoot, ".genethub", ".rgignore");
+      t.assertions.assert(existsSync(rgignore) && readFileSync(rgignore, "utf8").includes("!sessions/**") && readFileSync(rgignore, "utf8").includes("sessions/*/blobs/"), ".genethub/.rgignore missing or incomplete");
+      const indexFile = path.join(opened.workspaceRoot, ".genethub", "sessions", sessionId, "rounds", "r-000", "index.jsonl");
+      t.assertions.assert(existsSync(indexFile) && readFileSync(indexFile, "utf8").includes(`"roundId":"${roundId}"`), "rounds/r-000/index.jsonl lacks roundId");
+      const trunkFile = path.join(opened.workspaceRoot, ".genethub", "sessions", sessionId, "rounds", "r-000", "t-0000.jsonl");
+      const trunkRaw = existsSync(trunkFile) ? readFileSync(trunkFile, "utf8") : "";
+      t.assertions.assert(trunkRaw.includes(`"roundId":"${roundId}"`), "t-0000.jsonl lacks roundId");
+      t.assertions.assert(trunkRaw.includes("hundred twenty characters for rg"), "t-0000.jsonl reasoning overview was truncated at 24 chars instead of 120 chars");
       const layer = await opened.client.call({
         type: "round.trunk.list",
         payload: { sessionId, roundId: roundId!, cursor: null, limit: 20 },
@@ -64,12 +74,12 @@ defineJourney(
   },
 );
 
-function foldRounds(contents: string): Array<{ roundId?: string; outcome?: string }> {
-  const rounds: Array<{ roundId?: string; outcome?: string }> = [];
+function foldRounds(contents: string): Array<{ roundId?: string; outcome?: string; userPreview?: string }> {
+  const rounds: Array<{ roundId?: string; outcome?: string; userPreview?: string }> = [];
   for (const line of contents.split("\n").filter((item) => item.trim())) {
-    let row: { t?: string; round?: { roundId?: string; outcome?: string } };
+    let row: { t?: string; round?: { roundId?: string; outcome?: string; userPreview?: string } };
     try {
-      row = JSON.parse(line) as { t?: string; round?: { roundId?: string; outcome?: string } };
+      row = JSON.parse(line) as { t?: string; round?: { roundId?: string; outcome?: string; userPreview?: string } };
     } catch {
       continue;
     }

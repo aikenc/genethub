@@ -34,10 +34,13 @@ describe("matchesConversation", () => {
     expect(shown(session({}), children)).toBe(false);
   });
 
-  it("never hides an internal session that is waiting or failed", () => {
+  it("keeps internal sessions hidden by default even when waiting or failed", () => {
+    const children = { ...defaultConversationFilter, ownership: "children" as const };
     for (const status of ["waiting", "failed"] as const) {
-      expect(shown(session({ workspaceId: "child", status }))).toBe(true);
-      expect(shown(session({ labels: [SYSTEM_STARTED_LABEL], status }))).toBe(true);
+      expect(shown(session({ workspaceId: "child", status }))).toBe(false);
+      expect(shown(session({ labels: [SYSTEM_STARTED_LABEL], status }))).toBe(false);
+      expect(shown(session({ workspaceId: "child", status }), children)).toBe(true);
+      expect(shown(session({ labels: [SYSTEM_STARTED_LABEL], status }), children)).toBe(true);
     }
     expect(shown(session({ workspaceId: "child", status: "running" as never }))).toBe(false);
   });

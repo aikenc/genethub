@@ -726,57 +726,6 @@ isolation?: IsolationInfo, };
 export type HistoryCoverage = { sourceItemCount?: number, retainedItemCount: number, omittedItemCount: number, retrieval: RetrievalCapability, reason?: string, };
 
 /**
- * One timer hook file in a project's `.genethub/hooks/`, as the daemon read it
- * just now. The directory is the registry: this is a view of the files, not a
- * second record of them.
- */
-export type HookInfo = { 
-/**
- * The file name without `.genet.json`.
- */
-id: string, 
-/**
- * False when the file cannot run: `problem` says why. An invalid hook is
- * listed, not hidden, so a broken file is something a script can read.
- */
-valid: boolean, problem?: string, event?: string, 
-/**
- * Seconds between runs.
- */
-everySeconds?: number, exec?: Array<string>, enabled: boolean, 
-/**
- * Who wrote the file, as the file says. The daemon does not interpret it.
- */
-owner?: string, running: boolean, 
-/**
- * Runs since this daemon started; the daemon keeps no hook state on disk.
- */
-runs: number, lastStartedAtMs?: number, 
-/**
- * Exit code of the last finished run; absent while it has none or when it
- * was ended by a signal or the timeout.
- */
-lastExitCode?: number, lastTimedOut?: boolean, 
-/**
- * Failed runs in a row. A hook is never disabled for failing: this is the
- * number a script reads to decide whether to fix it.
- */
-consecutiveFailures: number, 
-/**
- * The tail of the last failed run's stderr, or why it did not start.
- */
-lastError?: string, };
-
-/**
- * What `hook.list` answers.
- */
-export type HookList = { workspaceId: string, 
-/**
- * The directory read, so a caller can see exactly where hooks live.
- */
-directory: string, hooks: Array<HookInfo>, };
-
-/**
  * The ways back into an identity that has no password.
  *
  * A trial identity is reachable only through these, so whatever shows them
@@ -1301,7 +1250,7 @@ export type Reply = { "type": "previewFeedback", "data": PreviewFeedbackResponse
  * True when the requested `sinceSeq` fell outside the retained window
  * and the snapshot is a full reset rather than a continuation.
  */
-reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "agentRequests", "data": Array<AgentUserRequest> } | { "type": "agentTestResult", "data": { passed: boolean, output: string, } } | { "type": "agentLogs", "data": { lines: Array<string>, } } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "callerAuthority", "data": CallerAuthority } | { "type": "providers", "data": Array<ProviderInfo> } | { "type": "providerOperation", "data": ProviderOperationReceipt } | { "type": "speechCapabilities", "data": SpeechCapabilities } | { "type": "speechRuntimeStatus", "data": SpeechRuntimeStatus } | { "type": "speechContext", "data": SpeechContextPack } | { "type": "speechFeedbackReceipt", "data": SpeechFeedbackReceipt } | { "type": "log", "data": LogTail } | { "type": "diagnostics", "data": SupportDiagnostics } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "forkTransfer", "data": ForkTransfer } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionDrafts", "data": Array<SessionDraft> } | { "type": "previewAnnotations", "data": PreviewReviewDraft } | { "type": "sessionComponents", "data": Array<ComponentInstanceInfo> } | { "type": "sessionFlow", "data": ExecutorFlowStatus } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "sessionInspection", "data": SessionInspection } | { "type": "sessionNarrative", "data": SessionNarrativePage } | { "type": "sessionRounds", "data": SessionRoundPage } | { "type": "sessionContext", "data": SessionContext } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "roundTrunks", "data": Array<RoundTrunk> } | { "type": "blob", "data": BlobPayload } | { "type": "blobs", "data": Array<BlobPayload> } | { "type": "sessionArtifactUpload", "data": SessionArtifactUpload } | { "type": "sessionArtifact", "data": SessionArtifactBundle } | { "type": "workflowProject", "data": WorkflowProjectStatus } | { "type": "workflowPackages", "data": WorkflowPackageList } | { "type": "workflowBuild", "data": WorkflowBuildReport } | { "type": "workflowRun", "data": WorkflowRunStatus } | { "type": "workflowJournal", "data": Array<JsonValue> } | { "type": "workflowCheck", "data": WorkflowCheckReport } | { "type": "workflowRuns", "data": Array<WorkflowRunStatus> } | { "type": "agentSpaceBuilder", "data": AgentSpaceBuilderReport } | { "type": "agentSpaceChangePlan", "data": AgentSpaceChangePlan } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "processes", "data": Array<BackgroundProcess> } | { "type": "hooks", "data": HookList } | { "type": "ack" };
+reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "agentRequests", "data": Array<AgentUserRequest> } | { "type": "agentTestResult", "data": { passed: boolean, output: string, } } | { "type": "agentLogs", "data": { lines: Array<string>, } } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "callerAuthority", "data": CallerAuthority } | { "type": "providers", "data": Array<ProviderInfo> } | { "type": "providerOperation", "data": ProviderOperationReceipt } | { "type": "speechCapabilities", "data": SpeechCapabilities } | { "type": "speechRuntimeStatus", "data": SpeechRuntimeStatus } | { "type": "speechContext", "data": SpeechContextPack } | { "type": "speechFeedbackReceipt", "data": SpeechFeedbackReceipt } | { "type": "log", "data": LogTail } | { "type": "diagnostics", "data": SupportDiagnostics } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "forkTransfer", "data": ForkTransfer } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionDrafts", "data": Array<SessionDraft> } | { "type": "previewAnnotations", "data": PreviewReviewDraft } | { "type": "sessionComponents", "data": Array<ComponentInstanceInfo> } | { "type": "sessionFlow", "data": ExecutorFlowStatus } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "sessionInspection", "data": SessionInspection } | { "type": "sessionNarrative", "data": SessionNarrativePage } | { "type": "sessionRounds", "data": SessionRoundPage } | { "type": "sessionContext", "data": SessionContext } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "roundTrunks", "data": Array<RoundTrunk> } | { "type": "blob", "data": BlobPayload } | { "type": "blobs", "data": Array<BlobPayload> } | { "type": "sessionArtifactUpload", "data": SessionArtifactUpload } | { "type": "sessionArtifact", "data": SessionArtifactBundle } | { "type": "workflowProject", "data": WorkflowProjectStatus } | { "type": "workflowPackages", "data": WorkflowPackageList } | { "type": "workflowBuild", "data": WorkflowBuildReport } | { "type": "workflowRun", "data": WorkflowRunStatus } | { "type": "workflowJournal", "data": Array<JsonValue> } | { "type": "workflowCheck", "data": WorkflowCheckReport } | { "type": "workflowRuns", "data": Array<WorkflowRunStatus> } | { "type": "agentSpaceBuilder", "data": AgentSpaceBuilderReport } | { "type": "agentSpaceChangePlan", "data": AgentSpaceChangePlan } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "processes", "data": Array<BackgroundProcess> } | { "type": "ack" };
 
 export type Request = { "type": "preview.feedback", "payload": PreviewFeedbackRequest } | { "type": "client.debug", "payload": ClientDebugRequest } | { "type": "connection.identity" } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, 
 /**
@@ -1425,15 +1374,7 @@ continuesRound: string | null,
  * when it forwards the send to another machine. A local Agent caller's
  * own identity replaces whatever it declares here.
  */
-origin?: InputOrigin, 
-/**
- * Queues the text as a `system` notice written by a script, not by
- * the Human and not by another Agent's request. It waits for the
- * current round instead of interrupting it, never lifts a pause the
- * Human set, and is never a Human approval. Needs a stable
- * `messageId`: a notice that cannot be retried safely is not durable.
- */
-system?: boolean, } } | { "type": "session.artifact.begin", "payload": { sessionId: string, files: Array<SessionArtifactFile>, metadata: JsonValue, } } | { "type": "session.artifact.chunk", "payload": { sessionId: string, uploadId: string, fileIndex: number, offset: number, dataBase64: string, } } | { "type": "session.artifact.finish", "payload": { sessionId: string, uploadId: string, } } | { "type": "session.artifact.abort", "payload": { sessionId: string, uploadId: string, } } | { "type": "session.fork", "payload": { sessionId: string, turnId: string, 
+origin?: InputOrigin, } } | { "type": "session.artifact.begin", "payload": { sessionId: string, files: Array<SessionArtifactFile>, metadata: JsonValue, } } | { "type": "session.artifact.chunk", "payload": { sessionId: string, uploadId: string, fileIndex: number, offset: number, dataBase64: string, } } | { "type": "session.artifact.finish", "payload": { sessionId: string, uploadId: string, } } | { "type": "session.artifact.abort", "payload": { sessionId: string, uploadId: string, } } | { "type": "session.fork", "payload": { sessionId: string, turnId: string, 
 /**
  * Absent is the legacy native-only request. New clients send an
  * explicit target to opt into provider-agnostic reconstruction when
@@ -1485,7 +1426,7 @@ name: string | null, } } | { "type": "diagnostics.snapshot" } | { "type": "updat
 /**
  * Empty means "everything currently changed".
  */
-paths: Array<string>, } } | { "type": "pty.open", "payload": { workspaceId: string, cols: number | null, rows: number | null, } } | { "type": "pty.write", "payload": { ptyId: string, data: string, } } | { "type": "pty.resize", "payload": { ptyId: string, cols: number, rows: number, } } | { "type": "pty.close", "payload": { ptyId: string, } } | { "type": "process.list" } | { "type": "hook.list", "payload": { workspaceId: string, } } | { "type": "process.workspaceList", "payload": { workspaceId: string, } } | { "type": "process.serviceStop", "payload": { workspaceId: string, entryPath: string, runId: string, } } | { "type": "process.kill", "payload": { sessionId: string, pid: number, } } | { "type": "process.killAll", "payload": { sessionId: string, } };
+paths: Array<string>, } } | { "type": "pty.open", "payload": { workspaceId: string, cols: number | null, rows: number | null, } } | { "type": "pty.write", "payload": { ptyId: string, data: string, } } | { "type": "pty.resize", "payload": { ptyId: string, cols: number, rows: number, } } | { "type": "pty.close", "payload": { ptyId: string, } } | { "type": "process.list" } | { "type": "process.workspaceList", "payload": { workspaceId: string, } } | { "type": "process.serviceStop", "payload": { workspaceId: string, entryPath: string, runId: string, } } | { "type": "process.kill", "payload": { sessionId: string, pid: number, } } | { "type": "process.killAll", "payload": { sessionId: string, } };
 
 /**
  * Whether text outside the retained GeneHub window can be read again.
@@ -1700,18 +1641,7 @@ coverage?: HistoryCoverage, };
  */
 export type SessionImportSource = { agentId: string, label: string, supported: boolean, candidates: Array<SessionImportCandidate>, error?: string, };
 
-export type SessionInputSummary = { pendingMessageIds: Array<string>, paused: boolean, error?: string, 
-/**
- * The same unhandled inputs as `pending_message_ids`, with what a sender
- * needs to judge them: where each came from, whether it is still waiting
- * or already being worked on, and how long ago it arrived.
- */
-pending?: Array<SessionPendingInput>, 
-/**
- * How many unhandled inputs a session accepts before refusing more.
- * Zero from a daemon that does not say.
- */
-limit: number, };
+export type SessionInputSummary = { pendingMessageIds: Array<string>, paused: boolean, error?: string, };
 
 /**
  * A small structural entry point. It deliberately contains no free-form
@@ -1741,19 +1671,6 @@ export type SessionMessagePreview = { itemId: string, text: string, atMs: number
  * A recent-first page of narrative items, returned in chronological order.
  */
 export type SessionNarrativePage = { source: SessionReadSource, items: Array<TimelineItem>, nextCursor?: string, };
-
-/**
- * One unhandled input in a session's queue.
- */
-export type SessionPendingInput = { messageId: string, 
-/**
- * `user`, `agent`, `system` or `workflow`.
- */
-source: string, 
-/**
- * `receiving`, `queued` or `sent` (delivered to the Agent, not yet settled).
- */
-state: string, receivedAtMs: number, };
 
 /**
  * Stable identity and waterline shared by every read-only session page.
@@ -2183,13 +2100,7 @@ export type TimelineItem = { "type": "userMessage", id: string, text: string, at
  * Present when another Agent Session wrote this message; absent means
  * the Human typed it (or an older daemon did not say).
  */
-origin?: InputOrigin, 
-/**
- * A notice a script queued (`session send --queue`), not something a
- * person typed. Clients show it as a notice, never as the person's own
- * bubble.
- */
-system?: boolean, } | { "type": "assistantMessage", id: string, text: string, 
+origin?: InputOrigin, } | { "type": "assistantMessage", id: string, text: string, 
 /**
  * When the daemon first saw this item. Drives batch/trunk timing for
  * items that carry no tool timestamps of their own.

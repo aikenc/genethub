@@ -28,6 +28,7 @@ pub const OVERVIEW_CHARS: usize = 48;
 pub const SUMMARY_CHARS: usize = 64;
 pub const TOOL_LINE_CHARS: usize = 64;
 pub const REASONING_CHARS: usize = 24;
+pub const TRUNK_REASONING_CHARS: usize = 120;
 
 /// One line, at most `max` characters, with an ellipsis where text was cut.
 ///

@@ -178,9 +178,9 @@ DataEndpoint method 只有四个：
 
 `session.describe` 给会话一句话描述：写法同 Skill 的 description，说这个会话做什么、什么情况下该找它，供别的会话和 Agent 决定该问谁。它不是标题——标题是给人看的名字。文本去掉首尾空白后至多 300 字节（按字节，和其他面向 Agent 的文本上限一致），不含换行或控制字符，空文本清除描述；不合法整次请求被拒，原描述不动。和 `session.label` 一样在 meta 锁内改并落盘，并更新 `updatedAtMs`，否则按这个时间戳刷新摘要的客户端会一直显示旧的一句。`session list` / `session get` 的摘要直接带 `description`；`genet agent run --description` 在创建后、发送第一条提示前设置，所以第一个 round 开始时它已经在。fork 不继承描述，理由同标签。
 
-`session.send` 的 `system: true`（CLI 是 `--queue`）把文本作为 `system` 来源的通知排进队列：它由脚本写，不是人的要求，也不是别的 Agent 的请求。三条规则：**不打断**（只有 `conversational` 来源，即 `user` 与 `agent`，才会在会话忙时触发中途引导或打断）；**不解除暂停**（用户 `interrupt` 或一个 round 失败后会话暂停，只有 `conversational` 输入能解除，所以暂停期间通知安静地排着，不是被丢掉）；**不冒充人类批准**（说明句写明它是脚本发出的系统消息）。它自己是一条投递通道，优先级在 Human 与 Workflow 之后：一个 turn 只带一种通道，所以通知不会和人的话混在同一批里。通知必须带稳定的 `messageId`（只允许字母、数字、`_`、`-`、`.`，至多 128 字符），重发同一 id 与同一内容被确认且不重复入队，同一 id 不同内容被拒；不带 `taskRunId`。通知占用和其他输入一样的待处理名额（32 条）。会话摘要的 `inputSummary.pending` 列出每条未处理输入的来源、状态（`receiving` / `queued` / `sent`）和到达时间，`limit` 给出名额，所以发送方可以在发送前判断是否会被拒。
+`session.send` 中由脚本发出的 `"用途: "` 信封消息（或 `origin.sessionId == "system"`）作为 `system` 来源的通知排进 `Lane::System` 通道：它由脚本写，不是人的要求，也不是别的 Agent 的请求。三条规则：**不打断**（只有对话式输入才会在会话忙时触发中途引导或打断）；**不解除暂停**（用户 `interrupt` 或一个 round 失败后会话暂停，只有对话式输入能解除，所以暂停期间通知安静地排着，不是被丢掉）；**不冒充人类批准**（说明句写明它是脚本发出的系统消息）。它自己是一条投递通道，优先级在 Human 与 Workflow 之后：一个 turn 只带一种通道，所以通知不会和人的话混在同一批里。通知带稳定的 `messageId`（只允许字母、数字、`_`、`-`、`.`，至多 128 字符），重发同一 id 与同一内容被确认且不重复入队，同一 id 不同内容被拒；不带 `taskRunId`。通知占用和其他输入一样的待处理名额（32 条）。会话摘要的 `inputSummary.pendingMessageIds` 列出所有待处理消息的 `messageId`，发送方可以据此做去重与消费确认。
 
-时间线里的这条消息（`userMessage`）带 `system: true`，它是持久的，fork、转发和重载后仍在。客户端据此把它显示成一条折叠的系统消息，而不是人自己的气泡：不带这个标记，脚本发的通知就会和人说的话长得一模一样（`origin` 只在发送方是会话时才有，定时 hook 没有）。
+时间线里的这条消息（`userMessage`）以 `"用途: "` 信封开头（或带 `origin.sessionId == "system"`），它是持久的，fork、转发和重载后仍在。客户端据此把它显示成一条折叠的系统消息（`SystemNotice`），而不是人自己的气泡。
 
 ### 定时 hook
 
@@ -197,7 +197,7 @@ daemon 解析 `schema`（缺省可）、`event`（只能是 `timer`）、`every`
 
 **命令的运行**：作为独立进程组启动，超时则整组结束；同一 hook 同一时刻最多一个，跑得比间隔久时下一次至少隔 1 秒；全局最多 8 个同时跑；daemon 启动后每个 hook 立即补跑一次（运行记录只在内存里，命令必须幂等）。stdin 是一行 JSON：`event`、`hook`、`firedAtMs`、`space.dir`、`payload`、`openEnvProblems`。环境变量：`GENEHUB_HOOK_ID`、`GENEHUB_HOOK_EVENT`、`GENEHUB_SPACE_DIR`、`GENEHUB_CLI`、`GENEHUB_PYTHON`，加项目 `open.env` 里的变量；GeneHub 自己的名字不能被 `open.env` 改写（以 `GENEHUB_` 开头的行被拒并写进 `openEnvProblems`）。`exec` 与 `cwd` 里的 `${GENEHUB_SPACE_DIR}`、`${GENEHUB_PYTHON}`、`${GENEHUB_CLI}` 会被展开，别的 `${X}` 原样保留。
 
-**失败只记录，不自愈，也不停用。** 失败（非零退出、超时、被信号结束、起不来）记入内存里的运行记录：连续失败数、最后一次退出码、stderr 末尾 2 KiB。hook 永远不会因为失败被停用——"被停用"是第二份需要有人发现并撤销的状态。`timer` 不由会话事件触发，所以 hook 发出的消息不可能再触发 hook，不会有循环。`genet hook list [--workspace <id>]`（`hook.list`）读目录并合并运行记录，是脚本发现"某个 hook 坏了"的办法。
+**失败只记录，不自愈，也不停用。** 失败（非零退出、超时、被信号结束、起不来）记入内存与 `<项目>/.genethub/hooks/.status.json` 的运行记录：连续失败数、最后一次退出码、stderr 末尾 2 KiB。hook 永远不会因为失败被停用——"被停用"是第二份需要有人发现并撤销的状态。`timer` 不由会话事件触发，所以 hook 发出的消息不可能再触发 hook，不会有循环。`genet hook list [--workspace <id>]` 读取 `.genethub/hooks/*.genet.json` 并合并 `.status.json` 运行记录，是脚本发现"某个 hook 坏了"的办法。
 
 `open.env` 是 `<项目>/.genethub/open.env`：`KEY=VALUE`，`#` 注释行，值可用一对引号；不支持多行、命令替换、嵌套引用。读不了的行被报告并跳过，不影响其余行。
 

@@ -1,0 +1,11 @@
+{
+  "schema": "agent-space.v1",
+  "name": "research",
+  "description": "专家的研究会话：评审、调研、复盘、方案、诊断，对项目没有副作用。",
+  "tags": [],
+  "agents": ["codex", "claude-code", "codebuddy", "cursor"],
+  "skills": ["expert-core", "expert-research"],
+  "skillProviders": [{"type": "folder", "path": "../../skills"}],
+  "identity": ["../../soul.md", "../../memory.md", "style.md", "index.md"],
+  "folders": [{"path": "."}, {"path": "../../datas"}, {"path": "../../temp"}]
+}

@@ -4,7 +4,6 @@ import { useWorkbench } from "../session/store";
 import type { Host, Endpoint } from "../host";
 import { OpenProject } from "./OpenProject";
 import { AgentAdvancedSettings } from "./AgentAdvancedSettings";
-import { useAgentGroups } from "./agentGroups";
 import { AgentAvatar, AgentAvatarPicker } from "./AgentAvatar";
 import { WorkspaceDetailsDialog } from "./WorkspaceDetailsDialog";
 
@@ -15,7 +14,6 @@ export function AgentDetails({ workspace, deviceName, compact = false }: { works
   const client = useWorkbench((s) => s.client);
   const connection = useWorkbench((s) => s.connection);
   const workspaces = useWorkbench((s) => s.workspaces);
-  const { groups } = useAgentGroups(client?.identity?.machineId ?? "");
   const [reload, setReload] = useState(0);
   const [result, setResult] = useState<{ owner: string; sessions?: SessionSummary[]; error?: string } | null>(null);
   useEffect(() => {
@@ -32,12 +30,13 @@ export function AgentDetails({ workspace, deviceName, compact = false }: { works
   const rows = result?.owner === workspace.id ? result.sessions : undefined;
   const components = workspace.agentSpace?.components.filter((c) => c.enabled).map((c) => c.role ? `${c.componentId} · ${c.role}` : c.componentId) ?? [];
   const parent = workspaces.find((w) => w.id === workspace.agentSpace?.parentWorkspaceId);
+  const worktreeDir = workspace.folders.find((f) => f.root !== workspace.root)?.root;
   return <section aria-label={`${workspace.name} 的资料`} className="min-w-0 space-y-4">
     {!compact && <div className="flex items-center gap-3"><AgentAvatar id={workspace.id} name={workspace.name} /><div className="min-w-0"><h2 className="break-words text-lg font-semibold">{workspace.name}</h2><p className="text-xs text-muted">{components.join(" / ") || (workspace.workspaceFile ? "多目录项目" : "单目录项目")}</p></div></div>}
     <dl className="space-y-3 text-sm">
-      <Fact label="分组">{groups.filter((g) => g.workspaceIds.includes(workspace.id)).map((g) => g.name).join("、") || "未分组"}</Fact>
       <Fact label="所属设备">{deviceName || "当前设备"}</Fact>
       <Fact label="主路径">{workspace.root}</Fact>
+      {(worktreeDir || parent) && <Fact label="工位目录">{worktreeDir || "未激活（待岗）"}</Fact>}
       {workspace.workspaceFile && <Fact label="工作区文件">{workspace.workspaceFile}</Fact>}
       {parent && <Fact label="上级项目">{parent.name}</Fact>}
       <Fact label="会话数量">

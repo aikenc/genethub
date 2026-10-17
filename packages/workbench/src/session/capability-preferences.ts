@@ -16,14 +16,14 @@ import {
   resolveModeBadge,
 } from "../presentation/catalog/resolve";
 
-export const BUILTIN_TAGS = ["Max", "Pro", "Flash", "视频理解", "图片理解"] as const;
+export const BUILTIN_TAGS = ["Ultra", "Max", "Pro", "Flash", "Mini", "视频理解", "图片理解"] as const;
 export type BuiltinAgentTag = (typeof BUILTIN_TAGS)[number];
 export const IMAGE_TAG: BuiltinAgentTag = "图片理解";
 export const VIDEO_TAG: BuiltinAgentTag = "视频理解";
 export const BUILTIN_TAG_GROUP: AgentTagGroup = {
   id: "builtin-intelligence",
   label: "智能档位",
-  tags: ["Max", "Pro", "Flash"],
+  tags: ["Ultra", "Max", "Pro", "Flash", "Mini"],
 };
 
 export const COST_LEVELS: ReadonlyArray<{ id: AgentCostLevel; label: string }> = [

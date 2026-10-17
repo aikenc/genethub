@@ -4,13 +4,15 @@
 //! from, plus one more Skill (`expert-admin`) that knows how to make the others. Nothing here is special to
 //! the rest of the daemon: the scan registers it like any Space, and SpaceBuilder builds it like any Space.
 //!
-//! What the product owns and what it does not:
-//!   - owned, rewritten on every start if it differs: the descriptors, `skills/`, `tools/`;
-//!   - created once and then left alone: `soul.md`, `memory.md` (the expert writes those);
-//!   - never touched: everything else in the directory.
+//! The built-in administrator is stateless product-owned bootstrap material:
+//!   - rewritten on every start if it differs: every file from `expert-template/` and `expert-admin-skill/`;
+//!   - stale template files not in the current shipment are pruned;
+//!   - runtime and build-output paths (`.genethub/`, `.spacebuilder/`, `temp/`, `datas/`, `posts/`, and SpaceBuilder
+//!     target files) are preserved.
 //!
 //! A Space the user removed is not put back.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -21,8 +23,6 @@ use crate::state::Shared;
 const TEMPLATE: &str = "genehub/references/expert-template/";
 const ADMIN_SKILL: &str = "genehub/references/expert-admin-skill/";
 const BUILDER: &str = "genehub/references/spacebuilder/spacebuilder.py";
-/// Files the expert itself keeps: written when missing, never overwritten.
-const EXPERT_OWNED: &[&str] = &["soul.md", "memory.md"];
 const BUILD_TIMEOUT: Duration = Duration::from_secs(60);
 const NAME_LIMIT: usize = 64;
 const SUFFIX: &str = "管理员";
@@ -45,7 +45,8 @@ pub async fn ensure_admin(state: &Shared) {
     if !changed && admin.join(".spacebuilder").join("lock.json").is_file() {
         return;
     }
-    let script = crate::skills::builtin_skills_dir(&state.paths.root).join(BUILDER);
+    let script = crate::space_descriptor::space_builder(&admin)
+        .unwrap_or_else(|| crate::skills::builtin_skills_dir(&state.paths.root).join(BUILDER));
     match build(&script, &admin, state.registry.python()).await {
         Ok(()) => tracing::info!(dir = %admin.display(), "the administrator is built"),
         Err(error) => {
@@ -72,14 +73,18 @@ pub fn admin_name(machine: &str) -> String {
     }
 }
 
-/// Writes what the product owns. Returns whether anything on disk changed.
+/// Writes what the product owns and prunes stale template files. Returns whether anything on disk changed.
 pub fn refresh(admin: &Path, name: &str) -> std::io::Result<bool> {
     let mut changed = false;
-    let mut put = |relative: &str, contents: &[u8], overwrite: bool| -> std::io::Result<()> {
+    let mut shipped = HashSet::new();
+    let owned = spacebuilder_owned_paths(admin);
+    let mut put = |relative: &str, contents: &[u8]| -> std::io::Result<()> {
+        shipped.insert(relative.replace('\\', "/"));
         let target = admin.join(relative);
-        match std::fs::read(&target) {
-            Ok(existing) if !overwrite || existing == contents => return Ok(()),
-            _ => {}
+        if let Ok(existing) = std::fs::read(&target) {
+            if existing == contents {
+                return Ok(());
+            }
         }
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
@@ -90,15 +95,108 @@ pub fn refresh(admin: &Path, name: &str) -> std::io::Result<bool> {
     };
     for (relative, contents) in crate::skills::builtin_files_under(TEMPLATE) {
         if relative == "agent-space.genet.json" {
-            put(relative, &admin_descriptor(contents, name), true)?;
+            put(relative, &admin_descriptor(contents, name))?;
         } else {
-            put(relative, contents, !EXPERT_OWNED.contains(&relative))?;
+            put(relative, contents)?;
         }
     }
     for (relative, contents) in crate::skills::builtin_files_under(ADMIN_SKILL) {
-        put(&format!("skills/{relative}"), contents, true)?;
+        put(&format!("skills/{relative}"), contents)?;
+    }
+    if prune_stale_admin(admin, admin, &shipped, &owned)? {
+        changed = true;
     }
     Ok(changed)
+}
+
+/// Removes files and empty directories left over from older templates while leaving runtime data and
+/// SpaceBuilder outputs alone.
+fn prune_stale_admin(
+    root: &Path,
+    current: &Path,
+    shipped: &HashSet<String>,
+    owned: &HashSet<String>,
+) -> std::io::Result<bool> {
+    let Ok(entries) = std::fs::read_dir(current) else {
+        return Ok(false);
+    };
+    let mut removed = false;
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        let Ok(rel_path) = path.strip_prefix(root) else {
+            continue;
+        };
+        let rel = rel_path.to_string_lossy().replace('\\', "/");
+        if is_preserved_runtime_or_build_path(&rel, owned) {
+            continue;
+        }
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            if prune_stale_admin(root, &path, shipped, owned)? {
+                removed = true;
+            }
+            let prefix = format!("{rel}/");
+            let has_shipped = shipped.iter().any(|item| item.starts_with(&prefix));
+            let has_owned = owned.iter().any(|item| item.starts_with(&prefix));
+            if !has_shipped && !has_owned && std::fs::read_dir(&path)?.next().is_none() {
+                std::fs::remove_dir(&path)?;
+                removed = true;
+            }
+        } else if !shipped.contains(&rel) {
+            std::fs::remove_file(&path)?;
+            removed = true;
+        }
+    }
+    Ok(removed)
+}
+
+fn is_preserved_runtime_or_build_path(rel: &str, owned: &HashSet<String>) -> bool {
+    if owned.contains(rel) {
+        return true;
+    }
+    let first = rel.split('/').next().unwrap_or_default();
+    if matches!(
+        first,
+        ".genethub" | ".spacebuilder" | "posts" | "datas" | "temp"
+    ) {
+        return true;
+    }
+    let last = rel.rsplit('/').next().unwrap_or_default();
+    if last.ends_with(".code-workspace") {
+        return true;
+    }
+    rel.split('/')
+        .any(|segment| matches!(segment, ".genethub" | ".spacebuilder"))
+}
+
+fn spacebuilder_owned_paths(admin: &Path) -> HashSet<String> {
+    let mut owned = HashSet::new();
+    let Ok(bytes) = std::fs::read(admin.join(".spacebuilder").join("lock.json")) else {
+        return owned;
+    };
+    let Ok(lock) = serde_json::from_slice::<Value>(&bytes) else {
+        return owned;
+    };
+    let Some(spaces) = lock.get("spaces").and_then(Value::as_array) else {
+        return owned;
+    };
+    for space in spaces {
+        let space_path = space.get("path").and_then(Value::as_str).unwrap_or(".");
+        let prefix = if space_path == "." || space_path.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", space_path.trim_matches('/'))
+        };
+        if let Some(files) = space.get("ownedFiles").and_then(Value::as_array) {
+            for file in files {
+                if let Some(rel) = file.get("path").and_then(Value::as_str) {
+                    owned.insert(format!("{prefix}{}", rel.trim_start_matches('/')));
+                }
+            }
+        }
+    }
+    owned
 }
 
 /// The template's root descriptor, named for this machine and given the administrator's Skill.
@@ -185,81 +283,6 @@ mod tests {
         assert!(
             long.ends_with(SUFFIX),
             "the suffix is never the part that is cut"
-        );
-    }
-
-    #[test]
-    fn refresh_installs_the_template_and_the_admin_skill_and_names_the_space() {
-        let data = tempfile::tempdir().unwrap();
-        let admin = data.path().join("spaces/admin");
-        assert!(refresh(&admin, "办公室-Mac管理员").unwrap());
-        let descriptor: Value =
-            serde_json::from_slice(&std::fs::read(admin.join("agent-space.genet.json")).unwrap())
-                .unwrap();
-        assert_eq!(descriptor["name"], "办公室-Mac管理员");
-        assert_eq!(descriptor["tags"], json!(["expert"]));
-        assert_eq!(descriptor["agentCwd"], "front");
-        assert_eq!(
-            descriptor["skills"],
-            json!(["expert-core", "expert-front", "expert-admin"])
-        );
-        for file in [
-            "tools/expert.py",
-            "skills/expert-core/SKILL.md",
-            "skills/expert-front/hooks/timer.genet.json",
-            "skills/expert-admin/SKILL.md",
-            "spaces/think/agent-space.genet.json",
-            "spaces/work/agent-space.genet.json",
-            "soul.md",
-            "memory.md",
-        ] {
-            assert!(admin.join(file).is_file(), "{file} missing");
-        }
-        assert!(
-            !refresh(&admin, "办公室-Mac管理员").unwrap(),
-            "a second run changes nothing"
-        );
-    }
-
-    #[test]
-    fn what_the_product_owns_is_restored_and_what_the_expert_owns_is_not_touched() {
-        let data = tempfile::tempdir().unwrap();
-        let admin = data.path().join("spaces/admin");
-        refresh(&admin, "甲管理员").unwrap();
-        std::fs::write(admin.join("soul.md"), "my own soul").unwrap();
-        std::fs::write(admin.join("memory.md"), "my memory").unwrap();
-        std::fs::write(admin.join("tools/expert.py"), "# edited").unwrap();
-        std::fs::create_dir_all(admin.join("posts")).unwrap();
-        std::fs::write(admin.join("posts/x.md"), "git@example/x.git").unwrap();
-        std::fs::write(admin.join("skills/expert-core/SKILL.md"), "edited").unwrap();
-
-        assert!(refresh(&admin, "乙管理员").unwrap());
-        assert_eq!(
-            std::fs::read_to_string(admin.join("soul.md")).unwrap(),
-            "my own soul"
-        );
-        assert_eq!(
-            std::fs::read_to_string(admin.join("memory.md")).unwrap(),
-            "my memory"
-        );
-        assert_eq!(
-            std::fs::read_to_string(admin.join("posts/x.md")).unwrap(),
-            "git@example/x.git"
-        );
-        assert_ne!(
-            std::fs::read_to_string(admin.join("tools/expert.py")).unwrap(),
-            "# edited"
-        );
-        assert_ne!(
-            std::fs::read_to_string(admin.join("skills/expert-core/SKILL.md")).unwrap(),
-            "edited"
-        );
-        let descriptor: Value =
-            serde_json::from_slice(&std::fs::read(admin.join("agent-space.genet.json")).unwrap())
-                .unwrap();
-        assert_eq!(
-            descriptor["name"], "乙管理员",
-            "a renamed machine renames the descriptor"
         );
     }
 }

@@ -113,7 +113,9 @@ pub fn list_directory(requested: Option<&Path>) -> Result<DirectoryListing> {
         };
         if kind.is_dir() {
             directories.push(item);
-        } else if kind.is_file() && is_workspace_file(&entry.path()) {
+        } else if kind.is_file()
+            && (is_workspace_file(&entry.path()) || is_space_descriptor_file(&entry.path()))
+        {
             workspace_files.push(item);
         }
     }
@@ -328,7 +330,53 @@ impl Workspaces {
                 Err(error) => tracing::warn!(%error, "registering scanned Spaces failed"),
             }
         }
+        if let Err(error) = self.retire_missing_scanned_children(spaces_root).await {
+            tracing::warn!(%error, "retiring missing scanned child Spaces failed");
+        }
         report
+    }
+
+    /// Retires child Spaces under `spaces_root` whose directory has been removed
+    /// from disk (for example `spaces/think` after the 3-role layout migration),
+    /// so deleted role directories do not linger in the catalogue or log errors.
+    /// Retires Spaces under `spaces_root` whose directory has been removed
+    /// from disk (for example `spaces/think` after the 3-role layout migration
+    /// or a deleted temporary expert under `spaces/`), so deleted directories
+    /// do not linger in the catalogue or log errors.
+    async fn retire_missing_scanned_children(&self, spaces_root: &Path) -> Result<usize> {
+        let Ok(canonical_root) = crate::guest_paths::guest_path(spaces_root).canonicalize() else {
+            return Ok(0);
+        };
+        let mut entries = self.entries.write().await;
+        let mut config = self.config.write().await;
+        let stale: Vec<String> = entries
+            .values()
+            .filter(|entry| {
+                !entry.removed
+                    && entry.root.starts_with(&canonical_root)
+                    && !entry.root.exists()
+            })
+            .map(|entry| entry.id.clone())
+            .collect();
+        if stale.is_empty() {
+            return Ok(0);
+        }
+        let mut next = config.clone();
+        for id in &stale {
+            if let Some(entry) = entries.get_mut(id) {
+                entry.removed = true;
+            }
+            if let Some(saved) = next.workspaces.iter_mut().find(|entry| entry.id == *id) {
+                saved.removed = true;
+            }
+            self.homes.detach(id);
+        }
+        next.agent_spaces
+            .retain(|space| !stale.contains(&space.workspace_id));
+        next.workspace_catalog_revision = next.workspace_catalog_revision.saturating_add(1);
+        next.save(&self.config_path)?;
+        *config = next;
+        Ok(stale.len())
     }
 
     async fn scan_tree(
@@ -362,13 +410,30 @@ impl Workspaces {
         };
         {
             let entries = self.entries.read().await;
-            let candidate = folder_workspace(source.clone(), None);
+            let candidate = directory_workspace(source.clone(), found.descriptor.name.clone());
             if let Some(existing) = existing_project(&entries, &candidate) {
-                return if existing.removed {
-                    Scanned::Removed
-                } else {
-                    Scanned::Id(existing.id.clone())
-                };
+                // The descriptor's folders and name are read again on every scan, so editing them takes effect without
+                // reopening by hand. A project registered another way (a plain folder, a `.code-workspace`)
+                // whose directory declares no folders is left as it is.
+                let declared_differently = candidate.workspace_file.is_some()
+                    && (existing.workspace_file != candidate.workspace_file
+                        || existing.folders.len() != candidate.folders.len()
+                        || existing
+                            .folders
+                            .iter()
+                            .zip(&candidate.folders)
+                            .any(|(left, right)| left.root != right.root || left.name != right.name));
+                let name_changed = found
+                    .descriptor
+                    .name
+                    .as_deref()
+                    .is_some_and(|name| name != existing.name);
+                if existing.removed {
+                    return Scanned::Removed;
+                }
+                if !declared_differently && !name_changed {
+                    return Scanned::Id(existing.id.clone());
+                }
             }
         }
         match self.open(&source, found.descriptor.name.clone()).await {
@@ -1137,6 +1202,44 @@ impl Workspaces {
         )
     }
 
+    /// Opens `root` (a directory, `.code-workspace`, or `agent-space.genet.json`)
+    /// and, when it is a Space with child Spaces under `<dir>/spaces/*`, opens
+    /// and links those child Spaces too so its Squad is immediately complete.
+    pub async fn open_with_children(&self, root: &Path) -> Result<WorkspaceInfo> {
+        let info = self.open(root, None).await?;
+        let dir = Path::new(&info.root);
+        if let Ok(Some(found)) = crate::space_descriptor::discover_root(dir) {
+            if !found.children.is_empty() {
+                let mut links = vec![(info.id.clone(), None)];
+                self.open_child_tree(&found.children, &info.id, &mut links)
+                    .await;
+                let _ = self.register_scanned_parents(&links).await;
+                let entries = self.entries.read().await;
+                let config = self.config.read().await;
+                if let Some(entry) = entries.get(&info.id) {
+                    return Ok(self.describe_with_space(entry, &config));
+                }
+            }
+        }
+        Ok(info)
+    }
+
+    async fn open_child_tree(
+        &self,
+        children: &[crate::space_descriptor::Found],
+        parent_id: &str,
+        links: &mut Vec<(String, Option<String>)>,
+    ) {
+        for child in children {
+            if let Ok(opened) = self.open(&child.dir, child.descriptor.name.clone()).await {
+                links.push((opened.id.clone(), Some(parent_id.to_string())));
+                if !child.children.is_empty() {
+                    Box::pin(self.open_child_tree(&child.children, &opened.id, links)).await;
+                }
+            }
+        }
+    }
+
     /// Registers a root, or returns the existing entry if it is already known.
     ///
     /// Opening the same folder twice is a normal thing for a user to do and
@@ -1150,8 +1253,25 @@ impl Workspaces {
         let source = root
             .canonicalize()
             .with_context(|| format!("no such folder or workspace file: {}", root.display()))?;
+        let explicit_or_descriptor_name = name.clone().or_else(|| {
+            let dir = if source.is_dir() {
+                Some(source.as_path())
+            } else if source.is_file() && is_space_descriptor_file(&source) {
+                source.parent()
+            } else {
+                None
+            };
+            dir.and_then(|dir| crate::space_descriptor::read(dir).ok().flatten())
+                .and_then(|descriptor| descriptor.name)
+        });
         let candidate = if source.is_dir() {
-            folder_workspace(source, name)
+            directory_workspace(source, name)
+        } else if source.is_file() && is_space_descriptor_file(&source) {
+            let dir = source
+                .parent()
+                .ok_or_else(|| anyhow!("descriptor file has no parent directory"))?
+                .to_path_buf();
+            directory_workspace(dir, name)
         } else if source.is_file() && is_workspace_file(&source) && name.is_none() {
             code_workspace(&source)?
         } else {
@@ -1178,8 +1298,10 @@ impl Workspaces {
             updated.id = existing.id.clone();
             // The label belongs to the durable project identity, not whichever
             // folder/workspace-file view most recently opened it. In particular,
-            // switching views must not erase a name the user chose.
-            updated.name = existing.name.clone();
+            // switching views must not erase a name the user chose; however,
+            // an explicit name or `agent-space.genet.json` `name` is the Space's
+            // declared name and updates any earlier placeholder (like "expert").
+            updated.name = explicit_or_descriptor_name.unwrap_or_else(|| existing.name.clone());
             updated.removed = false;
             if updated == existing {
                 return Ok(self.describe_with_space(&existing, &config));
@@ -1187,7 +1309,8 @@ impl Workspaces {
 
             let catalog_changed = existing.removed
                 || existing.name != updated.name
-                || existing.is_git_repo != updated.is_git_repo;
+                || existing.is_git_repo != updated.is_git_repo
+                || existing.folders != updated.folders;
             let saved = next
                 .workspaces
                 .iter_mut()
@@ -1548,6 +1671,22 @@ fn existing_or_unregistered(config: &Config, workspace_id: &str) -> AgentSpaceEn
         })
 }
 
+fn resolve_worktree_dir(base: &Path) -> Option<PathBuf> {
+    let env = crate::hooks::env::load(base);
+    let raw = env.vars.get("WORKTREE_DIR")?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let portable = raw.replace('\\', "/");
+    let requested = crate::guest_paths::guest_path(Path::new(&portable));
+    let full = if requested.is_absolute() {
+        requested
+    } else {
+        base.join(requested)
+    };
+    Some(full.canonicalize().unwrap_or(full))
+}
+
 fn describe(entry: &WorkspaceEntry) -> WorkspaceInfo {
     WorkspaceInfo {
         id: entry.id.clone(),
@@ -1580,6 +1719,76 @@ fn verify_pipe_space(project_root: &Path, entry: &WorkspaceEntry) -> Result<Stri
     crate::agent_space_builder::verify_space(project_root, &entry.root)
         .map(|verified| verified.lock_digest)
         .map_err(|error| anyhow!("AgentSpaceBuilder verification failed: {error}"))
+}
+
+/// What opening a directory gives: the directories its `agent-space.genet.json` declares in `folders` (the
+/// descriptor replaces a `.code-workspace` file, which keeps working for projects that have no such descriptor),
+/// otherwise the directory itself. An entry this machine cannot use (a URI, a missing directory, one already
+/// listed) is dropped rather than refusing the Space; with none left the directory alone is the project.
+fn directory_workspace(dir: PathBuf, name: Option<String>) -> WorkspaceEntry {
+    let name = name.or_else(|| {
+        crate::space_descriptor::read(&dir)
+            .ok()
+            .flatten()
+            .and_then(|descriptor| descriptor.name)
+    });
+    let mut entry =
+        descriptor_workspace(&dir, name.clone()).unwrap_or_else(|| folder_workspace(dir.clone(), name));
+    if let Some(wt) = resolve_worktree_dir(&dir) {
+        if wt.is_dir()
+            && entry.folders.len() < MAX_WORKSPACE_FOLDERS
+            && !entry.folders.iter().any(|folder| folder.root == wt)
+        {
+            if let Ok(folder_name) = workspace_folder_name(None, &wt) {
+                entry.folders.push(WorkspaceFolderEntry {
+                    name: folder_name,
+                    root: wt,
+                    root_handle: String::new(),
+                });
+            }
+        }
+    }
+    entry
+}
+
+fn descriptor_workspace(dir: &Path, name: Option<String>) -> Option<WorkspaceEntry> {
+    let declared = crate::space_descriptor::declared_folders(dir)?;
+    let mut seen = HashSet::new();
+    let mut usable = Vec::new();
+    for folder in declared {
+        let Some(raw) = folder.get("path").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let portable = raw.replace('\\', "/");
+        let requested = crate::guest_paths::guest_path(Path::new(&portable));
+        let requested = if requested.is_absolute() {
+            requested
+        } else {
+            dir.join(requested)
+        };
+        match requested.canonicalize() {
+            Ok(root) if root.is_dir() && seen.insert(root.clone()) => usable.push(folder),
+            _ => {}
+        }
+        if usable.len() == MAX_WORKSPACE_FOLDERS {
+            break;
+        }
+    }
+    if usable.is_empty() {
+        return None;
+    }
+    let path = dir.join(crate::space_descriptor::FILE);
+    let body = serde_json::json!({ "folders": usable }).to_string();
+    let mut entry = parse_code_workspace(&path, &body).ok()?;
+    if entry.folders.len() == 1 && entry.folders[0].root == dir {
+        return None; // only the Space itself: an ordinary project, not a multi-root one
+    }
+    entry.name = name.unwrap_or_else(|| {
+        dir.file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| dir.display().to_string())
+    });
+    Some(entry)
 }
 
 fn folder_workspace(root: PathBuf, name: Option<String>) -> WorkspaceEntry {
@@ -1764,6 +1973,12 @@ fn is_workspace_file(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("code-workspace"))
+}
+
+fn is_space_descriptor_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == crate::space_descriptor::FILE)
 }
 
 fn resolve_entry(entry: &WorkspaceEntry, virtual_path: &str) -> Result<ResolvedWorkspacePath> {
@@ -3294,6 +3509,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_descriptor_declares_the_roots_of_its_space_like_a_code_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let spaces_root = dir.path().join("spaces");
+        let expert = spaces_root.join("expert");
+        let reflect = expert.join("spaces/reflect");
+        let datas = expert.join("datas");
+        std::fs::create_dir_all(&datas).unwrap();
+        descriptor(&expert, r#"{"name":"专家","folders":[{"path":"."}]}"#);
+        descriptor(
+            &reflect,
+            r#"{"name":"反思","folders":[{"path":"."},{"path":"../.."},{"path":"../../datas"},{"path":"../../gone"},{"path":"../../datas"}]}"#,
+        );
+        let spaces = workspaces(dir.path()).await;
+        spaces.scan_spaces(&spaces_root, true).await;
+
+        let plain = named(&spaces, "专家").await;
+        assert!(plain.workspace_file.is_none(), "only itself: an ordinary project");
+        assert_eq!(plain.folders.len(), 1);
+
+        let opened = named(&spaces, "反思").await;
+        assert_eq!(
+            opened.folders.iter().map(|folder| folder.name.as_str()).collect::<Vec<_>>(),
+            vec!["reflect", "expert", "datas"],
+            "declared order; the missing directory and the repeat are dropped, the Space still opens"
+        );
+        assert_eq!(opened.root, reflect.canonicalize().unwrap().display().to_string());
+        assert!(opened.folders.iter().all(|folder| folder.root_handle.starts_with("r_")));
+        let before = spaces.list().await.len();
+
+        // Scanning again changes nothing; editing the descriptor changes the roots, not the identity.
+        spaces.scan_spaces(&spaces_root, true).await;
+        assert_eq!(spaces.list().await.len(), before);
+        descriptor(&reflect, r#"{"name":"反思","folders":[{"path":"."},{"path":"../../datas","name":"数据"}]}"#);
+        spaces.scan_spaces(&spaces_root, true).await;
+        let edited = named(&spaces, "反思").await;
+        assert_eq!(edited.id, opened.id);
+        assert_eq!(
+            edited.folders.iter().map(|folder| folder.name.as_str()).collect::<Vec<_>>(),
+            vec!["reflect", "数据"]
+        );
+        assert_eq!(spaces.list().await.len(), before);
+    }
+
+    #[tokio::test]
     async fn a_scan_opens_spaces_and_links_children_to_the_root_they_sit_in() {
         let (_dir, root, spaces, _config) = scan_fixture();
         let report = spaces.scan_spaces(&root, true).await;
@@ -3443,6 +3702,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_deleted_scanned_child_space_is_retired_on_next_scan() {
+        let (_dir, root, spaces, config) = scan_fixture();
+        spaces.scan_spaces(&root, true).await;
+        let think = named(&spaces, "管理员·思考").await;
+        std::fs::remove_dir_all(root.join("admin/spaces/think")).unwrap();
+
+        spaces.scan_spaces(&root, true).await;
+        assert!(
+            spaces
+                .list()
+                .await
+                .iter()
+                .all(|workspace| workspace.id != think.id),
+            "a deleted child role directory leaves the active catalogue"
+        );
+        assert!(
+            config
+                .read()
+                .await
+                .agent_spaces
+                .iter()
+                .all(|space| space.workspace_id != think.id),
+            "its child registration is retired too"
+        );
+    }
+
+    #[tokio::test]
     async fn a_session_starts_in_agent_cwd_when_it_names_a_real_directory() {
         let (_dir, root, spaces, _config) = scan_fixture();
         spaces.scan_spaces(&root, true).await;
@@ -3466,5 +3752,67 @@ mod tests {
             think.root,
             "no agentCwd, the project root"
         );
+    }
+
+    #[tokio::test]
+    async fn editing_a_descriptor_name_updates_a_scanned_space_and_opening_descriptor_links_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let spaces_root = dir.path().join("spaces");
+        let doc = spaces_root.join("doc-auditor");
+        descriptor(&doc, r#"{"name":"expert","tags":["expert"]}"#);
+        descriptor(&doc.join("spaces/reflect"), r#"{"name":"reflect"}"#);
+        descriptor(&doc.join("spaces/work"), r#"{"name":"work"}"#);
+
+        let spaces = workspaces(dir.path()).await;
+        spaces.scan_spaces(&spaces_root, true).await;
+        let initial = named(&spaces, "expert").await;
+
+        // Updating agent-space.genet.json name from the template placeholder "expert"
+        // to "doc-auditor" updates the workspace name on the next scan.
+        descriptor(&doc, r#"{"name":"doc-auditor","tags":["expert"]}"#);
+        spaces.scan_spaces(&spaces_root, true).await;
+        let renamed = named(&spaces, "doc-auditor").await;
+        assert_eq!(renamed.id, initial.id);
+
+        // Directory listing exposes agent-space.genet.json as a selectable workspace file.
+        let listing = list_directory(Some(&doc)).unwrap();
+        assert!(
+            listing
+                .workspace_files
+                .iter()
+                .any(|item| item.name == crate::space_descriptor::FILE)
+        );
+
+        // Removing the expert's children then the expert itself, then manually opening
+        // agent-space.genet.json via open_with_children restores both the expert and its Squad.
+        for item in spaces
+            .list()
+            .await
+            .into_iter()
+            .filter(|w| w.id != renamed.id)
+        {
+            spaces.remove(&item.id).await.unwrap();
+        }
+        spaces.remove(&renamed.id).await.unwrap();
+        assert!(spaces.list().await.is_empty());
+
+        let reopened = spaces
+            .open_with_children(&doc.join(crate::space_descriptor::FILE))
+            .await
+            .unwrap();
+        assert_eq!(reopened.id, initial.id);
+        assert_eq!(reopened.name, "doc-auditor");
+        let all = spaces.list().await;
+        assert_eq!(all.len(), 3);
+        let reflect = named(&spaces, "reflect").await;
+        assert_eq!(
+            reflect.agent_space.and_then(|s| s.parent_workspace_id).as_deref(),
+            Some(reopened.id.as_str())
+        );
+
+        // Deleting the root expert directory under spaces/ retires both root and children on scan.
+        std::fs::remove_dir_all(&doc).unwrap();
+        spaces.scan_spaces(&spaces_root, true).await;
+        assert!(spaces.list().await.is_empty());
     }
 }
