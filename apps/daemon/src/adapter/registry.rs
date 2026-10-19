@@ -29,6 +29,29 @@ use super::{ImportCandidate, ImportedHistory, ProviderMap, SharedAdapter};
 /// How long one native adapter may take to answer `probe` + `catalog`.
 const NATIVE_DEADLINE: Duration = Duration::from_secs(10);
 
+/// What a catalogue depends on, in one string.
+///
+/// A catalogue is not a fact about an Agent alone: it is what that Agent can
+/// reach, which is the configured providers. The start-up warm-up probes before
+/// any provider exists, and a provider configured afterwards — by a CLI, or by
+/// another window — changes the answer. Without this comparison a plain
+/// `agent.list` would keep handing out the empty catalogue that warm-up cached.
+fn catalog_question(providers: &ProviderMap) -> String {
+    providers
+        .iter()
+        .map(|(id, config)| {
+            format!(
+                "{id}|{}|{}|{}|{}",
+                config.base_url.as_deref().unwrap_or_default(),
+                config.dialect.as_deref().unwrap_or_default(),
+                config.api_key.as_deref().unwrap_or_default(),
+                config.models.join(","),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 struct Script {
     host: Arc<AgentHost>,
     adapter: SharedAdapter,
@@ -37,6 +60,8 @@ struct Script {
 pub struct Registry {
     native: Vec<SharedAdapter>,
     native_cache: RwLock<BTreeMap<String, AgentInfo>>,
+    /// What the cached catalogues were probed with; see `catalog_question`.
+    catalog_question: RwLock<Option<String>>,
     scripts: std::sync::RwLock<BTreeMap<String, Script>>,
     layout: Option<Layout>,
     runtime: Option<Arc<Runtime>>,
@@ -58,6 +83,7 @@ impl Registry {
         let registry = Registry {
             native: vec![Arc::new(GenetAdapter::discover())],
             native_cache: RwLock::new(BTreeMap::new()),
+            catalog_question: RwLock::new(None),
             scripts: std::sync::RwLock::new(BTreeMap::new()),
             layout: Some(layout.clone()),
             runtime: Some(runtime),
@@ -88,6 +114,7 @@ impl Registry {
         Registry {
             native: adapters,
             native_cache: RwLock::new(BTreeMap::new()),
+            catalog_question: RwLock::new(None),
             scripts: std::sync::RwLock::new(BTreeMap::new()),
             layout: None,
             runtime: None,
@@ -222,13 +249,17 @@ impl Registry {
             host.ensure_settled(SCRIPT_SETTLE_BUDGET).await;
         }))
         .await;
-        let missing = {
+        let asked = catalog_question(providers);
+        let stale = {
             let cache = self.native_cache.read().await;
-            self.native
+            let missing = self
+                .native
                 .iter()
-                .any(|adapter| !cache.contains_key(adapter.id()))
+                .any(|adapter| !cache.contains_key(adapter.id()));
+            let changed = self.catalog_question.read().await.as_deref() != Some(asked.as_str());
+            missing || changed
         };
-        if missing {
+        if stale {
             self.probe_native(providers).await;
         }
         self.snapshot().await
@@ -285,6 +316,7 @@ impl Registry {
                 native_info(&adapter, probe, catalog),
             );
         }
+        *self.catalog_question.write().await = Some(catalog_question(providers));
     }
 
     async fn snapshot(&self) -> Vec<AgentInfo> {
@@ -506,5 +538,89 @@ mod tests {
         );
         let refreshed = registry.refresh(&providers).await;
         assert_eq!(refreshed[0].catalog.models[0].id, "new");
+    }
+
+    /// The start-up warm-up asks before any provider exists. A provider that
+    /// lands afterwards must reach a plain `agent.list`, which is what the
+    /// model picker reads; only `refresh` used to see it.
+    #[tokio::test]
+    async fn a_provider_configured_after_the_first_list_reaches_a_plain_list() {
+        struct FromProviders;
+
+        #[async_trait::async_trait]
+        impl crate::adapter::AgentAdapter for FromProviders {
+            fn id(&self) -> &str {
+                "from-providers"
+            }
+            fn label(&self) -> &str {
+                "From providers"
+            }
+            fn capabilities(&self) -> genehub_proto::Capabilities {
+                Default::default()
+            }
+            async fn probe(&self) -> ProbeState {
+                ProbeState::Ready
+            }
+            async fn catalog(&self, providers: &ProviderMap) -> genehub_proto::Catalog {
+                genehub_proto::Catalog {
+                    models: providers
+                        .iter()
+                        .flat_map(|(id, config)| {
+                            config
+                                .models
+                                .iter()
+                                .map(move |model| genehub_proto::ModelInfo {
+                                    id: format!("{id}/{model}"),
+                                    label: model.clone(),
+                                    context_window: None,
+                                    reasoning: false,
+                                    efforts: Vec::new(),
+                                    input_modalities: None,
+                                    supports_fast: false,
+                                })
+                        })
+                        .collect(),
+                    ..Default::default()
+                }
+            }
+            async fn start(
+                &self,
+                _config: crate::adapter::SessionConfig,
+            ) -> Result<Box<dyn crate::adapter::AgentSession>> {
+                anyhow::bail!("not started")
+            }
+        }
+
+        let registry = Registry::of(vec![Arc::new(FromProviders)]);
+        let warm_up = registry.list(&ProviderMap::new()).await;
+        assert!(
+            warm_up[0].catalog.models.is_empty(),
+            "the warm-up has no provider to offer"
+        );
+
+        let mut providers = ProviderMap::new();
+        providers.insert(
+            "deepseek".into(),
+            crate::config::ProviderConfig {
+                api_key: Some("sk-test".into()),
+                base_url: Some("http://127.0.0.1:1".into()),
+                models: vec!["deepseek-v4-flash".into()],
+                ..Default::default()
+            },
+        );
+        let listed = registry.list(&providers).await;
+        assert_eq!(
+            listed[0]
+                .catalog
+                .models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["deepseek/deepseek-v4-flash"],
+            "a plain list kept the catalogue it cached before any provider existed"
+        );
+        // An unchanged question must still be answered from the cache.
+        let again = registry.list(&providers).await;
+        assert_eq!(again[0].catalog.models.len(), 1);
     }
 }
