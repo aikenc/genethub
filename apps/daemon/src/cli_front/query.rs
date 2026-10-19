@@ -16,7 +16,7 @@ use super::output::{self, CliFailure, CLI_SCHEMA};
 use super::rpc::{ConnectError, Refusal, Rpc, RpcError};
 use super::target::{self, Routing, Selection};
 
-const COMMAND_NAMES: [&str; 87] = [
+const COMMAND_NAMES: [&str; 88] = [
     "schema",
     "context",
     "capabilities",
@@ -34,6 +34,7 @@ const COMMAND_NAMES: [&str; 87] = [
     "process.killAll",
     "workspace.list",
     "workspace.show",
+    "workspace.remove",
     "preview.feedback",
     "session.list",
     "session.get",
@@ -147,6 +148,7 @@ fn mutates(name: &str) -> bool {
             | "session.label"
             | "session.describe"
             | "session.model"
+            | "workspace.remove"
             | "workflow.build"
             | "workflow.activate"
             | "workflow.dispatch"
@@ -180,6 +182,9 @@ enum Query {
     },
     WorkspaceList,
     WorkspaceShow {
+        workspace_id: String,
+    },
+    WorkspaceRemove {
         workspace_id: String,
     },
     SessionList {
@@ -315,8 +320,18 @@ fn parse_workspace(args: &[String]) -> Result<Query, CliFailure> {
         [verb] if verb == "show" => Err(CliFailure::invalid_args(
             "workspace show needs a workspace id",
         )),
+        [verb, workspace_id]
+            if verb == "remove" && workspace_id.starts_with("w_") =>
+        {
+            Ok(Query::WorkspaceRemove {
+                workspace_id: workspace_id.clone(),
+            })
+        }
+        [verb] if verb == "remove" => Err(CliFailure::invalid_args(
+            "workspace remove needs a workspace id",
+        )),
         _ => Err(CliFailure::invalid_args(
-            "usage: genet workspace list | genet workspace show <id>",
+            "usage: genet workspace list | genet workspace show <id> | genet workspace remove <id>",
         )),
     }
 }
@@ -653,6 +668,15 @@ async fn execute(
                 .find(|workspace| workspace.id == workspace_id)
                 .ok_or_else(|| CliFailure::target_not_found("workspace", &workspace_id))?;
             Ok(("workspace.show", json!({"workspace": workspace})))
+        }
+        Query::WorkspaceRemove { workspace_id } => {
+            let rpc = connect_selected(selection).await?;
+            rpc.call(Request::WorkspaceRemove {
+                workspace_id: workspace_id.clone(),
+            })
+            .await
+            .map_err(rpc_error)?;
+            Ok(("workspace.remove", json!({"workspaceId": workspace_id, "removed": true})))
         }
         Query::SessionList {
             workspace_id,
@@ -1257,6 +1281,14 @@ fn command_schema(name: &str) -> Value {
         "workspace.list" => ("genet workspace list", true, object_input(json!({}), &[])),
         "workspace.show" => (
             "genet workspace show <id>",
+            true,
+            object_input(
+                json!({"workspaceId": {"type": "string", "minLength": 1}}),
+                &["workspaceId"],
+            ),
+        ),
+        "workspace.remove" => (
+            "genet workspace remove <id>",
             true,
             object_input(
                 json!({"workspaceId": {"type": "string", "minLength": 1}}),
@@ -2581,6 +2613,22 @@ mod tests {
         let (capability_kind, capabilities) = execute(Query::Capabilities, &here).await.unwrap();
         assert_eq!(capability_kind, "capabilities");
         assert_eq!(capabilities["remoteExec"], true);
+    }
+
+    #[test]
+    fn workspace_remove_needs_its_workspace_id() {
+        assert_eq!(
+            parse(&words(&["workspace", "remove", "w_1"])).unwrap(),
+            Query::WorkspaceRemove {
+                workspace_id: "w_1".into()
+            }
+        );
+        for bad in [
+            &["workspace", "remove"][..],
+            &["workspace", "remove", "spaces/game-qa"][..],
+        ] {
+            assert_eq!(parse(&words(bad)).unwrap_err().code, "invalidArgs");
+        }
     }
 
     #[test]

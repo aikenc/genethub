@@ -357,7 +357,6 @@ def me(root):
     return name, {"root": real, "spaces": spaces}
 
 
-_SESSIONS_CACHE = {"at": 0.0, "items": None}
 _WORKSPACE_SESSIONS_CACHE = {}
 
 # 默认 CLI 单次调用直接查实时会话列表；定时钩子将 SESSIONS_TTL 设为 HOOK_SESSIONS_TTL 以在一轮内复用快照。
@@ -366,17 +365,7 @@ HOOK_SESSIONS_TTL = 20.0
 
 
 def clear_sessions_cache():
-    _SESSIONS_CACHE["items"] = None
     _WORKSPACE_SESSIONS_CACHE.clear()
-
-
-def all_sessions(max_age=None):
-    now = time.time()
-    age = SESSIONS_TTL if max_age is None else max_age
-    if _SESSIONS_CACHE["items"] is None or now - _SESSIONS_CACHE["at"] > age:
-        _SESSIONS_CACHE["items"] = genet("session", "list").get("sessions", [])
-        _SESSIONS_CACHE["at"] = time.time()
-    return _SESSIONS_CACHE["items"]
 
 
 def auto_describe_session(session_id, text):
@@ -1553,7 +1542,6 @@ def cmd_init(args):
             )
     # Every thing a person builds is a team: a 1+0 team (front + leader + qa + research + team-reflect)
     # is the smallest one, and `--team` / `--member` are accepted but no longer change the shape.
-    is_team = True
     template = template_dir(root, team=True)
     staging = os.path.join(base, ".init-%s-%d" % (new_name, os.getpid()))
     if os.path.exists(staging):
@@ -1569,7 +1557,7 @@ def cmd_init(args):
         desc_data = read_json(desc_path, {}) or {}
         desc_data["name"] = new_name
         desc_data["description"] = args.desc.strip()
-        if is_team and "team" not in (desc_data.get("tags") or []):
+        if "team" not in (desc_data.get("tags") or []):
             desc_data["tags"] = list(desc_data.get("tags") or ["expert"]) + ["team"]
         write_json(desc_path, desc_data)
         soul_path = os.path.join(staging, "soul.md")
@@ -1589,14 +1577,9 @@ def cmd_init(args):
             new_soul = "# 灵魂\n\n" + role_block
         with open(soul_path, "w", encoding="utf-8") as handle:
             handle.write(new_soul.rstrip() + "\n")
-        if is_team:
-            with open(os.path.join(staging, "charter.md"), "w", encoding="utf-8") as handle:
-                handle.write(new_soul.rstrip() + "\n")
-            setup_team_structure(staging, new_name, args.desc.strip(), getattr(args, "members", None), final_root=target)
-        else:
-            root_env = open_env(staging)
-            root_env.setdefault("EXPERT_EFFORT", "high")
-            write_open_env(staging, root_env)
+        with open(os.path.join(staging, "charter.md"), "w", encoding="utf-8") as handle:
+            handle.write(new_soul.rstrip() + "\n")
+        setup_team_structure(staging, new_name, args.desc.strip(), getattr(args, "members", None), final_root=target)
         ensure_git(staging)
         os.replace(staging, target)
     except Exception:
@@ -2603,6 +2586,11 @@ def platform_digest(root):
 
 def platform_commit(root, template):
     """Records the template as it is now on the `platform` branch (one commit per version). Returns whether it added one."""
+    if not template_files(template):
+        # A template that ships nothing (removed, or not unpacked yet) must never be recorded:
+        # `template_tracked` would keep only `.gitignore`, and merging that tree strips the team bare.
+        print("平台模板目录是空的（%s），跳过这次 platform 记录" % template)
+        return False
     digest = template_digest(template)
     ref = platform_ref(root)
     if platform_digest(root) == digest and ref == "refs/heads/platform":
