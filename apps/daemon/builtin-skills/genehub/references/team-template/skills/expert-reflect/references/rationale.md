@@ -44,7 +44,7 @@
 - **谁都能开 `research` 和 `work`**（`front`、`work`、`research`、`reflect` 之间互相开），不设约束，由 Skill 引导。
 
 **3. 唤醒靠脚本判断，不靠模型；留言与动态追加结合**
-- 约束：专家空闲时 LLM 请求数应为 0。判断"该不该唤醒"由 `expert.py` 的 timer 做，不调模型。
+- 约束：专家空闲时 LLM 请求数应为 0。判断"该不该唤醒"由 `team.py` 的 timer 做，不调模型。
 - 触发：用户累计完成 3 轮对话立即满足轮次条件（不要求额外静默 10 分钟），或留言里有未处理记录；普通唤醒最短间隔 `EXPERT_WAKE_GAP=600`（10 分钟），而 `anomaly` 与 `upgrade` 紧急留言豁免间隔与聚批延迟、立即唤醒。
 - 动态追加：若反思会话正在运行且来了新留言，timer 直接通过 `notice` 将新留言追加给运行中的反思会话（在 `reflect.json` 记录 `notifiedNotes` 防重），不等下一轮。
 - 数据：只数用户发起的轮（`userItemId` 不以 `x.` 开头），"实质"由你判断。
@@ -63,7 +63,7 @@
 - **但锁是脚本层，你可以调。** 如果反思时有证据表明这位用户偏好激进（愿意承担并发写的风险、嫌排队慢），你可以放宽：比如改成提示不拒绝，或只对特定目录放宽。放宽要走第五节的卫生规则（引用证据、写进 `tools/local/policy.json`、之后复查冲突是否真的多了）。没有这类证据时，不要动。
 
 **6. 文件分层：平台层与专家层；记忆按 L1/L2/L3 三级治理**
-- 平台层：模板带来的 `expert-*` Skill、`tools/expert.py`、`tools/spacebuilder.py`、描述文件。**产品升级会覆盖它们（通过三方合并）。**
+- 平台层：模板带来的 `expert-*` Skill、`tools/team.py`、`tools/spacebuilder.py`、描述文件。**产品升级会覆盖它们（通过三方合并）。**
 - 专家层：`soul.md`、`memory.md`（L1 高频核心记忆，≤ 30 行）、各角色 `style.md` 与 `index.md`（L2 索引指针）、自己新建的 Skill 目录（如 `skills/local-*`）、`tools/local/` 下的脚本、`posts/`。升级与 `reset` 不动它们。
 - 会话即事实源（L3）：历史会话存储在 `.genethub/sessions/`（内置 `.rgignore` 放行索引流并屏蔽 `blobs/`），需要查过往细节时用 `rg` 搜索会话索引并用 `genet session` 调阅，不在 `memory.md` 堆流水账。
 
@@ -71,10 +71,10 @@
 - 放弃：独立目录放仓库（`.genethub/` 与生成物必须在根目录，来回链接脆弱）；自造补丁账本；用 `-X ours` 假合并（会静默丢弃平台新改动）。
 - 做法：根目录有仓库，`.gitignore` 用**允许名单**（默认全忽略，只放行 `soul.md`、`memory.md`、`front/style.md`、`front/index.md`、`spaces/*/style.md`、`spaces/*/index.md`、`skills/`、`tools/`、`posts/`、`docs/`、描述文件），所以 `temp/`、`datas/` 里的嵌套仓库、`.genethub/`、生成物都不会被收。
 - `platform` 分支在初始化时即建立并作为 `main` 的父提交，后续每次平台升级在 `platform` 分支形成单调演进链，支持直接 `git merge platform` 真实三方合并。
-- **升级由你执行**：在 `temp/` 里克隆，把新模板提交到 `platform`，用 `git merge platform` 合并进 `main`（无共同祖先的旧仓库才加 `--allow-unrelated-histories`，绝不用 `-X ours`），解冲突，运行 `python3 tools/spacebuilder.py build .` 构建通过后才落到根目录并调用 `expert.py sync-identity`。`reset` 只在用户明确授权时直接用。
+- **升级由你执行**：在 `temp/` 里克隆，把新模板提交到 `platform`，用 `git merge platform` 合并进 `main`（无共同祖先的旧仓库才加 `--allow-unrelated-histories`，绝不用 `-X ours`），解冲突，运行 `python3 tools/spacebuilder.py build .` 构建通过后才落到根目录并调用 `team.py sync-identity`。`reset` 只在用户明确授权时直接用。
 
 **8. 平台限制，你可以去读平台代码**
-- 平台仓库：开源仓 `https://github.com/aikenc/genethub`（不同部署地址可能不同；运行中的版本用 `genet daemon status` 看）。守护进程、内置 Skill、专家模板、`expert.py`、SpaceBuilder 都在里面。
+- 平台仓库：开源仓 `https://github.com/aikenc/genethub`（不同部署地址可能不同；运行中的版本用 `genet daemon status` 看）。守护进程、内置 Skill、专家模板、`team.py`、SpaceBuilder 都在里面。
 - 读哪个版本：运行中的版本看 `daemon status` 的 `daemonVersion`；版本到提交的对应关系**未核实**，对应不上就读 `main` 并写明。克隆到 `temp/`，用完可清。
 - 你改不了运行中的平台代码。所以结论是**外部问题**：写清种类、证据引用、读到的代码位置、建议怎么改，经 `front` 告诉用户。
 
@@ -130,7 +130,7 @@
 
 ---
 
-## 九、当前实现的参数与限制地图（会变，以 `tools/expert.py` 为准）
+## 九、当前实现的参数与限制地图（会变，以 `tools/team.py` 为准）
 
 ### 1. 脚本层可调参数（环境变量或 `.genethub/open.env`）
 
@@ -145,10 +145,10 @@
 
 | 限制 / 机制 | 所在位置 | 你能否直接改 | 怎么改 / 遇到问题怎么办 |
 |---|---|---|---|
-| 写者锁（同一目录单写会话） | `tools/expert.py` 的 `spawn --dir` | 能（谨慎档） | 平台默认严格拒绝；有用户偏好激进的明确证据时可按第五节规则放宽 |
-| 父子等待与同轮批次（`batch`）聚批 | `tools/expert.py` 的 `reconcile` | 能（谨慎档） | 默认同一请求方同一轮派出的子会话全部结束后合并发 1 条 `result`；若某专家需逐条即时通知可改脚本 |
-| 消息正文 8 KiB 截断（`ref` 在头部保留） | `tools/expert.py` 的 `clip` / `notice` | 能（谨慎档） | `ref` 固定在正文前不被截断；需要全文时用 `genet session narrative <会话> --item <消息>` |
-| 模型/媒体档位路由拒绝 | `tools/expert.py` 的 `choose` | 能（谨慎档） | 可调整回退逻辑或在 `.genethub/open.env` 配置默认模型 |
+| 写者锁（同一目录单写会话） | `tools/team.py` 的 `spawn --dir` | 能（谨慎档） | 平台默认严格拒绝；有用户偏好激进的明确证据时可按第五节规则放宽 |
+| 父子等待与同轮批次（`batch`）聚批 | `tools/team.py` 的 `reconcile` | 能（谨慎档） | 默认同一请求方同一轮派出的子会话全部结束后合并发 1 条 `result`；若某专家需逐条即时通知可改脚本 |
+| 消息正文 8 KiB 截断（`ref` 在头部保留） | `tools/team.py` 的 `clip` / `notice` | 能（谨慎档） | `ref` 固定在正文前不被截断；需要全文时用 `genet session narrative <会话> --item <消息>` |
+| 模型/媒体档位路由拒绝 | `tools/team.py` 的 `choose` | 能（谨慎档） | 可调整回退逻辑或在 `.genethub/open.env` 配置默认模型 |
 | Skill 文件 ≤ 40 行、`memory.md` ≤ 30 行 | 产品测试与约定 | 改 Skill/记忆时必须遵守 | 每加一行先删一行，低频索引放各角色 `index.md`，完整证据留在 `.genethub/sessions/` |
-| 编译后 `identity` 总长 ≤ 32 KiB、根树边界内相对路径 | `tools/spacebuilder.py`（SB019 / SB001） | 能（谨慎档，构建器在 `tools/spacebuilder.py`） | 精简 `soul.md` / `memory.md` / `style.md` / `index.md`；修改后运行 `expert.py sync-identity` |
+| 编译后 `identity` 总长 ≤ 32 KiB、根树边界内相对路径 | `tools/spacebuilder.py`（SB019 / SB001） | 能（谨慎档，构建器在 `tools/spacebuilder.py`） | 精简 `soul.md` / `memory.md` / `style.md` / `index.md`；修改后运行 `team.py sync-identity` |
 | 会话待处理消息队列上限（约 32 条） | 守护进程 `session/inbox.rs` | 不能（平台层） | 属于平台限制；若触发，记入 `docs/platform-issues.md` 并按需 `tell-user` |
