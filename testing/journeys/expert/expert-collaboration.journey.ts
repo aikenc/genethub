@@ -160,10 +160,10 @@ defineJourney(
       await t.tools.waitUntil(async () => (await resultsIn()).length >= 1, 40_000);
       await new Promise((resolve) => setTimeout(resolve, 3_000));
       t.assertions.assert((await resultsIn()).length === 1, `the result was delivered ${(await resultsIn()).length} times`);
-      const pending = path.join(alice, ".genethub/expert/pending");
-      const done = path.join(alice, ".genethub/expert/done");
+      const pending = path.join(alice, ".genethub/team/pending");
+      const done = path.join(alice, ".genethub/team/done");
       t.assertions.assert(readdirSync(pending).length === 0 && readdirSync(done).length === 1, `pending ${readdirSync(pending)} done ${readdirSync(done)}`);
-      t.assertions.assert(existsSync(path.join(alice, ".genethub/expert/alive")), "the timer never reported itself alive");
+      t.assertions.assert(existsSync(path.join(alice, ".genethub/team/alive")), "the timer never reported itself alive");
 
       // 2. Two jobs from one turn: each result reaches the front exactly once and `pending/` ends empty.
       const resultsFor = async (sid: string) =>
@@ -235,14 +235,14 @@ defineJourney(
       // 5. `note` is a file. It records the session, creates no session, and a note for another expert lands there.
       const noted = expert(alice, "note", "--session", front, "--kind", "preference", "--quote", "that is not what I meant", "--context", "opened a read-only review as work");
       t.assertions.assert(noted.code === 0 && noted.out.includes("已留言"), `note: ${noted.err || noted.out}`);
-      const ownNotes = readdirSync(path.join(alice, ".genethub/expert/notes"));
-      const ownNote = JSON.parse(readFileSync(path.join(alice, ".genethub/expert/notes", ownNotes[0]!), "utf8"));
+      const ownNotes = readdirSync(path.join(alice, ".genethub/team/notes"));
+      const ownNote = JSON.parse(readFileSync(path.join(alice, ".genethub/team/notes", ownNotes[0]!), "utf8"));
       t.assertions.assert(ownNotes.length === 1 && ownNote.session === front && ownNote.kind === "preference" && ownNote.quote === "that is not what I meant", `own note ${JSON.stringify(ownNote)}`);
       t.assertions.assert(expert(alice, "note", "--session", front, "--kind", "preference", "--quote", "that is not what I meant", "--context", "opened a read-only review as work").out.includes("记过了"), "the same note was written twice");
       const toBob = expert(alice, "note", "--session", front, "--expert", "bob", "please look at the review habit");
       t.assertions.assert(toBob.code === 0, `note --expert: ${toBob.err || toBob.out}`);
-      const bobNotes = readdirSync(path.join(bob, ".genethub/expert/notes"));
-      const bobRead = bobNotes.map((file) => JSON.parse(readFileSync(path.join(bob, ".genethub/expert/notes", file), "utf8")) as { from?: string; kind?: string; context?: string });
+      const bobNotes = readdirSync(path.join(bob, ".genethub/team/notes"));
+      const bobRead = bobNotes.map((file) => JSON.parse(readFileSync(path.join(bob, ".genethub/team/notes", file), "utf8")) as { from?: string; kind?: string; context?: string });
       const fromAlice = bobRead.filter((note) => note.from === "alice");
       t.assertions.assert(
         fromAlice.length === 1 && fromAlice[0]!.context === "please look at the review habit",

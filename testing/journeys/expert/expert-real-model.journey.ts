@@ -191,7 +191,7 @@ defineJourney(
         await fail("the front did not answer the person after the result arrived", [front, worker.id]);
       }
       metrics.final = { totalMs: Date.now() - started2, front: await usage(front), reply: (await replies()).at(-1)?.slice(0, 200) };
-      metrics.pendingLeft = readdirSync(path.join(alice, ".genethub/expert/pending"));
+      metrics.pendingLeft = readdirSync(path.join(alice, ".genethub/team/pending"));
       // Where to keep what the model did, when the person running this wants it.
       if (process.env.EXPERT_REAL_METRICS_OUT) writeFileSync(process.env.EXPERT_REAL_METRICS_OUT, JSON.stringify(metrics, null, 1));
     } finally {

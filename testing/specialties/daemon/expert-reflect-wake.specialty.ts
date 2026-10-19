@@ -314,7 +314,7 @@ defineSpecialty(
     t.assertions.assert(started.code === 0 && started.out.startsWith("已开始反思会话 s_new1"), `reflect now: ${started.out} ${started.err}`);
     const run = r.calls().filter((call) => call[0] === "agent");
     t.assertions.assert(run.length === 1 && run[0]!.join(" ").includes("把评审分流的毛病现在就改掉") && run[0]!.join(" ").includes("用户要求立刻反思"), `agent run ${JSON.stringify(run)}`);
-    const pending = join(r.expert, ".genethub/expert/pending");
+    const pending = join(r.expert, ".genethub/team/pending");
     const record = JSON.parse(readFileSync(join(pending, readdirSync(pending)[0]!), "utf8"));
     t.assertions.assert(record.quiet === false && record.requester === "s_front" && record.kind === "reflect", `record ${JSON.stringify(record)}`);
 

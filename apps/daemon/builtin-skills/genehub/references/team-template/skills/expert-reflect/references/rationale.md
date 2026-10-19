@@ -45,7 +45,7 @@
 
 **3. 唤醒靠脚本判断，不靠模型；留言与动态追加结合**
 - 约束：专家空闲时 LLM 请求数应为 0。判断"该不该唤醒"由 `team.py` 的 timer 做，不调模型。
-- 触发：用户累计完成 3 轮对话立即满足轮次条件（不要求额外静默 10 分钟），或留言里有未处理记录；普通唤醒最短间隔 `EXPERT_WAKE_GAP=600`（10 分钟），而 `anomaly` 与 `upgrade` 紧急留言豁免间隔与聚批延迟、立即唤醒。
+- 触发：用户累计完成 3 轮对话立即满足轮次条件（不要求额外静默 10 分钟），或留言里有未处理记录；普通唤醒最短间隔 `TEAM_WAKE_GAP=600`（10 分钟），而 `anomaly` 与 `upgrade` 紧急留言豁免间隔与聚批延迟、立即唤醒。
 - 动态追加：若反思会话正在运行且来了新留言，timer 直接通过 `notice` 将新留言追加给运行中的反思会话（在 `reflect.json` 记录 `notifiedNotes` 防重），不等下一轮。
 - 数据：只数用户发起的轮（`userItemId` 不以 `x.` 开头），"实质"由你判断。
 
@@ -136,10 +136,10 @@
 
 不同领域的专家（如秒级问答、深度评审、长耗时编译/仿真）节奏不同。发现默认阈值不合当前专家或用户习惯时，可在 `.genethub/open.env` 调整并记录原因：
 
-- **反思唤醒**：`EXPERT_WAKE_ROUNDS=3`（用户累计发起轮数，达标即触发）、`EXPERT_NOTE_QUIET=60`（普通留言聚批秒数）、`EXPERT_WAKE_GAP=600`（两次普通唤醒最短间隔 10 分钟；`kind=anomaly` 与 `kind=upgrade` 紧急留言及 `reflect now` 不受间隔与聚批限制）、`EXPERT_WAKE_CHECK=60`、`EXPERT_PLATFORM_CHECK=300`（5 分钟平台模板哈希对账）。
-- **后台会话监控**：`EXPERT_STOPPED_AFTER=60`（`idle` 无新回复静默满 60 秒报一次并留 `anomaly` 留言，保留待办记录）、`EXPERT_GIVEUP_AFTER=1800`（满 30 分钟仍无回复则归档，避免整批无限等待）、`EXPERT_STUCK_AFTER=180`（`running` 且 `lastActivityAtMs` 静默满 3 分钟报卡住并留 `anomaly` 留言）。
-- **临时区清理**：`EXPERT_TEMP_KEEP_DAYS=7`（最后修改超过 7 天且最近 24 小时无改动才清理）。
-- **模型路由**：`EXPERT_MODEL_REFLECT`、`EXPERT_MODEL_RESEARCH`、`EXPERT_MODEL_WORK`、`EXPERT_AGENT`。
+- **反思唤醒**：`TEAM_WAKE_ROUNDS=3`（用户累计发起轮数，达标即触发）、`TEAM_NOTE_QUIET=60`（普通留言聚批秒数）、`TEAM_WAKE_GAP=600`（两次普通唤醒最短间隔 10 分钟；`kind=anomaly` 与 `kind=upgrade` 紧急留言及 `reflect now` 不受间隔与聚批限制）、`TEAM_WAKE_CHECK=60`、`TEAM_PLATFORM_CHECK=300`（5 分钟平台模板哈希对账）。
+- **后台会话监控**：`TEAM_STOPPED_AFTER=60`（`idle` 无新回复静默满 60 秒报一次并留 `anomaly` 留言，保留待办记录）、`TEAM_GIVEUP_AFTER=1800`（满 30 分钟仍无回复则归档，避免整批无限等待）、`TEAM_STUCK_AFTER=180`（`running` 且 `lastActivityAtMs` 静默满 3 分钟报卡住并留 `anomaly` 留言）。
+- **临时区清理**：`TEAM_TEMP_KEEP_DAYS=7`（最后修改超过 7 天且最近 24 小时无改动才清理）。
+- **模型路由**：`TEAM_MODEL_REFLECT`、`TEAM_MODEL_RESEARCH`、`TEAM_MODEL_WORK`、`TEAM_AGENT`。
 
 ### 2. 限制地图：哪条限制在哪一层、你能怎么改
 

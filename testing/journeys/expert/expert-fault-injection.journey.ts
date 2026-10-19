@@ -125,7 +125,7 @@ defineJourney(
         const found = await notices(needle, kind);
         t.assertions.assert(found.length === 1, `${what}: ${found.length} notices for ${needle} ${kind}`);
       };
-      const pendingIds = () => readdirSync(path.join(alice, ".genethub/expert/pending")).map((name) => name.replace(/\.json$/, ""));
+      const pendingIds = () => readdirSync(path.join(alice, ".genethub/team/pending")).map((name) => name.replace(/\.json$/, ""));
 
       // waiting: the session stops at a question for the person.
       const waiting = await spawnWith("ctl-native-question", "needs an answer");
@@ -143,7 +143,7 @@ defineJourney(
       // failed: the Agent process dies mid-turn -> reported once to front AND recorded as an anomaly note for reflect.
       const failed = await spawnWith("ctl-exit-without-terminal", "dies in the middle");
       await exactlyOnce(failed, /已失败/, "failed");
-      const notesDir = path.join(alice, ".genethub/expert/notes");
+      const notesDir = path.join(alice, ".genethub/team/notes");
       const anomalyNotes = () =>
         existsSync(notesDir)
           ? readdirSync(notesDir)
@@ -165,7 +165,7 @@ defineJourney(
       if (badReflectCreated?.type !== "session") throw new Error(`session.create returned ${badReflectCreated?.type}`);
       const badReflectId = (badReflectCreated.data as unknown as { id: string }).id;
       writeFileSync(
-        path.join(alice, ".genethub/expert/pending", `${badReflectId}.json`),
+        path.join(alice, ".genethub/team/pending", `${badReflectId}.json`),
         JSON.stringify({
           sessionId: badReflectId,
           requester: null,
@@ -231,7 +231,7 @@ defineJourney(
       );
 
       // The timer survived all of it.
-      t.assertions.assert(existsSync(path.join(alice, ".genethub/expert/alive")), "no heartbeat");
+      t.assertions.assert(existsSync(path.join(alice, ".genethub/team/alive")), "no heartbeat");
     } finally {
       opened.client.close();
       opened.daemon.stop();

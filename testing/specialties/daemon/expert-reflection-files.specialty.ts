@@ -168,23 +168,23 @@ defineSpecialty(
 
     // A new template version: one upgrade note, then silence; drift says the template is newer; once platform branch catches up, the note is auto-cleaned.
     t.assertions.assert(r.drive([{ do: "watch" }])[0]!.error === undefined, "platform_watch failed");
-    t.assertions.assert(!existsSync(join(r.expert, ".genethub/expert/notes")), "a note was written though the template did not change");
+    t.assertions.assert(!existsSync(join(r.expert, ".genethub/team/notes")), "a note was written though the template did not change");
     t.assertions.assert(r.git("merge-base", "main", "platform").length > 0, "main and platform do not share a merge-base");
     writeFileSync(join(r.template, "skills/expert-work/SKILL.md"), readFileSync(join(r.template, "skills/expert-work/SKILL.md"), "utf8") + "\n新版本多一行\n");
     r.drive([{ do: "watch" }]);
     r.drive([{ do: "watch" }]);
-    const notes = readdirSync(join(r.expert, ".genethub/expert/notes"));
-    const note = JSON.parse(readFileSync(join(r.expert, ".genethub/expert/notes", notes[0]!), "utf8"));
+    const notes = readdirSync(join(r.expert, ".genethub/team/notes"));
+    const note = JSON.parse(readFileSync(join(r.expert, ".genethub/team/notes", notes[0]!), "utf8"));
     t.assertions.assert(notes.length === 1 && note.kind === "upgrade", `upgrade notes ${JSON.stringify(notes)}`);
     t.assertions.assert(r.cli(["drift"]).out.includes("平台模板有新版本"), `drift after a template change: ${r.cli(["drift"]).out}`);
     r.cli(["snapshot", "--refresh-platform"]);
     r.drive([{ do: "watch" }]);
-    t.assertions.assert(readdirSync(join(r.expert, ".genethub/expert/notes")).length === 0, "upgrade note was not auto-cleaned after platform branch caught up");
+    t.assertions.assert(readdirSync(join(r.expert, ".genethub/team/notes")).length === 0, "upgrade note was not auto-cleaned after platform branch caught up");
 
     // 3-way merge in temp/ (as upgrade.md prescribes): template updates front/style.md while expert customized soul.md and skills/expert-core/SKILL.md.
     writeFileSync(join(r.template, "front/style.md"), `${readFileSync(join(r.template, "front/style.md"), "utf8")}\n- 平台新增前台规范条目\n`);
     r.drive([{ do: "watch" }]);
-    t.assertions.assert(readdirSync(join(r.expert, ".genethub/expert/notes")).length === 1, "second template update did not create upgrade note");
+    t.assertions.assert(readdirSync(join(r.expert, ".genethub/team/notes")).length === 1, "second template update did not create upgrade note");
     const workdir = r.cli(["temp", "new", "upgrade-platform", "--purpose", "三方合并升级平台模板"]).out;
     t.assertions.assert(workdir.includes("/temp/"), `temp new for upgrade: ${workdir}`);
     spawnSync("git", ["clone", "-q", r.expert, join(workdir, "repo")], { env: r.env });
@@ -212,7 +212,7 @@ defineSpecialty(
       "3-way merge did not preserve both platform update and expert customization",
     );
     r.drive([{ do: "watch" }]);
-    t.assertions.assert(readdirSync(join(r.expert, ".genethub/expert/notes")).length === 0, "upgrade note was not auto-cleaned after 3-way merge");
+    t.assertions.assert(readdirSync(join(r.expert, ".genethub/team/notes")).length === 0, "upgrade note was not auto-cleaned after 3-way merge");
 
     // No git: said once with the next step; nothing else breaks.
     const python = spawnSync("which", ["python3"], { encoding: "utf8" }).stdout.trim();
@@ -252,7 +252,7 @@ defineSpecialty(
     id: "specialty.daemon.expert-notes",
     title: "A note records the session, the turn and a reference the reflect session can follow, and is kept even when fields are missing",
     oracle:
-      "note --quote --context writes one file under .genethub/expert/notes with the session, the newest round's id and user message id, and ghref:item:<session>:<message>; the same note twice is written once; a note with no quote or context is still kept and the output names what is missing; without a session id it is kept with a hint; `notes` lists it, `notes done` moves it to the handled set with the result, and a handled note is not written again",
+      "note --quote --context writes one file under .genethub/team/notes with the session, the newest round's id and user message id, and ghref:item:<session>:<message>; the same note twice is written once; a note with no quote or context is still kept and the output names what is missing; without a session id it is kept with a hint; `notes` lists it, `notes done` moves it to the handled set with the result, and a handled note is not written again",
     catches: [
       "a note that cannot be traced back to the round that caused it",
       "a note refused for a missing field, so the unhappiness goes unrecorded",
@@ -267,7 +267,7 @@ defineSpecialty(
     const withRounds = { FAKE_ROUNDS: rounds };
     const noted = r.cli(["note", "--kind", "unhappy", "--quote", "不对，不是这个意思", "--context", "把评审开成了 work"], withRounds);
     t.assertions.assert(noted.code === 0 && noted.out.startsWith("已留言") && !noted.out.includes("；"), `note: ${noted.out} ${noted.err}`);
-    const dir = join(r.expert, ".genethub/expert/notes");
+    const dir = join(r.expert, ".genethub/team/notes");
     const files = readdirSync(dir);
     const note = JSON.parse(readFileSync(join(dir, files[0]!), "utf8"));
     t.assertions.assert(
@@ -288,7 +288,7 @@ defineSpecialty(
     const id = files[0]!.replace(".json", "");
     t.assertions.assert(r.cli(["notes", "done", id, "--result", "改了前台 Skill"]).out === "已处理 1 条留言", "notes done");
     t.assertions.assert(!existsSync(join(dir, files[0]!)), "a handled note is still pending");
-    const handled = JSON.parse(readFileSync(join(r.expert, ".genethub/expert/notes-done", files[0]!), "utf8"));
+    const handled = JSON.parse(readFileSync(join(r.expert, ".genethub/team/notes-done", files[0]!), "utf8"));
     t.assertions.assert(handled.result === "改了前台 Skill" && typeof handled.handledAtMs === "number", `handled note ${JSON.stringify(handled)}`);
     t.assertions.assert(r.cli(["note", "--kind", "unhappy", "--quote", "不对，不是这个意思", "--context", "把评审开成了 work"], withRounds).out.includes("记过了") && !existsSync(join(dir, files[0]!)), "a handled note came back");
     const missing = r.cli(["notes", "done", "nope"]);

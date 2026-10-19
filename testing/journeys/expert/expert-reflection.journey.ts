@@ -101,7 +101,7 @@ defineJourney(
         } catch (error) {
           const notices = (await snapshot(front)).items.filter((item) => isSystem(item)).map((item) => (item.text ?? "").slice(0, 400));
           const hooks = spawnSync(genet, ["hook", "list", "--workspace", root!.id], { env, encoding: "utf8" }).stdout.slice(-1500);
-          const state = ["reflect.json", "platform-check.json"].map((name) => path.join(alice, ".genethub/expert", name)).filter(existsSync).map((file) => readFileSync(file, "utf8"));
+          const state = ["reflect.json", "platform-check.json"].map((name) => path.join(alice, ".genethub/team", name)).filter(existsSync).map((file) => readFileSync(file, "utf8"));
           const conversation = (await snapshot(front)).items.map((item) => `${item.type}${isSystem(item) ? "(system)" : ""}:${(item.text ?? "").slice(0, 30)}`);
           const rounds = spawnSync(genet, ["session", "rounds", front], { env, encoding: "utf8" }).stdout.slice(-1500);
           throw new Error(`gave up waiting for ${label}: ${String(error)}\nsystem notices at the front: ${JSON.stringify(notices)}\nhooks: ${hooks}\nstate: ${state.join(" ")}\nrounds: ${rounds}\nconversation: ${JSON.stringify(conversation)}`);
@@ -149,7 +149,7 @@ defineJourney(
       t.assertions.assert(prompt.includes("用途: reflect") && prompt.includes("按 expert-reflect 办") && briefingPath && existsSync(briefingPath), `first message: ${prompt.slice(0, 400)}`);
       t.assertions.assert(readFileSync(briefingPath!, "utf8").includes("自上次反思以来用户发起了 3 轮对话"), "the briefing does not say why");
       const results = async () => (await snapshot(front)).items.filter((item) => isSystem(item) && (item.text ?? "").includes("用途: result"));
-      const done = path.join(alice, ".genethub/expert/done");
+      const done = path.join(alice, ".genethub/team/done");
       await until("the first reflect record to close", async () => existsSync(done) && readdirSync(done).length >= 1);
       await new Promise((resolve) => setTimeout(resolve, 3_000));
       t.assertions.assert((await results()).length === 0, "a routine reflect run reported its result to the front");
@@ -159,7 +159,7 @@ defineJourney(
       const last = (await personsMessages()).at(-1)!;
       const noted = expert("note", "--session", front, "--kind", "unhappy", "--quote", "不对，不是这个意思", "--context", "把只读的评审开成了 work");
       t.assertions.assert(noted.code === 0 && noted.out.startsWith("已留言"), `note: ${noted.err || noted.out}`);
-      const notesDir = path.join(alice, ".genethub/expert/notes");
+      const notesDir = path.join(alice, ".genethub/team/notes");
       const noteFile = readdirSync(notesDir)[0]!;
       const note = JSON.parse(readFileSync(path.join(notesDir, noteFile), "utf8"));
       t.assertions.assert(note.turn?.userItemId === last.id && note.ref === `ghref:item:${front}:${last.id}`, `the note does not point at the newest user message ${last.id}: ${JSON.stringify(note)}`);

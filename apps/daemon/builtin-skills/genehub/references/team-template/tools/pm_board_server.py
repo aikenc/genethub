@@ -661,7 +661,7 @@ def build_board_live_data(team_root):
     team_name = desc.get("name") or os.path.basename(team_root)
     team_desc = desc.get("description") or ""
 
-    svc_state = read_json(os.path.join(team_root, ".genethub", "expert", "board-service.json"), {}) or {}
+    svc_state = read_json(os.path.join(team_root, ".genethub", "team", "board-service.json"), {}) or {}
     pid = svc_state.get("pid")
     svc_running = False
     if isinstance(pid, int) and pid > 0:
@@ -690,7 +690,7 @@ def build_board_live_data(team_root):
         role_desc_json = read_json(os.path.join(role_dir, "agent-space.genet.json"), {}) or {}
         env = parse_env_file(os.path.join(env_dir, ".genethub", "open.env"))
         wt_dir = team_root if role == "root" else env.get("WORKTREE_DIR")
-        effort = env.get("EXPERT_EFFORT") or "high"
+        effort = env.get("TEAM_EFFORT") or "high"
         ws_info = spaces_by_role.get(role) or {}
         wid = ws_info.get("id") or ""
         sess_list = sorted(sessions_by_ws.get(wid, []), key=lambda s: -s.get("updatedAtMs", 0))
@@ -871,7 +871,7 @@ def ensure_team_board(team_root, start_service=True, force_sync=False):
 
 def ensure_board_daemon(team_root):
     team_root = os.path.realpath(team_root)
-    state_file = os.path.join(team_root, ".genethub", "expert", "board-service.json")
+    state_file = os.path.join(team_root, ".genethub", "team", "board-service.json")
     state = read_json(state_file, {}) or {}
     pid = state.get("pid")
     if isinstance(pid, int) and pid > 0:
@@ -881,7 +881,7 @@ def ensure_board_daemon(team_root):
         except OSError:
             pass
     script_path = os.path.realpath(__file__)
-    log_path = os.path.join(team_root, ".genethub", "expert", "board-service.log")
+    log_path = os.path.join(team_root, ".genethub", "team", "board-service.log")
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
     with open(log_path, "a", encoding="utf-8") as log_handle:
         proc = subprocess.Popen(
@@ -1082,7 +1082,7 @@ async def serve_board(team_root):
     })
     os.chmod(reg_path, 0o600)
 
-    state_file = os.path.join(team_root, ".genethub", "expert", "board-service.json")
+    state_file = os.path.join(team_root, ".genethub", "team", "board-service.json")
     write_json_atomic(state_file, {
         "pid": os.getpid(),
         "port": port,

@@ -53,18 +53,28 @@ import time
 
 sys.dont_write_bytecode = True
 BODY_LIMIT = 8 * 1024
-STOPPED_AFTER_S = int(os.environ.get("EXPERT_STOPPED_AFTER", "60"))
-GIVEUP_AFTER_S = int(os.environ.get("EXPERT_GIVEUP_AFTER", "1800"))
-STUCK_AFTER_S = int(os.environ.get("EXPERT_STUCK_AFTER", "300"))
+
+
+def env_get(name, default=None):
+    """`TEAM_*` is the name now; a Space that predates the rename still carries `EXPERT_*`."""
+    value = os.environ.get(name)
+    if value in (None, "") and name.startswith("TEAM_"):
+        value = os.environ.get("EXPERT" + name[len("TEAM"):])
+    return default if value in (None, "") else value
+
+
+STOPPED_AFTER_S = int(env_get("TEAM_STOPPED_AFTER", "60"))
+GIVEUP_AFTER_S = int(env_get("TEAM_GIVEUP_AFTER", "1800"))
+STUCK_AFTER_S = int(env_get("TEAM_STUCK_AFTER", "300"))
 # The daemon's own wording for a turn that died (`apps/daemon/src/session/inbox.rs:808`); it pauses the session
 # with this message, which is the only way to tell a dead turn from a pause the person asked for.
 TURN_FAILED_ERROR = "本轮失败，已接收消息保留"
 # Patience for one member of a batch whose siblings are already finished: a leader driving 5-10 workers must
 # not wait the single-task threshold for a member that has gone quiet, or every finished result waits with it.
 # This never shortens a member that is still doing something; only its own silence ends the wait.
-BATCH_STUCK_AFTER_S = int(os.environ.get("EXPERT_BATCH_STUCK_AFTER", "90"))
-WATCHDOG_AFTER_S = int(os.environ.get("EXPERT_WATCHDOG_AFTER", "15"))
-WATCHDOG_MAX_WAKES = int(os.environ.get("EXPERT_WATCHDOG_MAX_WAKES", "3"))
+BATCH_STUCK_AFTER_S = int(env_get("TEAM_BATCH_STUCK_AFTER", "90"))
+WATCHDOG_AFTER_S = int(env_get("TEAM_WATCHDOG_AFTER", "15"))
+WATCHDOG_MAX_WAKES = int(env_get("TEAM_WATCHDOG_MAX_WAKES", "3"))
 # When the timer wakes the reflect session. Each can be overridden by the environment or `.genethub/open.env`.
 WAKE_ROUNDS = 3          # user-initiated rounds since the last wake
 WAKE_GAP_S = 600         # least time between two wakes (`reflect now` and urgent notes ignore it)
@@ -73,7 +83,7 @@ WAKE_CHECK_S = 60        # how often the rounds are counted (counting asks the d
 PLATFORM_CHECK_S = 60    # how often the template is compared with the platform branch
 REPORT_AGAIN_S = 6 * 3600
 HEALTH_CHECK_S = 60      # how often the timer asks the daemon whether its hooks are broken (one `hook list` is ~2s)
-TEMP_KEEP_DAYS = float(os.environ.get("EXPERT_TEMP_KEEP_DAYS", "7"))
+TEMP_KEEP_DAYS = float(env_get("TEAM_TEMP_KEEP_DAYS", "7"))
 TEMP_ACTIVE_S = 24 * 3600
 TEMP_CLEAN_EVERY_S = 3600
 SLUG_RULE = "slug 只能用小写字母、数字和连字符（如 fix-login、review-pr-42），1 到 30 个字符，要能看出用途；用途是中文就写成英文 slug，中文放进 --purpose"
@@ -163,13 +173,20 @@ def descriptor(directory):
     return read_json(os.path.join(directory, "agent-space.genet.json"))
 
 
+def is_space(info):
+    """A directory is one of ours when its descriptor says so. `team` is the tag now;
+    Spaces built before the rename still carry `expert`."""
+    tags = (info or {}).get("tags") or []
+    return "team" in tags or "expert" in tags
+
+
 def _walk_expert_root(path):
     if not path:
         return None
     here = os.path.realpath(path)
     while True:
         found = descriptor(here)
-        if found and "expert" in (found.get("tags") or []):
+        if is_space(found):
             return here
         parent = os.path.dirname(here)
         if parent == here:
@@ -211,6 +228,12 @@ def open_env(root):
                     values[key.strip()] = value.strip().strip('"')
     except OSError:
         pass
+    # A Space that predates the rename still carries `EXPERT_*`; read it under the new name too.
+    for key, value in list(values.items()):
+        if key == "EXPERT_TEAM":
+            values.setdefault("TEAM_MODE", value)
+        elif key.startswith("EXPERT_"):
+            values.setdefault("TEAM" + key[len("EXPERT"):], value)
     return values
 
 
@@ -224,8 +247,13 @@ def write_open_env(root, values):
 
 
 def setting(root, key, default):
-    """A number the environment or the machine's `.genethub/open.env` may override."""
-    value = os.environ.get(key) or open_env(root).get(key)
+    """A number the environment or the machine's `.genethub/open.env` may override.
+    `TEAM_*` is the name now; a Space that predates the rename still carries `EXPERT_*`."""
+    value = env_get(key)
+    if value in (None, ""):
+        value = open_env(root).get(key)
+    if value in (None, "") and key.startswith("TEAM_"):
+        value = open_env(root).get("EXPERT" + key[len("TEAM"):])
     try:
         return float(value) if value not in (None, "") else default
     except ValueError:
@@ -233,7 +261,19 @@ def setting(root, key, default):
 
 
 def state_dir(root, *parts):
-    return os.path.join(root, ".genethub", "expert", *parts)
+    """Where a team keeps its live state: pending/notes/inbox, and the hook's own bookkeeping.
+
+    It used to be `.genethub/team/`; the first call after the rename moves it, so a team
+    does not lose the receipts it was holding when it upgraded.
+    """
+    old = os.path.join(root, ".genethub", "expert")
+    new = os.path.join(root, ".genethub", "team")
+    if os.path.isdir(old) and not os.path.exists(new):
+        try:
+            os.replace(old, new)
+        except OSError:
+            pass
+    return os.path.join(new, *parts)
 
 
 def message_id(*parts):
@@ -294,7 +334,7 @@ def experts():
             if not os.path.isdir(candidate):
                 continue
             info = descriptor(candidate)
-            if not (info and "expert" in (info.get("tags") or [])):
+            if not is_space(info):
                 continue
             real = os.path.realpath(candidate)
             expected_name = info.get("name") or os.path.basename(real)
@@ -316,7 +356,7 @@ def experts():
     found = {}
     for root, workspace_id in by_root.items():
         info = descriptor(root)
-        if info and "expert" in (info.get("tags") or []):
+        if is_space(info):
             spaces = {"root": workspace_id}
             for role in child_role_names(root):
                 child = by_root.get(os.path.realpath(os.path.join(root, "spaces", role)))
@@ -475,7 +515,7 @@ def requester_summary(root):
                     break
     if front:
         summary = session_summary(front)
-    env_agent = open_env(root).get("EXPERT_AGENT")
+    env_agent = open_env(root).get("TEAM_AGENT")
     if not summary.get("agentId") or (env_agent and summary.get("agentId") != env_agent):
         try:
             all_routes = routes()
@@ -520,11 +560,11 @@ def choose(root, model_key, tier=None, model=None, media=None):
         if not routes(*sum((["--tag", tag] for tag in tags if tag in TIERS), []), *(["--media", media] if media else [])):
             raise ExpertError("本机没有同时满足 %s 的路由" % " + ".join(tags), "没有创建任何会话", "换一个档位，或让用户在设置里给模型加上对应标签")
         return args, "档位 %s%s" % (tier, " + " + media if media else "")
-    agent = env.get("EXPERT_AGENT")
+    agent = env.get("TEAM_AGENT")
     if model:
         agent = agent or requester_summary(root).get("agentId")
         if not agent:
-            raise ExpertError("不知道用哪个 Agent 开会话", "没有创建任何会话", "在 .genethub/open.env 里写 EXPERT_AGENT=<agent id>，或从一个会话里运行")
+            raise ExpertError("不知道用哪个 Agent 开会话", "没有创建任何会话", "在 .genethub/open.env 里写 TEAM_AGENT=<agent id>，或从一个会话里运行")
         if media and not any(r["agentId"] == agent and r.get("modelId") == model for r in routes("--media", media)):
             raise ExpertError("点名模型 %s/%s 看不了%s" % (agent, model, media), "没有创建任何会话", "换一个能看%s的模型，或去掉 --model 让系统按档位选择" % media)
         return ["--agent", agent, "--model", model], "点名模型 %s" % model
@@ -533,7 +573,7 @@ def choose(root, model_key, tier=None, model=None, media=None):
     if not agent:
         agent = inherited.get("agentId")
     if not agent:
-        raise ExpertError("不知道用哪个 Agent 开会话", "没有创建任何会话", "在 .genethub/open.env 里写 EXPERT_AGENT=<agent id>，或从一个会话里运行")
+        raise ExpertError("不知道用哪个 Agent 开会话", "没有创建任何会话", "在 .genethub/open.env 里写 TEAM_AGENT=<agent id>，或从一个会话里运行")
     if override:
         return ["--agent", agent, "--model", override], "本机覆盖 %s=%s" % (model_key, override)
     args, why = ["--agent", agent], "Agent %s，模型用它自己的默认" % agent
@@ -556,7 +596,7 @@ def choose(root, model_key, tier=None, model=None, media=None):
         fits = routes("--media", media)
         raise ExpertError("请求方没有记录模型，无法判断它能不能看%s" % media, "没有创建任何会话",
                           "用 --tier 指定档位%s" % ("（本机有 %d 条能看%s的路由）" % (len(fits), media) if fits else "；本机没有能看%s的路由" % media))
-    default_effort = env.get("EXPERT_EFFORT")
+    default_effort = env.get("TEAM_EFFORT")
     if default_effort and "--effort" not in args and "--tag" not in args:
         args += ["--effort", default_effort]
     return args, why
@@ -573,7 +613,7 @@ def start(root, workspace_id, role, desc, text, model_key, tier=None, model=None
     # The title defaults to the first line of the task, which starts with the user's own words: every session of one
     # request would then carry the same title in the list. Name it by what it does instead.
     role_label = ROLE_LABELS.get(role, role)[:10]
-    auto_archive = open_env(root).get("EXPERT_ARCHIVE_OLD_SESSIONS") == "1"
+    auto_archive = open_env(root).get("TEAM_ARCHIVE_OLD_SESSIONS") == "1"
     old_candidates = list(live_sessions(workspace_id)) if (auto_archive and role not in ("root", "front")) else []
     args = ["agent", "run", *picked, text, "--workspace", workspace_id, "--title", desc[:80], "--label", role_label,
             "--label", SYSTEM_LABEL, "--description", desc[:300],
@@ -673,7 +713,7 @@ def pop_session_inbox(root, session_id):
 
 def archive_guidance(root, kind, sender, target, text, ref=None):
     safe_kind = re.sub(r"[^a-z0-9_-]", "-", (kind or "note").lower()).strip("-") or "note"
-    if not (os.path.isdir(os.path.join(root, ".pm")) or open_env(root).get("EXPERT_TEAM") or safe_kind in ("human", "patrol", "expert", "member")):
+    if not (os.path.isdir(os.path.join(root, ".pm")) or open_env(root).get("TEAM_MODE") or safe_kind in ("human", "patrol", "expert", "member")):
         return None
     gdir = os.path.join(root, ".pm", "guidance", safe_kind)
     os.makedirs(gdir, exist_ok=True)
@@ -872,7 +912,7 @@ def _deliver_coalesced_inbox(root, session_id, items, unpause=False):
 
 
 def deliver_or_notice(root, session_id, purpose, sender, text, *id_parts, ref=None, unpause=False, use_inbox=False):
-    team_mode = bool(use_inbox or purpose in ("human", "patrol", "expert", "member") or open_env(root).get("EXPERT_TEAM") or is_team_root(root))
+    team_mode = bool(use_inbox or purpose in ("human", "patrol", "expert", "member") or open_env(root).get("TEAM_MODE") or is_team_root(root))
     if team_mode:
         try:
             summary = session_summary(session_id)
@@ -964,7 +1004,7 @@ def resolve_send_target(root, target_spec, kind, text, sender):
     wt_dir = role_env.get("WORKTREE_DIR")
     wt_hint = ("，专属工位目录 WORKTREE_DIR: %s" % wt_dir) if wt_dir else ""
     prompt = "[系统说明：本会话由 %s 跨专家/跨岗位发起（用途: %s，专家根目录: %s，数据仓根目录: %s%s）。完成后直接在本会话输出最终结论即可，系统会自动将你的最终回复转交发起方。]\n\n%s" % (sender, kind, target_root, datas_root(target_root), wt_hint, text)
-    model_key = "EXPERT_MODEL_RESEARCH" if role == "research" else "EXPERT_MODEL_WORK"
+    model_key = "TEAM_MODEL_RESEARCH" if role == "research" else "TEAM_MODEL_WORK"
     session_id, _ = start(
         target_root,
         workspace_id,
@@ -1223,7 +1263,7 @@ def cmd_spawn(args):
     turn = latest_round(requester) if requester else None
     round_key = (turn or {}).get("roundId") or (turn or {}).get("userItemId")
     batch = "%s:%s" % (requester, round_key) if requester and round_key else None
-    model_key = "EXPERT_MODEL_RESEARCH" if role == "research" else "EXPERT_MODEL_WORK"
+    model_key = "TEAM_MODEL_RESEARCH" if role == "research" else "TEAM_MODEL_WORK"
     try:
         session_id, why = start(target_root, workspace_id, role, args.desc, clip(task), model_key,
                                 args.tier, args.model, args.media)
@@ -1246,7 +1286,7 @@ def cmd_spawn(args):
 
 
 def refresh_live_status(root, force=False):
-    if not (os.path.isdir(os.path.join(root, ".pm")) or open_env(root).get("EXPERT_TEAM")):
+    if not (os.path.isdir(os.path.join(root, ".pm")) or open_env(root).get("TEAM_MODE")):
         return
     trunk_dir = os.path.join(root, ".pm", "trunk")
     status_path = os.path.join(trunk_dir, "status-live.md")
@@ -1310,9 +1350,9 @@ def refresh_live_status(root, force=False):
             if spec and spec.loader:
                 mod = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(mod)
-                # The board is a standing service; EXPERT_BOARD_PORT=0 turns it off, from the process or from
+                # The board is a standing service; TEAM_BOARD_PORT=0 turns it off, from the process or from
                 # this Space's own open.env, so a Space that does not want one (a test, a headless run) says so once.
-                board_off = os.environ.get("EXPERT_BOARD_PORT") == "0" or open_env(root).get("EXPERT_BOARD_PORT") == "0"
+                board_off = env_get("TEAM_BOARD_PORT") == "0" or open_env(root).get("TEAM_BOARD_PORT") == "0"
                 mod.ensure_team_board(root, start_service=not board_off, force_sync=force)
     except Exception:
         pass
@@ -1376,7 +1416,7 @@ def scaffold_role_space(root, role, desc, style_text, skills=None, worktree_dir=
         with open(idx_path, "w", encoding="utf-8") as handle:
             handle.write("# %s 经验与检索索引\n" % role)
     env = open_env(role_dir)
-    env.setdefault("EXPERT_EFFORT", "high")
+    env.setdefault("TEAM_EFFORT", "high")
     if worktree_dir:
         env["WORKTREE_DIR"] = os.path.realpath(worktree_dir)
     write_open_env(role_dir, env)
@@ -1393,14 +1433,14 @@ def setup_team_structure(root, team_name, desc, members=None, final_root=None):
     for kind in ("human", "patrol", "expert", "member", "task"):
         os.makedirs(os.path.join(root, ".pm", "guidance", kind), exist_ok=True)
     root_env = open_env(root)
-    root_env["EXPERT_TEAM"] = "1"
-    root_env.setdefault("EXPERT_EFFORT", "high")
-    root_env.setdefault("EXPERT_WAKE_ROUNDS", "10")
-    root_env.setdefault("EXPERT_WAKE_GAP", "1800")
+    root_env["TEAM_MODE"] = "1"
+    root_env.setdefault("TEAM_EFFORT", "high")
+    root_env.setdefault("TEAM_WAKE_ROUNDS", "10")
+    root_env.setdefault("TEAM_WAKE_GAP", "1800")
     write_open_env(root, root_env)
     front_env = open_env(os.path.join(root, "front"))
     front_env["WORKTREE_DIR"] = os.path.realpath(final_root or root)
-    front_env.setdefault("EXPERT_EFFORT", "high")
+    front_env.setdefault("TEAM_EFFORT", "high")
     write_open_env(os.path.join(root, "front"), front_env)
     if not os.path.isdir(os.path.join(root, "spaces", "leader")):
         front_style = (
@@ -1453,7 +1493,7 @@ def setup_team_structure(root, team_name, desc, members=None, final_root=None):
             rdir = os.path.join(root, "spaces", base_role)
             if os.path.isdir(rdir):
                 renv = open_env(rdir)
-                renv.setdefault("EXPERT_EFFORT", "high")
+                renv.setdefault("TEAM_EFFORT", "high")
                 write_open_env(rdir, renv)
     for member_spec in (members or []):
         m_parts = member_spec.split(":", 1)
@@ -1503,7 +1543,7 @@ def find_existing_project_conflict(base, new_name, desc="", soul=""):
             continue
         cand_dir = os.path.join(base, item)
         info = descriptor(cand_dir)
-        if not (info and "expert" in (info.get("tags") or [])):
+        if not is_space(info):
             continue
         cand_name = info.get("name") or item
         cand_desc = info.get("description") or ""
@@ -1558,7 +1598,10 @@ def cmd_init(args):
         desc_data["name"] = new_name
         desc_data["description"] = args.desc.strip()
         if "team" not in (desc_data.get("tags") or []):
-            desc_data["tags"] = list(desc_data.get("tags") or ["expert"]) + ["team"]
+            tags = [tag for tag in (desc_data.get("tags") or []) if tag != "expert"]
+            if "team" not in tags:
+                tags.append("team")
+            desc_data["tags"] = tags
         write_json(desc_path, desc_data)
         soul_path = os.path.join(staging, "soul.md")
         try:
@@ -1714,7 +1757,7 @@ def bind_space_worktree(root, space_name, wt_abs):
         raise ExpertError("空间 %r 不存在 (%s)" % (space_name, target_dir), "没有绑定工位", "先用 `team.py employee add %s --desc ...` 创建子空间" % space_name)
     env = open_env(target_dir)
     env["WORKTREE_DIR"] = wt_real
-    env.setdefault("EXPERT_EFFORT", "high")
+    env.setdefault("TEAM_EFFORT", "high")
     write_open_env(target_dir, env)
     desc_path = os.path.join(manifest_dir, ROOT_DESCRIPTOR)
     data = read_json(desc_path, {}) or {}
@@ -1967,9 +2010,9 @@ def cmd_models(args):
         role_dir = os.path.join(root, "front") if role == "root" and os.path.isdir(os.path.join(root, "front")) else (root if role == "root" else os.path.join(root, "spaces", role))
         env = dict(open_env(root))
         env.update(open_env(role_dir))
-        effort = env.get("EXPERT_EFFORT") or "default"
+        effort = env.get("TEAM_EFFORT") or "default"
         wt = env.get("WORKTREE_DIR") or "-"
-        model_cfg = env.get("EXPERT_MODEL") or env.get("EXPERT_MODEL_%s" % role.upper().replace("-", "_")) or "auto(Max/Pro)"
+        model_cfg = env.get("TEAM_MODEL") or env.get("TEAM_MODEL_%s" % role.upper().replace("-", "_")) or "auto(Max/Pro)"
         print("- %s: model=%s | effort=%s | worktree=%s" % (role, model_cfg, effort, wt))
 
 
@@ -2315,7 +2358,7 @@ def is_team_root(root):
     desc = descriptor(root) or {}
     if "team" in (desc.get("tags") or []):
         return True
-    if open_env(root).get("EXPERT_TEAM"):
+    if open_env(root).get("TEAM_MODE"):
         return True
     if (
         os.path.isdir(os.path.join(root, ".pm"))
@@ -2328,15 +2371,17 @@ def is_team_root(root):
 
 def template_dir(root, team=None):
     """The template teams are made from ships in the data directory next to `spaces/`;
-    EXPERT_TEMPLATE / EXPERT_TEAM_TEMPLATE override. There is one template: a team."""
+    TEAM_TEMPLATE overrides it (EXPERT_TEMPLATE / EXPERT_TEAM_TEMPLATE still work). There is one template: a team."""
     use_team = True
     tpl_name = "team-template"
-    if use_team and os.environ.get("EXPERT_TEAM_TEMPLATE"):
-        path = os.path.realpath(os.environ["EXPERT_TEAM_TEMPLATE"])
-        if os.path.isdir(path):
-            return path
-    if os.environ.get("EXPERT_TEMPLATE"):
-        base_tpl = os.path.realpath(os.environ["EXPERT_TEMPLATE"])
+    # `TEAM_TEMPLATE` names the template; the two `EXPERT_*` names are what older Spaces exported.
+    for override in ("TEAM_TEMPLATE", "EXPERT_TEAM_TEMPLATE"):
+        if use_team and env_get(override):
+            path = os.path.realpath(env_get(override))
+            if os.path.isdir(path):
+                return path
+    if env_get("EXPERT_TEMPLATE"):
+        base_tpl = os.path.realpath(env_get("EXPERT_TEMPLATE"))
         if use_team:
             sibling = os.path.join(os.path.dirname(base_tpl), "team-template")
             if os.path.isdir(sibling):
@@ -2359,7 +2404,7 @@ def template_dir(root, team=None):
             cur = parent
     path = os.path.realpath(os.path.join(root, "..", "..", "builtin-skills", "genehub", "references", tpl_name))
     if not os.path.isdir(path):
-        raise ExpertError("找不到专家模板: %s" % path, "没有改动任何文件", "把模板路径写进环境变量 EXPERT_TEMPLATE，或确认 GeneHub 的内置技能目录完整")
+        raise ExpertError("找不到专家模板: %s" % path, "没有改动任何文件", "把模板路径写进环境变量 TEAM_TEMPLATE，或确认 GeneHub 的内置技能目录完整")
     return path
 
 
@@ -2388,7 +2433,11 @@ def merge_descriptor(template, existing):
             merged[key] = existing[key]
     for key in ("tags", "skills", "agents"):
         if isinstance(merged.get(key), list):
-            merged[key] += [item for item in (existing or {}).get(key) or [] if item not in merged[key]]
+            extra = [item for item in (existing or {}).get(key) or [] if item not in merged[key]]
+            if key == "tags":
+                # `expert` is the old name of `team`; keeping both makes every reset look like drift.
+                extra = [item for item in extra if not (item == "expert" and "team" in merged[key])]
+            merged[key] += extra
     for key, value in (existing or {}).items():
         merged.setdefault(key, value)
     return (json.dumps(merged, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
@@ -2403,7 +2452,7 @@ def find_expert(root, name):
     for entry in sorted(os.listdir(siblings)) if os.path.isdir(siblings) else []:
         directory = os.path.join(siblings, entry)
         info = descriptor(directory)
-        if info and "expert" in (info.get("tags") or []) and name in (info.get("name"), entry):
+        if is_space(info) and name in (info.get("name"), entry):
             matches.add(os.path.realpath(directory))
     if not matches:
         try:  # an expert kept outside spaces/ is only known to the daemon; without it, the name is simply not found
@@ -2445,7 +2494,7 @@ def reset_plan(target, template, with_memory):
 
 def reset_expert(target, template, with_memory=False, apply=False, now=None):
     """Returns (plan, backup directory or None). With `apply` the plan is written, replaced files are copied to
-    .genethub/expert/reset/<time>/ first, and the expert is built again so the new soul.md reaches its Agents."""
+    .genethub/team/reset/<time>/ first, and the expert is built again so the new soul.md reaches its Agents."""
     plan = reset_plan(target, template, with_memory)
     if not apply or not plan:
         return plan, None
@@ -2529,7 +2578,7 @@ __pycache__/
 *.pyc
 """
 GIT_FLAGS = ["-c", "user.name=expert", "-c", "user.email=expert@genethub.local", "-c", "commit.gpgsign=false", "-c", "core.quotepath=off"]
-EXPERT_PATHS = re.compile(r"^(soul\.md|charter\.md|memory\.md|front/index\.md|front/role\.md|spaces/[^/]+/index\.md|spaces/[^/]+/role\.md|spaces/[^/]+/style\.md|spaces/[^/]+/agent-space\.genet\.json|skills/local-[^/]+/.*|tools/local/.*)$")
+TEAM_PATHS = re.compile(r"^(soul\.md|charter\.md|memory\.md|front/index\.md|front/role\.md|spaces/[^/]+/index\.md|spaces/[^/]+/role\.md|spaces/[^/]+/style\.md|spaces/[^/]+/agent-space\.genet\.json|skills/local-[^/]+/.*|tools/local/.*)$")
 
 
 def git(root, *args, input=None, env=None, check=True):
@@ -2692,7 +2741,7 @@ def drift_lines(root):
     if ref is None:
         raise ExpertError("还没有 platform 分支", "没有可比较的基准", "等下一次定时运行初始化，或确认本机有专家模板")
     names = git_text(root, "diff", "--name-status", ref, "--", "agent-space.genet.json", "front", "skills", "tools", "docs", "spaces").splitlines()
-    return [line for line in names if not EXPERT_PATHS.match(line.split("\t", 1)[-1])]
+    return [line for line in names if not TEAM_PATHS.match(line.split("\t", 1)[-1])]
 
 
 def cmd_drift(_args):
@@ -2869,7 +2918,7 @@ def user_rounds_since(spaces, since, team_mode=False, limit=None):
 def briefing(root, mine, reason):
     """The reflect session's starting file, assembled by the script without a model. Returns its path."""
     now = now_ms()
-    stuck_after = setting(root, "EXPERT_STUCK_AFTER", STUCK_AFTER_S)
+    stuck_after = setting(root, "TEAM_STUCK_AFTER", STUCK_AFTER_S)
     lines = ["# 反思简报（脚本生成，没有调用模型）", "", "原因: %s" % reason, "时间: %s" % time.strftime("%Y-%m-%d %H:%M:%S"), ""]
     notes = pending_notes(root)
     lines.append("## 未处理的留言（%d）" % len(notes))
@@ -2941,11 +2990,11 @@ def start_reflect(root, name, mine, reason, request=None, requester=None, tier=N
     title = reflect_title(reason, notes, request)
     path = briefing(root, mine, reason)
     team_hint = ""
-    if os.path.isdir(os.path.join(root, ".pm")) or open_env(root).get("EXPERT_TEAM"):
+    if os.path.isdir(os.path.join(root, ".pm")) or open_env(root).get("TEAM_MODE"):
         team_hint = "\n团队模式二级记忆提炼要求：先将各岗位（leader/组员/qa/research）具体经验与 ghref 证据写入对应 `spaces/<岗位>/index.md`，再将跨角色通用铁律提炼入根 `memory.md`（≤30 行）。"
     text = clip("[系统说明：本反思会话由 %s 发起（用途: reflect）]\n\n原因: %s\n简报: %s\n%s%s\n按 expert-reflect 办：先读简报，再按留言里的 ref 回到那一轮。处理完的留言用 `team.py notes done <编号>`；没有要告诉用户的就不要 tell-user。" % (
         sender, reason, path, ("用户的要求（原话在前，引用在后）:\n%s" % request) if request else "", team_hint))
-    session_id, why = start(root, mine["spaces"][ref_key], ref_key, title, text, "EXPERT_MODEL_REFLECT", tier, model)
+    session_id, why = start(root, mine["spaces"][ref_key], ref_key, title, text, "TEAM_MODEL_REFLECT", tier, model)
     write_json(state_dir(root, "pending", session_id + ".json"), {
         "sessionId": session_id, "requester": requester, "kind": "reflect", "desc": title, "createdAtMs": now_ms(),
         "baseline": None, "notified": [], "lock": None, "route": why, "quiet": requester is None})
@@ -3002,16 +3051,16 @@ def wake(root, name, mine):
         for note in notes
     )
     has_anomaly = any(note.get("kind") == "anomaly" for note in notes)
-    if not has_fresh_urgent and now - state.get("atMs", 0) < setting(root, "EXPERT_WAKE_GAP", WAKE_GAP_S) * 1000:
+    if not has_fresh_urgent and now - state.get("atMs", 0) < setting(root, "TEAM_WAKE_GAP", WAKE_GAP_S) * 1000:
         return
     reason = None
-    if notes and (has_urgent or now - max(note.get("at", 0) for note in notes) >= setting(root, "EXPERT_NOTE_QUIET", NOTE_QUIET_S) * 1000):
+    if notes and (has_urgent or now - max(note.get("at", 0) for note in notes) >= setting(root, "TEAM_NOTE_QUIET", NOTE_QUIET_S) * 1000):
         reason = "有 %d 条未处理的留言%s" % (len(notes), "（含会话异常）" if has_anomaly else "")
-    elif not has_urgent and now - state.get("checkedAtMs", 0) >= setting(root, "EXPERT_WAKE_CHECK", WAKE_CHECK_S) * 1000:
+    elif not has_urgent and now - state.get("checkedAtMs", 0) >= setting(root, "TEAM_WAKE_CHECK", WAKE_CHECK_S) * 1000:
         state["checkedAtMs"] = now
         write_json(state_dir(root, "reflect.json"), state)
-        is_team = bool(os.path.isdir(os.path.join(root, ".pm")) or open_env(root).get("EXPERT_TEAM"))
-        need = setting(root, "EXPERT_WAKE_ROUNDS", WAKE_ROUNDS)
+        is_team = bool(os.path.isdir(os.path.join(root, ".pm")) or open_env(root).get("TEAM_MODE"))
+        need = setting(root, "TEAM_WAKE_ROUNDS", WAKE_ROUNDS)
         count, last = user_rounds_since(mine["spaces"], state.get("atMs", 0), team_mode=is_team, limit=need)
         write_json(state_dir(root, "reflect.json"), dict(state, seen={"rounds": count, "lastEndedAtMs": last}))  # what the last count saw, for whoever wonders why no wake
         if count >= need:
@@ -3098,7 +3147,7 @@ def _team_progress_fingerprint(root):
 
 def leader_watchdog(root, name, mine):
     """Law 3 (Root Leader Watchdog): When a team has unfinished milestones in `.pm/trunk/MILESTONE_PLAN.md`,
-    the leader session is idle/failed past `EXPERT_WATCHDOG_AFTER`, and no active child/descendant tasks remain
+    the leader session is idle/failed past `TEAM_WATCHDOG_AFTER`, and no active child/descendant tasks remain
     in `pending/`, automatically wake the leader with disk progress state. Trips a 3-strike circuit breaker if
     the leader wakes 3 consecutive times without making progress."""
     unfinished = _team_unfinished_milestones(root)
@@ -3138,8 +3187,8 @@ def leader_watchdog(root, name, mine):
     status = leader_summary.get("status")
     if status not in ("idle", "failed"):
         return
-    watchdog_after = setting(root, "EXPERT_WATCHDOG_AFTER", WATCHDOG_AFTER_S)
-    max_wakes = int(setting(root, "EXPERT_WATCHDOG_MAX_WAKES", WATCHDOG_MAX_WAKES))
+    watchdog_after = setting(root, "TEAM_WATCHDOG_AFTER", WATCHDOG_AFTER_S)
+    max_wakes = int(setting(root, "TEAM_WATCHDOG_MAX_WAKES", WATCHDOG_MAX_WAKES))
     now = now_ms()
     last_active = max(
         leader_summary.get("lastActivityAtMs") or 0,
@@ -3225,10 +3274,10 @@ def reconcile(root, name, mine):
         if rec.get("done"):
             batch_has_done.add(bkey)
     closed = set()
-    stopped_after = setting(root, "EXPERT_STOPPED_AFTER", STOPPED_AFTER_S)
-    giveup_after = setting(root, "EXPERT_GIVEUP_AFTER", GIVEUP_AFTER_S)
-    stuck_after = setting(root, "EXPERT_STUCK_AFTER", STUCK_AFTER_S)
-    batch_stuck_after = setting(root, "EXPERT_BATCH_STUCK_AFTER", BATCH_STUCK_AFTER_S)
+    stopped_after = setting(root, "TEAM_STOPPED_AFTER", STOPPED_AFTER_S)
+    giveup_after = setting(root, "TEAM_GIVEUP_AFTER", GIVEUP_AFTER_S)
+    stuck_after = setting(root, "TEAM_STUCK_AFTER", STUCK_AFTER_S)
+    batch_stuck_after = setting(root, "TEAM_BATCH_STUCK_AFTER", BATCH_STUCK_AFTER_S)
     for path, record in records:
         session_id = record["sessionId"]
         bkey = record.get("batch") or session_id
@@ -3259,7 +3308,7 @@ def reconcile(root, name, mine):
         reply = (summary.get("latestReply") or {}).get("itemId")
         age = (now_ms() - record["createdAtMs"]) / 1000
         said = record.setdefault("notified", [])
-        if requests and (is_team_root(root) or setting(root, "EXPERT_AUTO_UNBLOCK", 0) > 0):
+        if requests and (is_team_root(root) or setting(root, "TEAM_AUTO_UNBLOCK", 0) > 0):
             if _auto_unblock_waiting_system_session(session_id, summary):
                 try:
                     summary = session_summary(session_id)
@@ -3494,7 +3543,7 @@ def health(root, name, mine):
     last = read_json(report_path, {})
     digest = hashlib.sha1("\n".join(problems).encode()).hexdigest()
     if problems and (last.get("digest") != digest or now_ms() - last.get("atMs", 0) > REPORT_AGAIN_S * 1000):
-        notice(front, "report", "%s:hook" % name, "机制出了问题:\n%s\n修好后无需注册，下一次运行自动恢复。待办记录都还在 .genethub/expert/pending/。" % "\n".join(problems), digest, str(now_ms() // (REPORT_AGAIN_S * 1000)))
+        notice(front, "report", "%s:hook" % name, "机制出了问题:\n%s\n修好后无需注册，下一次运行自动恢复。待办记录都还在 .genethub/team/pending/。" % "\n".join(problems), digest, str(now_ms() // (REPORT_AGAIN_S * 1000)))
         write_json(report_path, {"digest": digest, "atMs": now_ms()})
     elif not problems and last.get("digest"):
         write_json(report_path, {})
@@ -3505,8 +3554,8 @@ IDENTITY_RETRY_S = 60
 
 def builder_script(root):
     """SpaceBuilder lives in the expert's own `spaceBuilder` path (tools/spacebuilder.py), falling back to the data directory."""
-    if os.environ.get("EXPERT_SPACEBUILDER"):
-        path = os.path.realpath(os.environ["EXPERT_SPACEBUILDER"])
+    if env_get("TEAM_SPACEBUILDER"):
+        path = os.path.realpath(env_get("TEAM_SPACEBUILDER"))
     else:
         declared = (descriptor(root) or {}).get("spaceBuilder") or "tools/spacebuilder.py"
         local = os.path.realpath(os.path.join(root, declared))
@@ -3514,7 +3563,7 @@ def builder_script(root):
             return local
         path = os.path.realpath(os.path.join(root, "..", "..", "builtin-skills", "genehub", "references", "spacebuilder", "spacebuilder.py"))
     if not os.path.isfile(path):
-        raise ExpertError("找不到 SpaceBuilder: %s" % path, "soul.md 没有重新编译，新会话仍读到旧身份", "把 SpaceBuilder 路径写进环境变量 EXPERT_SPACEBUILDER，或手动运行 spacebuilder.py build <专家目录>")
+        raise ExpertError("找不到 SpaceBuilder: %s" % path, "soul.md 没有重新编译，新会话仍读到旧身份", "把 SpaceBuilder 路径写进环境变量 TEAM_SPACEBUILDER，或手动运行 spacebuilder.py build <专家目录>")
     return path
 
 
@@ -3656,7 +3705,7 @@ def cmd_hook(_args):
         report(root, name, mine, error.text())
         raise
     except Exception as error:  # noqa: BLE001 - turned into a system message below, never swallowed
-        report(root, name, mine, "出了什么: 未处理的异常 %r\n现在状态: 待办记录都还在 .genethub/expert/pending/\n下一步: 检查 tools/team.py；修好后下一次运行自动恢复" % error)
+        report(root, name, mine, "出了什么: 未处理的异常 %r\n现在状态: 待办记录都还在 .genethub/team/pending/\n下一步: 检查 tools/team.py；修好后下一次运行自动恢复" % error)
         raise
 
 
@@ -3765,7 +3814,7 @@ def main(argv):
     listing.add_argument("--mine", action="store_true")
     temp_sub.add_parser("rm").add_argument("target")
     clean = temp_sub.add_parser("clean")
-    clean.add_argument("--older-than", help="days, e.g. 3d (default EXPERT_TEMP_KEEP_DAYS, 7)")
+    clean.add_argument("--older-than", help="days, e.g. 3d (default TEAM_TEMP_KEEP_DAYS, 7)")
     clean.add_argument("--dry-run", action="store_true")
     reset = sub.add_parser("reset")
     reset.add_argument("--expert", help="reset this expert instead of yourself")

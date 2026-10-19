@@ -32,7 +32,7 @@ defineSpecialty(
     id: "specialty.daemon.expert-reset",
     title: "An expert is reset only on request, to the template with soul.md included, and what is the owner's stays",
     oracle:
-      "without --apply the command prints the plan and the expert directory is byte-identical afterwards; with --apply the expert's own skill and tool files, its soul.md and its compiled AGENTS.md/CLAUDE.md are the template's, the replaced files are kept under .genethub/expert/reset/<time>/, memory.md survives unless --with-memory, and name, description, an added skill, posts, datas and temp are untouched; one expert can reset another by name or directory name and the other expert's files do not change; a second reset reports nothing to do; an unknown name exits 1 with the next step and changes nothing",
+      "without --apply the command prints the plan and the expert directory is byte-identical afterwards; with --apply the expert's own skill and tool files, its soul.md and its compiled AGENTS.md/CLAUDE.md are the template's, the replaced files are kept under .genethub/team/reset/<time>/, memory.md survives unless --with-memory, and name, description, an added skill, posts, datas and temp are untouched; one expert can reset another by name or directory name and the other expert's files do not change; a second reset reports nothing to do; an unknown name exits 1 with the next step and changes nothing",
     catches: [
       "a reset that leaves the old soul.md behind",
       "a reset that runs without the user's confirmation step",
@@ -113,11 +113,11 @@ defineSpecialty(
     for (const file of ["front/AGENTS.md", "front/CLAUDE.md"]) {
       t.assertions.assert(!read(alpha, file).includes("只说方言"), `${file} still carries the old soul`);
     }
-    const backups = join(alpha, ".genethub", "expert", "reset");
+    const backups = join(alpha, ".genethub", "team", "reset");
     const stamps = readdirSync(backups);
     t.assertions.assert(stamps.length === 1 && read(join(backups, stamps[0]!), "soul.md").includes("只说方言") && read(join(backups, stamps[0]!), "skills/expert-core/SKILL.md") === OLD_SKILL, "the replaced files were not kept");
     t.assertions.assert(!existsSync(join(backups, stamps[0]!, "memory.md")), "memory.md was backed up though it was not touched");
-    t.assertions.assert(existsSync(join(alpha, ".genethub", "expert", "reset.log")), "the reset left no log");
+    t.assertions.assert(existsSync(join(alpha, ".genethub", "team", "reset.log")), "the reset left no log");
     const again = reset(alpha);
     t.assertions.assert(again.code === 0 && again.out.includes("一致"), `a second reset: ${again.out}`);
 
@@ -130,7 +130,7 @@ defineSpecialty(
     t.assertions.assert(read(beta, "soul.md") === templateText("soul.md") && read(beta, "memory.md") === templateText("memory.md"), "the other expert's soul or memory was not reset");
     t.assertions.assert(!read(beta, "front/AGENTS.md").includes("爱抬杠") && JSON.parse(read(beta, "agent-space.genet.json")).name === "老二", "the other expert's instructions or name");
     t.assertions.assert(read(alpha, "soul.md") === templateText("soul.md") && digest(alpha) === alphaNow, "resetting another expert changed the one that asked");
-    t.assertions.assert(readdirSync(join(beta, ".genethub", "expert", "reset")).length === 1, "the other expert has no backup");
+    t.assertions.assert(readdirSync(join(beta, ".genethub", "team", "reset")).length === 1, "the other expert has no backup");
 
     // A name that is no expert: refused, nothing changes.
     mkdirSync(join(data, "spaces", "plain"));

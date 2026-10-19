@@ -207,7 +207,7 @@ defineSpecialty(
     );
     t.assertions.assert(!left.includes("261005") && left.includes("261003"), `date directories: ${left}`);
     t.assertions.assert(cleaned.removed?.length === 3, `removed ${JSON.stringify(cleaned.removed)}`);
-    const log = readFileSync(join(expert, ".genethub/expert/temp-clean.log"), "utf8").trim().split("\n");
+    const log = readFileSync(join(expert, ".genethub/team/temp-clean.log"), "utf8").trim().split("\n");
     t.assertions.assert(log.length === 1 && log[0]!.includes("清理 3 项"), `log ${log}`);
 
     // A keep time of 0 still keeps what changed within a day.
