@@ -13,22 +13,32 @@ export function PermissionCard({
 }) {
   const [selected, setSelected] = useState<Record<string, string[]>>({});
   const [freeform, setFreeform] = useState<Record<string, string>>({});
+  // "I will type it myself": no option is picked, the text is the whole answer.
+  // It excludes the offered choices, so a submitted answer is never a guess
+  // about which parts were chosen and which parts were typed.
+  const [manual, setManual] = useState<Record<string, boolean>>({});
   useEffect(() => {
     setSelected({});
     setFreeform({});
+    setManual({});
   }, [request.id]);
   const answers = useMemo<InteractionAnswer[]>(
     () =>
       (request.questions ?? []).map((question) => ({
         questionId: question.id,
-        selectedOptionIds: selected[question.id] ?? [],
+        selectedOptionIds: manual[question.id] ? [] : selected[question.id] ?? [],
         freeformText: freeform[question.id]?.trim() || undefined,
       })),
-    [freeform, request.questions, selected],
+    [freeform, manual, request.questions, selected],
   );
   const complete = answers.every(
-    (answer) => answer.selectedOptionIds.length > 0 || Boolean(answer.freeformText),
+    (answer) =>
+      (manual[answer.questionId] ? false : answer.selectedOptionIds.length > 0)
+      || Boolean(answer.freeformText),
   );
+  const manualOnly =
+    (request.questions?.length ?? 0) > 0
+    && (request.questions ?? []).every((question) => manual[question.id]);
   const heading =
     request.kind === "question"
       ? "需要你的回答"
@@ -57,6 +67,11 @@ export function PermissionCard({
       <h2 className="text-base font-semibold text-fg">{heading}</h2>
       <p className="mt-1 text-sm leading-5 text-muted">{paused}</p>
       <p className="mt-3 text-sm font-medium text-fg">{request.title}</p>
+      {(request.questions?.length ?? 0) > 0 ? (
+        <p className="mt-1 text-xs leading-5 text-muted">
+          可以选一项，也可以选「其他：我自己输入」只提交你写的内容。
+        </p>
+      ) : null}
       {request.detail ? (
         <div
           className={`mt-2 max-h-56 max-w-full overflow-y-auto whitespace-pre-wrap break-words rounded-lg border border-line bg-surface px-3 py-2 text-sm text-fg ${
@@ -74,55 +89,93 @@ export function PermissionCard({
             if (complete && !submitting) onAnswer({ outcome: "answered", answers });
           }}
         >
-          {request.questions?.map((question) => (
-            <fieldset key={question.id} className="space-y-2">
-              <legend className="text-sm font-medium">{question.prompt}</legend>
-              {question.options.map((option) => {
-                const checked = (selected[question.id] ?? []).includes(option.id);
-                return (
-                  <label key={option.id} className="flex items-center gap-2 text-sm">
+          {request.questions?.map((question) => {
+            const own = manual[question.id] === true;
+            const fieldId = `interaction-${request.id}-${question.id}-text`;
+            return (
+              <fieldset key={question.id} className="space-y-2">
+                <legend className="text-sm font-medium">{question.prompt}</legend>
+                {question.options.map((option) => {
+                  const checked = !own && (selected[question.id] ?? []).includes(option.id);
+                  return (
+                    <label
+                      key={option.id}
+                      className={`flex items-center gap-2 text-sm ${own ? "opacity-50" : ""}`}
+                    >
+                      <input
+                        type={question.allowMultiple ? "checkbox" : "radio"}
+                        name={`interaction-${request.id}-${question.id}`}
+                        checked={checked}
+                        onChange={() => {
+                          setManual((current) => ({ ...current, [question.id]: false }));
+                          setSelected((current) => ({
+                            ...current,
+                            [question.id]: question.allowMultiple
+                              ? checked
+                                ? (current[question.id] ?? []).filter((id) => id !== option.id)
+                                : [...(current[question.id] ?? []), option.id]
+                              : [option.id],
+                          }));
+                        }}
+                      />
+                      {option.label}
+                    </label>
+                  );
+                })}
+                {question.allowFreeform && question.options.length > 0 ? (
+                  <label className="flex items-center gap-2 text-sm">
                     <input
                       type={question.allowMultiple ? "checkbox" : "radio"}
                       name={`interaction-${request.id}-${question.id}`}
-                      checked={checked}
-                      onChange={() =>
-                        setSelected((current) => ({
+                      checked={own}
+                      onChange={() => {
+                        setManual((current) => ({
                           ...current,
-                          [question.id]: question.allowMultiple
-                            ? checked
-                              ? (current[question.id] ?? []).filter((id) => id !== option.id)
-                              : [...(current[question.id] ?? []), option.id]
-                            : [option.id],
+                          [question.id]: !own,
+                        }));
+                        setSelected((current) => ({ ...current, [question.id]: [] }));
+                      }}
+                    />
+                    其他：我自己输入
+                  </label>
+                ) : null}
+                {question.allowFreeform ? (
+                  <div className="space-y-1">
+                    <label className="block text-xs text-muted" htmlFor={fieldId}>
+                      {own || question.options.length === 0
+                        ? "你的回答（必填）"
+                        : "补充说明（可不填）"}
+                    </label>
+                    <textarea
+                      id={fieldId}
+                      value={freeform[question.id] ?? ""}
+                      onChange={(event) =>
+                        setFreeform((current) => ({
+                          ...current,
+                          [question.id]: event.target.value,
                         }))
                       }
+                      placeholder={own ? "写下你自己的回答" : "其他答案或补充说明"}
+                      rows={2}
+                      className="w-full rounded border border-line bg-surface px-2 py-1.5 text-sm"
                     />
-                    {option.label}
-                  </label>
-                );
-              })}
-              {question.allowFreeform ? (
-                <textarea
-                  value={freeform[question.id] ?? ""}
-                  onChange={(event) =>
-                    setFreeform((current) => ({
-                      ...current,
-                      [question.id]: event.target.value,
-                    }))
-                  }
-                  placeholder="其他答案或补充说明"
-                  rows={2}
-                  className="w-full rounded border border-line bg-surface px-2 py-1.5 text-sm"
-                />
-              ) : null}
-            </fieldset>
-          ))}
+                  </div>
+                ) : null}
+              </fieldset>
+            );
+          })}
+          {manualOnly ? (
+            <p className="text-xs text-muted" role="status">
+              未选择任何选项，只提交你写的内容。
+            </p>
+          ) : null}
           <div className="flex flex-wrap gap-3">
             <button
               type="submit"
               disabled={!complete || submitting}
               className="min-h-11 rounded-lg bg-accent px-4 py-2.5 text-sm font-medium text-white disabled:opacity-50"
             >
-              提交答案
+              {manualOnly ? "提交我输入的内容" : "提交答案"}
             </button>
             <button
               type="button"

@@ -1676,15 +1676,17 @@ fn command_schema(name: &str) -> Value {
             &["runId", "revision"],
         ),
         "session.respond" => (
-            "genet session respond <id> --request <rid> --choose <optionId>",
+            "genet session respond <id> --request <rid> (--choose <optionId> | --text \"...\" [--question <qid>])",
             true,
             object_input(
                 json!({
                     "sessionId": {"type": "string", "minLength": 1},
                     "requestId": {"type": "string", "minLength": 1},
-                    "optionId": {"type": "string", "minLength": 1},
+                    "optionId": {"type": "string", "minLength": 1, "description": "--choose: one of the offered options"},
+                    "text": {"type": "string", "minLength": 1, "description": "--text: your own answer, with no option picked; mutually exclusive with optionId"},
+                    "questionId": {"type": "string", "minLength": 1, "description": "--question: which question --text answers, when the request asks more than one"},
                 }),
-                &["sessionId", "requestId", "optionId"],
+                &["sessionId", "requestId"],
             ),
         ),
         "session.label" => (

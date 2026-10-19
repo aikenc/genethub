@@ -262,8 +262,9 @@ pub fn usage() -> i32 {
   genet session components <id>     which responsibilities are live in this session
   genet session flow <id>           read an Executor Session's structured DCG timeline
   genet session send <id> \"<text>\"  continue a session
-  genet session respond <id> --request <rid> --choose <optionId>
-                                    answer what a waiting session asked
+  genet session respond <id> --request <rid> (--choose <optionId> | --text \"...\")
+                                    answer what a waiting session asked; --text submits your
+                                    own words with no option picked
   genet session interrupt <id>      stop the running turn
   genet session close <id>          close the session
   genet machine list                machines this installation can reach

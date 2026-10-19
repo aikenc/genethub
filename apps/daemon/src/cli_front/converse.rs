@@ -114,7 +114,11 @@ pub enum Command {
     Respond {
         session_id: String,
         request_id: String,
-        choose: String,
+        choose: Option<String>,
+        /// The person's own answer, submitted without picking any option.
+        text: Option<String>,
+        /// Which question `--text` answers, when the request has more than one.
+        question: Option<String>,
     },
     Interrupt {
         session_id: String,
@@ -380,15 +384,29 @@ fn parse_session(args: &[String], selection: &Selection) -> Result<Command, CliF
         }
         "respond" => {
             let options = Options::parse(&args[2..], selection)?;
-            let (Some(request_id), Some(choose)) = (options.request, options.choose) else {
+            let Some(request_id) = options.request else {
                 return Err(CliFailure::invalid_args(
-                    "genet session respond needs --request <id> and --choose <optionId>",
+                    "genet session respond needs --request <id> and either --choose <optionId> or --text \"...\"",
                 ));
             };
+            // One answer shape, chosen on purpose: an offered option, or the
+            // person's own words with no option picked.
+            if options.choose.is_some() && options.text.is_some() {
+                return Err(CliFailure::invalid_args(
+                    "--choose and --text are two answers to the same question; give one",
+                ));
+            }
+            if options.choose.is_none() && options.text.is_none() {
+                return Err(CliFailure::invalid_args(
+                    "genet session respond needs --request <id> and either --choose <optionId> or --text \"...\"",
+                ));
+            }
             Ok(Command::Respond {
                 session_id,
                 request_id,
-                choose,
+                choose: options.choose,
+                text: options.text,
+                question: options.question,
             })
         }
         "interrupt" => Ok(Command::Interrupt { session_id }),
@@ -499,6 +517,8 @@ struct Options {
     media: Vec<String>,
     request: Option<String>,
     choose: Option<String>,
+    text: Option<String>,
+    question: Option<String>,
     since_seq: Option<u64>,
     timeout: Option<u64>,
     wait: Option<bool>,
@@ -541,6 +561,8 @@ impl Options {
                 "--message" => options.positional.push(value()?),
                 "--request" => options.request = Some(value()?),
                 "--choose" => options.choose = Some(value()?),
+                "--text" => options.text = Some(value()?),
+                "--question" => options.question = Some(value()?),
                 "--since-seq" => options.since_seq = Some(number(&value()?, "--since-seq")?),
                 "--timeout" => options.timeout = Some(number(&value()?, "--timeout")?),
                 "--wait" => options.wait = Some(true),
@@ -781,7 +803,16 @@ async fn execute(command: Command, selection: &Selection) -> i32 {
             session_id,
             request_id,
             choose,
-        } => respond(&rpc, &session_id, &request_id, &choose)
+            text,
+            question,
+        } => respond(
+            &rpc,
+            &session_id,
+            &request_id,
+            choose.as_deref(),
+            text.as_deref(),
+            question.as_deref(),
+        )
             .await
             .map(|data| {
                 output::succeed("session.respond", data);
@@ -1074,18 +1105,97 @@ async fn respond(
     rpc: &Rpc,
     session_id: &str,
     request_id: &str,
-    choose: &str,
+    choose: Option<&str>,
+    text: Option<&str>,
+    question: Option<&str>,
 ) -> Result<Value, CliFailure> {
+    let outcome = match (choose, text) {
+        (Some(option_id), None) => PermissionOutcome::Selected {
+            option_id: option_id.to_string(),
+        },
+        (None, Some(text)) => {
+            let questions = pending_questions(rpc, session_id, request_id).await?;
+            let ids = questions
+                .iter()
+                .map(|question| question.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let question_id = match (question, questions.as_slice()) {
+                (Some(given), _) if questions.iter().any(|item| item.id == given) => {
+                    given.to_string()
+                }
+                (Some(given), _) => {
+                    return Err(CliFailure::invalid_args(format!(
+                        "--question '{given}' is not one of this request's questions: {ids}"
+                    )))
+                }
+                (None, []) => {
+                    return Err(CliFailure::invalid_args(format!(
+                        "request '{request_id}' has no question to answer with --text"
+                    )))
+                }
+                (None, [only]) => only.id.clone(),
+                (None, _) => {
+                    return Err(CliFailure::invalid_args(format!(
+                        "request '{request_id}' has several questions; name one with --question <id>: {ids}"
+                    )))
+                }
+            };
+            // No option picked: everything the person typed is the answer.
+            PermissionOutcome::Answered {
+                answers: vec![genehub_proto::InteractionAnswer {
+                    question_id,
+                    selected_option_ids: Vec::new(),
+                    freeform_text: Some(text.to_string()),
+                }],
+            }
+        }
+        _ => {
+            return Err(CliFailure::invalid_args(
+                "genet session respond needs --request <id> and either --choose <optionId> or --text \"...\"",
+            ))
+        }
+    };
     rpc.call(Request::SessionRespondPermission {
         session_id: session_id.to_string(),
         request_id: request_id.to_string(),
-        outcome: PermissionOutcome::Selected {
-            option_id: choose.to_string(),
-        },
+        outcome,
     })
     .await
     .map_err(query::rpc_error)?;
-    Ok(json!({"sessionId": session_id, "requestId": request_id, "chose": choose}))
+    Ok(json!({
+        "sessionId": session_id,
+        "requestId": request_id,
+        "chose": choose,
+        "text": text,
+    }))
+}
+
+/// The questions a pending request still offers, so `--text` can name the one
+/// it answers instead of guessing an id.
+async fn pending_questions(
+    rpc: &Rpc,
+    session_id: &str,
+    request_id: &str,
+) -> Result<Vec<genehub_proto::InteractionQuestion>, CliFailure> {
+    let snapshot = match rpc
+        .call(Request::SessionGet {
+            recent_rounds: Some(0),
+            before_item_id: None,
+            session_id: session_id.to_string(),
+        })
+        .await
+        .map_err(query::rpc_error)?
+    {
+        Reply::Snapshot(snapshot) => snapshot,
+        other => return Err(query::unexpected_reply("session snapshot", &other)),
+    };
+    Ok(snapshot
+        .pending_permissions
+        .into_iter()
+        .find(|request| request.id == request_id)
+        .and_then(|request| request.questions)
+        .unwrap_or_default())
 }
 
 async fn run_conversation(rpc: &Rpc, run: Run, here: bool) -> Result<i32, CliFailure> {
@@ -1642,12 +1752,39 @@ mod tests {
             Command::Respond {
                 session_id: "s_1".into(),
                 request_id: "r_1".into(),
-                choose: "allow".into()
+                choose: Some("allow".into()),
+                text: None,
+                question: None,
+            }
+        );
+        assert_eq!(
+            parse_session(
+                &words(&["respond", "s_1", "--request", "r_1", "--text", "ship to beta"]),
+                &selection(None)
+            )
+            .unwrap(),
+            Command::Respond {
+                session_id: "s_1".into(),
+                request_id: "r_1".into(),
+                choose: None,
+                text: Some("ship to beta".into()),
+                question: None,
             }
         );
         assert_eq!(
             parse_session(
                 &words(&["respond", "s_1", "--request", "r_1"]),
+                &selection(None)
+            )
+            .unwrap_err()
+            .code,
+            "invalidArgs"
+        );
+        assert_eq!(
+            parse_session(
+                &words(&[
+                    "respond", "s_1", "--request", "r_1", "--choose", "allow", "--text", "beta"
+                ]),
                 &selection(None)
             )
             .unwrap_err()

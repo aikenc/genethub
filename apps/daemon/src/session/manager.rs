@@ -6277,6 +6277,9 @@ fn selected_option<'a>(
         .ok_or_else(|| anyhow!("'{option_id}' is not an option for this interaction"))
 }
 
+/// The body of a recorded answer, shared by the timeline item and the resumed
+/// Agent prompt. It keeps three shapes apart: a picked option, a picked option
+/// plus the Human's own words, and no option at all.
 fn question_answer(
     request: &PermissionRequest,
     outcome: &PermissionOutcome,
@@ -6315,7 +6318,7 @@ fn question_answer(
                 question.id
             ));
         }
-        let mut values = Vec::new();
+        let mut labels = Vec::new();
         for option_id in &answer.selected_option_ids {
             let option = question
                 .options
@@ -6327,7 +6330,7 @@ fn question_answer(
                         question.id
                     )
                 })?;
-            values.push(option.label.clone());
+            labels.push(option.label.clone());
         }
         let freeform = answer
             .freeform_text
@@ -6340,13 +6343,34 @@ fn question_answer(
                 question.id
             ));
         }
-        if let Some(text) = freeform {
-            values.push(text.to_string());
+        // Three answer shapes, kept distinguishable: an option was picked, an
+        // option was picked and the person added their own words, or nothing was
+        // picked and everything below is what they typed. Joining them with a
+        // comma made the offered wording indistinguishable from the Human's own.
+        if question.options.is_empty() {
+            let Some(text) = freeform else {
+                return Err(anyhow!("question '{}' has no answer", question.id));
+            };
+            lines.push(format!("- {}: {}", question.prompt, text));
+            continue;
         }
-        if values.is_empty() {
-            return Err(anyhow!("question '{}' has no answer", question.id));
+        let Some(text) = freeform else {
+            if labels.is_empty() {
+                return Err(anyhow!("question '{}' has no answer", question.id));
+            }
+            lines.push(format!("- {}", question.prompt));
+            lines.push(format!("  selected: {}", labels.join("、")));
+            continue;
+        };
+        lines.push(format!("- {}", question.prompt));
+        if labels.is_empty() {
+            lines.push(format!(
+                "  no option selected; typed by the user (verbatim): {text}"
+            ));
+        } else {
+            lines.push(format!("  selected: {}", labels.join("、")));
+            lines.push(format!("  added note (verbatim): {text}"));
         }
-        lines.push(format!("- {}: {}", question.prompt, values.join(", ")));
     }
     Ok((!lines.is_empty()).then(|| lines.join("\n")))
 }
@@ -11859,10 +11883,77 @@ mod tests {
         .unwrap()
         .expect("complete answers resume");
         assert!(!continuation.elevated);
+        assert!(continuation.prompt.contains("Where should this ship?"));
+        assert!(continuation.prompt.contains("  selected: Beta"));
+        assert!(continuation.prompt.contains("Keep the rollback switch"));
+    }
+
+    #[test]
+    fn a_typed_answer_says_that_no_option_was_picked() {
+        let mut request = interaction(PermissionRequestKind::Question);
+        request.questions = Some(vec![genehub_proto::InteractionQuestion {
+            id: "environment".into(),
+            prompt: "Where should this ship?".into(),
+            allow_multiple: false,
+            allow_freeform: true,
+            options: vec![
+                genehub_proto::InteractionOption {
+                    id: "beta".into(),
+                    label: "Beta".into(),
+                },
+                genehub_proto::InteractionOption {
+                    id: "official".into(),
+                    label: "Official".into(),
+                },
+            ],
+        }]);
+        let continuation = continuation_for(
+            &request,
+            &PermissionOutcome::Answered {
+                answers: vec![genehub_proto::InteractionAnswer {
+                    question_id: "environment".into(),
+                    selected_option_ids: vec![],
+                    freeform_text: Some("ship it nowhere".into()),
+                }],
+            },
+        )
+        .unwrap()
+        .expect("a typed answer resumes");
         assert!(continuation
             .prompt
-            .contains("Where should this ship?: Beta"));
-        assert!(continuation.prompt.contains("Keep the rollback switch"));
+            .contains("no option selected; typed by the user (verbatim): ship it nowhere"));
+        assert!(!continuation.prompt.contains("selected: Beta"));
+    }
+
+    #[test]
+    fn a_note_on_top_of_a_choice_stays_a_separate_line() {
+        let mut request = interaction(PermissionRequestKind::Question);
+        request.questions = Some(vec![genehub_proto::InteractionQuestion {
+            id: "environment".into(),
+            prompt: "Where should this ship?".into(),
+            allow_multiple: false,
+            allow_freeform: true,
+            options: vec![genehub_proto::InteractionOption {
+                id: "beta".into(),
+                label: "Beta".into(),
+            }],
+        }]);
+        let continuation = continuation_for(
+            &request,
+            &PermissionOutcome::Answered {
+                answers: vec![genehub_proto::InteractionAnswer {
+                    question_id: "environment".into(),
+                    selected_option_ids: vec!["beta".into()],
+                    freeform_text: Some("and tell me the rollback switch".into()),
+                }],
+            },
+        )
+        .unwrap()
+        .expect("a choice plus a note resumes");
+        assert!(continuation.prompt.contains("  selected: Beta"));
+        assert!(continuation
+            .prompt
+            .contains("  added note (verbatim): and tell me the rollback switch"));
     }
 
     #[test]

@@ -141,7 +141,7 @@
             "allowed": true,
             "updatedInput": {
               "answers": {
-                "Which color?": "Blue, maybe teal"
+                "Which color?": "Blue\nadded note (verbatim): maybe teal"
               }
             }
           }

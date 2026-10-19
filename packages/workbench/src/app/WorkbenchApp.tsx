@@ -1020,6 +1020,11 @@ export function App({
                       </div>
                     ) : null}
                     {session && durableInput ? <InputDelivery session={session} /> : null}
+                    {session && durableInput && workbench.timeline.pendingPermission ? (
+                      <p className="shrink-0 px-4 pb-1 text-xs leading-5 text-muted" role="status">
+                        输入框里发出去的是追问，不算回答；要回答请用上面的卡片。
+                      </p>
+                    ) : null}
                     {(!workbench.timeline.pendingPermission || durableInput) && (!starting || overviewSurface === "sessions") ? (
                       <Composer
                         layout={starting || workbench.timeline.pendingPermission || workbench.timeline.permissionProgress ? "inline" : "overlay"}

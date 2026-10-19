@@ -532,17 +532,28 @@ def question_event(request_id: str, questions: List[Question], item_id: Optional
 
 def question_answers(questions: List[Question], outcome: dict) -> Optional[Dict[str, str]]:
     """``{question text: answer}`` as the tool expects it, or None when
-    nothing was answered."""
+    nothing was answered.
+
+    The three shapes stay apart, the way the daemon records them: a picked
+    option, a picked option plus the person's own words, and no option at all
+    with only what they typed. Joining them with a comma made the offered
+    wording look like the Human's own answer.
+    """
     submitted = outcome.get("answers") if outcome.get("outcome") == "answered" else None
     answers: Dict[str, str] = {}
     for question in questions:
         found = next((a for a in submitted or [] if isinstance(a, dict) and a.get("questionId") == question.id), None)
         if found is None:
             continue
-        values = [question.options[int(picked)] for picked in found.get("selectedOptionIds") or [] if str(picked).isdigit() and int(picked) < len(question.options)]
+        picked = [question.options[int(p)] for p in found.get("selectedOptionIds") or [] if str(p).isdigit() and int(p) < len(question.options)]
         freeform = found.get("freeformText")
-        if isinstance(freeform, str) and freeform.strip():
-            values.append(freeform.strip())
-        if values:
-            answers[question.prompt] = ", ".join(values)
+        note = freeform.strip() if isinstance(freeform, str) and freeform.strip() else ""
+        if not picked and not note:
+            continue
+        if not picked:
+            answers[question.prompt] = f"no option selected; typed by the user (verbatim): {note}"
+        elif not note:
+            answers[question.prompt] = "、".join(picked)
+        else:
+            answers[question.prompt] = "、".join(picked) + f"\nadded note (verbatim): {note}"
     return answers or None

@@ -3116,6 +3116,86 @@ describe("the controls offered to the user", () => {
       ],
     });
   });
+
+  it("submits a typed answer as its own answer, with nothing selected", async () => {
+    const onAnswer = vi.fn();
+    render(
+      <PermissionCard
+        request={{
+          id: "q-own",
+          kind: "question",
+          title: "发布选择",
+          options: [],
+          questions: [
+            {
+              id: "environment",
+              prompt: "发布到哪里？",
+              allowMultiple: false,
+              allowFreeform: true,
+              options: [
+                { id: "beta", label: "Beta" },
+                { id: "official", label: "Official" },
+              ],
+            },
+          ],
+        }}
+        onAnswer={onAnswer}
+      />,
+    );
+
+    await userEvent.click(screen.getByLabelText("其他：我自己输入"));
+    expect(screen.getByText("未选择任何选项，只提交你写的内容。")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "提交我输入的内容" })).toBeDisabled();
+    await userEvent.type(screen.getByLabelText("你的回答（必填）"), "先只发内部，别上官方");
+    await userEvent.click(screen.getByRole("button", { name: "提交我输入的内容" }));
+
+    expect(onAnswer).toHaveBeenCalledWith({
+      outcome: "answered",
+      answers: [
+        {
+          questionId: "environment",
+          selectedOptionIds: [],
+          freeformText: "先只发内部，别上官方",
+        },
+      ],
+    });
+  });
+
+  it("leaves the typed-only state when an option is picked again", async () => {
+    const onAnswer = vi.fn();
+    render(
+      <PermissionCard
+        request={{
+          id: "q-back",
+          kind: "question",
+          title: "发布选择",
+          options: [],
+          questions: [
+            {
+              id: "environment",
+              prompt: "发布到哪里？",
+              allowMultiple: false,
+              allowFreeform: true,
+              options: [{ id: "beta", label: "Beta" }],
+            },
+          ],
+        }}
+        onAnswer={onAnswer}
+      />,
+    );
+
+    await userEvent.click(screen.getByLabelText("其他：我自己输入"));
+    await userEvent.click(screen.getByLabelText("Beta"));
+    expect(screen.queryByText("未选择任何选项，只提交你写的内容。")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "提交答案" }));
+
+    expect(onAnswer).toHaveBeenCalledWith({
+      outcome: "answered",
+      answers: [
+        { questionId: "environment", selectedOptionIds: ["beta"], freeformText: undefined },
+      ],
+    });
+  });
 });
 
 describe("a whole turn as the timeline sees it", () => {
