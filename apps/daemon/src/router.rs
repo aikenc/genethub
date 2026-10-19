@@ -7,7 +7,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use genehub_proto::{
-    ErrorCode, HelloResult, ProtocolError, Reply, Request, TransportKind, WEB_PROTOCOL_VERSION,
+    ErrorCode, HelloResult, ProtocolError, Reply, Request, SessionAgentTarget, TransportKind,
+    WEB_PROTOCOL_VERSION,
 };
 use tokio::sync::broadcast;
 
@@ -2828,6 +2829,37 @@ async fn dispatch(
                 Ok(summary) => summary,
                 Err(error) => return failed(error),
             };
+            // Naming a model the session's own Agent does not ship is a request
+            // to move the session to whoever does, not a reason to refuse.
+            if let Some(owner) = crate::agent_routing::agent_offering_model(state, &model_id).await
+            {
+                if owner != summary.agent_id {
+                    let mut target = SessionAgentTarget {
+                        agent_id: owner,
+                        model_id: Some(model_id.clone()),
+                        mode_id: None,
+                        effort_id: None,
+                        fast: None,
+                        runtime_values: std::collections::BTreeMap::new(),
+                    };
+                    target.model_id = match crate::agent_routing::ensure_concrete_route_allowed(
+                        state,
+                        &target.agent_id,
+                        target.model_id,
+                    )
+                    .await
+                    {
+                        Ok(model_id) => model_id,
+                        Err(error) => return failed(error),
+                    };
+                    let providers = state.providers().await;
+                    return match state.sessions.switch_agent(&session_id, target, &providers).await
+                    {
+                        Ok(summary) => Handled::ok(Reply::Session(summary)),
+                        Err(error) => failed(error),
+                    };
+                }
+            }
             if let Err(error) = crate::agent_routing::ensure_concrete_route_allowed(
                 state,
                 &summary.agent_id,

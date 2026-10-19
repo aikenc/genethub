@@ -546,6 +546,42 @@ pub(crate) async fn ensure_concrete_route_allowed(
     ensure_concrete_route_allowed_in_preferences(&preferences, agent_id, model_id)
 }
 
+/// Which Agent on this machine offers `model_id` right now.
+///
+/// Naming a model is a request for *that* model, not for the Agent the session
+/// happens to sit on: Hy4 may only ship with `codebuddy` while the session was
+/// started on `codex`. Without this the only way to honour "use Hy4" is to ask
+/// for a tier, which is re-resolved at every send and can come up empty.
+pub(crate) async fn agent_offering_model(state: &Shared, model_id: &str) -> Option<String> {
+    let providers = state.providers().await;
+    let agents = state.registry.list(&providers).await;
+    let preferences = state
+        .config
+        .read()
+        .await
+        .agent_preferences
+        .clone()
+        .unwrap_or_default();
+    let disabled: BTreeSet<String> = preferences
+        .disabled_agent_ids
+        .iter()
+        .map(|id| id.trim().to_ascii_lowercase())
+        .filter(|id| !id.is_empty())
+        .collect();
+    agents
+        .iter()
+        .filter(|agent| !disabled.contains(&agent.id.to_ascii_lowercase()))
+        .filter(|agent| matches!(agent.probe, ProbeState::Ready))
+        .find(|agent| {
+            agent
+                .catalog
+                .models
+                .iter()
+                .any(|model| model.id == model_id && !is_auto_model(model))
+        })
+        .map(|agent| agent.id.clone())
+}
+
 fn validate_exclusive_tags(tags: &[String], preferences: &AgentSelectionPreferences) -> Result<()> {
     let mut claimed = BTreeSet::new();
     for tag in normalize_tags(tags.iter().cloned()) {
