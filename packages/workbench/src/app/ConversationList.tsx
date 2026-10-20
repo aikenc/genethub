@@ -42,18 +42,26 @@ function ConversationListContent({ host, endpoint, open, hidden, onNavigate, mac
   const isChildWorkspace = Boolean(selectedWorkspace?.agentSpace?.parentWorkspaceId);
   const [choosingAgent, setChoosingAgent] = useState(false);
   const [groupingOpen, setGroupingOpen] = useState(false);
-  const [groupedRoots, setGroupedRoots] = useState<string[]>(() => {
+  const [grouping, setGrouping] = useState<{ grouped: string[]; flat: string[] }>(() => {
     const saved = localValue<unknown>(`conversation-groups:${machine}`);
-    return Array.isArray(saved) ? saved.filter((value): value is string => typeof value === "string") : [];
+    const roots = (value: unknown): string[] => Array.isArray(value)
+      ? value.filter((root): root is string => typeof root === "string") : [];
+    // The previous UI auto-saved [] even when nobody chose a layout. It cannot
+    // express an explicit flat override, so keep its positive choices only.
+    if (Array.isArray(saved)) return { grouped: roots(saved), flat: [] };
+    const value = saved && typeof saved === "object" ? saved as Record<string, unknown> : {};
+    return { grouped: roots(value.grouped), flat: roots(value.flat) };
   });
-  useEffect(() => { if (machine) saveLocalValue(`conversation-groups:${machine}`, groupedRoots); }, [machine, groupedRoots]);
+  useEffect(() => { if (machine) saveLocalValue(`conversation-groups:${machine}`, grouping); }, [machine, grouping]);
   const tree = buildAgentSpaceTree(wb.workspaces);
-  const groupedProjectIds = new Set(tree.roots.filter(node => groupedRoots.includes(node.workspace.root)).map(node => node.workspace.id));
+  const groupedProjectIds = new Set(tree.roots.filter(({ workspace, children }) =>
+    !grouping.flat.includes(workspace.root) && (children.length > 0 || grouping.grouped.includes(workspace.root)))
+    .map(node => node.workspace.id));
   const [ownership, setOwnership] = useState<ConversationFilter["ownership"]>("all");
   const [state, setState] = useState<AttentionFilter>("all");
   const [advanced, setAdvanced] = useState(false);
   const [managing, setManaging] = useState(false);
-  const selectionScope = JSON.stringify([query, agentId, ownership, state, wb.includeArchived, groupedRoots]);
+  const selectionScope = JSON.stringify([query, agentId, ownership, state, wb.includeArchived, grouping]);
   const [selectionState, setSelectionState] = useState({ scope: "", ids: new Set<string>() });
   const selected = selectionState.scope === selectionScope ? selectionState.ids : new Set<string>();
   const setSelected = (next: Set<string> | ((previous: Set<string>) => Set<string>)) => {
@@ -169,10 +177,16 @@ function ConversationListContent({ host, endpoint, open, hidden, onNavigate, mac
 
     </footer>}
     {groupingOpen && <WorkspaceDetailsDialog title="会话分组" onClose={() => setGroupingOpen(false)}>
-      <p className="mb-2 text-xs leading-5 text-muted">会话默认平铺。选择需要一起观察的项目；分组只改变本浏览器上的展示。</p>
+      <p className="mb-2 text-xs leading-5 text-muted">含子 Space 的项目默认分组，其他会话平铺。可按需调整，仅改变本浏览器上的展示。</p>
       <div className="space-y-1">{tree.roots.map(({ workspace }) => <label key={workspace.id} className="flex min-h-11 items-center gap-3 rounded px-2 text-sm hover:bg-raised">
         <input type="checkbox" aria-label={`按项目分组 ${workspace.name}`} checked={groupedProjectIds.has(workspace.id)}
-          onChange={event => setGroupedRoots(old => event.target.checked ? [...new Set([...old, workspace.root])] : old.filter(root => root !== workspace.root))}
+          onChange={event => {
+            const checked = event.target.checked;
+            setGrouping(old => ({
+              grouped: checked ? [...new Set([...old.grouped, workspace.root])] : old.grouped.filter(root => root !== workspace.root),
+              flat: checked ? old.flat.filter(root => root !== workspace.root) : [...new Set([...old.flat, workspace.root])],
+            }));
+          }}
           className="h-4 w-4 shrink-0 accent-[rgb(var(--accent))]" />
         <span className="min-w-0 flex-1 truncate">{workspace.name}</span>
       </label>)}</div>

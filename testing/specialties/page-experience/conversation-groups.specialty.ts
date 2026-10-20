@@ -5,9 +5,9 @@ import { defineSpecialty, daemonEndpoint, openWorkbenchPage, runGenetAsync } fro
 
 for (const width of [390, 1280]) defineSpecialty({
   id: `specialty.page-experience.conversation-groups.${width}`,
-  title: `Flat conversations and explicit project observation at ${width}px`,
-  oracle: "A real browser lists ordinary and nested Space conversations flat, preserves an explicit project group across rename/reload, opens child history and actionable archived work, and opens a team-delivered page through Asset Preview",
-  catches: ["role names silently change layout", "child conversations or archived failures disappear", "grouping loses entry conversations or nested ownership", "phone controls require hover", "progress depends on platform-hardcoded paths"],
+  title: `Ordinary flat conversations and automatic project observation at ${width}px`,
+  oracle: "A real browser lists ordinary conversations flat and nested Space projects grouped by default, migrates old empty preferences and preserves manual overrides across reload, opens child history and actionable archived work, and opens a team-delivered page through Asset Preview",
+  catches: ["team projects stay flat until manually configured", "role names silently change layout", "child conversations or archived failures disappear", "grouping loses entry conversations or nested ownership", "phone controls require hover", "progress depends on platform-hardcoded paths"],
   tags: ["page-experience", "conversation-groups"], runner: "playwright", llm: { default: "mock" },
   expectedDurationMs: 45_000, timeoutMs: 180_000,
   resources: { environments: 1, cpu: 2, memoryMb: 1536, io: 1, browser: 1, pool: "browser" },
@@ -44,8 +44,8 @@ for (const width of [390, 1280]) defineSpecialty({
       if (attached?.type !== "workspace" || attached.data.agentSpace?.parentWorkspaceId !== parentWorkspaceId) throw new Error(`Could not attach ${name}`);
       return attached.data;
     };
-    const qa = await createSpace("qa", project.id);
-    const work = await createSpace("work", qa.id);
+    const qa = await createSpace("verification", project.id);
+    const work = await createSpace("delivery", qa.id);
     const plainRoot = path.join(t.env.root, "ordinary-project"); mkdirSync(plainRoot);
     const plainReply = await opened.client.call({ type: "workspace.open", payload: { root: plainRoot } });
     if (plainReply?.type !== "workspace") throw new Error("Could not open ordinary project");
@@ -93,12 +93,35 @@ for (const width of [390, 1280]) defineSpecialty({
       await list.waitFor();
     };
     const row = (title: string) => list.locator(".conversation-row").filter({ hasText: title });
+    if (width === 390) {
+      await page.getByRole("button", { name: "当前项目", exact: true }).waitFor();
+      // Exercise the deployed old browser preference through its real persistence boundary.
+      await page.evaluate(machine => localStorage.setItem(`genehub.conversation.v1:conversation-groups:${machine}`, "[]"), daemonEndpoint(opened.daemon).localServerProof.machineId);
+      await page.reload();
+    }
     await page.getByRole("button", { name: "当前项目", exact: true }).waitFor();
     await showList();
+    const group = list.getByLabel("项目分组 观察项目", { exact: true });
+    await group.waitFor();
+    await row("入口沟通一").waitFor(); await row("入口沟通二").waitFor();
+    await row("另一项目普通会话").waitFor();
+    t.assertions.assert(await list.locator(".project-session-group").count() === 1 && await group.locator(".conversation-row").filter({ hasText: "另一项目普通会话" }).count() === 0, "ordinary project was grouped with the Space project");
+    const children = group.getByRole("button", { name: "子 Space 会话 观察项目", exact: true });
+    await children.getByText("1 等待", { exact: true }).waitFor();
+    await children.getByText("1 失败", { exact: true }).waitFor();
+    t.assertions.assert(await row("验证会话一").count() === 0, "automatic group did not collapse internal conversations");
+    await list.getByRole("button", { name: "会话分组", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "会话分组", exact: true });
+    await dialog.getByRole("checkbox", { name: "按项目分组 观察项目", exact: true }).uncheck();
+    await dialog.getByRole("button", { name: "完成", exact: true }).click();
+    await row("深层工作会话").waitFor();
+    await page.reload();
+    await page.getByRole("heading", { name: "另一项目普通会话", exact: true }).waitFor();
+    await showList();
     for (const title of ["入口沟通一", "入口沟通二", "验证会话一", "验证会话二", "深层工作会话", "归档问题会话", "归档失败会话", "另一项目普通会话"]) await row(title).waitFor();
-    t.assertions.assert(await list.locator(".project-session-group").count() === 0, "role-like Space names created implicit groups");
+    t.assertions.assert(await list.locator(".project-session-group").count() === 0, "explicit flat override was lost after reload");
     t.assertions.assert(await row("已完成历史").count() === 0, "completed history leaked into current sessions");
-    await row("深层工作会话").getByText("观察项目 / qa / work").waitFor();
+    await row("深层工作会话").getByText("观察项目 / verification / delivery").waitFor();
     await list.getByRole("button", { name: "待你处理", exact: true }).click();
     await row("归档问题会话").waitFor();
     t.assertions.assert(await row("归档失败会话").count() === 0, "a provider failure was presented as a Human request");
@@ -115,16 +138,13 @@ for (const width of [390, 1280]) defineSpecialty({
     await list.getByRole("button", { name: "会话筛选", exact: true }).click();
     await scope.getByRole("button", { name: "清除筛选", exact: true }).click();
     await scope.getByRole("button", { name: "查看结果", exact: true }).click();
-    // Grouping is opt-in, and entry sessions remain directly reachable.
+    // A manual group override remains available, and entry sessions are directly reachable.
     await list.getByRole("button", { name: "会话分组", exact: true }).click();
-    const dialog = page.getByRole("dialog", { name: "会话分组", exact: true });
     await dialog.getByRole("checkbox", { name: "按项目分组 观察项目", exact: true }).check();
     await dialog.getByRole("button", { name: "完成", exact: true }).click();
-    const group = list.getByLabel("项目分组 观察项目", { exact: true });
     await group.waitFor();
     await row("入口沟通一").waitFor(); await row("入口沟通二").waitFor();
     t.assertions.assert(await row("验证会话一").count() === 0, "child collapse had no effect");
-    const children = group.getByRole("button", { name: "子 Space 会话 观察项目", exact: true });
     await children.getByText("1 等待", { exact: true }).waitFor();
     await children.getByText("1 失败", { exact: true }).waitFor();
     await children.click();
@@ -135,7 +155,7 @@ for (const width of [390, 1280]) defineSpecialty({
     await group.getByRole("combobox").selectOption("");
     await row("深层工作会话").getByRole("button").first().click();
     await page.getByRole("heading", { name: "深层工作会话", exact: true }).waitFor();
-    await page.getByRole("button", { name: "当前项目", exact: true }).getByText("观察项目 / qa / work").waitFor();
+    await page.getByRole("button", { name: "当前项目", exact: true }).getByText("观察项目 / verification / delivery").waitFor();
     // Persisted structural membership must not depend on role names.
     await opened.client.call({ type: "workspace.rename", payload: { workspaceId: project.id, name: "改名项目" } });
     await opened.client.call({ type: "workspace.rename", payload: { workspaceId: qa.id, name: "验证空间" } });
@@ -146,7 +166,7 @@ for (const width of [390, 1280]) defineSpecialty({
     await renamedGroup.waitFor();
     await row("另一项目普通会话").waitFor();
     await renamedGroup.getByRole("button", { name: "子 Space 会话 改名项目", exact: true }).click();
-    await row("深层工作会话").getByText("改名项目 / 验证空间 / work").waitFor();
+    await row("深层工作会话").getByText("改名项目 / 验证空间 / delivery").waitFor();
     await row("归档问题会话").getByRole("button").first().click();
     await page.getByRole("group", { name: "请选择验收范围", exact: true }).waitFor();
     t.assertions.assert((await snapshot(pending)).summary.interactionSummary?.count === 1, "opening a question consumed it");
@@ -172,6 +192,6 @@ for (const width of [390, 1280]) defineSpecialty({
     await page.frameLocator('iframe[title="HTML 文件预览"]').getByRole("heading", { name: "TEAM_PROGRESS_FROM_MESSAGE", exact: true }).waitFor();
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1);
     t.assertions.assert(!overflow, "conversation UI overflows the viewport");
-    t.note(`${width}px: real parent relationships, opt-in persistence, all entry/child sessions, archived work/history and message-delivered Asset Preview verified; nested session ${nested}`);
+    t.note(`${width}px: real parent defaults, old empty-preference migration and manual override persistence, all entry/child sessions, archived work/history and message-delivered Asset Preview verified; nested session ${nested}`);
   } finally { await browser?.close(); opened.client.close(); opened.daemon.stop(); await opened.mock.stop(); }
 });

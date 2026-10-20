@@ -1,3 +1,4 @@
+import { setTimeout as yieldToIO } from "node:timers/promises";
 import type { SequencedEvent } from "@genehub/proto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -20,7 +21,8 @@ import {
   type FakeSocket,
 } from "./fake-socket";
 
-const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+// Crypto still completes on real IO turns when an individual case controls its timers.
+const settle = () => yieldToIO(0);
 
 function localProof(
   proof = TEST_PEER_SECRET,
@@ -512,26 +514,44 @@ describe("RPC exchanges are independent logical streams", () => {
   });
 
   it("bounds offline queues and applies per-exchange deadlines", async () => {
-    const offline = new Client({
-      url: "ws://127.0.0.1:1/ws",
-      localServerProof: localProof(),
-      maxQueuedRequests: 1,
-      maxQueueAgeMs: 5,
-      rtcEnabled: false,
-    });
-    const waiting = offline.call({ type: "agent.list" });
-    await expect(offline.call({ type: "agent.list" })).rejects.toBeInstanceOf(
-      ClientQueueFullError,
-    );
-    await expect(waiting).rejects.toBeInstanceOf(ClientRequestTimeoutError);
-    offline.close();
+    // Keep the 5ms deadline, but do not spend it on real crypto scheduling
+    // during connection.identity. Advance time only for the exchange under test.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    let offline: Client | undefined;
+    let client: Client | undefined;
+    try {
+      offline = new Client({
+        url: "ws://127.0.0.1:1/ws",
+        localServerProof: localProof(),
+        maxQueuedRequests: 1,
+        maxQueueAgeMs: 5,
+        rtcEnabled: false,
+      });
+      const waiting = offline.call({ type: "agent.list" });
+      await expect(offline.call({ type: "agent.list" })).rejects.toBeInstanceOf(
+        ClientQueueFullError,
+      );
+      const queueExpired = expect(waiting).rejects.toBeInstanceOf(ClientRequestTimeoutError);
+      await vi.advanceTimersByTimeAsync(5);
+      await queueExpired;
+      offline.close();
 
-    const { client, socket } = await connected({ requestTimeoutMs: 5 });
-    const unanswered = client.call({ type: "agent.list" });
-    await waitFor(() => socket.sent.some((message) => message.type === "agent.list"));
-    await expect(unanswered).rejects.toBeInstanceOf(ClientRequestTimeoutError);
-    expect(client.connectionState).toBe("ready");
-    client.close();
+      const ready = await connected({ requestTimeoutMs: 5 });
+      client = ready.client;
+      const unanswered = client.call({ type: "agent.list" });
+      const finished = vi.fn();
+      void unanswered.then(finished, finished);
+      const expired = expect(unanswered).rejects.toBeInstanceOf(ClientRequestTimeoutError);
+      await waitFor(() => ready.socket.sent.some((message) => message.type === "agent.list"));
+      await vi.advanceTimersByTimeAsync(4);
+      expect(finished).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await expired;
+      expect(client.connectionState).toBe("ready");
+    } finally {
+      client?.close(); offline?.close();
+      vi.useRealTimers();
+    }
   });
 
   it("emits correlated operation evidence without request bodies", async () => {
