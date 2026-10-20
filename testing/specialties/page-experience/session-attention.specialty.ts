@@ -108,7 +108,7 @@ for (const scenario of ["pending-entry", "reply-read"] as const) {
         const cursor = (await snapshot()).summary.latestReply;
         await send("这是一条用户输入，等待回复。");
         await t.tools.waitUntil(async () => (await snapshot()).summary.status === "running", 30_000);
-        await row.getByText("Agent 处理中", { exact: true }).waitFor();
+        await row.getByRole("img", { name: "Agent 处理中", exact: true }).waitFor();
         t.assertions.assert((await snapshot()).summary.latestReply?.itemId === cursor?.itemId && await row.getByLabel("有未读新回复").count() === 0, "own input or running status produced unread content");
         await opened.client.call({ type: "session.interrupt", payload: { sessionId: target } });
       }

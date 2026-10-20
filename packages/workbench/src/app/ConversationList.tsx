@@ -6,7 +6,7 @@ import { useWorkbench } from "../session/store";
 import { useAgentActivities } from "../workspace/useAgentActivity";
 import { attentionFilters, hasCurrentWork, matchesAttention, pendingSessions, type AttentionFilter } from "../session/attention";
 import { matchesConversation, defaultConversationFilter, type ConversationFilter } from "../session/conversationFilters";
-import { isDescendant } from "../workspace/agent-space-tree";
+import { buildAgentSpaceTree, isDescendant } from "../workspace/agent-space-tree";
 import { localValue, saveLocalValue, hasUnreadReply, useConversationLocalChanges } from "../session/localConversation";
 import { RecentSessions } from "../shell/ConversationRows";
 import { ListPane, ListHeader, ListScroll, ListToolbar, ListSearch, listPrimaryAction } from "../ui/ListLayout";
@@ -41,17 +41,19 @@ function ConversationListContent({ host, endpoint, open, hidden, onNavigate, mac
   const selectedWorkspace = wb.workspaces.find((w) => w.id === agentId);
   const isChildWorkspace = Boolean(selectedWorkspace?.agentSpace?.parentWorkspaceId);
   const [choosingAgent, setChoosingAgent] = useState(false);
-  const [groupByTeam, setGroupByTeam] = useState(true);
-  const [ownership, setOwnership] = useState<ConversationFilter["ownership"]>("primary");
+  const [groupingOpen, setGroupingOpen] = useState(false);
+  const [groupedRoots, setGroupedRoots] = useState<string[]>(() => {
+    const saved = localValue<unknown>(`conversation-groups:${machine}`);
+    return Array.isArray(saved) ? saved.filter((value): value is string => typeof value === "string") : [];
+  });
+  useEffect(() => { if (machine) saveLocalValue(`conversation-groups:${machine}`, groupedRoots); }, [machine, groupedRoots]);
+  const tree = buildAgentSpaceTree(wb.workspaces);
+  const groupedProjectIds = new Set(tree.roots.filter(node => groupedRoots.includes(node.workspace.root)).map(node => node.workspace.id));
+  const [ownership, setOwnership] = useState<ConversationFilter["ownership"]>("all");
   const [state, setState] = useState<AttentionFilter>("all");
   const [advanced, setAdvanced] = useState(false);
   const [managing, setManaging] = useState(false);
-  const teamRootIds = new Set(
-    wb.workspaces
-      .filter((w) => w.agentSpace?.parentWorkspaceId && (w.name === "leader" || w.name === "team-reflect" || w.name === "qa" || w.name.endsWith("-lead")))
-      .map((w) => w.agentSpace!.parentWorkspaceId!),
-  );
-  const selectionScope = JSON.stringify([query, agentId, ownership, state, wb.includeArchived, groupByTeam]);
+  const selectionScope = JSON.stringify([query, agentId, ownership, state, wb.includeArchived, groupedRoots]);
   const [selectionState, setSelectionState] = useState({ scope: "", ids: new Set<string>() });
   const selected = selectionState.scope === selectionScope ? selectionState.ids : new Set<string>();
   const setSelected = (next: Set<string> | ((previous: Set<string>) => Set<string>)) => {
@@ -76,15 +78,12 @@ function ConversationListContent({ host, endpoint, open, hidden, onNavigate, mac
   );
   const candidates = state === "pending" ? pendingSessions(sources, wb.sessions) : sources;
   const rows = candidates.filter((s) => {
-    // Explicit child Space selection or 1+N project team grouping reveals team member conversations; single-expert root respects ownership filter.
-    const ws = wb.workspaces.find((w) => w.id === s.workspaceId);
-    const rootId = ws?.agentSpace?.parentWorkspaceId ?? ws?.id ?? s.workspaceId;
-    const inProjectTeam = teamRootIds.has(rootId) && (groupByTeam || agentId === rootId);
-    const currentView = state === "pending" || state === "running";
+    const ws = wb.workspaces.find(w => w.id === s.workspaceId);
+    const currentView = state === "pending" || state === "running" || state === "blocked";
     if (!matchesConversation(s, wb.workspaces, { ...defaultConversationFilter,
-      ownership: isChildWorkspace || inProjectTeam || state === "pending" ? "all" : ownership,
-      archived: currentView && hasCurrentWork(s, wb.sessions) ? s.archived : wb.includeArchived })) return false;
-    if (!`${s.title} ${s.description ?? ""} ${s.labels?.join(" ") ?? ""} ${ws?.name ?? ""}`.toLowerCase().includes(query.trim().toLowerCase())) return false;
+      ownership: isChildWorkspace || state === "pending" ? "all" : ownership,
+      archived: currentView && hasCurrentWork(s, wb.sessions) ? Boolean(s.archived) : wb.includeArchived })) return false;
+    if (!`${s.title} ${s.description ?? ""} ${s.labels?.join(" ") ?? ""} ${tree.breadcrumbById[s.workspaceId] ?? ws?.name ?? ""}`.toLowerCase().includes(query.trim().toLowerCase())) return false;
     return matchesAttention(s, state, hasUnreadReply(machine, s), wb.sessions);
   }).map((s) => ({ ...s, unread: hasUnreadReply(machine, s) }));
   const visibleIds = new Set(rows.map((s) => s.id));
@@ -127,22 +126,13 @@ function ConversationListContent({ host, endpoint, open, hidden, onNavigate, mac
       <fieldset disabled={busy} className="min-w-0 space-y-2 disabled:opacity-60">
         <ListToolbar label="会话导航工具栏" searchLabel="搜索会话" searchOpen={searchOpen} onSearch={() => { setSearchOpen(!searchOpen); if (searchOpen) setQuery(""); }}>
           <button type="button" aria-label="选择项目范围" onClick={() => setChoosingAgent(true)} className="min-h-11 min-w-0 flex-1 truncate rounded-lg px-2 text-left text-sm font-semibold text-fg hover:bg-raised">{selectedWorkspace?.name ?? "全部会话"}</button>
-          <button
-            type="button"
-            aria-label="按项目团队分组"
-            aria-pressed={groupByTeam}
-            title="按项目与 1+N 项目团队分组展示会话"
-            onClick={() => setGroupByTeam((v) => !v)}
-            className={`min-h-9 shrink-0 rounded-lg border px-2 text-xs font-medium transition-colors ${
-              groupByTeam
-                ? "border-accent/40 bg-accent/10 text-accent"
-                : "border-line bg-surface text-muted hover:bg-raised"
-            }`}
-          >团队分组</button>
+          <button type="button" aria-label="会话分组" aria-expanded={groupingOpen}
+            onClick={() => setGroupingOpen(true)}
+            className={`min-h-9 shrink-0 rounded-lg border px-2 text-xs font-medium ${groupedProjectIds.size ? "border-accent/40 bg-accent/10 text-accent" : "border-line bg-surface text-muted hover:bg-raised"}`}>分组</button>
           <button type="button" aria-label="新建会话" className={listPrimaryAction} onClick={() => { wb.newSession(agentId || null, null); onNavigate(); }}><Plus size={18} />新建</button>
         </ListToolbar>
         <FilterBar<AttentionFilter> label="会话状态工具栏" options={attentionFilters} value={state} onChange={setState} actions={<>
-          <button type="button" aria-label="会话筛选" aria-expanded={advanced} className={`flex h-9 w-8 shrink-0 items-center justify-center ${agentId || ownership !== "primary" ? "text-accent" : "text-muted"}`} onClick={() => setAdvanced(true)}><ListFilter size={16} /></button>
+          <button type="button" aria-label="会话筛选" aria-expanded={advanced} className={`flex h-9 w-8 shrink-0 items-center justify-center ${agentId || ownership !== "all" ? "text-accent" : "text-muted"}`} onClick={() => setAdvanced(true)}><ListFilter size={16} /></button>
           <button type="button" aria-label="会话列表选项" aria-expanded={listMenuOpen} className="flex h-9 w-8 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-raised" onClick={() => setListMenuOpen(!listMenuOpen)}><MoreHorizontal size={20} /></button>
         </>} />
         {searchOpen && <ListSearch label="搜索会话" value={query} onChange={setQuery} onClose={() => { setSearchOpen(false); setQuery(""); }}/>}
@@ -163,7 +153,7 @@ function ConversationListContent({ host, endpoint, open, hidden, onNavigate, mac
     {notice && <div role="status" className="flex max-h-[10%] shrink-0 gap-2 overflow-y-auto border-b border-line px-3 py-2 text-xs leading-5"><p className="min-w-0 flex-1 break-words">{notice}</p><button aria-label="关闭操作结果" className="h-8 w-8 shrink-0" onClick={() => setNotice("")}>×</button></div>}
     <ListScroll label="会话滚动区域">
       <RecentSessions sessions={rows} workspaces={wb.workspaces} activeSessionId={wb.activeSessionId}
-        groupByTeam={groupByTeam}
+        groupedProjectIds={groupedProjectIds}
         selection={managing ? { ids: selection, toggle, disabled: busy } : undefined}
         onPickSession={(id) => { void wb.selectSession(id); onNavigate(); }}
         onRename={(id, title) => void wb.renameSession(id, title)} onDelete={(id) => void wb.deleteSession(id)} />
@@ -178,12 +168,22 @@ function ConversationListContent({ host, endpoint, open, hidden, onNavigate, mac
       </div>
 
     </footer>}
+    {groupingOpen && <WorkspaceDetailsDialog title="会话分组" onClose={() => setGroupingOpen(false)}>
+      <p className="mb-2 text-xs leading-5 text-muted">会话默认平铺。选择需要一起观察的项目；分组只改变本浏览器上的展示。</p>
+      <div className="space-y-1">{tree.roots.map(({ workspace }) => <label key={workspace.id} className="flex min-h-11 items-center gap-3 rounded px-2 text-sm hover:bg-raised">
+        <input type="checkbox" aria-label={`按项目分组 ${workspace.name}`} checked={groupedProjectIds.has(workspace.id)}
+          onChange={event => setGroupedRoots(old => event.target.checked ? [...new Set([...old, workspace.root])] : old.filter(root => root !== workspace.root))}
+          className="h-4 w-4 shrink-0 accent-[rgb(var(--accent))]" />
+        <span className="min-w-0 flex-1 truncate">{workspace.name}</span>
+      </label>)}</div>
+      <button type="button" className="mt-3 min-h-11 w-full rounded-lg bg-accent text-sm text-white" onClick={() => setGroupingOpen(false)}>完成</button>
+    </WorkspaceDetailsDialog>}
         {choosingAgent && <ExpertPickerDialog title="按项目筛选" selectedId={agentId} allowNone onClose={() => setChoosingAgent(false)} onPick={id => { setAgentId(id); setChoosingAgent(false); }} />}
         {advanced && <WorkspaceDetailsDialog title="筛选会话" onClose={() => setAdvanced(false)}><div className="grid gap-3">
           <div className="flex items-center gap-2 text-xs text-muted">项目<button type="button" aria-label="按项目筛选" className={`${input} min-w-0 flex-1 truncate text-left`} onClick={() => setChoosingAgent(true)}>{wb.workspaces.find(w => w.id === agentId)?.name ?? "所有项目"}</button></div>
-          {!isChildWorkspace && <label className="flex items-center gap-2 text-xs text-muted">范围<select aria-label="会话范围" value={ownership} onChange={(e) => setOwnership(e.target.value as ConversationFilter["ownership"])} className={`${input} flex-1`}><option value="primary">主要会话</option><option value="children">子项目会话</option><option value="all">全部会话</option></select></label>}
-          {isChildWorkspace && <p className="text-xs text-muted">当前已选定子成员空间，直接展示该空间下的会话。</p>}
-          <button className="min-h-9 text-xs text-accent" onClick={() => { setAgentId(""); setOwnership("primary"); setState("all"); setQuery(""); }}>清除筛选</button>
+          {!isChildWorkspace && <label className="flex items-center gap-2 text-xs text-muted">范围<select aria-label="会话范围" value={ownership} onChange={(e) => setOwnership(e.target.value as ConversationFilter["ownership"])} className={`${input} flex-1`}><option value="primary">主要会话（含等待与失败）</option><option value="children">子项目会话</option><option value="all">全部会话</option></select></label>}
+          {isChildWorkspace && <p className="text-xs text-muted">当前已选定子 Space，直接展示该 Space 下的会话。</p>}
+          <button className="min-h-9 text-xs text-accent" onClick={() => { setAgentId(""); setOwnership("all"); setState("all"); setQuery(""); }}>清除筛选</button>
           <button className="min-h-11 rounded-lg bg-accent text-white" onClick={() => setAdvanced(false)}>查看结果</button>
         </div></WorkspaceDetailsDialog>}
       {confirmArchive && <WorkspaceDetailsDialog title={wb.includeArchived ? "恢复会话" : "归档会话"} onClose={() => setConfirmArchive(false)}><div className="text-sm"><p>{wb.includeArchived ? "恢复" : "归档"}选中的 {selection.size} 个会话？会话历史保留，变更会保存到设备。</p><div className="mt-1 flex justify-end gap-2"><button className="min-h-9 px-2" onClick={() => setConfirmArchive(false)}>取消</button><button className="min-h-9 px-2 text-accent" onClick={() => void archive()}>确认{wb.includeArchived ? "恢复" : "归档"}</button></div></div></WorkspaceDetailsDialog>}

@@ -25,15 +25,16 @@ export function matchesConversation(
     session.labels?.includes(SYSTEM_STARTED_LABEL),
   );
   const needsAttention = ["waiting", "failed"].includes(session.status);
-  // Internal conversations stay out of the default primary list.
+  // Primary scope preserves actionable internal sessions; explicit child scope still selects children only.
   const owned =
     filter.ownership === "all" ||
     (filter.ownership === "children"
       ? child
-      : Boolean(workspace) && !child);
+      : (Boolean(workspace) && !child) || needsAttention);
   return (
     owned &&
-    Boolean(session.archived) === filter.archived &&
+    (Boolean(session.archived) === filter.archived ||
+      (!filter.archived && (needsAttention || session.status === "running"))) &&
     (filter.state !== "blocked" || needsAttention)
   );
 }

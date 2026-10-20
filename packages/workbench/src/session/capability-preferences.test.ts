@@ -346,6 +346,7 @@ describe("machine-global Agent tag routing", () => {
 
   it("supports Ultra and Mini intelligence tiers in Ultra/Max/Pro/Flash/Mini order while keeping existing settings intact", () => {
     const existing: AgentSelectionPreferences = {
+      runtimes: {},
       selectedTags: ["Pro"],
       modelProfiles: [
         { agentId: "codex", modelId: "text", tags: ["Pro"], cost: "medium" },

@@ -15,6 +15,7 @@ import { useAgentActivity } from "../workspace/useAgentActivity";
 import { AgentDetailsDialog, AgentDetailsEnvironment } from "../workspace/AgentDetails";
 import { AgentAvatar } from "../workspace/AgentAvatar";
 import { SessionStatusIcon } from "./SessionStatusIcon";
+import { buildAgentSpaceTree } from "../workspace/agent-space-tree";
 
 interface RowActions {
   selection?: { ids: ReadonlySet<string>; toggle(id: string): void; disabled?: boolean };
@@ -293,336 +294,107 @@ export function WorkspaceRow({
  * a title on its own does not say where the work is happening.
  */
 export function RecentSessions({
-  sessions,
-  workspaces,
-  activeSessionId,
-  density = "auto",
-  pick = false,
-  groupByTeam = false,
-  listLabel = "最近会话",
-  ...actions
+  density = "auto", sessions, workspaces, activeSessionId, pick = false,
+  groupedProjectIds = new Set<string>(), listLabel = "最近会话", ...actions
 }: {
   density?: "auto" | "comfortable" | "compact";
   sessions: ListedSession[];
   workspaces: WorkspaceInfo[];
   activeSessionId: string | null;
-  /** Same rows as the sidebar, used only to choose a conversation. */
   pick?: boolean;
-  /** Group conversations by project & 1+N project team with three-tier team organization. */
-  groupByTeam?: boolean;
+  /** Explicit local display choice; neither names nor Space roles select groups. */
+  groupedProjectIds?: ReadonlySet<string>;
   listLabel?: string;
 } & RowActions) {
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
-  const [expandedHistory, setExpandedHistory] = useState<Record<string, boolean>>({});
-  const deviceHandle = useWorkbench((s) => s.client?.identity?.machineId ?? "local");
-  const openPreviewFloat = useWorkbench((s) => s.openPreviewFloat);
-
-  const sortedSessions = [...sessions].sort(
-    (left, right) =>
-      (right.messagePreview?.atMs ?? right.updatedAtMs) -
-      (left.messagePreview?.atMs ?? left.updatedAtMs),
-  );
-
-  if (!groupByTeam || pick) {
-    return (
-      <ul
-        data-density={density}
-        className={`entity-list conversation-list w-full min-w-0 max-w-full space-y-1 ${pick ? "overflow-hidden" : ""}`}
-        role={pick ? "listbox" : undefined}
-        aria-label={listLabel}
-      >
-        {sortedSessions.map((session) => {
-          const project = workspaces.find(({ id }) => id === session.workspaceId);
-          const parentProject = project?.agentSpace?.parentWorkspaceId
-            ? workspaces.find(({ id }) => id === project.agentSpace?.parentWorkspaceId)
-            : undefined;
-          return (
-            <SessionRow
-              key={session.id}
-              session={session}
-              pick={pick}
-              active={session.id === activeSessionId}
-              project={project}
-              parentProject={parentProject}
-              {...actions}
-            />
-          );
-        })}
-      </ul>
-    );
-  }
-
-  const byId = new Map(workspaces.map((w) => [w.id, w]));
-  const childrenByRoot = new Map<string, WorkspaceInfo[]>();
-  for (const w of workspaces) {
-    const pid = w.agentSpace?.parentWorkspaceId;
-    if (pid && byId.has(pid)) {
-      childrenByRoot.set(pid, [...(childrenByRoot.get(pid) ?? []), w]);
-    }
-  }
-  const isProjectTeamRoot = (rootId: string): boolean => {
-    const kids = childrenByRoot.get(rootId) ?? [];
-    return kids.some(
-      (k) =>
-        k.name === "leader" ||
-        k.name === "team-reflect" ||
-        k.name === "qa" ||
-        k.name.endsWith("-lead"),
-    );
-  };
-
-  const groupsMap = new Map<string, ListedSession[]>();
+  const [expandedChildren, setExpandedChildren] = useState<Record<string, boolean>>({});
+  const [spaceFilters, setSpaceFilters] = useState<Record<string, string>>({});
+  const tree = buildAgentSpaceTree(workspaces);
+  const byId = new Map(workspaces.map(w => [w.id, w]));
+  const sortedSessions = [...sessions].sort((a, b) =>
+    (b.messagePreview?.atMs ?? b.updatedAtMs) - (a.messagePreview?.atMs ?? a.updatedAtMs));
+  const items: Array<{ key: string; root?: WorkspaceInfo; sessions: ListedSession[] }> = [];
+  const groups = new Map<string, typeof items[number]>();
   for (const session of sortedSessions) {
-    const ws = byId.get(session.workspaceId);
-    const rootId = ws?.agentSpace?.parentWorkspaceId && byId.has(ws.agentSpace.parentWorkspaceId)
-      ? ws.agentSpace.parentWorkspaceId
-      : session.workspaceId;
-    groupsMap.set(rootId, [...(groupsMap.get(rootId) ?? []), session]);
+    const rootId = tree.projectRootById[session.workspaceId];
+    const root = rootId ? byId.get(rootId) : undefined;
+    if (!pick && root && groupedProjectIds.has(root.id)) {
+      let group = groups.get(root.id);
+      if (!group) {
+        group = { key: `project:${root.id}`, root, sessions: [] };
+        groups.set(root.id, group); items.push(group);
+      }
+      group.sessions.push(session);
+    } else items.push({ key: `session:${session.id}`, sessions: [session] });
   }
-
-  const rolePriority = (roleName: string): number => {
-    if (roleName === "leader") return 1;
-    if (roleName.endsWith("-lead")) return 2;
-    if (roleName === "qa") return 3;
-    if (roleName === "research") return 4;
-    return 5;
+  const renderRow = (session: ListedSession) => {
+    const project = byId.get(session.workspaceId);
+    const parentProject = project?.agentSpace?.parentWorkspaceId
+      ? byId.get(project.agentSpace.parentWorkspaceId) : undefined;
+    return <SessionRow key={session.id} session={session} pick={pick}
+      active={session.id === activeSessionId} project={project} parentProject={parentProject}
+      breadcrumb={tree.breadcrumbById[session.workspaceId]} {...actions} />;
   };
-
-  return (
-    <ul
-      data-density={density}
-      className="entity-list conversation-list w-full min-w-0 max-w-full space-y-2"
-      aria-label={listLabel}
-    >
-      {[...groupsMap.entries()].map(([rootId, groupSessions]) => {
-        const rootWs = byId.get(rootId);
-        const isTeam = isProjectTeamRoot(rootId);
-        const collapsed = Boolean(collapsedGroups[rootId]);
-        const runningCount = groupSessions.filter(
-          (s) => s.status === "running" || s.status === "waiting",
-        ).length;
-        const rootHandle = rootWs?.folders?.[0]?.rootHandle;
-
-        if (!isTeam) {
-          return (
-            <li key={rootId} className="project-session-group space-y-1">
-              {rootWs && groupsMap.size > 1 && (
-                <div className="flex items-center justify-between px-2 py-1 text-xs text-muted">
-                  <button
-                    type="button"
-                    aria-label={`${collapsed ? "展开" : "折叠"}项目分组 ${rootWs.name}`}
-                    aria-expanded={!collapsed}
-                    onClick={() => setCollapsedGroups((prev) => ({ ...prev, [rootId]: !prev[rootId] }))}
-                    className="flex min-w-0 flex-1 items-center gap-1.5 text-left font-medium text-muted hover:text-fg"
-                  >
-                    <span aria-hidden className="text-[10px]">{collapsed ? "▸" : "▾"}</span>
-                    <AgentAvatar id={rootWs.id} name={rootWs.name} size="small" />
-                    <span className="truncate">{rootWs.name}</span>
-                    <span className="shrink-0 text-[11px] text-faint">({groupSessions.length})</span>
-                  </button>
-                </div>
-              )}
-              {!collapsed && (
-                <ul className="space-y-1">
-                  {groupSessions.map((session) => {
-                    const project = byId.get(session.workspaceId);
-                    const parentProject = project?.agentSpace?.parentWorkspaceId
-                      ? byId.get(project.agentSpace.parentWorkspaceId)
-                      : undefined;
-                    return (
-                      <SessionRow
-                        key={session.id}
-                        session={session}
-                        active={session.id === activeSessionId}
-                        project={project}
-                        parentProject={parentProject}
-                        {...actions}
-                      />
-                    );
-                  })}
-                </ul>
-              )}
-            </li>
-          );
-        }
-
-        // 1+N Project Team three-tier organization:
-        // Tier 1: Root (Front / Patrol) primary sessions
-        // Tier 2: Core Member Spaces (leader, *-lead, qa, research) -> latest session per member space
-        // Tier 3: Background & historical sub-sessions (team-reflect, reflect, work, or older member sessions)
-        const frontSessions: ListedSession[] = [];
-        const latestByMember = new Map<string, ListedSession>();
-        const historyAndReflect: ListedSession[] = [];
-
-        for (const session of groupSessions) {
-          if (session.workspaceId === rootId) {
-            frontSessions.push(session);
-            continue;
-          }
-          const memberWs = byId.get(session.workspaceId);
-          const roleName = memberWs?.name ?? "";
-          if (roleName === "team-reflect" || roleName === "reflect" || roleName === "work") {
-            historyAndReflect.push(session);
-            continue;
-          }
-          if (!latestByMember.has(session.workspaceId)) {
-            latestByMember.set(session.workspaceId, session);
-          } else {
-            historyAndReflect.push(session);
-          }
-        }
-
-        const memberSessions = [...latestByMember.values()].sort((a, b) => {
-          const wa = byId.get(a.workspaceId)?.name ?? "";
-          const wbName = byId.get(b.workspaceId)?.name ?? "";
-          const diff = rolePriority(wa) - rolePriority(wbName);
-          return diff !== 0 ? diff : wa.localeCompare(wbName);
-        });
-
-        const showHistory = Boolean(expandedHistory[rootId]);
-
-        return (
-          <li
-            key={rootId}
-            aria-label={`项目团队分组 ${rootWs?.name ?? rootId}`}
-            className="team-session-group rounded-xl border border-line bg-surface/60 p-1.5"
-          >
-            <div className="space-y-1 px-1.5 py-1">
-              <button
-                type="button"
-                aria-label={`${collapsed ? "展开" : "折叠"}团队分组 ${rootWs?.name ?? rootId}`}
-                aria-expanded={!collapsed}
-                onClick={() => setCollapsedGroups((prev) => ({ ...prev, [rootId]: !prev[rootId] }))}
-                className="flex w-full min-w-0 items-center gap-1.5 text-left text-xs font-semibold text-fg hover:text-accent"
-              >
-                <span aria-hidden className="text-[10px] text-muted">{collapsed ? "▸" : "▾"}</span>
-                <AgentAvatar id={rootId} name={rootWs?.name ?? "团队"} size="small" />
-                <span className="min-w-0 flex-1 truncate" title={rootWs?.name ?? "项目团队"}>
-                  {rootWs?.name ?? "项目团队"}
-                </span>
-                <span className="shrink-0 rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-medium text-accent">
-                  项目团队
-                </span>
-                {runningCount > 0 && (
-                  <span className="shrink-0 rounded bg-ok/15 px-1.5 py-0.5 text-[10px] font-medium text-ok">
-                    {runningCount} 运行中
-                  </span>
-                )}
-              </button>
-              {rootWs && rootHandle && (
-                <div className="flex items-center gap-1.5 pl-4">
-                  <button
-                    type="button"
-                    aria-label={`打开 ${rootWs.name} 团队看板`}
-                    title="打开常驻实时团队作战看板 (datas/board/index.html)"
-                    className="rounded border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-[10px] font-medium text-accent hover:bg-accent/20"
-                    onClick={() =>
-                      openPreviewFloat({
-                        deviceHandle,
-                        workspaceHandle: rootWs.id,
-                        path: `${rootHandle}/datas/board/index.html`,
-                        sessionId: activeSessionId,
-                      })
-                    }
-                  >
-                    📊 看板
-                  </button>
-                  <button
-                    type="button"
-                    aria-label={`打开 ${rootWs.name} 最新试玩`}
-                    title="打开团队最新可玩版本 (datas/releases/index.html)"
-                    className="rounded border border-ok/30 bg-ok/10 px-1.5 py-0.5 text-[10px] font-medium text-ok hover:bg-ok/20"
-                    onClick={() =>
-                      openPreviewFloat({
-                        deviceHandle,
-                        workspaceHandle: rootWs.id,
-                        path: `${rootHandle}/datas/releases/index.html`,
-                        sessionId: activeSessionId,
-                      })
-                    }
-                  >
-                    🎮 试玩
-                  </button>
-                </div>
-              )}
-            </div>
-            {!collapsed && (
-              <div className="mt-1 space-y-1">
-                {frontSessions.length > 0 && (
-                  <div className="space-y-0.5">
-                    <div className="px-2 pt-0.5 text-[10px] font-medium text-muted">📌 主入口（巡查）</div>
-                    <ul className="space-y-1">
-                      {frontSessions.map((session) => (
-                        <SessionRow
-                          key={session.id}
-                          session={session}
-                          active={session.id === activeSessionId}
-                          project={rootWs}
-                          {...actions}
-                        />
-                      ))}
-                    </ul>
-                  </div>
-                )}
-                {memberSessions.length > 0 && (
-                  <div className="space-y-0.5">
-                    <div className="px-2 pt-1 text-[10px] font-medium text-muted">
-                      🧭 组长与团队成员 ({memberSessions.length})
-                    </div>
-                    <ul className="space-y-1 border-l-2 border-line pl-1.5 ml-2">
-                      {memberSessions.map((session) => {
-                        const project = byId.get(session.workspaceId);
-                        return (
-                          <SessionRow
-                            key={session.id}
-                            session={session}
-                            active={session.id === activeSessionId}
-                            project={project}
-                            parentProject={rootWs}
-                            {...actions}
-                          />
-                        );
-                      })}
-                    </ul>
-                  </div>
-                )}
-                {historyAndReflect.length > 0 && (
-                  <div className="pt-1">
-                    <button
-                      type="button"
-                      aria-expanded={showHistory}
-                      onClick={() => setExpandedHistory((prev) => ({ ...prev, [rootId]: !prev[rootId] }))}
-                      className="flex w-full items-center gap-1 rounded px-2 py-1 text-left text-[11px] text-muted hover:bg-raised hover:text-fg"
-                    >
-                      <span aria-hidden>{showHistory ? "▾" : "▸"}</span>
-                      <span>后台自省与历史子任务 ({historyAndReflect.length})</span>
-                    </button>
-                    {showHistory && (
-                      <ul className="mt-1 space-y-1 border-l border-line pl-1.5 ml-2">
-                        {historyAndReflect.map((session) => {
-                          const project = byId.get(session.workspaceId);
-                          return (
-                            <SessionRow
-                              key={session.id}
-                              session={session}
-                              active={session.id === activeSessionId}
-                              project={project}
-                              parentProject={rootWs}
-                              {...actions}
-                            />
-                          );
-                        })}
-                      </ul>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
-          </li>
-        );
-      })}
-    </ul>
-  );
+  const counts = (rows: ListedSession[]) => {
+    const running = rows.filter(s => s.status === "running").length;
+    const waiting = rows.filter(s => s.status === "waiting").length;
+    const failed = rows.filter(s => s.status === "failed").length;
+    return <span className="flex shrink-0 flex-wrap items-center gap-2 text-[10px] font-normal">
+      {running > 0 && <span className="text-ok">{running} 运行</span>}
+      {waiting > 0 && <span className="text-accent">{waiting} 等待</span>}
+      {failed > 0 && <span className="text-danger">{failed} 失败</span>}
+    </span>;
+  };
+  return <ul data-density={density}
+    className={`entity-list conversation-list w-full min-w-0 max-w-full space-y-1 ${pick ? "overflow-hidden" : ""}`}
+    role={pick ? "listbox" : undefined} aria-label={listLabel}>
+    {items.map(item => {
+      if (!item.root) return renderRow(item.sessions[0]!);
+      const root = item.root;
+      const collapsed = Boolean(collapsedGroups[root.id]);
+      const children = item.sessions.filter(s => s.workspaceId !== root.id);
+      const own = item.sessions.filter(s => s.workspaceId === root.id);
+      const childSpaces = workspaces.filter(w => w.id !== root.id && tree.projectRootById[w.id] === root.id);
+      const filter = spaceFilters[root.id] ?? "";
+      const childRows = children.filter(s => !filter || s.workspaceId === filter);
+      const expanded = Boolean(expandedChildren[root.id]);
+      const activeChild = children.find(s => s.id === activeSessionId);
+      return <li key={item.key} aria-label={`项目分组 ${root.name}`}
+        className="project-session-group my-2 rounded-xl border border-line bg-surface/60 p-1.5">
+        <button type="button" aria-label={`${collapsed ? "展开" : "折叠"}项目分组 ${root.name}`}
+          aria-expanded={!collapsed} onClick={() => setCollapsedGroups(old => ({ ...old, [root.id]: !old[root.id] }))}
+          className="flex min-h-11 w-full min-w-0 items-center gap-1.5 rounded px-2 text-left text-xs font-semibold hover:text-accent">
+          <span aria-hidden className="text-[10px] text-muted">{collapsed ? "▸" : "▾"}</span>
+          <AgentAvatar id={root.id} name={root.name} size="small" />
+          <span className="min-w-0 flex-1 truncate">{root.name}</span>
+          <span className="shrink-0 text-[10px] font-normal text-faint">{item.sessions.length} 条</span>
+        </button>
+        {collapsed ? <div className="px-2 pb-1">{counts(item.sessions)}</div> : <>
+          {own.length > 0 && <><p className="px-2 pt-1 text-[10px] text-muted">本项目会话</p><ul className="space-y-1">{own.map(renderRow)}</ul></>}
+          {children.length > 0 && <>
+            <button type="button" aria-label={`子 Space 会话 ${root.name}`} aria-expanded={expanded}
+              onClick={() => setExpandedChildren(old => ({ ...old, [root.id]: !old[root.id] }))}
+              className="mt-1 flex min-h-11 w-full flex-wrap items-center gap-2 border-t border-line px-2 text-left text-[11px] text-muted hover:text-fg">
+              <span aria-hidden>{expanded ? "▾" : "▸"}</span><span className="flex-1">子 Space 会话 ({children.length})</span>{counts(children)}
+            </button>
+            {!expanded && activeChild && <p className="truncate px-2 pb-1 text-[10px] text-accent">正在查看 {byId.get(activeChild.workspaceId)?.name ?? "子 Space"} 的会话</p>}
+            {expanded && <div>
+              <label className="flex min-h-11 items-center gap-2 px-2 text-[10px] text-muted">Space
+                <select aria-label={`筛选 ${root.name} 的子 Space`} value={filter}
+                  onChange={event => setSpaceFilters(old => ({ ...old, [root.id]: event.target.value }))}
+                  className="min-h-9 min-w-0 flex-1 rounded border border-line bg-surface px-2 text-xs text-fg">
+                  <option value="">全部子 Spaces</option>
+                  {childSpaces.map(w => <option key={w.id} value={w.id}>{tree.breadcrumbById[w.id]}</option>)}
+                </select>
+              </label>
+              <ul className="space-y-1">{childRows.map(renderRow)}</ul>
+              {!childRows.length && <p className="px-3 py-3 text-xs text-muted">没有匹配的会话</p>}
+            </div>}
+          </>}
+        </>}
+      </li>;
+    })}
+  </ul>;
 }
 
 function SessionRow({
@@ -630,6 +402,7 @@ function SessionRow({
   active,
   project,
   parentProject,
+  breadcrumb,
   pick = false,
   onPickSession,
   onRename,
@@ -640,6 +413,7 @@ function SessionRow({
   active: boolean;
   project?: WorkspaceInfo;
   parentProject?: WorkspaceInfo;
+  breadcrumb?: string;
   pick?: boolean;
 } & RowActions) {
   const [menu, setMenu] = useState<"shut" | "open" | "confirming">("shut");
@@ -656,7 +430,8 @@ function SessionRow({
   );
   const unsupported = session.unsupported;
   const managedReadOnly = session.managed?.userInteraction === "readOnly";
-  const displayTitle = title(session, Boolean(parentProject));
+  const displayTitle = title(session, Boolean(project?.agentSpace?.parentWorkspaceId));
+  const projectPath = breadcrumb ?? (parentProject && project ? `${parentProject.name} / ${project.name}` : project?.name ?? "项目");
 
   if (editing) {
     return (
@@ -699,9 +474,9 @@ function SessionRow({
                 {session.unread && <span role="img" aria-label="有未读新回复" title="有未读新回复" className="block h-2 w-2 shrink-0 rounded-full bg-accent" />}
                 <span className="truncate" title={displayTitle}>{displayTitle}</span>
               </span>
-              <span className={`conversation-facts entity-secondary flex min-w-0 items-center gap-1 text-xs font-normal leading-4 text-muted ${!selection && !pick ? "conversation-row-meta" : ""}`} title={`${messageDate.toLocaleString()} · ${parentProject && project ? `${parentProject.name} / ${project.name}` : (project?.name ?? "项目")}`}>
+              <span className={`conversation-facts entity-secondary flex min-w-0 items-center gap-1 text-xs font-normal leading-4 text-muted ${!selection && !pick ? "conversation-row-meta" : ""}`} title={`${messageDate.toLocaleString()} · ${projectPath}`}>
                 <AgentAvatar id={session.workspaceId} name={project?.name ?? "项目"} size="small" />
-                <span className="min-w-0 truncate"><time dateTime={messageDate.toISOString()}>{relativeTime(messageDate.getTime())}</time> · {parentProject && project ? `${parentProject.name} / ${project.name}` : (project?.name ?? "项目")}{session.draftCount ? ` · ${session.draftCount} 个草稿` : ""}{managedReadOnly ? " · 只读" : ""}{session.archived ? " · 已归档" : ""}{unsupported ? " · 需升级" : ""}</span>
+                <span className="min-w-0 truncate"><time dateTime={messageDate.toISOString()}>{relativeTime(messageDate.getTime())}</time> · {projectPath}{session.draftCount ? ` · ${session.draftCount} 个草稿` : ""}{managedReadOnly ? " · 只读" : ""}{session.archived ? " · 已归档" : ""}{unsupported ? " · 需升级" : ""}</span>
               </span>
               <span className={`conversation-marks entity-secondary flex min-h-3.5 min-w-0 items-center gap-1 text-[10px] font-normal leading-[14px] ${!selection && !pick ? "conversation-row-meta" : ""}`}>
                 {(facts.kind || stale) && <SessionStatusIcon session={session} sessions={summaries} stale={stale} />}

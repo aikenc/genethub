@@ -91,5 +91,5 @@ export function matchesAttention(session: SessionSummary, filter: AttentionFilte
 
 export function hasCurrentWork(session: SessionSummary, sessions: readonly SessionSummary[] = []) {
   const facts = sessionAttention(session, sessions);
-  return facts.inProgress || facts.pending > 0;
+  return facts.inProgress || facts.pending > 0 || facts.blocked;
 }
