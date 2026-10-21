@@ -97,6 +97,9 @@ for (const window of ["waiting", "approved", "applied", "rejected", "canceled"] 
       opened.mock.script(...Array.from({ length: 20 }, () => ({ respond })));
       const project = await client.call({ type: "workspace.open", payload: { root: projectRoot } });
       if (project?.type !== "workspace") throw new Error("could not open project");
+      const before = await client.call({ type: "workspace.list" });
+      if (before?.type !== "workspaces") throw new Error("could not list initial workspaces");
+      const baseline = new Set(before.data.map(space => space.id));
       const sessionId = await t.flows.main.createBuiltinSession(client, project.data.id);
       await t.flows.main.sendPrompt(client, sessionId, "DURABLE_APPROVAL_GOAL: 请初始化 PM 小游戏团队，完成接管即可。");
       let requestId = "";
@@ -160,7 +163,15 @@ for (const window of ["waiting", "approved", "applied", "rejected", "canceled"] 
       }, 90_000);
       t.assertions.assert(denied ? resumed === 0 : resumed > 0, "no approved adapter continuation occurred");
       const spaces = await client.call({ type: "workspace.list" });
-      t.assertions.assert(spaces?.type === "workspaces" && spaces.data.length === (denied ? 2 : 7), "bootstrap did not create exactly five children");
+      t.assertions.assert(spaces?.type === "workspaces", "workspace.list failed after recovery");
+      if (spaces?.type !== "workspaces") throw new Error("missing workspace inventory");
+      t.assertions.assert(spaces.data.filter(space => baseline.has(space.id)).length === baseline.size,
+        "bootstrap removed an unrelated workspace");
+      const added = spaces.data.filter(space => !baseline.has(space.id));
+      const expectedRoots = denied ? [] : ["executor", "coder", "reviewer", "workflow-manager", "workflow-reviewer"]
+        .map(name => path.join(projectRoot, "spaces", `game-delivery--${name}`));
+      t.assertions.assert(JSON.stringify(added.map(space => space.root).sort()) === JSON.stringify(expectedRoots.sort()),
+        `bootstrap registration delta differs from the approved five-member team: ${JSON.stringify(added.map(space => ({ name: space.name, root: space.root })))}`);
       if (window === "applied") {
         const team = spaces?.type === "workspaces" ? spaces.data.map((space) => space.id).sort().join(",") : "";
         t.assertions.assert(replayedApply && team === committedTeam && Boolean(team), "replayed apply changed the built team");

@@ -257,6 +257,11 @@ modelCase(
     "the default overwriting a model the caller did name",
   ],
   async (t, { cli, client, workspaceId, snapshot, mock }) => {
+    // Explicit profiles resolve a permitted model at creation. This case instead
+    // exercises an unconfigured Agent whose own catalog default is used at start.
+    await client.call({ type: "settings.setAgentPreferences", payload: { preferences: {
+      runtimes: {}, selectedTags: [], modelProfiles: [],
+    } } });
     const catalog = (
       succeeded(t, cli(["agent", "list"]), "agent.list").agents as Array<{ id: string; catalog: { defaultModel?: string } }>
     ).find((agent) => agent.id === "genet");

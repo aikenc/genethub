@@ -9,7 +9,7 @@ import type { MockLlmHandle } from "../../../infrastructure/public.ts";
 import { BlockedError } from "../../../infrastructure/public.ts";
 import { assertions } from "../../assertions/index.ts";
 import { connectProductClient } from "../../drivers/client.ts";
-import { daemonEndpoint, startDaemon, type DaemonHandle } from "../../drivers/daemon.ts";
+import { daemonEndpoint, waitForDaemonEndpoint, startDaemon, type DaemonHandle } from "../../drivers/daemon.ts";
 import { locateGenet, tryLocateDaemonComponent } from "../../drivers/cli.ts";
 import type { EnvironmentLease } from "../../../infrastructure/public.ts";
 import { startMockLlm } from "../../../infrastructure/public.ts";
@@ -294,19 +294,26 @@ export async function startLocalEnvironment(input: {
   launchEnv?: NodeJS.ProcessEnv;
 }): Promise<{ daemon: DaemonHandle; mock: MockLlmHandle; client: ProductSession["client"] }> {
   const mock = await startMockLlm();
-  const daemon = startDaemon({
-    genet: locateGenet(input.openRoot),
-    wasm: tryLocateDaemonComponent(input.openRoot),
-    lease: input.lease,
-    launchEnv: input.launchEnv,
-  });
-  const endpoint = daemonEndpoint(daemon);
-  const client = await connectProductClient({
-    ...endpoint,
-    onDiagnostic: input.onDiagnostic,
-    redial: async () => daemonEndpoint(daemon),
-  });
-  return { daemon, mock, client };
+  let daemon: DaemonHandle | undefined;
+  try {
+    daemon = startDaemon({
+      genet: locateGenet(input.openRoot),
+      wasm: tryLocateDaemonComponent(input.openRoot),
+      lease: input.lease,
+      launchEnv: input.launchEnv,
+    });
+    const started = daemon;
+    const endpoint = await waitForDaemonEndpoint(started);
+    const client = await connectProductClient({
+      ...endpoint,
+      onDiagnostic: input.onDiagnostic,
+      redial: async () => daemonEndpoint(started),
+    });
+    return { daemon: started, mock, client };
+  } catch (error) {
+    try { daemon?.stop(); } finally { await mock.stop(); }
+    throw error;
+  }
 }
 
 export async function openWorkspace(input: {

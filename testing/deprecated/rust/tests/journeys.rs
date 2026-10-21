@@ -883,9 +883,6 @@ async fn a_real_provider_that_rejects_our_key_says_so_instead_of_hanging() {
 
 #[tokio::test]
 async fn model_failures_surface_as_actionable_errors() {
-    let journey = Journey::start().await.expect("journey starts");
-    mock_only!(journey);
-
     for (scripted, expected) in [
         (
             Scripted::Status {
@@ -907,7 +904,18 @@ async fn model_failures_surface_as_actionable_errors() {
             TurnErrorCode::Upstream,
         ),
     ] {
-        journey.mock().push(scripted).await;
+        let journey = Journey::start().await.expect("journey starts");
+        mock_only!(journey);
+        // Keep an HTTP fault present for the initial attempt and three retries.
+        // An exhausted mock script is a different 500, not the injected 429.
+        let attempts = if matches!(&scripted, Scripted::Status { .. }) {
+            4
+        } else {
+            1
+        };
+        for _ in 0..attempts {
+            journey.mock().push(scripted.clone()).await;
+        }
         let session = journey.session("genet").await.expect("session opens");
         journey.send(&session, "Go.").await.expect("accepted");
         let events = journey.client.drain_turn().await.expect("the turn ends");
@@ -925,9 +933,8 @@ async fn model_failures_surface_as_actionable_errors() {
                 "expected {code:?}"
             ),
         }
+        journey.finish().await;
     }
-
-    journey.finish().await;
 }
 
 /// What we send the model is invisible to a real run, because a real model

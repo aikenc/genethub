@@ -36,6 +36,13 @@ defineJourney(
         },
       });
       t.assertions.assert(saved?.type === "settings", "model input settings were not saved");
+      // Both the media model and the later text-only choice are explicitly allowed.
+      await opened.client.call({ type: "settings.setAgentPreferences", payload: { preferences: {
+        runtimes: {}, selectedTags: ["Flash"], modelProfiles: [
+          { agentId: "genet", modelId: "deepseek/deepseek-v4-flash", tags: ["Flash", "图片理解", "视频理解"], cost: "low" },
+          { agentId: "genet", modelId: "deepseek/deepseek-text", tags: ["Pro"], cost: "medium" },
+        ],
+      } } });
       const provider = saved?.type === "settings"
         ? saved.data.providers.find((item) => item.id === "deepseek")
         : undefined;

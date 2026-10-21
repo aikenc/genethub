@@ -76,7 +76,10 @@ export function daemonEndpoint(handle: DaemonHandle): DaemonEndpoint {
   const proof = json.serverProof;
   const admission = json.admission as Record<string, unknown> | undefined;
   if (typeof url !== "string" || typeof proof !== "string" || !admission) {
-    throw new BlockedError("genet daemon endpoint did not return admission");
+    throw new BlockedError(`genet daemon endpoint did not return admission: ${JSON.stringify({
+      running: json.running, pid: json.pid, port: json.port, channel: json.channel,
+      hasUrl: typeof url === "string", hasProof: typeof proof === "string", hasAdmission: Boolean(admission),
+    })}`);
   }
   return {
     url,
@@ -89,4 +92,16 @@ export function daemonEndpoint(handle: DaemonHandle): DaemonEndpoint {
       expiresAt: Number(admission.expiresAt ?? 0),
     },
   };
+}
+
+/** Wait only for the public start/restart precondition, never a test's outcome. */
+export async function waitForDaemonEndpoint(handle: DaemonHandle): Promise<DaemonEndpoint> {
+  const deadline = Date.now() + 5_000;
+  for (;;) {
+    try { return daemonEndpoint(handle); }
+    catch (error) {
+      if (!(error instanceof BlockedError) || Date.now() >= deadline) throw error;
+    }
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
 }

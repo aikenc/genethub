@@ -1,9 +1,10 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { cpSync } from "node:fs";
 import { createServer } from "node:net";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ServicePreviewClient } from "@genehub/workbench/client";
-import { defineSpecialty } from "../../framework/public.ts";
+import { BlockedError, defineSpecialty } from "../../framework/public.ts";
 
 defineSpecialty(
   {
@@ -35,6 +36,16 @@ defineSpecialty(
     requiredArtifacts: ["genehub-host-local", "genehub_guest.wasm"],
   },
   async (t) => {
+    // Exercise the shipped example as documented: copy it into the user's
+    // project and install its pinned dependencies there, never in product source.
+    const example = join(t.env.workspace, "service-example");
+    for (const folder of ["node-adapter", "demo"]) cpSync(
+      join(t.openRoot, "apps/daemon/builtin-skills/genehub-preview/assets", folder),
+      join(example, folder), { recursive: true, filter: source => !source.split(/[\\/]/).includes("node_modules") },
+    );
+    const installed = spawnSync("npm", ["--prefix", join(example, "node-adapter"), "ci", "--ignore-scripts", "--no-audit", "--no-fund", "--prefer-offline"],
+      { encoding: "utf8", timeout: 30_000 });
+    if (installed.status !== 0) throw new BlockedError(`the copied preview example dependencies could not be installed (exit ${installed.status}); its package-lock.json and npm are required`);
     const opened = await t.flows.main.openWorkspace({
       openRoot: t.openRoot,
       lease: t.env,
@@ -58,7 +69,7 @@ defineSpecialty(
           {
             command: [
               process.execPath,
-              join(t.openRoot, "apps/daemon/builtin-skills/genehub-preview/assets/demo/backend.mjs"),
+              join(example, "demo/backend.mjs"),
             ],
             origin: `http://127.0.0.1:${port}`,
             env: { PREVIEW_DEMO_PORT: String(port) },
@@ -71,7 +82,7 @@ defineSpecialty(
     const runner = spawn(
       process.execPath,
       [
-        join(t.openRoot, "apps/daemon/builtin-skills/genehub-preview/assets/node-adapter/run.mjs"),
+        join(example, "node-adapter/run.mjs"),
         "--config",
         config,
         "--daemon-root",

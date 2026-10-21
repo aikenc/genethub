@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { connectProductClient, daemonEndpoint, defineSpecialty, openProviderSession, openWorkbenchPage, parseJson,
+import { connectProductClient, daemonEndpoint, waitForDaemonEndpoint, defineSpecialty, openProviderSession, openWorkbenchPage, parseJson,
   runGenet, runGenetAsync, startMockLlm, type CaseContext } from "../../framework/public.ts";
 import type { ProviderOperationCommand } from "@genehub/proto";
 
@@ -56,7 +56,7 @@ defineSpecialty({ ...shape, id: "specialty.agent.provider-configuration.browser"
     const before = await snapshot(s);
     client.close(); s.daemon.stop();
     t.assertions.assert(runGenet(s.daemon.genet, ["daemon", "start"], s.daemon.env).code === 0, "daemon restart failed");
-    client = await connectProductClient(daemonEndpoint(s.daemon));
+    client = await connectProductClient(await waitForDaemonEndpoint(s.daemon));
     await browser.page.reload();
     await browser.page.getByLabel("Provider API Key").waitFor();
     t.assertions.assert((await snapshot(s, client)).pendingPermissions[0]?.id === request.id, "restart changed the operation");
@@ -156,13 +156,13 @@ defineSpecialty({ ...shape, id: "specialty.agent.provider-configuration.crash",
     const key = "crash-" + randomBytes(16).toString("hex");
     const pending = operation(s, { type: "submit", actionId: s.actionId, approved: true, apiKey: key }).catch(() => null);
     await t.tools.waitUntil(() => s.mock.calls.length > 0, 15_000);
-    const pid = daemonEndpoint(s.daemon).localServerProof.pid;
+    const pid = (await waitForDaemonEndpoint(s.daemon)).localServerProof.pid;
     process.kill(pid, "SIGKILL"); client.close();
     await pending;
     await t.tools.waitUntil(() => { try { const stat = readFileSync(`/proc/${pid}/stat`, "utf8"); return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0] === "Z"; } catch { return true; } }, 10_000);
     const started = await runGenetAsync(s.daemon.genet, ["daemon", "start"], s.daemon.env);
     t.assertions.assert(started.code === 0, "restart after host kill failed");
-    client = await connectProductClient(daemonEndpoint(s.daemon));
+    client = await connectProductClient(await waitForDaemonEndpoint(s.daemon));
     await t.tools.waitUntil(async () => (await snapshot(s, client)).summary.status === "idle" && s.journal().some(e => e.event === "continuation-received"), 25_000);
     const receipt = await operation(s, { type: "get", actionId: s.actionId }, client);
     t.assertions.assert(receipt.state === "saved" && receipt.validation.status === "interrupted", "crash hid verification uncertainty");

@@ -51,7 +51,7 @@ export {
   type TcpPayloadServer,
   type TcpTransferSample,
 } from "./drivers/network-link.ts";
-export { daemonEndpoint, type DaemonEndpoint, type DaemonHandle } from "./drivers/daemon.ts";
+export { daemonEndpoint, waitForDaemonEndpoint, type DaemonEndpoint, type DaemonHandle } from "./drivers/daemon.ts";
 export { startRelay, type RelayHandle } from "./drivers/relay.ts";
 export { startHub, type HubBrowser, type HubHandle } from "./drivers/hub.ts";
 export { data } from "./builders/index.ts";
