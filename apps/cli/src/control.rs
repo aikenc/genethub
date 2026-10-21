@@ -208,8 +208,20 @@ fn read_endpoint(paths: &Paths) -> Option<Endpoint> {
 /// The lock file is checked first because it names the process precisely; a
 /// stale lock from a hard kill must not read as "running".
 fn live_pid(paths: &Paths) -> Option<u32> {
-    let pid = lifecycle::lock_pid(paths)?;
-    lifecycle::pid_alive(pid).then_some(pid)
+    if let Some(pid) =
+        lifecycle::lock_pid(paths).filter(|pid| *pid != 0 && lifecycle::pid_alive(*pid))
+    {
+        return Some(pid);
+    }
+    // The guest's diagnostic write can be unavailable while its host holds
+    // the kernel lock (notably with mandatory Windows locks). Recover the pid
+    // only from an authenticated live endpoint, never from its file alone.
+    let endpoint = read_endpoint(paths)?;
+    (lifecycle::instance_locked(paths).ok()?
+        && endpoint.pid != 0
+        && lifecycle::pid_alive(endpoint.pid)
+        && health(&endpoint))
+    .then_some(endpoint.pid)
 }
 
 /// The facts every "where is the daemon" answer is built from.
@@ -318,11 +330,18 @@ fn start() -> i32 {
         );
     }
 
-    if lifecycle::instance_locked(&paths).unwrap_or(false) {
+    let settling = Instant::now() + START_TIMEOUT;
+    while lifecycle::instance_locked(&paths).unwrap_or(false) {
         let mut value = facts(&paths);
-        value["started"] = serde_json::json!(false);
-        value["alreadyRunning"] = serde_json::json!(true);
-        return ok(value);
+        if value["running"].as_bool() == Some(true) && value["port"].as_u64().is_some() {
+            value["started"] = serde_json::json!(false);
+            value["alreadyRunning"] = serde_json::json!(true);
+            return ok(value);
+        }
+        if Instant::now() >= settling {
+            fail("daemon_unreachable", "the daemon lock is held but its endpoint did not become ready; inspect daemon logs", EXIT_UNREACHABLE);
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
 
     if let Err(error) = lifecycle::reap_stale_runtime(&paths) {

@@ -134,7 +134,9 @@ impl AgentAdapter for ScriptAdapter {
         limit: usize,
     ) -> Result<Option<Vec<ImportCandidate>>> {
         self.host.ensure_settled(SCRIPT_SETTLE_BUDGET).await;
-        if !self.host.ready() {
+        // Reading local history needs the script transport, not credentials
+        // for starting a model turn. Let the Agent report import support itself.
+        if !self.host.running() {
             return Ok(None);
         }
         let reply = self

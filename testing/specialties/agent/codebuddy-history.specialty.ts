@@ -26,18 +26,24 @@ for (const scenario of ["unicode", "long", "config-override"] as const) defineSp
   const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
   const prompt = `CodeBuddy history fixture ${scenario}`;
   try {
+    // A native CLI must not inherit another Agent's server, account or tracing
+    // context. The isolated user talks only to this test's model endpoint.
+    const env: NodeJS.ProcessEnv = {
+      HOME: t.env.home, PATH: process.env.PATH, LANG: "C.UTF-8",
+      TMPDIR: t.env.root, NO_PROXY: "localhost,127.0.0.1",
+      CODEBUDDY_CONFIG_DIR: t.env.env.CODEBUDDY_CONFIG_DIR ?? path.join(t.env.home, ".codebuddy"),
+      CODEBUDDY_BASE_URL: opened.mock.origin, CODEBUDDY_API_KEY: "sk-test",
+      CODEBUDDY_INTERNET_ENVIRONMENT: "internal", CODEBUDDY_IS_SANDBOX: "1",
+      CODEBUDDY_MODEL: "mock-llm", CODEBUDDY_SMALL_FAST_MODEL: "mock-llm", CODEBUDDY_BIG_SLOW_MODEL: "mock-llm",
+    };
     opened.mock.script({ text: "CBC_HISTORY_RESPONSE" });
-    await promisify(execFile)("cbc", ["--print", "--output-format", "stream-json", "--verbose",
-      "--model", "claude-sonnet-5", "--dangerously-skip-permissions", "--max-turns", "1", prompt], {
+    const execution = await promisify(execFile)("cbc", ["--print", "--output-format", "stream-json", "--verbose",
+      "--model", "mock-llm", "--dangerously-skip-permissions", "--max-turns", "1", prompt], {
       cwd: t.env.workspace, timeout: 60_000, maxBuffer: 1024 * 1024,
-      env: { ...process.env, ...t.env.env, CODEBUDDY_BASE_URL: opened.mock.origin,
-        CODEBUDDY_AUTH_TOKEN: "sk-test", CODEBUDDY_IS_SANDBOX: "1" },
+      env,
     });
     if (opened.mock.requests.length === 0) {
-      // `cbc --print` exits cleanly without a request when the installed CLI
-      // cannot be pointed at a local model endpoint here (it needs its own
-      // sign-in). That is this machine's prerequisite, not a history result.
-      throw new BlockedError("the installed CBC did not call the isolated mock LLM; it cannot write a history fixture on this machine");
+      throw new BlockedError(`the isolated CBC did not call its mock model; stdout=${execution.stdout.slice(-1600)} stderr=${execution.stderr.slice(-800)} calls=${JSON.stringify(opened.mock.calls)}`);
     }
     // A script Agent reads history only once its process is up, and it is started by the first
     // listing, not by the daemon: ask for it, then list until CodeBuddy answers as a source.

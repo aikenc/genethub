@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { connectProductClient, daemonEndpoint, defineSpecialty, openProviderSession, openWorkbenchPage, parseJson,
   runGenet, runGenetAsync, startMockLlm, type CaseContext } from "../../framework/public.ts";
@@ -144,6 +144,14 @@ defineSpecialty({ ...shape, id: "specialty.agent.provider-configuration.crash",
   let client = s.client;
   try {
     await prepare(t, s);
+    // The PID file is diagnostic; the kernel lock and authenticated endpoint
+    // still identify this exact live host when a guest PID write is missing.
+    const originalPid = daemonEndpoint(s.daemon).localServerProof.pid;
+    writeFileSync(path.join(t.env.data, "daemon.lock"), "");
+    const adopted = await runGenetAsync(s.daemon.genet, ["daemon", "start"], s.daemon.env);
+    const adoption = parseJson(adopted.stdout);
+    t.assertions.assert(adopted.code === 0 && adoption.alreadyRunning === true && adoption.running === true && adoption.pid === originalPid,
+      "start failed to identify the locked host with missing PID diagnostics");
     s.mock.script({ delayMs: 1500, text: "ok" });
     const key = "crash-" + randomBytes(16).toString("hex");
     const pending = operation(s, { type: "submit", actionId: s.actionId, approved: true, apiKey: key }).catch(() => null);
