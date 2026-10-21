@@ -372,12 +372,23 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
           return;
         }
       }
+      let observedBusinessRunId: string | undefined;
       await t.tools.waitUntil(async () => {
         const history = await opened.client.call({
           type: "workflow.history",
           payload: { workspaceId: projectId, limit: 10 },
         });
-        return history?.type === "workflowRuns" && history.data.length === 1 && history.data.some((run) => run.status === (outcome === "exhausted" ? "blocked" : "completed"));
+        t.assertions.assert(history?.type === "workflowRuns", "workflow.history did not return Runs");
+        if (history?.type !== "workflowRuns") return false;
+        // A blocked request starts a separate diagnostic Run. Observe that
+        // recovery too: correctness must not depend on polling before it exists.
+        const business = history.data.filter(run => run.handles.length === 0);
+        t.assertions.assert(business.length <= 1, `unexpected additional business Runs: ${JSON.stringify(business)}`);
+        const run = business[0];
+        observedBusinessRunId = run?.id;
+        return run?.status === (outcome === "exhausted" ? "blocked" : "completed")
+          && (outcome !== "exhausted" || history.data.some(candidate =>
+            candidate.handles.some(handle => handle.runId === run.id)));
       }, 140_000);
       const listed = await opened.client.call({
         type: "session.list",
@@ -396,6 +407,7 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
       const reviewer = workers.find((session) => session.managed?.role === "reviewer");
       t.assertions.assert(Boolean(coder && reviewer), "Coder or Reviewer Session is missing");
       const runId = coder?.managed?.workflowRunId ?? "missing";
+      t.assertions.assert(runId === observedBusinessRunId, "Worker execution disagrees with the observed business Run");
 
       const runReply = await opened.client.call({
         type: "workflow.get",
