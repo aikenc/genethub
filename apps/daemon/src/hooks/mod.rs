@@ -18,15 +18,15 @@
 //!   notice and undo.
 //! * **Nothing a hook does can trigger a hook**: `timer` is not fired by
 //!   Sessions, so there is no way to loop.
-//! * **Restart**: the run record lives in memory, so a restarted daemon runs
-//!   every hook once, at once. Scripts are idempotent by contract.
+//! * **Restart and channels**: a project-local OS lock holds each execution;
+//!   its last-start timestamp also preserves the interval across daemons.
 
 pub mod env;
 pub mod file;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use tokio::io::AsyncReadExt;
@@ -94,6 +94,8 @@ const ROSTER_EVERY: Duration = Duration::from_secs(5);
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Run {
+    #[serde(skip)]
+    queued: bool,
     #[serde(default)]
     running: bool,
     #[serde(default)]
@@ -134,6 +136,7 @@ pub struct Hooks {
     front_door_cli: Option<PathBuf>,
     runs: Mutex<HashMap<Key, Run>>,
     limit: Arc<tokio::sync::Semaphore>,
+    active_paths: Arc<Mutex<HashSet<PathBuf>>>,
 }
 
 impl Hooks {
@@ -142,6 +145,7 @@ impl Hooks {
             front_door_cli,
             runs: Mutex::new(HashMap::new()),
             limit: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT)),
+            active_paths: Arc::new(Mutex::new(HashSet::new())),
         })
     }
 
@@ -149,10 +153,20 @@ impl Hooks {
     pub fn list(&self, workspace_id: &str, project_root: &Path) -> HookList {
         let directory = hooks_dir(project_root);
         let runs = self.runs.lock().expect("never poisoned");
+        let persisted = read_status_file(&directory);
         build_hook_list(workspace_id, &directory, |id| {
-            runs.get(&(workspace_id.to_string(), id.to_string()))
-                .cloned()
-                .unwrap_or_default()
+            let local = runs.get(&(workspace_id.to_string(), id.to_string()));
+            let shared = persisted.get(id);
+            match (local, shared) {
+                (Some(local), Some(shared))
+                    if local.last_started_at_ms >= shared.last_started_at_ms =>
+                {
+                    local.clone()
+                }
+                (_, Some(shared)) => shared.clone(),
+                (Some(local), _) => local.clone(),
+                _ => Run::default(),
+            }
         })
     }
 
@@ -163,6 +177,7 @@ impl Hooks {
         workspace_id: &str,
         project_root: &Path,
         python: Option<&Path>,
+        state: Weak<crate::state::AppState>,
     ) {
         let directory = hooks_dir(project_root);
         if !directory.is_dir() {
@@ -180,6 +195,11 @@ impl Hooks {
             if !spec.enabled {
                 continue;
             }
+            // Do not create an unbounded collection of waiting tasks. The next
+            // tick reads the file again when capacity actually exists.
+            let Ok(permit) = self.limit.clone().try_acquire_owned() else {
+                break;
+            };
             let key = (workspace_id.to_string(), id.clone());
             {
                 let mut runs = self.runs.lock().expect("never poisoned");
@@ -188,13 +208,30 @@ impl Hooks {
                     continue;
                 }
                 run.running = true;
+                run.queued = true;
             }
             let hooks = self.clone();
             let root = project_root.to_path_buf();
             let python = python.map(Path::to_path_buf);
+            let state = state.clone();
             tokio::spawn(async move {
-                let _permit = hooks.limit.clone().acquire_owned().await.ok();
-                hooks.run(key, id, spec, root, python).await;
+                let _permit = permit;
+                // Scheduling can yield after the roster was read. Check the
+                // current registration immediately before the command starts.
+                let registered = if let Some(state) = state.upgrade() {
+                    state
+                        .workspaces
+                        .get(&key.0)
+                        .await
+                        .is_ok_and(|entry| entry.root == root)
+                } else {
+                    false
+                };
+                if !registered {
+                    hooks.runs.lock().expect("never poisoned").remove(&key);
+                    return;
+                }
+                hooks.run(key, id, root, python).await;
             });
         }
     }
@@ -205,7 +242,7 @@ impl Hooks {
         let mut runs = self.runs.lock().expect("never poisoned");
         let before = runs.len();
         runs.retain(|(workspace, id), run| {
-            workspace != workspace_id || present.contains(id) || run.running
+            workspace != workspace_id || present.contains(id) || (run.running && !run.queued)
         });
         if runs.len() != before {
             write_status_file(workspace_id, project_root, &runs);
@@ -214,23 +251,128 @@ impl Hooks {
 
     fn forget_projects_except(&self, workspace_ids: &HashSet<String>) {
         let mut runs = self.runs.lock().expect("never poisoned");
-        runs.retain(|(workspace, _), run| workspace_ids.contains(workspace) || run.running);
+        runs.retain(|(workspace, _), run| {
+            workspace_ids.contains(workspace) || (run.running && !run.queued)
+        });
     }
 
     async fn run(
         self: Arc<Self>,
         key: Key,
         id: String,
-        spec: file::Spec,
         project_root: PathBuf,
         python: Option<PathBuf>,
     ) {
+        // The task may have yielded after tick_project. Revalidate membership
+        // and the current file before acquiring project execution ownership.
+        let current = file::snapshot(&hooks_dir(&project_root))
+            .into_iter()
+            .find_map(|entry| match entry {
+                file::Entry::Valid {
+                    id: current_id,
+                    spec,
+                } if current_id == id && spec.enabled => Some(spec),
+                _ => None,
+            });
+        let Some(spec) = current else {
+            if let Some(run) = self.runs.lock().expect("never poisoned").get_mut(&key) {
+                run.running = false;
+            }
+            return;
+        };
+        if !self.runs.lock().expect("never poisoned").contains_key(&key) {
+            return;
+        }
+        let directory = match project_root.canonicalize() {
+            Ok(root) => hooks_dir(&root),
+            Err(error) => {
+                if let Some(run) = self.runs.lock().expect("never poisoned").get_mut(&key) {
+                    run.running = false;
+                    run.last_error = Some(format!("project directory is unavailable: {error}"));
+                }
+                return;
+            }
+        };
+        let path = directory.join(".locks").join(format!("{id}.lock"));
+        if !self
+            .active_paths
+            .lock()
+            .expect("never poisoned")
+            .insert(path.clone())
+        {
+            if let Some(run) = self.runs.lock().expect("never poisoned").get_mut(&key) {
+                run.running = false;
+            }
+            return;
+        }
+        let ownership = lock_file(&path).and_then(|guard| {
+            let Some(mut guard) = guard else {
+                return Ok(None);
+            };
+            use std::io::{Read, Seek, SeekFrom, Write};
+            let mut timestamp = Vec::new();
+            guard.file.read_to_end(&mut timestamp)?;
+            let (previous, finished) = match timestamp.len() {
+                0 => (0, 0),
+                8 => (
+                    i64::from_le_bytes(timestamp[..8].try_into().expect("eight bytes")),
+                    0,
+                ),
+                16 => (
+                    i64::from_le_bytes(timestamp[..8].try_into().expect("eight bytes")),
+                    i64::from_le_bytes(timestamp[8..].try_into().expect("eight bytes")),
+                ),
+                _ => {
+                    return Err(std::io::Error::other(
+                        "invalid hook execution timestamps; inspect the lock file",
+                    ))
+                }
+            };
+            let now = now_ms();
+            if now.saturating_sub(previous) < spec.every.as_millis() as i64
+                || now.saturating_sub(finished) < MIN_GAP.as_millis() as i64
+            {
+                return Ok(None);
+            }
+            guard.file.seek(SeekFrom::Start(0))?;
+            guard.file.write_all(&now.to_le_bytes())?;
+            guard.file.write_all(&0i64.to_le_bytes())?;
+            guard.file.set_len(16)?;
+            guard.file.sync_all()?;
+            Ok(Some(guard))
+        });
+        let mut ownership = match ownership {
+            Ok(Some(guard)) => guard,
+            outcome => {
+                self.active_paths
+                    .lock()
+                    .expect("never poisoned")
+                    .remove(&path);
+                let mut runs = self.runs.lock().expect("never poisoned");
+                if let Some(run) = runs.get_mut(&key) {
+                    run.running = false;
+                    if let Err(error) = outcome {
+                        run.last_error = Some(format!("hook execution ownership failed: {error}"));
+                        run.consecutive_failures = run.consecutive_failures.saturating_add(1);
+                        write_status_file(&key.0, &project_root, &runs);
+                    }
+                }
+                return;
+            }
+        };
+        ownership.local = Some(self.active_paths.clone());
+        let _ownership = ownership;
         let started = Instant::now();
         let started_at_ms = now_ms();
         {
             let mut runs = self.runs.lock().expect("never poisoned");
             if let Some(run) = runs.get_mut(&key) {
+                if let Some(shared) = read_status_file(&hooks_dir(&project_root)).get(&id) {
+                    run.runs = run.runs.max(shared.runs);
+                    run.consecutive_failures = shared.consecutive_failures;
+                }
                 run.running = true;
+                run.queued = false;
                 run.last_started = Some(started);
                 run.last_started_at_ms = Some(started_at_ms);
             }
@@ -527,16 +669,84 @@ fn write_status_file(workspace_id: &str, project_root: &Path, runs: &HashMap<Key
     if !directory.is_dir() {
         return;
     }
-    let map: HashMap<&str, &Run> = runs
-        .iter()
-        .filter_map(|((ws, id), run)| (ws == workspace_id).then_some((id.as_str(), run)))
-        .collect();
-    if let Ok(bytes) = serde_json::to_vec(&map) {
-        let tmp = directory.join(".status.json.tmp");
-        let dst = directory.join(".status.json");
-        if std::fs::write(&tmp, bytes).is_ok() {
-            let _ = std::fs::rename(&tmp, &dst);
+    // Merge under the same cross-process primitive. Another channel may own
+    // different hooks; neither a stale snapshot nor a fixed temp name may erase it.
+    let result = (|| -> std::io::Result<()> {
+        let Some(_guard) = lock_file(&directory.join(".locks").join(".status.lock"))? else {
+            return Ok(());
+        };
+        let mut map = read_status_file(&directory);
+        let present: HashSet<String> = file::snapshot(&directory)
+            .into_iter()
+            .map(|entry| entry.id().to_string())
+            .collect();
+        map.retain(|id, _| present.contains(id));
+        for ((workspace, id), run) in runs {
+            if workspace != workspace_id {
+                continue;
+            }
+            if map
+                .get(id)
+                .is_none_or(|old| old.last_started_at_ms <= run.last_started_at_ms)
+            {
+                map.insert(id.clone(), run.clone());
+            }
         }
+        let bytes = serde_json::to_vec(&map).map_err(std::io::Error::other)?;
+        crate::config::save_private(&directory.join(".status.json"), &bytes)
+            .map_err(std::io::Error::other)
+    })();
+    if let Err(error) = result {
+        tracing::warn!(%error, "could not persist hook status");
+    }
+}
+
+struct FileGuard {
+    file: std::fs::File,
+    path: PathBuf,
+    local: Option<Arc<Mutex<HashSet<PathBuf>>>>,
+}
+impl Drop for FileGuard {
+    fn drop(&mut self) {
+        if self.local.is_some() {
+            use std::io::{Seek, SeekFrom, Write};
+            let saved = (|| -> std::io::Result<()> {
+                self.file.seek(SeekFrom::Start(8))?;
+                self.file.write_all(&now_ms().to_le_bytes())?;
+                self.file.sync_all()
+            })();
+            if let Err(error) = saved {
+                tracing::warn!(%error, "could not persist hook finish time");
+            }
+        }
+        let _ = crate::fs_lock::unlock(&self.file, &self.path);
+        if let Some(local) = &self.local {
+            local.lock().expect("never poisoned").remove(&self.path);
+        }
+    }
+}
+fn lock_file(path: &Path) -> std::io::Result<Option<FileGuard>> {
+    let parent = path.parent().expect("hook lock directory");
+    if parent.is_symlink() || path.is_symlink() {
+        return Err(std::io::Error::other(
+            "hook locks must not be symbolic links",
+        ));
+    }
+    std::fs::create_dir_all(parent)?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)?;
+    match crate::fs_lock::try_lock_exclusive(&file, path) {
+        Ok(()) => Ok(Some(FileGuard {
+            file,
+            path: path.to_path_buf(),
+            local: None,
+        })),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        Err(error) => Err(error),
     }
 }
 
@@ -569,10 +779,9 @@ pub async fn run_timer(state: Shared) {
         }
         let python = state.registry.python();
         for (id, root) in &roster {
-            state.hooks.tick_project(id, root, python.as_deref());
+            state
+                .hooks
+                .tick_project(id, root, python.as_deref(), Arc::downgrade(&state));
         }
     }
 }
-
-#[cfg(test)]
-mod tests;

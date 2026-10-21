@@ -4,8 +4,8 @@
 //! `agentCwd` — and nothing else: every other key (`agents`, `skills`,
 //! `skillProviders`, `children`, …) belongs to the Space builder and is
 //! ignored here, so the file can grow without the daemon having to learn what
-//! the keys mean. The format is JSON5, the same reader a `.code-workspace`
-//! gets.
+//! the keys mean. The descriptor is strict JSON, matching SpaceBuilder. A legacy
+//! `.code-workspace` file can still use its existing JSON5 reader.
 //!
 //! The daemon never keeps what it reads. `agentCwd` is read again each time a
 //! session starts, and the scan below looks at the directories again each time
@@ -59,7 +59,7 @@ pub fn read(dir: &Path) -> Result<Option<Descriptor>, String> {
 
 pub fn parse(text: &str) -> Result<Descriptor, String> {
     let value: serde_json::Value =
-        json5::from_str(text).map_err(|error| format!("{FILE} is not valid JSON: {error}"))?;
+        serde_json::from_str(text).map_err(|error| format!("{FILE} is not valid JSON: {error}"))?;
     let Some(object) = value.as_object() else {
         return Err(format!("{FILE} must be one JSON object"));
     };
@@ -110,7 +110,8 @@ pub fn declared_folders(dir: &Path) -> Option<Vec<serde_json::Value>> {
     if meta.file_type().is_symlink() || !meta.is_file() || meta.len() > MAX_BYTES {
         return None;
     }
-    let value: serde_json::Value = json5::from_str(&std::fs::read_to_string(&path).ok()?).ok()?;
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).ok()?).ok()?;
     let folders = value.get("folders")?.as_array()?;
     (!folders.is_empty()).then(|| folders.clone())
 }
@@ -135,7 +136,9 @@ fn safe_relative_key(key: &str, text: &str) -> Result<PathBuf, String> {
         }
     }
     if clean.as_os_str().is_empty() {
-        return Err(format!("\"{key}\" names the Space itself; leave it out instead"));
+        return Err(format!(
+            "\"{key}\" names the Space itself; leave it out instead"
+        ));
     }
     Ok(clean)
 }
@@ -285,143 +288,4 @@ fn subdirectories(dir: &Path) -> Vec<PathBuf> {
         .collect();
     dirs.sort();
     dirs
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn space(dir: &Path, body: &str) {
-        std::fs::create_dir_all(dir).unwrap();
-        std::fs::write(dir.join(FILE), body).unwrap();
-    }
-
-    #[test]
-    fn four_keys_are_read_and_the_rest_is_the_builders() {
-        let d = parse(
-            r#"{
-              // json5: comments and trailing commas are fine
-              "name": "办公室-Mac 管理员", "description": "介绍专家", "tags": ["expert"],
-              "agentCwd": "./front/", "spaceBuilder": "tools/spacebuilder.py",
-              "agents": ["codex"], "skills": ["x"], "children": {"scanDepth": 2},
-            }"#,
-        )
-        .unwrap();
-        assert_eq!(d.name.as_deref(), Some("办公室-Mac 管理员"));
-        assert_eq!(d.description.as_deref(), Some("介绍专家"));
-        assert_eq!(d.tags, ["expert"]);
-        assert_eq!(d.agent_cwd.as_deref(), Some("./front/"));
-        assert_eq!(d.space_builder.as_deref(), Some("tools/spacebuilder.py"));
-        assert_eq!(parse("{}").unwrap(), Descriptor::default());
-    }
-
-    #[test]
-    fn a_descriptor_that_cannot_be_used_says_what_to_change() {
-        for (text, mention) in [
-            ("{", "valid JSON"),
-            ("[]", "one JSON object"),
-            (r#"{"name": 3}"#, "\"name\""),
-            (r#"{"name": "  "}"#, "\"name\""),
-            (r#"{"tags": "expert"}"#, "list of strings"),
-            (r#"{"tags": ["a", ""]}"#, "non-empty strings"),
-            (r#"{"agentCwd": "/etc"}"#, "relative path"),
-            (r#"{"agentCwd": "../elsewhere"}"#, "no `..`"),
-            (r#"{"agentCwd": "a/../../b"}"#, "no `..`"),
-            (r#"{"agentCwd": "."}"#, "the Space itself"),
-        ] {
-            let problem = parse(text).unwrap_err();
-            assert!(problem.contains(mention), "`{text}` -> {problem}");
-        }
-    }
-
-    #[test]
-    fn agent_cwd_is_a_real_directory_inside_the_space_or_nothing() {
-        let root = tempfile::tempdir().unwrap();
-        assert_eq!(agent_cwd(root.path()), None, "no descriptor, no default");
-        space(root.path(), r#"{"agentCwd": "front"}"#);
-        assert_eq!(agent_cwd(root.path()), None, "front/ does not exist yet");
-        std::fs::create_dir(root.path().join("front")).unwrap();
-        assert_eq!(agent_cwd(root.path()), Some(root.path().join("front")));
-
-        space(root.path(), "{");
-        assert_eq!(
-            agent_cwd(root.path()),
-            None,
-            "a broken descriptor never stops a session"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_link_cannot_carry_a_session_out_of_the_space() {
-        let root = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        space(root.path(), r#"{"agentCwd": "front"}"#);
-        std::os::unix::fs::symlink(outside.path(), root.path().join("front")).unwrap();
-        assert_eq!(agent_cwd(root.path()), None);
-    }
-
-    #[test]
-    fn discovery_finds_roots_sets_and_nested_spaces_and_nothing_else() {
-        let data = tempfile::tempdir().unwrap();
-        let spaces = data.path().join("spaces");
-        // A root with two children and a grandchild.
-        space(
-            &spaces.join("admin"),
-            r#"{"name":"admin","tags":["expert"]}"#,
-        );
-        space(&spaces.join("admin/spaces/think"), r#"{"name":"think"}"#);
-        space(&spaces.join("admin/spaces/work"), r#"{"name":"work"}"#);
-        space(
-            &spaces.join("admin/spaces/work/spaces/deep"),
-            r#"{"name":"deep"}"#,
-        );
-        space(
-            &spaces.join("admin/spaces/work/spaces/deep/spaces/too-deep"),
-            r#"{"name":"x"}"#,
-        );
-        // A set (no descriptor) holding one expert; its other directories are not Spaces.
-        space(&spaces.join("team/perf"), r#"{"name":"perf"}"#);
-        std::fs::create_dir_all(spaces.join("team/notes")).unwrap();
-        // Things that are never entered or never Spaces.
-        space(&spaces.join(".hidden"), r#"{"name":"hidden"}"#);
-        space(&spaces.join("node_modules/pkg"), r#"{"name":"pkg"}"#);
-        space(
-            &spaces.join("admin/front"),
-            r#"{"name":"not under spaces/"}"#,
-        );
-        space(&spaces.join("broken"), "{");
-
-        let found = discover(&spaces);
-        let names: Vec<_> = found
-            .roots
-            .iter()
-            .map(|root| root.descriptor.name.clone().unwrap())
-            .collect();
-        assert_eq!(
-            names,
-            ["admin", "perf"],
-            "set members are roots; hidden and node_modules are skipped"
-        );
-        let admin = &found.roots[0];
-        assert_eq!(
-            admin
-                .children
-                .iter()
-                .map(|c| c.descriptor.name.clone().unwrap())
-                .collect::<Vec<_>>(),
-            ["think", "work"],
-            "only spaces/<name>, not any directory with a descriptor"
-        );
-        let work = &admin.children[1];
-        assert_eq!(
-            work.children.len(),
-            1,
-            "two levels below the root are followed"
-        );
-        assert!(work.children[0].children.is_empty(), "and no deeper");
-        assert_eq!(found.problems.len(), 1, "{:?}", found.problems);
-        assert!(found.problems[0].contains("broken") && found.problems[0].contains("valid JSON"));
-        assert!(discover(&data.path().join("none")).roots.is_empty());
-    }
 }

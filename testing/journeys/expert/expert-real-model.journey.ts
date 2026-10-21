@@ -37,7 +37,7 @@ type Item = {
   name?: string;
   stats?: { usage?: { llmRounds?: number; inputTokens?: number; outputTokens?: number }; durationMs?: number };
 };
-const isSystem = (item: Item): boolean => item.system === true || item.origin?.sessionId === "system" || (item.text ?? "").startsWith("用途: ");
+const isSystem = (item: Item): boolean => item.origin?.sessionId === "system";
 
 defineJourney(
   {

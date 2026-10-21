@@ -28,7 +28,7 @@ function lay(dir: string, descriptor: Record<string, unknown> | string): void {
 
 /** admin (agentCwd front) with think and work children, and a broken sibling. */
 function layTree(data: string): { admin: string; think: string; work: string } {
-  const admin = path.join(data, "spaces", "admin");
+  const admin = path.join(data, "spaces", "tree-fixture");
   lay(admin, { name: "admin", description: "the machine's expert", tags: ["expert"], agentCwd: "front" });
   mkdirSync(path.join(admin, "front"), { recursive: true });
   lay(path.join(admin, "spaces", "think"), { name: "think" });

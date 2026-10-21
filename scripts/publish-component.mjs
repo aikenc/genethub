@@ -40,7 +40,11 @@ async function main() {
   const cloud = resolve(
     argumentsMap.get("cloud-root") ?? process.env.GENEHUB_CLOUD_ROOT ?? join(open, "../genethub-cloud"),
   );
-  const { publishComponent } = await import(pathToFileURL(join(cloud, "publisher/component.mjs")).href);
+  const { publishComponent, releaseOrigin } = await import(pathToFileURL(join(cloud, "publisher/component.mjs")).href);
+  const allowHttpLoopback = channel === "dev";
+  // A plan validates the exact configured publication origin before building,
+  // acquiring a publication lock or touching the artifact store.
+  if (argumentsMap.has("public-origin")) releaseOrigin(argumentsMap.get("public-origin"), allowHttpLoopback);
   const { readCurrent } = await import(pathToFileURL(join(cloud, "publisher/store.mjs")).href);
   const versions = await import(pathToFileURL(join(cloud, "publisher/version.mjs")).href);
   const { nextLiveVersion } = versions;
@@ -175,7 +179,7 @@ async function main() {
       // A development slot publishes to its own Control on a literal loopback address,
       // which is plain http. The publisher accepts that only when asked, and only the
       // dev channel asks: beta and stable keep publishing to https origins alone.
-      allowHttpLoopback: channel === "dev",
+      allowHttpLoopback,
       githubUrl,
       source,
       runner,

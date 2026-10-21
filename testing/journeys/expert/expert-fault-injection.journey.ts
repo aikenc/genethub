@@ -9,7 +9,7 @@
 //   stuck    a running session makes no progress               -> one report after the threshold
 //   gone     the session is deleted behind the hook's back     -> one report; the record is closed
 //   broken   a hook file is damaged                            -> one report naming the file
-//   full     the target's queue is at its limit                -> `send` fails with the three-part message
+//   full     the platform and local inbox reach their limits   -> bounded storage and actionable refusal
 
 import { spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
@@ -29,14 +29,14 @@ const BUILDER = "apps/daemon/builtin-skills/genehub/references/spacebuilder/spac
 
 type Info = { id: string; name: string; agentSpace?: { parentWorkspaceId?: string } };
 type Item = { type?: string; text?: string; system?: boolean; origin?: { sessionId?: string } };
-const isSystem = (item: Item): boolean => item.system === true || item.origin?.sessionId === "system" || (item.text ?? "").startsWith("用途: ");
+const isSystem = (item: Item): boolean => item.origin?.sessionId === "system";
 
 defineJourney(
   {
     id: "journey.expert.fault-injection",
     title: "the expert's timer reports each way a background session can go wrong, once, and says what to do",
     oracle:
-      "for a session waiting on a person, interrupted, dying, silent, deleted, a damaged hook file and a full queue, the front receives exactly one system notice that names the session or file; the failing `send` exits non-zero with 出了什么/现在状态/下一步; no branch is reported twice across many timer runs",
+      "waiting/interrupted/failed/stuck/deleted sessions and damaged hooks produce one system notice; a full platform queue refuses further input while the local inbox retains up to32 complete messages without claiming a platform receipt, then refuses overflow with actionable state and no change to accepted entries",
     catches: [
       "a session waiting on the person that nobody is told about",
       "a paused or failed background session that goes unnoticed",
@@ -50,7 +50,7 @@ defineJourney(
     expectedDurationMs: 90_000,
     timeoutMs: 360_000,
     surfaces: ["daemon", "spacebuilder", "genet-cli", "script-agent", "timer-hook"],
-    productInterfaces: ["tools/expert.py", "genet hook list", "session.send --queue"],
+    productInterfaces: ["tools/expert.py", "genet hook list", "session.send --system"],
   },
   async (t) => {
     hideHostAgentClis(t.env);
@@ -65,8 +65,8 @@ defineJourney(
     writeFileSync(descriptorPath, JSON.stringify({ ...JSON.parse(readFileSync(descriptorPath, "utf8")), name: "alice" }));
     const hookPath = path.join(alice, "skills/expert-front/hooks/timer.genet.json");
     writeFileSync(hookPath, JSON.stringify({ ...JSON.parse(readFileSync(hookPath, "utf8")), every: "1s" }));
-    const setEnv = (agent: string): void =>
-      writeFileSync(path.join(alice, ".genethub", "open.env"), `EXPERT_AGENT=${agent}\nEXPERT_BOARD_PORT=0\nEXPERT_STUCK_AFTER=4\nEXPERT_STOPPED_AFTER=3600\n`);
+    const setEnv = (agent: string, stuckAfter = 4): void =>
+      writeFileSync(path.join(alice, ".genethub", "open.env"), `EXPERT_AGENT=${agent}\nEXPERT_BOARD_PORT=0\nEXPERT_STUCK_AFTER=${stuckAfter}\nEXPERT_STOPPED_AFTER=3600\n`);
     mkdirSync(path.join(alice, ".genethub"), { recursive: true });
     setEnv("ctl-normal");
     const built = spawnSync("python3", [path.join(t.openRoot, BUILDER), "build", alice, "--format", "json"], { encoding: "utf8" });
@@ -215,20 +215,37 @@ defineJourney(
       writeFileSync(path.join(alice, ".genethub/hooks/damaged.genet.json"), "{ not json");
       await exactlyOnce("damaged", /机制出了问题/, "broken hook file");
 
-      // full: the target's queue is at its limit; the caller is told, not the front.
+      // Capacity is separate at the two real acceptance boundaries.
       const target = await spawnWith("ctl-accept-then-silent", "queue target");
+      setEnv("ctl-accept-then-silent", 3600); // Keep watchdog timeout out of this capacity scenario.
       await t.tools.waitUntil(async () => {
         const reply = await opened.client.call({ type: "session.get", payload: { sessionId: target } });
         return reply?.type === "snapshot" && (reply.data as unknown as { summary: { status: string } }).summary.status === "running";
       }, 30_000);
+      let platformRefused = false;
       for (let n = 0; n < 40; n += 1) {
-        spawnSync(genet, ["session", "send", target, `用途: notice\n\nfiller ${n}`, "--message-id", `fill.${n}`, "--no-wait"], { env, encoding: "utf8" });
+        const filled = spawnSync(genet, ["session", "send", target, "--system", `用途: notice\n\nfiller ${n}`, "--message-id", `fill.${n}`, "--no-wait"], { env, encoding: "utf8" });
+        if (filled.status !== 0) {
+          t.assertions.assert(/queue.*full|队列已满/i.test(filled.stdout + filled.stderr), "platform input failed for a reason other than capacity");
+          platformRefused = true;
+          break;
+        }
       }
+      t.assertions.assert(platformRefused, "the platform accepted input beyond its bounded queue");
+      for (let n = 0; n < 32; n += 1) {
+        const local = expert("send", "--to", target, `local correction ${n}`);
+        t.assertions.assert(local.code === 0 && local.out.includes("文件收件箱") && local.out.includes("尚未取得平台回执"), `local acceptance was not distinguished from platform acceptance: ${local.out} ${local.err}`);
+      }
+      const inbox = path.join(alice, ".genethub/team/inbox", `${target}.jsonl`);
+      const accepted = readFileSync(inbox, "utf8");
+      const entries = accepted.trim().split("\n").map(line => JSON.parse(line));
+      t.assertions.assert(entries.length === 32 && entries.some(item => item.text.includes("local correction 31")), "local capacity lost an accepted correction");
       const refused = expert("send", "--to", target, "one too many");
       t.assertions.assert(
-        refused.code !== 0 && refused.err.includes("队列已满") && refused.err.includes("现在状态") && refused.err.includes("下一步"),
+        refused.code !== 0 && refused.err.includes("收件箱已满") && refused.err.includes("现在状态") && refused.err.includes("下一步"),
         `full queue: exit ${refused.code} ${refused.err}`,
       );
+      t.assertions.assert(readFileSync(inbox, "utf8") === accepted, "overflow changed or discarded accepted local inputs");
 
       // The timer survived all of it.
       t.assertions.assert(existsSync(path.join(alice, ".genethub/team/alive")), "no heartbeat");

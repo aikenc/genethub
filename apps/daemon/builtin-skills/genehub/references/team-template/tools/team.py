@@ -38,9 +38,11 @@ Failure modes (each error says what happened, the state now, and what to do next
   hook   soul.md changed, rebuild fails -> reported to the front, retried after 60s -> fix the cause named in the report
   hook   unhandled exception            -> system message to the front, exit 1; the next tick retries
   spawn  no route has the medium / tier -> error text, no session created       -> `genet agent list --routes`, pick a --tier or --model
-Every action is idempotent: message ids are derived from what is being said, so a repeat is dropped by the daemon.
+Messages to the same Session retry with the same identity and body. For creation or other ambiguous operations, inspect existing effects before repeating.
 """
 import argparse
+import contextlib
+import glob
 import hashlib
 import json
 import os
@@ -52,7 +54,6 @@ import tempfile
 import time
 
 sys.dont_write_bytecode = True
-BODY_LIMIT = 8 * 1024
 
 
 def env_get(name, default=None):
@@ -95,9 +96,10 @@ SESSION_ID = re.compile(r"^s_[0-9a-f]+$")
 
 
 class ExpertError(Exception):
-    def __init__(self, what, state, nxt):
+    def __init__(self, what, state, nxt, code=None):
         super().__init__(what)
         self.what, self.state, self.next = what, state, nxt
+        self.code = code
 
     def text(self):
         return "出了什么: %s\n现在状态: %s\n下一步: %s" % (self.what, self.state, self.next)
@@ -106,27 +108,10 @@ class ExpertError(Exception):
 # ---------------------------------------------------------------- genet and files
 
 def _resolve_genet_env():
+    # The caller owns channel selection and authority. Never guess another
+    # installation or discard a controller/lease after an authentication error.
     env = dict(os.environ)
-    cli = env.get("GENEHUB_CLI")
-    script_abs = os.path.realpath(__file__)
-    parts = script_abs.split(os.sep)
-    if "spaces" in parts:
-        idx = len(parts) - 1 - parts[::-1].index("spaces")
-        daemon_dir = os.sep.join(parts[:idx]) or os.sep
-        slot_cli = os.path.realpath(os.path.join(daemon_dir, "..", "..", "install", "bin", "genet-dev"))
-        if os.path.isfile(os.path.join(daemon_dir, "config.json")) and os.path.isfile(slot_cli):
-            real_daemon = os.path.realpath(daemon_dir)
-            cur_data_dir = os.path.realpath(env["GENEHUB_DEV_DATA_DIR"]) if env.get("GENEHUB_DEV_DATA_DIR") else None
-            if cur_data_dir != real_daemon:
-                env.pop("GENEHUB_CONTROLLER_TOKEN", None)
-                env.pop("GENEHUB_EXECUTION_LEASE", None)
-            env["GENEHUB_DEV_DATA_DIR"] = real_daemon
-            if not cli or os.path.realpath(cli) != slot_cli:
-                cli = slot_cli
-                env["GENEHUB_CLI"] = slot_cli
-                env.pop("GENEHUB_CONTROLLER_TOKEN", None)
-                env.pop("GENEHUB_EXECUTION_LEASE", None)
-    return cli, env
+    return env.get("GENEHUB_CLI"), env
 
 
 def genet(*args, ok_codes=(0,)):
@@ -134,12 +119,6 @@ def genet(*args, ok_codes=(0,)):
     if not cli:
         raise ExpertError("环境里没有 GENEHUB_CLI", "没有执行任何操作", "在 GeneHub 会话或 timer hook 里运行本脚本")
     done = subprocess.run([cli] + list(args), capture_output=True, text=True, env=env, timeout=120)
-    if done.returncode not in ok_codes and "401 Unauthorized" in (done.stdout + done.stderr):
-        if env.get("GENEHUB_CONTROLLER_TOKEN") or env.get("GENEHUB_EXECUTION_LEASE"):
-            retry_env = dict(env)
-            retry_env.pop("GENEHUB_CONTROLLER_TOKEN", None)
-            retry_env.pop("GENEHUB_EXECUTION_LEASE", None)
-            done = subprocess.run([cli] + list(args), capture_output=True, text=True, env=retry_env, timeout=120)
     lines = [line for line in done.stdout.splitlines() if line.strip()]
     try:
         envelope = json.loads(lines[-1]) if lines else {}  # the answer is the last line; earlier lines are progress
@@ -147,7 +126,7 @@ def genet(*args, ok_codes=(0,)):
         envelope = {}
     if done.returncode not in ok_codes:
         message = (envelope.get("error") or {}).get("message") or done.stderr.strip()[-300:] or "exit %d" % done.returncode
-        raise ExpertError("genet %s 失败: %s" % (" ".join(args[:2]), message), "没有产生副作用或已部分完成，见错误", "核对目标会话与参数后重试；操作是幂等的")
+        raise ExpertError("genet %s 失败: %s" % (" ".join(args[:2]), message), "没有产生副作用或已部分完成，见错误", "核对目标会话与参数及已有回执后，使用同一身份重试", code=(envelope.get("error") or {}).get("code"))
     if len(args) >= 2 and args[0] == "space" and args[1] == "open":
         _WORKSPACES_CACHE["items"] = None
     return envelope.get("data") or {}
@@ -617,7 +596,7 @@ def start(root, workspace_id, role, desc, text, model_key, tier=None, model=None
     old_candidates = list(live_sessions(workspace_id)) if (auto_archive and role not in ("root", "front")) else []
     args = ["agent", "run", *picked, text, "--workspace", workspace_id, "--title", desc[:80], "--label", role_label,
             "--label", SYSTEM_LABEL, "--description", desc[:300],
-            "--message-id", message_id("start", workspace_id, role, desc, text), "--no-wait"]
+            "--system", "--message-id", message_id("start", workspace_id, role, desc, text), "--no-wait"]
     new_sid = genet(*args).get("sessionId")
     clear_sessions_cache()
     if new_sid and old_candidates:
@@ -634,33 +613,20 @@ def start(root, workspace_id, role, desc, text, model_key, tier=None, model=None
 
 
 def clip(text):
-    raw = text.encode("utf-8")
-    if len(raw) <= BODY_LIMIT:
-        return text
-    return raw[:BODY_LIMIT].decode("utf-8", "ignore") + "\n…（已截断，用 session narrative 取全文）"
+    # Delivery must preserve the latest correction too. The platform applies
+    # its explicit size limit; an oversized message stays pending with an error.
+    return text
 
 
-def notice(session_id, purpose, sender, text, *id_parts, ref=None, unpause=False):
-    """Queue a system notice. Idempotent: the id comes from what is said, so a repeat is dropped."""
-    summary = session_summary(session_id)
-    inputs = summary.get("inputSummary") or {}
-    if len(inputs.get("pendingMessageIds") or []) >= 32:
-        raise ExpertError("目标 %s 的队列已满（32 条）" % session_id, "没有排入任何消息", "等它处理完，或改发给别的会话")
-    if summary.get("archived"):
-        raise ExpertError("目标 %s 已归档" % session_id, "没有排入任何消息", "用 `directory` 找现在的会话，或发给 EXPERT:default")
-    if unpause and (inputs.get("paused") or summary.get("status") == "failed"):
-        head = "【人类唤醒】\n用途: %s\n发送方: %s\n" % (purpose, sender)
-    else:
-        head = "用途: %s\n发送方: %s\n" % (purpose, sender)
+def notice(session_id, purpose, sender, text, *id_parts, ref=None, unpause=False, delivery_id=None):
+    """Queue an explicitly attributed script notice; it never clears a pause."""
+    head = "用途: %s\n发送方: %s\n" % (purpose, sender)
     if ref:
         head += "ref: %s\n" % ref
-    body = clip("%s\n%s" % (head, text))
-    send_args = ["session", "send", session_id, body, "--message-id", message_id(session_id, purpose, *id_parts), "--no-wait"]
-    try:
-        genet(*send_args)
-    except ExpertError as err:
-        if "messageId collides" not in err.what:
-            raise
+    body = "%s\n%s" % (head, text)
+    stable_id = delivery_id or message_id(session_id, purpose, sender, text, ref or "", *id_parts)
+    # An id collision with different content is an error, never an acceptance.
+    genet("session", "send", session_id, body, "--system", "--message-id", stable_id, "--no-wait")
 
 
 def candidate_roots(root):
@@ -680,35 +646,86 @@ def candidate_roots(root):
     return out
 
 
-def push_session_inbox(root, session_id, purpose, sender, text, ref=None):
-    inbox_path = state_dir(root, "inbox", session_id + ".jsonl")
-    os.makedirs(os.path.dirname(inbox_path), exist_ok=True)
-    entry = {"atMs": now_ms(), "purpose": purpose, "sender": sender, "ref": ref, "text": clip(text)}
-    with open(inbox_path, "a", encoding="utf-8") as handle:
-        handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
-
-
-def pop_session_inbox(root, session_id):
-    inbox_path = state_dir(root, "inbox", session_id + ".jsonl")
-    if not os.path.isfile(inbox_path):
-        return []
-    tmp = "%s.%d.read" % (inbox_path, os.getpid())
-    try:
-        os.replace(inbox_path, tmp)
-    except OSError:
-        return []
-    items = []
-    try:
-        with open(tmp, "r", encoding="utf-8") as handle:
-            for line in handle:
-                if line.strip():
-                    items.append(json.loads(line))
-    finally:
+@contextlib.contextmanager
+def inbox_lock(root, session_id):
+    path = state_dir(root, "inbox", session_id + ".lock")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a+b") as handle:
+        if os.name == "nt":
+            import msvcrt
+            if os.path.getsize(path) == 0:
+                handle.write(b"0"); handle.flush()
+            handle.seek(0)
+            acquire = lambda: msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            release = lambda: (handle.seek(0), msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1))
+        else:
+            import fcntl
+            acquire = lambda: fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            release = lambda: fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         try:
-            os.remove(tmp)
-        except OSError:
-            pass
-    return items
+            acquire()
+        except OSError as error:
+            raise ExpertError("收件箱正由另一进程处理: %s" % error, "没有丢弃或重投消息", "保留当前任务，稍后使用同一消息身份重试")
+        try:
+            yield
+        finally:
+            release()
+
+
+def _inbox_paths(root, session_id):
+    path = state_dir(root, "inbox", session_id + ".jsonl")
+    # Include interrupted claims from the previous implementation too.
+    claims = glob.glob(path + "*.read")
+    claims.sort(key=lambda claim: (min((int(item.get("atMs", 0)) for item in _read_inbox(claim)), default=0), claim))
+    return claims + ([path] if os.path.isfile(path) else [])
+
+
+def _read_inbox(path):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            items = [json.loads(line) for line in handle if line.strip()]
+        if any(not isinstance(item, dict) or not isinstance(item.get("text"), str) for item in items):
+            raise ValueError("每条消息必须是含 text 的对象")
+        return items
+    except (OSError, ValueError) as error:
+        raise ExpertError("无法读取收件箱 %s: %s" % (os.path.basename(path), error), "原文件保留，没有销账或丢弃消息", "核对并修复原文件后使用原消息身份继续投递")
+
+
+def _write_inbox(path, items):
+    temporary = "%s.%d.tmp" % (path, os.getpid())
+    with open(temporary, "w", encoding="utf-8") as handle:
+        for item in items:
+            handle.write(json.dumps(item, ensure_ascii=False) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+
+
+def _inbox_message_id(session_id, item):
+    return item.get("messageId") or message_id(session_id, json.dumps(item, ensure_ascii=False, sort_keys=True))
+
+
+def push_session_inbox(root, session_id, purpose, sender, text, ref=None, id_parts=()):
+    path = state_dir(root, "inbox", session_id + ".jsonl")
+    stable_id = message_id(session_id, purpose, sender, text, ref or "", *id_parts)
+    with inbox_lock(root, session_id):
+        for existing in _inbox_paths(root, session_id):
+            if any(_inbox_message_id(session_id, item) == stable_id for item in _read_inbox(existing)):
+                return
+        pending = [item for existing in _inbox_paths(root, session_id) for item in _read_inbox(existing)]
+        if len(pending) >= 32:
+            raise ExpertError("本地收件箱已满（32 条）", "没有接收或截断新消息", "先恢复目标会话并核对已有投递回执")
+        body = "用途: %s\n发送方: %s\n%s\n%s" % (purpose, sender, ("ref: %s\n" % ref) if ref else "", text)
+        if len(body.encode("utf-8")) > 65536:
+            raise ExpertError("消息超过平台 65536 字节上限", "没有接收或截断新消息", "拆成独立的完整消息，或交付含全部要求的文件链接")
+        items = _read_inbox(path) if os.path.isfile(path) else []
+        items.append({"messageId": stable_id, "atMs": now_ms(), "purpose": purpose, "sender": sender, "ref": ref, "text": text})
+        _write_inbox(path, items)
+
+
+def peek_session_inbox(root, session_id):
+    # Atomic replacements make reading safe; showing text is not acknowledgement.
+    return [item for path in _inbox_paths(root, session_id) for item in _read_inbox(path)]
 
 
 def archive_guidance(root, kind, sender, target, text, ref=None):
@@ -734,28 +751,6 @@ def archive_guidance(root, kind, sender, target, text, ref=None):
         handle.write("\n".join(lines))
     return path
 
-
-def _auto_unblock_waiting_system_session(session_id, summary):
-    if not summary or summary.get("status") != "waiting":
-        return False
-    if SYSTEM_LABEL not in (summary.get("labels") or []) and not summary.get("managed"):
-        return False
-    reqs = (summary.get("interactionSummary") or {}).get("requests") or []
-    unblocked = False
-    for req in reqs:
-        if req.get("kind") != "question":
-            continue
-        req_id = req.get("requestId") or req.get("id")
-        if not req_id:
-            continue
-        try:
-            genet("session", "respond", session_id, "--request", req_id, "--choose", "0", "--no-wait")
-            unblocked = True
-        except Exception:
-            pass
-    if unblocked:
-        clear_sessions_cache()
-    return unblocked
 
 
 def format_coalesced_inbox_items(items, inline=False):
@@ -795,7 +790,7 @@ def check_and_flush_self_inbox_inline(root, command_name):
         return
     all_items = []
     for cand in candidate_roots(root):
-        all_items.extend(pop_session_inbox(cand, self_id))
+        all_items.extend(peek_session_inbox(cand, self_id))
     if not all_items:
         return
     formatted, has_human, _ = format_coalesced_inbox_items(all_items, inline=True)
@@ -846,91 +841,41 @@ def _has_unfinished_children(root, session_id):
 
 
 def flush_session_inbox_if_idle(root, session_id, force=False):
-    """If `session_id` has accumulated file-inbox messages and is now wakeable (`idle` or `failed`), deliver them as 1 merged turn."""
-    inbox_path = state_dir(root, "inbox", session_id + ".jsonl")
-    if not os.path.isfile(inbox_path):
+    """Transfer durable entries to the platform; only its receipt permits deletion."""
+    if not _inbox_paths(root, session_id):
         return False
-    try:
-        summary = session_summary(session_id)
-    except ExpertError:
-        pop_session_inbox(root, session_id)
-        return False
-    if _auto_unblock_waiting_system_session(session_id, summary):
-        try:
-            summary = session_summary(session_id)
-        except ExpertError:
-            return False
-    status = summary.get("status")
-    inputs = summary.get("inputSummary") or {}
-    if status not in ("idle", "failed"):
-        return False
-    front = None
-    try:
-        _, mine = me(root)
-        front = front_session(root, (mine or {}).get("spaces") or {})
-    except ExpertError:
-        pass
-    if status == "idle" and inputs.get("paused") and session_id == front:
+    summary = session_summary(session_id)
+    if summary.get("status") != "idle" or (summary.get("inputSummary") or {}).get("paused"):
         return False
     if not force and _has_unfinished_children(root, session_id):
-        try:
-            with open(inbox_path, "r", encoding="utf-8") as handle:
-                peek_items = [json.loads(ln) for ln in handle if ln.strip()]
-        except Exception:
-            peek_items = []
-        if not any(i.get("purpose") in ("human", "patrol", "task", "question") for i in peek_items):
+        if not any(item.get("purpose") in ("human", "patrol", "task", "question") for item in peek_session_inbox(root, session_id)):
             return False
-    should_unpause = (status == "failed") or bool(inputs.get("paused"))
-    items = pop_session_inbox(root, session_id)
-    if not items:
-        return False
-    _advance_parent_baseline(root, session_id, summary)
-    # Sort so human instructions always lead the batch
-    items.sort(key=lambda item: (0 if item.get("purpose") == "human" else 1, item.get("atMs", 0)))
-    try:
-        _deliver_coalesced_inbox(root, session_id, items, unpause=should_unpause)
-    except Exception:
-        # `pop_session_inbox` already removed the file, so a failed delivery would destroy the message for good —
-        # put it back untouched (the next tick retries) instead of losing a result forever.
-        for item in reversed(items):
-            push_session_inbox(root, session_id, item.get("purpose") or "notice", item.get("sender") or "-", item.get("text") or "", ref=item.get("ref"))
-        raise
-    return True
-
-
-def _deliver_coalesced_inbox(root, session_id, items, unpause=False):
-    if len(items) == 1 and items[0].get("purpose") != "human":
-        only = items[0]
-        notice(session_id, only.get("purpose") or "notice", only.get("sender") or "-", only.get("text") or "",
-               session_id, str(only.get("atMs", 0)), ref=only.get("ref"), unpause=unpause)
-    else:
-        formatted, has_human, human_count = format_coalesced_inbox_items(items, inline=False)
-        purpose = "human" if has_human else (items[0].get("purpose") or "result")
-        sender = "收件箱合并投递（%d 条%s）" % (len(items), "，含 %d 条人类高优指令" % human_count if has_human else "")
-        notice(session_id, purpose, sender, formatted, session_id, *(str(i.get("atMs", 0)) for i in items), unpause=unpause)
-    return True
+    delivered = False
+    with inbox_lock(root, session_id):
+        for path in _inbox_paths(root, session_id):
+            claim = path if path.endswith(".read") else path + ".read"
+            if claim != path:
+                os.replace(path, claim)
+            items = _read_inbox(claim)
+            _advance_parent_baseline(root, session_id, summary)
+            while items:
+                item = items[0]
+                notice(session_id, item.get("purpose") or "notice", item.get("sender") or "-", item.get("text") or "",
+                       ref=item.get("ref"), delivery_id=_inbox_message_id(session_id, item))
+                # A crash before this replacement retries the same id AND body.
+                items = items[1:]
+                _write_inbox(claim, items)
+                delivered = True
+            os.remove(claim)
+    return delivered
 
 
 def deliver_or_notice(root, session_id, purpose, sender, text, *id_parts, ref=None, unpause=False, use_inbox=False):
     team_mode = bool(use_inbox or purpose in ("human", "patrol", "expert", "member") or open_env(root).get("TEAM_MODE") or is_team_root(root))
     if team_mode:
-        try:
-            summary = session_summary(session_id)
-            inputs = summary.get("inputSummary") or {}
-            if len(inputs.get("pendingMessageIds") or []) < 32 and summary.get("status") in ("running", "waiting"):
-                push_session_inbox(root, session_id, purpose, sender, text, ref=ref)
-                return "inbox"
-            if summary.get("status") in ("idle", "failed"):
-                existing = pop_session_inbox(root, session_id)
-                if existing:
-                    for item in existing:
-                        push_session_inbox(root, session_id, item.get("purpose") or "notice", item.get("sender") or "-", item.get("text") or "", ref=item.get("ref"))
-                    push_session_inbox(root, session_id, purpose, sender, text, ref=ref)
-                    flush_session_inbox_if_idle(root, session_id, force=True)
-                    return "queue"
-        except ExpertError:
-            pass
-    notice(session_id, purpose, sender, text, *id_parts, ref=ref, unpause=unpause)
+        push_session_inbox(root, session_id, purpose, sender, text, ref=ref, id_parts=id_parts)
+        return "queue" if flush_session_inbox_if_idle(root, session_id) else "inbox"
+    notice(session_id, purpose, sender, text, *id_parts, ref=ref)
     return "queue"
 
 
@@ -1100,7 +1045,7 @@ def cmd_send(args):
                 "route": "send",
             })
     if mode == "inbox":
-        print("已写入文件收件箱（0 打断，目标空闲时自动合并唤醒） → %s" % target)
+        print("已写入文件收件箱（尚未取得平台回执；待目标空闲且未暂停时重试） → %s" % target)
     elif mode == "spawned":
         print("已为 %s 启动会话并投递 → %s（请直接结束本轮，系统收齐结果后将自动异步唤醒）" % (args.to, target))
     else:
@@ -1168,7 +1113,7 @@ def _cut_worker_sub_worktree(target_root, role, base_repo_hint, desc, explicit_s
     os.makedirs(os.path.dirname(wt_dir), exist_ok=True)
     branch = "worker/%s" % slot
     if not os.path.exists(wt_dir):
-        done = subprocess.run(["git", "-C", base_repo, "worktree", "add", "-B", branch, wt_dir, "HEAD"], capture_output=True, text=True, timeout=60)
+        done = subprocess.run(["git", "-C", base_repo, "worktree", "add", "-b", branch, wt_dir, "HEAD"], capture_output=True, text=True, timeout=60)
         if done.returncode != 0:
             raise ExpertError(
                 "自动切出并发子工位失败: %s" % (done.stderr or done.stdout).strip()[-300:],
@@ -1620,8 +1565,6 @@ def cmd_init(args):
             new_soul = "# 灵魂\n\n" + role_block
         with open(soul_path, "w", encoding="utf-8") as handle:
             handle.write(new_soul.rstrip() + "\n")
-        with open(os.path.join(staging, "charter.md"), "w", encoding="utf-8") as handle:
-            handle.write(new_soul.rstrip() + "\n")
         setup_team_structure(staging, new_name, args.desc.strip(), getattr(args, "members", None), final_root=target)
         ensure_git(staging)
         os.replace(staging, target)
@@ -1728,7 +1671,7 @@ def cmd_employee(args):
         os.makedirs(os.path.dirname(wt_dir), exist_ok=True)
         branch = getattr(args, "branch", None) or ("pipeline/%s" % role)
         if not os.path.exists(wt_dir):
-            done = subprocess.run(["git", "-C", repo_abs, "worktree", "add", "-B", branch, wt_dir, "HEAD"], capture_output=True, text=True, timeout=60)
+            done = subprocess.run(["git", "-C", repo_abs, "worktree", "add", "-b", branch, wt_dir, "HEAD"], capture_output=True, text=True, timeout=60)
             if done.returncode != 0:
                 raise ExpertError("git worktree add 失败: %s" % (done.stderr or done.stdout).strip()[-300:], "没有完成工位切出", "检查仓库状态或分支名后重试")
         wt = wt_dir
@@ -1814,7 +1757,7 @@ def cmd_worktree(args):
     branch = args.branch or ("wt/%s" % slot)
     if not os.path.exists(wt_dir):
         base_ref = args.base or "HEAD"
-        done = subprocess.run(["git", "-C", repo, "worktree", "add", "-B", branch, wt_dir, base_ref], capture_output=True, text=True, timeout=60)
+        done = subprocess.run(["git", "-C", repo, "worktree", "add", "-b", branch, wt_dir, base_ref], capture_output=True, text=True, timeout=60)
         if done.returncode != 0:
             raise ExpertError("git worktree add 失败: %s" % (done.stderr or done.stdout).strip()[-300:], "没有完成工位切出", "检查仓库状态或分支名后重试")
     if getattr(args, "space", None):
@@ -2557,7 +2500,6 @@ GITIGNORE = """# 专家根目录的仓库只跟踪专家自己的文件（允许
 !/.gitignore
 !/agent-space.genet.json
 !/soul.md
-!/charter.md
 !/memory.md
 !/front/
 /front/*
@@ -3163,7 +3105,7 @@ def leader_watchdog(root, name, mine):
     leader_sess = max(live, key=lambda s: s.get("updatedAtMs", 0))
     leader_sid = leader_sess["id"]
     inbox_path = state_dir(root, "inbox", leader_sid + ".jsonl")
-    if os.path.isfile(inbox_path) and os.path.getsize(inbox_path) > 0:
+    if _inbox_paths(root, leader_sid):
         return
     pdir = state_dir(root, "pending")
     if os.path.isdir(pdir):
@@ -3185,7 +3127,7 @@ def leader_watchdog(root, name, mine):
     except ExpertError:
         return
     status = leader_summary.get("status")
-    if status not in ("idle", "failed"):
+    if status not in ("idle", "failed") or (leader_summary.get("inputSummary") or {}).get("paused"):
         return
     watchdog_after = setting(root, "TEAM_WATCHDOG_AFTER", WATCHDOG_AFTER_S)
     max_wakes = int(setting(root, "TEAM_WATCHDOG_MAX_WAKES", WATCHDOG_MAX_WAKES))
@@ -3288,7 +3230,9 @@ def reconcile(root, name, mine):
         has_children = any(other.get("requester") == session_id for _, other in records if other["sessionId"] != session_id)
         try:
             summary = session_summary(session_id)
-        except ExpertError:
+        except ExpertError as error:
+            if error.code != "targetNotFound":
+                raise
             if to:
                 deliver_or_notice(root, to, "report", "%s:hook" % name, "会话 %s（%s）已不存在，待办记录已清除。" % (session_id, record["desc"]), session_id, "gone")
             if is_multi_batch and not record.get("quiet"):
@@ -3308,16 +3252,6 @@ def reconcile(root, name, mine):
         reply = (summary.get("latestReply") or {}).get("itemId")
         age = (now_ms() - record["createdAtMs"]) / 1000
         said = record.setdefault("notified", [])
-        if requests and (is_team_root(root) or setting(root, "TEAM_AUTO_UNBLOCK", 0) > 0):
-            if _auto_unblock_waiting_system_session(session_id, summary):
-                try:
-                    summary = session_summary(session_id)
-                    status = summary.get("status")
-                    inputs = summary.get("inputSummary") or {}
-                    requests = (summary.get("interactionSummary") or {}).get("requests") or []
-                    reply = (summary.get("latestReply") or {}).get("itemId")
-                except ExpertError:
-                    pass
         if requests:
             key = "wait:%s" % json.dumps(requests, sort_keys=True)[:200]
             if front and key not in said:
@@ -3329,27 +3263,33 @@ def reconcile(root, name, mine):
         # The kernel pauses a session for two different reasons: the person stopped it (`interrupt`,
         # `session/manager.rs:3362`, no error) and a turn that died (`session/inbox.rs:808`, this message).
         # Only the second is a failure. Reporting the person's own stop as a failure hides who is holding it up.
-        stopped_by_person = paused and TURN_FAILED_ERROR not in (inputs.get("error") or "")
-        if paused or status == "failed":
+        timed_out = record.get("stopReason") == "timeout"
+        if timed_out and status == "running":
+            # Acknowledgement of interrupt is not yet a terminal observation.
+            continue
+        stopped_by_person = paused and not timed_out and TURN_FAILED_ERROR not in (inputs.get("error") or "")
+        if timed_out or paused or status == "failed":
             # Told once. An interrupted session's partial reply is not a result, so it is not delivered as one;
             # a paused record stays until the person resumes it, a failed one is closed (or converted to a bounded
             # terminal batch item so it never hangs sibling tasks in the same batch).
-            verdict = "已失败" if (status == "failed" and not stopped_by_person) else "被暂停"
-            if "stop" not in said:
+            timeout_after = record.get("stopAfterSeconds")
+            timeout_verdict = ("超过 %s 秒没有进展，已超时终止" % timeout_after) if timeout_after is not None else "长时间没有进展，已超时终止"
+            verdict = timeout_verdict if timed_out else ("已失败" if (status == "failed" and not stopped_by_person) else "被暂停")
+            if "stop" not in said and not (timed_out and "stuck" in said):
                 if to:
                     deliver_or_notice(root, to, "report", "%s:hook" % name, "会话 %s（%s）%s：%s" % (session_id, record["desc"], verdict, inputs.get("error") or "无附加信息"), session_id, "stop", unpause=(status == "failed" and not paused and to != front))
-                if (status == "failed" or inputs.get("error")) and record.get("kind") not in ("reflect", "team-reflect"):
+                if (timed_out or status == "failed" or inputs.get("error")) and record.get("kind") not in ("reflect", "team-reflect"):
                     add_note(root, {"kind": "anomaly", "session": session_id, "turn": latest_round(session_id), "ref": "ghref:item:%s:%s" % (session_id, reply) if reply else None, "from": "%s:hook" % name, "quote": "无", "context": "会话 %s（%s）%s：%s" % (session_id, record["desc"], verdict, inputs.get("error") or "无附加信息"), "text": record["desc"]}, "anomaly", session_id, "stop")
                 said.append("stop")
                 update_pending(root, path, record)
-            if status == "failed" and not paused and not has_children:
+            if ((status == "failed" and not stopped_by_person) or timed_out) and not has_children:
                 if is_multi_batch and not record.get("quiet"):
                     if not record.get("done"):
                         record["done"] = {
-                            "outcome": "failed",
-                            "reply": "failed:%s" % session_id,
+                            "outcome": "stuck" if timed_out else "failed",
+                            "reply": "%s:%s" % ("stuck" if timed_out else "failed", session_id),
                             "ref": ("ghref:item:%s:%s" % (session_id, reply)) if reply else ("ghref:session:%s" % session_id),
-                            "text": "⚠️ 会话已失败：%s" % (inputs.get("error") or "无附加信息"),
+                            "text": "⚠️ 会话%s。" % verdict if timed_out else "⚠️ 会话已失败：%s" % (inputs.get("error") or "无附加信息"),
                         }
                         update_pending(root, path, record)
                 else:
@@ -3409,11 +3349,19 @@ def reconcile(root, name, mine):
             # A member holding up finished siblings gets less patience than one running on its own.
             patience = min(stuck_after, batch_stuck_after) if bkey in batch_has_done else stuck_after
             if (now_ms() - last_active) / 1000 > patience:
+                genet("session", "interrupt", session_id)
+                record["stopReason"] = "timeout"
+                record["stopAfterSeconds"] = patience
+                update_pending(root, path, record)
+                clear_sessions_cache()
+                stopped = session_summary(session_id)
+                if stopped.get("status") == "running":
+                    continue
                 if "stuck" not in said:
                     if to:
-                        deliver_or_notice(root, to, "report", "%s:hook" % name, "会话 %s（%s）超过 %d 秒没有进展，可能卡住了。" % (session_id, record["desc"], patience), session_id, "stuck")
+                        deliver_or_notice(root, to, "report", "%s:hook" % name, "会话 %s（%s）超过 %d 秒没有进展，已超时终止。" % (session_id, record["desc"], patience), session_id, "stuck")
                     if record.get("kind") not in ("reflect", "team-reflect"):
-                        add_note(root, {"kind": "anomaly", "session": session_id, "turn": latest_round(session_id), "ref": None, "from": "%s:hook" % name, "quote": "无", "context": "会话 %s（%s）超过 %d 秒没有进展，可能卡住了" % (session_id, record["desc"], patience), "text": record["desc"]}, "anomaly", session_id, "stuck")
+                        add_note(root, {"kind": "anomaly", "session": session_id, "turn": latest_round(session_id), "ref": None, "from": "%s:hook" % name, "quote": "无", "context": "会话 %s（%s）超过 %d 秒没有进展，已超时终止" % (session_id, record["desc"], patience), "text": record["desc"]}, "anomaly", session_id, "stuck")
                     said.append("stuck")
                     update_pending(root, path, record)
                 if is_multi_batch and not record.get("done"):
@@ -3493,9 +3441,9 @@ def reconcile(root, name, mine):
                 move(root, path)
     inbox_dir = state_dir(root, "inbox")
     if os.path.isdir(inbox_dir):
-        for entry in sorted(os.listdir(inbox_dir)):
-            if entry.endswith(".jsonl"):
-                sid = entry[:-6]
+        session_ids = {entry.split(".jsonl", 1)[0] for entry in os.listdir(inbox_dir) if ".jsonl" in entry and (entry.endswith(".jsonl") or entry.endswith(".read"))}
+        for sid in sorted(session_ids):
+            if SESSION_ID.match(sid):
                 try:
                     flush_session_inbox_if_idle(root, sid)
                 except Exception as error:  # noqa: BLE001 - the message is put back, so this must not kill the tick

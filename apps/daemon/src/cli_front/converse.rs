@@ -48,6 +48,7 @@ enum Outcome {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Run {
+    pub system: bool,
     pub message_id: Option<String>,
     pub task_run_id: Option<String>,
     pub agent_id: Option<String>,
@@ -500,6 +501,7 @@ fn parse_session(args: &[String], selection: &Selection) -> Result<Command, CliF
 /// `genet <agentId>` and `genet session send` cannot drift apart.
 #[derive(Debug, Default)]
 struct Options {
+    system: bool,
     message_id: Option<String>,
     task_run_id: Option<String>,
     positional: Vec<String>,
@@ -545,6 +547,7 @@ impl Options {
                     })
             };
             match argument {
+                "--system" => options.system = true,
                 "--message-id" => options.message_id = Some(value()?),
                 "--task-run" => options.task_run_id = Some(value()?),
                 "--agent" => options.agent = Some(value()?),
@@ -582,7 +585,11 @@ impl Options {
         Ok(options)
     }
 
-    fn into_run(mut self, agent_id: Option<String>, creates_session: bool) -> Result<Run, CliFailure> {
+    fn into_run(
+        mut self,
+        agent_id: Option<String>,
+        creates_session: bool,
+    ) -> Result<Run, CliFailure> {
         if self.workspace.is_some() && self.cwd.is_some() {
             return Err(CliFailure::invalid_args(
                 "--workspace and --cwd are two answers to the same question; give one",
@@ -604,14 +611,14 @@ impl Options {
         // new session behind without its prompt.
         crate::session::store::apply_session_labels(&[], &self.labels, &[])
             .map_err(CliFailure::invalid_args)?;
-        let system_notice = prompt.starts_with("用途: ");
+        let system_notice = self.system;
         if system_notice && self.message_id.is_none() {
             // A notice into a live session must carry a stable id: the sender may retry and the notice must
             // not be delivered twice. Creating a session is different: there is nothing to retry against, and
             // older scripts start their background sessions without an id, so derive one from the content.
             if !creates_session {
                 return Err(CliFailure::invalid_args(
-                    "a system notice (用途: ...) requires --message-id: a notice that cannot be retried safely is not durable",
+                    "a --system notice requires --message-id: a notice that cannot be retried safely is not durable",
                 ));
             }
             self.message_id = Some(derived_message_id(&[
@@ -623,7 +630,7 @@ impl Options {
         }
         if system_notice && self.task_run_id.is_some() {
             return Err(CliFailure::invalid_args(
-                "a system notice (用途: ...) cannot carry --task-run: a system notice is not a Run's notice",
+                "a --system notice cannot carry --task-run: a system notice is not a Run's notice",
             ));
         }
         if let Some(description) = &self.description {
@@ -652,6 +659,7 @@ impl Options {
         }
         let wait = self.wait.unwrap_or(self.message_id.is_none());
         Ok(Run {
+            system: self.system,
             message_id: self.message_id,
             task_run_id: self.task_run_id,
             agent_id,
@@ -1199,14 +1207,11 @@ async fn pending_questions(
 }
 
 async fn run_conversation(rpc: &Rpc, run: Run, here: bool) -> Result<i32, CliFailure> {
-    // Checked before anything is created: a notice has a recipient, and
-    // creating a session just to leave a notice in it would be an odd way to
-    // find that out.
-    // A notice with a stable id may also be the first message of a session this command creates; scripts
-    // written before notices needed an id start their background sessions exactly that way.
-    if run.prompt.starts_with("用途: ") && run.session_id.is_none() && run.message_id.is_none() {
+    // A script may send the first input to a new session too. Its input needs
+    // a stable identity before creation; that does not make creation itself idempotent.
+    if run.system && run.session_id.is_none() && run.message_id.is_none() {
         return Err(CliFailure::invalid_args(
-            "a system notice (用途: ...) sends to an existing session: use genet session send <id> ..., or give it a --message-id to open one with it",
+            "a --system notice sends to an existing session: use genet session send <id> ..., or give it a --message-id to open one with it",
         ));
     }
     let mut session = match run.session_id.as_deref() {
@@ -1305,7 +1310,15 @@ async fn run_conversation(rpc: &Rpc, run: Run, here: bool) -> Result<i32, CliFai
         attachments: Vec::new(),
         artifact_preview_base_url: None,
         continues_round: None,
-        origin: caller_origin(),
+        origin: if run.system {
+            Some(genehub_proto::InputOrigin {
+                machine_id: String::new(),
+                machine_name: None,
+                session_id: "system".into(),
+            })
+        } else {
+            caller_origin()
+        },
     })
     .await
     .map_err(query::rpc_error)?;
@@ -1759,7 +1772,14 @@ mod tests {
         );
         assert_eq!(
             parse_session(
-                &words(&["respond", "s_1", "--request", "r_1", "--text", "ship to beta"]),
+                &words(&[
+                    "respond",
+                    "s_1",
+                    "--request",
+                    "r_1",
+                    "--text",
+                    "ship to beta"
+                ]),
                 &selection(None)
             )
             .unwrap(),
@@ -1783,7 +1803,14 @@ mod tests {
         assert_eq!(
             parse_session(
                 &words(&[
-                    "respond", "s_1", "--request", "r_1", "--choose", "allow", "--text", "beta"
+                    "respond",
+                    "s_1",
+                    "--request",
+                    "r_1",
+                    "--choose",
+                    "allow",
+                    "--text",
+                    "beta"
                 ]),
                 &selection(None)
             )
@@ -1797,188 +1824,6 @@ mod tests {
                 .code,
             "invalidArgs"
         );
-    }
-
-    #[test]
-    fn session_describe_takes_exactly_one_line_and_agent_run_takes_a_description() {
-        assert_eq!(
-            parse_session(
-                &words(&[
-                    "describe",
-                    "s_1",
-                    "评审 Rust 改动；要找人看 daemon 代码时来问我"
-                ]),
-                &selection(None)
-            )
-            .unwrap(),
-            Command::Describe {
-                session_id: "s_1".into(),
-                text: "评审 Rust 改动；要找人看 daemon 代码时来问我".into(),
-            }
-        );
-        // An empty line clears it, so it is a valid argument.
-        assert_eq!(
-            parse_session(&words(&["describe", "s_1", ""]), &selection(None)).unwrap(),
-            Command::Describe {
-                session_id: "s_1".into(),
-                text: String::new(),
-            }
-        );
-        let too_long = "x".repeat(301);
-        for bad in [
-            &["describe", "s_1"][..],
-            &["describe", "s_1", "a", "b"],
-            &["describe", "s_1", "two\nlines"],
-            &["describe", "s_1", too_long.as_str()],
-        ] {
-            assert_eq!(
-                parse_session(&words(bad), &selection(None))
-                    .unwrap_err()
-                    .code,
-                "invalidArgs",
-                "{bad:?}"
-            );
-        }
-        let run = run_of(
-            parse_agent(
-                &words(&[
-                    "run",
-                    "--agent",
-                    "codex",
-                    "--description",
-                    "跑评审的会话",
-                    "hi",
-                ]),
-                &selection(Some("/s")),
-            )
-            .unwrap(),
-        );
-        assert_eq!(run.description.as_deref(), Some("跑评审的会话"));
-        let error = parse_agent(
-            &words(&[
-                "run",
-                "--agent",
-                "codex",
-                "--description",
-                &"x".repeat(301),
-                "hi",
-            ]),
-            &selection(Some("/s")),
-        )
-        .unwrap_err();
-        assert_eq!(
-            error.code, "invalidArgs",
-            "checked before a session is created"
-        );
-    }
-
-    #[test]
-    fn system_notice_envelope_requires_message_id_and_forbids_task_run() {
-        let run = run_of(
-            parse_session(
-                &words(&[
-                    "send",
-                    "s_1",
-                    "--message",
-                    "用途: result\n\ndone",
-                    "--message-id",
-                    "s_9.r1.done",
-                ]),
-                &selection(None),
-            )
-            .unwrap(),
-        );
-        assert!(run.prompt.starts_with("用途: "));
-        assert_eq!(run.session_id.as_deref(), Some("s_1"));
-        assert!(!run.wait, "a durable send returns acceptance");
-        let plain =
-            run_of(parse_session(&words(&["send", "s_1", "hello"]), &selection(None)).unwrap());
-        assert!(!plain.prompt.starts_with("用途: "));
-        for bad in [
-            // A notice that cannot be retried safely is not durable.
-            &["send", "s_1", "--message", "用途: result\n\ndone"][..],
-            // And it is not a Run's notice.
-            &[
-                "send",
-                "s_1",
-                "--message",
-                "用途: result\n\ndone",
-                "--message-id",
-                "m",
-                "--task-run",
-                "r",
-            ],
-        ] {
-            assert_eq!(
-                parse_session(&words(bad), &selection(None))
-                    .unwrap_err()
-                    .code,
-                "invalidArgs",
-                "{bad:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn older_scripts_still_start_a_notice_session_and_may_ask_for_the_old_queue() {
-        // A Space created before the queue was removed still runs its own copy of expert.py: it starts
-        // background sessions with a `用途: ` envelope, no --message-id, and a --queue flag that no longer
-        // exists. Refusing either would fail its timer hook forever, so it could never upgrade itself.
-        let run = run_of(
-            parse_agent(
-                &words(&[
-                    "run",
-                    "--agent",
-                    "codex",
-                    "--workspace",
-                    "w_1",
-                    "--queue",
-                    "--message",
-                    "用途: reflect\n\nreflect now",
-                ]),
-                &selection(None),
-            )
-            .unwrap(),
-        );
-        assert!(run.prompt.starts_with("用途: "));
-        let derived = run.message_id.clone().expect("a created session's notice gets a derived id");
-        assert!(derived.starts_with("x."), "{derived}");
-        // The same words to the same target derive the same id, so a retried start cannot double-deliver.
-        let again = run_of(
-            parse_agent(
-                &words(&[
-                    "run",
-                    "--agent",
-                    "codex",
-                    "--workspace",
-                    "w_1",
-                    "--queue",
-                    "--message",
-                    "用途: reflect\n\nreflect now",
-                ]),
-                &selection(None),
-            )
-            .unwrap(),
-        );
-        assert_eq!(again.message_id.as_deref(), Some(derived.as_str()));
-        // A notice into a live session is different: it can be retried, so it still needs a named id.
-        assert_eq!(
-            parse_session(&words(&["send", "s_1", "--queue", "--message", "用途: result\n\ndone"]), &selection(None))
-                .unwrap_err()
-                .code,
-            "invalidArgs"
-        );
-        // A notice may also be the first message of a session this command opens, and it is durable once it
-        // carries an id — which is why `run_conversation` only refuses a notice with neither a recipient nor an id.
-        assert!(run_of(
-            parse_agent(
-                &words(&["run", "--agent", "codex", "--workspace", "w_1", "--message", "用途: reflect\n\nhi"]),
-                &selection(None),
-            )
-            .unwrap()
-        )
-        .message_id
-        .is_some());
     }
 
     #[test]
@@ -2118,187 +1963,5 @@ mod tests {
         // A dropped connection is retryable infrastructure, not a verdict on
         // the turn, so it keeps the unreachable code.
         assert_eq!(report("s_1", Outcome::Disconnected), EXIT_UNREACHABLE);
-    }
-
-    #[test]
-    fn agent_list_routes_takes_tiers_and_media_and_plain_list_takes_nothing() {
-        assert_eq!(
-            parse_agent(&words(&["list"]), &selection(None)).unwrap(),
-            Command::AgentList
-        );
-        assert_eq!(
-            parse_agent(&words(&["list", "--routes"]), &selection(None)).unwrap(),
-            Command::AgentRoutes {
-                tags: vec![],
-                media_tags: vec![]
-            }
-        );
-        assert_eq!(
-            parse_agent(
-                &words(&["list", "--routes", "--tag", "pro", "--tag", "Max", "--media", "image"]),
-                &selection(None)
-            )
-            .unwrap(),
-            Command::AgentRoutes {
-                tags: vec!["Pro".into(), "Max".into()],
-                media_tags: vec!["图片理解".into()],
-            }
-        );
-        for bad in [
-            &["list", "--tag", "Pro"][..],
-            &["list", "--media", "image"],
-            &["list", "--routes", "--media", "audio"],
-            &["list", "--routes", "--media", "image", "--media", "image"],
-            &["list", "--routes", "--tag", "Pro", "--tag", "Pro"],
-            &["list", "extra"],
-        ] {
-            assert_eq!(
-                parse_agent(&words(bad), &selection(None)).unwrap_err().code,
-                "invalidArgs",
-                "{bad:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn agent_run_with_tiers_lets_routing_choose_and_refuses_what_would_override_it() {
-        let run = run_of(
-            parse_agent(
-                &words(&[
-                    "run",
-                    "--tag",
-                    "Max",
-                    "--media",
-                    "video",
-                    "--no-wait",
-                    "--message-id",
-                    "m1",
-                    "look",
-                ]),
-                &selection(Some("/s")),
-            )
-            .unwrap(),
-        );
-        assert_eq!(run.agent_id, None);
-        assert_eq!(run.tags, vec!["Max".to_string()]);
-        assert_eq!(run.media_tags, vec!["视频理解".to_string()]);
-        for bad in [
-            &["run", "--tag", "Max", "--agent", "codex", "hi"][..],
-            &["run", "--tag", "Max", "--model", "m", "hi"],
-            &["run", "--tag", "Max", "--mode", "x", "hi"],
-            &["run", "--tag", "Max", "--session", "s_1", "hi"],
-            &["run", "--media", "image", "--agent", "codex", "hi"],
-            &["run", "--tag", "Fast", "--tag", "Fast", "hi"],
-        ] {
-            assert_eq!(
-                parse_agent(&words(bad), &selection(Some("/s")))
-                    .unwrap_err()
-                    .code,
-                "invalidArgs",
-                "{bad:?}"
-            );
-        }
-        // The `genet <agentId>` shorthand names an Agent, so it cannot also ask routing to.
-        assert!(run_of(
-            parse_agent(
-                &words(&["run", "--agent", "codex", "hi"]),
-                &selection(Some("/s"))
-            )
-            .unwrap()
-        )
-        .tags
-        .is_empty());
-    }
-
-    #[test]
-    fn session_model_is_either_a_pinned_model_or_a_tier_move_never_both() {
-        assert_eq!(
-            parse_session(
-                &words(&["model", "s_1", "--model", "gpt-6-luna", "--effort", "high"]),
-                &selection(None)
-            )
-            .unwrap(),
-            Command::Model {
-                session_id: "s_1".into(),
-                model_id: Some("gpt-6-luna".into()),
-                effort_id: Some("high".into()),
-                tags: vec![],
-                media_tags: vec![],
-            }
-        );
-        assert_eq!(
-            parse_session(
-                &words(&["model", "s_1", "--effort", "low"]),
-                &selection(None)
-            )
-            .unwrap(),
-            Command::Model {
-                session_id: "s_1".into(),
-                model_id: None,
-                effort_id: Some("low".into()),
-                tags: vec![],
-                media_tags: vec![],
-            }
-        );
-        assert_eq!(
-            parse_session(
-                &words(&["model", "s_1", "--tag", "flash", "--media", "image"]),
-                &selection(None)
-            )
-            .unwrap(),
-            Command::Model {
-                session_id: "s_1".into(),
-                model_id: None,
-                effort_id: None,
-                tags: vec!["Flash".into()],
-                media_tags: vec!["图片理解".into()],
-            }
-        );
-        for bad in [
-            &["model", "s_1"][..],
-            &["model", "s_1", "--tag", "Pro", "--model", "m"],
-            &["model", "s_1", "--tag", "Pro", "--effort", "low"],
-            &["model", "s_1", "--media", "image"],
-            &["model", "s_1", "--model"],
-            &["model", "s_1", "--model", "a", "--model", "b"],
-            &["model", "s_1", "--bogus", "x"],
-        ] {
-            assert_eq!(
-                parse_session(&words(bad), &selection(None))
-                    .unwrap_err()
-                    .code,
-                "invalidArgs",
-                "{bad:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn route_lines_are_filtered_by_every_tier_and_mark_the_agents_default() {
-        let data = json!({"agents": [
-            {"id": "codex", "catalog": {"defaultModel": "gpt-6.1-sol"}, "routes": [
-                {"modelId": "gpt-6.1-sol", "tags": ["Max", "图片理解"], "cost": "medium"},
-                {"modelId": "gpt-6-luna", "tags": ["Flash", "图片理解"], "cost": "veryLow"},
-            ]},
-            {"id": "tclaude", "catalog": {"defaultModel": null}, "routes": [
-                {"modelId": "glm-5.3", "tags": ["Pro"], "cost": "medium"},
-                {"tags": ["Flash"], "cost": "low"},
-            ]},
-        ]});
-        let all = routes_of(&data, &[], &[]);
-        assert_eq!(all["routes"].as_array().unwrap().len(), 4);
-        assert_eq!(all["routes"][0]["default"], json!(true));
-        assert_eq!(all["routes"][1]["default"], json!(false));
-        // A route without a model id is never "the default model".
-        assert_eq!(all["routes"][3]["default"], json!(false));
-
-        let flash_image = routes_of(&data, &["flash".into()], &["图片理解".into()]);
-        let lines = flash_image["routes"].as_array().unwrap();
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0]["modelId"], json!("gpt-6-luna"));
-        assert_eq!(lines[0]["cost"], json!("veryLow"));
-
-        let none = routes_of(&data, &["Max".into()], &["视频理解".into()]);
-        assert!(none["routes"].as_array().unwrap().is_empty());
     }
 }

@@ -91,7 +91,10 @@ pub fn materialize(root: &Path) -> Option<PathBuf> {
         }
     }
     prune_stale(root, root, &|relative| {
-        relative == ENTRYPOINT_MANIFEST || BUILTIN_FILES.iter().any(|file| file.relative_path == relative)
+        relative == ENTRYPOINT_MANIFEST
+            || BUILTIN_FILES
+                .iter()
+                .any(|file| file.relative_path == relative)
     });
     Some(root.to_path_buf())
 }
@@ -645,26 +648,6 @@ mod tests {
         assert!(body.contains("change only the intelligence tag"));
         assert!(body.contains("Do not pin `agentId` or `modelId`"));
         assert!(body.contains("`Flush` is not a tag"));
-    }
-
-    #[test]
-    fn files_an_older_daemon_left_behind_are_removed_and_current_ones_kept() {
-        let root = temp_dir("stale");
-        load(&root);
-        let current = BUILTIN_FILES[0].relative_path;
-        let stale_file = root.join("genehub/references/team-template/spaces/think/agent-space.genet.json");
-        let retired_skill = root.join("genehub-html-preview/SKILL.md");
-        let in_flight = root.join("genehub/.SKILL.md.1234.tmp");
-        for path in [&stale_file, &retired_skill, &in_flight] {
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, "old").unwrap();
-        }
-        let skills = load(&root);
-        assert!(!stale_file.exists() && !stale_file.parent().unwrap().exists(), "a retired template part is gone with its directory");
-        assert!(!retired_skill.exists() && !retired_skill.parent().unwrap().exists());
-        assert!(in_flight.exists(), "another process's temporary file is not touched");
-        assert!(root.join(current).is_file() && root.join(ENTRYPOINT_MANIFEST).is_file());
-        assert_eq!(skills.len(), BUILTIN_ENTRYPOINTS.len());
     }
 
     #[test]

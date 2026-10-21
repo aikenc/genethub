@@ -2292,8 +2292,7 @@ async fn dispatch(
             }
             let system = origin
                 .as_ref()
-                .is_some_and(|o| o.session_id == "system")
-                || text.starts_with("用途: ");
+                .is_some_and(|o| o.session_id == "system");
             // A system notice is durable or it is nothing: the sender retries
             // it, and only a stable messageId makes a retry safe. It is not a
             // Run's notice either, so it carries no task.
@@ -2831,7 +2830,7 @@ async fn dispatch(
             };
             // Naming a model the session's own Agent does not ship is a request
             // to move the session to whoever does, not a reason to refuse.
-            if let Some(owner) = crate::agent_routing::agent_offering_model(state, &model_id).await
+            if let Some(owner) = crate::agent_routing::agent_offering_model(state, &model_id, &summary.agent_id).await
             {
                 if owner != summary.agent_id {
                     let mut target = SessionAgentTarget {

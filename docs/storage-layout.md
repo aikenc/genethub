@@ -77,3 +77,9 @@ agent CLI 自己的线程库（`~/.codex/` 之类）不归我们管，只在会�
 
 没有存储绑定的既有激活记录，按包身份在项目根及包名前缀对应的 Executor 目录中有界查找；出现多个
 激活位置时明确报错。只读查询不写绑定，后续写入才固定位置。缺少源包时可用 `--package` 点名旧包。
+
+#### timer 与模板投递恢复文件
+
+项目 `.genethub/hooks/.locks/<hook-id>.lock` 由 hook runner 持有 OS 执行锁并保存上次启动和结束时间；`.locks/.status.lock` 保护共享状态合并，均跨 channel 共用。文件存在不代表锁被持有，进程退出由 OS 释放执行锁。
+
+团队现有状态目录下 `inbox/<session>.jsonl`、`*.read` 保存尚未取得平台回执的完整输入，逐条固定身份重试；`<session>.lock` 保护同机转交。读取或展示不等于回执。内置管理员 `.genethub/bootstrap-owned.json` 只记录产品分发拥有的相对路径，不扩大到未知用户文件。

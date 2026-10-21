@@ -31,7 +31,7 @@ const BUILDER = "apps/daemon/builtin-skills/genehub/references/spacebuilder/spac
 type Info = { id: string; name: string; agentSpace?: { parentWorkspaceId?: string } };
 type Item = { id?: string; type?: string; text?: string; system?: boolean; origin?: { sessionId?: string } };
 type Listed = { id: string; labels?: string[]; description?: string; status?: string };
-const isSystem = (item: Item): boolean => item.system === true || item.origin?.sessionId === "system" || (item.text ?? "").startsWith("用途: ");
+const isSystem = (item: Item): boolean => item.origin?.sessionId === "system";
 
 defineJourney(
   {

@@ -884,38 +884,6 @@ mod tests {
         assert_eq!(lane_of(&entry("m", "system")), Lane::System);
     }
 
-    /// A script's notice never takes a turn from a person or from Workflow
-    /// activity, and it is not dropped: it stays queued for a quiet moment.
-    #[test]
-    fn system_notices_wait_for_people_and_workflow_activity() {
-        let ready = [
-            entry("m_sys", "system"),
-            entry("m_wf", "workflow"),
-            entry("m_sys2", "system"),
-        ];
-        assert_eq!(primary_lane(ready.iter()), Lane::Activity);
-        let ready = [entry("m_sys", "system"), entry("m_agent", "agent")];
-        assert_eq!(primary_lane(ready.iter()), Lane::Human);
-        let ready = [entry("m_a", "system"), entry("m_b", "system")];
-        let primary = primary_lane(ready.iter());
-        let (pending, deferred): (Vec<_>, Vec<_>) =
-            ready.iter().partition(|e| lane_of(e) == primary);
-        assert_eq!(primary, Lane::System);
-        assert_eq!(pending.len(), 2, "one lane still batches within itself");
-        assert!(deferred.is_empty());
-    }
-
-    /// The two properties the whole `system` source exists for. A script's
-    /// notice must not interrupt a busy session or lift a pause the person set:
-    /// only `conversational` input does either.
-    #[test]
-    fn a_system_notice_neither_interrupts_nor_lifts_a_pause() {
-        assert!(conversational("user"));
-        assert!(conversational("agent"));
-        assert!(!conversational("system"));
-        assert!(!conversational("workflow"));
-    }
-
     #[test]
     fn new_human_input_retires_only_failed_human_deliveries() {
         let mut failed_human = entry("m_failed", "user");

@@ -1071,7 +1071,7 @@ function SystemNotice({ text }: { text: string }) {
 function Item({ item }: { item: TimelineItem }) {
   switch (item.type) {
     case "userMessage": {
-      if (item.origin?.sessionId === "system" || item.text.startsWith("用途: ")) {
+      if (item.origin?.sessionId === "system") {
         return (
           <div className="flex flex-col items-start">
             <SystemNotice text={item.text} />

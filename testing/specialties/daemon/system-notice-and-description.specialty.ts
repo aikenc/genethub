@@ -5,7 +5,7 @@
 // whom to ask). These cases drive the shipped `genet` against a real daemon and
 // a real script Agent; nothing in the product is replaced.
 //
-//   - `session send` with a `用途: ...` notice envelope queues a `system` notice behind a running round;
+//   - `session send` with an explicit `--system` notice queues a `system` notice behind a running round;
 //   - a notice never lifts a pause, and a person's message still does;
 //   - a notice is idempotent by messageId, and the CLI refuses what is not
 //     durable;
@@ -109,7 +109,7 @@ const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 noticeCase(
   "does-not-interrupt-and-waits-behind-a-person",
   "a system notice sent to a busy Session waits for the round and behind a person's message",
-  "while a round is running, `genet session send` with a `用途: ...` notice envelope is accepted and the Agent is NOT interrupted (no cancel reaches it, the turn stays open); the same send from a person does interrupt; and once the person's turn is delivered the notice is still queued in pendingMessageIds",
+  "while a round is running, `genet session send` with an explicit `--system` notice is accepted and the Agent is NOT interrupted (no cancel reaches it, the turn stays open); the same send from a person does interrupt; and once the person's turn is delivered the notice is still queued in pendingMessageIds",
   [
     "a script's notice cancelling the work it was meant to inform",
     "a notice delivered ahead of the person who is waiting",
@@ -124,7 +124,7 @@ noticeCase(
 
     succeeded(
       t,
-      cli(["session", "send", session.sessionId, "用途: result\n\n子会话 s_9 已完成", "--message-id", "s9.r1.done", "--no-wait"]),
+      cli(["session", "send", session.sessionId, "--system", "用途: result\n\n子会话 s_9 已完成", "--message-id", "s9.r1.done", "--no-wait"]),
       "session.result",
     );
     await t.tools.waitUntil(
@@ -182,7 +182,7 @@ noticeCase(
 
     succeeded(
       t,
-      cli(["session", "send", session.sessionId, "用途: result\n\n后台任务 s_7 已完成", "--message-id", "s7.r2.done", "--no-wait"]),
+      cli(["session", "send", session.sessionId, "--system", "用途: result\n\n后台任务 s_7 已完成", "--message-id", "s7.r2.done", "--no-wait"]),
       "session.result",
     );
     await t.tools.waitUntil(
@@ -219,18 +219,18 @@ noticeCase(
 noticeCase(
   "is-idempotent-and-the-cli-refuses-what-is-not-durable",
   "a system notice is acknowledged again, not queued twice, and the CLI refuses a notice that cannot be retried",
-  "the same notice sent twice leaves one message and is delivered and handled; the same id with other text is refused; a system notice without --message-id, with --task-run, or on `agent run` exits 2 before anything is created",
+  "the same notice sent twice leaves one message and is delivered and handled; the same id with other text is refused; a system notice without --message-id, with --task-run, exits 2; an initial system notice with a stable id creates one Session",
   [
     "two channels or a retry delivering the same notice twice",
     "an id reused for different content silently overwriting a notice",
     "a notice without a stable id accepted",
-    "`agent run` with a system notice creating a Session just to leave a notice in it",
+    "an initial durable notice rejected instead of creating its Session",
   ],
   { profile: "normal" },
   async (t, session, cli) => {
     const id = session.sessionId;
     const send = (text: string) =>
-      cli(["session", "send", id, text, "--message-id", "s9.r1.done", "--no-wait"]);
+      cli(["session", "send", id, "--system", text, "--message-id", "s9.r1.done", "--no-wait"]);
     succeeded(t, send("用途: result\n\n子会话 s_9 已完成"), "session.result");
     succeeded(t, send("用途: result\n\n子会话 s_9 已完成"), "session.result");
     const other = send("用途: result\n\nanother body under the same id");
@@ -251,20 +251,17 @@ noticeCase(
     t.assertions.assert(copies.length === 1, `the retried notice appeared ${copies.length} times in the timeline`);
     t.assertions.assert(prompts(session) === 1, `the notice ran ${prompts(session)} turns`);
 
-    refusedWithUsage(t, cli(["session", "send", id, "用途: result\n\nx", "--no-wait"]), "system notice without --message-id");
+    refusedWithUsage(t, cli(["session", "send", id, "--system", "用途: result\n\nx", "--no-wait"]), "system notice without --message-id");
     refusedWithUsage(
       t,
-      cli(["session", "send", id, "用途: result\n\nx", "--message-id", "q.1", "--task-run", "r1", "--no-wait"]),
+      cli(["session", "send", id, "--system", "用途: result\n\nx", "--message-id", "q.1", "--task-run", "r1", "--no-wait"]),
       "system notice with --task-run",
     );
     const before = await sessionIds(session);
-    refusedWithUsage(
-      t,
-      cli(["agent", "run", "--agent", session.agent.agentId, "--workspace", session.workspaceId, "--message-id", "q.2", "--no-wait", "用途: result\n\nx"]),
-      "agent run system notice",
-    );
+    succeeded(t, cli(["agent", "run", "--agent", session.agent.agentId, "--workspace", session.workspaceId,
+      "--system", "--message-id", "q.2", "--no-wait", "用途: result\n\nx"]), "session.result");
     const after = await sessionIds(session);
-    t.assertions.assert(after.length === before.length, "`agent run` with system notice created a Session before refusing");
+    t.assertions.assert(after.length === before.length + 1, "a durable initial system notice did not create one Session");
   },
 );
 

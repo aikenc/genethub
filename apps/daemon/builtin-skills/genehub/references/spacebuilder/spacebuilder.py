@@ -3028,14 +3028,6 @@ class BuildLock:
             handle.flush()
             os.fsync(handle.fileno())
         self.acquired = True
-        hold_raw = os.environ.get("SPACEBUILDER_TEST_HOLD_LOCK_MILLISECONDS")
-        if hold_raw:
-            try:
-                hold_seconds = max(0, int(hold_raw)) / 1000
-            except ValueError:
-                hold_seconds = 0
-            if hold_seconds:
-                time.sleep(hold_seconds)
         return self
 
     def raise_existing(self) -> None:
@@ -3193,24 +3185,8 @@ def plan(root: Path, *, offline: bool = False, run_builders: bool = False) -> Bu
 def apply_build(model: BuildModel) -> tuple[int, int]:
     new_targets = {operation.target for operation in model.operations}
     old_targets = owned_targets(model.previous)
-    fault_after_raw = os.environ.get("SPACEBUILDER_TEST_FAIL_AFTER_WRITES")
-    crash_after_raw = os.environ.get("SPACEBUILDER_TEST_CRASH_AFTER_WRITES")
-    try:
-        fault_after = int(fault_after_raw) if fault_after_raw is not None else 0
-    except ValueError:
-        fault_after = 0
-    try:
-        crash_after = int(crash_after_raw) if crash_after_raw is not None else 0
-    except ValueError:
-        crash_after = 0
-    writes = 0
     for operation in model.operations:
         atomic_write(model.root, operation)
-        writes += 1
-        if crash_after > 0 and writes >= crash_after:
-            os._exit(97)
-        if fault_after > 0 and writes >= fault_after:
-            raise OSError("injected apply failure for E2E verification")
     removed = 0
     for target in sorted(old_targets - new_targets, reverse=True):
         remove_owned_target(model.root, target)

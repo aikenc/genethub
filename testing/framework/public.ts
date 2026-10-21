@@ -139,3 +139,4 @@ export { selectForGate } from "../policies/gates.ts";
 export { recoverAbandonedLeases, registerLeaseWorker } from "../infrastructure/public.ts";
 
 export { openProviderSession } from "./flows/branches/provider.ts";
+export { openTeam } from "./flows/branches/team.ts";

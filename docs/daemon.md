@@ -178,9 +178,9 @@ DataEndpoint method 只有四个：
 
 `session.describe` 给会话一句话描述：写法同 Skill 的 description，说这个会话做什么、什么情况下该找它，供别的会话和 Agent 决定该问谁。它不是标题——标题是给人看的名字。文本去掉首尾空白后至多 300 字节（按字节，和其他面向 Agent 的文本上限一致），不含换行或控制字符，空文本清除描述；不合法整次请求被拒，原描述不动。和 `session.label` 一样在 meta 锁内改并落盘，并更新 `updatedAtMs`，否则按这个时间戳刷新摘要的客户端会一直显示旧的一句。`session list` / `session get` 的摘要直接带 `description`；`genet agent run --description` 在创建后、发送第一条提示前设置，所以第一个 round 开始时它已经在。fork 不继承描述，理由同标签。
 
-`session.send` 中由脚本发出的 `"用途: "` 信封消息（或 `origin.sessionId == "system"`）作为 `system` 来源的通知排进 `Lane::System` 通道：它由脚本写，不是人的要求，也不是别的 Agent 的请求。三条规则：**不打断**（只有对话式输入才会在会话忙时触发中途引导或打断）；**不解除暂停**（用户 `interrupt` 或一个 round 失败后会话暂停，只有对话式输入能解除，所以暂停期间通知安静地排着，不是被丢掉）；**不冒充人类批准**（说明句写明它是脚本发出的系统消息）。它自己是一条投递通道，优先级在 Human 与 Workflow 之后：一个 turn 只带一种通道，所以通知不会和人的话混在同一批里。通知带稳定的 `messageId`（只允许字母、数字、`_`、`-`、`.`，至多 128 字符），重发同一 id 与同一内容被确认且不重复入队，同一 id 不同内容被拒；不带 `taskRunId`。通知占用和其他输入一样的待处理名额（32 条）。会话摘要的 `inputSummary.pendingMessageIds` 列出所有待处理消息的 `messageId`，发送方可以据此做去重与消费确认。
+`session.send` 中明确带 `origin.sessionId == "system"` 的脚本通知（CLI 使用 `--system`）作为 `system` 来源的通知排进 `Lane::System` 通道：它由脚本写，不是人的要求，也不是别的 Agent 的请求。三条规则：**不打断**（只有对话式输入才会在会话忙时触发中途引导或打断）；**不解除暂停**（用户 `interrupt` 或一个 round 失败后会话暂停，只有对话式输入能解除，所以暂停期间通知安静地排着，不是被丢掉）；**不冒充人类批准**（说明句写明它是脚本发出的系统消息）。它自己是一条投递通道，优先级在 Human 与 Workflow 之后：一个 turn 只带一种通道，所以通知不会和人的话混在同一批里。通知带稳定的 `messageId`（只允许字母、数字、`_`、`-`、`.`，至多 128 字符），重发同一 id 与同一内容被确认且不重复入队，同一 id 不同内容被拒；不带 `taskRunId`。通知占用和其他输入一样的待处理名额（32 条）。会话摘要的 `inputSummary.pendingMessageIds` 列出所有待处理消息的 `messageId`，发送方可以据此做去重与消费确认。
 
-时间线里的这条消息（`userMessage`）以 `"用途: "` 信封开头（或带 `origin.sessionId == "system"`），它是持久的，fork、转发和重载后仍在。客户端据此把它显示成一条折叠的系统消息（`SystemNotice`），而不是人自己的气泡。
+时间线里的这条消息（`userMessage`）带 `origin.sessionId == "system"`，它是持久的，fork、转发和重载后仍在。客户端据此把它显示成一条折叠的系统消息（`SystemNotice`），而不是人自己的气泡。
 
 ### 定时 hook
 
@@ -195,7 +195,7 @@ DataEndpoint method 只有四个：
 
 daemon 解析 `schema`（缺省可）、`event`（只能是 `timer`）、`every`（`5s`/`1m`/`2h`，1 秒到 24 小时）、`exec`（argv，不经 shell）、`cwd`、`timeout`（1–300 秒，缺省 30）、`enabled`；`owner` 与 `payload` 原样保留、原样转交。没有"注册"这一步，也没有 CLI 去写或删——写文件、删文件就是全部；daemon 每个 tick（1 秒）重新读目录，所以新增、修改、停用、删除下一个 tick 就生效，不用重启。读不了的文件（坏 JSON、缺字段、符号链接、过大、大小写不同的重名）**被列出并写明原因，不会被忽略**，也不会运行。
 
-**命令的运行**：作为独立进程组启动，超时则整组结束；同一 hook 同一时刻最多一个，跑得比间隔久时下一次至少隔 1 秒；全局最多 8 个同时跑；daemon 启动后每个 hook 立即补跑一次（运行记录只在内存里，命令必须幂等）。stdin 是一行 JSON：`event`、`hook`、`firedAtMs`、`space.dir`、`payload`、`openEnvProblems`。环境变量：`GENEHUB_HOOK_ID`、`GENEHUB_HOOK_EVENT`、`GENEHUB_SPACE_DIR`、`GENEHUB_CLI`、`GENEHUB_PYTHON`，加项目 `open.env` 里的变量；GeneHub 自己的名字不能被 `open.env` 改写（以 `GENEHUB_` 开头的行被拒并写进 `openEnvProblems`）。`exec` 与 `cwd` 里的 `${GENEHUB_SPACE_DIR}`、`${GENEHUB_PYTHON}`、`${GENEHUB_CLI}` 会被展开，别的 `${X}` 原样保留。
+**命令的运行**：作为独立进程组启动，超时则整组结束；同一 hook 同一时刻最多一个，跑得比间隔久时下一次至少隔 1 秒；每个 daemon 最多 8 个同时跑，满额时留到下次 tick 重读，不建立等待任务队列；实际启动前重新核对文件与项目登记。相同项目路径和 hook ID 使用 `.genethub/hooks/.locks/` 中的 OS 文件锁与上次启动时间，跨渠道和 daemon 重启共享间隔、不并发执行；命令仍必须幂等。已经启动的进程按原 timeout 收尾，删除或停用不追杀在途命令。stdin 是一行 JSON：`event`、`hook`、`firedAtMs`、`space.dir`、`payload`、`openEnvProblems`。环境变量：`GENEHUB_HOOK_ID`、`GENEHUB_HOOK_EVENT`、`GENEHUB_SPACE_DIR`、`GENEHUB_CLI`、`GENEHUB_PYTHON`，加项目 `open.env` 里的变量；GeneHub 自己的名字不能被 `open.env` 改写（以 `GENEHUB_` 开头的行被拒并写进 `openEnvProblems`）。`exec` 与 `cwd` 里的 `${GENEHUB_SPACE_DIR}`、`${GENEHUB_PYTHON}`、`${GENEHUB_CLI}` 会被展开，别的 `${X}` 原样保留。
 
 **失败只记录，不自愈，也不停用。** 失败（非零退出、超时、被信号结束、起不来）记入内存与 `<项目>/.genethub/hooks/.status.json` 的运行记录：连续失败数、最后一次退出码、stderr 末尾 2 KiB。hook 永远不会因为失败被停用——"被停用"是第二份需要有人发现并撤销的状态。`timer` 不由会话事件触发，所以 hook 发出的消息不可能再触发 hook，不会有循环。`genet hook list [--workspace <id>]` 读取 `.genethub/hooks/*.genet.json` 并合并 `.status.json` 运行记录，是脚本发现"某个 hook 坏了"的办法。
 
@@ -211,7 +211,7 @@ daemon 解析 `schema`（缺省可）、`event`（只能是 `timer`）、`every`
 
 `agentCwd`（相对 Space 根的路径，不得绝对或含 `..`；必须是已存在、且解析符号链接后仍在 Space 内的目录，否则回退到 Space 根）是该 Space 里新会话的默认工作目录；调用方显式给 `cwd` 时以调用方为准。
 
-**会话发起的会话带标签 `系统发起`。** `session.create` 的调用方是会话自己的校验身份（不是它声明的）时，daemon 给新会话加这个标签；工作台默认列表把带它的会话当作子会话藏起来，但处于 `waiting` / `failed` 的永远显示——卡住的正是人要看见的。没有自己会话的脚本（定时 hook）不会被识别，需要时自己加标签。
+**会话发起的会话带标签 `系统发起`。** `session.create` 的调用方是会话自己的校验身份（不是它声明的）时，daemon 给新会话加这个标签；工作台默认列表保留这些会话；有实际子 Space 的项目可折叠内部会话，折叠入口仍显示运行、等待和失败数量，展开可逐条查看。没有自己会话的脚本（定时 hook）不会被识别，需要时自己加标签。
 
 ### 内置管理员
 
@@ -220,7 +220,7 @@ daemon 解析 `schema`（缺省可）、`event`（只能是 `timer`）、`every`
 daemon 每次启动，在扫描之前做三件事：
 
 1. 用户移除过它就什么都不做——移除是决定，不被重建。
-2. 把产品自带的文件写进去（只在内容不同时写）：描述文件（名字按机器改写、加上 `expert-admin`）、`skills/`、`tools/`、think 与 work 的描述文件。`soul.md`、`memory.md` 只在缺失时创建，之后归专家自己；目录里的其他文件一概不碰。
+2. 把产品自带的文件写进去（只在内容不同时写）：描述文件（名字按机器改写、加上 `expert-admin`）、根身份文件、`skills/` 与 `tools/`；管理员没有后台子 Space。管理员无状态，产品拥有的文件在不同于模板时覆盖。`.genethub/bootstrap-owned.json` 记录上次分发拥有的路径，只有其中已退役文件才清理；未知文件和缺少归属记录的旧文件保留，运行数据与 Builder 输出也保留。普通团队的已复制模板不因此自动覆盖。
 3. 有文件变了、或还没有构建锁，就用平台 Python（没有则 PATH 里的 `python3`）运行内置的 SpaceBuilder `build`，限时 60 秒。失败只记警告，daemon 照常启动，下次启动再试。
 
 已经从模板复制出去的专家不随模板升级。模板里 hook 的命令用 `${GENEHUB_PYTHON}`：定时 hook 展开它时，没有安装平台 Python 就退回 `python3`（环境变量本身只在真有平台 Python 时才导出）。
@@ -379,3 +379,15 @@ CLI 不接受密钥参数。静态 schema/capabilities 描述语法，context.au
 配置指纹不符会报告 stale，更换地址或协议要求新密钥。applying 中断后只比较已保存配置指纹，不能盲目重放。
 验证执行实际最小模型请求；saved 与 validation.status=ready 分开，失败只返回类别和可操作说明。
 验证被中断时记 interrupted，需显式 verify。保存/拒绝决定后按原权限模式恢复原 Session，重复提交不重复配置。
+
+### 描述文件与发现范围
+
+`agent-space.genet.json` 与 SpaceBuilder 使用严格 JSON；`.code-workspace` 的既有 JSON5 兼容保持。descriptor 的 `folders` 使用相对 Space 的路径，缺失目录、URI、绝对路径不挂载；未留下可用项时使用 Space 本身。daemon 不解释 `WORKTREE_DIR`；模板须把实际工位写入已有 `folders`。
+
+自动登记只在已打开项目的 `spaces/<名>` 和下一层 `spaces/<名>/spaces/<名>` 发现 Space；Builder 的 `children.scanDepth` 是构建源的递归发现范围，并不授权 daemon 自动打开所有构建源。位于其他路径或更深层的 Space 通过现有打开/父子登记入口加入。两种发现任务的范围有意不同。
+
+`sourceKind` 仅保留通用自动/人工分类：managed 或平台“系统发起”标记属于 system，普通会话属于 human；角色、展示标签和任意名字不会推导 patrol/expert/reflect。CLI 的 source-kind 筛选只说明通用的 human/system 分类。
+
+模板消息投递使用显式脚本来源，人的暂停不会被回执、watchdog 或转发消息解除，也不会自动代答问题。本地 inbox 只是等待转交的平台输入，保留完整正文和固定消息身份；中断的 `.read` 文件重启后继续处理，平台逐条确认后才销账，错误保留待办。`soul.md` 是团队核心身份的唯一模板来源，不再并行维护一份 charter。
+
+升级旧团队工具时须同步采用 `--system --message-id`：单凭 `用途:` 正文不再取得系统通知语义。已复制的团队源文件归团队所有，不随 daemon 更新而自动覆盖；维护者应先保存自有改动，通过团队的 `drift`/Git 对照新版 `tools/team.py` 合并通知、投递和认证修复，再验收暂停与投递恢复。`reset --apply` 会恢复整个模板，不能把它当作保留自定义工具的局部升级。部署新通知约定前需完成这一工具升级，旧脚本的普通输入不会被平台猜成通知。

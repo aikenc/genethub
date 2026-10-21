@@ -1,36 +1,29 @@
-// The Live publisher accepts a plain-http loopback origin only when it is told to, and the
-// command line tells it to for the dev channel alone. A development slot publishes to its
-// own Control on 127.0.0.1; beta and stable publish to https origins and must keep refusing
-// anything else. This case holds the one line that decides it, because nothing else would
-// notice it widening.
-
-import { readFileSync } from "node:fs";
+import { execFile } from "node:child_process";
 import path from "node:path";
-
+import { promisify } from "node:util";
 import { defineSpecialty } from "../../framework/public.ts";
 
-defineSpecialty(
-  {
-    id: "specialty.install.live-loopback-dev-only",
-    title: "plain-http loopback publishing is enabled for the dev channel and no other",
-    oracle:
-      "scripts/publish-component.mjs mentions allowHttpLoopback exactly once, as `channel === \"dev\"`, so beta and stable publishing stay https-only",
-    catches: [
-      "plain-http publishing enabled for beta or stable",
-      "the dev slot's Live publish failing because the loopback exception was removed",
-    ],
-    tags: ["core", "install"],
-    llm: { default: "none" },
-    expectedDurationMs: 300,
-    timeoutMs: 10_000,
-    surfaces: ["publish"],
-  },
-  async (t) => {
-    const source = readFileSync(path.join(t.openRoot, "scripts", "publish-component.mjs"), "utf8");
-    const uses = [...source.matchAll(/allowHttpLoopback[^\n]*/g)].map((match) => match[0].trim());
-    t.assertions.assert(
-      uses.length === 1 && /allowHttpLoopback:\s*channel === "dev",/.test(uses[0]!),
-      `allowHttpLoopback must appear once, tied to the dev channel; found: ${JSON.stringify(uses)}`,
-    );
-  },
-);
+defineSpecialty({
+  id: "specialty.install.live-loopback-dev-only",
+  title: "publication plans reject HTTP outside literal dev loopback before any build or publication",
+  oracle: "the real publisher CLI plan refuses beta/stable loopback HTTP and dev remote HTTP with an HTTPS error; dev literal loopback and HTTPS reach the missing-store preflight, without a build or release",
+  catches: ["non-dev public HTTP accepted", "dev remote HTTP accepted", "dev loopback validation broken"],
+  tags: ["core", "install", "merge-remediation"], requiredRepos: ["cloud"], llm: { default: "none" },
+  expectedDurationMs: 3000, timeoutMs: 30000, surfaces: ["publish-cli"],
+}, async t => {
+  for (const [channel, origin, allowed] of [
+    ["beta", "http://127.0.0.1:1234", false], ["stable", "http://127.0.0.1:1234", false],
+    ["dev", "http://example.invalid", false], ["dev", "http://127.0.0.1:1234", true],
+    ["beta", "https://example.invalid", true],
+  ] as const) {
+    let output = "";
+    try {
+      await promisify(execFile)(process.execPath, [path.join(t.openRoot, "scripts/publish-component.mjs"),
+        "--plan", "--channel", channel, "--cloud-root", process.env.TESTCTL_CLOUD_ROOT!, "--public-origin", origin], { timeout: 10000 });
+      throw new Error("plan unexpectedly progressed without its required store");
+    } catch (error) {
+      output = String((error as { stderr?: string }).stderr ?? error);
+    }
+    t.assertions.assert(allowed ? output.includes("--store or --stage") : /https|loopback/i.test(output), `${channel} ${origin}: ${output}`);
+  }
+});

@@ -1542,44 +1542,4 @@ mod tests {
         let second = split_produced_image_batches(first.clone());
         assert_eq!(first, second);
     }
-
-    #[test]
-    fn blob_search_hint_preserves_long_path_tail_error_output_and_120_char_reasoning() {
-        let deep_path = format!(
-            "/data/workspace/{}/apps/daemon/src/session/store.rs",
-            "very-deep-segment/".repeat(8)
-        );
-        assert!(deep_path.chars().count() > 160);
-        let tool = TimelineItem::ToolCall {
-            id: "tc1".into(),
-            name: "Shell".into(),
-            status: genehub_proto::ToolStatus::Error,
-            detail: genehub_proto::ToolCallDetail::Shell {
-                command: format!("cargo test --manifest-path {deep_path}"),
-                output: "compiling...\nline 2\nerror[E0308]: mismatched types\nFAILED: session::store::tests".into(),
-                exit_code: Some(101),
-            },
-            images: vec![],
-            started_at_ms: None,
-            finished_at_ms: None,
-        };
-        let hint = blob_search_hint(&tool).expect("tool search hint");
-        let input = hint.input.expect("input hint");
-        assert!(input.chars().count() <= 160);
-        assert!(input.starts_with("cargo test --manifest-path"));
-        assert!(input.ends_with("apps/daemon/src/session/store.rs"));
-        let output = hint.output.expect("output hint");
-        assert!(output.contains("error[E0308]: mismatched types"));
-        assert!(output.contains("FAILED: session::store::tests"));
-
-        let reasoning = TimelineItem::Reasoning {
-            id: "r1".into(),
-            text: "这是一段超过二十四个字符但不到一百二十个字符的思考摘要，用于验证 t-NNNN.jsonl 中的 reasoning 行不会被截断成半句话。".into(),
-            received_at_ms: None,
-        };
-        let r_hint = blob_search_hint(&reasoning).expect("reasoning search hint");
-        let overview = r_hint.overview.expect("reasoning overview");
-        assert!(overview.chars().count() > 24 && overview.chars().count() <= 120);
-        assert!(overview.contains("不会被截断成半句话"));
-    }
 }

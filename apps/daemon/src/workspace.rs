@@ -352,9 +352,7 @@ impl Workspaces {
         let stale: Vec<String> = entries
             .values()
             .filter(|entry| {
-                !entry.removed
-                    && entry.root.starts_with(&canonical_root)
-                    && !entry.root.exists()
+                !entry.removed && entry.root.starts_with(&canonical_root) && !entry.root.exists()
             })
             .map(|entry| entry.id.clone())
             .collect();
@@ -415,14 +413,13 @@ impl Workspaces {
                 // The descriptor's folders and name are read again on every scan, so editing them takes effect without
                 // reopening by hand. A project registered another way (a plain folder, a `.code-workspace`)
                 // whose directory declares no folders is left as it is.
-                let declared_differently = candidate.workspace_file.is_some()
-                    && (existing.workspace_file != candidate.workspace_file
-                        || existing.folders.len() != candidate.folders.len()
-                        || existing
-                            .folders
-                            .iter()
-                            .zip(&candidate.folders)
-                            .any(|(left, right)| left.root != right.root || left.name != right.name));
+                let declared_differently =
+                    candidate.workspace_file.is_some()
+                        && (existing.workspace_file != candidate.workspace_file
+                            || existing.folders.len() != candidate.folders.len()
+                            || existing.folders.iter().zip(&candidate.folders).any(
+                                |(left, right)| left.root != right.root || left.name != right.name,
+                            ));
                 let name_changed = found
                     .descriptor
                     .name
@@ -1672,22 +1669,6 @@ fn existing_or_unregistered(config: &Config, workspace_id: &str) -> AgentSpaceEn
         })
 }
 
-fn resolve_worktree_dir(base: &Path) -> Option<PathBuf> {
-    let env = crate::hooks::env::load(base);
-    let raw = env.vars.get("WORKTREE_DIR")?.trim();
-    if raw.is_empty() {
-        return None;
-    }
-    let portable = raw.replace('\\', "/");
-    let requested = crate::guest_paths::guest_path(Path::new(&portable));
-    let full = if requested.is_absolute() {
-        requested
-    } else {
-        base.join(requested)
-    };
-    Some(full.canonicalize().unwrap_or(full))
-}
-
 fn describe(entry: &WorkspaceEntry) -> WorkspaceInfo {
     WorkspaceInfo {
         id: entry.id.clone(),
@@ -1733,23 +1714,7 @@ fn directory_workspace(dir: PathBuf, name: Option<String>) -> WorkspaceEntry {
             .flatten()
             .and_then(|descriptor| descriptor.name)
     });
-    let mut entry =
-        descriptor_workspace(&dir, name.clone()).unwrap_or_else(|| folder_workspace(dir.clone(), name));
-    if let Some(wt) = resolve_worktree_dir(&dir) {
-        if wt.is_dir()
-            && entry.folders.len() < MAX_WORKSPACE_FOLDERS
-            && !entry.folders.iter().any(|folder| folder.root == wt)
-        {
-            if let Ok(folder_name) = workspace_folder_name(None, &wt) {
-                entry.folders.push(WorkspaceFolderEntry {
-                    name: folder_name,
-                    root: wt,
-                    root_handle: String::new(),
-                });
-            }
-        }
-    }
-    entry
+    descriptor_workspace(&dir, name.clone()).unwrap_or_else(|| folder_workspace(dir.clone(), name))
 }
 
 fn descriptor_workspace(dir: &Path, name: Option<String>) -> Option<WorkspaceEntry> {
@@ -1762,11 +1727,14 @@ fn descriptor_workspace(dir: &Path, name: Option<String>) -> Option<WorkspaceEnt
         };
         let portable = raw.replace('\\', "/");
         let requested = crate::guest_paths::guest_path(Path::new(&portable));
-        let requested = if requested.is_absolute() {
-            requested
-        } else {
-            dir.join(requested)
-        };
+        if requested.is_absolute()
+            || portable.contains("${")
+            || portable.contains("://")
+            || portable.as_bytes().get(1) == Some(&b':')
+        {
+            continue;
+        }
+        let requested = dir.join(requested);
         match requested.canonicalize() {
             Ok(root) if root.is_dir() && seen.insert(root.clone()) => usable.push(folder),
             _ => {}
@@ -3467,353 +3435,5 @@ mod tests {
             error.to_string().contains("drifted"),
             "the lock is re-verified on every change, not only at registration: {error}"
         );
-    }
-
-    // -- Spaces found on disk -------------------------------------------------
-
-    fn descriptor(dir: &Path, body: &str) {
-        std::fs::create_dir_all(dir).unwrap();
-        std::fs::write(dir.join(crate::space_descriptor::FILE), body).unwrap();
-    }
-
-    fn scan_fixture() -> (tempfile::TempDir, PathBuf, Workspaces, Arc<RwLock<Config>>) {
-        let dir = tempfile::tempdir().unwrap();
-        let spaces_root = dir.path().join("spaces");
-        descriptor(
-            &spaces_root.join("admin"),
-            r#"{"name":"管理员","tags":["expert"],"agentCwd":"front"}"#,
-        );
-        descriptor(
-            &spaces_root.join("admin/spaces/think"),
-            r#"{"name":"管理员·思考"}"#,
-        );
-        descriptor(
-            &spaces_root.join("admin/spaces/work"),
-            r#"{"name":"管理员·工作"}"#,
-        );
-        let config = Arc::new(RwLock::new(Config::default()));
-        let spaces = Workspaces::new(
-            config.clone(),
-            dir.path().join("config.json"),
-            WorkspaceHomes::default(),
-        );
-        (dir, spaces_root, spaces, config)
-    }
-
-    async fn named(spaces: &Workspaces, name: &str) -> WorkspaceInfo {
-        spaces
-            .list()
-            .await
-            .into_iter()
-            .find(|workspace| workspace.name == name)
-            .unwrap_or_else(|| panic!("no project named {name}"))
-    }
-
-    #[tokio::test]
-    async fn a_descriptor_declares_the_roots_of_its_space_like_a_code_workspace() {
-        let dir = tempfile::tempdir().unwrap();
-        let spaces_root = dir.path().join("spaces");
-        let expert = spaces_root.join("expert");
-        let reflect = expert.join("spaces/reflect");
-        let datas = expert.join("datas");
-        std::fs::create_dir_all(&datas).unwrap();
-        descriptor(&expert, r#"{"name":"专家","folders":[{"path":"."}]}"#);
-        descriptor(
-            &reflect,
-            r#"{"name":"反思","folders":[{"path":"."},{"path":"../.."},{"path":"../../datas"},{"path":"../../gone"},{"path":"../../datas"}]}"#,
-        );
-        let spaces = workspaces(dir.path()).await;
-        spaces.scan_spaces(&spaces_root, true).await;
-
-        let plain = named(&spaces, "专家").await;
-        assert!(plain.workspace_file.is_none(), "only itself: an ordinary project");
-        assert_eq!(plain.folders.len(), 1);
-
-        let opened = named(&spaces, "反思").await;
-        assert_eq!(
-            opened.folders.iter().map(|folder| folder.name.as_str()).collect::<Vec<_>>(),
-            vec!["reflect", "expert", "datas"],
-            "declared order; the missing directory and the repeat are dropped, the Space still opens"
-        );
-        assert_eq!(opened.root, reflect.canonicalize().unwrap().display().to_string());
-        assert!(opened.folders.iter().all(|folder| folder.root_handle.starts_with("r_")));
-        let before = spaces.list().await.len();
-
-        // Scanning again changes nothing; editing the descriptor changes the roots, not the identity.
-        spaces.scan_spaces(&spaces_root, true).await;
-        assert_eq!(spaces.list().await.len(), before);
-        descriptor(&reflect, r#"{"name":"反思","folders":[{"path":"."},{"path":"../../datas","name":"数据"}]}"#);
-        spaces.scan_spaces(&spaces_root, true).await;
-        let edited = named(&spaces, "反思").await;
-        assert_eq!(edited.id, opened.id);
-        assert_eq!(
-            edited.folders.iter().map(|folder| folder.name.as_str()).collect::<Vec<_>>(),
-            vec!["reflect", "数据"]
-        );
-        assert_eq!(spaces.list().await.len(), before);
-    }
-
-    #[tokio::test]
-    async fn a_scan_opens_spaces_and_links_children_to_the_root_they_sit_in() {
-        let (_dir, root, spaces, _config) = scan_fixture();
-        let report = spaces.scan_spaces(&root, true).await;
-        assert_eq!(
-            report,
-            ScanReport {
-                opened: 3,
-                linked: 3
-            }
-        );
-
-        let admin = named(&spaces, "管理员").await;
-        let think = named(&spaces, "管理员·思考").await;
-        let work = named(&spaces, "管理员·工作").await;
-        let registration = |info: &WorkspaceInfo| info.agent_space.clone().expect("registered");
-        assert_eq!(
-            registration(&admin).parent_workspace_id,
-            None,
-            "the root is a project entry"
-        );
-        assert_eq!(
-            registration(&think).parent_workspace_id.as_deref(),
-            Some(admin.id.as_str())
-        );
-        assert_eq!(
-            registration(&work).parent_workspace_id.as_deref(),
-            Some(admin.id.as_str())
-        );
-        assert!(
-            registration(&think).health.is_none() && registration(&admin).health.is_none(),
-            "a scan makes no Builder lock, so health is not judged against one"
-        );
-
-        // Nothing to do the second time, and nothing is duplicated.
-        assert_eq!(spaces.scan_spaces(&root, true).await, ScanReport::default());
-        assert_eq!(spaces.list().await.len(), 3);
-    }
-
-    #[tokio::test]
-    async fn a_space_the_user_removed_stays_removed() {
-        let (_dir, root, spaces, _config) = scan_fixture();
-        spaces.scan_spaces(&root, true).await;
-        let think = named(&spaces, "管理员·思考").await;
-        spaces.remove(&think.id).await.unwrap();
-
-        let report = spaces.scan_spaces(&root, true).await;
-        assert_eq!(
-            report,
-            ScanReport::default(),
-            "removal is a decision a scan may not undo"
-        );
-        assert!(spaces
-            .list()
-            .await
-            .iter()
-            .all(|workspace| workspace.id != think.id));
-    }
-
-    #[tokio::test]
-    async fn an_existing_registration_is_never_overwritten() {
-        let (_dir, root, spaces, config) = scan_fixture();
-        // The user already registered `work` under nothing, at a revision the
-        // scan must respect.
-        let work = spaces
-            .open(&root.join("admin/spaces/work"), None)
-            .await
-            .unwrap();
-        config
-            .write()
-            .await
-            .agent_spaces
-            .push(crate::config::AgentSpaceEntry {
-                workspace_id: work.id.clone(),
-                parent_workspace_id: None,
-                revision: 5,
-                lifecycle: "pooled".into(),
-                builder_lock_digest: "kept".into(),
-                components: Vec::new(),
-                guidance: Vec::new(),
-            });
-        spaces.scan_spaces(&root, true).await;
-        let kept = config
-            .read()
-            .await
-            .agent_spaces
-            .iter()
-            .find(|space| space.workspace_id == work.id)
-            .cloned()
-            .unwrap();
-        assert_eq!(
-            (
-                kept.revision,
-                kept.parent_workspace_id,
-                kept.lifecycle.as_str(),
-                kept.builder_lock_digest.as_str()
-            ),
-            (5, None, "pooled", "kept"),
-            "a parent chosen by hand survives a scan"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_root_with_no_children_is_a_project_with_no_registration() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join("spaces");
-        descriptor(&root.join("solo"), r#"{"name":"独行"}"#);
-        let config = Arc::new(RwLock::new(Config::default()));
-        let spaces = Workspaces::new(
-            config.clone(),
-            dir.path().join("config.json"),
-            WorkspaceHomes::default(),
-        );
-        assert_eq!(
-            spaces.scan_spaces(&root, true).await,
-            ScanReport {
-                opened: 1,
-                linked: 0
-            }
-        );
-        assert!(config.read().await.agent_spaces.is_empty());
-        assert!(named(&spaces, "独行").await.agent_space.is_none());
-    }
-
-    #[tokio::test]
-    async fn the_scan_is_throttled_unless_forced_and_costs_nothing_without_a_directory() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join("spaces");
-        let config = Arc::new(RwLock::new(Config::default()));
-        let spaces = Workspaces::new(
-            config,
-            dir.path().join("config.json"),
-            WorkspaceHomes::default(),
-        );
-        assert_eq!(
-            spaces.scan_spaces(&root, true).await,
-            ScanReport::default(),
-            "no spaces/ directory is not an error"
-        );
-
-        descriptor(&root.join("late"), r#"{"name":"晚到"}"#);
-        assert_eq!(
-            spaces.scan_spaces(&root, false).await,
-            ScanReport::default(),
-            "asked again at once, the scan has nothing new to say"
-        );
-        assert_eq!(spaces.scan_spaces(&root, true).await.opened, 1);
-    }
-
-    #[tokio::test]
-    async fn a_deleted_scanned_child_space_is_retired_on_next_scan() {
-        let (_dir, root, spaces, config) = scan_fixture();
-        spaces.scan_spaces(&root, true).await;
-        let think = named(&spaces, "管理员·思考").await;
-        std::fs::remove_dir_all(root.join("admin/spaces/think")).unwrap();
-
-        spaces.scan_spaces(&root, true).await;
-        assert!(
-            spaces
-                .list()
-                .await
-                .iter()
-                .all(|workspace| workspace.id != think.id),
-            "a deleted child role directory leaves the active catalogue"
-        );
-        assert!(
-            config
-                .read()
-                .await
-                .agent_spaces
-                .iter()
-                .all(|space| space.workspace_id != think.id),
-            "its child registration is retired too"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_session_starts_in_agent_cwd_when_it_names_a_real_directory() {
-        let (_dir, root, spaces, _config) = scan_fixture();
-        spaces.scan_spaces(&root, true).await;
-        let admin = spaces
-            .get(&named(&spaces, "管理员").await.id)
-            .await
-            .unwrap();
-        assert_eq!(
-            spaces.default_cwd(&admin),
-            admin.root,
-            "front/ does not exist yet"
-        );
-        std::fs::create_dir(root.join("admin/front")).unwrap();
-        assert_eq!(spaces.default_cwd(&admin), admin.root.join("front"));
-        let think = spaces
-            .get(&named(&spaces, "管理员·思考").await.id)
-            .await
-            .unwrap();
-        assert_eq!(
-            spaces.default_cwd(&think),
-            think.root,
-            "no agentCwd, the project root"
-        );
-    }
-
-    #[tokio::test]
-    async fn editing_a_descriptor_name_updates_a_scanned_space_and_opening_descriptor_links_children() {
-        let dir = tempfile::tempdir().unwrap();
-        let spaces_root = dir.path().join("spaces");
-        let doc = spaces_root.join("doc-auditor");
-        descriptor(&doc, r#"{"name":"expert","tags":["expert"]}"#);
-        descriptor(&doc.join("spaces/reflect"), r#"{"name":"reflect"}"#);
-        descriptor(&doc.join("spaces/work"), r#"{"name":"work"}"#);
-
-        let spaces = workspaces(dir.path()).await;
-        spaces.scan_spaces(&spaces_root, true).await;
-        let initial = named(&spaces, "expert").await;
-
-        // Updating agent-space.genet.json name from the template placeholder "expert"
-        // to "doc-auditor" updates the workspace name on the next scan.
-        descriptor(&doc, r#"{"name":"doc-auditor","tags":["expert"]}"#);
-        spaces.scan_spaces(&spaces_root, true).await;
-        let renamed = named(&spaces, "doc-auditor").await;
-        assert_eq!(renamed.id, initial.id);
-
-        // Directory listing exposes agent-space.genet.json as a selectable workspace file.
-        let listing = list_directory(Some(&doc)).unwrap();
-        assert!(
-            listing
-                .workspace_files
-                .iter()
-                .any(|item| item.name == crate::space_descriptor::FILE)
-        );
-
-        // Removing the expert's children then the expert itself, then manually opening
-        // agent-space.genet.json via open_with_children restores both the expert and its Squad.
-        for item in spaces
-            .list()
-            .await
-            .into_iter()
-            .filter(|w| w.id != renamed.id)
-        {
-            spaces.remove(&item.id).await.unwrap();
-        }
-        spaces.remove(&renamed.id).await.unwrap();
-        assert!(spaces.list().await.is_empty());
-
-        let reopened = spaces
-            .open_with_children(&doc.join(crate::space_descriptor::FILE))
-            .await
-            .unwrap();
-        assert_eq!(reopened.id, initial.id);
-        assert_eq!(reopened.name, "doc-auditor");
-        let all = spaces.list().await;
-        assert_eq!(all.len(), 3);
-        let reflect = named(&spaces, "reflect").await;
-        assert_eq!(
-            reflect.agent_space.and_then(|s| s.parent_workspace_id).as_deref(),
-            Some(reopened.id.as_str())
-        );
-
-        // Deleting the root expert directory under spaces/ retires both root and children on scan.
-        std::fs::remove_dir_all(&doc).unwrap();
-        spaces.scan_spaces(&spaces_root, true).await;
-        assert!(spaces.list().await.is_empty());
     }
 }

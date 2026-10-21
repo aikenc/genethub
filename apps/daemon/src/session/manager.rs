@@ -5642,7 +5642,11 @@ impl Live {
         index: u32,
         finished_at_ms: Option<i64>,
     ) -> Option<RoundTrunk> {
-        Some(self.build_open_trunk_with_hints(index, finished_at_ms).await?.0)
+        Some(
+            self.build_open_trunk_with_hints(index, finished_at_ms)
+                .await?
+                .0,
+        )
     }
 
     async fn build_open_trunk_with_hints(
@@ -5719,7 +5723,9 @@ impl Live {
                 round.closed_trunks.len() as u32,
             )
         };
-        let Some((trunk, hints)) = self.build_open_trunk_with_hints(index, finished_at_ms).await
+        let Some((trunk, hints)) = self
+            .build_open_trunk_with_hints(index, finished_at_ms)
+            .await
         else {
             return;
         };
@@ -7010,32 +7016,37 @@ async fn pump_events(
         // and the turn's ending: both belong beside the conversation, not only
         // in a log that a later rotation can take away.
         if let Some(turn_id) = event_turn_id(&event) {
-            let mut meta = live.meta.lock().await;
-            let open = meta
-                .open_turn
-                .as_mut()
-                .filter(|open| open.turn_id == turn_id);
-            if let Some(open) = open {
-                if open.first_event_at_ms.is_none() {
-                    open.first_event_at_ms = Some(now_ms());
-                }
-            }
             let ended = matches!(
                 &event,
                 SessionEvent::TurnCompleted { .. }
                     | SessionEvent::TurnFailed { .. }
                     | SessionEvent::TurnCanceled { .. }
             );
-            if ended
-                && meta
-                    .open_turn
-                    .as_ref()
-                    .is_some_and(|open| open.turn_id == turn_id)
+            let response = matches!(
+                &event,
+                SessionEvent::Item { .. }
+                    | SessionEvent::ItemDelta { .. }
+                    | SessionEvent::TurnProgress { .. }
+            );
+            let mut meta = live.meta.lock().await;
+            let mut changed = false;
+            if let Some(open) = meta
+                .open_turn
+                .as_mut()
+                .filter(|open| open.turn_id == turn_id)
             {
-                meta.open_turn = None;
+                if ended {
+                    meta.open_turn = None;
+                    changed = true;
+                } else if response && open.first_event_at_ms.is_none() {
+                    open.first_event_at_ms = Some(now_ms());
+                    changed = true;
+                }
             }
-            if let Err(error) = store.save_meta(&meta) {
-                tracing::warn!("could not update the open turn {turn_id}: {error}");
+            if changed {
+                if let Err(error) = store.save_meta(&meta) {
+                    tracing::warn!("could not update the open turn {turn_id}: {error}");
+                }
             }
         }
         if let SessionEvent::Item { turn_id, item } = &event {
@@ -7960,8 +7971,6 @@ fn listed<'a>(axis: &str, value: &str, offered: impl Iterator<Item = &'a str>) -
     )
 }
 
-/// Reconcile durable choices with what this Agent offers *now*.
-/// Catalog-less Agents remain opaque; declared catalogs are authoritative.
 /// Records the catalog's default model on a session that named none. Only a
 /// model the catalog actually lists is recorded; an Agent that reports no
 /// default (or none it lists) keeps the session unpinned. Returns whether
@@ -7979,6 +7988,8 @@ fn pin_default_model(meta: &mut SessionMeta, catalog: &Catalog) -> bool {
     true
 }
 
+/// Reconcile durable choices with what this Agent offers now.
+/// Catalog-less Agents remain opaque; declared catalogs are authoritative.
 fn normalize_runtime_selection(meta: &mut SessionMeta, catalog: &Catalog) -> bool {
     let before = (
         meta.model_id.clone(),
@@ -8113,72 +8124,6 @@ mod tests {
         }
     }
 
-    /// A turn that never ended is the one case the conversation file used to
-    /// have nothing to say about: content only lands once something is
-    /// produced, so a stuck turn looked like no turn at all.
-    #[test]
-    fn an_open_turn_is_written_into_the_session_file_and_a_missing_one_is_none() {
-        let mut session = meta();
-        session.open_turn = Some(OpenTurnMarker {
-            turn_id: "turn-9".into(),
-            agent_id: "codebuddy".into(),
-            model_id: Some("hy4-preview-ioa".into()),
-            started_at_ms: 1_000,
-            first_event_at_ms: None,
-        });
-        let raw = serde_json::to_string(&session).expect("serialize the session");
-        assert!(
-            raw.contains("\"openTurn\""),
-            "the open turn should sit in the session file: {raw}"
-        );
-        let back: SessionMeta = serde_json::from_str(&raw).expect("read the session back");
-        assert_eq!(
-            back.open_turn, session.open_turn,
-            "the open turn lost its facts"
-        );
-        let written_before_the_marker: SessionMeta =
-            serde_json::from_str(&raw.replace("\"openTurn\"", "\"openTurnIgnored\""))
-                .expect("a session file written before the marker still opens");
-        assert!(
-            written_before_the_marker.open_turn.is_none(),
-            "a session file without the marker has no open turn"
-        );
-    }
-
-    #[test]
-    fn the_ledger_follows_the_events_that_are_about_a_turn() {
-        assert_eq!(
-            event_turn_id(&SessionEvent::TurnStarted {
-                turn_id: "t1".into(),
-                started_at_ms: 0
-            }),
-            Some("t1")
-        );
-        assert_eq!(
-            event_turn_id(&SessionEvent::Item {
-                turn_id: "t1".into(),
-                item: item("i1", "hi")
-            }),
-            Some("t1")
-        );
-        assert_eq!(
-            event_turn_id(&SessionEvent::TurnCanceled {
-                turn_id: "t1".into()
-            }),
-            Some("t1")
-        );
-        assert_eq!(
-            event_turn_id(&SessionEvent::TurnFailed {
-                turn_id: "t1".into(),
-                error: TurnError {
-                    code: TurnErrorCode::Timeout,
-                    message: "gone".into()
-                },
-            }),
-            Some("t1")
-        );
-    }
-
     #[test]
     fn migration_history_excludes_inputs_that_still_need_delivery() {
         let mut session = meta();
@@ -8220,69 +8165,6 @@ mod tests {
         let history = migration_seed_history(&session, &items);
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].id(), "handled");
-    }
-
-    fn catalog_with(default_model: Option<&str>, models: &[&str]) -> Catalog {
-        Catalog {
-            models: models
-                .iter()
-                .map(|id| genehub_proto::ModelInfo {
-                    id: (*id).into(),
-                    label: (*id).into(),
-                    context_window: None,
-                    reasoning: false,
-                    efforts: vec![],
-                    input_modalities: None,
-                    supports_fast: false,
-                })
-                .collect(),
-            default_model: default_model.map(str::to_string),
-            ..Catalog::default()
-        }
-    }
-
-    #[test]
-    fn a_session_that_named_no_model_records_the_agents_default() {
-        let mut session = meta();
-        session.model_id = None;
-        assert!(pin_default_model(
-            &mut session,
-            &catalog_with(Some("m1"), &["m0", "m1"])
-        ));
-        assert_eq!(session.model_id.as_deref(), Some("m1"));
-    }
-
-    #[test]
-    fn a_named_model_is_never_replaced_by_the_default() {
-        let mut session = meta();
-        session.model_id = Some("chosen".into());
-        assert!(!pin_default_model(
-            &mut session,
-            &catalog_with(Some("m1"), &["m1"])
-        ));
-        assert_eq!(session.model_id.as_deref(), Some("chosen"));
-    }
-
-    #[test]
-    fn a_default_the_catalog_does_not_list_is_not_recorded() {
-        let mut session = meta();
-        session.model_id = None;
-        assert!(!pin_default_model(
-            &mut session,
-            &catalog_with(Some("ghost"), &["m1"])
-        ));
-        assert_eq!(session.model_id, None);
-        assert!(!pin_default_model(
-            &mut session,
-            &catalog_with(None, &["m1"])
-        ));
-        assert_eq!(session.model_id, None);
-        // An Agent that lists nothing but still reports the model it will use.
-        assert!(pin_default_model(
-            &mut session,
-            &catalog_with(Some("only"), &[])
-        ));
-        assert_eq!(session.model_id.as_deref(), Some("only"));
     }
 
     #[test]
@@ -10525,274 +10407,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_description_is_one_short_line_and_survives_restart() {
-        let dir = tempfile::tempdir().unwrap();
-        let sessions = manager(dir.path());
-        sessions.store.save_meta(&meta()).unwrap();
-
-        let summary = sessions
-            .describe("s1", "  评审 Rust 改动；要找人看 daemon 代码时来问我  ")
-            .await
-            .unwrap();
-        assert_eq!(
-            summary.description.as_deref(),
-            Some("评审 Rust 改动；要找人看 daemon 代码时来问我"),
-            "the line is trimmed"
-        );
-        assert_eq!(
-            manager(dir.path())
-                .store
-                .load_meta("w1", "s1")
-                .unwrap()
-                .description
-                .as_deref(),
-            Some("评审 Rust 改动；要找人看 daemon 代码时来问我"),
-            "the description only reached the copy in memory, so it is lost on restart"
-        );
-
-        // A refused change leaves the line as it was.
-        let too_long = "x".repeat(super::super::store::MAX_SESSION_DESCRIPTION_BYTES + 1);
-        for bad in [too_long.as_str(), "two\nlines", "tab\there"] {
-            let error = sessions.describe("s1", bad).await.unwrap_err();
-            assert!(format!("{error:#}").contains("invalid session description"));
-        }
-        // The bound is in bytes: exactly at it is fine.
-        let at_limit = "y".repeat(super::super::store::MAX_SESSION_DESCRIPTION_BYTES);
-        sessions.describe("s1", &at_limit).await.unwrap();
-        sessions
-            .describe("s1", "back to a short one")
-            .await
-            .unwrap();
-        assert_eq!(
-            sessions.summary("s1").await.unwrap().description.as_deref(),
-            Some("back to a short one")
-        );
-
-        // Empty clears it, and clearing is not an error.
-        let cleared = sessions.describe("s1", "   ").await.unwrap();
-        assert_eq!(cleared.description, None);
-        assert_eq!(sessions.describe("s1", "").await.unwrap().description, None);
-    }
-
-    #[tokio::test]
-    async fn describing_a_session_that_is_not_there_is_an_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let sessions = manager(dir.path());
-        assert!(sessions.describe("nope", "anything").await.is_err());
-    }
-
-    /// The reason the `system` source exists. A script's notice is queued and
-    /// acknowledged like any input, but it cannot do what only a person or
-    /// another Agent's request may: lift the pause a Human put on the session,
-    /// or retire the inputs that failed before it.
-    #[tokio::test]
-    async fn a_system_notice_queues_without_lifting_a_pause_or_retiring_failed_input() {
-        let dir = tempfile::tempdir().unwrap();
-        let sessions = manager(dir.path());
-        let mut paused = meta();
-        paused.inbox.paused = true;
-        paused.inbox.error = Some("本轮失败，已接收消息保留；发送新消息后核对并继续。".into());
-        paused
-            .inbox
-            .entries
-            .push(crate::session::store::InboxEntry {
-                message_id: "m_failed".into(),
-                received_at_ms: 1,
-                digest: String::new(),
-                source: "user".into(),
-                task_run_id: None,
-                state: "sent".into(),
-                turn_id: Some("t1".into()),
-            });
-        sessions.store.save_meta(&paused).unwrap();
-
-        sessions
-            .accept_input(
-                "s1",
-                "m_sys".into(),
-                "子会话 s_9 已完成".into(),
-                vec![],
-                None,
-                "system",
-                None,
-            )
-            .await
-            .unwrap();
-        let after = sessions.store.load_meta("w1", "s1").unwrap();
-        assert!(
-            after.inbox.paused,
-            "a script must not lift the Human's pause"
-        );
-        assert!(after.inbox.error.is_some());
-        let by_id = |id: &str| {
-            after
-                .inbox
-                .entries
-                .iter()
-                .find(|e| e.message_id == id)
-                .unwrap()
-        };
-        assert_eq!(by_id("m_sys").source, "system");
-        assert_eq!(
-            by_id("m_sys").state,
-            "queued",
-            "it waits, it is not dropped"
-        );
-        assert_eq!(
-            by_id("m_failed").state,
-            "sent",
-            "a failed Human input is retired by a Human, not by a notice"
-        );
-
-        // A person speaking is what lifts the pause and retires the failure.
-        sessions
-            .accept_input(
-                "s1",
-                "m_user".into(),
-                "继续".into(),
-                vec![],
-                None,
-                "user",
-                None,
-            )
-            .await
-            .unwrap();
-        let resumed = sessions.store.load_meta("w1", "s1").unwrap();
-        assert!(!resumed.inbox.paused);
-        let by_id = |id: &str| {
-            resumed
-                .inbox
-                .entries
-                .iter()
-                .find(|e| e.message_id == id)
-                .unwrap()
-        };
-        assert_eq!(by_id("m_failed").state, "handled");
-        assert_eq!(
-            by_id("m_sys").state,
-            "queued",
-            "the notice is still waiting its turn"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_system_notice_is_idempotent_by_message_id_and_refuses_other_content() {
-        let dir = tempfile::tempdir().unwrap();
-        let sessions = manager(dir.path());
-        sessions.store.save_meta(&meta()).unwrap();
-        let send = |text: &str| {
-            sessions.accept_input(
-                "s1",
-                "s9.r1.done".into(),
-                text.into(),
-                vec![],
-                None,
-                "system",
-                None,
-            )
-        };
-        send("done").await.unwrap();
-        // Two channels, or a retry after a crash, send the same notice again.
-        send("done")
-            .await
-            .expect("the same notice is acknowledged again");
-        assert!(
-            send("something else").await.is_err(),
-            "another body under the same id is a collision, not a retry"
-        );
-        let entries = sessions.store.load_meta("w1", "s1").unwrap().inbox.entries;
-        assert_eq!(entries.len(), 1, "a retry must not queue a second copy");
-    }
-
-    #[tokio::test]
-    async fn the_input_summary_says_where_each_pending_input_came_from() {
-        let dir = tempfile::tempdir().unwrap();
-        let sessions = manager(dir.path());
-        sessions.store.save_meta(&meta()).unwrap();
-        for (id, source) in [("m_a", "user"), ("m_b", "system"), ("m_c", "agent")] {
-            sessions
-                .accept_input("s1", id.into(), "hi".into(), vec![], None, source, None)
-                .await
-                .unwrap();
-        }
-        let summary = sessions.summary("s1").await.unwrap();
-        let input = summary.input_summary.expect("there are pending inputs");
-        assert_eq!(input.pending_message_ids, ["m_a", "m_b", "m_c"]);
-
-        // Handled inputs leave pending_message_ids.
-        let mut meta = sessions.store.load_meta("w1", "s1").unwrap();
-        meta.inbox.entries[0].state = "handled".into();
-        sessions.store.save_meta(&meta).unwrap();
-        let reloaded = manager(dir.path()).summary("s1").await.unwrap();
-        let input = reloaded.input_summary.unwrap();
-        assert_eq!(input.pending_message_ids, ["m_b", "m_c"]);
-    }
-
-    #[tokio::test]
-    async fn the_pending_queue_is_full_at_the_limit_for_system_notices_too() {
-        let dir = tempfile::tempdir().unwrap();
-        let sessions = manager(dir.path());
-        sessions.store.save_meta(&meta()).unwrap();
-        let limit = super::super::store::MAX_PENDING_INPUTS;
-        for n in 0..limit {
-            sessions
-                .accept_input(
-                    "s1",
-                    format!("m_{n}"),
-                    "notice".into(),
-                    vec![],
-                    None,
-                    "system",
-                    None,
-                )
-                .await
-                .unwrap();
-        }
-        let error = sessions
-            .accept_input(
-                "s1",
-                "m_over".into(),
-                "one too many".into(),
-                vec![],
-                None,
-                "system",
-                None,
-            )
-            .await
-            .unwrap_err();
-        assert!(format!("{error:#}").contains("pending queue is full"));
-        // A sender can see this coming before it sends.
-        let input = sessions.summary("s1").await.unwrap().input_summary.unwrap();
-        assert_eq!(input.pending_message_ids.len(), limit);
-    }
-
-    #[tokio::test]
-    async fn a_pause_is_in_the_summary_even_when_nothing_is_queued() {
-        let dir = tempfile::tempdir().unwrap();
-        let sessions = manager(dir.path());
-        sessions.store.save_meta(&meta()).unwrap();
-        assert!(
-            sessions
-                .summary("s1")
-                .await
-                .unwrap()
-                .input_summary
-                .is_none(),
-            "an untouched session has nothing to say about its inputs"
-        );
-        let mut paused = meta();
-        paused.inbox.paused = true;
-        sessions.store.save_meta(&paused).unwrap();
-        let input = manager(dir.path())
-            .summary("s1")
-            .await
-            .unwrap()
-            .input_summary
-            .expect("a paused session must say so, or it looks like one that finished");
-        assert!(input.paused && input.pending_message_ids.is_empty());
-    }
-
-    #[tokio::test]
     async fn a_session_cannot_be_renamed_to_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let sessions = manager(dir.path());
@@ -11886,74 +11500,6 @@ mod tests {
         assert!(continuation.prompt.contains("Where should this ship?"));
         assert!(continuation.prompt.contains("  selected: Beta"));
         assert!(continuation.prompt.contains("Keep the rollback switch"));
-    }
-
-    #[test]
-    fn a_typed_answer_says_that_no_option_was_picked() {
-        let mut request = interaction(PermissionRequestKind::Question);
-        request.questions = Some(vec![genehub_proto::InteractionQuestion {
-            id: "environment".into(),
-            prompt: "Where should this ship?".into(),
-            allow_multiple: false,
-            allow_freeform: true,
-            options: vec![
-                genehub_proto::InteractionOption {
-                    id: "beta".into(),
-                    label: "Beta".into(),
-                },
-                genehub_proto::InteractionOption {
-                    id: "official".into(),
-                    label: "Official".into(),
-                },
-            ],
-        }]);
-        let continuation = continuation_for(
-            &request,
-            &PermissionOutcome::Answered {
-                answers: vec![genehub_proto::InteractionAnswer {
-                    question_id: "environment".into(),
-                    selected_option_ids: vec![],
-                    freeform_text: Some("ship it nowhere".into()),
-                }],
-            },
-        )
-        .unwrap()
-        .expect("a typed answer resumes");
-        assert!(continuation
-            .prompt
-            .contains("no option selected; typed by the user (verbatim): ship it nowhere"));
-        assert!(!continuation.prompt.contains("selected: Beta"));
-    }
-
-    #[test]
-    fn a_note_on_top_of_a_choice_stays_a_separate_line() {
-        let mut request = interaction(PermissionRequestKind::Question);
-        request.questions = Some(vec![genehub_proto::InteractionQuestion {
-            id: "environment".into(),
-            prompt: "Where should this ship?".into(),
-            allow_multiple: false,
-            allow_freeform: true,
-            options: vec![genehub_proto::InteractionOption {
-                id: "beta".into(),
-                label: "Beta".into(),
-            }],
-        }]);
-        let continuation = continuation_for(
-            &request,
-            &PermissionOutcome::Answered {
-                answers: vec![genehub_proto::InteractionAnswer {
-                    question_id: "environment".into(),
-                    selected_option_ids: vec!["beta".into()],
-                    freeform_text: Some("and tell me the rollback switch".into()),
-                }],
-            },
-        )
-        .unwrap()
-        .expect("a choice plus a note resumes");
-        assert!(continuation.prompt.contains("  selected: Beta"));
-        assert!(continuation
-            .prompt
-            .contains("  added note (verbatim): and tell me the rollback switch"));
     }
 
     #[test]

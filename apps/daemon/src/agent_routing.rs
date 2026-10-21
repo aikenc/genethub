@@ -25,13 +25,7 @@ pub const TAG_VIDEO: &str = "视频理解";
 pub const TAG_IMAGE: &str = "图片理解";
 pub const INTELLIGENCE_TAGS: [&str; 5] = [TAG_ULTRA, TAG_MAX, TAG_PRO, TAG_FLASH, TAG_MINI];
 pub const BUILTIN_TAGS: [&str; 7] = [
-    TAG_ULTRA,
-    TAG_MAX,
-    TAG_PRO,
-    TAG_FLASH,
-    TAG_MINI,
-    TAG_VIDEO,
-    TAG_IMAGE,
+    TAG_ULTRA, TAG_MAX, TAG_PRO, TAG_FLASH, TAG_MINI, TAG_VIDEO, TAG_IMAGE,
 ];
 
 #[derive(Debug)]
@@ -247,8 +241,13 @@ pub(crate) fn select_tag_route_excluding(
     // An Agent that never became a candidate is the other half of the answer: "配错了" and
     // "暂时挤不进去" look identical from the error alone.
     for agent in agents {
-        if candidates.iter().any(|candidate| candidate.route.agent_id == agent.id)
-            || dropped.iter().any(|reason| reason.starts_with(&format!("{}/", agent.id)) || reason.starts_with(&format!("{}:", agent.id)))
+        if candidates
+            .iter()
+            .any(|candidate| candidate.route.agent_id == agent.id)
+            || dropped.iter().any(|reason| {
+                reason.starts_with(&format!("{}/", agent.id))
+                    || reason.starts_with(&format!("{}:", agent.id))
+            })
         {
             continue;
         }
@@ -506,9 +505,11 @@ pub(crate) fn ensure_concrete_route_supports_media_in_preferences(
     if required.is_empty() {
         return Ok(());
     }
-    let Some(profile) = preferences.model_profiles.iter().find(|profile| {
-        profile.agent_id == agent_id && profile.model_id.as_deref() == model_id
-    }) else {
+    let Some(profile) = preferences
+        .model_profiles
+        .iter()
+        .find(|profile| profile.agent_id == agent_id && profile.model_id.as_deref() == model_id)
+    else {
         return Ok(());
     };
     if profile.tags.is_empty() {
@@ -552,7 +553,11 @@ pub(crate) async fn ensure_concrete_route_allowed(
 /// happens to sit on: Hy4 may only ship with `codebuddy` while the session was
 /// started on `codex`. Without this the only way to honour "use Hy4" is to ask
 /// for a tier, which is re-resolved at every send and can come up empty.
-pub(crate) async fn agent_offering_model(state: &Shared, model_id: &str) -> Option<String> {
+pub(crate) async fn agent_offering_model(
+    state: &Shared,
+    model_id: &str,
+    preferred_agent: &str,
+) -> Option<String> {
     let providers = state.providers().await;
     let agents = state.registry.list(&providers).await;
     let preferences = state
@@ -568,18 +573,30 @@ pub(crate) async fn agent_offering_model(state: &Shared, model_id: &str) -> Opti
         .map(|id| id.trim().to_ascii_lowercase())
         .filter(|id| !id.is_empty())
         .collect();
-    agents
+    // Keep the current legal owner first. A model id is not a request to
+    // replace the Agent, and a denied catalog entry must not hide a legal one.
+    let mut candidates: Vec<_> = agents
         .iter()
         .filter(|agent| !disabled.contains(&agent.id.to_ascii_lowercase()))
         .filter(|agent| matches!(agent.probe, ProbeState::Ready))
-        .find(|agent| {
+        .filter(|agent| {
             agent
                 .catalog
                 .models
                 .iter()
                 .any(|model| model.id == model_id && !is_auto_model(model))
         })
-        .map(|agent| agent.id.clone())
+        .collect();
+    candidates.sort_by_key(|agent| agent.id != preferred_agent);
+    for agent in candidates {
+        if ensure_concrete_route_allowed(state, &agent.id, Some(model_id.to_string()))
+            .await
+            .is_ok()
+        {
+            return Some(agent.id.clone());
+        }
+    }
+    None
 }
 
 fn validate_exclusive_tags(tags: &[String], preferences: &AgentSelectionPreferences) -> Result<()> {
@@ -1165,169 +1182,5 @@ mod tests {
             finished_at_ms: None,
         }];
         assert_eq!(media_tags_for_timeline(&items), vec![TAG_IMAGE.to_string()]);
-    }
-
-    #[test]
-    fn a_route_with_no_candidate_says_why_each_one_was_dropped() {
-        let ready = agent("codebuddy", "hy4-preview-ioa", None);
-        let mut not_ready = agent("codex", "gpt-6", None);
-        not_ready.probe = ProbeState::Unavailable {
-            reason: "正在启动".into(),
-        };
-        let registry = Registry::of(Vec::new());
-        let preferences = AgentSelectionPreferences {
-            model_profiles: vec![AgentModelProfile {
-                agent_id: "codebuddy".into(),
-                model_id: Some("hy4-preview-ioa".into()),
-                display_name: None,
-                tags: vec![TAG_FLASH.into()],
-                cost: Some(AgentCostLevel::VeryLow),
-            }],
-            ..Default::default()
-        };
-        let error = select_tag_route_excluding(
-            &preferences,
-            &[TAG_PRO.into()],
-            &[ready, not_ready],
-            &registry,
-            false,
-            &BTreeSet::new(),
-        )
-        .unwrap_err()
-        .to_string();
-        // "配错了" and "Agent 还没起来" must be told apart from the error alone: both look like
-        // `agentTagRouteUnavailable` without this.
-        assert!(error.contains("agentTagRouteUnavailable"));
-        assert!(error.contains("codebuddy/hy4-preview-ioa"), "{error}");
-        assert!(error.contains("不带标签"), "{error}");
-        assert!(error.contains("codex: 正在启动"), "{error}");
-    }
-
-    fn disabled_agents_and_removed_models_are_excluded_from_routes_and_concrete_selection() {
-        let mut claude = agent("claude", "opus", None);
-        claude.catalog.models.push(ModelInfo {
-            id: "sonnet".into(),
-            label: "sonnet".into(),
-            context_window: None,
-            reasoning: true,
-            efforts: vec!["medium".into()],
-            input_modalities: None,
-            supports_fast: false,
-        });
-        let mut codebuddy = agent("codebuddy", "claude-sonnet-5.5", None);
-        codebuddy.catalog.default_model = Some("claude-sonnet-5.5".into());
-        codebuddy.catalog.models.push(ModelInfo {
-            id: "hy4-preview-ioa".into(),
-            label: "hy4-preview-ioa".into(),
-            context_window: None,
-            reasoning: false,
-            efforts: Vec::new(),
-            input_modalities: None,
-            supports_fast: false,
-        });
-        codebuddy.catalog.models.push(ModelInfo {
-            id: "gpt-6-luna".into(),
-            label: "gpt-6-luna".into(),
-            context_window: None,
-            reasoning: false,
-            efforts: Vec::new(),
-            input_modalities: Some(vec!["image".into()]),
-            supports_fast: false,
-        });
-        let registry = Registry::of(Vec::new());
-        let preferences = AgentSelectionPreferences {
-            disabled_agent_ids: vec!["claude".into()],
-            model_profiles: vec![
-                AgentModelProfile {
-                    agent_id: "codebuddy".into(),
-                    model_id: Some("hy4-preview-ioa".into()),
-                    display_name: None,
-                    tags: vec![TAG_PRO.into()],
-                    cost: Some(AgentCostLevel::VeryLow),
-                },
-                AgentModelProfile {
-                    agent_id: "codebuddy".into(),
-                    model_id: Some("gpt-6-luna".into()),
-                    display_name: None,
-                    tags: vec![TAG_FLASH.into(), TAG_IMAGE.into()],
-                    cost: Some(AgentCostLevel::Low),
-                },
-            ],
-            ..Default::default()
-        };
-
-        assert!(
-            route_infos(&preferences, &claude, &registry).is_empty(),
-            "disabled agent must not fall back to default first three models"
-        );
-        let codebuddy_routes = route_infos(&preferences, &codebuddy, &registry);
-        assert_eq!(
-            codebuddy_routes
-                .iter()
-                .filter_map(|route| route.model_id.clone())
-                .collect::<Vec<_>>(),
-            vec!["hy4-preview-ioa".to_string(), "gpt-6-luna".to_string()]
-        );
-
-        assert!(
-            ensure_concrete_route_allowed_in_preferences(&preferences, "claude", Some("opus".into()))
-                .is_err()
-        );
-        assert!(ensure_concrete_route_allowed_in_preferences(
-            &preferences,
-            "codebuddy",
-            Some("claude-sonnet-5.5".into())
-        )
-        .is_err());
-        assert_eq!(
-            ensure_concrete_route_allowed_in_preferences(
-                &preferences,
-                "codebuddy",
-                Some("hy4-preview-ioa".into())
-            )
-            .unwrap(),
-            Some("hy4-preview-ioa".into())
-        );
-        assert_eq!(
-            ensure_concrete_route_allowed_in_preferences(&preferences, "codebuddy", None).unwrap(),
-            Some("hy4-preview-ioa".into()),
-            "omitted model resolves to lowest-cost configured model instead of deleted catalog default"
-        );
-        let err = ensure_concrete_route_supports_media_in_preferences(
-            &preferences,
-            "codebuddy",
-            Some("hy4-preview-ioa"),
-            &[TAG_IMAGE.into()],
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("agentMediaUnsupported"));
-        assert!(err.contains("图片理解"));
-        assert!(ensure_concrete_route_supports_media_in_preferences(
-            &preferences,
-            "codebuddy",
-            Some("gpt-6-luna"),
-            &[TAG_IMAGE.into()],
-        )
-        .is_ok());
-    }
-
-    #[test]
-    fn ultra_and_mini_tiers_normalize_and_share_exclusive_intelligence_group() {
-        assert_eq!(
-            BUILTIN_TAGS,
-            ["Ultra", "Max", "Pro", "Flash", "Mini", "视频理解", "图片理解"]
-        );
-        assert_eq!(
-            normalize_tags(vec!["ultra".into(), "mini".into()]),
-            vec!["Ultra".to_string(), "Mini".to_string()]
-        );
-        let preferences = AgentSelectionPreferences::default();
-        assert!(validate_exclusive_tags(&["Ultra".into()], &preferences).is_ok());
-        assert!(validate_exclusive_tags(&["Mini".into()], &preferences).is_ok());
-        let err = validate_exclusive_tags(&["Ultra".into(), "Mini".into()], &preferences)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("agentTagInvalid"));
     }
 }

@@ -507,27 +507,9 @@ impl SessionMeta {
 }
 
 pub fn derived_source_kind_for(labels: &[String], managed: bool) -> &'static str {
-    if labels.iter().any(|l| {
-        l == "自省" || l == "反思" || l.eq_ignore_ascii_case("reflect")
-    }) {
-        "reflect"
-    } else if labels.iter().any(|l| {
-        l == "巡查" || l == "建议" || l.eq_ignore_ascii_case("patrol")
-    }) {
-        "patrol"
-    } else if labels.iter().any(|l| {
-        l == "专家" || l == "研究" || l.eq_ignore_ascii_case("expert")
-    }) {
-        "expert"
-    } else if managed
-        || labels.iter().any(|l| {
-            l == SESSION_STARTED_LABEL
-                || l == "后台"
-                || l == "内部"
-                || l == "组长"
-                || l.eq_ignore_ascii_case("system")
-        })
-    {
+    // Labels are display text. Only the generic platform-created marker and
+    // managed execution distinguish automated sessions, never business roles.
+    if managed || labels.iter().any(|label| label == SESSION_STARTED_LABEL) {
         "system"
     } else {
         "human"

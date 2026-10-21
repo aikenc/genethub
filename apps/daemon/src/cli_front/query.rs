@@ -320,9 +320,7 @@ fn parse_workspace(args: &[String]) -> Result<Query, CliFailure> {
         [verb] if verb == "show" => Err(CliFailure::invalid_args(
             "workspace show needs a workspace id",
         )),
-        [verb, workspace_id]
-            if verb == "remove" && workspace_id.starts_with("w_") =>
-        {
+        [verb, workspace_id] if verb == "remove" && workspace_id.starts_with("w_") => {
             Ok(Query::WorkspaceRemove {
                 workspace_id: workspace_id.clone(),
             })
@@ -676,7 +674,10 @@ async fn execute(
             })
             .await
             .map_err(rpc_error)?;
-            Ok(("workspace.remove", json!({"workspaceId": workspace_id, "removed": true})))
+            Ok((
+                "workspace.remove",
+                json!({"workspaceId": workspace_id, "removed": true}),
+            ))
         }
         Query::SessionList {
             workspace_id,
@@ -1304,7 +1305,7 @@ fn command_schema(name: &str) -> Value {
                     "labels": {"type": "array", "items": {"type": "string", "minLength": 1},
                         "description": "--label, repeatable; keeps sessions carrying every given label"},
                     "sourceKind": {"type": ["string", "null"], "minLength": 1,
-                        "description": "--source-kind; keeps sessions matching the given sourceKind (human, system, patrol, expert, reflect)"},
+                        "description": "--source-kind; keeps sessions matching the given sourceKind (human or system)"},
                     "includeArchived": {"type": "boolean", "description": "--include-archived; include archived sessions"},
                 }),
                 &[],
@@ -1510,7 +1511,7 @@ fn command_schema(name: &str) -> Value {
         "agent.run" => (
             "genet agent run (--agent <id> | --tag <tier>... [--media image|video]) \"<prompt>\" [--cwd <dir> | --workspace <id>] \
              [--session <id>] [--model <id>] [--mode <id>] [--effort <id>] [--title <t>] \
-             [--label <label>]... [--description <text>] [--wait|--no-wait] [--since-seq <n>] \
+             [--label <label>]... [--description <text>] [--system] [--message-id <id>] [--wait|--no-wait] [--since-seq <n>] \
              [--auto-approve] [--timeout <s>] [--open-workspace]",
             true,
             object_input(
@@ -1522,6 +1523,8 @@ fn command_schema(name: &str) -> Value {
                     "media": {"type": "array", "items": {"enum": ["image", "video"]}, "maxItems": 2,
                         "description": "--media, only with --tag; the task contains images or video, so the route must understand them"},
                     "prompt": {"type": "string", "minLength": 1},
+                    "system": {"type": "boolean", "description": "--system; script-created input, never a Human decision"},
+                    "messageId": {"type": "string", "minLength": 1, "maxLength": 128, "description": "--message-id; durable acceptance with stable input identity"},
                     "sessionId": {"type": ["string", "null"], "minLength": 1},
                     "workspaceId": {"type": ["string", "null"], "minLength": 1},
                     "modelId": {"type": ["string", "null"], "minLength": 1},
@@ -1532,7 +1535,7 @@ fn command_schema(name: &str) -> Value {
                         "description": "--label, repeatable; added to the session before the prompt is sent"},
                     "description": {"type": ["string", "null"], "minLength": 1, "maxLength": 300,
                         "description": "--description; one line, like a Skill description: what this session does and when to ask it. Set before the prompt is sent, at most 300 bytes"},
-                    "wait": {"type": "boolean", "default": true},
+                    "wait": {"type": "boolean", "description": "defaults to false with messageId, true otherwise; --wait is incompatible with messageId"},
                     "sinceSeq": {"type": ["integer", "null"], "minimum": 0},
                     "autoApprove": {"type": "boolean", "default": false},
                     "timeout": {"type": ["integer", "null"], "minimum": 1},
@@ -1554,12 +1557,13 @@ fn command_schema(name: &str) -> Value {
             }), &["sessionId", "question"]),
         ),
         "session.send" => (
-            "genet session send <id> \"<text>\" [--message-id <id> [--task-run <run>]] [--wait|--no-wait] [--timeout <s>]",
+            "genet session send <id> \"<text>\" [--system] [--message-id <id> [--task-run <run>]] [--wait|--no-wait] [--timeout <s>]",
             true,
             object_input(
                 json!({
                     "sessionId": {"type": "string", "minLength": 1},
                     "prompt": {"type": "string", "minLength": 1},
+                    "system": {"type": "boolean", "description": "--system; explicitly attributed script notice; requires stable messageId and never lifts a pause"},
                     "messageId": {"type": "string", "minLength": 1, "maxLength": 128,
                         "description": "--message-id; stable receipt ID, requires session.input.v1; returns acceptance"},
                     "taskRunId": {"type": "string", "minLength": 1,
@@ -2321,20 +2325,6 @@ mod tests {
     }
 
     #[test]
-    fn a_route_failure_keeps_the_name_the_router_gave_it() {
-        let failure = rpc_error(RpcError::Remote(ProtocolError {
-            code: ErrorCode::Internal,
-            message: "agentTagRouteUnavailable: no route matches Max".into(),
-        }));
-        assert_eq!(failure.code, "agentTagRouteUnavailable");
-        let other = rpc_error(RpcError::Remote(ProtocolError {
-            code: ErrorCode::Internal,
-            message: "something else: broke".into(),
-        }));
-        assert_eq!(other.code, "internal");
-    }
-
-    #[test]
     fn parses_the_complete_read_only_command_surface() {
         assert_eq!(
             parse(&words(&["schema"])).unwrap(),
@@ -2615,22 +2605,6 @@ mod tests {
         let (capability_kind, capabilities) = execute(Query::Capabilities, &here).await.unwrap();
         assert_eq!(capability_kind, "capabilities");
         assert_eq!(capabilities["remoteExec"], true);
-    }
-
-    #[test]
-    fn workspace_remove_needs_its_workspace_id() {
-        assert_eq!(
-            parse(&words(&["workspace", "remove", "w_1"])).unwrap(),
-            Query::WorkspaceRemove {
-                workspace_id: "w_1".into()
-            }
-        );
-        for bad in [
-            &["workspace", "remove"][..],
-            &["workspace", "remove", "spaces/game-qa"][..],
-        ] {
-            assert_eq!(parse(&words(bad)).unwrap_err().code, "invalidArgs");
-        }
     }
 
     #[test]

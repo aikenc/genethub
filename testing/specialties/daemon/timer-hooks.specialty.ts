@@ -14,10 +14,12 @@
 // Only the LLM endpoint is ever replaced in these cases, and none of them needs
 // a model: hooks are run by the daemon, not by an Agent.
 
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import {
+  createLease,
+  releaseLease,
   defineSpecialty,
   localGenetCli,
   type CaseContext,
@@ -56,7 +58,7 @@ function hookCase(
       title,
       oracle,
       catches,
-      tags: ["core", "daemon", "timer-hooks", "genet-cli"],
+      tags: ["core", "daemon", "timer-hooks", "genet-cli", "merge-remediation"],
       llm: { default: "none" },
       expectedDurationMs: durationMs,
       timeoutMs: Math.max(durationMs * 4, 90_000),
@@ -259,3 +261,80 @@ hookCase(
   },
   45_000,
 );
+
+
+hookCase("shared-project-execution", "two independent daemons share hook execution ownership and interval",
+  "the same hook registered in two independent daemon data directories never overlaps, preserves a shared interval and continues after one owner stops",
+  ["per-daemon locks execute a project hook twice", "cross-channel writes overlap"], async (t, opened, _cli, root) => {
+    const lease = createLease("genehub-hook-other-channel-");
+    let other: Opened | undefined;
+    try {
+      other = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease });
+      await other.client.call({ type: "workspace.open", payload: { root } });
+      const script = String.raw`const fs=require('fs');try{fs.mkdirSync('critical')}catch{fs.appendFileSync('overlap','bad\n')}fs.appendFileSync('shared-starts',Date.now()+'\n');setTimeout(()=>{fs.rmSync('critical',{recursive:true,force:true})},1500)`;
+      writeHook(root, "shared", { event: "timer", every: "3s", timeout: 10, exec: [process.execPath, "-e", script] });
+      await t.tools.waitUntil(() => lines(root, "shared-starts").length >= 3, 25000);
+      t.assertions.assert(!existsSync(path.join(root, "overlap")), "two daemons entered one hook together");
+      const times = lines(root, "shared-starts").map(Number);
+      t.assertions.assert(times.slice(1).every((at, index) => at - times[index]! >= 2800), `shared interval doubled: ${times}`);
+      const before = times.length;
+      opened.client.close(); opened.daemon.stop();
+      await t.tools.waitUntil(() => lines(root, "shared-starts").length > before, 12000);
+      writeHook(root, "shared", { event: "timer", every: "3s", enabled: false, exec: [process.execPath, "-e", script] });
+    } finally {
+      if (other) { other.client.close(); other.daemon.stop(); await other.mock.stop(); }
+      releaseLease(lease);
+    }
+  }, 45000);
+
+hookCase("disabled-at-capacity", "disabled work cannot wait behind full hook capacity",
+  "eight actual commands occupy capacity; a ninth hook is disabled and deleted before capacity opens, and its side effect never happens",
+  ["a disabled queued hook starts with an obsolete captured spec"], async (t, opened, cli, root) => {
+    const blocker = `const fs=require('fs');fs.writeFileSync(process.argv[1],'started');const timer=setInterval(()=>{if(fs.existsSync('release-hooks'))clearInterval(timer)},100)`;
+    for (let i=0;i<8;i++) writeHook(root, `a${i}`, { event: "timer", every: "60s", timeout: 30, exec: [process.execPath, "-e", blocker, `blocker-${i}`] });
+    writeHook(root, "z-target", { event: "timer", every: "1s", exec: [process.execPath, "-e", "require('fs').writeFileSync('obsolete-started','bad')"] });
+    await t.tools.waitUntil(() => Array.from({length:8},(_,i)=>existsSync(path.join(root,`blocker-${i}`))).every(Boolean), 15000);
+    writeHook(root, "z-target", { event: "timer", every: "1s", enabled: false, exec: [process.execPath, "-e", "require('fs').writeFileSync('obsolete-started','bad')"] });
+    rmSync(path.join(hooksDir(root), "z-target.genet.json"));
+    writeFileSync(path.join(root, "release-hooks"), "release");
+    await t.tools.waitUntil(() => listed(t, cli(["hook", "list", "--workspace", opened.workspaceId])).filter(row=>/^a[0-7]$/.test(row.id)).every(row=>row.runs >= 1 && !row.running), 15000);
+    await sleep(1500);
+    t.assertions.assert(!existsSync(path.join(root, "obsolete-started")), "deleted hook ran after its slot became free");
+  }, 30000);
+
+
+hookCase("removed-project-stops-starts", "removing a project stops hook launches before the cached roster refresh",
+  "after one actual hook writes its marker, workspace.remove preserves the directory but no later tick runs the hook, including the cached roster window",
+  ["cached project roster starts commands for a removed project"], async (t, opened, cli, root) => {
+    writeHook(root, "membership", { event: "timer", every: "1s", exec: [process.execPath, "-e", "require('fs').appendFileSync('membership.log','tick\\n')"] });
+    await t.tools.waitUntil(() => lines(root,"membership.log").length >= 1, 12000);
+    const removed = await opened.client.call({ type: "workspace.remove", payload: { workspaceId: opened.workspaceId } });
+    t.assertions.assert(removed?.type === "workspaces", "project removal failed");
+    const before = lines(root,"membership.log").length;
+    await sleep(2500);
+    t.assertions.assert(lines(root,"membership.log").length === before && existsSync(root), "removed project continued launching hooks or lost files");
+    t.assertions.assert(cli(["workspace","list"]).code === 0, "daemon stopped after project removal");
+  }, 20000);
+
+
+hookCase("public-spec-validation", "hook validation is proved at the actual CLI boundary",
+  "invalid schema/event/duration/argv/timeout/cwd/enabled, oversized and symlink files are listed invalid; declared duration boundaries are accepted; unsupported CLI verbs fail with usage",
+  ["hook parser accepts malformed configuration", "private parser tests are the only validation oracle"], async (t, opened, cli, root) => {
+    const base = { event: "timer", every: "1s", exec: [process.execPath,"-e","process.exit(0)"], enabled: false };
+    const invalid: Array<Record<string,unknown>> = [
+      {schema:"other"}, {event:"round.settled"}, {every:"0s"}, {every:"25h"}, {every:5},
+      {exec:[]}, {exec:"sh -c echo wrong"}, {timeout:301}, {timeout:0}, {cwd:""}, {enabled:"yes"},
+    ];
+    invalid.forEach((change,index)=>writeHook(root,`bad-${index}`,{...base,...change}));
+    writeHook(root,"minimum",base); writeHook(root,"maximum",{...base,every:"24h"});
+    writeFileSync(path.join(hooksDir(root),"oversized.genet.json")," ".repeat(70000));
+    const outside = path.join(root,"outside-hook.json"); writeFileSync(outside,JSON.stringify(base));
+    symlinkSync(outside,path.join(hooksDir(root),"linked.genet.json"));
+    const rows = listed(t,cli(["hook","list","--workspace",opened.workspaceId]));
+    for(const id of [...invalid.map((_,i)=>`bad-${i}`),"oversized","linked"]) {
+      const row=rows.find(row=>row.id===id); t.assertions.assert(row && !row.valid && Boolean(row.problem),`invalid file accepted or hidden: ${id}`);
+    }
+    t.assertions.assert(rows.find(row=>row.id==="minimum")?.everySeconds===1 && rows.find(row=>row.id==="maximum")?.everySeconds===86400,"public duration bounds changed");
+    const badVerb=cli(["hook","run","--workspace",opened.workspaceId]);
+    t.assertions.assert(badVerb.code===2 && badVerb.envelope?.error?.code==="invalidArgs","unsupported hook verb accepted");
+  },15000);

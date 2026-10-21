@@ -3,8 +3,9 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { defineSpecialty } from "../../framework/public.ts";
 
-// Native-intrinsic properties stay in the owning crate. Actual Session/CLI/
-// browser journeys separately verify the external behavior of this change.
+// Retain the pre-existing owning-crate regression baseline during migration.
+// New business coverage belongs in public TypeScript journeys/specialties; this
+// baseline is not a claim that every inherited test is native-intrinsic.
 defineSpecialty({
   id: "specialty.contracts.daemon-baseline",
   title: "The owning daemon library baseline keeps authorization, CLI and Session properties",

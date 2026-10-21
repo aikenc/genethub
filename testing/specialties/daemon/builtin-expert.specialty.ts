@@ -116,6 +116,10 @@ adminCase(
     writeFileSync(soul, "my own soul\n");
     writeFileSync(script, "# damaged\n");
     const stale = path.join(admin, "front", "soul.mirror.md");
+    const ownedPath = path.join(admin, ".genethub/bootstrap-owned.json");
+    writeFileSync(ownedPath, JSON.stringify([...JSON.parse(readFileSync(ownedPath, "utf8")), "front/soul.mirror.md"]));
+    const unknown = path.join(admin, "owner-notes.txt");
+    writeFileSync(unknown, "untracked user content");
     writeFileSync(stale, "stale mirror\n");
     mkdirSync(path.join(admin, "posts"), { recursive: true });
     const post = path.join(admin, "posts", "keep.md");
@@ -126,6 +130,7 @@ adminCase(
     try {
       t.assertions.assert(readFileSync(script, "utf8") === originalScript, "the damaged product script was not restored");
       t.assertions.assert(readFileSync(soul, "utf8") === originalSoul, "the built-in admin's soul.md was not restored to the template");
+      t.assertions.assert(readFileSync(unknown, "utf8") === "untracked user content", "unknown user file was pruned");
       t.assertions.assert(!existsSync(stale), "a stale file from an older template was not pruned");
       t.assertions.assert(readFileSync(post, "utf8") === "keep me\n", "posts/ was pruned");
       const root = (await list(opened)).find((space) => space.name === NAME);

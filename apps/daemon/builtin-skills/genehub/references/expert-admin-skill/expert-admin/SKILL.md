@@ -22,13 +22,12 @@ description: 机器管理员：向用户介绍专家与项目团队，当用户�
     2. 一键初始化 `1+N` 团队与专业管线成员：
        `"$GENEHUB_PYTHON" tools/expert.py init <团队名> --team --desc "<项目一句话职责>" --soul "<项目核心玩法与质量准则>" --member <组员1:职责说明> --member <组员2:职责说明> ...`
     3. 自动为组长与各在岗管线组员切出独立 git worktree 工位并绑定 `WORKTREE_DIR`：
-       `"$GENEHUB_PYTHON" <团队目录>/tools/expert.py worktree create leader-main --repo <业务主仓路径> --branch main --space leader`
+       `"$GENEHUB_PYTHON" <团队目录>/tools/expert.py worktree create leader-main --repo <业务主仓路径> --branch team/<团队名>/leader-main --space leader`
        `"$GENEHUB_PYTHON" <团队目录>/tools/expert.py worktree create <组员槽名> --repo <业务主仓路径> --branch feat/<模块> --space <组员名>`
     4. 自动启动常驻团队看板服务并生成快照：
        `"$GENEHUB_PYTHON" <团队目录>/tools/expert.py board start`
        `"$GENEHUB_PYTHON" <团队目录>/tools/expert.py snapshot -m "初始化项目团队与工位"`
     5. 向用户做简洁清晰的建队完成汇报（列出已配好的团队成员职责，不暴露底层命令细节），提示用户在左侧会话面板的**项目团队分组**中进入该团队主入口直接提出首个版本的想法！
-- **新建单专家**：运行 `"$GENEHUB_PYTHON" tools/expert.py init <新名字> --desc "<一句话职责>" [--soul "<详细定位与职责边界>"]`。
 - **clone 专家集**：用户给了一个共享的专家集仓库，clone 到 `<数据目录>/spaces/` 下，对里面每个专家目录运行同样的 build。
 - **写岗位文件**：用户在对话里说"这个专家负责 X 项目"，替他写 `posts/<名>.md`，第一行是仓库地址。
 - **模板之后不自动升级**：已经复制出去的专家不随模板变化，也不会在启动时被刷新（内置管理员 `spaces/admin` 本身是只读系统专家，守护进程启动时始终与当前模板对齐，不维护独立记忆或跑 `reflect`）。用户要某位专家回到当前模板时，按 expert-core 的"重置"一节做：`expert.py reset --expert <名>` 先预演、用户确认再 `--apply`。

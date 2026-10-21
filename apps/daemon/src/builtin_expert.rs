@@ -8,7 +8,8 @@
 //!   - rewritten on every start if it differs: every file from `team-template/` (except its child Spaces —
 //!     the administrator is one Space plus `expert-admin`, with no background Spaces of its own) and
 //!     `expert-admin-skill/`;
-//!   - stale template files not in the current shipment are pruned;
+//!   - only files recorded in the previous bootstrap ownership manifest are pruned;
+//!     unrelated files and untracked legacy material are preserved;
 //!   - runtime and build-output paths (`.genethub/`, `.spacebuilder/`, `temp/`, `datas/`, `posts/`, and SpaceBuilder
 //!     target files) are preserved.
 //!
@@ -80,6 +81,12 @@ pub fn refresh(admin: &Path, name: &str) -> std::io::Result<bool> {
     let mut changed = false;
     let mut shipped = HashSet::new();
     let owned = spacebuilder_owned_paths(admin);
+    let manifest = admin.join(".genethub").join("bootstrap-owned.json");
+    let previous: HashSet<String> = match std::fs::read(&manifest) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(std::io::Error::other)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => HashSet::new(),
+        Err(error) => return Err(error),
+    };
     let mut put = |relative: &str, contents: &[u8]| -> std::io::Result<()> {
         shipped.insert(relative.replace('\\', "/"));
         let target = admin.join(relative);
@@ -110,52 +117,40 @@ pub fn refresh(admin: &Path, name: &str) -> std::io::Result<bool> {
     for (relative, contents) in crate::skills::builtin_files_under(ADMIN_SKILL) {
         put(&format!("skills/{relative}"), contents)?;
     }
-    if prune_stale_admin(admin, admin, &shipped, &owned)? {
-        changed = true;
+    for relative in previous.difference(&shipped) {
+        if is_preserved_runtime_or_build_path(relative, &owned) {
+            continue;
+        }
+        let path = Path::new(relative);
+        if path
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+        {
+            return Err(std::io::Error::other("invalid bootstrap ownership path"));
+        }
+        let mut parent = admin.to_path_buf();
+        for part in path.components() {
+            parent.push(part);
+            if parent.is_symlink() {
+                return Err(std::io::Error::other(
+                    "bootstrap ownership path traverses a symbolic link",
+                ));
+            }
+        }
+        match std::fs::remove_file(admin.join(path)) {
+            Ok(()) => changed = true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    if previous != shipped {
+        crate::config::save_private(
+            &manifest,
+            &serde_json::to_vec(&shipped).map_err(std::io::Error::other)?,
+        )
+        .map_err(std::io::Error::other)?;
     }
     Ok(changed)
-}
-
-/// Removes files and empty directories left over from older templates while leaving runtime data and
-/// SpaceBuilder outputs alone.
-fn prune_stale_admin(
-    root: &Path,
-    current: &Path,
-    shipped: &HashSet<String>,
-    owned: &HashSet<String>,
-) -> std::io::Result<bool> {
-    let Ok(entries) = std::fs::read_dir(current) else {
-        return Ok(false);
-    };
-    let mut removed = false;
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-        let Ok(rel_path) = path.strip_prefix(root) else {
-            continue;
-        };
-        let rel = rel_path.to_string_lossy().replace('\\', "/");
-        if is_preserved_runtime_or_build_path(&rel, owned) {
-            continue;
-        }
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            if prune_stale_admin(root, &path, shipped, owned)? {
-                removed = true;
-            }
-            let prefix = format!("{rel}/");
-            let has_shipped = shipped.iter().any(|item| item.starts_with(&prefix));
-            let has_owned = owned.iter().any(|item| item.starts_with(&prefix));
-            if !has_shipped && !has_owned && std::fs::read_dir(&path)?.next().is_none() {
-                std::fs::remove_dir(&path)?;
-                removed = true;
-            }
-        } else if !shipped.contains(&rel) {
-            std::fs::remove_file(&path)?;
-            removed = true;
-        }
-    }
-    Ok(removed)
 }
 
 fn is_preserved_runtime_or_build_path(rel: &str, owned: &HashSet<String>) -> bool {
@@ -212,7 +207,7 @@ fn admin_descriptor(template: &[u8], name: &str) -> Vec<u8> {
         serde_json::from_slice(template).expect("the template descriptor is valid JSON");
     descriptor["name"] = json!(name);
     descriptor["description"] =
-        json!("这台机器上的管理员：介绍专家、新建专家、clone 别人共享的专家集、答疑。");
+        json!("这台机器上的管理员：建立和管理项目团队、clone 共享团队、答疑。");
     if let Some(skills) = descriptor["skills"].as_array_mut() {
         skills.push(json!("expert-admin"));
     }
@@ -275,23 +270,4 @@ async fn read_all<R: tokio::io::AsyncRead + Unpin>(mut pipe: R) -> String {
     let mut bytes = Vec::new();
     let _ = pipe.read_to_end(&mut bytes).await;
     String::from_utf8_lossy(&bytes).into_owned()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_name_is_the_machine_plus_the_suffix_and_always_valid() {
-        assert_eq!(admin_name("办公室-Mac"), "办公室-Mac管理员");
-        assert_eq!(admin_name("  dev/box\\1\n "), "devbox1管理员");
-        assert_eq!(admin_name(""), "本机管理员");
-        assert_eq!(admin_name("\n/\\"), "本机管理员");
-        let long = admin_name(&"机".repeat(200));
-        assert_eq!(long.chars().count(), NAME_LIMIT);
-        assert!(
-            long.ends_with(SUFFIX),
-            "the suffix is never the part that is cut"
-        );
-    }
 }
