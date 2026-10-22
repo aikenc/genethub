@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import json
 import os
 from pathlib import Path
 import shutil
@@ -39,41 +40,68 @@ GENEHUB_PRIVATE = (
 # it answers anything, the launching ``cbc`` is still listening there, and the
 # bind failure leaves a CLI that is alive and silent forever.
 #
-# The shell scrubs the same names from the daemon's own environment when it
-# starts (``apps/host/src/main.rs``, ``LAUNCHING_AGENT_SESSION``); a unit test
-# there keeps the two lists equal. Settings a person chose on purpose
-# (``CODEBUDDY_INTERNET_ENVIRONMENT``, API keys, proxies) are not in it.
-LAUNCHING_AGENT_SESSION = (
+# Which names those are is the Agent's business, so the Agent declares them in
+# its own manifest (``agent.genet.json``, ``launchingEnv``) and both this SDK
+# and the shell read the tree the daemon materialised. Settings a person chose
+# on purpose (``CODEBUDDY_INTERNET_ENVIRONMENT``, API keys, proxies) are never
+# in it.
+
+# What the platform knows without any Agent: the endpoint a CLI binds and the
+# trace context a shell hands out.
+PLATFORM_LAUNCHING_ENV = (
     "SERVER__PORT",
     "SERVER__HOST",
-    "CODEBUDDY_SERVICE_PROXY_URL",
-    "CODEBUDDY_SESSION_ID",
-    "CODEBUDDY_ROOT_REQUEST_ID",
-    "CODEBUDDY_CONVERSATION_REQUEST_ID",
-    "CODEBUDDY_CONVERSATION_MESSAGE_ID",
-    "CODEBUDDY_ARTIFACTS",
-    "CODEBUDDY_PROJECT_DIR",
-    "CODEBUDDY_CURRENT_MODEL_ID",
-    "CODEBUDDY_SESSION_KIND",
-    "CODEBUDDY_SESSION_NAME",
-    "CODEBUDDY_SESSION_LOG",
-    "CODEBUDDY_OWNER_KEY",
-    "CODEBUDDY_TEAMMATE_OWNER_KEY",
-    "CODEBUDDY_GATEWAY_AUTH",
-    "CLAUDE_SESSION_ID",
-    "CLAUDE_PROJECT_DIR",
-    "CURSOR_AGENT",
-    "CURSOR_CONVERSATION_ID",
-    "CURSOR_INVOKED_AS",
-    "CURSOR_LAYOUT",
-    "__CURSOR_SANDBOX_ENV_RESTORE",
-    "CODEX_CI",
-    "CODEX_THREAD_ID",
-    "CODEX_SESSION_ID",
     "TRACEPARENT",
     "TRACESTATE",
     "BAGGAGE",
 )
+
+_LAUNCHING_CACHE: Optional[tuple] = None
+
+
+def _agent_tree_roots() -> list:
+    """Where Agent directories are found: ``agents/builtin`` in the tree the
+    daemon materialised, and ``builtin-agents/agents`` when the SDK runs out of
+    a checkout instead."""
+    home = Path(__file__).resolve().parents[2]
+    return [home / "builtin", home / "agents"]
+
+
+def _declared_launching_env(roots: list) -> tuple:
+    fingerprint = []
+    names = []
+    for root in roots:
+        try:
+            entries = sorted(root.iterdir())
+        except OSError:
+            continue
+        for agent in entries:
+            manifest = agent / "agent.genet.json"
+            try:
+                stat = manifest.stat()
+                body = json.loads(manifest.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            fingerprint.append((agent.name, stat.st_size, stat.st_mtime))
+            for name in body.get("launchingEnv", []):
+                if isinstance(name, str) and name not in names:
+                    names.append(name)
+    return tuple(fingerprint), tuple(sorted(names))
+
+
+def launching_agent_session() -> tuple:
+    """The names an Agent says belong to the session that launched this one.
+
+    Read once per change: the fingerprint is a directory listing and a stat per
+    Agent, and the manifests are only parsed when it moves.
+    """
+    global _LAUNCHING_CACHE
+    fingerprint, names = _declared_launching_env(_agent_tree_roots())
+    if _LAUNCHING_CACHE is not None and _LAUNCHING_CACHE[0] == fingerprint:
+        return _LAUNCHING_CACHE[1]
+    merged = tuple(sorted(dict.fromkeys(PLATFORM_LAUNCHING_ENV + names)))
+    _LAUNCHING_CACHE = (fingerprint, merged)
+    return merged
 
 
 # Which session a process belongs to, so closing the session (or this process
@@ -142,7 +170,8 @@ def end_all_now() -> None:
 
 
 def child_environment(extra: Optional[Dict[str, str]] = None, remove: Iterable[str] = ()) -> Dict[str, str]:
-    env = {key: value for key, value in os.environ.items() if key not in GENEHUB_PRIVATE and key not in LAUNCHING_AGENT_SESSION}
+    forbidden = GENEHUB_PRIVATE + launching_agent_session()
+    env = {key: value for key, value in os.environ.items() if key not in forbidden}
     # The pid an Agent CLI must never kill (its prompt says so), alongside the
     # daemon's GENEHUB_HOST_PID. This script is that process: ending it ends
     # every session it serves.

@@ -19,7 +19,7 @@ runtime/        the platform Python the installer put there (python.json)
 3. `"$GENEHUB_CLI" agent test <id>` — offline checks; add `--live` to also
    probe the real CLI.
 4. `"$GENEHUB_CLI" agent reload <id>` — the only way an edit takes effect.
-   An invalid `agent.toml` is reported and the running version stays.
+   An invalid `agent.genet.json` is reported and the running version stays.
 5. `"$GENEHUB_CLI" agent logs <id>` shows what the script wrote to stderr.
 
 `"$GENEHUB_CLI" agent reset <id>` deletes `user/<id>` and goes back to the
@@ -30,12 +30,19 @@ next reload.
 
 Create `user/<id>/` (`^[a-z][a-z0-9-]{1,31}$`) with:
 
-```toml
-# agent.toml
-protocol = 1
-label    = "My Agent"
-entry    = "agent.py"
+```json
+{
+  "schema": "genet.agent.v1",
+  "protocol": 1,
+  "label": "My Agent",
+  "entry": "agent.py"
+}
 ```
+
+`launchingEnv` is optional: the environment variable names this Agent exports
+for the shell it gives its own tools. The platform drops them before it starts
+anything, so a daemon started from inside the Agent's session does not hand
+that session's identity to every process it starts afterwards.
 
 ```python
 # agent.py

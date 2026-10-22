@@ -735,7 +735,15 @@ fn validate_tag_groups(preferences: &AgentSelectionPreferences) -> Result<()> {
     if preferences.tag_groups.len() > 32 {
         anyhow::bail!("最多配置 32 个标签组");
     }
-    let builtins = ["ultra", "max", "pro", "flash", "mini", "视频理解", "图片理解"];
+    let builtins = [
+        "ultra",
+        "max",
+        "pro",
+        "flash",
+        "mini",
+        "视频理解",
+        "图片理解",
+    ];
     let mut ids = std::collections::BTreeSet::new();
     let mut grouped_tags = std::collections::BTreeSet::new();
     for group in &preferences.tag_groups {

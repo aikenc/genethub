@@ -14,15 +14,16 @@
 //! artifact and recompile from the verified bytes.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+#[cfg(test)]
+use crate::channel;
 use wasmtime::component::Component;
 use wasmtime::Engine;
-
-use crate::channel;
 
 /// Metadata sidecar for one derived artifact. Serialized as JSON next to the
 /// `.cwasm` it describes.
@@ -59,7 +60,7 @@ pub fn try_load(engine: &Engine, wasm_bytes: &[u8]) -> Option<Component> {
 
 fn try_load_inner(engine: &Engine, wasm_bytes: &[u8]) -> Result<Option<Component>> {
     let wasm_digest = sha256_hex(wasm_bytes);
-    let dir = derived_dir()?;
+    let dir = crate::data_dir::derived()?;
     let meta_path = dir.join(format!("{wasm_digest}.json"));
     let cwasm_path = dir.join(format!("{wasm_digest}.cwasm"));
 
@@ -130,7 +131,7 @@ pub fn derive_and_store(engine: &Engine, wasm_bytes: &[u8]) -> Result<()> {
 /// metadata sidecar.
 pub fn store_precompiled(wasm_bytes: &[u8], precompiled: &[u8]) -> Result<()> {
     let wasm_digest = sha256_hex(wasm_bytes);
-    let dir = derived_dir()?;
+    let dir = crate::data_dir::derived()?;
     fs::create_dir_all(&dir).context("creating derived artifact directory")?;
     set_owner_only_dir(&dir)?;
 
@@ -144,29 +145,6 @@ pub fn store_precompiled(wasm_bytes: &[u8], precompiled: &[u8]) -> Result<()> {
     write_atomic(&dir.join(format!("{wasm_digest}.cwasm")), precompiled)?;
     write_atomic(&dir.join(format!("{wasm_digest}.json")), &meta_bytes)?;
     Ok(())
-}
-
-/// The derived-artifact directory lives next to the update store, in a
-/// location only this user can read or write (§5.1.6 first phase).
-fn derived_dir() -> Result<PathBuf> {
-    let data = std::env::var(channel::ENV_DATA_DIR)
-        .ok()
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(PathBuf::from).map(|home| {
-                home.join(".local")
-                    .join("share")
-                    .join(match channel::CHANNEL {
-                        "stable" => "GeneHub",
-                        "beta" => "GeneHub-beta",
-                        "dev" => "GeneHub-dev",
-                        _ => "GeneHub-local",
-                    })
-            })
-        })
-        .ok_or_else(|| anyhow::anyhow!("no data directory for derived artifacts"))?;
-    Ok(data.join("component").join("derived"))
 }
 
 /// The engine-side invalidation key. Wasmtime's artifact header already

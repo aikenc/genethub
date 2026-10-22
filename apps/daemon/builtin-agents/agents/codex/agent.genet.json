@@ -1,0 +1,12 @@
+{
+  "schema": "genet.agent.v1",
+  "protocol": 1,
+  "label": "Codex",
+  "description": "OpenAI Codex CLI，通过它自己的 app-server 协议接入",
+  "entry": "agent.py",
+  "launchingEnv": [
+    "CODEX_CI",
+    "CODEX_THREAD_ID",
+    "CODEX_SESSION_ID"
+  ]
+}

@@ -44,7 +44,14 @@ pub struct Resolved {
     pub source: AgentSource,
 }
 
+/// The manifest file an Agent directory declares itself with. `.genet.json`
+/// is the platform's suffix for files it reads without running code.
+pub const MANIFEST_FILE: &str = "agent.genet.json";
+/// The flat TOML manifest Agents were written against before `agent.genet.json`.
+const LEGACY_MANIFEST_FILE: &str = "agent.toml";
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Manifest {
     pub protocol: u32,
     pub label: String,
@@ -54,6 +61,12 @@ pub struct Manifest {
     pub entry: String,
     #[serde(default)]
     pub icon: Option<String>,
+    /// What this Agent exports for the shell it gives its own tools. The host
+    /// drops these before it starts anything, so a daemon started from inside
+    /// a CodeBuddy/Claude/Codex/Cursor session does not hand that session's
+    /// identity to every process it later starts.
+    #[serde(default)]
+    pub launching_env: Vec<String>,
 }
 
 fn default_entry() -> String {
@@ -164,7 +177,7 @@ impl Layout {
     pub fn resolve(&self, id: &str, override_disabled: bool) -> Option<Resolved> {
         let user = self.user_dir().join(id);
         let builtin = self.builtin_dir().join(id);
-        let has_builtin = builtin.join("agent.toml").is_file();
+        let has_builtin = manifest_exists(&builtin);
         if user.is_dir() && !(override_disabled && has_builtin) {
             return Some(Resolved {
                 dir: user,
@@ -182,7 +195,7 @@ impl Layout {
     }
 
     pub fn has_builtin(&self, id: &str) -> bool {
-        self.builtin_dir().join(id).join("agent.toml").is_file()
+        manifest_exists(&self.builtin_dir().join(id))
     }
 
     /// Deletes `user/<id>`. The next start uses the built-in directory.
@@ -240,20 +253,36 @@ impl Layout {
     }
 }
 
+/// A directory is an Agent when it declares itself, in either format.
+pub fn manifest_exists(dir: &Path) -> bool {
+    dir.join(MANIFEST_FILE).is_file() || dir.join(LEGACY_MANIFEST_FILE).is_file()
+}
+
 pub fn read_manifest(dir: &Path) -> Result<Manifest> {
-    let path = dir.join("agent.toml");
-    let raw =
-        std::fs::read_to_string(&path).map_err(|error| anyhow!("读不到 agent.toml：{error}"))?;
-    let manifest: Manifest =
-        toml::from_str(&raw).map_err(|error| anyhow!("agent.toml 无效：{error}"))?;
+    let path = dir.join(MANIFEST_FILE);
+    let legacy = dir.join(LEGACY_MANIFEST_FILE);
+    let (raw, legacy) = match std::fs::read_to_string(&path) {
+        Ok(raw) => (raw, false),
+        Err(_) if legacy.is_file() => (
+            std::fs::read_to_string(&legacy)
+                .map_err(|error| anyhow!("读不到 {MANIFEST_FILE}：{error}"))?,
+            true,
+        ),
+        Err(error) => return Err(anyhow!("读不到 {MANIFEST_FILE}：{error}")),
+    };
+    let manifest: Manifest = if legacy {
+        toml::from_str(&raw).map_err(|error| anyhow!("{LEGACY_MANIFEST_FILE} 无效：{error}"))?
+    } else {
+        serde_json::from_str(&raw).map_err(|error| anyhow!("{MANIFEST_FILE} 无效：{error}"))?
+    };
     if manifest.protocol != PROTOCOL {
         anyhow::bail!(
-            "agent.toml 的 protocol 是 {}，这个 GeneHub 只支持 {PROTOCOL}",
+            "清单的 protocol 是 {}，这个 GeneHub 只支持 {PROTOCOL}",
             manifest.protocol
         );
     }
     if manifest.label.trim().is_empty() {
-        anyhow::bail!("agent.toml 的 label 不能为空");
+        anyhow::bail!("清单的 label 不能为空");
     }
     let entry = Path::new(&manifest.entry);
     if entry.is_absolute()
@@ -261,7 +290,7 @@ pub fn read_manifest(dir: &Path) -> Result<Manifest> {
             .components()
             .any(|part| !matches!(part, std::path::Component::Normal(_)))
     {
-        anyhow::bail!("agent.toml 的 entry 必须是目录内的相对路径");
+        anyhow::bail!("清单的 entry 必须是目录内的相对路径");
     }
     if !dir.join(entry).is_file() {
         anyhow::bail!("找不到入口文件 {}", manifest.entry);

@@ -1,0 +1,11 @@
+{
+  "schema": "genet.agent.v1",
+  "protocol": 1,
+  "label": "Claude Code",
+  "description": "Anthropic Claude Code CLI，用它的 stream-json 协议接入（一个会话一个常驻进程）",
+  "entry": "agent.py",
+  "launchingEnv": [
+    "CLAUDE_SESSION_ID",
+    "CLAUDE_PROJECT_DIR"
+  ]
+}

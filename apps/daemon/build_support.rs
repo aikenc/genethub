@@ -185,7 +185,7 @@ fn validate_skill_entrypoint(path: &Path, directory_name: &str) -> Result<(), St
     Ok(())
 }
 
-/// The script Agent tree: `agents/<id>/agent.toml` and `sdk/`.
+/// The script Agent tree: `agents/<id>/agent.genet.json` and `sdk/`.
 ///
 /// Every regular file is embedded except interpreter caches, which a local
 /// `python -m py_compile` or `agent.py test` run may leave behind.
@@ -206,8 +206,8 @@ pub(crate) fn scan_agents_tree(root: &Path) -> Result<BuiltinTree, String> {
         }
         let id = utf8_file_name(&agent)?;
         validate_agent_id(id)?;
-        if !agent.join("agent.toml").is_file() {
-            return Err(format!("{} has no agent.toml", agent.display()));
+        if !agent.join("agent.genet.json").is_file() {
+            return Err(format!("{} has no agent.genet.json", agent.display()));
         }
     }
     let mut directories = Vec::new();
