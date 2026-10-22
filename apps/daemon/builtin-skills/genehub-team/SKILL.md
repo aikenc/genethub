@@ -21,7 +21,8 @@ description: GeneHub 的 1+N 项目团队机制：一个团队根空间加若干
 | 自省 | `spaces/team-reflect` | 维护团队规范、脚本与模板升级 |
 
 - 团队根是子空间的父目录；`agent-space.genet.json` 的 `children.scanDepth` 决定子空间发现深度。
-- 每个子空间有自己的会话（接待、研究、工作、反思按岗位配置）与可选工位 `WORKTREE_DIR`；工位是独立 git worktree。
+- 团队根有自己的前台会话，`spaces/team-reflect` 跑反思，其余子空间按岗位接收 `work` / `research` 会话；
+  每个子空间可以绑独立工位 `WORKTREE_DIR`（一个 git worktree）。
 - 模板在 `../genehub/references/team-template/`；建团队、挂工位、起看板走机器管理员
   `../genehub/references/expert-admin-skill/expert-admin/SKILL.md`，不要手搓目录结构。
 
@@ -53,11 +54,11 @@ description: GeneHub 的 1+N 项目团队机制：一个团队根空间加若干
 | 命令 | 作用 |
 |---|---|
 | `publish release <源> --name vX.Y` / `publish report <源> --slug <名>` / `publish rollback` | 发可玩版本到 `datas/releases/`、报告到 `datas/reports/`、紧急回滚 `latest` |
-| `board start\|refresh\|status` | 常驻团队看板 `datas/board/index.html` |
+| `board start\|refresh` | 确保常驻看板服务在线并刷新 `datas/board/index.html` |
 | `note --kind unhappy\|preference\|external\|observation --quote "原话"` / `reflect now "要求"` | 给自省岗位留言或立即改进团队流程 |
 
 - 对用户只说进展与结论，不提 `team.py`、`.pm/`、工位等内部结构；链接一律写相对团队根的 `datas/...`。
-- 常驻看板可用进程环境或子空间 `open.env` 的 `TEAM_BOARD_PORT=0` 关闭；跑测试的团队必须关掉，
+- 常驻看板可用进程环境或团队根 `open.env` 的 `TEAM_BOARD_PORT=0` 关闭；跑测试的团队必须关掉，
   否则常驻进程会被判为资源泄漏。
 
 ## 边界
