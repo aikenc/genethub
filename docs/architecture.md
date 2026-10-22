@@ -209,6 +209,8 @@ enum ToolCallDetail {                // 决定前端用哪个渲染器
 
 **谁能连你的机器，由 daemon 自己判断。** 它本地有一份已授权设备列表，撤销即时生效。自建部署因此完全不需要控制面：relay + 静态工作台两个东西就够（[self-hosting.md](./self-hosting.md)）。
 
+**多会话编排不在内核里。** 和 B1 同理，daemon 不认识具体团队：它只提供 Space 树、身份编译、定时 hook、系统通知、会话控制和跨机执行这些原语；“一支会接力的队伍”由用户数据目录里的 Space 树与脚本实现，内置的只是一份可替换的样板。原语清单、样板与用户团队的分工见 [teams.md](./teams.md)。退役中的 Workflow 子系统不再是这条路径的一部分（[deprecated.md](./deprecated.md)）。
+
 细节见 [daemon.md](./daemon.md)、[relay.md](./relay.md)、[web-workbench.md](./web-workbench.md)。
 
 ---
@@ -304,7 +306,7 @@ packages/identity ← 协议世代常量（webProtocol / dataPlane），零依�
 packages/wasi-guest ← guest 的非阻塞 WASI/process/TLS/stdio 桥
 packages/workbench     ← 工作台前端（四个宿主同一份产物）
 packages/proto   ← 会话协议的唯一定义处，生成 TS 类型与 Rust 结构
-skills/          ← 教 Agent 怎么用 genet CLI 的 Agent Skills
+apps/daemon/builtin-skills ← 随产品分发的内置 Agent Skills，含团队样板 team-template
 testing/         ← 跨部件旅程测试（daemon + agent + mock 模型）
 ```
 

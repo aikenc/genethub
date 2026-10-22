@@ -1,13 +1,13 @@
-//! The machine's administrator: an expert that ships with the product.
+//! The machine's administrator: a Space that ships with the product and sets up teams.
 //!
-//! It is an ordinary Space on disk — `<data>/spaces/admin/` — made from the same template any expert is made
-//! from, plus one more Skill (`expert-admin`) that knows how to make the others. Nothing here is special to
+//! It is an ordinary Space on disk — `<data>/spaces/admin/` — made from the same template any team is made
+//! from, plus one more Skill (`team-admin`) that knows how to make the teams. Nothing here is special to
 //! the rest of the daemon: the scan registers it like any Space, and SpaceBuilder builds it like any Space.
 //!
 //! The built-in administrator is stateless product-owned bootstrap material:
 //!   - rewritten on every start if it differs: every file from `team-template/` (except its child Spaces —
-//!     the administrator is one Space plus `expert-admin`, with no background Spaces of its own) and
-//!     `expert-admin-skill/`;
+//!     the administrator is one Space plus `team-admin`, with no background Spaces of its own) and
+//!     `team-admin-skill/`;
 //!   - only files recorded in the previous bootstrap ownership manifest are pruned;
 //!     unrelated files and untracked legacy material are preserved;
 //!   - runtime and build-output paths (`.genethub/`, `.spacebuilder/`, `temp/`, `datas/`, `posts/`, and SpaceBuilder
@@ -24,7 +24,7 @@ use serde_json::{json, Value};
 use crate::state::Shared;
 
 const TEMPLATE: &str = "genehub/references/team-template/";
-const ADMIN_SKILL: &str = "genehub/references/expert-admin-skill/";
+const ADMIN_SKILL: &str = "genehub/references/team-admin-skill/";
 const BUILDER: &str = "genehub/references/spacebuilder/spacebuilder.py";
 const BUILD_TIMEOUT: Duration = Duration::from_secs(60);
 const NAME_LIMIT: usize = 64;
@@ -209,7 +209,7 @@ fn admin_descriptor(template: &[u8], name: &str) -> Vec<u8> {
     descriptor["description"] =
         json!("这台机器上的管理员：建立和管理项目团队、clone 共享团队、答疑。");
     if let Some(skills) = descriptor["skills"].as_array_mut() {
-        skills.push(json!("expert-admin"));
+        skills.push(json!("team-admin"));
     }
     // One Space, no children: nothing scans under the administrator for role Spaces that do not exist.
     descriptor["children"] = json!({ "scanDepth": 0 });

@@ -1,6 +1,7 @@
 // An expert made from the template stays on that template; the product never rewrites it behind the owner's back.
 // A reset happens only when the user asks, through `tools/expert.py reset`: an expert resets itself or another one,
-// soul.md included. These cases run the real script and the real SpaceBuilder on experts laid out as the daemon lays
+// soul.md included. A team made before the template's Skills were renamed still selects `expert-core`; a reset or
+// the timer's identity sync moves it onto `team-core`. These cases run the real script and the real SpaceBuilder on experts laid out as the daemon lays
 // them out (<data>/spaces/<name> next to <data>/builtin-skills), with no daemon and no model.
 
 import { spawnSync } from "node:child_process";
@@ -11,7 +12,9 @@ import { join } from "node:path";
 import { defineSpecialty } from "../../framework/public.ts";
 
 const GENEHUB = "apps/daemon/builtin-skills/genehub";
-const OLD_SKILL = "---\nname: expert-core\ndescription: 旧版本的技能\n---\n";
+const OLD_SKILL = "---\nname: team-core\ndescription: 旧版本的技能\n---\n";
+// The same Skill as the template shipped it before `expert-*` became `team-*`.
+const LEGACY_SKILL = "---\nname: expert-core\ndescription: 改名前的技能\n---\n";
 
 function digest(dir: string): string {
   const hash = createHash("sha256");
@@ -32,7 +35,7 @@ defineSpecialty(
     id: "specialty.daemon.expert-reset",
     title: "An expert is reset only on request, to the template with soul.md included, and what is the owner's stays",
     oracle:
-      "without --apply the command prints the plan and the expert directory is byte-identical afterwards; with --apply the expert's own skill and tool files, its soul.md and its compiled AGENTS.md/CLAUDE.md are the template's, the replaced files are kept under .genethub/team/reset/<time>/, memory.md survives unless --with-memory, and name, description, an added skill, posts, datas and temp are untouched; one expert can reset another by name or directory name and the other expert's files do not change; a second reset reports nothing to do; an unknown name exits 1 with the next step and changes nothing",
+      "without --apply the command prints the plan and the expert directory is byte-identical afterwards; with --apply the expert's own skill and tool files, its soul.md and its compiled AGENTS.md/CLAUDE.md are the template's, the replaced files are kept under .genethub/team/reset/<time>/, memory.md survives unless --with-memory, and name, description, an added skill, posts, datas and temp are untouched; the descriptor selects team-core instead of the pre-rename expert-core, and sync-identity moves a member descriptor that still names expert-core/expert-work onto team-core/team-work and builds; one expert can reset another by name or directory name and the other expert's files do not change; a second reset reports nothing to do; an unknown name exits 1 with the next step and changes nothing",
     catches: [
       "a reset that leaves the old soul.md behind",
       "a reset that runs without the user's confirmation step",
@@ -40,6 +43,7 @@ defineSpecialty(
       "an overwrite with no way back",
       "a new soul.md that never reaches the Agents' instruction files",
       "a reset of expert A that changes expert B",
+      "a team made before the Skill rename that no longer builds, or selects the same Skill twice, after upgrading",
     ],
     tags: ["core", "expert"],
     llm: { default: "none" },
@@ -67,13 +71,15 @@ defineSpecialty(
       const descriptor = JSON.parse(read(expert, "agent-space.genet.json"));
       descriptor.name = name;
       descriptor.description = `${name}的描述`;
-      descriptor.skills = [...descriptor.skills, "my-extra-skill"];
+      descriptor.skills = [...descriptor.skills, "expert-core", "my-extra-skill"];
       writeFileSync(join(expert, "agent-space.genet.json"), JSON.stringify(descriptor, null, 2));
       mkdirSync(join(expert, "skills", "my-extra-skill"), { recursive: true });
       writeFileSync(join(expert, "skills", "my-extra-skill", "SKILL.md"), "---\nname: my-extra-skill\ndescription: x\n---\n");
       writeFileSync(join(expert, "soul.md"), soul);
       writeFileSync(join(expert, "memory.md"), `${name}的记忆\n`);
-      writeFileSync(join(expert, "skills", "expert-core", "SKILL.md"), OLD_SKILL);
+      writeFileSync(join(expert, "skills", "team-core", "SKILL.md"), OLD_SKILL);
+      mkdirSync(join(expert, "skills", "expert-core"), { recursive: true });
+      writeFileSync(join(expert, "skills", "expert-core", "SKILL.md"), LEGACY_SKILL);
       mkdirSync(join(expert, "posts"), { recursive: true });
       writeFileSync(join(expert, "posts", "p.md"), "https://example.com/a/b\n");
       mkdirSync(join(expert, "datas", "g", "p"), { recursive: true });
@@ -96,7 +102,7 @@ defineSpecialty(
     // Without --apply: a plan, and nothing else.
     const before = digest(alpha);
     const plan = reset(alpha);
-    t.assertions.assert(plan.code === 0 && plan.out.includes("预演") && plan.out.includes("soul.md") && plan.out.includes("skills/expert-core/SKILL.md") && plan.out.includes("--apply"), `plan: ${plan.out} ${plan.err}`);
+    t.assertions.assert(plan.code === 0 && plan.out.includes("预演") && plan.out.includes("soul.md") && plan.out.includes("skills/team-core/SKILL.md") && plan.out.includes("--apply"), `plan: ${plan.out} ${plan.err}`);
     t.assertions.assert(!plan.out.includes("覆盖 memory.md"), "memory.md was listed without --with-memory");
     t.assertions.assert(digest(alpha) === before, "the plan changed the expert");
 
@@ -104,10 +110,10 @@ defineSpecialty(
     const done = reset(alpha, "--apply");
     t.assertions.assert(done.code === 0 && done.out.includes("已重置自己"), `apply: ${done.out} ${done.err}`);
     t.assertions.assert(read(alpha, "soul.md") === templateText("soul.md"), "soul.md was not reset");
-    t.assertions.assert(read(alpha, "skills/expert-core/SKILL.md") === templateText("skills/expert-core/SKILL.md"), "a product file was not restored");
+    t.assertions.assert(read(alpha, "skills/team-core/SKILL.md") === templateText("skills/team-core/SKILL.md"), "a product file was not restored");
     t.assertions.assert(read(alpha, "memory.md") === "小满的记忆\n", "memory.md was reset without --with-memory");
     const descriptor = JSON.parse(read(alpha, "agent-space.genet.json"));
-    t.assertions.assert(descriptor.name === "小满" && descriptor.description === "小满的描述" && descriptor.skills.includes("my-extra-skill") && descriptor.skills.includes("expert-core"), `descriptor: ${JSON.stringify(descriptor)}`);
+    t.assertions.assert(descriptor.name === "小满" && descriptor.description === "小满的描述" && descriptor.skills.includes("my-extra-skill") && descriptor.skills.includes("team-core") && !descriptor.skills.includes("expert-core"), `descriptor: ${JSON.stringify(descriptor)}`);
     t.assertions.assert(existsSync(join(alpha, "skills", "my-extra-skill", "SKILL.md")), "an added skill was removed");
     t.assertions.assert(read(alpha, "posts/p.md") === "https://example.com/a/b\n" && read(alpha, "datas/g/p/file.txt") === "keep\n" && read(alpha, "temp/261013/1405_x_abcd/f") === "keep\n", "posts, datas or temp changed");
     for (const file of ["front/AGENTS.md", "front/CLAUDE.md"]) {
@@ -115,7 +121,7 @@ defineSpecialty(
     }
     const backups = join(alpha, ".genethub", "team", "reset");
     const stamps = readdirSync(backups);
-    t.assertions.assert(stamps.length === 1 && read(join(backups, stamps[0]!), "soul.md").includes("只说方言") && read(join(backups, stamps[0]!), "skills/expert-core/SKILL.md") === OLD_SKILL, "the replaced files were not kept");
+    t.assertions.assert(stamps.length === 1 && read(join(backups, stamps[0]!), "soul.md").includes("只说方言") && read(join(backups, stamps[0]!), "skills/team-core/SKILL.md") === OLD_SKILL, "the replaced files were not kept");
     t.assertions.assert(!existsSync(join(backups, stamps[0]!, "memory.md")), "memory.md was backed up though it was not touched");
     t.assertions.assert(existsSync(join(alpha, ".genethub", "team", "reset.log")), "the reset left no log");
     const again = reset(alpha);
@@ -124,9 +130,9 @@ defineSpecialty(
     // Reset another expert, by name, with its memory; the one asking is not touched.
     const alphaNow = digest(alpha);
     const betaPlan = reset(alpha, "--expert", "beta");
-    t.assertions.assert(betaPlan.code === 0 && betaPlan.out.includes("专家 老二") && read(beta, "soul.md").includes("爱抬杠"), `plan for another: ${betaPlan.out} ${betaPlan.err}`);
-    const other = reset(alpha, "--expert", "老二", "--with-memory", "--apply");
-    t.assertions.assert(other.code === 0 && other.out.includes("专家 老二"), `another: ${other.out} ${other.err}`);
+    t.assertions.assert(betaPlan.code === 0 && betaPlan.out.includes("团队 老二") && read(beta, "soul.md").includes("爱抬杠"), `plan for another: ${betaPlan.out} ${betaPlan.err}`);
+    const other = reset(alpha, "--team", "老二", "--with-memory", "--apply");
+    t.assertions.assert(other.code === 0 && other.out.includes("团队 老二"), `another: ${other.out} ${other.err}`);
     t.assertions.assert(read(beta, "soul.md") === templateText("soul.md") && read(beta, "memory.md") === templateText("memory.md"), "the other expert's soul or memory was not reset");
     t.assertions.assert(!read(beta, "front/AGENTS.md").includes("爱抬杠") && JSON.parse(read(beta, "agent-space.genet.json")).name === "老二", "the other expert's instructions or name");
     t.assertions.assert(read(alpha, "soul.md") === templateText("soul.md") && digest(alpha) === alphaNow, "resetting another expert changed the one that asked");
@@ -137,9 +143,19 @@ defineSpecialty(
     writeFileSync(join(data, "spaces", "plain", "agent-space.genet.json"), JSON.stringify({ name: "不是专家", tags: ["other"] }));
     const unknown = digest(join(data, "spaces"));
     for (const name of ["没有这位", "不是专家"]) {
-      const missing = reset(alpha, "--expert", name, "--apply");
-      t.assertions.assert(missing.code === 1 && missing.err.includes("找不到专家") && missing.err.includes("下一步"), `unknown ${name}: ${missing.code} ${missing.err}`);
+      const missing = reset(alpha, "--team", name, "--apply");
+      t.assertions.assert(missing.code === 1 && missing.err.includes("找不到团队") && missing.err.includes("下一步"), `unknown ${name}: ${missing.code} ${missing.err}`);
     }
     t.assertions.assert(digest(join(data, "spaces")) === unknown, "a refused reset changed something");
+
+    // A member added before the rename (as `employee add` wrote it) still names the old Skills; the identity sync the
+    // timer runs moves it onto the renamed ones, and the team builds again.
+    const member = join(beta, "spaces", "leader", "agent-space.genet.json");
+    const memberDescriptor = JSON.parse(read(join(beta, "spaces", "leader"), "agent-space.genet.json"));
+    memberDescriptor.skills = ["expert-core", "expert-work"];
+    writeFileSync(member, JSON.stringify(memberDescriptor, null, 2));
+    const synced = spawnSync("python3", ["tools/team.py", "sync-identity"], { cwd: beta, env, encoding: "utf8" });
+    t.assertions.assert(synced.status === 0 && synced.stdout.trim() === "rebuilt", `sync-identity: ${synced.stdout} ${synced.stderr}`);
+    t.assertions.assert(JSON.stringify(JSON.parse(readFileSync(member, "utf8")).skills) === JSON.stringify(["team-core", "team-work"]), `member skills: ${readFileSync(member, "utf8")}`);
   },
 );

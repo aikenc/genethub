@@ -20,7 +20,7 @@ export async function openTeam(t: CaseContext, name = "review-team", extraAgents
   const descriptor = path.join(root, "agent-space.genet.json");
   writeFileSync(descriptor, JSON.stringify({ ...JSON.parse(readFileSync(descriptor, "utf8")), name }));
   // Drive timer actions explicitly; this is an ordinary user-owned hook setting.
-  const hook = path.join(root, "skills/expert-front/hooks/timer.genet.json");
+  const hook = path.join(root, "skills/team-front/hooks/timer.genet.json");
   writeFileSync(hook, JSON.stringify({ ...JSON.parse(readFileSync(hook, "utf8")), enabled: false }));
   mkdirSync(path.join(root, ".genethub"), { recursive: true });
   const env: NodeJS.ProcessEnv = { ...opened.daemon.env, GENEHUB_CLI: opened.daemon.genet, TEAM_AGENT: "ctl-normal" };

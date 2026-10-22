@@ -1,6 +1,6 @@
 # 定制与重写团队
 
-**内置团队是样板，不是平台内置能力。** 平台只提供 Space、会话、定时器、CLI 这些原语；
+**内置团队是样板，不是平台内置能力。** 平台只提供 Space、会话、定时器、CLI 这些原语（见 [primitives.md](primitives.md)）；
 `genehub/references/team-template/` 是一份可直接复制、改写、甚至整体替换的样板。团队一旦建出来，
 就是用户自己磁盘上的一棵 Space 树加一个 git 仓库，不属于产品代码。
 
@@ -10,7 +10,7 @@
 |---|---|---|
 | 团队目标与铁律 | `soul.md`、`memory.md`（全局经验，≤30 行） | `team.py sync-identity` |
 | 岗位职责与风格 | `front/role.md`、`front/style.md`、`spaces/<岗位>/role.md`、`style.md`、`index.md` | 同上 |
-| 团队自己的 Skill | `skills/local-*`，或任意新增目录；`skills/expert-*` 也可改 | 同上；新会话读取 |
+| 团队自己的 Skill | `skills/local-*`，或任意新增目录；样板的 `skills/team-*` 也可改 | 同上；新会话读取 |
 | 派单与看板脚本 | `tools/team.py`、`tools/pm_board_server.py` | 直接运行，无编译 |
 | 成员与层级 | `team.py employee add` / `retire`；或手写 `spaces/<名>/` 并改 `agent-space.genet.json` 的 `children.scanDepth` | 前者自动建子空间；后者要 build |
 | 生成物 | `AGENTS.md`、`.agents/skills/*`、`.genethub/hooks/*` | 不要手改；`spacebuilder verify` 会报 `SB017` |
@@ -39,16 +39,17 @@
    和 `skills/`，再 `sync-identity` + `snapshot`。派单、看板、模板升级链都还在。
 2. **只要一棵自己的 Space 树**：自己写 `agent-space.genet.json` 与 Skill，放在
    `<数据目录>/spaces/<名字>/`，用 `spacebuilder.py build <目录>` 生成 Agent 实际读的文件。
-   这时没有 `team.py`，派单、看板、模板升级要自己实现或者不要。
+   这时没有 `team.py`，派单、看板、模板升级要自己实现或者不要；能依赖的平台能力见 [primitives.md](primitives.md)，
    字段与构建规则见内置 Skill 目录下的 `genehub/references/spacebuilder.md`。
 
-daemon 从 `<数据目录>/spaces/` 发现 Space，两条路的产物都放在那里才会被注册。
+daemon 从 `<数据目录>/spaces/` 发现 Space，两条路的产物都放在那里才会被注册。团队本身是一个 git 仓库，可以分享：
+别人 clone 到自己的 `<数据目录>/spaces/<名字>/` 下运行 `team.py sync-identity`，就成了他自己的团队。
 
 ## 与平台模板的关系
 
 - 团队初始化时把模板记进 `platform` 分支；`team.py drift` 看团队自定义与模板的差异。
-- 平台模板更新不会自动覆盖团队，走 `genehub/references/team-template/skills/expert-reflect/references/upgrade.md`
-  的三方合并。
+- 平台模板更新不会自动覆盖团队：定时任务给反思会话留升级留言，按
+  `genehub/references/team-template/skills/team-reflect/references/upgrade.md` 三方合并。
 - `team.py reset` 会覆盖平台文件与 `soul.md`，只在用户明确要求时用，并且先看预演。
 
 ## 不要改的

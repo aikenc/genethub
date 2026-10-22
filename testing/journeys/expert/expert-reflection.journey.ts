@@ -62,7 +62,7 @@ defineJourney(
     cpSync(path.join(t.openRoot, TEMPLATE), alice, { recursive: true });
     const descriptorPath = path.join(alice, "agent-space.genet.json");
     writeFileSync(descriptorPath, JSON.stringify({ ...JSON.parse(readFileSync(descriptorPath, "utf8")), name: "alice" }));
-    const hookPath = path.join(alice, "skills/expert-front/hooks/timer.genet.json");
+    const hookPath = path.join(alice, "skills/team-front/hooks/timer.genet.json");
     writeFileSync(hookPath, JSON.stringify({ ...JSON.parse(readFileSync(hookPath, "utf8")), every: "1s" }));
     mkdirSync(path.join(alice, ".genethub"), { recursive: true });
     writeFileSync(
@@ -146,7 +146,7 @@ defineJourney(
       await until("the first reflect session to answer", async () => (await snapshot(first.id)).summary.status === "idle" && (await snapshot(first.id)).items.some((item) => item.type === "assistantMessage"));
       const prompt = (await snapshot(first.id)).items.find((item) => item.type === "userMessage")!.text ?? "";
       const briefingPath = /简报: (\S+\.md)/.exec(prompt)?.[1];
-      t.assertions.assert(prompt.includes("用途: reflect") && prompt.includes("按 expert-reflect 办") && briefingPath && existsSync(briefingPath), `first message: ${prompt.slice(0, 400)}`);
+      t.assertions.assert(prompt.includes("用途: reflect") && prompt.includes("按 team-reflect 办") && briefingPath && existsSync(briefingPath), `first message: ${prompt.slice(0, 400)}`);
       t.assertions.assert(readFileSync(briefingPath!, "utf8").includes("自上次反思以来用户发起了 3 轮对话"), "the briefing does not say why");
       const results = async () => (await snapshot(front)).items.filter((item) => isSystem(item) && (item.text ?? "").includes("用途: result"));
       const done = path.join(alice, ".genethub/team/done");
@@ -186,7 +186,7 @@ defineJourney(
       const branches = spawnSync("git", ["-C", alice, "branch", "--format=%(refname:short)"], { encoding: "utf8" }).stdout.trim().split("\n").sort();
       t.assertions.assert(existsSync(path.join(alice, ".git")) && branches.includes("main"), `the expert root is not a repository on main: ${branches}`);
       const tracked = spawnSync("git", ["-C", alice, "ls-files"], { encoding: "utf8" }).stdout;
-      t.assertions.assert(tracked.includes("skills/expert-reflect/SKILL.md") && !tracked.includes(".genethub/"), "the repository tracks the wrong files");
+      t.assertions.assert(tracked.includes("skills/team-reflect/SKILL.md") && !tracked.includes(".genethub/"), "the repository tracks the wrong files");
     } finally {
       opened.client.close();
       opened.daemon.stop();

@@ -1,32 +1,32 @@
 #!/usr/bin/env python3
-"""team.py: how one expert's sessions talk to each other. Everything it knows is in files and in `genet`.
+"""team.py: how one team's sessions talk to each other. Everything it knows is in files and in `genet`.
 
   send --to <session id> [--kind TEXT] TEXT                    queue a system notice to a session
   spawn --kind research|work --desc TEXT [--dir PATH] [--tier T | --model ID] [--media image|video] TASK
                                                                start a background session and watch it
-  note [--kind K] [--quote TEXT] [--context TEXT] [--expert NAME] [TEXT]
+  note [--kind K] [--quote TEXT] [--context TEXT] [--team NAME] [TEXT]
                                                                leave a note for the reflect session: session, turn and ref are filled in
   notes [ls [--all]] | notes done ID... [--result TEXT]        read / close the notes
   tell-user TEXT                                               ask the front to pass a message to the person, as it is
   reflect now [--tier T | --model ID] TEXT                     start a reflect session now, whatever the thresholds say
-  snapshot [-m TEXT]                                           commit what changed in the expert's own files (git at the root)
+  snapshot [-m TEXT]                                           commit what changed in the team's own files (git at the root)
   drift                                                        what differs from the platform's template (git diff against `platform`)
-  directory [--expert NAME]                                    list experts, what they keep, and their live sessions
+  directory [--team NAME]                                      list teams, what they keep, and their live sessions
   mount PATH | unmount PATH                                    claim / release a business directory
-  path datas|temp|root [GROUP/NAME | --from GIT_URL] [--create]   absolute path under the expert's datas/ or temp/, or the root itself
+  path datas|temp|root [GROUP/NAME | --from GIT_URL] [--create]   absolute path under the team's datas/ or temp/, or the root itself
   datas ls                                                     what is kept under datas/ (and who is writing it)
   temp new SLUG --purpose TEXT | ls | rm TARGET | clean        scratch space: temp/YYMMDD/hhmm_slug_hash4
-  reset [--expert NAME] [--with-memory] [--apply]              ONLY when the user asks: restore the template (soul.md included); plan first
+  reset [--team NAME] [--with-memory] [--apply]                ONLY when the user asks: restore the template (soul.md included); plan first
   sync-identity                                                recompile soul.md into the Agents' own instruction files
   hook                                                         run by the daemon's timer; not for Agents
 
 Failure modes (each error says what happened, the state now, and what to do next):
-  send   target missing / archived      -> error text, nothing queued           -> `directory`; to ask another expert use `note --expert`
+  send   target missing / archived      -> error text, nothing queued           -> `directory`; to ask another team use `note --team`
   send   target queue full (limit)      -> error text, nothing queued           -> wait, or send to another session
   spawn  writer lock held by a live one -> error text, no session created       -> wait for it, or pick another directory
   note   field missing                  -> the note is kept, a hint says what to add -> add it next time; the reflect session can still follow session/turn/ref
   note   no genet / no session          -> the note is kept without session/turn  -> run it inside a session
-  reflect now, no reflect Space         -> error text, nothing created            -> the expert predates reflect; `reset` (only if the user asks)
+  reflect now, no reflect Space         -> error text, nothing created            -> the team predates reflect; `reset` (only if the user asks)
   reflect now, one already running      -> the request is queued into it          -> wait for its result
   git    `git` not installed            -> reported to the front once, files untouched -> install git; the next tick initialises the repository
   hook   `genet` fails or session gone  -> reported to the front once, record kept or moved to done/
@@ -193,7 +193,7 @@ def find_root(start=None):
         return env_root
     if script_root:
         return script_root
-    raise ExpertError("当前目录不在任何专家里", "没有执行任何操作", "在专家的目录（或它的 research、work、reflect 子目录）里运行")
+    raise ExpertError("当前目录不在任何团队里", "没有执行任何操作", "在团队的目录（或它的 spaces/<岗位> 子目录）里运行")
 
 
 def open_env(root):
@@ -533,7 +533,7 @@ def choose(root, model_key, tier=None, model=None, media=None):
     env = open_env(root)
     if tier:
         if tier not in TIERS:
-            raise ExpertError("档位 %r 不是 Ultra / Max / Pro / Flash / Mini" % tier, "没有创建任何会话", "用 `genet agent list --routes` 看可用的档位")
+            raise ExpertError("档位 %r 不是 Ultra / Max / Pro / Flash / Mini" % tier, "没有创建任何会话", "用 `\"$GENEHUB_CLI\" agent list --routes` 看可用的档位")
         tags = [tier] + ([MEDIA_TAGS[media]] if media else [])
         args = ["--tag", tier] + (["--media", media] if media else [])
         if not routes(*sum((["--tag", tag] for tag in tags if tag in TIERS), []), *(["--media", media] if media else [])):
@@ -909,9 +909,9 @@ def resolve_send_target(root, target_spec, kind, text, sender):
             target_root = find_expert(root, exp_name)
         except ExpertError:
             raise ExpertError(
-                "目标 %r 既不是会话 id，也不是已知专家名" % target_spec,
+                "目标 %r 既不是会话 id，也不是已知团队名" % target_spec,
                 "没有排入任何消息",
-                "用 `directory` 查会话 id 或专家名；支持直接写 `s_xxx`、`专家名`、团队岗位名（如 `leader`、`qa`）或 `专家名:岗位名`",
+                "用 `directory` 查会话 id 或团队名；支持直接写 `s_xxx`、`团队名`、团队岗位名（如 `leader`、`qa`）或 `团队名:岗位名`",
             )
     _, target_mine = me(target_root)
     spaces = target_mine.get("spaces") or {}
@@ -941,14 +941,14 @@ def resolve_send_target(root, target_spec, kind, text, sender):
                 if front:
                     return front, False, target_root, "root"
     else:
-        raise ExpertError("未知的目标角色 %r" % role_spec, "没有排入任何消息", "支持 `<专家名>`、`<专家名>:<角色名>`（如 work、research、leader、qa）或 `<专家名>:default`")
+        raise ExpertError("未知的目标角色 %r" % role_spec, "没有排入任何消息", "支持 `<团队名>`、`<团队名>:<角色名>`（如 work、research、leader、qa）或 `<团队名>:default`")
     workspace_id = spaces.get(role)
     if not workspace_id:
-        raise ExpertError("专家 %s 没有 %s 空间" % (exp_name, role), "没有创建或发送消息", "检查该专家的 spaces/%s/agent-space.genet.json" % role)
+        raise ExpertError("团队 %s 没有 %s 空间" % (exp_name, role), "没有创建或发送消息", "检查该团队的 spaces/%s/agent-space.genet.json" % role)
     role_env = open_env(os.path.join(target_root, "spaces", role))
     wt_dir = role_env.get("WORKTREE_DIR")
     wt_hint = ("，专属工位目录 WORKTREE_DIR: %s" % wt_dir) if wt_dir else ""
-    prompt = "[系统说明：本会话由 %s 跨专家/跨岗位发起（用途: %s，专家根目录: %s，数据仓根目录: %s%s）。完成后直接在本会话输出最终结论即可，系统会自动将你的最终回复转交发起方。]\n\n%s" % (sender, kind, target_root, datas_root(target_root), wt_hint, text)
+    prompt = "[系统说明：本会话由 %s 跨团队/跨岗位发起（用途: %s，团队根目录: %s，数据仓根目录: %s%s）。完成后直接在本会话输出最终结论即可，系统会自动将你的最终回复转交发起方。]\n\n%s" % (sender, kind, target_root, datas_root(target_root), wt_hint, text)
     model_key = "TEAM_MODEL_RESEARCH" if role == "research" else "TEAM_MODEL_WORK"
     session_id, _ = start(
         target_root,
@@ -1135,11 +1135,11 @@ def cmd_spawn(args):
         role = "leader"
         workspace_id = mine["spaces"].get(role)
     if not workspace_id:
-        raise ExpertError("专家 %s 没有 %s 空间" % (name, role), "没有创建会话", "确认专家目录里有 spaces/%s/agent-space.genet.json" % role)
+        raise ExpertError("团队 %s 没有 %s 空间" % (name, role), "没有创建会话", "确认团队目录里有 spaces/%s/agent-space.genet.json" % role)
     requester = os.environ.get("GENEHUB_SESSION_ID")
     if requester and not getattr(args, "expert", None):
         # When an external session (such as `admin` bootstrapping a team) runs
-        # `<team>/tools/team.py spawn --space leader` directly without `--expert`,
+        # `<team>/tools/team.py spawn --space leader` directly without `--team`,
         # isolate the completion callback so `<team>:hook` reports to `<team>`'s
         # own front session instead of waking `admin` across space boundaries.
         if not same_expert_session(target_root, requester, mine.get("spaces")):
@@ -1194,9 +1194,9 @@ def cmd_spawn(args):
     if spawned_wt:
         exec_guidance = "你是并发派出的叶子 Worker 会话（独立子工位: %s，分支: %s），请直接在本会话内完成编码与自测并 git commit 到本分支（严禁再递归 spawn 子会话），完成后直接输出分支名、commit SHA 与验证结果即可，系统会自动回传给上级。" % (spawned_wt, spawned_branch)
     elif is_team_root(target_root) and role not in ("research", "reflect", "team-reflect", "leader"):
-        exec_guidance = "你是团队 `%s` 管线负责人（专家根目录: %s，数据仓根目录: %s%s）。单模块任务请直接在工位内完成编码、自测并 commit；若需拆分为多子模块并发推进，可作为小组长连续调用 `team.py spawn --space %s --kind work --worktree auto --desc \"子模块\" \"任务\"` 派生多名 Worker（及 `--space research --kind research`）后立即结束本轮，系统收齐全部子任务后会唤醒你合并各 `worker/*` 分支。最终直接在本会话输出结论即可，无需手动调用 team.py send 回传。" % (role, target_root, datas_root(target_root), wt_hint, role)
+        exec_guidance = "你是团队 `%s` 管线负责人（团队根目录: %s，数据仓根目录: %s%s）。单模块任务请直接在工位内完成编码、自测并 commit；若需拆分为多子模块并发推进，可作为小组长连续调用 `team.py spawn --space %s --kind work --worktree auto --desc \"子模块\" \"任务\"` 派生多名 Worker（及 `--space research --kind research`）后立即结束本轮，系统收齐全部子任务后会唤醒你合并各 `worker/*` 分支。最终直接在本会话输出结论即可，无需手动调用 team.py send 回传。" % (role, target_root, datas_root(target_root), wt_hint, role)
     else:
-        exec_guidance = "你本身就是被派出的后台 %s 会话（专家根目录: %s，数据仓根目录: %s%s），请直接在本会话内执行任务（不要再递归 spawn 同类会话），完成后直接输出最终结论即可，系统会自动将你的最终回复转交发起方，无需再手动调用 team.py send 回传。" % (role, target_root, datas_root(target_root), wt_hint)
+        exec_guidance = "你本身就是被派出的后台 %s 会话（团队根目录: %s，数据仓根目录: %s%s），请直接在本会话内执行任务（不要再递归 spawn 同类会话），完成后直接输出最终结论即可，系统会自动将你的最终回复转交发起方，无需再手动调用 team.py send 回传。" % (role, target_root, datas_root(target_root), wt_hint)
     task = "[系统说明：本会话由 %s 发起（用途: %s）。%s]\n\n%s" % (
         requester or name,
         role,
@@ -1256,7 +1256,7 @@ def refresh_live_status(root, force=False):
     ]
     for role, wid in sorted((mine.get("spaces") or {}).items()):
         role_dir = root if role == "root" else os.path.join(root, "spaces", role)
-        wt = open_env(role_dir).get("WORKTREE_DIR") or ("主入口" if role == "root" else "未绑定工位（待岗）")
+        wt = open_env(role_dir).get("WORKTREE_DIR") or ("前台" if role == "root" else "未绑定工位（待岗）")
         live = live_sessions(wid)
         if not live:
             lines.append("- **%s** (工位: `%s`): 暂无会话" % (role, wt))
@@ -1331,7 +1331,7 @@ def _worktree_folder_entry(space_dir, wt_real, folders):
 def scaffold_role_space(root, role, desc, style_text, skills=None, worktree_dir=None):
     role_dir = os.path.join(root, "spaces", role)
     os.makedirs(role_dir, exist_ok=True)
-    skills_list = skills or (["expert-core", "expert-reflect"] if role in ("reflect", "team-reflect") else (["expert-core", "expert-research"] if role == "research" else ["expert-core", "expert-work"]))
+    skills_list = skills or (["team-core", "team-reflect"] if role in ("reflect", "team-reflect") else (["team-core", "team-research"] if role == "research" else ["team-core", "team-work"]))
     folders = [{"path": "."}, {"path": "../../datas"}, {"path": "../../temp"}]
     if worktree_dir and os.path.isdir(worktree_dir):
         entry = _worktree_folder_entry(role_dir, os.path.realpath(worktree_dir), folders)
@@ -1351,7 +1351,7 @@ def scaffold_role_space(root, role, desc, style_text, skills=None, worktree_dir=
     write_json(os.path.join(role_dir, ROOT_DESCRIPTOR), manifest)
     style_path = os.path.join(role_dir, "style.md")
     if style_text or not os.path.isfile(style_path):
-        body = style_text or ("# %s 角色规范\n\n我是团队的 `%s`（%s）。动手前必读 `expert-core` 与对应技能，严格在分配的职责与工位目录内交付。\n" % (role, role, desc))
+        body = style_text or ("# %s 角色规范\n\n我是团队的 `%s`（%s）。动手前必读 `team-core` 与对应技能，严格在分配的职责与工位目录内交付。\n" % (role, role, desc))
         with open(style_path, "w", encoding="utf-8") as handle:
             handle.write(body.rstrip() + "\n")
         with open(os.path.join(role_dir, "role.md"), "w", encoding="utf-8") as handle:
@@ -1389,8 +1389,8 @@ def setup_team_structure(root, team_name, desc, members=None, final_root=None):
     write_open_env(os.path.join(root, "front"), front_env)
     if not os.path.isdir(os.path.join(root, "spaces", "leader")):
         front_style = (
-            "# 风格与铁律（巡查 / 接待台 Front）\n\n"
-            "- 我是 `%s` 团队的**巡查（主入口接待台）**，唯一直接面向人类用户的窗口。\n"
+            "# 风格与铁律（前台）\n\n"
+            "- 我是 `%s` 团队的**前台**，唯一直接面向人类用户的窗口。\n"
             "- **用户零命令/零内部结构负担**：用户只会用简单自然语言表达“参考什么项目、下个版本想要什么内容”、“现在进展怎么样”、“刚玩了下哪里不够爽”。我严禁要求用户知道 `.pm/` 目录结构、里程碑文件名或 `team.py` 命令。\n"
             "- **自动驱动组长（首次启动 vs 中途反馈）**：收到用户的版本诉求或试玩修改意见时，若组长 `leader` 尚无会话，立即用 `team.py spawn --space leader --kind work --desc \"评估里程碑规划与推进版本交付\" \"<用户原话与目标>\"` 启动组长；若组长已在岗，立即用 `team.py send --to leader --kind human \"<用户原话与要求>\"` 投递给组长（0 打断写入收件箱并归档 `.pm/guidance/human/`）。\n"
             "- **常驻团队看板服务与秒回汇报**：用户查进度或要看板时，调用 `team.py board refresh`，基于实时数据直接给出清晰零黑话汇报，并固定附上**常驻实时看板 `[📊 实时团队看板](datas/board/index.html)`** 与 **`[🎮 最新可玩版本](datas/releases/index.html)`**（及当前版本试玩入口）。\n"
@@ -1406,7 +1406,7 @@ def setup_team_structure(root, team_name, desc, members=None, final_root=None):
             "# 研发组长（Leader）角色规范\n\n"
             "- 我是团队的**后台研发组长（Leader）**。用户只提供参考项目与下个版本想要的核心内容，**里程碑规划与版本内容可达性评估由我全权负责**。\n"
             "- **纯异步回合接力自驱闭环（严禁调用 sleep 或同步阻塞等待）**：① 收到用户诉求后，先盘点当前代码基线，评估版本内容可达性，自主编写/更新 `<团队根>/.pm/trunk/MILESTONE_PLAN.md`（用 `- [ ]` 列出待交付版本与模块，全部完成时标 `- [x]`）与 `milestone-vX.Y.md` 契约 → ② 连续调用 `team.py spawn --space <组员> --kind work` 并发派单到各组员（或小组长）独立 `worktrees/<slot>` 工位后**立即结束本轮**（系统收齐全部子任务结果后会自动唤醒我，若中途异常中断看门狗也会自动自愈唤醒） → ③ 收到组员批次汇总回执后，在集成工位用 `git merge-tree` 预检无冲突后合入 `main` → ④ 派 `qa` 执行无头浏览器实操截图与数值断言验收（若有数值对比诉求同时派 `research` 产出报告并 `publish report`）后结束本轮 → ⑤ 收到 QA PASS 回执后调用 `team.py publish release <构建目录> --name vX.Y` 发布可玩版本、勾选 `MILESTONE_PLAN.md` 并同步刷新常驻团队看板 `datas/board/index.html`。\n",
-            skills=["expert-core", "expert-work"],
+            skills=["team-core", "team-work"],
         )
         scaffold_role_space(
             root,
@@ -1415,7 +1415,7 @@ def setup_team_structure(root, team_name, desc, members=None, final_root=None):
             "# QA 验收测试专家角色规范\n\n"
             "- 我是团队的 **QA 验收专家**，只认真实运行证据：必须用 Playwright/无头浏览器加载真实页面、模拟按键/点击操作、捕获 console/pageerror 零报错、保存截图并跑数值仿真断言。\n"
             "- 验收报告与截图归档后，通过 `team.py publish report` 发布至 `datas/reports/`，向组长返回明确 PASS/FAIL 与截图链接。\n",
-            skills=["expert-core", "expert-work"],
+            skills=["team-core", "team-work"],
         )
         scaffold_role_space(
             root,
@@ -1423,15 +1423,15 @@ def setup_team_structure(root, team_name, desc, members=None, final_root=None):
             "数值与玩法研究专家（战斗公式推演、关卡节奏设计、竞品与机制调研）",
             "# 数值与玩法研究专家角色规范\n\n"
             "- 我是团队的**数值与玩法研究专家**，负责伤害/成长曲线推演、多套平衡参数仿真对比与机制设计，只读业务仓，产出写进 `temp/` 或通过 `team.py publish report` 发布到 `datas/reports/`。\n",
-            skills=["expert-core", "expert-research"],
+            skills=["team-core", "team-research"],
         )
         scaffold_role_space(
             root,
             "team-reflect",
-            "团队自省与进化专家（跨角色会话复盘、二级记忆提炼、Skill 与流程持续调优）",
-            "# 团队自省专家（TeamReflect）角色规范\n\n"
-            "- 我是团队的 **TeamReflect 自省专家**，扫描全队（`front`、`leader`、各管线组员、`qa`、`research`）的增量会话与留言，执行**二级记忆提炼**：先把各岗位经验与 `ghref` 证据指针写入 `spaces/<角色>/index.md`，再将跨角色高频铁律提炼入根 `memory.md`（≤30 行），必要时升级团队 Skill/脚本并 `snapshot` 提交。\n",
-            skills=["expert-core", "expert-reflect"],
+            "团队反思与进化（跨角色会话复盘、二级记忆提炼、Skill 与流程持续调优）",
+            "# 团队反思岗位角色规范\n\n"
+            "- 我是团队的 **反思岗位**，扫描全队（`front`、`leader`、各管线组员、`qa`、`research`）的增量会话与留言，执行**二级记忆提炼**：先把各岗位经验与 `ghref` 证据指针写入 `spaces/<角色>/index.md`，再将跨角色高频铁律提炼入根 `memory.md`（≤30 行），必要时升级团队 Skill/脚本并 `snapshot` 提交。\n",
+            skills=["team-core", "team-reflect"],
         )
     else:
         for base_role in ("leader", "qa", "research", "team-reflect"):
@@ -1453,7 +1453,7 @@ def setup_team_structure(root, team_name, desc, members=None, final_root=None):
                 "- 我是团队的 `%s`（%s）。我只在自己绑定的专属 `WORKTREE_DIR` 工位分支上修改或集成负责模块，严禁跨模块污染或直接改主仓 `main`。\n"
                 "- **单模块直做 vs 多级并发拆解**：聚焦模块直接在本工位编码、自测并 `git commit`；复杂模块可作为小组长连续调用 `team.py spawn --space %s --kind work --worktree auto --desc \"子模块\" \"任务\"` 并发派生多名独立子工位 Worker（及 `--space research --kind research`）后立即结束本轮，待系统收齐全部子任务回执唤醒我后再合入本工位分支。\n"
                 "- 完成后直接在本会话输出分支名、commit SHA、改动摘要与验证结果，系统自动回传给研发组长。\n" % (m_name, m_name, m_desc, m_name),
-                skills=["expert-core", "expert-work"],
+                skills=["team-core", "team-work"],
             )
 
 
@@ -1512,17 +1512,17 @@ def cmd_init(args):
     base = os.path.realpath(args.spaces_dir) if args.spaces_dir else os.path.dirname(os.path.realpath(root))
     new_name = (args.name or "").strip()
     if not new_name or new_name in (".", "..", "expert") or "/" in new_name or "\\" in new_name or new_name.startswith("."):
-        raise ExpertError("专家名 %r 不合法" % new_name, "没有创建任何目录", "使用简洁名字（如 game-lead、qa-expert），不要叫 expert 或包含路径分隔符")
+        raise ExpertError("团队名 %r 不合法" % new_name, "没有创建任何目录", "使用简洁名字（如 taixu-team、novel-studio），不要叫 expert 或包含路径分隔符")
     target = os.path.join(base, new_name)
     if os.path.exists(target):
-        raise ExpertError("目标专家目录已存在: %s" % target, "没有改动现有目录", "换一个名字，或直接在该专家目录里修改 soul.md")
+        raise ExpertError("目标团队目录已存在: %s" % target, "没有改动现有目录", "换一个名字，或直接在该团队目录里修改 soul.md")
     if not getattr(args, "force", False):
         conflict = find_existing_project_conflict(base, new_name, getattr(args, "desc", ""), getattr(args, "soul", ""))
         if conflict:
             existing_name, existing_dir, reason = conflict
             raise ExpertError(
-                "已存在同项目的专家/团队 %s (%s，命中原因：%s)" % (existing_name, existing_dir, reason),
-                "没有重复创建专家目录",
+                "已存在同项目的团队 %s (%s，命中原因：%s)" % (existing_name, existing_dir, reason),
+                "没有重复创建团队目录",
                 "请直接复用现有团队 %s（在 %s 下操作或用 team.py send --to %s）；若确需另建独立副本请显式加 --force" % (existing_name, existing_dir, existing_name),
             )
     # Every thing a person builds is a team: a 1+0 team (front + leader + qa + research + team-reflect)
@@ -1584,8 +1584,8 @@ def cmd_init(args):
             if spaces_map:
                 opened_info = "\n已打开空间: " + ", ".join("%s=%s" % (k, v) for k, v in sorted(spaces_map.items()))
         except ExpertError as err:
-            opened_info = "\n注意: 自动打开空间未完成（%s），可稍后运行 genet space open %s" % (err.what, target)
-    print("已创建并初始化专家 %s: %s%s" % (new_name, target, opened_info))
+            opened_info = "\n注意: 自动打开空间未完成（%s），可稍后运行 \"$GENEHUB_CLI\" space open %s" % (err.what, target)
+    print("已创建并初始化团队 %s: %s%s" % (new_name, target, opened_info))
 
 
 def _unbind_space_worktree(root, space_name):
@@ -1948,7 +1948,7 @@ def cmd_board(args):
 def cmd_models(args):
     root = find_root()
     name, mine = me(root)
-    print("专家/团队: %s (%s)" % (name, root))
+    print("团队: %s (%s)" % (name, root))
     for role in sorted((mine.get("spaces") or {}).keys()):
         role_dir = os.path.join(root, "front") if role == "root" and os.path.isdir(os.path.join(root, "front")) else (root if role == "root" else os.path.join(root, "spaces", role))
         env = dict(open_env(root))
@@ -1980,7 +1980,7 @@ def cmd_directory(args):
             for item in sorted(live_sessions(workspace_id), key=lambda value: -value.get("updatedAtMs", 0)):
                 labels = ",".join(item.get("labels") or [])
                 lines.append("%s/%s %s [%s] %s %s" % (name, role, item["id"], item.get("status"), labels, item.get("description") or item.get("title") or ""))
-    print("\n".join(lines) if lines else "没有专家")
+    print("\n".join(lines) if lines else "没有团队")
 
 
 def project_dirs(env):
@@ -2027,7 +2027,7 @@ def cmd_mount(args):
         holder = read_json(marker) or {}
         stale = not os.path.isdir(holder.get("expertDir", "")) or path not in project_dirs(open_env(holder.get("expertDir", "")))
         if holder.get("expertDir") != root and not stale:
-            raise ExpertError("%s 已由专家 %s 负责" % (path, holder.get("expert")), "没有改动任何东西", "让那个专家 unmount，或换一个目录")
+            raise ExpertError("%s 已由团队 %s 负责" % (path, holder.get("expert")), "没有改动任何东西", "让那个团队 unmount，或换一个目录")
         write_json(marker, {"expert": name, "expertDir": root, "claimedAtMs": now_ms()})
     env = open_env(root)
     dirs = project_dirs(env)
@@ -2293,6 +2293,7 @@ def cmd_temp(args):
 
 RESET_BACKUPS = "reset"
 ROOT_DESCRIPTOR = "agent-space.genet.json"
+LEGACY_SKILLS = {"expert-" + part: "team-" + part for part in ("core", "front", "work", "research", "reflect", "admin")}
 
 
 def is_team_root(root):
@@ -2347,7 +2348,7 @@ def template_dir(root, team=None):
             cur = parent
     path = os.path.realpath(os.path.join(root, "..", "..", "builtin-skills", "genehub", "references", tpl_name))
     if not os.path.isdir(path):
-        raise ExpertError("找不到专家模板: %s" % path, "没有改动任何文件", "把模板路径写进环境变量 TEAM_TEMPLATE，或确认 GeneHub 的内置技能目录完整")
+        raise ExpertError("找不到团队模板: %s" % path, "没有改动任何文件", "把模板路径写进环境变量 TEAM_TEMPLATE，或确认 GeneHub 的内置技能目录完整")
     return path
 
 
@@ -2380,6 +2381,9 @@ def merge_descriptor(template, existing):
             if key == "tags":
                 # `expert` is the old name of `team`; keeping both makes every reset look like drift.
                 extra = [item for item in extra if not (item == "expert" and "team" in merged[key])]
+            if key == "skills":
+                # The template's own Skills under their old names: the template already selects them.
+                extra = [item for item in extra if LEGACY_SKILLS.get(item) not in merged[key]]
             merged[key] += extra
     for key, value in (existing or {}).items():
         merged.setdefault(key, value)
@@ -2405,9 +2409,9 @@ def find_expert(root, name):
         if known:
             matches.add(os.path.realpath(known["root"]))
     if not matches:
-        raise ExpertError("找不到专家 %s" % name, "没有改动任何文件", "用 `team.py directory` 看这台机器上有哪些专家，名字照抄")
+        raise ExpertError("找不到团队 %s" % name, "没有改动任何文件", "用 `team.py directory` 看这台机器上有哪些团队，名字照抄")
     if len(matches) > 1:
-        raise ExpertError("%s 对应多个专家目录: %s" % (name, "、".join(sorted(matches))), "没有改动任何文件", "改用目录名，或先让用户改掉重名")
+        raise ExpertError("%s 对应多个团队目录: %s" % (name, "、".join(sorted(matches))), "没有改动任何文件", "改用目录名，或先让用户改掉重名")
     return matches.pop()
 
 
@@ -2463,7 +2467,7 @@ def cmd_reset(args):
     target = find_expert(root, args.expert)
     template = template_dir(target)
     plan, _ = reset_expert(target, template, args.with_memory, False)
-    who = "自己" if target == root else "专家 %s" % ((descriptor(target) or {}).get("name") or os.path.basename(target))
+    who = "自己" if target == root else "团队 %s" % ((descriptor(target) or {}).get("name") or os.path.basename(target))
     if not plan:
         print("%s已经和模板一致，没有什么可重置的" % who)
         return
@@ -2495,7 +2499,7 @@ def cmd_reset(args):
 
 # Allowlist: the repository tracks what the reflect session maintains and nothing else. Everything unlisted (runtime
 # state, datas/, temp/, SpaceBuilder's generated files) stays out, including repositories nested under datas/ and temp/.
-GITIGNORE = """# 专家根目录的仓库只跟踪专家自己的文件（允许名单）。要纳入新路径，加一行 !/路径
+GITIGNORE = """# 团队根目录的仓库只跟踪团队自己的文件（允许名单）。要纳入新路径，加一行 !/路径
 /*
 !/.gitignore
 !/agent-space.genet.json
@@ -2519,7 +2523,7 @@ GITIGNORE = """# 专家根目录的仓库只跟踪专家自己的文件（允许
 __pycache__/
 *.pyc
 """
-GIT_FLAGS = ["-c", "user.name=expert", "-c", "user.email=expert@genethub.local", "-c", "commit.gpgsign=false", "-c", "core.quotepath=off"]
+GIT_FLAGS = ["-c", "user.name=team", "-c", "user.email=team@genethub.local", "-c", "commit.gpgsign=false", "-c", "core.quotepath=off"]
 TEAM_PATHS = re.compile(r"^(soul\.md|charter\.md|memory\.md|front/index\.md|front/role\.md|spaces/[^/]+/index\.md|spaces/[^/]+/role\.md|spaces/[^/]+/style\.md|spaces/[^/]+/agent-space\.genet\.json|skills/local-[^/]+/.*|tools/local/.*)$")
 
 
@@ -2527,7 +2531,7 @@ def git(root, *args, input=None, env=None, check=True):
     done = subprocess.run(["git", "-C", root] + GIT_FLAGS + list(args), input=input, capture_output=True, env=env, timeout=60)
     if check and done.returncode != 0:
         raise ExpertError("git %s 失败: %s" % (" ".join(args[:2]), (done.stderr or done.stdout).decode("utf-8", "replace").strip()[-300:]),
-                          "专家目录的仓库保持原样或已部分完成，见错误", "按错误处理后下一次运行自动重试")
+                          "团队目录的仓库保持原样或已部分完成，见错误", "按错误处理后下一次运行自动重试")
     return done
 
 
@@ -2613,7 +2617,7 @@ def git_snapshot(root, message):
 def ensure_git(root):
     """Initialises the repository at the root (idempotent). Returns "ready" or "initialized"."""
     if not shutil.which("git"):
-        raise ExpertError("这台机器没有 git", "专家目录没有版本管理：反思会话的改动无法回退，也看不到平台差异", "请用户安装 git；装好后下一次运行自动初始化")
+        raise ExpertError("这台机器没有 git", "团队目录没有版本管理：反思会话的改动无法回退，也看不到平台差异", "请用户安装 git；装好后下一次运行自动初始化")
     if has_repo(root):
         ignore = os.path.join(root, ".gitignore")
         try:
@@ -2638,7 +2642,7 @@ def ensure_git(root):
         pass  # no template on this machine: the branch appears once there is one
     git(root, "add", "-A")
     tree = git(root, "write-tree").stdout.decode().strip()
-    commit = git(root, "commit-tree", tree, *(["-p", parent] if parent else []), "-m", "expert: 初始状态").stdout.decode().strip()
+    commit = git(root, "commit-tree", tree, *(["-p", parent] if parent else []), "-m", "team: 初始状态").stdout.decode().strip()
     git(root, "update-ref", "refs/heads/main", commit)
     return "initialized"
 
@@ -2668,7 +2672,7 @@ def platform_watch(root):
                     os.remove(source)
     else:
         record = {"kind": "upgrade", "session": None, "turn": None, "ref": None, "from": "platform", "quote": "无",
-                  "context": "平台模板有新版本（%s，平台分支上是 %s）。升级由反思会话在 temp/ 里做：见 expert-reflect。" % (digest, held),
+                  "context": "平台模板有新版本（%s，平台分支上是 %s）。升级由反思会话在 temp/ 里做：见 team-reflect。" % (digest, held),
                   "text": "template %s" % digest}
         note_id = "n" + hashlib.sha1("\x1f".join(("upgrade", digest)).encode("utf-8")).hexdigest()[:12]
         done_path = os.path.join(notes_dir(root, True), note_id + ".json")
@@ -2681,7 +2685,7 @@ def drift_lines(root):
     """Files whose content differs from the template's `platform` branch, expert-owned ones left out. Raises when there is no branch."""
     ref = platform_ref(root)
     if ref is None:
-        raise ExpertError("还没有 platform 分支", "没有可比较的基准", "等下一次定时运行初始化，或确认本机有专家模板")
+        raise ExpertError("还没有 platform 分支", "没有可比较的基准", "等下一次定时运行初始化，或确认本机有团队模板")
     names = git_text(root, "diff", "--name-status", ref, "--", "agent-space.genet.json", "front", "skills", "tools", "docs", "spaces").splitlines()
     return [line for line in names if not TEAM_PATHS.match(line.split("\t", 1)[-1])]
 
@@ -2689,7 +2693,7 @@ def drift_lines(root):
 def cmd_drift(_args):
     root = find_root()
     if not has_repo(root):
-        raise ExpertError("专家目录还没有 git 仓库", "没有可比较的基准", "等定时运行初始化（几秒内），或运行 `team.py snapshot`")
+        raise ExpertError("团队目录还没有 git 仓库", "没有可比较的基准", "等定时运行初始化（几秒内），或运行 `team.py snapshot`")
     git_snapshot(root, "snapshot: drift 之前")
     lines = drift_lines(root)
     try:
@@ -2698,7 +2702,7 @@ def cmd_drift(_args):
         current = None
     print("\n".join(lines) if lines else "平台文件与 platform 分支一致")
     if current and current != platform_digest(root):
-        print("平台模板有新版本 %s，platform 分支上是 %s：升级见 expert-reflect 的 references/upgrade.md" % (current, platform_digest(root)))
+        print("平台模板有新版本 %s，platform 分支上是 %s：升级见 team-reflect 的 references/upgrade.md" % (current, platform_digest(root)))
 
 
 def cmd_snapshot(args):
@@ -2757,7 +2761,7 @@ def cmd_note(args):
     if args.expert:
         known = experts().get(args.expert)
         if not known:
-            raise ExpertError("没有专家 %r" % args.expert, "没有留言", "用 `directory` 查看有哪些专家")
+            raise ExpertError("没有团队 %r" % args.expert, "没有留言", "用 `directory` 查看有哪些团队")
         target = known["root"]
     session = args.session or os.environ.get("GENEHUB_SESSION_ID")
     turn = latest_round(session) if session else None
@@ -2836,7 +2840,7 @@ def reflect_sessions(spaces):
 
 def user_rounds_since(spaces, since, team_mode=False, limit=None):
     """(how many rounds started after `since`, when the last one ended).
-    In team mode, counts completed rounds across all non-reflect spaces so TeamReflect wakes after team progress.
+    In team mode, counts completed rounds across all non-reflect spaces so the reflect session wakes after team progress.
     Each `session rounds` costs about a second, so the walk goes newest-first and stops at `limit`: the caller only
     needs to know whether enough rounds piled up."""
     count, last = 0, 0
@@ -2918,7 +2922,7 @@ def start_reflect(root, name, mine, reason, request=None, requester=None, tier=N
     """Starts a one-shot reflect session, or hands the request to the one that is running. Returns a sentence saying what happened."""
     ref_key = reflect_space_key(mine["spaces"])
     if not ref_key:
-        raise ExpertError("这个专家没有 reflect 空间", "没有创建会话", "它的目录早于反思机制；用户要求时 `reset` 会补上 spaces/reflect")
+        raise ExpertError("这个团队没有 reflect 空间", "没有创建会话", "它的目录早于反思机制；用户要求时 `reset` 会补上 spaces/team-reflect")
     busy = [item for item in reflect_sessions(mine["spaces"]) if item.get("status") in ("running", "waiting")]
     sender = os.environ.get("GENEHUB_SESSION_ID") or "%s:hook" % name
     if busy:
@@ -2934,7 +2938,7 @@ def start_reflect(root, name, mine, reason, request=None, requester=None, tier=N
     team_hint = ""
     if os.path.isdir(os.path.join(root, ".pm")) or open_env(root).get("TEAM_MODE"):
         team_hint = "\n团队模式二级记忆提炼要求：先将各岗位（leader/组员/qa/research）具体经验与 ghref 证据写入对应 `spaces/<岗位>/index.md`，再将跨角色通用铁律提炼入根 `memory.md`（≤30 行）。"
-    text = clip("[系统说明：本反思会话由 %s 发起（用途: reflect）]\n\n原因: %s\n简报: %s\n%s%s\n按 expert-reflect 办：先读简报，再按留言里的 ref 回到那一轮。处理完的留言用 `team.py notes done <编号>`；没有要告诉用户的就不要 tell-user。" % (
+    text = clip("[系统说明：本反思会话由 %s 发起（用途: reflect）]\n\n原因: %s\n简报: %s\n%s%s\n按 team-reflect 办：先读简报，再按留言里的 ref 回到那一轮。处理完的留言用 `team.py notes done <编号>`；没有要告诉用户的就不要 tell-user。" % (
         sender, reason, path, ("用户的要求（原话在前，引用在后）:\n%s" % request) if request else "", team_hint))
     session_id, why = start(root, mine["spaces"][ref_key], ref_key, title, text, "TEAM_MODEL_REFLECT", tier, model)
     write_json(state_dir(root, "pending", session_id + ".json"), {
@@ -2950,7 +2954,7 @@ def cmd_reflect(args):
         raise ExpertError(
             "内置管理员（spaces/admin）在守护进程启动时始终与平台模板对齐，不维护独立记忆或跑自进化反思",
             "没有创建反思会话",
-            "若要体验或验证专家自进化闭环，请在 spaces/<新专家> 下新建或选择一个普通专家目录执行",
+            "若要体验或验证团队自进化闭环，请在 spaces/<新团队> 下新建或选择一个普通团队目录执行",
         )
     name, mine = me(root)
     request = " ".join(args.text)
@@ -3511,7 +3515,7 @@ def builder_script(root):
             return local
         path = os.path.realpath(os.path.join(root, "..", "..", "builtin-skills", "genehub", "references", "spacebuilder", "spacebuilder.py"))
     if not os.path.isfile(path):
-        raise ExpertError("找不到 SpaceBuilder: %s" % path, "soul.md 没有重新编译，新会话仍读到旧身份", "把 SpaceBuilder 路径写进环境变量 TEAM_SPACEBUILDER，或手动运行 spacebuilder.py build <专家目录>")
+        raise ExpertError("找不到 SpaceBuilder: %s" % path, "soul.md 没有重新编译，新会话仍读到旧身份", "把 SpaceBuilder 路径写进环境变量 TEAM_SPACEBUILDER，或手动运行 spacebuilder.py build <团队目录>")
     return path
 
 
@@ -3595,12 +3599,45 @@ def heal_identity_aliases(root):
     return healed
 
 
+def migrate_skill_names(root):
+    """The template's Skills were `expert-*` before they became `team-*`. A template upgrade renames the directories, but
+    descriptors the template never shipped (a member added with `employee add`, say) still select the old names, and
+    `spacebuilder.py build` fails on a Skill it cannot find. Point them at the new name once that Skill is on disk; while
+    it is not, the team has not taken the upgrade and the old name is still right."""
+    migrated = []
+    space_dirs = [root]
+    base = os.path.join(root, "spaces")
+    if os.path.isdir(base):
+        space_dirs += [os.path.join(base, entry) for entry in sorted(os.listdir(base))]
+    for space_dir in space_dirs:
+        path = os.path.join(space_dir, ROOT_DESCRIPTOR)
+        desc = read_json(path)
+        if not isinstance(desc, dict) or not isinstance(desc.get("skills"), list):
+            continue
+        skills = []
+        for name in desc["skills"]:
+            renamed = LEGACY_SKILLS.get(name)
+            if renamed and os.path.isfile(os.path.join(root, "skills", renamed, "SKILL.md")):
+                name = renamed
+            if name not in skills:
+                skills.append(name)
+        if skills != desc["skills"]:
+            desc["skills"] = skills
+            temporary = "%s.%d.tmp" % (path, os.getpid())
+            with open(temporary, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(desc, ensure_ascii=False, indent=2) + "\n")
+            os.replace(temporary, path)
+            migrated.append(path)
+    return migrated
+
+
 def sync_identity(root):
     """Identity files and Skills are compiled into the instruction files Agents read natively; when any of them changes, compile again.
 
-    Returns "none" (the expert declares no identity), "unchanged", or "rebuilt". A failed build is remembered by the
+    Returns "none" (the team declares no identity), "unchanged", or "rebuilt". A failed build is remembered by the
     digest it failed on so the five-second tick does not rerun it more than once a minute.
     """
+    migrate_skill_names(root)
     heal_identity_aliases(root)
     digest, label = identity_inputs_digest(root)
     if not digest:
@@ -3628,7 +3665,7 @@ def cmd_sync_identity(_args):
 
 def is_builtin_admin(root):
     info = descriptor(root) or {}
-    return os.path.basename(root) == "admin" and "expert-admin" in (info.get("skills") or [])
+    return os.path.basename(root) == "admin" and bool({"team-admin", "expert-admin"} & set(info.get("skills") or []))
 
 
 def cmd_hook(_args):
@@ -3675,24 +3712,24 @@ def main(argv):
     send.add_argument("--inbox", action="store_true", help="write to file inbox when target is busy without interrupting")
     send.add_argument("text", nargs="+")
     spawn = sub.add_parser("spawn")
-    spawn.add_argument("--expert", help="spawn inside another expert's research/work space")
-    spawn.add_argument("--space", help="spawn inside a specific child space of the current team/expert (e.g. leader, skill-lead, qa)")
+    spawn.add_argument("--team", "--expert", dest="expert", help="spawn inside another team's research/work space (--expert is the old name)")
+    spawn.add_argument("--space", help="spawn inside a specific child space of the current team (e.g. leader, skill-lead, qa)")
     spawn.add_argument("--kind", choices=["research", "work"], required=True)
     spawn.add_argument("--desc", required=True)
     spawn.add_argument("--dir")
     spawn.add_argument("--worktree", help="auto or slot name: cut an isolated git worktree under worktrees/ for parallel workers")
     spawn.add_argument("--tier", help="Ultra, Max, Pro, Flash or Mini; the platform picks the cheapest live model with it")
-    spawn.add_argument("--model", help="an exact model id on the expert's Agent")
+    spawn.add_argument("--model", help="an exact model id on the team's Agent")
     spawn.add_argument("--media", choices=sorted(MEDIA_TAGS), help="the task has images or video: the model must understand them")
     spawn.add_argument("task", nargs="+")
     init_p = sub.add_parser("init")
-    init_p.add_argument("name", help="new expert directory and display name")
-    init_p.add_argument("--desc", required=True, help="one-line description of the expert")
+    init_p.add_argument("name", help="new team directory and display name")
+    init_p.add_argument("--desc", required=True, help="one-line description of the team")
     init_p.add_argument("--soul", help="detailed role & boundaries written into soul.md")
-    init_p.add_argument("--spaces-dir", help="parent spaces directory (default: sibling of current expert)")
-    init_p.add_argument("--team", action="store_true", help="initialize as a 1+N project team with leader/qa/research/team-reflect")
+    init_p.add_argument("--spaces-dir", help="parent spaces directory (default: sibling of the current team)")
+    init_p.add_argument("--team", action="store_true", help="no effect: every init makes a 1+N team; kept so old commands still run")
     init_p.add_argument("--member", dest="members", action="append", help="add team member space NAME:DESC (repeatable)")
-    init_p.add_argument("--force", action="store_true", help="allow creating another expert/team even if a matching project already exists")
+    init_p.add_argument("--force", action="store_true", help="allow creating another team even if a matching project already exists")
     for emp_cmd in ("employee", "member"):
         emp_p = sub.add_parser(emp_cmd)
         emp_sub = emp_p.add_subparsers(dest="employee_command", required=True)
@@ -3741,7 +3778,7 @@ def main(argv):
     models_p = sub.add_parser("models")
     models_p.add_subparsers(dest="models_command", required=False).add_parser("check")
     directory = sub.add_parser("directory")
-    directory.add_argument("--expert")
+    directory.add_argument("--team", "--expert", dest="expert", help="only this team (--expert is the old name)")
     for verb in ("mount", "unmount"):
         sub.add_parser(verb).add_argument("path")
     path = sub.add_parser("path")
@@ -3765,7 +3802,7 @@ def main(argv):
     clean.add_argument("--older-than", help="days, e.g. 3d (default TEAM_TEMP_KEEP_DAYS, 7)")
     clean.add_argument("--dry-run", action="store_true")
     reset = sub.add_parser("reset")
-    reset.add_argument("--expert", help="reset this expert instead of yourself")
+    reset.add_argument("--team", "--expert", dest="expert", help="reset this team instead of yourself (--expert is the old name)")
     reset.add_argument("--with-memory", action="store_true", help="also reset memory.md (default: kept)")
     reset.add_argument("--apply", action="store_true", help="do it; without it only the plan is printed")
     note = sub.add_parser("note")
@@ -3773,7 +3810,7 @@ def main(argv):
     note.add_argument("--quote", help="what the person said, in their words")
     note.add_argument("--context", help="what was going on, what you did, where it may have gone wrong")
     note.add_argument("--session", help="default: the session you are in")
-    note.add_argument("--expert", help="leave the note for another expert's reflect session")
+    note.add_argument("--team", "--expert", dest="expert", help="leave the note for another team's reflect session (--expert is the old name)")
     note.add_argument("words", nargs="*")
     notes = sub.add_parser("notes")
     notes.add_argument("--all", action="store_true", help="with ls: handled notes too")

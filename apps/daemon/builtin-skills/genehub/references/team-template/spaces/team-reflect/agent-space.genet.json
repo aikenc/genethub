@@ -1,7 +1,7 @@
 {
   "schema": "agent-space.v1",
   "name": "team-reflect",
-  "description": "团队自省与进化专家（跨角色会话复盘、二级记忆提炼、Skill 与流程持续调优）",
+  "description": "团队反思与进化（跨角色会话复盘、二级记忆提炼、Skill 与流程持续调优）",
   "tags": [],
   "agents": [
     "codex",
@@ -10,8 +10,8 @@
     "cursor"
   ],
   "skills": [
-    "expert-core",
-    "expert-reflect"
+    "team-core",
+    "team-reflect"
   ],
   "skillProviders": [
     {

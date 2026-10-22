@@ -268,7 +268,7 @@ async fn authorize_pm_space_open(
 /// Opening an already-built Space directory (or its `agent-space.genet.json`)
 /// inside `<data>/spaces/` only registers what `scan_spaces` would register on
 /// the next unthrottled `workspace.list`, so an Agent session (such as the
-/// built-in Admin or `expert.py`) may invoke `genet space open` without
+/// built-in Admin or a team's `team.py`) may invoke `genet space open` without
 /// machine-wide `settings` authority.
 fn authorize_managed_space_open(state: &Shared, root: &str) -> anyhow::Result<()> {
     let requested = crate::guest_paths::inbound_absolute(root)

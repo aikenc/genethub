@@ -1,13 +1,13 @@
 ---
 name: genehub
-description: GeneHub 通用能力入口与多机协作指南。用于：了解 GeneHub 工作台、机器、workspace、Agent 会话与 CLI；多机协作——查看机器目录、配对与授权、用 --machine 远程执行命令（shell）、跨机下载/传输文件（file download）与验收、在其他机器启动或续接 Agent 会话；daemon 启动/停止/重启/离线恢复/环境生效；实时联调页面（网页白屏、DOM、截图、手机复现）；测试、安装或诊断本地语音识别 runtime（Qwen3-ASR）。静态与实时预览读 genehub-preview，会话历史读 genehub-introspect，项目团队与派单读 genehub-team。不是通用软件开发流程。
+description: GeneHub 通用能力入口与多机协作指南。用于：了解 GeneHub 工作台、机器、workspace、Agent 会话与 CLI；回答平台是什么、架构与原理、数据在哪、安全边界、能否自建，附开源仓 GitHub 链接；多机协作——查看机器目录、配对与授权、用 --machine 远程执行命令（shell）、跨机下载/传输文件（file download）与验收、在其他机器启动或续接 Agent 会话；daemon 启动/停止/重启/离线恢复/环境生效；实时联调页面（网页白屏、DOM、截图、手机复现）；测试、安装或诊断本地语音识别 runtime（Qwen3-ASR）。静态与实时预览读 genehub-preview，会话历史读 genehub-introspect，项目团队、多 Agent 派单接力与团队定制读 genehub-team。不是通用软件开发流程。
 ---
 
 # GeneHub 使用入口
 
 GeneHub 是端侧多机器 Agent 的 hub：每台机器上的 daemon 持有自己的工作区、进程和会话，工作台与 CLI
 只是经授权的操作界面。多机是常态，本机只是延迟最低的一项。浏览器所在设备、对话所在工作区与实际执行机器
-可以不同；用户无需因为远程执行而迁移对话。PipeSpace 提供项目角色和流程，不是另一台机器。
+可以不同；用户无需因为远程执行而迁移对话。PipeSpace 提供项目角色和流程，不是另一台机器。架构、原理与开源仓链接见 [platform.md](references/platform.md)。
 
 ## 身份不能互换
 
@@ -29,8 +29,8 @@ GeneHub 是端侧多机器 Agent 的 hub：每台机器上的 daemon 持有自�
   `client`。只能在本机：`workflow`、`process`、`machine`、`speech`、`file`、`daemon` 生命周期、`update`。
 - 配对、`device invite`、授权范围属于授权变更，只在用户明确要求时执行；授权只给所需最小范围，不要生成
   不限范围的设备，也不要把邀请链接或码贴进聊天以外的地方。
-- 会话控制本机与跨机同规则：Agent 可创建并控制普通会话，只读的 Workflow 受管子会话只由委托它的 PM（或项目例外权限）写入；
-  Agent 发出的消息带来源，按 Agent 输入而非 Human 决定对待。
+- 会话控制本机与跨机同规则：Agent 可创建并控制普通会话；退役中的 Workflow 留下的只读受管子会话只由委托它的 PM
+  （或项目例外权限）写入。Agent 发出的消息带来源，按 Agent 输入而非 Human 决定对待。多会话协作用团队机制（Skill `genehub-team`）。
 - 用会话标签（`session label`、`agent run --label`、`session list --label`）标明会话的设备、角色或分工，
   不要把 `[标签]` 写进标题；见 [multi-machine.md](references/multi-machine.md)。
 - 数据留在所属机器：不要为了“方便”把工作区或密钥搬到别的机器；把任务派给持有资源的那台机器。
@@ -42,6 +42,7 @@ GeneHub 是端侧多机器 Agent 的 hub：每台机器上的 daemon 持有自�
 
 | 任务 | 读什么 |
 |---|---|
+| 平台是什么、架构与原理、数据去向与安全边界、自建；附 GitHub 正本链接 | [platform.md](references/platform.md) |
 | 跨机器执行命令、派发或续接 Agent、配对与授权 | [multi-machine.md](references/multi-machine.md) |
 | 跨机上传、下载、GB 文件传输与续传 | [file-transfer.md](references/file-transfer.md) |
 | daemon 启动、停止、重启、环境生效、离线恢复 | [daemon.md](references/daemon.md)，重启前必读 [daemon-restart.md](references/daemon-restart.md) |

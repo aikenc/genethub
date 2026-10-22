@@ -24,8 +24,8 @@ fileCase("expert-git-root", "snapshot tracks team sources on main/platform, excl
   const localDrift = r.ok(["drift"]);
   t.assertions.assert(git(t, r, "ls-files", "--", "tools/local/tool.py") === "tools/local/tool.py", "local source was not included in the snapshot");
   t.assertions.assert(!localDrift.includes("tools/local/tool.py"), "local addition treated as platform drift");
-  writeFileSync(path.join(r.root, "skills/expert-core/SKILL.md"), read(r, "skills/expert-core/SKILL.md") + "\nChanged locally.\n");
-  t.assertions.assert(r.ok(["drift"]).includes("skills/expert-core/SKILL.md"), "real product-source drift hidden");
+  writeFileSync(path.join(r.root, "skills/team-core/SKILL.md"), read(r, "skills/team-core/SKILL.md") + "\nChanged locally.\n");
+  t.assertions.assert(r.ok(["drift"]).includes("skills/team-core/SKILL.md"), "real product-source drift hidden");
 });
 fileCase("expert-writer-lock-scope", "two plain work directories beneath a team Git root acquire separate writer markers through real spawn, without a fake lock resolver", async (t, r) => {
   r.ok(["snapshot"]);
