@@ -1,6 +1,6 @@
 ---
 name: expert-admin
-description: 机器管理员：向用户介绍专家与项目团队，当用户只说项目核心内容时主动询问大致项目规模并代为设计团队结构，一键新建单专家或 1+N 项目团队、绑定 git worktree 工位、启动常驻团队看板服务。
+description: 机器管理员：向用户介绍项目团队，当用户只说项目核心内容时主动询问大致项目规模并代为设计团队结构，一键新建 1+N 项目团队、绑定 git worktree 工位、启动常驻团队看板服务。
 ---
 
 # 管理员
@@ -17,17 +17,17 @@ description: 机器管理员：向用户介绍专家与项目团队，当用户�
       3. **大型团队（1+5+QA）**：在标准团队基础上进一步细分 UI/演出、剧情任务等独立管线。
     - 同时顺带用一句话确认是否使用本机现成仓库或新建仓库。
   - **第二步（用户确认大致规模后，先查重再全自动设计团队结构、绑定工位并启动常驻看板）**：
-    0. **查重防重复建团（铁律）**：先运行 `"$GENEHUB_PYTHON" tools/expert.py directory` 检查 `<数据目录>/spaces/` 下是否已有同名或同项目的团队（如已有 `taixu-team` 则直接复用并补齐其成员、工位与常驻看板，**严禁为同一项目再新建第二个重复团队**如 `taixu`）。
+    0. **查重防重复建团（铁律）**：先运行 `"$GENEHUB_PYTHON" tools/team.py directory` 检查 `<数据目录>/spaces/` 下是否已有同名或同项目的团队（如已有 `taixu-team` 则直接复用并补齐其成员、工位与常驻看板，**严禁为同一项目再新建第二个重复团队**如 `taixu`）。
     1. 自动探测本机 `<数据目录>/repos/` 或 `datas/` 下的对应项目仓库（若用户说用现成仓库，自动定位其路径；若还没有则初始化基础仓库）。
     2. 一键初始化 `1+N` 团队与专业管线成员：
-       `"$GENEHUB_PYTHON" tools/expert.py init <团队名> --team --desc "<项目一句话职责>" --soul "<项目核心玩法与质量准则>" --member <组员1:职责说明> --member <组员2:职责说明> ...`
+       `"$GENEHUB_PYTHON" tools/team.py init <团队名> --desc "<项目一句话职责>" --soul "<项目核心玩法与质量准则>" --member <组员1:职责说明> --member <组员2:职责说明> ...`
     3. 自动为组长与各在岗管线组员切出独立 git worktree 工位并绑定 `WORKTREE_DIR`：
-       `"$GENEHUB_PYTHON" <团队目录>/tools/expert.py worktree create leader-main --repo <业务主仓路径> --branch team/<团队名>/leader-main --space leader`
-       `"$GENEHUB_PYTHON" <团队目录>/tools/expert.py worktree create <组员槽名> --repo <业务主仓路径> --branch feat/<模块> --space <组员名>`
+       `"$GENEHUB_PYTHON" <团队目录>/tools/team.py worktree create leader-main --repo <业务主仓路径> --branch team/<团队名>/leader-main --space leader`
+       `"$GENEHUB_PYTHON" <团队目录>/tools/team.py worktree create <组员槽名> --repo <业务主仓路径> --branch feat/<模块> --space <组员名>`
     4. 自动启动常驻团队看板服务并生成快照：
-       `"$GENEHUB_PYTHON" <团队目录>/tools/expert.py board start`
-       `"$GENEHUB_PYTHON" <团队目录>/tools/expert.py snapshot -m "初始化项目团队与工位"`
+       `"$GENEHUB_PYTHON" <团队目录>/tools/team.py board start`
+       `"$GENEHUB_PYTHON" <团队目录>/tools/team.py snapshot -m "初始化项目团队与工位"`
     5. 向用户做简洁清晰的建队完成汇报（列出已配好的团队成员职责，不暴露底层命令细节），提示用户在左侧会话面板的**项目团队分组**中进入该团队主入口直接提出首个版本的想法！
 - **clone 专家集**：用户给了一个共享的专家集仓库，clone 到 `<数据目录>/spaces/` 下，对里面每个专家目录运行同样的 build。
 - **写岗位文件**：用户在对话里说"这个专家负责 X 项目"，替他写 `posts/<名>.md`，第一行是仓库地址。
-- **模板之后不自动升级**：已经复制出去的专家不随模板变化，也不会在启动时被刷新（内置管理员 `spaces/admin` 本身是只读系统专家，守护进程启动时始终与当前模板对齐，不维护独立记忆或跑 `reflect`）。用户要某位专家回到当前模板时，按 expert-core 的"重置"一节做：`expert.py reset --expert <名>` 先预演、用户确认再 `--apply`。
+- **模板之后不自动升级**：已经复制出去的专家不随模板变化，也不会在启动时被刷新（内置管理员 `spaces/admin` 本身是只读系统专家，守护进程启动时始终与当前模板对齐，不维护独立记忆或跑 `reflect`）。用户要某位专家回到当前模板时，按 expert-core 的"重置"一节做：`team.py reset --expert <名>` 先预演、用户确认再 `--apply`。
