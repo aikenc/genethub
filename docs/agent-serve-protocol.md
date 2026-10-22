@@ -17,7 +17,7 @@ subclasses `Agent` / `Session`.
 ```
 
 `<id>` matches `^[a-z][a-z0-9-]{1,31}$`. A directory is an Agent when it has
-`agent.toml`:
+`agent.genet.json`:
 
 ```toml
 protocol    = 1                  # required; also the SDK major version

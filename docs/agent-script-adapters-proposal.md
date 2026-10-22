@@ -83,7 +83,7 @@
 
 ```
 <id>/
-  agent.toml     静态清单；扫描时只读这个文件，不执行代码
+  agent.genet.json  静态清单；扫描时只读这个文件，不执行代码
   agent.py       入口；平台只调用 `agent.py serve`
   lib/           可选；放在 sys.path 最前面，可以覆盖 SDK 里的同名模块
   tests/         录好的标准对话和测试数据，供 `agent.py test` 用

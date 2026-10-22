@@ -4,10 +4,12 @@
 //! workspace / provider types. `CHANNEL` is compile-time `dev`: no verify.
 
 mod abi;
+mod agent_env;
 mod artifact;
 mod artifact_cli;
 mod bindings;
 mod channel;
+mod data_dir;
 mod derived;
 mod error;
 mod file_lock;
@@ -89,61 +91,18 @@ const SESSION_SCOPED: &[&str] = &[
     "GENET_WORKSPACE_ROOT",
 ];
 
-/// What *another* Agent exports for the shell it gives its own tools: its HTTP
-/// endpoint, its session and request identity, its trace context. The same
-/// start-from-inside-a-session case as above, for Agents that are not ours:
-/// a daemon started by a CodeBuddy, Claude, Cursor or Codex session keeps all
-/// of it, and then hands it to every CLI, terminal and script it starts.
-///
-/// The endpoint is the one that breaks things. CodeBuddy's `cbc` binds
-/// `SERVER__PORT` before it answers anything; the launching `cbc` is still
-/// listening there, so every `cbc` this daemon started failed to bind and
-/// stayed alive and silent forever (a turn that never ends, no token
-/// statistics). Settings a person chose on purpose — the internet environment,
-/// API keys, proxies — are not in the list.
-///
-/// The agent SDK drops the same names before it starts a CLI
-/// (`genehub_agent.process.LAUNCHING_AGENT_SESSION`), which also covers a daemon
-/// that was started before this one; `launching_agent_session_matches_the_sdk`
-/// keeps the two lists equal.
-const LAUNCHING_AGENT_SESSION: &[&str] = &[
-    "SERVER__PORT",
-    "SERVER__HOST",
-    "CODEBUDDY_SERVICE_PROXY_URL",
-    "CODEBUDDY_SESSION_ID",
-    "CODEBUDDY_ROOT_REQUEST_ID",
-    "CODEBUDDY_CONVERSATION_REQUEST_ID",
-    "CODEBUDDY_CONVERSATION_MESSAGE_ID",
-    "CODEBUDDY_ARTIFACTS",
-    "CODEBUDDY_PROJECT_DIR",
-    "CODEBUDDY_CURRENT_MODEL_ID",
-    "CODEBUDDY_SESSION_KIND",
-    "CODEBUDDY_SESSION_NAME",
-    "CODEBUDDY_SESSION_LOG",
-    "CODEBUDDY_OWNER_KEY",
-    "CODEBUDDY_TEAMMATE_OWNER_KEY",
-    "CODEBUDDY_GATEWAY_AUTH",
-    "CLAUDE_SESSION_ID",
-    "CLAUDE_PROJECT_DIR",
-    "CURSOR_AGENT",
-    "CURSOR_CONVERSATION_ID",
-    "CURSOR_INVOKED_AS",
-    "CURSOR_LAYOUT",
-    "__CURSOR_SANDBOX_ENV_RESTORE",
-    "CODEX_CI",
-    "CODEX_THREAD_ID",
-    "CODEX_SESSION_ID",
-    "TRACEPARENT",
-    "TRACESTATE",
-    "BAGGAGE",
-];
-
-/// Everything a daemon drops of the session that launched it.
-fn forgotten_names() -> impl Iterator<Item = &'static str> {
-    SESSION_SCOPED
-        .iter()
-        .chain(LAUNCHING_AGENT_SESSION)
-        .copied()
+/// What the platform itself knows about a launching shell: the endpoint a CLI
+/// binds and the trace context it hands out. Which *Agent* set them, and which
+/// other names that Agent exports, is declared by the Agent and read from the
+/// materialised Agent tree (`agent_env`).
+fn forgotten_names() -> Vec<String> {
+    let mut names: Vec<String> = SESSION_SCOPED.iter().map(|name| name.to_string()).collect();
+    for name in agent_env::forgotten() {
+        if !names.iter().any(|seen| seen == &name) {
+            names.push(name);
+        }
+    }
+    names
 }
 
 /// Must run while this process still has one thread.
@@ -228,16 +187,15 @@ mod launching_session_tests {
     fn a_launching_cbcs_endpoint_is_forgotten() {
         // The variable that made every CodeBuddy session of a daemon started
         // from a CodeBuddy session hang (fb_dsnk7EPzireY, fb_6z8pp5UaLaxg).
-        let names: Vec<_> = forgotten_names().collect();
-        assert!(names.contains(&"SERVER__PORT"));
-        assert!(names.contains(&"SERVER__HOST"));
-        assert!(names.contains(&"CODEBUDDY_SERVICE_PROXY_URL"));
-        assert!(names.contains(&"GENEHUB_SESSION_ID"));
+        let names = forgotten_names();
+        assert!(names.contains(&"SERVER__PORT".to_string()));
+        assert!(names.contains(&"SERVER__HOST".to_string()));
+        assert!(names.contains(&"GENEHUB_SESSION_ID".to_string()));
     }
 
     #[test]
     fn settings_a_person_chose_are_kept() {
-        let names: Vec<_> = forgotten_names().collect();
+        let names = forgotten_names();
         for kept in [
             "CODEBUDDY_API_KEY",
             "CODEBUDDY_INTERNET_ENVIRONMENT",
@@ -249,7 +207,7 @@ mod launching_session_tests {
             "HOME",
         ] {
             assert!(
-                !names.contains(&kept),
+                !names.iter().any(|name| name == kept),
                 "{kept} is configuration, not a launching session"
             );
         }
@@ -257,34 +215,33 @@ mod launching_session_tests {
 
     #[test]
     fn no_name_is_listed_twice() {
-        let mut names: Vec<_> = forgotten_names().collect();
+        let mut names = forgotten_names();
         let before = names.len();
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), before);
     }
 
-    /// The agent SDK drops these before it starts a CLI; a daemon that was
-    /// started before this shell knew them still gets that protection only if
-    /// the two lists stay the same.
+    /// What an Agent declares reaches the same list the shell scrubs, so a
+    /// daemon started from inside a CodeBuddy session does not hand that
+    /// session's identity to everything it starts afterwards.
     #[test]
-    fn launching_agent_session_matches_the_sdk() {
-        let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../daemon/builtin-agents/sdk/genehub_agent/process.py");
-        let source = std::fs::read_to_string(&sdk)
-            .unwrap_or_else(|error| panic!("cannot read {}: {error}", sdk.display()));
-        let after = source
-            .split("LAUNCHING_AGENT_SESSION = (")
-            .nth(1)
-            .expect("the SDK declares LAUNCHING_AGENT_SESSION");
-        let body = after.split("\n)").next().expect("the tuple ends");
-        let mut sdk_names: Vec<&str> = body
-            .lines()
-            .filter_map(|line| line.trim().strip_prefix('"')?.split('"').next())
-            .collect();
-        let mut host_names: Vec<&str> = LAUNCHING_AGENT_SESSION.to_vec();
-        sdk_names.sort_unstable();
-        host_names.sort_unstable();
-        assert_eq!(host_names, sdk_names);
+    fn an_agents_declared_environment_is_forgotten() {
+        let tree = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../daemon/builtin-agents/agents");
+        let declared = agent_env::launching_env_in(&tree);
+        assert!(
+            declared
+                .iter()
+                .any(|name| name == "CODEBUDDY_SERVICE_PROXY_URL"),
+            "the built-in CodeBuddy Agent declares its own session environment"
+        );
+        let names = agent_env::forgotten_in(&tree);
+        for name in declared {
+            assert!(
+                names.contains(&name),
+                "{name} is declared but not forgotten"
+            );
+        }
     }
 }

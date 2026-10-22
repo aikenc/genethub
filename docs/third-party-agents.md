@@ -8,7 +8,7 @@
 
 ## 1. 原则
 
-- **第三方 Agent 全部是脚本目录。** 每个 Agent 一个目录，目录名就是 Agent id。daemon 只读 `agent.toml`，
+- **第三方 Agent 全部是脚本目录。** 每个 Agent 一个目录，目录名就是 Agent id。daemon 只读 `agent.genet.json`，
   用自己的 Python 以隔离模式拉起 `agent.py serve`，按协议收发 JSON-RPC。怎么安装、怎么登录、怎么判断登录态、
   怎么拉起 CLI、怎么翻译事件，全部写在目录里的 Python 中。
 - **内置 Agent 不走脚本层。** 它的协议是我们自己定的，没有追上游的问题；它保持原生实现，保证永远有一个能用的
@@ -98,7 +98,7 @@ TClaude、OpenCode 和 `agents.custom` 里声明的自定义 ACP Agent 的 Rust 
 ## 5. 写一个新的 Agent
 
 看 `<渠道数据目录>/agents/README.md`（源码：`apps/daemon/builtin-agents/README.md`）。最小的 Agent 是一个
-`agent.toml` 加二十几行 `agent.py`；`codex/`、`cursor/` 是完整示例，`claude/`、`codebuddy/` 展示了怎样复用 SDK 里的 `claude_family`（两个用同一套 stream-json 协议的 CLI 只写各自不同的几十行）。验收：
+`agent.genet.json` 加二十几行 `agent.py`；`codex/`、`cursor/` 是完整示例，`claude/`、`codebuddy/` 展示了怎样复用 SDK 里的 `claude_family`（两个用同一套 stream-json 协议的 CLI 只写各自不同的几十行）。验收：
 
 ```bash
 "$GENEHUB_CLI" agent test <id> [--live]
@@ -108,7 +108,7 @@ TClaude、OpenCode 和 `agents.custom` 里声明的自定义 ACP Agent 的 Rust 
 
 ## 6. 起不来的时候
 
-- 列表里的说明文字来自脚本；脚本本身起不来时由 daemon 写明原因（Python 运行时未安装、`agent.toml`、握手失败、
+- 列表里的说明文字来自脚本；脚本本身起不来时由 daemon 写明原因（Python 运行时未安装、`agent.genet.json`、握手失败、
   退出码和最后几行 stderr）。
 - `genet agent logs <id>` 给出脚本的 stderr 和 daemon 记下的协议问题（不合规的事件、超时重启）。
 - 工作台里不可用的脚本 Agent 有「让内置 Agent 修复」：开一个内置 Agent 会话，按上面的流程复制、修改、

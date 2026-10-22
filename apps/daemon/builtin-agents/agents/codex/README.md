@@ -10,7 +10,7 @@ print to stdout).
 
 | file | what it does |
 |---|---|
-| `agent.toml` | manifest (`protocol = 1`, label, entry) |
+| `agent.genet.json` | manifest (`protocol = 1`, label, entry) |
 | `agent.py` | `CodexAgent`: state (`refresh`), actions `install` / `login` / `login-api-key` / `logout` / `update`, auth-file watcher, daily update check, `import.list` / `import.show`, and `replay()` for the offline tests |
 | `lib/codex_appserver.py` | spawning `codex app-server`, the JSON-RPC client (`AppServer`), modes → `approvalPolicy` / `sandbox(Policy)`, `model/list` parsing, one-shot queries (catalog, import) |
 | `lib/codex_translate.py` | pure frame → `SessionEvent` translation: `Translator` (turn state, items, deltas, usage, plan, compaction, thread/turn filtering against sub-agent threads) and `AskBook` (approvals and questions from the CLI, and the replies they need) |

@@ -101,6 +101,12 @@ impl ChildHandle {
         for key in env_remove {
             command.env_remove(key);
         }
+        // A launching session's variables never reach a child by inheritance;
+        // the guest can still set one on purpose, which is why this runs
+        // before `.envs`.
+        for key in crate::agent_env::forgotten() {
+            command.env_remove(key);
+        }
         command
             .args(arguments)
             .envs(

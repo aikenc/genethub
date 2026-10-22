@@ -1,19 +1,25 @@
-"""``agent.toml``: the only file the daemon reads without running code.
+"""``agent.genet.json``: the only file the daemon reads without running code.
 
-The format is a flat subset of TOML — ``key = "string"`` and ``key = 123`` —
-so the SDK can read it on interpreters older than ``tomllib``. The daemon
-parses the same file with a full TOML parser; anything beyond this subset is
-rejected there too.
+``.genet.json`` is the platform's suffix for files it reads without executing
+anything. An Agent that still ships the flat TOML ``agent.toml`` keeps working;
+the daemon reads that too, but it cannot declare ``launchingEnv``.
+
+The daemon parses the same files with its own reader
+(``apps/daemon/src/adapter/script/layout.rs``); anything the SDK accepts here
+has to be accepted there as well.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import re
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import List, Optional
 
 PROTOCOL = 1
+MANIFEST_FILE = "agent.genet.json"
+LEGACY_MANIFEST_FILE = "agent.toml"
 ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{1,31}$")
 _LINE = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(".*"|-?\d+)\s*(#.*)?$')
 
@@ -25,10 +31,48 @@ class Manifest:
     entry: str = "agent.py"
     description: Optional[str] = None
     icon: Optional[str] = None
+    # What this Agent exports for the shell it gives its own tools. The host
+    # drops these before it starts anything, so a daemon started from inside an
+    # Agent's session does not hand that session's identity to every process it
+    # starts afterwards.
+    launching_env: List[str] = field(default_factory=list)
 
 
 class ManifestError(ValueError):
     pass
+
+
+def _check(manifest: Manifest) -> Manifest:
+    if manifest.protocol != PROTOCOL:
+        raise ManifestError(f"manifest protocol must be {PROTOCOL}, got {manifest.protocol!r}")
+    if not manifest.label.strip():
+        raise ManifestError("manifest needs a non-empty label")
+    if manifest.entry.startswith(("/", "\\")) or ".." in manifest.entry.replace("\\", "/").split("/"):
+        raise ManifestError("manifest entry must be a relative path inside the Agent directory")
+    return manifest
+
+
+def parse_manifest(text: str) -> Manifest:
+    """Parse the JSON manifest."""
+    try:
+        values = json.loads(text)
+    except ValueError as error:
+        raise ManifestError(f"{MANIFEST_FILE} is not valid JSON: {error}") from None
+    if not isinstance(values, dict):
+        raise ManifestError(f"{MANIFEST_FILE} must hold an object")
+    launching = values.get("launchingEnv", [])
+    if not isinstance(launching, list) or not all(isinstance(name, str) for name in launching):
+        raise ManifestError(f"{MANIFEST_FILE} launchingEnv must be a list of names")
+    return _check(
+        Manifest(
+            protocol=values.get("protocol", 0),
+            label=values.get("label", ""),
+            entry=values.get("entry", "agent.py"),
+            description=values.get("description"),
+            icon=values.get("icon"),
+            launching_env=list(launching),
+        )
+    )
 
 
 def _unquote(raw: str) -> str:
@@ -47,7 +91,8 @@ def _unquote(raw: str) -> str:
     return "".join(out)
 
 
-def parse_manifest(text: str) -> Manifest:
+def parse_legacy_manifest(text: str) -> Manifest:
+    """Parse the flat TOML manifest Agents were written against at first."""
     values = {}
     for number, line in enumerate(text.splitlines(), start=1):
         stripped = line.strip()
@@ -55,28 +100,24 @@ def parse_manifest(text: str) -> Manifest:
             continue
         match = _LINE.match(stripped)
         if not match:
-            raise ManifestError(f"agent.toml line {number}: expected key = value")
+            raise ManifestError(f"{LEGACY_MANIFEST_FILE} line {number}: expected key = value")
         key, raw = match.group(1), match.group(2)
         values[key] = _unquote(raw) if raw.startswith('"') else int(raw)
-    protocol = values.get("protocol")
-    if protocol != PROTOCOL:
-        raise ManifestError(f"agent.toml protocol must be {PROTOCOL}, got {protocol!r}")
-    label = values.get("label")
-    if not isinstance(label, str) or not label.strip():
-        raise ManifestError("agent.toml needs a non-empty label")
-    entry = values.get("entry", "agent.py")
-    if not isinstance(entry, str) or entry.startswith(("/", "\\")) or ".." in entry.replace("\\", "/").split("/"):
-        raise ManifestError("agent.toml entry must be a relative path inside the Agent directory")
-    return Manifest(
-        protocol=protocol,
-        label=label.strip(),
-        entry=entry,
-        description=values.get("description") if isinstance(values.get("description"), str) else None,
-        icon=values.get("icon") if isinstance(values.get("icon"), str) else None,
+    return _check(
+        Manifest(
+            protocol=values.get("protocol", 0),
+            label=values.get("label", ""),
+            entry=values.get("entry", "agent.py"),
+            description=values.get("description"),
+            icon=values.get("icon"),
+        )
     )
 
 
 def read_manifest(agent_dir: str) -> Manifest:
-    path = os.path.join(agent_dir, "agent.toml")
-    with open(path, "r", encoding="utf-8") as handle:
-        return parse_manifest(handle.read())
+    path = os.path.join(agent_dir, MANIFEST_FILE)
+    if os.path.isfile(path):
+        with open(path, "r", encoding="utf-8") as handle:
+            return parse_manifest(handle.read())
+    with open(os.path.join(agent_dir, LEGACY_MANIFEST_FILE), "r", encoding="utf-8") as handle:
+        return parse_legacy_manifest(handle.read())

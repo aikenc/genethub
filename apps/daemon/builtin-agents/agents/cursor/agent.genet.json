@@ -1,0 +1,15 @@
+{
+  "schema": "genet.agent.v1",
+  "protocol": 1,
+  "label": "Cursor",
+  "description": "Cursor CLI (cursor-agent)，每轮以 print 模式运行",
+  "entry": "agent.py",
+  "icon": "icon.svg",
+  "launchingEnv": [
+    "CURSOR_AGENT",
+    "CURSOR_CONVERSATION_ID",
+    "CURSOR_INVOKED_AS",
+    "CURSOR_LAYOUT",
+    "__CURSOR_SANDBOX_ENV_RESTORE"
+  ]
+}

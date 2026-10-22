@@ -1,0 +1,23 @@
+{
+  "schema": "genet.agent.v1",
+  "protocol": 1,
+  "label": "CodeBuddy",
+  "description": "腾讯 CodeBuddy CLI（cbc），用它的 stream-json 协议接入（一个会话一个常驻进程）",
+  "entry": "agent.py",
+  "launchingEnv": [
+    "CODEBUDDY_SERVICE_PROXY_URL",
+    "CODEBUDDY_SESSION_ID",
+    "CODEBUDDY_ROOT_REQUEST_ID",
+    "CODEBUDDY_CONVERSATION_REQUEST_ID",
+    "CODEBUDDY_CONVERSATION_MESSAGE_ID",
+    "CODEBUDDY_ARTIFACTS",
+    "CODEBUDDY_PROJECT_DIR",
+    "CODEBUDDY_CURRENT_MODEL_ID",
+    "CODEBUDDY_SESSION_KIND",
+    "CODEBUDDY_SESSION_NAME",
+    "CODEBUDDY_SESSION_LOG",
+    "CODEBUDDY_OWNER_KEY",
+    "CODEBUDDY_TEAMMATE_OWNER_KEY",
+    "CODEBUDDY_GATEWAY_AUTH"
+  ]
+}
