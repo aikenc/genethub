@@ -72,7 +72,7 @@ defineJourney(
       const body = JSON.stringify(opened.mock.requests[0]);
       t.assertions.assert(body.includes("system") || body.includes("developer"), "no system prompt");
       t.assertions.assert(body.includes("a distinctive user request"), "the user's words must reach the model verbatim");
-      for (const name of ["genehub", "genehub-introspect", "genehub-preview"]) {
+      for (const name of ["genehub", "genehub-introspect", "genehub-preview", "genehub-team"]) {
         const marker = `<name>${name}</name>`;
         t.assertions.assert(
           body.split(marker).length - 1 === 1,
@@ -80,7 +80,7 @@ defineJourney(
         );
       }
       // Capabilities folded into the hub are references, not catalog entries.
-      for (const name of ["genehub-session-history", "genehub-speech-runtime", "genehub-daemon-management", "genehub-client-debug", "genehub-html-preview", "genehub-service-preview"]) {
+      for (const name of ["genehub-session-history", "genehub-speech-runtime", "genehub-daemon-management", "genehub-client-debug", "genehub-html-preview", "genehub-service-preview", "pm-project-bootstrap", "project-manager"]) {
         t.assertions.assert(!body.includes(`<name>${name}</name>`), `${name} must not be a separate product catalog entry`);
       }
       t.assertions.assert(!body.includes("must-not-leak"), "workspace .genethub/skills leaked into the product catalog");

@@ -453,10 +453,9 @@ mod tests {
                 "genehub",
                 "genehub-introspect",
                 "genehub-preview",
-                "pm-project-bootstrap",
-                "project-manager",
+                "genehub-team",
             ],
-            "the product catalog is exactly these five Skills; capability detail belongs in references"
+            "the product catalog is exactly these four Skills; capability detail belongs in references"
         );
         // Capabilities folded into the hub stay reachable as references, not Skills.
         let hub = skills
@@ -506,6 +505,7 @@ mod tests {
             "references/speech-runtime.md",
             "genehub-preview",
             "genehub-introspect",
+            "genehub-team",
             "machineNotPaired",
             "--machine",
         ] {
@@ -519,6 +519,7 @@ mod tests {
             "语音识别",
             "genehub-preview",
             "genehub-introspect",
+            "项目团队",
         ] {
             assert!(
                 hub.description.contains(trigger),
@@ -597,43 +598,39 @@ mod tests {
     }
 
     #[test]
-    fn pm_bootstrap_uses_the_session_bound_human_approval_request() {
-        let root = temp_dir("pm-bootstrap-interaction");
+    fn the_team_skill_explains_the_relay_and_points_at_the_template() {
+        let root = temp_dir("team-skill");
         let skills = load(&root);
         let skill = skills
             .iter()
-            .find(|skill| skill.name == "pm-project-bootstrap")
-            .expect("PM bootstrap built-in");
+            .find(|skill| skill.name == "genehub-team")
+            .expect("team built-in");
         let body = std::fs::read_to_string(&skill.file_path).unwrap();
-
-        assert!(body.contains("space approval request --challenge <challengeId>"));
-        assert!(body.contains("only submits a durable approval request"));
-        assert!(body.contains("authenticated Human answers"));
-        assert!(body.contains("ordinary chat"));
-        assert!(body.contains("stops this Agent turn"));
-        assert!(body.contains("command success is not approval"));
-        assert!(body.contains("stable action ID"));
-        assert!(!body.contains("Keep this command attached"));
-        assert!(!body.contains("request_user_input"));
-        assert!(!body.contains("AskQuestion"));
-    }
-
-    #[test]
-    fn project_manager_treats_flush_as_an_intelligence_tier() {
-        let root = temp_dir("pm-tiers");
-        let skills = load(&root);
-        let skill = skills
-            .iter()
-            .find(|skill| skill.name == "project-manager")
-            .expect("PM built-in");
-        let body = std::fs::read_to_string(&skill.file_path).unwrap();
-        assert!(body.contains("Platform model tiers"));
-        assert!(body.contains("routing tags, not model ids"));
-        assert!(body.contains("workflowTagRouteUnavailable"));
-        assert!(body.contains("The tag is spelled Flash"));
-        assert!(body.contains("Flush is not accepted"));
-        assert!(body.contains("--workflow workflow-improvement"));
-        assert!(body.contains("preserving existing media tags"));
+        for needle in [
+            "tools/team.py",
+            "spawn --space",
+            "send --to",
+            "立即结束本轮",
+            "有界终态",
+            "父就绪才交棒销账",
+            "看门狗自愈",
+            "TEAM_BOARD_PORT=0",
+            "../genehub/references/team-template/",
+        ] {
+            assert!(
+                body.contains(needle),
+                "the team Skill no longer explains {needle}"
+            );
+        }
+        let dir = skill.file_path.parent().unwrap();
+        for tool in ["team.py", "pm_board_server.py"] {
+            assert!(
+                dir.join("../genehub/references/team-template/tools")
+                    .join(tool)
+                    .is_file(),
+                "the team Skill points at a missing {tool}"
+            );
+        }
     }
 
     #[test]
@@ -718,6 +715,7 @@ mod tests {
         assert!(prompt.contains("index.html"));
         assert!(prompt.contains("genehub-introspect"));
         assert!(prompt.contains("genehub-preview"));
+        assert!(prompt.contains("genehub-team"));
         assert!(prompt.contains("--machine"));
         assert!(!prompt.contains("genehub-speech-runtime"));
         assert!(!prompt.contains("genehub-html-preview"));

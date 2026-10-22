@@ -233,7 +233,7 @@ defineSpecialty(
               arguments: {
                 command: `"$GENEHUB_CLI" workflow build --package game-delivery --apply --plan-digest ${shellArg(
                   planDigest,
-                )} --revision ${revision} --action-id bootstrap-approved && cat .pipebuilder/skills/project-manager/SKILL.md`,
+                )} --revision ${revision} --action-id bootstrap-approved`,
               },
             },
           };

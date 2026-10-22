@@ -16,5 +16,7 @@
 
 - 平台里“不写死 Agent 名字”的后续整改（动作 `confirm` 字段、`needsModelCatalog` 能力位、防回退检查）不再包含上述废弃目录；
   防回退检查把它们列为白名单，移除后白名单随之删除。
-- 仍引用这些部分的入口（工作台的 Workflow 界面、`genet` CLI 的 Workflow 命令、`workspace.rs` 对构建器的调用、内置 Skills `pm-project-bootstrap` / `project-manager`）
+- 仍引用这些部分的入口（工作台的 Workflow 界面、`genet` CLI 的 Workflow 命令、`workspace.rs` 对构建器的调用）
   尚未单独标记，也未改动行为；是否一并下线，由退役计划决定。
+- 内置 Skills `pm-project-bootstrap` / `project-manager` 已下线，其 Workflow 入口能力不再随产品分发；
+  Workflow 的测试 case 与 fixture 仍保留，供退役计划核对。

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import type { SessionSnapshot, WorkflowRunStatus } from "@genehub/proto";
@@ -154,8 +154,6 @@ for (const scenario of ["milestones", "replan", "exhausted", "no-go", "budget-ga
     // PM methods are a product built-in now, not something a package installs:
     // the root AgentSpace is single and its capability surface must not drift
     // with how many packages a project happens to have cloned.
-    const pmSource = readFileSync(path.join(t.env.data, "builtin-skills/project-manager/SKILL.md"), "utf8");
-    t.assertions.assert(pmSource === readFileSync(path.join(t.openRoot, "apps/daemon/builtin-skills/project-manager/SKILL.md"), "utf8"), "materialized PM methods differ from the shipped source");
     t.note(`one Executor Run; ${plans.length} plans, ${writes.length} real committed edits, ${reviews.length} commit-bound criterion checks; this proves scripted mechanics, not autonomous PM judgment`);
     if (scenario === "exhausted") {
       const reply = await opened.client.call({ type: "workflow.history", payload: { workspaceId: opened.workspaceId, limit: 10 } });
