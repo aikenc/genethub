@@ -292,7 +292,7 @@ defineSpecialty(
       const requestText = JSON.stringify(opened.mock.requests);
       t.assertions.assert(
         requestText.includes("<name>genehub-team</name>") &&
-          requestText.includes("1+N 项目团队") &&
+          requestText.includes("会接力的队伍") &&
           requestText.includes("<genehub_cli>") &&
           requestText.includes("你是当前项目直达流程中的实现 Worker"),
         "the built-in team entrypoint or Worker Workflow contract was not delivered",
