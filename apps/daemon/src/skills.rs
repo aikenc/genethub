@@ -631,6 +631,23 @@ mod tests {
                 "the team Skill points at a missing {tool}"
             );
         }
+        // The built-in team is a sample the user may rewrite; that promise needs a
+        // written path, not just prose in the entry body.
+        let customize = dir.join("references/customize.md");
+        let text = std::fs::read_to_string(&customize)
+            .expect("the team Skill no longer explains customization");
+        for needle in [
+            "team-template",
+            "sync-identity",
+            "employee add",
+            "spacebuilder.py",
+            "drift",
+        ] {
+            assert!(
+                text.contains(needle),
+                "the customization reference dropped {needle}"
+            );
+        }
     }
 
     #[test]

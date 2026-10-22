@@ -30,7 +30,7 @@ frontmatter 必须包含与目录名完全相同的 `name` 和非空 `descriptio
 | `genehub` | 通用能力入口与多机协作：机器目录、配对授权、`--machine` 远程 shell 与 Agent、身份对照；daemon 生命周期、客户端联调、本机语音 runtime 作为它的 `references/` |
 | `genehub-preview` | 静态 H5、站点、相册、阶段产物，以及影视、DCC、游戏引擎等创作过程预览；按需接入 HTTP/WS、原生媒体和操作回传，数字人为子场景 |
 | `genehub-introspect` | 对 GeneHub 自身的只读观察；目前是使用绑定 CLI 查阅会话历史 |
-| `genehub-team` | 1+N 项目团队机制：团队拓扑与职责、`team.py` 派单与纯异步回合接力、独立工位、看板与发版；建团队交付给机器管理员 |
+| `genehub-team` | 1+N 项目团队机制：团队拓扑与职责、`team.py` 派单与纯异步回合接力、独立工位、看板与发版；内置团队只是样板，可定制或整体重写，建团队交付给机器管理员 |
 
 ### 收束原则
 
