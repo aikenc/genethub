@@ -291,11 +291,11 @@ defineSpecialty(
 
       const requestText = JSON.stringify(opened.mock.requests);
       t.assertions.assert(
-        requestText.includes("<name>pm-project-bootstrap</name>") &&
-          requestText.includes("PM-managed project") &&
+        requestText.includes("<name>genehub-team</name>") &&
+          requestText.includes("1+N 项目团队") &&
           requestText.includes("<genehub_cli>") &&
           requestText.includes("你是当前项目直达流程中的实现 Worker"),
-        "the built-in PM entrypoint or Worker Workflow contract was not delivered",
+        "the built-in team entrypoint or Worker Workflow contract was not delivered",
       );
       t.note(
         `root=${rootSessionId} worker=${managed?.id} run=${runId} branch=${initialBranch} commits=3`,

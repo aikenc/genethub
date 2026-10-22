@@ -1,6 +1,6 @@
 ---
 name: genehub
-description: GeneHub 通用能力入口与多机协作指南。用于：了解 GeneHub 工作台、机器、workspace、Agent 会话与 CLI；多机协作——查看机器目录、配对与授权、用 --machine 远程执行命令（shell）、跨机下载/传输文件（file download）与验收、在其他机器启动或续接 Agent 会话；daemon 启动/停止/重启/离线恢复/环境生效；实时联调页面（网页白屏、DOM、截图、手机复现）；测试、安装或诊断本地语音识别 runtime（Qwen3-ASR）。静态与实时预览读 genehub-preview，会话历史读 genehub-introspect。不是通用软件开发流程。
+description: GeneHub 通用能力入口与多机协作指南。用于：了解 GeneHub 工作台、机器、workspace、Agent 会话与 CLI；多机协作——查看机器目录、配对与授权、用 --machine 远程执行命令（shell）、跨机下载/传输文件（file download）与验收、在其他机器启动或续接 Agent 会话；daemon 启动/停止/重启/离线恢复/环境生效；实时联调页面（网页白屏、DOM、截图、手机复现）；测试、安装或诊断本地语音识别 runtime（Qwen3-ASR）。静态与实时预览读 genehub-preview，会话历史读 genehub-introspect，项目团队与派单读 genehub-team。不是通用软件开发流程。
 ---
 
 # GeneHub 使用入口
@@ -50,6 +50,7 @@ GeneHub 是端侧多机器 Agent 的 hub：每台机器上的 daemon 持有自�
 | 把一棵 Space 树（`agent-space.genet.json`、Skill、定时 hook）生成成 Agent 读的规则与 Skill 文件 | [spacebuilder.md](references/spacebuilder.md) |
 | 静态 H5、站点、相册，或影视/DCC/引擎的创作过程预览 | Skill `genehub-preview` |
 | 会话历史、转发会话、来源引用 | Skill `genehub-introspect` |
+| 项目团队：建团队、派单、并发工位、看板与发版 | Skill `genehub-team` |
 | 产品反馈修复或 Beta 发布 | 当前 Space 选中的领域 Skill；没有时说明缺口，不凭本文执行发布 |
 
 ## 动手前的门禁

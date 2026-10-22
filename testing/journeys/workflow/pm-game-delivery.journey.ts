@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import type {
   ExecutorFlowStatus,
@@ -13,6 +14,9 @@ import type {
 import { defineJourney, type CaseContext } from "../../framework/public.ts";
 
 const FIFTEEN_MINUTES_MS = 15 * 60 * 1_000;
+// PM's preparation script used to ship inside a built-in Skill. That Skill is gone
+// with the Workflow subsystem, so the surviving journey carries its own copy.
+const PREPARE_EXECUTOR = fileURLToPath(new URL("../../fixtures/workflow/prepare-executor.mjs", import.meta.url));
 const TEN_MINUTES_MS = 10 * 60 * 1_000;
 const PACKAGE_ID = "game-delivery";
 const TEAM_NAMES = ["workflow-manager", "workflow-reviewer", "executor", "coder", "reviewer"] as const;
@@ -293,9 +297,6 @@ function developmentPlan(goal: string, markers: string[]) {
 function scriptProductJourney(
   mock: JourneyMock,
   projectRoot: string,
-  /// Where the daemon materializes built-in Skills, which is where PM's own
-  /// scripts now live: they are a product built-in, not a package asset.
-  dataRoot: string,
   deliveries: DeliveryScript[],
   managerPromptPath?: string,
   reviewFirst?: "approved" | "repair" | "limit",
@@ -385,7 +386,7 @@ process.stdout.write(cp.execFileSync(process.env.GENEHUB_CLI,args,{encoding:'utf
         repositories: [{ path: "project", source: ".", ref: "HEAD" }],
       }) } } };
       if (stage === 1) {
-        const script = path.join(dataRoot, "builtin-skills/project-manager/scripts/prepare-executor.mjs");
+        const script = PREPARE_EXECUTOR;
         const prepare = `test -f ${shellArg(script)} || { echo "missing prepare script: ${script}"; exit 9; }; test -f ${shellArg(trialPlan)} || { echo "missing trial plan: ${trialPlan}"; exit 9; }; node ${shellArg(script)} ${shellArg(trialPlan)}`;
         const stale = `
 const fs=require('node:fs'),p=require('node:path'),cp=require('node:child_process');
@@ -992,7 +993,7 @@ defineJourney(
   async (t) => {
     const fixture = await createProject(t, "stardust-garden");
     try {
-      scriptProductJourney(fixture.opened.mock, fixture.projectRoot, t.env.data, [PROJECT_DELIVERY]);
+      scriptProductJourney(fixture.opened.mock, fixture.projectRoot, [PROJECT_DELIVERY]);
       const pmSessionId = await t.flows.main.createBuiltinSession(fixture.opened.client, fixture.projectId);
       const timing = await runPmDelivery(
         t,
@@ -1048,7 +1049,7 @@ defineJourney(
   async (t) => {
     const fixture = await createProject(t, "stardust-expedition");
     try {
-      scriptProductJourney(fixture.opened.mock, fixture.projectRoot, t.env.data, [
+      scriptProductJourney(fixture.opened.mock, fixture.projectRoot, [
         PROJECT_DELIVERY,
         FEATURE_DELIVERY,
       ]);
@@ -1152,7 +1153,6 @@ defineJourney(
       scriptProductJourney(
         fixture.opened.mock,
         fixture.projectRoot,
-        t.env.data,
         [PROJECT_DELIVERY, FEATURE_DELIVERY],
         promptPath,
       );
@@ -1403,7 +1403,7 @@ for (const scenario of ["approved", "repair", "limit"] as const) defineJourney({
 }, async t => {
   const fixture = await createProject(t, `review-first-${scenario}`);
   try {
-    scriptProductJourney(fixture.opened.mock, fixture.projectRoot, t.env.data, [PROJECT_DELIVERY], undefined, scenario);
+    scriptProductJourney(fixture.opened.mock, fixture.projectRoot, [PROJECT_DELIVERY], undefined, scenario);
     const pm = await t.flows.main.createBuiltinSession(fixture.opened.client, fixture.projectId);
     await runPmDelivery(t, fixture, pm, PROJECT_DELIVERY.userMarker, PROJECT_DELIVERY.task, true);
     const before = git(fixture.projectRoot, ["rev-parse", "HEAD"]);
