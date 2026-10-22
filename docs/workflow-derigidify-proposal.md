@@ -1,6 +1,6 @@
 # Workflow 去僵化：从 fork 失权到平台交还清单
 
-> **已废弃（2026-10-10）**：Workflow 子系统正在退役，本文仅作历史与维护参考，不再作为新设计依据。见 [deprecated.md](deprecated.md)。
+> **已废弃（2026-10-10）**：Workflow 子系统正在退役，本文仅作历史与维护参考，不再作为新设计依据。见 [deprecated.md](deprecated.md)；多会话接力的现行机制是团队，见 [teams.md](teams.md)。
 
 状态：提案，尚未实施。日期：2026-09-21。
 落地分支：`dev-1`（承接已合入的 git-native Workflow 包模型）。

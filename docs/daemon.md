@@ -189,7 +189,7 @@ DataEndpoint method 只有四个：
 **目录就是注册表。** hook 是 `<项目>/.genethub/hooks/<id>.genet.json`，一个文件一个 hook：
 
 ```json
-{"schema":"genet.hook.v1","event":"timer","every":"5s","exec":["python3","tools/expert.py","hook"],
+{"schema":"genet.hook.v1","event":"timer","every":"5s","exec":["python3","tools/team.py","hook"],
  "cwd":".","timeout":20,"enabled":true,"owner":"…","payload":{}}
 ```
 
@@ -203,9 +203,9 @@ daemon 解析 `schema`（缺省可）、`event`（只能是 `timer`）、`every`
 
 ### Space 树与 `agent-space.genet.json`
 
-一个目录放一份 `agent-space.genet.json`（json5），它就是一个 Space；daemon 不要求谁来"注册"。读 `name`、`description`、`tags`、`agentCwd`，其余字段忽略。扫描只看 `<data>/spaces/`：其下的目录有描述文件就是根 Space，没有则再看一层（一组专家的集合目录）；根 Space 之下只认 `spaces/<名>/`，往下跟两层，不进隐藏目录、符号链接和 `node_modules`，所以不会遍历进别人的工作树。
+一个目录放一份 `agent-space.genet.json`（json5），它就是一个 Space；daemon 不要求谁来"注册"。读 `name`、`description`、`tags`、`agentCwd`，其余字段忽略。扫描只看 `<data>/spaces/`：其下的目录有描述文件就是根 Space，没有则再看一层（一组团队的集合目录）；根 Space 之下只认 `spaces/<名>/`，往下跟两层，不进隐藏目录、符号链接和 `node_modules`，所以不会遍历进别人的工作树。
 
-父子关系只来自目录布局：`<根>/spaces/<名>` 的父是 `<根>`。这是会话（不是用户）也能搭出树的唯一路径——常规的改父子需要项目控制绑定，而那是 Workflow 接管才给的。扫描三条约束：用户删除过的 Space 保持删除；已有登记不覆盖，用户手工选的父保留；描述文件损坏只记一条告警，不影响其余。扫描生成的登记没有 builder 锁摘要，所以不做 Space 健康检查。
+父子关系只来自目录布局：`<根>/spaces/<名>` 的父是 `<根>`。这是会话（不是用户）也能搭出树的唯一路径——常规的改父子需要项目控制绑定，那只属于退役中的 Workflow。团队就是靠这条路径搭出来的，见 [teams.md](./teams.md)。扫描三条约束：用户删除过的 Space 保持删除；已有登记不覆盖，用户手工选的父保留；描述文件损坏只记一条告警，不影响其余。扫描生成的登记没有 builder 锁摘要，所以不做 Space 健康检查。
 
 触发：daemon 启动时扫一次，`workspace.list` 时最多每 2 秒扫一次。
 
@@ -215,15 +215,15 @@ daemon 解析 `schema`（缺省可）、`event`（只能是 `timer`）、`every`
 
 ### 内置管理员
 
-每台机器有一位随产品发布的专家：`<data>/spaces/admin/`，名字是"<机器名>管理员"（机器名取自 `GENEHUB_LOCAL_MACHINE_NAME`，没有则主机名；去掉控制字符与路径分隔符，整体不超过 64 个字符，被截短的只会是机器名）。它就是一个普通 Space：用的是团队模板 `builtin-skills/genehub/references/team-template/` 的同一份文件（不含团队的子 Space），只多一份 `expert-admin` Skill，由扫描登记、由 SpaceBuilder 构建，daemon 里没有给它的特殊路径。
+每台机器有一个随产品发布的管理员 Space：`<data>/spaces/admin/`，名字是"<机器名>管理员"（机器名取自 `GENEHUB_LOCAL_MACHINE_NAME`，没有则主机名；去掉控制字符与路径分隔符，整体不超过 64 个字符，被截短的只会是机器名）。它就是一个普通 Space：用的是团队模板 `builtin-skills/genehub/references/team-template/` 的同一份文件（不含团队的子 Space），只多一份 `team-admin` Skill，由扫描登记、由 SpaceBuilder 构建，daemon 里没有给它的特殊路径。
 
 daemon 每次启动，在扫描之前做三件事：
 
 1. 用户移除过它就什么都不做——移除是决定，不被重建。
-2. 把产品自带的文件写进去（只在内容不同时写）：描述文件（名字按机器改写、加上 `expert-admin`）、根身份文件、`skills/` 与 `tools/`；管理员没有后台子 Space。管理员无状态，产品拥有的文件在不同于模板时覆盖。`.genethub/bootstrap-owned.json` 记录上次分发拥有的路径，只有其中已退役文件才清理；未知文件和缺少归属记录的旧文件保留，运行数据与 Builder 输出也保留。普通团队的已复制模板不因此自动覆盖。
+2. 把产品自带的文件写进去（只在内容不同时写）：描述文件（名字按机器改写、加上 `team-admin`）、根身份文件、`skills/` 与 `tools/`；管理员没有后台子 Space。管理员无状态，产品拥有的文件在不同于模板时覆盖。`.genethub/bootstrap-owned.json` 记录上次分发拥有的路径，只有其中已退役文件才清理；未知文件和缺少归属记录的旧文件保留，运行数据与 Builder 输出也保留。普通团队的已复制模板不因此自动覆盖。
 3. 有文件变了、或还没有构建锁，就用平台 Python（没有则 PATH 里的 `python3`）运行内置的 SpaceBuilder `build`，限时 60 秒。失败只记警告，daemon 照常启动，下次启动再试。
 
-已经从模板复制出去的专家不随模板升级。模板里 hook 的命令用 `${GENEHUB_PYTHON}`：定时 hook 展开它时，没有安装平台 Python 就退回 `python3`（环境变量本身只在真有平台 Python 时才导出）。
+已经从模板建出来的团队归用户所有，daemon 不覆盖它们；模板更新时由团队自己的定时任务发现并交给它的反思会话合并（[teams.md](./teams.md) §4）。模板里 hook 的命令用 `${GENEHUB_PYTHON}`：定时 hook 展开它时，没有安装平台 Python 就退回 `python3`（环境变量本身只在真有平台 Python 时才导出）。
 
 `session.delete` 是真删：时间线、meta、以及那个会话的 scratch 目录一起没。scratch 里放的是 adapter 存的「CLI 自己那份对话」（`--resume` id、线程文件），留着它等于「删掉的对话在 agent 那边还在」，那不叫删除。没有回收站，也没有撤销——想删掉的对话，通常正是不希望留副本的那种。删一个已经不在的会话不算失败：调用方要的是「它不存在」，而它确实不存在，两个窗口点同一行不该有一个看到报错。
 

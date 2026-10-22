@@ -71,7 +71,7 @@ defineJourney(
       const file = path.join(alice, "spaces", child, "agent-space.genet.json");
       writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf8")), agents: ["codex"] }));
     }
-    const hookPath = path.join(alice, "skills/expert-front/hooks/timer.genet.json");
+    const hookPath = path.join(alice, "skills/team-front/hooks/timer.genet.json");
     writeFileSync(hookPath, JSON.stringify({ ...JSON.parse(readFileSync(hookPath, "utf8")), every: "2s" }));
     mkdirSync(path.join(alice, ".genethub"), { recursive: true });
     writeFileSync(

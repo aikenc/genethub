@@ -13,7 +13,7 @@
 //     back the same asynchronous way;
 //   - writer lock prevents two concurrent `work` sessions on the same `--dir` while allowing `research`;
 //   - `send --to <expert>:work` starts/routes cross-expert collaboration and delivers the reply back to the caller;
-//   - `note` is only a file (including `--expert bob`), `directory` lists sessions, and `mount`/`unmount`
+//   - `note` is only a file (including `--team bob`), `directory` lists sessions, and `mount`/`unmount`
 //     enforces single-expert ownership and warns on a dirty worktree.
 
 import { spawnSync } from "node:child_process";
@@ -67,7 +67,7 @@ defineJourney(
     cpSync(path.join(t.openRoot, TEMPLATE), alice, { recursive: true });
     const descriptorPath = path.join(alice, "agent-space.genet.json");
     writeFileSync(descriptorPath, JSON.stringify({ ...JSON.parse(readFileSync(descriptorPath, "utf8")), name: "alice" }));
-    const hookPath = path.join(alice, "skills/expert-front/hooks/timer.genet.json");
+    const hookPath = path.join(alice, "skills/team-front/hooks/timer.genet.json");
     writeFileSync(hookPath, JSON.stringify({ ...JSON.parse(readFileSync(hookPath, "utf8")), every: "1s" }));
     mkdirSync(path.join(alice, ".genethub"), { recursive: true });
     writeFileSync(path.join(alice, ".genethub", "open.env"), "EXPERT_AGENT=ctl-normal\nEXPERT_BOARD_PORT=0\nEXPERT_WAKE_ROUNDS=100000\nEXPERT_NOTE_QUIET=100000\n");
@@ -122,7 +122,7 @@ defineJourney(
 
       // 0. J1: `expert.py init` creates `bob` from the template, preserves soul.md anchors, initializes git, and opens its 4 Spaces.
       const inited = expert(alice, "init", "bob", "--desc", "QA与协作专家", "--soul", "负责跨专家验收与回合制回归验证");
-      t.assertions.assert(inited.code === 0 && inited.out.includes("已创建并初始化专家 bob") && inited.out.includes("已打开空间"), `init bob: ${inited.out} ${inited.err}`);
+      t.assertions.assert(inited.code === 0 && inited.out.includes("已创建并初始化团队 bob") && inited.out.includes("已打开空间"), `init bob: ${inited.out} ${inited.err}`);
       const bob = path.join(t.env.data, "spaces", "bob");
       writeFileSync(path.join(bob, ".genethub", "open.env"), "EXPERT_AGENT=ctl-normal\nEXPERT_BOARD_PORT=0\nEXPERT_WAKE_ROUNDS=100000\nEXPERT_NOTE_QUIET=100000\n");
       const bobSoul = readFileSync(path.join(bob, "soul.md"), "utf8");
@@ -207,7 +207,7 @@ defineJourney(
       );
       t.assertions.assert((await crossResults()).length === 1, `cross-expert result delivered ${(await crossResults()).length} times`);
       const badSend = expert(alice, "send", "--to", "nonexistent-expert", "hello");
-      t.assertions.assert(badSend.code !== 0 && badSend.err.includes("既不是会话 id，也不是已知专家名") && badSend.err.includes("下一步"), `send to unknown expert: ${badSend.out} ${badSend.err}`);
+      t.assertions.assert(badSend.code !== 0 && badSend.err.includes("既不是会话 id，也不是已知团队名") && badSend.err.includes("下一步"), `send to unknown expert: ${badSend.out} ${badSend.err}`);
 
       // 4. Writer lock (J5).
       const project = path.join(t.env.root, "project");
@@ -239,8 +239,8 @@ defineJourney(
       const ownNote = JSON.parse(readFileSync(path.join(alice, ".genethub/team/notes", ownNotes[0]!), "utf8"));
       t.assertions.assert(ownNotes.length === 1 && ownNote.session === front && ownNote.kind === "preference" && ownNote.quote === "that is not what I meant", `own note ${JSON.stringify(ownNote)}`);
       t.assertions.assert(expert(alice, "note", "--session", front, "--kind", "preference", "--quote", "that is not what I meant", "--context", "opened a read-only review as work").out.includes("记过了"), "the same note was written twice");
-      const toBob = expert(alice, "note", "--session", front, "--expert", "bob", "please look at the review habit");
-      t.assertions.assert(toBob.code === 0, `note --expert: ${toBob.err || toBob.out}`);
+      const toBob = expert(alice, "note", "--session", front, "--team", "bob", "please look at the review habit");
+      t.assertions.assert(toBob.code === 0, `note --team: ${toBob.err || toBob.out}`);
       const bobNotes = readdirSync(path.join(bob, ".genethub/team/notes"));
       const bobRead = bobNotes.map((file) => JSON.parse(readFileSync(path.join(bob, ".genethub/team/notes", file), "utf8")) as { from?: string; kind?: string; context?: string });
       const fromAlice = bobRead.filter((note) => note.from === "alice");

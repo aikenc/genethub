@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Permanent Live Team Board Service & Data Aggregator for GeneHub 1+N Expert Teams.
+"""Permanent Live Team Board Service & Data Aggregator for GeneHub 1+N Agent Teams.
 
 Provides:
 1. `<team-root>/datas/board/index.html`: Permanent interactive H5 Team Board entry.
@@ -31,7 +31,7 @@ BOARD_HTML = r"""<!doctype html>
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>实时团队作战看板 · GeneHub Expert Team</title>
+<title>实时团队作战看板 · GeneHub Agent Team</title>
 <style>
   :root {
     --bg: #0b0f17;
@@ -204,7 +204,7 @@ BOARD_HTML = r"""<!doctype html>
     <div class="kpi">
       <div class="label">活跃会话 / 总会话数</div>
       <div class="val" id="kpi-sessions">-</div>
-      <div class="sub" id="kpi-sessions-sub">含主入口、组长与管线组员</div>
+      <div class="sub" id="kpi-sessions-sub">含前台、组长与管线组员</div>
     </div>
     <div class="kpi">
       <div class="label">已发布可玩版本 (Releases)</div>
@@ -643,15 +643,15 @@ def _query_daemon_spaces_and_sessions_uncached(team_root):
 
 
 ROLE_DISPLAY_ORDER = {
-    "root": (0, "📌 巡查主入口 (front)"),
+    "root": (0, "📌 前台 (front)"),
     "leader": (1, "🧭 研发组长 (leader)"),
     "skill-lead": (2, "⚔️ 功法技能管线 (skill-lead)"),
     "monster-lead": (3, "👹 妖兽与战斗管线 (monster-lead)"),
     "map-lead": (4, "🗺️ 秘境地图管线 (map-lead)"),
     "qa": (10, "🧪 QA 验收专家 (qa)"),
     "research": (11, "📐 数值与玩法研究 (research)"),
-    "team-reflect": (12, "🧠 团队自省专家 (team-reflect)"),
-    "reflect": (13, "🧠 自省专家 (reflect)"),
+    "team-reflect": (12, "🧠 团队反思 (team-reflect)"),
+    "reflect": (13, "🧠 反思 (reflect)"),
 }
 
 
@@ -721,7 +721,7 @@ def build_board_live_data(team_root):
             "roleDesc": role_desc_json.get("description") or "",
             "workspaceId": wid,
             "worktreeDir": wt_dir,
-            "worktreeLabel": "主入口接待台" if role == "root" else (os.path.basename(wt_dir) if wt_dir else "未绑工位 (待岗)"),
+            "worktreeLabel": "前台" if role == "root" else (os.path.basename(wt_dir) if wt_dir else "未绑工位 (待岗)"),
             "onDuty": on_duty,
             "effort": effort,
             "git": git_info,
@@ -1127,7 +1127,7 @@ async def serve_board(team_root):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="GeneHub Expert Team Live Board Service")
+    parser = argparse.ArgumentParser(description="GeneHub Agent Team Live Board Service")
     parser.add_argument("--team-root", required=True)
     parser.add_argument("--serve", action="store_true", help="Run as background Service Preview daemon")
     parser.add_argument("--once", action="store_true", help="Generate index.html + live.json once and exit")

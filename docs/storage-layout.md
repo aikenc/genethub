@@ -9,7 +9,7 @@
 
 | 根 | 放什么 | 生命周期 |
 | --- | --- | --- |
-| **Space 根下的 `.genethub/`** | 业务状态：会话、组件实例数据、Workflow 包源 | 跟着项目走：复制项目一起复制，删掉项目一起没；各 channel 共用同一份 |
+| **Space 根下的 `.genethub/`** | 业务状态：会话、组件实例数据、团队脚本状态、退役中的 Workflow 包源 | 跟着项目走：复制项目一起复制，删掉项目一起没；各 channel 共用同一份 |
 | **daemon 数据目录 `<data>`** | 机器本地、可丢弃的东西：项目注册表与 rootHandle（`config.json`）、机器身份（`state.json`）、已授权设备（`devices.json`）、`logs/`、缓存 | 每个 channel 一份；卸载即整个删掉 |
 
 判断标准只有一条：**换一个 channel 打开同一个项目，这份数据还应该在吗？** 应该在，就放 `.genethub/`；
@@ -29,10 +29,12 @@ agent CLI 自己的线程库（`~/.codex/` 之类）不归我们管，只在会�
     provider-operations/      本会话 provider 草案、无密钥决定与配置/验证回执
   components/<组件>/          组件实例的 Space 级存储
   tombstones/<会话>.json      会话删除墓碑
-  workflows/<包>/             Workflow 包源（仅项目根）；手写，可自带 git
+  workflows/<包>/             Workflow 包源（仅项目根；Workflow 退役中，不再新建）
   preview-feedback/           文件与版本绑定的反馈草稿、证据、提交回执与限时分享范围
   speech/                     项目级语音偏好与学习词表（仅项目根）
-  temp/                       普通临时材料，例如 Workflow 试验材料 temp/exp/<testname>/
+  temp/                       普通临时材料
+  team/                       团队脚本的状态：收件箱、待办、留言、身份指纹、reset 备份（团队自己写，daemon 不读）
+  bootstrap-owned.json        内置管理员 Space 上次分发的产品文件清单（只在 <data>/spaces/admin/）
   hooks/<id>.genet.json       定时 hook：一个文件一个 hook，目录就是注册表（见 daemon.md「定时 hook」）
   open.env                    项目的本机环境变量，KEY=VALUE；注入 hook 命令的环境
   owner.lock                  滚动升级期间的旧版兼容锁
@@ -58,13 +60,15 @@ agent CLI 自己的线程库（`~/.codex/` 之类）不归我们管，只在会�
 | 目录 | 谁写 |
 | --- | --- |
 | `sessions/`、`components/`、`tombstones/`、`preview-feedback/` | 只由 daemon 写。Agent 不直接改写 |
-| `workflows/`、`temp/` | 普通目录，Agent 按任务需要编辑 |
+| `workflows/`、`temp/`、`team/` | 普通目录，Agent 与团队脚本按需要编辑 |
 | `hooks/`、`open.env` | 普通文件，Agent 与脚本直接写（先写临时文件再 `rename`）。daemon 只读，运行记录只在内存里 |
 
 "只由 daemon 写"是**纪律，不是强制**：任何有项目写权限的 Agent 技术上都能写，放进 `<data>` 也挡不住。
 越权写入会在会话记录里留痕，由复查发现。不要为此设计额外的防篡改机制。
 
-## 5. Workflow 布局
+## 5. Workflow 布局（退役中）
+
+只为读取已有记录保留，新的多会话协作用团队机制（[teams.md](./teams.md)）。
 
 | 数据 | 位置 |
 | --- | --- |

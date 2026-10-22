@@ -101,7 +101,7 @@ pub fn materialize(root: &Path) -> Option<PathBuf> {
 
 /// Remove what an older daemon materialized and this one no longer ships. The directory is
 /// product-owned, and a file left behind is not harmless: a Skill's template is copied from it,
-/// so a retired part of the template would be copied into every new expert. Another process's
+/// so a retired part of the template would be copied into every new team. Another process's
 /// in-flight temporary file (`.name.<pid>.tmp`) is left alone.
 fn prune_stale(root: &Path, directory: &Path, shipped: &dyn Fn(&str) -> bool) {
     let Ok(entries) = std::fs::read_dir(directory) else {
@@ -606,46 +606,124 @@ mod tests {
             .find(|skill| skill.name == "genehub-team")
             .expect("team built-in");
         let body = std::fs::read_to_string(&skill.file_path).unwrap();
+        // The entry routes by who is asking; the template's own rules live in a reference.
         for needle in [
-            "tools/team.py",
-            "spawn --space",
-            "send --to",
-            "立即结束本轮",
-            "有界终态",
-            "父就绪才交棒销账",
-            "看门狗自愈",
-            "TEAM_BOARD_PORT=0",
+            "references/template.md",
+            "references/customize.md",
+            "references/primitives.md",
+            "../genehub/references/team-admin-skill/team-admin/SKILL.md",
             "../genehub/references/team-template/",
+            "立即结束本轮",
+            "Workflow",
         ] {
             assert!(
                 body.contains(needle),
-                "the team Skill no longer explains {needle}"
+                "the team Skill no longer routes to {needle}"
             );
         }
         let dir = skill.file_path.parent().unwrap();
-        for tool in ["team.py", "pm_board_server.py"] {
-            assert!(
-                dir.join("../genehub/references/team-template/tools")
-                    .join(tool)
-                    .is_file(),
-                "the team Skill points at a missing {tool}"
-            );
-        }
-        // The built-in team is a sample the user may rewrite; that promise needs a
-        // written path, not just prose in the entry body.
-        let customize = dir.join("references/customize.md");
-        let text = std::fs::read_to_string(&customize)
-            .expect("the team Skill no longer explains customization");
-        for needle in [
-            "team-template",
-            "sync-identity",
-            "employee add",
-            "spacebuilder.py",
-            "drift",
+        for file in [
+            "../genehub/references/team-template/tools/team.py",
+            "../genehub/references/team-template/tools/pm_board_server.py",
+            "../genehub/references/team-template/skills/team-reflect/references/upgrade.md",
+            "../genehub/references/team-admin-skill/team-admin/SKILL.md",
         ] {
             assert!(
-                text.contains(needle),
-                "the customization reference dropped {needle}"
+                dir.join(file).is_file(),
+                "the team Skill points at a missing {file}"
+            );
+        }
+        let reference = |name: &str| {
+            std::fs::read_to_string(dir.join("references").join(name))
+                .unwrap_or_else(|_| panic!("the team Skill lost references/{name}"))
+        };
+        let checks: [(&str, &[&str]); 3] = [
+            (
+                "template.md",
+                &[
+                    "tools/team.py",
+                    "spawn --space",
+                    "send --to",
+                    "立即结束本轮",
+                    "有界终态",
+                    "父就绪才交棒销账",
+                    "看门狗自愈",
+                    "TEAM_BOARD_PORT=0",
+                    "upgrade.md",
+                ],
+            ),
+            // The built-in team is a sample the user may rewrite; that promise needs a
+            // written path, not just prose in the entry body.
+            (
+                "customize.md",
+                &[
+                    "team-template",
+                    "sync-identity",
+                    "employee add",
+                    "spacebuilder.py",
+                    "drift",
+                    "primitives.md",
+                ],
+            ),
+            (
+                "primitives.md",
+                &[
+                    "agent-space.genet.json",
+                    "spacebuilder.py",
+                    "timer",
+                    "--system",
+                    "--message-id",
+                    "agent list --routes",
+                ],
+            ),
+        ];
+        for (name, needles) in checks {
+            let text = reference(name);
+            for needle in needles {
+                assert!(text.contains(needle), "references/{name} dropped {needle}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_platform_reference_links_only_documents_this_repository_has() {
+        let root = temp_dir("platform-reference");
+        let skills = load(&root);
+        let skill = skills
+            .iter()
+            .find(|skill| skill.name == "genehub")
+            .expect("entry built-in");
+        let body = std::fs::read_to_string(&skill.file_path).unwrap();
+        assert!(body.contains("references/platform.md"));
+        let text = std::fs::read_to_string(
+            skill
+                .file_path
+                .parent()
+                .unwrap()
+                .join("references/platform.md"),
+        )
+        .unwrap();
+        // Installed copies have no source tree, so the links point at the public repository;
+        // each one must still name a document that ships in it.
+        const PREFIX: &str = "https://github.com/aikenc/genethub/blob/main/";
+        let docs = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut linked = Vec::new();
+        for piece in text.split(PREFIX).skip(1) {
+            let path = piece.split([')', '>', '#', ' ']).next().unwrap();
+            assert!(
+                docs.join(path).is_file(),
+                "platform.md links a missing {path}"
+            );
+            linked.push(path.to_owned());
+        }
+        for core in [
+            "docs/architecture.md",
+            "docs/security-model.md",
+            "docs/teams.md",
+        ] {
+            assert!(
+                linked.iter().any(|path| path == core),
+                "platform.md no longer links {core}"
             );
         }
     }

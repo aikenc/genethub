@@ -279,7 +279,7 @@ defineSpecialty(
       ["tools/expert.py", "init", "game-qa", "--desc", "QA自动化专家", "--soul", "使用Playwright真实操作与截图核验"],
       { cwd: expert, env: initEnv, encoding: "utf8" },
     );
-    t.assertions.assert(inited.status === 0 && inited.stdout.includes("已创建并初始化专家 game-qa"), `init game-qa: ${inited.stdout} ${inited.stderr}`);
+    t.assertions.assert(inited.status === 0 && inited.stdout.includes("已创建并初始化团队 game-qa"), `init game-qa: ${inited.stdout} ${inited.stderr}`);
     const qaDir = join(t.env.root, "expert-datas-paths", "game-qa");
     const dupInit = spawnSync("python3", ["tools/expert.py", "init", "game-qa", "--desc", "x"], { cwd: expert, env: initEnv, encoding: "utf8" });
     t.assertions.assert(dupInit.status !== 0 && dupInit.stderr.includes("已存在"), "duplicate init succeeded");
