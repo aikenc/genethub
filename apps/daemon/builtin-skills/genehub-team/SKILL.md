@@ -9,6 +9,9 @@ description: GeneHub 的 1+N 项目团队机制：一个团队根空间加若干
 团队复制、可自主演进的脚本 `tools/team.py` 与 `tools/pm_board_server.py`。用户只跟**主入口（前台）**
 说话，其余岗位在后台协同；里程碑规划、并发开发、验收和发版由团队自己完成。
 
+内置团队只是样板，团队属于用户：岗位、Skill、脚本、成员结构都能改，甚至整体重写，
+见 [references/customize.md](references/customize.md)。
+
 ## 拓扑
 
 | 岗位 | 位置 | 职责 |
@@ -63,6 +66,7 @@ description: GeneHub 的 1+N 项目团队机制：一个团队根空间加若干
 
 ## 边界
 
-- 团队产物是产品资产：改模板、脚本与规范走 `sync-identity` 校验后 `snapshot` 提交，不手改生成文件。
+- 团队属于用户：内置 `team-template` 只是样板，改岗位、Skill、脚本或整体重写都走
+  [references/customize.md](references/customize.md) 的落地方式，不手改生成文件。
 - 用户不满意先 `note --kind unhappy`，流程问题用 `reflect now`，不要直接改平台机制。
 - 团队自省可以改自己的 Skill 与 `tools/team.py`；平台内置 Skill 与 daemon 行为不归团队。
