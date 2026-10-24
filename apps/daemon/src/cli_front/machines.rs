@@ -112,12 +112,14 @@ pub fn find(machine_id: &str) -> Result<PairedMachine, CliFailure> {
             CliFailure::business(
                 "machineNotPaired",
                 format!(
-                    "{machine_id} is not a machine this installation has paired with; \
-                     `genet machine list` shows the ones it has"
+                    "{machine_id} is not a machine this installation has paired with directly; \
+                     `genet machine list` shows only those. A machine can also be reached through the \
+                     Hub without a direct pairing: compare with `genet machine list --reachable`."
                 ),
                 Some(serde_json::json!({
                     "machineId": machine_id,
                     "paired": machines.iter().map(|m| m.machine_id.clone()).collect::<Vec<_>>(),
+                    "reachableHint": "genet machine list --reachable",
                 })),
             )
         })

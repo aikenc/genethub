@@ -11,8 +11,8 @@ description: 1+N 项目团队内部协作的公共约定：前台、研发组长
 
 | 命令 | 作用 |
 |---|---|
-| `spawn --space <岗位> --kind research\|work [--worktree auto] --desc "一句话" [--tier Ultra\|Max\|Pro\|Flash\|Mini] "任务"` | 在指定团队子空间开后台会话（加 `--worktree auto` 自动切独立并发子工位），完成后自动合并回传 |
-| `send --to <岗位\|会话id\|团队名[:岗位]> [--kind human\|patrol\|task\|question\|note] "话"` | 投递消息；对方忙时自动写文件收件箱 `.genethub/team/inbox/` 0 抢占合并 |
+| `spawn --space <岗位> --kind research\|work [--worktree auto] [--machine <ID>] --desc "一句话" [--tier Ultra\|Max\|Pro\|Flash\|Mini] "任务"` | 在指定团队子空间开后台会话（加 `--worktree auto` 自动切独立并发子工位），完成后自动合并回传；`--machine` 派到远端机器的同名岗位 workspace |
+| `send --to <岗位\|会话id\|团队名[:岗位]> [--machine <ID>] [--kind human\|patrol\|task\|question\|note] "话"` | 投递消息；对方忙时自动写文件收件箱 `.genethub/team/inbox/` 0 抢占合并；`--machine` 投给远端岗位或远端会话 |
 | `employee add <名> --desc "职责" [--repo 仓]` / `employee ls` / `employee retire <名>` | 动态扩编管线岗位（自动建子空间并切 worktree 工位）、查看在岗编制或转入待岗 |
 | `worktree create <slot> --repo <仓> [--branch B] [--space 岗位]` / `worktree bind\|ls` | 从主仓切出独立 git worktree 工位并写入子空间 `open.env` `WORKTREE_DIR` |
 | `publish release <源> --name <vX.Y>` / `publish report <源> --slug <名>` / `publish rollback` | 发布可玩版本至 `datas/releases/<vX.Y>/`、发布报告至 `datas/reports/` 或紧急回滚 `latest` |

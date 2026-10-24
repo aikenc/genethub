@@ -21,8 +21,8 @@ Skill：`team-core`（所有会话先读）、`team-front`（带 5 秒定时 hoo
 
 | 命令 | 用途 |
 |---|---|
-| `spawn --space <岗位> --kind work\|research [--worktree auto] --desc "一句话" [--tier Ultra\|Max\|Pro\|Flash\|Mini] [--media image\|video] "任务"` | 在子空间起后台会话；`--worktree auto` 自动切独立并发工位；`--team <名>` 派到本机另一支团队 |
-| `send --to <岗位\|会话\|团队名[:岗位]> [--kind human\|patrol\|task\|question\|note] "话"` | 投递消息；对方忙时写文件收件箱，0 抢占不打断 |
+| `spawn --space <岗位> --kind work\|research [--worktree auto] [--machine <ID>] --desc "一句话" [--tier Ultra\|Max\|Pro\|Flash\|Mini] [--media image\|video] "任务"` | 在子空间起后台会话；`--worktree auto` 自动切独立并发工位；`--machine` 派到远端机器的同名岗位 workspace；`--team <名>` 派到本机另一支团队 |
+| `send --to <岗位\|会话\|团队名[:岗位]> [--machine <ID>] [--kind human\|patrol\|task\|question\|note] "话"` | 投递消息；对方忙时写文件收件箱，0 抢占不打断；`--machine` 投给远端岗位或远端会话 |
 | `employee add\|ls\|retire` | 动态扩编或待岗岗位，自动建子空间与工位 |
 | `worktree create\|bind\|ls` | 从主仓切 worktree 并写子空间 `open.env` 的 `WORKTREE_DIR` |
 | `publish release <源> --name vX.Y` / `publish report <源> --slug <名>` / `publish rollback` | 发可玩版本到 `datas/releases/`、报告到 `datas/reports/`、紧急回滚 `latest` |
@@ -42,6 +42,10 @@ Skill：`team-core`（所有会话先读）、`team-front`（带 5 秒定时 hoo
 - 同一批子任务全部结束后合并为一条 `result` 回执；中途异常由看门狗拉起，不必人工催促。
 - 一个目录同一时间只有一个写会话；并发组员在各自 worktree 提交，由组长 `git merge-tree` 预检后合入。
 - 档位是平台路由标签，不是模型 id；团队只写标签，不钉 `modelId`。
+- **跨机器**：`spawn --machine <ID>` / `send --machine <ID> --to <岗位>` 在远端的岗位 workspace 起会话或投递。
+  账本、收件箱和写者锁仍留在派单方，`pending` 记录带 `machine`，定时对账据此去远端取状态与最终回复；
+  远端不注册团队根、不跑前台与对账器。`--worktree`/`--dir` 只对本机有效，跨机没有共享写者锁；远端用目标机器
+  自己的 Agent 与默认模型，不沿用请求方的 `modelId`。
 
 ## 对用户
 

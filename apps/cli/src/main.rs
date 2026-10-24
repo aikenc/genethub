@@ -267,10 +267,11 @@ pub fn usage() -> i32 {
                                     own words with no option picked
   genet session interrupt <id>      stop the running turn
   genet session close <id>          close the session
-  genet machine list                machines this installation can reach
+  genet machine list                machines paired directly with this one
+  genet machine list --reachable    every machine this identity can route to
   genet machine pair <code> --endpoint <url> [--name <label>]
                                     redeem a pairing code from another machine
-  genet machine show <machineId>    one paired machine
+  genet machine show <machineId>    one directly paired machine
   genet machine forget <machineId>  drop the local credential for a machine
   genet device list                 clients authorized on the target machine
   genet device invite [--grant read,session,files,git,pty,devices,settings,update]

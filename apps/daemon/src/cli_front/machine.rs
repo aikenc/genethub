@@ -67,10 +67,31 @@ async fn list(args: &[String]) -> Result<serde_json::Value, CliFailure> {
         ));
     }
     let machines = machines::load()?;
-    Ok(json!({
+    Ok(list_json(
+        &machines,
+        machines::file()?.display().to_string(),
+    ))
+}
+
+/// What `machine list` prints for the direct-pairing store.
+///
+/// An empty list reads as "there is no other machine", which is false for
+/// every installation that reaches its machines through the Hub. The hint
+/// names the question this store answers and the command that asks the other
+/// one, rather than leaving the caller to guess.
+fn list_json(machines: &[PairedMachine], store: String) -> serde_json::Value {
+    let mut value = json!({
         "machines": machines.iter().map(PairedMachine::public).collect::<Vec<_>>(),
-        "store": machines::file()?.display().to_string(),
-    }))
+        "store": store,
+    });
+    if machines.is_empty() {
+        value["hint"] = json!(
+            "this store lists machines paired directly with this one; \
+             `genet machine list --reachable` asks the Hub for every machine \
+             this identity can route to"
+        );
+    }
+    value
 }
 
 /// Explicit opt-in discovery: self + direct credentials + this identity's Hub directory.
@@ -433,6 +454,31 @@ mod tests {
         let rows = merge_directory("self", "genethub-server-beta", vec![], vec![]);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["local"], true);
+    }
+
+    #[test]
+    fn an_empty_direct_store_says_which_command_asks_the_hub() {
+        let value = list_json(&[], "/home/a/.local/share/GeneHub/machines.json".into());
+        assert_eq!(value["machines"], json!([]));
+        let hint = value["hint"].as_str().expect("no hint on an empty list");
+        assert!(hint.contains("--reachable"), "{hint}");
+        assert!(hint.contains("paired directly"), "{hint}");
+    }
+
+    #[test]
+    fn a_non_empty_direct_store_does_not_need_the_hint() {
+        let machine = PairedMachine {
+            machine_id: "mch_1".into(),
+            name: "laptop".into(),
+            fingerprint: "AA-BB".into(),
+            endpoint: "wss://relay.example/forward/client".into(),
+            device_id: "dev_1".into(),
+            secret: "never printed".into(),
+            paired_at: "2026-10-24T00:00:00Z".into(),
+        };
+        let value = list_json(&[machine], "/tmp/machines.json".into());
+        assert_eq!(value["machines"].as_array().unwrap().len(), 1);
+        assert!(value.get("hint").is_none(), "{value}");
     }
 
     #[test]

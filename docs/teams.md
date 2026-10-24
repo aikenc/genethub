@@ -41,7 +41,7 @@
 | 会话控制：创建、发送、中断、标签、描述；会话发起的会话带 `系统发起` | 派出后台会话，按岗位打标签，前台折叠内部会话 | [daemon.md](./daemon.md)「4.1 会话」 |
 | 会话历史与 `ghref` 引用 | 反思与接手时按引用回到原话 | [session-history-cli.md](./session-history-cli.md) |
 | 档位路由：`--tag Ultra/Max/Pro/Flash/Mini`、`--media`，`agent list --routes` | 团队只写档位，不钉模型 id | `genet agent list --routes`、`genet session model` 的 schema |
-| 跨机：`--machine` 下的 `shell`、`session`、`agent run`、`file download` | 把任务派到持有资源的那台机器 | 内置 Skill `genehub` 的 [multi-machine.md](../apps/daemon/builtin-skills/genehub/references/multi-machine.md) |
+| 跨机 | `--machine` 下的 `shell`、`session`、`agent run`；团队样板用 `spawn`/`send` 的 `--machine` 把任务派到远端岗位 | 把任务派到持有资源的那台机器，账本仍留在派单方 | 内置 Skill `genehub` 的 [multi-machine.md](../apps/daemon/builtin-skills/genehub/references/multi-machine.md)、本文 §6 |
 | Asset Preview | 看板、可玩版本、报告直接作为链接给用户打开 | [assets-quick-preview.md](./assets-quick-preview.md) |
 
 团队状态（收件箱、待办、留言、写者锁）是团队脚本自己的文件，放在 Space 根下的 `.genethub/team/` 与业务目录里，
@@ -82,7 +82,27 @@ daemon 不解释它们（[storage-layout.md](./storage-layout.md)）。
 
 团队可以分享：它是一个 git 仓库，别人 clone 到自己的 `<data>/spaces/` 下重新编译身份，就成了他自己的团队。
 
-## 6. 演进与退役
+## 6. 跨机器工位
+
+岗位所在的机器与执行任务的机器可以不同，但只有两种组合：
+
+| 需求 | 做法 |
+|---|---|
+| 会话在 A，工具在 B | 成员留在 A 的岗位会话里，用 `genet shell --machine B` 在 B 的 workspace 内执行；结果回到 A 的会话，走本机接力 |
+| 会话本身在 B | `team.py spawn --machine <B 的机器 ID> ...` 或 `send --machine <B> --to <岗位>`：在 B 的岗位 workspace 创建/投递，Agent 进程、身份与产物都在 B |
+
+`--machine` 接受 `genet machine list --reachable` 返回的精确 ID。目标机器上必须已经打开该岗位的 Space
+（`genet space open <团队>/spaces/<岗位>`）；样板按 workspace 名或根目录名匹配岗位，重名时用 `--workspace` 指定。
+
+**账本仍在派单方**：`pending/`、文件收件箱与写者锁都是发起方机器上的文件，定时对账按记录里的 `machine`
+去远端读会话状态与最终回复。所以远端不需要注册团队根、不跑前台、不跑看板和 5 秒对账器。边界也要说清楚：
+
+- `--worktree` 与 `--dir` 只对本机有效；远端岗位用它自己的 `WORKTREE_DIR`，跨机没有共享写者锁。
+- 远端岗位完成后直接输出结论，不要手动 `send` 回来；结果由派单方的对账收走。
+- 远端会话被暂停时，`send` 改用普通 Agent 消息投递（`--system` 不解除暂停）。
+- 远端用哪台机器的 Agent 与模型由目标机器决定；`--machine` 下不沿用请求方的 `modelId`，除非显式给 `--model`/`--tier`。
+
+## 7. 演进与退役
 
 团队机制经过三轮探索才定型，旧形态按 [deprecated.md](./deprecated.md) 冻结或兼容：
 
@@ -94,7 +114,7 @@ daemon 不解释它们（[storage-layout.md](./storage-layout.md)）。
 | 样板 Skill `expert-core/front/work/research/reflect`、`expert-admin` | 改名为 `team-*`（2026-10-22）；团队升级合并后，`team.py sync-identity` 把描述文件里的旧名改指新名；`--expert` 参数保留为 `--team` 的别名 |
 | `posts/` 岗位文件 | 不再创建；已有目录在 reset 与仓库允许名单里保留 |
 
-## 7. 验证
+## 8. 验证
 
 - 平台原语：`testing/specialties/daemon/` 下的 `timer-hooks`、`space-tree`、`builtin-expert` 等专项。
 - 样板：`testing/journeys/expert/`（协作、故障注入、反思、真实模型）与 `testing/specialties/daemon/expert-*`、

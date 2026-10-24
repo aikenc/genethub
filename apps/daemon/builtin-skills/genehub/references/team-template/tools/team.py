@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """team.py: how one team's sessions talk to each other. Everything it knows is in files and in `genet`.
 
-  send --to <session id> [--kind TEXT] TEXT                    queue a system notice to a session
-  spawn --kind research|work --desc TEXT [--dir PATH] [--tier T | --model ID] [--media image|video] TASK
-                                                               start a background session and watch it
+  send --to <session id> [--kind TEXT] [--machine ID] TEXT       queue a system notice to a session
+  spawn --kind research|work --desc TEXT [--dir PATH] [--tier T | --model ID] [--media image|video] [--machine ID] TASK
+                                                               start a background session and watch it; --machine runs it in
+                                                               that machine's role workspace, with the ledger kept here
   note [--kind K] [--quote TEXT] [--context TEXT] [--team NAME] [TEXT]
                                                                leave a note for the reflect session: session, turn and ref are filled in
   notes [ls [--all]] | notes done ID... [--result TEXT]        read / close the notes
@@ -282,6 +283,35 @@ def workspace_root(entry):
     return os.path.realpath((folders[0].get("root") if folders else entry.get("root")) or "")
 
 
+def remote_workspaces(machine):
+    return genet("workspace", "list", "--machine", machine).get("workspaces", [])
+
+
+def remote_role_workspace(machine, role, explicit=None):
+    """The workspace a role's Space has on that machine, asking the machine itself."""
+    if explicit:
+        return explicit
+    matches = []
+    for entry in remote_workspaces(machine):
+        name = entry.get("name")
+        base = os.path.basename(workspace_root(entry))
+        if role in (name, base):
+            matches.append(entry)
+    if len(matches) == 1:
+        return matches[0]["id"]
+    if not matches:
+        raise ExpertError(
+            "机器 %s 上没有 %s 岗位的 workspace" % (machine, role),
+            "没有创建会话",
+            "在那台机器上打开岗位 Space（`genet space open <团队>/spaces/%s`），或用 --workspace 指定已有 workspace" % role,
+        )
+    raise ExpertError(
+        "机器 %s 上有 %d 个名为 %s 的 workspace" % (machine, len(matches), role),
+        "没有创建会话",
+        "用 --workspace 指定其中一个：%s" % "、".join(m["id"] for m in matches),
+    )
+
+
 def child_role_names(root):
     spaces_dir = os.path.join(root, "spaces")
     if not os.path.isdir(spaces_dir):
@@ -402,25 +432,31 @@ def auto_describe_session(session_id, text):
         pass
 
 
-def sessions_of(workspace_id, max_age=None):
+def machine_args(machine):
+    """The selector a routed command needs, or nothing when the target is this machine."""
+    return ["--machine", machine] if machine else []
+
+
+def sessions_of(workspace_id, machine=None, max_age=None):
     if not workspace_id:
         return []
     now = time.time()
     age = SESSIONS_TTL if max_age is None else max_age
-    cached = _WORKSPACE_SESSIONS_CACHE.get(workspace_id)
+    key = (machine or "", workspace_id)
+    cached = _WORKSPACE_SESSIONS_CACHE.get(key)
     if age <= 0 or cached is None or now - cached[0] > age:
-        items = genet("session", "list", "--workspace", workspace_id).get("sessions", [])
-        _WORKSPACE_SESSIONS_CACHE[workspace_id] = (time.time(), items)
+        items = genet("session", "list", "--workspace", workspace_id, *machine_args(machine)).get("sessions", [])
+        _WORKSPACE_SESSIONS_CACHE[key] = (time.time(), items)
         return items
     return cached[1]
 
 
-def live_sessions(workspace_id):
-    return [item for item in sessions_of(workspace_id) if not item.get("archived")]
+def live_sessions(workspace_id, machine=None):
+    return [item for item in sessions_of(workspace_id, machine) if not item.get("archived")]
 
 
-def session_summary(session_id):
-    return genet("session", "get", session_id).get("session", {}).get("summary", {})
+def session_summary(session_id, machine=None):
+    return genet("session", "get", session_id, *machine_args(machine)).get("session", {}).get("summary", {})
 
 
 def same_expert_session(root, session_id, spaces=None):
@@ -509,8 +545,8 @@ def requester_summary(root):
     return summary
 
 
-def routes(*filters):
-    return genet("agent", "list", "--routes", *filters).get("routes", [])
+def routes(*filters, machine=None):
+    return genet("agent", "list", "--routes", *filters, *machine_args(machine)).get("routes", [])
 
 
 def pick_equivalent(inherited, everything, with_medium):
@@ -525,7 +561,7 @@ def pick_equivalent(inherited, everything, with_medium):
     return min(fits, key=lambda r: (abs(COST_RANK.get(r["cost"], 2) - cost), COST_RANK.get(r["cost"], 2), r["agentId"], r["modelId"]), default=None)
 
 
-def choose(root, model_key, tier=None, model=None, media=None):
+def choose(root, model_key, tier=None, model=None, media=None, machine=None):
     """The `agent run` arguments that pick the Agent and model, and one line saying why.
     Order: asked for explicitly, then this machine's own override, then what the requester runs on."""
     if tier and model:
@@ -536,15 +572,15 @@ def choose(root, model_key, tier=None, model=None, media=None):
             raise ExpertError("档位 %r 不是 Ultra / Max / Pro / Flash / Mini" % tier, "没有创建任何会话", "用 `\"$GENEHUB_CLI\" agent list --routes` 看可用的档位")
         tags = [tier] + ([MEDIA_TAGS[media]] if media else [])
         args = ["--tag", tier] + (["--media", media] if media else [])
-        if not routes(*sum((["--tag", tag] for tag in tags if tag in TIERS), []), *(["--media", media] if media else [])):
-            raise ExpertError("本机没有同时满足 %s 的路由" % " + ".join(tags), "没有创建任何会话", "换一个档位，或让用户在设置里给模型加上对应标签")
+        if not routes(*sum((["--tag", tag] for tag in tags if tag in TIERS), []), *(["--media", media] if media else []), machine=machine):
+            raise ExpertError("目标机器没有同时满足 %s 的路由" % " + ".join(tags), "没有创建任何会话", "换一个档位，或让用户在设置里给模型加上对应标签")
         return args, "档位 %s%s" % (tier, " + " + media if media else "")
     agent = env.get("TEAM_AGENT")
     if model:
         agent = agent or requester_summary(root).get("agentId")
         if not agent:
             raise ExpertError("不知道用哪个 Agent 开会话", "没有创建任何会话", "在 .genethub/open.env 里写 TEAM_AGENT=<agent id>，或从一个会话里运行")
-        if media and not any(r["agentId"] == agent and r.get("modelId") == model for r in routes("--media", media)):
+        if media and not any(r["agentId"] == agent and r.get("modelId") == model for r in routes("--media", media, machine=machine)):
             raise ExpertError("点名模型 %s/%s 看不了%s" % (agent, model, media), "没有创建任何会话", "换一个能看%s的模型，或去掉 --model 让系统按档位选择" % media)
         return ["--agent", agent, "--model", model], "点名模型 %s" % model
     override = env.get(model_key)
@@ -555,6 +591,11 @@ def choose(root, model_key, tier=None, model=None, media=None):
         raise ExpertError("不知道用哪个 Agent 开会话", "没有创建任何会话", "在 .genethub/open.env 里写 TEAM_AGENT=<agent id>，或从一个会话里运行")
     if override:
         return ["--agent", agent, "--model", override], "本机覆盖 %s=%s" % (model_key, override)
+    if machine:
+        # The requester's model id is a fact about this machine. A routed
+        # session uses the target Agent's own default rather than asking it to
+        # load a model that may not be installed there.
+        return ["--agent", agent], "Agent %s，在目标机器用自己的默认模型" % agent
     args, why = ["--agent", agent], "Agent %s，模型用它自己的默认" % agent
     if inherited.get("agentId") == agent and inherited.get("modelId"):
         route = {"agentId": agent, "modelId": inherited["modelId"]}
@@ -586,17 +627,18 @@ def front_session(root, spaces):
     return max(candidates, key=lambda item: item.get("updatedAtMs", 0))["id"] if candidates else None
 
 
-def start(root, workspace_id, role, desc, text, model_key, tier=None, model=None, media=None):
+def start(root, workspace_id, role, desc, text, model_key, tier=None, model=None, media=None, machine=None):
     """Starts the session and returns (its id, why this Agent and model)."""
-    picked, why = choose(root, model_key, tier, model, media)
+    picked, why = choose(root, model_key, tier, model, media, machine)
     # The title defaults to the first line of the task, which starts with the user's own words: every session of one
     # request would then carry the same title in the list. Name it by what it does instead.
     role_label = ROLE_LABELS.get(role, role)[:10]
     auto_archive = open_env(root).get("TEAM_ARCHIVE_OLD_SESSIONS") == "1"
-    old_candidates = list(live_sessions(workspace_id)) if (auto_archive and role not in ("root", "front")) else []
+    old_candidates = list(live_sessions(workspace_id, machine)) if (auto_archive and role not in ("root", "front")) else []
     args = ["agent", "run", *picked, text, "--workspace", workspace_id, "--title", desc[:80], "--label", role_label,
             "--label", SYSTEM_LABEL, "--description", desc[:300],
-            "--system", "--message-id", message_id("start", workspace_id, role, desc, text), "--no-wait"]
+            "--system", "--message-id", message_id("start", workspace_id, role, desc, text), "--no-wait",
+            *machine_args(machine)]
     new_sid = genet(*args).get("sessionId")
     clear_sessions_cache()
     if new_sid and old_candidates:
@@ -606,7 +648,7 @@ def start(root, workspace_id, role, desc, text, model_key, tier=None, model=None
                 continue
             if old.get("status") in ("idle", "failed") and not os.path.isfile(state_dir(root, "pending", old_sid + ".json")):
                 try:
-                    genet("session", "archive", old_sid)
+                    genet("session", "archive", old_sid, *machine_args(machine))
                 except Exception:
                     pass
     return new_sid, why
@@ -618,15 +660,24 @@ def clip(text):
     return text
 
 
-def notice(session_id, purpose, sender, text, *id_parts, ref=None, unpause=False, delivery_id=None):
-    """Queue an explicitly attributed script notice; it never clears a pause."""
+def notice(session_id, purpose, sender, text, *id_parts, ref=None, unpause=False, delivery_id=None, machine=None):
+    """Queue an explicitly attributed script notice; it never clears a pause.
+
+    A routed member is the one exception: `--system` never lifts a pause, so a
+    task sent to a remote session that stopped would sit unread forever. There
+    the notice is delivered as an ordinary Agent message instead.
+    """
     head = "用途: %s\n发送方: %s\n" % (purpose, sender)
     if ref:
         head += "ref: %s\n" % ref
     body = "%s\n%s" % (head, text)
     stable_id = delivery_id or message_id(session_id, purpose, sender, text, ref or "", *id_parts)
     # An id collision with different content is an error, never an acceptance.
-    genet("session", "send", session_id, body, "--system", "--message-id", stable_id, "--no-wait")
+    args = ["session", "send", session_id, body]
+    if not (machine and unpause):
+        args.append("--system")
+    args += ["--message-id", stable_id, "--no-wait", *machine_args(machine)]
+    genet(*args)
 
 
 def candidate_roots(root):
@@ -870,7 +921,13 @@ def flush_session_inbox_if_idle(root, session_id, force=False):
     return delivered
 
 
-def deliver_or_notice(root, session_id, purpose, sender, text, *id_parts, ref=None, unpause=False, use_inbox=False):
+def deliver_or_notice(root, session_id, purpose, sender, text, *id_parts, ref=None, unpause=False, use_inbox=False, machine=None):
+    if machine:
+        # The inbox and the pause-aware flush are files on this machine; a
+        # routed member keeps its state on its own. Hand the message straight
+        # to that daemon, which is the only place that can decide about a pause.
+        notice(session_id, purpose, sender, text, *id_parts, ref=ref, unpause=unpause, machine=machine)
+        return "queue"
     team_mode = bool(use_inbox or purpose in ("human", "patrol", "expert", "member") or open_env(root).get("TEAM_MODE") or is_team_root(root))
     if team_mode:
         push_session_inbox(root, session_id, purpose, sender, text, ref=ref, id_parts=id_parts)
@@ -892,7 +949,37 @@ def close_pending_between(root, requester_id, responder_id):
     return closed_any
 
 
-def resolve_send_target(root, target_spec, kind, text, sender):
+def resolve_send_target(root, target_spec, kind, text, sender, machine=None, workspace=None):
+    if machine:
+        if SESSION_ID.match(target_spec):
+            return target_spec, False, root, None
+        role = "leader" if target_spec == "work" else target_spec
+        if role in ("default", "root", "front") or ":" in role:
+            raise ExpertError(
+                "跨机目标只能是远端岗位名或会话 id（收到 %r）" % target_spec,
+                "没有排入任何消息",
+                "用 `--machine <id> --to <岗位名>`（如 qa、leader）或 `--to s_xxx`；远端不注册团队根和前台",
+            )
+        workspace_id = remote_role_workspace(machine, role, workspace)
+        existing = [item for item in live_sessions(workspace_id, machine) if item.get("status") in ("idle", "running", "waiting")]
+        if existing:
+            return max(existing, key=lambda item: item.get("updatedAtMs", 0))["id"], False, root, role
+        prompt = (
+            "[系统说明：本会话由 %s 跨机器发起（用途: %s；机器: %s；岗位: %s）。你是该团队 %s 岗位的远端工位，"
+            "团队根、任务账本和定时对账都在发起方机器上；完成后直接在本会话输出最终结论，发起方的对账会把结果交回上级。]"
+            "\n\n%s" % (sender, kind, machine, role, role, text)
+        )
+        model_key = "TEAM_MODEL_RESEARCH" if role == "research" else "TEAM_MODEL_WORK"
+        session_id, _ = start(
+            root,
+            workspace_id,
+            role,
+            ("来自 %s 的 %s" % (sender, kind))[:60],
+            clip(prompt),
+            model_key,
+            machine=machine,
+        )
+        return session_id, True, root, role
     if SESSION_ID.match(target_spec):
         return target_spec, False, root, None
     parts = target_spec.split(":", 1)
@@ -966,9 +1053,12 @@ def resolve_send_target(root, target_spec, kind, text, sender):
 def cmd_send(args):
     root = find_root()
     name, mine = me(root)
+    machine = getattr(args, "machine", None)
     sender = os.environ.get("GENEHUB_SESSION_ID") or "%s:hook" % name
     body_text = " ".join(args.text)
-    target, created_now, target_root, target_role = resolve_send_target(root, args.to, args.kind, body_text, sender)
+    target, created_now, target_root, target_role = resolve_send_target(
+        root, args.to, args.kind, body_text, sender, machine, getattr(args, "workspace", None)
+    )
     archive_guidance(target_root or root, args.kind, sender, "%s (%s)" % (args.to, target), body_text)
     was_pending = close_pending_between(root, requester_id=target, responder_id=sender) if args.kind == "result" else False
     own_front = front_session(root, mine["spaces"]) if "root" in mine.get("spaces", {}) else None
@@ -986,7 +1076,7 @@ def cmd_send(args):
     baseline = None
     if track_reply and not created_now:
         try:
-            baseline = (session_summary(target).get("latestReply") or {}).get("itemId")
+            baseline = (session_summary(target, machine).get("latestReply") or {}).get("itemId")
         except ExpertError:
             baseline = None
     if not created_now:
@@ -1002,11 +1092,12 @@ def cmd_send(args):
             body_text,
             unpause=(target != own_front),
             use_inbox=getattr(args, "inbox", False),
+            machine=machine,
         )
-        if target_role == "leader" and args.kind in ("human", "patrol", "task"):
+        if not machine and target_role == "leader" and args.kind in ("human", "patrol", "task"):
             snippet = " ".join(body_text.splitlines()).strip()[:36]
             auto_describe_session(target, "研发组长：响应最新需求（%s）" % snippet)
-        elif target_role and target_role not in ("root", "front") and args.kind == "task":
+        elif not machine and target_role and target_role not in ("root", "front") and args.kind == "task":
             snippet = " ".join(body_text.splitlines()).strip()[:36]
             auto_describe_session(target, "%s：%s" % (target_role, snippet))
     else:
@@ -1028,11 +1119,13 @@ def cmd_send(args):
                 existing_rec["notified"] = []
                 existing_rec["createdAtMs"] = now_ms()
                 existing_rec.pop("done", None)
+                if machine:
+                    existing_rec["machine"] = machine
                 if SESSION_ID.match(str(sender)):
                     existing_rec["requester"] = sender
                 write_json(pending_path, existing_rec)
         else:
-            write_json(pending_path, {
+            record = {
                 "sessionId": target,
                 "requester": sender,
                 "batch": target,
@@ -1043,7 +1136,10 @@ def cmd_send(args):
                 "notified": [],
                 "lock": None,
                 "route": "send",
-            })
+            }
+            if machine:
+                record["machine"] = machine
+            write_json(pending_path, record)
     if mode == "inbox":
         print("已写入文件收件箱（尚未取得平台回执；待目标空闲且未暂停时重试） → %s" % target)
     elif mode == "spawned":
@@ -1125,17 +1221,27 @@ def _cut_worker_sub_worktree(target_root, role, base_repo_hint, desc, explicit_s
 
 def cmd_spawn(args):
     root = find_root()
+    machine = getattr(args, "machine", None)
+    if machine and getattr(args, "expert", None):
+        raise ExpertError("--machine 只能派给本团队在其它机器上的岗位", "没有创建会话", "先在本机定位到该团队再派单，或去掉 --team")
     target_root = find_expert(root, getattr(args, "expert", None)) if getattr(args, "expert", None) else root
     name, mine = me(target_root)
     role = getattr(args, "space", None) or args.kind
-    workspace_id = mine["spaces"].get(role)
-    if not workspace_id and role == "work" and not getattr(args, "space", None):
-        # A team has no generic `work` Space: the role that does the work is its leader, which is how a
-        # 1+0 team (front + leader + qa + research + team-reflect) takes a plain `--kind work` task.
-        role = "leader"
+    if machine and (getattr(args, "worktree", None) or args.dir):
+        raise ExpertError("--machine 不支持 --worktree/--dir", "没有创建会话", "远端岗位用它自己的 WORKTREE_DIR；需要隔离目录时在那个岗位的会话里再 spawn")
+    if machine:
+        if role == "work" and not getattr(args, "space", None):
+            role = "leader"
+        workspace_id = remote_role_workspace(machine, role, getattr(args, "workspace", None))
+    else:
         workspace_id = mine["spaces"].get(role)
-    if not workspace_id:
-        raise ExpertError("团队 %s 没有 %s 空间" % (name, role), "没有创建会话", "确认团队目录里有 spaces/%s/agent-space.genet.json" % role)
+        if not workspace_id and role == "work" and not getattr(args, "space", None):
+            # A team has no generic `work` Space: the role that does the work is its leader, which is how a
+            # 1+0 team (front + leader + qa + research + team-reflect) takes a plain `--kind work` task.
+            role = "leader"
+            workspace_id = mine["spaces"].get(role)
+        if not workspace_id:
+            raise ExpertError("团队 %s 没有 %s 空间" % (name, role), "没有创建会话", "确认团队目录里有 spaces/%s/agent-space.genet.json" % role)
     requester = os.environ.get("GENEHUB_SESSION_ID")
     if requester and not getattr(args, "expert", None):
         # When an external session (such as `admin` bootstrapping a team) runs
@@ -1144,17 +1250,17 @@ def cmd_spawn(args):
         # own front session instead of waking `admin` across space boundaries.
         if not same_expert_session(target_root, requester, mine.get("spaces")):
             requester = front_session(target_root, mine["spaces"]) if "root" in (mine.get("spaces") or {}) else None
-    role_env = open_env(os.path.join(target_root, "spaces", role))
+    role_env = {} if machine else open_env(os.path.join(target_root, "spaces", role))
     wt_dir = role_env.get("WORKTREE_DIR")
     spawned_wt = None
     spawned_branch = None
     wt_opt = getattr(args, "worktree", None)
-    if wt_opt and role != "research":
+    if wt_opt and role != "research" and not machine:
         spawned_wt, spawned_branch = _cut_worker_sub_worktree(target_root, role, wt_dir, args.desc, wt_opt)
         wt_dir = spawned_wt
     lock = None
-    effective_dir = args.dir or spawned_wt or (wt_dir if role not in ("research", "reflect", "team-reflect", "leader") else None)
-    if effective_dir and role != "research":
+    effective_dir = None if machine else (args.dir or spawned_wt or (wt_dir if role not in ("research", "reflect", "team-reflect", "leader") else None))
+    if not machine and effective_dir and role != "research":
         path = resolve_expert_dir(target_root, effective_dir)
         marker, won = claim(path, {"session": None, "expert": name, "at": now_ms()}, "genet-writer.json")
         if not won:
@@ -1191,7 +1297,13 @@ def cmd_spawn(args):
     wt_hint = ("，专属工位目录 WORKTREE_DIR: %s%s" % (wt_dir, " (branch: %s)" % spawned_branch if spawned_branch else "")) if wt_dir else ""
     task_body = " ".join(args.task)
     archive_guidance(target_root, "task", requester or name, "%s/%s" % (name, role), "[%s] %s" % (args.desc, task_body))
-    if spawned_wt:
+    if machine:
+        exec_guidance = (
+            "你是团队 `%s` 在机器 %s 上的远端 %s 岗位会话。团队根、任务账本与定时对账都在发起方机器上；"
+            "请按本岗位自己的 WORKTREE_DIR 工作，直接在本会话完成并输出可读的最终结论，"
+            "不要递归 spawn 同类会话，也不需要手动 send 回传——发起方的对账会取走你的最终回复。" % (name, machine, role)
+        )
+    elif spawned_wt:
         exec_guidance = "你是并发派出的叶子 Worker 会话（独立子工位: %s，分支: %s），请直接在本会话内完成编码与自测并 git commit 到本分支（严禁再递归 spawn 子会话），完成后直接输出分支名、commit SHA 与验证结果即可，系统会自动回传给上级。" % (spawned_wt, spawned_branch)
     elif is_team_root(target_root) and role not in ("research", "reflect", "team-reflect", "leader"):
         exec_guidance = "你是团队 `%s` 管线负责人（团队根目录: %s，数据仓根目录: %s%s）。单模块任务请直接在工位内完成编码、自测并 commit；若需拆分为多子模块并发推进，可作为小组长连续调用 `team.py spawn --space %s --kind work --worktree auto --desc \"子模块\" \"任务\"` 派生多名 Worker（及 `--space research --kind research`）后立即结束本轮，系统收齐全部子任务后会唤醒你合并各 `worker/*` 分支。最终直接在本会话输出结论即可，无需手动调用 team.py send 回传。" % (role, target_root, datas_root(target_root), wt_hint, role)
@@ -1211,7 +1323,7 @@ def cmd_spawn(args):
     model_key = "TEAM_MODEL_RESEARCH" if role == "research" else "TEAM_MODEL_WORK"
     try:
         session_id, why = start(target_root, workspace_id, role, args.desc, clip(task), model_key,
-                                args.tier, args.model, args.media)
+                                args.tier, args.model, args.media, machine=machine)
     except ExpertError:
         if lock:
             os.remove(lock)  # no session will ever hold this directory
@@ -1222,6 +1334,8 @@ def cmd_spawn(args):
         "sessionId": session_id, "requester": requester, "batch": batch or session_id, "kind": role, "desc": args.desc, "createdAtMs": now_ms(),
         "baseline": None, "notified": [], "lock": lock, "route": why,
     }
+    if machine:
+        pending_rec["machine"] = machine
     if spawned_wt:
         pending_rec["worktree"] = spawned_wt
         pending_rec["branch"] = spawned_branch
@@ -2743,10 +2857,10 @@ def add_note(root, record, *identity):
     return note_id, True
 
 
-def latest_round(session_id):
+def latest_round(session_id, machine=None):
     """The newest round of a session: its round id and the id of the user message that started it. None when unknown."""
     try:
-        rounds = genet("session", "rounds", session_id).get("page", {}).get("rounds", [])
+        rounds = genet("session", "rounds", session_id, *machine_args(machine)).get("page", {}).get("rounds", [])
     except ExpertError:
         return None
     if not rounds:
@@ -3023,8 +3137,8 @@ def wake(root, name, mine):
 
 # ---------------------------------------------------------------- the timer
 
-def last_reply_text(session_id, item_id):
-    page = genet("session", "narrative", session_id, "--item", item_id).get("page", {})
+def last_reply_text(session_id, item_id, machine=None):
+    page = genet("session", "narrative", session_id, "--item", item_id, *machine_args(machine)).get("page", {})
     for item in page.get("items", []):
         if item.get("id") == item_id and item.get("text"):
             return item["text"]
@@ -3233,7 +3347,7 @@ def reconcile(root, name, mine):
         finish = lambda p=path, sid=session_id: (move(root, p), closed.add(sid))  # noqa: E731
         has_children = any(other.get("requester") == session_id for _, other in records if other["sessionId"] != session_id)
         try:
-            summary = session_summary(session_id)
+            summary = session_summary(session_id, record.get("machine"))
         except ExpertError as error:
             if error.code != "targetNotFound":
                 raise
@@ -3283,7 +3397,7 @@ def reconcile(root, name, mine):
                 if to:
                     deliver_or_notice(root, to, "report", "%s:hook" % name, "会话 %s（%s）%s：%s" % (session_id, record["desc"], verdict, inputs.get("error") or "无附加信息"), session_id, "stop", unpause=(status == "failed" and not paused and to != front))
                 if (timed_out or status == "failed" or inputs.get("error")) and record.get("kind") not in ("reflect", "team-reflect"):
-                    add_note(root, {"kind": "anomaly", "session": session_id, "turn": latest_round(session_id), "ref": "ghref:item:%s:%s" % (session_id, reply) if reply else None, "from": "%s:hook" % name, "quote": "无", "context": "会话 %s（%s）%s：%s" % (session_id, record["desc"], verdict, inputs.get("error") or "无附加信息"), "text": record["desc"]}, "anomaly", session_id, "stop")
+                    add_note(root, {"kind": "anomaly", "session": session_id, "turn": latest_round(session_id, record.get("machine")), "ref": "ghref:item:%s:%s" % (session_id, reply) if reply else None, "from": "%s:hook" % name, "quote": "无", "context": "会话 %s（%s）%s：%s" % (session_id, record["desc"], verdict, inputs.get("error") or "无附加信息"), "text": record["desc"]}, "anomaly", session_id, "stop")
                 said.append("stop")
                 update_pending(root, path, record)
             if ((status == "failed" and not stopped_by_person) or timed_out) and not has_children:
@@ -3322,7 +3436,7 @@ def reconcile(root, name, mine):
                 finish()  # routine reflect runs wake quietly; requested ones report back like any task
             else:
                 if not record.get("done") or record["done"].get("reply") != reply:
-                    text = last_reply_text(session_id, reply) or (summary.get("messagePreview") or {}).get("text", "")
+                    text = last_reply_text(session_id, reply, record.get("machine")) or (summary.get("messagePreview") or {}).get("text", "")
                     record["done"] = {"outcome": "ok", "reply": reply, "ref": "ghref:item:%s:%s" % (session_id, reply), "text": text}
                     update_pending(root, path, record)
         elif status == "idle" and not record.get("done") and not has_children:
@@ -3335,7 +3449,7 @@ def reconcile(root, name, mine):
                     if to:
                         deliver_or_notice(root, to, "report", "%s:hook" % name, "会话 %s（%s）已停止，没有给出回复。" % (session_id, record["desc"]), session_id, "stopped")
                     if record.get("kind") not in ("reflect", "team-reflect"):
-                        add_note(root, {"kind": "anomaly", "session": session_id, "turn": latest_round(session_id), "ref": None, "from": "%s:hook" % name, "quote": "无", "context": "会话 %s（%s）已停止超过 %d 秒仍未给出回复" % (session_id, record["desc"], stopped_after), "text": record["desc"]}, "anomaly", session_id, "stopped")
+                        add_note(root, {"kind": "anomaly", "session": session_id, "turn": latest_round(session_id, record.get("machine")), "ref": None, "from": "%s:hook" % name, "quote": "无", "context": "会话 %s（%s）已停止超过 %d 秒仍未给出回复" % (session_id, record["desc"], stopped_after), "text": record["desc"]}, "anomaly", session_id, "stopped")
                     said.append("stopped")
                     update_pending(root, path, record)
                 if record.get("kind") in ("reflect", "team-reflect"):
@@ -3353,19 +3467,19 @@ def reconcile(root, name, mine):
             # A member holding up finished siblings gets less patience than one running on its own.
             patience = min(stuck_after, batch_stuck_after) if bkey in batch_has_done else stuck_after
             if (now_ms() - last_active) / 1000 > patience:
-                genet("session", "interrupt", session_id)
+                genet("session", "interrupt", session_id, *machine_args(record.get("machine")))
                 record["stopReason"] = "timeout"
                 record["stopAfterSeconds"] = patience
                 update_pending(root, path, record)
                 clear_sessions_cache()
-                stopped = session_summary(session_id)
+                stopped = session_summary(session_id, record.get("machine"))
                 if stopped.get("status") == "running":
                     continue
                 if "stuck" not in said:
                     if to:
                         deliver_or_notice(root, to, "report", "%s:hook" % name, "会话 %s（%s）超过 %d 秒没有进展，已超时终止。" % (session_id, record["desc"], patience), session_id, "stuck")
                     if record.get("kind") not in ("reflect", "team-reflect"):
-                        add_note(root, {"kind": "anomaly", "session": session_id, "turn": latest_round(session_id), "ref": None, "from": "%s:hook" % name, "quote": "无", "context": "会话 %s（%s）超过 %d 秒没有进展，已超时终止" % (session_id, record["desc"], patience), "text": record["desc"]}, "anomaly", session_id, "stuck")
+                        add_note(root, {"kind": "anomaly", "session": session_id, "turn": latest_round(session_id, record.get("machine")), "ref": None, "from": "%s:hook" % name, "quote": "无", "context": "会话 %s（%s）超过 %d 秒没有进展，已超时终止" % (session_id, record["desc"], patience), "text": record["desc"]}, "anomaly", session_id, "stuck")
                     said.append("stuck")
                     update_pending(root, path, record)
                 if is_multi_batch and not record.get("done"):
@@ -3710,6 +3824,8 @@ def main(argv):
     send.add_argument("--to", required=True)
     send.add_argument("--kind", default="note")
     send.add_argument("--inbox", action="store_true", help="write to file inbox when target is busy without interrupting")
+    send.add_argument("--machine", help="exact id from `machine list --reachable`: deliver to a role workspace on that machine")
+    send.add_argument("--workspace", help="with --machine: the remote workspace id when the role name is ambiguous")
     send.add_argument("text", nargs="+")
     spawn = sub.add_parser("spawn")
     spawn.add_argument("--team", "--expert", dest="expert", help="spawn inside another team's research/work space (--expert is the old name)")
@@ -3718,6 +3834,8 @@ def main(argv):
     spawn.add_argument("--desc", required=True)
     spawn.add_argument("--dir")
     spawn.add_argument("--worktree", help="auto or slot name: cut an isolated git worktree under worktrees/ for parallel workers")
+    spawn.add_argument("--machine", help="exact id from `machine list --reachable`: run this task in the role's workspace there")
+    spawn.add_argument("--workspace", help="with --machine: the remote workspace id when the role name is ambiguous")
     spawn.add_argument("--tier", help="Ultra, Max, Pro, Flash or Mini; the platform picks the cheapest live model with it")
     spawn.add_argument("--model", help="an exact model id on the team's Agent")
     spawn.add_argument("--media", choices=sorted(MEDIA_TAGS), help="the task has images or video: the model must understand them")
