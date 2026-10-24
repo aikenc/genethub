@@ -201,7 +201,7 @@ pub async fn handle(
     };
     if !caller.allows(needed) && !session_exception {
         return Handled::err(
-            ErrorCode::Unauthorized,
+            ErrorCode::Forbidden,
             format!("caller lacks the {} capability", needed.as_str()),
         );
     }

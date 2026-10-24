@@ -44,6 +44,11 @@
 - 输出是 JSON Lines；以 `shell.exit.data.exitCode` 为准，CLI 进程的退出码不是命令的退出码；
   `timedOut: true` 表示是被超时终止的。
 
+`--` 后面的参数原样交给目标进程，包括 `--version`、`-V` 和 `--help`。例如
+`shell --workspace <id> -- python3 --version` 查询的是目标 Python 的版本。
+列表仍返回完整 JSON，按需使用管道和结构化筛选（如 `session list | jq -c '.data.sessions[] | select(.status == "running")'`）。
+命令分组帮助用 `session --help` 或 `agent run --help`；`schema <command>` 提供机器可读合同。
+
 ## 跨机传文件
 
 机器之间传文件（含 GB 文件、续传）用 `file download --from <源机器> <源路径> <目标路径>`，由接收文件的
@@ -99,7 +104,10 @@
 
 ## 只能在本机的命令
 
-`workflow`、`process`、`machine`、`speech`、`file`、daemon 生命周期（`daemon …`）和 `update` 不可路由，
+`process list/kill/kill-all` 支持 `--machine`，只管理目标机器上已登记、归属指定会话的后台进程；
+`kill-all` 仍必须指定 `--session`。
+
+`workflow`、`machine`、`speech`、`file`、daemon 生命周期（`daemon …`）和 `update` 不可路由，
 `--machine` 对它们无效。远端的 daemon 重启走那台机器自己的独立连接，见 [daemon.md](daemon.md)。
 
 ## 配对与授权（授权变更，需用户明确要求）

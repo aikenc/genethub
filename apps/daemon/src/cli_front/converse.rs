@@ -304,12 +304,7 @@ fn parse_agent_list(args: &[String]) -> Result<Command, CliFailure> {
         }
         index += 1;
     }
-    if !routes {
-        if !tags.is_empty() || !media.is_empty() {
-            return Err(CliFailure::invalid_args(
-                "--tag and --media filter the routes: add --routes",
-            ));
-        }
+    if !routes && tags.is_empty() && media.is_empty() {
         return Ok(Command::AgentList);
     }
     // No tiers lists every route; the ones given must be valid.

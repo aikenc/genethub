@@ -194,10 +194,16 @@ pub fn usage() -> i32 {
 }
 
 async fn dispatch(args: Vec<String>) -> i32 {
+    let command_help = !args.iter().any(|argument| argument == "--");
     let (selection, args) = match target::split(&args) {
         Ok(split) => split,
         Err(error) => return output::fail(error),
     };
+    if command_help {
+        if let Some(code) = query::help(&args) {
+            return code;
+        }
+    }
     if let Err(error) = target::enforce(&selection, target::canonical(&args).as_deref()) {
         return output::fail(error);
     }

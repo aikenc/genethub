@@ -55,11 +55,25 @@ fn main() {
 
 #[tokio::main]
 async fn run(args: Vec<String>) {
-    if args
-        .iter()
-        .any(|argument| argument == "--version" || argument == "-V")
-    {
+    if matches!(args.as_slice(), [flag] if flag == "--version" || flag == "-V") {
         println!("{}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    let native_help = match args.as_slice() {
+        [group, flag] => {
+            ["daemon", "status", "update", "agent-serve"].contains(&group.as_str())
+                && matches!(flag.as_str(), "--help" | "-h")
+        }
+        [group, verb, flag] => {
+            group == "daemon"
+                && ["run", "start", "stop", "restart", "status", "endpoint"]
+                    .contains(&verb.as_str())
+                && matches!(flag.as_str(), "--help" | "-h")
+        }
+        _ => false,
+    };
+    if native_help || matches!(args.as_slice(), [flag] if flag == "--help" || flag == "-h") {
+        print_usage();
         return;
     }
 
@@ -147,7 +161,7 @@ fn update(args: &[String]) -> i32 {
     );
 }
 
-pub fn usage() -> i32 {
+fn print_usage() {
     eprintln!(
         "usage:
   genet status                      overview: channel, version, daemon, hub
@@ -299,6 +313,10 @@ pub fn usage() -> i32 {
   genet hub unpair                  drop Hub enrollment
   genet --version                   print the version"
     );
+}
+
+pub fn usage() -> i32 {
+    print_usage();
     fail(
         "invalid_args",
         "no or unknown command; usage is on stderr",
