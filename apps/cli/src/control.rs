@@ -497,13 +497,18 @@ fn stop_verified(paths: &Paths) -> Result<bool, String> {
         ));
     }
     // A listener that answers without our proof may belong to a reused pid.
-    // A port that never answers, while this pid still holds daemon.lock, is
+    // A port that never accepts, while this pid still holds daemon.lock, is
     // our daemon with a dead listener: stop does not need its cooperation.
     match identify(&endpoint) {
         Identity::Proven => {}
         Identity::ForeignListener => {
             return Err(format!(
                 "refusing to stop pid {lock}: its private endpoint identity could not be verified"
+            ));
+        }
+        Identity::Unresponsive => {
+            return Err(format!(
+                "refusing to stop pid {lock}: its listener did not provide an identity proof within the bounded probes; retry when it responds"
             ));
         }
         Identity::NoListener => return stop_locked_process(paths, lock),
@@ -568,6 +573,9 @@ enum Identity {
     Proven,
     /// Something accepted and answered, and it was not this daemon.
     ForeignListener,
+    /// TCP accepted, but no complete answer arrived. This is not evidence of
+    /// either a foreign listener or a dead one, and never authorizes a signal.
+    Unresponsive,
     /// Nothing accepted across the probes.
     NoListener,
 }
@@ -576,17 +584,23 @@ enum Identity {
 /// single accept, and a later refused connect must not be read as "ours, but
 /// silent". Repeated refusals are a dead listener.
 fn identify(endpoint: &Endpoint) -> Identity {
+    let mut accepted_without_proof = false;
     for attempt in 0..3 {
         match probe(endpoint) {
             Identity::Proven => return Identity::Proven,
             Identity::ForeignListener => return Identity::ForeignListener,
-            Identity::NoListener if attempt + 1 < 3 => {
-                std::thread::sleep(Duration::from_millis(150));
-            }
+            Identity::Unresponsive => accepted_without_proof = true,
             Identity::NoListener => {}
         }
+        if attempt + 1 < 3 {
+            std::thread::sleep(Duration::from_millis(150));
+        }
     }
-    Identity::NoListener
+    if accepted_without_proof {
+        Identity::Unresponsive
+    } else {
+        Identity::NoListener
+    }
 }
 
 fn probe(endpoint: &Endpoint) -> Identity {
@@ -603,14 +617,14 @@ fn probe(endpoint: &Endpoint) -> Identity {
         "GET /health?challenge={challenge} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
     );
     if stream.write_all(request.as_bytes()).is_err() {
-        return Identity::ForeignListener;
+        return Identity::Unresponsive;
     }
     let mut answer = Vec::new();
-    if stream.read_to_end(&mut answer).is_err() && answer.is_empty() {
-        return Identity::ForeignListener;
-    }
+    let read = stream.read_to_end(&mut answer);
     if health_body_matches(endpoint, &challenge, &answer) {
         Identity::Proven
+    } else if read.is_err() {
+        Identity::Unresponsive
     } else {
         Identity::ForeignListener
     }
@@ -654,7 +668,7 @@ fn wait_unhealthy(endpoint: &Endpoint, within: Duration) -> bool {
 
 /// Whether the exact daemon described by endpoint.json owns this listener.
 fn health(endpoint: &Endpoint) -> bool {
-    matches!(probe(endpoint), Identity::Proven)
+    matches!(identify(endpoint), Identity::Proven)
 }
 
 fn health_body_matches(endpoint: &Endpoint, challenge: &str, answer: &[u8]) -> bool {

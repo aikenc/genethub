@@ -53,7 +53,9 @@ fn main() {
     run(args)
 }
 
-#[tokio::main]
+// A front door waits on one forwarded command; it does not run the daemon.
+// Avoid creating a CPU-sized idle worker pool for every short CLI invocation.
+#[tokio::main(flavor = "current_thread")]
 async fn run(args: Vec<String>) {
     if matches!(args.as_slice(), [flag] if flag == "--version" || flag == "-V") {
         println!("{}", env!("CARGO_PKG_VERSION"));
