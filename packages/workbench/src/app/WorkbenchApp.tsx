@@ -34,7 +34,6 @@ import { NewSessionPanel } from "../session/NewSessionPanel";
 import { PermissionCard } from "../session/Permission";
 import { ProviderConfigurationCard } from "../settings/ProviderConfigurationCard";
 import { TimelineView } from "../session/TimelineView";
-import { TaskProgress } from "../session/TaskProgress";
 import { InputDelivery } from "../session/InputDelivery";
 import { humanController } from "../session/attention";
 import type {
@@ -939,7 +938,6 @@ export function App({
 
           <div className="flex min-h-0 flex-1">
             <section className="relative flex min-w-0 flex-1 flex-col">
-              {showChat && session && !session.managed ? <TaskProgress key={`${workbench.client?.identity?.machineId}:${session.id}`} session={session} onReportSession={onReportSession} /> : null}
               {showChat ? (
                 composing ? (
                   <>

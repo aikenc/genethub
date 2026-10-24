@@ -66,12 +66,6 @@ fn canonical_tag(tag: &str) -> &str {
     }
 }
 
-pub(crate) fn is_builtin_tag(tag: &str) -> bool {
-    BUILTIN_TAGS
-        .iter()
-        .any(|candidate| tags_equal(candidate, canonical_tag(tag)))
-}
-
 pub(crate) fn normalize_tags(tags: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut normalized = Vec::new();
@@ -1112,27 +1106,6 @@ mod tests {
     }
 
     #[test]
-    fn routed_request_tags_are_bounded_and_media_vocabulary_is_closed() {
-        assert_eq!(
-            validate_selected_tags(vec![" max ".into(), "私有".into()]).unwrap(),
-            vec![TAG_MAX.to_string(), "私有".to_string()]
-        );
-        assert!(validate_selected_tags(Vec::new()).is_err());
-        assert!(validate_selected_tags(vec!["Flash".into(), "flash".into()]).is_err());
-        assert_eq!(
-            normalize_tags(["Flush".into(), "flash".into()]),
-            vec!["Flash".to_string()]
-        );
-        assert!(is_builtin_tag("Flush"));
-        assert!(validate_selected_tags(vec!["x".repeat(41)]).is_err());
-        assert_eq!(
-            validate_media_tags(vec![TAG_VIDEO.into(), TAG_IMAGE.into()]).unwrap(),
-            vec![TAG_VIDEO.to_string(), TAG_IMAGE.to_string()]
-        );
-        assert!(validate_media_tags(vec!["私有".into()]).is_err());
-    }
-
-    #[test]
     fn portable_history_adds_image_and_video_requirements() {
         let items = vec![TimelineItem::UserMessage {
             origin: None,
@@ -1182,5 +1155,24 @@ mod tests {
             finished_at_ms: None,
         }];
         assert_eq!(media_tags_for_timeline(&items), vec![TAG_IMAGE.to_string()]);
+    }
+    #[test]
+    fn routed_request_tags_are_bounded_and_media_vocabulary_is_closed() {
+        assert_eq!(
+            validate_selected_tags(vec![" max ".into(), "私有".into()]).unwrap(),
+            vec![TAG_MAX.to_string(), "私有".to_string()]
+        );
+        assert!(validate_selected_tags(Vec::new()).is_err());
+        assert!(validate_selected_tags(vec!["Flash".into(), "flash".into()]).is_err());
+        assert_eq!(
+            normalize_tags(["Flush".into(), "flash".into()]),
+            vec!["Flash".to_string()]
+        );
+        assert!(validate_selected_tags(vec!["x".repeat(41)]).is_err());
+        assert_eq!(
+            validate_media_tags(vec![TAG_VIDEO.into(), TAG_IMAGE.into()]).unwrap(),
+            vec![TAG_VIDEO.to_string(), TAG_IMAGE.to_string()]
+        );
+        assert!(validate_media_tags(vec!["私有".into()]).is_err());
     }
 }

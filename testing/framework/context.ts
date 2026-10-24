@@ -4,7 +4,7 @@ import { BlockedError, createLease, releaseLease, type CaseMeta, type Environmen
 
 import { assertions } from "./assertions/index.ts";
 import { data } from "./builders/index.ts";
-import { clonePackage, seedWorkflowPackage, seedDirectChangePackage, completeVerifiableTask, handshakeAndList, startLocalEnvironment, openWorkspace, createBuiltinSession, createAgentSession, requireAgentReady, selectRealModel, configureMockProvider, sendPrompt, attachEventLog, openSecondClient, pairDevice, connectDevice, claimDeviceInvite, daemonWsUrl, connectWithoutAdmission, seedHostCursorLogin, seedHostBetaProviders, seedHostCodexLogin, pointClaudeAtBuiltinLlm, sessionEventOf, startShell, runShell, shellText, shellExit, shellTimedOut } from "./flows/main/index.ts";
+import { completeVerifiableTask, handshakeAndList, startLocalEnvironment, openWorkspace, createBuiltinSession, createAgentSession, requireAgentReady, selectRealModel, configureMockProvider, sendPrompt, attachEventLog, openSecondClient, pairDevice, connectDevice, claimDeviceInvite, daemonWsUrl, connectWithoutAdmission, seedHostCursorLogin, seedHostBetaProviders, seedHostCodexLogin, pointClaudeAtBuiltinLlm, sessionEventOf, startShell, runShell, shellText, shellExit, shellTimedOut } from "./flows/main/index.ts";
 import { agentControl, agentLogs, agentReady, answerAgentRequest, leftoverProcesses, listAgents, openControlledAgentSession, processAlive, reconnectAfterStop, recordAgentPushes, summarizeAgent, timeControlCall, waitForAgent } from "./flows/branches/index.ts";
 import { waitUntil } from "./tools/wait.ts";
 
@@ -46,9 +46,6 @@ export interface CaseContext {
       seedHostBetaProviders: typeof seedHostBetaProviders;
       seedHostCodexLogin: typeof seedHostCodexLogin;
       pointClaudeAtBuiltinLlm: typeof pointClaudeAtBuiltinLlm;
-      clonePackage: typeof clonePackage;
-      seedWorkflowPackage: typeof seedWorkflowPackage;
-      seedDirectChangePackage: typeof seedDirectChangePackage;
       sessionEventOf: typeof sessionEventOf;
       startShell: typeof startShell;
       runShell: typeof runShell;
@@ -158,9 +155,6 @@ export async function createCaseContext(meta: CaseMeta): Promise<CaseContext> {
         seedHostBetaProviders,
         seedHostCodexLogin,
         pointClaudeAtBuiltinLlm,
-        clonePackage,
-        seedWorkflowPackage,
-        seedDirectChangePackage,
         sessionEventOf,
         startShell,
         runShell,

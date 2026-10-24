@@ -21,17 +21,9 @@ const NAMES: [&str; 6] = [
 ];
 
 /// Source paths (relative to the repository root) that may still name Agents.
-const ALLOWED: [(&str, &str); 4] = [
+const ALLOWED: [(&str, &str); 2] = [
     (
         "apps/daemon/src/agent_space_builder/",
-        "deprecated; removed with the subsystem (docs/deprecated.md)",
-    ),
-    (
-        "apps/daemon/src/workflow/",
-        "deprecated; removed with the subsystem (docs/deprecated.md)",
-    ),
-    (
-        "packages/workflow-engine/",
         "deprecated; removed with the subsystem (docs/deprecated.md)",
     ),
     ("apps/daemon/src/speech/", "speech models, not Agents"),

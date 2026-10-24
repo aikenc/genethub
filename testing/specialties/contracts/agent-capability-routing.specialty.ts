@@ -16,29 +16,25 @@ const TESTS = [
   "session::manager::tests::routing_metadata_change_keeps_the_same_agent_context",
   "session::manager::tests::cross_agent_migration_keeps_session_and_replays_history_once",
   "session::manager::tests::same_agent_model_switch_replays_accepted_history_once",
-  "session::manager::tests::delivered_worker_without_matching_pending_migration_stays_blocked",
-  "workflow::tests::role_v3_declares_only_builtin_tags",
-  "workflow::tests::tag_routes_use_live_cost_and_and_matching",
-  "workflow::tests::tag_route_failure_hands_to_pm",
 ] as const;
 
 defineSpecialty({
-  id: "specialty.contracts.workflow-capability-routing",
-  title: "Workflow roles resolve machine-global tag routes at dispatch",
+  id: "specialty.contracts.agent-capability-routing",
+  title: "Agent routing preserves machine-global tag selection and portable context",
   oracle:
-    "Role v3 accepts only built-in tags; dispatch selects the lowest-cost all-tag match and hands an unusable route to PM",
+    "Existing machine-global tag validation, route selection and session migration properties execute independently of the removed Workflow engine",
   catches: [
-    "workflow package pins a concrete Agent or model",
+    "routed Session pins an obsolete Agent or model",
     "route selection treats tags as OR rather than AND",
-    "missing tag route disappears as a generic launch failure",
+    "portable context is replayed more than once",
   ],
-  tags: ["contract", "workflow", "tag-routing"],
+  tags: ["contract", "tag-routing"],
   llm: { default: "none" },
   expectedDurationMs: 45_000,
   timeoutMs: 300_000,
   resources: { environments: 1, cpu: 4, memoryMb: 2048, io: 1, browser: 0 },
-  surfaces: ["daemon", "workflow"],
-  productInterfaces: ["workflow role schema", "settings.agentPreferences"],
+  surfaces: ["daemon", "session"],
+  productInterfaces: ["settings.agentPreferences", "session.switchAgent"],
 }, async t => {
   for (const test of TESTS) {
     try {
@@ -65,14 +61,14 @@ defineSpecialty({
       );
       t.assertions.assert(
         stdout.includes("test result: ok. 1 passed; 0 failed"),
-      `Workflow tag regression did not execute: ${test}\n${stdout.slice(-3000)}`,
+      `Agent tag regression did not execute: ${test}\n${stdout.slice(-3000)}`,
       );
     } catch (error) {
       const failure = error as Error & { stdout?: string; stderr?: string };
       throw new Error(
-        `Workflow tag regression failed: ${test}\n${(failure.stdout ?? "").slice(-4000)}\n${(failure.stderr ?? failure.message).slice(-3000)}`,
+        `Agent tag regression failed: ${test}\n${(failure.stdout ?? "").slice(-4000)}\n${(failure.stderr ?? failure.message).slice(-3000)}`,
       );
     }
   }
-  t.note(`Workflow tag routing regressions passed=${TESTS.length}`);
+  t.note(`Agent tag routing regressions passed=${TESTS.length}`);
 });

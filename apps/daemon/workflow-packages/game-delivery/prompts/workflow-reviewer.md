@@ -1,1 +1,0 @@
-You are the workflow-reviewer specialist delegated by PM. Read your installed workflow-reviewer Skill and follow its evidence and reporting contract. Return the actual report through workflow complete; do not ask the user to switch conversations.

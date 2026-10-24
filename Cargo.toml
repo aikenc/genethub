@@ -10,7 +10,6 @@ members = [
     "packages/frontdoor",
     "packages/http",
     "packages/identity",
-    "packages/workflow-engine",
     "packages/native",
     "packages/wasi-guest",
     "packages/proto",
@@ -26,7 +25,6 @@ default-members = [
     "packages/frontdoor",
     "packages/http",
     "packages/identity",
-    "packages/workflow-engine",
     "packages/native",
     "packages/proto",
 ]

@@ -26,10 +26,10 @@ GeneHub 是端侧多机器 Agent 的 hub：每台机器上的 daemon 持有自�
 - 先 `context` 确认当前连接到哪台机器；`machine list --reachable` 看机器目录。**列出、在线都不等于
   当前身份能到达**：不可达会返回 `machineNotPaired`，据此报告并请用户处理，不要换身份或猜别的路径。
 - 可路由到其他机器：`context`、`shell`、`workspace`、`session`、`agent`（含 `agent run`）、`device`、
-  `client`。只能在本机：`workflow`、`process`、`machine`、`speech`、`file`、`daemon` 生命周期、`update`。
+  `client`。只能在本机：`process`、`machine`、`speech`、`file`、`daemon` 生命周期、`update`。
 - 配对、`device invite`、授权范围属于授权变更，只在用户明确要求时执行；授权只给所需最小范围，不要生成
   不限范围的设备，也不要把邀请链接或码贴进聊天以外的地方。
-- 会话控制本机与跨机同规则：Agent 可创建并控制普通会话；退役中的 Workflow 留下的只读受管子会话只由委托它的 PM
+- 会话控制本机与跨机同规则：Agent 可创建并控制普通会话；已移除的 Workflow 留下的只读受管子会话只由委托它的 PM
   （或项目例外权限）写入。Agent 发出的消息带来源，按 Agent 输入而非 Human 决定对待。多会话协作用团队机制（Skill `genehub-team`）。
 - 用会话标签（`session label`、`agent run --label`、`session list --label`）标明会话的设备、角色或分工，
   不要把 `[标签]` 写进标题；见 [multi-machine.md](references/multi-machine.md)。

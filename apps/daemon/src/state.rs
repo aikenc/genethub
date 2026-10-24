@@ -33,7 +33,6 @@ pub struct AppState {
     pub registry: Arc<Registry>,
     pub speech: Arc<crate::speech::SpeechBroker>,
     pub sessions: SessionManager,
-    pub workflow_tasks: crate::adapter::SessionTasks,
     pub workspaces: Workspaces,
     pub project_control: crate::project_control::Broker,
     pub(crate) provider_operations:
@@ -183,7 +182,6 @@ impl AppState {
             registry,
             speech: Arc::new(crate::speech::SpeechBroker::new()),
             sessions,
-            workflow_tasks: Default::default(),
             workspaces,
             project_control,
             provider_operations: Default::default(),

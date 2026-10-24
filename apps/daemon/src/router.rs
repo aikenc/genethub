@@ -125,28 +125,6 @@ fn failed(error: anyhow::Error) -> Handled {
     }
 }
 
-async fn start_workflow_sessions(
-    state: &Shared,
-    workspace_id: &str,
-    run_id: &str,
-    sessions: Vec<(genehub_proto::SessionSummary, String)>,
-) -> anyhow::Result<()> {
-    for (session, message) in sessions {
-        if let Err(error) =
-            crate::workflow::start_assigned(state, workspace_id, run_id, &session, message).await
-        {
-            let launch = anyhow::anyhow!("启动 Workflow 子会话 {}：{error:#}", session.id);
-            return match crate::workflow::abort_launch(state, workspace_id, run_id).await {
-                Ok(()) => Err(launch),
-                Err(cleanup) => Err(anyhow::anyhow!(
-                    "{launch:#}；终止 Workflow Run 时又失败：{cleanup:#}"
-                )),
-            };
-        }
-    }
-    Ok(())
-}
-
 /// Handles one request on behalf of `caller`.
 ///
 /// The caller is passed in rather than re-derived here because the gate above
@@ -179,12 +157,7 @@ pub async fn handle(
                 Some(session_id),
             ) => {
                 match agent_space_management_project(state, caller, workspace_id, operation).await {
-                    Ok(project) => {
-                        session_may_manage_project(state, &project, session_id).await
-                            || crate::workflow::exception_authority(state, &project, session_id)
-                                .await
-                                .unwrap_or(false)
-                    }
+                    Ok(project) => session_may_manage_project(state, &project, session_id).await,
                     Err(_) => false,
                 }
             }
@@ -233,7 +206,7 @@ async fn authorize_pm_space_open(
 ) -> anyhow::Result<()> {
     let session = state.sessions.summary(session_id).await?;
     let project_id = &session.workspace_id;
-    authorize_project_workflow_mutation(state, caller, project_id)
+    authorize_project_mutation(state, caller, project_id)
         .await
         .map_err(anyhow::Error::msg)?;
     if !session_may_manage_project(state, project_id, session_id).await {
@@ -385,19 +358,6 @@ async fn authorize_session_request(
         if managed.parent_session_id == controller {
             return Ok(());
         }
-        if !matches!(request, Request::SessionRespondPermission { .. }) {
-            let project = state
-                .workspaces
-                .project_root(&summary.workspace_id)
-                .await
-                .map_err(|error| format!("无法确认项目边界：{error:#}"))?;
-            if crate::workflow::exception_authority(state, &project, controller)
-                .await
-                .unwrap_or(false)
-            {
-                return Ok(());
-            }
-        }
     }
     if managed.user_interaction == genehub_proto::SessionUserInteraction::ReadOnly {
         return Err(
@@ -408,7 +368,7 @@ async fn authorize_session_request(
     Ok(())
 }
 
-async fn authorize_project_workflow_mutation(
+async fn authorize_project_mutation(
     state: &Shared,
     caller: &crate::authz::Principal,
     workspace_id: &str,
@@ -437,7 +397,7 @@ async fn authorize_project_workflow_mutation(
                 {
                     return Ok(());
                 }
-                return Err("只有本项目的 WM 受管会话可以修改 Workflow 配置".into());
+                return Err("历史 Workflow 子会话不能修改项目配置".into());
             }
             if summary.workspace_id != workspace_id {
                 return Err("入口会话不属于请求的项目 Workspace".into());
@@ -449,15 +409,12 @@ async fn authorize_project_workflow_mutation(
                 .map_err(|error| format!("无法确认项目管理授权：{error:#}"))?;
             if agent_space_requires_project_control(&space)
                 && !session_may_manage_project(state, workspace_id, session_id).await
-                && !crate::workflow::exception_authority(state, workspace_id, session_id)
-                    .await
-                    .unwrap_or(false)
             {
-                return Err("这个项目尚未接管；请先完成 PM 接管后再修改 Workflow 配置".into());
+                return Err("这个项目尚未授权当前会话管理配置".into());
             }
             Ok(())
         }
-        _ => Err("只有本机用户或项目普通主会话可以修改 DCG 生命周期".into()),
+        _ => Err("只有认证用户或项目普通主会话可以修改项目配置".into()),
     }
 }
 
@@ -585,51 +542,6 @@ pub(crate) async fn session_may_manage_project(
         .is_ok_and(|owner| owner == project_id)
 }
 
-/// The one action name that can turn a cloned Workflow package into a team
-/// with scheduling rights. Naming it once keeps the reservation, the replay
-/// receipt and the human card describing the same thing.
-const WORKFLOW_BUILD_ACTION: &str = "project.workflow.build";
-
-/// Human card for authorizing a package's component topology.
-///
-/// It states the package, the product directories and the exact components
-/// being granted, because that — not the file copy — is what the human is
-/// being asked to allow.
-fn workflow_build_challenge(
-    controller_session_id: &str,
-    workspace_id: &str,
-    project_root: &Path,
-    report: &genehub_proto::WorkflowBuildReport,
-) -> crate::project_control::ChallengeSpec {
-    crate::project_control::ChallengeSpec {
-        controller_session_id: controller_session_id.into(),
-        workspace_id: workspace_id.into(),
-        canonical_root: project_root.display().to_string(),
-        action: WORKFLOW_BUILD_ACTION.into(),
-        pack_id: report.package_id.clone(),
-        pack_digest: report.source_digest.clone(),
-        plan_digest: report.plan_digest.clone(),
-        expected_revision: report.expected_revision,
-        git_head: None,
-        status_digest: String::new(),
-        title: format!(
-            "授权 Workflow 包「{}」在「{}」建立执行团队？",
-            report.package_id,
-            project_root
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("当前项目")
-        ),
-        detail: format!(
-            "将把该包的 Space 源物化为 {} 个产物目录并授予其组件权限（executor 可派发 Worker 并取得写租约）。\n产物：{}\n组件：{}\nplan: {}",
-            report.spaces.len(),
-            report.spaces.join("、"),
-            report.components.join("；"),
-            report.plan_digest,
-        ),
-    }
-}
-
 async fn authorize_agent_space_change(
     state: &Shared,
     caller: &crate::authz::Principal,
@@ -658,9 +570,6 @@ async fn authorize_agent_space_change(
                 .map_err(|error| format!("无法确认项目边界：{error:#}"))?;
             if summary.workspace_id == workspace_id
                 || session_may_manage_project(state, &project_id, session_id).await
-                || crate::workflow::exception_authority(state, &project_id, session_id)
-                    .await
-                    .unwrap_or(false)
             {
                 Ok(())
             } else {
@@ -842,32 +751,6 @@ async fn guard_agent_space_mutation(
         );
     }
 
-    // Scoped to the Runs that actually pinned this Space. A Run belonging to
-    // another package cannot be reinterpreted by a change to a carrier it
-    // never used, and blocking on it made a busy project's team permanently
-    // unmodifiable — the more a project is used, the less it could be
-    // maintained.
-    let project = state.workspaces.project_root(workspace_id).await?;
-    let executor_parent = current.parent_workspace_id.clone();
-    let active_runs = match state.workspaces.get(&project).await {
-        Ok(project_entry) => crate::workflow::carrier_active_run_ids(
-            &state.paths.root,
-            &project,
-            &project_entry.root,
-            workspace_id,
-            executor_parent.as_deref(),
-        )?,
-        Err(error) => anyhow::bail!(
-            "activeRunUnknown: 无法确认 AgentSpace 是否仍被 Workflow 使用；先恢复项目 {project}：{error:#}"
-        ),
-    };
-    if !active_runs.is_empty() {
-        anyhow::bail!(
-            "activeRunConflict: finish or cancel these Workflow Runs before changing the team: {}",
-            active_runs.join(", ")
-        );
-    }
-
     let removes_executor = match operation {
         genehub_proto::AgentSpaceOperation::RemoveComponent { component_id } => {
             component_id == crate::agent_space::COMPONENT_EXECUTOR
@@ -991,7 +874,6 @@ async fn dispatch(
                     "asset.preview.image.v1".to_string(),
                     "service.preview.v1".to_string(),
                     "process.services.v1".to_string(),
-                    "workflow.control.v1".to_string(),
                     "agentSpace.builderPlans.v1".to_string(),
                     "session.input.v1".to_string(),
                     "provider.configuration.v1".to_string(),
@@ -1017,12 +899,7 @@ async fn dispatch(
                 .subscribe_window(&session_id, since_seq, expand_last_round, recent_rounds)
                 .await
             {
-                Ok((mut snapshot, replayed, reset, receiver)) => {
-                    crate::workflow::summarize_sessions(
-                        state,
-                        std::slice::from_mut(&mut snapshot.summary),
-                    )
-                    .await;
+                Ok((snapshot, replayed, reset, receiver)) => {
                     Handled {
                         reply: Ok(Reply::Subscribed {
                             snapshot,
@@ -1124,775 +1001,26 @@ async fn dispatch(
             }
         }).await,
 
-        Request::WorkflowInspect {
-            workspace_id,
-            package_id,
-            candidate_digest,
-        } => Box::pin(async move {
-            let workspace = match state.workspaces.project_entry(&workspace_id).await {
-                Ok(workspace) => workspace,
-                Err(error) => {
-                    return Handled::err(ErrorCode::Forbidden, format!("{error:#}"));
-                }
-            };
-            let package_id =
-                match crate::workflow::resolve_package_id(&workspace.root, package_id.as_deref()) {
-                    Ok(id) => id,
-                    Err(error) => return Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
-                };
-            let runtime = match crate::workflow::RuntimeStore::for_package(
-                &state.paths.root,
-                &workspace_id,
-                &workspace.root,
-                &package_id,
-            ) {
-                Ok(runtime) => runtime,
-                Err(error) => return failed(error),
-            };
-            match crate::workflow::inspect_selected(
-                &workspace.root,
-                &runtime,
-                candidate_digest.as_deref(),
-            ) {
-                Ok(status) => Handled::ok(Reply::WorkflowProject(status)),
-                Err(error) => failed(error),
-            }
-        }).await,
-
-        Request::WorkflowList { workspace_id } => Box::pin(async move {
-            let workspace = match state.workspaces.project_entry(&workspace_id).await {
-                Ok(workspace) => workspace,
-                Err(error) => {
-                    return Handled::err(ErrorCode::Forbidden, format!("{error:#}"));
-                }
-            };
-            match crate::workflow::list_packages(state, &workspace_id, &workspace.root).await {
-                Ok(list) => Handled::ok(Reply::WorkflowPackages(list)),
-                Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
-            }
-        }).await,
-
-        Request::WorkflowBuild {
-            workspace_id,
-            package_id,
-            apply,
-            plan_digest,
-            action_id,
-            expected_revision,
-        } => Box::pin(async move {
-            if let Err(message) =
-                authorize_project_workflow_mutation(state, caller, &workspace_id).await
-            {
-                return Handled::err(ErrorCode::Forbidden, message);
-            }
-            let workspace = match state.workspaces.project_entry(&workspace_id).await {
-                Ok(workspace) => workspace,
-                Err(error) => {
-                    return Handled::err(ErrorCode::Forbidden, format!("{error:#}"));
-                }
-            };
-            // A retried apply must not spend a second authorization: the
-            // recorded receipt for this exact plan is the same answer.
-            if apply {
-                if let (Some(session_id), Some(plan_digest), Some(action_id)) = (
-                    caller.session_controller_id(),
-                    plan_digest.as_deref(),
-                    action_id.as_deref(),
-                ) {
-                    match state
-                        .project_control
-                        .completed_action::<genehub_proto::WorkflowBuildReport>(
-                            &workspace_id,
-                            session_id,
-                            WORKFLOW_BUILD_ACTION,
-                            plan_digest,
-                            action_id,
-                        ) {
-                        Ok(Some(report)) => return Handled::ok(Reply::WorkflowBuild(report)),
-                        Ok(None) => {}
-                        Err(error) => {
-                            return Handled::err(ErrorCode::Conflict, format!("{error:#}"));
-                        }
-                    }
-                }
-            }
-            let _mutation = apply.then(|| state.project_control.mutation_lock());
-            let _mutation = match _mutation {
-                Some(lock) => Some(lock.await),
-                None => None,
-            };
-            let (plan, mut report) = match crate::workflow::plan_build(
-                state,
-                &workspace_id,
-                &workspace.root,
-                &package_id,
-            )
-            .await
-            {
-                Ok(planned) => planned,
-                Err(error) => {
-                    return Handled::err(
-                        if apply {
-                            ErrorCode::Conflict
-                        } else {
-                            ErrorCode::BadRequest
-                        },
-                        format!("{error:#}"),
-                    );
-                }
-            };
-            if !apply {
-                if report.conflict_runs.is_empty() {
-                    if let Some(session_id) = caller.session_controller_id() {
-                        let spec = workflow_build_challenge(
-                            session_id,
-                            &workspace_id,
-                            &workspace.root,
-                            &report,
-                        );
-                        report.approval = match state
-                            .project_control
-                            .issue_management(
-                                spec,
-                                &workspace_id,
-                                session_may_manage_project(state, &workspace_id, session_id).await,
-                                crate::workflow::exception_authority(
-                                    state,
-                                    &workspace_id,
-                                    session_id,
-                                )
-                                .await
-                                .unwrap_or(false),
-                            )
-                            .await
-                        {
-                            Ok(approval) => approval,
-                            Err(error) => return failed(error),
-                        };
-                    }
-                }
-                return Handled::ok(Reply::WorkflowBuild(report));
-            }
-            if !report.conflict_runs.is_empty() {
-                return Handled::err(
-                    ErrorCode::Conflict,
-                    format!(
-                        "activeRunConflict: 先结束或取消这些执行再重建共享载体：{}",
-                        report.conflict_runs.join("、")
-                    ),
-                );
-            }
-            let Some(session_id) = caller.session_controller_id() else {
-                return Handled::err(
-                    ErrorCode::Forbidden,
-                    "approvalRequired: 请在 Agent Session 中生成 plan 并由用户确认",
-                );
-            };
-            let Some(plan_digest) = plan_digest.as_deref() else {
-                return Handled::err(ErrorCode::BadRequest, "apply requires --plan-digest");
-            };
-            let Some(action_id) = action_id.as_deref() else {
-                return Handled::err(ErrorCode::BadRequest, "apply requires --action-id");
-            };
-            let Some(expected_revision) = expected_revision else {
-                return Handled::err(ErrorCode::BadRequest, "apply requires --expected-revision");
-            };
-            if report.plan_digest != plan_digest || report.expected_revision != expected_revision {
-                return Handled::err(
-                    ErrorCode::Conflict,
-                    "approvalStale: project facts changed; create and approve a new plan",
-                );
-            }
-            let challenge = match state
-                .project_control
-                .reserve(
-                    session_id,
-                    &workspace_id,
-                    &workspace.root.display().to_string(),
-                    WORKFLOW_BUILD_ACTION,
-                    &report.package_id,
-                    &report.source_digest,
-                    plan_digest,
-                    expected_revision,
-                    // The plan digest already binds the package's exact bytes
-                    // via its source digest, so whole-project Git state would
-                    // only make an approved plan go stale on unrelated edits.
-                    None,
-                    "",
-                    action_id,
-                    session_may_manage_project(state, &workspace_id, session_id).await,
-                    crate::workflow::exception_authority(state, &workspace_id, session_id)
-                        .await
-                        .unwrap_or(false),
-                )
-                .await
-            {
-                Ok(challenge) => challenge,
-                Err(error) => return Handled::err(ErrorCode::Forbidden, format!("{error:#}")),
-            };
-            match crate::workflow::apply_build(
-                state,
-                &workspace_id,
-                &workspace.root,
-                &plan,
-                session_id,
-                report,
-            )
-            .await
-            {
-                Ok(report) => {
-                    if let Err(error) = state.project_control.record_completed_action(
-                        &workspace_id,
-                        session_id,
-                        WORKFLOW_BUILD_ACTION,
-                        plan_digest,
-                        action_id,
-                        &report,
-                    ) {
-                        // The build itself is durably complete and a repeated
-                        // apply is a no-op against the same source digest.
-                        // Do not report success as failure; surface the
-                        // degraded replay receipt in diagnostics instead.
-                        tracing::error!(
-                            workspace = %workspace_id,
-                            action_id,
-                            %error,
-                            "could not persist the completed Workflow build receipt"
-                        );
-                    }
-                    if let Err(error) = state.project_control.complete(&challenge, action_id).await
-                    {
-                        return failed(error);
-                    }
-                    Handled::ok(Reply::WorkflowBuild(report))
-                }
-                Err(error) => {
-                    if let Err(error) = state
-                        .project_control
-                        .release_failed(&challenge, action_id)
-                        .await
-                    {
-                        return failed(error);
-                    }
-                    Handled::err(ErrorCode::BadRequest, format!("{error:#}"))
-                }
-            }
-        }).await,
-
-        Request::WorkflowActivate {
-            workspace_id,
-            package_id,
-            candidate_digest,
-            expected_revision,
-        } => Box::pin(async move {
-            if let Err(message) =
-                authorize_project_workflow_mutation(state, caller, &workspace_id).await
-            {
-                return Handled::err(ErrorCode::Forbidden, message);
-            }
-            let workspace = match state.workspaces.project_entry(&workspace_id).await {
-                Ok(workspace) => workspace,
-                Err(error) => {
-                    return Handled::err(ErrorCode::Forbidden, format!("{error:#}"));
-                }
-            };
-            let package_id =
-                match crate::workflow::resolve_package_id(&workspace.root, package_id.as_deref()) {
-                    Ok(id) => id,
-                    Err(error) => return Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
-                };
-            let runtime = match crate::workflow::RuntimeStore::for_package(
-                &state.paths.root,
-                &workspace_id,
-                &workspace.root,
-                &package_id,
-            ) {
-                Ok(runtime) => runtime,
-                Err(error) => return failed(error),
-            };
-            let (approved_digest, recovery_change) =
-                match crate::workflow::recovery_activation_change(
-                    &workspace.root,
-                    &runtime,
-                    candidate_digest.as_deref(),
-                    expected_revision,
-                ) {
-                    Ok(change) => change,
-                    Err(error) => return failed(error),
-                };
-            if let Some((request_id, detail)) = recovery_change {
-                if let Some(session_id) = caller.session_controller_id() {
-                    match state
-                        .sessions
-                        .workflow_question_outcome(session_id, &request_id)
-                        .await
-                    {
-                        Ok(Some(genehub_proto::PermissionOutcome::Selected { option_id }))
-                            if option_id == "approve" => {}
-                        Ok(Some(_)) => {
-                            return Handled::err(
-                                ErrorCode::Forbidden,
-                                "Human rejected the recovery flow change",
-                            )
-                        }
-                        Ok(None) => {
-                            let request = genehub_proto::PermissionRequest {
-                                id: request_id,
-                                kind: genehub_proto::PermissionRequestKind::Question,
-                                title: "授权激活恢复流程变更".into(),
-                                detail: Some(detail),
-                                tool_call_id: None,
-                                options: vec![
-                                    genehub_proto::PermissionOption {
-                                        id: "approve".into(),
-                                        label: "批准这次恢复流程变更".into(),
-                                        kind: genehub_proto::PermissionOptionKind::AllowOnce,
-                                    },
-                                    genehub_proto::PermissionOption {
-                                        id: "reject".into(),
-                                        label: "拒绝".into(),
-                                        kind: genehub_proto::PermissionOptionKind::AllowOnce,
-                                    },
-                                ],
-                                questions: None,
-                            };
-                            if let Err(error) = state
-                                .sessions
-                                .request_workflow_question(session_id, request)
-                                .await
-                            {
-                                return failed(error);
-                            }
-                            return Handled::err(ErrorCode::BadRequest, "recoveryActivationPending: Human approval is required before retrying this Candidate");
-                        }
-                        Err(error) => return failed(error),
-                    }
-                }
-                // A direct LocalUser call is itself an explicit Human action.
-            }
-            match crate::workflow::activate_bound_project(
-                state,
-                &workspace_id,
-                &workspace.root,
-                &runtime,
-                Some(&approved_digest),
-                expected_revision,
-            )
-            .await
-            {
-                Ok(status) => Handled::ok(Reply::WorkflowProject(status)),
-                Err(error) => failed(error),
-            }
-        }).await,
-
-        Request::WorkflowDispatch {
-            retry_of,
-            resume_cancelled,
-            candidate_digest,
-            workspace_id,
-            package_id,
-            workflow_id,
-            execution_root,
-            task_id,
-            prompt,
-        } => Box::pin(async move {
-            let Some(parent_session_id) = caller.session_controller_id() else {
-                return Handled::err(
-                    ErrorCode::Unauthorized,
-                    "workflow.dispatch 只能由当前根会话中的 Agent 发起",
-                );
-            };
-            let project_space = match state.workspaces.agent_space(&workspace_id).await {
-                Ok(space) => space,
-                Err(error) => return failed(error),
-            };
-            // Delegation belongs to the authorized project, not to one chat tab.
-            // dispatch below still requires an ordinary root Session in this project;
-            // configuration changes retain their controller/exception checks.
-            if agent_space_requires_project_control(&project_space)
-                && !state.project_control.has_binding(&workspace_id)
-                && !crate::workflow::exception_authority(state, &workspace_id, parent_session_id)
-                    .await
-                    .unwrap_or(false)
-            {
-                return Handled::err(
-                    ErrorCode::Forbidden,
-                    "项目尚未接管；请先完成 PM 接管后再委托任务",
-                );
-            }
-            let project_root = match state.workspaces.project_entry(&workspace_id).await {
-                Ok(workspace) => workspace.root,
-                Err(error) => return Handled::err(ErrorCode::Forbidden, format!("{error:#}")),
-            };
-            // Both selections are refused rather than defaulted when a
-            // project runs several packages or a package several flows.
-            let package_id =
-                match crate::workflow::resolve_package_id(&project_root, package_id.as_deref()) {
-                    Ok(id) => id,
-                    Err(error) => return Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
-                };
-            let workflow_id = match crate::workflow::resolve_flow_id(
-                &project_root,
-                &package_id,
-                workflow_id.as_deref(),
-            ) {
-                Ok(id) => id,
-                Err(error) => return Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
-            };
-            let transition = match crate::workflow::dispatch(
-                state,
-                &workspace_id,
-                parent_session_id,
-                &package_id,
-                &workflow_id,
-                &task_id,
-                &prompt,
-                crate::workflow::DispatchOptions {
-                    candidate_digest: candidate_digest.as_deref(),
-                    execution_root: execution_root.as_deref(),
-                    retry_of: retry_of.as_deref(),
-                    resume_cancelled: resume_cancelled.unwrap_or(false),
-                    recovery: None,
-                    journal_actor: "",
-                    recovery_fallback: false,
-                },
-            )
-            .await
-            {
-                Ok(transition) => transition,
-                Err(error) => return failed(error),
-            };
-            if let Err(error) = start_workflow_sessions(
-                state,
-                &workspace_id,
-                &transition.status.id,
-                transition.sessions,
-            )
-            .await
-            {
-                return failed(error);
-            }
-            Handled::ok(Reply::WorkflowRun(transition.status))
-        }).await,
-
-        Request::WorkflowCheck {
-            workspace_id,
-            run_id,
-            package_id,
-            draft,
-        } => Box::pin(async move {
-            match crate::workflow::check(
-                state,
-                &workspace_id,
-                run_id.as_deref(),
-                package_id.as_deref(),
-                draft.unwrap_or(false),
-            )
-            .await
-            {
-                Ok(report) => Handled::ok(Reply::WorkflowCheck(report)),
-                Err(error) => failed(error),
-            }
-        }).await,
-
-        Request::WorkflowGet {
-            workspace_id,
-            run_id,
-        } => Box::pin(async move {
-            let workspace = match state.workspaces.get(&workspace_id).await {
-                Ok(workspace) => workspace,
-                Err(error) => return failed(error),
-            };
-            let runtime = match crate::workflow::RuntimeStore::new(
-                &state.paths.root,
-                &workspace_id,
-                &workspace.root,
-            ) {
-                Ok(runtime) => runtime,
-                Err(error) => return failed(error),
-            };
-            match crate::workflow::get(&runtime, &run_id) {
-                Ok(status) => Handled::ok(Reply::WorkflowRun(status)),
-                Err(error) => failed(error),
-            }
-        }).await,
-
-        Request::WorkflowJournal {
-            workspace_id,
-            run_id,
-            since,
-            limit,
-        } => Box::pin(async move {
-            let workspace = match state.workspaces.get(&workspace_id).await {
-                Ok(workspace) => workspace,
-                Err(error) => return failed(error),
-            };
-            let runtime = match crate::workflow::RuntimeStore::new(
-                &state.paths.root,
-                &workspace_id,
-                &workspace.root,
-            ) {
-                Ok(runtime) => runtime,
-                Err(error) => return failed(error),
-            };
-            match crate::workflow::journal(&runtime, &run_id, since, limit) {
-                Ok(events) => Handled::ok(Reply::WorkflowJournal(events)),
-                Err(error) => failed(error),
-            }
-        }).await,
-
-        Request::WorkflowHistory {
-            workspace_id,
-            limit,
-        } => Box::pin(async move {
-            let workspace = match state.workspaces.get(&workspace_id).await {
-                Ok(workspace) => workspace,
-                Err(error) => return failed(error),
-            };
-            let runtime = match crate::workflow::RuntimeStore::new(
-                &state.paths.root,
-                &workspace_id,
-                &workspace.root,
-            ) {
-                Ok(runtime) => runtime,
-                Err(error) => return failed(error),
-            };
-            match crate::workflow::history(&runtime, limit.unwrap_or(50)) {
-                Ok(runs) => Handled::ok(Reply::WorkflowRuns(runs)),
-                Err(error) => failed(error),
-            }
-        }).await,
-
-        Request::WorkflowComplete {
-            workspace_id,
-            run_id,
-            node_id,
-            expected_revision,
-            evidence,
-            output,
-            outcome,
-            reason,
-        } => Box::pin(async move {
-            let Some(caller_session_id) = caller.session_controller_id() else {
-                return Handled::err(
-                    ErrorCode::Unauthorized,
-                    "workflow.complete 只能由该节点的受管子会话发起",
-                );
-            };
-            let transition = match crate::workflow::complete(
-                state,
-                &workspace_id,
-                caller_session_id,
-                &run_id,
-                &node_id,
-                expected_revision,
-                crate::workflow::Completion {
-                    evidence,
-                    output,
-                    outcome: outcome.unwrap_or_default(),
-                    reason,
-                },
-            )
-            .await
-            {
-                Ok(transition) => transition,
-                Err(error) => return failed(error),
-            };
-            if let Err(error) = start_workflow_sessions(
-                state,
-                &workspace_id,
-                &transition.status.id,
-                transition.sessions,
-            )
-            .await
-            {
-                return failed(error);
-            }
-            Handled::ok(Reply::WorkflowRun(transition.status))
-        }).await,
-
-        Request::WorkflowCancel {
-            workspace_id,
-            run_id,
-            expected_revision,
-        } => Box::pin(async move {
-            // Device/channel Session grants were checked by the common entry.
-            // Agent-bound callers additionally prove project ownership.
-            if caller.session_controller_id().is_some() {
-                if let Err(error) =
-                    authorize_project_workflow_mutation(state, caller, &workspace_id).await
-                {
-                    return Handled::err(ErrorCode::Forbidden, error);
-                }
-            }
-            match crate::workflow::cancel(
-                state,
-                &workspace_id,
-                &run_id,
-                expected_revision,
-                caller.session_controller_id().is_some(),
-            )
-            .await
-            {
-                Ok(run) => Handled::ok(Reply::WorkflowRun(run)),
-                Err(error) => failed(error),
-            }
-        }).await,
-
-        Request::WorkflowRecover {
-            workspace_id,
-            run_id,
-            expected_revision,
-        } => Box::pin(async move {
-            if let Err(error) =
-                authorize_project_workflow_mutation(state, caller, &workspace_id).await
-            {
-                return Handled::err(ErrorCode::Forbidden, error);
-            }
-            match crate::workflow::recover(state, &workspace_id, &run_id, expected_revision).await {
-                Ok(run) => Handled::ok(Reply::WorkflowRun(run)),
-                Err(error) => failed(error),
-            }
-        }).await,
-
-        Request::WorkflowRecoveryStart {
-            workspace_id,
-            run_id,
-            reason,
-        } => Box::pin(async move {
-            if let Err(error) =
-                authorize_project_workflow_mutation(state, caller, &workspace_id).await
-            {
-                return Handled::err(ErrorCode::Forbidden, error);
-            }
-            let Some(parent_session_id) = caller.session_controller_id() else {
-                return Handled::err(
-                    ErrorCode::Unauthorized,
-                    "workflow.recovery.start requires an ordinary PM Session",
-                );
-            };
-            let transition = match crate::workflow::start_recovery(
-                state,
-                &workspace_id,
-                parent_session_id,
-                &run_id,
-                &reason,
-                "pm",
-            )
-            .await
-            {
-                Ok(transition) => transition,
-                Err(error) => return failed(error),
-            };
-            if let Err(error) = start_workflow_sessions(
-                state,
-                &workspace_id,
-                &transition.status.id,
-                transition.sessions,
-            )
-            .await
-            {
-                return failed(error);
-            }
-            Handled::ok(Reply::WorkflowRun(transition.status))
-        }).await,
-
-        Request::WorkflowHuman {
-            workspace_id,
-            run_id,
-            expected_revision,
-            kind,
-            reason,
-        } => Box::pin(async move {
-            if let Err(error) =
-                authorize_project_workflow_mutation(state, caller, &workspace_id).await
-            {
-                return Handled::err(ErrorCode::Forbidden, error);
-            }
-            if caller.session_controller_id().is_none() {
-                return Handled::err(
-                    ErrorCode::Unauthorized,
-                    "workflow.human requires an ordinary PM Session",
-                );
-            }
-            match crate::workflow::request_human_exit(
-                state,
-                &workspace_id,
-                &run_id,
-                expected_revision,
-                &kind,
-                &reason,
-            )
-            .await
-            {
-                Ok(run) => Handled::ok(Reply::WorkflowRun(run)),
-                Err(error) => failed(error),
-            }
-        }).await,
-
-        Request::WorkflowRecoveryReset {
-            workspace_id,
-            package_id,
-            expected_revision,
-        } => Box::pin(async move {
-            if let Err(error) =
-                authorize_project_workflow_mutation(state, caller, &workspace_id).await
-            {
-                return Handled::err(ErrorCode::Forbidden, error);
-            }
-            let workspace = match state.workspaces.project_entry(&workspace_id).await {
-                Ok(workspace) => workspace,
-                Err(error) => return failed(error),
-            };
-            let package_id =
-                match crate::workflow::resolve_package_id(&workspace.root, package_id.as_deref()) {
-                    Ok(id) => id,
-                    Err(error) => return failed(error),
-                };
-            let runtime = match crate::workflow::RuntimeStore::for_package(
-                &state.paths.root,
-                &workspace_id,
-                &workspace.root,
-                &package_id,
-            ) {
-                Ok(runtime) => runtime,
-                Err(error) => return failed(error),
-            };
-            match crate::workflow::reset_recovery(&workspace.root, &runtime, expected_revision) {
-                Ok(status) => Handled::ok(Reply::WorkflowProject(status)),
-                Err(error) => failed(error),
-            }
-        }).await,
-
-        Request::WorkflowBudget {
-            workspace_id,
-            run_id,
-            expected_revision,
-            max_runs,
-            deadline_seconds,
-            max_llm_rounds,
-        } => Box::pin(async move {
-            if let Err(error) =
-                authorize_project_workflow_mutation(state, caller, &workspace_id).await
-            {
-                return Handled::err(ErrorCode::Forbidden, error);
-            }
-            match crate::workflow::budget(
-                state,
-                &workspace_id,
-                caller.session_controller_id(),
-                &run_id,
-                expected_revision,
-                max_runs,
-                deadline_seconds,
-                max_llm_rounds,
-            )
-            .await
-            {
-                Ok(run) => Handled::ok(Reply::WorkflowRun(run)),
-                Err(error) => failed(error),
-            }
-        }).await,
+        // Legacy wire tags remain decodable; no Workflow runtime is shipped.
+        Request::WorkflowInspect { .. }
+        | Request::WorkflowList { .. }
+        | Request::WorkflowBuild { .. }
+        | Request::WorkflowActivate { .. }
+        | Request::WorkflowDispatch { .. }
+        | Request::WorkflowCheck { .. }
+        | Request::WorkflowGet { .. }
+        | Request::WorkflowJournal { .. }
+        | Request::WorkflowHistory { .. }
+        | Request::WorkflowComplete { .. }
+        | Request::WorkflowCancel { .. }
+        | Request::WorkflowRecover { .. }
+        | Request::WorkflowRecoveryStart { .. }
+        | Request::WorkflowHuman { .. }
+        | Request::WorkflowRecoveryReset { .. }
+        | Request::WorkflowBudget { .. }
+        | Request::SessionFlow { .. } => Handled::err(
+            ErrorCode::BadRequest, "workflowRetired: Workflow has been removed; use team Skills and ordinary Sessions",
+        ),
 
         Request::SessionCreate {
             workspace_id,
@@ -2048,8 +1176,7 @@ async fn dispatch(
                 .list(workspace_id.as_deref(), include_archived)
                 .await
             {
-                Ok(mut sessions) => {
-                    crate::workflow::summarize_sessions(state, &mut sessions).await;
+                Ok(sessions) => {
                     Handled::ok(Reply::Sessions(sessions))
                 }
                 Err(error) => failed(error),
@@ -2070,12 +1197,7 @@ async fn dispatch(
                 }
                 None => state.sessions.snapshot(&session_id).await,
             } {
-                Ok(mut snapshot) => {
-                    crate::workflow::summarize_sessions(
-                        state,
-                        std::slice::from_mut(&mut snapshot.summary),
-                    )
-                    .await;
+                Ok(snapshot) => {
                     Handled::ok(Reply::Snapshot(snapshot))
                 }
                 Err(error) => failed(error),
@@ -2141,13 +1263,6 @@ async fn dispatch(
         Request::SessionComponents { session_id } => Box::pin(async move {
             match session_components(state, &session_id).await {
                 Ok(instances) => Handled::ok(Reply::SessionComponents(instances)),
-                Err(error) => failed(error),
-            }
-        }).await,
-
-        Request::SessionFlow { session_id } => Box::pin(async move {
-            match crate::workflow::executor_flow(state, &session_id).await {
-                Ok(flow) => Handled::ok(Reply::SessionFlow(flow)),
                 Err(error) => failed(error),
             }
         }).await,
@@ -2328,13 +1443,7 @@ async fn dispatch(
                 }
             };
             if let Some(message_id) = message_id {
-                if let Some(run_id) = task_run_id.as_deref() {
-                    if let Err(error) =
-                        crate::workflow::validate_input_target(state, &session_id, run_id).await
-                    {
-                        return failed(error);
-                    }
-                } else {
+                {
                     let media_tags = crate::agent_routing::media_tags_for_mimes(
                         attachments
                             .iter()
@@ -3018,8 +2127,7 @@ async fn dispatch(
             // reviewer's recovery choice) stays an Agent-to-Agent path.
             if (kind == Some(genehub_proto::PermissionRequestKind::PlanApproval)
                 || (kind == Some(genehub_proto::PermissionRequestKind::Question)
-                    && (request_id.starts_with("workflow-human-")
-                        || caller.session_controller_id() == Some(session_id.as_str()))))
+                    && (caller.session_controller_id() == Some(session_id.as_str()))))
                 && matches!(caller, crate::authz::Principal::SessionController { .. })
             {
                 return Handled::err(
@@ -3546,7 +2654,7 @@ async fn dispatch(
                             ),
                         }, &project_id,
                         session_may_manage_project(state, &project_id, session_id).await,
-                        crate::workflow::exception_authority(state, &project_id, session_id).await.unwrap_or(false))
+                        false)
                         .await { Ok(challenge) => challenge, Err(error) => return failed(error) }
             } else {
                 None
@@ -3648,9 +2756,7 @@ async fn dispatch(
                         &current.builder_lock_digest,
                         action_id,
                         session_may_manage_project(state, &project_id, session_id).await,
-                        crate::workflow::exception_authority(state, &project_id, session_id)
-                            .await
-                            .unwrap_or(false),
+                        false,
                     )
                     .await
                 {
@@ -3769,14 +2875,7 @@ async fn dispatch(
                     | genehub_proto::AgentSpaceBuilderOperation::Verify
                     | genehub_proto::AgentSpaceBuilderOperation::Build { dry_run: true, .. }
             );
-            let recovery = match caller.session_controller_id() {
-                Some(session) => {
-                    crate::workflow::exception_authority(state, &workspace_id, session)
-                        .await
-                        .unwrap_or(false)
-                }
-                None => false,
-            };
+            let recovery = false;
             if let Some(session_id) = caller.session_controller_id() {
                 if !(read_only
                     || recovery
@@ -3790,7 +2889,7 @@ async fn dispatch(
                 }
             }
             if let Err(message) =
-                authorize_project_workflow_mutation(state, caller, &workspace_id).await
+                authorize_project_mutation(state, caller, &workspace_id).await
             {
                 return Handled::err(ErrorCode::Forbidden, message);
             }
@@ -4426,11 +3525,8 @@ mod tests {
         assert!(agent_space_requires_project_control(&pm));
     }
 
-    /// Minimal Builder-verifiable PM root, mirroring what
-    /// `workflow::build::apply` writes for a fresh project before it
-    /// registers the PM component. This test is about the rebind mechanism,
-    /// not about how a project becomes PM-managed (`workflow/build.rs`
-    /// already covers that end to end via a real package).
+    /// Builder-verifiable project root for testing management authority independently
+    /// of the retired Workflow bootstrapper.
     fn seed_pm_project_manifest(project_root: &std::path::Path) {
         std::fs::write(
             project_root.join("pipespace.json"),
@@ -4480,16 +3576,14 @@ mod tests {
         .expect("the seeded PM root must be buildable");
         state
             .workspaces
-            .apply_bootstrap_space_plan(
+            .configure_agent_space(
                 &workspace.id,
                 0,
-                &[crate::workspace::BootstrapSpaceRegistration {
-                    workspace_id: workspace.id.clone(),
-                    parent_workspace_id: None,
-                    lifecycle: "persistent".into(),
-                    components: vec![(crate::agent_space::COMPONENT_PM.into(), None)],
-                    guidance: Vec::new(),
-                }],
+                &genehub_proto::AgentSpaceOperation::SetComponent {
+                    component_id: crate::agent_space::COMPONENT_PM.into(),
+                    enabled: true,
+                    role: None,
+                },
             )
             .await
             .unwrap();
@@ -4565,16 +3659,14 @@ mod tests {
         .expect("the seeded PM root must be buildable");
         state
             .workspaces
-            .apply_bootstrap_space_plan(
+            .configure_agent_space(
                 &workspace.id,
                 0,
-                &[crate::workspace::BootstrapSpaceRegistration {
-                    workspace_id: workspace.id.clone(),
-                    parent_workspace_id: None,
-                    lifecycle: "persistent".into(),
-                    components: vec![(crate::agent_space::COMPONENT_PM.into(), None)],
-                    guidance: Vec::new(),
-                }],
+                &genehub_proto::AgentSpaceOperation::SetComponent {
+                    component_id: crate::agent_space::COMPONENT_PM.into(),
+                    enabled: true,
+                    role: None,
+                },
             )
             .await
             .unwrap();
