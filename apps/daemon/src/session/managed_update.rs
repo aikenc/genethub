@@ -40,9 +40,15 @@ impl SessionManager {
         )
     }
     /// Returns true only while this Session is awaiting its update result.
-    pub(super) async fn update_blocks_delivery(&self, state: &Shared, live: &Arc<Live>) -> bool {
-        let meta = live.meta.lock().await.clone();
-        let Ok(path) = records::session_file(&state.paths.root, &meta.id) else {
+    pub(super) async fn update_blocks_delivery(
+        &self,
+        state: &Shared,
+        live: &Arc<Live>,
+        session_id: &str,
+    ) -> bool {
+        // No new Session lock or metadata clone on normal delivery. Only an
+        // actual waiting handoff joins the lifecycle of this Session.
+        let Ok(path) = records::session_file(&state.paths.root, session_id) else {
             return false;
         };
         let Ok(mut c) = records::read::<Continuation>(&path) else {
@@ -51,6 +57,7 @@ impl SessionManager {
         if c.state != "waiting" {
             return false;
         }
+        let meta = live.meta.lock().await.clone();
         let result:Result<bool>=async {
             let dir=records::job(&state.paths.root,&c.request_id)?;
             let request:Request=records::read(&dir.join("request.json"))?;

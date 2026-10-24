@@ -528,43 +528,6 @@ impl wit::Host for crate::load::Host {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn bundled_version_is_absent_or_canonical() {
-        assert_eq!(parse_bundled_version(None).unwrap(), None);
-        assert_eq!(
-            parse_bundled_version(Some("0.1.2")).unwrap(),
-            Some(ProductVersion::parse("0.1.2").unwrap())
-        );
-        assert!(parse_bundled_version(Some("0.2.0-beta.1"))
-            .unwrap()
-            .is_some());
-        for value in ["", "0", "42", "1.2", "01.2.3", "1.2.3 ", "v1.2.3"] {
-            assert!(
-                parse_bundled_version(Some(value)).is_err(),
-                "accepted {value:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn update_sources_are_https_or_literal_loopback_in_debug_builds() {
-        assert!(validate_url(
-            "https://relay.genethub.com/artifacts/manifests/component/latest.json"
-        )
-        .is_ok());
-        assert!(validate_url("https://user:secret@relay.genethub.com/update").is_err());
-        assert!(validate_url("http://localhost:8080/update").is_err());
-        assert!(validate_url("file:///tmp/update").is_err());
-        if cfg!(debug_assertions) {
-            assert!(validate_url("http://127.0.0.1:8080/update").is_ok());
-        }
-    }
-}
-
 /// Native CLI consumer. Network IO happens outside the resident guest.
 pub fn native_cli(args: &[String]) -> Result<serde_json::Value> {
     match args.first().map(String::as_str) {
@@ -644,4 +607,41 @@ pub(crate) fn note_daemon_start() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundled_version_is_absent_or_canonical() {
+        assert_eq!(parse_bundled_version(None).unwrap(), None);
+        assert_eq!(
+            parse_bundled_version(Some("0.1.2")).unwrap(),
+            Some(ProductVersion::parse("0.1.2").unwrap())
+        );
+        assert!(parse_bundled_version(Some("0.2.0-beta.1"))
+            .unwrap()
+            .is_some());
+        for value in ["", "0", "42", "1.2", "01.2.3", "1.2.3 ", "v1.2.3"] {
+            assert!(
+                parse_bundled_version(Some(value)).is_err(),
+                "accepted {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn update_sources_are_https_or_literal_loopback_in_debug_builds() {
+        assert!(validate_url(
+            "https://relay.genethub.com/artifacts/manifests/component/latest.json"
+        )
+        .is_ok());
+        assert!(validate_url("https://user:secret@relay.genethub.com/update").is_err());
+        assert!(validate_url("http://localhost:8080/update").is_err());
+        assert!(validate_url("file:///tmp/update").is_err());
+        if cfg!(debug_assertions) {
+            assert!(validate_url("http://127.0.0.1:8080/update").is_ok());
+        }
+    }
 }

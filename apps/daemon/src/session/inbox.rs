@@ -337,9 +337,15 @@ impl SessionManager {
 
     /// Work is per Session: a slow adapter handover never blocks other inboxes.
     pub(crate) async fn dispatch_deliveries(&self, state: &Shared) {
-        let lives: Vec<_> = self.sessions.read().await.values().cloned().collect();
-        for live in lives {
-            if self.update_blocks_delivery(state, &live).await {
+        let lives: Vec<_> = self
+            .sessions
+            .read()
+            .await
+            .iter()
+            .map(|(id, live)| (id.clone(), live.clone()))
+            .collect();
+        for (session_id, live) in lives {
+            if self.update_blocks_delivery(state, &live, &session_id).await {
                 continue;
             }
             let configuration = {
@@ -395,10 +401,11 @@ impl SessionManager {
                         .await;
                     Ok(())
                 };
-                let update_session = task_live.meta.lock().await.id.clone();
+                // Do not acquire another Session lock before releasing the
+                // dispatch claim. An ordinary delivery has no update handoff.
                 state.sessions.update_delivery_result(
                     &state,
-                    &update_session,
+                    &session_id,
                     result.as_ref().map(|_| ()).map_err(|e| format!("{e:#}")),
                 );
                 if let Err(error) = result {
