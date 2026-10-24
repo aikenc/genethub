@@ -283,6 +283,7 @@ fn build_instance(
                 | crate::channel::ENV_CLI
                 | crate::channel::ENV_COMPONENT_FILE
                 | crate::channel::ENV_DATA_DIR
+                | "GENEHUB_COMPONENT_SHA256"
                 | "GENEHUB_COMPONENT_VERSION"
                 | "GENEHUB_APP_VERSION"
                 | "GENEHUB_BUNDLED_RELEASE_VERSION"
@@ -343,6 +344,9 @@ fn build_instance(
         "GENEHUB_COMPONENT_VERSION",
         crate::update::running_version_string(),
     );
+    if let Some(hash) = crate::update::running_sha256() {
+        wasi.env("GENEHUB_COMPONENT_SHA256", hash);
+    }
     wasi.env("GENEHUB_APP_VERSION", crate::version::app_version());
     // The data directory is another fact the guest cannot learn on its own:
     // WASI has no platform dirs, so `Paths::discover` in there only works

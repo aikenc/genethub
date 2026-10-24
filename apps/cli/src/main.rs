@@ -7,6 +7,7 @@
 
 mod control;
 mod invoke;
+mod update;
 mod wasm;
 
 use genet_frontdoor::selectors;
@@ -55,10 +56,7 @@ fn main() {
 
 #[tokio::main]
 async fn run(args: Vec<String>) {
-    if args
-        .iter()
-        .any(|argument| argument == "--version" || argument == "-V")
-    {
+    if args.len() == 1 && matches!(args[0].as_str(), "--version" | "-V") {
         println!("{}", env!("CARGO_PKG_VERSION"));
         return;
     }
@@ -90,7 +88,7 @@ async fn run(args: Vec<String>) {
                 Ok(rest) => rest,
                 Err(code) => std::process::exit(code),
             };
-            update(&rest[1..])
+            update::run(&rest[1..]).await
         }
         Some(head) if should_forward(head, &args) => invoke::forward(args).await,
         _ => usage(),
@@ -136,20 +134,14 @@ fn fail_envelope(error: genet_frontdoor::envelope::CliFailure) -> i32 {
     error.exit
 }
 
-fn update(args: &[String]) -> i32 {
-    if !args.is_empty() {
-        return usage();
-    }
-    fail(
-        "unsupported",
-        "automatic update is disabled until releases have an independent signing key; download manually from https://github.com/aikenc/genethub/releases and verify SHA256SUMS",
-        EXIT_FAILED,
-    );
-}
-
 pub fn usage() -> i32 {
     eprintln!(
         "usage:
+  genet update check                query this channel App and Live releases
+  genet update live|app [--request-id <id>] [--wait] [--resume-session <id>]
+                                    update in the background; may interrupt sessions
+  genet update status --request-id <id>
+                                    durable receipt, usable while daemon is restarting
   genet status                      overview: channel, version, daemon, hub
   genet schema [command]            static CLI input/output schemas
   genet context                     explicit local-daemon execution context

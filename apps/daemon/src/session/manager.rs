@@ -48,6 +48,8 @@ use crate::diagnostics::Diagnostics;
 mod activity;
 #[path = "inbox.rs"]
 mod inbox;
+#[path = "managed_update.rs"]
+mod managed_update;
 
 const BROADCAST_CAPACITY: usize = 1024;
 const IMPORT_CANDIDATE_TTL_MS: i64 = 10 * 60 * 1000;

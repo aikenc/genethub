@@ -16,10 +16,14 @@ use super::output::{self, CliFailure, CLI_SCHEMA};
 use super::rpc::{ConnectError, Refusal, Rpc, RpcError};
 use super::target::{self, Routing, Selection};
 
-const COMMAND_NAMES: [&str; 88] = [
+const COMMAND_NAMES: [&str; 92] = [
     "schema",
     "context",
     "capabilities",
+    "update.check",
+    "update.live",
+    "update.app",
+    "update.status",
     "provider.list",
     "provider.configure",
     "provider.get",
@@ -129,6 +133,8 @@ fn mutates(name: &str) -> bool {
     matches!(
         name,
         "shell"
+            | "update.live"
+            | "update.app"
             | "provider.configure"
             | "provider.verify"
             | "file.download"
@@ -1191,7 +1197,7 @@ fn capabilities_data() -> Value {
         },
         "commands": COMMAND_NAMES.iter().map(|name| json!({
             "name": name,
-            "requiresDaemon": !matches!(*name, "schema" | "capabilities"),
+            "requiresDaemon": !matches!(*name, "schema" | "capabilities" | "update.status"),
             "mutation": mutates(name),
             "routable": matches!(target::routing(name), Routing::Routable),
             "streaming": streams(name),
@@ -1214,6 +1220,9 @@ fn schema_data(command: Option<&str>) -> Value {
 
 fn command_schema(name: &str) -> Value {
     let (synopsis, requires_daemon, input) = match name {
+        "update.check" => ("genet update check",true,object_input(json!({}),&[])),
+        "update.live" | "update.app" => ("genet update live|app [--request-id <id>] [--resume-session <id>] [--wait]",true,object_input(json!({"requestId":{"type":"string"},"resumeSession":{"type":"string"},"wait":{"type":"boolean"}}),&[])),
+        "update.status" => ("genet update status --request-id <id> [--wait]",false,object_input(json!({"requestId":{"type":"string"},"wait":{"type":"boolean"}}),&["requestId"])),
         "preview.feedback" => ("genet preview feedback show <id> --workspace <workspace-id>",true,object_input(json!({"id":{"type":"string"},"workspaceId":{"type":"string"}}), &["id","workspaceId"])) ,
         "client.list" => ("genet client list [--machine <coordinator>]", true, object_input(json!({}), &[])),
         "client.attach" => ("genet client attach <clientId> --label <operator> [--machine <coordinator>]", true, object_input(json!({"clientId":{"type":"string"},"label":{"type":"string"}}), &["clientId","label"])),

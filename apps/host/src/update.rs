@@ -28,9 +28,9 @@ const MAX_MANIFEST_BYTES: usize = 256 * 1024;
 const MAX_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_REDIRECTS: usize = 3;
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ComponentManifest {
+pub(crate) struct ComponentManifest {
     schema: String,
     channel: String,
     release_version: String,
@@ -42,7 +42,7 @@ struct ComponentManifest {
     activation: ComponentActivation,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ArtifactDescriptor {
     sources: Vec<ArtifactSource>,
@@ -50,13 +50,13 @@ struct ArtifactDescriptor {
     size: u64,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ArtifactSource {
     url: String,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ComponentActivation {
     enabled: bool,
@@ -100,9 +100,14 @@ pub fn has_update_source() -> bool {
 /// The version of the component this process actually loaded, recorded at
 /// instantiate time from the signed envelope. Raw unsigned builds report
 /// nothing, which the guest surfaces as a source build.
+static RUNNING_HASH: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
 static RUNNING_VERSION: OnceLock<Mutex<Option<ProductVersion>>> = OnceLock::new();
 
 pub fn note_running_component(bytes: &[u8]) {
+    if let Ok(mut hash) = RUNNING_HASH.get_or_init(|| Mutex::new(None)).lock() {
+        *hash = Some(sha256_hex(bytes));
+    }
     let version = SignedArtifact::from_single_file(bytes)
         .ok()
         .and_then(|signed| ProductVersion::parse(signed.envelope.release_version()).ok());
@@ -199,28 +204,7 @@ fn parse_bundled_version(raw: Option<&str>) -> Result<Option<ProductVersion>> {
 }
 
 fn store_root() -> Result<PathBuf> {
-    let data = std::env::var(channel::ENV_DATA_DIR)
-        .ok()
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            dirs_data().map(|root| {
-                root.join(match channel::CHANNEL {
-                    "stable" => "GeneHub",
-                    "beta" => "GeneHub-beta",
-                    "dev" => "GeneHub-dev",
-                    _ => "GeneHub-local",
-                })
-            })
-        })
-        .ok_or_else(|| anyhow!("no data directory for the component update store"))?;
-    Ok(data.join("component"))
-}
-
-fn dirs_data() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join(".local").join("share"))
+    Ok(genet_frontdoor::Paths::discover()?.root.join("component"))
 }
 
 pub fn check() -> Result<wit::Status> {
@@ -280,10 +264,13 @@ pub fn check() -> Result<wit::Status> {
 }
 
 pub fn apply(_request_id: &str) -> Result<()> {
+    apply_manifest(fetch_manifest()?)
+}
+
+fn apply_manifest(manifest: ComponentManifest) -> Result<()> {
     if !has_update_source() {
         bail!("这个通道没有签名组件更新源");
     }
-    let manifest = fetch_manifest()?;
     if manifest.schema != RELEASE_MANIFEST_SCHEMA || manifest.channel != channel::CHANNEL {
         bail!("更新清单不属于这个通道");
     }
@@ -576,4 +563,43 @@ mod tests {
             assert!(validate_url("http://127.0.0.1:8080/update").is_ok());
         }
     }
+}
+
+/// Native CLI consumer. Network IO happens outside the resident guest.
+pub fn native_cli(args: &[String]) -> Result<serde_json::Value> {
+    match args.first().map(String::as_str) {
+        Some("check") if args.len() == 2 => {
+            let bytes = std::fs::read(&args[1])?;
+            note_running_component(&bytes);
+            let manifest = fetch_manifest()?;
+            if manifest.schema != RELEASE_MANIFEST_SCHEMA || manifest.channel != channel::CHANNEL {
+                bail!("component manifest channel/schema mismatch");
+            }
+            if !manifest.activation.enabled {
+                bail!("component activation is paused");
+            }
+            let mut value = serde_json::to_value(&manifest)?;
+            value["appRequired"] =
+                serde_json::json!(manifest.app_abi_hash != abi::hex_digest(&abi::host_digest()));
+            Ok(value)
+        }
+        Some("apply") if args.len() == 3 => {
+            note_running_component(&std::fs::read(&args[1])?);
+            let manifest: ComponentManifest =
+                genet_frontdoor::managed_update::read(std::path::Path::new(&args[2]))?;
+            let target = serde_json::to_value(&manifest)?;
+            apply_manifest(manifest)?;
+            Ok(target)
+        }
+        _ => bail!(
+            "usage: component-update check <bundled.wasm> | apply <bundled.wasm> <manifest.json>"
+        ),
+    }
+}
+pub fn running_sha256() -> Option<String> {
+    RUNNING_HASH
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|v| v.clone())
 }

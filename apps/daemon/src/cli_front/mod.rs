@@ -27,6 +27,7 @@ mod space;
 mod speech;
 pub mod target;
 mod update;
+pub(crate) use update::runtime as update_runtime;
 mod workflow;
 
 use std::path::PathBuf;
@@ -227,7 +228,7 @@ async fn dispatch(args: Vec<String>) -> i32 {
         Some("device") => Box::pin(machine::device(&args[1..], &selection)).await,
         Some("hub") => Box::pin(hub::hub(&args[1..])).await,
         Some("desktop") => Box::pin(desktop::desktop(&args[1..])).await,
-        Some("update") => update::update(&args[1..]),
+        Some("update") => Box::pin(update::update(&args[1..])).await,
         Some("status" | "daemon" | "agent-serve") => fail(
             "invalid_args",
             "this verb stays on the native CLI and is not forwarded",

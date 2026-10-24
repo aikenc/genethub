@@ -339,6 +339,9 @@ impl SessionManager {
     pub(crate) async fn dispatch_deliveries(&self, state: &Shared) {
         let lives: Vec<_> = self.sessions.read().await.values().cloned().collect();
         for live in lives {
+            if self.update_blocks_delivery(state, &live).await {
+                continue;
+            }
             let configuration = {
                 let meta = live.meta.lock().await;
                 meta.pending_permission
@@ -392,6 +395,12 @@ impl SessionManager {
                         .await;
                     Ok(())
                 };
+                let update_session = task_live.meta.lock().await.id.clone();
+                state.sessions.update_delivery_result(
+                    &state,
+                    &update_session,
+                    result.as_ref().map(|_| ()).map_err(|e| format!("{e:#}")),
+                );
                 if let Err(error) = result {
                     let mut meta = task_live.meta.lock().await;
                     let mut next = meta.clone();
@@ -763,6 +772,7 @@ impl SessionManager {
         } else {
             text
         };
+        let text = self.update_context(state, &meta.id, text).await;
         // Each delivered inbox turn has a new user-visible message as its
         // anchor. Continuing the previous round would put work from both
         // sides of an interruption under the first message's trunk. A formal

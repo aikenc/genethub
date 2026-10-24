@@ -56,6 +56,16 @@ fn main() {
             }
             run_and_exit(&component, &guest_args, entry);
         }
+        Some("component-update") => {
+            let rest: Vec<String> = args.collect();
+            match update::native_cli(&rest) {
+                Ok(value) => println!("{value}"),
+                Err(error) => {
+                    eprintln!("{error:#}");
+                    std::process::exit(1);
+                }
+            }
+        }
         Some("thumbnail") => {
             if let Err(error) = image_preview::thumbnail_cli(args) {
                 eprintln!("error: {error}");

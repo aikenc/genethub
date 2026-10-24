@@ -102,14 +102,14 @@ pub async fn status(args: &[String]) -> i32 {
 /// running their own. `daemon run`, which the service itself executes, is
 /// unaffected.
 #[derive(Debug, PartialEq)]
-struct Service {
-    manager: Manager,
-    name: String,
-    file: std::path::PathBuf,
+pub(crate) struct Service {
+    pub(crate) manager: Manager,
+    pub(crate) name: String,
+    pub(crate) file: std::path::PathBuf,
 }
 
 #[derive(Debug, PartialEq)]
-enum Manager {
+pub(crate) enum Manager {
     Systemd,
     Launchd,
 }
@@ -140,7 +140,7 @@ impl Service {
     }
 }
 
-fn installed_service() -> Option<Service> {
+pub(crate) fn installed_service() -> Option<Service> {
     let home = std::path::PathBuf::from(std::env::var_os("HOME")?);
     let config = std::env::var_os("XDG_CONFIG_HOME").map(std::path::PathBuf::from);
     find_service(
