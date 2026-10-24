@@ -20,8 +20,8 @@ Quick start
     python3 spacebuilder.py check [SPACE] [--format text|json] [--offline]
     python3 spacebuilder.py explain [SPACE] [--format text|json] [--offline]
     python3 spacebuilder.py build [SPACE] [--format text|json] [--offline] [--dry-run]
-                                  [--require-no-post-commands]
-    python3 spacebuilder.py verify [SPACE] [--format text|json]
+                                  [--require-no-post-commands] [--output DIRECTORY]
+    python3 spacebuilder.py verify [SPACE] [--format text|json] [--artifacts-only]
     python3 spacebuilder.py clean [SPACE] [--format text|json]
     python3 spacebuilder.py --version
     python3 spacebuilder.py --help
@@ -82,6 +82,17 @@ selected Provider declares a command.
 
 Ownership and outputs
 ---------------------
+build --output DIRECTORY writes a portable execution descriptor, compiled files
+and .spacebuilder/output-lock.json outside the source Space. Relative folders
+are preserved even when they only exist on the destination. Verify the moved
+output with verify --artifacts-only; ordinary verify still requires its sources.
+Optional manifest buildHooks.pre/post arrays use {cwd, args}. Args bypass the
+shell and expand {python}, {sourceRoot}, {spaceRoot}, {outputRoot}, {spaceName}.
+Pre runs before planning; all tree members verify before Space post hooks run,
+in reverse member order with the entry Space last. Planning never invokes hooks.
+--require-no-post-commands rejects hooks before any command can run. External
+hook side effects are not rolled back; post failure is a failed build report.
+
 Platform configurations and installed Skills are Builder-owned targets.
 Human-owned sources may only reside in .spacebuilder/agents, .spacebuilder/skills,
 or external Providers. build records ownership in .spacebuilder/lock.json; clean
@@ -125,7 +136,7 @@ except ImportError:  # Python 3.7-3.10 use the dependency-free compatibility par
     _tomllib = None
 
 
-VERSION = "0.1.4"
+VERSION = "0.1.5"
 REPORT_SCHEMA = "spacebuilder-report.v1"
 LOCK_SCHEMA = "spacebuilder-lock.v1"
 SPACE_SCHEMA = "agent-space.v1"
@@ -207,7 +218,7 @@ DIAGNOSTIC_ACTIONS = {
     "SB015": "Migrate the legacy HarnessBuilder / THarness layout before building.",
     "SB016": "For a Skill Builder, run the declared args from the Provider source root and inspect the reported output; for a legacy post command, correct its cwd/runtime, then rebuild.",
     "SB017": "Correct nested Space inputs or the recorded hierarchy state and retry.",
-    "SB018": "Review Provider post commands, then remove the fail-closed flag only when their side effects are approved.",
+    "SB018": "Review build hooks and Provider post commands, then remove the fail-closed flag only when their side effects are approved.",
     "SB019": "Fix the identity file named by manifest.identity: it must exist, be UTF-8 text, and fit the instruction size limit of every declared Agent.",
     "PBW001": "Review the selected Provider and shadowed Skill candidates.",
     "PBW002": "Prefer a standard Skill for new Claude Code workflows.",
@@ -537,6 +548,7 @@ class Manifest:
     folders: list[dict[str, Any]] | None = None
     identity: list[str] = dataclasses.field(default_factory=list)
     space_builder: str = ""
+    build_hooks: dict[str, list[dict[str, Any]]] = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -713,7 +725,7 @@ def load_manifest(root: Path) -> Manifest:
         fail("SB001", "agent-space.genet.json must contain a JSON object", sources=(path.as_posix(),))
     required = {"schema", "name", "agents", "skills", "tags", "skillProviders"}
     missing = sorted(required - raw.keys())
-    unknown = sorted(raw.keys() - required - {"description", "children", "agentCwd", "folders", "identity", "spaceBuilder"})
+    unknown = sorted(raw.keys() - required - {"description", "children", "agentCwd", "folders", "identity", "spaceBuilder", "buildHooks"})
     if missing:
         fail("SB001", "Missing manifest fields: " + ", ".join(missing), sources=(path.as_posix(),))
     if unknown:
@@ -851,7 +863,28 @@ def load_manifest(root: Path) -> Manifest:
     folders = validate_manifest_folders(raw.get("folders"), path)
     identity = validate_identity(raw.get("identity"), path)
     space_builder = validate_space_builder(raw.get("spaceBuilder"), path)
-    return Manifest(path, name, description, agents, skills, tags, providers, scan_depth, agent_cwd, folders, identity, space_builder)
+    hooks = validate_build_hooks(raw.get("buildHooks"), path)
+    return Manifest(path, name, description, agents, skills, tags, providers, scan_depth, agent_cwd, folders, identity, space_builder, hooks)
+
+
+def validate_build_hooks(value: Any, path: Path) -> dict[str, list[dict[str, Any]]]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict) or set(value) - {"pre", "post"}:
+        fail("SB001", "buildHooks accepts pre and post arrays", sources=(path.as_posix(),))
+    for phase, commands in value.items():
+        if not isinstance(commands, list):
+            fail("SB001", f"buildHooks.{phase} must be an array")
+        for command in commands:
+            if not isinstance(command, dict) or set(command) - {"cwd", "args"} or "args" not in command:
+                fail("SB001", f"buildHooks.{phase} command accepts cwd and args")
+            cwd = command.get("cwd", ".")
+            if not isinstance(cwd, str) or not cwd or Path(cwd).is_absolute() or "\\" in cwd or ".." in Path(cwd).parts:
+                fail("SB001", "Build hook cwd must stay within the source Space")
+            require_string_list(command["args"], f"buildHooks.{phase}.args", nonempty=True)
+            if any(not arg or "\x00" in arg for arg in command["args"]):
+                fail("SB001", "Build hook args must be nonempty strings without NUL")
+    return value
 
 
 def valid_space_name(name: Any) -> bool:
@@ -1011,12 +1044,12 @@ def tree_members(tree: SpaceTree) -> list[TreeMember]:
     ]
 
 
-def load_workspace(root: Path, manifest: Manifest) -> Workspace:
+def load_workspace(root: Path, manifest: Manifest, *, portable: bool = False) -> Workspace:
     if manifest.folders is not None:
         # The descriptor lists the folders itself, so there is no .code-workspace to keep in step with it.
         # An entry that cannot be used on this machine (a ${VAR}, an absolute path, a missing directory)
         # is skipped rather than failing the build; with nothing left the Space root is the one folder.
-        usable = [
+        usable = manifest.folders if portable else [
             item
             for item in manifest.folders
             if "${" not in item["path"] and not Path(item["path"]).is_absolute() and (root / item["path"]).is_dir()
@@ -1037,6 +1070,8 @@ def load_workspace(root: Path, manifest: Manifest) -> Workspace:
         if not isinstance(item, dict):
             fail("SB004", f"workspace.folders[{index}] must be an object", sources=(path.as_posix(),))
         configured = item.get("path")
+        if portable and isinstance(configured, str) and ("\\" in configured or re.match(r"^[A-Za-z]:", configured)):
+            fail("SB004", "Portable folders must use relative POSIX paths or target variables", sources=(path.as_posix(),))
         if not isinstance(configured, str) or not configured.strip() or Path(configured).is_absolute():
             fail(
                 "SB004",
@@ -1044,7 +1079,7 @@ def load_workspace(root: Path, manifest: Manifest) -> Workspace:
                 sources=(path.as_posix(),),
             )
         resolved = (root / configured).resolve()
-        if not resolved.is_dir():
+        if not portable and not resolved.is_dir():
             fail("SB004", f"Workspace folder does not exist: {configured}", sources=(path.as_posix(), configured))
         if "name" not in item:
             name = resolved.name
@@ -1736,22 +1771,26 @@ def resolve_skills(providers: list[Provider], manifest: Manifest, warnings: list
     return result, resolved
 
 
-def workspace_rule(manifest: Manifest, workspace: Workspace) -> str:
-    declared = workspace.path.name == "agent-space.genet.json"
+def workspace_rule(manifest: Manifest, workspace: Workspace, *, portable: bool = False) -> str:
+    declared = portable or workspace.path.name == "agent-space.genet.json"
     lines = [
         "# SpaceBuilder Workspace",
         "",
         f"Space: `{manifest.name}`",
-        f"Workspace: `{workspace.path.name}`",
+        f"Workspace: `{'agent-space.genet.json' if portable else workspace.path.name}`",
         "",
         "## Folders (declared order)",
         "",
-        "This Space is one workspace made of the directories below, all real directories on this machine. "
-        "Read, search and manage across them as the task needs.",
+        ("Paths below are relative to the Space root, not the shell cwd. The Space root is "
+         f"`{Path(os.path.relpath('.', manifest.agent_cwd or '.')).as_posix()}` relative to this instruction directory. "
+         "Resolve variables using this machine's Space configuration; check folders on this machine."
+         if portable else "This Space is one workspace made of the directories below, all real directories on this machine. "
+         "Read, search and manage across them as the task needs."),
         "",
     ]
     for folder in workspace.folders:
-        lines.append(f"- `{folder.name}`: `{folder.resolved}` (declared as `{folder.path}`)")
+        lines.append(f"- `{folder.name}`: `{folder.path}` (relative to Space root)" if portable else
+                     f"- `{folder.name}`: `{folder.resolved}` (declared as `{folder.path}`)")
     source = (
         "The `folders` of agent-space.genet.json (paths relative to the Space directory) are the source of truth"
         if declared
@@ -1763,8 +1802,11 @@ def workspace_rule(manifest: Manifest, workspace: Workspace) -> str:
             "Folder order does not imply primary/reference, writable/read-only, validation, or commit boundaries.",
             f"{source}; this file is a generated projection of them for this machine.",
             "SpaceBuilder platform targets and generated state are build outputs; do not edit them directly.",
-            "Edit `.spacebuilder/agents`, `.spacebuilder/skills`, or the selected Skill's `.space-agents` source, then run `spacebuilder build` and `spacebuilder verify`.",
-            "If a write is denied or output drifts, use `spacebuilder explain` to locate the source and continue; this is not a Human blocker.",
+            ("This is a deployed execution artifact. Ask the source Space owner to change its inputs, rebuild and redeploy. "
+             "Validate this directory with `spacebuilder verify --artifacts-only`; do not create or edit build sources here."
+             if portable else "Edit `.spacebuilder/agents`, `.spacebuilder/skills`, or the selected Skill's `.space-agents` source, then run `spacebuilder build` and `spacebuilder verify`."),
+            ("Keep machine configuration and project worktrees separate from these generated files."
+             if portable else "If a write is denied or output drifts, use `spacebuilder explain` to locate the source and continue; this is not a Human blocker."),
             "",
         ]
     )
@@ -1772,12 +1814,13 @@ def workspace_rule(manifest: Manifest, workspace: Workspace) -> str:
 
 
 class Planner:
-    def __init__(self, root: Path, manifest: Manifest, workspace: Workspace, skills: list[Skill], warnings: list[Diagnostic]):
+    def __init__(self, root: Path, manifest: Manifest, workspace: Workspace, skills: list[Skill], warnings: list[Diagnostic], *, portable: bool = False):
         self.root = root
         self.manifest = manifest
         self.workspace = workspace
         self.skills = skills
         self.warnings = warnings
+        self.portable = portable
         self.contributions: dict[str, list[Contribution]] = {}
         self.case_targets: dict[str, str] = {}
         self.semantic_targets: dict[str, str] = {}
@@ -1793,7 +1836,7 @@ class Planner:
         self.contributions.setdefault(target, []).append(contribution)
 
     def build(self) -> list[Operation]:
-        rule = workspace_rule(self.manifest, self.workspace).encode()
+        rule = workspace_rule(self.manifest, self.workspace, portable=self.portable).encode()
         self.add(Contribution(".spacebuilder/generated/workspace-rule.md", rule, "core:workspace", "workspace-rule"))
         self.add_identity()
         for agent in self.manifest.agents:
@@ -3166,19 +3209,20 @@ class BuildModel:
     warnings: list[Diagnostic]
 
 
-def plan(root: Path, *, offline: bool = False, run_builders: bool = False) -> BuildModel:
+def plan(root: Path, *, offline: bool = False, run_builders: bool = False, portable: bool = False) -> BuildModel:
     if not root.is_dir():
         fail("SB001", f"Space root is not a directory: {root}")
     detect_legacy(root)
     manifest = load_manifest(root)
-    workspace = load_workspace(root, manifest)
+    workspace = load_workspace(root, manifest, portable=portable)
     validate_agent_namespace(root / ".spacebuilder" / "agents", "Space")
     previous = load_previous_lock(root)
     providers = load_providers(root, manifest, previous, offline, run_builders)
     warnings: list[Diagnostic] = []
     skills, resolved = resolve_skills(providers, manifest, warnings)
-    operations = Planner(root, manifest, workspace, skills, warnings).build()
-    check_target_conflicts(root, operations, previous)
+    operations = Planner(root, manifest, workspace, skills, warnings, portable=portable).build()
+    if not portable:
+        check_target_conflicts(root, operations, previous)
     return BuildModel(root, manifest, workspace, providers, skills, resolved, operations, previous, warnings)
 
 
@@ -3802,6 +3846,285 @@ def report(
     return value
 
 
+OUTPUT_SCHEMA = "spacebuilder-output.v1"
+OUTPUT_RECEIPT = ".spacebuilder/output-lock.json"
+
+
+def output_member_path(value: Any) -> str:
+    if value == ".":
+        return "."
+    if not isinstance(value, str) or normalize_target(value) != value:
+        fail("SB017", "Invalid output member path")
+    return value
+
+
+def output_artifact_path(record: dict[str, Any], members: dict[str, dict[str, Any]]) -> str:
+    member = record.get("member")
+    if not isinstance(member, str) or member not in members:
+        fail("SB017", "Output artifact refers to an unknown member")
+    target = record.get("target")
+    if not isinstance(target, str) or not isinstance(record.get("logicalType"), str):
+        fail("SB017", "Invalid output artifact target")
+    if target == "agent-space.genet.json" and record.get("logicalType") == "runtime-manifest":
+        pass
+    else:
+        if normalize_target(target) != target:
+            fail("SB017", "Noncanonical output artifact path", target=target)
+        inner = strip_agent_cwd(members[member]["agentCwd"], target)
+        if inner is None or not managed_target_matches(record.get("logicalType"), inner):
+            fail("SB017", "Invalid output artifact ownership", target=target)
+    if not valid_digest(record.get("digest")) or not isinstance(record.get("executable"), bool):
+        fail("SB017", "Invalid output artifact digest or mode", target=target)
+    return target if member == "." else member + "/" + target
+
+
+def load_output_receipt(root: Path, *, required: bool = False) -> dict[str, Any] | None:
+    path = root / OUTPUT_RECEIPT
+    ensure_safe_parent(root, path)
+    if path.is_symlink():
+        fail("SB011", "Output receipt must not be a symlink")
+    if not path.exists() and not required:
+        return None
+    value = read_json(path, "SB017", "output receipt")
+    if (not isinstance(value, dict) or set(value) != {"schema", "builder", "members", "artifacts"}
+            or value.get("schema") != OUTPUT_SCHEMA
+            or not isinstance(value.get("builder"), dict)
+            or not isinstance(value["builder"].get("version"), str)
+            or not valid_digest(value["builder"].get("digest"))
+            or not isinstance(value.get("members"), list) or not value["members"]
+            or not isinstance(value.get("artifacts"), list)):
+        fail("SB017", "Invalid or unsupported output receipt")
+    members: dict[str, dict[str, Any]] = {}
+    for item in value["members"]:
+        if (not isinstance(item, dict) or set(item) != {"path", "name", "agentCwd", "manifestDigest"}
+                or not valid_space_name(item.get("name")) or not valid_digest(item.get("manifestDigest"))):
+            fail("SB017", "Invalid output member")
+        rel = output_member_path(item.get("path"))
+        if rel in members:
+            fail("SB017", "Duplicate output member")
+        if not isinstance(item["agentCwd"], str):
+            fail("SB017", "Invalid output agentCwd")
+        if item["agentCwd"]:
+            validate_agent_cwd(item["agentCwd"], path)
+        elif item["agentCwd"] != "":
+            fail("SB017", "Invalid output agentCwd")
+        members[rel] = item
+    if "." not in members:
+        fail("SB017", "Output receipt lacks its root member")
+    seen: set[str] = set()
+    descriptors: set[str] = set()
+    for item in value["artifacts"]:
+        if not isinstance(item, dict) or set(item) != {"member", "target", "logicalType", "digest", "executable"}:
+            fail("SB017", "Invalid output artifact")
+        rel = output_artifact_path(item, members)
+        key = unicodedata.normalize("NFC", rel).casefold()
+        if key in seen:
+            fail("SB017", "Duplicate output artifact", target=rel)
+        seen.add(key)
+        if item["logicalType"] == "runtime-manifest":
+            descriptors.add(item["member"])
+    if descriptors != set(members):
+        fail("SB017", "Output receipt lacks a runtime manifest")
+    return value
+
+
+def verify_output(root: Path) -> dict[str, Any]:
+    receipt = load_output_receipt(root, required=True)
+    assert receipt is not None
+    members = {item["path"]: item for item in receipt["members"]}
+    for member in members.values():
+        cwd = root / member["path"] / member["agentCwd"]
+        ensure_safe_parent(root, cwd / ".preflight")
+        if not cwd.is_dir():
+            fail("SB017", "Output agentCwd is missing", target=str(cwd.relative_to(root)))
+    for artifact in receipt["artifacts"]:
+        rel = output_artifact_path(artifact, members)
+        target = root / rel
+        ensure_safe_parent(root, target)
+        if (target.is_symlink() or not target.is_file() or sha256_file(target) != artifact["digest"]
+                or bool(target.stat().st_mode & stat.S_IXUSR) != artifact["executable"]):
+            fail("SB017", "Output artifact is missing, unsafe or changed", target=rel)
+    return {"members": receipt["members"], "verified": len(receipt["artifacts"]),
+            "receiptDigest": sha256_file(root / OUTPUT_RECEIPT)}
+
+
+def preflight_commands(tree: SpaceTree, *, require_no_commands: bool) -> list[Manifest]:
+    manifests = [load_manifest(item.root) for item in tree_members(tree)]
+    if require_no_commands:
+        for manifest in manifests:
+            if any(manifest.build_hooks.values()) or any(provider.get("command") for provider in manifest.providers):
+                fail("SB018", "Build hooks or Provider post commands are forbidden by --require-no-post-commands",
+                     sources=(manifest.path.as_posix(),))
+    return manifests
+
+
+def run_build_hooks(manifest: Manifest, phase: str, output: Path) -> int:
+    source = manifest.path.parent
+    replacements = {"{sourceRoot}": str(source), "{outputRoot}": str(output),
+                    "{spaceRoot}": str(source), "{spaceName}": manifest.name, "{python}": sys.executable}
+    for command in manifest.build_hooks.get(phase, []):
+        cwd = (source / command.get("cwd", ".")).resolve()
+        if cwd != source and source not in cwd.parents:
+            fail("SB011", "Build hook cwd escapes the source Space")
+        arguments = []
+        for arg in command["args"]:
+            for key, value in replacements.items():
+                arg = arg.replace(key, value)
+            arguments.append(arg)
+        env = os.environ.copy()
+        env.update({"SPACE_ROOT": str(source), "SPACE_SOURCE_ROOT": str(source),
+                    "SPACE_OUTPUT_ROOT": str(output), "SPACE_NAME": manifest.name})
+        try:
+            result = subprocess.run(arguments, cwd=str(cwd), env=env, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", timeout=600)
+        except (OSError, subprocess.SubprocessError) as exc:
+            fail("SB016", f"Build {phase} hook could not run: {exc}")
+        for stream in (result.stdout, result.stderr):
+            if stream:
+                print(stream, file=sys.stderr, end="" if stream.endswith("\n") else "\n")
+        if result.returncode:
+            fail("SB016", f"Build {phase} hook failed (exit {result.returncode}); external side effects are not rolled back",
+                 sources=(manifest.path.as_posix(),))
+    return len(manifest.build_hooks.get(phase, []))
+
+
+def safe_output_root(source: Path, configured: str) -> Path:
+    raw = Path(configured).absolute()
+    for candidate in (raw, *raw.parents):
+        if candidate.is_symlink():
+            fail("SB011", "Output path contains a symlink")
+    output = raw.resolve()
+    if output == source or source in output.parents or output in source.parents:
+        fail("SB011", "Independent output must not overlap the source Space; omit --output for in-place builds")
+    if output.exists() and not output.is_dir():
+        fail("SB010", "Output root is not a directory")
+    return output
+
+
+def write_output(root: Path, members: list[TreeMember], models: list[BuildModel]) -> None:
+    previous = load_output_receipt(root)
+    old_members = {item["path"]: item for item in previous["members"]} if previous else {}
+    old = {output_artifact_path(item, old_members) for item in previous["artifacts"]} if previous else set()
+    operations: list[Operation] = []
+    records: list[dict[str, Any]] = []
+    member_records = []
+    for member, model in zip(members, models):
+        manifest = model.manifest
+        descriptor: dict[str, Any] = {"schema": SPACE_SCHEMA, "name": manifest.name, "agents": manifest.agents,
+            "skills": [], "tags": [], "skillProviders": [], "children": {"scanDepth": manifest.child_scan_depth},
+            "folders": [{"name": item.name, "path": item.path} for item in model.workspace.folders]}
+        if manifest.agent_cwd:
+            descriptor["agentCwd"] = manifest.agent_cwd
+        own = model.operations + [Operation("agent-space.genet.json", json_bytes(descriptor),
+                                           ["core:runtime-manifest"], "runtime-manifest", "render")]
+        member_records.append({"path": member.path, "name": manifest.name, "agentCwd": manifest.agent_cwd,
+                               "manifestDigest": sha256_file(manifest.path)})
+        for operation in own:
+            rel = operation.target if member.path == "." else member.path + "/" + operation.target
+            operations.append(dataclasses.replace(operation, target=rel))
+            records.append({"member": member.path, "target": operation.target, "logicalType": operation.logical_type,
+                            "digest": operation.digest, "executable": operation.executable})
+    receipt = {"schema": OUTPUT_SCHEMA, "builder": {"version": VERSION, "digest": sha256_file(Path(__file__))},
+               "members": member_records, "artifacts": records}
+    # Preflight the entire output before the first artifact write. Do not adopt arbitrary existing files.
+    targets: set[str] = set()
+    for operation in operations:
+        key = unicodedata.normalize("NFC", operation.target).casefold()
+        if key in targets:
+            fail("SB010", "Output target collision", target=operation.target)
+        targets.add(key)
+        target = root / operation.target
+        ensure_safe_parent(root, target)
+        if target.is_symlink() or (target.exists() and not target.is_file()):
+            fail("SB010", "Unsafe output target", target=operation.target)
+        if target.exists() and operation.target not in old:
+            fail("SB010", "Output target exists without output ownership", target=operation.target)
+    for rel in old:
+        target = root / rel
+        ensure_safe_parent(root, target)
+        if target.is_symlink() or (target.exists() and not target.is_file()):
+            fail("SB010", "Previous output target has an unsafe type", target=rel)
+    for member in member_records:
+        cwd = root / member["path"] / member["agentCwd"]
+        ensure_safe_parent(root, cwd / ".preflight")
+        cwd.mkdir(parents=True, exist_ok=True)
+    for operation in operations:
+        atomic_write(root, operation)
+    new = {item.target for item in operations}
+    for rel in sorted(old - new, reverse=True):
+        target = root / rel
+        if target.is_file():
+            target.unlink()
+            prune_empty_parents(root, target.parent)
+    atomic_write(root, Operation(OUTPUT_RECEIPT, json_bytes(receipt), ["core:output"], "output-receipt", "render"))
+    verify_output(root)
+
+
+def extended_build(tree: SpaceTree, *, output: Path | None, offline: bool, dry_run: bool,
+                   require_no_commands: bool) -> dict[str, Any]:
+    manifests = preflight_commands(tree, require_no_commands=require_no_commands)
+    members = tree_members(tree)
+    portable = output is not None
+    if dry_run:
+        models = [plan(member.root, offline=offline, portable=portable) for member in members]
+        validate_tree_provider_coherence(members, models)
+        return {"members": len(members), "planned": sum(len(model.operations) for model in models),
+                "buildHooks": sum(len(commands) for manifest in manifests for commands in manifest.build_hooks.values())}
+    with ExitStack() as locks:
+        locks.enter_context(BuildLock(tree.root, "tree-build.lock", "extended Space build"))
+        for member in sorted(members, key=lambda item: str(item.root)):
+            locks.enter_context(BuildLock(member.root))
+        if output is not None:
+            output.mkdir(parents=True, exist_ok=True)
+            locks.enter_context(BuildLock(output))
+        for member, manifest in zip(members, manifests):
+            target = output / member.path if output is not None else member.root
+            if output is not None:
+                ensure_safe_parent(output, target / ".preflight")
+                target.mkdir(parents=True, exist_ok=True)
+            run_build_hooks(manifest, "pre", target)
+        fresh = discover_space_tree(tree.root)
+        if [(m.path, m.expect_name) for m in tree_members(fresh)] != [(m.path, m.expect_name) for m in members]:
+            fail("SB017", "Build pre hooks changed Space membership; rerun with the updated tree")
+        # Refresh after pre, but keep the original hook list for this invocation.
+        models = [plan(member.root, offline=offline, run_builders=True, portable=portable) for member in members]
+        validate_tree_provider_coherence(members, models)
+        if output is not None:
+            write_output(output, members, models)
+            for model in models:
+                run_post_commands(model)
+            verify_output(output)
+        else:
+            journal = new_tree_journal(tree, members, "build")
+            persist_tree_journal(tree, journal)
+            if tree.children and tree_lock_path(tree.root).exists():
+                remove_tree_document(tree.root, tree_lock_path(tree.root))
+            for index, (member, model) in enumerate(zip(members, models)):
+                current = plan(member.root, offline=offline)
+                if model_fingerprint(current) != model_fingerprint(model):
+                    fail("SB017", "Earlier commands changed another Space after planning")
+                apply_build(current)
+                run_post_commands(current)
+                journal["members"][index]["stage"] = "post-succeeded"
+                persist_tree_journal(tree, journal)
+            if tree.children:
+                write_tree_document(tree.root, ".spacebuilder/tree-lock.json", make_tree_lock(tree, members), "tree-receipt")
+            else:
+                verify_single_space(tree.root)
+            remove_tree_document(tree.root, tree_journal_path(tree.root))
+        # All members have passed generation/verification before any Space post hook may publish.
+        for member, manifest in reversed(list(zip(members, manifests))):
+            run_build_hooks(manifest, "post", output / member.path if output is not None else member.root)
+        if output is not None:
+            verify_output(output)
+        elif tree.children:
+            verify_space_tree(tree)
+        else:
+            verify_single_space(tree.root)
+        return {"members": len(members), "generated": sum(len(model.operations) for model in models),
+                "buildHooks": sum(len(commands) for manifest in manifests for commands in manifest.build_hooks.values())}
+
+
 def print_report(value: dict[str, Any], output_format: str) -> None:
     if output_format == "json":
         print(json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2))
@@ -3846,6 +4169,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     build_parser = subparsers.add_parser("build", help="Build a Space")
     add_common_subcommand(build_parser, dry_run=True)
+    build_parser.add_argument("--output", help="Independent portable output directory (source inputs remain at SPACE)")
     build_parser.add_argument(
         "--require-no-post-commands",
         action="store_true",
@@ -3853,7 +4177,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     add_common_subcommand(subparsers.add_parser("check", help="Validate and plan without writes"))
     add_common_subcommand(subparsers.add_parser("explain", help="Explain providers, skills, and targets"))
-    add_common_subcommand(subparsers.add_parser("verify", help="Verify generated artifacts"), offline=False)
+    verify_parser = subparsers.add_parser("verify", help="Verify generated artifacts")
+    add_common_subcommand(verify_parser, offline=False)
+    verify_parser.add_argument("--artifacts-only", action="store_true", help="Verify portable output without source inputs")
     add_common_subcommand(subparsers.add_parser("clean", help="Remove owned generated artifacts"), offline=False)
     return parser.parse_args(argv)
 
@@ -3886,7 +4212,22 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if not root.is_dir():
             fail("SB001", f"Space root is not a directory: {root}")
+        if args.command == "verify" and args.artifacts_only:
+            details = verify_output(root)
+            print_report(report("verify --artifacts-only", "ok", root,
+                                summary={"verified": details["verified"]}, details=details), args.format)
+            return 0
         tree = discover_space_tree(root)
+        if args.command == "build":
+            manifests = preflight_commands(tree, require_no_commands=args.require_no_post_commands)
+            if args.output or any(any(item.build_hooks.values()) for item in manifests):
+                output = safe_output_root(root, args.output) if args.output else None
+                summary = extended_build(tree, output=output, offline=args.offline, dry_run=args.dry_run,
+                                         require_no_commands=args.require_no_post_commands)
+                print_report(report("build --dry-run" if args.dry_run else "build", "ok", root,
+                                    name=tree.parent_name, summary=summary,
+                                    details={"outputRoot": str(output)} if output else None), args.format)
+                return 0
         if tree.children:
             if args.command == "verify":
                 details = verify_space_tree(tree)
