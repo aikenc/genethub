@@ -10,7 +10,7 @@ import {
 
 // Public CLI consumers against an external release-protocol fixture. Nothing
 // inside daemon/Host is replaced: bytes are packed by the actual native Host.
-async function fixture(t: CaseContext, selfUpdate = false) {
+async function fixture(t: CaseContext, selfUpdate = false, holdApp = false) {
   const hostArtifact = tryLocateHost(t.openRoot);
   const raw = tryLocateDaemonComponent(t.openRoot);
   if (!hostArtifact || !raw) throw new BlockedError("CLI updater requires built Host and guest artifacts");
@@ -38,6 +38,7 @@ async function fixture(t: CaseContext, selfUpdate = false) {
   const identity = await exec(host, ["inspect", latest]);
   let origin = "";
   let downloads = 0;
+  let appRequests = 0;
   const server = createServer((req, res) => {
     if (req.url === "/component") res.end(JSON.stringify({
       schema: "genehub.release-manifest.v2", channel: "local", releaseVersion: "0.1.1",
@@ -52,7 +53,7 @@ async function fixture(t: CaseContext, selfUpdate = false) {
         "darwin-aarch64": { kind: "cli", url: origin + "/bad-app", size: 3, sha256: "0".repeat(64) },
       },
     }));
-    else if (req.url === "/bad-app") res.end("bad");
+    else if (req.url === "/bad-app") { appRequests++; if (!holdApp) res.end("bad"); }
     else { res.statusCode = 404; res.end(); }
   });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -80,6 +81,7 @@ async function fixture(t: CaseContext, selfUpdate = false) {
       },
       sha256,
       downloads: () => downloads,
+      appRequests: () => appRequests,
       async close() {
         try { if (started) await exec(cli, ["daemon", "stop"]); }
         finally { await new Promise<void>(resolve => server.close(() => resolve())); }
@@ -146,4 +148,34 @@ defineSpecialty(meta(
     t.assertions.assert(sends.length === 2 && sends[1].hasUpdateReceipt && sends[0].sessionId === sends[1].sessionId, "original Session was not resumed once with its receipt");
     t.assertions.assert(session?.summary.status === "idle" && session.summary.inputSummary.pendingMessageIds.length === 0 && session.items.filter((x: any) => x.type === "assistantMessage").length === 1 && f.downloads() === 1, "original goal did not finish exactly once");
   } finally { await f.close(); }
+});
+
+
+defineSpecialty(meta(
+  "specialty.release.cli-cold-start-recovers-interrupted-preparation", "Manual daemon start reconciles an interrupted App transaction",
+  "after a real updater is killed while its external App download is held, daemon start records preparation failure and restarts unchanged software without another download",
+  ["manual start bypasses cold recovery", "interrupted request remains unresolved", "startup repeats installation instead of reconciling"],
+), async t => {
+  const f = await fixture(t, false, true);
+  let worker: number | undefined;
+  try {
+    const before = (await f.call(["update", "check"])).data.current;
+    await f.call(["update", "app", "--request-id", "cold-prepare"]);
+    await t.tools.waitUntil(() => f.appRequests() === 1, 10_000);
+    const progress = JSON.parse(readFileSync(path.join(t.env.data, "updates/requests/cold-prepare/progress.json"), "utf8"));
+    worker = progress.workerPid;
+    t.assertions.assert(progress.phase === "preparing" && Number.isInteger(worker) && worker! > 1, "the owned updater did not reach external preparation");
+    process.kill(worker!, "SIGKILL"); worker = undefined;
+    // Observe OS lock release via supported status; never repeat the update.
+    await t.tools.waitUntil(async () => (await f.call(["update", "status", "--request-id", "cold-prepare"])).data.updateState === "interrupted", 10_000);
+    await f.call(["daemon", "stop"]);
+    await f.call(["daemon", "start"]);
+    const receipt = (await f.call(["update", "status", "--request-id", "cold-prepare"])).data;
+    const after = (await f.call(["update", "check"])).data.current;
+    t.assertions.assert(receipt.updateState === "failed" && /preparation was interrupted/.test(receipt.error), "manual startup did not reconcile the interrupted transaction");
+    t.assertions.assert(after.appVersion === before.appVersion && after.componentVersion === before.componentVersion && after.instanceId !== before.instanceId && f.appRequests() === 1, "cold startup changed bytes or repeated the App download");
+  } finally {
+    if (worker) try { process.kill(worker, "SIGKILL"); } catch {}
+    await f.close();
+  }
 });
