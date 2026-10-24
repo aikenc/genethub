@@ -38,9 +38,14 @@ export async function openWorkbenchPage(openRoot: string, getEndpoint: () => Dae
   process.chdir(root);
   const entry = require.resolve("@genehub/workbench");
   const script = `import React from 'react'; import {createRoot} from 'react-dom/client';
-import {App} from ${JSON.stringify(entry)}; import '@genehub/workbench/theme.css';
+import {App, parseAssetPreviewPath, parsePreviewPopout, PreviewPopoutPage, watchPreviewConnectionFragment} from ${JSON.stringify(entry)}; import '@genehub/workbench/theme.css';
 const host = {kind:'browser', endpoint:async()=>({...await (await fetch('/__test_endpoint')).json(),via:'loopback',label:'Browser test machine'}), notify:()=>{}, openExternal:()=>{}};
-createRoot(document.getElementById('root')).render(React.createElement(App,{host}));`;
+const source = parseAssetPreviewPath(window.location.pathname);
+if (source) watchPreviewConnectionFragment();
+// The popout must inherit the opener's authenticated client through the real
+// public bridge. Giving it the fixture host would hide a broken bridge.
+const page = source ? React.createElement(PreviewPopoutPage,{source,context:parsePreviewPopout(window.location.search,window.location.hash)}) : React.createElement(App,{host});
+createRoot(document.getElementById('root')).render(page);`;
   const server = await vite.createServer({
     root, configFile: path.join(root, "vite.config.ts"),
     server: { host: "127.0.0.1", port: 0, open: false },
@@ -66,7 +71,7 @@ createRoot(document.getElementById('root')).render(React.createElement(App,{host
     const browser = await openBrowser(options, evidence);
     try {
       const route = `d/${encodeURIComponent(endpoint.localServerProof.machineId)}/w/${encodeURIComponent(workspaceId)}/s/${encodeURIComponent(sessionId)}`;
-      await browser.page.goto(url + route);
+      await browser.page.goto(url + route, {waitUntil: "domcontentloaded", timeout: 45_000});
       return { ...browser, async close() { try { await browser.close(); } finally { await server.close(); process.chdir(originalCwd); } } };
     } catch (error) { await browser.close(); throw error; }
   } catch (error) { await server.close(); process.chdir(originalCwd); throw error; }

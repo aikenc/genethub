@@ -17,6 +17,7 @@ export async function openPreviewBrowser(input: {
   refreshEndpoint?: () => DaemonEndpoint;
   workspaceId: string;
   entryPath: string;
+  contentSecurityPolicy?: string;
   surface?: "preview" | "processes" | "client-debug";
 }) {
   const errors: string[] = [];
@@ -100,6 +101,7 @@ if(input.surface==='client-debug'){
       host: "127.0.0.1",
       port: 0,
       fs: { allow: [root, input.openRoot] },
+      ...(input.contentSecurityPolicy ? {headers: {"Content-Security-Policy": input.contentSecurityPolicy}} : {}),
     },
   });
   await server.listen();
@@ -118,7 +120,12 @@ if(input.surface==='client-debug'){
     entryPath: input.entryPath,
     surface: input.surface,
   }));
-  await input.page.goto(server.resolvedUrls.local[0]);
+  try {
+    // Readiness belongs to the page assertions; waiting for every subresource
+    // also waits for nested preview work and makes cold parallel Vite builds
+    // look like navigation failures. The case deadline still bounds startup.
+    await input.page.goto(server.resolvedUrls.local[0], {waitUntil: "domcontentloaded", timeout: 45_000});
+  } catch (error) { await server.close(); throw error; }
   if (input.surface === "processes") {
     await input.page.waitForFunction(() => (window as any).previewAppReady === true, null, { timeout: 30000 });
     const menu = input.page.getByRole("button", { name: "此电脑的后台进程", exact: true });

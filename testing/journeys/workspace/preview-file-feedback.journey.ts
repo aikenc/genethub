@@ -1,4 +1,4 @@
-import { mkdir, writeFile, readFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { existsSync } from "node:fs";
 import type { PreviewFeedbackOperation, PreviewFeedbackResponse } from "@genehub/proto";
@@ -12,6 +12,7 @@ defineJourney({
   tags: ["core", "workspace", "filesystem", "preview-feedback"],
   llm: { default: "none" }, expectedDurationMs: 20_000, timeoutMs: 60_000,
   surfaces: ["daemon", "asset-preview", "genet-cli"],
+  requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
   productInterfaces: ["preview.feedback", "genet preview feedback show"],
 }, async t => {
   const secondary = path.join(t.env.root, "secondary");
@@ -39,7 +40,7 @@ defineJourney({
     t.assertions.assert(Boolean(source.data.machineName) && source.data.absolutePath === path.join(secondary, "notes.md"), "info omitted machine or owning absolute path");
     const created = await call({ kind: "open", path: sourcePath, version: source.data.version, draftId: null });
     if (created.kind !== "draft") throw new Error("missing feedback draft");
-    t.assertions.assert((await readFile(path.join(opened.workspaceRoot, ".genethub/.gitignore"), "utf8")).includes("*"), "feedback storage is visible to project git");
+    t.assertions.assert(!existsSync(path.join(opened.workspaceRoot, ".genethub/preview-feedback")), "new feedback still writes into the project");
     const id = created.data.id;
     const annotation = { id: "ann-file-review", source: { root: { kind: "primary" as const }, relativePath: sourcePath, contentVersion: source.data.version }, target: { kind: "markdownLines" as const, startLine: 3, endLine: 3, excerpt: "Review this line." }, comment: "Keep the example", createdAtMs: Date.now() };
     await call({ kind: "upsert", id, annotation, expectedRevision: 0 });

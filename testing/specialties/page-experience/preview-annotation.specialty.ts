@@ -15,7 +15,7 @@ defineSpecialty({
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
 }, async t => {
   const paragraphs = Array.from({ length: 20 }, (_, n) => `<p id="paragraph-${n}" style="margin:24px 0;min-height:100px">Section ${n}: content for scrolling and annotation.</p>`).join("");
-  await writeFile(path.join(t.env.workspace, "review.html"), `<!doctype html><html><head><title>Review</title></head><body style="margin:24px"><button id="action" onclick="this.textContent='Activated'">Action</button>${paragraphs}</body></html>`);
+  await writeFile(path.join(t.env.workspace, "review.html"), `<!doctype html><html><head><title>Review</title></head><body style="margin:24px"><button id="action" onclick="this.textContent='Activated'">Action</button><a href="review.md?view=raw#review-notes">Read notes</a>${paragraphs}</body></html>`);
   await writeFile(path.join(t.env.workspace, "review.md"), "# Review notes\n\nFirst paragraph.\n\n" + Array.from({ length: 20 }, (_, n) => `## Section ${n}\n\nContent for scrolling.\n`).join("\n"));
   const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
   let browser: Awaited<ReturnType<typeof openWorkbenchPage>> | undefined;
@@ -25,7 +25,7 @@ defineSpecialty({
     const session = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
     opened.mock.script({ text: "[review.md](review.md) · [review.html](review.html)" });
     await t.flows.main.sendPrompt(opened.client, session, "Show the two review files.");
-    browser = await openWorkbenchPage(t.openRoot, () => daemonEndpoint(opened.daemon), opened.workspaceId, session, { viewport: { width: 430, height: 775 }, hasTouch: true, isMobile: true });
+    browser = await openWorkbenchPage(t.openRoot, () => daemonEndpoint(opened.daemon), opened.workspaceId, session, { viewport: { width: 430, height: 775 }, hasTouch: true, isMobile: true }, { trace: false });
     const page = browser.page;
     const openFile = async (name: string) => {
       await page.getByRole("link", { name, exact: true }).first().click();
@@ -119,15 +119,24 @@ defineSpecialty({
     const receipt = page.getByRole("textbox", { name: "可复制的预览反馈", exact: true });
     await receipt.waitFor();
     const id = (await receipt.inputValue()).match(/pf_[a-f0-9]{32}/)![0];
-    const saved = await opened.client.call({ type: "preview.feedback", payload: { workspaceId: opened.workspaceId, operation: {kind: "read", id} } });
+    const saved = await opened.client.call({ type: "preview.feedback", payload: { workspaceId: "", operation: {kind: "read", id} } });
     t.assertions.assert(saved?.type === "previewFeedback" && saved.data.kind === "receipt" && saved.data.data.annotations.some(note => note.comment === "Keep this section readable" && note.target.kind === "htmlElement" && note.target.selector === "p#paragraph-0"), "selected HTML note was not persisted in file feedback");
     await page.getByRole("button", { name: "关闭反馈", exact: true }).click();
     t.assertions.assert(await page.getByRole("button", { name: "查看批注", exact: true }).count() === 0, "offscreen note stuck to viewport top");
     await frame.locator("#action").click();
     t.assertions.assert(await frame.locator("#action").innerText() === "Activated", "browse mode did not restore HTML interaction");
+    await frame.getByRole("link", {name: "Read notes"}).click();
+    await page.getByRole("heading", {name: "Review notes", exact: true}).waitFor().catch(() => {
+      throw new Error("HTML to Markdown navigation did not render the target in the original viewer");
+    });
     const popupEvent = page.waitForEvent("popup");
     await page.getByRole("button", {name: "新窗口打开", exact: true}).click();
     const popup = await popupEvent;
+    await popup.getByRole("heading", {name: "Review notes", exact: true}).waitFor().catch(async () => {
+      const url = new URL(popup.url());
+      throw new Error(`Popout did not render the current Markdown: route=${url.pathname.replace(/m_[a-f0-9]+/, "[machine]")} query=${url.searchParams.get("docQuery")} body=${(await popup.locator("body").innerText()).slice(0, 1500)}`);
+    });
+    t.assertions.assert(new URL(popup.url()).searchParams.get("docQuery") === "?view=raw", "popout lost the current document query");
     t.assertions.assert(await page.getByRole("dialog", {name: "文件预览", exact: true}).isVisible(), "external open minimized the original preview");
     await popup.close();
     await page.screenshot({ path: path.join(process.env.TESTCTL_BROWSER_ARTIFACTS!, "preview-toolbar-430.png") });
