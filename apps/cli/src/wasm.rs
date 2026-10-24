@@ -265,7 +265,7 @@ fn exec_host(guest: &Guest, entry: load::Entry, guest_args: &[String]) -> i32 {
     exec_binary(guest.host.clone(), &args)
 }
 
-fn exec_binary(exe: PathBuf, args: &[String]) -> i32 {
+pub(crate) fn exec_binary(exe: PathBuf, args: &[String]) -> i32 {
     let mut command = Command::new(&exe);
     command.args(args);
     cli_env(&mut command);
