@@ -156,7 +156,8 @@ fn open_runtime() -> Result<Runtime> {
     .map_err(|error| anyhow!("{error}"))?;
     let root = store_root()?;
     let store = ArtifactStore::open(root, verifier).map_err(|error| anyhow!("{error}"))?;
-    store
+    let transaction = store.transaction().map_err(|error| anyhow!("{error}"))?;
+    transaction
         .recover_candidate()
         .map_err(|error| anyhow!("recovering the signed component candidate: {error}"))?;
     let baseline_version = bundled_version()?;
@@ -165,13 +166,14 @@ fn open_runtime() -> Result<Runtime> {
         // update the store's high-water mark already sits above it, and that
         // is the normal state of an updated machine, not a replay. Refusing
         // it here would kill every cold start after the first Live update.
-        match store.advance_high_water(baseline) {
+        match transaction.advance_high_water(baseline) {
             Ok(()) | Err(ArtifactError::VersionReplay { .. }) => {}
             Err(error) => {
                 return Err(anyhow!("recording bundled component version: {error}"));
             }
         }
     }
+    drop(transaction);
     Ok(Runtime {
         store,
         baseline_version,
@@ -340,18 +342,13 @@ fn apply_manifest(manifest: ComponentManifest) -> Result<()> {
     // manifest digest covers the signed file on the wire; the signature
     // already proved they belong together, so there is nothing left to
     // cross-check here.
+    // Only the durable store transaction is shared across processes. Download
+    // and precompile stay outside it, while recovery cannot steal a candidate.
     guard
         .store
-        .stage(&verified)
-        .map_err(|error| anyhow!("staging artifact {}: {error}", verified.artifact_id()))?;
-    guard
-        .store
-        .advance_high_water(&manifest_version)
-        .map_err(|error| anyhow!("{error}"))?;
-    guard
-        .store
-        .commit_candidate(&manifest_version)
-        .map_err(|error| anyhow!("{error}"))?;
+        .transaction()
+        .and_then(|transaction| transaction.activate(&verified))
+        .map_err(|error| anyhow!("activating artifact {}: {error}", verified.artifact_id()))?;
     // §5.1.6: derive the precompiled artifact now, while the user is already
     // waiting, so the reload that follows deserializes instead of compiling.
     // A failure here never fails the update — the reload compiles from the
@@ -380,13 +377,17 @@ pub fn load_active_bytes() -> Result<Option<Vec<u8>>> {
     // that no longer verifies — corrupted, or signed for another App ABI
     // after an App upgrade — must not keep the machine from starting. Fall
     // back to the bundled component and drop the unusable file.
-    let active = match guard.store.load_active() {
+    let transaction = guard
+        .store
+        .transaction()
+        .map_err(|error| anyhow!("{error}"))?;
+    let active = match transaction.load_active() {
         Ok(active) => active,
         Err(error) => {
             crate::load::debug_log(&format!(
                 "the stored active component is unusable ({error}); falling back to the bundled one"
             ));
-            guard.store.discard_active_quietly();
+            transaction.discard_active_quietly();
             return Ok(None);
         }
     };
@@ -412,6 +413,8 @@ fn current_version(runtime: &Runtime) -> Result<String> {
     }
     let highest = runtime
         .store
+        .transaction()
+        .map_err(|error| anyhow!("{error}"))?
         .highest_version()
         .map_err(|error| anyhow!("{error}"))?;
     let current = match (highest, &runtime.baseline_version) {
