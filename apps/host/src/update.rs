@@ -603,3 +603,45 @@ pub fn running_sha256() -> Option<String> {
         .ok()
         .and_then(|v| v.clone())
 }
+
+/// An exited process may already have migrated data. Record entry before the
+/// guest can open it, so a lock-free failed startup never authorises downgrade.
+/// Both CLI-managed and direct-Host service entries pass through this boundary.
+pub(crate) fn note_daemon_start() -> anyhow::Result<()> {
+    use genet_frontdoor::managed_update as records;
+    let paths = genet_frontdoor::Paths::discover()?;
+    let requests = records::root(&paths.root).join("requests");
+    let entries = match std::fs::read_dir(requests) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    let host = std::env::current_exe()?.canonicalize()?;
+    for entry in entries {
+        let dir = entry?.path();
+        let Ok(request) = records::read::<records::Request>(&dir.join("request.json")) else {
+            continue;
+        };
+        let Ok(progress) = records::read::<records::Progress>(&dir.join("progress.json")) else {
+            continue;
+        };
+        if request.schema == "genehub.update-request.v1"
+            && request.channel == crate::channel::CHANNEL
+            && request.kind == "app"
+            && request.host == host
+            && progress.phase == "starting"
+            && request
+                .app
+                .as_ref()
+                .is_some_and(|a| a.version == env!("CARGO_PKG_VERSION"))
+        {
+            records::write(
+                &dir.join("startup-observed.json"),
+                &serde_json::json!({
+                    "hostVersion":env!("CARGO_PKG_VERSION"),"pid":std::process::id(),"atMs":records::now_ms()
+                }),
+            )?;
+        }
+    }
+    Ok(())
+}

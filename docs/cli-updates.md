@@ -53,8 +53,10 @@ gets an explicit independent startup adapter. Only the actual adjacent channel
 CLI/Host/component are replaced; other channels' binaries are not selected by
 name or killed by image matching. A bad package leaves the old daemon running.
 
-If a new process cannot start and the data is not in use, the worker restores
-its backup. A running but unverifiable new process is reported for inspection;
+If replacement fails before the new Host starts and the data is not in use, the
+worker restores its backup. Before opening a new guest, the Host records a durable
+startup observation. Once that exists, even an exited new process is reported
+for compatibility inspection;
 it is not blindly downgraded over potentially migrated data. `partial` records
 an App that installed successfully while its subsequent Live update failed.
 The bundled component remains a floor for active Live selection.

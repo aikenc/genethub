@@ -668,7 +668,7 @@ jobs:
       # This is discovery metadata for a human-led manual update, not a signed
       # updater manifest. SHA-256 detects corruption only when its source is
       # independently trusted; it does not authenticate a release delivered
-      # beside the digest. Daemon, CLI and desktop automatic install paths stay
+      # beside the digest.
       # Development updates use hashes and channel/ABI checks; signing-key
       # management can be introduced without blocking CLI update testing.
       - name: Say what the newest version is, at an address that never moves

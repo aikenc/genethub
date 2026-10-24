@@ -103,9 +103,11 @@ async fn perform(
                 // Do not roll old software over a daemon that has already
                 // started and may have migrated data. A wrong running identity
                 // is reported for recovery rather than blindly downgrading it.
-                if genet_frontdoor::lifecycle::instance_locked(paths)? {
+                if genet_frontdoor::lifecycle::instance_locked(paths)?
+                    || dir.join("startup-observed.json").exists()
+                {
                     progress.rollback = Some(
-                        "notAttempted: a daemon is running; data compatibility requires inspection"
+                        "notAttempted: a new daemon started or data is in use; data compatibility requires inspection"
                             .into(),
                     );
                     return Err(error.context("new App could not be verified"));
