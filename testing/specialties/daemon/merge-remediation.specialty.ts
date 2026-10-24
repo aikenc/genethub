@@ -51,9 +51,15 @@ check("inbox-recovery", "an interrupted .read claim keeps complete text, origina
   // A real Human message is the only operation that may resume the pause.
   await r.send(target, "resume explicitly");
   await t.tools.waitUntil(async () => !(await r.snapshot(target)).summary.inputSummary?.paused, 15000);
-  await idle(t, r, target);
+  // Idle can be observed between the Human lane and the queued system lane.
+  // The hook only flushes an idle Session, so wait for both accepted inputs to
+  // finish before asking it to reconcile its original local claim.
+  await t.tools.waitUntil(async () => {
+    const summary = (await r.snapshot(target)).summary;
+    return summary.status === "idle" && summary.inputSummary?.pendingMessageIds.length === 0;
+  }, 30000);
   r.ok(["hook"]);
-  t.assertions.assert(!existsSync(claim), "accepted replay was not acknowledged locally");
+  t.assertions.assert(!existsSync(claim), `accepted replay was not acknowledged locally: ${JSON.stringify((await r.snapshot(target)).summary.inputSummary)}`);
   const copies = (await r.snapshot(target)).items.filter(item => item.type === "userMessage" && item.id === entry.messageId);
   t.assertions.assert(copies.length === 1 && copies[0]?.type === "userMessage" && copies[0].text.endsWith("最新要求：取消旧方案，保留设置。") && copies[0].origin?.sessionId === "system", "recovery duplicated, truncated or misattributed the input");
 });
