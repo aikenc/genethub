@@ -450,6 +450,7 @@ impl SessionMeta {
         last_activity_at_ms: Option<i64>,
     ) -> SessionSummary {
         SessionSummary {
+            cwd: Some(crate::file_access::display(&self.cwd)),
             interaction_summary: self
                 .openable()
                 .then(|| interaction_summary(self.pending_permission.iter())),

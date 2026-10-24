@@ -16,6 +16,7 @@ import { emitClientDiagnostic, registerDiagnosticClient } from "../diagnostics";
 import { detectHost, type Endpoint, type Host } from "../host";
 import {
   Client,
+  AssetPreviewError_,
   type AssetPreviewResult,
   type AssetPreviewTransferStats,
   type ProtocolDial,
@@ -24,7 +25,7 @@ import { HighlightedCode, languageForPath, Markdown } from "../session/Markdown"
 import { loadSessionImage } from "../session/imagePreviewRequests";
 import { HtmlAnnotationOverlay, ImageAnnotationLayer, PreviewReviewChrome } from "./PreviewAnnotation";
 import { readRtcEnabled } from "../settings/rtc";
-import { remapHtmlSite, resolveRuntimeAssetPath, sameSiteHtmlPath } from "./htmlSite";
+import { remapHtmlSite, resolveRuntimeAssetPath, resolveSiteReference, virtualFileUrl } from "./htmlSite";
 import {
   applyPreviewStoreMutation,
   clearPreviewStore,
@@ -43,7 +44,7 @@ import {
   type RuntimeArtifactSubmit,
 } from "./PreviewRuntimeControls";
 import type { PixelSnapshot } from "./runtimeCapture";
-import type { AssetPreviewLocation } from "./url";
+import { isAbsoluteFilePath, type AssetPreviewLocation } from "./url";
 import { uploadSessionArtifact } from "./sessionArtifactUpload";
 import { PreviewToolbarContext } from "./PreviewToolbar";
 
@@ -54,6 +55,7 @@ type ViewState =
   | { kind: "error"; message: string };
 
 export type PreviewMeta = {
+  location?: Pick<AssetPreviewLocation, "path" | "docQuery" | "docFragment" | "siteEntryPath">;
   sourceInfo?: PreviewSourceInfo;
   resourcePaths?: Set<string>;
   documentTitle: string | null;
@@ -112,6 +114,7 @@ export function AssetPreviewPage({
   const [state, setState] = useState<ViewState>({ kind: "loading" });
   const resources = useRef(new Set<string>());
   const [feedbackSource, setFeedbackSource] = useState<{path: string; version: string} | null>(null);
+  const [folders, setFolders] = useState<Array<{root: string; rootHandle: string}>>([]);
   const [sourceInfo, setSourceInfo] = useState<PreviewSourceInfo | null>(null);
   const [pageInfoOpen, setPageInfoOpen] = useState(false);
   const [meta, setMeta] = useState<PreviewMeta | null>(null);
@@ -152,9 +155,9 @@ export function AssetPreviewPage({
     legacyAbort.current?.abort();
     legacyAbort.current = null;
     serviceRef.current = null;
-    reportMeta(null);
+    publishMeta(null);
     setPageInfoOpen(false);
-  }, [source.path, source.workspaceHandle, source.deviceHandle, reportMeta]);
+  }, [source.path, source.workspaceHandle, source.deviceHandle, publishMeta]);
 
   useEffect(() => {
     let cancelled = false;
@@ -205,9 +208,17 @@ export function AssetPreviewPage({
           imageFile ? "image-1024" : "original",
           abort.signal,
         );
+        // Only linked v2 documents need the catalogue mapping. Images and
+        // representation negotiation must not depend on project-list access.
+        if (!isAbsoluteFilePath(source.path) && !shareAccess && ["html", "markdown"].includes(result.metadata.kind)) {
+          const reply = await active.call({type: "workspace.list"}).catch(() => null);
+          if (!cancelled && reply?.type === "workspaces") setFolders(reply.data.find(w => w.id === source.workspaceHandle)?.folders ?? []);
+        }
         if (active.identity?.features?.includes("preview.feedback.v1")) {
-          const info = await previewFeedback(active, source.workspaceHandle, { kind: "source", path: source.path });
-          if (!cancelled && info.kind === "source") setSourceInfo(info.data);
+          // Feedback metadata is optional. A workspace-scoped peer can read
+          // the file without access to the machine-wide feedback namespace.
+          const info = await previewFeedback(active, isAbsoluteFilePath(source.path) ? "" : source.workspaceHandle, { kind: "source", path: source.path }).catch(() => null);
+          if (!cancelled && info?.kind === "source") setSourceInfo(info.data);
         }
         if (cancelled) {
           owned?.close();
@@ -294,11 +305,11 @@ export function AssetPreviewPage({
     setOpenShare(() => open);
   }, []);
   const annotatable = state.kind === "ready" && (state.result.metadata.kind === "markdown" || state.result.metadata.kind === "html" || state.result.metadata.kind === "image");
-  const feedback = useFileFeedback(feedbackClient, source.workspaceHandle, feedbackSource?.path ?? source.path, feedbackSource?.version ?? (state.kind === "ready" ? state.result.metadata.version : ""), feedbackAccessScope);
+  const feedback = useFileFeedback(feedbackClient, isAbsoluteFilePath(feedbackSource?.path ?? source.path) ? "" : source.workspaceHandle, feedbackSource?.path ?? source.path, feedbackSource?.version ?? (state.kind === "ready" ? state.result.metadata.version : ""), feedbackAccessScope);
   useEffect(() => {
     if (!feedbackClient || !fileFeedbackEnabled || !feedbackSource || feedbackSource.path === source.path) return;
     let cancelled = false;
-    void previewFeedback(feedbackClient, source.workspaceHandle, {kind: "source", path: feedbackSource.path}).then(reply => {
+    void previewFeedback(feedbackClient, isAbsoluteFilePath(feedbackSource.path) ? "" : source.workspaceHandle, {kind: "source", path: feedbackSource.path}).then(reply => {
       if (!cancelled && reply.kind === "source") setSourceInfo(reply.data);
     }).catch(() => {});
     return () => { cancelled = true; };
@@ -358,6 +369,11 @@ export function AssetPreviewPage({
         <PreviewDocument
           result={state.result}
           path={source.path}
+          folders={folders}
+          siteEntryPath={source.siteEntryPath ?? source.path}
+          docQuery={source.docQuery}
+          docFragment={source.docFragment}
+          storageAccessScope={feedbackAccessScope}
           deviceHandle={source.deviceHandle}
           workspaceHandle={source.workspaceHandle}
           client={state.client}
@@ -373,7 +389,7 @@ export function AssetPreviewPage({
         />
       )}
       {fileFeedbackEnabled ? <PreviewFeedbackPanel feedback={feedback} bindOpen={annotatable ? bindFileFeedback : undefined} showToolbarButton={!annotatable} /> : null}
-      {fileFeedbackEnabled && !shareAccess && feedbackClient ? <PreviewShareButton client={feedbackClient} source={source} resources={resources.current} trigger={false} bindOpen={bindShare} /> : null}
+      {fileFeedbackEnabled && !shareAccess && feedbackClient ? <PreviewShareButton client={feedbackClient} source={{...source, ...meta?.location, path: feedbackSource?.path ?? source.path, siteEntryPath: source.siteEntryPath ?? source.path}} resources={resources.current} trigger={false} bindOpen={bindShare} /> : null}
       {fileFeedbackEnabled && shareAccess ? <PreviewShareCopyButton trigger={false} bindOpen={bindShare} /> : null}
       {chrome === "page" && pageInfoOpen ? (
         <EmbeddedInfoDialog
@@ -397,6 +413,11 @@ export function AssetPreviewPage({
 function PreviewDocument({
   result,
   path,
+  folders,
+  siteEntryPath,
+  docQuery = "",
+  docFragment = "",
+  storageAccessScope,
   deviceHandle,
   workspaceHandle,
   client,
@@ -412,6 +433,11 @@ function PreviewDocument({
 }: {
   result: AssetPreviewResult;
   path: string;
+  folders: Array<{root: string; rootHandle: string}>;
+  siteEntryPath: string;
+  docQuery?: string;
+  docFragment?: string;
+  storageAccessScope: string;
   deviceHandle: string;
   workspaceHandle: string;
   client: Client;
@@ -425,42 +451,68 @@ function PreviewDocument({
   onServiceChange?: (service: PreviewServiceInfo | null) => void;
   resourcePaths?: Set<string>;
 }) {
-  const { metadata, bytes, transfer } = result;
-  const [followedHtml, setFollowedHtml] = useState<{ path: string; result: AssetPreviewResult } | null>(null);
+  type Visit = {path: string; result: AssetPreviewResult; query: string; fragment: string};
+  const [history, setHistory] = useState<Visit[]>([]);
+  const [historyIndex, setHistoryIndex] = useState(-1);
   const [linkProblem, setLinkProblem] = useState<string | null>(null);
   const followGeneration = useRef(0);
+  const followAbort = useRef<AbortController | null>(null);
+  const documentRef = useRef<HTMLElement | null>(null);
+  const scrollPositions = useRef(new Map<number, {x: number; y: number}>());
+  const visitKey = Math.max(0, historyIndex);
+  const rememberScroll = useCallback((x: number, y: number) => {scrollPositions.current.set(visitKey, {x, y});}, [visitKey]);
   useEffect(() => {
     followGeneration.current += 1;
-    setFollowedHtml(null);
-    setLinkProblem(null);
-  }, [path]);
-  const shown = followedHtml ?? { path, result };
-  useEffect(() => { onSourceChange?.({path: shown.path, version: shown.result.metadata.version}); }, [shown.path, shown.result.metadata.version, onSourceChange]);
-  const openHtml = useCallback(async (nextPath: string) => {
+    followAbort.current?.abort();
+    setHistory([]); setHistoryIndex(-1); setLinkProblem(null); scrollPositions.current.clear();
+    return () => { followAbort.current?.abort(); };
+  }, [path, result]);
+  const shown = history[historyIndex] ?? {path, result, query: docQuery, fragment: docFragment};
+  const {metadata, bytes, transfer} = shown.result;
+  useEffect(() => { onSourceChange?.({path: shown.path, version: metadata.version}); }, [shown.path, metadata.version, onSourceChange]);
+  const openFile = useCallback(async (nextPath: string, query = "", fragment = "") => {
     const generation = ++followGeneration.current;
+    followAbort.current?.abort();
+    const abort = new AbortController(); followAbort.current = abort;
     setLinkProblem(null);
     try {
-      const loaded = await client.preview(workspaceHandle, nextPath);
+      const loaded = nextPath === shown.path ? shown.result : await client.preview(workspaceHandle, nextPath, "original", abort.signal);
       if (generation !== followGeneration.current) return;
-      if (loaded.metadata.kind !== "html") {
-        setLinkProblem("这个链接不是可以预览的 HTML 页面");
-        return;
-      }
-      setFollowedHtml({ path: nextPath, result: loaded });
+      const prior = historyIndex < 0 ? [{path, result, query: docQuery, fragment: docFragment}] : history.slice(0, historyIndex + 1);
+      setHistory([...prior, {path: nextPath, result: loaded, query, fragment}]);
+      setHistoryIndex(prior.length);
+      if (nextPath !== shown.path) { resourcePaths?.clear(); resourcePaths?.add(nextPath); }
     } catch (error) {
-      if (generation !== followGeneration.current) return;
-      setLinkProblem(error instanceof Error ? error.message : "无法打开这个链接");
+      if (generation === followGeneration.current && !abort.signal.aborted) setLinkProblem(error instanceof Error ? error.message : "无法打开这个链接");
     }
-  }, [client, workspaceHandle]);
+  }, [client, workspaceHandle, shown, history, historyIndex, path, result, docQuery, docFragment, resourcePaths]);
+  const navigateHistory = (next: number) => {
+    followGeneration.current += 1; followAbort.current?.abort(); setLinkProblem(null); setHistoryIndex(next);
+    resourcePaths?.clear(); if (history[next]) resourcePaths?.add(history[next]!.path);
+  };
+  useEffect(() => {
+    const node = documentRef.current;
+    if (!node) return;
+    const saved = scrollPositions.current.get(visitKey);
+    if (saved) { node.scrollTo(saved.x, saved.y); return; }
+    node.scrollTo(0, 0);
+    let id: string; try { id = decodeURIComponent(shown.fragment.replace(/^#/, "")); } catch { return; }
+    if (id) Array.from(node.querySelectorAll("[id]")).find(target => target.id === id)?.scrollIntoView();
+  }, [shown.path, shown.fragment, metadata.kind, visitKey]);
+  const publishDocumentMeta = useCallback((meta: PreviewMeta | null) => {
+    onMetaChange?.(meta ? {...meta, location: {path: shown.path, docQuery: shown.query, docFragment: shown.fragment, siteEntryPath}} : null);
+  }, [onMetaChange, shown.path, shown.query, shown.fragment, siteEntryPath]);
   const rootHandle = path.split("/")[0] ?? "";
   const loadPreview = useCallback(
-    async (assetPath: string) => {
+    async (assetPath: string, signal?: AbortSignal) => {
       try {
-        const loaded = await client.preview(workspaceHandle, assetPath);
+        const loaded = await client.preview(workspaceHandle, assetPath, "original", signal);
         resourcePaths?.add(assetPath);
-        return { bytes: loaded.bytes, mediaType: loaded.metadata.mediaType };
-      } catch {
-        return null;
+        return { bytes: loaded.bytes, mediaType: loaded.metadata.mediaType, status: 200 };
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        const status = error instanceof AssetPreviewError_ ? error.status : 503;
+        return {bytes: new TextEncoder().encode(error instanceof Error ? error.message : "资源读取失败"), mediaType: "text/plain", status};
       }
     },
     [client, workspaceHandle, resourcePaths],
@@ -479,17 +531,19 @@ function PreviewDocument({
     () => ({
       deviceHandle,
       workspaceHandle,
-      folders: [{ root: "", rootHandle }],
-      documentPath: path,
+      folders: folders.length ? folders : [{ root: "", rootHandle }],
+      documentPath: shown.path,
+      machineFiles: isAbsoluteFilePath(shown.path),
+      onNavigate: (next: string, query?: string, fragment?: string) => void openFile(next, query, fragment),
       ...(runtimeSessionId ? { sessionId: runtimeSessionId } : {}),
       loadPreview: loadInlineImage,
     }),
-    [deviceHandle, workspaceHandle, rootHandle, path, runtimeSessionId, loadInlineImage],
+    [deviceHandle, workspaceHandle, rootHandle, folders, shown.path, runtimeSessionId, loadInlineImage, openFile],
   );
 
   useEffect(() => {
     if (metadata.kind === "html") return;
-    onMetaChange?.({
+    publishDocumentMeta({
       documentTitle: null,
       transfer,
       infoLines: [
@@ -499,19 +553,18 @@ function PreviewDocument({
         "单文件预览（无静态站点重写）",
       ],
     });
-  }, [metadata, onMetaChange, transfer]);
+  }, [metadata, publishDocumentMeta, transfer]);
 
   const body = metadata.kind === "markdown" ? (
-    <article className="min-h-0 w-full flex-1 overflow-y-auto overscroll-contain touch-pan-y">
+    <article ref={documentRef} onScroll={event => rememberScroll(event.currentTarget.scrollLeft, event.currentTarget.scrollTop)} className="min-h-0 w-full flex-1 overflow-y-auto overscroll-contain touch-pan-y">
       <div className="mx-auto max-w-4xl px-5 py-6 sm:px-8 sm:py-10">
         <Markdown text={text} variant="document" artifact={artifact} />
       </div>
     </article>
   ) : metadata.kind === "text" ? (
-    <HighlightedCode text={text} language={languageForPath(path)} document />
+    <HighlightedCode text={text} language={languageForPath(shown.path)} document />
   ) : metadata.kind === "html" ? (
     <>
-      {linkProblem ? <p role="alert" className="shrink-0 px-3 py-1 text-xs text-danger">{linkProblem}</p> : null}
       <ServiceHtmlDocument
         client={client}
         workspaceHandle={workspaceHandle}
@@ -519,12 +572,17 @@ function PreviewDocument({
         metadata={shown.result.metadata}
         transfer={shown.result.transfer}
         entryPath={shown.path}
-        storageScope={{ deviceHandle, workspaceHandle }}
+        siteEntryPath={siteEntryPath}
+        docQuery={shown.query}
+        docFragment={shown.fragment}
+        storageScope={{ deviceHandle, workspaceHandle, accessScope: storageAccessScope, principalScope: shown.result.metadata.storageScope }}
         fetchAsset={loadPreview}
-        onMetaChange={onMetaChange}
+        initialScroll={scrollPositions.current.get(visitKey)}
+        onScroll={rememberScroll}
+        onMetaChange={publishDocumentMeta}
         onRuntimeArtifact={onRuntimeArtifact}
         onRuntimeReady={onRuntimeReady}
-        onOpenHtml={(next) => void openHtml(next)}
+        onOpenHtml={(next, query, fragment) => void openFile(next, query, fragment)}
         onServiceChange={onServiceChange}
       />
     </>
@@ -533,7 +591,7 @@ function PreviewDocument({
       二进制资源（{metadata.mediaType}，{metadata.sourceBytes} bytes）。请从入口 HTML 打开以运行游戏或站点。
     </p>
   ) : (
-    <BlobDocument bytes={bytes} metadata={metadata} client={client} workspaceHandle={workspaceHandle} path={path} />
+    <BlobDocument bytes={bytes} metadata={metadata} client={client} workspaceHandle={workspaceHandle} path={shown.path} />
   );
   return (
     <PreviewReviewChrome
@@ -546,6 +604,9 @@ function PreviewDocument({
       kind={shown.result.metadata.kind}
       sourceText={text}
     >
+      {history.length > 0 ? <nav aria-label="预览浏览记录" className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-1 text-xs"><button disabled={historyIndex <= 0} onClick={() => navigateHistory(historyIndex - 1)}>后退</button><button disabled={historyIndex >= history.length - 1} onClick={() => navigateHistory(historyIndex + 1)}>前进</button><span className="truncate">{shown.path}{shown.query}{shown.fragment}</span></nav> : null}
+      {linkProblem ? <p role="alert" className="px-3 py-1 text-xs text-danger">{linkProblem}</p> : null}
+      {shown.query ? <p role="status" className="px-3 py-1 text-xs text-muted">页面参数：{shown.query}（srcdoc 的原生 location.search 不可改写；页面可读取 genehubPreviewLocation.search）</p> : null}
       {body}
       {shown.result.metadata.kind === "html" ? null : <ProductFeedbackOverflow />}
     </PreviewReviewChrome>
@@ -665,7 +726,7 @@ function ServiceHtmlDocument(props: React.ComponentProps<typeof HtmlDocument> & 
   }), [props.client, supported]);
   useEffect(()=>{let cancelled=false;let loaded:ServicePreviewClient|null=null;setCandidate(null);setEnabled(false);setMark(null);
     if(!supported)return;
-    void ServicePreviewClient.discover(props.client,props.workspaceHandle,props.entryPath).then(value=>{loaded=value;if(cancelled || props.client.connectionState!=="ready")value?.close();else { setCandidate(value); setMark(value ? serviceMark(value) : { state: "absent" }); }}).catch(error=>{if(!cancelled)setMark(classifyServiceFailure(error));});
+    void ServicePreviewClient.discover(props.client,isAbsoluteFilePath(props.entryPath) ? "" : props.workspaceHandle,props.entryPath).then(value=>{loaded=value;if(cancelled || props.client.connectionState!=="ready")value?.close();else { setCandidate(value); setMark(value ? serviceMark(value) : { state: "absent" }); }}).catch(error=>{if(!cancelled)setMark(classifyServiceFailure(error));});
     return()=>{cancelled=true;loaded?.close();};
   },[props.client,props.workspaceHandle,props.entryPath,generation,supported]);
   return <>{enabled&&candidate?<ServiceMediaPanel service={candidate}/>:null}
@@ -678,6 +739,11 @@ export function HtmlDocument({
   metadata,
   transfer,
   entryPath,
+  siteEntryPath = entryPath,
+  docQuery = "",
+  docFragment = "",
+  initialScroll,
+  onScroll,
   storageScope,
   fetchAsset,
   onMetaChange,
@@ -691,20 +757,26 @@ export function HtmlDocument({
   metadata: AssetPreviewMetadata;
   transfer?: AssetPreviewTransferStats;
   entryPath: string;
+  siteEntryPath?: string;
+  docQuery?: string;
+  docFragment?: string;
+  initialScroll?: {x: number; y: number};
+  onScroll?: (x: number, y: number) => void;
   /** Identifies the device/workspace the store namespace is confined to. */
   storageScope?: PreviewStorageScope;
-  fetchAsset: (path: string) => Promise<{ bytes: Uint8Array; mediaType: string } | null>;
+  fetchAsset: (path: string, signal?: AbortSignal) => Promise<{ bytes: Uint8Array; mediaType: string; status?: number } | null>;
   onMetaChange?: (meta: PreviewMeta | null) => void;
   onRuntimeArtifact?: RuntimeArtifactSubmit;
   onRuntimeReady?: () => void;
   /** Opens another HTML file from this site without leaving the sandbox. */
-  onOpenHtml?: (path: string) => void;
+  onOpenHtml?: (path: string, query?: string, fragment?: string) => void;
 }) {
   const [srcDoc, setSrcDoc] = useState<string | null>(null);
   const [frameReady, setFrameReady] = useState(false);
   const [collectorReady, setCollectorReady] = useState(false);
   const [eventCount, setEventCount] = useState(0);
   const frameRef = useRef<HTMLIFrameElement>(null);
+  const onScrollRef = useRef(onScroll); onScrollRef.current = onScroll;
   const onOpenHtmlRef = useRef(onOpenHtml);
   onOpenHtmlRef.current = onOpenHtml;
   useServiceBridge(frameRef, service, srcDoc);
@@ -732,7 +804,7 @@ export function HtmlDocument({
   );
 
   const storageNamespace = storageScope
-    ? previewStorageNamespace(storageScope, entryPath)
+    ? previewStorageNamespace(storageScope, siteEntryPath)
     : null;
   const [storageCount, setStorageCount] = useState(0);
   const [baseMeta, setBaseMeta] = useState<{
@@ -820,6 +892,7 @@ export function HtmlDocument({
   }, []);
 
   useEffect(() => {
+    const assetRequests = new Map<string, AbortController>();
     const receive = (event: MessageEvent) => {
       if (event.source !== frameRef.current?.contentWindow) return;
       const payload = event.data;
@@ -834,8 +907,8 @@ export function HtmlDocument({
         const url = data.detail && typeof data.detail === "object"
           ? String((data.detail as { url?: unknown }).url ?? "")
           : "";
-        const next = url ? sameSiteHtmlPath(entryPath, url) : null;
-        if (next && next !== entryPath) onOpenHtmlRef.current?.(next);
+        const next = url ? resolveSiteReference(entryPath, url, siteEntryPath) : null;
+        if (next) onOpenHtmlRef.current?.(next.path, url.startsWith("#") ? docQuery : next.query, next.fragment);
         return;
       }
       if (data.source === PREVIEW_RUNTIME_SOURCE && data.kind === "dom-snapshot") {
@@ -859,24 +932,32 @@ export function HtmlDocument({
         return;
       }
       if (data.source === PREVIEW_ASSET_SOURCE && typeof data.requestId === "string") {
+        const request = data as typeof data & {url?: string; method?: string; cancel?: boolean};
+        if (request.cancel) { assetRequests.get(data.requestId)?.abort(); assetRequests.delete(data.requestId); return; }
+        if (assetRequests.has(data.requestId) || assetRequests.size >= 64) return;
+        const abort = new AbortController(); assetRequests.set(data.requestId, abort);
+        const frame = frameRef.current?.contentWindow;
         void (async () => {
-          const path = resolveRuntimeAssetPath(entryPath, String((data as { url?: string }).url ?? ""));
-          const loaded = path ? await fetchAsset(path) : null;
-          const body = loaded ? loaded.bytes.slice().buffer : null;
-          frameRef.current?.contentWindow?.postMessage(
-            {
-              source: PREVIEW_ASSET_SOURCE,
-              requestId: data.requestId,
-              ok: Boolean(loaded),
-              mediaType: loaded?.mediaType ?? "",
-              body,
-              message: loaded ? "" : "not found",
-            },
-            "*",
-            body ? [body] : [],
-          );
+          try {
+            const method = String(request.method ?? "GET").toUpperCase();
+            const path = resolveRuntimeAssetPath(entryPath, String(request.url ?? ""), siteEntryPath);
+            const loaded = !["GET", "HEAD"].includes(method)
+              ? {bytes: new Uint8Array(), mediaType: "text/plain", status: 405}
+              : path ? await fetchAsset(path, abort.signal) : null;
+            if (abort.signal.aborted || frame !== frameRef.current?.contentWindow) return;
+            const status = loaded?.status ?? (loaded ? 200 : 403);
+            const body = method === "HEAD" ? new ArrayBuffer(0) : loaded?.bytes.slice().buffer ?? new ArrayBuffer(0);
+            frame?.postMessage({source: PREVIEW_ASSET_SOURCE, requestId: data.requestId, status,
+              mediaType: loaded?.mediaType ?? "text/plain", sourceBytes: loaded?.bytes.byteLength ?? 0, body}, "*", [body]);
+          } catch (error) {
+            if (!abort.signal.aborted) frame?.postMessage({source: PREVIEW_ASSET_SOURCE, requestId: data.requestId, message: String(error)}, "*");
+          } finally { assetRequests.delete(data.requestId!); }
         })();
         return;
+      }
+      if (data.source === PREVIEW_DIAG_SOURCE && data.detail && typeof data.detail === "object") {
+        const detail = data.detail as Record<string, unknown>;
+        if (detail.topic === "interaction" && detail.action === "scroll" && typeof detail.x === "number" && typeof detail.y === "number") onScrollRef.current?.(detail.x, detail.y);
       }
       if (data.source === PREVIEW_STORAGE_SOURCE) {
         if (!storageNamespace) return;
@@ -932,6 +1013,8 @@ export function HtmlDocument({
     };
     window.addEventListener("message", receive);
     return () => {
+      for (const abort of assetRequests.values()) abort.abort();
+      assetRequests.clear();
       window.removeEventListener("message", receive);
       for (const pending of domRequestsRef.current.values()) {
         clearTimeout(pending.timer);
@@ -944,7 +1027,7 @@ export function HtmlDocument({
       }
       renderRequestsRef.current.clear();
     };
-  }, [entryPath, fetchAsset, storageNamespace]);
+  }, [entryPath, siteEntryPath, docQuery, fetchAsset, storageNamespace]);
 
   useEffect(() => {
     eventsRef.current = [];
@@ -977,6 +1060,7 @@ export function HtmlDocument({
       try {
         const remapped = await remapHtmlSite({
           entryPath,
+          siteEntryPath,
           html: sourceHtml,
           fetchAsset,
         });
@@ -997,7 +1081,7 @@ export function HtmlDocument({
             : "未加载资源：0",
           ...remapped.warnings.slice(0, 40).map((warning) => `· ${warning}`),
         ];
-        setSrcDoc(isolatedHtml(remapped.html, storageSnapshot, Boolean(service)));
+        setSrcDoc(isolatedHtml(remapped.html, storageSnapshot, Boolean(service), {entryPath, query: docQuery, fragment: docFragment, scroll: initialScroll}));
         setBaseMeta({ documentTitle, infoLines });
         emitPreviewDiagnostic("log", {
           topic: "html-site",
@@ -1016,7 +1100,7 @@ export function HtmlDocument({
       } catch (error) {
         if (!cancelled) {
           const message = error instanceof Error ? error.message : "资源解析失败";
-          setSrcDoc(isolatedHtml(sourceHtml, storageSnapshot, Boolean(service)));
+          setSrcDoc(isolatedHtml(sourceHtml, storageSnapshot, Boolean(service), {entryPath, query: docQuery, fragment: docFragment, scroll: initialScroll}));
           setBaseMeta({
             documentTitle,
             infoLines: [
@@ -1039,7 +1123,7 @@ export function HtmlDocument({
       cancelled = true;
       for (const url of blobUrls) URL.revokeObjectURL(url);
     };
-  }, [bytes, entryPath, fetchAsset, metadata.sourceBytes, storageNamespace, service]);
+  }, [bytes, entryPath, siteEntryPath, docQuery, docFragment, fetchAsset, metadata.sourceBytes, storageNamespace, service]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -1297,6 +1381,7 @@ export function isolatedHtml(
   source: string,
   storageSnapshot?: Record<string, string> | null,
   serviceEnabled = false,
+  documentLocation?: {entryPath: string; query: string; fragment: string; scroll?: {x: number; y: number}},
 ): string {
   const document_ = new DOMParser().parseFromString(source, "text/html");
   document_.querySelectorAll("base, meta[http-equiv]").forEach((node) => {
@@ -1325,7 +1410,7 @@ export function isolatedHtml(
     "navigate-to 'none'",
   ].join("; ");
   const base = document_.createElement("base");
-  base.href = "https://preview.invalid/";
+  base.href = documentLocation ? virtualFileUrl(documentLocation.entryPath) : "https://preview.invalid/";
   // Opaque sandboxed iframe events never reach the parent. Install the bridge
   // before application scripts so startup logs/errors and the initial DOM are
   // part of the runtime artifact as well.
@@ -1333,7 +1418,10 @@ export function isolatedHtml(
   bridge.textContent = PREVIEW_DIAG_BRIDGE;
   const renderer = document_.createElement("script");
   renderer.textContent = modernScreenshotSource;
-  const injected = [policy, base, renderer, bridge];
+  const locationShim = document_.createElement("script");
+  const locator = JSON.stringify({pathname: documentLocation?.entryPath ?? "", search: documentLocation?.query ?? "", hash: documentLocation?.fragment ?? "", scroll: documentLocation?.scroll}).replace(/</g, "\\u003c");
+  locationShim.textContent = `Object.defineProperty(window,"genehubPreviewLocation",{value:Object.freeze(${locator})});document.addEventListener("DOMContentLoaded",function(){var scroll=window.genehubPreviewLocation.scroll;if(scroll){window.scrollTo(scroll.x,scroll.y);return;}var hash=window.genehubPreviewLocation.hash;if(hash){try{var target=document.getElementById(decodeURIComponent(hash.slice(1)));if(target)target.scrollIntoView();}catch(e){}}});`;
+  const injected = [policy, base, locationShim, renderer, bridge];
   if (serviceEnabled) { const serviceScript = document_.createElement("script"); serviceScript.textContent = serviceBridgeScript(); injected.push(serviceScript); }
   if (storageSnapshot) {
     // Sandboxed frames have no storage of their own: the shim backed by a
@@ -1697,14 +1785,15 @@ const PREVIEW_DIAG_BRIDGE = `(function(){
     event.preventDefault();
     event.stopPropagation();
     var path = parsed.pathname.replace(/^\\/+/, "");
-    if (!path) {
+    if (href.charAt(0) === "#" || !path) {
+      sendRuntime("open-path", "open-path", {url: href});
       if (parsed.hash) {
         var target = document.getElementById(decodeURIComponent(parsed.hash.slice(1)));
         if (target && target.scrollIntoView) target.scrollIntoView();
       }
       return;
     }
-    sendRuntime("open-path", "open-path", { url: parsed.href });
+    sendRuntime("open-path", "open-path", { url: href });
   }, true);
   window.addEventListener("message", function(event){
     if (event.source !== parent) return;
@@ -1817,29 +1906,29 @@ const PREVIEW_DIAG_BRIDGE = `(function(){
       return false;
     }
   }
-  function requestPreviewAsset(url){
+  function requestPreviewAsset(url, options){
+    options = options || {};
+    var method = String(options.method || "GET").toUpperCase();
+    var signal = options.signal;
+    if (signal && signal.aborted) return Promise.reject(new DOMException("Aborted", "AbortError"));
     var requestId = (crypto.randomUUID && crypto.randomUUID()) || String(Date.now()) + Math.random();
     return new Promise(function(resolve, reject){
+      var timer;
+      function cleanup(){clearTimeout(timer);window.removeEventListener("message",onMessage);if(signal)signal.removeEventListener("abort",abort);}
+      function abort(){cleanup();parent.postMessage({source:${JSON.stringify(PREVIEW_ASSET_SOURCE)},requestId:requestId,cancel:true},"*");reject(new DOMException("Aborted","AbortError"));}
       function onMessage(event){
-        if (event.source !== parent) return;
-        var data = event.data;
-        if (!data || data.source !== ${JSON.stringify(PREVIEW_ASSET_SOURCE)} || data.requestId !== requestId) return;
-        window.removeEventListener("message", onMessage);
-        if (!data.ok || !data.body) {
-          reject(new Error(data.message || "asset load failed"));
-          return;
-        }
-        resolve(new Response(data.body, {
-          status: 200,
-          headers: { "Content-Type": data.mediaType || "application/octet-stream" }
-        }));
+        if(event.source!==parent)return;
+        var data=event.data;
+        if(!data||data.source!==${JSON.stringify(PREVIEW_ASSET_SOURCE)}||data.requestId!==requestId)return;
+        cleanup();
+        if(typeof data.status!=="number"||!data.body){reject(new Error(data.message||"asset load failed"));return;}
+        resolve(new Response(method==="HEAD"?null:data.body,{status:data.status,headers:{"Content-Type":data.mediaType||"application/octet-stream","Content-Length":String(data.sourceBytes||0)}}));
       }
-      window.addEventListener("message", onMessage);
-      parent.postMessage({ source: ${JSON.stringify(PREVIEW_ASSET_SOURCE)}, requestId: requestId, url: String(url || "") }, "*");
-      setTimeout(function(){
-        window.removeEventListener("message", onMessage);
-        reject(new Error("asset load timed out"));
-      }, 60000);
+      window.addEventListener("message",onMessage);
+      if(signal)signal.addEventListener("abort",abort,{once:true});
+      timer=setTimeout(function(){cleanup();reject(new Error("asset load timed out"));},60000);
+      // Send the original reference: new URL(raw, origin) would erase ../.
+      parent.postMessage({source:${JSON.stringify(PREVIEW_ASSET_SOURCE)},requestId:requestId,url:String(url||""),method:method},"*");
     });
   }
   // --- Lazy media resolver -------------------------------------------------
@@ -1977,7 +2066,7 @@ const PREVIEW_DIAG_BRIDGE = `(function(){
       var method = text((args[1] && args[1].method) || (input && input.method) || "GET", 20).toUpperCase();
       var rawUrl = (input && input.url) || input;
       var url = safeUrl(rawUrl);
-      var pending = shouldInterceptAsset(rawUrl) ? requestPreviewAsset(rawUrl) : originalFetch.apply(window, args);
+      var pending = shouldInterceptAsset(rawUrl) ? requestPreviewAsset(rawUrl, {method:method, signal:(args[1] && args[1].signal) || (input && input.signal)}) : originalFetch.apply(window, args);
       return pending.then(function(response){
         send("log", { topic: "network", transport: "fetch", method: method, url: url, status: response.status || 0, durationMs: Date.now() - started });
         return response;
@@ -1988,23 +2077,60 @@ const PREVIEW_DIAG_BRIDGE = `(function(){
     };
   }
   if (window.XMLHttpRequest) {
-    var xhrOpen = XMLHttpRequest.prototype.open;
-    var xhrSend = XMLHttpRequest.prototype.send;
-    XMLHttpRequest.prototype.open = function(method, url){
-      this.__genehubMethod = text(method || "GET", 20).toUpperCase();
-      this.__genehubUrl = safeUrl(url);
-      return xhrOpen.apply(this, arguments);
+    var xhrOpen=XMLHttpRequest.prototype.open, xhrSend=XMLHttpRequest.prototype.send, xhrAbort=XMLHttpRequest.prototype.abort;
+    var xhrSetHeader=XMLHttpRequest.prototype.setRequestHeader, xhrGetHeader=XMLHttpRequest.prototype.getResponseHeader, xhrGetHeaders=XMLHttpRequest.prototype.getAllResponseHeaders;
+    function xhrEmit(xhr,type){xhr.dispatchEvent(new Event(type));}
+    function xhrState(xhr,state){xhr.__genehubLocal.readyState=state;xhrEmit(xhr,"readystatechange");}
+    XMLHttpRequest.prototype.open=function(method,url,async){
+      if(this.__genehubLocal && this.__genehubLocal.abort)this.__genehubLocal.abort.abort();
+      this.__genehubLocal=null;
+      if(!shouldInterceptAsset(url))return xhrOpen.apply(this,arguments);
+      if(async===false)throw new DOMException("Synchronous local Preview XHR is unsupported","NotSupportedError");
+      var xhr=this;
+      this.__genehubLocal={method:String(method||"GET").toUpperCase(),url:String(url),readyState:1,status:0,statusText:"",response:null,responseText:"",responseXML:null,responseURL:"",headers:new Headers(),requestHeaders:{},sent:false};
+      ["readyState","status","statusText","response","responseText","responseXML","responseURL"].forEach(function(key){
+        Object.defineProperty(xhr,key,{configurable:true,get:function(){
+          var local=xhr.__genehubLocal;
+          if(!local){var p=XMLHttpRequest.prototype;return Object.getOwnPropertyDescriptor(p,key).get.call(xhr);}
+          if(key==="responseText" && xhr.responseType && xhr.responseType!=="text")throw new DOMException("Response type is not text","InvalidStateError");
+          return local[key];
+        }});
+      });
+      xhrEmit(this,"readystatechange");
     };
-    XMLHttpRequest.prototype.send = function(){
-      var xhr = this;
-      var started = Date.now();
-      xhr.addEventListener("loadend", function(){
-        send(xhr.status >= 400 || xhr.status === 0 ? "error" : "log", {
-          topic: "network", transport: "xhr", method: xhr.__genehubMethod || "GET", url: xhr.__genehubUrl || "",
-          status: xhr.status || 0, durationMs: Date.now() - started
-        });
-      }, { once: true });
-      return xhrSend.apply(this, arguments);
+    XMLHttpRequest.prototype.setRequestHeader=function(name,value){var local=this.__genehubLocal;if(!local)return xhrSetHeader.apply(this,arguments);if(local.readyState!==1||local.sent)throw new DOMException("XHR is not opened","InvalidStateError");local.requestHeaders[name]=value;};
+    XMLHttpRequest.prototype.getResponseHeader=function(name){var local=this.__genehubLocal;return local?(local.readyState>=2?local.headers.get(name):null):xhrGetHeader.apply(this,arguments);};
+    XMLHttpRequest.prototype.getAllResponseHeaders=function(){var local=this.__genehubLocal;if(!local)return xhrGetHeaders.apply(this,arguments);var out="";if(local.readyState>=2)local.headers.forEach(function(value,key){out+=key+": "+value+"\\r\\n";});return out;};
+    XMLHttpRequest.prototype.abort=function(){var local=this.__genehubLocal;if(!local)return xhrAbort.apply(this,arguments);if(local.abort)local.abort.abort();};
+    XMLHttpRequest.prototype.send=function(body){
+      var xhr=this,local=this.__genehubLocal;
+      if(!local)return xhrSend.apply(this,arguments);
+      if(local.readyState!==1||local.sent)throw new DOMException("XHR is not opened","InvalidStateError");
+      local.sent=true;local.abort=new AbortController();var ended=false,timedOut=false;
+      var timer=xhr.timeout?setTimeout(function(){timedOut=true;local.abort.abort();},xhr.timeout):null;
+      xhrEmit(xhr,"loadstart");
+      // Dispatch through the current fetch so registered API routes retain
+      // their service bridge and consent; local files use the same file bridge.
+      window.fetch(local.url,{method:local.method,headers:local.requestHeaders,body:["GET","HEAD"].indexOf(local.method)>=0?undefined:body,signal:local.abort.signal}).then(async function(response){
+        if(xhr.__genehubLocal!==local)return;
+        local.status=response.status;local.statusText=response.statusText;local.headers=response.headers;local.responseURL=local.url;xhrState(xhr,2);
+        var buffer=await response.arrayBuffer();if(local.abort.signal.aborted)throw new DOMException("Aborted","AbortError");
+        var value=new TextDecoder().decode(buffer),type=xhr.responseType;
+        local.responseText=value;
+        if(type==="arraybuffer")local.response=buffer;
+        else if(type==="blob")local.response=new Blob([buffer],{type:response.headers.get("Content-Type")||""});
+        else if(type==="json"){try{local.response=JSON.parse(value);}catch(e){local.response=null;}}
+        else if(type==="document"){local.responseXML=new DOMParser().parseFromString(value,/html/i.test(response.headers.get("Content-Type")||"")?"text/html":"application/xml");local.response=local.responseXML;}
+        else local.response=value;
+        xhrState(xhr,3);xhr.dispatchEvent(new ProgressEvent("progress",{lengthComputable:true,loaded:buffer.byteLength,total:buffer.byteLength}));
+        xhrState(xhr,4);ended=true;clearTimeout(timer);xhrEmit(xhr,"load");xhrEmit(xhr,"loadend");
+      }).catch(function(error){
+        clearTimeout(timer);if(ended||xhr.__genehubLocal!==local)return;ended=true;
+        local.status=0;local.statusText="";local.response=null;local.responseText="";xhrState(xhr,4);
+        xhrEmit(xhr,timedOut?"timeout":local.abort.signal.aborted?"abort":"error");xhrEmit(xhr,"loadend");
+        if(local.abort.signal.aborted)local.readyState=0;
+        send("error",{topic:"network",transport:"xhr",url:safeUrl(local.url),message:text(error,500)});
+      });
     };
   }
   ["click", "input", "change"].forEach(function(type){
@@ -2047,6 +2173,11 @@ const PREVIEW_DIAG_BRIDGE = `(function(){
       subtree: true, childList: true, attributes: true, characterData: true
     });
   } catch (e) {}
+  if (new URL(document.baseURI).hostname !== "preview.invalid") {
+    send("error", {topic: "preview-platform-policy", message: "Preview base URL was blocked by the parent Content-Security-Policy. Update the workbench base-uri policy."});
+    document.addEventListener("DOMContentLoaded", function(){ var alert=document.createElement("p"); alert.setAttribute("role","alert"); alert.textContent="平台预览策略阻止了资源基址，请更新工作台 CSP 的 base-uri 配置。"; document.body.prepend(alert); });
+    window.stop();
+  }
   send("log", { topic: "html-preview-iframe", phase: "bridge-ready" });
 })();`;
 

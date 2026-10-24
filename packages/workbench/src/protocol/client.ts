@@ -625,6 +625,9 @@ export class Client {
     if (representation !== "original" && !this.identity?.features?.includes("asset.preview.image.v1")) {
       throw new DataPlaneError("当前设备不支持图片缩略图预览");
     }
+    if (isMachinePath(path) && !this.identity?.features?.includes("asset.preview.machine-file.v1")) {
+      throw new DataPlaneError("当前设备尚不支持机器绝对路径预览，请更新源设备或使用原项目链接");
+    }
     const remaining = deadline - this.now();
     if (remaining <= 0) throw new ClientRequestTimeoutError("asset preview response head timed out");
     const endpoint = this.requireReadyEndpoint();
@@ -642,7 +645,9 @@ export class Client {
       version: DATA_PLANE_VERSION,
       method: "asset.preview",
       metadata: {
-        source: { kind: "workspaceFile", workspaceHandle, path },
+        source: isMachinePath(path)
+          ? { kind: "machineFile", absolutePath: path }
+          : { kind: "workspaceFile", workspaceHandle, path },
         ...(representation !== "original" ? { representation } : {}),
         diagnosticId: requestId,
       },
@@ -2473,7 +2478,7 @@ function previewErrorMessage(error: AssetPreviewError, sourceBytes?: number): st
     case "notFound":
       return "找不到这个文件";
     case "forbidden":
-      return "这个路径不在当前工作区内";
+      return "当前连接的可访问目录或分享授权不包含这个文件";
     case "unsupported":
       return "这种文件暂不支持预览";
     case "tooLarge":
@@ -2488,3 +2493,5 @@ function previewErrorMessage(error: AssetPreviewError, sourceBytes?: number): st
 function rtcAvailableHere(): boolean {
   return typeof globalThis.RTCPeerConnection === "function";
 }
+
+function isMachinePath(path: string): boolean { return path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path); }

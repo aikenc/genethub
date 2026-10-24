@@ -1,4 +1,4 @@
-//! Agent-friendly, read-only CLI commands.
+//! Agent-friendly queries and explicit catalogue/directory configuration.
 //!
 //! Every dynamic answer comes from the selected daemon RPC. The commands in
 //! this module are deterministic reads; target selection and remote transport
@@ -16,7 +16,7 @@ use super::output::{self, CliFailure, CLI_SCHEMA};
 use super::rpc::{ConnectError, Refusal, Rpc, RpcError};
 use super::target::{self, Routing, Selection};
 
-const COMMAND_NAMES: [&str; 88] = [
+const COMMAND_NAMES: [&str; 92] = [
     "schema",
     "context",
     "capabilities",
@@ -32,6 +32,10 @@ const COMMAND_NAMES: [&str; 88] = [
     "hook.list",
     "process.kill",
     "process.killAll",
+    "file-access.list",
+    "file-access.configure",
+    "workspace.open",
+    "workspace.add-root",
     "workspace.list",
     "workspace.show",
     "workspace.remove",
@@ -180,6 +184,18 @@ enum Query {
         workspace_id: String,
         id: String,
     },
+    FileAccessList,
+    FileAccessConfigure {
+        expected_revision: String,
+        directories: Vec<String>,
+    },
+    WorkspaceOpen {
+        root: String,
+    },
+    WorkspaceAddRoot {
+        workspace_id: String,
+        root: String,
+    },
     WorkspaceList,
     WorkspaceShow {
         workspace_id: String,
@@ -262,6 +278,9 @@ fn parse(args: &[String]) -> Result<Query, CliFailure> {
         "context" => no_args(rest, Query::Context, "context"),
         "capabilities" => no_args(rest, Query::Capabilities, "capabilities"),
         "preview" => match rest {
+            [verb, action, id] if verb == "feedback" && action == "show" => {
+                Ok(Query::PreviewFeedback {workspace_id: String::new(), id: id.clone()})
+            }
             [verb, action, id, flag, workspace]
                 if verb == "feedback" && action == "show" && flag == "--workspace" =>
             {
@@ -271,10 +290,22 @@ fn parse(args: &[String]) -> Result<Query, CliFailure> {
                 })
             }
             _ => Err(CliFailure::invalid_args(
-                "usage: genet preview feedback show <id> --workspace <workspace-id>",
+                "usage: genet preview feedback show <id> [--workspace <workspace-id>]",
             )),
         },
         "workspace" => parse_workspace(rest),
+        "file-access" => match rest {
+            [verb] if verb == "list" => Ok(Query::FileAccessList),
+            [verb, flag, revision, directories @ ..] if verb == "configure" && flag == "--expected-revision" => {
+                let mut paths = Vec::new();
+                for pair in directories.chunks(2) {
+                    if pair.len() != 2 || pair[0] != "--directory" { return Err(CliFailure::invalid_args("use --directory <absolute-path> for each additional directory")); }
+                    paths.push(pair[1].clone());
+                }
+                Ok(Query::FileAccessConfigure {expected_revision: revision.clone(), directories: paths})
+            }
+            _ => Err(CliFailure::invalid_args("usage: genet file-access list | configure --expected-revision <revision> [--directory <path>]...")),
+        },
         "session" => parse_session(rest),
         _ => Err(CliFailure::invalid_args(format!(
             "unknown read-only command: {command}"
@@ -312,6 +343,11 @@ fn parse_schema(args: &[String]) -> Result<Query, CliFailure> {
 fn parse_workspace(args: &[String]) -> Result<Query, CliFailure> {
     match args {
         [verb] if verb == "list" => Ok(Query::WorkspaceList),
+        [verb, root] if verb == "open" => Ok(Query::WorkspaceOpen { root: root.clone() }),
+        [verb, workspace_id, root] if verb == "add-root" => Ok(Query::WorkspaceAddRoot {
+            workspace_id: workspace_id.clone(),
+            root: root.clone(),
+        }),
         [verb, workspace_id] if verb == "show" && !workspace_id.trim().is_empty() => {
             Ok(Query::WorkspaceShow {
                 workspace_id: workspace_id.clone(),
@@ -650,6 +686,44 @@ async fn execute(
                     Ok(("preview.feedback", json!({"feedback":record})))
                 }
                 other => Err(unexpected_reply("preview feedback", &other)),
+            }
+        }
+        Query::FileAccessList | Query::FileAccessConfigure { .. } => {
+            let rpc = connect_selected(selection).await?;
+            let (kind, request) = match command {
+                Query::FileAccessList => ("file-access.list", Request::FileAccessList),
+                Query::FileAccessConfigure {
+                    expected_revision,
+                    directories,
+                } => (
+                    "file-access.configure",
+                    Request::FileAccessConfigure {
+                        expected_revision,
+                        additional_directories: directories,
+                    },
+                ),
+                _ => unreachable!(),
+            };
+            match rpc.call(request).await.map_err(rpc_error)? {
+                Reply::FileAccess(info) => Ok((kind, json!(info))),
+                reply => Err(unexpected_reply("file access directories", &reply)),
+            }
+        }
+        Query::WorkspaceOpen { .. } | Query::WorkspaceAddRoot { .. } => {
+            let rpc = connect_selected(selection).await?;
+            let (kind, request) = match command {
+                Query::WorkspaceOpen { root } => {
+                    ("workspace.open", Request::WorkspaceOpen { root })
+                }
+                Query::WorkspaceAddRoot { workspace_id, root } => (
+                    "workspace.add-root",
+                    Request::WorkspaceAddRoot { workspace_id, root },
+                ),
+                _ => unreachable!(),
+            };
+            match rpc.call(request).await.map_err(rpc_error)? {
+                Reply::Workspace(workspace) => Ok((kind, json!({"workspace":workspace}))),
+                reply => Err(unexpected_reply("workspace registration", &reply)),
             }
         }
         Query::WorkspaceList => {
@@ -1214,7 +1288,7 @@ fn schema_data(command: Option<&str>) -> Value {
 
 fn command_schema(name: &str) -> Value {
     let (synopsis, requires_daemon, input) = match name {
-        "preview.feedback" => ("genet preview feedback show <id> --workspace <workspace-id>",true,object_input(json!({"id":{"type":"string"},"workspaceId":{"type":"string"}}), &["id","workspaceId"])) ,
+        "preview.feedback" => ("genet preview feedback show <id> [--workspace <workspace-id>]",true,object_input(json!({"id":{"type":"string"},"workspaceId":{"type":"string"}}), &["id"])) ,
         "client.list" => ("genet client list [--machine <coordinator>]", true, object_input(json!({}), &[])),
         "client.attach" => ("genet client attach <clientId> --label <operator> [--machine <coordinator>]", true, object_input(json!({"clientId":{"type":"string"},"label":{"type":"string"}}), &["clientId","label"])),
         "client.eval" => (
@@ -1279,6 +1353,10 @@ fn command_schema(name: &str) -> Value {
             true,
             object_input(json!({}), &[]),
         ),
+        "file-access.list" => ("genet file-access list", true, object_input(json!({}), &[])),
+        "file-access.configure" => ("genet file-access configure --expected-revision <revision> [--directory <path>]...", true, object_input(json!({"expectedRevision":{"type":"string"},"directories":{"type":"array","items":{"type":"string"}}}), &["expectedRevision"])),
+        "workspace.open" => ("genet workspace open <path>", true, object_input(json!({"root":{"type":"string"}}), &["root"])),
+        "workspace.add-root" => ("genet workspace add-root <id> <path>", true, object_input(json!({"workspaceId":{"type":"string"},"root":{"type":"string"}}), &["workspaceId","root"])),
         "workspace.list" => ("genet workspace list", true, object_input(json!({}), &[])),
         "workspace.show" => (
             "genet workspace show <id>",
@@ -2269,6 +2347,7 @@ pub fn reply_kind(reply: &Reply) -> &'static str {
         Reply::Pty { .. } => "pty",
         Reply::Processes(_) => "background processes",
         Reply::PreviewFeedback(_) => "preview feedback",
+        Reply::FileAccess(_) => "fileAccess",
         Reply::Ack => "ack",
     }
 }
@@ -2622,6 +2701,7 @@ mod tests {
         assert!(mismatch.message.contains("returned sessions"));
 
         let summary = SessionSummary {
+            cwd: None,
             interaction_summary: None,
             work_summary: None,
             input_summary: None,

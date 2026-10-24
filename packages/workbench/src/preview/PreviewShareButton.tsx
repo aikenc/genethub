@@ -3,7 +3,7 @@ import { Share2, ExternalLink } from "lucide-react";
 import type { Client, ProtocolDial } from "../protocol/client";
 import type { PreviewShareLink } from "@genehub/proto";
 import { previewFeedback } from "./fileFeedback";
-import { assetPreviewUrl, type AssetPreviewLocation } from "./url";
+import { assetPreviewUrl, isAbsoluteFilePath, type AssetPreviewLocation } from "./url";
 export type PreviewShareCredential = {
     token: string;
     redeemUrl: string;
@@ -36,7 +36,7 @@ export async function redeemPreviewShare(share: PreviewShareCredential, signal?:
 export function previewShareUrl(source: AssetPreviewLocation, link: PreviewShareLink): string {
     const redeem = new URL(link.redeemUrl);
     const base = redeem.pathname.slice(0, -"api/preview-shares/redeem".length);
-    const url = new URL(assetPreviewUrl(source.deviceHandle, source.workspaceHandle, source.path, redeem.origin, base));
+    const url = new URL(assetPreviewUrl(source.deviceHandle, source.workspaceHandle, source.path, redeem.origin, base, source));
     url.hash = new URLSearchParams({ genehubPreviewShare: link.token, genehubPreviewRedeem: link.redeemUrl }).toString();
     return url.toString();
 }
@@ -44,7 +44,7 @@ export async function mintPreviewShare(client: Client, source: AssetPreviewLocat
     url: string;
     link: PreviewShareLink;
 }> {
-    const result = await previewFeedback(client, source.workspaceHandle, { kind: "share", path: source.path, ttlSeconds, resources: Array.from(resources) });
+    const result = await previewFeedback(client, isAbsoluteFilePath(source.path) ? "" : source.workspaceHandle, { kind: "share", path: source.path, ttlSeconds, resources: Array.from(resources) });
     if (result.kind !== "share")
         throw new Error("设备未确认分享授权");
     return { url: previewShareUrl(source, result.data), link: result.data };
@@ -92,7 +92,7 @@ export function PreviewShareButton({ client, source, defaultTtl = 3600, label = 
       {!quick ? <label>授权时间 <select aria-label="分享授权时间" value={ttl} onChange={e => { setTtl(Number(e.target.value)); setValue(null); setCopied(false); }} className="rounded border border-line bg-bg p-1"><option value={3600}>1h</option><option value={86400}>1d</option><option value={604800}>7d</option></select></label> : <p>链接授权时间：1h</p>}
       {value ? <><p className="mt-2 text-xs">有效至 {new Date(value.link.expiresAtMs).toLocaleString()}</p><textarea aria-label="预览分享链接" readOnly value={value.url} className="mt-2 h-24 w-full rounded border border-line bg-bg p-2 text-xs"/><p className="mt-2 text-xs text-muted">访问者可以添加批注和提交运行日志，提交后复制反馈传回。</p></> : null}
       {problem ? <p role="alert" className="mt-2 text-danger">{problem}</p> : null}
-      <footer className="mt-3 flex justify-end gap-2">{value ? <><button className="rounded border border-line px-3 py-2" onClick={() => { void previewFeedback(client, source.workspaceHandle, { kind: "revoke", shareId: value.link.shareId }).then(() => { setValue(null); setProblem("分享已撤销"); }).catch(e => setProblem(String(e))); }}>撤销分享</button><button className="rounded bg-accent px-3 py-2 text-white" onClick={() => { if (!navigator.clipboard) {
+      <footer className="mt-3 flex justify-end gap-2">{value ? <><button className="rounded border border-line px-3 py-2" onClick={() => { void previewFeedback(client, isAbsoluteFilePath(source.path) ? "" : source.workspaceHandle, { kind: "revoke", shareId: value.link.shareId }).then(() => { setValue(null); setProblem("分享已撤销"); }).catch(e => setProblem(String(e))); }}>撤销分享</button><button className="rounded bg-accent px-3 py-2 text-white" onClick={() => { if (!navigator.clipboard) {
             setProblem("请选择上面的链接手动复制");
             return;
         } void navigator.clipboard.writeText(value.url).then(() => setCopied(true)).catch(() => setProblem("复制失败，请选择上面的链接手动复制")); }}>{copied ? "已复制" : "复制链接"}</button></> : <button disabled={busy} className="rounded bg-accent px-3 py-2 text-white disabled:opacity-50" onClick={() => void generate(quick ? 3600 : ttl)}>{busy ? "正在生成…" : "生成链接"}</button>}</footer>

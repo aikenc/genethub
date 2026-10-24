@@ -169,7 +169,7 @@ static PREVIEW_SNAPSHOT_BUDGET: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
 #[derive(Debug)]
 pub(crate) enum PreviewSource {
-    File(std::fs::File),
+    File(crate::fs_cap::PreviewReader),
     Snapshot {
         bytes: std::io::Cursor<Vec<u8>>,
         _budget: OwnedSemaphorePermit,
@@ -245,31 +245,29 @@ pub async fn preview(
     relative_path: &str,
 ) -> std::result::Result<PreviewFile, PreviewFailure> {
     validate_preview_path(relative_path)?;
-    let directory = workspace_dir(root).map_err(|_| PreviewFailure::Forbidden)?;
     let relative = Path::new(relative_path);
-    let file = directory.open(relative).map_err(map_preview_io)?;
-    let before = file.metadata().map_err(map_preview_io)?;
-    if !before.is_file() {
+    let (mut source, source_size, regular) =
+        crate::fs_cap::open_preview(root, relative).map_err(map_preview_io)?;
+    if !regular {
         return Err(PreviewFailure::Unsupported);
     }
-    if before.len() > genehub_proto::MAX_PREVIEW_SOURCE_BYTES as u64 {
+    if source_size > genehub_proto::MAX_PREVIEW_SOURCE_BYTES as u64 {
         return Err(PreviewFailure::TooLarge {
-            source_bytes: before.len(),
+            source_bytes: source_size,
         });
     }
-    let mut source = file.into_std();
-    let snapshot_budget = if before.len() <= PREVIEW_SNAPSHOT_FILE_BYTES as u64 {
+    let snapshot_budget = if source_size <= PREVIEW_SNAPSHOT_FILE_BYTES as u64 {
         PREVIEW_SNAPSHOT_BUDGET
             .get_or_init(|| Arc::new(Semaphore::new(PREVIEW_SNAPSHOT_BUDGET_BYTES)))
             .clone()
-            .try_acquire_many_owned(before.len().max(1) as u32)
+            .try_acquire_many_owned(source_size.max(1) as u32)
             .ok()
     } else {
         None
     };
     let mut snapshot = snapshot_budget
         .as_ref()
-        .map(|_| Vec::with_capacity(before.len() as usize));
+        .map(|_| Vec::with_capacity(source_size as usize));
     let mut hasher = Sha256::new();
     let mut probe = PreviewProbe::default();
     let mut step = vec![0u8; PREVIEW_STEP_BYTES];
@@ -283,7 +281,7 @@ pub async fn preview(
         if read == 0 {
             break;
         }
-        if snapshot.is_some() && source_bytes + read > before.len() as usize {
+        if snapshot.is_some() && source_bytes + read > source_size as usize {
             return Err(PreviewFailure::SourceChanged);
         }
         hasher.update(&step[..read]);
@@ -303,7 +301,7 @@ pub async fn preview(
     // complete file into a prefix. Length catches the portable, meaningful
     // race; the hash taken as it was read makes the successful response version
     // exact.
-    if source_bytes as u64 != before.len() {
+    if source_bytes as u64 != source_size {
         return Err(PreviewFailure::SourceChanged);
     }
     let (kind, media_type) = preview_type(relative, probe.prefix(), probe.is_text())?;
@@ -327,6 +325,8 @@ pub async fn preview(
             media_type: media_type.to_string(),
             source_bytes: source_bytes as u64,
             version,
+            absolute_path: None,
+            storage_scope: None,
             representation: None,
             width: None,
             height: None,
@@ -644,10 +644,6 @@ fn copy_recursive(directory: &Dir, from: &Path, to: &Path) -> Result<()> {
         return Ok(());
     }
     anyhow::bail!("unsupported file type: {}", from.display())
-}
-
-fn workspace_dir(root: &Path) -> Result<crate::fs_cap::Dir> {
-    crate::fs_cap::open_workspace_root(root)
 }
 
 fn workspace_relative(root: &Path, path: &Path) -> Result<PathBuf> {

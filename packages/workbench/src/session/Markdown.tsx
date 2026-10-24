@@ -264,6 +264,7 @@ function markdownUrlTransform(value: string): string {
 }
 
 export type MarkdownArtifactProps = ArtifactResolveContext & {
+  onNavigate?: (path: string, query?: string, fragment?: string) => void;
   /** Session that owns links rendered in this Markdown. */
   sessionId?: string;
   /** Session-inlined thumbs; tiles use these instead of fetching the original. */
@@ -351,6 +352,7 @@ function AnnotationBlock({
   ) : null;
   const shared = {
     className: classNames,
+    ...( /^h[1-6]$/.test(tag) ? {id: headingId(children)} : {}),
     "data-md-start": clickable ? start : undefined,
     "data-md-end": clickable ? end : undefined,
     onClick,
@@ -366,6 +368,12 @@ function AnnotationBlock({
   if (tag === "pre") return <div {...shared}>{children}{markButton}</div>;
   if (tag === "table") return <table {...shared}>{children}</table>;
   return <p {...shared}>{children}{markButton}</p>;
+}
+
+function headingId(children: ReactNode): string {
+  const plain = (node: ReactNode): string => typeof node === "string" || typeof node === "number" ? String(node)
+    : Array.isArray(node) ? node.map(plain).join("") : node && typeof node === "object" && "props" in node ? plain((node as {props: {children?: ReactNode}}).props.children) : "";
+  return plain(children).trim().toLowerCase().replace(/[^\p{L}\p{N}_\-\s]/gu, "").replace(/\s+/g, "-");
 }
 
 function MarkdownParagraph({ children, node }: MarkdownChildren & { node?: PositionedNode }) {
@@ -460,14 +468,17 @@ function MarkdownLink({ href, children }: { href?: string; children?: ReactNode 
   if (
     resolved.kind === "preview" &&
     artifact?.deviceHandle &&
-    artifact.workspaceHandle
+    (artifact.workspaceHandle || artifact.machineFiles)
   ) {
     const open = (event: { preventDefault: () => void }) => {
       event.preventDefault();
+      if (artifact.onNavigate) { artifact.onNavigate(resolved.path, resolved.docQuery, resolved.docFragment); return; }
       openPreviewFloat({
         deviceHandle: artifact.deviceHandle,
         workspaceHandle: artifact.workspaceHandle,
         path: resolved.path,
+        docQuery: resolved.docQuery,
+        docFragment: resolved.docFragment,
         sessionId: artifact.sessionId ?? null,
       });
     };
@@ -753,7 +764,7 @@ function MarkdownImage({
     resolved.kind === "preview" &&
     previewPath &&
     artifact?.deviceHandle &&
-    artifact.workspaceHandle
+    (artifact.workspaceHandle || artifact.machineFiles)
   ) {
     return (
       <button

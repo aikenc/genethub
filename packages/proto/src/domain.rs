@@ -1112,6 +1112,11 @@ pub struct PreviewReviewDraft {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct SessionSummary {
+    /// Actual native Agent working directory captured by this Session. Older
+    /// peers omit it; clients then retain the legacy project-root resolver.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cwd: Option<String>,
     /// Independent of turn status: a PM may process input while a question remains.
     /// Absent on older peers; an empty summary means there is no pending request.
     #[serde(default, skip_serializing_if = "Option::is_none")]

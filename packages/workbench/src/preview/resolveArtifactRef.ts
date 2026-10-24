@@ -1,4 +1,4 @@
-import { assetPreviewUrl, parseAssetPreviewPath, previewPath } from "./url";
+import { assetPreviewUrl, parseAssetPreviewPath, previewPath, absoluteFilePath, isAbsoluteFilePath } from "./url";
 
 export type ArtifactFolder = {
   root: string;
@@ -9,6 +9,8 @@ export type ArtifactResolveContext = {
   deviceHandle: string;
   workspaceHandle: string;
   folders: ArtifactFolder[];
+  machineFiles?: boolean;
+  cwd?: string;
   /**
    * Root-qualified path of the current Markdown/HTML document
    * (`r_handle/dir/file.md`). Relative refs resolve against its directory.
@@ -19,7 +21,7 @@ export type ArtifactResolveContext = {
 };
 
 export type ResolvedArtifactRef =
-  | { kind: "preview"; path: string; href: string }
+  | { kind: "preview"; path: string; href: string; docQuery?: string; docFragment?: string }
   | { kind: "external"; href: string }
   | { kind: "blocked" };
 
@@ -54,17 +56,27 @@ export function resolveArtifactRef(
     return { kind: "external", href: value.startsWith("//") ? `https:${value}` : value };
   }
 
-  if (!context?.deviceHandle || !context.workspaceHandle || context.folders.length === 0) {
+  if (!context?.deviceHandle || (!context.workspaceHandle && !context.machineFiles) || (context.folders.length === 0 && !context.documentPath)) {
     return { kind: "blocked" };
   }
 
-  const filePath = resolveWorkspacePath(value, context);
+  const hashAt = value.indexOf("#");
+  const withoutHash = hashAt < 0 ? value : value.slice(0, hashAt);
+  const queryAt = withoutHash.indexOf("?");
+  const pathValue = queryAt < 0 ? withoutHash : withoutHash.slice(0, queryAt);
+  const docQuery = queryAt < 0 ? "" : withoutHash.slice(queryAt);
+  const docFragment = hashAt < 0 ? "" : value.slice(hashAt);
+  let decodedPath: string;
+  try { decodedPath = /^file:/i.test(pathValue) ? pathValue : decodeURIComponent(pathValue); }
+  catch { return {kind: "blocked"}; }
+  const filePath = resolveWorkspacePath(decodedPath, context);
   if (!filePath) return { kind: "blocked" };
   try {
     return {
       kind: "preview",
       path: filePath,
-      href: assetPreviewUrl(context.deviceHandle, context.workspaceHandle, filePath, origin),
+      href: documentLocatorUrl(assetPreviewUrl(context.deviceHandle, context.workspaceHandle, filePath, origin), docQuery, docFragment),
+      ...(docQuery ? {docQuery} : {}), ...(docFragment ? {docFragment} : {}),
     };
   } catch {
     return { kind: "blocked" };
@@ -76,40 +88,28 @@ function rebindPreviewUrl(
   context: ArtifactResolveContext | null | undefined,
   origin: string,
 ): ResolvedArtifactRef | null {
-  let pathname: string | null = null;
-  try {
-    if (/^https?:\/\//i.test(value)) {
-      pathname = new URL(value).pathname;
-    } else if (value.includes("/assets/preview/v2/")) {
-      pathname = value.startsWith("/") ? value : `/${value}`;
-    }
-  } catch {
-    return null;
-  }
-  if (!pathname) return null;
-  // Accept any deployment base (`/`, `/console/`, …): locate the stable marker.
-  const marker = "/assets/preview/v2/";
-  const idx = pathname.indexOf(marker);
-  if (idx < 0) return null;
-  const parsed = parseAssetPreviewPath(pathname.slice(idx), "/");
+  let url: URL;
+  try { url = new URL(value, origin); } catch { return null; }
+  const match = url.pathname.match(/\/assets\/preview\/v[23]\//);
+  if (!match || match.index === undefined) return null;
+  const parsed = parseAssetPreviewPath(url.pathname.slice(match.index), "/", url.search);
   if (!parsed) return null;
-  if (!context?.deviceHandle || !context.workspaceHandle) {
-    return { kind: "external", href: value };
+  // A machine locator already identifies its machine. Never rebind it onto
+  // the currently selected device and accidentally read a different file.
+  if (isAbsoluteFilePath(parsed.path)) {
+    if (!context || parsed.deviceHandle !== context.deviceHandle) return {kind: "external", href: value};
+    return {kind: "preview", path: parsed.path, href: documentLocatorUrl(assetPreviewUrl(parsed.deviceHandle, "", parsed.path, origin), parsed.docQuery ?? "", parsed.docFragment ?? ""),
+      ...(parsed.docQuery ? {docQuery: parsed.docQuery} : {}), ...(parsed.docFragment ? {docFragment: parsed.docFragment} : {})};
   }
-  try {
-    return {
-      kind: "preview",
-      path: parsed.path,
-      href: assetPreviewUrl(
-        context.deviceHandle,
-        context.workspaceHandle,
-        parsed.path,
-        origin,
-      ),
-    };
-  } catch {
-    return { kind: "blocked" };
-  }
+  if (!context?.deviceHandle || !context.workspaceHandle) return {kind: "external", href: value};
+  return {kind: "preview", path: parsed.path, href: assetPreviewUrl(context.deviceHandle, context.workspaceHandle, parsed.path, origin)};
+}
+
+function documentLocatorUrl(href: string, query: string, fragment: string): string {
+  const url = new URL(href);
+  if (query) url.searchParams.set("docQuery", query);
+  if (fragment) url.searchParams.set("docFragment", fragment);
+  return url.toString();
 }
 
 /** Resolve a workspace-relative, root-qualified, or absolute filesystem path. */
@@ -118,6 +118,18 @@ export function resolveWorkspacePath(
   context: ArtifactResolveContext,
 ): string | null {
   const stripped = stripFileUrl(value);
+  if (context.machineFiles) {
+    try {
+      const normalized = stripped.replace(/\\/g, "/");
+      if (isAbsoluteFilePath(normalized)) return absoluteFilePath(normalized);
+      const folder = context.folders.find(folder => normalized.startsWith(`${folder.rootHandle}/`));
+      if (folder) return joinFilesystem(folder.root, normalized.slice(folder.rootHandle.length + 1));
+      const base = context.documentPath && isAbsoluteFilePath(context.documentPath)
+        ? context.documentPath.split("/").slice(0, -1).join("/")
+        : context.cwd ?? context.folders[0]?.root;
+      return base ? joinFilesystem(base, normalized) : null;
+    } catch { return null; }
+  }
   const absolute = matchAbsolutePath(stripped, context.folders);
   if (absolute) return absolute;
 

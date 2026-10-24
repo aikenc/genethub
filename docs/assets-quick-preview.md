@@ -1,296 +1,84 @@
-# 轻量 Asset Preview v4
+# Asset Preview：机器文件与站点导航
 
-> 状态：v4.4。在 v4 单文件 Preview 与 E2EE 边界上，聊天/文档 Markdown 于渲染期绑定 Preview URL（不再向 Agent 注入部署前缀），HTML Viewer 重映射 CSS/JS/module 与站点根路径资源，并把 iframe 内相对 fetch/import 转回 `asset.preview`。新 client/daemon 在认证握手中为有限 Preview 协商完整 64 MiB 授信，持续传输由 TCP/socket 背压而不是应用层 RTT 回包推进；预览信息面板展示本次入口文件的五项实测传输数据。单文件上限仍为 64 MiB，含 WASM/二进制。真 WebRoot HTTP origin 与公开 Assets Gateway 仍不在本版本内。
+Asset Preview 读取源机器上的普通文件。新版文件定位使用稳定机器 ID 和绝对路径；项目仍负责 Agent cwd、Git、会话与项目管理。目录名单不是凭证，所有读取仍经过已认证的 E2EE peer。
 
-## 1. 产品结论
+## 定位与授权
 
-Asset Preview 是给人和 Agent 快速打开 workspace 文件的轻量查看器：
+新版 locator：`/assets/preview/v3/<machineId>?path=<encoded-absolute-path>`，部署子路径由前端 builder 处理。`docQuery`、`docFragment` 单独携带文档参数和锚点，URL hash 留给分享和 popout 的连接材料。不要手拼这些 URL；Agent 分享普通入口链接，Workbench 在渲染时绑定。
 
-- 唯一入口是 daemon 已注册项目中的 **`<rootHandle>/<recursive-relative-path>`**。同一物理目录在 folder 和任意 `.code-workspace` 项目中复用同一个 device-local root handle；folder label 只用于显示。
-- URL 明文包含稳定 device handle、workspace handle 和相对路径；路径不是秘密，也不是授权凭证。
-- 同一个 URL 可在另一台已配对电脑或手机浏览器打开。查看设备不需要安装 daemon；它只需能够加载工作台并持有本地配对凭证，或已登录有权访问该设备的托管账号。
-- 文件由资源所在设备的 daemon 读取，经已有 E2EE Data Plane 返回；Fabric Relay 不解析或解密内部 Preview request、MIME 与文件 bytes。URL locator 本身是明文产品地址，工作台 HTTPS 终止层会看到它，这与“不隐藏设备路径”的产品取舍一致。
-- 只返回完整原文件。源文件 `<= 64 MiB` 才成功，超过直接提示无法预览。
-- 支持图片、Markdown、任意有效 UTF-8 且不含 NUL 的文本、HTML、MP4/WebM、WASM，以及其他二进制资源；已知源码/配置格式尽可能语法着色。
-- HTML 可运行 inline/HTTPS/module script、编译 WASM，并访问 HTTPS/WSS 网络，但位于无同源权限的 sandbox iframe 中，不能取得工作台权限。
-- 点击文件默认全屏预览，可最小化成可拖动、靠边停靠的微信式浮窗；浮窗可「新窗口打开」深链页。HTML 多文件通过内联 CSS/JS/module 与 data: 媒体嵌入，相对 fetch/import 由父页转发；真 WebRoot HTTP origin 仍不在本版本内。
-- `file.read` 已删除，文件查看器统一使用 Preview；写文件仍是独立业务能力。
+旧 `/assets/preview/v2/<device>/<workspace>/<rootHandle>/<relative-path>` 链接与 `workspaceFile` source 继续读取。旧映射缺失直接失败，不按文件名搜索磁盘。新 client 仅在源设备声明 `asset.preview.machine-file.v1` 后发送机器文件请求；旧设备显示明确的不兼容提示。
 
-v4 明确不做缩略图、摘要、截断、转码、poster、probe、Range、缓存、上传 bytes、HTTP URL、Git object、多文件 HTML 目录映射、Service Worker 或 daemon HTTPS。Agent artifact 仍是 workspace 普通文件；本版本只让 Agent 按统一 locator 输出链接，没有新增 artifact 存储。
+当前真实运行验证为 Linux Host/WASI 与 Chromium。Windows 保留 v2，不宣告或接受 machine-file v3，待真实 Windows Host 的盘符、reparse 与撤权验收后开放；macOS 和 iPhone 尚无本轮实机验收证据。
 
-## 2. 规范 URL
+有效可访问目录实时派生自：
 
-```text
-https://<workbench-origin>/<deployment-base>/assets/preview/v2/
-  <deviceHandle>/<projectHandle>/<rootHandle>/<recursive-relative-path>
+- 所有未移除项目的 `folders[].root`；同目录的多个项目登记各自保留来源。
+- 机器配置 `fileAccess.additionalDirectories`。
+
+设置页“可访问目录”展示两类来源，补充目录按行配置。自动目录不复制进手动配置；移除最后一个来源后，后续读取失去授权。父目录与近似前缀目录按路径组件区分。配置使用目录列表 revision 做 CAS，冲突时先重新加载。
+
+连接的 `files` 权限、workspace-scoped admission 和分享 manifest 与目录名单取交集。旧项目连接只能读其项目目录；分享只能读该分享明确覆盖的文件，不获得其他项目或补充目录的访问权。源机器取自已认证 peer，请求不能替换目标机器。
+
+公开 RPC：
+
+```json
+{"type":"fileAccess.list"}
+{"type":"fileAccess.configure","payload":{"expectedRevision":"<revision>","additionalDirectories":["/srv/reports"]}}
 ```
 
-例子：
+公开 CLI（使用当前会话绑定的 `$GENEHUB_CLI`）：
 
-```text
-https://app.example/assets/preview/v2/dev_7k2/ws_docs/r_a81f/docs/architecture.png
-https://app.example/console/assets/preview/v2/dev_7k2/ws_docs/r_a81f/reports/result.md
+```sh
+"$GENEHUB_CLI" file-access list
+"$GENEHUB_CLI" file-access configure --expected-revision <revision> --directory /srv/reports
+"$GENEHUB_CLI" workspace open /srv/project/project.code-workspace
+"$GENEHUB_CLI" workspace add-root <workspace-id> /srv/another-root
+"$GENEHUB_CLI" preview feedback show <machine-feedback-id>
 ```
 
-真实 URL 不换行。`deployment-base` 来自前端构建的 base path，因此根部署和 `/console/` 等子路径部署都能 deep-link。
+配置和登记需 `settings` 权限。权限拒绝不能通过改配置文件、切换 CLI 身份或伪造 proof 绕过。先用 `capabilities`、`schema <command>` 和 `context` 查明真实能力。只新增一个根时使用 add-root，保留项目 ID、历史及其他根。
 
-URL 中的 `/v2/` 是 locator contract 版本，不跟随 Viewer UI 迭代。旧 `/v1/` 把可变 folder label 当作多根前缀，不能安全解释为新 locator，因此没有运行时 fallback。
+## 数据平面
 
-这三个 locator 都是可见的：
+旧请求不变，新请求增加一种 source：
 
-- `deviceHandle`：daemon 拥有的稳定设备句柄；不是用户输入的展示名。
-- `projectHandle`：该连接可解析的项目 locator。直接打开 folder 与打开 `.code-workspace` 使用不同、可恢复的持久 ID；workspace-scoped hosted route 可使用 Control 分配的外部 handle。
-- `rootHandle`：daemon 配置中持久化的随机 device-local 目录句柄。映射独立于项目，同一 canonical directory 在该 daemon 的配置生命周期内复用同一 handle；项目授权只依据成员关系。
-- `path`：相对该 root 的规范递归路径，例如 `docs/readme.md` 或 `src/main.ts`，深度没有业务层限制，总 URL 仍受 4096 UTF-8 bytes 上限约束。
-
-`.code-workspace` 读取 [VS Code multi-root workspace schema](https://code.visualstudio.com/docs/editing/workspaces/multi-root-workspaces#_workspace-file-schema) 的 `folders[].path/name` 子集：支持 JSONC/JSON5 注释、尾逗号，以及相对 workspace 文件或绝对的本地路径；`settings`、`extensions` 等字段不参与 GeneHub 行为。MVP 不接受 `uri`/remote root，最多 32 个根，定义文件最多 1 MiB。Explorer 按文件顺序显示每个根；Agent、会话存储、终端和 Git 始终使用第一个根，只有文件树、`file.write` 与 Asset Preview 使用全部根。
-
-URL **不是 capability**。仅知道或转发 URL 不会获得文件：Viewer 必须重新取得目标 endpoint/route，并以当前浏览器已有的配对 credential 或账号 session 完成 peer authentication。daemon 最终再次校验 project scope、root membership 和递归 path。
-
-前端统一使用：
-
-```ts
-assetPreviewUrl(deviceHandle, projectHandle, `${rootHandle}/${relativePath}`)
-parseAssetPreviewPath(location.pathname)
+```json
+{"version":4,"method":"asset.preview","metadata":{"source":{"kind":"machineFile","absolutePath":"/srv/site/index.html"}},"bodyLength":0}
 ```
 
-FilesPanel、Agent 输出和聊天链接应共享这个 builder，不能手拼 URL。解析器要求 percent-encoding canonical round-trip，拒绝 encoded slash、空 segment、`.`、`..`、反斜杠、NUL、drive/ADS 冒号和平台尾随点/空格。相对 path 最多 4096 UTF-8 bytes；device/workspace segment 最多 256 字符。
+`version` 应始终取生成协议的 `DATA_PLANE_VERSION`，上例仅展示 source 形状。Windows wire 路径使用 `C:/dir/file`，由源 daemon 按实际宿主转换为 guest mount；不按浏览器平台猜测。drive-relative、device、未挂载 UNC、NUL、点段路径被拒绝。
 
-## 3. 打开流程
+返回完整文件，单文件上限 64 MiB。metadata 包含种类、MIME、sourceBytes、内容版本，以及非分享读取可用的 `absolutePath`。metadata、hash、流式传输来自同一打开句柄；不在扫描后重新打开 ambient 路径。native 使用目录 capability，WASI 逐组件持有目录 descriptor 并禁止跟随符号链接，防止目录替换时越界。目录、分享和 files 权限在传输期间重新检查；图片缓存同样不绕过授权。
 
-```text
-用户点击规范 URL
-  │
-  ├─ Viewer 解析 device/workspace/path
-  ├─ Host.targets() 按 deviceHandle 找目标
-  ├─ Host.openTarget() 获取新 endpoint + one-use route admission
-  ├─ Client 完成 v3 peer authentication
-  ├─ 校验 daemon 返回的 machineId == URL deviceHandle
-  └─ 发起 asset.preview Exchange
-         └─ daemon 校验 workspace/path、首遍有界扫描、复位同一文件句柄并流式返回 bytes
-```
+Relay 保持不透明转发。目录名单、路径、MIME 与文件字节只在 E2EE 端点处理；明文 locator 本身可能出现在浏览器历史和 HTTPS 请求日志中，不能当作秘密。
 
-Cloud console 在入口就识别 Preview deep link，并使用账号机器列表或浏览器本地 pairing roster 解析设备；不要求先进入 workbench 选择机器。连接重建会重新签发 one-use Fabric endpoint/route ticket，不复用已消费票据。
+## 资源与导航
 
-独立 Viewer 为本次预览创建自己的 `Client`。页面卸载会关闭该 client、所有在途 stream 和 RTC/Fabric carrier，并释放 Blob URL。它不依赖另一个 tab 中已存在的 JS connection，因此链接可以复制到已授权的其他设备。
+- 聊天相对路径基于实际 Session cwd；文档相对路径基于当前文档目录。
+- CSS url 和模块 import 基于各自文件目录；`..` 在解析前不先丢掉。
+- HTML `/assets/x` 基于最初入口的站点目录，继续浏览二级页面时保持该目录。它不是源机器的文件系统根。
+- 虚拟 `https://preview.invalid/@file/...` URL 编码完整目标文件身份；不从当前目录反向猜测模块和媒体来源。
+- HTML、Markdown、图片、视频和文本共用预览内导航。浮窗、独立页、popout 的本地链接都可打开，错误显示在当前预览。工具栏提供前进、后退，锚点定位到目标元素。
+- 路径与 query/fragment 分离。srcdoc 无法提供真正站点的 `location.search` 或同源 History API。参数显示在预览中，页面可读取 `window.genehubPreviewLocation.search/hash`；不能把它描述成原生站点路由。依赖原生 origin/路由的应用需要正式 Service Preview 或独立站点。
 
-## 4. Exchange 契约
+运行时本地 `fetch` 与异步 XHR 共用文件桥，GET/HEAD 返回实际状态和 Content-Type，支持取消及超时。XHR 支持文本、JSON、ArrayBuffer、Blob 和 document；同步本地 XHR 明确拒绝。已登记的 `/api/` 继续通过服务桥，保留独立 `services` 授权及可信工具栏确认；失败不得悄悄落到 Cloud 站点路径。
 
-Preview 只是通用 v3 Exchange method，不定义新的 transport：
+字面量 module import 会重写；动态构造 import、相对 Worker、Service Worker、cookie、IndexedDB、Cache API 不在静态预览契约内。HTML 继续使用 opaque `sandbox="allow-scripts"`，嵌套 iframe、object 与表单受限，不增加 allow-same-origin。
 
-```text
-RequestHead {
-  version: 3,
-  method: "asset.preview",
-  metadata: {
-    source: {
-      kind: "workspaceFile",
-      workspaceHandle,
-      path
-    }
-  },
-  bodyLength: 0
-}
-FIN
+## CSP 与诊断
 
-ResponseHead {
-  status,
-  metadata: {
-    kind?, mediaType?, sourceBytes?, version?,
-    error?: notFound | forbidden | unsupported | tooLarge | sourceChanged,
-    limitBytes?: 67108864
-  },
-  bodyLength
-}
-DATA*
-FIN
-```
+srcdoc 同时受父页响应头和自身 meta CSP 约束。Workbench 与独立预览响应都必须允许 `base-uri 'self' https://preview.invalid`；仅修改 srcdoc 的 meta 无法放宽父页 CSP。保留精确 preview.invalid 来源，不设置通配 base-uri。
 
-method、metadata、status 和 body 都在 E2EE record 内。body 是 streaming bytes，不经过 JSON/base64；DataEndpoint 自动切成最多 16 KiB record 并与其他 logical streams 公平轮转。
+加载器在应用启动前检查实际 document.baseURI。基址被拦截时显示平台策略错误，不让应用继续把相对请求发到 Cloud。点击二级链接出现 base-uri 或 frame-src 报错时先检查平台响应头、版本和原始 href；不要把站点改成嵌套 iframe 规避。
 
-新 client 在 `PeerHello` 声明自己支持的有限 Preview 授信上限，新 daemon 取双方上限并在
-`PeerWelcome` 返回。双方都为当前版本时，`asset.preview` 的 OPEN 一次授予完整 64 MiB 方法上限；
-分片仍参与公平轮转，但合法单文件即使完全收不到 `WINDOW_UPDATE` 也能发送完，因此应用层确认不再
-位于吞吐关键路径。首批支持有限 bulk 的旧 client 没有 Hello 声明，只获得 8 MiB；更老 daemon
-缺少 Welcome 字段时回退 256 KiB。三种组合都保持 wire-compatible。
+iframe 原始诊断只由持有该 frame 的 AssetPreviewPage 校验 `event.source` 后接收一次，再发给工作台收集器。Cloud 不重复监听未经 frame 校验的相同原始消息。运行信息展示源文件传输、资源缺失、控制台和策略错误；函数测试不等于用户点击链路通过。
 
-请求没有 body。成功 response 的 `bodyLength`、`sourceBytes` 和实际收到的 bytes 必须完全相等且不超过 64 MiB，否则 Viewer fail-close 当前 stream。失败 response body 必须为空。
+## 反馈、分享与存储
 
-`source.kind` 在 MVP 只有 `workspaceFile`。未来若支持 artifact、Git revision 或生成文档，应新增明确 contract，而不是让 `path` 指向 workspace 外资源。
+新反馈存储在 daemon 数据目录 `preview-feedback/machine-files`，按绝对路径和内容版本索引。旧 workspace-file 反馈放在机器数据目录的独立 workspace namespace；按已登记项目的精确旧 `.genethub/preview-feedback` 路径幂等导入，保留原文件，不扫描整盘。导入锚定项目 capability，禁止链接逃逸，并限制单文件 64 MiB、总量 2 GiB、最多 100000 个条目与 64 层目录。新增回执、快照与运行证据引用实际机器数据路径，旧回执保留原引用。
 
-## 5. daemon 文件边界
+分享仍是有期限、可撤销的精确资源 manifest。同一页面仅更换 hash 中的分享/连接凭证时，入口会重新启动认证并销毁原连接与渲染状态，避免旧角色状态沿用到新链接。服务权限不随文件分享继承。浏览器 localStorage shim 按机器、部署 origin、调用者 scope 与最初入口目录隔离；跨分享不复用 owner 状态。旧 daemon 的 v2 owner namespace 保持读取兼容；新版 daemon 返回当前认证主体的 opaque storageScope，新版 viewer 按该 scope 隔离 owner 与不同账号/分享。不能证明相同主体的旧状态不自动迁入新 namespace。
 
-```text
-MAX_PREVIEW_SOURCE_BYTES = 64 * 1024 * 1024
-MAX_PREVIEW_STREAM_LEASE_BYTES = 64 * 1024 * 1024  # 新 client + 新 daemon
-LEGACY_PREVIEW_STREAM_LEASE_BYTES = 8 * 1024 * 1024
-PREVIEW_WORKERS = 8
-PREVIEW_HEAD_OR_STALL_TIMEOUT = 60 seconds
-```
+## 验收边界
 
-daemon 的顺序是：
-
-1. 校验 canonical root-qualified path。
-2. 校验 route 限定的 project handle；解析为 daemon-local project id。
-3. 用首段查 daemon 级 root mapping，并确认该 rootHandle 是当前项目成员；再以对应 capability directory API 打开余下递归相对路径。
-4. 要求目标是普通文件；不把目录、FIFO、设备或 socket 当文件流。
-5. 先读 metadata。大于 64 MiB 直接返回 `tooLarge`，不开始传输。
-6. 用固定 256 KiB 缓冲首遍扫描同一 capability-opened 文件句柄，最多读取 `64 MiB + 1`；增长越界返回 `tooLarge`，长度变化返回 `sourceChanged`。
-7. 首遍同时完成类型探测与 SHA-256；图片/视频/WASM 按扩展名 + magic 判定，Markdown/HTML 按扩展名 + UTF-8 判定，其他有效 UTF-8 无 NUL 内容作为安全文本，其余二进制作为 `binary`。
-8. 将同一文件句柄复位到开头，发送精确 response head，再以固定 256 KiB 读缓冲流式写入 DataEndpoint；第二遍重新核对长度和 SHA-256，源文件变化则 fail-close。
-
-最多 8 个 Preview worker permit 覆盖首遍扫描和第二遍实际发送的完整生命周期；这限制的是同时打开的
-文件句柄、磁盘读取和加密工作，而不是每 RTT 可发送的字节数。WASM guest 没有 blocking thread pool，
-两遍读取都按 256 KiB step cooperative yield；原生形态沿用同一算法。client 根据精确 `bodyLength`
-只分配一次最终 `Uint8Array` 并逐块写入，不再同时保留 chunk 列表和第二份最终副本。
-
-60 秒不再是整个 Preview 的总寿命：client 对 response head 设 60 秒期限，收到 body 后则只在连续
-60 秒没有新 chunk/FIN 时取消。稳定持续传输可以超过 60 秒。daemon 的 worker 排队与首遍本地扫描仍
-分别有 60 秒故障期限；它们保护本地资源故障，不参与网络稳态速率。
-
-路径边界使用 `cap-std::fs::Dir` 相对于已验证 workspace root 打开，并有 symlink escape 测试。绝对路径、`..`、编码分隔符和平台歧义 spelling 在 URL 层与 daemon 层分别拒绝，不能依赖前端校验作为安全边界。
-
-## 6. 类型 allowlist
-
-成功响应只产生以下组合：
-
-| kind | mediaType | 识别规则 |
-|---|---|---|
-| `image` | `image/png` | `.png` + PNG signature |
-| `image` | `image/jpeg` | `.jpg/.jpeg` + JPEG signature |
-| `image` | `image/gif` | `.gif` + GIF87a/GIF89a |
-| `image` | `image/webp` | `.webp` + RIFF/WEBP |
-| `video` | `video/mp4` | `.mp4` + `ftyp` box marker |
-| `video` | `video/webm` | `.webm` + EBML marker |
-| `markdown` | `text/markdown` | `.md/.markdown/.mdown` + valid UTF-8 |
-| `html` | `text/html` | `.html/.htm` + valid UTF-8 |
-| `wasm` | `application/wasm` | `.wasm` + `\0asm` |
-| `binary` | `application/octet-stream` | 其他非文本字节 |
-| `text` | `text/plain` | 其他扩展名 + valid UTF-8 + 无 NUL |
-
-文本中任意位置含 NUL 或 UTF-8 非法时拒绝。daemon 不相信浏览器传来的 MIME，也不做可执行的通用 MIME sniffing；未知扩展名只要满足文本判定就作为转义文本显示。图片/视频仍必须同时匹配扩展名与 magic；否则若 bytes 本身是文本就降级为文本，其他二进制返回 `unsupported`。
-
-## 7. 浏览器渲染
-
-### 图片与视频
-
-Viewer 用完整 bytes 创建带 daemon MIME 的 Blob URL。图片使用 `<img>`，MP4/WebM 使用带 controls 的 `<video>`。没有 Range 和转码，因此 64 MiB 上限仍同时控制最终浏览器对象内存和首屏等待；传输层已经可以为整个合法文件一次授信，不等于可以取消这个产品内存边界。
-
-### 预览信息与传输统计
-
-独立 Viewer 和 Preview 浮窗共用同一份“预览信息”面板。入口文件完成后，面板展示五项由本次
-`asset.preview` 实际字节流和单调时钟直接计算的数据：
-
-1. 文件大小：收到并通过精确长度校验的正文 bytes；
-2. 总等待：发起 request 到精确正文完成；
-3. 首字节：发起 request 到第一个非空 DATA 分片；
-4. 正文平均速度：response head 被接受到精确正文完成之间的正文 bytes/s；
-5. DATA 分片：GeneHub 逻辑 DATA 记录数及本次最大的记录大小。
-
-面板同时标明本次入口文件使用 WebSocket、Fabric Relay 或 WebRTC。DATA 分片不是 TCP packet；保留
-16 KiB 量级的逻辑记录是为了多流公平调度，并不表示每片等待网络确认。首字节包含请求 RTT、daemon
-首遍扫描、worker 排队和调度，不能解释成独立 RTT。浏览器 WebSocket 没有跨直连、Fabric 与 WebRTC
-通用且可信的 RTT API，因此产品 UI 不从首字节时间反推 RTT，也不展示伪精度估算值；独立 RTT 与同链路
-TCP 利用率继续由 neteff 专项的受控整形器测量。
-
-### Markdown 与文本
-
-Markdown 使用 `react-markdown` + GFM，不启用 raw HTML。document 变体有完整标题层级、列表/任务列表、引用、表格、inline code、代码块复制与常用语言语法着色；未知语言由 highlighter 自动识别，单块超过 256 KiB 时回到已转义纯文本，避免高亮器独占主线程。普通文本复用同一高亮组件：按文件名/扩展名推断常见源码、配置、构建和脚本语言，未知格式自动检测，始终先转义再显示，并拥有独立双向滚动容器。
-
-````markdown
-```mermaid
-flowchart LR
-  Agent --> File --> Preview
-```
-````
-
-`mermaid` fence 按需加载独立 bundle，普通 Markdown 不加载它。输入最多 128 KiB，`securityLevel=strict` 且禁用 HTML label；输出再次移除 script、foreignObject、image、link 与事件属性，最后作为 Blob SVG `<img>` 显示，而不是把活动 SVG 注入工作台 DOM。Markdown 作者声明图片不会自动联网；普通链接只在用户点击后以独立 tab 和 `noopener/noreferrer` 打开。
-
-工作台浮窗与深链 Preview 页根容器都占满各自视口，只有正文 pane 使用 `overflow-y:auto`，因此长文档在手机和桌面都可滚动。两种页面都能主动提交反馈。浮窗及深链 Preview 的 iframe 错误经父页面桥接进入同一套浏览器有界事件环；父页面只接受自己渲染的 `iframe.contentWindow` 发来的消息，不能靠伪造 `source` 字段注入诊断。提交时，当前已授权 Client 再通过 E2EE `diagnostics.snapshot` 拉取 daemon 的白名单快照；不会自动上传 `daemon.log`、agent stderr、请求体、凭据或文件正文附件。
-
-### 活动单文件 HTML
-
-HTML 在 `iframe srcdoc` 中运行：
-
-```html
-<iframe
-  sandbox="allow-scripts"
-  referrerpolicy="no-referrer"
-  srcdoc="..."
-/>
-```
-
-关键边界：
-
-- 没有 `allow-same-origin`，document 是 opaque origin，不能读父页面 DOM、cookie、localStorage、IndexedDB 或 GeneHub credential。
-- 没有表单、弹窗、top navigation、下载、摄像头、麦克风、定位、剪贴板、USB 或串口权限。
-- Viewer 删除源文件自带 `<base>` 和 CSP，插入固定 `https://preview.invalid/` base 与自己的 CSP。
-- 允许 inline/module script、`wasm-unsafe-eval`、blob/data worker，以及绝对 HTTPS script/style/image/media/font 和 HTTPS/WSS connect。
-- 禁止 object、嵌套 frame、form action。相对资源先静态重映射；未重映射的 `https://preview.invalid/` 请求由父页转发为 `asset.preview`。
-- UI 明示 WASM/Worker 与运行时 fetch 已开启。
-
-`srcdoc` 会继承承载 Preview 页面的 HTTP CSP；iframe 内的 `<meta>` 只能继续收紧，不能放宽它。因此生产 edge 必须只对 `/assets/preview/v2/*` 页面提供上述 active-HTML CSP，并让普通工作台继续使用不含 `unsafe-inline` 的严格策略。Cloud 的 Caddy 配置已按路径分开；自托管若统一下发 `script-src 'self'`，HTML 文档能显示，但其中脚本会被浏览器阻止。这是部署契约，不能靠在 iframe 内插入另一条 CSP 绕过。
-
-“允许网络”是产品取舍：HTML 本身可向互联网发送它已经拥有的文件内容，所以用户不应把不可信 HTML 当成静态文档；但 sandbox 隔离保证它不能因此取得 GeneHub 页面或其他本地文件的权限。未来若提供无网络模式，应是显式渲染模式，不与当前契约混淆。
-
-## 8. 多文件 HTML 与运行时转发
-
-相对 URL 需要一个可解析的目录命名空间。Viewer 在入口 HTML 上做静态重映射，并把 `https://preview.invalid/` 上的运行时 fetch/import 转回同站点的 `asset.preview`。这覆盖 H5/WASM 游戏的常见加载方式，仍不是带独立 HTTP origin 的 WebRoot。
-
-真 WebRoot、Range/缓存和公开托管仍走 [云端 Assets Gateway](./assets-cloud-gateway.md) 或 [daemon HTTPS + SNI 字节隧道](./assets-daemon-https-sni-tunnel.md)；不引入 Service Worker。
-
-## 9. 错误与用户提示
-
-| error | HTTP-like status | UI 含义 |
-|---|---:|---|
-| `notFound` | 404 | 找不到文件 |
-| `forbidden` | 403 | workspace/path 不在当前授权内 |
-| `unsupported` | 415 | 目录或无法作为文件读取 |
-| `tooLarge` | 413 | 超过 64 MiB，不预览 |
-| `sourceChanged` | 409/500/408 | 读取期间变化、worker 异常或超时，请重试 |
-
-连接未配对、设备离线、URL 设备与握手身份不一致、版本不兼容和 E2EE 认证失败使用连接层错误，不伪装成文件不存在。协议版本不匹配直接关闭，不尝试旧 `file.read`。
-
-## 10. v3 文件界面、多根工作区与 Agent 链接
-
-FilesPanel 把目录和文件交互彻底分开：文件才打开 Preview，目录只在当前树中展开。每次打开 Files pane 都重新获取 root；窗口重新获得焦点/可见性时自动刷新，并提供明确的“刷新”按钮。root 刷新后，仍处于展开状态的目录会重新获取自己的 subtree，不会把整个工作台导航到目录 URL，也不会永久停在“载入中”。
-
-协议中的折叠目录以**缺失 `children`**表示，而不是 `children: null`；Web 仍归一化旧 daemon 的 null。这个边界有协议序列化和整页组件两层回归测试：旧实现点击真实目录后执行 `null.map()`，React 因未捕获 render error 卸载整个工作台，正是“全 page 都没了”的根因。
-
-打开工作区入口同时接受普通文件夹和 `.code-workspace`。远端浏览器列出子文件夹及当前路径中的 workspace 文件；桌面原生壳在「打开工作区」下提供文件夹与 `.code-workspace` 两种来源。两种来源即使第一根相同也拥有独立工作区 ID；多根 Explorer 顶层仍显示各 `folders[].name`，但节点 path 始终带全局 `rootHandle`。daemon 在每次 tree/write/preview 时重新验证工作区成员关系并解析到 capability root，label、排序和重名不参与寻址。
-
-Agent 不必输出部署相关的 Preview prefix。聊天与文档 Preview 共用 Markdown 渲染器，在展示时把下列引用解析为当前 device/project/root 的 Preview URL：
-
-- 相对 Agent cwd（第一根）的路径，例如 `reports/a.md`
-- 落在已注册 root 下的绝对文件系统路径
-- 已是 `/assets/preview/v2/...` 的旧链接（保留 path，重绑当前 device/project）
-- Markdown 图片的相对/绝对本地路径：经 `asset.preview` 鉴权加载为 blob，外链图片仍阻断
-
-`session.send` 的 `artifactPreviewBaseUrl` 仍保留在协议中以兼容旧客户端，但当前工作台始终传 `null`，daemon **不会**把它拼成部署相关 Preview 前缀注入 adapter。daemon 会注入一段与部署无关的路径链接指引：要求 Agent 输出工作区相对文件路径（Markdown 链接或裸路径）、禁止只给目录，并强调 H5/静态站必须落到入口 `.html`（通常是 `index.html`），同时列出 Preview 支持的文件种类。
-
-HTML 预览在 Viewer 内对入口文件做静态依赖重映射（`link`/`script`/`img` 等相对或站点根路径引用、`type=module`、CSS `url()`）；CSP 允许 `wasm-unsafe-eval` 与 `blob:` worker。运行时相对 `fetch`/import 经 iframe 桥转发到 `asset.preview`。真 WebRoot HTTP origin 仍不在本版本内。
-
-## 11. 预览批注
-
-文件读取仍只读。人在已打开会话的全屏 Preview 里确认的批注，写入该会话目录的 `preview-review.json`，不改源文件，也不进入 `meta.json` 或最多五条 `SessionDraft`。HTML 页面脚本不能发起这次写入。外部浏览器的 portable 链接在票据收窄之前不能保存批注。对话里的 Agent 回复不是批注面。契约见 [批注提案](asset-preview-annotations-proposal.md)。
-
-## 12. 验收
-
-- URL 可 round-trip Unicode、空格和部署子路径；拒绝 traversal、encoded slash、反斜杠和非 canonical encoding。
-- FilesPanel 用当前 daemon identity + workspace id + 相对 path 生成独立 Viewer URL。
-- Cloud 根入口可直接渲染 Preview deep link，并按 URL device handle 找账号或本地 pairing target。
-- 两台独立已配对客户端能用同一 locator 通过真实 self-hosted Relay/daemon 读取相同 bytes。
-- 文件恰好 64 MiB 成功，64 MiB + 1 byte 明确 `tooLarge`；没有截断或 overview。
-- 目录只展开不导航；重新打开、回到页面或按刷新均能看到新文件，展开目录在 root refresh 后自行恢复。
-- 真实 wire 的折叠目录字段缺失；旧端的 `children:null` 也只触发展开请求，不会卸载页面。
-- `.code-workspace` 的注释、尾逗号、相对/绝对本地 path、folder name 和重复显示名称可用；URI root、重复目录、越界路径、超量定义明确拒绝。
-- folder 与 `.code-workspace` 项目 ID 独立；同一 canonical directory 跨项目复用全局 rootHandle。改 label、调顺序不会改变资源 locator。
-- 多根 tree/write/Preview 都按 `rootHandle` 到达正确 capability root；Agent/session/terminal/Git cwd 仍是第一根。
-- 长 Markdown 可滚动，GFM/inline code/fenced code 高亮和安全 Mermaid 流程图可用。
-- 任意有效 UTF-8 无 NUL 文件可读；已知源码/配置/构建格式按路径着色，未知文本自动识别或安全退化为转义纯文本。
-- 聊天/文档 Markdown 把相对路径、绝对路径和旧 Preview URL 解析为当前绑定；外链图片仍阻断，本地图片经鉴权 blob 显示。
-- `session.send` 不注入部署相关 Preview URL 前缀；会注入路径链接指引（含 HTML 入口与支持类型）。
-- allowlist、UTF-8、magic、普通文件和 symlink escape 均有 daemon 测试。
-- 成功 response 精确校验三处长度；取消、超时和页面关闭能释放 stream/client/Blob。
-- HTML script/module 可运行，静态相对或站点根路径 CSS/JS/图片可经重映射加载，相对 fetch/WASM 经父页转发，网络策略可见，父页面同源权限不可得。
-- `file.read`、`FileContent` 和旧查看器没有运行路径或 fallback。
+编译和类型检查不能替代真实 daemon、真实浏览器和权限验收。至少覆盖 v2/v3 读取、补充目录与 CAS、多个项目同根及移除、近似路径与符号链接、受限连接与分享、二级 HTML/Markdown/跨类型导航、query/fragment、相对 fetch/XHR/媒体、父页 CSP、错误可见和分享撤销。跨平台编译不能冒充在目标 Windows/macOS 上运行通过。

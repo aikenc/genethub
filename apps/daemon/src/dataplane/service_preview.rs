@@ -125,6 +125,14 @@ async fn load(services: &PeerServices, req: &Request) -> Result<Option<Run>> {
         }
         None => &req.workspace_handle,
     };
+    if crate::file_access::absolute(&req.entry_path).is_ok() {
+        crate::file_access::resolve(
+            &services.state,
+            &req.entry_path,
+            access.workspace_id.as_deref(),
+        )
+        .await?;
+    }
     load_entry(&services.state, workspace_id, &req.entry_path).await
 }
 async fn load_entry(
@@ -132,7 +140,16 @@ async fn load_entry(
     workspace_id: &str,
     entry_path: &str,
 ) -> Result<Option<Run>> {
-    let resolved = state.workspaces.resolve(workspace_id, entry_path).await?;
+    let resolved = if crate::file_access::absolute(entry_path).is_ok() {
+        crate::file_access::resolve(
+            state,
+            entry_path,
+            (!workspace_id.is_empty()).then_some(workspace_id),
+        )
+        .await?
+    } else {
+        state.workspaces.resolve(workspace_id, entry_path).await?
+    };
     let entry = std::fs::canonicalize(resolved.absolute)?;
     let native = crate::guest_paths::host_form(&entry.to_string_lossy()).into_owned();
     let entry_identity = if crate::guest_paths::windows_host() {

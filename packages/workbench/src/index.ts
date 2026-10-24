@@ -20,7 +20,7 @@ export { Client } from "./protocol/client";
 export { AssetPreviewPage } from "./preview/AssetPreviewPage";
 export { PreviewFloat } from "./preview/PreviewFloat";
 export { PreviewPopoutPage } from "./preview/PreviewPopoutPage";
-export { parsePreviewPopout } from "./preview/popout";
+export { parsePreviewPopout, watchPreviewConnectionFragment } from "./preview/popout";
 export type { PreviewPopoutContext } from "./preview/popout";
 export { assetPreviewUrl, parseAssetPreviewPath } from "./preview/url";
 export {

@@ -45,10 +45,14 @@ pub(crate) fn windows_volumes() -> &'static [Volume] {
         if !cfg!(target_family = "wasm") {
             return Vec::new();
         }
+        #[cfg(target_family = "wasm")]
+        let mounted: Vec<String> = wasi::filesystem::preopens::get_directories().into_iter().map(|(_, name)| name).collect();
+        #[cfg(not(target_family = "wasm"))]
+        let mounted: Vec<String> = Vec::new();
         (b'a'..=b'z')
             .filter_map(|letter| {
                 let guest = format!("/{}", letter as char);
-                if !Path::new(&guest).is_dir() {
+                if !mounted.contains(&guest) {
                     return None;
                 }
                 Some(Volume {

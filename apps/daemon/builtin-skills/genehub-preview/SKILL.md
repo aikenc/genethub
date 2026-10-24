@@ -5,7 +5,7 @@ description: 编写、分享和诊断 GeneHub Asset Preview 里的预览。静�
 
 # GeneHub 预览
 
-预览打开用户点击的**工作区里的普通文件**。交付物就是聊天里一条可点的链接，不是架构说明。
+预览打开用户点击的**源机器可访问目录里的普通文件**。交付物就是聊天里一条可点的链接，不是架构说明。
 
 ## 先判断是静态还是实时
 
@@ -20,8 +20,8 @@ description: 编写、分享和诊断 GeneHub Asset Preview 里的预览。静�
 ## 两种预览共同的规则
 
 - 分享**入口文件**，不分享目录：`[阶段预览](review/index.html)` 或 `review/index.html`。路径相对工作区、
-  使用正斜杠。
-- 不写 `E:\…`、`file://`、`http://127.0.0.1`，不编造 `/assets/preview/…` 或部署域名；Workbench 在显示时
+  使用正斜杠；新设备也可解析源机器绝对路径，但聊天交付优先给相对当前 Agent cwd 的普通入口链接。
+- 不写 `file://`、`http://127.0.0.1`，不编造 `/assets/preview/…` 或部署域名；Workbench 在显示时
   解析入口。
 - 页面用相对路径引用资源；不嵌入 GeneHub 专用加载器，不为静态资源启动 HTTP 服务器。
 - 每个预览文件不超过 64 MiB。大体积内容先生成代理片、缩略图或分段产物。
@@ -34,3 +34,11 @@ description: 编写、分享和诊断 GeneHub Asset Preview 里的预览。静�
 按需读取，不必一次读完。实时服务相关的其余资料都在 [live-service.md](references/live-service.md) 的
 “按需阅读”里列出。预览页面本身出了问题（空白、加载失败）而页面已接入联调时，可用 `genehub` 的客户端联调
 参考现场诊断。
+
+## 平台路径与二级链接诊断
+
+新设备按稳定机器 ID + 绝对路径定位，目录权限取所有已登记项目根与手动补充目录的并集，再与当前连接/分享权限取交集。
+项目不是文件 locator；改机器展示名、移动 workspace 定义或缺失旧项目映射应分别诊断，不能按同名文件猜位置。
+
+二级链接打不开时，先读 [static.md](references/static.md) 的排障步骤。若出现 base-uri 或 frame-src，先核对平台父页 CSP，
+不要建议页面嵌套 iframe。路径、query、fragment 分开验证，并分别检查浮窗、独立页和 popout。只有原页面入口能加载，不代表二级导航成功。

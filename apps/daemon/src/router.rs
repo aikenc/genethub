@@ -1003,7 +1003,7 @@ async fn dispatch(
                     genehub_proto::SPEECH_FEATURE_PARTIAL.to_string(),
                     genehub_proto::SPEECH_FEATURE_CONTEXT_PREVIEW.to_string(),
                     genehub_proto::SPEECH_FEATURE_FEEDBACK.to_string(),
-                ]),
+                ].into_iter().chain(crate::file_access::machine_files_supported().then(|| "asset.preview.machine-file.v1".to_string())).collect()),
                 isolation: Some(crate::isolation::report()),
             }))
         }).await,        Request::Subscribe {
@@ -3459,6 +3459,16 @@ async fn dispatch(
             }
         }).await,
 
+        Request::FileAccessList => Box::pin(async move {
+            Handled::ok(Reply::FileAccess(crate::file_access::info(&*state.config.read().await)))
+        }).await,
+        Request::FileAccessConfigure { expected_revision, additional_directories } => Box::pin(async move {
+            match crate::file_access::configure(state, &expected_revision, additional_directories).await {
+                Ok(info) => Handled::ok(Reply::FileAccess(info)),
+                Err(error) if error.to_string().contains("revision conflict") => Handled::err(ErrorCode::Conflict, error.to_string()),
+                Err(error) => Handled::err(ErrorCode::BadRequest, error.to_string()),
+            }
+        }).await,
         Request::WorkspaceList => Box::pin(async move {
             // Spaces written into <data>/spaces/ become projects the next time
             // anyone looks; throttled, and a no-op when there is nothing there.

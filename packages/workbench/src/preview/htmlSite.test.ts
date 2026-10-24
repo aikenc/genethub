@@ -45,9 +45,9 @@ describe("remapHtmlSite", () => {
     expect(fetchAsset).not.toHaveBeenCalledWith("r_demo/clip.mp4");
     expect(result.html).toContain("<style>body{color:red}</style>");
     expect(result.html).toContain("<script>globalThis.ok=true</script>");
-    expect(result.html).toContain('src="https://preview.invalid/@root/mark.svg"');
-    expect(result.html).toContain('poster="https://preview.invalid/@root/cover.png"');
-    expect(result.html).toContain('src="https://preview.invalid/@root/clip.mp4"');
+    expect(result.html).toContain('src="https://preview.invalid/@file/root/r_demo/mark.svg"');
+    expect(result.html).toContain('poster="https://preview.invalid/@file/root/r_demo/cover.png"');
+    expect(result.html).toContain('src="https://preview.invalid/@file/root/r_demo/clip.mp4"');
     expect(result.html).not.toContain("blob:");
     expect(result.blobUrls).toHaveLength(0);
   });
@@ -80,8 +80,8 @@ describe("remapHtmlSite", () => {
       html: `<img src="./mark.svg?v=2"><svg><use href="./icons.svg#play"></use></svg>`,
       fetchAsset,
     });
-    expect(result.html).toContain('src="https://preview.invalid/@root/mark.svg?v=2"');
-    expect(result.html).toContain('href="https://preview.invalid/@root/icons.svg#play"');
+    expect(result.html).toContain('src="https://preview.invalid/@file/root/r_demo/mark.svg?v=2"');
+    expect(result.html).toContain('href="https://preview.invalid/@file/root/r_demo/icons.svg#play"');
     expect(fetchAsset).not.toHaveBeenCalled();
   });
 
@@ -120,7 +120,7 @@ describe("remapHtmlSite", () => {
       fetchAsset,
     });
     expect(result.html).toContain("type=\"module\"");
-    expect(result.html).toContain("https://preview.invalid/app.js");
+    expect(result.html).toContain("https://preview.invalid/@file/root/r_demo/app.js");
     expect(result.html).not.toContain("import.meta.url");
   });
 });

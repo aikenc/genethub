@@ -28,6 +28,9 @@ export const PREVIEW_STORAGE_NAMESPACE_LIMIT = 400_000;
 export type PreviewStorageScope = {
   deviceHandle: string;
   workspaceHandle: string;
+  accessScope?: string;
+  principalScope?: string;
+  channel?: string;
 };
 
 /** Pages of one site (the entry HTML's directory) share a store, like an origin. */
@@ -36,6 +39,11 @@ export function previewStorageNamespace(
   entryPath: string,
 ): string {
   const dir = entryPath.split("/").slice(0, -1).join("/");
+  if (scope.principalScope || scope.accessScope && scope.accessScope !== "owner" || entryPath.startsWith("/") || /^[A-Za-z]:\//.test(entryPath)) {
+    // Origin already separates deployments; explicit channel and principal
+    // separate shares and owners even when they open the same physical site.
+    return `v2/${encodeURIComponent(scope.deviceHandle)}/${encodeURIComponent(scope.channel ?? "origin")}/${encodeURIComponent(scope.principalScope ?? scope.accessScope ?? "owner")}/${encodeURIComponent(dir)}`;
+  }
   return `${scope.deviceHandle}/${scope.workspaceHandle}/${dir}`;
 }
 

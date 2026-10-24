@@ -107,6 +107,9 @@ export type RightPanel = "changes" | "files" | null;
 
 /** In-workbench Asset Preview float (default open path; not a new browser tab). */
 export type PreviewFloatTarget = {
+  docQuery?: string;
+  docFragment?: string;
+  siteEntryPath?: string;
   deviceHandle: string;
   workspaceHandle: string;
   path: string;

@@ -12,6 +12,8 @@ const NO_FOLDERS: MarkdownArtifactProps["folders"] = [];
 export function useSessionArtifact(): MarkdownArtifactProps | null {
   const client = useWorkbench((state) => state.client);
   const deviceHandle = client?.identity?.machineId ?? null;
+  const cwd = useWorkbench(state => state.sessions.find(session => session.id === state.activeSessionId)?.cwd);
+  const machineFiles = !!client?.identity?.features?.includes("asset.preview.machine-file.v1");
   const sessionId = useWorkbench((state) => state.activeSessionId);
   const workspaceHandle = useWorkbench((state) => {
     const session = state.sessions.find((entry) => entry.id === state.activeSessionId);
@@ -42,6 +44,8 @@ export function useSessionArtifact(): MarkdownArtifactProps | null {
     return {
       deviceHandle,
       workspaceHandle,
+      machineFiles,
+      cwd,
       folders: folders.map((folder) => ({
         root: folder.root,
         rootHandle: folder.rootHandle,
@@ -50,5 +54,5 @@ export function useSessionArtifact(): MarkdownArtifactProps | null {
       ...(inlineImages.length > 0 ? { inlineImages } : {}),
       loadPreview,
     };
-  }, [deviceHandle, folders, inlineImages, loadPreview, sessionId, workspaceHandle]);
+  }, [deviceHandle, folders, inlineImages, loadPreview, sessionId, workspaceHandle, cwd, machineFiles]);
 }
