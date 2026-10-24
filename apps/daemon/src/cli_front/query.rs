@@ -1087,12 +1087,7 @@ pub async fn connect_selected(selection: &Selection) -> Result<Rpc, CliFailure> 
 /// one — a machine that is unreachable because nothing here is enrolled must
 /// not read as a machine that does not exist.
 async fn hosted(machine_id: &str) -> Result<Rpc, CliFailure> {
-    let local = Rpc::connect().await.map_err(|_| {
-        not_paired(
-            machine_id,
-            "no local daemon is running here to fetch a hosted ticket with",
-        )
-    })?;
+    let local = Rpc::connect().await.map_err(connect_error)?;
     let ticket = match local
         .call(Request::HubConnect {
             machine_id: machine_id.to_string(),
@@ -1101,30 +1096,22 @@ async fn hosted(machine_id: &str) -> Result<Rpc, CliFailure> {
     {
         Ok(Reply::HubTicket(ticket)) => ticket,
         Ok(other) => return Err(CliFailure::protocol(format!("unexpected reply: {other:?}"))),
-        Err(RpcError::Remote(error)) => {
-            return Err(not_paired(
-                machine_id,
-                &format!("the Hub did not issue a ticket for it: {}", error.message),
-            ))
+        Err(error) => {
+            let mut failure = rpc_error(error);
+            failure.message = format!(
+                "Hub ticket request for {machine_id} failed: {}",
+                failure.message
+            );
+            failure.details = Some(
+                json!({"machineId": machine_id, "stage": "hubTicket", "upstream": failure.details}),
+            );
+            return Err(failure);
         }
-        Err(error) => return Err(rpc_error(error)),
     };
     drop(local);
     Rpc::connect_hosted(&ticket)
         .await
         .map_err(|error| remote_connect_error(machine_id, error))
-}
-
-fn not_paired(machine_id: &str, why: &str) -> CliFailure {
-    CliFailure::business(
-        "machineNotPaired",
-        format!(
-            "{machine_id} is not a machine this installation can reach: {why}. \
-             `genet machine list` shows the ones it paired with directly, and \
-             `genet hub status` whether a Hub can introduce the rest"
-        ),
-        Some(json!({"machineId": machine_id})),
-    )
 }
 
 fn context_data(hello: &HelloResult, machine: Option<&str>) -> Value {
@@ -1817,15 +1804,19 @@ fn command_schema(name: &str) -> Value {
                 &["sessionId"],
             ),
         ),
-        "machine.list" => ("genet machine list [--reachable]", false, object_input(json!({
+        "machine.list" => ("genet machine list [--paired | --reachable]", true, object_input(json!({
             "reachable": {"type":"boolean", "default":false,
-                "description":"Include this machine and the current identity's Hub directory; errors rather than returning a partial directory"}
+                "description":"Compatibility alias for the default: this machine, direct records and the current identity's Hub directory; no target connection probes"},
+            "paired": {"type":"boolean", "default":false,
+                "description":"Only direct pairing records; does not query the Hub. Mutually exclusive with reachable. The thin CLI still requires the local daemon"}
         }), &[])),
         "machine.show" => (
-            "genet machine show <machineId>",
-            false,
+            "genet machine show <machineId> [--paired]",
+            true,
             object_input(
-                json!({"machineId": {"type": "string", "minLength": 1}}),
+                json!({"machineId": {"type": "string", "minLength": 1},
+                    "paired": {"type": "boolean", "default": false,
+                        "description": "Only inspect a direct pairing record; default resolves through the same directory as machine list"}}),
                 &["machineId"],
             ),
         ),

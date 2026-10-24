@@ -281,11 +281,13 @@ fn print_usage() {
                                     own words with no option picked
   genet session interrupt <id>      stop the running turn
   genet session close <id>          close the session
-  genet machine list                machines paired directly with this one
-  genet machine list --reachable    every machine this identity can route to
+  genet machine list                this machine, direct pairings and Hub directory
+  genet machine list --paired       direct pairing records without querying Hub
+  genet machine list --reachable    compatibility alias for machine list
   genet machine pair <code> --endpoint <url> [--name <label>]
                                     redeem a pairing code from another machine
-  genet machine show <machineId>    one directly paired machine
+  genet machine show <machineId> [--paired]
+                                    one machine from the directory or direct store
   genet machine forget <machineId>  drop the local credential for a machine
   genet device list                 clients authorized on the target machine
   genet device invite [--grant read,session,files,git,pty,devices,settings,update]
