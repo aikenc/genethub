@@ -319,6 +319,22 @@ async fn authorize_session_request(
             return Err("feedback belongs to another workspace".into());
         }
     }
+    // OS-account capability parity does not turn an Agent into the Human
+    // answering a credential card. Keep this semantic gate independent of
+    // the coarse Settings grant.
+    if caller.session_controller_id().is_some()
+        && matches!(
+            request,
+            Request::SettingsSetProvider { .. }
+                | Request::SettingsForgetProvider { .. }
+                | Request::ProviderOperation {
+                    operation: genehub_proto::ProviderOperationCommand::Submit { .. },
+                    ..
+                }
+        )
+    {
+        return Err("provider 配置须由 Human 确认；请用 provider configure 创建配置卡片".into());
+    }
     if let (Some(controller), Request::ProviderOperation { session_id, .. }) =
         (caller.session_controller_id(), request)
     {
@@ -415,7 +431,7 @@ async fn authorize_project_workflow_mutation(
 ) -> Result<(), String> {
     match caller {
         crate::authz::Principal::LocalUser => Ok(()),
-        crate::authz::Principal::SessionController { session_id } => {
+        crate::authz::Principal::SessionController { session_id, .. } => {
             if state.sessions.consulting(session_id).await {
                 return Err(
                     "PM 正在咨询未决 Human 请求；不能以项目管理权替代该请求的正式决定".into(),
@@ -637,7 +653,7 @@ async fn authorize_agent_space_change(
 ) -> Result<(), String> {
     match caller {
         crate::authz::Principal::LocalUser => Ok(()),
-        crate::authz::Principal::SessionController { session_id } => {
+        crate::authz::Principal::SessionController { session_id, .. } => {
             if state.sessions.consulting(session_id).await {
                 return Err(
                     "PM 正在咨询未决 Human 请求；不能以项目管理权替代该请求的正式决定".into(),

@@ -1334,7 +1334,7 @@ async fn run_conversation(rpc: &Rpc, run: Run, here: bool) -> Result<i32, CliFai
 /// the send. A remote daemon cannot see the caller's local identity, so without
 /// this its Agent would read another Agent's text as the Human's.
 fn caller_origin() -> Option<genehub_proto::InputOrigin> {
-    let crate::authz::Principal::SessionController { session_id } = super::caller_principal()
+    let crate::authz::Principal::SessionController { session_id, .. } = super::caller_principal()
     else {
         return None;
     };

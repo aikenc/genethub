@@ -21,6 +21,9 @@ description: 1+N 项目团队内部协作的公共约定：前台、研发组长
 
 失败时命令会说明：出了什么、现在状态、下一步。细则见 `datas/README.md`、`temp/README.md`；模型选择见 `references/models.md`。
 
+跨机派单先读 [references/remote-targets.md](references/remote-targets.md)：固定目标、不按短名猜团队，执行端
+拿写锁并保存回执；未知创建结果不盲重派。`send` 不创建会话、不解除暂停，多个远端会话须用精确 ID。
+
 自动身份刷新（定时任务与 `sync-identity`）只重编身份，不执行 Space pre/post 或 Provider post；有此类配置时
 返回 `SB018`，保留上一版生成身份。发布 hook 由源 Space 的显式构建执行，不能靠反复刷新身份来运行。
 

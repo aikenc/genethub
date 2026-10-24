@@ -21,7 +21,7 @@ Skill：`team-core`（所有会话先读）、`team-front`（带 5 秒定时 hoo
 
 | 命令 | 用途 |
 |---|---|
-| `spawn --space <岗位> --kind work\|research [--worktree auto] [--machine <ID>] --desc "一句话" [--tier Ultra\|Max\|Pro\|Flash\|Mini] [--media image\|video] "任务"` | 在子空间起后台会话；`--worktree auto` 自动切独立并发工位；`--machine` 派到远端机器的同名岗位 workspace；`--team <名>` 派到本机另一支团队 |
+| `spawn --space <岗位> --kind work\|research [--worktree auto] [--machine <ID>] --desc "一句话" [--tier Ultra\|Max\|Pro\|Flash\|Mini] [--media image\|video] "任务"` | 在子空间起后台会话；`--worktree auto` 自动切独立并发工位；`--machine` 派到固定绑定的远端岗位 workspace；`--team <名>` 派到本机另一支团队 |
 | `send --to <岗位\|会话\|团队名[:岗位]> [--machine <ID>] [--kind human\|patrol\|task\|question\|note] "话"` | 投递消息；对方忙时写文件收件箱，0 抢占不打断；`--machine` 投给远端岗位或远端会话 |
 | `employee add\|ls\|retire` | 动态扩编或待岗岗位，自动建子空间与工位 |
 | `worktree create\|bind\|ls` | 从主仓切 worktree 并写子空间 `open.env` 的 `WORKTREE_DIR` |
@@ -42,13 +42,10 @@ Skill：`team-core`（所有会话先读）、`team-front`（带 5 秒定时 hoo
 - 同一批子任务全部结束后合并为一条 `result` 回执；中途异常由看门狗拉起，不必人工催促。
 - 一个目录同一时间只有一个写会话；并发组员在各自 worktree 提交，由组长 `git merge-tree` 预检后合入。
 - 档位是平台路由标签，不是模型 id；团队只写标签，不钉 `modelId`。
-- **跨机器**：`spawn --machine <ID>` / `send --machine <ID> --to <岗位>` 在远端的岗位 workspace 起会话或投递。
-  账本、收件箱和写者锁仍留在派单方，`pending` 记录带 `machine`，定时对账据此去远端取状态与最终回复；
-  远端不注册团队根、不跑前台与对账器。`--worktree`/`--dir` 只对本机有效，跨机没有共享写者锁；远端用目标机器
-  自己的 Agent 与默认模型，不沿用请求方的 `modelId`。
-- 远端岗位可用 SpaceBuilder `build <岗位源目录> --output <制品目录>` 准备；移动后用 `verify --artifacts-only`
-  验收，无需把团队源码带到远端重建。运行资源、传输、安装和只注册岗位由部署适配完成，不等于远端写者锁或目标绑定已具备。
-  具体路径与生命周期见 `../../genehub/references/spacebuilder.md`。
+- **跨机器**：先按团队自己的 `skills/team-core/references/remote-targets.md` 配置固定 machine/workspace/接单命令，
+  再 `spawn --machine <ID>`。执行端校验模型并持有写锁、创建回执；派单方保留待办和结果回传。
+  丢失回复用同一 `--request-id` 查回执，unknown 不重派。`send` 只投递已有会话且不解除暂停。
+  单独 portable 岗位制品不含接单脚本与父团队配置；当前必须补齐目标机团队运行资源，不能当成已完成部署。
 - 自动身份刷新（定时任务与 `sync-identity`）使用 `--require-no-post-commands`：有 Space pre/post 或 Provider post
   时返回 `SB018` 并保留旧生成身份。发布 hook 应在源 Space 显式构建中执行，不能借一次身份刷新触发部署。
 

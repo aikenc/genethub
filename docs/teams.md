@@ -91,21 +91,29 @@ daemon 不解释它们（[storage-layout.md](./storage-layout.md)）。
 | 会话在 A，工具在 B | 成员留在 A 的岗位会话里，用 `genet shell --machine B` 在 B 的 workspace 内执行；结果回到 A 的会话，走本机接力 |
 | 会话本身在 B | `team.py spawn --machine <B 的机器 ID> ...` 或 `send --machine <B> --to <岗位>`：在 B 的岗位 workspace 创建/投递，Agent 进程、身份与产物都在 B |
 
-`--machine` 接受 `genet machine list` 返回的精确 ID（`--reachable` 仍是兼容别名）。目标机器上必须已经打开该岗位的 Space
-（`genet space open <团队>/spaces/<岗位>`）；样板按 workspace 名或根目录名匹配岗位，重名时用 `--workspace` 指定。
+`--machine` 接受 `genet machine list` 返回的精确 ID。派单方在 `.genethub/remote-targets.json` 为每个远端岗位
+固定 `machineId`、`workspaceId` 与 `command`（目标机 Python、已安装 `tools/team.py` 的绝对路径 argv）。
+不再按岗位短名/目录名猜归属，`--workspace` 只能核对同一个绑定。完整配置与恢复见
+[远端岗位接单](../apps/daemon/builtin-skills/genehub/references/team-template/skills/team-core/references/remote-targets.md)。
 
-岗位制品可在协调机器上用 SpaceBuilder 0.1.5 的 `build <岗位源目录> --output <输出目录>` 生成；移动后用
-`verify <制品目录> --artifacts-only` 验收，不要求目标机取得团队源码并重新构建。生成、传输和注册是不同步骤：
-输出不自动包含 `tools/`、父容器或项目仓，部署适配要补齐运行资源、保留目标端配置，并只注册目标岗位。
-完整合同见 [spacebuilder.md](../apps/daemon/builtin-skills/genehub/references/spacebuilder.md)。这项能力没有补齐下列派单与跨机写者锁边界。
+**派单账本在发起方，写锁与创建回执在执行端**。`spawn` 经已授权的 `shell --machine` 调用执行端 `receive`，
+先验证目标 workspace 确属该团队岗位，使用目标团队/岗位配置校验 Agent、模型及媒体能力，然后原子申请本机写锁。
+写目录由目标岗位 `WORKTREE_DIR` 决定，未配置时锁岗位根目录；遇到已有锁直接报忙，不排队、不自动切远端工位。本机 work 派单也默认锁岗位目录（或 WORKTREE_DIR），沿用本机并发子工位机制；两端不能跳过同目录互斥。
+同一派单编号只能对应同一内容；创建前保存回执，创建结果 unknown 时保留锁和意图，不自动重派。
 
-**账本仍在派单方**：`pending/`、文件收件箱与写者锁都是发起方机器上的文件，定时对账按记录里的 `machine`
-去远端读会话状态与最终回复。所以远端不需要注册团队根、不跑前台、不跑看板和 5 秒对账器。边界也要说清楚：
+派单方 `pending` 保存 machine 和执行端绑定快照，对账逐条读远端状态/最终回复。单条远端错误留待下次处理，
+不会使其他记录停摆。完成批次先确认执行端释放写锁，再回传、销账；释放失败保留账本。执行端不启动前台、看板或对账器。
 
-- `--worktree` 与 `--dir` 只对本机有效；远端岗位用它自己的 `WORKTREE_DIR`，跨机没有共享写者锁。
-- 远端岗位完成后直接输出结论，不要手动 `send` 回来；结果由派单方的对账收走。
-- 远端会话被暂停时，`send` 改用普通 Agent 消息投递（`--system` 不解除暂停）。
-- 远端用哪台机器的 Agent 与模型由目标机器决定；`--machine` 下不沿用请求方的 `modelId`，除非显式给 `--model`/`--tier`。
+- `--worktree`/`--dir` 只用于本机派单。远端并发应绑定不同实际目录/工位。
+- `send --machine --to <岗位>` 只补充该绑定中唯一的未结束派单会话，执行端校验有效回执后投递；已释放的旧会话不能重用，新任务先 spawn；零个会话提示先 spawn，多个会话要求精确 session ID。
+- 本机和远端通知都携带 `--system`，均不解除暂停。用户暂停任务保留写锁，由 Human 恢复后继续对账；本派单的超时取消或内核失败终态可释放锁，仍不解除暂停。
+- 默认使用目标机 `TEAM_AGENT`、目标机模型配置或该 Agent 的默认模型；本机隐式模型覆盖不传过去。
+- 接单通过目标账号的 shell 执行能力认证；本版只支持有完整执行授权的机器。脚本内容注明原发起方，平台输入仍是脚本通知，不伪造 Human 批准。
+
+SpaceBuilder 0.1.5 可 `build <岗位源目录> --output <制品目录>`，移动后 `verify --artifacts-only`。该制品不自动带
+`tools/`、父团队描述或目标端配置，**单独一个 portable 岗位制品尚不能作为本版 receive 的安装包**。
+当前接单命令要求目标机已安装团队脚本、团队/岗位描述、目标配置，并注册岗位 workspace；不用启动团队根会话或定时器。
+已有团队需要显式升级模板并配置绑定后才生效。部署资源合同见 [spacebuilder.md](../apps/daemon/builtin-skills/genehub/references/spacebuilder.md)。
 
 身份自动刷新（定时任务与 `sync-identity`）使用 `--require-no-post-commands`，遇到 Space pre/post 或 Provider post
 返回 `SB018` 并保留上一版生成身份，不因文字更新隐式发布或部署。发布 hook 由源 Space 的显式构建执行；

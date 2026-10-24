@@ -170,3 +170,11 @@ Relay 维护 Control 签发的 endpoint presence lease，并订阅 endpoint/rout
 | 应用服务只监听 `127.0.0.1`，由反向代理终止 TLS | 不暴露明文端口 |
 | 任何常驻服务都要有重启策略 | 容器用 `unless-stopped`；非容器进程用 systemd |
 | 服务器上如果确实要跑 daemon：独立低权限用户 + 限定 workspace + 不放 provider 凭证 | 限制被攻破后的爆炸半径 |
+
+## 普通 Agent 的本机 CLI 权限
+
+经过 daemon 签发的 SessionController proof 认证的普通会话按当前 OS 账号能力执行，与本机用户和完整 Hub Channel 一致。
+context.authority 仍显示 sessionController 和真实 sessionId，不通过移除会话身份冒充 LocalUser。Workflow managed 子会话继续保持原有 handshake/read/session 能力和父会话约束。
+
+完整能力不等于代替 Human：Agent 级认证请求、provider 凭证提交、直接写入/删除 provider 配置、Human 问题与计划批准仍有操作级检查。Agent 使用 provider configure 准备卡片，由 Human 提交，回执回到同一会话。
+设备连接仍逐请求读取显式 grants；撤销与 PreviewShare 文件范围不变。普通 Agent 原本就能执行该 OS 账号下的任意代码，设备若被授予 Session/不受限 shell 也不能被视为 OS 沙箱；本改动不承诺按最初发起设备给已运行 Agent 的 OS 进程施加限制。

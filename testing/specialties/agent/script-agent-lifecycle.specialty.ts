@@ -569,11 +569,11 @@ const REPAIR_TRIGGER = "RUN_SCRIPT_AGENT_REPAIR";
 defineSpecialty(
   {
     id: "specialty.agent.script.repair-from-session",
-    title: "A built-in Agent session can read and reload a script Agent, but not run its actions",
-    oracle: "a user/<id> directory written after daemon start is picked up when the built-in Genet session itself runs `$GENEHUB_CLI agent reload <id>` (exit 0, Agent ready with source user); `agent logs` from the same session exits 0, while `agent action` from it is refused because actions stay with a person",
+    title: "An ordinary built-in Agent can reload and operate its account’s script Agents",
+    oracle: "a user/<id> directory written after daemon start is picked up when the built-in Genet session itself runs `$GENEHUB_CLI agent reload <id>` (exit 0, Agent ready with source user); `agent logs` from the same session exits 0, and `agent action` reaches the fixture as an owner operation; Human authentication requests remain a separate boundary",
     catches: [
       "a session Agent cannot reach agent reload / logs, so 让内置 Agent 修复 cannot finish",
-      "a session Agent can run Agent actions (install, login) without a person",
+      "an ordinary session still lacks owner Agent lifecycle capabilities",
     ],
     tags: ["core", "agent", "script-agent", "script-agent-lifecycle", "genet-cli"],
     llm: { default: "mock" },
@@ -619,10 +619,10 @@ defineSpecialty(
       for (const name of ["reload", "logs"]) {
         t.assertions.assert(read(`${name}.exit`) === "0", `agent ${name} from the session failed: ${read(`${name}.out`).slice(-600)}`);
       }
-      t.assertions.assert(read("action.exit") !== "0", `agent action ran from a session Agent: ${read("action.out").slice(-600)}`);
+      t.assertions.assert(read("action.exit") === "0", `owner agent action failed: ${read("action.out").slice(-600)}`);
       const ready = await t.flows.branches.waitForAgent(opened.client, agent.agentId, t.flows.branches.agentReady, { what: "ready after the session's reload" });
       t.assertions.assert(ready.source === "user", `source ${ready.source}`);
-      t.assertions.assert(!journalOf(agent, "action").length, "the refused action reached the script");
+      t.assertions.assert(journalOf(agent, "action").length === 1, "owner action did not reach the script exactly once");
     }, ["fixture-repair"]);
   },
 );

@@ -36,7 +36,7 @@ const shape = {
 
 defineSpecialty({ ...shape, id: "specialty.agent.provider-configuration.browser",
   title: "Provider configuration remains in the original conversation across restart, with direct Human secret input",
-  oracle: "a real Agent CLI reports sessionController without Settings, stops before the browser shows the configuration; restart retains the card; one password submission saves and probes Anthropic, starts a fresh execution in the original Session, and leaves no key in receipts/chat/model requests; duplicate submission does not call the model or overwrite config",
+  oracle: "a real Agent CLI retains sessionController identity with ordinary owner capabilities and stops before the browser shows the Human configuration; restart retains the card; one password submission saves and probes Anthropic, starts a fresh execution in the original Session, and leaves no key in receipts/chat/model requests; duplicate submission does not call the model or overwrite config",
   catches: ["wrong caller identity", "Agent configures unrelated software", "secret enters model context", "restart loses card", "duplicate provider mutation"],
   runner: "playwright", resources: { environments: 1, cpu: 1, memoryMb: 1536, io: 1, browser: 1, pool: "browser" },
 }, async t => {
@@ -47,7 +47,7 @@ defineSpecialty({ ...shape, id: "specialty.agent.provider-configuration.browser"
     const request = await prepare(t, s);
     const discovered = s.journal().filter(e => e.event === "provider-discovery");
     const context = discovered.map(e => { try { return parseJson(String(e.result)) as { type?: string; data?: { principal?: {type?: string}; authority?: { grants?: string[] } } }; } catch { return null; } }).find(e => e?.type === "context");
-    t.assertions.assert(context?.data?.principal?.type === "sessionController" && !context?.data?.authority?.grants?.includes("settings"), "Agent received invented localUser or Settings authority");
+    t.assertions.assert(context?.data?.principal?.type === "sessionController" && context?.data?.authority?.grants?.includes("settings"), "Agent lost its session identity or ordinary owner capabilities");
     const cli = s.journal().find(e => e.event === "provider-cli");
     t.assertions.assert(!!cli, "configuration did not use the public CLI");
     const isRunning = (pid: number) => { try { const stat = readFileSync(`/proc/${pid}/stat`, "utf8"); return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0] !== "Z"; } catch { return false; } };

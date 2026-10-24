@@ -418,8 +418,12 @@ function describeAgentVerbs(t: CaseContext, cli: Cli): void {
       if (command?.requiresDaemon !== true) problems.push(`${name} requiresDaemon ${String(command?.requiresDaemon)}`);
       if (command?.mutation !== mutation) problems.push(`${name} schema mutation ${String(command?.mutation)}, expected ${mutation}`);
       const input = command?.inputSchema as { required?: unknown } | undefined;
-      if (verb !== "list" && !(Array.isArray(input?.required) && input!.required.includes("agentId"))) {
-        problems.push(`${name} input does not require agentId: ${JSON.stringify(input?.required)}`);
+      const required = verb === "run" ? "prompt" : "agentId";
+      if (verb !== "list" && !(Array.isArray(input?.required) && input!.required.includes(required))) {
+        problems.push(`${name} input does not require ${required}: ${JSON.stringify(input?.required)}`);
+      }
+      if (verb === "run" && Array.isArray(input?.required) && input.required.includes("agentId")) {
+        problems.push("agent.run globally requires agentId even for tag routing or session resume");
       }
     }
     if (!listedNames.has(name)) problems.push(`genet schema does not list ${name}`);
@@ -512,14 +516,9 @@ const SESSION_TRIGGER = "RUN_AGENT_CLI_FROM_SESSION";
 
 cliCase(
   "session-controller-refused",
-  "From inside a session, agent action and reset are refused for lack of settings while test and logs work",
-  "a built-in Genet session (mock LLM) running `$GENEHUB_CLI agent action fixture-cli noop` and `agent reset codex` gets exit 4 for both with error code unauthenticated and message `caller lacks the settings capability`, while `agent test fixture-cli` and `agent logs fixture-cli` exit 0; the action never reaches the script and user/codex is still there",
-  [
-    "a session Agent installs, logs in or runs actions without a person",
-    "a session Agent resets an override the user wrote",
-    "the refusal is indistinguishable from a broken Agent (no capability named)",
-    "a session Agent cannot run the tests it needs to repair a script",
-  ],
+  "An ordinary session can manage its account's Agents without losing session identity",
+  "a real built-in Agent runs action/reset/test/logs through its session-bound CLI; the action reaches the fixture exactly once and reset removes its user override",
+  ["ordinary session lacks owner settings capabilities", "Agent repair cannot complete", "reset reports success without removing the user override"],
   async (t) => {
     const agent = installScriptAgent(t.env, { id: "fixture-cli", control: { profile: "normal" } });
     const override = installScriptAgent(t.env, { id: "codex", control: { profile: "normal" } });
@@ -564,11 +563,8 @@ cliCase(
       const problems: string[] = [];
       for (const name of ["action", "reset"]) {
         const got = outcome(name);
-        // The platform's wording for a session caller missing a grant
-        // (router.rs): the code is `unauthenticated`, the message names it.
-        if (!(got.exit === "4" && got.body.type === "error" && got.body.error?.code === "unauthenticated"
-          && got.body.error.message === "caller lacks the settings capability")) {
-          problems.push(`agent ${name} from a session: exit ${got.exit} ${got.text}`);
+        if (!(got.exit === "0" && got.body.type === `agent.${name}`)) {
+          problems.push(`agent ${name} from an ordinary session: exit ${got.exit} ${got.text}`);
         }
       }
       for (const name of ["test", "logs"]) {
@@ -576,8 +572,8 @@ cliCase(
         if (!(got.exit === "0" && got.body.type === `agent.${name}`)) problems.push(`agent ${name} from a session: exit ${got.exit} ${got.text}`);
       }
       t.assertions.assert(problems.length === 0, problems.join("\n"));
-      t.assertions.assert(journalOf(agent, "action").length === 0, "the refused action reached the script");
-      t.assertions.assert(existsSync(path.join(override.dir, "agent.toml")), "the refused reset removed user/codex");
+      t.assertions.assert(journalOf(agent, "action").length === 1, "owner action did not execute exactly once");
+      t.assertions.assert(!existsSync(path.join(override.dir, "agent.toml")), "owner reset left user/codex in place");
     });
   },
   { durationMs: 30_000, llm: "mock" },

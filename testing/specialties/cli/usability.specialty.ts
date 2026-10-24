@@ -104,17 +104,21 @@ check("route-filters", "Agent filters select routes without a redundant mode swi
     t.assertions.assert(summary.agentId === "genet" && summary.modelId === "deepseek/deepseek-v4-pro", "tag selection did not reach its requested model");
   }), true);
 
-check("capability-denial", "An authenticated Agent's missing capability is forbidden rather than unauthenticated",
-  "a real builtin Agent calls client list through its session-bound CLI, gets forbidden, and remains a usable authenticated Session",
-  ["capability denial requests a new login", "repair widens Agent grants", "CLI bypasses the originating Session"],
+// Keep the existing case ID so policy selections continue covering the repaired boundary.
+check("capability-denial", "An ordinary Agent has owner capabilities and retains its session identity",
+  "a real builtin Agent lists clients and reports owner capabilities tied to its durable Session",
+  ["ordinary Agent is artificially limited", "controller identity is discarded"],
   async t => workspace(t, async opened => {
     await t.flows.main.configureMockProvider(opened.client, opened.mock);
-    opened.mock.script({ tool: { name: "bash", arguments: { command:
-      '"$GENEHUB_CLI" client list < /dev/null > cli-denied.json 2> cli-denied.err; echo done > cli-denied.done' } } }, { text: "Capability check complete." });
+    const commands = ['"$GENEHUB_CLI" client list > owner-clients.json',
+      '"$GENEHUB_CLI" context > owner-context.json',
+      'echo done > owner.done'];
+    opened.mock.script({ tool: { name: "bash", arguments: { command: commands.join("; ") } } }, { text: "Capability check complete." });
     const sid = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
-    await t.flows.main.sendPrompt(opened.client, sid, "Check the CLI capability result.");
-    await t.tools.waitUntil(() => existsSync(path.join(opened.workspaceRoot, "cli-denied.done")), 30000);
-    const denied = parseJson(readFileSync(path.join(opened.workspaceRoot, "cli-denied.json"), "utf8")) as unknown as Envelope;
-    t.assertions.assert(denied.error?.code === "forbidden", "missing capability was misclassified or granted");
-    t.assertions.assert((await json(opened, ["session", "get", sid])).data.session.summary.id === sid, "authenticated Session disappeared");
+    await t.flows.main.sendPrompt(opened.client, sid, "Check the CLI owner authority result.");
+    await t.tools.waitUntil(() => existsSync(path.join(opened.workspaceRoot, "owner.done")), 30000);
+    const read = (file: string) => parseJson(readFileSync(path.join(opened.workspaceRoot, file), "utf8")) as unknown as Envelope;
+    t.assertions.assert(read("owner-clients.json").type === "client.debug", "ordinary Agent could not list clients");
+    const authority = read("owner-context.json").data.authority;
+    t.assertions.assert(authority.principalType === "sessionController" && authority.sessionId === sid && authority.grants.includes("settings") && authority.grants.includes("pty"), "owner parity lost scope or identity");
   }), true);
