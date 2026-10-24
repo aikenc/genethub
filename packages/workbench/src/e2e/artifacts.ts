@@ -61,10 +61,20 @@ export function runtimeArtifacts(daemon: string): {
   const dir = path.dirname(daemon);
   const suffix = process.platform === "win32" ? ".exe" : "";
   const stem = path.basename(daemon).replace(/\.exe$/i, "");
+  // Source-tree launchers accept these overrides and Cargo keeps the guest
+  // under its cross-target directory. Validate what will actually be run,
+  // rather than requiring an obsolete copy beside the native executable.
+  const local = stem === "genet-local";
+  const target = path.dirname(dir);
+  const cargoLayout = ["iterate", "debug", "release"].includes(path.basename(dir));
+  const components = [
+    ...(cargoLayout ? ["iterate", "debug", "release"].map(profile => path.join(target, "wasm32-wasip2", profile, "genehub_guest.wasm")) : []),
+    path.join(dir, "genehub_guest.wasm"),
+  ];
   return {
     daemon,
-    host: path.join(dir, `${stem.replace(/^genet/, "genehub-host")}${suffix}`),
-    component: path.join(dir, "genehub_guest.wasm"),
+    host: (local && process.env.GENEHUB_HOST?.trim()) || path.join(dir, `${stem.replace(/^genet/, "genehub-host")}${suffix}`),
+    component: (local && (process.env.GENEHUB_LOCAL_COMPONENT?.trim() || process.env.GENEHUB_LOCAL_DAEMON_COMPONENT?.trim())) || components.find(existsSync) || components[0]!,
   };
 }
 

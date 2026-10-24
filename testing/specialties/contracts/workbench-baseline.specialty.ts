@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { BlockedError, defineSpecialty } from "../../framework/public.ts";
+import { BlockedError, defineSpecialty, locateGenet, tryLocateHost, tryLocateDaemonComponent } from "../../framework/public.ts";
 
 defineSpecialty({
   id: "specialty.contracts.workbench-baseline",
@@ -12,12 +12,16 @@ defineSpecialty({
   tags: ["contract", "network-risk-v2", "workbench-baseline"], llm: { default: "mock" },
   expectedDurationMs: 120000, timeoutMs: 240000,
   resources: { environments: 1, cpu: 2, memoryMb: 2048, io: 1, browser: 0, pool: "exclusive" },
+  requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
   surfaces: ["workbench-owning-package", "vitest"],
 }, async t => {
   const cwd = join(t.openRoot, "packages/workbench"), report = join(t.env.root, "vitest.json");
+  const host = tryLocateHost(t.openRoot), component = tryLocateDaemonComponent(t.openRoot);
+  if (!host || !component) throw new BlockedError("Workbench baseline requires the native host and daemon component");
   try {
     await promisify(execFile)(process.execPath, [join(cwd, "node_modules/vitest/vitest.mjs"), "run", "--maxWorkers", "2", "--reporter=default", "--reporter=json", "--outputFile", report], {
       cwd, timeout: 220000, maxBuffer: 4 * 1024 * 1024,
+      env: { ...process.env, GENET_E2E_REQUIRED: "1", GENET_E2E_DAEMON: locateGenet(t.openRoot), GENEHUB_HOST: host, GENEHUB_LOCAL_COMPONENT: component },
     });
     const result = JSON.parse(readFileSync(report, "utf8"));
     t.assertions.assert(result.success === true && result.numPassedTests > 0 && result.numFailedTests === 0,
