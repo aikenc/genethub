@@ -5,10 +5,11 @@ import {
   type ClientDiagnosticEvent,
   type InviteChannelCredential,
   type LocalServerProof,
+  type ProtocolDial,
   type WebSocketLike,
 } from "@genehub/workbench/client";
 
-export async function connectProductClient(input: {
+export async function connectProductClient(input: ProtocolDial & {
   url: string;
   localServerProof?: LocalServerProof;
   credential?: { deviceId: string; secret: string };
@@ -28,6 +29,9 @@ export async function connectProductClient(input: {
     url: input.url,
     localServerProof: input.localServerProof,
     credential: input.credential,
+    channelCredential: input.channelCredential,
+    fabricRouteTicket: input.fabricRouteTicket,
+    fabricAuthorizationExpiresAt: input.fabricAuthorizationExpiresAt,
     inviteCredential: input.inviteCredential,
     rtcEnabled: false,
     connectTimeoutMs: 45_000,

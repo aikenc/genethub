@@ -1370,8 +1370,13 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
         return refuse(stream, needed).await;
     }
 
-    let handled =
-        router::handle(&services.state, services.access.transport, &caller, request).await;
+    let handled = router::handle_in_workspace(
+        &services.state,
+        services.access.transport,
+        &caller,
+        services.access.workspace_id.as_deref(),
+        request,
+    ).await;
     match handled.reply {
         Ok(mut reply) => {
             if let Reply::Agents(agents) = &mut reply {
@@ -1594,7 +1599,11 @@ async fn handle_events(stream: &mut ServerStream, services: &PeerServices) -> Re
 
 fn request_workspace(request: &Request) -> Option<&str> {
     match request {
-        Request::PreviewFeedback(request) => Some(&request.workspace_id),
+        // Machine feedback has no workspace identity. Its handler intersects
+        // every source/record/manifest with the admission's physical scope.
+        Request::PreviewFeedback(request) => {
+            (!request.workspace_id.is_empty()).then_some(request.workspace_id.as_str())
+        }
         Request::SessionFork {
             target: Some(target),
             ..

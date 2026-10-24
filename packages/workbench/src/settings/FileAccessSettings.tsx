@@ -8,14 +8,17 @@ export function FileAccessSettings({client}: {client: Client}) {
   const [text, setText] = useState("");
   const [problem, setProblem] = useState("");
   const [busy, setBusy] = useState(false);
+  const [reload, setReload] = useState(0);
   const accept = (value: FileAccessInfo) => { setInfo(value); setText(value.additionalDirectories.join("\n")); };
   useEffect(() => {
     let cancelled = false;
+    setInfo(null); setText("");
+    setProblem("");
     void client.call({type: "fileAccess.list"}).then(reply => {
       if (!cancelled && reply?.type === "fileAccess") accept(reply.data);
     }).catch(error => { if (!cancelled) setProblem(String(error)); });
     return () => { cancelled = true; };
-  }, [client]);
+  }, [client, reload]);
   const save = async () => {
     if (!info) return;
     setBusy(true); setProblem("");
@@ -38,5 +41,6 @@ export function FileAccessSettings({client}: {client: Client}) {
     </label>
     {problem ? <p role="alert" className="my-2 text-xs text-danger">{problem}</p> : null}
     <button disabled={!info || busy} onClick={() => void save()} className="mt-2 rounded border border-line px-3 py-1 text-xs disabled:opacity-50">{busy ? "保存中…" : "保存目录配置"}</button>
+    <button disabled={busy} onClick={() => setReload(value => value + 1)} className="ml-2 rounded border border-line px-3 py-1 text-xs">重新加载目录</button>
   </section>;
 }

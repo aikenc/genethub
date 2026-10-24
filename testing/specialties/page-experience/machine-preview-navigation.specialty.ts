@@ -35,8 +35,8 @@ defineSpecialty({
     fetch("../data.json",{method:"HEAD"}).then(async r=>document.getElementById("head").textContent=r.status+":"+(await r.text()).length);
     const aborted=new XMLHttpRequest();aborted.open("GET","../data.json");aborted.onabort=()=>document.getElementById("abort").textContent="aborted";aborted.send();aborted.abort();
     </script></body></html>`);
-  await writeFile(path.join(pages, "deep", "next.html"), '<!doctype html><html><head><title>Second</title></head><body><div style="height:1200px"></div><h1 id="anchor">Second page target</h1><p id="query"></p><p id="root-data"></p><a href="../guide.md#install">Read guide</a><script>fetch("/root.json").then(r=>r.json()).then(x=>document.getElementById("root-data").textContent=x.label);document.getElementById("query").textContent=window.genehubPreviewLocation.search;</script></body></html>');
-  await writeFile(path.join(pages, "guide.md"), '# Guide\n\n[Open source](source%20file.txt?view=raw#target)\n\n## Install\n\nInstallation target.\n');
+  await writeFile(path.join(pages, "deep", "next.html"), '<!doctype html><html><head><title>Second</title></head><body><div style="height:1200px"></div><h1 id="anchor">Second page target</h1><p id="query"></p><p id="root-data"></p><a href="../guide.md?mode=read#install">Read guide</a><script>fetch("/root.json").then(r=>r.json()).then(x=>document.getElementById("root-data").textContent=x.label);document.getElementById("query").textContent=window.genehubPreviewLocation.search;</script></body></html>');
+  await writeFile(path.join(pages, "guide.md"), '# Guide\n\n[Jump to install](#install)\n\n[Open source](source%20file.txt?view=raw#target)\n\n' + Array.from({length: 40}, (_, i) => `Paragraph ${i}.\n\n`).join("") + '## Install\n\nInstallation target.\n');
   await writeFile(path.join(pages, "source file.txt"), 'source file target');
   const opened = await t.flows.main.openWorkspace({openRoot: t.openRoot, lease: t.env});
   let browser: Awaited<ReturnType<typeof openBrowser>> | undefined;
@@ -69,8 +69,15 @@ defineSpecialty({
     t.assertions.assert(await frame().locator("#query").textContent() === "?view=wide", "document query was lost or entered the filename");
     await frame().getByRole("link", {name: "Read guide"}).click();
     await page.getByRole("heading", {name: "Install", exact: true}).waitFor();
+    const windows = browser.context.pages().length;
+    await page.getByRole("link", {name: "Jump to install", exact: true}).click();
+    await t.tools.waitUntil(async () => await page.getByRole("heading", {name: "Install", exact: true}).evaluate(node => {const r=node.getBoundingClientRect();return r.top>=0 && r.bottom<=innerHeight;}), 5000);
+    t.assertions.assert(browser.context.pages().length === windows, "Markdown anchor opened a new window");
+    await page.getByRole("status").filter({hasText: "页面参数：?mode=read"}).waitFor();
     await page.getByRole("link", {name: "Open source"}).click();
     await page.getByText("source file target", {exact: true}).waitFor();
+    await page.getByRole("button", {name: "后退", exact: true}).click();
+    await page.getByRole("heading", {name: "Guide", exact: true}).waitFor();
     await page.getByRole("button", {name: "后退", exact: true}).click();
     await page.getByRole("heading", {name: "Guide", exact: true}).waitFor();
     await page.getByRole("button", {name: "后退", exact: true}).click();

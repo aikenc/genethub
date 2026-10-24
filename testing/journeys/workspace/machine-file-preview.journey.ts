@@ -1,7 +1,8 @@
-import { mkdir, writeFile, symlink, readFile, readdir } from "node:fs/promises";
+import { mkdir, writeFile, symlink, readFile, readdir, unlink } from "node:fs/promises";
 import path from "node:path";
 import { AssetPreviewError_, ProtocolError_ } from "@genehub/workbench/client";
-import { defineJourney, runGenetAsync } from "../../framework/public.ts";
+import type { PreviewFeedbackOperation } from "@genehub/proto";
+import { defineJourney, runGenetAsync, openWorkspacePeer } from "../../framework/public.ts";
 
 defineJourney({
   id: "journey.workspace.machine-file-preview",
@@ -9,12 +10,13 @@ defineJourney({
   oracle: "Real local WASI daemon returns exact absolute-path bytes, merges project/manual roots with CAS, revokes the last source, denies prefix/symlink escapes and persists machine feedback outside projects",
   catches: ["absolute path bypasses directory policy", "removed project remains authorized", "one duplicate source revokes another", "CAS overwrites a newer policy", "symlink escapes the allowed root", "feedback still depends on workspace mapping"],
   tags: ["core", "workspace", "filesystem", "authorization", "machine-preview"],
-  llm: {default: "none"}, expectedDurationMs: 30_000, timeoutMs: 90_000,
+  llm: {default: "none"}, expectedDurationMs: 45_000, timeoutMs: 150_000, requiredRepos: ["cloud"],
   surfaces: ["daemon", "workbench-client", "genet-cli"],
   productInterfaces: ["@genehub/workbench/client", "genet file-access", "preview.feedback"],
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
 }, async t => {
   const opened = await t.flows.main.openWorkspace({openRoot: t.openRoot, lease: t.env});
+  let peer: Awaited<ReturnType<typeof openWorkspacePeer>> | undefined;
   try {
     const client = opened.client;
     const read = (file: string) => client.preview("", file);
@@ -82,6 +84,13 @@ defineJourney({
     t.assertions.assert(persisted.data.source.path === entry, "machine feedback lost the absolute identity");
     const submitted = await client.call({type: "preview.feedback", payload: {workspaceId: "", operation: {kind: "submit", id: draft.data.data.id, description: "Machine feedback proof", annotationIds: [], bundlePaths: []}}});
     if (submitted?.type !== "previewFeedback" || submitted.data.kind !== "receipt") throw new Error("machine feedback receipt absent");
+    const receiptFile = await read(submitted.data.data.workspacePath);
+    t.assertions.assert(JSON.parse(new TextDecoder().decode(receiptFile.bytes)).id === draft.data.data.id, "ordinary preview cannot open the returned feedback link");
+    await denied(path.join(path.dirname(submitted.data.data.workspacePath), "draft.json"));
+    await denied(path.join(t.env.data, "config.json"));
+    await symlink(secret, path.join(path.dirname(submitted.data.data.workspacePath), "unpublished.txt"));
+    await denied(path.join(path.dirname(submitted.data.data.workspacePath), "unpublished.txt"));
+    await unlink(path.join(path.dirname(submitted.data.data.workspacePath), "unpublished.txt"));
     t.assertions.assert(JSON.parse(await readFile(submitted.data.data.workspacePath, "utf8")).id === draft.data.data.id, "receipt points to a retired project path");
     const feedbackCli = await runGenetAsync(opened.daemon.genet, ["preview", "feedback", "show", draft.data.data.id], opened.daemon.env);
     t.assertions.assert(feedbackCli.code === 0 && feedbackCli.stdout.includes("Machine feedback proof"), "machine feedback CLI still requires a workspace locator");
@@ -106,6 +115,59 @@ defineJourney({
     t.assertions.assert(append.code === 0 && append.stdout.includes(second.data.id), "formal add-root failed to preserve workspace identity");
     const cli = await runGenetAsync(opened.daemon.genet, ["file-access", "list"], opened.daemon.env);
     t.assertions.assert(cli.code === 0 && cli.stdout.includes("additionalDirectories"), "public directory CLI did not return the policy");
+    // A real Cloud workspace route must retain the same physical scope for
+    // machine locators, record IDs and the final share resource manifest.
+    await client.call({type: "workspace.open", payload: {root: extra}});
+    const foreign = await read(external);
+    const foreignDraft = await client.call({type: "preview.feedback", payload: {workspaceId: "", operation: {kind: "open", path: external, version: foreign.metadata.version, draftId: null}}});
+    if (foreignDraft?.type !== "previewFeedback" || foreignDraft.data.kind !== "draft") throw new Error("foreign draft absent");
+    const foreignId = foreignDraft.data.data.id;
+    peer = await openWorkspacePeer({openRoot: t.openRoot, lease: t.env, client, workspaceId: opened.workspaceId});
+    const scoped = peer.client;
+    const call = async (operation: PreviewFeedbackOperation) => {
+      const reply = await scoped.call({type: "preview.feedback", payload: {workspaceId: "", operation}});
+      if (reply?.type !== "previewFeedback") throw new Error("scoped feedback absent");
+      return reply.data;
+    };
+    const refuse = async (action: () => Promise<unknown>) => {
+      let rejected = false; try { await action(); } catch { rejected = true; }
+      t.assertions.assert(rejected, "workspace admission escaped its physical scope");
+    };
+    t.assertions.assert(new TextDecoder().decode((await scoped.preview("", entry)).bytes) === "exact machine bytes", "scoped absolute preview failed");
+    await call({kind: "source", path: entry});
+    const scopedDraft = await call({kind: "open", path: entry, version: loaded.metadata.version, draftId: null});
+    if (scopedDraft.kind !== "draft") throw new Error("scoped draft absent");
+    const scopeId = scopedDraft.data.id;
+    const upload = await call({kind: "beginArtifact", id: scopeId, files: [{name: "note.txt", mime: "text/plain", bytes: 4}], metadata: {}});
+    if (upload.kind !== "upload") throw new Error("scoped upload absent");
+    await call({kind: "chunk", id: scopeId, uploadId: upload.data.uploadId, fileIndex: 0, offset: 0, dataBase64: Buffer.from("note").toString("base64")});
+    const bundle = await call({kind: "finishArtifact", id: scopeId, uploadId: upload.data.uploadId});
+    if (bundle.kind !== "artifact") throw new Error("scoped bundle absent");
+    const scopeReceipt = await call({kind: "submit", id: scopeId, description: "Scoped preview feedback", annotationIds: [], bundlePaths: [bundle.data.workspacePath]});
+    if (scopeReceipt.kind !== "receipt") throw new Error("scoped receipt absent");
+    await call({kind: "read", id: scopeId});
+    t.assertions.assert(new TextDecoder().decode((await scoped.preview("", `${bundle.data.workspacePath}/note.txt`)).bytes) === "note", "scoped evidence link failed");
+    await scoped.preview("", scopeReceipt.data.workspacePath);
+    await unlink(`${bundle.data.workspacePath}/note.txt`);
+    await symlink(secret, `${bundle.data.workspacePath}/note.txt`);
+    await refuse(() => scoped.preview("", `${bundle.data.workspacePath}/note.txt`));
+    const share = await call({kind: "share", path: entry, ttlSeconds: 3600, resources: []});
+    if (share.kind !== "share") throw new Error("scoped share absent");
+    await call({kind: "revoke", shareId: share.data.shareId});
+    await refuse(() => scoped.preview("", external));
+    await refuse(() => call({kind: "source", path: external}));
+    await refuse(() => call({kind: "draft", id: foreignId}));
+    await refuse(() => call({kind: "submit", id: foreignId, description: "forbidden", annotationIds: [], bundlePaths: []}));
+    await refuse(() => call({kind: "share", path: entry, ttlSeconds: 3600, resources: [external]}));
+    const otherShare = await client.call({type: "preview.feedback", payload: {workspaceId: "", operation: {kind: "share", path: external, ttlSeconds: 3600, resources: []}}});
+    if (otherShare?.type !== "previewFeedback" || otherShare.data.kind !== "share") throw new Error("foreign share absent");
+    const otherShareId = otherShare.data.data.shareId;
+    await refuse(() => call({kind: "revoke", shareId: otherShareId}));
+    await client.call({type: "preview.feedback", payload: {workspaceId: "", operation: {kind: "revoke", shareId: otherShareId}}});
+    await client.call({type: "workspace.remove", payload: {workspaceId: opened.workspaceId}});
+    await client.call({type: "workspace.remove", payload: {workspaceId: second.data.id}});
+    await denied(submitted.data.data.workspacePath);
+    await refuse(() => scoped.preview("", scopeReceipt.data.workspacePath));
     t.note("Real public Client/CLI with local WASI: v2/v3 file identity, manual roots, live source union, revocation, CAS, prefix/symlink confinement and machine feedback storage.");
-  } finally { opened.client.close(); opened.daemon.stop(); await opened.mock.stop(); }
+  } finally { await peer?.close(); opened.client.close(); opened.daemon.stop(); await opened.mock.stop(); }
 });

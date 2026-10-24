@@ -52,6 +52,8 @@ import {
 import type { AddressScope } from "../location/workbench";
 import type { Client, ConnectionState } from "../protocol/client";
 import { PREVIEW_ANNOTATIONS_FEATURE } from "../preview/reviewDraft";
+import { resolveWorkspacePath } from "../preview/resolveArtifactRef";
+import { isAbsoluteFilePath } from "../preview/url";
 import { uploadSessionArtifact } from "../preview/sessionArtifactUpload";
 import { ClientRequestTimeoutError, ConnectionOutcomeUnknownError, ProtocolError_ } from "../protocol/client";
 import { canStartAgent } from "../presentation/catalog/resolve";
@@ -1728,11 +1730,19 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   },
 
   openPreviewFloat(target) {
+    const state = get();
+    const folders = state.workspaces.find(workspace => workspace.id === target.workspaceHandle)?.folders ?? [];
+    const machineFiles = state.client?.identity?.machineId === target.deviceHandle
+      && state.client.identity.features?.includes("asset.preview.machine-file.v1");
+    // A stale catalogue keeps the v2 reader; never guess an unknown root.
+    const resolve = (path: string) => machineFiles
+      && (isAbsoluteFilePath(path) || folders.some(folder => path.startsWith(`${folder.rootHandle}/`)))
+      ? resolveWorkspacePath(path, {...target, folders, machineFiles: true}) ?? path : path;
     set({
       previewFloat: {
-        deviceHandle: target.deviceHandle,
-        workspaceHandle: target.workspaceHandle,
-        path: target.path,
+        ...target,
+        path: resolve(target.path),
+        ...(target.siteEntryPath ? {siteEntryPath: resolve(target.siteEntryPath)} : {}),
         sessionId:
           target.sessionId === undefined ? get().activeSessionId : target.sessionId,
       },

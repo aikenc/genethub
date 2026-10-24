@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 import { join, dirname } from "node:path";
 import type { Page } from "playwright";
 import type { EnvironmentLease } from "../../infrastructure/public.ts";
-import type { DaemonEndpoint } from "./daemon.ts";
+import type { ProtocolDial } from "@genehub/workbench/client";
 
 /** Real package consumer, compiled by the product's Vite installation. No UI
  * replacements: AssetPreviewPage owns its normal iframe, bridge and media UI. */
@@ -13,8 +13,8 @@ export async function openPreviewBrowser(input: {
   openRoot: string;
   lease: EnvironmentLease;
   page: Page;
-  endpoint: DaemonEndpoint;
-  refreshEndpoint?: () => DaemonEndpoint;
+  endpoint: ProtocolDial;
+  refreshEndpoint?: () => ProtocolDial;
   workspaceId: string;
   entryPath: string;
   contentSecurityPolicy?: string;

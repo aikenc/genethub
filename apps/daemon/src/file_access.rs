@@ -232,8 +232,19 @@ pub async fn resolve(
 
 pub struct AuthorizedFile {
     pub resolved: ResolvedWorkspacePath,
-    legacy_grant: Option<(String, String)>,
-    machine: bool,
+    source: WorkspaceFileSource,
+}
+
+pub(crate) async fn resolve_source(
+    state: &Shared,
+    workspace: &str,
+    path: &str,
+) -> Result<ResolvedWorkspacePath> {
+    if absolute(path).is_ok() {
+        resolve(state, path, (!workspace.is_empty()).then_some(workspace)).await
+    } else {
+        state.workspaces.resolve(workspace, path).await
+    }
 }
 
 pub async fn authorize(
@@ -243,7 +254,7 @@ pub async fn authorize(
 ) -> Result<AuthorizedFile> {
     let caller = crate::authz::Principal::of(state, access);
     let scope = access.workspace_id.as_deref();
-    let (resolved, legacy_grant, machine) = match source {
+    let resolved = match source {
         WorkspaceFileSource::WorkspaceFile {
             workspace_handle,
             path,
@@ -259,33 +270,45 @@ pub async fn authorize(
             let resolved = state.workspaces.resolve(workspace, path).await?;
             // The v2 adapter intersects the live machine directory policy too.
             resolve(state, &display(&resolved.absolute), Some(workspace)).await?;
-            (resolved, Some((workspace.to_owned(), path.clone())), false)
+            crate::preview_feedback::authorize_asset(state, &caller, workspace, path).await?;
+            resolved
         }
         WorkspaceFileSource::MachineFile { absolute_path } => {
-            let resolved = resolve(state, absolute_path, scope).await?;
-            let legacy = scope.map(|workspace| {
-                (
-                    workspace.to_owned(),
-                    format!(
-                        "{}/{}",
-                        resolved.root_handle,
-                        resolved.relative.to_string_lossy().replace('\\', "/")
-                    ),
-                )
-            });
-            (resolved, legacy, true)
+            match resolve(state, absolute_path, scope).await {
+                Ok(resolved) => {
+                    let grant_path = scope
+                        .map(|_| {
+                            format!(
+                                "{}/{}",
+                                resolved.root_handle,
+                                resolved.relative.to_string_lossy().replace('\\', "/")
+                            )
+                        })
+                        .unwrap_or_else(|| display(&resolved.absolute));
+                    crate::preview_feedback::authorize_asset(
+                        state,
+                        &caller,
+                        scope.unwrap_or(""),
+                        &grant_path,
+                    )
+                    .await?;
+                    resolved
+                }
+                Err(_) => {
+                    crate::preview_feedback::resolve_evidence(
+                        state,
+                        &caller,
+                        scope,
+                        &absolute(absolute_path)?,
+                    )
+                    .await?
+                }
+            }
         }
     };
-    if let Some((workspace, path)) = &legacy_grant {
-        crate::preview_feedback::authorize_asset(state, &caller, workspace, path).await?;
-    } else if matches!(caller, crate::authz::Principal::PreviewShare { .. }) {
-        crate::preview_feedback::authorize_asset(state, &caller, "", &display(&resolved.absolute))
-            .await?;
-    }
     Ok(AuthorizedFile {
         resolved,
-        legacy_grant,
-        machine,
+        source: source.clone(),
     })
 }
 
@@ -300,26 +323,7 @@ impl AuthorizedFile {
         if !caller.allows(crate::authz::Capability::Files) {
             bail!("file capability revoked");
         }
-        resolve(
-            state,
-            &display(&self.resolved.absolute),
-            access
-                .workspace_id
-                .as_deref()
-                .or_else(|| self.legacy_grant.as_ref().map(|g| g.0.as_str())),
-        )
-        .await?;
-        if let Some((workspace, path)) = &self.legacy_grant {
-            crate::preview_feedback::authorize_asset(state, &caller, workspace, path).await?;
-        } else if self.machine {
-            crate::preview_feedback::authorize_asset(
-                state,
-                &caller,
-                "",
-                &display(&self.resolved.absolute),
-            )
-            .await?;
-        }
+        authorize(state, access, &self.source).await?;
         Ok(())
     }
 }

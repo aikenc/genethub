@@ -160,6 +160,16 @@ pub async fn handle(
     caller: &crate::authz::Principal,
     request: Request,
 ) -> Handled {
+    handle_in_workspace(state, transport, caller, None, request).await
+}
+
+pub(crate) async fn handle_in_workspace(
+    state: &Shared,
+    transport: TransportKind,
+    caller: &crate::authz::Principal,
+    workspace_scope: Option<&str>,
+    request: Request,
+) -> Handled {
     let needed = crate::authz::required(&request);
     let session_exception = if !caller.allows(needed) {
         match (&request, caller.session_controller_id()) {
@@ -209,7 +219,7 @@ pub async fn handle(
         return Handled::err(ErrorCode::Forbidden, message);
     }
     let operation = diagnostic_operation(&request);
-    let handled = dispatch(state, transport, caller, request).await;
+    let handled = dispatch(state, transport, caller, workspace_scope, request).await;
     if let Some(operation) = operation {
         let (outcome, code) = match &handled.reply {
             Ok(_) => ("ok", None),
@@ -949,6 +959,7 @@ async fn dispatch(
     state: &Shared,
     transport: TransportKind,
     caller: &crate::authz::Principal,
+    workspace_scope: Option<&str>,
     request: Request,
 ) -> Handled {
     if matches!(caller, crate::authz::Principal::PreviewShare { .. })
@@ -964,7 +975,7 @@ async fn dispatch(
     }
     match request {
         Request::PreviewFeedback(request) => Box::pin(async move {
-            match crate::preview_feedback::handle(state, caller, request).await {
+            match crate::preview_feedback::handle(state, caller, workspace_scope, request).await {
                 Ok(reply) => Handled::ok(Reply::PreviewFeedback(reply)),
                 Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
             }

@@ -79,6 +79,10 @@ iframe 原始诊断只由持有该 frame 的 AssetPreviewPage 校验 `event.sour
 
 分享仍是有期限、可撤销的精确资源 manifest。同一页面仅更换 hash 中的分享/连接凭证时，入口会重新启动认证并销毁原连接与渲染状态，避免旧角色状态沿用到新链接。服务权限不随文件分享继承。浏览器 localStorage shim 按机器、部署 origin、调用者 scope 与最初入口目录隔离；跨分享不复用 owner 状态。旧 daemon 的 v2 owner namespace 保持读取兼容；新版 daemon 返回当前认证主体的 opaque storageScope，新版 viewer 按该 scope 隔离 owner 与不同账号/分享。不能证明相同主体的旧状态不自动迁入新 namespace。
 
+已提交反馈 JSON、已完成附件的 manifest 和已登记文件复用 `asset.preview` 读取；只允许该记录明确发布的文件，并持续检查原文件的目录权限、连接 scope 和分享归属。不会把 daemon 数据目录整体加入名单，草稿、上传状态与分享凭据不能通过此入口读取。不支持 machine-file 的旧 Host 继续把新反馈保存在原项目目录，普通链接仍由 v2 reader 解析。
+
+workspace-scoped 连接可以操作范围内的机器文件反馈和分享；分享的最终资源清单也必须全部落在该 scope 内。文件树、聊天和其他新浮窗入口共用同一解析入口；同文档 Markdown 锚点由当前宿主滚动，保留文档参数与连接凭据。
+
 ## 验收边界
 
 编译和类型检查不能替代真实 daemon、真实浏览器和权限验收。至少覆盖 v2/v3 读取、补充目录与 CAS、多个项目同根及移除、近似路径与符号链接、受限连接与分享、二级 HTML/Markdown/跨类型导航、query/fragment、相对 fetch/XHR/媒体、父页 CSP、错误可见和分享撤销。跨平台编译不能冒充在目标 Windows/macOS 上运行通过。

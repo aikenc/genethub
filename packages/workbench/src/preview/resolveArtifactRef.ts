@@ -18,6 +18,7 @@ export type ArtifactResolveContext = {
    * Agent cwd; `../` may land in a sibling registered root.
    */
   documentPath?: string;
+  docQuery?: string;
 };
 
 export type ResolvedArtifactRef =
@@ -36,6 +37,11 @@ export function resolveArtifactRef(
   origin = typeof location === "undefined" ? "https://local.test" : location.origin,
 ): ResolvedArtifactRef {
   const value = (raw ?? "").trim();
+  if (value.startsWith("#") && context?.documentPath) {
+    return {kind: "preview", path: context.documentPath,
+      href: documentLocatorUrl(assetPreviewUrl(context.deviceHandle, context.workspaceHandle, context.documentPath, origin), context.docQuery ?? "", value),
+      docQuery: context.docQuery, docFragment: value};
+  }
   if (!value || value.startsWith("#")) {
     return value ? { kind: "external", href: value } : { kind: "blocked" };
   }

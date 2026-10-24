@@ -533,12 +533,13 @@ function PreviewDocument({
       workspaceHandle,
       folders: folders.length ? folders : [{ root: "", rootHandle }],
       documentPath: shown.path,
+      docQuery: shown.query,
       machineFiles: isAbsoluteFilePath(shown.path),
       onNavigate: (next: string, query?: string, fragment?: string) => void openFile(next, query, fragment),
       ...(runtimeSessionId ? { sessionId: runtimeSessionId } : {}),
       loadPreview: loadInlineImage,
     }),
-    [deviceHandle, workspaceHandle, rootHandle, folders, shown.path, runtimeSessionId, loadInlineImage, openFile],
+    [deviceHandle, workspaceHandle, rootHandle, folders, shown.path, shown.query, runtimeSessionId, loadInlineImage, openFile],
   );
 
   useEffect(() => {

@@ -1,6 +1,7 @@
 //! Project-owned file feedback and locally enforced preview share grants.
 use crate::{
     authz::Principal,
+    file_access::resolve_source,
     session::{artifacts::ArtifactStorage, preview_review},
     state::Shared,
 };
@@ -69,13 +70,12 @@ async fn legacy_home(state: &Shared, workspace: &str) -> Result<PathBuf> {
     Ok(base.join(HOME))
 }
 async fn home(state: &Shared, workspace: &str) -> Result<PathBuf> {
-    use sha2::{Digest, Sha256};
-    let namespace = if workspace.is_empty() {
-        "machine-files".to_owned()
-    } else {
-        format!("workspace-{:x}", Sha256::digest(workspace.as_bytes()))
-    };
-    let home = state.paths.root.join("preview-feedback").join(namespace);
+    // Old hosts cannot preview a machine locator. Keep their new receipts in
+    // the project so the existing v2 file reader can still open ordinary links.
+    if !crate::file_access::machine_files_supported() && !workspace.is_empty() {
+        return legacy_home(state, workspace).await;
+    }
+    let home = state.paths.root.join("preview-feedback").join(namespace(workspace));
     if !workspace.is_empty() {
         let legacy = legacy_home(state, workspace).await?;
         if legacy.is_dir() && !home.join("legacy-imported").exists() {
@@ -96,6 +96,15 @@ async fn home(state: &Shared, workspace: &str) -> Result<PathBuf> {
         }
     }
     Ok(home)
+}
+
+fn namespace(workspace: &str) -> String {
+    use sha2::{Digest, Sha256};
+    if workspace.is_empty() {
+        "machine-files".to_owned()
+    } else {
+        format!("workspace-{:x}", Sha256::digest(workspace.as_bytes()))
+    }
 }
 fn import_legacy(anchor: &Path, relative: &Path, to: &Path, budget: &mut (u64, u64)) -> Result<()> {
     if relative.components().count() > 64 {
@@ -135,17 +144,6 @@ fn import_legacy(anchor: &Path, relative: &Path, to: &Path, budget: &mut (u64, u
         }
     }
     Ok(())
-}
-async fn resolve_source(
-    state: &Shared,
-    workspace: &str,
-    path: &str,
-) -> Result<crate::workspace::ResolvedWorkspacePath> {
-    if crate::file_access::absolute(path).is_ok() {
-        crate::file_access::resolve(state, path, (!workspace.is_empty()).then_some(workspace)).await
-    } else {
-        state.workspaces.resolve(workspace, path).await
-    }
 }
 fn prepare_home(home: &Path) -> Result<()> {
     let hidden = home
@@ -318,6 +316,98 @@ async fn load_draft(
     }
     Ok((dir, draft))
 }
+
+/// Read only published feedback evidence through the normal preview stream.
+/// The data directory itself is never added to the machine's directory list.
+pub(crate) async fn resolve_evidence(
+    state: &Shared,
+    caller: &Principal,
+    scope: Option<&str>,
+    path: &Path,
+) -> Result<crate::workspace::ResolvedWorkspacePath> {
+    let relative = path.strip_prefix(state.paths.root.join("preview-feedback"))?;
+    let parts: Vec<_> = relative.iter().collect();
+    if parts.len() < 4 || parts[1] != "drafts" {
+        bail!("not published feedback evidence");
+    }
+    let workspace = if parts[0] == "machine-files" {
+        String::new()
+    } else {
+        state
+            .config
+            .read()
+            .await
+            .workspaces
+            .iter()
+            .find(|w| !w.removed && Some(namespace(&w.id).as_str()) == parts[0].to_str())
+            .map(|w| w.id.clone())
+            .ok_or_else(|| anyhow!("unknown feedback namespace"))?
+    };
+    let id = parts[2]
+        .to_str()
+        .ok_or_else(|| anyhow!("invalid feedback id"))?;
+    let (dir, draft) = load_draft(state, caller, &workspace, id).await?;
+    crate::file_access::resolve(state, &draft.data.source.absolute_path, scope).await?;
+    let published = draft.data.receipt.is_some() && path == dir.join("feedback.json")
+        || draft.data.bundles.iter().any(|bundle| {
+            path == Path::new(&bundle.manifest_path)
+                || bundle
+                    .files
+                    .iter()
+                    .any(|file| path == Path::new(&bundle.workspace_path).join(&file.name))
+        });
+    if !published {
+        bail!("not published feedback evidence");
+    }
+    Ok(crate::workspace::ResolvedWorkspacePath {
+        relative: path.strip_prefix(&dir)?.to_owned(),
+        root: dir,
+        absolute: path.to_owned(),
+        root_handle: String::new(),
+    })
+}
+
+async fn authorize_scope(
+    state: &Shared,
+    caller: &Principal,
+    workspace: &str,
+    scope: &str,
+    operation: &PreviewFeedbackOperation,
+) -> Result<()> {
+    use PreviewFeedbackOperation as Op;
+    let path = match operation {
+        Op::Source { path } | Op::Share { path, .. } | Op::Open { path, .. } => {
+            crate::file_access::display(&resolve_source(state, workspace, path).await?.absolute)
+        }
+        Op::Revoke { share_id } => {
+            let grant = grant(state, workspace, share_id).await?;
+            crate::file_access::display(
+                &resolve_source(state, workspace, &grant.path)
+                    .await?
+                    .absolute,
+            )
+        }
+        Op::Draft { id }
+        | Op::Upsert { id, .. }
+        | Op::Remove { id, .. }
+        | Op::BeginArtifact { id, .. }
+        | Op::Chunk { id, .. }
+        | Op::FinishArtifact { id, .. }
+        | Op::AbortArtifact { id, .. }
+        | Op::Submit { id, .. }
+        | Op::Read { id } => {
+            load_draft(state, caller, workspace, id)
+                .await?
+                .1
+                .data
+                .source
+                .absolute_path
+        }
+    };
+    crate::file_access::resolve(state, &path, Some(scope)).await?;
+    Ok(())
+}
+
 fn writable(draft: &Draft) -> Result<()> {
     if draft.data.receipt.is_some() {
         bail!("feedback already submitted; create a new feedback draft");
@@ -357,10 +447,13 @@ async fn dependencies(
     workspace: &str,
     path: &str,
     resources: Vec<String>,
+    workspace_scope: Option<&str>,
 ) -> Result<BTreeSet<String>> {
+    // Apply the physical scope before reading or probing any dependency.
+    let file_workspace = workspace_scope.unwrap_or(workspace);
     let mut found = BTreeSet::new();
     let mut pending = vec![path.to_owned()];
-    let entry = resolve_source(state, workspace, path).await?;
+    let entry = resolve_source(state, file_workspace, path).await?;
     let site_directory = entry
         .absolute
         .parent()
@@ -370,7 +463,7 @@ async fn dependencies(
         bail!("preview site exceeds 512 resources");
     }
     for resource in resources {
-        let resolved = resolve_source(state, workspace, &resource).await?;
+        let resolved = resolve_source(state, file_workspace, &resource).await?;
         if (!workspace.is_empty() && resolved.root_handle != entry.root_handle)
             || resolved
                 .relative
@@ -389,7 +482,7 @@ async fn dependencies(
         if found.len() > 512 {
             bail!("preview site exceeds 512 referenced resources");
         }
-        let resolved = resolve_source(state, workspace, &path).await?;
+        let resolved = resolve_source(state, file_workspace, &path).await?;
         let file =
             crate::files::preview(&resolved.root, &resolved.relative.to_string_lossy()).await?;
         let ext = resolved
@@ -468,7 +561,7 @@ async fn dependencies(
             {
                 continue;
             }
-            if let Ok(next) = resolve_source(state, workspace, &candidate).await {
+            if let Ok(next) = resolve_source(state, file_workspace, &candidate).await {
                 if next.absolute.is_file() {
                     pending.push(candidate);
                 }
@@ -478,14 +571,21 @@ async fn dependencies(
     }
     Ok(found)
 }
-pub async fn handle(
+pub(crate) async fn handle(
     state: &Shared,
     caller: &Principal,
+    workspace_scope: Option<&str>,
     request: PreviewFeedbackRequest,
 ) -> Result<PreviewFeedbackResponse> {
     use PreviewFeedbackOperation as Op;
     use PreviewFeedbackResponse as Out;
     let workspace = &request.workspace_id;
+    if let Some(scope) = workspace_scope {
+        if !workspace.is_empty() && workspace != scope {
+            bail!("feedback workspace mismatch");
+        }
+        authorize_scope(state, caller, workspace, scope, &request.operation).await?;
+    }
     if let Some(id) = share_id(caller) {
         grant(state, workspace, id).await?;
     }
@@ -577,7 +677,7 @@ pub async fn handle(
                 bail!("preview share limit reached; remove expired shares");
             }
             let id = format!("ps_{}", uuid::Uuid::new_v4().simple());
-            let allowed = dependencies(state, workspace, &path, resources).await?;
+            let allowed = dependencies(state, workspace, &path, resources, workspace_scope).await?;
             let record = Share {
                 id: id.clone(),
                 path,

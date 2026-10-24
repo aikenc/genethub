@@ -58,6 +58,11 @@ defineJourney({
     const receipt = await call(submit);
     const repeated = await call(submit);
     t.assertions.assert(receipt.kind === "receipt" && JSON.stringify(receipt) === JSON.stringify(repeated), "submission retry changed receipt");
+    if (receipt.kind !== "receipt") throw new Error("receipt absent");
+    const record = await opened.client.preview("", receipt.data.workspacePath);
+    const manifest = await opened.client.preview("", bundle.data.manifestPath);
+    const evidence = await opened.client.preview("", `${bundle.data.workspacePath}/events.jsonl`);
+    t.assertions.assert(JSON.parse(new TextDecoder().decode(record.bytes)).id === id && JSON.parse(new TextDecoder().decode(manifest.bytes)).files.length === 1 && Buffer.from(evidence.bytes).equals(logs), "returned receipt or attachment link cannot be read by the real preview client");
     const restored = await call({ kind: "open", path: sourcePath, version: source.data.version, draftId: id });
     t.assertions.assert(restored.kind === "draft" && restored.data.receipt?.id === id && restored.data.bundles.length === 1, "reload lost receipt or duplicated logs");
     for (const operation of [{ kind: "upsert" as const, id, annotation: { ...annotation, comment: "Changed" }, expectedRevision: 1 }, { ...submit, description: "Changed" }, { kind: "open" as const, path: sourcePath, version: "other-version", draftId: id }]) {
