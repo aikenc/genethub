@@ -104,6 +104,13 @@ pub fn run_component(path: &Path, guest_args: &[String], entry: Entry) -> Result
 pub(crate) fn engine_config() -> Config {
     let mut config = Config::new();
     config.wasm_component_model(true);
+    // This standalone host spawns and reaps native children. On macOS their
+    // SIGCHLD can interrupt Wasmtime's Mach-port receive (MACH_RCV_INTERRUPTED),
+    // whose handler aborts instead of retrying. Use Wasmtime's supported Unix
+    // signal trap handler so stopping an Agent cannot kill the daemon during
+    // reload. The host does not embed a competing Mach-port crash handler.
+    #[cfg(target_os = "macos")]
+    config.macos_use_mach_ports(false);
     config
 }
 
