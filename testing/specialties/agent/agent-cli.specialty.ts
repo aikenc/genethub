@@ -442,10 +442,10 @@ const literal = (text: string) => text.replace(/[.*+?^$()|[\]{}\\]/g, "\\$&");
 const okLine = (name: string) => new RegExp(`^ok\\s+${literal(name)}$`, "m");
 const failLine = (name: string) => new RegExp(`^FAIL\\s+${literal(name)}:`, "m");
 
-cliCase(
-  "builtin-agent-tests",
-  "agent test runs the built-in codex, cursor, claude and codebuddy adapters' own replay tests and they pass",
-  "with neither CLI installed, `agent test codex` and `agent test cursor` each exit 0 with passed:true and an `ok` line for every tests/*.json the daemon materialized under agents/builtin/<id>/, which is the same set as the source tree ships",
+for (const id of ["codex", "cursor", "claude", "codebuddy"]) cliCase(
+  `builtin-agent-tests.${id}`,
+  `agent test runs the built-in ${id} adapter replay tests and they pass`,
+  `Without the native CLI installed, agent test ${id} replays every shipped tests/*.json and reports passed:true with an ok line per recording`,
   [
     "a built-in adapter regression its own recorded transcripts would catch",
     "the shipped built-in copy lacks the tests the source has",
@@ -454,19 +454,17 @@ cliCase(
   async (t) => {
     seedScriptAgentRuntime(t.env);
     await withDaemon(t, [], async (opened, cli) => {
-      for (const id of ["codex", "cursor", "claude", "codebuddy"]) {
-        await t.flows.branches.waitForAgent(opened.client, id, (info) => info.source === "builtin" && primary(info) === "install", { what: "built-in, not installed" });
-        const shipped = shippedTests(path.join(t.env.data, "agents", "builtin", id));
-        const source = shippedTests(path.join(t.openRoot, "apps", "daemon", "builtin-agents", "agents", id));
-        t.assertions.assert(shipped.length > 0 && JSON.stringify(shipped) === JSON.stringify(source),
-          `${id} tests shipped ${JSON.stringify(shipped)} vs source ${JSON.stringify(source)}`);
-        const data = succeeded(t, cli(["agent", "test", id]), "agent.test");
-        const output = String(data.output ?? "");
-        const missing = shipped.filter((name) => !okLine(name).test(output));
-        t.assertions.assert(data.passed === true && missing.length === 0,
-          `${id}: passed ${String(data.passed)}, no ok line for ${missing.join(",")}: ${output.slice(-600)}`);
-        t.note(`${id}: ${shipped.length} replays ok`);
-      }
+      await t.flows.branches.waitForAgent(opened.client, id, (info) => info.source === "builtin" && primary(info) === "install", { what: "built-in, not installed" });
+      const shipped = shippedTests(path.join(t.env.data, "agents", "builtin", id));
+      const source = shippedTests(path.join(t.openRoot, "apps", "daemon", "builtin-agents", "agents", id));
+      t.assertions.assert(shipped.length > 0 && JSON.stringify(shipped) === JSON.stringify(source),
+        `${id} tests shipped ${JSON.stringify(shipped)} vs source ${JSON.stringify(source)}`);
+      const data = succeeded(t, cli(["agent", "test", id]), "agent.test");
+      const output = String(data.output ?? "");
+      const missing = shipped.filter((name) => !okLine(name).test(output));
+      t.assertions.assert(data.passed === true && missing.length === 0,
+        `${id}: passed ${String(data.passed)}, no ok line for ${missing.join(",")}: ${output.slice(-600)}`);
+      t.note(`${id}: ${shipped.length} replays ok`);
     });
   },
 );
