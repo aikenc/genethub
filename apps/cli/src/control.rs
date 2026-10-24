@@ -501,7 +501,7 @@ fn stop_verified(paths: &Paths) -> Result<bool, String> {
     // our daemon with a dead listener: stop does not need its cooperation.
     match identify(&endpoint) {
         Identity::Proven => {}
-        Identity::ForeignListener => {
+        Identity::ForeignListener | Identity::SilentListener => {
             return Err(format!(
                 "refusing to stop pid {lock}: its private endpoint identity could not be verified"
             ));
@@ -568,6 +568,8 @@ enum Identity {
     Proven,
     /// Something accepted and answered, and it was not this daemon.
     ForeignListener,
+    /// Accepted but sent no answer before timeout; retry without trusting it.
+    SilentListener,
     /// Nothing accepted across the probes.
     NoListener,
 }
@@ -576,17 +578,27 @@ enum Identity {
 /// single accept, and a later refused connect must not be read as "ours, but
 /// silent". Repeated refusals are a dead listener.
 fn identify(endpoint: &Endpoint) -> Identity {
+    let mut saw_silence = false;
     for attempt in 0..3 {
         match probe(endpoint) {
             Identity::Proven => return Identity::Proven,
             Identity::ForeignListener => return Identity::ForeignListener,
+            Identity::SilentListener if attempt + 1 == 3 => return Identity::ForeignListener,
+            Identity::SilentListener => {
+                saw_silence = true;
+                std::thread::sleep(Duration::from_millis(150));
+            }
             Identity::NoListener if attempt + 1 < 3 => {
                 std::thread::sleep(Duration::from_millis(150));
             }
             Identity::NoListener => {}
         }
     }
-    Identity::NoListener
+    if saw_silence {
+        Identity::ForeignListener
+    } else {
+        Identity::NoListener
+    }
 }
 
 fn probe(endpoint: &Endpoint) -> Identity {
@@ -606,8 +618,18 @@ fn probe(endpoint: &Endpoint) -> Identity {
         return Identity::ForeignListener;
     }
     let mut answer = Vec::new();
-    if stream.read_to_end(&mut answer).is_err() && answer.is_empty() {
-        return Identity::ForeignListener;
+    if let Err(error) = stream.read_to_end(&mut answer) {
+        if answer.is_empty()
+            && matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            )
+        {
+            return Identity::SilentListener;
+        }
+        if answer.is_empty() {
+            return Identity::ForeignListener;
+        }
     }
     if health_body_matches(endpoint, &challenge, &answer) {
         Identity::Proven
