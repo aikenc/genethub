@@ -46,6 +46,11 @@ Skill：`team-core`（所有会话先读）、`team-front`（带 5 秒定时 hoo
   账本、收件箱和写者锁仍留在派单方，`pending` 记录带 `machine`，定时对账据此去远端取状态与最终回复；
   远端不注册团队根、不跑前台与对账器。`--worktree`/`--dir` 只对本机有效，跨机没有共享写者锁；远端用目标机器
   自己的 Agent 与默认模型，不沿用请求方的 `modelId`。
+- 远端岗位可用 SpaceBuilder `build <岗位源目录> --output <制品目录>` 准备；移动后用 `verify --artifacts-only`
+  验收，无需把团队源码带到远端重建。运行资源、传输、安装和只注册岗位由部署适配完成，不等于远端写者锁或目标绑定已具备。
+  具体路径与生命周期见 `../../genehub/references/spacebuilder.md`。
+- 自动身份刷新（定时任务与 `sync-identity`）使用 `--require-no-post-commands`：有 Space pre/post 或 Provider post
+  时返回 `SB018` 并保留旧生成身份。发布 hook 应在源 Space 显式构建中执行，不能借一次身份刷新触发部署。
 
 ## 对用户
 

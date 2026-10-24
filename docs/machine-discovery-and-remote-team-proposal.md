@@ -291,3 +291,15 @@ CLI 范围，不作为 Beta 发布或完整 dev 资格。回滚可回退本批�
 公开 CLI 专项 `specialty.cli.machine-directory.local` 和 `.hub` 使用真实 launcher/host/签名 guest；Hub 场景使用配对的 Cloud 真实 HTTP 服务，不替换内部目录或授权函数。覆盖默认/旧别名一致、未加入 Hub 时仍列本机、Hub 身份去重、列表 ID 可 show、显式 paired 分离、参数拒绝、真实 Hub 停止后的非零错误及已知条目、票据错误阶段保留。迁移用例明确使用 `--paired` 验证直连记录的一次导入和忘记后不复活。
 
 这是 dev-2 候选，验证记录由当前 Space 的 testctl run 和任务状态保存；未合主干、未发布、未重启用户 daemon。团队 B/C 的目标绑定、远端锁与重试恢复仍未实现。
+
+## 14. 同步主干后的集成复查（2026-10-24）
+
+同步基线：open `3faf3350`（SpaceBuilder 0.1.5），Cloud `4a6d5a52`。本槽原有三个 CLI/跨机提交继续保留；Cloud 原有 63 项未提交路径逐一与主干比对，内容及删除状态全部一致，同步后由主干承接，未丢弃本地独有内容。
+
+主干补齐的是岗位制品准备：协调机可 `build <岗位源目录> --output <制品目录>`，交付编译规则、Skill、定时 hook 与执行描述；制品移动且删除源输入后仍可 `verify --artifacts-only`。运行资源、传输、目标端配置、安装及 Space 注册仍由部署适配组合；不能把构建成功当作跨机派单完成。团队目标归属、远端写者锁、模型/暂停/重试等 B/C 问题仍按原提案处理，没有因新 builder 自动解决。
+
+复查发现并复现一个新旧能力组合的问题：团队定时身份刷新会直接调用普通 `build`，新增的 Space pre/post 因而随一次身份文字变化执行。若 post 用于发布或部署，会在自动身份刷新时发生外部动作；原有 20 秒身份刷新超时也不适用于最长 600 秒的构建 hook。失败证据保存在 `261024-1816-team-hooks-repro-0e2c`：仅调用 `team.py sync-identity` 就执行了 pre 标记动作并返回 rebuilt。
+
+补充修正：自动 `sync_identity` 使用已有 `--require-no-post-commands` 门禁，拒绝 Space pre/post（含子岗位）及 Provider post，明确返回 `SB018`、保留上一版生成身份并沿用失败摘要的退避；显式 SpaceBuilder build 保持 hook 执行能力。没有增加新的授权层或默认跳过命令开关，也不把原有 Provider build 纳入该门禁的承诺。团队公共 Skill、样板说明和机制文档同步说明此边界。
+
+新增 `specialty.daemon.team-identity-build-hooks` 通过公开的团队/Builder 脚本、真实文件标记与生成身份验证上述区分；同步后同时复验主干 portable-output 专项及本槽机器目录/CLI 契约。权限策略与上一节相同：主干这批合入没有修改 `SessionController` 的能力范围，不能宣称“连接即有权”的历史例外已经修复。此次同步不涉及 Beta 部署或用户 daemon 重启。

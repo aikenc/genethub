@@ -3762,12 +3762,16 @@ def sync_identity(root):
         return "unchanged"
     if record.get("failedDigest") == digest and now_ms() - record.get("failedAtMs", 0) < IDENTITY_RETRY_S * 1000:
         return "unchanged"
-    done = subprocess.run([sys.executable, builder_script(root), "build", root], capture_output=True, text=True, timeout=20)
+    # This path also runs on the timer. Refreshing identity must not invoke
+    # deployment pre/post hooks; explicit SpaceBuilder builds own that action.
+    done = subprocess.run([sys.executable, builder_script(root), "build", root, "--require-no-post-commands"], capture_output=True, text=True, timeout=20)
     if done.returncode != 0:
         if "SB013" in (done.stdout + done.stderr):
             return "unchanged"
         write_json(marker, {"digest": record.get("digest"), "failedDigest": digest, "failedAtMs": now_ms()})
         tail = "\n".join(line for line in (done.stdout + done.stderr).splitlines() if line.strip())[-400:]
+        if "SB018" in (done.stdout + done.stderr):
+            raise ExpertError("身份自动重编拒绝执行构建 hook 或 Provider post（SB018）", "生成身份仍保留上一次版本，没有执行发布 hook", "由源 Space 的构建负责人显式运行 SpaceBuilder build；将发布构建与自动身份刷新分开")
         raise ExpertError("soul.md 编译进 AGENTS.md/CLAUDE.md 失败: %s" % tail, "前台仍是上一次编译的身份；soul.md 本身已保存", "按上面的错误修改 %s（超过 32 KiB 要精简），60 秒后自动重试" % label)
     write_json(marker, {"digest": digest})
     return "rebuilt"

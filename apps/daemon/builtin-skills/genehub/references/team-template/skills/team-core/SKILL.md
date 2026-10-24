@@ -21,6 +21,9 @@ description: 1+N 项目团队内部协作的公共约定：前台、研发组长
 
 失败时命令会说明：出了什么、现在状态、下一步。细则见 `datas/README.md`、`temp/README.md`；模型选择见 `references/models.md`。
 
+自动身份刷新（定时任务与 `sync-identity`）只重编身份，不执行 Space pre/post 或 Provider post；有此类配置时
+返回 `SB018`，保留上一版生成身份。发布 hook 由源 Space 的显式构建执行，不能靠反复刷新身份来运行。
+
 ## 纯异步多级回合接力与二级记忆
 
 - **纯异步回合接力**：发起 `spawn`（支持 `Leader -> 小组长 Lead -> 多名并发 Worker + Research`）或 `send` 后**立即结束本轮**；系统按「有界终态 + 父就绪才交棒销账 + 组长看门狗」三法则收齐同批结果后自动合并唤醒上级进入下一轮。

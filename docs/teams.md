@@ -91,8 +91,13 @@ daemon 不解释它们（[storage-layout.md](./storage-layout.md)）。
 | 会话在 A，工具在 B | 成员留在 A 的岗位会话里，用 `genet shell --machine B` 在 B 的 workspace 内执行；结果回到 A 的会话，走本机接力 |
 | 会话本身在 B | `team.py spawn --machine <B 的机器 ID> ...` 或 `send --machine <B> --to <岗位>`：在 B 的岗位 workspace 创建/投递，Agent 进程、身份与产物都在 B |
 
-`--machine` 接受 `genet machine list --reachable` 返回的精确 ID。目标机器上必须已经打开该岗位的 Space
+`--machine` 接受 `genet machine list` 返回的精确 ID（`--reachable` 仍是兼容别名）。目标机器上必须已经打开该岗位的 Space
 （`genet space open <团队>/spaces/<岗位>`）；样板按 workspace 名或根目录名匹配岗位，重名时用 `--workspace` 指定。
+
+岗位制品可在协调机器上用 SpaceBuilder 0.1.5 的 `build <岗位源目录> --output <输出目录>` 生成；移动后用
+`verify <制品目录> --artifacts-only` 验收，不要求目标机取得团队源码并重新构建。生成、传输和注册是不同步骤：
+输出不自动包含 `tools/`、父容器或项目仓，部署适配要补齐运行资源、保留目标端配置，并只注册目标岗位。
+完整合同见 [spacebuilder.md](../apps/daemon/builtin-skills/genehub/references/spacebuilder.md)。这项能力没有补齐下列派单与跨机写者锁边界。
 
 **账本仍在派单方**：`pending/`、文件收件箱与写者锁都是发起方机器上的文件，定时对账按记录里的 `machine`
 去远端读会话状态与最终回复。所以远端不需要注册团队根、不跑前台、不跑看板和 5 秒对账器。边界也要说清楚：
@@ -101,6 +106,10 @@ daemon 不解释它们（[storage-layout.md](./storage-layout.md)）。
 - 远端岗位完成后直接输出结论，不要手动 `send` 回来；结果由派单方的对账收走。
 - 远端会话被暂停时，`send` 改用普通 Agent 消息投递（`--system` 不解除暂停）。
 - 远端用哪台机器的 Agent 与模型由目标机器决定；`--machine` 下不沿用请求方的 `modelId`，除非显式给 `--model`/`--tier`。
+
+身份自动刷新（定时任务与 `sync-identity`）使用 `--require-no-post-commands`，遇到 Space pre/post 或 Provider post
+返回 `SB018` 并保留上一版生成身份，不因文字更新隐式发布或部署。发布 hook 由源 Space 的显式构建执行；
+不要通过增大定时任务超时或反复重试来执行它。该门禁不禁止既有 Provider build。
 
 ## 7. 演进与退役
 
