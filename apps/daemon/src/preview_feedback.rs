@@ -75,7 +75,11 @@ async fn home(state: &Shared, workspace: &str) -> Result<PathBuf> {
     if !crate::file_access::machine_files_supported() && !workspace.is_empty() {
         return legacy_home(state, workspace).await;
     }
-    let home = state.paths.root.join("preview-feedback").join(namespace(workspace));
+    let home = state
+        .paths
+        .root
+        .join("preview-feedback")
+        .join(namespace(workspace));
     if !workspace.is_empty() {
         let legacy = legacy_home(state, workspace).await?;
         if legacy.is_dir() && !home.join("legacy-imported").exists() {

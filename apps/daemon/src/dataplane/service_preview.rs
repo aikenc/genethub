@@ -120,7 +120,8 @@ async fn load(services: &PeerServices, req: &Request) -> Result<Option<Run>> {
         Some(id) => {
             if !(req.workspace_handle.is_empty()
                 && crate::file_access::absolute(&req.entry_path).is_ok())
-                && req.workspace_handle != access.workspace_handle.as_deref().unwrap_or(id) {
+                && req.workspace_handle != access.workspace_handle.as_deref().unwrap_or(id)
+            {
                 anyhow::bail!("workspace denied");
             }
             id

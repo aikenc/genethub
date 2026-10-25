@@ -132,7 +132,10 @@ mod version_tests {
 /// A 401 with this exact daemon response is produced before `cli_front`
 /// starts the invocation. Only that refusal permits a fresh admission and
 /// one new attempt. A transport error can follow a completed mutation.
-async fn request_cli(body: &Value, timeout: Option<Duration>) -> Result<genet_http::Response, String> {
+async fn request_cli(
+    body: &Value,
+    timeout: Option<Duration>,
+) -> Result<genet_http::Response, String> {
     let client = Client::builder()
         .build()
         .map_err(|error| format!("build http client: {error}"))?;

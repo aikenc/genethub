@@ -31,8 +31,10 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
     }
     let request: AssetPreviewRequest = serde_json::from_value(stream.head.metadata.clone())
         .context("invalid asset.preview metadata")?;
-    if matches!(request.source, genehub_proto::WorkspaceFileSource::MachineFile { .. })
-        && !crate::file_access::machine_files_supported()
+    if matches!(
+        request.source,
+        genehub_proto::WorkspaceFileSource::MachineFile { .. }
+    ) && !crate::file_access::machine_files_supported()
     {
         return preview_error(stream, 415, AssetPreviewError::Unsupported, None).await;
     }

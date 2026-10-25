@@ -46,7 +46,10 @@ pub(crate) fn windows_volumes() -> &'static [Volume] {
             return Vec::new();
         }
         #[cfg(target_family = "wasm")]
-        let mounted: Vec<String> = wasi::filesystem::preopens::get_directories().into_iter().map(|(_, name)| name).collect();
+        let mounted: Vec<String> = wasi::filesystem::preopens::get_directories()
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect();
         #[cfg(not(target_family = "wasm"))]
         let mounted: Vec<String> = Vec::new();
         (b'a'..=b'z')

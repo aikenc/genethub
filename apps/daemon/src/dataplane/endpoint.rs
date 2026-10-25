@@ -1244,8 +1244,17 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
             )
             .await;
         }
-        if matches!(request, Request::FileAccessList | Request::FileAccessConfigure { .. }) {
-            return send_error(stream, 403, ErrorCode::Forbidden, "directory settings require a machine capability").await;
+        if matches!(
+            request,
+            Request::FileAccessList | Request::FileAccessConfigure { .. }
+        ) {
+            return send_error(
+                stream,
+                403,
+                ErrorCode::Forbidden,
+                "directory settings require a machine capability",
+            )
+            .await;
         }
         if matches!(request, Request::ProcessList) {
             return send_error(
@@ -1376,7 +1385,8 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
         &caller,
         services.access.workspace_id.as_deref(),
         request,
-    ).await;
+    )
+    .await;
     match handled.reply {
         Ok(mut reply) => {
             if let Reply::Agents(agents) = &mut reply {
