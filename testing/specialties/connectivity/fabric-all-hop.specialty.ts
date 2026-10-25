@@ -104,6 +104,11 @@ for (const v of variants) defineSpecialty({
       await t.tools.waitUntil(() => [0,1,2].every(i => { const pid = Number(readFileSync(join(o.workspaceRoot,`pool-pid-${i}`),"utf8")); return !existsSync(`/proc/${pid}`); }),5000).catch(() => { canceledPids = false; });
     }
     const localAt = performance.now(); const local = await o.client.call({ type: "workspace.list" }); const localMs = Math.round(performance.now()-localAt);
+    const support=await o.client.call({type:"diagnostics.snapshot"});
+    if(support?.type==="diagnostics") {
+      const ingress=support.data.events.filter(e=>e.operation==="peer.ingress");t.note(JSON.stringify({nativeIngress:ingress}));
+      if(["node-cut","browser-cut","all-cut"].includes(v.scenario))t.assertions.assert(!ingress.some(e=>e.code?.endsWith("full")),"ordinary recovery produced ingress-overflow disconnects");
+    }
     const summary = { phase: "result", variant: v.name, rpc: quantiles(rpc), errors, exact24MiB: exact, uploadOk, canceledPids,
       interruptMs, interruptOk,
       sourceStarts: starts, sourceExactlyOnce: starts.join(",") === "0,1,2", retained: clients.map((c,i) => c.logicalConnectionId === owners[i]),

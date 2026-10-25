@@ -30,7 +30,7 @@ export async function openFabricPool(t: CaseContext, nodeChannels: number, brows
       const fresh = () => ({ url: fault ? fault.urlFor(url.toString()) : url.toString(), credential: paired.credential });
       const client = new Client({ separateDataChannel: false, ...fresh(), rtcEnabled: false, requestTimeoutMs: 10000, redial: async () => fresh(),
         socketFactory: u => new WebSocket(u) as unknown as WebSocketLike,
-        onDiagnostic(event) { if (event.kind === "connection") { diagnostics.push({ peer, state: event.detail.state, phase: event.detail.phase, reason: event.detail.closeReason }); if (diagnostics.length > 40) diagnostics.shift(); } },
+        onDiagnostic(event) { if (event.kind === "connection" || event.kind === "error") { diagnostics.push({ peer, state: event.detail.state, phase: event.detail.phase, reason: event.kind === "error" ? event.detail.errorName : event.detail.closeReason }); if (diagnostics.length > 40) diagnostics.shift(); } },
       });
       clients.push(client); client.connect(); await t.tools.waitUntil(() => client.connectionState === "ready", 15000);
     }

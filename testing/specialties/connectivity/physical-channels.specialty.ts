@@ -86,6 +86,11 @@ for (const route of ["direct", "fabric"] as const) for (const peers of [1, 2]) {
         interactiveHeartbeats: diagnostics.filter(d => d.peer === peers - 1 && d.state === "reconnecting" && d.reason === "heartbeat-timeout").length,
         lateFrames: (log.match(/lateFrameOverflow/g) ?? []).length,
         nodeDisconnects: (daemonLog.match(/Fabric uplink disconnected/g) ?? []).length, diagnostics };
+      const support=await opened.client.call({type:"diagnostics.snapshot"});
+      if(support?.type==="diagnostics") {
+        const ingress=support.data.events.filter(e=>e.operation==="peer.ingress");t.note(JSON.stringify({nativeIngress:ingress}));
+        t.assertions.assert(!ingress.some(e=>e.code?.endsWith("full")),"ordinary capacity restoration overflowed source ingress");
+      }
       t.note(JSON.stringify(summary));
       const delivered = Math.max(...summary.forwardedUnderLoad);
       t.assertions.assert(delivered > 1024 * 1024 && delivered * 8 / windowMs / 1000 <= 2.05, "load did not cross one aggregate 2Mbps bottleneck");
