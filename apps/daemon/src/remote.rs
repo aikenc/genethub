@@ -11,7 +11,7 @@
 use std::sync::{Arc, Weak};
 
 use anyhow::{anyhow, Context, Result};
-use genehub_proto::{RemoteAccess, ServerFrame};
+use genehub_proto::{RemoteAccess, RemoteAccessChannel, ServerFrame};
 use tokio::sync::{broadcast, Mutex};
 
 use crate::config::{MachineState, Paths, Rendezvous};
@@ -28,7 +28,7 @@ pub struct Remote {
 
 struct Attached {
     config: Rendezvous,
-    uplink: FabricUplink,
+    uplinks: Vec<FabricUplink>,
 }
 
 pub type SharedRemote = Arc<Remote>;
@@ -48,8 +48,8 @@ impl Remote {
         let remote = Arc::get_mut(self).expect("attach happens before the remote is shared");
         remote.state = Arc::downgrade(state);
         if let Some(config) = state.machine.rendezvous.clone() {
-            let uplink = dial(state, &remote.pty, &config, &state.machine);
-            *remote.attached.lock().await = Some(Attached { config, uplink });
+            let uplinks = dial(state, &remote.pty, &config, &state.machine);
+            *remote.attached.lock().await = Some(Attached { config, uplinks });
         }
     }
 
@@ -59,26 +59,56 @@ impl Remote {
                 relay_url: None,
                 rendezvous_url: None,
                 online: false,
+                channels: None,
             },
             Some(attached) => {
-                let id = self
-                    .state
-                    .upgrade()
-                    .map(|state| rendezvous_id(&state.machine.machine_id, &state.machine.secret));
+                let machine = self.state.upgrade();
+                let channels = machine.as_ref().map(|state| {
+                    attached
+                        .uplinks
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(lane, uplink)| {
+                            let id = lane_id(&state.machine, lane as u8);
+                            client_url(&attached.config.relay_url, &id).ok().map(|url| {
+                                RemoteAccessChannel {
+                                    id: lane as u8,
+                                    url,
+                                    online: uplink.is_online(),
+                                }
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                });
                 RemoteAccess {
                     relay_url: Some(attached.config.relay_url.clone()),
-                    rendezvous_url: id
-                        .map(|id| client_url(&attached.config.relay_url, &id))
-                        .transpose()
-                        .ok()
-                        .flatten(),
-                    online: attached.uplink.is_online(),
+                    rendezvous_url: channels
+                        .as_ref()
+                        .and_then(|lanes| lanes.first())
+                        .map(|lane| lane.url.clone()),
+                    online: attached
+                        .uplinks
+                        .first()
+                        .is_some_and(FabricUplink::is_online),
+                    channels,
                 }
             }
         }
     }
 
     pub async fn set(&self, relay_url: &str, join_token: Option<String>) -> Result<RemoteAccess> {
+        self.set_channels(relay_url, join_token, 1).await
+    }
+
+    pub async fn set_channels(
+        &self,
+        relay_url: &str,
+        join_token: Option<String>,
+        channel_count: u8,
+    ) -> Result<RemoteAccess> {
+        if !(1..=4).contains(&channel_count) {
+            return Err(anyhow!("remote channel count must be from 1 through 4"));
+        }
         let state = self
             .state
             .upgrade()
@@ -102,16 +132,33 @@ impl Remote {
         let config = Rendezvous {
             relay_url,
             join_token,
+            channel_count,
         };
         let mut attached = self.attached.lock().await;
-        if let Some(previous) = attached.take() {
-            previous.uplink.stop();
+        if let Some(previous) = attached.as_mut().filter(|a| {
+            a.config.relay_url == config.relay_url && a.config.join_token == config.join_token
+        }) {
+            // A size change preserves the primary and every retained lane.
+            // Closing one tail lane must not interrupt unrelated control owners.
+            previous.uplinks.truncate(channel_count as usize);
+            for lane in previous.uplinks.len()..channel_count as usize {
+                previous
+                    .uplinks
+                    .push(dial_lane(&state, &config, &state.machine, lane as u8));
+            }
+            previous.config = config.clone();
+        } else {
+            if let Some(previous) = attached.take() {
+                for uplink in previous.uplinks {
+                    uplink.stop();
+                }
+            }
+            let uplinks = dial(&state, &self.pty, &config, &state.machine);
+            *attached = Some(Attached {
+                config: config.clone(),
+                uplinks,
+            });
         }
-        let uplink = dial(&state, &self.pty, &config, &state.machine);
-        *attached = Some(Attached {
-            config: config.clone(),
-            uplink,
-        });
         drop(attached);
 
         self.persist(Some(config)).await?;
@@ -122,7 +169,9 @@ impl Remote {
     /// turning the door off is not the same as changing the locks.
     pub async fn clear(&self) -> Result<RemoteAccess> {
         if let Some(previous) = self.attached.lock().await.take() {
-            previous.uplink.stop();
+            for uplink in previous.uplinks {
+                uplink.stop();
+            }
         }
         self.persist(None).await?;
         Ok(self.status().await)
@@ -131,7 +180,9 @@ impl Remote {
     /// Drops the connection without forgetting the setting.
     pub async fn stop(&self) {
         if let Some(attached) = &*self.attached.lock().await {
-            attached.uplink.stop();
+            for uplink in &attached.uplinks {
+                uplink.stop();
+            }
         }
     }
 
@@ -152,17 +203,39 @@ fn dial(
     pty: &broadcast::Sender<ServerFrame>,
     config: &Rendezvous,
     machine: &MachineState,
+) -> Vec<FabricUplink> {
+    let _ = pty;
+    (0..config.channel_count.clamp(1, 4))
+        .map(|lane| dial_lane(state, config, machine, lane))
+        .collect()
+}
+
+fn dial_lane(
+    state: &Arc<AppState>,
+    config: &Rendezvous,
+    machine: &MachineState,
+    lane: u8,
 ) -> FabricUplink {
-    let id = rendezvous_id(&machine.machine_id, &machine.secret);
+    let id = lane_id(machine, lane);
     let ticket = match &config.join_token {
         Some(token) if !token.is_empty() => format!("{token}.{id}"),
-        _ => id.clone(),
+        _ => id,
     };
-    let _ = pty;
     FabricUplink::start_rendezvous(
         state.clone(),
         daemon_url(&config.relay_url, &ticket).unwrap_or_default(),
     )
+}
+
+fn lane_id(machine: &MachineState, lane: u8) -> String {
+    if lane == 0 {
+        rendezvous_id(&machine.machine_id, &machine.secret)
+    } else {
+        rendezvous_id(
+            &format!("{}:channel:{lane}", machine.machine_id),
+            &machine.secret,
+        )
+    }
 }
 
 /// Where the machine hangs its uplink.

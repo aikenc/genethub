@@ -1007,6 +1007,10 @@ pub enum Request {
         relay_url: String,
         #[serde(default)]
         join_token: Option<String>,
+        /// Independent node uplinks, 1..4. Omission preserves one-channel access.
+        #[serde(default)]
+        #[ts(optional)]
+        channel_count: Option<u8>,
     },
     /// Stops being reachable from outside. Authorized devices stay authorized.
     #[serde(rename = "device.remoteDetach")]

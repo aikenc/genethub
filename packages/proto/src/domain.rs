@@ -2283,6 +2283,10 @@ pub enum TransportKind {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct HelloResult {
+    /// Optional second rendezvous carrier; it grants no authority by itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub data_channel_url: Option<String>,
     pub daemon_version: String,
     pub web_protocol: u32,
     pub machine_id: String,
@@ -2944,6 +2948,13 @@ pub struct HubTicket {
     /// from the connection — which is what makes comparing the two worth
     /// anything.
     pub fingerprint: String,
+    /// Optional independent data carrier; old callers keep using the primary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub bulk: Option<Box<HubTicket>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub fabric_authorization_expires_at: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -3038,6 +3049,19 @@ pub struct RemoteAccess {
     /// machine identity so it survives restarts.
     #[ts(optional)]
     pub rendezvous_url: Option<String>,
+    pub online: bool,
+    /// Independently recoverable carriers for the same machine and authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub channels: Option<Vec<RemoteAccessChannel>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct RemoteAccessChannel {
+    pub id: u8,
+    pub url: String,
     pub online: bool,
 }
 

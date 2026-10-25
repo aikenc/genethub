@@ -2220,6 +2220,7 @@ function connect(endpoint: Endpoint, host: Host, deviceHandle: string): Client {
 
 function dial(endpoint: Endpoint): ProtocolDial {
   return {
+    bulk: endpoint.bulk,
     url: endpoint.url,
     fabricRouteTicket: endpoint.fabricRouteTicket,
     fabricAuthorizationExpiresAt: endpoint.fabricAuthorizationExpiresAt,

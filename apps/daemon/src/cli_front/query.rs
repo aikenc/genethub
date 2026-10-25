@@ -2454,6 +2454,7 @@ mod tests {
 
     fn hello() -> HelloResult {
         HelloResult {
+            data_channel_url: None,
             daemon_version: "1.2.3".into(),
             web_protocol: genehub_proto::DATA_PLANE_VERSION,
             machine_id: "m_local".into(),

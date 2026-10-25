@@ -1,11 +1,11 @@
-//! Keeps one bulk response from filling the shared Fabric uplink.
+//! Keeps response DATA from filling the shared Fabric uplink.
 //!
 //! A preview receive window of 3MiB lets that much sit in front of every other
-//! stream on the same daemon socket. Only Fabric previews are paced; direct
-//! and RTC peers do not share that socket. The cap starts at 576KiB and follows
-//! the rate implied by client acks, about 200ms of that rate. One completed
-//! window of at least half the start size that returns within 900ms opens
-//! straight to the protocol ceiling, including a fast loopback drain. The
+//! stream on the same daemon socket. Direct and RTC peers do not share that
+//! socket. The cap starts at 32KiB and uses delivery ACK samples. A completed
+//! window returning within 450ms may double the cap; only a drain under 50ms
+//! opens straight to the protocol ceiling. This avoids mistaking a small
+//! window completing on a narrow link for proof of high capacity. The
 //! opened cap is retained only while its physical uplink is busy. A full window
 //! still unacked after 900ms shrinks the cap to what drained in 900ms, never
 //! below the start. An idle path starts conservatively again; already sent
@@ -15,11 +15,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-// Leave queueing headroom below the 1200ms interactive latency budget at 5Mbps.
-const START_BYTES: u64 = 576 * 1024;
+const START_BYTES: u64 = 32 * 1024;
 const RATE_TARGET: Duration = Duration::from_millis(200);
-/// A full start window on a 5Mbps uplink takes about 944ms. Anything slower
-/// than this stays at the start so the first RPC is not stuck behind a megabyte.
+/// Slow drains cannot justify a larger queue on a constrained uplink.
 const OPEN_DRAIN_MAX: Duration = Duration::from_millis(900);
 // Every admitted physical peer may keep at most one record in flight even
 // when another peer owns the shared window. The Fabric admission limit bounds
@@ -235,15 +233,18 @@ impl UplinkPace {
         };
 
         let rate_grew = rate_window.is_some_and(|window| window > current);
-        // A completed window of at least half the start size that returns
-        // within the open band goes to the protocol ceiling, even when a
-        // partial ack has already nudged the cap above the floor. A 10ms
-        // loopback drain is included. Anything slower than the band stays put.
+        // Grow by at most one doubling per completed window on delayed paths.
+        // Keep the fast-LAN shortcut without promoting a small weak-link sample
+        // directly to a multi-MiB queue.
         let delay_bound = drain.is_some_and(|(elapsed, probed)| {
-            probed >= floor / 2 && elapsed <= OPEN_DRAIN_MAX && current < ceiling
+            probed >= floor / 2 && elapsed <= OPEN_DRAIN_MAX / 2 && current < ceiling
         });
         let next = if delay_bound {
-            ceiling
+            if short_drain {
+                ceiling
+            } else {
+                current.saturating_mul(2).min(ceiling)
+            }
         } else if let Some(fits) = overrun.filter(|fits| *fits < current) {
             fits
         } else if rate_grew {
@@ -424,14 +425,14 @@ mod tests {
     async fn bulk_waits_once_the_floor_is_full_and_resumes_on_ack() {
         let pace = Arc::new(UplinkPace::new(3 * 1024 * 1024));
         let share = PaceShare::new(pace.peer(), 3 * 1024 * 1024);
-        share.reserve(500 * 1024).await;
-        let second = share.reserve(500 * 1024);
+        share.reserve(START_BYTES * 3 / 4).await;
+        let second = share.reserve(START_BYTES * 3 / 4);
         tokio::pin!(second);
         tokio::select! {
-            _ = &mut second => panic!("reserved past the 576KiB start"),
+            _ = &mut second => panic!("reserved past the initial window"),
             _ = tokio::time::sleep(Duration::from_millis(20)) => {}
         }
-        share.release(500 * 1024);
+        share.release(START_BYTES * 3 / 4);
         tokio::time::timeout(Duration::from_secs(1), second)
             .await
             .expect("ack should let the next chunk through");
@@ -465,14 +466,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_delay_bound_window_opens_to_the_ceiling() {
+    async fn a_delay_bound_window_grows_by_one_doubling() {
         let ceiling = 3 * 1024 * 1024;
         let pace = Arc::new(UplinkPace::new(ceiling));
         let share = PaceShare::new(pace.peer(), ceiling);
         share.reserve(START_BYTES).await;
         tokio::time::sleep(Duration::from_millis(220)).await;
         share.release(START_BYTES);
-        assert_eq!(pace.cap(), ceiling);
+        assert_eq!(pace.cap(), START_BYTES * 2);
     }
 
     #[tokio::test]
@@ -546,9 +547,9 @@ mod tests {
         share.release(START_BYTES);
         share.reserve(ceiling).await;
         tokio::time::sleep(Duration::from_millis(1_000)).await;
-        share.release(64 * 1024);
+        share.release(START_BYTES / 4);
         assert_eq!(pace.cap(), START_BYTES);
-        share.release(ceiling - 64 * 1024);
+        share.release(ceiling - START_BYTES / 4);
     }
     #[tokio::test]
     async fn cancellation_frees_budget_without_training_the_path() {

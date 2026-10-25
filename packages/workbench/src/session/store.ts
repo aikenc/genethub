@@ -575,7 +575,7 @@ interface WorkbenchState {
   killBackgroundProcesses(sessionId: string): Promise<void>;
   invite(): Promise<DeviceInvite | null>;
   revokeDevice(deviceId: string): Promise<void>;
-  attachRelay(relayUrl: string, joinToken: string): Promise<void>;
+  attachRelay(relayUrl: string, joinToken: string, channelCount?: number): Promise<void>;
   detachRelay(): Promise<void>;
 }
 
@@ -2916,10 +2916,10 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     if (reply?.type === "devices") set({ devices: reply.data.devices, remote: reply.data.remote });
   },
 
-  async attachRelay(relayUrl, joinToken) {
+  async attachRelay(relayUrl, joinToken, channelCount) {
     const reply = await require_(get().client).call({
       type: "device.remoteAttach",
-      payload: { relayUrl, joinToken: joinToken || null },
+      payload: { relayUrl, joinToken: joinToken || null, ...(channelCount === undefined ? {} : { channelCount }) },
     });
     if (reply?.type === "remoteAccess") set({ remote: reply.data });
   },

@@ -50,6 +50,7 @@ import {
   normalizeAgentPreferences,
   resolveTagRoute,
 } from "../session/capability-preferences";
+import { MachineSummaryOverview } from "./MachineSummaryOverview";
 import { ConversationList as Sidebar } from "./ConversationList";
 import { ToolsMenu } from "../shell/ToolsMenu";
 import { WorkbenchNavigation } from "../shell/WorkbenchNavigation";
@@ -83,6 +84,7 @@ const openConnection = (
   redial: () => Promise<string | ProtocolDial>,
 ) =>
   new Client({
+    bulk: endpoint.bulk,
     url: endpoint.url,
     redial,
     credential: endpoint.credential,
@@ -196,7 +198,9 @@ export function App({
   // desktop asking for the room back, which starts false because the left
   // column is how the workbench is read.
   const [sidebarHidden, setSidebarHidden] = useState(false);
+  const [summaryOverview,setSummaryOverview]=useState(false);
   const [pendingJumpSession, setPendingJumpSession] = useState<string | null>(null);
+  const [pendingJumpFrom,setPendingJumpFrom]=useState<Client|null>(null);
   useEffect(() => { if (section === "spaces") setSpacesVisited(true); }, [section]);
   const workbench = useWorkbench();
   // A background initial draft must not pull the user out of Space browsing.
@@ -535,19 +539,22 @@ export function App({
   useEffect(() => {
     if (
       !pendingJumpSession ||
+      (pendingJumpFrom !== null && workbench.client === pendingJumpFrom) ||
       workbench.connection !== "ready" ||
       !workbench.sessions.some((entry) => entry.id === pendingJumpSession)
     ) return;
     const sessionId = pendingJumpSession;
     setPendingJumpSession(null);
+    setPendingJumpFrom(null);
     void useWorkbench.getState().selectSession(sessionId).catch((error: unknown) => {
       useWorkbench.setState({
         notice: error instanceof Error ? error.message : String(error),
       });
     });
-  }, [pendingJumpSession, workbench.connection, workbench.sessions]);
+  }, [pendingJumpSession, pendingJumpFrom, workbench.client, workbench.connection, workbench.sessions]);
 
   const pickTarget = useCallback((picked: Target, next: Endpoint) => {
+    setPendingJumpSession(null);setPendingJumpFrom(null);
     // The local machine goes back to following the shell, which is the only
     // thing that knows where its daemon moved to.
     setTarget(picked.kind === "local" ? null : picked.id);
@@ -702,7 +709,6 @@ export function App({
         // The one navigation cross-machine flows still perform — deliberately
         // chosen from the completion banner, never a side effect of confirming.
         void openTarget(machine.routeId).then((next) => {
-          setPendingJumpSession(sessionId);
           pickTarget(
             {
               id: machine.routeId,
@@ -713,10 +719,16 @@ export function App({
             },
             next,
           );
+          setPendingJumpFrom(machine.id===sourceMachine.id?null:useWorkbench.getState().client);setPendingJumpSession(sessionId);
         });
       },
     };
   }, [connect, host.openTarget, host.targets, pickTarget, sourceMachine]);
+
+  const summarySource=useMemo(()=>machineBroker && host.openTarget ? {
+    targets:async()=> await host.targets!({requireComplete:true}),
+    openTarget:host.openTarget,
+  } : null,[machineBroker,host.openTarget]);
 
   const forkController = useMemo<ForkController | undefined>(() => {
     if (!machineBroker) return undefined;
@@ -837,6 +849,7 @@ export function App({
         }} />
         <Sidebar
           host={host}
+          onOpenOverview={summarySource ? ()=>setSummaryOverview(true) : undefined}
           open={sessionsOpen && section === "sessions"}
           sessionOnly
           hidden={sidebarHidden || section !== "sessions" || !showChat}
@@ -1189,6 +1202,15 @@ export function App({
       {/* Outside every tab, because a finished download is not about whichever
           panel happens to be open. */}
       <UpdateToast host={host} />
+      {summaryOverview && summarySource && machineBroker && <MachineSummaryOverview source={summarySource} onClose={()=>setSummaryOverview(false)} onOpenSession={async (target,sessionId,signal)=>{
+        if(target.deviceHandle===workbench.client?.identity?.machineId){await useWorkbench.getState().selectSession(sessionId);return;}
+        if(!host.openTarget)throw new Error("machine navigation unavailable");
+        const previous=useWorkbench.getState().client;
+        const next=await host.openTarget(target.id);
+        if(signal.aborted)throw new DOMException("Cancelled","AbortError");
+        pickTarget(target,next);
+        setPendingJumpFrom(previous);setPendingJumpSession(sessionId);setSummaryOverview(false);
+      }}/>}
       {/* An Agent-level request is for whoever is at this window, whatever tab. */}
       <AgentConfigDialog />
       <AgentRequestDialog />
@@ -1259,6 +1281,7 @@ async function withForkClient<T>(
 function dialOf(endpoint: Endpoint): ProtocolDial {
   return {
     fabricAuthorizationExpiresAt: endpoint.fabricAuthorizationExpiresAt,
+    bulk: endpoint.bulk,
     url: endpoint.url,
     ...(endpoint.channelCredential
       ? { channelCredential: endpoint.channelCredential }

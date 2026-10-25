@@ -714,7 +714,11 @@ export type GitChangeKind = "added" | "modified" | "deleted" | "renamed" | "untr
 
 export type GitStatus = { branch?: string, changes: Array<GitChange>, clean: boolean, };
 
-export type HelloResult = { daemonVersion: string, webProtocol: number, machineId: string, 
+export type HelloResult = { 
+/**
+ * Optional second rendezvous carrier; it grants no authority by itself.
+ */
+dataChannelUrl?: string, daemonVersion: string, webProtocol: number, machineId: string, 
 /**
  * Short human-comparable form of the daemon key, for out-of-band checking.
  */
@@ -833,7 +837,11 @@ fabricRouteTicket: string, fabricRouteExpiresAt: string,
  * from the connection — which is what makes comparing the two worth
  * anything.
  */
-fingerprint: string, };
+fingerprint: string, 
+/**
+ * Optional independent data carrier; old callers keep using the primary.
+ */
+bulk?: HubTicket, fabricAuthorizationExpiresAt?: string, };
 
 /**
  * A downscaled stand-in for an image row, inlined into the batch overview so
@@ -1255,7 +1263,13 @@ export type RemoteAccess = { relayUrl?: string,
  * Where clients meet this machine. Unguessable, and derived from the
  * machine identity so it survives restarts.
  */
-rendezvousUrl?: string, online: boolean, };
+rendezvousUrl?: string, online: boolean, 
+/**
+ * Independently recoverable carriers for the same machine and authority.
+ */
+channels?: Array<RemoteAccessChannel>, };
+
+export type RemoteAccessChannel = { id: number, url: string, online: boolean, };
 
 /**
  * Successful payloads, one per request that returns something.
@@ -1437,7 +1451,11 @@ workspaceId?: string, } } | { "type": "speech.runtime.probe" } | { "type": "spee
  * Omitted means the daemon's own log, which is what an error is about
  * almost every time.
  */
-name: string | null, } } | { "type": "diagnostics.snapshot" } | { "type": "update.check" } | { "type": "update.appCheck" } | { "type": "update.download" } | { "type": "update.downloadState" } | { "type": "update.dismiss" } | { "type": "hub.status" } | { "type": "hub.pair", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.trial", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.claimLink" } | { "type": "hub.machines" } | { "type": "hub.connect", "payload": { machineId: string, } } | { "type": "hub.unpair" } | { "type": "device.list" } | { "type": "device.invite", "payload": InviteScope | null } | { "type": "device.claim", "payload": { code: string, deviceName: string, } } | { "type": "device.revoke", "payload": { deviceId: string, } } | { "type": "device.remoteAttach", "payload": { relayUrl: string, joinToken: string | null, } } | { "type": "device.remoteDetach" } | { "type": "workspace.list" } | { "type": "workspace.open", "payload": { root: string, } } | { "type": "workspace.addRoot", "payload": { workspaceId: string, root: string, } } | { "type": "workspace.create", "payload": { root: string, name: string, } } | { "type": "workspace.rename", "payload": { workspaceId: string, name: string, } } | { "type": "workspace.remove", "payload": { workspaceId: string, } } | { "type": "directory.list", "payload": { path: string | null, } } | { "type": "directory.mkdir", "payload": { parent: string, name: string, } } | { "type": "fileAccess.list" } | { "type": "fileAccess.configure", "payload": { expectedRevision: string, additionalDirectories: Array<string>, } } | { "type": "file.tree", "payload": { workspaceId: string, path: string | null, depth: number | null, } } | { "type": "file.write", "payload": { workspaceId: string, path: string, content: string, } } | { "type": "file.mkdir", "payload": { workspaceId: string, path: string, } } | { "type": "file.copy", "payload": { workspaceId: string, from: string, to: string, } } | { "type": "file.move", "payload": { workspaceId: string, from: string, to: string, } } | { "type": "file.delete", "payload": { workspaceId: string, paths: Array<string>, } } | { "type": "git.status", "payload": { workspaceId: string, } } | { "type": "git.diff", "payload": { workspaceId: string, path: string | null, } } | { "type": "git.commit", "payload": { workspaceId: string, message: string, 
+name: string | null, } } | { "type": "diagnostics.snapshot" } | { "type": "update.check" } | { "type": "update.appCheck" } | { "type": "update.download" } | { "type": "update.downloadState" } | { "type": "update.dismiss" } | { "type": "hub.status" } | { "type": "hub.pair", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.trial", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.claimLink" } | { "type": "hub.machines" } | { "type": "hub.connect", "payload": { machineId: string, } } | { "type": "hub.unpair" } | { "type": "device.list" } | { "type": "device.invite", "payload": InviteScope | null } | { "type": "device.claim", "payload": { code: string, deviceName: string, } } | { "type": "device.revoke", "payload": { deviceId: string, } } | { "type": "device.remoteAttach", "payload": { relayUrl: string, joinToken: string | null, 
+/**
+ * Independent node uplinks, 1..4. Omission preserves one-channel access.
+ */
+channelCount?: number, } } | { "type": "device.remoteDetach" } | { "type": "workspace.list" } | { "type": "workspace.open", "payload": { root: string, } } | { "type": "workspace.addRoot", "payload": { workspaceId: string, root: string, } } | { "type": "workspace.create", "payload": { root: string, name: string, } } | { "type": "workspace.rename", "payload": { workspaceId: string, name: string, } } | { "type": "workspace.remove", "payload": { workspaceId: string, } } | { "type": "directory.list", "payload": { path: string | null, } } | { "type": "directory.mkdir", "payload": { parent: string, name: string, } } | { "type": "fileAccess.list" } | { "type": "fileAccess.configure", "payload": { expectedRevision: string, additionalDirectories: Array<string>, } } | { "type": "file.tree", "payload": { workspaceId: string, path: string | null, depth: number | null, } } | { "type": "file.write", "payload": { workspaceId: string, path: string, content: string, } } | { "type": "file.mkdir", "payload": { workspaceId: string, path: string, } } | { "type": "file.copy", "payload": { workspaceId: string, from: string, to: string, } } | { "type": "file.move", "payload": { workspaceId: string, from: string, to: string, } } | { "type": "file.delete", "payload": { workspaceId: string, paths: Array<string>, } } | { "type": "git.status", "payload": { workspaceId: string, } } | { "type": "git.diff", "payload": { workspaceId: string, path: string | null, } } | { "type": "git.commit", "payload": { workspaceId: string, message: string, 
 /**
  * Empty means "everything currently changed".
  */

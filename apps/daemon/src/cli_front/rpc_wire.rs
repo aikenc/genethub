@@ -911,6 +911,7 @@ mod tests {
             expires_at,
         };
         let hello = HelloResult {
+            data_channel_url: None,
             daemon_version: "test".into(),
             web_protocol: genehub_proto::WEB_PROTOCOL_VERSION,
             machine_id: admission.machine_id.clone(),

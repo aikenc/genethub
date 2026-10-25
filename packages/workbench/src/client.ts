@@ -35,3 +35,8 @@ export type {
 export type { DataStream } from "./dataplane";
 
 export { ServicePreviewClient } from "./preview/serviceClient";
+
+export { MachineSummaryDirectory } from "./protocol/summary-directory";
+export type { SummarySource, SummaryState, MachineSummary, SummaryDirectory } from "./protocol/summary-directory";
+
+export type { Endpoint, Target } from "./protocol/target";

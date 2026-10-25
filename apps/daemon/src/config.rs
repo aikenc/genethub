@@ -635,6 +635,12 @@ pub struct Rendezvous {
     pub relay_url: String,
     #[serde(default)]
     pub join_token: Option<String>,
+    #[serde(default = "default_remote_channel_count")]
+    pub channel_count: u8,
+}
+
+fn default_remote_channel_count() -> u8 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -78,6 +78,8 @@ struct Directory {
 pub struct FabricAdmission {
     pub url: String,
     pub admission_expires_at: String,
+    #[serde(default)]
+    pub node_channel_count: Option<u8>,
 }
 
 /// One-use E2E secret fetched by the target daemon. The opaque capability may
@@ -370,11 +372,26 @@ impl Client {
     }
 
     pub async fn fabric_admission(&self, enrollment: &Enrollment) -> Result<FabricAdmission> {
+        self.fabric_admission_lane(enrollment, 0).await
+    }
+
+    pub async fn fabric_admission_lane(
+        &self,
+        enrollment: &Enrollment,
+        lane: u8,
+    ) -> Result<FabricAdmission> {
+        if lane > 1 {
+            anyhow::bail!("invalid Fabric node lane");
+        }
         let response = self
             .http
             .post(self.url("/api/fabric/v2/endpoints")?)
             .bearer_auth(&enrollment.secret)
-            .json(&serde_json::json!({}))
+            .json(&if lane == 0 {
+                serde_json::json!({})
+            } else {
+                serde_json::json!({ "lane": lane })
+            })
             .send()
             .await
             .context("requesting a one-use Fabric admission")?;

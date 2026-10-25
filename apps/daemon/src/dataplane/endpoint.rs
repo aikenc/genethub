@@ -442,7 +442,7 @@ impl ServerStream {
                         payload: bytes[offset..offset + length].to_vec(),
                     },
                     timings.as_deref_mut(),
-                    self.head.method == "asset.preview",
+                    true,
                 )
                 .await?;
             if let Some(timings) = timings.as_mut() {
@@ -876,15 +876,12 @@ fn dispatch(
         let credit = Credit::new(frame.value)?;
         // Logical DATA (including replay) is paced at the active carrier's
         // send pump. Bootstrap physical streams retain their fixed owner.
-        let pace = (head.method == "asset.preview")
-            .then(|| services.physical_pace.as_ref())
-            .flatten()
-            .map(|pace| {
-                Arc::new(super::uplink_pace::PaceShare::new(
-                    pace.clone(),
-                    genehub_proto::INITIAL_STREAM_WINDOW_BYTES as u64,
-                ))
-            });
+        let pace = services.physical_pace.as_ref().map(|pace| {
+            Arc::new(super::uplink_pace::PaceShare::new(
+                pace.clone(),
+                genehub_proto::INITIAL_STREAM_WINDOW_BYTES as u64,
+            ))
+        });
         streams.insert(
             frame.stream_id,
             StreamState {

@@ -261,24 +261,29 @@ describe("the logical peer connection", () => {
     client.close();
   });
 
-  it("notices a silently dead carrier through the heartbeat and reconnects", async () => {
+  it("retains its logical owner while application heartbeats time out on a progressing carrier", async () => {
+    const phases: string[] = [];
     const { client, queue } = await connected({
       heartbeatMs: 20,
       heartbeatTimeoutMs: 40,
       backoffMs: () => 0,
+      onDiagnostic(event) {
+        if (event.kind === "connection" && typeof event.detail.phase === "string") phases.push(event.detail.phase);
+      },
     });
-
-    // The page was suspended and the carrier died without a close frame: the
-    // socket still looks open, it just never answers again.
-    queue.latest().silence();
-    await waitFor(() => client.connectionState === "reconnecting", 500);
-    await waitFor(() => queue.sockets.length === 2, 500);
-
-    queue.latest().open();
-    await waitFor(() => queue.latest().sent.some((message) => message.type === "hello"), 500);
-    queue.latest().acceptHandshake();
-    await waitFor(() => client.connectionState === "ready", 500);
-    client.close();
+    const owner = client.logicalConnectionId;
+    try {
+      // The fixture still accepts encrypted records and channel controls. Only
+      // application replies stall; this must not masquerade as physical loss.
+      queue.latest().silenceRpc();
+      await waitFor(() => phases.includes("application-heartbeat-delayed"), 500);
+      await waitFor(() => queue.latest().sent.filter(message => message.type === "connection.identity").length >= 3, 500);
+      expect(client.connectionState).toBe("ready");
+      expect(queue.sockets).toHaveLength(1);
+      expect(client.logicalConnectionId).toBe(owner);
+    } finally {
+      client.close();
+    }
   });
 
   it("keeps a healthy carrier ready across heartbeat probes", async () => {

@@ -897,6 +897,12 @@ async fn dispatch(
         }).await,
         Request::ConnectionIdentity => Box::pin(async move {
             Handled::ok(Reply::Hello(HelloResult {
+                data_channel_url: match state.remote.get() {
+                    Some(remote) => remote.status().await.channels
+                        .and_then(|lanes| lanes.into_iter().find(|lane| lane.id == 1))
+                        .map(|lane| lane.url),
+                    None => None,
+                },
                 daemon_version: state.version.clone(),
                 web_protocol: WEB_PROTOCOL_VERSION,
                 machine_id: state.machine.machine_id.clone(),
@@ -905,6 +911,7 @@ async fn dispatch(
                 machine_name: crate::link::default_display_name(),
                 rtc_supported: crate::dataplane::rtc::SUPPORTED,
                 features: Some(vec![
+                    "fabric.channels.v1".to_string(),
                     "asset.preview.image.v1".to_string(),
                     "service.preview.v1".to_string(),
                     "process.services.v1".to_string(),
@@ -2577,11 +2584,12 @@ async fn dispatch(
         Request::DeviceRemoteAttach {
             relay_url,
             join_token,
+            channel_count,
         } => Box::pin(async move {
             let Some(remote) = state.remote.get() else {
                 return Handled::err(ErrorCode::Internal, "the daemon is still starting up");
             };
-            match remote.set(&relay_url, join_token).await {
+            match remote.set_channels(&relay_url, join_token, channel_count.unwrap_or(1)).await {
                 Ok(status) => Handled::ok(Reply::RemoteAccess(status)),
                 Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
             }
@@ -2596,6 +2604,7 @@ async fn dispatch(
                 None => Handled::ok(Reply::RemoteAccess(genehub_proto::RemoteAccess {
                     relay_url: None,
                     rendezvous_url: None,
+                    channels: None,
                     online: false,
                 })),
             }
@@ -3520,6 +3529,7 @@ async fn remote_status(state: &Shared) -> genehub_proto::RemoteAccess {
         None => genehub_proto::RemoteAccess {
             relay_url: None,
             rendezvous_url: None,
+            channels: None,
             online: false,
         },
     }
