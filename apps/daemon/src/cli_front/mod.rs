@@ -27,7 +27,8 @@ mod space;
 mod speech;
 pub mod target;
 mod update;
-mod workflow;
+pub(crate) use update::runtime as update_runtime;
+mod project;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -213,8 +214,8 @@ async fn dispatch(args: Vec<String>) -> i32 {
         }
         Some("session") => match args.get(1).map(String::as_str) {
             Some(
-                "list" | "get" | "components" | "flow" | "inspect" | "narrative" | "rounds"
-                | "trunks" | "trunk" | "blob" | "context",
+                "list" | "get" | "components" | "inspect" | "narrative" | "rounds" | "trunks"
+                | "trunk" | "blob" | "context",
             )
             | None => Box::pin(query::run(&args, &selection)).await,
             Some(_) => Box::pin(converse::session(&args[1..], &selection)).await,
@@ -225,7 +226,11 @@ async fn dispatch(args: Vec<String>) -> i32 {
         Some("file") => Box::pin(file::file(&args[1..], &selection)).await,
         Some("client") => Box::pin(client::run(&args[1..], &selection)).await,
         Some("speech") => Box::pin(speech::speech(&args[1..], &selection)).await,
-        Some("workflow") => Box::pin(workflow::workflow(&args[1..], &selection)).await,
+        Some("workflow") => output::fail(output::CliFailure::business(
+            "workflowRetired",
+            "Workflow has been removed; use team Skills and ordinary Sessions",
+            None,
+        )),
         Some("space") => Box::pin(space::space(&args[1..], &selection)).await,
         Some("process") => Box::pin(process::process(&args[1..], &selection)).await,
         Some("hook") => Box::pin(hook::hook(&args[1..], &selection)).await,
@@ -233,7 +238,7 @@ async fn dispatch(args: Vec<String>) -> i32 {
         Some("device") => Box::pin(machine::device(&args[1..], &selection)).await,
         Some("hub") => Box::pin(hub::hub(&args[1..])).await,
         Some("desktop") => Box::pin(desktop::desktop(&args[1..])).await,
-        Some("update") => update::update(&args[1..]),
+        Some("update") => Box::pin(update::update(&args[1..])).await,
         Some("status" | "daemon" | "agent-serve") => fail(
             "invalid_args",
             "this verb stays on the native CLI and is not forwarded",

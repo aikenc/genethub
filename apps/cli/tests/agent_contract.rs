@@ -119,7 +119,11 @@ async fn a_machine_selector_is_refused_by_name_rather_than_ignored() {
         &["session", "list", "--machine=m_other"],
         4,
     );
-    assert_eq!(routable["error"]["code"], "machineNotPaired");
+    // The local daemon has no Hub enrollment. Preserve that upstream failure,
+    // rather than inventing a missing pairing or returning local sessions.
+    assert_eq!(routable["type"], "error");
+    assert_eq!(routable["error"]["code"], "internal");
+    assert_eq!(routable["error"]["details"]["stage"], "hubTicket");
     assert_eq!(routable["error"]["details"]["machineId"], "m_other");
     assert_eq!(routable["error"]["retryable"], false);
 }
@@ -140,7 +144,7 @@ async fn the_working_directory_is_refused_where_it_would_be_ignored() {
 }
 
 #[test]
-fn unsigned_self_update_is_explicitly_unsupported() {
+fn managed_update_requires_an_explicit_operation() {
     let dir = tempfile::tempdir().unwrap();
     let sentinel = dir.path().join("must-not-run");
     let output = genet()
@@ -151,15 +155,15 @@ fn unsigned_self_update_is_explicitly_unsupported() {
     assert_eq!(output.status.code(), Some(4));
     assert!(
         !sentinel.exists(),
-        "the disabled updater executed a child process"
+        "an incomplete update invocation executed a child process"
     );
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["error"]["code"], "unsupported");
+    assert_eq!(value["error"]["code"], "updateFailed");
     assert_eq!(value["error"]["retryable"], false);
     assert!(value["error"]["message"]
         .as_str()
         .unwrap()
-        .contains("SHA256SUMS"));
+        .contains("update check|live|app|status"));
 }
 
 #[test]

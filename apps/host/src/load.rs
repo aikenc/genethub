@@ -104,6 +104,13 @@ pub fn run_component(path: &Path, guest_args: &[String], entry: Entry) -> Result
 pub(crate) fn engine_config() -> Config {
     let mut config = Config::new();
     config.wasm_component_model(true);
+    // This standalone host spawns and reaps native children. On macOS their
+    // SIGCHLD can interrupt Wasmtime's Mach-port receive (MACH_RCV_INTERRUPTED),
+    // whose handler aborts instead of retrying. Use Wasmtime's supported Unix
+    // signal trap handler so stopping an Agent cannot kill the daemon during
+    // reload. The host does not embed a competing Mach-port crash handler.
+    #[cfg(target_os = "macos")]
+    config.macos_use_mach_ports(false);
     config
 }
 
@@ -276,6 +283,7 @@ fn build_instance(
                 | crate::channel::ENV_CLI
                 | crate::channel::ENV_COMPONENT_FILE
                 | crate::channel::ENV_DATA_DIR
+                | "GENEHUB_COMPONENT_SHA256"
                 | "GENEHUB_COMPONENT_VERSION"
                 | "GENEHUB_APP_VERSION"
                 | "GENEHUB_BUNDLED_RELEASE_VERSION"
@@ -336,6 +344,9 @@ fn build_instance(
         "GENEHUB_COMPONENT_VERSION",
         crate::update::running_version_string(),
     );
+    if let Some(hash) = crate::update::running_sha256() {
+        wasi.env("GENEHUB_COMPONENT_SHA256", hash);
+    }
     wasi.env("GENEHUB_APP_VERSION", crate::version::app_version());
     // The data directory is another fact the guest cannot learn on its own:
     // WASI has no platform dirs, so `Paths::discover` in there only works

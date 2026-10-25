@@ -1,33 +1,5 @@
 //! Only admitted adapter output and changing usage/tool facts count as work.
-use super::super::store::ExecutionActivity;
 use super::*;
-
-impl SessionManager {
-    pub(crate) async fn execution_activity(&self, session_id: &str) -> Result<ExecutionActivity> {
-        Ok(self
-            .live(session_id)
-            .await?
-            .meta
-            .lock()
-            .await
-            .activity
-            .clone())
-    }
-    pub(crate) async fn input_handled(
-        &self,
-        session_id: &str,
-        message_id: &str,
-    ) -> Result<Option<bool>> {
-        let live = self.live(session_id).await?;
-        let meta = live.meta.lock().await;
-        Ok(meta
-            .inbox
-            .entries
-            .iter()
-            .find(|entry| entry.message_id == message_id)
-            .map(|entry| entry.state == "handled"))
-    }
-}
 
 pub(super) async fn observe(live: &Live, event: &SessionEvent) {
     let items = live.items.lock().await;

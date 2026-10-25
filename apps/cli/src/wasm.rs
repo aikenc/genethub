@@ -195,6 +195,11 @@ fn host_command(guest: &Guest) -> Command {
 /// Foreground: replace this process with the shell. systemd and the desktop
 /// sidecar both treat `daemon run` as "the pid that holds the listener".
 pub fn become_daemon() -> i32 {
+    match crate::update::recover_before_daemon() {
+        Ok(Some(cli)) => return exec_binary(cli, &["daemon".into(), "run".into()]),
+        Ok(None) => {}
+        Err(error) => fail("updateRecoveryFailed", &format!("{error:#}"), EXIT_FAILED),
+    }
     if let Ok(override_command) = std::env::var(channel::ENV_DAEMON_COMMAND) {
         if !override_command.is_empty() {
             return exec_binary(PathBuf::from(override_command), &[]);
@@ -260,7 +265,7 @@ fn exec_host(guest: &Guest, entry: load::Entry, guest_args: &[String]) -> i32 {
     exec_binary(guest.host.clone(), &args)
 }
 
-fn exec_binary(exe: PathBuf, args: &[String]) -> i32 {
+pub(crate) fn exec_binary(exe: PathBuf, args: &[String]) -> i32 {
     let mut command = Command::new(&exe);
     command.args(args);
     cli_env(&mut command);

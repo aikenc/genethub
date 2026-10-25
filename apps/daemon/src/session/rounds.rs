@@ -692,7 +692,7 @@ pub fn tail_excerpt_output(text: &str) -> Option<String> {
         .lines()
         .map(str::trim)
         .filter(|line| {
-            !line.is_empty() && !(line.starts_with("… 已省略 ") && line.ends_with(" 行 …"))
+            !(line.is_empty() || line.starts_with("… 已省略 ") && line.ends_with(" 行 …"))
         })
         .map(|line| overview::clip(line, 80))
         .collect();

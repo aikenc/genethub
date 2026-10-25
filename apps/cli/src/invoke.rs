@@ -130,13 +130,37 @@ mod version_tests {
 }
 
 async fn collect(argv: Vec<String>) -> Result<Vec<CliRecord>, String> {
+    collect_inner(argv, true).await
+}
+
+pub(crate) async fn update_call(argv: Vec<String>, scoped: bool) -> Result<Value, String> {
+    let records = collect_inner(argv, scoped).await?;
+    if records.last().and_then(|r| r.exit) != Some(0) {
+        return Err(records
+            .iter()
+            .filter_map(|r| r.line.as_ref())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n"));
+    }
+    records
+        .into_iter()
+        .filter_map(|r| r.line)
+        .find_map(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| v.get("data").cloned())
+        .ok_or_else(|| "update call returned no result".into())
+}
+
+async fn collect_inner(argv: Vec<String>, scoped: bool) -> Result<Vec<CliRecord>, String> {
     let (url, _) = admission()?;
     let cwd = caller_cwd();
     let mut body = serde_json::json!({
         "argv": argv,
         "cwd": cwd,
     });
-    add_session_controller_identity(&mut body);
+    if scoped {
+        add_session_controller_identity(&mut body);
+    }
     let response = Client::new()
         .post(&url)
         .timeout(Duration::from_secs(15))

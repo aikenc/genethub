@@ -16,12 +16,12 @@ defineJourney(
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
     try {
       for (const name of ["../config.json", "../../.ssh/id_rsa"]) {
-        try {
-          await opened.client.call({ type: "log.tail", payload: { name } });
-          t.assertions.assert(false, `${name} was served`);
-        } catch (error) {
-          t.assertions.assert(error instanceof Error, `${name} did not fail`);
-        }
+        // The helper throws outside its catch if a request succeeds; neither
+        // our assertion nor a transport disconnect may count as a refusal.
+        await t.assertions.expectProtocolCode(
+          () => opened.client.call({ type: "log.tail", payload: { name } }),
+          "internal",
+        );
       }
     } finally {
       opened.client.close();

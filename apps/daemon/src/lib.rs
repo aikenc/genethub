@@ -63,7 +63,6 @@ pub mod transfer;
 pub mod transport;
 pub mod updates;
 pub mod version;
-pub mod workflow;
 pub mod workspace;
 
 use anyhow::Result;
@@ -76,7 +75,6 @@ pub struct Daemon {
     pub port: u16,
     listener: tokio::task::JoinHandle<()>,
     session_deliveries: tokio::task::JoinHandle<()>,
-    workflow_control: tokio::task::JoinHandle<()>,
     hook_timer: tokio::task::JoinHandle<()>,
     agent_pushes: tokio::task::JoinHandle<()>,
 }
@@ -130,22 +128,10 @@ impl Daemon {
                 }
             }
         });
-        let workflow_control = tokio::spawn({
-            let state = state.clone();
-            async move {
-                let mut ticks = tokio::time::interval(std::time::Duration::from_secs(5));
-                ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                loop {
-                    ticks.tick().await;
-                    workflow::maintain(&state).await;
-                }
-            }
-        });
         let hook_timer = tokio::spawn(hooks::run_timer(state.clone()));
         let agent_pushes = tokio::spawn(push_agent_changes(state.clone()));
         Ok(Daemon {
             session_deliveries,
-            workflow_control,
             hook_timer,
             agent_pushes,
             state,
@@ -175,11 +161,8 @@ impl Daemon {
     pub async fn shutdown(self) {
         self.session_deliveries.abort();
         let _ = self.session_deliveries.await;
-        self.workflow_control.abort();
-        let _ = self.workflow_control.await;
         self.hook_timer.abort();
         let _ = self.hook_timer.await;
-        self.state.workflow_tasks.stop().await;
         self.agent_pushes.abort();
         let _ = self.agent_pushes.await;
         // Script Agents first and alongside: stopping one takes the process

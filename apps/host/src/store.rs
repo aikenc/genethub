@@ -27,6 +27,14 @@ pub(crate) struct ArtifactStore {
     verifier: ArtifactVerifier,
 }
 
+/// Every reader/recovery path and writer shares the same kernel lock. The
+/// resident Host and an independent CLI Host must not validate one candidate
+/// and then rename bytes staged by the other process.
+pub(crate) struct StoreTransaction<'a> {
+    store: &'a ArtifactStore,
+    _lease: File,
+}
+
 impl ArtifactStore {
     pub fn open(root: impl Into<PathBuf>, verifier: ArtifactVerifier) -> Result<Self> {
         let root = root.into();
@@ -44,8 +52,41 @@ impl ArtifactStore {
         })
     }
 
+    pub fn transaction(&self) -> Result<StoreTransaction<'_>> {
+        let path = self.root.join("transaction.lock");
+        reject_non_file_if_present(&path)?;
+        let lease = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)?;
+        fs2::FileExt::lock_exclusive(&lease)?;
+        Ok(StoreTransaction {
+            store: self,
+            _lease: lease,
+        })
+    }
+}
+
+impl StoreTransaction<'_> {
+    pub fn activate(&self, artifact: &VerifiedArtifact) -> Result<()> {
+        let version = artifact.envelope().version();
+        if let Some(highest) = self.highest_version()? {
+            if version < highest {
+                return Err(ArtifactError::VersionReplay {
+                    candidate: version.to_string(),
+                    highest: highest.to_string(),
+                });
+            }
+        }
+        self.stage(artifact)?;
+        self.advance_high_water(&version)?;
+        self.commit_candidate(&version)
+    }
+
     pub fn highest_version(&self) -> Result<Option<ProductVersion>> {
-        let bytes = match read_limited(&self.high_water, MAX_HIGH_WATER_BYTES) {
+        let bytes = match read_limited(&self.store.high_water, MAX_HIGH_WATER_BYTES) {
             Ok(bytes) => bytes,
             Err(ArtifactError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(None)
@@ -81,23 +122,23 @@ impl ArtifactStore {
                 return Ok(());
             }
         }
-        replace_bytes(&self.high_water, format!("{version}\n").as_bytes())?;
-        sync_directory(&self.root)
+        replace_bytes(&self.store.high_water, format!("{version}\n").as_bytes())?;
+        sync_directory(&self.store.root)
     }
 
     pub fn load_active(&self) -> Result<Option<VerifiedArtifact>> {
-        self.load_optional(&self.active)
+        self.load_optional(&self.store.active)
     }
 
     pub fn load_candidate(&self) -> Result<Option<VerifiedArtifact>> {
-        self.load_optional(&self.candidate)
+        self.load_optional(&self.store.candidate)
     }
 
     pub fn stage(&self, artifact: &VerifiedArtifact) -> Result<()> {
         let file = SignedArtifact::new(artifact.envelope.clone(), artifact.component.to_vec())
             .to_single_file()?;
-        replace_bytes(&self.candidate, &file)?;
-        sync_directory(&self.root)
+        replace_bytes(&self.store.candidate, &file)?;
+        sync_directory(&self.store.root)
     }
 
     /// Publishes the already-fenced candidate as the sole downloaded active.
@@ -120,8 +161,8 @@ impl ArtifactStore {
                 candidate.envelope().release_version()
             )));
         }
-        atomic_replace(&self.candidate, &self.active)?;
-        sync_directory(&self.root)
+        atomic_replace(&self.store.candidate, &self.store.active)?;
+        sync_directory(&self.store.root)
     }
 
     /// Completes the only recoverable crash point: the high-water mark was
@@ -151,23 +192,24 @@ impl ArtifactStore {
     /// Drops the active file if it can be dropped; a failure to delete is
     /// logged by the caller's context and never blocks a fallback.
     pub fn discard_active_quietly(&self) {
-        let _ = remove_if_present(&self.active);
-        let _ = sync_directory(&self.root);
+        let _ = remove_if_present(&self.store.active);
+        let _ = sync_directory(&self.store.root);
     }
 
     #[cfg(test)]
     pub fn discard_active(&self) -> Result<()> {
-        remove_if_present(&self.active)?;
-        sync_directory(&self.root)
+        remove_if_present(&self.store.active)?;
+        sync_directory(&self.store.root)
     }
 
     pub fn discard_candidate(&self) -> Result<()> {
-        remove_if_present(&self.candidate)?;
-        sync_directory(&self.root)
+        remove_if_present(&self.store.candidate)?;
+        sync_directory(&self.store.root)
     }
 
     fn load_optional(&self, path: &Path) -> Result<Option<VerifiedArtifact>> {
         let limit = self
+            .store
             .verifier
             .max_artifact_bytes()
             .checked_add(MAX_ENVELOPE_BYTES)
@@ -180,7 +222,7 @@ impl ArtifactStore {
             Err(error) => return Err(error),
         };
         let artifact = SignedArtifact::from_single_file(&bytes)?;
-        self.verifier.verify(&artifact).map(Some)
+        self.store.verifier.verify(&artifact).map(Some)
     }
 }
 
@@ -326,6 +368,7 @@ mod tests {
     fn candidate_failure_never_changes_active_or_high_water() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(&dir);
+        let store = store.transaction().unwrap();
         let first = signed("0.1.2");
         store.stage(&first).unwrap();
         store.advance_high_water(&version("0.1.2")).unwrap();
@@ -349,6 +392,7 @@ mod tests {
     fn replay_is_rejected_and_equal_version_can_repair_corruption() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(&dir);
+        let store = store.transaction().unwrap();
         store.stage(&signed("0.1.3")).unwrap();
         store.advance_high_water(&version("0.1.3")).unwrap();
         store.commit_candidate(&version("0.1.3")).unwrap();

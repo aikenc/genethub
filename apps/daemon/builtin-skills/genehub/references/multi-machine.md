@@ -102,7 +102,7 @@ Hub 查询失败会返回非零退出码和 `complete: false` 的已知条目，
 
 - Agent 会话控制其他会话时，本机与 `--machine` 遵循同一套规则：可以创建普通会话，也可以对普通会话执行
   `session send`、中断、改名、关闭等操作，与用户本人相同。
-- 退役中的 Workflow 创建的受管子会话默认只读：只由委托它的 PM 会话或项目例外权限写入，其他调用方（包括用户本人）
+- 已移除的 Workflow 创建的受管子会话默认只读：只由委托它的 父会话写入，其他调用方（包括用户本人）
   只能查看或 fork。被拒时不要换路径绕过，改为通过对应 PM 处理；新的多会话协作用团队机制（Skill `genehub-team`），
   不要再建 Workflow。
 - Agent 发出的消息会带上来源（机器与会话），目标会话中显示为 Agent 输入，不是 Human 输入。收到
@@ -114,7 +114,7 @@ Hub 查询失败会返回非零退出码和 `complete: false` 的已知条目，
 `process list/kill/kill-all` 支持 `--machine`，只管理目标机器上已登记、归属指定会话的后台进程；
 `kill-all` 仍必须指定 `--session`。
 
-`workflow`、`machine`、`speech`、`file`、daemon 生命周期（`daemon …`）和 `update` 不可路由，
+`machine`、`speech`、`file`、daemon 生命周期（`daemon …`）和 `update` 不可路由，
 `--machine` 对它们无效。远端的 daemon 重启走那台机器自己的独立连接，见 [daemon.md](daemon.md)。
 
 ## 配对与授权（授权变更，需用户明确要求）

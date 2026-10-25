@@ -729,20 +729,6 @@ mod tests {
     }
 
     #[test]
-    fn workflow_manager_keeps_intelligence_tiers_on_role_tags() {
-        let body = std::fs::read_to_string(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join(
-                "workflow-packages/game-delivery/spaces/workflow-manager/skills/workflow-manager/SKILL.md",
-            ),
-        )
-        .unwrap();
-        assert!(body.contains("platform intelligence-tier tags"));
-        assert!(body.contains("change only the intelligence tag"));
-        assert!(body.contains("Do not pin `agentId` or `modelId`"));
-        assert!(body.contains("`Flush` is not a tag"));
-    }
-
-    #[test]
     fn unknown_data_dir_skill_is_not_in_the_genehub_catalog() {
         let root = temp_dir("unknown");
         write_skill(

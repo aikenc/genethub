@@ -668,13 +668,15 @@ jobs:
       # This is discovery metadata for a human-led manual update, not a signed
       # updater manifest. SHA-256 detects corruption only when its source is
       # independently trusted; it does not authenticate a release delivered
-      # beside the digest. Daemon, CLI and desktop automatic install paths stay
-      # fail-closed until the project has an independent signing root.
+      # beside the digest.
+      # Development updates use hashes and channel/ABI checks; signing-key
+      # management can be introduced without blocking CLI update testing.
       - name: Say what the newest version is, at an address that never moves
         env:
           CHANNEL: ${{ needs.channel.outputs.name }}
           MANIFEST: ${{ needs.channel.outputs.manifest }}
           ASSET_PREFIX: ${{ needs.channel.outputs.asset_prefix }}
+          TARBALL_PREFIX: ${{ needs.channel.outputs.tarball_prefix }}
         run: |
           set -euo pipefail
           node -e '
@@ -685,6 +687,12 @@ jobs:
             const asset = `${process.env.ASSET_PREFIX}-${version}-windows-x64-setup.exe`;
             const bytes = require("node:fs").readFileSync(`dist/${asset}`);
             const sha256 = require("node:crypto").createHash("sha256").update(bytes).digest("hex");
+            const cliAsset = (platform) => {
+              const name = `${process.env.TARBALL_PREFIX}-${platform}.tar.gz`;
+              const bytes = require("node:fs").readFileSync(`dist/${name}`);
+              return { kind: "cli", url: `${release}/download/${tag}/${name}`,
+                sha256: require("node:crypto").createHash("sha256").update(bytes).digest("hex"), size: bytes.length };
+            };
             require("node:fs").writeFileSync(
               `dist/${process.env.MANIFEST}`,
               JSON.stringify(
@@ -696,6 +704,8 @@ jobs:
                   // human wants the notes and the checksums next to it.
                   page: `${release}/tag/${tag}`,
                   platforms: {
+                    "linux-x86_64": cliAsset("linux-x64"),
+                    "darwin-aarch64": cliAsset("darwin-arm64"),
                     "windows-x86_64": {
                       url: `${release}/download/${tag}/${asset}`,
                       sha256,
