@@ -146,6 +146,7 @@ export interface RunManifest {
   qualification: RunQualification;
   governanceDigest?: string;
   environments: number;
+  budget?: Record<"environments" | "cpu" | "memoryMb" | "io" | "browser", number>;
   resultsPath: string;
   leak: { processes: number | null; ports: number | null };
   inputsAtStart?: { open: RepoIdentity; cloud: RepoIdentity; artifact: ArtifactIdentity };

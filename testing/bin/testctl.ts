@@ -50,6 +50,13 @@ function has(args: string[], name: string): boolean {
   return args.includes(name);
 }
 
+function resourceBudget(args: string[]) {
+  return defaultBudget(Number(flag(args, "--environments", "16")), {
+    ...(has(args, "--cpu") ? { cpu: Number(flag(args, "--cpu")) } : {}),
+    ...(has(args, "--memory-mb") ? { memoryMb: Number(flag(args, "--memory-mb")) } : {}),
+  });
+}
+
 function valuesOf(args: string[], name: string): string[] {
   const out: string[] = [];
   for (let i = 0; i < args.length; i += 1) {
@@ -67,6 +74,8 @@ function usage(): string {
   plan --gate <gate> [--open <path>] [--cloud <path>] [--tags <tag>] [--case <id>] [--reason <scope explanation>]
   run --space <abs> --gate <gate> --topic <slug> [--environments 16] [--summary-language <en|zh-CN>] [--open] [--cloud] [--max-run-ms] [--case <id>|--tags <tag>] [--reason <text>] [--resume <finalized-run>]
       [--no-build]
+  plan/run: [--environments 16] [--cpu <tokens>] [--memory-mb <MiB>]; independent positive integer budgets.
+  Set budgets from the container's available capacity, reserving room for other work; host CPU count may exceed its quota.
   dev-feedback requires explicit --case/--tags and --reason; it is scoped evidence, never full release qualification.
   Selected dependencies are checked before execution. Progress is on stderr and inspect works while running.
   --resume creates new evidence; only matching passed results are reused, failed/unstable retries are refused.
@@ -116,7 +125,7 @@ async function main(): Promise<number> {
   if (command === "capabilities") {
     process.stdout.write(`${JSON.stringify({ schema: "genehub.test-capabilities.v1", runnerVersion: RUNNER_VERSION,
       policyVersion: POLICY_VERSION, feedbackGate: "dev-feedback", explicitSelection: true, preflight: true,
-      liveInspect: true, resume: "matching-passed-only" }, null, 2)}\n`);
+      liveInspect: true, resourceBudgets: true, resume: "matching-passed-only" }, null, 2)}\n`);
     return 0;
   }
 
@@ -143,10 +152,11 @@ async function main(): Promise<number> {
 
   if (command === "plan") {
     const gate = parseGate(flag(args, "--gate", "change"));
+    const budget = resourceBudget(args);
     const cases = await loadCatalog({ openRoot, cloudRoot });
     const plan = planCases(cases, gate, valuesOf(args, "--tags"), valuesOf(args, "--case"), flag(args, "--reason"));
     process.stdout.write(
-      `${JSON.stringify({ gate, scope: gate === "dev-feedback" ? "feedback" : "gate", reason: flag(args, "--reason"), units: plan.units.map((unit) => ({ id: unit.id, ms: unit.meta.expectedDurationMs, runner: unit.meta.runner, surfaces: unit.meta.surfaces, requirements: unit.meta.requirements ?? [] })), skipped: plan.skipped, estimatedMs: plan.estimatedMs }, null, 2)}\n`,
+      `${JSON.stringify({ gate, scope: gate === "dev-feedback" ? "feedback" : "gate", budget, reason: flag(args, "--reason"), units: plan.units.map((unit) => ({ id: unit.id, ms: unit.meta.expectedDurationMs, runner: unit.meta.runner, surfaces: unit.meta.surfaces, requirements: unit.meta.requirements ?? [] })), skipped: plan.skipped, estimatedMs: plan.estimatedMs }, null, 2)}\n`,
     );
     return 0;
   }
@@ -156,7 +166,8 @@ async function main(): Promise<number> {
     const topic = flag(args, "--topic", "change");
     const gate = parseGate(flag(args, "--gate", "change"));
     const summaryLanguage = parseSummaryLanguage(flag(args, "--summary-language", "en"));
-    const environments = Number(flag(args, "--environments", "16")) || 16;
+    const budget = resourceBudget(args);
+    const environments = budget.environments;
     const maxRunMs = Number(flag(args, "--max-run-ms", "0")) || 0;
     // Every refusal below names the value it received and the shape it wanted.
     // "--space is required" and "space runs/ is not gitignored" both read like
@@ -241,7 +252,7 @@ async function main(): Promise<number> {
       const governanceDigest = checkGovernance(openRoot, cloudRoot).digest;
       const resumeBinding = preflightBlocked ? undefined : {
         common: digest({ inputsAtStart, catalog: catalogDigest(cases), gate, selection,
-          governanceDigest, runner: RUNNER_VERSION, policy: POLICY_VERSION, environment: prerequisites.environment.common, environments }),
+          governanceDigest, runner: RUNNER_VERSION, policy: POLICY_VERSION, environment: prerequisites.environment.common, environments, budget }),
         cases: prerequisites.environment.cases,
       };
       const resumeDir = flag(args, "--resume");
@@ -256,7 +267,7 @@ async function main(): Promise<number> {
       }
       for (const issue of prerequisites.issues) process.stderr.write(`[testctl] blocked before execution: ${issue.caseId}: ${issue.reason}\n`);
       const completedIds = new Set(results.map(result => result.id));
-      const scheduler = createScheduler(plan.units.filter(unit => !completedIds.has(unit.id)), defaultBudget(environments));
+      const scheduler = createScheduler(plan.units.filter(unit => !completedIds.has(unit.id)), budget);
       phase = "running"; progress(); announce();
       // Every environment compiles the same component on each daemon start;
       // a shared, machine-local cache (target/ is gitignored) turns that into
@@ -430,6 +441,7 @@ async function main(): Promise<number> {
         },
         governanceDigest,
         environments,
+        budget,
         resultsPath: path.join(store.dir, "results.ndjson"),
         leak,
         inputsAtStart,

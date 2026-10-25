@@ -53,13 +53,20 @@ defineSpecialty({
   const assert = t.assertions.assert;
 
   const capabilities = await cli(["capabilities"]);
-  assert(capabilities.code === 0 && JSON.parse(capabilities.out).feedbackGate === "dev-feedback", "scoped feedback capability unavailable");
+  assert(capabilities.code === 0 && JSON.parse(capabilities.out).feedbackGate === "dev-feedback" && JSON.parse(capabilities.out).resourceBudgets === true, "feedback or independent resource budget capability unavailable");
 
   assert((await cli(["plan", "--open", repo, "--gate", "dev-feedback"])).code !== 0, "implicit feedback scope accepted");
   assert((await cli(["plan", "--open", repo, "--gate", "typo"])).code !== 0, "unknown gate accepted");
   assert((await cli(["plan", "--open", repo, "--case", "missing"])).code !== 0, "unknown case accepted");
   const large = await cli(["plan", "--open", repo, "--gate", "dev-feedback", "--tags", "fixture", "--reason", "catalog output fixture"]);
   assert(large.code === 0 && large.out.length > 8192 && JSON.parse(large.out).units.length === 306, "large plan JSON was truncated in pipe");
+  const budgeted = await cli(["plan", "--open", repo, "--gate", "dev-feedback", "--case", "fixture.passed", "--reason", "independent budget", "--environments", "4", "--cpu", "12", "--memory-mb", "24576"]);
+  const budgetPlan = JSON.parse(budgeted.out);
+  assert(budgeted.code === 0 && budgetPlan.units.length === 1 && budgetPlan.budget.environments === 4 && budgetPlan.budget.cpu === 12 && budgetPlan.budget.memoryMb === 24576, "plan lost independent resource budgets or changed selection");
+  for (const [name, value] of [["--environments", "0"], ["--environments", "-1"], ["--environments", "9007199254740991"], ["--cpu", "0"], ["--cpu", "1.5"], ["--cpu", "NaN"], ["--memory-mb", "-1"], ["--memory-mb", "9007199254740992"]]) {
+    const invalid = await cli(["plan", "--open", repo, "--gate", "dev-feedback", "--case", "fixture.passed", "--reason", "invalid budget", name!, value!]);
+    assert(invalid.code === 2 && invalid.err.includes("positive safe integer"), `invalid resource budget accepted: ${name} ${value}`);
+  }
   const missingDocs = await cli(["governance", "check", "--open", repo]);
   assert(missingDocs.code !== 0 && JSON.parse(missingDocs.out).findings.length > 0, "missing governance documents reported success");
   const blocked = await cli(runArgs(["passed", "python"]));
@@ -67,8 +74,9 @@ defineSpecialty({
   assert(!existsSync(marker("executions")), "a test ran despite failed dependency preflight");
   assert(manifest(directory(blocked.out)).counts.blocked === 2, "unstarted cases were misreported as pass");
   const python = execFileSync("python3", ["-c", "import sys;print(sys.executable)"], { encoding: "utf8" }).trim();
-  const repaired = await cli(runArgs(["python"]), { TESTCTL_FIXTURE_PYTHON: python });
-  assert(repaired.code === 0 && manifest(directory(repaired.out)).preflight.checked === 1, `repaired preflight failed: ${repaired.err}`);
+  const repaired = await cli([...runArgs(["python"]), "--cpu", "2", "--memory-mb", "1024"], { TESTCTL_FIXTURE_PYTHON: python });
+  const repairedManifest = manifest(directory(repaired.out));
+  assert(repaired.code === 0 && repairedManifest.preflight.checked === 1 && repairedManifest.budget.cpu === 2 && repairedManifest.budget.memoryMb === 1024, `repaired preflight or budget evidence failed: ${repaired.err}`);
 
   // inspect must return a useful record before manifest.json exists.
   const before = new Set(readdirSync(join(space, "runs")));
@@ -93,6 +101,8 @@ defineSpecialty({
   const base = await cli(runArgs(["passed", "blocked"]));
   const baseDir = directory(base.out), oldBytes = readFileSync(join(baseDir, "manifest.json"), "utf8");
   assert(base.code !== 0 && manifest(baseDir).counts.passed === 1, "partial base was not retained");
+  const differentBudget = await cli([...runArgs(["passed", "blocked"]), "--cpu", "7", "--resume", baseDir]);
+  assert(differentBudget.code === 2 && differentBudget.err.includes("resume inputs differ"), "changed CPU budget reused prior results");
   writeFileSync(marker("ready"), "ready");
   const resumed = await cli([...runArgs(["passed", "blocked"]), "--resume", baseDir]);
   const next = manifest(directory(resumed.out));
