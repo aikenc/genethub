@@ -119,7 +119,11 @@ async fn a_machine_selector_is_refused_by_name_rather_than_ignored() {
         &["session", "list", "--machine=m_other"],
         4,
     );
-    assert_eq!(routable["error"]["code"], "machineNotPaired");
+    // The local daemon has no Hub enrollment. Preserve that upstream failure,
+    // rather than inventing a missing pairing or returning local sessions.
+    assert_eq!(routable["type"], "error");
+    assert_eq!(routable["error"]["code"], "internal");
+    assert_eq!(routable["error"]["details"]["stage"], "hubTicket");
     assert_eq!(routable["error"]["details"]["machineId"], "m_other");
     assert_eq!(routable["error"]["retryable"], false);
 }
