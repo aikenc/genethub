@@ -77,9 +77,18 @@ defineSpecialty({
     stalledLeg.blackhole("server");
     let aDone = false;
     const large = a.preview(opened.workspaceId, path("isolated-large.png"))
-      .then(result => { aDone = true; return result; });
+      .finally(() => { aDone = true; });
     void large.catch(() => {});
-    await t.tools.waitUntil(() => stalledLeg.heldBytes().server > 0 && uplink.stats().clientToTargetBytes > 640 * 1024, 5000);
+    // Observe real backpressure without depending on the product's current
+    // window size: the held downstream grows, then stops while A is active.
+    let lastHeld = 0;
+    let heldSince = performance.now();
+    await t.tools.waitUntil(() => {
+      const held = stalledLeg.heldBytes().server;
+      if (held !== lastHeld) { lastHeld = held; heldSince = performance.now(); }
+      return held > 0 && performance.now() - heldSince >= 150
+        && uplink.stats().clientToTargetBytes > 0;
+    }, 5000);
     t.assertions.assert(!aDone, "A finished before the downstream fault");
     const controlStarted = performance.now();
     const control = await b.call({ type: "workspace.list" });
