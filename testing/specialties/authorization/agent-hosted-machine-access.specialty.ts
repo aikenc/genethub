@@ -9,12 +9,12 @@ const scrub = (text: string): string => text.replace(/https?:\/\/\S+|wss?:\/\/\S
 
 defineSpecialty({
   id: "specialty.authorization.agent-hosted-machine-access",
-  title: "An Agent Session's CLI reaches a Hub-introduced machine without gaining other capabilities",
-  oracle: "A real Agent Session runs the product CLI with --machine against a machine only the Hub can introduce and the remote command's own file effect appears, while the same session's device list is still refused",
+  title: "An ordinary Agent reaches Hub machines with its account authority and verified identity",
+  oracle: "A real Agent Session runs the product CLI with --machine against a machine only the Hub can introduce and the remote command's own file effect appears, while device list retains ordinary account authority and verified Session identity, and a read-only device remains refused",
   catches: [
     "Hub ticket request refused for an Agent Session and reported as machineNotPaired",
     "Hub-listed online machine that no Agent can reach",
-    "fixing the regression by widening every Agent Session capability",
+    "ordinary owner authority loses its Session identity or leaks to a restricted device",
   ],
   tags: ["authorization-depth", "cloud-server", "genet-cli"],
   llm: { default: "mock" },
@@ -57,17 +57,20 @@ defineSpecialty({
     // No machine is paired directly with this installation, so the only way
     // for the CLI to reach `machineId` is the Hub's per-connection ticket.
     const root = opened.workspaceRoot;
+    let agentSession = "";
     await t.stage("agent-runs-cli", async () => {
       const command = [
         `cd "${root}"`,
         `"$GENEHUB_CLI" --machine ${machineId} shell --workspace ${opened.workspaceId} --timeout 20 -- sh -c 'echo reached > hosted.marker' < /dev/null > hosted.out 2> hosted.err`,
         "echo $? > hosted.exit",
-        `"$GENEHUB_CLI" device list < /dev/null > denied.out 2> denied.err`,
-        "echo $? > denied.exit",
+        `"$GENEHUB_CLI" context < /dev/null > authority.json`,
+        `"$GENEHUB_CLI" device list < /dev/null > devices.out 2> devices.err`,
+        "echo $? > devices.exit",
         "touch done",
       ].join("; ");
       opened.mock.script({ tool: { name: "bash", arguments: { command } } }, { text: "Finished." });
       const session = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
+      agentSession = session;
       await t.flows.main.sendPrompt(opened.client, session, "Run the remote check.");
       try {
         await t.tools.waitUntil(() => existsSync(join(root, "done")), 40_000);
@@ -82,11 +85,17 @@ defineSpecialty({
         hostedExit === "0" && read(join(root, "hosted.marker")) === "reached\n",
         `the Agent's CLI could not run a command on the Hub-introduced machine: exit=${hostedExit} stderr=${scrub(read(join(root, "hosted.err")))}`,
       );
-      const deniedExit = read(join(root, "denied.exit")).trim();
-      t.assertions.assert(
-        deniedExit !== "" && deniedExit !== "0" && /unauthenticated|lacks the devices capability/.test(read(join(root, "denied.out")) + read(join(root, "denied.err"))),
-        `an Agent Session gained device administration: exit=${deniedExit}`,
-      );
+      const devicesExit = read(join(root, "devices.exit")).trim();
+      const devices = JSON.parse(read(join(root, "devices.out")));
+      const authority = JSON.parse(read(join(root, "authority.json"))).data.authority;
+      t.assertions.assert(devicesExit === "0" && devices.type === "device.list" && Array.isArray(devices.data.devices),
+        "ordinary Agent could not inspect its account's devices");
+      t.assertions.assert(authority.principalType === "sessionController" && authority.sessionId === agentSession && authority.grants.includes("devices"),
+        "ordinary Agent lost its verified Session identity or owner capability");
+      const restricted = await t.flows.main.pairDevice(opened.client, opened.daemon, ["read"], "read-only");
+      try {
+        await t.assertions.expectProtocolCode(() => restricted.client.call({ type: "device.list" }), "forbidden");
+      } finally { restricted.client.close(); }
     });
   } finally {
     opened.client.close();
