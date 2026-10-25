@@ -32,9 +32,15 @@ const TRANSPORT_FLOW: &str = "transport-v1";
 const MAX_PEERS: usize = 32;
 const MAX_PENDING: usize = 8;
 const WRITER_QUEUE: usize = 256;
-// 1 MiB maximum, inside the existing per-owner 20 MiB transmission reservation.
-// A stalled peer cannot make the shared socket reader await its private queue.
-const PEER_INGRESS_QUEUE: usize = 64;
+// 1 MiB payload maximum, inside the existing per-owner 20 MiB reservation.
+// The independent record cap also bounds metadata for tiny hostile records.
+// Legitimate ACK bursts are small bytes, not 64 full-sized DATA records.
+const PEER_INGRESS_BYTES: usize = 1024 * 1024;
+const PEER_INGRESS_QUEUE: usize = 4096;
+struct IngressRecord {
+    payload: Vec<u8>,
+    _budget: tokio::sync::OwnedSemaphorePermit,
+}
 
 struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
 impl<T> Drop for AbortOnDrop<T> {
@@ -242,7 +248,8 @@ impl StreamFlow {
 struct PeerSlot {
     cancelled: Arc<Notify>,
     generation: u64,
-    inbound: mpsc::Sender<Vec<u8>>,
+    inbound: mpsc::Sender<IngressRecord>,
+    ingress_budget: Arc<tokio::sync::Semaphore>,
     remote_sequence: u64,
     outbound_flow: StreamFlow,
 }
@@ -553,7 +560,7 @@ async fn receive(
         }
         Kind::Data => {
             let bytes = u64::try_from(frame.payload.len())?;
-            let (inbound, peer_generation, transport_flow) = {
+            let (inbound, ingress_budget, peer_generation, transport_flow) = {
                 let mut peers = peers.lock().await;
                 let Some(slot) = peers.get_mut(&frame.stream_id) else {
                     drop(peers);
@@ -569,6 +576,7 @@ async fn receive(
                 slot.remote_sequence = frame.value;
                 (
                     slot.inbound.clone(),
+                    slot.ingress_budget.clone(),
                     slot.generation,
                     slot.outbound_flow.is_transport(),
                 )
@@ -577,13 +585,29 @@ async fn receive(
             // were not accepted, and never silently discard an application
             // frame. Overload detaches this physical carrier; the logical
             // owner's journal remains responsible for authenticated recovery.
-            if inbound.try_send(frame.payload).is_err() {
-                state.diagnostics.record(
-                    "fabric",
-                    "peer.ingress",
-                    "detached",
-                    Some("queue-full-or-closed"),
-                );
+            let admitted = ingress_budget
+                .try_acquire_many_owned(u32::try_from(bytes)?)
+                .map_err(|_| "byte-budget-full")
+                .and_then(|permit| {
+                    inbound
+                        .try_send(IngressRecord {
+                            payload: frame.payload,
+                            _budget: permit,
+                        })
+                        .map_err(|error| match error {
+                            mpsc::error::TrySendError::Full(record)
+                                if record.payload.len() <= 256 =>
+                            {
+                                "small-record-queue-full"
+                            }
+                            mpsc::error::TrySendError::Full(_) => "data-record-queue-full",
+                            mpsc::error::TrySendError::Closed(_) => "queue-closed",
+                        })
+                });
+            if let Err(code) = admitted {
+                state
+                    .diagnostics
+                    .record("fabric", "peer.ingress", "detached", Some(code));
                 let mut peers = peers.lock().await;
                 if peers
                     .get(&frame.stream_id)
@@ -594,6 +618,12 @@ async fn receive(
                 drop(peers);
                 writer.reset(frame.stream_id, 6).await;
                 return Ok(());
+            }
+            // Yield a scheduling turn during bursts without awaiting one
+            // peer's consumer. This lets delivery/decryption run even when the
+            // WebSocket decoder already has many records buffered as Ready.
+            if inbound.capacity() <= PEER_INGRESS_QUEUE - 32 {
+                tokio::task::yield_now().await;
             }
             // The bounded carrier queue accepted ownership, so this outer
             // stream can return exactly the credit it consumed.
@@ -734,12 +764,14 @@ async fn serve_peer_inner(
     carrier.uplink_pace = Some(writer.pace.peer());
     let flow = StreamFlow::from_wire(frame.value)?;
     let cancelled = Arc::new(Notify::new());
-    let (ingress, mut queued) = mpsc::channel(PEER_INGRESS_QUEUE);
+    let ingress_budget = Arc::new(tokio::sync::Semaphore::new(PEER_INGRESS_BYTES));
+    let (ingress, mut queued) = mpsc::channel::<IngressRecord>(PEER_INGRESS_QUEUE);
     let delivery = AbortOnDrop(tokio::spawn(async move {
         while let Some(record) = queued.recv().await {
-            if inbound.send(record).await.is_err() {
+            if inbound.send(record.payload).await.is_err() {
                 break;
             }
+            drop(record._budget);
         }
     }));
     peers.lock().await.insert(
@@ -748,6 +780,7 @@ async fn serve_peer_inner(
             cancelled: cancelled.clone(),
             generation,
             inbound: ingress,
+            ingress_budget,
             remote_sequence: 0,
             outbound_flow: flow.clone(),
         },

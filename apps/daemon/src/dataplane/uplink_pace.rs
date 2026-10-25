@@ -1,8 +1,8 @@
 //! Keeps response DATA from filling the shared Fabric uplink.
 //!
 //! A preview receive window of 3MiB lets that much sit in front of every other
-//! stream on the same daemon socket. Direct and RTC peers do not share that
-//! socket. The cap starts at 32KiB and uses delivery ACK samples. A completed
+//! stream on the same daemon socket. Direct WebSockets use a separate budget
+//! per physical socket; RTC retains its transport policy. The cap starts at 32KiB and uses delivery ACK samples. A completed
 //! window returning within 450ms may double the cap; only a drain under 50ms
 //! opens straight to the protocol ceiling. This avoids mistaking a small
 //! window completing on a narrow link for proof of high capacity. The
