@@ -317,8 +317,12 @@ async fn authorize_session_request(
     caller: &crate::authz::Principal,
     request: &Request,
 ) -> Result<(), String> {
-    if let (Some(controller), Request::PreviewFeedback(feedback)) =
-        (caller.session_controller_id(), request)
+    // Ordinary Agents have their OS account's file authority. Only managed
+    // children retain the legacy workspace-bound receipt restriction.
+    if let (
+        crate::authz::Principal::SessionController { session_id: controller, ordinary: false },
+        Request::PreviewFeedback(feedback),
+    ) = (caller, request)
     {
         let session = state
             .sessions
