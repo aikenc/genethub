@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readlinkSync, rmSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -26,8 +26,11 @@ export async function runNodeUnit(unit: WorkUnit, extraEnv: Record<string, strin
   mkdirSync(resultDir);
   const resultPath = path.join(resultDir, "result.json");
   const tsxLoader = pathToFileURL(require.resolve("tsx")).href;
-  const child = spawnGroup(process.execPath, ["--import", tsxLoader, WORKER], {
-    env: {
+  const namespaced = unit.meta.isolation?.networkNamespace === true;
+  const launcher = namespaced ? (process.env.GENEHUB_TEST_UNSHARE ?? extraEnv.GENEHUB_TEST_UNSHARE ?? "") : process.execPath;
+  const workerArgs = ["--import", tsxLoader, WORKER];
+  const args = namespaced ? ["--user","--map-root-user","--net","--","sh","-c",'"$GENEHUB_TEST_IP" link set lo up && exec "$@"',"testctl-network-namespace",process.execPath,...workerArgs] : workerArgs;
+  const workerEnv: NodeJS.ProcessEnv = {
       ...process.env,
       ...lease.env,
       ...extraEnv,
@@ -39,8 +42,12 @@ export async function runNodeUnit(unit: WorkUnit, extraEnv: Record<string, strin
       TESTCTL_STAGES_PATH: path.join(resultDir, "stages.json"),
       TESTCTL_LEASE_ROOT: lease.root,
       TESTCTL_RESOURCE_OWNER: lease.id,
-    },
-  });
+      ...(namespaced ? { TESTCTL_PARENT_NETNS: readlinkSync("/proc/self/ns/net") } : {}),
+  };
+  // The saved caller authority is solely for explicitly declared remote CLI
+  // consumers. It must never reach ordinary isolated daemon/agent fixtures.
+  if (!unit.meta.requirements?.some(req=>req.env==="GENEHUB_NETWORK_CALLER_ENV")) delete workerEnv.GENEHUB_NETWORK_CALLER_ENV;
+  const child = spawnGroup(launcher,args,{env:workerEnv});
   if (child.pid) registerLeaseWorker(lease.root, child.pid);
   const resources = trackResources(lease.id, child.pid ?? -1);
   let result: UnitResult | undefined;

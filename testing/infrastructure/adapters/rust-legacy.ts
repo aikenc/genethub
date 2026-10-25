@@ -39,7 +39,7 @@ function ensureAgentBinary(openRoot: string): Promise<string | null> {
     execFile(
       process.env.CARGO?.trim() || "cargo",
       ["build", "--manifest-path", path.join(openRoot, "Cargo.toml"), "-p", "genet-agent", "--bin", "genet-agent-local"],
-      { cwd: openRoot, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, env: { ...process.env, RUSTUP_TOOLCHAIN: process.env.RUSTUP_TOOLCHAIN || "1.95.0" } },
+      { cwd: openRoot, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, env: { ...process.env, GENEHUB_NETWORK_CALLER_ENV: undefined, RUSTUP_TOOLCHAIN: process.env.RUSTUP_TOOLCHAIN || "1.95.0" } },
       (error, stdout, stderr) => resolve(error ? `${stderr}${stdout}`.trim().split("\n").slice(-12).join("\n") || error.message : null),
     );
   });
@@ -101,7 +101,7 @@ export async function runRustLegacyUnit(
   const child = spawnGroup("cargo", ["test", "--manifest-path", manifest, "--test", suite, "--", testName, "--exact", "--include-ignored", "--show-output"], {
     cwd: openRoot,
     env: {
-      ...process.env,
+      ...process.env, GENEHUB_NETWORK_CALLER_ENV: undefined,
       ...lease.env,
       TESTCTL_RESOURCE_OWNER: lease.id,
       TESTCTL_HOST_HOME: userInfo().homedir,

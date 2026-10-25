@@ -64,7 +64,8 @@ export interface CaseMeta {
    * reporting the case blocked.
    */
   requiredRepos?: Array<"cloud">;
-  requirements?: Array<{ kind: "python"; env: string; minVersion: [number, number]; modules: string[] }>;
+  requirements?: Array<{ kind: "python"; env: string; minVersion: [number, number]; modules: string[] } | { kind: "command"; env: string; args: string[]; contains?: string } | { kind: "environment"; env: string; format: "text" | "string-map" }>;
+  isolation?: { networkNamespace?: boolean };
   doubleExceptions?: DoubleException[];
   retention?: boolean;
   stages?: string[];

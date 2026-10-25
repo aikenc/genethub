@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHash } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -44,6 +44,44 @@ export interface HubHandle {
   /** Approves a machine's pairing code as the signed-in browser. */
   approvePairing(browser: HubBrowser, userCode: string): Promise<void>;
   stop(): Promise<void>;
+}
+
+/** A metadata source enrolled over the same HTTP contracts as an actual daemon.
+ * It is not a live native daemon, and never claims endpoint presence. */
+export async function enrollCatalogSource(hub: HubHandle, owner: HubBrowser, name: string, options: { publicKey?: string } = {}) {
+  const startedResponse = await fetch(new URL("/api/device-authorizations", hub.origin), {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ displayName: name }),
+  });
+  if (!startedResponse.ok) throw new Error(`catalog source pairing start: ${startedResponse.status}`);
+  const started = await startedResponse.json() as { userCode: string; deviceCode: string };
+  await hub.approvePairing(owner, started.userCode);
+  const pollResponse = await fetch(new URL("/api/device-authorizations/poll", hub.origin), {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ deviceCode: started.deviceCode }),
+  });
+  const poll = await pollResponse.json() as { enrollmentToken?: string };
+  if (!pollResponse.ok || !poll.enrollmentToken) throw new Error(`catalog source pairing poll: ${pollResponse.status}`);
+  const secret = randomBytes(32).toString("base64url");
+  const enrolled = await fetch(new URL("/api/machines/enroll", hub.origin), {
+    method: "POST", headers: { authorization: `Bearer ${poll.enrollmentToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ daemonId: `dmn_scale_${randomBytes(16).toString("hex")}`, publicKey: options.publicKey ?? randomBytes(32).toString("base64"),
+      credentialVerifier: createHash("sha256").update(secret).digest("base64url"), platform: "linux" }),
+  });
+  if (!enrolled.ok) throw new Error(`catalog source enrollment: ${enrolled.status}`);
+  const machine = await enrolled.json() as { machineId: string };
+  return { machineId: machine.machineId, async admission(lane: 0 | 1, currentHub: HubHandle = hub) {
+    const response = await fetch(new URL("/api/fabric/v2/endpoints",currentHub.origin),{
+      method:"POST",headers:{authorization:`Bearer ${secret}`,"content-type":"application/json"},body:JSON.stringify(lane===0?{}:{lane}),
+    });
+    if(!response.ok){await response.body?.cancel();throw new Error(`catalog node admission failed: ${response.status}`);}
+    return await response.json() as {url:string};
+  }, async sync(revision: number, count: number) {
+    const response = await fetch(new URL("/api/fabric/v2/workspace-catalog", hub.origin), {
+      method: "PUT", headers: { authorization: `Bearer ${secret}`, "content-type": "application/json" },
+      body: JSON.stringify({ generation: "scale-generation", revision,
+        workspaces: Array.from({ length: count }, (_, i) => ({ localWorkspaceId: `w_scale_${i}`, reportedName: `${name} project ${i}`, isGitRepo: false })) }),
+    });
+    if (!response.ok) throw new Error(`catalog synchronization failed: ${response.status}`);
+  } };
 }
 
 interface ControlServerLike {

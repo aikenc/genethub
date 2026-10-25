@@ -43,6 +43,7 @@ export function startDaemon(input: {
   // managed Agent Session, whose controller identity must not cross into it.
   delete env.GENEHUB_SESSION_ID;
   delete env.GENEHUB_CONTROLLER_TOKEN;
+  delete env.GENEHUB_NETWORK_CALLER_ENV;
   // Foreign Agent contexts and credential roots must not cross a lease.
   // A case may opt in through its own env/launchEnv; no host value is printed.
   for (const key of ["CODEX_HOME", "CURSOR_AGENT", "CURSOR_CONVERSATION_ID", "CURSOR_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "npm_config_prefix"]) {

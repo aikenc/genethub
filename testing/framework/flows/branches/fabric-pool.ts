@@ -1,0 +1,39 @@
+import { Client, type WebSocketLike } from "@genehub/workbench/client";
+import { WebSocket } from "ws";
+import { startRelay } from "../../drivers/relay.ts";
+import { startSharedBottleneck } from "../../drivers/shared-bottleneck.ts";
+import { startFaultLink } from "../../drivers/fault-link.ts";
+import type { CaseContext } from "../../context.ts";
+
+export async function openFabricPool(t: CaseContext, nodeChannels: number, browserChannels: number, bothLegs = false, nativePath = false) {
+  const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
+  const relay = await startRelay({ openRoot: t.openRoot });
+  const link = await startSharedBottleneck(relay.origin, { bandwidthMbps: 1000, rttMs: 0 });
+  const clients: Client[] = [], browserFaults: Awaited<ReturnType<typeof startFaultLink>>[] = [];
+  const diagnostics: Array<{ peer: number; state: unknown; phase: unknown; reason: unknown }> = [];
+  async function dispose() {
+    clients.forEach(c => c.close());
+    for (const fault of browserFaults) await fault.stop();
+    await link.stop(); relay.stop(); opened.client.close(); opened.daemon.stop(); await opened.mock.stop();
+  }
+  try {
+    const paired = await t.flows.main.pairDevice(opened.client, opened.daemon, [], "all-hop-pool"); paired.client.close();
+    const reply = await opened.client.call({ type: "device.remoteAttach", payload: { relayUrl: nativePath ? relay.origin : link.urlFor(relay.origin), joinToken: relay.joinToken, channelCount: nodeChannels } });
+    if (reply?.type !== "remoteAccess") throw new Error("node pool attachment did not return metadata");
+    let lanes = reply.data.channels ?? [];
+    await t.tools.waitUntil(async () => { const r = await opened.client.call({ type: "device.list" }); if (r?.type === "devices") lanes = r.data.remote.channels ?? []; return lanes.length === nodeChannels && lanes.every(l => l.online); }, 15000);
+    const nodeFlowIds = link.connections().filter(c => !c.closed).map(c => c.id);
+    for (let peer = 0; peer < browserChannels; peer++) {
+      const url = new URL(lanes[peer % nodeChannels]!.url); url.host = new URL(relay.origin).host;
+      const fault = nativePath ? undefined : await startFaultLink(bothLegs ? link.urlFor(url.toString()) : url.toString());
+      if (fault) browserFaults.push(fault);
+      const fresh = () => ({ url: fault ? fault.urlFor(url.toString()) : url.toString(), credential: paired.credential });
+      const client = new Client({ separateDataChannel: false, ...fresh(), rtcEnabled: false, requestTimeoutMs: 10000, redial: async () => fresh(),
+        socketFactory: u => new WebSocket(u) as unknown as WebSocketLike,
+        onDiagnostic(event) { if (event.kind === "connection") { diagnostics.push({ peer, state: event.detail.state, phase: event.detail.phase, reason: event.detail.closeReason }); if (diagnostics.length > 40) diagnostics.shift(); } },
+      });
+      clients.push(client); client.connect(); await t.tools.waitUntil(() => client.connectionState === "ready", 15000);
+    }
+    return { opened, relay, link, nodeFlowIds, browserFaults, clients, diagnostics, credential: paired.credential, dispose };
+  } catch (error) { await dispose(); throw error; }
+}

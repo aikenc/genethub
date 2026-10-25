@@ -233,12 +233,17 @@ export function startShell(
   const result = (async () => {
     if (stdin.byteLength > 0) await stream.write(stdin);
     await stream.finish();
-    const head = await stream.responseHead;
-    const frames = head.status === 200 ? await collectLengthPrefixedJson(stream.body()) : [];
-    return { status: head.status, metadata: head.metadata, frames };
+    return collectShellResult(stream);
   })();
   void result.catch(() => undefined);
   return { stream, result };
+}
+
+/** Allows a real consumer to start reading only after a deliberate pause. */
+export async function collectShellResult(stream: ReturnType<ProductSession["client"]["openShellStream"]>): Promise<ShellResult> {
+  const head = await stream.responseHead;
+  const frames = head.status === 200 ? await collectLengthPrefixedJson(stream.body()) : [];
+  return { status: head.status, metadata: head.metadata, frames };
 }
 
 /** Runs argv through the production `shell.run` stream and collects frames. */

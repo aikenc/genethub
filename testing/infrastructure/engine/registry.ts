@@ -26,6 +26,7 @@ export interface DefineInput {
   requiredArtifacts?: string[];
   requiredRepos?: CaseMeta["requiredRepos"];
   requirements?: CaseMeta["requirements"];
+  isolation?: CaseMeta["isolation"];
   doubleExceptions?: CaseMeta["doubleExceptions"];
   retention?: boolean;
   stages?: string[];
@@ -52,6 +53,7 @@ function register(kind: CaseKind, input: DefineInput, run: CaseDefinition["run"]
     requiredArtifacts: input.requiredArtifacts,
     requiredRepos: input.requiredRepos,
     requirements: input.requirements,
+    isolation: input.isolation,
     doubleExceptions: input.doubleExceptions,
     retention: input.retention,
     stages: input.stages,
