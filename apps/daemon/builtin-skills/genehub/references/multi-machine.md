@@ -15,18 +15,25 @@
 
 ```bash
 "$GENEHUB_CLI" context                         # 当前连到哪台机器、隔离后端、能力
-"$GENEHUB_CLI" machine list                    # 直接配对过的机器
-"$GENEHUB_CLI" machine list --reachable        # 加上本机与当前身份的 Hub 目录
-"$GENEHUB_CLI" machine show <machineId>        # 某台直接配对机器的详情
+"$GENEHUB_CLI" machine list                    # 本机、直连配对与当前身份的 Hub 目录
+"$GENEHUB_CLI" machine list --reachable        # 兼容旧写法，等同默认列表
+"$GENEHUB_CLI" machine list --paired           # 只看直连记录，不查询 Hub
+"$GENEHUB_CLI" machine show <machineId>        # 同一目录中的机器详情，不探测目标连接
+"$GENEHUB_CLI" machine show <machineId> --paired # 只查看直连记录
 ```
 
-`machine list` 的每项包含 `machineId`、`name`、`online`、`local`、`source`（如 `hub`）。注意：
+`machine list` 的每项包含 `machineId`、`name`、`online`、`local`、`source`（主要展示来源）和 `sources`
+（如 `["paired", "hub"]`）。按精确 ID 合并，同名机器保留。成功返回 `complete: true`；
+Hub 查询失败会返回非零退出码和 `complete: false` 的已知条目，不能把它当作完整目录。
+`--paired` 仅表示不依赖 Hub，薄 CLI 仍需要本机 daemon。注意：
 
 - `--machine` 只接受 `machineId` 的精确值，不接受名称、前缀，也没有隐式默认。
 - `online: true` 只说明机器在线，**不说明当前身份能到达它**。
-- 取不到到达凭证时返回 `machineNotPaired`，其中会说明原因（例如调用身份缺少 `settings` 能力，Hub
-  没有为它签发连接票据）。这是权限边界，不是网络故障：如实报告，并请用户在可操作的设备上配对或授权。
-  不要换身份、重试其他路径或绕过。
+- 显式 `machine show <ID> --paired` 的 `machineNotPaired` 只表示没有这条直连记录；
+  默认 `show` 查不到精确 ID 返回 `targetNotFound`，二者都不替代实际连接诊断。
+- 取票失败保留真实错误码和 `stage: hubTicket`，不要一概解释成未配对、权限不足或目标离线。
+  本机会话调用 HubConnect 有既有授权例外，不需要把缺少 `settings` 当作取票失败的固定原因。
+  明确拒绝授权时如实报告；网络故障按返回的可重试信息处理，不要换身份或绕过授权。
 
 ## 在目标机器执行命令
 
@@ -43,6 +50,11 @@
   不是“无权限”**。不要据此认定文件缺失。
 - 输出是 JSON Lines；以 `shell.exit.data.exitCode` 为准，CLI 进程的退出码不是命令的退出码；
   `timedOut: true` 表示是被超时终止的。
+
+`--` 后面的参数原样交给目标进程，包括 `--version`、`-V` 和 `--help`。例如
+`shell --workspace <id> -- python3 --version` 查询的是目标 Python 的版本。
+列表仍返回完整 JSON，按需使用管道和结构化筛选（如 `session list | jq -c '.data.sessions[] | select(.status == "running")'`）。
+命令分组帮助用 `session --help` 或 `agent run --help`；`schema <command>` 提供机器可读合同。
 
 ## 跨机传文件
 
@@ -99,7 +111,10 @@
 
 ## 只能在本机的命令
 
-`process`、`machine`、`speech`、`file`、daemon 生命周期（`daemon …`）和 `update` 不可路由，
+`process list/kill/kill-all` 支持 `--machine`，只管理目标机器上已登记、归属指定会话的后台进程；
+`kill-all` 仍必须指定 `--session`。
+
+`machine`、`speech`、`file`、daemon 生命周期（`daemon …`）和 `update` 不可路由，
 `--machine` 对它们无效。远端的 daemon 重启走那台机器自己的独立连接，见 [daemon.md](daemon.md)。
 
 ## 配对与授权（授权变更，需用户明确要求）

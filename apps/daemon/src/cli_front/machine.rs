@@ -21,7 +21,7 @@ pub async fn machine(args: &[String]) -> i32 {
         Some("list") => list(&args[1..]).await,
         Some("pair") => pair(&args[1..]).await,
         Some("forget") => forget(&args[1..]),
-        Some("show") => show(&args[1..]),
+        Some("show") => show(&args[1..]).await,
         other => Err(unknown("machine", other, "list, pair, forget, show")),
     };
     report(&format!("machine.{}", verb(args)), outcome)
@@ -58,60 +58,97 @@ fn unknown(group: &str, given: Option<&str>, expected: &str) -> CliFailure {
 }
 
 async fn list(args: &[String]) -> Result<serde_json::Value, CliFailure> {
-    if args == ["--reachable"] {
+    if args.is_empty() || args == ["--reachable"] {
         return reachable().await;
     }
-    if !args.is_empty() {
+    if args != ["--paired"] {
         return Err(CliFailure::invalid_args(
-            "machine list accepts only --reachable",
+            "machine list accepts --paired or --reachable, not both",
         ));
     }
     let machines = machines::load()?;
-    Ok(json!({
-        "machines": machines.iter().map(PairedMachine::public).collect::<Vec<_>>(),
-        "store": machines::file()?.display().to_string(),
-    }))
+    Ok(list_json(
+        &machines,
+        machines::file()?.display().to_string(),
+    ))
 }
 
-/// Explicit opt-in discovery: self + direct credentials + this identity's Hub directory.
+/// What `machine list` prints for the direct-pairing store.
+///
+/// This is the explicit `--paired` view, not the default machine directory.
+fn list_json(machines: &[PairedMachine], store: String) -> serde_json::Value {
+    let mut value = json!({
+        "scope": "paired",
+        "complete": true,
+        "machines": machines.iter().map(PairedMachine::public).collect::<Vec<_>>(),
+        "store": store,
+    });
+    if machines.is_empty() {
+        value["hint"] = json!(
+            "this store lists machines paired directly with this one; \
+             `genet machine list` includes this machine and the current identity's Hub directory"
+        );
+    }
+    value
+}
+
+/// Default discovery: self + direct credentials + this identity's Hub directory.
 /// An unavailable Hub is an error, never a partial directory presented as complete.
 async fn reachable() -> Result<serde_json::Value, CliFailure> {
     let paired = machines::load()?;
-    let rpc = Rpc::connect().await.map_err(super::query::connect_error)?;
+    let direct: Vec<_> = paired
+        .iter()
+        .map(|m| {
+            let mut row = m.public();
+            row["online"] = json!(null);
+            row["source"] = json!("paired");
+            row
+        })
+        .collect();
+    let rpc = Rpc::connect()
+        .await
+        .map_err(|error| directory_error(super::query::connect_error(error), "daemon", &direct))?;
+    let known = merge_directory(
+        &rpc.hello().machine_id,
+        &rpc.hello().machine_name,
+        direct.clone(),
+        vec![],
+    );
     let hub_status = rpc
         .call(Request::HubStatus)
         .await
-        .map_err(super::query::rpc_error)?;
-    let (hub_self, hub_machines) = match hub_status {
-        Reply::HubStatus(HubStatus::Unpaired) => (None, Vec::new()),
-        Reply::HubStatus(HubStatus::Paired { machine_id, .. }) => {
-            match rpc
-                .call(Request::HubMachines)
-                .await
-                .map_err(super::query::rpc_error)?
-            {
-                Reply::HubMachines(items) => (Some(machine_id), items),
-                other => return Err(unexpected(other)),
+        .map_err(|error| directory_error(super::query::rpc_error(error), "hubStatus", &known))?;
+    let (hub_self, hub_machines) =
+        match hub_status {
+            Reply::HubStatus(HubStatus::Unpaired) => (None, Vec::new()),
+            Reply::HubStatus(HubStatus::Paired { machine_id, .. }) => {
+                let known = merge_directory(
+                    &machine_id,
+                    &rpc.hello().machine_name,
+                    direct.clone(),
+                    vec![],
+                );
+                match rpc.call(Request::HubMachines).await.map_err(|error| {
+                    directory_error(super::query::rpc_error(error), "hub", &known)
+                })? {
+                    Reply::HubMachines(items) => (Some(machine_id), items),
+                    other => return Err(directory_error(unexpected(other), "hub", &known)),
+                }
             }
-        }
-        Reply::HubStatus(_) => {
-            return Err(CliFailure::business(
-                "machineDirectoryUnavailable",
-                "Hub pairing is not ready; retry after it settles",
-                None,
-            ))
-        }
-        other => return Err(unexpected(other)),
-    };
+            Reply::HubStatus(_) => {
+                return Err(directory_error(
+                    CliFailure::business(
+                        "machineDirectoryUnavailable",
+                        "Hub pairing is not ready; retry after it settles",
+                        None,
+                    ),
+                    "hubStatus",
+                    &known,
+                ))
+            }
+            other => return Err(directory_error(unexpected(other), "hubStatus", &known)),
+        };
     let local_id = hub_self.as_deref().unwrap_or(&rpc.hello().machine_id);
-    let direct = paired
-        .iter()
-        .map(|m| {
-            json!({
-                "machineId": m.machine_id, "name": m.name, "online": null, "source": "paired"
-            })
-        })
-        .collect();
     let hub = hub_machines
         .iter()
         .map(|m| {
@@ -120,9 +157,20 @@ async fn reachable() -> Result<serde_json::Value, CliFailure> {
             })
         })
         .collect();
-    Ok(json!({"scope": "reachable", "machines": merge_directory(
-        local_id, &rpc.hello().machine_name, direct, hub
-    )}))
+    Ok(
+        json!({"scope": "reachable", "complete": true, "machines": merge_directory(
+            local_id, &rpc.hello().machine_name, direct, hub
+        )}),
+    )
+}
+
+fn directory_error(mut error: CliFailure, source: &str, known: &[serde_json::Value]) -> CliFailure {
+    error.details = Some(json!({
+        "complete": false, "source": source, "machines": known,
+        "upstream": {"code": error.code, "details": error.details},
+        "hint": "use `genet machine list --paired` to inspect direct records without querying the Hub",
+    }));
+    error
 }
 
 fn merge_directory(
@@ -140,15 +188,31 @@ fn merge_directory(
     );
     // Hub display names are current; direct credential names may predate a rename.
     for entry in direct.into_iter().chain(hub) {
-        entries.insert(
-            entry["machineId"].as_str().expect("machine id").to_string(),
-            entry,
-        );
+        let id = entry["machineId"].as_str().expect("machine id").to_string();
+        let previous = entries.entry(id).or_insert_with(|| json!({}));
+        let mut sources = previous
+            .get("sources")
+            .and_then(|s| s.as_array())
+            .cloned()
+            .unwrap_or_else(|| previous.get("source").cloned().into_iter().collect());
+        if let Some(source) = entry.get("source") {
+            if !sources.contains(source) {
+                sources.push(source.clone());
+            }
+        }
+        previous
+            .as_object_mut()
+            .expect("machine entry")
+            .extend(entry.as_object().expect("machine entry").clone());
+        previous["sources"] = json!(sources);
     }
     entries
         .into_iter()
         .map(|(id, mut entry)| {
             entry["local"] = json!(id == local_id);
+            if entry.get("sources").is_none() {
+                entry["sources"] = json!([entry["source"]]);
+            }
             if id == local_id {
                 entry["online"] = json!(true);
             }
@@ -157,11 +221,26 @@ fn merge_directory(
         .collect()
 }
 
-fn show(args: &[String]) -> Result<serde_json::Value, CliFailure> {
+async fn show(args: &[String]) -> Result<serde_json::Value, CliFailure> {
     let id = args
         .first()
         .ok_or_else(|| CliFailure::invalid_args("machine show needs a machine id"))?;
-    Ok(machines::find(id)?.public())
+    if id.starts_with('-') || (args.len() != 1 && !(args.len() == 2 && args[1] == "--paired")) {
+        return Err(CliFailure::invalid_args(
+            "machine show needs <machineId> [--paired]",
+        ));
+    }
+    if args.len() == 2 {
+        return Ok(machines::find(id)?.public());
+    }
+    let directory = reachable().await?;
+    directory["machines"]
+        .as_array()
+        .expect("machine directory")
+        .iter()
+        .find(|row| row["machineId"] == id.as_str())
+        .cloned()
+        .ok_or_else(|| CliFailure::target_not_found("machine", id))
 }
 
 fn forget(args: &[String]) -> Result<serde_json::Value, CliFailure> {
@@ -177,7 +256,7 @@ fn forget(args: &[String]) -> Result<serde_json::Value, CliFailure> {
         "machineId": id,
         "forgotten": removed,
         "note": "this only drops the local credential; run `genet device revoke` \
-                 on that machine to withdraw the authorization",
+                 on that machine to withdraw the authorization; Hub directory entries are unaffected",
     }))
 }
 
@@ -433,6 +512,31 @@ mod tests {
         let rows = merge_directory("self", "genethub-server-beta", vec![], vec![]);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["local"], true);
+    }
+
+    #[test]
+    fn an_empty_direct_store_says_which_command_asks_the_hub() {
+        let value = list_json(&[], "/home/a/.local/share/GeneHub/machines.json".into());
+        assert_eq!(value["machines"], json!([]));
+        let hint = value["hint"].as_str().expect("no hint on an empty list");
+        assert!(hint.contains("genet machine list"), "{hint}");
+        assert!(hint.contains("paired directly"), "{hint}");
+    }
+
+    #[test]
+    fn a_non_empty_direct_store_does_not_need_the_hint() {
+        let machine = PairedMachine {
+            machine_id: "mch_1".into(),
+            name: "laptop".into(),
+            fingerprint: "AA-BB".into(),
+            endpoint: "wss://relay.example/forward/client".into(),
+            device_id: "dev_1".into(),
+            secret: "never printed".into(),
+            paired_at: "2026-10-24T00:00:00Z".into(),
+        };
+        let value = list_json(&[machine], "/tmp/machines.json".into());
+        assert_eq!(value["machines"].as_array().unwrap().len(), 1);
+        assert!(value.get("hint").is_none(), "{value}");
     }
 
     #[test]

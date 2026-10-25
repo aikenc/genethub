@@ -106,7 +106,7 @@ const routesOf = (t: CaseContext, result: GenetCliResult): Route[] =>
 modelCase(
   "routes-are-listed-one-per-line-and-filtered-by-every-tier",
   "agent list --routes prints one line per routable model and filters by every tier and medium",
-  "`genet agent list --routes` lists genet's flash (Flash, low) and pro (Pro, medium) routes each with agentId, modelId, tags, cost and default; --tag keeps only routes carrying every tier, --media keeps only routes that understand the medium; no match is an empty list, not an error; --tag without --routes and an unknown medium exit 2",
+  "`genet agent list --routes` lists genet's flash (Flash, low) and pro (Pro, medium) routes each with agentId, modelId, tags, cost and default; --tag keeps only routes carrying every tier and implies route mode, --media keeps only routes that understand the medium; no match is an empty list, not an error; an unknown medium exits 2",
   [
     "the router's candidates hidden from the scripts that have to choose among them",
     "a filter that ORs tiers instead of ANDing them",
@@ -134,7 +134,8 @@ modelCase(
     const and = routesOf(t, cli(["agent", "list", "--routes", "--tag", "Flash", "--tag", "Pro"]));
     t.assertions.assert(and.length === 0, `Flash + Pro must be an AND, not an OR: ${JSON.stringify(and)}`);
 
-    refused(t, cli(["agent", "list", "--tag", "Pro"]), 2, "invalidArgs", "--tag without --routes");
+    const implicit = routesOf(t, cli(["agent", "list", "--tag", "Pro"]));
+    t.assertions.assert(implicit.length === 1 && implicit[0]?.modelId === PRO, `implicit route mode: ${JSON.stringify(implicit)}`);
     refused(t, cli(["agent", "list", "--routes", "--media", "audio"]), 2, "invalidArgs", "an unknown medium");
   },
 );

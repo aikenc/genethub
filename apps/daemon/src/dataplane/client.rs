@@ -222,7 +222,7 @@ async fn run(
     let mut streams = HashMap::<u32, Stream>::new();
     let mut next_stream_id = 1u32;
     let (returned_credit, mut credits) = mpsc::channel::<(u32, u32)>(256);
-    let (mut reader, mut writer, _actor) = if key.principal().starts_with("invite:") {
+    let (mut reader, mut writer, actor) = if key.principal().starts_with("invite:") {
         let (reader, writer) = authenticated_channel(key, carrier, Role::Client);
         (
             PeerReader::Physical(reader),
@@ -435,6 +435,20 @@ async fn run(
         .unwrap_or_else(|| "the data endpoint closed".into());
     for (_, mut stream) in streams {
         stream.target.fail(message.clone());
+    }
+    // Closing dispatch tells the logical actor to send the existing CLOSE
+    // control message. Keep the endpoint (and its caller's carrier pump)
+    // alive until that actor flushes, instead of turning a normal CLI exit
+    // into an unexpected disconnect with a retained recovery lease.
+    drop(reader);
+    drop(writer);
+    if let Some(mut actor) = actor {
+        if tokio::time::timeout(std::time::Duration::from_secs(1), &mut actor)
+            .await
+            .is_err()
+        {
+            actor.abort();
+        }
     }
     outcome
 }

@@ -41,7 +41,7 @@
 | 会话控制：创建、发送、中断、标签、描述；会话发起的会话带 `系统发起` | 派出后台会话，按岗位打标签，前台折叠内部会话 | [daemon.md](./daemon.md)「4.1 会话」 |
 | 会话历史与 `ghref` 引用 | 反思与接手时按引用回到原话 | [session-history-cli.md](./session-history-cli.md) |
 | 档位路由：`--tag Ultra/Max/Pro/Flash/Mini`、`--media`，`agent list --routes` | 团队只写档位，不钉模型 id | `genet agent list --routes`、`genet session model` 的 schema |
-| 跨机：`--machine` 下的 `shell`、`session`、`agent run`、`file download` | 把任务派到持有资源的那台机器 | 内置 Skill `genehub` 的 [multi-machine.md](../apps/daemon/builtin-skills/genehub/references/multi-machine.md) |
+| 跨机 | `--machine` 下的 `shell`、`session`、`agent run`；团队样板用 `spawn`/`send` 的 `--machine` 把任务派到远端岗位 | 把任务派到持有资源的那台机器，账本仍留在派单方 | 内置 Skill `genehub` 的 [multi-machine.md](../apps/daemon/builtin-skills/genehub/references/multi-machine.md)、本文 §6 |
 | Asset Preview | 看板、可玩版本、报告直接作为链接给用户打开 | [assets-quick-preview.md](./assets-quick-preview.md) |
 
 团队状态（收件箱、待办、留言、写者锁）是团队脚本自己的文件，放在 Space 根下的 `.genethub/team/` 与业务目录里，
@@ -82,7 +82,44 @@ daemon 不解释它们（[storage-layout.md](./storage-layout.md)）。
 
 团队可以分享：它是一个 git 仓库，别人 clone 到自己的 `<data>/spaces/` 下重新编译身份，就成了他自己的团队。
 
-## 6. 演进与退役
+## 6. 跨机器工位
+
+岗位所在的机器与执行任务的机器可以不同，但只有两种组合：
+
+| 需求 | 做法 |
+|---|---|
+| 会话在 A，工具在 B | 成员留在 A 的岗位会话里，用 `genet shell --machine B` 在 B 的 workspace 内执行；结果回到 A 的会话，走本机接力 |
+| 会话本身在 B | `team.py spawn --machine <B 的机器 ID> ...` 或 `send --machine <B> --to <岗位>`：在 B 的岗位 workspace 创建/投递，Agent 进程、身份与产物都在 B |
+
+`--machine` 接受 `genet machine list` 返回的精确 ID。派单方在 `.genethub/remote-targets.json` 为每个远端岗位
+固定 `machineId`、`workspaceId` 与 `command`（目标机 Python、已安装 `tools/team.py` 的绝对路径 argv）。
+不再按岗位短名/目录名猜归属，`--workspace` 只能核对同一个绑定。完整配置与恢复见
+[远端岗位接单](../apps/daemon/builtin-skills/genehub/references/team-template/skills/team-core/references/remote-targets.md)。
+
+**派单账本在发起方，写锁与创建回执在执行端**。`spawn` 经已授权的 `shell --machine` 调用执行端 `receive`，
+先验证目标 workspace 确属该团队岗位，使用目标团队/岗位配置校验 Agent、模型及媒体能力，然后原子申请本机写锁。
+写目录由目标岗位 `WORKTREE_DIR` 决定，未配置时锁岗位根目录；遇到已有锁直接报忙，不排队、不自动切远端工位。本机 work 派单也默认锁岗位目录（或 WORKTREE_DIR），沿用本机并发子工位机制；两端不能跳过同目录互斥。
+同一派单编号只能对应同一内容；创建前保存回执，创建结果 unknown 时保留锁和意图，不自动重派。
+
+派单方 `pending` 保存 machine 和执行端绑定快照，对账逐条读远端状态/最终回复。单条远端错误留待下次处理，
+不会使其他记录停摆。完成批次先确认执行端释放写锁，再回传、销账；释放失败保留账本。执行端不启动前台、看板或对账器。
+
+- `--worktree`/`--dir` 只用于本机派单。远端并发应绑定不同实际目录/工位。
+- `send --machine --to <岗位>` 只补充该绑定中唯一的未结束派单会话，执行端校验有效回执后投递；已释放的旧会话不能重用，新任务先 spawn；零个会话提示先 spawn，多个会话要求精确 session ID。
+- 本机和远端通知都携带 `--system`，均不解除暂停。用户暂停任务保留写锁，由 Human 恢复后继续对账；本派单的超时取消或内核失败终态可释放锁，仍不解除暂停。
+- 默认使用目标机 `TEAM_AGENT`、目标机模型配置或该 Agent 的默认模型；本机隐式模型覆盖不传过去。
+- 接单通过目标账号的 shell 执行能力认证；本版只支持有完整执行授权的机器。脚本内容注明原发起方，平台输入仍是脚本通知，不伪造 Human 批准。
+
+SpaceBuilder 0.1.5 可 `build <岗位源目录> --output <制品目录>`，移动后 `verify --artifacts-only`。该制品不自动带
+`tools/`、父团队描述或目标端配置，**单独一个 portable 岗位制品尚不能作为本版 receive 的安装包**。
+当前接单命令要求目标机已安装团队脚本、团队/岗位描述、目标配置，并注册岗位 workspace；不用启动团队根会话或定时器。
+已有团队需要显式升级模板并配置绑定后才生效。部署资源合同见 [spacebuilder.md](../apps/daemon/builtin-skills/genehub/references/spacebuilder.md)。
+
+身份自动刷新（定时任务与 `sync-identity`）使用 `--require-no-post-commands`，遇到 Space pre/post 或 Provider post
+返回 `SB018` 并保留上一版生成身份，不因文字更新隐式发布或部署。发布 hook 由源 Space 的显式构建执行；
+不要通过增大定时任务超时或反复重试来执行它。该门禁不禁止既有 Provider build。
+
+## 7. 演进与退役
 
 团队机制经过三轮探索才定型，旧形态按 [deprecated.md](./deprecated.md) 冻结或兼容：
 
@@ -94,7 +131,7 @@ daemon 不解释它们（[storage-layout.md](./storage-layout.md)）。
 | 样板 Skill `expert-core/front/work/research/reflect`、`expert-admin` | 改名为 `team-*`（2026-10-22）；团队升级合并后，`team.py sync-identity` 把描述文件里的旧名改指新名；`--expert` 参数保留为 `--team` 的别名 |
 | `posts/` 岗位文件 | 不再创建；已有目录在 reset 与仓库允许名单里保留 |
 
-## 7. 验证
+## 8. 验证
 
 - 平台原语：`testing/specialties/daemon/` 下的 `timer-hooks`、`space-tree`、`builtin-expert` 等专项。
 - 样板：`testing/journeys/expert/`（协作、故障注入、反思、真实模型）与 `testing/specialties/daemon/expert-*`、

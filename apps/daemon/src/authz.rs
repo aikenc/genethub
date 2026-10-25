@@ -188,9 +188,10 @@ pub enum Principal {
     /// so withholding a capability here would protect nothing.
     LocalUser,
     /// A loopback CLI invocation carrying a daemon-verified proof minted for
-    /// one durable ordinary Session. It may inspect project state and drive
-    /// only Workflow children whose parent is that exact Session.
-    SessionController { session_id: String },
+    /// one durable Session. Ordinary Agents execute as this OS account and
+    /// have its capabilities; the session identity still enforces Human-only
+    /// interactions and managed Workflow ownership in the router.
+    SessionController { session_id: String, ordinary: bool },
     /// A paired device, holding exactly what it was granted.
     Device { id: String, grants: GrantSet },
     /// An end-to-end authenticated hosted channel that never identified as a
@@ -240,14 +241,18 @@ impl Principal {
 
     pub fn allows(&self, capability: Capability) -> bool {
         match self {
-            Principal::LocalUser | Principal::Channel => true,
-            Principal::PreviewShare { .. } => {
-                matches!(capability, Capability::Handshake | Capability::Files)
-            }
-            Principal::SessionController { .. } => matches!(
+            Principal::LocalUser
+            | Principal::Channel
+            | Principal::SessionController { ordinary: true, .. } => true,
+            Principal::SessionController {
+                ordinary: false, ..
+            } => matches!(
                 capability,
                 Capability::Handshake | Capability::Read | Capability::Session
             ),
+            Principal::PreviewShare { .. } => {
+                matches!(capability, Capability::Handshake | Capability::Files)
+            }
             Principal::Device { grants, .. } => grants.allows(capability),
             Principal::Pairing => capability == Capability::Handshake,
         }
@@ -276,7 +281,7 @@ impl Principal {
 
     pub fn session_controller_id(&self) -> Option<&str> {
         match self {
-            Principal::SessionController { session_id } => Some(session_id),
+            Principal::SessionController { session_id, .. } => Some(session_id),
             _ => None,
         }
     }

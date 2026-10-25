@@ -16,8 +16,10 @@ use super::output::{self, CliFailure, CLI_SCHEMA};
 use super::rpc::{ConnectError, Refusal, Rpc, RpcError};
 use super::target::{self, Routing, Selection};
 
-const COMMAND_NAMES: [&str; 72] = [
+const COMMAND_NAMES: [&str; 75] = [
     "schema",
+    "status",
+    "daemon.status",
     "context",
     "capabilities",
     "update.check",
@@ -39,6 +41,7 @@ const COMMAND_NAMES: [&str; 72] = [
     "workspace.list",
     "workspace.show",
     "workspace.remove",
+    "space.open",
     "preview.feedback",
     "session.list",
     "session.get",
@@ -115,6 +118,7 @@ fn mutates(name: &str) -> bool {
         "shell"
             | "update.live"
             | "update.app"
+            | "space.open"
             | "provider.configure"
             | "provider.verify"
             | "file.download"
@@ -223,6 +227,43 @@ pub async fn run(args: &[String], selection: &Selection) -> i32 {
         Ok((kind, data)) => output::succeed(kind, data),
         Err(error) => output::fail(error),
     }
+}
+
+/// Only a command path followed by a help flag is help. In particular, do
+/// not consume a prompt, an option value, or argv after `--`.
+pub(super) fn help(args: &[String]) -> Option<i32> {
+    let (flag, path) = args.split_last()?;
+    if !matches!(flag.as_str(), "--help" | "-h")
+        || path.is_empty()
+        || path.iter().any(|part| part.starts_with('-'))
+    {
+        return None;
+    }
+    let name = path.join(".");
+    if COMMAND_NAMES.contains(&name.as_str()) {
+        return Some(output::succeed(
+            "help",
+            json!({"command": command_schema(&name)}),
+        ));
+    }
+    let prefix = format!("{name}.");
+    let commands: Vec<_> = COMMAND_NAMES
+        .iter()
+        .filter(|command| command.starts_with(&prefix))
+        .map(|command| {
+            let schema = command_schema(command);
+            json!({"name": command, "synopsis": schema["synopsis"]})
+        })
+        .collect();
+    if commands.is_empty() {
+        return None;
+    }
+    Some(output::succeed(
+        "help",
+        json!({
+            "commands": commands, "schemaHint": "genet schema <command>"
+        }),
+    ))
 }
 
 fn parse(args: &[String]) -> Result<Query, CliFailure> {
@@ -360,6 +401,11 @@ fn parse_session(args: &[String]) -> Result<Query, CliFailure> {
                             .ok_or_else(|| {
                                 CliFailure::invalid_args("--source-kind needs a value")
                             })?;
+                        if !matches!(value.trim(), "human" | "system") {
+                            return Err(CliFailure::invalid_args(
+                                "--source-kind takes human or system",
+                            ));
+                        }
                         source_kind = Some(value.trim().to_string());
                     }
                     "--include-archived" => {
@@ -993,12 +1039,7 @@ pub async fn connect_selected(selection: &Selection) -> Result<Rpc, CliFailure> 
 /// one — a machine that is unreachable because nothing here is enrolled must
 /// not read as a machine that does not exist.
 async fn hosted(machine_id: &str) -> Result<Rpc, CliFailure> {
-    let local = Rpc::connect().await.map_err(|_| {
-        not_paired(
-            machine_id,
-            "no local daemon is running here to fetch a hosted ticket with",
-        )
-    })?;
+    let local = Rpc::connect().await.map_err(connect_error)?;
     let ticket = match local
         .call(Request::HubConnect {
             machine_id: machine_id.to_string(),
@@ -1007,30 +1048,22 @@ async fn hosted(machine_id: &str) -> Result<Rpc, CliFailure> {
     {
         Ok(Reply::HubTicket(ticket)) => ticket,
         Ok(other) => return Err(CliFailure::protocol(format!("unexpected reply: {other:?}"))),
-        Err(RpcError::Remote(error)) => {
-            return Err(not_paired(
-                machine_id,
-                &format!("the Hub did not issue a ticket for it: {}", error.message),
-            ))
+        Err(error) => {
+            let mut failure = rpc_error(error);
+            failure.message = format!(
+                "Hub ticket request for {machine_id} failed: {}",
+                failure.message
+            );
+            failure.details = Some(
+                json!({"machineId": machine_id, "stage": "hubTicket", "upstream": failure.details}),
+            );
+            return Err(failure);
         }
-        Err(error) => return Err(rpc_error(error)),
     };
     drop(local);
     Rpc::connect_hosted(&ticket)
         .await
         .map_err(|error| remote_connect_error(machine_id, error))
-}
-
-fn not_paired(machine_id: &str, why: &str) -> CliFailure {
-    CliFailure::business(
-        "machineNotPaired",
-        format!(
-            "{machine_id} is not a machine this installation can reach: {why}. \
-             `genet machine list` shows the ones it paired with directly, and \
-             `genet hub status` whether a Hub can introduce the rest"
-        ),
-        Some(json!({"machineId": machine_id})),
-    )
 }
 
 fn context_data(hello: &HelloResult, machine: Option<&str>) -> Value {
@@ -1138,7 +1171,7 @@ fn capabilities_data() -> Value {
         },
         "commands": COMMAND_NAMES.iter().map(|name| json!({
             "name": name,
-            "requiresDaemon": !matches!(*name, "schema" | "capabilities" | "update.status"),
+            "requiresDaemon": command_schema(name)["requiresDaemon"],
             "mutation": mutates(name),
             "routable": matches!(target::routing(name), Routing::Routable),
             "streaming": streams(name),
@@ -1184,6 +1217,11 @@ fn command_schema(name: &str) -> Value {
             false,
             object_input(json!({"command": {"type": "string"}}), &[]),
         ),
+        "status" | "daemon.status" => (
+            if name == "status" { "genet status" } else { "genet daemon status" },
+            false,
+            object_input(json!({}), &[]),
+        ),
         "provider.list" => ("genet provider list", true, object_input(json!({}), &[])),
         "provider.configure" => ("genet provider configure <id> --session <id> --action <stable-id> --base-url <url> --dialect <openai|anthropic> --label <name> [--model <id>]", true,
             object_input(json!({"providerId":{"type":"string"},"sessionId":{"type":"string"},"actionId":{"type":"string"},"baseUrl":{"type":"string"},"dialect":{"enum":["openai","anthropic"]},"label":{"type":"string"},"models":{"type":"array","items":{"type":"string"}}}), &["providerId","sessionId","actionId","baseUrl","dialect","label"])),
@@ -1226,6 +1264,12 @@ fn command_schema(name: &str) -> Value {
             object_input(json!({}), &[]),
         ),
         "workspace.list" => ("genet workspace list", true, object_input(json!({}), &[])),
+        "space.open" => (
+            "genet space open <root>",
+            true,
+            object_input(json!({"root": {"type":"string", "minLength":1,
+                "description":"Space directory or agent-space.genet.json on this machine"}}), &["root"]),
+        ),
         "workspace.show" => (
             "genet workspace show <id>",
             true,
@@ -1250,7 +1294,7 @@ fn command_schema(name: &str) -> Value {
                     "workspaceId": {"type": ["string", "null"], "minLength": 1},
                     "labels": {"type": "array", "items": {"type": "string", "minLength": 1},
                         "description": "--label, repeatable; keeps sessions carrying every given label"},
-                    "sourceKind": {"type": ["string", "null"], "minLength": 1,
+                    "sourceKind": {"enum": ["human", "system", null],
                         "description": "--source-kind; keeps sessions matching the given sourceKind (human or system)"},
                     "includeArchived": {"type": "boolean", "description": "--include-archived; include archived sessions"},
                 }),
@@ -1396,16 +1440,16 @@ fn command_schema(name: &str) -> Value {
             ),
         ),
         "agent.list" => (
-            "genet agent list [--routes [--tag <tier>]... [--media image|video]]",
+            "genet agent list [--routes] [--tag <tier>]... [--media image|video]",
             true,
             object_input(
                 json!({
                     "routes": {"type": "boolean", "default": false,
                         "description": "--routes; print only the routable Agent/model pairs, one per line: agentId, modelId, tags, cost, default. This is what `agent run --tag` chooses from"},
                     "tags": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 40}, "maxItems": 4,
-                        "description": "--tag, repeatable, only with --routes; keep routes whose tags contain every one (Ultra, Max, Pro, Flash, Mini, 图片理解, 视频理解, or a Human-defined tag)"},
+                        "description": "--tag, repeatable; implies --routes; keep routes whose tags contain every one (Ultra, Max, Pro, Flash, Mini, 图片理解, 视频理解, or a Human-defined tag)"},
                     "media": {"type": "array", "items": {"enum": ["image", "video"]}, "maxItems": 2,
-                        "description": "--media, only with --routes; keep routes that understand the medium"},
+                        "description": "--media; implies --routes; keep routes that understand the medium"},
                 }),
                 &[],
             ),
@@ -1486,7 +1530,7 @@ fn command_schema(name: &str) -> Value {
                     "timeout": {"type": ["integer", "null"], "minimum": 1},
                     "openWorkspace": {"type": "boolean", "default": false},
                 }),
-                &["agentId", "prompt"],
+                &["prompt"],
             ),
         ),
         "session.ask" => (
@@ -1601,15 +1645,19 @@ fn command_schema(name: &str) -> Value {
                 &["sessionId"],
             ),
         ),
-        "machine.list" => ("genet machine list [--reachable]", false, object_input(json!({
+        "machine.list" => ("genet machine list [--paired | --reachable]", true, object_input(json!({
             "reachable": {"type":"boolean", "default":false,
-                "description":"Include this machine and the current identity's Hub directory; errors rather than returning a partial directory"}
+                "description":"Compatibility alias for the default: this machine, direct records and the current identity's Hub directory; no target connection probes"},
+            "paired": {"type":"boolean", "default":false,
+                "description":"Only direct pairing records; does not query the Hub. Mutually exclusive with reachable. The thin CLI still requires the local daemon"}
         }), &[])),
         "machine.show" => (
-            "genet machine show <machineId>",
-            false,
+            "genet machine show <machineId> [--paired]",
+            true,
             object_input(
-                json!({"machineId": {"type": "string", "minLength": 1}}),
+                json!({"machineId": {"type": "string", "minLength": 1},
+                    "paired": {"type": "boolean", "default": false,
+                        "description": "Only inspect a direct pairing record; default resolves through the same directory as machine list"}}),
                 &["machineId"],
             ),
         ),
@@ -1713,8 +1761,18 @@ fn command_schema(name: &str) -> Value {
         "mutation": mutates(name),
         "routable": matches!(target::routing(name), Routing::Routable),
         "streaming": streams(name),
-        "inputSchema": with_selectors(name, input),
+        "inputSchema": with_selectors(name, run_selection_schema(name, input)),
         "outputSchema": match name {
+            "update.check" => single_output("update.check"),
+            "update.live" | "update.app" | "update.status" => single_output("update.status"),
+            "status" | "daemon.status" => json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "required": ["running", "version"],
+                "properties": {"running": {"type": "boolean"}, "version": {"type": "string"}},
+                "$comment": "Native process facts, not a genet.cli/v1 envelope. A successful query may report running:false."
+            }),
+            _ if name.starts_with("client.") => single_output("client.debug"),
             "file.download" => json!({
                 "type": "object",
                 "$comment": "JSON Lines; transfer.started first, transfer.progress every 10s \
@@ -1726,7 +1784,11 @@ fn command_schema(name: &str) -> Value {
                 "properties": {"schema": {"const": CLI_SCHEMA},
                     "type": {"enum": ["transfer.started", "transfer.progress", "transfer.result", "error"]}},
             }),
-            "file.transfer.status" => single_output("transfer"),
+            "file.transfer.status" => {
+                let mut schema = single_output("transfer");
+                schema["properties"]["type"] = json!({"enum": ["transfer", "transfers"]});
+                schema
+            },
             "file.transfer.cancel" => single_output("transfer.cancel"),
             _ if !streams(name) => single_output(name),
             "shell" => command_output(),
@@ -1905,6 +1967,26 @@ fn object_input(properties: Value, required: &[&str]) -> Value {
         "properties": properties,
         "required": required,
     })
+}
+
+fn run_selection_schema(name: &str, mut schema: Value) -> Value {
+    if name == "agent.run" {
+        // Resuming a session, choosing an Agent, and routing by tags are all
+        // public entry paths. A tag route must not require an explicit Agent.
+        schema["anyOf"] = json!([
+            {"required": ["agentId"]},
+            {"required": ["tags"], "properties": {"tags": {"minItems": 1}}},
+            {"required": ["sessionId"], "properties": {"sessionId": {"type": "string"}}}
+        ]);
+        schema["allOf"] = json!([
+            {"if": {"required": ["tags"], "properties": {"tags": {"minItems": 1}}},
+             "then": {"not": {"anyOf": [
+                 {"required": ["agentId"]}, {"required": ["modelId"]},
+                 {"required": ["modeId"]}, {"required": ["sessionId"]}
+             ]}}}
+        ]);
+    }
+    schema
 }
 
 fn workspaces(reply: Reply) -> Result<Vec<WorkspaceInfo>, CliFailure> {

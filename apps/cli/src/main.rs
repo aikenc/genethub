@@ -28,6 +28,7 @@ const FORWARDED: &[&str] = &[
     "file",
     "speech",
     "client",
+    // Preserve the explicit workflowRetired reply for legacy callers.
     "workflow",
     "process",
     "machine",
@@ -54,10 +55,31 @@ fn main() {
     run(args)
 }
 
-#[tokio::main]
+// A front door waits on one forwarded command; it does not run the daemon.
+// Avoid creating a CPU-sized idle worker pool for every short CLI invocation.
+#[tokio::main(flavor = "current_thread")]
 async fn run(args: Vec<String>) {
-    if args.len() == 1 && matches!(args[0].as_str(), "--version" | "-V") {
+    if matches!(args.as_slice(), [flag] if flag == "--version" || flag == "-V") {
         println!("{}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    let native_help = match args.as_slice() {
+        [group, flag] => {
+            ["daemon", "status", "update", "agent-serve"].contains(&group.as_str())
+                && matches!(flag.as_str(), "--help" | "-h")
+        }
+        [group, verb, flag] => {
+            ((group == "daemon"
+                && ["run", "start", "stop", "restart", "status", "endpoint"]
+                    .contains(&verb.as_str()))
+                || (group == "update"
+                    && ["check", "live", "app", "status"].contains(&verb.as_str())))
+                && matches!(flag.as_str(), "--help" | "-h")
+        }
+        _ => false,
+    };
+    if native_help || matches!(args.as_slice(), [flag] if flag == "--help" || flag == "-h") {
+        print_usage();
         return;
     }
 
@@ -134,7 +156,7 @@ fn fail_envelope(error: genet_frontdoor::envelope::CliFailure) -> i32 {
     error.exit
 }
 
-pub fn usage() -> i32 {
+fn print_usage() {
     eprintln!(
         "usage:
   genet update check                query this channel App and Live releases
@@ -205,38 +227,6 @@ pub fn usage() -> i32 {
   genet speech runtime register --command <absolute-path> [--arg <value>...]
                                     probe and register a community adapter
   genet speech runtime unregister  remove the adapter registration only
-  genet workflow list              the Workflow packages cloned into this project
-  genet workflow build --package <id> [--apply --plan-digest <digest> --action-id <id> --revision <n>]
-                                    materialize one package's Spaces; applying needs approval
-  genet workflow inspect           validate and list project workflows
-  genet workflow dispatch [--package <id>] [--workflow <id>] [--root <dir>] \"<task>\"
-                                    run one flow from one package; both are
-                                    inferred only when the project has exactly one
-  genet workflow get --run <id>    read one durable workflow run
-  genet workflow check [--run <id> | --draft]
-  genet schema workflow.definition
-                                    inspect graph exits, execution and evidence without an LLM
-  genet workflow cancel --run <id> --revision <n>
-                                    fence the original request, then stop its squad
-  genet workflow dispatch ... --retry-of <run> [--resume-cancelled]
-                                    share the original request bounds; recovery needs new user input
-  genet workflow history [--limit <n>]
-                                    list recent Runs for Workflow analysis
-  genet workflow journal --run <id> [--since <seq>] [--limit <n>]
-                                    read committed Run events and references
-  genet workflow recovery start --run <id> --reason <text>
-                                    PM starts the package's recovery flow
-  genet workflow recovery status --run <id>
-                                    inspect one recovery Run
-  genet workflow recovery check|activate|reset ...
-                                    validate, authorize or reset recovery configuration
-  genet workflow human --run <id> --revision <n> --kind <a|b|c|d|e|f> --reason <text>
-                                    PM asks for a classified Human decision
-  genet workflow complete --run <id> --node <id> --revision <n> --evidence <key=value>...
-                                    submit exact node evidence from its managed session
-                              [--outcome <name> --reason <text>]
-                                    finish a negative review through its explicit or default exit;
-                                    built-in changesRequested|failed|blocked or a Workflow-declared name
   genet space inspect              which responsibilities this AgentSpace carries
   genet space children             the direct Workers this Executor may dispatch to
   genet space component set --component <pm|executor|worker|reviewer> [--role <r>]
@@ -259,10 +249,13 @@ pub fn usage() -> i32 {
                                     own words with no option picked
   genet session interrupt <id>      stop the running turn
   genet session close <id>          close the session
-  genet machine list                machines this installation can reach
+  genet machine list                this machine, direct pairings and Hub directory
+  genet machine list --paired       direct pairing records without querying Hub
+  genet machine list --reachable    compatibility alias for machine list
   genet machine pair <code> --endpoint <url> [--name <label>]
                                     redeem a pairing code from another machine
-  genet machine show <machineId>    one paired machine
+  genet machine show <machineId> [--paired]
+                                    one machine from the directory or direct store
   genet machine forget <machineId>  drop the local credential for a machine
   genet device list                 clients authorized on the target machine
   genet device invite [--grant read,session,files,git,pty,devices,settings,update]
@@ -270,7 +263,6 @@ pub fn usage() -> i32 {
   genet device revoke <deviceId>    withdraw one client's authorization
   genet <any of the above> --machine <machineId>
                                     run it on a paired machine instead
-  genet update                      unsupported until releases are independently signed
   genet daemon run                  run the daemon in the foreground
   genet daemon start                start the daemon in the background
   genet daemon stop                 stop the verified local daemon instance
@@ -290,6 +282,10 @@ pub fn usage() -> i32 {
   genet hub unpair                  drop Hub enrollment
   genet --version                   print the version"
     );
+}
+
+pub fn usage() -> i32 {
+    print_usage();
     fail(
         "invalid_args",
         "no or unknown command; usage is on stderr",

@@ -1,8 +1,8 @@
 # SpaceBuilder 独立输出与远程岗位制品改进提案
 
-状态：待评审。日期：2026-10-24。实施槽位建议：`dev-3`。
+状态：核心构建接口已在 `3faf3350` 合入主干（SpaceBuilder 0.1.5）；远程部署组合与双机验收仍是后续目标。日期：2026-10-24。实施槽位：`dev-3`；同步集成复查：`dev-2`。
 
-本文交付设计文档；接口、配置及诊断名称中标为“拟议”的内容尚未实现。本文不代表已经完成跨机部署或 Beta 发布。
+本文保留设计背景。`build --output`、Space pre/post 和 `verify --artifacts-only` 已实现，实际用法以 [SpaceBuilder 说明](../apps/daemon/builtin-skills/genehub/references/spacebuilder.md) 为准；其余拟议的部署适配和回执流程不因构建接口落地而视为完成。本文不代表已经完成跨机部署或 Beta 发布。
 
 ## 摘要与用户场景
 

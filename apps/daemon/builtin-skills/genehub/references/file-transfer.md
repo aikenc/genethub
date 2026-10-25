@@ -34,6 +34,10 @@
   `file transfer status <id>` 查询。从 remote shell 发起时建议加 `--no-wait`，再查询状态，这样不会被
   shell 的超时卡住。
 
+等待超时时的 `transfer.result` 带 `waited: false`，必须继续检查 `transfer.state`；这时退出 0
+表示等待调用正常结束，不表示传输完成。无 ID 的 `file transfer status` 返回 `type: transfers`
+列表，带 ID 时返回 `type: transfer` 单条记录，可用管道按状态筛选列表。
+
 ## 完成、续传与失败
 
 - **完成**：状态为 `completed`，并带有 `sha256`。这表示接收方计算出的 SHA-256 与源文件一致，部分文件也已

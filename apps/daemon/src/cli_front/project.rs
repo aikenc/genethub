@@ -58,7 +58,8 @@ pub(super) async fn resolve_workspace(
     // Coder/Reviewer Space normally mounts the project root as an additional
     // folder, so cwd alone can match several siblings and accidentally choose
     // a child as the project. Walk the caller's ownership tree instead.
-    if let crate::authz::Principal::SessionController { session_id } = super::caller_principal() {
+    if let crate::authz::Principal::SessionController { session_id, .. } = super::caller_principal()
+    {
         let state = super::local_state()
             .map_err(|message| CliFailure::business("projectBindingUnavailable", message, None))?;
         let summary = state.sessions.summary(&session_id).await.map_err(|error| {
