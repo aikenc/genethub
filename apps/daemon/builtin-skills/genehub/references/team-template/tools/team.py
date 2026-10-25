@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """team.py: how one team's sessions talk to each other. Everything it knows is in files and in `genet`.
 
-  send --to <session id> [--kind TEXT] TEXT                    queue a system notice to a session
-  spawn --kind research|work --desc TEXT [--dir PATH] [--tier T | --model ID] [--media image|video] TASK
-                                                               start a background session and watch it
+  send --to <session id> [--kind TEXT] [--machine ID] TEXT       queue a system notice to a session
+  spawn --kind research|work --desc TEXT [--dir PATH] [--tier T | --model ID] [--media image|video] [--machine ID] TASK
+                                                               start a background session and watch it; --machine runs it in
+                                                               that machine's role workspace, with the ledger kept here
   note [--kind K] [--quote TEXT] [--context TEXT] [--team NAME] [TEXT]
                                                                leave a note for the reflect session: session, turn and ref are filled in
   notes [ls [--all]] | notes done ID... [--result TEXT]        read / close the notes
@@ -45,6 +46,7 @@ import contextlib
 import glob
 import hashlib
 import json
+import ntpath
 import os
 import re
 import shutil
@@ -118,7 +120,10 @@ def genet(*args, ok_codes=(0,)):
     cli, env = _resolve_genet_env()
     if not cli:
         raise ExpertError("环境里没有 GENEHUB_CLI", "没有执行任何操作", "在 GeneHub 会话或 timer hook 里运行本脚本")
-    done = subprocess.run([cli] + list(args), capture_output=True, text=True, env=env, timeout=120)
+    try:
+        done = subprocess.run([cli] + list(args), capture_output=True, text=True, env=env, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ExpertError("genet 调用未完成: %s" % type(error).__name__, "结果未确认，可能已部分完成", "先核对已有会话与回执，再决定是否重试") from error
     lines = [line for line in done.stdout.splitlines() if line.strip()]
     try:
         envelope = json.loads(lines[-1]) if lines else {}  # the answer is the last line; earlier lines are progress
@@ -282,6 +287,203 @@ def workspace_root(entry):
     return os.path.realpath((folders[0].get("root") if folders else entry.get("root")) or "")
 
 
+def remote_workspaces(machine):
+    return genet("workspace", "list", "--machine", machine).get("workspaces", [])
+
+
+def read_dispatch_record(path):
+    # A corrupt or unreadable creation record is uncertainty, never absence.
+    try:
+        with open(path, encoding="utf-8") as handle:
+            record = json.load(handle)
+        if not isinstance(record, dict):
+            raise ValueError("expected object")
+        return record
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as error:
+        raise ExpertError("派单配置/回执无法读取: %s" % path, "没有重建或覆盖原回执", "管理员检查文件；先核对实际会话，不要删账重派") from error
+
+
+def remote_target(root, machine, role, explicit=None):
+    """A role is bound to one exact target; never infer team identity from a short name."""
+    target = (read_dispatch_record(os.path.join(root, ".genethub", "remote-targets.json")) or {}).get(role)
+    if (not isinstance(target, dict) or target.get("machineId") != machine
+            or not isinstance(target.get("workspaceId"), str) or not target["workspaceId"]
+            or not isinstance(target.get("command"), list) or len(target["command"]) < 2
+            or not all(isinstance(part, str) and part for part in target["command"])
+            or not all(os.path.isabs(part) or ntpath.isabs(part) for part in target["command"][:2])):
+        raise ExpertError("远端岗位 %s 未绑定到机器 %s" % (role, machine), "没有创建或发送消息",
+                          "在 .genethub/remote-targets.json 为该岗位配置 machineId、workspaceId 和目标机接单命令 command（Python 与 team.py 的绝对路径）")
+    if explicit is not None and explicit != target["workspaceId"]:
+        raise ExpertError("--workspace 与岗位固定绑定不同", "没有创建或发送消息", "核对 remote-targets.json；修改绑定后再派单")
+    if not any(item.get("id") == target["workspaceId"] for item in remote_workspaces(machine)):
+        raise ExpertError("目标机器没有绑定的 workspace %s" % target["workspaceId"], "没有创建或发送消息", "先在目标机注册岗位 Space，再更新固定绑定")
+    return target
+
+
+def remote_receive(target, request):
+    """Run the installed executor through the real shell stream, without a command shell."""
+    cli, env = _resolve_genet_env()
+    if not cli:
+        raise ExpertError("环境里没有 GENEHUB_CLI", "没有派单", "在 GeneHub 会话内运行")
+    argv = [cli, "shell", "--machine", target["machineId"], "--workspace", target["workspaceId"],
+            "--timeout", "110", "--max-output", "65536", "--", *target["command"],
+            "receive", json.dumps(request, ensure_ascii=False)]
+    cause = ""
+    try:
+        done = subprocess.run(argv, capture_output=True, text=True, env=env, timeout=120)
+        frames = [json.loads(line) for line in done.stdout.splitlines() if line.strip()]
+        failure = next((f.get("error") for f in frames if isinstance(f.get("error"), dict)), None)
+        if failure:
+            cause = " (%s: %s)" % (failure.get("code"), str(failure.get("message", ""))[:300])
+        output = "".join(f.get("data", {}).get("data", "") for f in frames
+                         if f.get("type") == "shell.output" and f.get("data", {}).get("stream") == "stdout")
+        terminal = next((f.get("data", {}) for f in frames if f.get("type") == "shell.exit"), {})
+        receipt = json.loads(output)
+        if not isinstance(receipt, dict):
+            raise ValueError("invalid receiver envelope")
+        if receipt.get("ok") is False and isinstance(receipt.get("error"), dict):
+            error = receipt["error"]
+            raise ExpertError(error["what"], error["state"], error["next"])
+        if done.returncode == 0 and terminal.get("exitCode") == 0 and not terminal.get("timedOut") and receipt.get("ok"):
+            return receipt
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        pass
+    raise ExpertError("远端接单结果未确认" + cause, "可能已创建会话；本机派单意图与远端回执保持原状，不会自动重派",
+                      "使用同一 --request-id 重试以读取远端回执；若远端回执是 unknown，先核对会话与锁再由管理员恢复")
+
+
+def dispatch_remote(root, target, role, desc, text, tier=None, model=None, media=None, request_id=None):
+    origin = os.environ.get("GENEHUB_SESSION_ID") or "timer"
+    # A new spawn is a new task even when its wording matches yesterday's.
+    # Print its identity before any remote mutation so an ambiguous failure
+    # can be recovered explicitly, without guessing whether this was a retry.
+    request_id = request_id if request_id is not None else "dispatch." + os.urandom(16).hex()
+    print("派单编号: %s" % request_id, flush=True)
+    request = {"id": request_id, "workspaceId": target["workspaceId"], "role": role, "desc": desc,
+               "text": text, "tier": tier, "model": model, "media": media, "origin": origin}
+    # Store intent before any remote mutation. The executor persists its own receipt before creating.
+    intent = state_dir(root, "dispatch", hashlib.sha256(request_id.encode()).hexdigest() + ".json")
+    with inbox_lock(root, "dispatch-" + hashlib.sha256(request_id.encode()).hexdigest()):
+        old = read_dispatch_record(intent)
+        if old is not None and (old.get("request") != request or old.get("target") != target):
+            raise ExpertError("派单编号已用于不同内容", "没有重派", "复用原内容查回执；新任务使用新的 --request-id")
+        if old is None:
+            write_json(intent, {"request": request, "target": target, "atMs": now_ms()})
+        try:
+            result = remote_receive(target, request)
+        except ExpertError as error:
+            raise ExpertError(error.what, error.state, "%s；查询原派单请复用 --request-id %s" % (error.next, request_id), code=error.code) from error
+        write_json(intent, {"request": request, "target": target, "receipt": result, "atMs": now_ms()})
+    return result["sessionId"], result["why"], {"id": request_id, "target": target}
+
+
+def cmd_receive(args):
+    """Executor entry: target-local config, atomic writer marker and durable create receipt.
+
+    Requires an installed team script, but never discovers/registers fronts or starts a timer.
+    The shell connection already needed the target account's execution authority.
+    """
+    request = json.loads(args.request)
+    key = request.get("id")
+    if not isinstance(key, str) or not key or len(key) > 200:
+        raise ExpertError("缺少有效派单编号", "没有创建会话", "传入 1–200 字符的稳定 id")
+    root = _walk_expert_root(os.path.dirname(os.path.abspath(__file__)))
+    if not root:
+        raise ExpertError("接单脚本不在已安装团队内", "没有创建会话", "安装完整团队接单资源，不能只复制单个脚本")
+    workspace_id = request.get("workspaceId")
+    entry = next((item for item in workspaces() if item.get("id") == workspace_id), None)
+    role = request.get("role")
+    if (not entry or not isinstance(role, str) or role in ("root", "front", "default")
+            or role not in child_role_names(root)
+            or workspace_root(entry) != os.path.realpath(os.path.join(root, "spaces", role))):
+        raise ExpertError("workspace 不属于此接单命令的指定岗位", "没有创建或发送会话", "核对目标机 team.py 路径、岗位与 workspaceId")
+    role_root = workspace_root(entry)
+    receipt_path = state_dir(role_root, "dispatch", hashlib.sha256(key.encode()).hexdigest() + ".json")
+    with inbox_lock(role_root, "receive"):
+        old = read_dispatch_record(receipt_path)
+        operation = request.get("operation")
+        if operation in ("release", "notice"):
+            if not old or old.get("sessionId") != request.get("sessionId"):
+                raise ExpertError("请求与派单回执不符", "锁保留，没有投递", "核对原派单 id 与 sessionId")
+        if operation == "notice":
+            lock = old.get("lock")
+            holder = read_json(lock, {}) if lock else None
+            if old.get("released") or (lock and (not holder or holder.get("session") != old["sessionId"] or holder.get("requestId") != key)):
+                raise ExpertError("该会话的派单写锁已释放或变更", "没有投递，也没有恢复旧会话", "新任务请重新 spawn；补充要求只发送给尚未结束的派单")
+            notice(old["sessionId"], request["purpose"], request["sender"], request["text"], ref=request.get("ref"), delivery_id=request["messageId"])
+            print(json.dumps({"ok": True, "delivered": True}))
+            return
+        if operation == "release":
+            if old.get("released"):
+                lock = old.get("lock")
+                holder = read_json(lock, {}) if lock else None
+                if holder and holder.get("requestId") == key and holder.get("session") == old["sessionId"]:
+                    os.remove(lock)
+                print(json.dumps({"ok": True, "released": True}))
+                return
+            try:
+                summary = session_summary(old["sessionId"])
+            except ExpertError as error:
+                if error.code != "targetNotFound":
+                    raise
+                summary = {"status": "failed"}
+            inputs = summary.get("inputSummary") or {}
+            canceled = bool(request.get("canceled"))
+            failed = TURN_FAILED_ERROR in (inputs.get("error") or "")
+            if (summary.get("status") not in ("idle", "failed")
+                    or (inputs.get("paused") and not canceled and not failed)
+                    or (inputs.get("pendingMessageIds") and not canceled and not failed)):
+                raise ExpertError("远端会话仍在执行、有待处理输入或被用户暂停", "锁保留", "等补充输入执行结束；用户暂停须由 Human 恢复")
+            actual_reply = (summary.get("latestReply") or {}).get("itemId")
+            if not canceled and not failed and actual_reply != request.get("expectedReply"):
+                raise ExpertError("回复在对账后发生变化", "锁与待办保留，没有用旧回复销账", "下次对账重新取得最新回复后再释放")
+            lock = old.get("lock")
+            if lock and os.path.exists(lock):
+                holder = read_json(lock, {}) or {}
+                if holder.get("requestId") != key or holder.get("session") != old["sessionId"]:
+                    raise ExpertError("写锁已变更", "没有删除其他任务的锁", "核对执行端写者")
+            # Persist authorization before unlinking. A retry can finish our
+            # own unlink or acknowledge after another writer has taken over;
+            # it must never remove that newer writer's marker.
+            old["released"] = True
+            write_json(receipt_path, old)
+            if lock and os.path.exists(lock):
+                os.remove(lock)
+            print(json.dumps({"ok": True, "released": True}))
+            return
+        if old is not None:
+            if old.get("request") != request:
+                raise ExpertError("派单编号已用于不同内容", "没有重派", "检查原回执；新任务使用新的编号")
+            if old.get("sessionId"):
+                print(json.dumps({"ok": True, "sessionId": old["sessionId"], "why": old["why"]}))
+                return
+            raise ExpertError("上次创建结果 unknown", "不会重复创建；锁与回执保留", "管理员核对实际会话后恢复原回执，禁止换编号盲重派")
+        # Validate selection BEFORE taking a lock or writing a creation intent.
+        model_key = "TEAM_MODEL_RESEARCH" if role == "research" else "TEAM_MODEL_WORK"
+        selection = choose(role_root, model_key, request.get("tier"), request.get("model"), request.get("media"), executor=True)
+        lock = None
+        if role != "research":
+            directory = resolve_expert_dir(root, open_env(role_root).get("WORKTREE_DIR") or role_root)
+            with inbox_lock(writer_lock(directory), "writer", purpose="写者锁"):
+                lock, won = claim(directory, {"session": None, "requestId": key, "at": now_ms()}, "genet-writer.json")
+                if not won:
+                    raise ExpertError("执行目录已有写锁 %s" % lock, "没有创建会话，也没有自动排队或切工位", "等待原任务回执完成并释放；未知状态先核对，不删除锁重派")
+        record = {"request": request, "status": "unknown", "lock": lock, "atMs": now_ms()}
+        # If this write or any following create/receipt write fails, retain the reservation.
+        write_json(receipt_path, record)
+        sid, why = start(role_root, workspace_id, role, request["desc"], request["text"], model_key,
+                         selection=selection)
+        if not sid:
+            raise ExpertError("没有收到创建回执", "unknown；锁保留", "先核对实际会话")
+        if lock:
+            write_json(lock, {"session": sid, "requestId": key, "at": now_ms()})
+        record.update(status="created", sessionId=sid, why=why)
+        write_json(receipt_path, record)
+        print(json.dumps({"ok": True, "sessionId": sid, "why": why}))
+
+
 def child_role_names(root):
     spaces_dir = os.path.join(root, "spaces")
     if not os.path.isdir(spaces_dir):
@@ -402,25 +604,43 @@ def auto_describe_session(session_id, text):
         pass
 
 
-def sessions_of(workspace_id, max_age=None):
+def machine_args(machine):
+    """The selector a routed command needs, or nothing when the target is this machine."""
+    return ["--machine", machine] if machine else []
+
+
+def dispatch_machine(args):
+    machine = getattr(args, "machine", None)
+    if machine == "":
+        raise ExpertError("--machine 不能为空", "没有执行操作", "从 machine list 取得精确 ID；本机派单移除 --machine")
+    if machine is None and any(getattr(args, key, None) is not None for key in ("workspace", "request_id")):
+        raise ExpertError("--workspace/--request-id 仅用于 --machine 派单", "没有执行操作", "本机派单用 --space 选择岗位；移除无效的远端选项")
+    request_id = getattr(args, "request_id", None)
+    if request_id is not None and (not isinstance(request_id, str) or not request_id or len(request_id) > 200):
+        raise ExpertError("--request-id 必须是 1–200 字符的稳定编号", "没有派单或生成新的编号", "查询旧任务时复用原编号；新任务省略 --request-id 或提供新的有效编号")
+    return machine
+
+
+def sessions_of(workspace_id, machine=None, max_age=None):
     if not workspace_id:
         return []
     now = time.time()
     age = SESSIONS_TTL if max_age is None else max_age
-    cached = _WORKSPACE_SESSIONS_CACHE.get(workspace_id)
+    key = (machine or "", workspace_id)
+    cached = _WORKSPACE_SESSIONS_CACHE.get(key)
     if age <= 0 or cached is None or now - cached[0] > age:
-        items = genet("session", "list", "--workspace", workspace_id).get("sessions", [])
-        _WORKSPACE_SESSIONS_CACHE[workspace_id] = (time.time(), items)
+        items = genet("session", "list", "--workspace", workspace_id, *machine_args(machine)).get("sessions", [])
+        _WORKSPACE_SESSIONS_CACHE[key] = (time.time(), items)
         return items
     return cached[1]
 
 
-def live_sessions(workspace_id):
-    return [item for item in sessions_of(workspace_id) if not item.get("archived")]
+def live_sessions(workspace_id, machine=None):
+    return [item for item in sessions_of(workspace_id, machine) if not item.get("archived")]
 
 
-def session_summary(session_id):
-    return genet("session", "get", session_id).get("session", {}).get("summary", {})
+def session_summary(session_id, machine=None):
+    return genet("session", "get", session_id, *machine_args(machine)).get("session", {}).get("summary", {})
 
 
 def same_expert_session(root, session_id, spaces=None):
@@ -509,8 +729,8 @@ def requester_summary(root):
     return summary
 
 
-def routes(*filters):
-    return genet("agent", "list", "--routes", *filters).get("routes", [])
+def routes(*filters, machine=None):
+    return genet("agent", "list", "--routes", *filters, *machine_args(machine)).get("routes", [])
 
 
 def pick_equivalent(inherited, everything, with_medium):
@@ -525,26 +745,40 @@ def pick_equivalent(inherited, everything, with_medium):
     return min(fits, key=lambda r: (abs(COST_RANK.get(r["cost"], 2) - cost), COST_RANK.get(r["cost"], 2), r["agentId"], r["modelId"]), default=None)
 
 
-def choose(root, model_key, tier=None, model=None, media=None):
+def choose(root, model_key, tier=None, model=None, media=None, machine=None, executor=False):
     """The `agent run` arguments that pick the Agent and model, and one line saying why.
     Order: asked for explicitly, then this machine's own override, then what the requester runs on."""
     if tier and model:
         raise ExpertError("--tier 和 --model 不能同时给", "没有创建任何会话", "只留一个：档位让平台选，模型是点名")
     env = open_env(root)
+    if executor and not tier:
+        env = {**open_env(_walk_expert_root(root) or root), **env}
+        agent = env.get("TEAM_AGENT")
+        info = next((a for a in genet("agent", "list").get("agents", []) if a.get("id") == agent), None)
+        if not info:
+            raise ExpertError("目标岗位未配置可用的 TEAM_AGENT", "没有创建会话或写锁", "在目标团队或岗位 open.env 配置目标机实际可用的 TEAM_AGENT")
+        catalog = info.get("catalog") or {}
+        selected_model = model or env.get(model_key) or catalog.get("defaultModel")
+        model_info = next((m for m in catalog.get("models", []) if m.get("id") == selected_model), None)
+        if selected_model and not model_info:
+            raise ExpertError("目标 Agent 没有模型 %s" % selected_model, "没有创建会话或写锁", "核对目标机 agent list 的模型目录")
+        if media and (not model_info or media not in (model_info.get("inputModalities") or [])):
+            raise ExpertError("目标模型无法确认支持 %s" % media, "没有创建会话或写锁", "在目标机确认模型媒体能力，或显式选择满足要求的 --tier")
+        return ["--agent", agent, *(["--model", selected_model] if selected_model else [])], "目标岗位路由 %s/%s" % (agent, selected_model or "default")
     if tier:
         if tier not in TIERS:
             raise ExpertError("档位 %r 不是 Ultra / Max / Pro / Flash / Mini" % tier, "没有创建任何会话", "用 `\"$GENEHUB_CLI\" agent list --routes` 看可用的档位")
         tags = [tier] + ([MEDIA_TAGS[media]] if media else [])
         args = ["--tag", tier] + (["--media", media] if media else [])
-        if not routes(*sum((["--tag", tag] for tag in tags if tag in TIERS), []), *(["--media", media] if media else [])):
-            raise ExpertError("本机没有同时满足 %s 的路由" % " + ".join(tags), "没有创建任何会话", "换一个档位，或让用户在设置里给模型加上对应标签")
+        if not routes(*sum((["--tag", tag] for tag in tags if tag in TIERS), []), *(["--media", media] if media else []), machine=machine):
+            raise ExpertError("目标机器没有同时满足 %s 的路由" % " + ".join(tags), "没有创建任何会话", "换一个档位，或让用户在设置里给模型加上对应标签")
         return args, "档位 %s%s" % (tier, " + " + media if media else "")
     agent = env.get("TEAM_AGENT")
     if model:
         agent = agent or requester_summary(root).get("agentId")
         if not agent:
             raise ExpertError("不知道用哪个 Agent 开会话", "没有创建任何会话", "在 .genethub/open.env 里写 TEAM_AGENT=<agent id>，或从一个会话里运行")
-        if media and not any(r["agentId"] == agent and r.get("modelId") == model for r in routes("--media", media)):
+        if media and not any(r["agentId"] == agent and r.get("modelId") == model for r in routes("--media", media, machine=machine)):
             raise ExpertError("点名模型 %s/%s 看不了%s" % (agent, model, media), "没有创建任何会话", "换一个能看%s的模型，或去掉 --model 让系统按档位选择" % media)
         return ["--agent", agent, "--model", model], "点名模型 %s" % model
     override = env.get(model_key)
@@ -555,6 +789,11 @@ def choose(root, model_key, tier=None, model=None, media=None):
         raise ExpertError("不知道用哪个 Agent 开会话", "没有创建任何会话", "在 .genethub/open.env 里写 TEAM_AGENT=<agent id>，或从一个会话里运行")
     if override:
         return ["--agent", agent, "--model", override], "本机覆盖 %s=%s" % (model_key, override)
+    if machine:
+        # The requester's model id is a fact about this machine. A routed
+        # session uses the target Agent's own default rather than asking it to
+        # load a model that may not be installed there.
+        return ["--agent", agent], "Agent %s，在目标机器用自己的默认模型" % agent
     args, why = ["--agent", agent], "Agent %s，模型用它自己的默认" % agent
     if inherited.get("agentId") == agent and inherited.get("modelId"):
         route = {"agentId": agent, "modelId": inherited["modelId"]}
@@ -586,17 +825,18 @@ def front_session(root, spaces):
     return max(candidates, key=lambda item: item.get("updatedAtMs", 0))["id"] if candidates else None
 
 
-def start(root, workspace_id, role, desc, text, model_key, tier=None, model=None, media=None):
+def start(root, workspace_id, role, desc, text, model_key, tier=None, model=None, media=None, machine=None, selection=None):
     """Starts the session and returns (its id, why this Agent and model)."""
-    picked, why = choose(root, model_key, tier, model, media)
+    picked, why = selection or choose(root, model_key, tier, model, media, machine)
     # The title defaults to the first line of the task, which starts with the user's own words: every session of one
     # request would then carry the same title in the list. Name it by what it does instead.
     role_label = ROLE_LABELS.get(role, role)[:10]
     auto_archive = open_env(root).get("TEAM_ARCHIVE_OLD_SESSIONS") == "1"
-    old_candidates = list(live_sessions(workspace_id)) if (auto_archive and role not in ("root", "front")) else []
+    old_candidates = list(live_sessions(workspace_id, machine)) if (auto_archive and role not in ("root", "front")) else []
     args = ["agent", "run", *picked, text, "--workspace", workspace_id, "--title", desc[:80], "--label", role_label,
             "--label", SYSTEM_LABEL, "--description", desc[:300],
-            "--system", "--message-id", message_id("start", workspace_id, role, desc, text), "--no-wait"]
+            "--system", "--message-id", message_id("start", workspace_id, role, desc, text), "--no-wait",
+            *machine_args(machine)]
     new_sid = genet(*args).get("sessionId")
     clear_sessions_cache()
     if new_sid and old_candidates:
@@ -606,7 +846,7 @@ def start(root, workspace_id, role, desc, text, model_key, tier=None, model=None
                 continue
             if old.get("status") in ("idle", "failed") and not os.path.isfile(state_dir(root, "pending", old_sid + ".json")):
                 try:
-                    genet("session", "archive", old_sid)
+                    genet("session", "archive", old_sid, *machine_args(machine))
                 except Exception:
                     pass
     return new_sid, why
@@ -618,15 +858,18 @@ def clip(text):
     return text
 
 
-def notice(session_id, purpose, sender, text, *id_parts, ref=None, unpause=False, delivery_id=None):
-    """Queue an explicitly attributed script notice; it never clears a pause."""
+def notice(session_id, purpose, sender, text, *id_parts, ref=None, unpause=False, delivery_id=None, machine=None):
+    """Queue an attributed system notice; local and remote delivery preserve a pause."""
     head = "用途: %s\n发送方: %s\n" % (purpose, sender)
     if ref:
         head += "ref: %s\n" % ref
     body = "%s\n%s" % (head, text)
     stable_id = delivery_id or message_id(session_id, purpose, sender, text, ref or "", *id_parts)
     # An id collision with different content is an error, never an acceptance.
-    genet("session", "send", session_id, body, "--system", "--message-id", stable_id, "--no-wait")
+    args = ["session", "send", session_id, body]
+    args.append("--system")
+    args += ["--message-id", stable_id, "--no-wait", *machine_args(machine)]
+    genet(*args)
 
 
 def candidate_roots(root):
@@ -647,7 +890,7 @@ def candidate_roots(root):
 
 
 @contextlib.contextmanager
-def inbox_lock(root, session_id):
+def inbox_lock(root, session_id, purpose="收件箱"):
     path = state_dir(root, "inbox", session_id + ".lock")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a+b") as handle:
@@ -665,7 +908,7 @@ def inbox_lock(root, session_id):
         try:
             acquire()
         except OSError as error:
-            raise ExpertError("收件箱正由另一进程处理: %s" % error, "没有丢弃或重投消息", "保留当前任务，稍后使用同一消息身份重试")
+            raise ExpertError("%s正由另一进程处理: %s" % (purpose, error), "没有丢弃或重投消息", "保留当前任务，稍后使用同一消息身份重试")
         try:
             yield
         finally:
@@ -870,7 +1113,18 @@ def flush_session_inbox_if_idle(root, session_id, force=False):
     return delivered
 
 
-def deliver_or_notice(root, session_id, purpose, sender, text, *id_parts, ref=None, unpause=False, use_inbox=False):
+def deliver_or_notice(root, session_id, purpose, sender, text, *id_parts, ref=None, unpause=False, use_inbox=False, machine=None):
+    if machine:
+        record = read_dispatch_record(state_dir(root, "pending", session_id + ".json"))
+        dispatch = (record or {}).get("remoteDispatch")
+        if not dispatch or record.get("machine") != machine or record.get("remoteReleased"):
+            raise ExpertError("该会话没有本团队尚未结束的远端派单回执", "没有投递或重新启动会话", "新任务用 spawn；补充要求使用仍在 pending 中的派单会话")
+        target = dispatch["target"]
+        stable_id = message_id(session_id, purpose, sender, text, ref or "", *id_parts)
+        remote_receive(target, {"id": dispatch["id"], "workspaceId": target["workspaceId"],
+                               "role": record["kind"], "operation": "notice", "sessionId": session_id,
+                               "purpose": purpose, "sender": sender, "text": text, "ref": ref, "messageId": stable_id})
+        return "queue"
     team_mode = bool(use_inbox or purpose in ("human", "patrol", "expert", "member") or open_env(root).get("TEAM_MODE") or is_team_root(root))
     if team_mode:
         push_session_inbox(root, session_id, purpose, sender, text, ref=ref, id_parts=id_parts)
@@ -892,7 +1146,33 @@ def close_pending_between(root, requester_id, responder_id):
     return closed_any
 
 
-def resolve_send_target(root, target_spec, kind, text, sender):
+def resolve_send_target(root, target_spec, kind, text, sender, machine=None, workspace=None):
+    if machine:
+        if SESSION_ID.match(target_spec):
+            if workspace is not None:
+                record = read_dispatch_record(state_dir(root, "pending", target_spec + ".json")) or {}
+                bound = ((record.get("remoteDispatch") or {}).get("target") or {}).get("workspaceId")
+                if workspace != bound:
+                    raise ExpertError("--workspace 与会话派单绑定不同", "没有投递消息", "使用该会话原派单回执中的 workspace；新目标先 spawn")
+            return target_spec, False, root, None
+        role = "leader" if target_spec == "work" else target_spec
+        if role in ("default", "root", "front") or ":" in role:
+            raise ExpertError(
+                "跨机目标只能是远端岗位名或会话 id（收到 %r）" % target_spec,
+                "没有排入任何消息",
+                "用 `--machine <id> --to <岗位名>`（如 qa、leader）或 `--to s_xxx`；远端不注册团队根和前台",
+            )
+        target = remote_target(root, machine, role, workspace)
+        existing = []
+        for item in live_sessions(target["workspaceId"], machine):
+            record = read_dispatch_record(state_dir(root, "pending", item["id"] + ".json")) or {}
+            if (record.get("machine") == machine and record.get("remoteDispatch")
+                    and not record.get("remoteReleased") and item.get("status") in ("idle", "running", "waiting")):
+                existing.append(item)
+        if len(existing) == 1:
+            return existing[0]["id"], False, root, role
+        raise ExpertError("远端岗位有 %d 个可投递会话" % len(existing), "没有发送或创建会话",
+                          "没有会话时先 spawn；多个会话时用精确 --to s_xxx")
     if SESSION_ID.match(target_spec):
         return target_spec, False, root, None
     parts = target_spec.split(":", 1)
@@ -965,10 +1245,13 @@ def resolve_send_target(root, target_spec, kind, text, sender):
 
 def cmd_send(args):
     root = find_root()
+    machine = dispatch_machine(args)
     name, mine = me(root)
     sender = os.environ.get("GENEHUB_SESSION_ID") or "%s:hook" % name
     body_text = " ".join(args.text)
-    target, created_now, target_root, target_role = resolve_send_target(root, args.to, args.kind, body_text, sender)
+    target, created_now, target_root, target_role = resolve_send_target(
+        root, args.to, args.kind, body_text, sender, machine, getattr(args, "workspace", None)
+    )
     archive_guidance(target_root or root, args.kind, sender, "%s (%s)" % (args.to, target), body_text)
     was_pending = close_pending_between(root, requester_id=target, responder_id=sender) if args.kind == "result" else False
     own_front = front_session(root, mine["spaces"]) if "root" in mine.get("spaces", {}) else None
@@ -986,7 +1269,7 @@ def cmd_send(args):
     baseline = None
     if track_reply and not created_now:
         try:
-            baseline = (session_summary(target).get("latestReply") or {}).get("itemId")
+            baseline = (session_summary(target, machine).get("latestReply") or {}).get("itemId")
         except ExpertError:
             baseline = None
     if not created_now:
@@ -1002,11 +1285,12 @@ def cmd_send(args):
             body_text,
             unpause=(target != own_front),
             use_inbox=getattr(args, "inbox", False),
+            machine=machine,
         )
-        if target_role == "leader" and args.kind in ("human", "patrol", "task"):
+        if not machine and target_role == "leader" and args.kind in ("human", "patrol", "task"):
             snippet = " ".join(body_text.splitlines()).strip()[:36]
             auto_describe_session(target, "研发组长：响应最新需求（%s）" % snippet)
-        elif target_role and target_role not in ("root", "front") and args.kind == "task":
+        elif not machine and target_role and target_role not in ("root", "front") and args.kind == "task":
             snippet = " ".join(body_text.splitlines()).strip()[:36]
             auto_describe_session(target, "%s：%s" % (target_role, snippet))
     else:
@@ -1028,11 +1312,13 @@ def cmd_send(args):
                 existing_rec["notified"] = []
                 existing_rec["createdAtMs"] = now_ms()
                 existing_rec.pop("done", None)
+                if machine:
+                    existing_rec["machine"] = machine
                 if SESSION_ID.match(str(sender)):
                     existing_rec["requester"] = sender
                 write_json(pending_path, existing_rec)
         else:
-            write_json(pending_path, {
+            record = {
                 "sessionId": target,
                 "requester": sender,
                 "batch": target,
@@ -1043,7 +1329,10 @@ def cmd_send(args):
                 "notified": [],
                 "lock": None,
                 "route": "send",
-            })
+            }
+            if machine:
+                record["machine"] = machine
+            write_json(pending_path, record)
     if mode == "inbox":
         print("已写入文件收件箱（尚未取得平台回执；待目标空闲且未暂停时重试） → %s" % target)
     elif mode == "spawned":
@@ -1125,17 +1414,28 @@ def _cut_worker_sub_worktree(target_root, role, base_repo_hint, desc, explicit_s
 
 def cmd_spawn(args):
     root = find_root()
+    machine = dispatch_machine(args)
+    if machine and getattr(args, "expert", None):
+        raise ExpertError("--machine 只能派给本团队在其它机器上的岗位", "没有创建会话", "先在本机定位到该团队再派单，或去掉 --team")
     target_root = find_expert(root, getattr(args, "expert", None)) if getattr(args, "expert", None) else root
     name, mine = me(target_root)
     role = getattr(args, "space", None) or args.kind
-    workspace_id = mine["spaces"].get(role)
-    if not workspace_id and role == "work" and not getattr(args, "space", None):
-        # A team has no generic `work` Space: the role that does the work is its leader, which is how a
-        # 1+0 team (front + leader + qa + research + team-reflect) takes a plain `--kind work` task.
-        role = "leader"
+    if machine and (getattr(args, "worktree", None) or args.dir):
+        raise ExpertError("--machine 不支持 --worktree/--dir", "没有创建会话", "远端岗位用它自己的 WORKTREE_DIR；需要隔离目录时在那个岗位的会话里再 spawn")
+    if machine:
+        if role == "work" and not getattr(args, "space", None):
+            role = "leader"
+        remote_binding = remote_target(root, machine, role, getattr(args, "workspace", None))
+        workspace_id = remote_binding["workspaceId"]
+    else:
         workspace_id = mine["spaces"].get(role)
-    if not workspace_id:
-        raise ExpertError("团队 %s 没有 %s 空间" % (name, role), "没有创建会话", "确认团队目录里有 spaces/%s/agent-space.genet.json" % role)
+        if not workspace_id and role == "work" and not getattr(args, "space", None):
+            # A team has no generic `work` Space: the role that does the work is its leader, which is how a
+            # 1+0 team (front + leader + qa + research + team-reflect) takes a plain `--kind work` task.
+            role = "leader"
+            workspace_id = mine["spaces"].get(role)
+        if not workspace_id:
+            raise ExpertError("团队 %s 没有 %s 空间" % (name, role), "没有创建会话", "确认团队目录里有 spaces/%s/agent-space.genet.json" % role)
     requester = os.environ.get("GENEHUB_SESSION_ID")
     if requester and not getattr(args, "expert", None):
         # When an external session (such as `admin` bootstrapping a team) runs
@@ -1144,54 +1444,66 @@ def cmd_spawn(args):
         # own front session instead of waking `admin` across space boundaries.
         if not same_expert_session(target_root, requester, mine.get("spaces")):
             requester = front_session(target_root, mine["spaces"]) if "root" in (mine.get("spaces") or {}) else None
-    role_env = open_env(os.path.join(target_root, "spaces", role))
+    local_selection = None if machine else choose(target_root, "TEAM_MODEL_RESEARCH" if role == "research" else "TEAM_MODEL_WORK", args.tier, args.model, args.media)
+    role_env = {} if machine else open_env(os.path.join(target_root, "spaces", role))
     wt_dir = role_env.get("WORKTREE_DIR")
     spawned_wt = None
     spawned_branch = None
     wt_opt = getattr(args, "worktree", None)
-    if wt_opt and role != "research":
+    if wt_opt and role != "research" and not machine:
         spawned_wt, spawned_branch = _cut_worker_sub_worktree(target_root, role, wt_dir, args.desc, wt_opt)
         wt_dir = spawned_wt
     lock = None
-    effective_dir = args.dir or spawned_wt or (wt_dir if role not in ("research", "reflect", "team-reflect", "leader") else None)
-    if effective_dir and role != "research":
+    effective_dir = None if machine else (args.dir or spawned_wt or wt_dir or os.path.join(target_root, "spaces", role))
+    if not machine and effective_dir and role != "research":
         path = resolve_expert_dir(target_root, effective_dir)
-        marker, won = claim(path, {"session": None, "expert": name, "at": now_ms()}, "genet-writer.json")
-        if not won:
-            holder = (read_json(marker) or {}).get("session")
-            same_holder = bool(holder and requester and holder == requester)
-            alive = same_holder or bool(holder and not session_missing(holder) and session_summary(holder).get("status") in ("running", "waiting"))
-            if alive and not args.dir and not spawned_wt and is_team_root(target_root):
-                # Multi-tier team support (`Leader -> Lead -> 5~10 Workers`): when a Lead (who holds its space's
-                # primary worktree lock) or Leader spawns concurrent Workers into the same role space without `--dir`,
-                # automatically cut an isolated child git worktree so all Workers run in parallel with zero lock conflict.
-                spawned_wt, spawned_branch = _cut_worker_sub_worktree(target_root, role, path, args.desc, "auto")
-                wt_dir = spawned_wt
-                path = spawned_wt
-                marker, won = claim(path, {"session": None, "expert": name, "at": now_ms()}, "genet-writer.json")
+        with inbox_lock(writer_lock(path), "writer", purpose="写者锁"):
+            marker, won = claim(path, {"session": None, "expert": name, "at": now_ms()}, "genet-writer.json")
             if not won:
-                if same_holder:
-                    raise ExpertError(
-                        "当前会话 %s 自己就已经持有 %s 的写者锁" % (holder, path),
-                        "没有创建会话",
-                        "你本身就是这个目录的后台写会话，不要再递归调用 spawn work，直接在当前会话里修改文件并运行测试即可",
-                    )
-                if alive:
-                    raise ExpertError("%s 已有写会话 %s 在工作" % (path, holder), "没有创建会话", "等它完成，或换一个目录")
-                if holder:
-                    for cand in candidate_roots(root):
-                        old_pending = state_dir(cand, "pending", holder + ".json")
-                        if os.path.isfile(old_pending):
-                            move(cand, old_pending)
-                os.remove(marker)
-                marker, won = claim(path, {"session": None, "expert": name, "at": now_ms()}, "genet-writer.json")
+                holder = (read_json(marker) or {}).get("session")
+                if (read_json(marker) or {}).get("requestId"):
+                    raise ExpertError("目录由远端派单锁定", "没有创建会话", "等原派单完成对账并在执行端释放写锁")
+                if not holder:
+                    raise ExpertError("目录写锁的创建结果尚未确认", "没有创建会话，保留原锁", "先核对原派单回执和实际会话，不要删除锁盲重派")
+                same_holder = bool(holder and requester and holder == requester)
+                alive = same_holder or bool(holder and not session_missing(holder) and (session_summary(holder).get("status") in ("running", "waiting") or (session_summary(holder).get("inputSummary") or {}).get("paused")))
+                if alive and not args.dir and not spawned_wt and is_team_root(target_root):
+                    # Multi-tier team support (`Leader -> Lead -> 5~10 Workers`): when a Lead (who holds its space's
+                    # primary worktree lock) or Leader spawns concurrent Workers into the same role space without `--dir`,
+                    # automatically cut an isolated child git worktree so all Workers run in parallel with zero lock conflict.
+                    spawned_wt, spawned_branch = _cut_worker_sub_worktree(target_root, role, path, args.desc, "auto")
+                    wt_dir = spawned_wt
+                    path = spawned_wt
+                    marker, won = claim(path, {"session": None, "expert": name, "at": now_ms()}, "genet-writer.json")
                 if not won:
-                    raise ExpertError("%s 的写者锁刚被别人拿走" % path, "没有创建会话", "稍后重试")
-        lock = marker
+                    if same_holder:
+                        raise ExpertError(
+                            "当前会话 %s 自己就已经持有 %s 的写者锁" % (holder, path),
+                            "没有创建会话",
+                            "你本身就是这个目录的后台写会话，不要再递归调用 spawn work，直接在当前会话里修改文件并运行测试即可",
+                        )
+                    if alive:
+                        raise ExpertError("%s 已有写会话 %s 在工作" % (path, holder), "没有创建会话", "等它完成，或换一个目录")
+                    if holder:
+                        for cand in candidate_roots(root):
+                            old_pending = state_dir(cand, "pending", holder + ".json")
+                            if os.path.isfile(old_pending):
+                                move(cand, old_pending)
+                    os.remove(marker)
+                    marker, won = claim(path, {"session": None, "expert": name, "at": now_ms()}, "genet-writer.json")
+                    if not won:
+                        raise ExpertError("%s 的写者锁刚被别人拿走" % path, "没有创建会话", "稍后重试")
+            lock = marker
     wt_hint = ("，专属工位目录 WORKTREE_DIR: %s%s" % (wt_dir, " (branch: %s)" % spawned_branch if spawned_branch else "")) if wt_dir else ""
     task_body = " ".join(args.task)
     archive_guidance(target_root, "task", requester or name, "%s/%s" % (name, role), "[%s] %s" % (args.desc, task_body))
-    if spawned_wt:
+    if machine:
+        exec_guidance = (
+            "你是团队 `%s` 在机器 %s 上的远端 %s 岗位会话。团队根、任务账本与定时对账都在发起方机器上；"
+            "请按本岗位自己的 WORKTREE_DIR 工作，直接在本会话完成并输出可读的最终结论，"
+            "不要递归 spawn 同类会话，也不需要手动 send 回传——发起方的对账会取走你的最终回复。" % (name, machine, role)
+        )
+    elif spawned_wt:
         exec_guidance = "你是并发派出的叶子 Worker 会话（独立子工位: %s，分支: %s），请直接在本会话内完成编码与自测并 git commit 到本分支（严禁再递归 spawn 子会话），完成后直接输出分支名、commit SHA 与验证结果即可，系统会自动回传给上级。" % (spawned_wt, spawned_branch)
     elif is_team_root(target_root) and role not in ("research", "reflect", "team-reflect", "leader"):
         exec_guidance = "你是团队 `%s` 管线负责人（团队根目录: %s，数据仓根目录: %s%s）。单模块任务请直接在工位内完成编码、自测并 commit；若需拆分为多子模块并发推进，可作为小组长连续调用 `team.py spawn --space %s --kind work --worktree auto --desc \"子模块\" \"任务\"` 派生多名 Worker（及 `--space research --kind research`）后立即结束本轮，系统收齐全部子任务后会唤醒你合并各 `worker/*` 分支。最终直接在本会话输出结论即可，无需手动调用 team.py send 回传。" % (role, target_root, datas_root(target_root), wt_hint, role)
@@ -1209,25 +1521,36 @@ def cmd_spawn(args):
     round_key = (turn or {}).get("roundId") or (turn or {}).get("userItemId")
     batch = "%s:%s" % (requester, round_key) if requester and round_key else None
     model_key = "TEAM_MODEL_RESEARCH" if role == "research" else "TEAM_MODEL_WORK"
+    remote_dispatch = None
     try:
-        session_id, why = start(target_root, workspace_id, role, args.desc, clip(task), model_key,
-                                args.tier, args.model, args.media)
+        if machine:
+            session_id, why, remote_dispatch = dispatch_remote(target_root, remote_binding, role, args.desc, clip(task),
+                                                               args.tier, args.model, args.media, getattr(args, "request_id", None))
+        else:
+            session_id, why = start(target_root, workspace_id, role, args.desc, clip(task), model_key,
+                                    args.tier, args.model, args.media, selection=local_selection)
     except ExpertError:
-        if lock:
-            os.remove(lock)  # no session will ever hold this directory
+        # A lost create reply is not proof that no session exists. Keep its reservation.
         raise
+    if not session_id:
+        raise ExpertError("没有收到创建回执", "可能已创建会话；保留写锁", "核对实际会话后恢复待办，不要盲重派")
     if lock:
         write_json(lock, {"session": session_id, "expert": name, "at": now_ms()})
     pending_rec = {
         "sessionId": session_id, "requester": requester, "batch": batch or session_id, "kind": role, "desc": args.desc, "createdAtMs": now_ms(),
         "baseline": None, "notified": [], "lock": lock, "route": why,
     }
+    if machine:
+        pending_rec["machine"] = machine
+        pending_rec["remoteDispatch"] = remote_dispatch
     if spawned_wt:
         pending_rec["worktree"] = spawned_wt
         pending_rec["branch"] = spawned_branch
-    write_json(state_dir(root, "pending", session_id + ".json"), pending_rec)
+    pending_path = state_dir(root, "pending", session_id + ".json")
+    if not remote_dispatch or not (os.path.exists(pending_path) or os.path.exists(state_dir(root, "done", session_id + ".json"))):
+        write_json(pending_path, pending_rec)
     wt_msg = ("，子工位 %s [%s]" % (spawned_wt, spawned_branch)) if spawned_wt else ""
-    print("已开始 %s 会话 %s（%s%s）；请直接结束本轮，系统收齐同批结果后将自动异步唤醒" % (role, session_id, why, wt_msg))
+    print("%s %s 会话 %s（%s%s）；请直接结束本轮，系统收齐同批结果后将自动异步唤醒" % ("已确认派单" if machine else "已开始", role, session_id, why, wt_msg))
 
 
 def refresh_live_status(root, force=False):
@@ -2743,10 +3066,10 @@ def add_note(root, record, *identity):
     return note_id, True
 
 
-def latest_round(session_id):
+def latest_round(session_id, machine=None):
     """The newest round of a session: its round id and the id of the user message that started it. None when unknown."""
     try:
-        rounds = genet("session", "rounds", session_id).get("page", {}).get("rounds", [])
+        rounds = genet("session", "rounds", session_id, *machine_args(machine)).get("page", {}).get("rounds", [])
     except ExpertError:
         return None
     if not rounds:
@@ -3023,8 +3346,8 @@ def wake(root, name, mine):
 
 # ---------------------------------------------------------------- the timer
 
-def last_reply_text(session_id, item_id):
-    page = genet("session", "narrative", session_id, "--item", item_id).get("page", {})
+def last_reply_text(session_id, item_id, machine=None):
+    page = genet("session", "narrative", session_id, "--item", item_id, *machine_args(machine)).get("page", {})
     for item in page.get("items", []):
         if item.get("id") == item_id and item.get("text"):
             return item["text"]
@@ -3225,163 +3548,174 @@ def reconcile(root, name, mine):
     stuck_after = setting(root, "TEAM_STUCK_AFTER", STUCK_AFTER_S)
     batch_stuck_after = setting(root, "TEAM_BATCH_STUCK_AFTER", BATCH_STUCK_AFTER_S)
     for path, record in records:
-        session_id = record["sessionId"]
-        bkey = record.get("batch") or session_id
-        is_multi_batch = batch_counts.get(bkey, 1) > 1
-        is_quiet_reflect = bool(record.get("quiet") or (record.get("kind") in ("reflect", "team-reflect") and not record.get("requester")))
-        to = None if is_quiet_reflect else (record.get("requester") or front)
-        finish = lambda p=path, sid=session_id: (move(root, p), closed.add(sid))  # noqa: E731
-        has_children = any(other.get("requester") == session_id for _, other in records if other["sessionId"] != session_id)
         try:
-            summary = session_summary(session_id)
-        except ExpertError as error:
-            if error.code != "targetNotFound":
-                raise
-            if to:
-                deliver_or_notice(root, to, "report", "%s:hook" % name, "会话 %s（%s）已不存在，待办记录已清除。" % (session_id, record["desc"]), session_id, "gone")
-            if is_multi_batch and not record.get("quiet"):
-                record["done"] = {
-                    "outcome": "gone",
-                    "reply": "gone:%s" % session_id,
-                    "ref": "ghref:session:%s" % session_id,
-                    "text": "⚠️ 会话已不存在，待办记录已归档。",
-                }
-                update_pending(root, path, record)
-            else:
-                finish()
-            continue
-        status = summary.get("status")
-        inputs = summary.get("inputSummary") or {}
-        requests = (summary.get("interactionSummary") or {}).get("requests") or []
-        reply = (summary.get("latestReply") or {}).get("itemId")
-        age = (now_ms() - record["createdAtMs"]) / 1000
-        said = record.setdefault("notified", [])
-        if requests:
-            key = "wait:%s" % json.dumps(requests, sort_keys=True)[:200]
-            if front and key not in said:
-                deliver_or_notice(root, front, "report", "%s:hook" % name, "会话 %s（%s）在等人处理：%s" % (session_id, record["desc"], json.dumps(requests, ensure_ascii=False)[:600]), session_id, key)
-                said.append(key)
-                update_pending(root, path, record)
-            continue
-        paused = bool(inputs.get("paused"))
-        # The kernel pauses a session for two different reasons: the person stopped it (`interrupt`,
-        # `session/manager.rs:3362`, no error) and a turn that died (`session/inbox.rs:808`, this message).
-        # Only the second is a failure. Reporting the person's own stop as a failure hides who is holding it up.
-        timed_out = record.get("stopReason") == "timeout"
-        if timed_out and status == "running":
-            # Acknowledgement of interrupt is not yet a terminal observation.
-            continue
-        stopped_by_person = paused and not timed_out and TURN_FAILED_ERROR not in (inputs.get("error") or "")
-        if timed_out or paused or status == "failed":
-            # Told once. An interrupted session's partial reply is not a result, so it is not delivered as one;
-            # a paused record stays until the person resumes it, a failed one is closed (or converted to a bounded
-            # terminal batch item so it never hangs sibling tasks in the same batch).
-            timeout_after = record.get("stopAfterSeconds")
-            timeout_verdict = ("超过 %s 秒没有进展，已超时终止" % timeout_after) if timeout_after is not None else "长时间没有进展，已超时终止"
-            verdict = timeout_verdict if timed_out else ("已失败" if (status == "failed" and not stopped_by_person) else "被暂停")
-            if "stop" not in said and not (timed_out and "stuck" in said):
+            session_id = record["sessionId"]
+            bkey = record.get("batch") or session_id
+            is_multi_batch = batch_counts.get(bkey, 1) > 1
+            is_quiet_reflect = bool(record.get("quiet") or (record.get("kind") in ("reflect", "team-reflect") and not record.get("requester")))
+            to = None if is_quiet_reflect else (record.get("requester") or front)
+            finish = lambda p=path, sid=session_id: (move(root, p), closed.add(sid))  # noqa: E731
+            has_children = any(other.get("requester") == session_id for _, other in records if other["sessionId"] != session_id)
+            try:
+                summary = session_summary(session_id, record.get("machine"))
+            except ExpertError as error:
+                if error.code != "targetNotFound":
+                    raise
                 if to:
-                    deliver_or_notice(root, to, "report", "%s:hook" % name, "会话 %s（%s）%s：%s" % (session_id, record["desc"], verdict, inputs.get("error") or "无附加信息"), session_id, "stop", unpause=(status == "failed" and not paused and to != front))
-                if (timed_out or status == "failed" or inputs.get("error")) and record.get("kind") not in ("reflect", "team-reflect"):
-                    add_note(root, {"kind": "anomaly", "session": session_id, "turn": latest_round(session_id), "ref": "ghref:item:%s:%s" % (session_id, reply) if reply else None, "from": "%s:hook" % name, "quote": "无", "context": "会话 %s（%s）%s：%s" % (session_id, record["desc"], verdict, inputs.get("error") or "无附加信息"), "text": record["desc"]}, "anomaly", session_id, "stop")
-                said.append("stop")
-                update_pending(root, path, record)
-            if ((status == "failed" and not stopped_by_person) or timed_out) and not has_children:
+                    deliver_or_notice(root, to, "report", "%s:hook" % name, "会话 %s（%s）已不存在，待办记录已清除。" % (session_id, record["desc"]), session_id, "gone")
                 if is_multi_batch and not record.get("quiet"):
-                    if not record.get("done"):
+                    record["done"] = {
+                        "outcome": "gone",
+                        "reply": "gone:%s" % session_id,
+                        "ref": "ghref:session:%s" % session_id,
+                        "text": "⚠️ 会话已不存在，待办记录已归档。",
+                    }
+                    update_pending(root, path, record)
+                else:
+                    finish()
+                continue
+            status = summary.get("status")
+            inputs = summary.get("inputSummary") or {}
+            requests = (summary.get("interactionSummary") or {}).get("requests") or []
+            reply = (summary.get("latestReply") or {}).get("itemId")
+            age = (now_ms() - record["createdAtMs"]) / 1000
+            said = record.setdefault("notified", [])
+            if requests:
+                key = "wait:%s" % json.dumps(requests, sort_keys=True)[:200]
+                if front and key not in said:
+                    deliver_or_notice(root, front, "report", "%s:hook" % name, "会话 %s（%s）在等人处理：%s" % (session_id, record["desc"], json.dumps(requests, ensure_ascii=False)[:600]), session_id, key)
+                    said.append(key)
+                    update_pending(root, path, record)
+                continue
+            paused = bool(inputs.get("paused"))
+            # The kernel pauses a session for two different reasons: the person stopped it (`interrupt`,
+            # `session/manager.rs:3362`, no error) and a turn that died (`session/inbox.rs:808`, this message).
+            # Only the second is a failure. Reporting the person's own stop as a failure hides who is holding it up.
+            timed_out = record.get("stopReason") == "timeout"
+            if timed_out and status == "running":
+                # Acknowledgement of interrupt is not yet a terminal observation.
+                continue
+            stopped_by_person = paused and not timed_out and TURN_FAILED_ERROR not in (inputs.get("error") or "")
+            if timed_out or paused or status == "failed":
+                # Told once. An interrupted session's partial reply is not a result, so it is not delivered as one;
+                # a paused record stays until the person resumes it, a failed one is closed (or converted to a bounded
+                # terminal batch item so it never hangs sibling tasks in the same batch).
+                timeout_after = record.get("stopAfterSeconds")
+                timeout_verdict = ("超过 %s 秒没有进展，已超时终止" % timeout_after) if timeout_after is not None else "长时间没有进展，已超时终止"
+                verdict = timeout_verdict if timed_out else ("已失败" if (status == "failed" and not stopped_by_person) else "被暂停")
+                if "stop" not in said and not (timed_out and "stuck" in said):
+                    if to:
+                        deliver_or_notice(root, to, "report", "%s:hook" % name, "会话 %s（%s）%s：%s" % (session_id, record["desc"], verdict, inputs.get("error") or "无附加信息"), session_id, "stop", unpause=(status == "failed" and not paused and to != front))
+                    if (timed_out or status == "failed" or inputs.get("error")) and record.get("kind") not in ("reflect", "team-reflect"):
+                        add_note(root, {"kind": "anomaly", "session": session_id, "turn": latest_round(session_id, record.get("machine")), "ref": "ghref:item:%s:%s" % (session_id, reply) if reply else None, "from": "%s:hook" % name, "quote": "无", "context": "会话 %s（%s）%s：%s" % (session_id, record["desc"], verdict, inputs.get("error") or "无附加信息"), "text": record["desc"]}, "anomaly", session_id, "stop")
+                    said.append("stop")
+                    update_pending(root, path, record)
+                if ((status == "failed" and not stopped_by_person) or timed_out) and not has_children:
+                    if is_multi_batch and not record.get("quiet"):
+                        if not record.get("done"):
+                            record["done"] = {
+                                "outcome": "stuck" if timed_out else "failed",
+                                "reply": "%s:%s" % ("stuck" if timed_out else "failed", session_id),
+                                "ref": ("ghref:item:%s:%s" % (session_id, reply)) if reply else ("ghref:session:%s" % session_id),
+                                "text": "⚠️ 会话%s。" % verdict if timed_out else "⚠️ 会话已失败：%s" % (inputs.get("error") or "无附加信息"),
+                            }
+                            update_pending(root, path, record)
+                    else:
+                        parent_busy = False
+                        if to and to != front:
+                            try:
+                                tsum = session_summary(to)
+                                if tsum.get("status") not in ("idle", "failed"):
+                                    parent_busy = True
+                                else:
+                                    _advance_parent_baseline(root, to, tsum)
+                                    flush_session_inbox_if_idle(root, to, force=True)
+                            except ExpertError:
+                                pass
+                        if not parent_busy:
+                            finish()
+                elif record.get("kind") in ("reflect", "team-reflect") or age > giveup_after:
+                    finish()
+                continue
+            if status == "idle" and reply and reply != record.get("baseline"):
+                if has_children:
+                    record["baseline"] = reply
+                    record.pop("done", None)
+                    update_pending(root, path, record)
+                elif record.get("quiet"):
+                    finish()  # routine reflect runs wake quietly; requested ones report back like any task
+                else:
+                    if not record.get("done") or record["done"].get("reply") != reply:
+                        text = last_reply_text(session_id, reply, record.get("machine")) or (summary.get("messagePreview") or {}).get("text", "")
+                        record["done"] = {"outcome": "ok", "reply": reply, "ref": "ghref:item:%s:%s" % (session_id, reply), "text": text}
+                        update_pending(root, path, record)
+            elif status == "idle" and not record.get("done") and not has_children:
+                idle_anchor = max(record["createdAtMs"], record.get("wokenAtMs") or 0, summary.get("lastActivityAtMs") or 0)
+                idle_s = (now_ms() - idle_anchor) / 1000
+                if age > giveup_after:
+                    finish()
+                elif idle_s > stopped_after:
+                    if "stopped" not in said:
+                        if to:
+                            deliver_or_notice(root, to, "report", "%s:hook" % name, "会话 %s（%s）已停止，没有给出回复。" % (session_id, record["desc"]), session_id, "stopped")
+                        if record.get("kind") not in ("reflect", "team-reflect"):
+                            add_note(root, {"kind": "anomaly", "session": session_id, "turn": latest_round(session_id, record.get("machine")), "ref": None, "from": "%s:hook" % name, "quote": "无", "context": "会话 %s（%s）已停止超过 %d 秒仍未给出回复" % (session_id, record["desc"], stopped_after), "text": record["desc"]}, "anomaly", session_id, "stopped")
+                        said.append("stopped")
+                        update_pending(root, path, record)
+                    if record.get("kind") in ("reflect", "team-reflect"):
+                        finish()
+                    elif is_multi_batch:
                         record["done"] = {
-                            "outcome": "stuck" if timed_out else "failed",
-                            "reply": "%s:%s" % ("stuck" if timed_out else "failed", session_id),
-                            "ref": ("ghref:item:%s:%s" % (session_id, reply)) if reply else ("ghref:session:%s" % session_id),
-                            "text": "⚠️ 会话%s。" % verdict if timed_out else "⚠️ 会话已失败：%s" % (inputs.get("error") or "无附加信息"),
+                            "outcome": "stopped",
+                            "reply": "stopped:%s" % session_id,
+                            "ref": "ghref:session:%s" % session_id,
+                            "text": "⚠️ 会话已停止，没有给出回复。",
                         }
                         update_pending(root, path, record)
-                else:
-                    parent_busy = False
-                    if to and to != front:
-                        try:
-                            tsum = session_summary(to)
-                            if tsum.get("status") not in ("idle", "failed"):
-                                parent_busy = True
-                            else:
-                                _advance_parent_baseline(root, to, tsum)
-                                flush_session_inbox_if_idle(root, to, force=True)
-                        except ExpertError:
-                            pass
-                    if not parent_busy:
-                        finish()
-            elif record.get("kind") in ("reflect", "team-reflect") or age > giveup_after:
-                finish()
+            elif status == "running":
+                last_active = summary.get("lastActivityAtMs") or summary.get("updatedAtMs") or now_ms()
+                # A member holding up finished siblings gets less patience than one running on its own.
+                patience = min(stuck_after, batch_stuck_after) if bkey in batch_has_done else stuck_after
+                if (now_ms() - last_active) / 1000 > patience:
+                    genet("session", "interrupt", session_id, *machine_args(record.get("machine")))
+                    record["stopReason"] = "timeout"
+                    record["stopAfterSeconds"] = patience
+                    update_pending(root, path, record)
+                    clear_sessions_cache()
+                    stopped = session_summary(session_id, record.get("machine"))
+                    if stopped.get("status") == "running":
+                        continue
+                    if "stuck" not in said:
+                        if to:
+                            deliver_or_notice(root, to, "report", "%s:hook" % name, "会话 %s（%s）超过 %d 秒没有进展，已超时终止。" % (session_id, record["desc"], patience), session_id, "stuck")
+                        if record.get("kind") not in ("reflect", "team-reflect"):
+                            add_note(root, {"kind": "anomaly", "session": session_id, "turn": latest_round(session_id, record.get("machine")), "ref": None, "from": "%s:hook" % name, "quote": "无", "context": "会话 %s（%s）超过 %d 秒没有进展，已超时终止" % (session_id, record["desc"], patience), "text": record["desc"]}, "anomaly", session_id, "stuck")
+                        said.append("stuck")
+                        update_pending(root, path, record)
+                    if is_multi_batch and not record.get("done"):
+                        record["done"] = {
+                            "outcome": "stuck",
+                            "reply": "stuck:%s" % session_id,
+                            "ref": "ghref:session:%s" % session_id,
+                            "text": "⚠️ 会话超过 %d 秒没有进展（已熔断，不阻塞同批次其他子任务）。" % patience,
+                        }
+                        update_pending(root, path, record)
+        except (ExpertError, OSError, subprocess.TimeoutExpired) as error:
+            record["lastReconcileError"] = str(error)[:300]
+            record["lastReconcileErrorAtMs"] = now_ms()
+            update_pending(root, path, record)
             continue
-        if status == "idle" and reply and reply != record.get("baseline"):
-            if has_children:
-                record["baseline"] = reply
-                record.pop("done", None)
-                update_pending(root, path, record)
-            elif record.get("quiet"):
-                finish()  # routine reflect runs wake quietly; requested ones report back like any task
-            else:
-                if not record.get("done") or record["done"].get("reply") != reply:
-                    text = last_reply_text(session_id, reply) or (summary.get("messagePreview") or {}).get("text", "")
-                    record["done"] = {"outcome": "ok", "reply": reply, "ref": "ghref:item:%s:%s" % (session_id, reply), "text": text}
-                    update_pending(root, path, record)
-        elif status == "idle" and not record.get("done") and not has_children:
-            idle_anchor = max(record["createdAtMs"], record.get("wokenAtMs") or 0, summary.get("lastActivityAtMs") or 0)
-            idle_s = (now_ms() - idle_anchor) / 1000
-            if age > giveup_after:
-                finish()
-            elif idle_s > stopped_after:
-                if "stopped" not in said:
-                    if to:
-                        deliver_or_notice(root, to, "report", "%s:hook" % name, "会话 %s（%s）已停止，没有给出回复。" % (session_id, record["desc"]), session_id, "stopped")
-                    if record.get("kind") not in ("reflect", "team-reflect"):
-                        add_note(root, {"kind": "anomaly", "session": session_id, "turn": latest_round(session_id), "ref": None, "from": "%s:hook" % name, "quote": "无", "context": "会话 %s（%s）已停止超过 %d 秒仍未给出回复" % (session_id, record["desc"], stopped_after), "text": record["desc"]}, "anomaly", session_id, "stopped")
-                    said.append("stopped")
-                    update_pending(root, path, record)
-                if record.get("kind") in ("reflect", "team-reflect"):
-                    finish()
-                elif is_multi_batch:
-                    record["done"] = {
-                        "outcome": "stopped",
-                        "reply": "stopped:%s" % session_id,
-                        "ref": "ghref:session:%s" % session_id,
-                        "text": "⚠️ 会话已停止，没有给出回复。",
-                    }
-                    update_pending(root, path, record)
-        elif status == "running":
-            last_active = summary.get("lastActivityAtMs") or summary.get("updatedAtMs") or now_ms()
-            # A member holding up finished siblings gets less patience than one running on its own.
-            patience = min(stuck_after, batch_stuck_after) if bkey in batch_has_done else stuck_after
-            if (now_ms() - last_active) / 1000 > patience:
-                genet("session", "interrupt", session_id)
-                record["stopReason"] = "timeout"
-                record["stopAfterSeconds"] = patience
-                update_pending(root, path, record)
-                clear_sessions_cache()
-                stopped = session_summary(session_id)
-                if stopped.get("status") == "running":
-                    continue
-                if "stuck" not in said:
-                    if to:
-                        deliver_or_notice(root, to, "report", "%s:hook" % name, "会话 %s（%s）超过 %d 秒没有进展，已超时终止。" % (session_id, record["desc"], patience), session_id, "stuck")
-                    if record.get("kind") not in ("reflect", "team-reflect"):
-                        add_note(root, {"kind": "anomaly", "session": session_id, "turn": latest_round(session_id), "ref": None, "from": "%s:hook" % name, "quote": "无", "context": "会话 %s（%s）超过 %d 秒没有进展，已超时终止" % (session_id, record["desc"], patience), "text": record["desc"]}, "anomaly", session_id, "stuck")
-                    said.append("stuck")
-                    update_pending(root, path, record)
-                if is_multi_batch and not record.get("done"):
-                    record["done"] = {
-                        "outcome": "stuck",
-                        "reply": "stuck:%s" % session_id,
-                        "ref": "ghref:session:%s" % session_id,
-                        "text": "⚠️ 会话超过 %d 秒没有进展（已熔断，不阻塞同批次其他子任务）。" % patience,
-                    }
-                    update_pending(root, path, record)
     batches = {}
     for path, record in records:
         if record["sessionId"] not in closed:
             batches.setdefault(record.get("batch") or record["sessionId"], []).append((path, record))
     for batch_key, group in batches.items():
         if not all(item[1].get("done") for item in group):
+            continue
+        # Do not partially retire a batch after publishing it. Confirm every
+        # executor release first; a failed release retains the whole batch.
+        released = [release_remote(root, p, rec) for p, rec in group]
+        if not all(released):
             continue
         to = group[0][1].get("requester") or front
         should_unpause = False
@@ -3470,7 +3804,27 @@ def update_pending(root, path, record):
     write_json(path, record)
 
 
+def release_remote(root, path, record):
+    dispatch = record.get("remoteDispatch")
+    if dispatch and not record.get("remoteReleased"):
+        target = dispatch["target"]
+        try:
+            remote_receive(target, {"id": dispatch["id"], "workspaceId": target["workspaceId"],
+                                   "role": record["kind"], "operation": "release", "sessionId": record["sessionId"],
+                                   "canceled": record.get("stopReason") == "timeout",
+                                   "expectedReply": (record.get("done") or {}).get("reply") if (record.get("done") or {}).get("outcome") == "ok" else None})
+        except ExpertError as error:
+            record["lastReconcileError"] = error.what
+            update_pending(root, path, record)
+            return False
+        record["remoteReleased"] = True
+        update_pending(root, path, record)
+    return True
+
+
 def move(root, path):
+    if not release_remote(root, path, read_json(path, {}) or {}):
+        return
     destination = state_dir(root, "done", os.path.basename(path))
     os.makedirs(os.path.dirname(destination), exist_ok=True)
     try:
@@ -3648,12 +4002,16 @@ def sync_identity(root):
         return "unchanged"
     if record.get("failedDigest") == digest and now_ms() - record.get("failedAtMs", 0) < IDENTITY_RETRY_S * 1000:
         return "unchanged"
-    done = subprocess.run([sys.executable, builder_script(root), "build", root], capture_output=True, text=True, timeout=20)
+    # This path also runs on the timer. Refreshing identity must not invoke
+    # deployment pre/post hooks; explicit SpaceBuilder builds own that action.
+    done = subprocess.run([sys.executable, builder_script(root), "build", root, "--require-no-post-commands"], capture_output=True, text=True, timeout=20)
     if done.returncode != 0:
         if "SB013" in (done.stdout + done.stderr):
             return "unchanged"
         write_json(marker, {"digest": record.get("digest"), "failedDigest": digest, "failedAtMs": now_ms()})
         tail = "\n".join(line for line in (done.stdout + done.stderr).splitlines() if line.strip())[-400:]
+        if "SB018" in (done.stdout + done.stderr):
+            raise ExpertError("身份自动重编拒绝执行构建 hook 或 Provider post（SB018）", "生成身份仍保留上一次版本，没有执行发布 hook", "由源 Space 的构建负责人显式运行 SpaceBuilder build；将发布构建与自动身份刷新分开")
         raise ExpertError("soul.md 编译进 AGENTS.md/CLAUDE.md 失败: %s" % tail, "前台仍是上一次编译的身份；soul.md 本身已保存", "按上面的错误修改 %s（超过 32 KiB 要精简），60 秒后自动重试" % label)
     write_json(marker, {"digest": digest})
     return "rebuilt"
@@ -3710,6 +4068,8 @@ def main(argv):
     send.add_argument("--to", required=True)
     send.add_argument("--kind", default="note")
     send.add_argument("--inbox", action="store_true", help="write to file inbox when target is busy without interrupting")
+    send.add_argument("--machine", help="exact id from `machine list`: deliver to a role workspace on that machine")
+    send.add_argument("--workspace", help="with --machine: must equal the role’s fixed workspaceId in .genethub/remote-targets.json")
     send.add_argument("text", nargs="+")
     spawn = sub.add_parser("spawn")
     spawn.add_argument("--team", "--expert", dest="expert", help="spawn inside another team's research/work space (--expert is the old name)")
@@ -3718,6 +4078,9 @@ def main(argv):
     spawn.add_argument("--desc", required=True)
     spawn.add_argument("--dir")
     spawn.add_argument("--worktree", help="auto or slot name: cut an isolated git worktree under worktrees/ for parallel workers")
+    spawn.add_argument("--machine", help="exact id from `machine list`: run this task in the role's workspace there")
+    spawn.add_argument("--workspace", help="with --machine: must equal the role’s fixed workspaceId in .genethub/remote-targets.json")
+    spawn.add_argument("--request-id", help="remote retry identity; omitted means a new printed id; repeat the same id and payload to recover a receipt")
     spawn.add_argument("--tier", help="Ultra, Max, Pro, Flash or Mini; the platform picks the cheapest live model with it")
     spawn.add_argument("--model", help="an exact model id on the team's Agent")
     spawn.add_argument("--media", choices=sorted(MEDIA_TAGS), help="the task has images or video: the model must understand them")
@@ -3830,21 +4193,27 @@ def main(argv):
     sub.add_parser("drift")
     sub.add_parser("sync-identity")
     sub.add_parser("hook")
+    receive = sub.add_parser("receive", help="target-side executor; invoked by a fixed remote binding")
+    receive.add_argument("request", help="dispatch/release JSON envelope")
     args = parser.parse_args(argv)
-    handlers = {"send": cmd_send, "spawn": cmd_spawn, "init": cmd_init,
+    handlers = {"receive": cmd_receive, "send": cmd_send, "spawn": cmd_spawn, "init": cmd_init,
                 "employee": cmd_employee, "member": cmd_employee, "worktree": cmd_worktree, "publish": cmd_publish, "board": cmd_board, "models": cmd_models,
                 "directory": cmd_directory, "mount": cmd_mount, "unmount": cmd_unmount, "path": cmd_path, "datas": cmd_datas, "temp": cmd_temp, "reset": cmd_reset, "sync-identity": cmd_sync_identity, "hook": cmd_hook,
                 "note": cmd_note, "notes": cmd_notes, "tell-user": cmd_tell_user, "reflect": cmd_reflect, "snapshot": cmd_snapshot, "drift": cmd_drift}
     try:
         try:
-            check_and_flush_self_inbox_inline(find_root(), args.command)
+            if args.command != "receive":
+                check_and_flush_self_inbox_inline(find_root(), args.command)
         except ExpertError:
             raise
         except Exception:
             pass
         handlers[args.command](args)
     except ExpertError as error:
-        print(error.text(), file=sys.stderr)
+        if args.command == "receive":
+            print(json.dumps({"ok": False, "error": {"what": error.what, "state": error.state, "next": error.next}}))
+        else:
+            print(error.text(), file=sys.stderr)
         return 1
     return 0
 

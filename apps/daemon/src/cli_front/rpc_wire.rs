@@ -84,6 +84,10 @@ impl std::error::Error for ConnectError {}
 pub struct Rpc {
     endpoint: ClientEndpoint,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    // This monitor owns the Fabric pump until the endpoint has sent CLOSE.
+    // Dropping its handle detaches it; aborting it on normal RPC drop would
+    // tear down the carrier first and retain a resumable peer for 60 seconds.
+    _transport_monitor: tokio::task::JoinHandle<()>,
     hello: HelloResult,
     /// Absent until someone asks to watch. A one-shot command opens no event
     /// stream, and the daemon allows one per peer.
@@ -218,7 +222,8 @@ impl Rpc {
         verify_local_identity(&hello, &admission)?;
         Ok(Self {
             endpoint: data,
-            tasks: Mutex::new(vec![writer, reader, endpoint_monitor]),
+            tasks: Mutex::new(vec![writer, reader]),
+            _transport_monitor: endpoint_monitor,
             hello,
             events: Mutex::new(None),
         })
@@ -299,7 +304,8 @@ impl Rpc {
         };
         Ok(Self {
             endpoint: data,
-            tasks: Mutex::new(vec![monitor]),
+            tasks: Mutex::new(Vec::new()),
+            _transport_monitor: monitor,
             hello,
             events: Mutex::new(None),
         })

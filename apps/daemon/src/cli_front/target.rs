@@ -58,7 +58,7 @@ pub const RESERVED: [&str; 21] = [
     "provider",
 ];
 
-pub(crate) const ROUTABLE: [&str; 52] = [
+pub(crate) const ROUTABLE: [&str; 55] = [
     "context",
     "provider.list",
     "provider.configure",
@@ -69,6 +69,9 @@ pub(crate) const ROUTABLE: [&str; 52] = [
     "workspace.add-root",
     "file-access.list",
     "file-access.configure",
+    "process.list",
+    "process.kill",
+    "process.killAll",
     "workspace.list",
     "workspace.show",
     "session.list",
@@ -150,6 +153,7 @@ pub fn canonical(args: &[String]) -> Option<String> {
         return args.get(1).map(|_| "agent.run".to_string());
     }
     match (first, verb) {
+        ("process", Some("kill-all")) => Some("process.killAll".to_string()),
         ("schema" | "context" | "capabilities" | "status" | "update", _) => Some(first.to_string()),
         // Everything after `shell` is the command line, so the token following
         // it is not a verb. Reading it as one would make `genet shell ls` a

@@ -53,13 +53,29 @@ fn main() {
     run(args)
 }
 
-#[tokio::main]
+// A front door waits on one forwarded command; it does not run the daemon.
+// Avoid creating a CPU-sized idle worker pool for every short CLI invocation.
+#[tokio::main(flavor = "current_thread")]
 async fn run(args: Vec<String>) {
-    if args
-        .iter()
-        .any(|argument| argument == "--version" || argument == "-V")
-    {
+    if matches!(args.as_slice(), [flag] if flag == "--version" || flag == "-V") {
         println!("{}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    let native_help = match args.as_slice() {
+        [group, flag] => {
+            ["daemon", "status", "update", "agent-serve"].contains(&group.as_str())
+                && matches!(flag.as_str(), "--help" | "-h")
+        }
+        [group, verb, flag] => {
+            group == "daemon"
+                && ["run", "start", "stop", "restart", "status", "endpoint"]
+                    .contains(&verb.as_str())
+                && matches!(flag.as_str(), "--help" | "-h")
+        }
+        _ => false,
+    };
+    if native_help || matches!(args.as_slice(), [flag] if flag == "--help" || flag == "-h") {
+        print_usage();
         return;
     }
 
@@ -147,7 +163,7 @@ fn update(args: &[String]) -> i32 {
     );
 }
 
-pub fn usage() -> i32 {
+fn print_usage() {
     eprintln!(
         "usage:
   genet status                      overview: channel, version, daemon, hub
@@ -267,10 +283,13 @@ pub fn usage() -> i32 {
                                     own words with no option picked
   genet session interrupt <id>      stop the running turn
   genet session close <id>          close the session
-  genet machine list                machines this installation can reach
+  genet machine list                this machine, direct pairings and Hub directory
+  genet machine list --paired       direct pairing records without querying Hub
+  genet machine list --reachable    compatibility alias for machine list
   genet machine pair <code> --endpoint <url> [--name <label>]
                                     redeem a pairing code from another machine
-  genet machine show <machineId>    one paired machine
+  genet machine show <machineId> [--paired]
+                                    one machine from the directory or direct store
   genet machine forget <machineId>  drop the local credential for a machine
   genet device list                 clients authorized on the target machine
   genet device invite [--grant read,session,files,git,pty,devices,settings,update]
@@ -298,6 +317,10 @@ pub fn usage() -> i32 {
   genet hub unpair                  drop Hub enrollment
   genet --version                   print the version"
     );
+}
+
+pub fn usage() -> i32 {
+    print_usage();
     fail(
         "invalid_args",
         "no or unknown command; usage is on stderr",

@@ -109,7 +109,7 @@ defineJourney(
         `legacy route changed to ${rendezvous.searchParams.get("route")}`,
       );
 
-      const listed = cli(["machine", "list"]);
+      const listed = cli(["machine", "list", "--paired"]);
       const machines = (listed.data as { machines?: Array<{ machineId?: string }> } | undefined)?.machines ?? [];
       t.assertions.assert(machines.some((machine) => machine.machineId === "m_peer"), "legacy peer was not imported");
 
@@ -149,7 +149,7 @@ defineJourney(
         devices?.type === "devices" && !devices.data.remote.relayUrl,
         "legacy remote access resurrected after detach",
       );
-      const listed = cli(["machine", "list"]);
+      const listed = cli(["machine", "list", "--paired"]);
       const machines = (listed.data as { machines?: unknown[] } | undefined)?.machines ?? [];
       t.assertions.assert(machines.length === 0, "legacy peer resurrected after forget");
     } finally {

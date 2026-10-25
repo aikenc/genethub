@@ -298,6 +298,13 @@ async fn cli(
         {
             crate::authz::Principal::SessionController {
                 session_id: session_id.to_string(),
+                ordinary: context
+                    .state
+                    .sessions
+                    .summary(session_id)
+                    .await
+                    .map(|summary| summary.managed.is_none())
+                    .unwrap_or(false),
             }
         }
         _ => {
@@ -999,11 +1006,23 @@ mod tests {
                 !body.contains("\"sessions\""),
                 "a missing --machine must not fall back to this daemon's session list: {body}"
             );
+            let failed_ticket = body
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .filter_map(|chunk| {
+                    chunk["line"]
+                        .as_str()
+                        .and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                })
+                .any(|reply| {
+                    reply["type"] == "error"
+                        && reply["error"]["code"] == "internal"
+                        && reply["error"]["details"]["stage"] == "hubTicket"
+                        && reply["error"]["details"]["machineId"] == "m_not_paired"
+                });
             assert!(
-                body.contains("fabric")
-                    || body.contains("machineNotPaired")
-                    || body.contains("not a machine"),
-                "must fail honestly rather than run locally: {body}"
+                failed_ticket,
+                "must preserve the unready Hub ticket failure rather than run locally: {body}"
             );
             listener.handle.abort();
         });

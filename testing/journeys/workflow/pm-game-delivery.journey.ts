@@ -1341,7 +1341,9 @@ defineJourney(
       t.assertions.assert(receipt.prepared && receipt.members.length === 5, "PM did not prepare a complete carrier through the product");
       const stale = JSON.parse(readFileSync(path.join(fixture.projectRoot, ".genethub/temp/stale-builder.json"), "utf8"));
       t.assertions.assert(stale.code !== 0 && stale.error.includes("planStale") && stale.unchanged, "a changed Builder source was applied through its old plan");
-      t.assertions.assert(stale.outsideOpenCode !== 0 && stale.outsideOpenError.includes("unauthenticated"), `PM gained machine-wide workspace registration authority: ${JSON.stringify(stale)}`);
+      t.assertions.assert(stale.outsideOpenCode === 0, `ordinary PM could not register an OS-account workspace: ${JSON.stringify(stale)}`);
+      const outsideOpened = JSON.parse(stale.outsideOpenError);
+      t.assertions.assert(outsideOpened.type === "space.open" && outsideOpened.data?.workspace?.root === path.dirname(fixture.projectRoot), "ordinary PM registered a different workspace");
       t.assertions.assert(pmEvents.filter((event) => t.flows.main.sessionEventOf(event)?.type === "permissionRequested").length === asksBefore, "routine preparation asked Human to repeat the project grant");
       // The variant's Spaces live in the trial package's product
       // directories; their manifest names stay local, so identity is the root.

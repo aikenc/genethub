@@ -304,12 +304,7 @@ fn parse_agent_list(args: &[String]) -> Result<Command, CliFailure> {
         }
         index += 1;
     }
-    if !routes {
-        if !tags.is_empty() || !media.is_empty() {
-            return Err(CliFailure::invalid_args(
-                "--tag and --media filter the routes: add --routes",
-            ));
-        }
+    if !routes && tags.is_empty() && media.is_empty() {
         return Ok(Command::AgentList);
     }
     // No tiers lists every route; the ones given must be valid.
@@ -1339,7 +1334,7 @@ async fn run_conversation(rpc: &Rpc, run: Run, here: bool) -> Result<i32, CliFai
 /// the send. A remote daemon cannot see the caller's local identity, so without
 /// this its Agent would read another Agent's text as the Human's.
 fn caller_origin() -> Option<genehub_proto::InputOrigin> {
-    let crate::authz::Principal::SessionController { session_id } = super::caller_principal()
+    let crate::authz::Principal::SessionController { session_id, .. } = super::caller_principal()
     else {
         return None;
     };

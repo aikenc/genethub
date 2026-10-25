@@ -71,10 +71,16 @@ pub fn file() -> Result<PathBuf, CliFailure> {
 
 pub fn load() -> Result<Vec<PairedMachine>, CliFailure> {
     let path = file()?;
-    let Ok(raw) = std::fs::read_to_string(&path) else {
-        // Nothing paired yet is the ordinary state of a fresh installation,
-        // not a failure to report.
-        return Ok(Vec::new());
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(CliFailure::business(
+                "storeUnreadable",
+                format!("read {}: {error}", path.display()),
+                None,
+            ))
+        }
     };
     serde_json::from_str::<Persisted>(&raw)
         .map(|file| file.machines)
@@ -112,12 +118,14 @@ pub fn find(machine_id: &str) -> Result<PairedMachine, CliFailure> {
             CliFailure::business(
                 "machineNotPaired",
                 format!(
-                    "{machine_id} is not a machine this installation has paired with; \
-                     `genet machine list` shows the ones it has"
+                    "{machine_id} is not a machine this installation has paired with directly; \
+                     `genet machine list --paired` shows only those. A machine can also be reached through the \
+                     Hub without a direct pairing: compare with `genet machine list`."
                 ),
                 Some(serde_json::json!({
                     "machineId": machine_id,
                     "paired": machines.iter().map(|m| m.machine_id.clone()).collect::<Vec<_>>(),
+                    "reachableHint": "genet machine list",
                 })),
             )
         })

@@ -807,6 +807,15 @@ fn find(id: &str) -> Option<Transfer> {
 }
 
 fn status(args: &[String]) -> i32 {
+    if args.len() > 1
+        || args
+            .first()
+            .is_some_and(|id| id.starts_with('-') || id.is_empty())
+    {
+        return output::fail(CliFailure::invalid_args(
+            "usage: genet file transfer status [<transferId>]; unknown options and extra arguments are not accepted",
+        ));
+    }
     let registry = match registry() {
         Ok(registry) => registry,
         Err(error) => return output::fail(error),
@@ -821,6 +830,11 @@ fn status(args: &[String]) -> i32 {
 }
 
 fn cancel(args: &[String]) -> i32 {
+    if args.len() != 1 || args[0].starts_with('-') || args[0].is_empty() {
+        return output::fail(CliFailure::invalid_args(
+            "usage: genet file transfer cancel <transferId>",
+        ));
+    }
     let Some(id) = args.first() else {
         return output::fail(CliFailure::invalid_args("name the transfer to cancel"));
     };
