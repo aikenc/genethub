@@ -48,6 +48,8 @@ use crate::diagnostics::Diagnostics;
 mod activity;
 #[path = "inbox.rs"]
 mod inbox;
+#[path = "managed_update.rs"]
+mod managed_update;
 
 const BROADCAST_CAPACITY: usize = 1024;
 const IMPORT_CANDIDATE_TTL_MS: i64 = 10 * 60 * 1000;
@@ -68,14 +70,6 @@ impl std::fmt::Display for SessionMissing {
 }
 
 impl std::error::Error for SessionMissing {}
-
-/// Result of asking whether a Worker Session can take a post-restart continue turn.
-#[derive(Debug)]
-pub(crate) enum WorkerContinuation {
-    Ready,
-    ProcessAlive { pid: Option<u32> },
-    Unavailable { reason: String },
-}
 
 /// A snapshot is one RPC body (`MAX_RPC_BODY_BYTES` is 2.9 MiB). Leave room for
 /// summary/round metadata and JSON escaping instead of importing a transcript
@@ -1698,83 +1692,6 @@ impl SessionManager {
         Ok((enabled, meta.routing_tags, media_tags))
     }
 
-    /// A snapshot of live member turns; reading it never starts an Agent.
-    pub(crate) async fn executing_workflow_runs(&self) -> HashSet<String> {
-        let lives = self
-            .sessions
-            .read()
-            .await
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut runs = HashSet::new();
-        for live in lives {
-            let status = *live.status.lock().await;
-            if status == SessionStatus::Running {
-                if let Some(managed) = &live.meta.lock().await.managed {
-                    runs.insert(managed.workflow_run_id.clone());
-                }
-            }
-        }
-        runs
-    }
-
-    /// Execution ownership, including startup and cleanup, is stronger than a
-    /// rendered idle status. Workflow reconciliation must not guess from chat.
-    pub(crate) async fn has_execution(&self, session_id: &str) -> bool {
-        let live = self.sessions.read().await.get(session_id).cloned();
-        match live {
-            Some(live) => live.execution.lock().await.is_some(),
-            None => false,
-        }
-    }
-
-    /// Whether a persisted Worker Session can receive a continue turn after the
-    /// daemon has lost its in-memory execution. A live OS process must pause
-    /// continuation so two writers cannot share the project.
-    pub(crate) async fn worker_continuation(&self, session_id: &str) -> WorkerContinuation {
-        let live = match self.live(session_id).await {
-            Ok(live) => live,
-            Err(_) => {
-                return WorkerContinuation::Unavailable {
-                    reason: format!("Worker Session {session_id} 不存在"),
-                };
-            }
-        };
-        let meta = live.meta.lock().await.clone();
-        if meta.execution_retired || live.closing.load(Ordering::SeqCst) {
-            return WorkerContinuation::Unavailable {
-                reason: format!("旧 Worker Session {session_id} 已封禁，不能续接同一会话"),
-            };
-        }
-        if self.has_execution(session_id).await {
-            return WorkerContinuation::ProcessAlive {
-                pid: meta.agent_pid,
-            };
-        }
-        if let Some(pid) = meta.agent_pid {
-            if crate::process::exists(pid) {
-                return WorkerContinuation::ProcessAlive { pid: Some(pid) };
-            }
-        }
-        if meta.persist.is_none() && meta.inbox.has_delivered {
-            match self.has_pending_migration_seed(&meta) {
-                Ok(true) => {}
-                Ok(false) => {
-                    return WorkerContinuation::Unavailable {
-                        reason: format!("缺少原生会话句柄，不能续接 Worker {session_id}"),
-                    };
-                }
-                Err(error) => {
-                    return WorkerContinuation::Unavailable {
-                        reason: format!("读取 Worker {session_id} 的迁移上下文失败：{error:#}"),
-                    };
-                }
-            }
-        }
-        WorkerContinuation::Ready
-    }
-
     /// A route switch deliberately clears the old Agent's native handle. It
     /// can continue only while a fresh, route-bound history seed is waiting to
     /// be handed to the replacement Agent for the first time.
@@ -2771,9 +2688,6 @@ impl SessionManager {
         if let Some(managed) = meta.managed_system_prompt.as_deref() {
             additional_system_prompt.push_str("\n\n");
             additional_system_prompt.push_str(managed);
-        } else if let Some(root) = crate::workflow::root_session_guidance(&meta.cwd) {
-            additional_system_prompt.push_str("\n\n");
-            additional_system_prompt.push_str(&root);
         }
         let additional_system_prompt = Some(additional_system_prompt);
         let execution = live.claim_execution(prepared.is_some()).await?;
@@ -3708,20 +3622,6 @@ impl SessionManager {
         .await
     }
 
-    /// Rebinds a failed Workflow Worker in place. The Workflow controller is
-    /// the only caller allowed to migrate a managed Session: Human-initiated
-    /// switches stay forbidden so a project's role-tag contract remains the
-    /// authority. Session id, managed prompt, history and write lease survive.
-    pub(crate) async fn switch_managed_agent(
-        &self,
-        session_id: &str,
-        target: SessionAgentTarget,
-        providers: &ProviderMap,
-    ) -> Result<SessionSummary> {
-        self.switch_agent_with_routing(session_id, target, providers, None, true)
-            .await
-    }
-
     async fn switch_agent_with_routing(
         &self,
         session_id: &str,
@@ -4425,16 +4325,6 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Daemon-authored Workflow handoffs use the same durable native question
-    /// path as Agent questions. The normal PM Session is controlled by Human.
-    pub(crate) async fn request_workflow_question(
-        &self,
-        session_id: &str,
-        request: PermissionRequest,
-    ) -> Result<()> {
-        self.request_question(session_id, request, false).await
-    }
-
     pub(crate) async fn request_conversation_question(
         &self,
         session_id: &str,
@@ -4533,93 +4423,6 @@ impl SessionManager {
             false,
         )
         .await?;
-        Ok(())
-    }
-
-    pub(crate) async fn workflow_question_outcome(
-        &self,
-        session_id: &str,
-        request_id: &str,
-    ) -> Result<Option<PermissionOutcome>> {
-        let live = self.live(session_id).await?;
-        let outcome = live
-            .meta
-            .lock()
-            .await
-            .human_continuation
-            .as_ref()
-            .filter(|decision| decision.request.id == request_id)
-            .map(|decision| decision.outcome.clone());
-        Ok(outcome)
-    }
-
-    /// The built-in recovery reviewer may only submit the choice recorded by
-    /// its controller through the durable Session question path.
-    pub(crate) async fn workflow_recovery_choice(
-        &self,
-        session_id: &str,
-    ) -> Result<Option<String>> {
-        let live = self.live(session_id).await?;
-        let meta = live.meta.lock().await;
-        let Some(decision) = &meta.human_continuation else {
-            return Ok(None);
-        };
-        if decision.request.kind != PermissionRequestKind::Question {
-            return Ok(None);
-        }
-        let Some([question]) = decision.request.questions.as_deref() else {
-            return Ok(None);
-        };
-        let expected = ["repair", "resume", "successor", "human", "cancel"];
-        if question
-            .options
-            .iter()
-            .map(|option| option.label.as_str())
-            .collect::<Vec<_>>()
-            != expected
-        {
-            return Ok(None);
-        }
-        let selected = match &decision.outcome {
-            PermissionOutcome::Selected { option_id } => Some(option_id.as_str()),
-            PermissionOutcome::Answered { answers } => answers
-                .iter()
-                .find(|answer| answer.question_id == question.id)
-                .and_then(|answer| answer.selected_option_ids.as_slice().first())
-                .map(String::as_str),
-            _ => None,
-        };
-        Ok(selected
-            .and_then(|id| {
-                question
-                    .options
-                    .iter()
-                    .find(|option| option.id == id || option.label == id)
-            })
-            .map(|option| option.label.clone()))
-    }
-
-    pub(crate) async fn cancel_workflow_question(
-        &self,
-        session_id: &str,
-        request_id: &str,
-    ) -> Result<()> {
-        let live = match self.live(session_id).await {
-            Ok(live) => live,
-            Err(error) if error.is::<SessionMissing>() => return Ok(()),
-            Err(error) => return Err(error),
-        };
-        let _interaction = live.interaction_lock.lock().await;
-        if live
-            .meta
-            .lock()
-            .await
-            .pending_permission
-            .as_ref()
-            .is_some_and(|pending| pending.id == request_id)
-        {
-            cancel_human_continuation(&live, &self.store).await?;
-        }
         Ok(())
     }
 
@@ -4954,17 +4757,6 @@ impl SessionManager {
         Ok(())
     }
 
-    pub(crate) async fn fence_execution(&self, session_id: &str) -> Result<()> {
-        let live = self.live(session_id).await?;
-        let mut meta = live.meta.lock().await;
-        let mut next = meta.clone();
-        next.execution_retired = true;
-        self.store.save_meta(&next)?;
-        *meta = next;
-        live.closing.store(true, Ordering::SeqCst);
-        Ok(())
-    }
-
     pub(crate) async fn consulting(&self, session_id: &str) -> bool {
         let Ok(live) = self.live(session_id).await else {
             return false;
@@ -4976,65 +4768,6 @@ impl SessionManager {
             .as_ref()
             .is_some_and(|execution| execution.consultation);
         consulting
-    }
-
-    pub(crate) async fn current_request(
-        &self,
-        session_id: &str,
-    ) -> Result<(Option<String>, Option<String>, bool)> {
-        let live = self.live(session_id).await?;
-        let meta = live.meta.lock().await;
-        if let Some(entry) = meta
-            .inbox
-            .entries
-            .iter()
-            .rev()
-            .find(|entry| entry.state == "sent" && entry.source == "user")
-            .or_else(|| {
-                meta.inbox
-                    .entries
-                    .iter()
-                    .rev()
-                    .find(|entry| entry.state == "sent")
-            })
-        {
-            return Ok((
-                Some(entry.message_id.clone()),
-                entry.task_run_id.clone(),
-                entry.source == "user",
-            ));
-        }
-        drop(meta);
-        let id = live
-            .active_round
-            .lock()
-            .await
-            .as_ref()
-            .and_then(|round| round.user_item_id.clone());
-        Ok((id, None, true))
-    }
-
-    pub(crate) async fn user_input_after(
-        &self,
-        session_id: &str,
-        message_id: &str,
-        after_ms: i64,
-    ) -> Result<bool> {
-        let live = self.live(session_id).await?;
-        let meta = live.meta.lock().await;
-        if let Some(entry) = meta
-            .inbox
-            .entries
-            .iter()
-            .find(|entry| entry.message_id == message_id)
-        {
-            return Ok(entry.source == "user" && entry.received_at_ms > after_ms);
-        }
-        drop(meta);
-        let round = live.active_round.lock().await;
-        Ok(round.as_ref().is_some_and(|round| {
-            round.user_item_id.as_deref() == Some(message_id) && round.started_at_ms > after_ms
-        }))
     }
 
     pub async fn close(&self, session_id: &str) -> Result<()> {
@@ -8882,120 +8615,6 @@ mod tests {
         assert!(starts.lock().unwrap().is_empty());
     }
 
-    #[tokio::test]
-    async fn cross_agent_migration_keeps_session_and_replays_history_once() {
-        let workspace = tempfile::tempdir().unwrap();
-        let source_prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let source_starts = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let target_prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let target_starts = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let sessions = SessionManager::new(
-            test_store(workspace.path()),
-            Arc::new(Registry::of(vec![
-                Arc::new(ForkHarness {
-                    id: "source",
-                    native_fork: false,
-                    prompts: source_prompts.clone(),
-                    starts: source_starts.clone(),
-                }),
-                Arc::new(ForkHarness {
-                    id: "target",
-                    native_fork: false,
-                    prompts: target_prompts.clone(),
-                    starts: target_starts.clone(),
-                }),
-            ])),
-            16,
-        );
-        let created = sessions
-            .create_routed(
-                "w1",
-                workspace.path().to_path_buf(),
-                "source",
-                Some("model".into()),
-                None,
-                None,
-                None,
-                Default::default(),
-                None,
-                vec!["Flash".into()],
-                Vec::new(),
-            )
-            .await
-            .unwrap();
-        *sessions.live(&created.id).await.unwrap().items.lock().await = completed_turn(None);
-        {
-            let live = sessions.live(&created.id).await.unwrap();
-            let mut meta = live.meta.lock().await;
-            meta.inbox.has_delivered = true;
-            sessions.store.save_meta(&meta).unwrap();
-        }
-
-        let migrated = sessions
-            .switch_agent_routed(
-                &created.id,
-                SessionAgentTarget {
-                    agent_id: "target".into(),
-                    model_id: Some("model".into()),
-                    mode_id: None,
-                    effort_id: None,
-                    fast: None,
-                    runtime_values: Default::default(),
-                },
-                &ProviderMap::new(),
-                vec!["Pro".into()],
-                Vec::new(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(migrated.id, created.id);
-        assert_eq!(migrated.agent_id, "target");
-        let staged = sessions
-            .store
-            .load_seed("w1", &created.id)
-            .unwrap()
-            .expect("migration stages reconstructed history");
-        assert_eq!(staged.state, ContextSeedState::Pending);
-        assert_eq!(staged.target_agent_id.as_deref(), Some("target"));
-        assert_eq!(staged.target_model_id.as_deref(), Some("model"));
-        assert!(matches!(
-            sessions.worker_continuation(&created.id).await,
-            WorkerContinuation::Ready
-        ));
-
-        sessions
-            .send(
-                &created.id,
-                "Continue the investigation".into(),
-                Vec::new(),
-                &ProviderMap::new(),
-                None,
-                None,
-            )
-            .await
-            .unwrap();
-
-        assert!(source_starts.lock().unwrap().is_empty());
-        assert!(source_prompts.lock().unwrap().is_empty());
-        assert_eq!(target_starts.lock().unwrap().len(), 1);
-        let target = target_prompts.lock().unwrap();
-        assert_eq!(target.len(), 1);
-        assert!(target[0].text.contains("Investigate the failing deploy"));
-        assert!(target[0].text.contains("The health check path is stale"));
-        assert!(target[0].text.contains("Continue the investigation"));
-        drop(target);
-        assert_eq!(
-            sessions
-                .store
-                .load_seed("w1", &created.id)
-                .unwrap()
-                .expect("applied migration seed remains auditable")
-                .state,
-            ContextSeedState::Applied
-        );
-    }
-
     /// Reads only `chatId` handles, as Cursor print mode does after ACP.
     struct ChatIdOnly(ForkHarness);
 
@@ -9108,136 +8727,6 @@ mod tests {
                 .state,
             ContextSeedState::Applied
         );
-    }
-
-    #[tokio::test]
-    async fn same_agent_model_switch_replays_accepted_history_once() {
-        let workspace = tempfile::tempdir().unwrap();
-        let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let starts = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let sessions = SessionManager::new(
-            test_store(workspace.path()),
-            Arc::new(Registry::of(vec![Arc::new(ForkHarness {
-                id: "source",
-                native_fork: false,
-                prompts: prompts.clone(),
-                starts: starts.clone(),
-            })])),
-            16,
-        );
-        let created = sessions
-            .create_routed(
-                "w1",
-                workspace.path().to_path_buf(),
-                "source",
-                Some("model".into()),
-                None,
-                None,
-                None,
-                Default::default(),
-                None,
-                vec!["Flash".into()],
-                Vec::new(),
-            )
-            .await
-            .unwrap();
-        let live = sessions.live(&created.id).await.unwrap();
-        *live.items.lock().await = completed_turn(None);
-        {
-            let mut meta = live.meta.lock().await;
-            meta.inbox.has_delivered = true;
-            sessions.store.save_meta(&meta).unwrap();
-        }
-
-        let migrated = sessions
-            .switch_agent_routed(
-                &created.id,
-                SessionAgentTarget {
-                    agent_id: "source".into(),
-                    model_id: Some("model-alt".into()),
-                    mode_id: None,
-                    effort_id: None,
-                    fast: None,
-                    runtime_values: Default::default(),
-                },
-                &ProviderMap::new(),
-                vec!["Pro".into()],
-                Vec::new(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(migrated.model_id.as_deref(), Some("model-alt"));
-        assert!(matches!(
-            sessions.worker_continuation(&created.id).await,
-            WorkerContinuation::Ready
-        ));
-
-        sessions
-            .send(
-                &created.id,
-                "Continue on the new model".into(),
-                Vec::new(),
-                &ProviderMap::new(),
-                None,
-                None,
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(starts.lock().unwrap().len(), 1);
-        let prompts = prompts.lock().unwrap();
-        assert_eq!(prompts.len(), 1);
-        assert!(prompts[0].text.contains("Investigate the failing deploy"));
-        assert!(prompts[0].text.contains("Continue on the new model"));
-        assert_eq!(
-            sessions
-                .store
-                .load_seed("w1", &created.id)
-                .unwrap()
-                .unwrap()
-                .state,
-            ContextSeedState::Applied
-        );
-    }
-
-    #[tokio::test]
-    async fn delivered_worker_without_matching_pending_migration_stays_blocked() {
-        let workspace = tempfile::tempdir().unwrap();
-        let sessions = manager(workspace.path());
-        let mut record = meta();
-        record.cwd = workspace.path().to_path_buf();
-        record.inbox.has_delivered = true;
-        sessions.store.save_meta(&record).unwrap();
-
-        assert!(matches!(
-            sessions.worker_continuation("s1").await,
-            WorkerContinuation::Unavailable { .. }
-        ));
-        let mut seed = ContextSeed {
-            state: ContextSeedState::Pending,
-            text: "portable history".into(),
-            target_agent_id: Some("genet".into()),
-            target_model_id: None,
-        };
-        sessions.store.save_seed("w1", "s1", &seed).unwrap();
-        assert!(matches!(
-            sessions.worker_continuation("s1").await,
-            WorkerContinuation::Ready
-        ));
-
-        seed.target_model_id = Some("wrong-model".into());
-        sessions.store.save_seed("w1", "s1", &seed).unwrap();
-        assert!(matches!(
-            sessions.worker_continuation("s1").await,
-            WorkerContinuation::Unavailable { .. }
-        ));
-        seed.target_model_id = None;
-        seed.state = ContextSeedState::Applying;
-        sessions.store.save_seed("w1", "s1", &seed).unwrap();
-        assert!(matches!(
-            sessions.worker_continuation("s1").await,
-            WorkerContinuation::Unavailable { .. }
-        ));
     }
 
     #[tokio::test]
@@ -11015,59 +10504,6 @@ mod tests {
             .unwrap()
             .outcome
             .is_none());
-    }
-
-    #[tokio::test]
-    async fn workflow_human_question_is_durable_and_idempotent() {
-        let workspace = tempfile::tempdir().unwrap();
-        let sessions = manager(workspace.path());
-        sessions.store.save_meta(&meta()).unwrap();
-        let mut request = interaction(PermissionRequestKind::Question);
-        request.id = "workflow-human-s1".into();
-        sessions
-            .request_workflow_question("s1", request.clone())
-            .await
-            .unwrap();
-        sessions
-            .request_workflow_question("s1", request.clone())
-            .await
-            .unwrap();
-        let live = sessions.live("s1").await.unwrap();
-        assert_eq!(live.snapshot().await.unwrap().pending_permissions.len(), 1);
-        assert_eq!(
-            sessions
-                .store
-                .load_meta("w1", "s1")
-                .unwrap()
-                .pending_permission
-                .unwrap()
-                .id,
-            request.id
-        );
-        let outcome = PermissionOutcome::Selected {
-            option_id: "yes".into(),
-        };
-        sessions
-            .respond_permission("s1", &request.id, outcome.clone(), &ProviderMap::new())
-            .await
-            .unwrap();
-        assert_eq!(
-            sessions
-                .workflow_question_outcome("s1", &request.id)
-                .await
-                .unwrap(),
-            Some(outcome)
-        );
-        sessions
-            .request_workflow_question("s1", request)
-            .await
-            .unwrap();
-        assert!(live
-            .snapshot()
-            .await
-            .unwrap()
-            .pending_permissions
-            .is_empty());
     }
 
     /// Regression for the detached CLI: delivery is driven by the persisted
@@ -14124,5 +13560,200 @@ mod tests {
         assert_eq!(stats.model_id.as_deref(), Some("model-a"));
 
         pump.abort();
+    }
+    #[tokio::test]
+    async fn cross_agent_migration_keeps_session_and_replays_history_once() {
+        let workspace = tempfile::tempdir().unwrap();
+        let source_prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let source_starts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let target_prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let target_starts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sessions = SessionManager::new(
+            test_store(workspace.path()),
+            Arc::new(Registry::of(vec![
+                Arc::new(ForkHarness {
+                    id: "source",
+                    native_fork: false,
+                    prompts: source_prompts.clone(),
+                    starts: source_starts.clone(),
+                }),
+                Arc::new(ForkHarness {
+                    id: "target",
+                    native_fork: false,
+                    prompts: target_prompts.clone(),
+                    starts: target_starts.clone(),
+                }),
+            ])),
+            16,
+        );
+        let created = sessions
+            .create_routed(
+                "w1",
+                workspace.path().to_path_buf(),
+                "source",
+                Some("model".into()),
+                None,
+                None,
+                None,
+                Default::default(),
+                None,
+                vec!["Flash".into()],
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        *sessions.live(&created.id).await.unwrap().items.lock().await = completed_turn(None);
+        {
+            let live = sessions.live(&created.id).await.unwrap();
+            let mut meta = live.meta.lock().await;
+            meta.inbox.has_delivered = true;
+            sessions.store.save_meta(&meta).unwrap();
+        }
+
+        let migrated = sessions
+            .switch_agent_routed(
+                &created.id,
+                SessionAgentTarget {
+                    agent_id: "target".into(),
+                    model_id: Some("model".into()),
+                    mode_id: None,
+                    effort_id: None,
+                    fast: None,
+                    runtime_values: Default::default(),
+                },
+                &ProviderMap::new(),
+                vec!["Pro".into()],
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(migrated.id, created.id);
+        assert_eq!(migrated.agent_id, "target");
+        let staged = sessions
+            .store
+            .load_seed("w1", &created.id)
+            .unwrap()
+            .expect("migration stages reconstructed history");
+        assert_eq!(staged.state, ContextSeedState::Pending);
+        assert_eq!(staged.target_agent_id.as_deref(), Some("target"));
+        assert_eq!(staged.target_model_id.as_deref(), Some("model"));
+
+        sessions
+            .send(
+                &created.id,
+                "Continue the investigation".into(),
+                Vec::new(),
+                &ProviderMap::new(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(source_starts.lock().unwrap().is_empty());
+        assert!(source_prompts.lock().unwrap().is_empty());
+        assert_eq!(target_starts.lock().unwrap().len(), 1);
+        let target = target_prompts.lock().unwrap();
+        assert_eq!(target.len(), 1);
+        assert!(target[0].text.contains("Investigate the failing deploy"));
+        assert!(target[0].text.contains("The health check path is stale"));
+        assert!(target[0].text.contains("Continue the investigation"));
+        drop(target);
+        assert_eq!(
+            sessions
+                .store
+                .load_seed("w1", &created.id)
+                .unwrap()
+                .expect("applied migration seed remains auditable")
+                .state,
+            ContextSeedState::Applied
+        );
+    }
+
+    #[tokio::test]
+    async fn same_agent_model_switch_replays_accepted_history_once() {
+        let workspace = tempfile::tempdir().unwrap();
+        let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let starts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sessions = SessionManager::new(
+            test_store(workspace.path()),
+            Arc::new(Registry::of(vec![Arc::new(ForkHarness {
+                id: "source",
+                native_fork: false,
+                prompts: prompts.clone(),
+                starts: starts.clone(),
+            })])),
+            16,
+        );
+        let created = sessions
+            .create_routed(
+                "w1",
+                workspace.path().to_path_buf(),
+                "source",
+                Some("model".into()),
+                None,
+                None,
+                None,
+                Default::default(),
+                None,
+                vec!["Flash".into()],
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let live = sessions.live(&created.id).await.unwrap();
+        *live.items.lock().await = completed_turn(None);
+        {
+            let mut meta = live.meta.lock().await;
+            meta.inbox.has_delivered = true;
+            sessions.store.save_meta(&meta).unwrap();
+        }
+
+        let migrated = sessions
+            .switch_agent_routed(
+                &created.id,
+                SessionAgentTarget {
+                    agent_id: "source".into(),
+                    model_id: Some("model-alt".into()),
+                    mode_id: None,
+                    effort_id: None,
+                    fast: None,
+                    runtime_values: Default::default(),
+                },
+                &ProviderMap::new(),
+                vec!["Pro".into()],
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(migrated.model_id.as_deref(), Some("model-alt"));
+
+        sessions
+            .send(
+                &created.id,
+                "Continue on the new model".into(),
+                Vec::new(),
+                &ProviderMap::new(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(starts.lock().unwrap().len(), 1);
+        let prompts = prompts.lock().unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert!(prompts[0].text.contains("Investigate the failing deploy"));
+        assert!(prompts[0].text.contains("Continue on the new model"));
+        assert_eq!(
+            sessions
+                .store
+                .load_seed("w1", &created.id)
+                .unwrap()
+                .unwrap()
+                .state,
+            ContextSeedState::Applied
+        );
     }
 }

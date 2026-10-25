@@ -21,7 +21,7 @@ export function ExpertSquad({ workspace, onOpen }: { workspace: WorkspaceInfo; o
     finally { setBusy(false); }
   };
   return <div className="space-y-4">
-    <p className="text-xs text-muted">此处管理当前项目的直属成员；工作流与调度权限仍以该项目的 Workflow 配置为准，不在此处改变。</p>
+    <p className="text-xs text-muted">此处管理当前项目的直属成员；任务分工通过团队 Skill 和会话协作完成。</p>
     {children.length ? <><AgentList workspaces={workspaces} sessions={sessions} rootIds={children.map(w => w.id)} density="comfortable" actions={false} onPick={onOpen} />
       <details><summary className="min-h-11 cursor-pointer py-3 text-sm">调整成员归属</summary>{children.map(w => <div key={w.id} className="flex items-center gap-2 border-b border-line py-2"><span className="min-w-0 flex-1 truncate text-sm">{w.name}</span><button type="button" disabled={busy} className="min-h-11 px-3 text-sm text-muted disabled:opacity-40" onClick={() => void move(w, null)}>移出小队</button></div>)}</details></> : <p className="py-4 text-sm text-muted">还没有直属成员。</p>}
     <div className="flex gap-2"><button type="button" aria-label="添加已有项目到小队" disabled={busy} className="min-h-11 min-w-0 flex-1 truncate rounded-lg border border-line px-3 text-left text-sm" onClick={() => setChoosing(true)}>{candidates.find(w => w.id === selected)?.name ?? "选择已有项目"}</button><button type="button" disabled={busy || !candidates.some(w => w.id === selected)} className="min-h-11 rounded-lg bg-accent px-3 text-sm text-white disabled:opacity-40" onClick={() => { const child = candidates.find(w => w.id === selected); if(child) void move(child, workspace.id); }}>加入</button></div>

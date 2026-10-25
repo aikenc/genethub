@@ -102,14 +102,14 @@ pub async fn status(args: &[String]) -> i32 {
 /// running their own. `daemon run`, which the service itself executes, is
 /// unaffected.
 #[derive(Debug, PartialEq)]
-struct Service {
-    manager: Manager,
-    name: String,
-    file: std::path::PathBuf,
+pub(crate) struct Service {
+    pub(crate) manager: Manager,
+    pub(crate) name: String,
+    pub(crate) file: std::path::PathBuf,
 }
 
 #[derive(Debug, PartialEq)]
-enum Manager {
+pub(crate) enum Manager {
     Systemd,
     Launchd,
 }
@@ -140,7 +140,7 @@ impl Service {
     }
 }
 
-fn installed_service() -> Option<Service> {
+pub(crate) fn installed_service() -> Option<Service> {
     let home = std::path::PathBuf::from(std::env::var_os("HOME")?);
     let config = std::env::var_os("XDG_CONFIG_HOME").map(std::path::PathBuf::from);
     find_service(
@@ -321,6 +321,13 @@ fn endpoint() -> i32 {
 /// `genet daemon start` — idempotent on purpose: a script that runs it twice
 /// gets the same daemon twice, not a race (`genethub-cli.md` §4.0).
 fn start() -> i32 {
+    // Manual startup must recover the same interrupted App transaction as a
+    // service's `daemon run`, before locating or opening any installed bytes.
+    match crate::update::recover_before_daemon() {
+        Ok(Some(cli)) => return crate::wasm::exec_binary(cli, &["daemon".into(), "start".into()]),
+        Ok(None) => {}
+        Err(error) => fail("updateRecoveryFailed", &format!("{error:#}"), EXIT_FAILED),
+    }
     let paths = paths();
     if let Err(error) = paths.ensure() {
         fail(

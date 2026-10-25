@@ -154,13 +154,7 @@ pub(crate) async fn build(
                     genehub_proto::SessionStatus::Running | genehub_proto::SessionStatus::Waiting
                 )
             });
-        let registered = target
-            .agent_space
-            .as_ref()
-            .is_some_and(|config| !config.components.is_empty());
-        let runs =
-            crate::workflow::project_active_run_ids(&state.paths.root, project_id, &project_root)?;
-        if active || (registered && !runs.is_empty()) {
+        if active {
             bail!("activeResourceConflict: finish or cancel affected executions before rebuilding this Space");
         }
     }

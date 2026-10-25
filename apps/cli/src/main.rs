@@ -7,6 +7,7 @@
 
 mod control;
 mod invoke;
+mod update;
 mod wasm;
 
 use genet_frontdoor::selectors;
@@ -27,6 +28,7 @@ const FORWARDED: &[&str] = &[
     "file",
     "speech",
     "client",
+    // Preserve the explicit workflowRetired reply for legacy callers.
     "workflow",
     "process",
     "machine",
@@ -67,9 +69,11 @@ async fn run(args: Vec<String>) {
                 && matches!(flag.as_str(), "--help" | "-h")
         }
         [group, verb, flag] => {
-            group == "daemon"
+            ((group == "daemon"
                 && ["run", "start", "stop", "restart", "status", "endpoint"]
-                    .contains(&verb.as_str())
+                    .contains(&verb.as_str()))
+                || (group == "update"
+                    && ["check", "live", "app", "status"].contains(&verb.as_str())))
                 && matches!(flag.as_str(), "--help" | "-h")
         }
         _ => false,
@@ -106,7 +110,7 @@ async fn run(args: Vec<String>) {
                 Ok(rest) => rest,
                 Err(code) => std::process::exit(code),
             };
-            update(&rest[1..])
+            update::run(&rest[1..]).await
         }
         Some(head) if should_forward(head, &args) => invoke::forward(args).await,
         _ => usage(),
@@ -152,20 +156,14 @@ fn fail_envelope(error: genet_frontdoor::envelope::CliFailure) -> i32 {
     error.exit
 }
 
-fn update(args: &[String]) -> i32 {
-    if !args.is_empty() {
-        return usage();
-    }
-    fail(
-        "unsupported",
-        "automatic update is disabled until releases have an independent signing key; download manually from https://github.com/aikenc/genethub/releases and verify SHA256SUMS",
-        EXIT_FAILED,
-    );
-}
-
 fn print_usage() {
     eprintln!(
         "usage:
+  genet update check                query this channel App and Live releases
+  genet update live|app [--request-id <id>] [--wait] [--resume-session <id>]
+                                    update in the background; may interrupt sessions
+  genet update status --request-id <id>
+                                    durable receipt, usable while daemon is restarting
   genet status                      overview: channel, version, daemon, hub
   genet schema [command]            static CLI input/output schemas
   genet context                     explicit local-daemon execution context
@@ -229,38 +227,6 @@ fn print_usage() {
   genet speech runtime register --command <absolute-path> [--arg <value>...]
                                     probe and register a community adapter
   genet speech runtime unregister  remove the adapter registration only
-  genet workflow list              the Workflow packages cloned into this project
-  genet workflow build --package <id> [--apply --plan-digest <digest> --action-id <id> --revision <n>]
-                                    materialize one package's Spaces; applying needs approval
-  genet workflow inspect           validate and list project workflows
-  genet workflow dispatch [--package <id>] [--workflow <id>] [--root <dir>] \"<task>\"
-                                    run one flow from one package; both are
-                                    inferred only when the project has exactly one
-  genet workflow get --run <id>    read one durable workflow run
-  genet workflow check [--run <id> | --draft]
-  genet schema workflow.definition
-                                    inspect graph exits, execution and evidence without an LLM
-  genet workflow cancel --run <id> --revision <n>
-                                    fence the original request, then stop its squad
-  genet workflow dispatch ... --retry-of <run> [--resume-cancelled]
-                                    share the original request bounds; recovery needs new user input
-  genet workflow history [--limit <n>]
-                                    list recent Runs for Workflow analysis
-  genet workflow journal --run <id> [--since <seq>] [--limit <n>]
-                                    read committed Run events and references
-  genet workflow recovery start --run <id> --reason <text>
-                                    PM starts the package's recovery flow
-  genet workflow recovery status --run <id>
-                                    inspect one recovery Run
-  genet workflow recovery check|activate|reset ...
-                                    validate, authorize or reset recovery configuration
-  genet workflow human --run <id> --revision <n> --kind <a|b|c|d|e|f> --reason <text>
-                                    PM asks for a classified Human decision
-  genet workflow complete --run <id> --node <id> --revision <n> --evidence <key=value>...
-                                    submit exact node evidence from its managed session
-                              [--outcome <name> --reason <text>]
-                                    finish a negative review through its explicit or default exit;
-                                    built-in changesRequested|failed|blocked or a Workflow-declared name
   genet space inspect              which responsibilities this AgentSpace carries
   genet space children             the direct Workers this Executor may dispatch to
   genet space component set --component <pm|executor|worker|reviewer> [--role <r>]
@@ -297,7 +263,6 @@ fn print_usage() {
   genet device revoke <deviceId>    withdraw one client's authorization
   genet <any of the above> --machine <machineId>
                                     run it on a paired machine instead
-  genet update                      unsupported until releases are independently signed
   genet daemon run                  run the daemon in the foreground
   genet daemon start                start the daemon in the background
   genet daemon stop                 stop the verified local daemon instance

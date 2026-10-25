@@ -53,8 +53,22 @@ fn main() {
             });
             if matches!(entry, load::Entry::Daemon) {
                 forget_launching_session();
+                if let Err(error) = update::note_daemon_start() {
+                    eprintln!("cannot record App startup before opening data: {error:#}");
+                    std::process::exit(4);
+                }
             }
             run_and_exit(&component, &guest_args, entry);
+        }
+        Some("component-update") => {
+            let rest: Vec<String> = args.collect();
+            match update::native_cli(&rest) {
+                Ok(value) => println!("{value}"),
+                Err(error) => {
+                    eprintln!("{error:#}");
+                    std::process::exit(1);
+                }
+            }
         }
         Some("thumbnail") => {
             if let Err(error) = image_preview::thumbnail_cli(args) {

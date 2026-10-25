@@ -48,6 +48,9 @@ fn primary_lane<'a>(ready: impl Iterator<Item = &'a InboxEntry>) -> Lane {
 /// start a consultation; the sent original becomes eligible after a decision
 /// clears the pending request. Use persisted state, including during stop.
 fn dispatchable(entry: &InboxEntry, meta: &SessionMeta) -> bool {
+    if entry.source == "workflow" {
+        return false;
+    }
     matches!(entry.state.as_str(), "receiving" | "queued")
         || entry.state == "sent" && meta.pending_permission.is_none()
 }
@@ -337,8 +340,17 @@ impl SessionManager {
 
     /// Work is per Session: a slow adapter handover never blocks other inboxes.
     pub(crate) async fn dispatch_deliveries(&self, state: &Shared) {
-        let lives: Vec<_> = self.sessions.read().await.values().cloned().collect();
-        for live in lives {
+        let lives: Vec<_> = self
+            .sessions
+            .read()
+            .await
+            .iter()
+            .map(|(id, live)| (id.clone(), live.clone()))
+            .collect();
+        for (session_id, live) in lives {
+            if self.update_blocks_delivery(state, &live, &session_id).await {
+                continue;
+            }
             let configuration = {
                 let meta = live.meta.lock().await;
                 meta.pending_permission
@@ -392,6 +404,13 @@ impl SessionManager {
                         .await;
                     Ok(())
                 };
+                // Do not acquire another Session lock before releasing the
+                // dispatch claim. An ordinary delivery has no update handoff.
+                state.sessions.update_delivery_result(
+                    &state,
+                    &session_id,
+                    result.as_ref().map(|_| ()).map_err(|e| format!("{e:#}")),
+                );
                 if let Err(error) = result {
                     let mut meta = task_live.meta.lock().await;
                     let mut next = meta.clone();
@@ -618,19 +637,21 @@ impl SessionManager {
             }
             return Ok(());
         }
-        // Recheck the durable task fence before acquiring the delivery lock.
-        // This also retires queued notices left by older daemon versions.
-        for entry in meta
+        // Workflow was removed. Retire notices persisted by older versions;
+        // never let a stale task restart a Session during recovery.
+        let retired_runs = meta
             .inbox
             .entries
             .iter()
             .filter(|entry| entry.source == "workflow" && entry.state != "handled")
-        {
-            if let Some(run_id) = &entry.task_run_id {
-                if !crate::workflow::workflow_notice_current(state, &meta.id, run_id).await? {
-                    self.discard_workflow_inputs(&meta.id, run_id).await?;
-                }
+            .filter_map(|entry| entry.task_run_id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        if !retired_runs.is_empty() {
+            for run_id in retired_runs {
+                self.discard_workflow_inputs(&meta.id, &run_id).await?;
             }
+            // Work from fresh persisted metadata on the next dispatch tick.
+            return Ok(());
         }
         // Route only when delivery is actually about to start. Durable input
         // may wait behind another turn; switching at admission would either
@@ -720,8 +741,7 @@ impl SessionManager {
         let Some(anchor) = anchor else {
             return Ok(());
         };
-        let mut summary = vec![self.summary(&meta.id).await?];
-        crate::workflow::summarize_sessions(state, &mut summary).await;
+        let summary = [self.summary(&meta.id).await?];
         let consultation = !live.pending_permissions.lock().await.is_empty();
         // Deferred lanes are announced as counts and ids only. Their content
         // is deliberately withheld: an Agent that needs it reads the
@@ -763,6 +783,7 @@ impl SessionManager {
         } else {
             text
         };
+        let text = self.update_context(state, &meta.id, text).await;
         // Each delivered inbox turn has a new user-visible message as its
         // anchor. Continuing the previous round would put work from both
         // sides of an interruption under the first message's trunk. A formal
@@ -828,15 +849,15 @@ mod tests {
         }
     }
 
-    /// The property lanes exist for: a person's new requirement and a Run's
+    /// The property lanes exist for: a person's new requirement and a script's
     /// asynchronous notice never arrive as one batch, so "which of these am I
     /// being asked to act on" stops being something the model has to infer.
     #[test]
     fn one_turn_carries_one_lane_and_defers_the_rest() {
         let ready = [
-            entry("m_notice", "workflow"),
+            entry("m_notice", "system"),
             entry("m_typed", "user"),
-            entry("m_second_notice", "workflow"),
+            entry("m_second_notice", "system"),
         ];
         let primary = primary_lane(ready.iter());
         let (pending, deferred): (Vec<_>, Vec<_>) =
@@ -859,18 +880,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["m_notice", "m_second_notice"],
         );
-    }
-
-    #[test]
-    fn workflow_notices_still_form_a_turn_when_no_one_is_typing() {
-        let ready = [entry("m_a", "workflow"), entry("m_b", "workflow")];
-        let primary = primary_lane(ready.iter());
-        let (pending, deferred): (Vec<_>, Vec<_>) =
-            ready.iter().partition(|e| lane_of(e) == primary);
-
-        assert_eq!(primary, Lane::Activity);
-        assert_eq!(pending.len(), 2, "one lane still batches within itself");
-        assert!(deferred.is_empty());
     }
 
     /// An unknown source must not silently become Activity: anything the

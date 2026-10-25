@@ -2,7 +2,7 @@
 //!
 //! A preview receive window of 3MiB lets that much sit in front of every other
 //! stream on the same daemon socket. Only Fabric previews are paced; direct
-//! and RTC peers do not share that socket. The cap starts at 640KiB and follows
+//! and RTC peers do not share that socket. The cap starts at 576KiB and follows
 //! the rate implied by client acks, about 200ms of that rate. One completed
 //! window of at least half the start size that returns within 900ms opens
 //! straight to the protocol ceiling, including a fast loopback drain. The
@@ -15,9 +15,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-const START_BYTES: u64 = 640 * 1024;
+// Leave queueing headroom below the 1200ms interactive latency budget at 5Mbps.
+const START_BYTES: u64 = 576 * 1024;
 const RATE_TARGET: Duration = Duration::from_millis(200);
-/// A full start window on a 5Mbps uplink takes about a second. Anything slower
+/// A full start window on a 5Mbps uplink takes about 944ms. Anything slower
 /// than this stays at the start so the first RPC is not stuck behind a megabyte.
 const OPEN_DRAIN_MAX: Duration = Duration::from_millis(900);
 // Every admitted physical peer may keep at most one record in flight even
@@ -427,7 +428,7 @@ mod tests {
         let second = share.reserve(500 * 1024);
         tokio::pin!(second);
         tokio::select! {
-            _ = &mut second => panic!("reserved past the 640KiB start"),
+            _ = &mut second => panic!("reserved past the 576KiB start"),
             _ = tokio::time::sleep(Duration::from_millis(20)) => {}
         }
         share.release(500 * 1024);

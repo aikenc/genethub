@@ -56,7 +56,6 @@ export { daemonEndpoint, waitForDaemonEndpoint, type DaemonEndpoint, type Daemon
 export { startRelay, type RelayHandle } from "./drivers/relay.ts";
 export { startHub, type HubBrowser, type HubHandle } from "./drivers/hub.ts";
 export { data } from "./builders/index.ts";
-export { clonePackage, seedWorkflowPackage, seedDirectChangePackage, BUILTIN_PACKAGE_ID } from "./flows/main/index.ts";
 export { compareQueueTails } from "./queue.ts";
 export { qualificationReasons } from "../policies/gates.ts";
 export { BlockedError, UnstableError, parseSummaryLanguage, renderRunSummary } from "../infrastructure/public.ts";

@@ -167,7 +167,7 @@ async fn request_cli(body: &Value, timeout: Option<Duration>) -> Result<genet_ht
                 return Err("the local daemon refused CLI admission after one refresh; inspect its health before retrying".into());
             }
             "invalid session-controller CLI identity" => {
-                return Err("the local daemon refused this Session's CLI identity; keep the bound CLI and inspect the Session's state".into());
+                return Err(format!("the local daemon refused this Session's CLI identity ({status}); keep the bound CLI and inspect the Session's state"));
             }
             _ => return Err(format!("the local daemon refused /cli ({status})")),
         }
@@ -176,12 +176,36 @@ async fn request_cli(body: &Value, timeout: Option<Duration>) -> Result<genet_ht
 }
 
 async fn collect(argv: Vec<String>) -> Result<Vec<CliRecord>, String> {
+    collect_inner(argv, true).await
+}
+
+pub(crate) async fn update_call(argv: Vec<String>, scoped: bool) -> Result<Value, String> {
+    let records = collect_inner(argv, scoped).await?;
+    if records.last().and_then(|r| r.exit) != Some(0) {
+        return Err(records
+            .iter()
+            .filter_map(|r| r.line.as_ref())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n"));
+    }
+    records
+        .into_iter()
+        .filter_map(|r| r.line)
+        .find_map(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| v.get("data").cloned())
+        .ok_or_else(|| "update call returned no result".into())
+}
+
+async fn collect_inner(argv: Vec<String>, scoped: bool) -> Result<Vec<CliRecord>, String> {
     let cwd = caller_cwd();
     let mut body = serde_json::json!({
         "argv": argv,
         "cwd": cwd,
     });
-    add_session_controller_identity(&mut body);
+    if scoped {
+        add_session_controller_identity(&mut body);
+    }
     let response = request_cli(&body, Some(Duration::from_secs(15))).await?;
     let body = response
         .text()

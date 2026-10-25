@@ -41,6 +41,7 @@ pub const RESERVED: [&str; 21] = [
     "workspace",
     "file-access",
     "space",
+    "workflow", // Retired name stays reserved; never reinterpret it as an Agent.
     "session",
     "agent",
     "machine",
@@ -53,7 +54,6 @@ pub const RESERVED: [&str; 21] = [
     "shell",
     "speech",
     "client",
-    "workflow",
     "file",
     "provider",
 ];

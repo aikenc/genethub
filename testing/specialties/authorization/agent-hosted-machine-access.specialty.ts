@@ -9,12 +9,12 @@ const scrub = (text: string): string => text.replace(/https?:\/\/\S+|wss?:\/\/\S
 
 defineSpecialty({
   id: "specialty.authorization.agent-hosted-machine-access",
-  title: "An ordinary Agent reaches Hub machines with its account authority and verified identity",
-  oracle: "A real Agent Session runs the product CLI with --machine against a machine only the Hub can introduce and the remote command's own file effect appears, while device list retains ordinary account authority and verified Session identity, and a read-only device remains refused",
+  title: "An ordinary Agent reaches a Hub-introduced machine with owner capabilities and its session identity",
+  oracle: "A real ordinary Agent runs the product CLI through the Hub with a remote file effect, lists its account devices successfully, and reports the same sessionController ID with owner device capability",
   catches: [
     "Hub ticket request refused for an Agent Session and reported as machineNotPaired",
     "Hub-listed online machine that no Agent can reach",
-    "ordinary owner authority loses its Session identity or leaks to a restricted device",
+    "ordinary Agent loses owner capabilities or impersonates a localUser",
   ],
   tags: ["authorization-depth", "cloud-server", "genet-cli"],
   llm: { default: "mock" },
@@ -57,26 +57,26 @@ defineSpecialty({
     // No machine is paired directly with this installation, so the only way
     // for the CLI to reach `machineId` is the Hub's per-connection ticket.
     const root = opened.workspaceRoot;
-    let agentSession = "";
-    await t.stage("agent-runs-cli", async () => {
+    const sessionId = await t.stage("agent-runs-cli", async () => {
       const command = [
         `cd "${root}"`,
         `"$GENEHUB_CLI" --machine ${machineId} shell --workspace ${opened.workspaceId} --timeout 20 -- sh -c 'echo reached > hosted.marker' < /dev/null > hosted.out 2> hosted.err`,
         "echo $? > hosted.exit",
-        `"$GENEHUB_CLI" context < /dev/null > authority.json`,
         `"$GENEHUB_CLI" device list < /dev/null > devices.out 2> devices.err`,
         "echo $? > devices.exit",
+        `"$GENEHUB_CLI" context < /dev/null > context.out 2> context.err`,
+        "echo $? > context.exit",
         "touch done",
       ].join("; ");
       opened.mock.script({ tool: { name: "bash", arguments: { command } } }, { text: "Finished." });
       const session = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
-      agentSession = session;
       await t.flows.main.sendPrompt(opened.client, session, "Run the remote check.");
       try {
         await t.tools.waitUntil(() => existsSync(join(root, "done")), 40_000);
       } catch (error) {
         throw new Error(`the Agent never finished its command: files=${readdirSync(root).join(",")} ${String(error)}`);
       }
+      return session;
     });
 
     await t.stage("assert-effects", async () => {
@@ -86,12 +86,20 @@ defineSpecialty({
         `the Agent's CLI could not run a command on the Hub-introduced machine: exit=${hostedExit} stderr=${scrub(read(join(root, "hosted.err")))}`,
       );
       const devicesExit = read(join(root, "devices.exit")).trim();
-      const devices = JSON.parse(read(join(root, "devices.out")));
-      const authority = JSON.parse(read(join(root, "authority.json"))).data.authority;
-      t.assertions.assert(devicesExit === "0" && devices.type === "device.list" && Array.isArray(devices.data.devices),
-        "ordinary Agent could not inspect its account's devices");
-      t.assertions.assert(authority.principalType === "sessionController" && authority.sessionId === agentSession && authority.grants.includes("devices"),
-        "ordinary Agent lost its verified Session identity or owner capability");
+      const devices = JSON.parse(read(join(root, "devices.out"))) as { type?: string; data?: { devices?: unknown[] } };
+      t.assertions.assert(
+        devicesExit === "0" && devices.type === "device.list" && Array.isArray(devices.data?.devices),
+        `the ordinary Agent could not inspect its account devices: exit=${devicesExit}`,
+      );
+      const context = JSON.parse(read(join(root, "context.out"))) as {
+        type?: string; data?: { authority?: { principalType?: string; sessionId?: string; grants?: string[] } };
+      };
+      t.assertions.assert(
+        read(join(root, "context.exit")).trim() === "0" && context.type === "context"
+          && context.data?.authority?.principalType === "sessionController"
+          && context.data.authority.sessionId === sessionId && context.data.authority.grants?.includes("devices"),
+        "the Agent lost its owner device capability or its authenticated session identity",
+      );
       const restricted = await t.flows.main.pairDevice(opened.client, opened.daemon, ["read"], "read-only");
       try {
         await t.assertions.expectProtocolCode(() => restricted.client.call({ type: "device.list" }), "forbidden");

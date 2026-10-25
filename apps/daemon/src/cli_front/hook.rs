@@ -10,9 +10,9 @@
 use serde_json::json;
 
 use super::output::{self, CliFailure};
+use super::project::resolve_workspace;
 use super::query;
 use super::target::Selection;
-use super::workflow::resolve_workspace;
 
 const USAGE: &str = "usage: genet hook list [--workspace <id>]";
 

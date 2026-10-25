@@ -28,9 +28,9 @@ const MAX_MANIFEST_BYTES: usize = 256 * 1024;
 const MAX_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_REDIRECTS: usize = 3;
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ComponentManifest {
+pub(crate) struct ComponentManifest {
     schema: String,
     channel: String,
     release_version: String,
@@ -42,7 +42,7 @@ struct ComponentManifest {
     activation: ComponentActivation,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ArtifactDescriptor {
     sources: Vec<ArtifactSource>,
@@ -50,13 +50,13 @@ struct ArtifactDescriptor {
     size: u64,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ArtifactSource {
     url: String,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ComponentActivation {
     enabled: bool,
@@ -100,9 +100,14 @@ pub fn has_update_source() -> bool {
 /// The version of the component this process actually loaded, recorded at
 /// instantiate time from the signed envelope. Raw unsigned builds report
 /// nothing, which the guest surfaces as a source build.
+static RUNNING_HASH: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
 static RUNNING_VERSION: OnceLock<Mutex<Option<ProductVersion>>> = OnceLock::new();
 
 pub fn note_running_component(bytes: &[u8]) {
+    if let Ok(mut hash) = RUNNING_HASH.get_or_init(|| Mutex::new(None)).lock() {
+        *hash = Some(sha256_hex(bytes));
+    }
     let version = SignedArtifact::from_single_file(bytes)
         .ok()
         .and_then(|signed| ProductVersion::parse(signed.envelope.release_version()).ok());
@@ -151,7 +156,8 @@ fn open_runtime() -> Result<Runtime> {
     .map_err(|error| anyhow!("{error}"))?;
     let root = store_root()?;
     let store = ArtifactStore::open(root, verifier).map_err(|error| anyhow!("{error}"))?;
-    store
+    let transaction = store.transaction().map_err(|error| anyhow!("{error}"))?;
+    transaction
         .recover_candidate()
         .map_err(|error| anyhow!("recovering the signed component candidate: {error}"))?;
     let baseline_version = bundled_version()?;
@@ -160,13 +166,14 @@ fn open_runtime() -> Result<Runtime> {
         // update the store's high-water mark already sits above it, and that
         // is the normal state of an updated machine, not a replay. Refusing
         // it here would kill every cold start after the first Live update.
-        match store.advance_high_water(baseline) {
+        match transaction.advance_high_water(baseline) {
             Ok(()) | Err(ArtifactError::VersionReplay { .. }) => {}
             Err(error) => {
                 return Err(anyhow!("recording bundled component version: {error}"));
             }
         }
     }
+    drop(transaction);
     Ok(Runtime {
         store,
         baseline_version,
@@ -199,28 +206,7 @@ fn parse_bundled_version(raw: Option<&str>) -> Result<Option<ProductVersion>> {
 }
 
 fn store_root() -> Result<PathBuf> {
-    let data = std::env::var(channel::ENV_DATA_DIR)
-        .ok()
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            dirs_data().map(|root| {
-                root.join(match channel::CHANNEL {
-                    "stable" => "GeneHub",
-                    "beta" => "GeneHub-beta",
-                    "dev" => "GeneHub-dev",
-                    _ => "GeneHub-local",
-                })
-            })
-        })
-        .ok_or_else(|| anyhow!("no data directory for the component update store"))?;
-    Ok(data.join("component"))
-}
-
-fn dirs_data() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join(".local").join("share"))
+    Ok(genet_frontdoor::Paths::discover()?.root.join("component"))
 }
 
 pub fn check() -> Result<wit::Status> {
@@ -280,10 +266,13 @@ pub fn check() -> Result<wit::Status> {
 }
 
 pub fn apply(_request_id: &str) -> Result<()> {
+    apply_manifest(fetch_manifest()?)
+}
+
+fn apply_manifest(manifest: ComponentManifest) -> Result<()> {
     if !has_update_source() {
         bail!("这个通道没有签名组件更新源");
     }
-    let manifest = fetch_manifest()?;
     if manifest.schema != RELEASE_MANIFEST_SCHEMA || manifest.channel != channel::CHANNEL {
         bail!("更新清单不属于这个通道");
     }
@@ -353,18 +342,13 @@ pub fn apply(_request_id: &str) -> Result<()> {
     // manifest digest covers the signed file on the wire; the signature
     // already proved they belong together, so there is nothing left to
     // cross-check here.
+    // Only the durable store transaction is shared across processes. Download
+    // and precompile stay outside it, while recovery cannot steal a candidate.
     guard
         .store
-        .stage(&verified)
-        .map_err(|error| anyhow!("staging artifact {}: {error}", verified.artifact_id()))?;
-    guard
-        .store
-        .advance_high_water(&manifest_version)
-        .map_err(|error| anyhow!("{error}"))?;
-    guard
-        .store
-        .commit_candidate(&manifest_version)
-        .map_err(|error| anyhow!("{error}"))?;
+        .transaction()
+        .and_then(|transaction| transaction.activate(&verified))
+        .map_err(|error| anyhow!("activating artifact {}: {error}", verified.artifact_id()))?;
     // §5.1.6: derive the precompiled artifact now, while the user is already
     // waiting, so the reload that follows deserializes instead of compiling.
     // A failure here never fails the update — the reload compiles from the
@@ -393,13 +377,17 @@ pub fn load_active_bytes() -> Result<Option<Vec<u8>>> {
     // that no longer verifies — corrupted, or signed for another App ABI
     // after an App upgrade — must not keep the machine from starting. Fall
     // back to the bundled component and drop the unusable file.
-    let active = match guard.store.load_active() {
+    let transaction = guard
+        .store
+        .transaction()
+        .map_err(|error| anyhow!("{error}"))?;
+    let active = match transaction.load_active() {
         Ok(active) => active,
         Err(error) => {
             crate::load::debug_log(&format!(
                 "the stored active component is unusable ({error}); falling back to the bundled one"
             ));
-            guard.store.discard_active_quietly();
+            transaction.discard_active_quietly();
             return Ok(None);
         }
     };
@@ -425,6 +413,8 @@ fn current_version(runtime: &Runtime) -> Result<String> {
     }
     let highest = runtime
         .store
+        .transaction()
+        .map_err(|error| anyhow!("{error}"))?
         .highest_version()
         .map_err(|error| anyhow!("{error}"))?;
     let current = match (highest, &runtime.baseline_version) {
@@ -539,6 +529,87 @@ impl wit::Host for crate::load::Host {
             .await
             .map_err(|error| format!("component update apply task: {error}"))?
     }
+}
+
+/// Native CLI consumer. Network IO happens outside the resident guest.
+pub fn native_cli(args: &[String]) -> Result<serde_json::Value> {
+    match args.first().map(String::as_str) {
+        Some("check") if args.len() == 2 => {
+            let bytes = std::fs::read(&args[1])?;
+            note_running_component(&bytes);
+            let manifest = fetch_manifest()?;
+            if manifest.schema != RELEASE_MANIFEST_SCHEMA || manifest.channel != channel::CHANNEL {
+                bail!("component manifest channel/schema mismatch");
+            }
+            if !manifest.activation.enabled {
+                bail!("component activation is paused");
+            }
+            let mut value = serde_json::to_value(&manifest)?;
+            value["appRequired"] =
+                serde_json::json!(manifest.app_abi_hash != abi::hex_digest(&abi::host_digest()));
+            Ok(value)
+        }
+        Some("apply") if args.len() == 3 => {
+            note_running_component(&std::fs::read(&args[1])?);
+            let manifest: ComponentManifest =
+                genet_frontdoor::managed_update::read(std::path::Path::new(&args[2]))?;
+            let target = serde_json::to_value(&manifest)?;
+            apply_manifest(manifest)?;
+            Ok(target)
+        }
+        _ => bail!(
+            "usage: component-update check <bundled.wasm> | apply <bundled.wasm> <manifest.json>"
+        ),
+    }
+}
+pub fn running_sha256() -> Option<String> {
+    RUNNING_HASH
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|v| v.clone())
+}
+
+/// An exited process may already have migrated data. Record entry before the
+/// guest can open it, so a lock-free failed startup never authorises downgrade.
+/// Both CLI-managed and direct-Host service entries pass through this boundary.
+pub(crate) fn note_daemon_start() -> anyhow::Result<()> {
+    use genet_frontdoor::managed_update as records;
+    let paths = genet_frontdoor::Paths::discover()?;
+    let requests = records::root(&paths.root).join("requests");
+    let entries = match std::fs::read_dir(requests) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    let host = std::env::current_exe()?.canonicalize()?;
+    for entry in entries {
+        let dir = entry?.path();
+        let Ok(request) = records::read::<records::Request>(&dir.join("request.json")) else {
+            continue;
+        };
+        let Ok(progress) = records::read::<records::Progress>(&dir.join("progress.json")) else {
+            continue;
+        };
+        if request.schema == "genehub.update-request.v1"
+            && request.channel == crate::channel::CHANNEL
+            && request.kind == "app"
+            && request.host == host
+            && progress.phase == "starting"
+            && request
+                .app
+                .as_ref()
+                .is_some_and(|a| a.version == env!("CARGO_PKG_VERSION"))
+        {
+            records::write(
+                &dir.join("startup-observed.json"),
+                &serde_json::json!({
+                    "hostVersion":env!("CARGO_PKG_VERSION"),"pid":std::process::id(),"atMs":records::now_ms()
+                }),
+            )?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

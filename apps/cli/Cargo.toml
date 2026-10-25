@@ -21,6 +21,11 @@ genet-frontdoor = { path = "../../packages/frontdoor" }
 genet-http = { path = "../../packages/http" }
 genet-native = { path = "../../packages/native" }
 
+anyhow.workspace = true
+sha2 = "0.10"
+uuid.workspace = true
+flate2 = "1"
+tar = "0.4"
 base64.workspace = true
 futures-util.workspace = true
 fs2.workspace = true
