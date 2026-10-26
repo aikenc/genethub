@@ -859,6 +859,8 @@ defineSpecialty(
         daemonLink.resetStats();
         clientLink.resetStats();
         const probe = new PreviewProbe();
+        const logPath = path.join(t.env.data, "logs", "daemon.log");
+        const sampleLogOffset = readFileSync(logPath, "utf8").length;
         const client = await connectProductClient({
           url: routedRendezvous,
           credential,
@@ -872,7 +874,6 @@ defineSpecialty(
             // not after samples from a different RTT or expired idle state.
             await measurePreview(t, {client, opened, file, probe});
           }
-          const logPath = path.join(t.env.data, "logs", "daemon.log");
           const timingsBefore = readFileSync(logPath, "utf8").split("\n").filter(line => line.includes("preview_stage_timing")).length;
           const throttleCount = () => {
             try { return Number(/nr_throttled (\d+)/.exec(readFileSync("/sys/fs/cgroup/cpu/cpu.stat", "utf8"))?.[1] ?? 0); }
@@ -912,13 +913,21 @@ defineSpecialty(
             );
           }
           const product = await preview;
+          if (coldBulk) {
+            const rows = readFileSync(logPath, "utf8").slice(sampleLogOffset).replace(/\u001b\[[0-9;]*m/g, "").split("\n");
+            const numeric = (line: string, keys: string[]) => keys.map(key => Number(new RegExp(`${key}=(\\d+)`).exec(line)?.[1] ?? -1));
+            const initial = rows.filter(line => line.includes('event="uplink_initial_sample"')).map(line => numeric(line, ["cap_bytes", "sample_rtt_us", "baseline_rtt_us", "sample_bytes"]));
+            const windows = rows.filter(line => line.includes('event="uplink_pace"')).slice(0, 4).map(line => numeric(line, ["cap_bytes", "previous_bytes", "drain_ms", "probed_bytes", "overrun_fits_bytes"]));
+            t.note(`bootstrap${samples.length + 1} seed[cap,rttUs,baseUs,bytes]=${JSON.stringify(initial)} windows[cap,prev,drainMs,probed,overrun]=${JSON.stringify(windows)}`);
+          }
           if (coldStart) t.note(`sample${samples.length + 1}: tcp=${tcp.elapsedMs.toFixed(0)} product=${product.elapsedMs.toFixed(0)} first=${product.firstByteMs} body=${product.transferMs} rpc=${busyRpcMs?.toFixed(0)} throttledPeriods=${throttleCount() - throttledBefore}`);
           // The receiver finishing precedes the final ACK reaching the sender.
           // Keep that stream alive long enough to record its completed stages.
           if (startup !== "cold-abrupt") await t.tools.waitUntil(() => readFileSync(logPath, "utf8").split("\n").filter(line => line.includes("preview_stage_timing")).length > timingsBefore, 3000);
           if (product.elapsedMs > 2800) {
-            const line = readFileSync(logPath, "utf8").split("\n").filter(line => line.includes("preview_stage_timing")).at(-1);
-            t.note(`slow stages: ${line}`);
+            const line = readFileSync(logPath, "utf8").replace(/\u001b\[[0-9;]*m/g, "").split("\n").filter(line => line.includes("preview_stage_timing")).at(-1) ?? "";
+            const keys = ["scan_us", "send_us", "write_credit_us", "write_completion_us", "write_actor_send_us", "write_wake_us", "finish_us"];
+            t.note(`slow stages ${samples.length + 1}: ${JSON.stringify(Object.fromEntries(keys.map(key => [key, Number(new RegExp(`${key}=(\\d+)`).exec(line)?.[1] ?? -1)])))}`);
           }
           samples.push(
             recordUtilization(t, {
@@ -966,9 +975,9 @@ defineSpecialty(
       relay.stop();
       await rawServer.stop();
     }
-    const decisions = readFileSync(path.join(t.env.data, "logs", "daemon.log"), "utf8").split("\n").filter(line => (line.includes('event="uplink_pace"') || line.includes('preview_stage_timing')));
-    t.note(`pace decisions: ${decisions.slice(-8).join(" | ")}`);
-    t.note(`startup=${startup}; ${samples.map(sample => sample.line).join("; ")}`);
+    const decisions = readFileSync(path.join(t.env.data, "logs", "daemon.log"), "utf8").replace(/\u001b\[[0-9;]*m/g, "").split("\n").filter(line => line.includes('event="uplink_pace"'));
+    t.note(`pace tail [cap,drainMs,probed,overrun]: ${JSON.stringify(decisions.slice(-6).map(line => ["cap_bytes", "drain_ms", "probed_bytes", "overrun_fits_bytes"].map(key => Number(new RegExp(`${key}=(\\d+)`).exec(line)?.[1] ?? -1))))}`);
+    t.note(`startup=${startup}; samples=${samples.length}`);
     for (const sample of samples) {
       if (coldSmall) {
         // Cold budget discovery costs at most one RTT plus the actor's 100ms
