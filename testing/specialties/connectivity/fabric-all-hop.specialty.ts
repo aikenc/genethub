@@ -74,17 +74,22 @@ for (const v of variants) defineSpecialty({
         interrupt = control.call({ type: "session.interrupt", payload: { sessionId: controlSession! } }).then(r => { interruptMs = Math.round(performance.now()-began); interruptOk = r?.type === "ack"; }, () => { interruptMs = Math.round(performance.now()-began); });
       }
     }, faultAt);
-    const rpc: number[] = []; let errors=0;
+    const rpc: number[] = []; const wire: number[][] = []; let errors=0;
     while (performance.now()-start < (narrow ? 26000 : 20000)) {
       const began = performance.now();
       try { const reply = await control.call({ type: rpc.length%2 ? "session.list" : "workspace.list", ...(rpc.length%2 ? { payload: { workspaceId: null, includeArchived: false } } : {}) } as Parameters<typeof control.call>[0]); if (reply?.type !== "workspaces" && reply?.type !== "sessions") errors++; }
       catch { errors++; }
-      rpc.push(performance.now()-began); await pause(250);
+      rpc.push(performance.now()-began);
+      if (v.scenario === "duplex" && wire.length < 8 && performance.now()-start >= (wire.length + 1) * 2000) {
+        const connections = link.connections();
+        wire.push([Math.round(performance.now()-start), ...pool.nodeFlowIds.flatMap(id => connections.find(c => c.id === id)?.bytes ?? [0,0])]);
+      }
+      await pause(250);
     }
     const busy = link.stats();
     if (interrupt) await interrupt;
     t.note(JSON.stringify({ phase: "loaded", variant: v.name, rpc: quantiles(rpc), errors, faultApplied, hotBusy,
-      nodeChannels: pool.nodeFlowIds.length, browserChannels: clients.length, shapedConnections: busy.accepted,
+      wire, nodeChannels: pool.nodeFlowIds.length, browserChannels: clients.length, shapedConnections: busy.accepted,
       bytes: busy.forwardedBytes.map((b,i) => b-before.forwardedBytes[i]!), peakQueuedBytes: busy.peakQueuedBytes, logicalOwners: new Set(owners).size }));
     link.setProfile({ bandwidthMbps: 1000, rttMs: 0 });
     if (v.scenario === "slow-consumer") for (const stream of streams) results.push(collectShellResult(stream).then(r => r, () => null));

@@ -675,6 +675,7 @@ defineSpecialty(
     requireWasmArtifacts(t.openRoot);
     const file = seedImage(t, "neteff-direct-8m.png", 8 * MIB);
     const rawServer = await startTcpPayloadServer(file.sizeBytes);
+    t.env.env.GENEHUB_LOCAL_LOG = "warn,genet_daemon::dataplane::uplink_pace=info,genet_daemon::dataplane::preview=debug";
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
     const samples: UtilizationSample[] = [];
     let busyRpcMs: number | null = null;
@@ -708,6 +709,10 @@ defineSpecialty(
             );
           }
           const product = await preview;
+          const pathLog = readFileSync(path.join(t.env.data, "logs", "daemon.log"), "utf8").split("\n");
+          t.note(`direct native path rtt=${rttMs}ms: ${pathLog.filter(line =>
+            line.includes('event="uplink_initial_sample"') || line.includes('event="uplink_pace"') ||
+            line.includes('event="preview_stage_timing"')).slice(-8).join(" | ")}`);
           samples.push(
             recordUtilization(t, {
               label: `direct rtt=${rttMs}ms`,

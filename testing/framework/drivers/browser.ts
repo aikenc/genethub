@@ -1,34 +1,76 @@
 import { mkdirSync } from "node:fs";
+import { spawn } from "node:child_process";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
-import type { BrowserContextOptions } from "playwright";
+import type { BrowserContextOptions, Page } from "playwright";
 import type { Target } from "@genehub/workbench/client";
 import type { DaemonEndpoint } from "./daemon.ts";
-import { BlockedError } from "../../infrastructure/public.ts";
+import { BlockedError, createLease, releaseLease, waitForExit } from "../../infrastructure/public.ts";
 
-export async function openBrowser(options: BrowserContextOptions = {}, evidence: { trace?: boolean } = {}) {
+type BrowserEvidence = { trace?: boolean; naturalVisibility?: boolean };
+
+export async function openBrowser(options: BrowserContextOptions = {}, evidence: BrowserEvidence = {}) {
   if (process.env.TESTCTL_BROWSER_SELECTED !== "1") throw new BlockedError("Select a Playwright case to use the browser fixture");
   const { chromium } = await import("playwright");
   let browser;
-  try { browser = await chromium.launch({ headless: true }); }
-  catch (error) { throw new BlockedError(`Playwright Chromium is unavailable: ${String(error)}`); }
-  const context = await browser.newContext(options);
+  let stopNative: (() => Promise<void>) | undefined;
+  try {
+    if (evidence.naturalVisibility) {
+      if (Object.keys(options).some(key => key !== "viewport")) throw new Error("Natural visibility supports viewport options only");
+      // Playwright's normal launch enables focus emulation on its own CDP
+      // session. A second session cannot clear that override. A fresh owned
+      // profile plus public noDefaults keeps real browser visibility intact.
+      const lease = createLease("genehub-browser-");
+      const child = spawn(chromium.executablePath(), ["--no-sandbox", "--no-first-run", "--disable-dev-shm-usage", "--remote-debugging-port=0", `--user-data-dir=${path.join(lease.data, "profile")}`, "about:blank"], {
+        env: { ...process.env, ...lease.env }, stdio: ["ignore", "ignore", "pipe"],
+      });
+      stopNative = async () => {
+        try {
+          if (child.exitCode === null && child.signalCode === null) {
+            const exited = waitForExit(child, 5000);
+            child.kill("SIGTERM");
+            await exited;
+          }
+        } finally { releaseLease(lease); }
+      };
+      const endpoint = await new Promise<string>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("Chromium did not expose a debugging endpoint")), 15000);
+        let tail = "";
+        child.stderr!.on("data", (chunk: Buffer) => {
+          tail = (tail + chunk.toString()).slice(-4096);
+          const found = /DevTools listening on (ws:\/\/[^\s]+)/.exec(tail);
+          if (found) { clearTimeout(timer); resolve(found[1]!); }
+        });
+        child.once("error", error => { clearTimeout(timer); reject(error); });
+        child.once("exit", () => { clearTimeout(timer); reject(new Error("Chromium exited before connecting")); });
+      });
+      browser = await chromium.connectOverCDP(endpoint, { noDefaults: true });
+    } else browser = await chromium.launch({ headless: true });
+  }
+  catch (error) { await stopNative?.(); throw new BlockedError(`Playwright Chromium is unavailable: ${String(error)}`); }
+  try {
+  const context = evidence.naturalVisibility ? browser.contexts()[0]! : await browser.newContext(options);
   const artifacts = process.env.TESTCTL_BROWSER_ARTIFACTS;
   if (artifacts) mkdirSync(artifacts, { recursive: true });
   if (evidence.trace !== false) await context.tracing.start({ screenshots: true, snapshots: true });
   const page = await context.newPage();
+  if (evidence.naturalVisibility && options.viewport) await page.setViewportSize(options.viewport);
   page.setDefaultTimeout(15_000);
   return { page, context, async close() {
     try { if (evidence.trace !== false) await context.tracing.stop(artifacts ? { path: path.join(artifacts, "trace.zip") } : undefined); }
-    finally { await browser.close(); }
+    finally { try { await browser.close(); } finally { await stopNative?.(); } }
   } };
+  } catch (error) {
+    try { await browser.close(); } finally { await stopNative?.(); }
+    throw error;
+  }
 }
 
 /** Mount the public embedding entry against the real authenticated endpoint.
  * Vite is the product build pipeline; no private store or UI implementation
  * is imported or replaced by a test double. */
-export async function openWorkbenchPage(openRoot: string, getEndpoint: () => DaemonEndpoint, workspaceId: string, sessionId: string, options: BrowserContextOptions = {}, evidence: { trace?: boolean } = {}, catalog?: { targets(): Target[]; endpoint(id:string): DaemonEndpoint }) {
+export async function openWorkbenchPage(openRoot: string, getEndpoint: () => DaemonEndpoint, workspaceId: string, sessionId: string, options: BrowserContextOptions = {}, evidence: BrowserEvidence & { beforeNavigate?(page: Page): Promise<void> } = {}, catalog?: { targets(): Target[]; endpoint(id:string): DaemonEndpoint }) {
   const endpoint = getEndpoint();
   const require = createRequire(path.join(openRoot, "packages/workbench/package.json"));
   const vite = await import(pathToFileURL(require.resolve("vite")).href);
@@ -86,6 +128,7 @@ createRoot(document.getElementById('root')).render(${catalog ? 'React.createElem
     if (!url) throw new Error("Vite did not expose the public Workbench");
     const browser = await openBrowser(options, evidence);
     try {
+      await evidence.beforeNavigate?.(browser.page);
       const route = `d/${encodeURIComponent(endpoint.localServerProof.machineId)}/w/${encodeURIComponent(workspaceId)}/s/${encodeURIComponent(sessionId)}`;
       await browser.page.goto(url + route, {waitUntil: "domcontentloaded", timeout: 45_000});
       return { ...browser, async close() { try { await browser.close(); } finally { await server.close(); process.chdir(originalCwd); } } };

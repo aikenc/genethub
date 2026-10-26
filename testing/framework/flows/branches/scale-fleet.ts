@@ -7,12 +7,12 @@ import { startSharedBottleneck } from "../../drivers/shared-bottleneck.ts";
 import type { CaseContext } from "../../context.ts";
 import { daemonEndpoint } from "../../drivers/daemon.ts";
 import { runGenetAsync } from "../../drivers/cli.ts";
-import { Client, type WebSocketLike } from "@genehub/workbench/client";
+import { Client, type ClientDiagnosticEvent, type WebSocketLike } from "@genehub/workbench/client";
 import { WebSocket } from "ws";
 
 /** Real isolated machines, not mocked session stores. Labels model team membership;
  * this does not manufacture a Hub team ACL or claim the UI already aggregates them. */
-export async function openScaleFleet(t: CaseContext, machines: number, members: number, separateControl = false, poolOptions: { nodeChannels?: number; dataChannels?: number; bothLegs?: boolean; automatic?: boolean } = {}) {
+export async function openScaleFleet(t: CaseContext, machines: number, members: number, separateControl = false, poolOptions: { nodeChannels?: number; dataChannels?: number; bothLegs?: boolean; automatic?: boolean; nativeLog?: string; floodIntervalMs?: number; onDiagnostic?: (machine: number, event: ClientDiagnosticEvent) => void } = {}) {
   const relay = await startRelay({ openRoot: t.openRoot });
   const link = await startSharedBottleneck(relay.origin, { bandwidthMbps: 1000, rttMs: 0 });
   const nodes: Array<{ lease: ReturnType<typeof createLease>; opened: Awaited<ReturnType<typeof t.flows.main.openWorkspace>>; client: Client; dataClients: Client[]; control: Client; sessions: string[]; workspaces: string[]; pid: number; agent: ReturnType<typeof registerControlledAgent> }> = [];
@@ -34,7 +34,8 @@ export async function openScaleFleet(t: CaseContext, machines: number, members: 
   try {
     for (let machine = 0; machine < machines; machine++) {
       const lease = createLease("genehub-scale-");
-      const agent = registerControlledAgent(lease, { id: "scale-agent", profile: "flood-events", floods: 200, delayMs: 1000 });
+      if (poolOptions.nativeLog) lease.env.GENEHUB_LOCAL_LOG = poolOptions.nativeLog;
+      const agent = registerControlledAgent(lease, { id: "scale-agent", profile: "flood-events", floods: 200, delayMs: 1000, floodIntervalMs: poolOptions.floodIntervalMs ?? 0 });
       let opened: Awaited<ReturnType<typeof t.flows.main.openWorkspace>>;
       try { opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease }); }
       catch (error) { releaseLease(lease); throw error; }
@@ -64,7 +65,7 @@ export async function openScaleFleet(t: CaseContext, machines: number, members: 
       await t.tools.waitUntil(async () => { const r = await opened.client.call({ type: "device.list" }); if (r?.type === "devices") lanes = r.data.remote.channels ?? []; return lanes.length === count && lanes.every(l => l.online); },15000);
       const laneUrl = (lane: number) => { const value = new URL(lanes[lane % count]!.url); value.host = new URL(relay.origin).host; return poolOptions.bothLegs ? link.urlFor(value.toString()) : value.toString(); };
       const url = new URL(laneUrl(poolOptions.automatic ? 0 : count > 1 ? 1 : 0));
-      node.client = new Client({ separateDataChannel: poolOptions.automatic ? undefined : false, url: url.toString(), credential: paired.credential, rtcEnabled: false, requestTimeoutMs: 10000,
+      node.client = new Client({ onDiagnostic: event => poolOptions.onDiagnostic?.(machine, event), separateDataChannel: poolOptions.automatic ? undefined : false, url: url.toString(), credential: paired.credential, rtcEnabled: false, requestTimeoutMs: 10000,
         socketFactory: u => new WebSocket(u) as unknown as WebSocketLike,
         redial: async () => ({ url: url.toString(), credential: paired.credential }),
       });
@@ -84,7 +85,7 @@ export async function openScaleFleet(t: CaseContext, machines: number, members: 
       node.control = node.client;
       if (separateControl) {
         const controlUrl = laneUrl(0);
-        node.control = new Client({ separateDataChannel: false, url: controlUrl, credential: paired.credential, rtcEnabled: false, requestTimeoutMs: 10000,
+        node.control = new Client({ onDiagnostic: event => poolOptions.onDiagnostic?.(machine, event), separateDataChannel: false, url: controlUrl, credential: paired.credential, rtcEnabled: false, requestTimeoutMs: 10000,
           socketFactory: u => new WebSocket(u) as unknown as WebSocketLike,
           redial: async () => ({ url: controlUrl, credential: paired.credential }),
         });

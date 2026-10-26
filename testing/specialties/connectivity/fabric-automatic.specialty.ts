@@ -1,5 +1,5 @@
 import { randomBytes, createHash } from "node:crypto";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { WebSocket } from "ws";
 import { Client, type WebSocketLike, type ProtocolDial } from "@genehub/workbench/client";
@@ -14,6 +14,7 @@ for (const hosted of [false, true]) defineSpecialty({
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
   surfaces: ["daemon", "relay", "workbench-client", "cloud-server", "tcp"], productInterfaces: ["@genehub/workbench/client", "hub-http"],
   resources: { environments: 1, cpu: 2, memoryMb: 2048, io: 1, browser: 0, pool: "exclusive" },
+  stages: ["workspace-ready", "control-ready", "body-admission", "control-under-preview", "preview-complete", "physical-recovery", "revocation", "daemon-stop", "mock-stop", "hub-stop", "link-stop"],
   expectedDurationMs: 45000, timeoutMs: 120000, retention: true,
 }, async t => {
   const port = await allocatePort(), token = randomBytes(32).toString("hex");
@@ -22,7 +23,8 @@ for (const hosted of [false, true]) defineSpecialty({
   const hub = await startHub({ databasePath: join(t.env.root, "automatic.sqlite"), relayOrigin: hosted ? link.urlFor(origin) : origin, relayToken: token });
   const relay = await startRelay({ openRoot: t.openRoot, port, ...(hosted ? { control: { origin: hub.origin, token } } : {}) });
   t.env.env.GENEHUB_LOCAL_HUB_URL = hub.origin;
-  const o = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
+  t.env.env.GENEHUB_LOCAL_LOG = "warn,genet_daemon::dataplane::uplink_pace=info";
+  const o = await t.stage("workspace-ready", () => t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env }));
   let client: Client | undefined;
   const events: unknown[] = [];
   try {
@@ -60,8 +62,8 @@ for (const hosted of [false, true]) defineSpecialty({
     }
     client = new Client({...dial,credential,redial,rtcEnabled:false,onDiagnostic(e){if(e.kind === "connection"){events.push({state:e.detail.state,phase:e.detail.phase,lane:e.detail.lane});if(events.length>32)events.shift();}},socketFactory:u=>new WebSocket(u) as unknown as WebSocketLike});
     t.assertions.assert(await client.prepareDataChannel()===client,"an unauthenticated primary opened a companion");
-    client.connect(); await t.tools.waitUntil(()=>client!.connectionState==="ready",15000);
-    const body = await client.prepareDataChannel();
+    client.connect(); await t.stage("control-ready", () => t.tools.waitUntil(()=>client!.connectionState==="ready",15000));
+    const body = await t.stage("body-admission", () => client!.prepareDataChannel());
     t.assertions.assert(body !== client && body.identity?.machineId === client.identity?.machineId,"automatic body route missing or reaches another machine");
     t.assertions.assert(await body.prepareDataChannel() === body,"body carrier recursively opens another owner");
     const owners = [client.logicalConnectionId,body.logicalConnectionId];
@@ -71,23 +73,31 @@ for (const hosted of [false, true]) defineSpecialty({
     link.setProfile({bandwidthMbps:5,rttMs:200});
     const preview = client.preview(o.workspaceId,`${o.rootHandle}/automatic.png`);
     const latency:number[]=[];
-    for(let i=0;i<12;i++){const began=performance.now();const r=await client.call({type:"workspace.list"}); t.assertions.assert(r?.type==="workspaces","control failed under body traffic");latency.push(performance.now()-began);await new Promise(r=>setTimeout(r,100));}
-    const result=await preview;
+    await t.stage("control-under-preview", async () => {
+      for(let i=0;i<12;i++){const began=performance.now();const r=await client!.call({type:"workspace.list"}); t.assertions.assert(r?.type==="workspaces","control failed under body traffic");latency.push(performance.now()-began);await new Promise(r=>setTimeout(r,100));}
+    });
+    const result=await t.stage("preview-complete", () => preview);
     t.assertions.assert(hash(result.bytes)===hash(bytes),"body bytes changed");
+    const pace = readFileSync(join(t.env.data, "logs", "daemon.log"), "utf8").split("\n").filter(line => line.includes('event="uplink_pace"'));
+    t.note(`Native DATA window tail: ${pace.slice(-6).join(" | ")}`);
     latency.sort((a,b)=>a-b); const p95=latency[Math.ceil(latency.length*.95)-1]!;
     t.note(JSON.stringify({hosted,physicalConnections:connections.length,bytes:result.bytes.length,p95,ownersDistinct:true}));
     t.assertions.assert(p95<1500,"automatic production routing exceeded control p95 target");
-    link.setProfile({bandwidthMbps:1000,rttMs:0});
-    for(const flow of link.connections().filter(c=>!c.closed)) link.cutConnection(flow.id);
-    await t.tools.waitUntil(()=>client!.connectionState!=="ready" || body.connectionState!=="ready",3000);
-    await t.tools.waitUntil(()=>client!.connectionState==="ready" && body.connectionState==="ready",20000);
-    const after=await client.call({type:"workspace.list"});
-    const bodyAfter=await body.call({type:"workspace.list"});
-    t.note(JSON.stringify({phase:"recovered",primary:client.logicalConnectionId===owners[0],body:body.logicalConnectionId===owners[1],bodyReady:bodyAfter?.type === "workspaces"}));
-    t.assertions.assert(after?.type==="workspaces" && client.logicalConnectionId===owners[0] && body.logicalConnectionId===owners[1],"physical recovery changed an original logical owner");
-    await revoke();
-    await t.tools.waitUntil(()=>client!.connectionState!=="ready" && body.connectionState!=="ready",8000);
-    t.assertions.assert((await o.client.call({type:"workspace.list"}))?.type==="workspaces","revoking remote owners affected local authority");
-    t.note(JSON.stringify({phase:"revoked",bothOwnersRejected:true,localOwnerRetained:true}));
-  } catch(error) { t.note(JSON.stringify({events,error:String(error)})); throw error; } finally {client?.close();o.client.close();o.daemon.stop();await o.mock.stop();relay.stop();await hub.stop();await link.stop();}
+    await t.stage("physical-recovery", async () => {
+      link.setProfile({bandwidthMbps:1000,rttMs:0});
+      for(const flow of link.connections().filter(c=>!c.closed)) link.cutConnection(flow.id);
+      await t.tools.waitUntil(()=>client!.connectionState!=="ready" || body.connectionState!=="ready",3000);
+      await t.tools.waitUntil(()=>client!.connectionState==="ready" && body.connectionState==="ready",20000);
+      const after=await client!.call({type:"workspace.list"});
+      const bodyAfter=await body.call({type:"workspace.list"});
+      t.note(JSON.stringify({phase:"recovered",primary:client!.logicalConnectionId===owners[0],body:body.logicalConnectionId===owners[1],bodyReady:bodyAfter?.type === "workspaces"}));
+      t.assertions.assert(after?.type==="workspaces" && client!.logicalConnectionId===owners[0] && body.logicalConnectionId===owners[1],"physical recovery changed an original logical owner");
+    });
+    await t.stage("revocation", async () => {
+      await revoke();
+      await t.tools.waitUntil(()=>client!.connectionState!=="ready" && body.connectionState!=="ready",8000);
+      t.assertions.assert((await o.client.call({type:"workspace.list"}))?.type==="workspaces","revoking remote owners affected local authority");
+      t.note(JSON.stringify({phase:"revoked",bothOwnersRejected:true,localOwnerRetained:true}));
+    });
+  } catch(error) { t.note(JSON.stringify({events,error:String(error)})); throw error; } finally {client?.close();o.client.close();await t.stage("daemon-stop", async () => o.daemon.stop());await t.stage("mock-stop", () => o.mock.stop());relay.stop();await t.stage("hub-stop", () => hub.stop());await t.stage("link-stop", () => link.stop());}
 });
