@@ -173,6 +173,7 @@ pub(crate) async fn serve(
     carrier: Carrier,
     kind: CarrierKind,
 ) -> Result<()> {
+    let initial_pace = carrier.uplink_pace.clone();
     let (mut reader, mut writer) = authenticated_channel(key.clone(), carrier, Role::Server);
     let path = match kind {
         CarrierKind::Rtc => resume::Path::Rtc,
@@ -184,6 +185,7 @@ pub(crate) async fn serve(
     let mut created_id = None;
     let admission: Result<_> = async {
         let first = read_control(&mut reader).await?;
+        let mut large_rtt = None;
         let request = if let Message::Create { policy, resumable } = first {
             let policy = match policy.as_str() {
                 "relay-allowed" => Policy::RelayAllowed,
@@ -203,17 +205,23 @@ pub(crate) async fn serve(
             let registry = state.logical_connections.clone();
             let (handle, task) = start(state.clone(), access.clone(), kind, policy, id.clone());
             registry.own_task(&id, task.abort_handle(), handle)?;
-            writer
-                .send(
-                    &Message::Created {
-                        id,
-                        incarnation: created.incarnation,
-                        secret: created.secret,
-                    }
-                    .encode()?,
-                )
-                .await?;
-            read_control(&mut reader).await?
+            let mut created = Message::Created {
+                id,
+                incarnation: created.incarnation,
+                secret: created.secret,
+            }
+            .encode()?;
+            // Same authenticated record path and one client HMAC on both
+            // proof rounds. Key setup already completed, keeping its CPU
+            // cost out of this bounded network serialization sample.
+            if initial_pace.is_some() {
+                created.resize(8192, b' ');
+            }
+            let began = Instant::now();
+            writer.send(&created).await?;
+            let request = read_control(&mut reader).await?;
+            large_rtt = Some((began.elapsed(), created.len()));
+            request
         } else {
             first
         };
@@ -236,6 +244,7 @@ pub(crate) async fn serve(
             &proof,
             Instant::now(),
         )?;
+        let began = Instant::now();
         writer
             .send(
                 &Message::Attached {
@@ -255,6 +264,11 @@ pub(crate) async fn serve(
         };
         if activation_attempt != attempt || decimal(&expected)? != epoch {
             bail!("logical activation mismatch");
+        }
+        let baseline = began.elapsed();
+        if let Some(pace) = &initial_pace {
+            let (large, bytes) = large_rtt.unwrap_or((baseline, 0));
+            pace.observe_initial_path(bytes, large, baseline);
         }
         let handle = state.logical_connections.handle(&id)?;
         Ok((handle, attempt, epoch, position.watermark()?))
