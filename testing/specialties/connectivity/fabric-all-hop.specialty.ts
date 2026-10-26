@@ -23,6 +23,7 @@ for (const v of variants) defineSpecialty({
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"], retention: true,
 }, async t => {
   if (v.scenario === "interrupt") registerControlledAgent(t.env, { id: "pool-control", profile: "accept-then-silent" });
+  if (v.scenario === "duplex") t.env.env.GENEHUB_LOCAL_LOG = "warn,genet_daemon::dataplane::uplink_pace=info";
   const pool = await openFabricPool(t, v.nodes, v.browsers, v.both);
   const { opened: o, clients, link } = pool;
   const control = clients[0]!;
@@ -30,7 +31,7 @@ for (const v of variants) defineSpecialty({
   const streams: ReturnType<typeof control.openShellStream>[] = [];
   const results: Array<Promise<Awaited<ReturnType<typeof collectShellResult>> | null>> = [];
   let timer: NodeJS.Timeout | undefined, faultApplied = false, hotBusy = false, finished = 0;
-  let upload: Promise<{ ack: boolean; error: boolean }> | undefined;
+  let upload: Promise<{ ack: boolean; error: boolean; elapsedMs: number; errorType?: string }> | undefined;
   const loadBytes = 8*1024*1024;
   const before = link.stats();
   try {
@@ -51,7 +52,7 @@ for (const v of variants) defineSpecialty({
     link.setProfile({ bandwidthMbps: v.scenario === "hot-drop" ? 100 : narrow ? .25 : 2, rttMs: v.scenario === "hot-drop" ? 0 : 200 });
     const start = performance.now(); writeFileSync(join(o.workspaceRoot, "pool-go"), "go");
     const uploadText = "upload-pattern-".repeat(70000);
-    if (v.scenario === "duplex") upload = clients.at(-1)!.call({ type: "file.write", payload: { workspaceId: o.workspaceId, path: `${o.rootHandle}/pool-upload.txt`, content: uploadText } }).then(r => ({ ack: r?.type === "ack", error: false }), () => ({ ack: false, error: true }));
+    if (v.scenario === "duplex") upload = clients.at(-1)!.call({ type: "file.write", payload: { workspaceId: o.workspaceId, path: `${o.rootHandle}/pool-upload.txt`, content: uploadText } }).then(r => ({ ack: r?.type === "ack", error: false, elapsedMs: Math.round(performance.now()-start) }), (error: unknown) => ({ ack: false, error: true, errorType: error instanceof Error ? error.name : typeof error, elapsedMs: Math.round(performance.now()-start) }));
     const faultAt = v.scenario === "hot-drop" ? 2000 : 5000;
     let interruptMs: number | null = null, interruptOk = v.scenario !== "interrupt";
     let interrupt: Promise<void> | undefined;
@@ -96,7 +97,11 @@ for (const v of variants) defineSpecialty({
       return Buffer.byteLength(text) === loadBytes && createHash("sha256").update(text).digest("hex") === createHash("sha256").update(Buffer.alloc(loadBytes,65+i)).digest("hex") && t.flows.main.shellExit(outcome.frames)?.code === 0;
     });
     let uploadOk = true;
-    if (upload) { const result = await upload; uploadOk = result.ack && !result.error && existsSync(join(o.workspaceRoot,"pool-upload.txt")) && readFileSync(join(o.workspaceRoot,"pool-upload.txt"),"utf8") === uploadText; }
+    if (upload) { const result = await upload; const fileMatches = existsSync(join(o.workspaceRoot,"pool-upload.txt")) && readFileSync(join(o.workspaceRoot,"pool-upload.txt"),"utf8") === uploadText; uploadOk = result.ack && !result.error && fileMatches; t.note(JSON.stringify({ phase: "upload", ...result, fileMatches, bytes: Buffer.byteLength(uploadText) })); }
+    if (v.scenario === "duplex") {
+      const pace = readFileSync(join(t.env.data, "logs", "daemon.log"), "utf8").split("\n").filter(line => line.includes('event="uplink_pace"') || line.includes('event="uplink_initial_sample"'));
+      t.note(`Native DATA window tail: ${pace.slice(-8).join(" | ")}`);
+    }
     const starts = readFileSync(join(o.workspaceRoot,"pool-starts"),"utf8").trim().split("\n").sort();
     let canceledPids = true;
     if (narrow) {
@@ -117,6 +122,8 @@ for (const v of variants) defineSpecialty({
     t.assertions.assert(pool.nodeFlowIds.length === v.nodes && new Set(owners).size === v.browsers, "physical node channels or independent client journals did not match the requested topology");
     t.assertions.assert(starts.join(",") === "0,1,2" && uploadOk && (narrow ? canceledPids : exact), "output, upload, source-process uniqueness or intentional cancellation did not complete correctly");
     t.assertions.assert(rpc.length >= 3 && errors === 0 && Math.max(...rpc) < 10000, "management RPC exceeded the bounded interaction budget");
+    if (v.scenario === "duplex") t.assertions.assert(busy.peakQueuedBytes[1]! < 512 * 1024,
+      "upload queued half a MiB on the constrained node leg; DATA pacing did not constrain the actual payload path");
     if (controlSession) {
       const stopped = await o.client.call({ type: "session.get", payload: { sessionId: controlSession } });
       t.assertions.assert(interruptOk && stopped?.type === "snapshot" && !!stopped.data.summary.inputSummary?.paused, "remote interrupt failed to retain the Human pause");

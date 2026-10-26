@@ -1029,7 +1029,7 @@ defineSpecialty({
   requireWasmArtifacts(t.openRoot);
   const file = seedImage(t, "cancel-review.png", 24 * MIB);
   const relay = await startRelay({openRoot: t.openRoot});
-  const link = await startShapedTcpProxy({targetUrl: relay.origin, profile: {rttMs: 40, bandwidthMbps: 5}});
+  const link = await startShapedTcpProxy({targetUrl: relay.origin, profile: {rttMs: 40, bandwidthMbps: .5}});
   t.env.env.GENEHUB_LOCAL_LOG = "warn,genet_daemon::dataplane::uplink_pace=info";
   const opened = await t.flows.main.openWorkspace({openRoot: t.openRoot, lease: t.env});
   let client: ProductClient | undefined;
@@ -1049,7 +1049,7 @@ defineSpecialty({
     let completed = false, settled = false;
     const transfer = measurePreview(t, {client, opened, file, probe})
       .then(() => { settled = true; completed = true; return "completed"; }, () => { settled = true; return "cancelled"; });
-    await t.tools.waitUntil(() => link.stats().clientToTargetBytes >= 64 * 1024, 10000);
+    await t.tools.waitUntil(() => link.stats().clientToTargetBytes >= 16 * 1024, 10000);
     const before = link.stats();
     const elapsed = performance.now() - began;
     const logPath = path.join(t.env.data, "logs", "daemon.log");
@@ -1064,7 +1064,7 @@ defineSpecialty({
     const summary = `closeAfterMs=${elapsed.toFixed(0)} sentWireBytes=${before.clientToTargetBytes} completedBeforeClose=${completed} outcome=${outcome} eventsBefore=${earlier.length} after=${after.join(" | ")}`;
     t.note(summary);
     t.assertions.assert(!completed && elapsed < 900 && earlier.length === 0, `slow first-window cancellation precondition not met: ${summary}`);
-    t.assertions.assert(!after.some(line => line.includes("cap_bytes=3145728")), `cancelled bytes opened pacing ceiling: ${summary}`);
+    t.assertions.assert(!after.some(line => { const cap = /cap_bytes=(\d+)/.exec(line); const previous = /previous_bytes=(\d+)/.exec(line); return cap && previous && Number(cap[1]) > Number(previous[1]); }), `cancelled bytes grew pacing window: ${summary}`);
   } finally { client?.close(); opened.client.close(); opened.daemon.stop(); await opened.mock.stop(); await link.stop(); relay.stop(); }
 });
 
