@@ -1094,6 +1094,7 @@ export class Client {
         ? { socketFactory: this.options.socketFactory as unknown as (url: string) => import("../fabric").FabricSocketLike }
         : {}),
       onError: (error) => this.report(error),
+      onDiagnostic: this.options.onDiagnostic ? detail => this.diagnostic("transport", detail) : undefined,
     }).then(
       async (link) => {
         if (!this.finishFabricDial(epoch)) {
@@ -1191,6 +1192,7 @@ export class Client {
       maxBulkStreamWindowBytes: handshake.maxBulkStreamWindowBytes,
       maxReceiveBytesPerStream: 64 * 1024 * 1024,
       onError: (error) => this.report(error),
+      onDiagnostic: this.options.onDiagnostic ? detail => this.diagnostic("transport", detail) : undefined,
     });
     this.endpoint = endpoint;
     this.bindEndpoint(endpoint, epoch);

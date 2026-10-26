@@ -36,6 +36,8 @@ export interface DataEndpointOptions {
   /** Negotiated receive lease for allowlisted finite bulk responses. */
   maxBulkStreamWindowBytes?: number;
   onError?: (error: unknown) => void;
+  /** Bounded read-only transport evidence; contains no payloads or credentials. */
+  onDiagnostic?: (detail: Record<string, string | number | boolean | null>) => void;
 }
 
 export class DataPlaneError extends Error {
@@ -443,6 +445,7 @@ export class DataEndpoint {
         onClose: (reason) => this.closeFromCarrier(reason),
         onRecovering: () => { for (const handler of this.recoveringHandlers) handler(); },
         onReady: () => { for (const handler of this.pathHandlers) handler(); },
+        onDiagnostic: options.onDiagnostic,
       });
     }
   }

@@ -94,6 +94,7 @@ export class LogicalConnection {
     onClose(error: unknown): void;
     onRecovering?(): void;
     onReady?(): void;
+    onDiagnostic?(detail: Record<string, string | number | boolean | null>): void;
   }) {
     this.journal = new ResumeJournal(options.policy ?? "relay-allowed", LIMITS);
     this.clock = setInterval(() => this.tick(), 100);
@@ -160,6 +161,7 @@ export class LogicalConnection {
     finally { this.pendingCount--; if (progress) this.pendingProgress -= bytes; else this.pendingData -= bytes; }
   }
   private async sendOwned(frame: ResumeFrame): Promise<void> {
+    if (frame.kind === DataKind.Open) this.active?.pace?.beginStream();
     let seq: bigint;
     for (;;) {
       this.live();
@@ -308,7 +310,8 @@ export class LogicalConnection {
     this.journal.activate(channel.path, epoch, peer, this.now());
     this.acknowledgeTerminals(peer.received);
     this.epoch = epoch; channel.phase = "synced"; channel.committed = true;
-    channel.pace = channel.path === "rtc" ? null : new SendPace();
+    channel.pace = channel.path === "rtc" ? null : new SendPace(this.options.onDiagnostic
+      ? detail => this.options.onDiagnostic?.({ ...detail }) : undefined);
     const previous = this.active;
     this.active = channel;
     if (previous && previous !== channel) {
