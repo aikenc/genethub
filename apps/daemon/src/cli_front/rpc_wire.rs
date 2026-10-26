@@ -133,6 +133,7 @@ impl Rpc {
             },
             rtc_supported: false,
             max_bulk_stream_window_bytes: None,
+            packet_pair_probe_supported: None,
         };
         timeout_send(
             &mut socket,
@@ -654,6 +655,7 @@ async fn authenticated_fabric(
         auth,
         rtc_supported: false,
         max_bulk_stream_window_bytes: None,
+        packet_pair_probe_supported: None,
     };
     let mut transport_url = crate::http::Url::parse(endpoint)
         .map_err(|error| ConnectError::Protocol(error.to_string()))?;

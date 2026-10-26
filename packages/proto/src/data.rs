@@ -91,6 +91,11 @@ pub struct PeerHello {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub max_bulk_stream_window_bytes: Option<u32>,
+    /// Understands bounded encrypted Ping controls during logical admission.
+    /// Missing advertisements retain the legacy possession-proof sample.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub packet_pair_probe_supported: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

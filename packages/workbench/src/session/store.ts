@@ -371,6 +371,10 @@ interface WorkbenchState {
   download: UpdateDownload;
 
   attach(client: Client): Promise<void>;
+  /** Stop consuming conversation bodies while retaining local tabs and text. */
+  pauseSessionBody(): void;
+  /** Restore the focused body after its page becomes visible again. */
+  resumeSessionBody(): void;
   /** Refreshes AgentSpace composition, Parent tree, Pack and health facts. */
   refreshWorkspaces(): Promise<void>;
   /** Refreshes daemon-owned session status for the sidebar. */
@@ -707,6 +711,7 @@ function shouldExpandLastRound(summary: SessionSummary | undefined): boolean {
 
 /** The reconnect sentence this store put on screen, while it is still true. */
 let reconnectNotice: string | null = null;
+let selectedSessionLoad: { client: Client; sessionId: string } | null = null;
 
 /**
  * The connection-loss sentence put on screen by a request that died with the
@@ -876,7 +881,9 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   download: { state: "idle" },
 
   async attach(client) {
+    get().pauseSessionBody();
     sessionSummaryEpoch++;
+    selectedSessionLoad = null;
     reconnectNotice = null;
     connectionLossNotice = null;
     sessionListTimeoutNotice = null;
@@ -887,9 +894,18 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       sessions: [], sessionsLoaded: false, sessionsError: false,
       agentRequests: [], hiddenAgentRequests: [], repairingAgentIds: [], agentConfig: null });
     let wasReady = false;
+    let logicalOwner = client.logicalConnectionId;
     client.onStateChange((connection) => {
       if (get().client !== client) return;
-      sessionSummaryEpoch++;
+      // A physical resume retains in-flight RPCs. Invalidating their shared
+      // load here creates a second full catalog request beside the first.
+      if (connection === "ready" && client.logicalConnectionId) {
+        if (logicalOwner && logicalOwner !== client.logicalConnectionId) {
+          sessionSummaryEpoch++;
+          void get().refreshWorkspaces();
+        }
+        logicalOwner = client.logicalConnectionId;
+      }
       set({ connection });
       // A connection that was refused knows why — wrong credential, revoked
       // device, protocol mismatch — and none of those are fixed by waiting. Say
@@ -1016,8 +1032,25 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     await loadWorkspaces(client, set).catch(unattended(client, get, set));
   },
 
+  pauseSessionBody() {
+    const state = get(), client = state.client;
+    const ids = new Set(state.subscriptionOwner === client ? state.subscribedSessionIds : []);
+    if (selectedSessionLoad?.client === client) ids.add(selectedSessionLoad.sessionId);
+    selectedSessionLoad = null;
+    if (state.subscribedSessionIds.length || state.subscriptionOwner) set({ subscribedSessionIds: [], subscriptionOwner: null });
+    if (client) for (const id of ids) void Promise.resolve(client.unsubscribe(id)).catch(unattended(client, get, set));
+  },
+
+  resumeSessionBody() {
+    const state = get(), client = state.client, id = state.activeSessionId;
+    if (!client || !id || state.connection !== "ready" || !state.sessionsLoaded) return;
+    if (selectedSessionLoad?.client === client && selectedSessionLoad.sessionId === id) return;
+    void get().selectSession(id).catch(unattended(client, get, set));
+  },
+
   async openWorkspace(root) {
     const client = require_(get().client);
+    get().pauseSessionBody();
     const reply = await client.call({ type: "workspace.open", payload: { root } });
     if (reply?.type !== "workspace") return;
     const opened = reply.data;
@@ -1164,9 +1197,10 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   },
 
   newSession(workspaceId, agentId, options) {
-    const state = get();
-    const target = workspaceId ?? currentWorkspace(state);
+    const target = workspaceId ?? currentWorkspace(get());
     if (!target) return;
+    get().pauseSessionBody();
+    const state = get();
     const localId = options?.localId ?? crypto.randomUUID();
     const cachedDraft = state.client?.identity ? draftIdentities(state.client.identity.machineId).find(item => item.localId === localId) : undefined;
     const normalizedPreferences = normalizeAgentPreferences(
@@ -1261,11 +1295,20 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
 
   async selectSession(sessionId) {
     const client = require_(get().client);
+    const previousSelection = selectedSessionLoad;
+    const stateBefore = get();
+    const warm = previousSelection?.client === client && previousSelection.sessionId === sessionId &&
+      stateBefore.subscriptionOwner === client && stateBefore.subscribedSessionIds.includes(sessionId);
+    const selection = warm ? previousSelection : { client, sessionId };
+    selectedSessionLoad = selection;
+    const ownsSelection = () => get().client === client && get().activeSessionId === sessionId && selectedSessionLoad === selection;
+    const leaving = new Set(stateBefore.subscriptionOwner === client ? stateBefore.subscribedSessionIds.filter(id => id !== sessionId) : []);
+    // Include an initializing subscription, whose snapshot has not landed yet.
+    if (previousSelection?.client === client && previousSelection.sessionId !== sessionId) leaving.add(previousSelection.sessionId);
     const summary = get().sessions.find((entry) => entry.id === sessionId);
     if (summary && client.identity) saveLocalValue(`last:${client.identity.machineId}:${summary.workspaceId}`, sessionId);
     const tabId = `chat:${sessionId}`;
     let evicted: WorkbenchTab[] = [];
-    let warm = false;
     set((state) => {
       // The unstarted conversation gives way to a real one, whether because it
       // just became this session or because the user went elsewhere. Keeping
@@ -1290,11 +1333,6 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
           ];
       const limited = limitTabs(opened, tabId, state.tabLimit, state.sessions);
       evicted = limited.evicted;
-      // Only warm on the client that actually holds the subscription. A machine
-      // switch replaces the client, and a subscription on a client that is gone
-      // delivers nothing.
-      const mine = state.subscriptionOwner === client ? state.subscribedSessionIds : [];
-      warm = mine.includes(sessionId);
       return {
         activeSessionId: sessionId,
         sessionDrafts: [],
@@ -1311,27 +1349,32 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         timeline: state.sessionTimelines[sessionId] ?? emptyTimeline(),
         tabs: limited.tabs,
         sessionTimelines: omitMany(state.sessionTimelines, tabSessionIds(limited.evicted)),
-        subscribedSessionIds: mine.filter((id) => !tabSessionIds(limited.evicted).includes(id)),
+        subscribedSessionIds: warm ? [sessionId] : [],
         activeTabId: tabId,
       };
     });
 
-    discardSubscriptions(client, evicted);
+    for (const id of tabSessionIds(evicted)) leaving.add(id);
+    for (const id of leaving) void Promise.resolve(client.unsubscribe(id)).catch(unattended(client, get, set));
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+      if (selectedSessionLoad === selection) selectedSessionLoad = null;
+      return;
+    }
     refreshSessionDrafts(client, sessionId, get, set);
     refreshPreviewReview(client, sessionId, get, set);
-    // A tab stays warm until it is explicitly closed or LRU-evicted.
+    // Cached tabs retain their local text. Only the focused conversation keeps
+    // consuming body events; selecting it again restores a bounded snapshot.
     if (warm) {
-      // Narrative events keep a background tab current, but its daemon-owned
-      // trunk layer is only refreshed while that tab is on screen.
+      // Re-selecting the current tab keeps its existing live stream.
       scheduleRoundRefresh(get);
       return;
     }
 
-    const { snapshot, replayed } = await client.subscribe(
+    const loaded = await client.subscribe(
       sessionId,
       {
         onEvent: (event) => {
-        if (get().client !== client) return;
+        if (!ownsSelection()) return;
         if (event.event.type === "titleChanged") {
           applyTitle(sessionId, event.event.title, set);
         }
@@ -1369,7 +1412,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
           }
         },
         onResync: (resnapshot, events, reset) => {
-        if (get().client !== client) return;
+        if (!ownsSelection()) return;
         const previous = timelineOf(get(), sessionId);
         const base = reset
           ? fromSnapshot(resnapshot as SessionSnapshot, previous.pending, previous)
@@ -1398,9 +1441,20 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         },
       },
       { expandLastRound: shouldExpandLastRound(summary), recentRounds: 10 },
-    );
+    ).catch((error: unknown) => {
+      if (ownsSelection()) { selectedSessionLoad = null; throw error; }
+      return null;
+    });
 
-    if (get().client !== client) return;
+    if (!loaded || !ownsSelection()) {
+      // Admission can finish after hiding the page or selecting another tab.
+      // Release that late consumer without touching a newer visit to this id.
+      if (selectedSessionLoad?.client !== client || selectedSessionLoad.sessionId !== sessionId) {
+        void Promise.resolve(client.unsubscribe(sessionId)).catch(unattended(client, get, set));
+      }
+      return;
+    }
+    const { snapshot, replayed } = loaded;
     const typedSnapshot = snapshot as SessionSnapshot;
     const current = timelineOf(get(), sessionId);
     const saved = client.identity?.features?.includes("session.input.v1") ? savedInputReceipts(client.identity.machineId, sessionId) : [];
@@ -1642,6 +1696,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   },
 
   openTab(kind, title) {
+    if (kind !== "chat") get().pauseSessionBody();
     const id = kind === "chat" ? `chat:${get().activeSessionId ?? "draft"}` : kind;
     set((state) => {
       if (state.tabs.some((tab) => tab.id === id)) {
@@ -1676,13 +1731,15 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   activateTab(tabId) {
     const tab = get().tabs.find((entry) => entry.id === tabId);
     if (!tab) return;
+    if (tab.kind !== "chat") get().pauseSessionBody();
     set((state) => ({
       activeTabId: tabId,
       tabs: state.tabs.map((entry) =>
         entry.id === tabId ? { ...entry, lastActivatedAt: Date.now() } : entry,
       ),
     }));
-    if (tab.kind === "chat" && tab.sessionId && tab.sessionId !== get().activeSessionId) {
+    if (tab.kind === "chat" && tab.sessionId && (tab.sessionId !== get().activeSessionId ||
+        get().subscriptionOwner !== get().client || !get().subscribedSessionIds.includes(tab.sessionId))) {
       void get().selectSession(tab.sessionId);
     }
   },
@@ -1691,6 +1748,11 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     const { tabs, activeTabId } = get();
     const index = tabs.findIndex((tab) => tab.id === tabId);
     if (index < 0) return;
+    const wasActive = activeTabId === tabId;
+    if (wasActive) get().pauseSessionBody();
+    else if (tabs[index]!.sessionId && get().subscriptionOwner === get().client && get().subscribedSessionIds.includes(tabs[index]!.sessionId!)) {
+      discardSubscriptions(get().client, [tabs[index]!]);
+    }
     const next = tabs.filter((tab) => tab.id !== tabId);
     const fallback = next[Math.max(0, index - 1)] ?? next[0] ?? null;
     set({
@@ -1701,8 +1763,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       ),
       activeTabId: activeTabId === tabId ? (fallback?.id ?? null) : activeTabId,
     });
-    discardSubscriptions(get().client, [tabs[index]!]);
-    if (fallback?.kind === "chat" && fallback.sessionId) {
+    if (wasActive && fallback?.kind === "chat" && fallback.sessionId) {
       void get().selectSession(fallback.sessionId);
     }
   },
@@ -2988,13 +3049,9 @@ async function refreshCatalog(
     (reply) => ({ reply } as const),
     (error: unknown) => ({ error } as const),
   );
-  const workspaces = await client.call({ type: "workspace.list" });
+  const workspaces = await loadWorkspaces(client, set);
   if (useWorkbench.getState().client !== client) return;
-  if (workspaces?.type !== "workspaces") {
-    throw new Error("项目列表暂不可用，请重新连接后再试。");
-  }
-  set({ workspaces: workspaces.data });
-  const first = workspaces.data[0];
+  const first = workspaces[0];
   if (first) {
     const sessions = await loadSessions(client, set);
     // Which project to open on. The newest conversation anywhere, rather than
@@ -3003,7 +3060,7 @@ async function refreshCatalog(
     // the last thing is rarely in the first project alphabetically. Checked
     // against the list, because a session can outlive the workspace's entry.
     const last = newest(sessions);
-    const known = workspaces.data.some((entry) => entry.id === last?.workspaceId);
+    const known = workspaces.some((entry) => entry.id === last?.workspaceId);
     if (mayLand()) set({ activeWorkspaceId: known && last ? last.workspaceId : first.id });
     if (mayLand()) await land(get);
   }
@@ -3020,12 +3077,33 @@ async function refreshCatalog(
   if (mayLand()) await land(get);
 }
 
+const workspaceSummaryLoads = new WeakMap<Client, { epoch: number; promise: Promise<WorkspaceInfo[]> }>();
 async function loadWorkspaces(client: Client, set: Setter): Promise<WorkspaceInfo[]> {
-  const reply = await client.call({ type: "workspace.list" });
-  if (useWorkbench.getState().client !== client) return [];
-  const workspaces = reply?.type === "workspaces" ? reply.data : [];
-  if (reply?.type === "workspaces") set({ workspaces });
-  return workspaces;
+  const epoch = sessionSummaryEpoch;
+  const existing = workspaceSummaryLoads.get(client);
+  if (existing?.epoch === epoch) return existing.promise;
+  const before = new Map(useWorkbench.getState().workspaces.map(workspace => [workspace.id, workspace]));
+  const promise = (async () => {
+    const reply = await client.call({ type: "workspace.list" });
+    if (useWorkbench.getState().client !== client || epoch !== sessionSummaryEpoch) return [];
+    if (reply?.type !== "workspaces") throw new Error("项目列表暂不可用，请重新连接后再试。");
+    set(state => {
+      const current = new Map(state.workspaces.map(workspace => [workspace.id, workspace]));
+      const ids = new Set(reply.data.map(workspace => workspace.id));
+      const workspaces = reply.data.filter(workspace => !before.has(workspace.id) || current.has(workspace.id)).map(workspace => {
+        const previous = before.get(workspace.id), live = current.get(workspace.id);
+        if (!live || live === previous) return workspace;
+        const old = new Map(Object.entries(previous ?? {}));
+        return { ...workspace, ...Object.fromEntries(Object.entries(live).filter(([key, value]) => old.get(key) !== value)) };
+      });
+      workspaces.push(...state.workspaces.filter(workspace => !before.has(workspace.id) && !ids.has(workspace.id)));
+      return { workspaces };
+    });
+    return useWorkbench.getState().workspaces;
+  })();
+  workspaceSummaryLoads.set(client, { epoch, promise });
+  try { return await promise; }
+  finally { if (workspaceSummaryLoads.get(client)?.promise === promise) workspaceSummaryLoads.delete(client); }
 }
 
 /**

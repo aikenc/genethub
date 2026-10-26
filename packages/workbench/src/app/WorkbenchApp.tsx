@@ -203,6 +203,20 @@ export function App({
   const [pendingJumpFrom,setPendingJumpFrom]=useState<Client|null>(null);
   useEffect(() => { if (section === "spaces") setSpacesVisited(true); }, [section]);
   const workbench = useWorkbench();
+  useEffect(() => {
+    const client = workbench.client;
+    if (!client) return;
+    const visibilityChanged = () => {
+      const state = useWorkbench.getState();
+      if (state.client !== client) return;
+      if (document.visibilityState === "hidden" || section !== "sessions" ||
+          !state.activeSessionId || state.activeTabId !== `chat:${state.activeSessionId}`) state.pauseSessionBody();
+      else state.resumeSessionBody();
+    };
+    document.addEventListener("visibilitychange", visibilityChanged);
+    visibilityChanged();
+    return () => document.removeEventListener("visibilitychange", visibilityChanged);
+  }, [workbench.client, section, workbench.activeSessionId, workbench.activeTabId, workbench.connection, workbench.sessionsLoaded]);
   // A background initial draft must not pull the user out of Space browsing.
   // Explicit navigation here handles drafts; external session/tool jumps still
   // reveal their destination (for example Preview feedback or a deep link).

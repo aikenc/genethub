@@ -1067,7 +1067,12 @@ rtcSupported: boolean,
  * Optional bounded stream-window advertisement. v4 uses
  * [`INITIAL_STREAM_WINDOW_BYTES`] when omitted and no Preview exception.
  */
-maxBulkStreamWindowBytes?: number, };
+maxBulkStreamWindowBytes?: number, 
+/**
+ * Understands bounded encrypted Ping controls during logical admission.
+ * Missing advertisements retain the legacy possession-proof sample.
+ */
+packetPairProbeSupported?: boolean, };
 
 export type PeerWelcome = { version: number, serverNonce: string, proof: string, 
 /**

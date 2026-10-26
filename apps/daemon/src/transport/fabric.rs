@@ -4,7 +4,7 @@
 //! mutually authenticated v3 peer link; the peer link then multiplexes all
 //! business exchanges with its own bounded, fair frames.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -261,7 +261,11 @@ impl Drop for PeerSlot {
 }
 
 type Peers = Arc<tokio::sync::Mutex<HashMap<[u8; STREAM_ID_BYTES], PeerSlot>>>;
-type Pending = Arc<tokio::sync::Mutex<HashSet<[u8; STREAM_ID_BYTES]>>>;
+struct PendingPeer {
+    generation: u64,
+    cancelled: Arc<Notify>,
+}
+type Pending = Arc<tokio::sync::Mutex<HashMap<[u8; STREAM_ID_BYTES], PendingPeer>>>;
 
 pub struct FabricUplink {
     task: tokio::task::JoinHandle<()>,
@@ -433,7 +437,8 @@ async fn run_once(
     });
     let socket_writer = AbortOnDrop(socket_writer);
     let peers: Peers = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-    let pending: Pending = Arc::new(tokio::sync::Mutex::new(HashSet::new()));
+    let pending: Pending = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let admission_slots = Arc::new(tokio::sync::Semaphore::new(MAX_PENDING));
     let generation = Arc::new(AtomicU64::new(0));
     let tasks = PeerTasks::default();
 
@@ -459,6 +464,7 @@ async fn run_once(
                             &writer,
                             &peers,
                             &pending,
+                            &admission_slots,
                             &generation,
                             &tasks,
                         ),
@@ -516,6 +522,7 @@ async fn receive(
     writer: &Writer,
     peers: &Peers,
     pending: &Pending,
+    admission_slots: &Arc<tokio::sync::Semaphore>,
     generation: &Arc<AtomicU64>,
     tasks: &PeerTasks,
 ) -> Result<()> {
@@ -529,28 +536,36 @@ async fn receive(
                 writer.reset(frame.stream_id, 3).await;
                 return Ok(());
             }
+            let peer_generation = generation.fetch_add(1, Ordering::Relaxed) + 1;
+            let cancelled = Arc::new(Notify::new());
             {
                 let peers = peers.lock().await;
                 let mut pending = pending.lock().await;
                 if peers.contains_key(&frame.stream_id)
-                    || pending.contains(&frame.stream_id)
+                    || pending.contains_key(&frame.stream_id)
                     || peers.len() + pending.len() >= MAX_PEERS
-                    || pending.len() >= MAX_PENDING
                 {
                     drop(pending);
                     drop(peers);
                     writer.reset(frame.stream_id, 10).await;
                     return Ok(());
                 }
-                pending.insert(frame.stream_id);
+                pending.insert(
+                    frame.stream_id,
+                    PendingPeer {
+                        generation: peer_generation,
+                        cancelled: cancelled.clone(),
+                    },
+                );
             }
-            let peer_generation = generation.fetch_add(1, Ordering::Relaxed) + 1;
             let task = tokio::spawn(serve_peer(
                 state.clone(),
                 admission_source.clone(),
                 writer.clone(),
                 peers.clone(),
                 pending.clone(),
+                admission_slots.clone(),
+                cancelled,
                 frame,
                 peer_generation,
             ));
@@ -653,6 +668,9 @@ async fn receive(
         }
         Kind::Fin | Kind::Reset => {
             peers.lock().await.remove(&frame.stream_id);
+            if let Some(waiter) = pending.lock().await.remove(&frame.stream_id) {
+                waiter.cancelled.notify_one();
+            }
         }
         Kind::Ping => {
             if frame.stream_id != [0; STREAM_ID_BYTES] || !frame.payload.is_empty() {
@@ -677,20 +695,32 @@ async fn serve_peer(
     writer: Writer,
     peers: Peers,
     pending: Pending,
+    admission_slots: Arc<tokio::sync::Semaphore>,
+    cancelled: Arc<Notify>,
     frame: Frame,
     generation: u64,
 ) {
-    let result = serve_peer_inner(
-        state,
-        &admission_source,
-        &writer,
-        &peers,
-        &pending,
-        &frame,
-        generation,
-    )
-    .await;
-    pending.lock().await.remove(&frame.stream_id);
+    // Keep the existing eight executing handshakes, while bounded metadata
+    // waits inside the same 32-peer total. Never block the physical reader.
+    let result = tokio::select! {
+        _ = cancelled.notified() => Ok(()),
+        result = async {
+            let permit = tokio::time::timeout(CONNECT_TIMEOUT, admission_slots.acquire_owned())
+                .await.context("Fabric admission queue timed out")??;
+            serve_peer_inner(
+                state, &admission_source, &writer, &peers, &pending,
+                &frame, generation, permit, cancelled.clone(),
+            ).await
+        } => result,
+    };
+    let mut waiting = pending.lock().await;
+    if waiting
+        .get(&frame.stream_id)
+        .is_some_and(|slot| slot.generation == generation)
+    {
+        waiting.remove(&frame.stream_id);
+    }
+    drop(waiting);
     if let Err(error) = result {
         tracing::debug!(%error, "Fabric peer stream refused");
         writer.reset(frame.stream_id, 4).await;
@@ -712,6 +742,8 @@ async fn serve_peer_inner(
     pending: &Pending,
     frame: &Frame,
     generation: u64,
+    admission_permit: tokio::sync::OwnedSemaphorePermit,
+    cancelled: Arc<Notify>,
 ) -> Result<()> {
     let hello: PeerHello =
         serde_json::from_slice(&frame.payload).context("invalid Fabric peer hello")?;
@@ -761,9 +793,9 @@ async fn serve_peer_inner(
         });
     }
     let (inbound, mut outbound, mut carrier) = endpoint::carrier_channels();
+    carrier.packet_pair_probe = accepted.packet_pair_probe;
     carrier.uplink_pace = Some(writer.pace.peer());
     let flow = StreamFlow::from_wire(frame.value)?;
-    let cancelled = Arc::new(Notify::new());
     let ingress_budget = Arc::new(tokio::sync::Semaphore::new(PEER_INGRESS_BYTES));
     let (ingress, mut queued) = mpsc::channel::<IngressRecord>(PEER_INGRESS_QUEUE);
     let delivery = AbortOnDrop(tokio::spawn(async move {
@@ -785,7 +817,14 @@ async fn serve_peer_inner(
             outbound_flow: flow.clone(),
         },
     );
-    pending.lock().await.remove(&frame.stream_id);
+    let mut waiting = pending.lock().await;
+    if waiting
+        .get(&frame.stream_id)
+        .is_some_and(|slot| slot.generation == generation)
+    {
+        waiting.remove(&frame.stream_id);
+    }
+    drop(waiting);
     writer
         .frame(Frame {
             kind: Kind::Accept,
@@ -798,6 +837,9 @@ async fn serve_peer_inner(
             payload: serde_json::to_vec(&accepted.welcome)?,
         })
         .await?;
+    // The peer is installed and ACCEPT is owned by the bounded writer; its
+    // long-lived business endpoint must not retain a handshake worker.
+    drop(admission_permit);
 
     let peer_writer = writer.clone();
     let stream_id = frame.stream_id;

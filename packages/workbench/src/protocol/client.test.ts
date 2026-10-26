@@ -109,6 +109,62 @@ describe("the logical peer connection", () => {
     client.close();
   });
 
+  it("owns queued request JSON independently of later caller mutation", async () => {
+    const { client, socket } = await connected();
+    const pending: Promise<unknown>[] = [];
+    const observe = (request: Parameters<Client["call"]>[0]) => {
+      const promise = client.call(request);
+      void promise.catch(() => {});
+      pending.push(promise);
+      return promise;
+    };
+    try {
+      for (let i = 0; i < 6; i++) observe({ type: "agent.list" });
+      await waitFor(() => socket.sent.filter(r => r.type === "agent.list").length === 6);
+      const request = { type: "workspace.open" as const, payload: { root: "/original" } };
+      observe(request);
+      request.payload.root = "/changed-after-admission";
+      expect(socket.sent.filter(r => r.type === "workspace.open")).toHaveLength(0);
+      const first = socket.sent.find(r => r.type === "agent.list")!;
+      socket.reply(first.id, { type: "agents", data: [] });
+      await waitFor(() => socket.sent.some(r => r.type === "workspace.open"));
+      expect(socket.sent.find(r => r.type === "workspace.open")!.payload).toEqual({ root: "/original" });
+    } finally {
+      client.close();
+      await Promise.allSettled(pending);
+    }
+  });
+
+  it("orders one session's subscription changes without blocking another session", async () => {
+    const { client, socket } = await connected();
+    const pending: Promise<unknown>[] = [];
+    const call = (request: Parameters<Client["call"]>[0]) => {
+      const result = client.call(request);
+      void result.catch(() => {});
+      pending.push(result);
+      return result;
+    };
+    try {
+      call({ type: "subscribe", payload: { sessionId: "s1", sinceSeq: 0, expandLastRound: false, recentRounds: 1 } });
+      await waitFor(() => socket.sent.some(r => r.type === "subscribe"));
+      const first = socket.lastOf("subscribe");
+      call({ type: "unsubscribe", payload: { sessionId: "s1" } });
+      call({ type: "subscribe", payload: { sessionId: "s1", sinceSeq: 0, expandLastRound: false, recentRounds: 1 } });
+      call({ type: "subscribe", payload: { sessionId: "s2", sinceSeq: 0, expandLastRound: false, recentRounds: 1 } });
+      await waitFor(() => socket.sent.some(r => r.type === "subscribe" && r.payload?.sessionId === "s2"));
+      expect(socket.sent.filter(r => ["subscribe", "unsubscribe"].includes(r.type) && r.payload?.sessionId === "s1")).toEqual([first]);
+      socket.reply(first.id, { type: "subscribed", data: { snapshot: null as never, replayed: [], reset: false } });
+      await waitFor(() => socket.sent.some(r => r.type === "unsubscribe"));
+      const cancel = socket.lastOf("unsubscribe");
+      expect(socket.sent.filter(r => r.type === "subscribe" && r.payload?.sessionId === "s1")).toHaveLength(1);
+      socket.reply(cancel.id, { type: "ack" });
+      await waitFor(() => socket.sent.filter(r => r.type === "subscribe" && r.payload?.sessionId === "s1").length === 2);
+    } finally {
+      client.close();
+      await Promise.allSettled(pending);
+    }
+  });
+
   it("assumes WebProtocol v3 when protocol.identity is missing", async () => {
     const proof = localProof();
     const queue = socketQueue({

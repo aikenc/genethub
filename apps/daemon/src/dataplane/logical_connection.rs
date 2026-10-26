@@ -48,8 +48,15 @@ impl Reader {
         self.incoming.recv().await
     }
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WriteClass {
+    Ordinary,
+    Bulk,
+    Control,
+}
+
 struct Write {
-    bulk: bool,
+    class: WriteClass,
     frame: Frame,
     complete: oneshot::Sender<Result<()>>,
     _permit: OwnedSemaphorePermit,
@@ -62,9 +69,9 @@ pub(crate) struct Writer {
 }
 impl Writer {
     pub async fn send(&mut self, frame: Frame) -> Result<()> {
-        self.send_classified(frame, false).await
+        self.send_classified(frame, WriteClass::Ordinary).await
     }
-    pub(crate) async fn send_classified(&mut self, frame: Frame, bulk: bool) -> Result<()> {
+    pub(crate) async fn send_classified(&mut self, frame: Frame, class: WriteClass) -> Result<()> {
         let size = frame.payload.len() + resume::HEADER_BYTES;
         if size > 16 * 1024 {
             bail!("logical write too large");
@@ -78,7 +85,7 @@ impl Writer {
         let (complete, done) = oneshot::channel();
         self.outgoing
             .send(Write {
-                bulk,
+                class,
                 frame,
                 complete,
                 _permit: permit,
@@ -174,6 +181,7 @@ pub(crate) async fn serve(
     kind: CarrierKind,
 ) -> Result<()> {
     let initial_pace = carrier.uplink_pace.clone();
+    let packet_pair_probe = carrier.packet_pair_probe && initial_pace.is_some();
     let (mut reader, mut writer) = authenticated_channel(key.clone(), carrier, Role::Server);
     let path = match kind {
         CarrierKind::Rtc => resume::Path::Rtc,
@@ -186,6 +194,8 @@ pub(crate) async fn serve(
     let admission: Result<_> = async {
         let first = read_control(&mut reader).await?;
         let mut large_rtt = None;
+        let mut probe_sample = None;
+        let mut probe_permit = None;
         let request = if let Message::Create { policy, resumable } = first {
             let policy = match policy.as_str() {
                 "relay-allowed" => Policy::RelayAllowed,
@@ -214,11 +224,49 @@ pub(crate) async fn serve(
             // Same authenticated record path and one client HMAC on both
             // proof rounds. Key setup already completed, keeping its CPU
             // cost out of this bounded network serialization sample.
-            if initial_pace.is_some() {
+            if initial_pace.is_some() && !packet_pair_probe {
                 created.resize(8192, b' ');
             }
             let began = Instant::now();
-            writer.send(&created).await?;
+            if packet_pair_probe {
+                // A small control measures RTT without possession-key work.
+                // Low-latency paths need no train: ordinary DATA ACKs open them.
+                // Higher-RTT new owners pay one extra RTT and at most 64KiB,
+                // keeping every encrypted control within the existing 8KiB.
+                let nonce = super::logical_wire::nonce();
+                let small_at = Instant::now();
+                writer.send(&Message::Ping { nonce: nonce.clone() }.encode()?).await?;
+                if !matches!(read_control(&mut reader).await?, Message::Pong { nonce: answer } if answer == nonce) {
+                    bail!("initial path probe was not acknowledged");
+                }
+                let small_rtt = small_at.elapsed();
+                if small_rtt >= std::time::Duration::from_millis(50) {
+                    probe_permit = initial_pace.as_ref().and_then(|pace| pace.try_initial_probe());
+                }
+                if probe_permit.is_some() {
+                    let nonces: Vec<_> = (0..8).map(|_| super::logical_wire::nonce()).collect();
+                    let train_at = Instant::now();
+                    for nonce in &nonces {
+                        let mut probe = Message::Ping { nonce: nonce.clone() }.encode()?;
+                        probe.resize(8192, b' ');
+                        writer.send(&probe).await?;
+                    }
+                    writer.send(&created).await?;
+                    let mut first_reply = None;
+                    for nonce in &nonces {
+                        if !matches!(read_control(&mut reader).await?, Message::Pong { nonce: answer } if &answer == nonce) {
+                            bail!("initial path probe was not acknowledged");
+                        }
+                        first_reply.get_or_insert_with(Instant::now);
+                    }
+                    probe_sample = Some((small_rtt, train_at.elapsed(),
+                        first_reply.unwrap().elapsed(), (nonces.len() - 1) * 8192));
+                } else {
+                    writer.send(&created).await?;
+                }
+            } else {
+                writer.send(&created).await?;
+            }
             let request = read_control(&mut reader).await?;
             large_rtt = Some((began.elapsed(), created.len()));
             request
@@ -266,8 +314,22 @@ pub(crate) async fn serve(
             bail!("logical activation mismatch");
         }
         let baseline = began.elapsed();
-        if let Some(pace) = &initial_pace {
-            let (large, bytes) = large_rtt.unwrap_or((baseline, 0));
+        // A skipped train has no capacity sample. In particular, its small
+        // CREATED response must not overwrite the other owner's shared probe.
+        if let Some(pace) = initial_pace.as_ref().filter(|_| !packet_pair_probe || probe_permit.is_some()) {
+            let (large, bytes, baseline) = if let Some((small, train, span, bytes)) = probe_sample {
+                let baseline = baseline.min(small);
+                // TCP/GRO or an application shaper can deliver several probes
+                // together. Never infer capacity from compressed reply spacing
+                // alone: the complete train's extra RTT remains a lower bound
+                // on its serialization cost. Using seven payloads for the
+                // eight-record flight also keeps this estimate conservative.
+                let serialization = span.max(train.saturating_sub(baseline));
+                (baseline.saturating_add(serialization), bytes, baseline)
+            } else {
+                let (large, bytes) = large_rtt.unwrap_or((baseline, 0));
+                (large, bytes, baseline)
+            };
             pace.observe_initial_path(bytes, large, baseline);
         }
         let handle = state.logical_connections.handle(&id)?;
@@ -401,7 +463,7 @@ async fn run(
     let mut terminals = std::collections::BTreeMap::<u64, oneshot::Sender<Result<()>>>::new();
     let mut bulk_completions =
         std::collections::BTreeMap::<u64, oneshot::Sender<Result<()>>>::new();
-    let mut bulk_sequences = std::collections::BTreeSet::<u64>::new();
+    let mut paced_sequences = std::collections::BTreeMap::<u64, WriteClass>::new();
     let mut budget = false;
     let mut last_ping = Instant::now();
     let mut pending = std::collections::VecDeque::<Write>::new();
@@ -441,12 +503,15 @@ async fn run(
             // Do not assign a replay sequence to bulk work waiting for its
             // physical budget. Other streams can then enter the journal and
             // make progress without violating the journal's ordered replay.
-            if write.bulk
+            if write.class != WriteClass::Ordinary
                 && write.frame.kind == Kind::Data
                 && channel.as_ref().filter(|c| c.synced).is_some_and(|c| {
-                    c.pace
-                        .as_ref()
-                        .is_some_and(|pace| !pace.can_reserve(write.frame.payload.len() as u64))
+                    c.pace.as_ref().is_some_and(|pace| match write.class {
+                        WriteClass::Control => {
+                            !pace.can_reserve_control(write.frame.payload.len() as u64)
+                        }
+                        _ => !pace.can_reserve(write.frame.payload.len() as u64),
+                    })
                 })
             {
                 pace_blocked = true;
@@ -462,17 +527,20 @@ async fn run(
             };
             match journal.enqueue(frame) {
                 Ok(seq) => {
-                    if write.bulk && write.frame.kind == Kind::Data {
-                        bulk_sequences.insert(seq);
+                    if write.class != WriteClass::Ordinary && write.frame.kind == Kind::Data {
+                        paced_sequences.insert(seq, write.class);
                     }
                     if matches!(write.frame.kind, Kind::Fin | Kind::Reset) {
                         terminals.insert(seq, write.complete);
-                    } else if write.bulk
+                    } else if write.class != WriteClass::Ordinary
                         && write.frame.kind == Kind::Data
                         && channel.as_ref().is_none_or(|c| {
                             c.pace_blocked
-                                || c.pace.as_ref().is_some_and(|pace| {
-                                    !pace.can_reserve(write.frame.payload.len() as u64)
+                                || c.pace.as_ref().is_some_and(|pace| match write.class {
+                                    WriteClass::Control => {
+                                        !pace.can_reserve_control(write.frame.payload.len() as u64)
+                                    }
+                                    _ => !pace.can_reserve(write.frame.payload.len() as u64),
                                 })
                         })
                     {
@@ -534,11 +602,16 @@ async fn run(
                 } else {
                     active.pace_blocked = false;
                     if let Some((seq, frame)) = journal.next_frame().map_err(error)? {
-                        if bulk_sequences.contains(&seq) {
+                        if let Some(class) = paced_sequences.get(&seq) {
                             sent_bulk = Some(seq);
                             if let Some(pace) = &active.pace {
-                                let Some(charge) = pace.try_acquire(frame.payload.len() as u64)
-                                else {
+                                let charge = match class {
+                                    WriteClass::Control => {
+                                        pace.try_acquire_control(frame.payload.len() as u64)
+                                    }
+                                    _ => pace.try_acquire(frame.payload.len() as u64),
+                                };
+                                let Some(charge) = charge else {
                                     active.pace_blocked = true;
                                     pace_blocked = true;
                                     break;
@@ -579,7 +652,7 @@ async fn run(
                 if journal.activate(attachment.path, next, attachment.position, now()).is_err() { continue; }
                 acknowledge_terminals(&mut terminals, attachment.position.received);
                 acknowledge_terminals(&mut bulk_completions, attachment.position.received);
-                bulk_sequences.retain(|seq| *seq > attachment.position.received);
+                paced_sequences.retain(|seq, _| *seq > attachment.position.received);
                 epoch = if let Some(registry) = &lifetime.registry { registry.activate(&lifetime.id, &attachment.attempt, attachment.expected, Instant::now())? } else { next };
                 if let Some(mut previous) = channel.take() {
                     previous.sent_paced.clear(); previous.pace_blocked = false;
@@ -638,7 +711,7 @@ async fn run(
                             if received_epoch == epoch {
                                 acknowledge_terminals(&mut terminals, received);
                                 acknowledge_terminals(&mut bulk_completions, received);
-                                bulk_sequences.retain(|seq| *seq > received);
+                                paced_sequences.retain(|seq, _| *seq > received);
                                 while active.sent_paced.first_key_value().is_some_and(|(seq, _)| *seq <= received) {
                                     active.sent_paced.pop_first().unwrap().1.acknowledge();
                                 }
@@ -687,7 +760,7 @@ async fn run(
                         epoch = registry.activate(&lifetime.id, &attempt, epoch, Instant::now())?;
                         acknowledge_terminals(&mut terminals, peer.received);
                         acknowledge_terminals(&mut bulk_completions, peer.received);
-                        bulk_sequences.retain(|seq| *seq > peer.received);
+                        paced_sequences.retain(|seq, _| *seq > peer.received);
                         let mut promoted = standby.take().unwrap();
                         promoted.synced = false; promoted.attempt = None;
                         if let Some(mut previous) = channel.take() {

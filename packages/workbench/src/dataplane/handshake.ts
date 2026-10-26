@@ -47,6 +47,7 @@ export async function preparePeerHandshake(
     rtcSupported: options.rtcSupported ?? supportsRtc(),
     // v4 uses the same bounded per-stream window for finite and live flows.
     maxBulkStreamWindowBytes: INITIAL_STREAM_WINDOW_BYTES,
+    packetPairProbeSupported: true,
   };
   return {
     hello,

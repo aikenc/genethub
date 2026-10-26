@@ -7,7 +7,9 @@
 //! the first delivered full window can refine it using the small-control RTT.
 //! Complete windows within 400ms grow at most fourfold when serialization is
 //! below 100ms (or total delay below 250ms without an RTT baseline), otherwise
-//! twice. A real drain under 50ms opens to the 3MiB ceiling. Delayed ACKs keep
+//! twice. A delivered half-MiB with at most 100ms beyond an authenticated
+//! RTT baseline can probe eightfold. A real drain under 50ms opens to the
+//! 3MiB ceiling. Delayed ACKs keep
 //! their original send ages across accounting resets; 900ms drains shrink the
 //! cap, and idle paths lose their old capacity estimate.
 //! Already transmitted bytes cannot be recalled after a live capacity drop.
@@ -33,6 +35,7 @@ pub struct UplinkPace {
     ceiling: u64,
     changes: tokio::sync::watch::Sender<()>,
     outstanding: Mutex<u64>,
+    initial_probe: Arc<tokio::sync::Semaphore>,
     cap: AtomicU64,
     control: Mutex<Control>,
 }
@@ -59,6 +62,7 @@ impl UplinkPace {
             ceiling,
             changes: tokio::sync::watch::channel(()).0,
             outstanding: Mutex::new(0),
+            initial_probe: Arc::new(tokio::sync::Semaphore::new(1)),
             cap: AtomicU64::new(floor),
             control: Mutex::new(Control {
                 filled_at: None,
@@ -82,7 +86,8 @@ impl UplinkPace {
     }
 
     fn observe_initial_path(&self, bytes: usize, large: Duration, baseline: Duration) {
-        // The large and small authenticated possession proofs cross the same path.
+        // New clients supply a bounded encrypted probe train on this path;
+        // old clients retain the large/small possession-proof difference.
         // A positive serialization sample estimates a latency-bound path;
         // unresolved timing only admits a bounded 64KiB probe. Local fast
         // paths retain ordinary ACK-driven discovery.
@@ -110,10 +115,7 @@ impl UplinkPace {
             u128::from(floor.saturating_mul(2))
         } else {
             let serialization_us = (large - baseline).as_micros().max(1_000);
-            (bytes as u128)
-                .saturating_mul(baseline.as_micros())
-                .saturating_mul(2)
-                / serialization_us
+            (bytes as u128).saturating_mul((baseline + RATE_TARGET).as_micros()) / serialization_us
         };
         let estimate = (estimate.min(u128::from(self.ceiling)) as u64).max(floor);
         let mut control = self.control.lock().unwrap();
@@ -135,6 +137,7 @@ impl UplinkPace {
         Arc::new(PeerPace {
             shared: self.clone(),
             outstanding: Mutex::new(0),
+            control_outstanding: AtomicU64::new(0),
             initial: Mutex::new(None),
             progress: Mutex::new(PeerProgress {
                 cap: PEER_PROGRESS_BYTES,
@@ -223,6 +226,7 @@ impl UplinkPace {
             peer: None,
             bytes,
             sent_at: Instant::now(),
+            control: false,
         })
     }
 
@@ -344,6 +348,26 @@ impl UplinkPace {
         let delay_bound = drain.is_some_and(|(elapsed, probed)| {
             probed >= floor / 2 && elapsed <= GROW_DRAIN_MAX && current < ceiling
         });
+        // A path can become high-RTT after its initial local handshake. Two
+        // 200ms Fabric legs already exceed the normal 400ms discovery band,
+        // even at the floor. Admit at most 128KiB of slower discovery using
+        // real full-window ACK age, never a late partial ACK or cancellation.
+        // Without a current propagation baseline, a second slow probe must
+        // not multiply reverse-path queues across many physical lanes.
+        let slow_ceiling = if control.baseline_rtt.is_some() {
+            128 * 1024
+        } else {
+            2 * START_BYTES
+        }
+        .min(ceiling);
+        let slow_discovery = drain.is_some_and(|(elapsed, probed)| {
+            probed >= floor / 2
+                && elapsed <= OPEN_DRAIN_MAX
+                && current < slow_ceiling
+                && control
+                    .baseline_rtt
+                    .is_none_or(|rtt| elapsed.saturating_sub(rtt) <= RATE_TARGET)
+        });
         // A completed window contains both propagation and serialization.
         // The authenticated small controls give a propagation baseline; use
         // the remaining time to target one BDP plus 200ms of queued bytes.
@@ -374,7 +398,21 @@ impl UplinkPace {
             if short_drain {
                 ceiling
             } else {
-                let factor = if drain.is_some_and(|(elapsed, _)| {
+                // A full half-MiB delivery is a stronger capacity signal than
+                // the noisy 8KiB handshake or a small bootstrap window. On a
+                // high-RTT fast path another fourfold step otherwise adds an
+                // avoidable whole feedback round. Keep this larger probe behind
+                // both real full-window ACK age and the authenticated RTT; a
+                // narrow or uncalibrated path retains the smaller probes.
+                let fast_large_probe = drain.is_some_and(|(elapsed, probed)| {
+                    probed >= 512 * 1024
+                        && control.baseline_rtt.is_some_and(|rtt| {
+                            elapsed.saturating_sub(rtt) <= Duration::from_millis(100)
+                        })
+                });
+                let factor = if fast_large_probe {
+                    8
+                } else if drain.is_some_and(|(elapsed, _)| {
                     control
                         .baseline_rtt
                         .map_or(elapsed <= Duration::from_millis(250), |rtt| {
@@ -387,6 +425,8 @@ impl UplinkPace {
                 };
                 current.saturating_mul(factor).min(ceiling)
             }
+        } else if slow_discovery {
+            current.saturating_mul(2).min(slow_ceiling)
         } else if rate_grew {
             rate_window.unwrap_or(current)
         } else {
@@ -428,19 +468,47 @@ pub(crate) struct Charge {
     peer: Option<Arc<PeerPace>>,
     bytes: u64,
     sent_at: Instant,
+    control: bool,
 }
 impl Charge {
     pub(crate) fn acknowledge(mut self) {
-        if let Some(peer) = &self.peer {
-            peer.relinquish(self.bytes, true);
+        if self.control {
+            self.release_control();
+        } else {
+            if let Some(peer) = &self.peer {
+                peer.relinquish(self.bytes, true);
+            }
+            self.pace
+                .release_aged(self.bytes, self.pace.ceiling, self.sent_at.elapsed());
         }
-        self.pace
-            .release_aged(self.bytes, self.pace.ceiling, self.sent_at.elapsed());
+        self.bytes = 0;
+    }
+}
+impl Charge {
+    fn release_control(&mut self) {
+        if self.bytes == 0 {
+            return;
+        }
+        if let Some(peer) = &self.peer {
+            peer.control_outstanding
+                .fetch_sub(self.bytes, Ordering::Relaxed);
+        }
+        {
+            let mut outstanding = self.pace.outstanding.lock().unwrap();
+            *outstanding = outstanding.saturating_sub(self.bytes);
+        }
+        // Control delivery/cancellation returns custody without manufacturing
+        // a bulk rate sample or resetting another stream's active sample.
+        self.pace.changes.send_replace(());
         self.bytes = 0;
     }
 }
 impl Drop for Charge {
     fn drop(&mut self) {
+        if self.control {
+            self.release_control();
+            return;
+        }
         if let Some(peer) = &self.peer {
             peer.relinquish(self.bytes, false);
         }
@@ -458,6 +526,7 @@ struct PeerProgress {
 pub(crate) struct PeerPace {
     shared: Arc<UplinkPace>,
     outstanding: Mutex<u64>,
+    control_outstanding: AtomicU64,
     progress: Mutex<PeerProgress>,
     initial: Mutex<Option<(Instant, usize, Duration, Duration)>>,
 }
@@ -468,6 +537,42 @@ impl PeerPace {
     }
     pub(crate) fn changes(&self) -> tokio::sync::watch::Receiver<()> {
         self.shared.changes()
+    }
+
+    pub(crate) fn try_initial_probe(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        // One physical path is sampled once at a time. New owners never queue
+        // behind this permit, and must not add a train to active DATA.
+        if *self.shared.outstanding.lock().unwrap() != 0 {
+            return None;
+        }
+        self.shared.initial_probe.clone().try_acquire_owned().ok()
+    }
+
+    pub(crate) fn can_reserve_control(&self, bytes: u64) -> bool {
+        self.control_outstanding
+            .load(Ordering::Relaxed)
+            .saturating_add(bytes)
+            <= PEER_PROGRESS_BYTES
+    }
+
+    pub(crate) fn try_acquire_control(self: &Arc<Self>, bytes: u64) -> Option<Charge> {
+        self.control_outstanding
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                used.checked_add(bytes)
+                    .filter(|next| *next <= PEER_PROGRESS_BYTES)
+            })
+            .ok()?;
+        {
+            let mut outstanding = self.shared.outstanding.lock().unwrap();
+            *outstanding = outstanding.saturating_add(bytes);
+        }
+        Some(Charge {
+            pace: self.shared.clone(),
+            peer: Some(self.clone()),
+            bytes,
+            sent_at: Instant::now(),
+            control: true,
+        })
     }
 
     pub(crate) fn can_reserve(&self, bytes: u64) -> bool {
@@ -535,6 +640,7 @@ impl PeerPace {
             peer: Some(self.clone()),
             bytes,
             sent_at: Instant::now(),
+            control: false,
         })
     }
 }
@@ -617,7 +723,12 @@ mod tests {
     fn progress_is_bounded_per_peer_and_cancellation_returns_both_debits() {
         let pace = Arc::new(UplinkPace::new(START_BYTES));
         let stalled = pace.peer();
+        let probe = stalled.try_initial_probe().unwrap();
+        assert!(pace.peer().try_initial_probe().is_none());
+        drop(probe);
+        assert!(stalled.try_initial_probe().is_some());
         let occupied = stalled.try_acquire(START_BYTES).unwrap();
+        assert!(stalled.try_initial_probe().is_none());
         let peers: Vec<_> = (0..32).map(|_| pace.peer()).collect();
         let mut charges = Vec::new();
         for peer in &peers {
@@ -635,6 +746,33 @@ mod tests {
             assert_eq!(*peer.outstanding.lock().unwrap(), 0);
             peer.try_acquire(PEER_PROGRESS_BYTES).unwrap().acknowledge();
             assert_eq!(*peer.outstanding.lock().unwrap(), 0);
+        }
+        // Same-peer small replies have independent bounded custody even
+        // while bulk is full. Their ACK/drop must not train the bulk window.
+        let cap = pace.cap();
+        let sample = {
+            let control = pace.control.lock().unwrap();
+            (control.sample_started, control.sample_bytes)
+        };
+        for peer in &peers {
+            let control = peer.try_acquire_control(PEER_PROGRESS_BYTES).unwrap();
+            assert!(!peer.can_reserve_control(1));
+            assert!(peer.try_acquire_control(1).is_none());
+            assert_eq!(
+                *pace.outstanding.lock().unwrap(),
+                START_BYTES + PEER_PROGRESS_BYTES
+            );
+            control.acknowledge();
+            assert_eq!(peer.control_outstanding.load(Ordering::Relaxed), 0);
+            assert_eq!(*pace.outstanding.lock().unwrap(), START_BYTES);
+            drop(peer.try_acquire_control(PEER_PROGRESS_BYTES).unwrap());
+            assert_eq!(peer.control_outstanding.load(Ordering::Relaxed), 0);
+            assert_eq!(*pace.outstanding.lock().unwrap(), START_BYTES);
+        }
+        assert_eq!(pace.cap(), cap);
+        {
+            let control = pace.control.lock().unwrap();
+            assert_eq!((control.sample_started, control.sample_bytes), sample);
         }
         drop(occupied);
         assert_eq!(*pace.outstanding.lock().unwrap(), 0);

@@ -23,7 +23,9 @@ const IMAGE_CACHE_BYTES: usize = 128 * 1024 * 1024;
 /// On-demand preview loading fetches many small sub-resources in parallel;
 /// two slots serialized whole sites behind each other.
 const PREVIEW_WORKERS: usize = 8;
-const PREVIEW_SEND_STEP_BYTES: usize = 64 * 1024;
+// Whole resume payloads avoid a tiny fifth record after each 64KiB source
+// read, reducing per-record crypto/actor handoffs without enlarging buffers.
+const PREVIEW_SEND_STEP_BYTES: usize = 4 * genehub_proto::resume::MAX_PAYLOAD;
 
 pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -> Result<()> {
     if !stream.read_body(0).await?.is_empty() {
@@ -403,7 +405,7 @@ async fn send_file(
         }
         stats.write_us += began.elapsed().as_micros() as u64;
         // `write` already waits on the socket, so another yield here only
-        // inserts a scheduler hop between every 64KiB. On a 200ms high-BDP
+        // inserts a scheduler hop between source chunks. On a 200ms high-BDP
         // link those hops dominate the transfer and the protocol window never
         // reaches the shaped rate.
     }

@@ -10,6 +10,7 @@ pub struct AcceptedPeer {
     pub welcome: PeerWelcome,
     pub key: SessionKey,
     pub access: PeerAccess,
+    pub packet_pair_probe: bool,
 }
 
 /// Performs one PSK mutual handshake before any business stream exists.
@@ -156,6 +157,7 @@ pub fn accept(
     };
 
     Ok(AcceptedPeer {
+        packet_pair_probe: hello.packet_pair_probe_supported == Some(true),
         welcome: PeerWelcome {
             version: genehub_proto::DATA_PLANE_VERSION,
             server_nonce,
@@ -209,6 +211,7 @@ mod tests {
             },
             rtc_supported: true,
             max_bulk_stream_window_bytes: Some(genehub_proto::INITIAL_STREAM_WINDOW_BYTES),
+            packet_pair_probe_supported: None,
         };
         let accepted = accept(
             &state,
@@ -252,6 +255,7 @@ mod tests {
             },
             rtc_supported: false,
             max_bulk_stream_window_bytes: None,
+            packet_pair_probe_supported: None,
         };
         let accepted = accept(
             &state,

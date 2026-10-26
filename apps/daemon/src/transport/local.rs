@@ -510,6 +510,7 @@ async fn connection(
 
     let (mut sink, mut stream) = socket.split();
     let (inbound, mut outbound, mut carrier) = endpoint::carrier_channels();
+    carrier.packet_pair_probe = accepted.packet_pair_probe;
     // A direct WebSocket also multiplexes control and body over one TCP.
     // Bind the existing ACK-trained budget to this physical carrier, just as
     // Fabric does; a later RTC attachment keeps its own transport policy.
@@ -626,6 +627,7 @@ mod tests {
             },
             rtc_supported: false,
             max_bulk_stream_window_bytes: None,
+            packet_pair_probe_supported: None,
         };
         socket
             .send(tokio_tungstenite::tungstenite::Message::Binary(

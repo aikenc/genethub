@@ -297,7 +297,7 @@ export class Client {
   private bulkClient: Client | null = null;
   private bulkReady: Promise<Client | null> | null = null;
   private bulkRetryAt = 0;
-  private readonly bulkSubscriptions = new Set<string>();
+  private readonly bulkSubscriptions = new Map<string, symbol>();
   private socket: WebSocketLike | null = null;
   private fabricLink: FabricDataLink | null = null;
   private dialingTransport = false;
@@ -519,7 +519,8 @@ export class Client {
     const operation = request.type;
     const id = diagnosticId("op");
     const queuedAt = this.now();
-    const bytes = encoder.encode(JSON.stringify(request)).byteLength;
+    const serializedRequest = JSON.stringify(request);
+    const bytes = encoder.encode(serializedRequest).byteLength;
     if (bytes > MAX_RPC_BODY_BYTES) {
       this.diagnostic("operation", {
         operation,
@@ -558,7 +559,10 @@ export class Client {
         id,
         operation,
         queuedAt,
-        request,
+        // Keep the admitted JSON and its byte charge together. Callers may
+        // reuse their object while this request waits for an execution slot.
+        // The negotiated protocol codec still runs when the call starts.
+        request: JSON.parse(serializedRequest) as Request,
         bytes,
         resolve,
         reject,
@@ -568,7 +572,7 @@ export class Client {
       this.pendingBytes += bytes;
       const endpoint = this.state === "ready" ? this.requestEndpoint() : null;
       const epoch = endpoint ? this.epoch : null;
-      if (endpoint && epoch) {
+      if (endpoint && epoch && this.canStartCall(pending)) {
         this.startCall(pending, endpoint, epoch);
       } else {
         pending.queueTimer = setTimeout(() => {
@@ -584,7 +588,7 @@ export class Client {
             queueMs: Math.round(this.now() - queuedAt),
             requestBytes: bytes,
           });
-          reject(new ClientRequestTimeoutError("the request waited too long for a connection"));
+          reject(new ClientRequestTimeoutError("the request waited too long for admission"));
         }, this.options.maxQueueAgeMs ?? 30_000);
         this.queue.push(pending);
       }
@@ -875,9 +879,13 @@ export class Client {
     const body = this.bulkSubscriptions.has(sessionId) && this.bulkClient
       ? this.bulkClient : this.subscriptions.has(sessionId) ? this : await this.prepareDataChannel();
     if (body !== this) {
-      this.bulkSubscriptions.add(sessionId);
+      const attempt = Symbol("body-subscription");
+      this.bulkSubscriptions.set(sessionId, attempt);
       try { return await body.subscribe(sessionId, handlers, options); }
-      catch (error) { this.bulkSubscriptions.delete(sessionId); throw error; }
+      catch (error) {
+        if (this.bulkSubscriptions.get(sessionId) === attempt) this.bulkSubscriptions.delete(sessionId);
+        throw error;
+      }
     }
     const subscription: Subscription = {
       seq: 0,
@@ -916,6 +924,7 @@ export class Client {
       return;
     }
     const subscription = this.subscriptions.get(sessionId);
+    if (!subscription) return;
     if (subscription?.retry != null) clearTimeout(subscription.retry);
     this.subscriptions.delete(sessionId);
     await this.call({ type: "unsubscribe", payload: { sessionId } });
@@ -1373,6 +1382,8 @@ export class Client {
       .finally(() => {
         this.active.delete(pending);
         this.release(pending);
+        const next = this.state === "ready" ? this.requestEndpoint() : null;
+        if (next && this.epoch) this.flushQueue(next, this.epoch);
       });
   }
 
@@ -1622,14 +1633,42 @@ export class Client {
     subscription.retryDelay = Math.min(5_000, subscription.retryDelay * 2);
   }
 
-  private flushQueue(_endpoint: DataEndpoint, epoch: symbol): void {
-    for (const pending of this.queue.splice(0)) {
-      const endpoint = this.requestEndpoint();
-      if (endpoint) this.startCall(pending, endpoint, epoch);
-      else {
-        this.release(pending);
-        pending.reject(new DataPlaneError("the peer is not ready"));
+  private isManagementCall(pending: PendingCall): boolean {
+    return ["workspace.list", "session.list", "connection.identity"].includes(pending.operation);
+  }
+
+  private canStartCall(pending: PendingCall): boolean {
+    // Bound the request burst before it acquires ordered replay sequences.
+    // Leave two slots for small directory reads while task starts are queued.
+    if (this.active.size >= 8) return false;
+    const request = pending.request;
+    if (request.type === "subscribe" || request.type === "unsubscribe") {
+      const sessionId = request.payload.sessionId;
+      const sameSession = (other: PendingCall) => {
+        const next = other.request;
+        return (next.type === "subscribe" || next.type === "unsubscribe") && next.payload.sessionId === sessionId;
+      };
+      // These RPCs change one server-side consumer. Await its previous reply
+      // before canceling or replacing it; independent streams can otherwise
+      // register an old subscription after its cancellation has completed.
+      if ([...this.active].some(sameSession)) return false;
+      for (const queued of this.queue) {
+        if (queued === pending) break;
+        if (sameSession(queued)) return false;
       }
+    }
+    return this.isManagementCall(pending) ||
+      [...this.active].filter(call => !this.isManagementCall(call)).length < 6;
+  }
+
+  private flushQueue(_endpoint: DataEndpoint, epoch: symbol): void {
+    while (this.queue.length && this.state === "ready" && this.epoch === epoch) {
+      const endpoint = this.requestEndpoint();
+      if (!endpoint) return;
+      const index = this.queue.findIndex(pending => this.canStartCall(pending));
+      if (index < 0) return;
+      const [pending] = this.queue.splice(index, 1);
+      this.startCall(pending!, endpoint, epoch);
     }
   }
 
@@ -2472,6 +2511,9 @@ function errorName(error: unknown): string {
 /** Only stable opaque ids and workspace-relative paths leave request payloads. */
 function diagnosticContext(request: Request): ClientDiagnosticDetail {
   switch (request.type) {
+    case "subscribe":
+    case "unsubscribe":
+      return { sessionId: request.payload.sessionId };
     case "file.tree":
     case "file.write":
     case "git.diff":
