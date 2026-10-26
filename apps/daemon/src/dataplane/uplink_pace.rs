@@ -42,6 +42,7 @@ pub struct UplinkPace {
 
 struct Control {
     filled_at: Option<Instant>,
+    filled_peer: Option<Arc<()>>,
     acked_since_fill: u64,
     cap_at_fill: u64,
     sample_bytes: u64,
@@ -66,6 +67,7 @@ impl UplinkPace {
             cap: AtomicU64::new(floor),
             control: Mutex::new(Control {
                 filled_at: None,
+                filled_peer: None,
                 acked_since_fill: 0,
                 cap_at_fill: floor,
                 sample_bytes: 0,
@@ -136,6 +138,7 @@ impl UplinkPace {
     pub(crate) fn peer(self: &Arc<Self>) -> Arc<PeerPace> {
         Arc::new(PeerPace {
             shared: self.clone(),
+            sample_owner: Arc::new(()),
             outstanding: Mutex::new(0),
             control_outstanding: AtomicU64::new(0),
             initial: Mutex::new(None),
@@ -160,11 +163,16 @@ impl UplinkPace {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn can_reserve(&self, bytes: u64) -> bool {
+        self.can_reserve_for(bytes, None)
+    }
+
+    fn can_reserve_for(&self, bytes: u64, peer: Option<(&Arc<()>, u64)>) -> bool {
         let outstanding = *self.outstanding.lock().unwrap();
         let available = outstanding.saturating_add(bytes) <= self.cap();
         if !available {
-            self.note_filled(outstanding, outstanding);
+            self.note_filled(outstanding, outstanding, peer);
         }
         available
     }
@@ -174,7 +182,12 @@ impl UplinkPace {
         self.try_reserve_progress(bytes, false)
     }
 
+    #[cfg(test)]
     fn try_reserve_progress(&self, bytes: u64, progress: bool) -> bool {
+        self.try_reserve_for(bytes, progress, None)
+    }
+
+    fn try_reserve_for(&self, bytes: u64, progress: bool, peer: Option<(&Arc<()>, u64)>) -> bool {
         let mut outstanding = self.outstanding.lock().unwrap();
         if *outstanding == 0 {
             let mut control = self.control.lock().unwrap();
@@ -208,10 +221,14 @@ impl UplinkPace {
                     }
                 }
             }
-            self.note_filled(*outstanding, cap);
+            self.note_filled(
+                *outstanding,
+                cap,
+                peer.map(|(owner, used)| (owner, used.saturating_add(bytes))),
+            );
             return true;
         }
-        self.note_filled(*outstanding, *outstanding);
+        self.note_filled(*outstanding, *outstanding, peer);
         false
     }
 
@@ -230,9 +247,23 @@ impl UplinkPace {
         })
     }
 
-    fn note_filled(&self, outstanding: u64, cap: u64) {
+    fn note_filled(&self, outstanding: u64, cap: u64, peer: Option<(&Arc<()>, u64)>) {
         let mut control = self.control.lock().unwrap();
         if control.filled_at.is_none() && outstanding >= cap && cap > 0 {
+            // Physical admission includes every peer. Delivery evidence must
+            // instead finish the actual DATA cohort of the peer filling it;
+            // another reader's retained bytes cannot require a second flight.
+            let cap = peer.map_or(cap, |(_, used)| used);
+            if cap == 0 {
+                return;
+            }
+            control.filled_peer = peer.map(|(owner, _)| owner.clone());
+            tracing::trace!(
+                event = "uplink_fill",
+                outstanding_bytes = outstanding,
+                target_bytes = cap,
+                "DATA delivery sample begins"
+            );
             control.filled_at = Some(Instant::now());
             control.acked_since_fill = 0;
             control.cap_at_fill = cap;
@@ -240,7 +271,18 @@ impl UplinkPace {
         }
     }
 
+    #[cfg(test)]
     fn release_aged(&self, bytes: u64, ceiling: u64, ack_age: Duration) {
+        self.release_aged_for(bytes, ceiling, ack_age, None);
+    }
+
+    fn release_aged_for(
+        &self,
+        bytes: u64,
+        ceiling: u64,
+        ack_age: Duration,
+        peer: Option<&Arc<()>>,
+    ) {
         if bytes == 0 {
             return;
         }
@@ -249,7 +291,7 @@ impl UplinkPace {
             *outstanding = outstanding.saturating_sub(bytes);
             *outstanding == 0
         };
-        self.observe(bytes, ceiling, idle, ack_age);
+        self.observe(bytes, ceiling, idle, ack_age, peer);
         self.changes.send_replace(());
     }
 
@@ -262,6 +304,7 @@ impl UplinkPace {
         *outstanding = outstanding.saturating_sub(bytes);
         let mut control = self.control.lock().unwrap();
         control.filled_at = None;
+        control.filled_peer = None;
         control.acked_since_fill = 0;
         control.sample_bytes = 0;
         control.sample_started = None;
@@ -275,7 +318,14 @@ impl UplinkPace {
         self.changes.send_replace(());
     }
 
-    fn observe(&self, bytes: u64, ceiling: u64, idle: bool, ack_age: Duration) {
+    fn observe(
+        &self,
+        bytes: u64,
+        ceiling: u64,
+        idle: bool,
+        ack_age: Duration,
+        peer: Option<&Arc<()>>,
+    ) {
         let mut control = self.control.lock().unwrap();
         let floor = START_BYTES.min(ceiling);
         let current = self.cap.load(Ordering::Relaxed);
@@ -284,12 +334,30 @@ impl UplinkPace {
         }
         control.sample_bytes = control.sample_bytes.saturating_add(bytes);
         control.sample_ack_age = control.sample_ack_age.max(ack_age);
-        if control.filled_at.is_some() {
+        let sample_matches = match (&control.filled_peer, peer) {
+            (Some(owner), Some(peer)) => Arc::ptr_eq(owner, peer),
+            (None, None) => true,
+            _ => false,
+        };
+        // A peer that stops acknowledging must not own measurement forever.
+        // Forget only its expired sample; all physical debits and ACK ages
+        // remain owned by the original transmissions, and no delivery is made up.
+        if !sample_matches
+            && control
+                .filled_at
+                .is_some_and(|at| at.elapsed() > OPEN_DRAIN_MAX)
+        {
+            control.filled_at = None;
+            control.filled_peer = None;
+            control.acked_since_fill = 0;
+            control.filled_ack_age = Duration::ZERO;
+        }
+        if control.filled_at.is_some() && sample_matches {
             control.filled_ack_age = control.filled_ack_age.max(ack_age);
         }
         let mut drain = None;
         let mut overrun = None;
-        if let Some(filled_at) = control.filled_at {
+        if let Some(filled_at) = control.filled_at.filter(|_| sample_matches) {
             // A full window still unacked past the open band means the uplink
             // cannot clear it in time. Keep only what it cleared in that band,
             // then drop the timer so the next full window is measured afresh.
@@ -299,10 +367,11 @@ impl UplinkPace {
                 let fits = drained * OPEN_DRAIN_MAX.as_micros() / waited.as_micros().max(1);
                 overrun = Some((fits as u64).clamp(floor, ceiling));
                 control.filled_at = None;
+                control.filled_peer = None;
                 control.acked_since_fill = 0;
             }
         }
-        if let Some(filled_at) = control.filled_at {
+        if let Some(filled_at) = control.filled_at.filter(|_| sample_matches) {
             control.acked_since_fill = control.acked_since_fill.saturating_add(bytes);
             if control.acked_since_fill >= control.cap_at_fill && control.cap_at_fill > 0 {
                 drain = Some((
@@ -310,6 +379,7 @@ impl UplinkPace {
                     control.cap_at_fill,
                 ));
                 control.filled_at = None;
+                control.filled_peer = None;
                 control.acked_since_fill = 0;
             }
         }
@@ -340,13 +410,16 @@ impl UplinkPace {
             None
         };
 
+        // One complete maximum DATA record is a full progress share even
+        // when retained bytes leave less than half the physical floor free.
+        let minimum_sample = (floor / 2).min(super::frame::MAX_PAYLOAD_BYTES as u64);
         let rate_grew = rate_window.is_some_and(|window| window > current);
         // Bound discovery to one fourfold probe per completed window, with a
         // tighter drain limit so narrow links do not justify a large queue.
         // Keep the fast-LAN shortcut without promoting a small weak-link sample
         // directly to a multi-MiB queue.
         let delay_bound = drain.is_some_and(|(elapsed, probed)| {
-            probed >= floor / 2 && elapsed <= GROW_DRAIN_MAX && current < ceiling
+            probed >= minimum_sample && elapsed <= GROW_DRAIN_MAX && current < ceiling
         });
         // A path can become high-RTT after its initial local handshake. Two
         // 200ms Fabric legs already exceed the normal 400ms discovery band,
@@ -361,7 +434,7 @@ impl UplinkPace {
         }
         .min(ceiling);
         let slow_discovery = drain.is_some_and(|(elapsed, probed)| {
-            probed >= floor / 2
+            probed >= minimum_sample
                 && elapsed <= OPEN_DRAIN_MAX
                 && current < slow_ceiling
                 && control
@@ -373,7 +446,7 @@ impl UplinkPace {
         // the remaining time to target one BDP plus 200ms of queued bytes.
         // A 32KiB sample on a 200ms fast path can then discover capacity in
         // one delivery round, without repeatedly doubling across that RTT.
-        let initial_sample = if drain.is_some_and(|(_, probed)| probed >= floor / 2) {
+        let initial_sample = if drain.is_some_and(|(_, probed)| probed >= minimum_sample) {
             control.initial_delivery_sample.take()
         } else {
             None
@@ -383,7 +456,7 @@ impl UplinkPace {
             let baseline = control.baseline_rtt?;
             // Bootstrap only. Later windows overlap earlier delivery and ACK
             // batches, so subtracting propagation there would invent rate.
-            if probed < floor / 2 || elapsed > OPEN_DRAIN_MAX {
+            if probed < minimum_sample || elapsed > OPEN_DRAIN_MAX {
                 return None;
             }
             let serial_us = elapsed.saturating_sub(baseline).as_micros().max(1_000);
@@ -432,6 +505,23 @@ impl UplinkPace {
         } else {
             current
         };
+        tracing::trace!(
+            event = "uplink_delivery",
+            acked_bytes = bytes,
+            idle,
+            sample_matches,
+            cap_bytes = current,
+            next_bytes = next,
+            target_bytes = control.cap_at_fill,
+            filled_acked_bytes = control.acked_since_fill,
+            fill_ms = control
+                .filled_at
+                .map(|at| at.elapsed().as_millis() as u64)
+                .unwrap_or(0),
+            ack_age_ms = ack_age.as_millis() as u64,
+            drain_ms = drain.map(|(age, _)| age.as_millis() as u64).unwrap_or(0),
+            "DATA delivery sample progress"
+        );
         if next != current {
             tracing::info!(
                 event = "uplink_pace",
@@ -452,6 +542,7 @@ impl UplinkPace {
         if idle {
             control.idle_since = Some(Instant::now());
             control.filled_at = None;
+            control.filled_peer = None;
             control.acked_since_fill = 0;
             control.sample_bytes = 0;
             control.sample_started = None;
@@ -478,8 +569,12 @@ impl Charge {
             if let Some(peer) = &self.peer {
                 peer.relinquish(self.bytes, true);
             }
-            self.pace
-                .release_aged(self.bytes, self.pace.ceiling, self.sent_at.elapsed());
+            self.pace.release_aged_for(
+                self.bytes,
+                self.pace.ceiling,
+                self.sent_at.elapsed(),
+                self.peer.as_ref().map(|peer| &peer.sample_owner),
+            );
         }
         self.bytes = 0;
     }
@@ -525,6 +620,7 @@ struct PeerProgress {
 }
 pub(crate) struct PeerPace {
     shared: Arc<UplinkPace>,
+    sample_owner: Arc<()>,
     outstanding: Mutex<u64>,
     control_outstanding: AtomicU64,
     progress: Mutex<PeerProgress>,
@@ -576,8 +672,11 @@ impl PeerPace {
     }
 
     pub(crate) fn can_reserve(&self, bytes: u64) -> bool {
-        self.outstanding.lock().unwrap().saturating_add(bytes) <= self.progress.lock().unwrap().cap
-            || self.shared.can_reserve(bytes)
+        let outstanding = *self.outstanding.lock().unwrap();
+        outstanding.saturating_add(bytes) <= self.progress.lock().unwrap().cap
+            || self
+                .shared
+                .can_reserve_for(bytes, Some((&self.sample_owner, outstanding)))
     }
 
     fn try_reserve(&self, bytes: u64) -> bool {
@@ -590,7 +689,10 @@ impl PeerPace {
         }
         let mut outstanding = self.outstanding.lock().unwrap();
         let progress = outstanding.saturating_add(bytes) <= self.progress.lock().unwrap().cap;
-        if !self.shared.try_reserve_progress(bytes, progress) {
+        if !self
+            .shared
+            .try_reserve_for(bytes, progress, Some((&self.sample_owner, *outstanding)))
+        {
             return false;
         }
         if *outstanding == 0 {
@@ -703,7 +805,12 @@ impl PaceShare {
             }
         }
         for (bytes, age) in deliveries {
-            self.pace.shared.release_aged(bytes, self.ceiling, age);
+            self.pace.shared.release_aged_for(
+                bytes,
+                self.ceiling,
+                age,
+                Some(&self.pace.sample_owner),
+            );
         }
     }
 }
