@@ -82,6 +82,7 @@ export async function startSharedBottleneck(targetUrl: string, initial: NetworkL
         source.on("close", () => { lane.closed = true; lane.queue.length = 0; lane.queued = 0; });
         destination.on("drain", () => { lane.writable = true; wake(); });
       },
+      queuedBytes() { return lanes.reduce((sum, lane) => sum + lane.queued, 0); },
       changed() { availableAt = Math.min(availableAt, performance.now() + 100); wake(); },
       stop() { if (timer) clearTimeout(timer); for (const lane of lanes) lane.queue.length = 0; },
     };
@@ -104,6 +105,12 @@ export async function startSharedBottleneck(targetUrl: string, initial: NetworkL
   return {
     urlFor(input: string) { const u = new URL(input); u.hostname = "127.0.0.1"; u.port = String(address.port); return u.toString(); },
     setProfile(next: NetworkLinkProfile) { profile = checked(next); for (const group of groups) group.changed(); },
+    // Keep connection identities monotonic and include bytes already queued
+    // at the boundary; only observation counters start a new interval.
+    resetTrafficStats() {
+      stats.receivedBytes.fill(0); stats.forwardedBytes.fill(0);
+      stats.peakQueuedBytes = groups.map(group => group.queuedBytes());
+    },
     stats() { return { ...stats, receivedBytes: [...stats.receivedBytes], forwardedBytes: [...stats.forwardedBytes], peakQueuedBytes: [...stats.peakQueuedBytes] }; },
     connections() { return [...connections].map(([id, value]) => ({ id, bytes: [...value.bytes], closed: value.closed })); },
     cutConnection(id: number) { const c = connections.get(id); if (c) { c.closed = true; c.front.destroy(); c.back.destroy(); } },

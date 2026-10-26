@@ -7,11 +7,15 @@ import { openFabricPool } from "../../framework/flows/branches/fabric-pool.ts";
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const quantiles = (values: number[]) => { const sorted = [...values].sort((a,b) => a-b); const q = (p: number) => Math.round(sorted[Math.max(0,Math.ceil(sorted.length*p)-1)] ?? 0); return { n: sorted.length, p50: q(.5), p95: q(.95), p99: q(.99), max: q(1) }; };
 type Scenario = "download" | "duplex" | "hot-drop" | "slow-consumer" | "node-cut" | "browser-cut" | "all-cut" | "tail-close" | "interrupt";
-const variants: Array<{ name: string; nodes: number; browsers: number; both: boolean; scenario: Scenario }> = [];
+const variants: Array<{ name: string; nodes: number; browsers: number; both: boolean; scenario: Scenario; ackDelay?: number }> = [];
 for (const scenario of ["download", "duplex"] as const) for (const [nodes,browsers] of [[1,1],[1,2],[2,2],[4,4]]) variants.push({ name: `${scenario}-b${browsers}-n${nodes}`, nodes: nodes!, browsers: browsers!, both: false, scenario });
 for (const scenario of ["hot-drop", "slow-consumer", "node-cut", "browser-cut", "all-cut", "interrupt"] as const) for (const nodes of [1,2]) variants.push({ name: `${scenario}-b${nodes}-n${nodes}`, nodes, browsers: nodes, both: false, scenario });
 for (const nodes of [1,2]) variants.push({ name: `tail-close-b2-n${nodes}`, nodes, browsers: 2, both: false, scenario: "tail-close" });
 for (const nodes of [1,2]) variants.push({ name: `both-legs-b${nodes}-n${nodes}`, nodes, browsers: nodes, both: true, scenario: "download" });
+
+variants.push({ name: "duplex-delayed-ack-b4-n4", nodes: 4, browsers: 4, both: false, scenario: "duplex", ackDelay: 1200 });
+
+variants.push({ name: "duplex-ack-stall-b4-n4", nodes: 4, browsers: 4, both: false, scenario: "duplex", ackDelay: 3000 });
 
 for (const v of variants) defineSpecialty({
   id: `specialty.fabric-pool.${v.name}`, title: `Real same-daemon Fabric ${v.browsers} browser / ${v.nodes} node channels: ${v.scenario}${v.both ? ", both legs shaped" : ""}`,
@@ -23,13 +27,23 @@ for (const v of variants) defineSpecialty({
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"], retention: true,
 }, async t => {
   if (v.scenario === "interrupt") registerControlledAgent(t.env, { id: "pool-control", profile: "accept-then-silent" });
-  if (v.scenario === "duplex") t.env.env.GENEHUB_LOCAL_LOG = "warn,genet_daemon::dataplane::uplink_pace=info";
-  const pool = await openFabricPool(t, v.nodes, v.browsers, v.both);
+  if (v.scenario === "duplex") t.env.env.GENEHUB_LOCAL_LOG = "warn,diagnostic=debug,genet_daemon::dataplane::uplink_pace=info";
+  const uploadEvents: Array<{ at: number; peer: number; requestId: string; phase: unknown; outcome: unknown }> = [];
+  const paceEvents: Array<Record<string, string | number | boolean | null>> = [];
+  const pool = await openFabricPool(t, v.nodes, v.browsers, v.both, false, (event, peer) => {
+    if (event.kind === "operation" && event.detail.operation === "file.write" && uploadEvents.length < 12) {
+      uploadEvents.push({ at: Date.now(), peer, requestId: String(event.detail.requestId), phase: event.detail.phase, outcome: event.detail.outcome });
+    }
+    if (event.kind === "transport" && event.detail.phase === "send-pace" && peer === v.browsers - 1 && paceEvents.length < 96) {
+      paceEvents.push({ at: Date.now(), peer, ...event.detail });
+    }
+  });
   const { opened: o, clients, link } = pool;
   const control = clients[0]!;
   const owners = clients.map(c => c.logicalConnectionId);
   const streams: ReturnType<typeof control.openShellStream>[] = [];
   const results: Array<Promise<Awaited<ReturnType<typeof collectShellResult>> | null>> = [];
+  let ackHoldTimer: NodeJS.Timeout | undefined, ackHeldAt: number | undefined, ackHoldMs: number | undefined;
   let timer: NodeJS.Timeout | undefined, faultApplied = false, hotBusy = false, finished = 0;
   let upload: Promise<{ ack: boolean; error: boolean; elapsedMs: number; errorType?: string }> | undefined;
   const loadBytes = 8*1024*1024;
@@ -53,6 +67,12 @@ for (const v of variants) defineSpecialty({
     const start = performance.now(); writeFileSync(join(o.workspaceRoot, "pool-go"), "go");
     const uploadText = "upload-pattern-".repeat(70000);
     if (v.scenario === "duplex") upload = clients.at(-1)!.call({ type: "file.write", payload: { workspaceId: o.workspaceId, path: `${o.rootHandle}/pool-upload.txt`, content: uploadText } }).then(r => ({ ack: r?.type === "ack", error: false, elapsedMs: Math.round(performance.now()-start) }), (error: unknown) => ({ ack: false, error: true, errorType: error instanceof Error ? error.name : typeof error, elapsedMs: Math.round(performance.now()-start) }));
+    const ackDelay = v.ackDelay;
+    if (ackDelay) timer = setTimeout(() => {
+      faultApplied = true; ackHeldAt = performance.now();
+      link.holdConnection(pool.nodeFlowIds[(v.browsers - 1) % v.nodes]!, "forward");
+      ackHoldTimer = setTimeout(() => { ackHoldMs = Math.round(performance.now() - ackHeldAt!); link.releaseConnections(); }, ackDelay + 5);
+    }, 3000);
     const faultAt = v.scenario === "hot-drop" ? 2000 : 5000;
     let interruptMs: number | null = null, interruptOk = v.scenario !== "interrupt";
     let interrupt: Promise<void> | undefined;
@@ -104,8 +124,23 @@ for (const v of variants) defineSpecialty({
     let uploadOk = true;
     if (upload) { const result = await upload; const fileMatches = existsSync(join(o.workspaceRoot,"pool-upload.txt")) && readFileSync(join(o.workspaceRoot,"pool-upload.txt"),"utf8") === uploadText; uploadOk = result.ack && !result.error && fileMatches; t.note(JSON.stringify({ phase: "upload", ...result, fileMatches, bytes: Buffer.byteLength(uploadText) })); }
     if (v.scenario === "duplex") {
-      const pace = readFileSync(join(t.env.data, "logs", "daemon.log"), "utf8").split("\n").filter(line => line.includes('event="uplink_pace"') || line.includes('event="uplink_initial_sample"'));
-      t.note(`Native DATA window tail: ${pace.slice(-8).join(" | ")}`);
+      const log = readFileSync(join(t.env.data, "logs", "daemon.log"), "utf8").replace(/\u001b\[[0-9;]*m/g, "").split("\n");
+      const event = uploadEvents.find(e => e.phase === "start");
+      if (event) {
+        const rows = log.filter(line => line.includes(event.requestId));
+        const time = (line: string) => Date.parse(line.match(/\d{4}-\d{2}-\d{2}T[^ ]+Z/)?.[0] ?? "");
+        const chunks = rows.filter(line => line.includes("RPC request chunk received"));
+        const credits = rows.filter(line => line.includes("RPC request credit returned"));
+        const gaps = credits.map((line, i) => time(line) - time(chunks[i] ?? "")).filter(Number.isFinite);
+        const first = (text: string) => { const line = rows.find(row => row.includes(text)); return line && Number.isFinite(time(line)) ? time(line) - event.at : null; };
+        t.note(JSON.stringify({ phase: "upload-causal", client: uploadEvents, chunks: chunks.length, credits: credits.length,
+          chunkFirstMs: first("RPC request chunk received"), chunkLastMs: chunks.length ? time(chunks.at(-1)!) - event.at : null,
+          creditWaitMs: { total: gaps.reduce((a, b) => a + b, 0), max: Math.max(0, ...gaps) },
+          finDispatchMs: first("RPC request FIN dispatched"), decodedMs: first("RPC request decoded"), preparedMs: first("RPC response prepared"), completedMs: first("RPC exchange completed") }));
+      }
+      t.note(JSON.stringify({ phase: "upload-pace", minCapBytes: Math.min(...paceEvents.map(e => Number(e.capBytes))), maxCapBytes: Math.max(...paceEvents.map(e => Number(e.capBytes))), sampledLateAcks: paceEvents.filter(e => e.cause === "late-ack").length, columns: ["offsetMs", "cause", "capBeforeBytes", "capBytes", "inFlightBytes", "acknowledgedBytes", "oldestAckAgeMs", "sampleBytes", "sampleAckedBytes", "sampleElapsedMs"], samples: paceEvents.slice(0, 28).map(e => [Number(e.at) - Number(paceEvents[0]!.at), e.cause, e.capBeforeBytes, e.capBytes, e.inFlightBytes, e.acknowledgedBytes, e.oldestAckAgeMs, e.sampleBytes, e.sampleAckedBytes, e.sampleElapsedMs]) }));
+      const pace = log.filter(line => line.includes('event="uplink_pace"') || line.includes('event="uplink_initial_sample"'));
+      t.note(`Native DATA window tail: ${pace.slice(-4).join(" | ")}`);
     }
     const starts = readFileSync(join(o.workspaceRoot,"pool-starts"),"utf8").trim().split("\n").sort();
     let canceledPids = true;
@@ -120,7 +155,7 @@ for (const v of variants) defineSpecialty({
       if(["node-cut","browser-cut","all-cut"].includes(v.scenario))t.assertions.assert(!ingress.some(e=>e.code?.endsWith("full")),"ordinary recovery produced ingress-overflow disconnects");
     }
     const summary = { phase: "result", variant: v.name, rpc: quantiles(rpc), errors, exact24MiB: exact, uploadOk, canceledPids,
-      interruptMs, interruptOk,
+      interruptMs, interruptOk, ackHoldMs,
       sourceStarts: starts, sourceExactlyOnce: starts.join(",") === "0,1,2", retained: clients.map((c,i) => c.logicalConnectionId === owners[i]),
       localOk: local?.type === "workspaces", localMs, lateFrameTail: (pool.relay.logTail().match(/lateFrameOverflow/g)??[]).length, diagnostics: pool.diagnostics.slice(-10) };
     t.note(JSON.stringify(summary));
@@ -129,11 +164,17 @@ for (const v of variants) defineSpecialty({
     t.assertions.assert(rpc.length >= 3 && errors === 0 && Math.max(...rpc) < 10000, "management RPC exceeded the bounded interaction budget");
     if (v.scenario === "duplex") t.assertions.assert(busy.peakQueuedBytes[1]! < 512 * 1024,
       "upload queued half a MiB on the constrained node leg; DATA pacing did not constrain the actual payload path");
+    if (v.scenario === "duplex") t.assertions.assert(paceEvents.length > 0 && paceEvents.every(event =>
+      typeof event.capBytes === "number" && event.capBytes >= 32768 && event.capBytes <= 3 * 1024 * 1024 &&
+      typeof event.inFlightBytes === "number" && Number.isFinite(event.inFlightBytes) && event.inFlightBytes >= 0),
+      "public bounded sender-window diagnostics were unavailable or invalid");
+    if (v.ackDelay) t.assertions.assert(faultApplied && ackHoldMs !== undefined && ackHoldMs >= v.ackDelay && ackHoldMs < v.ackDelay + 800,
+      "the declared forward-only ACK-path pause was not applied and restored on time");
     if (controlSession) {
       const stopped = await o.client.call({ type: "session.get", payload: { sessionId: controlSession } });
       t.assertions.assert(interruptOk && stopped?.type === "snapshot" && !!stopped.data.summary.inputSummary?.paused, "remote interrupt failed to retain the Human pause");
     }
     t.assertions.assert(v.scenario !== "hot-drop" || hotBusy, "hot-drop happened only after bulk output had already completed");
     t.assertions.assert(summary.lateFrameTail === 0, "cancelled old data was charged as a node-wide protocol violation");
-  } finally { if (timer) clearTimeout(timer); streams.forEach(s => s.reset(1)); await pool.dispose(); }
+  } finally { if (timer) clearTimeout(timer); if (ackHoldTimer) clearTimeout(ackHoldTimer); link.releaseConnections(); streams.forEach(s => s.reset(1)); await pool.dispose(); }
 });

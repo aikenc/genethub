@@ -1,11 +1,11 @@
-import { Client, type WebSocketLike } from "@genehub/workbench/client";
+import { Client, type ClientDiagnosticEvent, type WebSocketLike } from "@genehub/workbench/client";
 import { WebSocket } from "ws";
 import { startRelay } from "../../drivers/relay.ts";
 import { startSharedBottleneck } from "../../drivers/shared-bottleneck.ts";
 import { startFaultLink } from "../../drivers/fault-link.ts";
 import type { CaseContext } from "../../context.ts";
 
-export async function openFabricPool(t: CaseContext, nodeChannels: number, browserChannels: number, bothLegs = false, nativePath = false) {
+export async function openFabricPool(t: CaseContext, nodeChannels: number, browserChannels: number, bothLegs = false, nativePath = false, observe?: (event: ClientDiagnosticEvent, peer: number) => void) {
   const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
   const relay = await startRelay({ openRoot: t.openRoot });
   const link = await startSharedBottleneck(relay.origin, { bandwidthMbps: 1000, rttMs: 0 });
@@ -30,7 +30,7 @@ export async function openFabricPool(t: CaseContext, nodeChannels: number, brows
       const fresh = () => ({ url: fault ? fault.urlFor(url.toString()) : url.toString(), credential: paired.credential });
       const client = new Client({ separateDataChannel: false, ...fresh(), rtcEnabled: false, requestTimeoutMs: 10000, redial: async () => fresh(),
         socketFactory: u => new WebSocket(u) as unknown as WebSocketLike,
-        onDiagnostic(event) { if (event.kind === "connection" || event.kind === "error") { diagnostics.push({ peer, state: event.detail.state, phase: event.detail.phase, reason: event.kind === "error" ? event.detail.errorName : event.detail.closeReason }); if (diagnostics.length > 40) diagnostics.shift(); } },
+        onDiagnostic(event) { if (event.kind === "connection" || event.kind === "error") { diagnostics.push({ peer, state: event.detail.state, phase: event.detail.phase, reason: event.kind === "error" ? event.detail.errorName : event.detail.closeReason }); if (diagnostics.length > 40) diagnostics.shift(); } observe?.(event, peer); },
       });
       clients.push(client); client.connect(); await t.tools.waitUntil(() => client.connectionState === "ready", 15000);
     }
