@@ -1,5 +1,5 @@
-import { spawn } from "node:child_process";
-import { writeFile, copyFile } from "node:fs/promises";
+import { spawn, spawnSync } from "node:child_process";
+import { writeFile, copyFile, cp } from "node:fs/promises";
 import { join } from "node:path";
 import { ServicePreviewClient } from "@genehub/workbench/client";
 import {
@@ -48,6 +48,16 @@ defineSpecialty(
       throw new BlockedError(
         "set GENEHUB_PREVIEW_MEDIA_PYTHON to Python with apps/daemon/builtin-skills/genehub-preview/assets/demo/requirements.txt",
       );
+    // Run the shipped example as documented, with its locked dependencies
+    // installed only in this case's workspace, never in product source.
+    const example = join(t.env.workspace, "service-example");
+    for (const folder of ["node-adapter", "demo"]) await cp(
+      join(t.openRoot, "apps/daemon/builtin-skills/genehub-preview/assets", folder),
+      join(example, folder), { recursive: true, filter: source => !source.split(/[\\/]/).includes("node_modules") },
+    );
+    const installed = spawnSync("npm", ["--prefix", join(example, "node-adapter"), "ci", "--ignore-scripts", "--no-audit", "--no-fund", "--prefer-offline"],
+      { encoding: "utf8", timeout: 30_000 });
+    if (installed.status !== 0) throw new BlockedError(`copied media adapter dependencies unavailable (exit ${installed.status}); npm and its package-lock.json are required`);
     const opened = await t.flows.main.openWorkspace({
       openRoot: t.openRoot,
       lease: t.env,
@@ -56,7 +66,7 @@ defineSpecialty(
     const demoPort = await allocatePort();
     const config = join(t.env.workspace, "media.json");
     await copyFile(
-      join(t.openRoot, "apps/daemon/builtin-skills/genehub-preview/assets/demo/index.html"),
+      join(example, "demo/index.html"),
       join(t.env.workspace, "index.html"),
     );
     await writeFile(
@@ -67,7 +77,7 @@ defineSpecialty(
           {
             command: [
               process.execPath,
-              join(t.openRoot, "apps/daemon/builtin-skills/genehub-preview/assets/demo/backend.mjs"),
+              join(example, "demo/backend.mjs"),
             ],
             origin: `http://127.0.0.1:${demoPort}`,
             env: { PREVIEW_DEMO_PORT: String(demoPort) },
@@ -77,7 +87,7 @@ defineSpecialty(
           {
             command: [
               python,
-              join(t.openRoot, "apps/daemon/builtin-skills/genehub-preview/assets/demo/media.py"),
+              join(example, "demo/media.py"),
             ],
             origin: `http://127.0.0.1:${port}`,
             env: { PREVIEW_MEDIA_PORT: String(port) },
@@ -95,7 +105,7 @@ defineSpecialty(
     const runner = spawn(
       process.execPath,
       [
-        join(t.openRoot, "apps/daemon/builtin-skills/genehub-preview/assets/node-adapter/run.mjs"),
+        join(example, "node-adapter/run.mjs"),
         "--config",
         config,
         "--daemon-root",

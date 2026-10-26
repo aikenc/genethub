@@ -31,19 +31,25 @@ with av.open(sys.argv[1],'w') as out:
  for packet in stream.encode():out.mux(packet)
 `);
   let app:ReturnType<typeof spawn>|null=null;
+  let appOutput = "";
   const page=await t.browser.newPage();await page.setViewportSize({width:390,height:844});
   let consumer:Awaited<ReturnType<typeof openPreviewBrowser>>|null=null;
   try{
     const generator=spawn(python,[fixture,video],{stdio:'ignore'});
     const code=await new Promise<number|null>(resolve=>{generator.once('error',()=>resolve(-1));generator.once('exit',resolve)});
     if(code!==0)throw new BlockedError("Python media fixture encoder unavailable");
-    app=spawn(python,[join(copied,"app.py"),'--entry',entry,'--daemon-root',t.env.data,'--video',video],{cwd:copied,stdio:'ignore'});
+    app=spawn(python,[join(copied,"app.py"),'--entry',entry,'--daemon-root',t.env.data,'--video',video],{cwd:copied,stdio:['ignore','pipe','pipe']});
+    const retainOutput = (bytes: Buffer) => { appOutput = (appOutput + bytes.toString()).slice(-2000); };
+    app.stdout?.on('data', retainOutput); app.stderr?.on('data', retainOutput);
     await t.tools.waitUntil(async()=>{
       if(app!.exitCode!==null)throw new Error('Python media application exited');
       const r=await opened.client.call({type:'process.workspaceList',payload:{workspaceId:opened.workspaceId}});
       return r?.type==='processes'&&r.data.some(p=>p.service?.reachable);
     },15000);
-    consumer=await openPreviewBrowser({openRoot:t.openRoot,lease:t.env,page,endpoint:daemonEndpoint(opened.daemon),refreshEndpoint:()=>daemonEndpoint(opened.daemon),workspaceId:opened.workspaceId,entryPath:`${opened.rootHandle}/index.html`,surface:'processes'});
+    const listed = await opened.client.call({ type: 'workspace.list' });
+    const target = listed?.type === 'workspaces' ? listed.data.find(w => w.id === opened.workspaceId) : undefined;
+    if (!target) throw new Error('media workspace missing from the public project directory');
+    consumer=await openPreviewBrowser({openRoot:t.openRoot,lease:t.env,page,endpoint:daemonEndpoint(opened.daemon),refreshEndpoint:()=>daemonEndpoint(opened.daemon),workspaceId:opened.workspaceId,workspaceLabel:target.name,entryPath:`${opened.rootHandle}/index.html`,surface:'processes'});
     await page.getByRole('button').filter({hasText:'内容过程预览（Python 示例）'}).click({timeout:30000}).catch(async () => {
       const controls = await page.getByRole("button").allTextContents();
       const rows = await opened.client.call({ type: "process.workspaceList", payload: { workspaceId: opened.workspaceId } });
@@ -60,7 +66,13 @@ with av.open(sys.argv[1],'w') as out:
     };
     await openServiceAction('允许本次预览访问登记服务');
     await page.getByRole('button',{name:'连接音视频',exact:true}).click();
-    await page.waitForFunction(()=>Array.from(document.querySelectorAll('video')).some(v=>v.videoWidth>0&&v.currentTime>0),{},{timeout:30000});
+    await page.waitForFunction(()=>Array.from(document.querySelectorAll('video')).some(v=>v.videoWidth>0&&v.currentTime>0),{},{timeout:30000}).catch(async error => {
+      const media = await page.evaluate(() => ({ secure: window.isSecureContext,
+        video: Array.from(document.querySelectorAll('video')).map(v => ({ width: v.videoWidth, height: v.videoHeight, time: v.currentTime, paused: v.paused, ready: v.readyState,
+          error: v.error ? { code: v.error.code, message: v.error.message } : null,
+          tracks: v.srcObject instanceof MediaStream ? v.srcObject.getTracks().map(t => ({ kind: t.kind, ready: t.readyState, enabled: t.enabled, muted: t.muted })) : [] })) }));
+      throw new Error(`${error instanceof Error ? error.message : String(error)}; media evidence=${JSON.stringify({ media, browser: consumer?.errors.slice(-6).map(e => e.slice(0,300)), body: (await page.locator('body').innerText()).slice(-1400), appOutput })}`);
+    });
     await openServiceAction('暂停服务访问');
     // Re-enable and query application's real session inventory via its public route.
     await openServiceAction('允许本次预览访问登记服务');
