@@ -28,10 +28,15 @@ for (const [runningPerMachine, watchedPerMachine] of [[5, 5], [8, 8], [20, 8]] a
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"], retention: true,
 }, async t => {
   let measuring = false;
+  const previewOperations: Array<Record<string, unknown>> = [];
   const started = new Map<string, { machine: number; operation: string; at: number }>();
   const measured: Array<{ machine: number; operation: string; requestId: string; start: number; finish: number; duration: number }> = [];
   const fleet = await t.stage("fleet", () => openScaleFleet(t, 10, 20, false, { automatic: true, bothLegs: true, nodeChannels: 2, floodIntervalMs: 150,
-    nativeLog: "warn,diagnostic=debug", onDiagnostic(machine, event) {
+    nativeLog: "warn,diagnostic=debug,genet_daemon::dataplane::preview=debug", onDiagnostic(machine, event) {
+      if (event.kind === "operation" && event.detail.operation === "asset.preview" && previewOperations.length < 4) {
+        const { requestId, phase, durationMs, firstByteMs, transferMs } = event.detail;
+        previewOperations.push({ machine, requestId, phase, at: Date.parse(event.at), durationMs, firstByteMs, transferMs });
+      }
       if (!measuring || event.kind !== "operation" || !["workspace.list", "session.list"].includes(String(event.detail.operation)) || typeof event.detail.requestId !== "string") return;
       const id = event.detail.requestId;
       if (event.detail.phase === "start") started.set(id, { machine, operation: String(event.detail.operation), at: Date.parse(event.at) });
@@ -76,7 +81,7 @@ for (const [runningPerMachine, watchedPerMachine] of [[5, 5], [8, 8], [20, 8]] a
       previewsInFlight++;
       const began = performance.now();
       previews.push(file.node.client.preview(file.node.opened.workspaceId, file.path, "original", previewAbort.signal).then(
-        body => ({ bytes: body.bytes.byteLength, firstByteMs: body.transfer.firstByteMs, elapsedMs: Math.round(performance.now() - began), exact: hash(body.bytes) === expectedPreview }),
+        body => ({ bytes: body.bytes.byteLength, firstByteMs: body.transfer.firstByteMs, headWaitMs: body.transfer.elapsedMs - body.transfer.transferMs, firstBodyWaitMs: body.transfer.firstByteMs === null ? null : body.transfer.firstByteMs - (body.transfer.elapsedMs - body.transfer.transferMs), elapsedMs: Math.round(performance.now() - began), exact: hash(body.bytes) === expectedPreview }),
         error => ({ bytes: 0, firstByteMs: null, elapsedMs: Math.round(performance.now() - began), exact: false, error: error instanceof Error ? error.name : String(error) }),
       ).finally(() => { previewsInFlight--; }));
     }
@@ -134,7 +139,32 @@ for (const [runningPerMachine, watchedPerMachine] of [[5, 5], [8, 8], [20, 8]] a
     try { previewResults = await Promise.all(previews); }
     finally { clearTimeout(deadline); }
     fleet.link.setProfile({ bandwidthMbps: 1000, rttMs: 0 });
+    const observedPreviews = previewOperations.filter(event => event.phase === "start").slice(0, 2);
+    const nativeLogsReady = await t.tools.waitUntil(() => observedPreviews.length === 2 && observedPreviews.every(event => {
+      if (typeof event.machine !== "number" || typeof event.requestId !== "string") return false;
+      const lines = stripVTControlCharacters(readFileSync(join(fleet.nodes[event.machine]!.lease.data, "logs", "daemon.log"), "utf8")).split("\n").filter(line => line.includes(event.requestId as string));
+      return lines.some(line => line.includes("preview_stage_timing")) && lines.some(line => line.includes("data operation completed"));
+    }), 3000).then(() => true, () => false);
     const logs = fleet.nodes.map(node => stripVTControlCharacters(readFileSync(join(node.lease.data, "logs", "daemon.log"), "utf8")).split("\n"));
+    for (const machine of [0, 1]) {
+      const began = previewOperations.find(event => event.machine === machine && event.phase === "start");
+      const finished = previewOperations.find(event => event.machine === machine && event.phase === "finish");
+      const requestId = typeof began?.requestId === "string" ? began.requestId : null;
+      const rows = requestId ? logs[machine]!.filter(line => line.includes(requestId)) : [];
+      const complete = rows.find(line => line.includes("data operation completed"));
+      const stage = rows.find(line => line.includes("preview_stage_timing"));
+      const field = (line: string | undefined, key: string) => {
+        const value = new RegExp(`\\b${key}=(\\d+)`).exec(line ?? "")?.[1];
+        return value === undefined ? null : Number(value);
+      };
+      const serverEndAt = complete ? Date.parse(complete.split(" ")[0]!) : null;
+      const serverMs = field(complete, "duration_ms");
+      const headWaitMs = typeof finished?.durationMs === "number" && typeof finished.transferMs === "number" ? finished.durationMs - finished.transferMs : null;
+      const firstBodyWaitMs = typeof finished?.firstByteMs === "number" && headWaitMs !== null ? finished.firstByteMs - headWaitMs : null;
+      t.note(JSON.stringify({ phase: "preview-start-causal", machine, nativeLogsReady, headWaitMs, firstBodyWaitMs, serverMs,
+        ingressToHandlerMs: serverEndAt !== null && serverMs !== null && typeof began?.at === "number" ? serverEndAt - serverMs - began.at : null,
+        native: Object.fromEntries(["worker_wait_us", "scan_us", "send_us", "read_us", "write_credit_us", "write_budget_us", "write_enqueue_us", "write_completion_us", "write_actor_queue_us", "write_actor_send_us", "write_wake_us", "finish_us"].map(key => [key, field(stage, key)])) }));
+    }
     for (const operation of ["workspace.list", "session.list"]) {
       const causal = measured.filter(call => call.operation === operation).sort((a, b) => b.duration - a.duration).slice(0, 4).map(call => {
         const lines = logs[call.machine]!.filter(line => line.includes(call.requestId));
