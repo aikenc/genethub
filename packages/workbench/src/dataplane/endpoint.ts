@@ -93,6 +93,7 @@ export class DataStream {
   private closed = false;
   private sentBytes = 0;
   private receivedBytes = 0;
+  private consumedCredit = 0;
   private totalReceivedBytes = 0;
   private readonly chunks: DataChunk[] = [];
   private readonly chunkWaiters: Array<ReturnType<typeof deferred<IteratorResult<Uint8Array>>>> = [];
@@ -337,11 +338,18 @@ export class DataStream {
   private returnCredit(value: number): void {
     this.receivedBytes -= value;
     if (this.closed) return;
+    this.consumedCredit += value;
+    // Small streamed events share one bounded credit update. Logical delivery
+    // credit is still released immediately by the chunk's existing lease.
+    const threshold = Math.min(8 * 1024, Math.floor(this.endpoint.maxReceiveBytesPerStream / 2));
+    if (this.consumedCredit < threshold) return;
+    const returned = this.consumedCredit;
+    this.consumedCredit = 0;
     void this.endpoint
       .sendFrame(this, {
         kind: DataKind.WindowUpdate,
         streamId: this.id,
-        value,
+        value: returned,
         payload: EMPTY,
       })
       .catch((error: unknown) => this.fail(error));

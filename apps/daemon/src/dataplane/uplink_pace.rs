@@ -23,6 +23,10 @@ const RATE_TARGET: Duration = Duration::from_millis(200);
 const GROW_DRAIN_MAX: Duration = Duration::from_millis(400);
 /// Slow drains cannot justify a larger queue on a constrained uplink.
 const OPEN_DRAIN_MAX: Duration = Duration::from_millis(900);
+// A small management reply sharing an uncalibrated uplink must not sit behind
+// a blind 3MiB fast-path burst after capacity drops. Calibrated high-RTT paths
+// and pure bulk retain their larger ceiling; existing sent debt is never erased.
+const UNPROFILED_MIXED_BURST_BYTES: u64 = 1024 * 1024;
 // Every admitted peer starts with one guaranteed record; a proven fast peer
 // may earn four. The 32-peer admission bound limits this extra occupancy; a
 // stalled downstream cannot take another peer's progress share.
@@ -53,6 +57,7 @@ struct Control {
     initial_seed_until: Option<Instant>,
     initial_seed_bytes: u64,
     baseline_rtt: Option<Duration>,
+    interactive: bool,
     initial_delivery_sample: Option<Instant>,
 }
 
@@ -78,6 +83,7 @@ impl UplinkPace {
                 initial_seed_until: None,
                 initial_seed_bytes: 0,
                 baseline_rtt: None,
+                interactive: false,
                 initial_delivery_sample: None,
             }),
         }
@@ -102,6 +108,12 @@ impl UplinkPace {
         }
         let mut control = self.control.lock().unwrap();
         control.baseline_rtt = (baseline >= Duration::from_millis(50)).then_some(baseline);
+        if control.interactive && control.baseline_rtt.is_none() {
+            self.cap.fetch_min(
+                UNPROFILED_MIXED_BURST_BYTES.min(self.ceiling),
+                Ordering::Relaxed,
+            );
+        }
         control.initial_delivery_sample = control
             .baseline_rtt
             .map(|_| Instant::now() + Duration::from_secs(2));
@@ -208,6 +220,7 @@ impl UplinkPace {
             {
                 self.cap
                     .store(START_BYTES.min(self.ceiling), Ordering::Relaxed);
+                control.interactive = false;
             }
         }
         let cap = self.cap.load(Ordering::Relaxed);
@@ -328,6 +341,11 @@ impl UplinkPace {
         peer: Option<&Arc<()>>,
     ) {
         let mut control = self.control.lock().unwrap();
+        let ceiling = if control.interactive && control.baseline_rtt.is_none() {
+            ceiling.min(UNPROFILED_MIXED_BURST_BYTES)
+        } else {
+            ceiling
+        };
         let floor = START_BYTES.min(ceiling);
         let current = self.cap.load(Ordering::Relaxed);
         if control.sample_started.is_none() {
@@ -663,6 +681,14 @@ impl PeerPace {
         {
             let mut outstanding = self.shared.outstanding.lock().unwrap();
             *outstanding = outstanding.saturating_add(bytes);
+            let mut control = self.shared.control.lock().unwrap();
+            control.interactive = true;
+            if control.baseline_rtt.is_none() {
+                self.shared.cap.fetch_min(
+                    UNPROFILED_MIXED_BURST_BYTES.min(self.shared.ceiling),
+                    Ordering::Relaxed,
+                );
+            }
         }
         Some(Charge {
             pace: self.shared.clone(),
