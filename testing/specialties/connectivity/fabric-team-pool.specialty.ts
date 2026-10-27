@@ -17,14 +17,14 @@ for (const [browsers,nodes,automatic,members] of [[1,1,false,20],[2,1,false,20],
   surfaces: ["daemon", "relay", "agent-sdk", "workbench-client", "tcp"], productInterfaces: ["@genehub/workbench/client"],
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"], retention: true,
 }, async t => {
-  const started = new Map<string, { machine: number; at: number }>();
-  const measured: Array<{ machine: number; requestId: string; start: number; finish: number; duration: number }> = [];
+  const started = new Map<string, { machine: number; at: number; operation: string }>();
+  const measured: Array<{ machine: number; requestId: string; operation: string; outcome: unknown; start: number; finish: number; duration: number }> = [];
   const fleet=await t.stage("fleet",()=>openScaleFleet(t,10,members,!automatic && browsers > 1,{ nodeChannels:nodes,dataChannels:browsers === 4 ? 3 : 1,automatic,bothLegs:automatic,
     ...(automatic ? { nativeLog: "warn,diagnostic=debug", onDiagnostic(machine, event) {
-      if (event.kind !== "operation" || event.detail.operation !== "workspace.list" || typeof event.detail.requestId !== "string") return;
+      if (event.kind !== "operation" || !["workspace.list", "session.get"].includes(String(event.detail.operation)) || typeof event.detail.requestId !== "string") return;
       const id=event.detail.requestId;
-      if (event.detail.phase === "start") started.set(id,{ machine, at: Date.parse(event.at) });
-      else if (event.detail.phase === "finish") { const first=started.get(id); started.delete(id); if(first && measured.length<512) measured.push({ machine,requestId:id,start:first.at,finish:Date.parse(event.at),duration:Number(event.detail.durationMs??0) }); }
+      if (event.detail.phase === "start") started.set(id,{ machine, at: Date.parse(event.at), operation: String(event.detail.operation) });
+      else if (event.detail.phase === "finish") { const first=started.get(id); started.delete(id); if(first && measured.length<512) measured.push({ machine,requestId:id,operation:first.operation,outcome:event.detail.outcome,start:first.at,finish:Date.parse(event.at),duration:Number(event.detail.durationMs??0) }); }
     } } : {}),
   }));
   let liveCompletions=0,repairCompletions=0,repairs=0; const seen=new Set<string>();
@@ -52,7 +52,7 @@ for (const [browsers,nodes,automatic,members] of [[1,1,false,20],[2,1,false,20],
     fleet.link.setProfile({bandwidthMbps:1000,rttMs:0});
     if (automatic) {
       const logs=fleet.nodes.map(node=>stripVTControlCharacters(readFileSync(join(node.lease.data,"logs","daemon.log"),"utf8")).split("\n"));
-      const timings=measured.slice().sort((a,b)=>b.duration-a.duration).slice(0,8).map(call=>{
+      const timings=measured.filter(call=>call.operation==="workspace.list").sort((a,b)=>b.duration-a.duration).slice(0,2).map(call=>{
         const lines=logs[call.machine]!.filter(line=>line.includes(call.requestId));
         const chunk=lines.find(line=>line.includes("RPC request chunk received"));
         const credited=lines.find(line=>line.includes("RPC request credit returned"));
@@ -85,6 +85,27 @@ for (const [browsers,nodes,automatic,members] of [[1,1,false,20],[2,1,false,20],
     }).catch(error=>{verificationError=error instanceof Error?error.message:String(error);});
     const sourceCounts=fleet.nodes.map(node=>{const journal=readControlledAgentJournal(node.agent);return {prompt:journal.filter(e=>e.event==="prompt").length,answered:journal.filter(e=>e.event==="answered").length};});
     t.note(JSON.stringify({phase:"result",browsers,nodes,rpc:q(rpc),errors,sends:sent.filter(s=>s.status==="fulfilled").length,remoteCompleted,exactReplies,sourceCounts,liveCompletions,repairCompletions,repairs,verificationError}));
+    if (automatic) {
+      // Read existing public-operation/Native RPC timing before fixture disposal.
+      // Bound evidence to four slow reads and two old catalog samples; keep
+      // the original workload, failure and all protection assertions intact.
+      const recentLogs=fleet.nodes.map(node=>{
+        try {return stripVTControlCharacters(readFileSync(join(node.lease.data,"logs","daemon.log"),"utf8")).split("\n");}
+        catch {return [] as string[];}
+      });
+      const bodyTimings=measured.filter(call=>call.operation==="session.get").sort((a,b)=>b.duration-a.duration).slice(0,4).map(call=>{
+        const lines=recentLogs[call.machine]!.filter(line=>line.includes(call.requestId));
+        const at=(label:string)=>{const line=lines.find(row=>row.includes(label));const value=line?Date.parse(line.split(" ")[0]!):NaN;return Number.isFinite(value)?Math.round(value-call.start):null;};
+        const prepared=lines.find(line=>line.includes("RPC response prepared"));
+        return {machine:call.machine,clientMs:call.duration,outcome:typeof call.outcome==="string"?call.outcome:null,
+          chunkMs:at("RPC request chunk received"),finMs:at("RPC request FIN dispatched"),decodedMs:at("RPC request decoded"),preparedMs:at("RPC response prepared"),doneMs:at("RPC exchange completed"),
+          responseBytes:prepared?Number(/response_bytes=(\d+)/.exec(prepared)?.[1]??0):null};
+      });
+      const recovery=fleet.nodes.map((_,machine)=>({machine,
+        settled:measured.filter(call=>call.machine===machine&&call.operation==="session.get").length,
+        pending:[...started.values()].filter(call=>call.machine===machine&&call.operation==="session.get").length}));
+      t.note(JSON.stringify({phase:"snapshot-recovery-causal",bodyTimings,recovery}));
+    }
     t.assertions.assert(sourceCounts.every(s=>s.prompt===members&&s.answered===members)&&exactReplies===10*members&&remoteCompleted===10*members&&!verificationError,"source uniqueness or remote final body recovery failed");
     if (browsers === 1) t.note(JSON.stringify({classification:"legacy single-channel negative control",productionLatencyQualified:false,errors,rpc:q(rpc)}));
     else t.assertions.assert(errors===0&&q(rpc).p95<1500,`${10*members} full subscriptions exceeded management p95/availability target`);

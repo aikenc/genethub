@@ -180,13 +180,15 @@ describe.skipIf(
     mkdirSync(path.join(workspaceRoot, "docs"), { recursive: true });
     writeFileSync(path.join(workspaceRoot, relative), source);
 
+    const opened = await owner.call({ type: "workspace.open", payload: { root: workspaceRoot } });
+    if (opened?.type !== "workspace") throw new Error("the preview workspace was not opened");
     const first = await pairedClient("预览浏览器一");
     const workspaces = await first.call({ type: "workspace.list" });
-    if (workspaces?.type !== "workspaces" || !workspaces.data[0]) {
-      throw new Error("the machine offered no preview workspace");
-    }
-    const workspace = workspaces.data[0].id;
-    const rootHandle = workspaces.data[0].folders[0]!.rootHandle;
+    const offered = workspaces?.type === "workspaces"
+      ? workspaces.data.find(workspace => workspace.id === opened.data.id) : undefined;
+    if (!offered) throw new Error("the paired browser could not see the preview workspace");
+    const workspace = offered.id;
+    const rootHandle = offered.folders[0]!.rootHandle;
     const locator = `${rootHandle}/${relative}`;
     const device = first.identity?.machineId;
     if (!device) throw new Error("the preview peer returned no device handle");

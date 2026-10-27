@@ -34,10 +34,20 @@ for (const v of variants) defineSpecialty({
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"], retention: true,
 }, async t => {
   if (v.scenario === "interrupt") registerControlledAgent(t.env, { id: "pool-control", profile: "accept-then-silent" });
-  if (v.scenario === "duplex") t.env.env.GENEHUB_LOCAL_LOG = "warn,diagnostic=debug,genet_daemon::dataplane::uplink_pace=info";
+  if (v.scenario === "duplex" || v.scenario === "hot-drop") t.env.env.GENEHUB_LOCAL_LOG = "warn,diagnostic=debug,genet_daemon::dataplane::uplink_pace=info";
+  const managementStarts = new Map<string, { at: number; peer: number; requestId: string; operation: string }>();
+  const management: Array<{ at: number; peer: number; requestId: string; operation: string; elapsed: number; outcome: unknown }> = [];
   const uploadEvents: Array<{ at: number; peer: number; requestId: string; phase: unknown; outcome: unknown }> = [];
   const paceEvents: Array<Record<string, string | number | boolean | null>> = [];
   const pool = await openFabricPool(t, v.nodes, v.browsers, v.both, false, (event, peer) => {
+    if (v.scenario === "hot-drop" && event.kind === "operation" && ["workspace.list", "session.list"].includes(String(event.detail.operation)) && typeof event.detail.requestId === "string") {
+      const requestId = event.detail.requestId, key = `${peer}:${requestId}`;
+      if (event.detail.phase === "start" && managementStarts.size < 64) managementStarts.set(key, { at: Date.parse(event.at), peer, requestId, operation: String(event.detail.operation) });
+      else if (event.detail.phase === "finish") {
+        const start = managementStarts.get(key); managementStarts.delete(key);
+        if (start && management.length < 64) management.push({ ...start, elapsed: Number(event.detail.durationMs ?? 0), outcome: event.detail.outcome });
+      }
+    }
     if (event.kind === "operation" && event.detail.operation === "file.write" && uploadEvents.length < 12) {
       uploadEvents.push({ at: Date.now(), peer, requestId: String(event.detail.requestId), phase: event.detail.phase, outcome: event.detail.outcome });
     }
@@ -73,7 +83,7 @@ for (const v of variants) defineSpecialty({
     }
     const narrow = v.scenario === "tail-close";
     setProfile({ bandwidthMbps: v.scenario === "hot-drop" ? 100 : narrow ? .25 : 2, rttMs: v.scenario === "hot-drop" ? 0 : 200 });
-    const start = performance.now(); writeFileSync(join(o.workspaceRoot, "pool-go"), "go");
+    const startWall = Date.now(), start = performance.now(); writeFileSync(join(o.workspaceRoot, "pool-go"), "go");
     const uploadText = "upload-pattern-".repeat(70000);
     if (v.scenario === "duplex") upload = clients.at(-1)!.call({ type: "file.write", payload: { workspaceId: o.workspaceId, path: `${o.rootHandle}/pool-upload.txt`, content: uploadText } }).then(r => ({ ack: r?.type === "ack", error: false, elapsedMs: Math.round(performance.now()-start) }), (error: unknown) => ({ ack: false, error: true, errorType: error instanceof Error ? error.name : typeof error, elapsedMs: Math.round(performance.now()-start) }));
     const ackDelay = v.ackDelay;
@@ -156,6 +166,22 @@ for (const v of variants) defineSpecialty({
       t.note(JSON.stringify({ phase: "upload-pace", minCapBytes: Math.min(...paceEvents.map(e => Number(e.capBytes))), maxCapBytes: Math.max(...paceEvents.map(e => Number(e.capBytes))), sampledLateAcks: paceEvents.filter(e => e.cause === "late-ack").length, columns: ["offsetMs", "cause", "capBeforeBytes", "capBytes", "inFlightBytes", "acknowledgedBytes", "oldestAckAgeMs", "sampleBytes", "sampleAckedBytes", "sampleElapsedMs"], samples: paceEvents.slice(0, 28).map(e => [Number(e.at) - Number(paceEvents[0]!.at), e.cause, e.capBeforeBytes, e.capBytes, e.inFlightBytes, e.acknowledgedBytes, e.oldestAckAgeMs, e.sampleBytes, e.sampleAckedBytes, e.sampleElapsedMs]) }));
       const pace = log.filter(line => line.includes('event="uplink_pace"') || line.includes('event="uplink_initial_sample"'));
       t.note(`Native DATA window tail: ${pace.slice(-4).join(" | ")}`);
+    }
+    if (v.scenario === "hot-drop") {
+      const log = readFileSync(join(t.env.data, "logs", "daemon.log"), "utf8").replace(/\u001b\[[0-9;]*m/g, "").split("\n");
+      const time = (line: string | undefined) => line ? Date.parse(line.match(/\d{4}-\d{2}-\d{2}T[^ ]+Z/)?.[0] ?? "") : NaN;
+      const timings = management.slice().sort((a, b) => b.elapsed - a.elapsed).slice(0, 4).map(call => {
+        const rows = log.filter(line => line.includes(call.requestId));
+        const first = (message: string) => { const at = time(rows.find(line => line.includes(message))); return Number.isFinite(at) ? at - call.at : null; };
+        return { operation: call.operation, peer: call.peer, clientMs: call.elapsed, outcome: call.outcome,
+          chunkMs: first("RPC request chunk received"), finMs: first("RPC request FIN dispatched"), decodedMs: first("RPC request decoded"), preparedMs: first("RPC response prepared"), doneMs: first("RPC exchange completed") };
+      });
+      const windows = log.filter(line => line.includes("preview pace window"));
+      const samples = [...windows.slice(0, 4), ...windows.slice(Math.max(4, windows.length - 4))].map(line => {
+        const number = (field: string) => Number(new RegExp(`\\b${field}=(\\d+)`).exec(line)?.[1] ?? NaN);
+        return { atMs: time(line) - startWall, capBytes: number("cap_bytes"), previousBytes: number("previous_bytes"), drainMs: number("drain_ms"), probedBytes: number("probed_bytes") };
+      });
+      t.note(JSON.stringify({ phase: "hot-drop-causal", timings, samples }));
     }
     const starts = readFileSync(join(o.workspaceRoot,"pool-starts"),"utf8").trim().split("\n").sort();
     let canceledPids = true;
