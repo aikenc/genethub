@@ -67,6 +67,7 @@ export class LogicalConnection {
   private credentials: Credentials | null = null;
   private closed = false;
   private readonly waiters = new Set<() => void>();
+  private readonly controlSequences = new Set<bigint>();
   private readonly ackWaiters = new Map<bigint, { resolve(): void; reject(error: unknown): void }>();
   private readonly started = performance.now();
   private deadline: number | null = null;
@@ -94,6 +95,7 @@ export class LogicalConnection {
     onClose(error: unknown): void;
     onRecovering?(): void;
     onReady?(): void;
+    onWritable?(): void;
     onDiagnostic?(detail: Record<string, string | number | boolean | null>): void;
   }) {
     this.journal = new ResumeJournal(options.policy ?? "relay-allowed", LIMITS);
@@ -151,23 +153,43 @@ export class LogicalConnection {
     void this.sendAttach(channel).catch((error: unknown) => this.lost(channel, error));
     return ready.then(() => true);
   }
-  async send(frame: ResumeFrame): Promise<void> {
+  /** Physical DATA admission belongs before replay sequence allocation.
+   * The endpoint's existing fair writer keeps ineligible frames in its queue. */
+  canSend(frame: { kind: number; payload: Uint8Array }, smallRequest = false): boolean {
+    if (this.closed) return false;
+    if (frame.kind !== DataKind.Data) return true;
+    const channel = this.active;
+    return channel?.phase === "ready" && (!channel.pace ||
+      (this.journal.peekNext() === null && channel.pace.canSend(frame.payload.length + 36, smallRequest)));
+  }
+  async send(frame: ResumeFrame, smallRequest = false): Promise<void> {
     this.live();
     const progress = frame.kind >= 4, bytes = frame.payload.length + 36;
     if (this.pendingCount >= 256 || (progress ? this.pendingProgress + bytes > LIMITS.progressBytes : this.pendingData + bytes > LIMITS.dataBytes)) throw new ResumeError("Backpressure");
     this.pendingCount++;
     if (progress) this.pendingProgress += bytes; else this.pendingData += bytes;
-    try { await this.sendOwned(frame); }
+    try { await this.sendOwned(frame, smallRequest); }
     finally { this.pendingCount--; if (progress) this.pendingProgress -= bytes; else this.pendingData -= bytes; }
   }
-  private async sendOwned(frame: ResumeFrame): Promise<void> {
-    if (frame.kind === DataKind.Open) this.active?.pace?.beginStream();
+  private async sendOwned(frame: ResumeFrame, smallRequest: boolean): Promise<void> {
+    if (frame.kind === DataKind.Open) {
+      // Finite small management requests do not invalidate another stream's
+      // active bulk sample. Large or unknown bodies restart discovery.
+      let small = false;
+      try {
+        const head = JSON.parse(decoder.decode(frame.payload)) as { bodyLength?: unknown };
+        small = typeof head.bodyLength === "number" && Number.isSafeInteger(head.bodyLength) && head.bodyLength >= 0 && head.bodyLength <= 8192;
+      } catch { /* Unknown heads retain conservative discovery. */ }
+      if (small) this.active?.pace?.noteInteractive();
+      else this.active?.pace?.beginStream();
+    }
     let seq: bigint;
     for (;;) {
       this.live();
       try { seq = this.journal.enqueue(frame); break; }
       catch (error) { if (!(error instanceof ResumeError) || error.code !== "Backpressure") throw error; await this.changed(); }
     }
+    if (smallRequest && frame.kind === DataKind.Data) this.controlSequences.add(seq);
     let acknowledged: Promise<void> | null = null;
     if (frame.kind === 5 || frame.kind === 6) acknowledged = new Promise<void>((resolve, reject) => this.ackWaiters.set(seq, { resolve, reject }));
     this.pump();
@@ -179,7 +201,7 @@ export class LogicalConnection {
     const active = this.active, candidate = this.candidate, standby = this.standby;
     this.active = null; this.candidate = null; this.standby = null;
     clearInterval(this.clock);
-    this.journal.close(); this.credentials = null;
+    this.journal.close(); this.credentials = null; this.controlSequences.clear();
     for (const waiter of this.ackWaiters.values()) waiter.reject(error);
     this.ackWaiters.clear(); this.wake();
     standby?.wire.close();
@@ -324,6 +346,7 @@ export class LogicalConnection {
     this.wake();
   }
   private acknowledgeTerminals(received: bigint): void {
+    for (const seq of this.controlSequences) { if (seq > received) break; this.controlSequences.delete(seq); }
     for (const [seq, waiter] of this.ackWaiters) if (seq <= received) { waiter.resolve(); this.ackWaiters.delete(seq); }
   }
   private markReady(channel: Channel): void {
@@ -344,12 +367,13 @@ export class LogicalConnection {
         else if (this.budget) { this.budget = false; bytes = encodeResumeControl({ kind: "budget", epoch: this.epoch, dataGrant: mark.dataGrant, progressGrant: mark.progressGrant }); }
         else {
           const next = this.journal.peekNext();
-          if (next?.kind === DataKind.Data && channel.pace && !channel.pace.canSend(next.bytes)) return;
+          if (next?.kind === DataKind.Data && channel.pace && !channel.pace.canSend(next.bytes, this.controlSequences.has(next.seq))) return;
           bytes = this.journal.next();
-          if (bytes && next?.kind === DataKind.Data) channel.pace?.record(next.seq, next.bytes);
+          if (bytes && next?.kind === DataKind.Data) channel.pace?.record(next.seq, next.bytes, this.controlSequences.has(next.seq));
         }
         if (!bytes) return;
         await channel.wire.send(bytes);
+        this.wake();
       }
     })().catch((error: unknown) => this.lost(channel, error)).finally(() => {
       this.pumping = false;
@@ -410,6 +434,9 @@ export class LogicalConnection {
   private owns(channel: Channel): boolean { return !this.closed && (this.active === channel || this.candidate === channel || this.standby === channel); }
   private now(): number { return Math.floor(performance.now() - this.started); }
   private changed(): Promise<void> { return new Promise((resolve) => this.waiters.add(resolve)); }
-  private wake(): void { const waiters = [...this.waiters]; this.waiters.clear(); for (const wake of waiters) wake(); }
+  private wake(): void {
+    const waiters = [...this.waiters]; this.waiters.clear(); for (const wake of waiters) wake();
+    if (!this.closed) this.options.onWritable?.();
+  }
   private live(): void { if (this.closed) throw this.terminal; }
 }

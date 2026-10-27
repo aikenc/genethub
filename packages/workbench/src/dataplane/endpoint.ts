@@ -446,6 +446,7 @@ export class DataEndpoint {
         onRecovering: () => { for (const handler of this.recoveringHandlers) handler(); },
         onReady: () => { for (const handler of this.pathHandlers) handler(); },
         onDiagnostic: options.onDiagnostic,
+        onWritable: () => this.pump(),
       });
     }
   }
@@ -688,6 +689,11 @@ export class DataEndpoint {
         if (this.transmitting.has(id)) { this.runnable.push(id); continue; }
         const queue = this.queues.get(id);
         if (!queue?.length) continue;
+        // Keep blocked DATA in this existing per-stream round-robin queue,
+        // before assigning a replay sequence. Reset/retire already cancels it.
+        if (this.channel instanceof LogicalConnection && !this.channel.canSend(queue[0]!.frame, this.smallRequestData(queue[0]!.frame))) {
+          this.runnable.push(id); continue;
+        }
         const pending = queue.shift()!;
         if (queue.length) this.runnable.push(id);
         else this.queues.delete(id);
@@ -717,9 +723,16 @@ export class DataEndpoint {
     if (this.state_ !== "open") return Promise.reject(new DataPlaneError("data endpoint is closed"));
     if (this.channel instanceof LogicalConnection) {
       if (frame.kind > 6) return Promise.reject(new DataPlaneError("channel controls do not use stream frames"));
-      return this.channel.send(frame as ResumeFrame);
+      return this.channel.send(frame as ResumeFrame, this.smallRequestData(frame));
     }
     return this.channel.send(encodeDataFrame(frame));
+  }
+
+  private smallRequestData(frame: DataFrame): boolean {
+    if (frame.kind !== DataKind.Data) return false;
+    const stream = this.streams.get(frame.streamId), length = stream?.requestHead.bodyLength;
+    return stream?.direction === "outgoing" && typeof length === "number" &&
+      Number.isSafeInteger(length) && length >= 0 && length <= 8192;
   }
 
   private allocateStreamId(): number {
