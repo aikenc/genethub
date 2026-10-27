@@ -7,7 +7,7 @@ import { openFabricPool } from "../../framework/flows/branches/fabric-pool.ts";
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const quantiles = (values: number[]) => { const sorted = [...values].sort((a,b) => a-b); const q = (p: number) => Math.round(sorted[Math.max(0,Math.ceil(sorted.length*p)-1)] ?? 0); return { n: sorted.length, p50: q(.5), p95: q(.95), p99: q(.99), max: q(1) }; };
 type Scenario = "download" | "duplex" | "hot-drop" | "slow-consumer" | "node-cut" | "browser-cut" | "all-cut" | "tail-close" | "interrupt";
-const variants: Array<{ name: string; nodes: number; browsers: number; both: boolean; scenario: Scenario; ackDelay?: number }> = [];
+const variants: Array<{ name: string; nodes: number; browsers: number; both: boolean; scenario: Scenario; ackDelay?: number; independent?: boolean; interactiveP95Ms?: number }> = [];
 for (const scenario of ["download", "duplex"] as const) for (const [nodes,browsers] of [[1,1],[1,2],[2,2],[4,4]]) variants.push({ name: `${scenario}-b${browsers}-n${nodes}`, nodes: nodes!, browsers: browsers!, both: false, scenario });
 for (const scenario of ["hot-drop", "slow-consumer", "node-cut", "browser-cut", "all-cut", "interrupt"] as const) for (const nodes of [1,2]) variants.push({ name: `${scenario}-b${nodes}-n${nodes}`, nodes, browsers: nodes, both: false, scenario });
 for (const nodes of [1,2]) variants.push({ name: `tail-close-b2-n${nodes}`, nodes, browsers: 2, both: false, scenario: "tail-close" });
@@ -17,9 +17,16 @@ variants.push({ name: "duplex-delayed-ack-b4-n4", nodes: 4, browsers: 4, both: f
 
 variants.push({ name: "duplex-ack-stall-b4-n4", nodes: 4, browsers: 4, both: false, scenario: "duplex", ackDelay: 3000 });
 
+// Independent WAN legs each retain one aggregate bandwidth budget, even
+// with four TCPs; the older shared-Hub bottleneck cases remain unchanged.
+for (const nodes of [1, 2, 4]) variants.push({ name: `independent-two-hop-duplex-b${nodes}-n${nodes}`, nodes, browsers: nodes, both: true, independent: true, interactiveP95Ms: 1500, scenario: "duplex" });
+variants.push({ name: "independent-two-hop-download-b4-n4", nodes: 4, browsers: 4, both: true, independent: true, interactiveP95Ms: 1500, scenario: "download" });
+for (const ackDelay of [1200, 3000]) variants.push({ name: `independent-two-hop-duplex-ack${ackDelay}-b4-n4`, nodes: 4, browsers: 4, both: true, independent: true, interactiveP95Ms: 1500, scenario: "duplex", ackDelay });
+variants.push({ name: "interactive-duplex-b1-n1", nodes: 1, browsers: 1, both: false, interactiveP95Ms: 1500, scenario: "duplex" });
+
 for (const v of variants) defineSpecialty({
   id: `specialty.fabric-pool.${v.name}`, title: `Real same-daemon Fabric ${v.browsers} browser / ${v.nodes} node channels: ${v.scenario}${v.both ? ", both legs shaped" : ""}`,
-  oracle: "Identical three real stdout producers and source bytes; management RPC remains bounded, independent owners and node TCP are proven, faults do not repeat source processes; full hash and exit after restoration, or explicit cancellation remains isolated",
+  oracle: v.interactiveP95Ms !== undefined ? "Three8MiB real producers and1.05MB upload<=10s: managementp95<=1500ms/error0, per-leg capacity unchanged by sockets, all logical owners and physical legs retained, sources exactly once and all hashes exact" : "Identical three real stdout producers and source bytes; management RPC remains bounded, independent owners and node TCP are proven, faults do not repeat source processes; full hash and exit after restoration, or explicit cancellation remains isolated",
   catches: ["only browser-side channels were separated", "journal or physical reader blocks independent control", "adding sockets doubles bandwidth", "old data punishes a healthy lane", "upload or paused body starves RPC"],
   tags: ["fabric-pool", "all-hop", v.scenario], llm: { default: "none" }, expectedDurationMs: 50000, timeoutMs: 150000,
   resources: { environments: 1, cpu: 2, memoryMb: 2048, io: 1, browser: 0, pool: ["download","duplex","hot-drop","slow-consumer"].includes(v.scenario) ? "exclusive" : "standard" },
@@ -37,17 +44,19 @@ for (const v of variants) defineSpecialty({
     if (event.kind === "transport" && event.detail.phase === "send-pace" && peer === v.browsers - 1 && paceEvents.length < 96) {
       paceEvents.push({ at: Date.now(), peer, ...event.detail });
     }
-  });
+  }, { independentBrowserLeg: v.independent });
   const { opened: o, clients, link } = pool;
+  const setProfile = (profile: Parameters<typeof link.setProfile>[0]) => { link.setProfile(profile); pool.browserLink?.setProfile(profile); };
   const control = clients[0]!;
   const owners = clients.map(c => c.logicalConnectionId);
   const streams: ReturnType<typeof control.openShellStream>[] = [];
   const results: Array<Promise<Awaited<ReturnType<typeof collectShellResult>> | null>> = [];
   let ackHoldTimer: NodeJS.Timeout | undefined, ackHeldAt: number | undefined, ackHoldMs: number | undefined;
+  let ackFault: { nodeFlowId: number; beforeForwarded: number; heldForwarded?: number } | undefined;
   let timer: NodeJS.Timeout | undefined, faultApplied = false, hotBusy = false, finished = 0;
   let upload: Promise<{ ack: boolean; error: boolean; elapsedMs: number; errorType?: string }> | undefined;
   const loadBytes = 8*1024*1024;
-  const before = link.stats();
+  const before = link.stats(), browserBefore = pool.browserLink?.stats();
   try {
     let controlSession: string | undefined;
     if (v.scenario === "interrupt") {
@@ -63,22 +72,28 @@ for (const v of variants) defineSpecialty({
       if (v.scenario !== "slow-consumer") results.push(collectShellResult(stream).then(r => { finished++; return r; }, () => null));
     }
     const narrow = v.scenario === "tail-close";
-    link.setProfile({ bandwidthMbps: v.scenario === "hot-drop" ? 100 : narrow ? .25 : 2, rttMs: v.scenario === "hot-drop" ? 0 : 200 });
+    setProfile({ bandwidthMbps: v.scenario === "hot-drop" ? 100 : narrow ? .25 : 2, rttMs: v.scenario === "hot-drop" ? 0 : 200 });
     const start = performance.now(); writeFileSync(join(o.workspaceRoot, "pool-go"), "go");
     const uploadText = "upload-pattern-".repeat(70000);
     if (v.scenario === "duplex") upload = clients.at(-1)!.call({ type: "file.write", payload: { workspaceId: o.workspaceId, path: `${o.rootHandle}/pool-upload.txt`, content: uploadText } }).then(r => ({ ack: r?.type === "ack", error: false, elapsedMs: Math.round(performance.now()-start) }), (error: unknown) => ({ ack: false, error: true, errorType: error instanceof Error ? error.name : typeof error, elapsedMs: Math.round(performance.now()-start) }));
     const ackDelay = v.ackDelay;
     if (ackDelay) timer = setTimeout(() => {
       faultApplied = true; ackHeldAt = performance.now();
-      link.holdConnection(pool.nodeFlowIds[(v.browsers - 1) % v.nodes]!, "forward");
-      ackHoldTimer = setTimeout(() => { ackHoldMs = Math.round(performance.now() - ackHeldAt!); link.releaseConnections(); }, ackDelay + 5);
+      const nodeFlowId = pool.browserNodeFlowIds[v.browsers - 1]!;
+      ackFault = { nodeFlowId, beforeForwarded: link.connections().find(flow => flow.id === nodeFlowId)!.bytes[0]! };
+      link.holdConnection(nodeFlowId, "forward");
+      ackHoldTimer = setTimeout(() => {
+        ackHoldMs = Math.round(performance.now() - ackHeldAt!);
+        ackFault!.heldForwarded = link.connections().find(flow => flow.id === nodeFlowId)!.bytes[0]!;
+        link.releaseConnections();
+      }, ackDelay + 5);
     }, 3000);
     const faultAt = v.scenario === "hot-drop" ? 2000 : 5000;
     let interruptMs: number | null = null, interruptOk = v.scenario !== "interrupt";
     let interrupt: Promise<void> | undefined;
     if (["hot-drop","node-cut","browser-cut","all-cut","tail-close","interrupt"].includes(v.scenario)) timer = setTimeout(() => {
       faultApplied = true;
-      if (v.scenario === "hot-drop") { hotBusy = finished < 3; link.setProfile({ bandwidthMbps: 2, rttMs: 200 }); }
+      if (v.scenario === "hot-drop") { hotBusy = finished < 3; setProfile({ bandwidthMbps: 2, rttMs: 200 }); }
       if (v.scenario === "node-cut" || v.scenario === "all-cut") {
         const candidates = link.connections().filter(c => pool.nodeFlowIds.includes(c.id));
         if (v.scenario === "all-cut") for (const c of candidates) link.cutConnection(c.id);
@@ -106,12 +121,12 @@ for (const v of variants) defineSpecialty({
       }
       await pause(250);
     }
-    const busy = link.stats();
+    const busy = link.stats(), browserBusy = pool.browserLink?.stats(), shapedMs = performance.now() - start;
     if (interrupt) await interrupt;
     t.note(JSON.stringify({ phase: "loaded", variant: v.name, rpc: quantiles(rpc), errors, faultApplied, hotBusy,
-      wire, nodeChannels: pool.nodeFlowIds.length, browserChannels: clients.length, shapedConnections: busy.accepted,
+      wire, browserNodeFlowIds: pool.browserNodeFlowIds, ackFault, independentBrowserLeg: !!pool.browserLink, browserWire: browserBusy, nodeChannels: pool.nodeFlowIds.length, browserChannels: clients.length, shapedConnections: busy.accepted,
       bytes: busy.forwardedBytes.map((b,i) => b-before.forwardedBytes[i]!), peakQueuedBytes: busy.peakQueuedBytes, logicalOwners: new Set(owners).size }));
-    link.setProfile({ bandwidthMbps: 1000, rttMs: 0 });
+    setProfile({ bandwidthMbps: 1000, rttMs: 0 });
     if (v.scenario === "slow-consumer") for (const stream of streams) results.push(collectShellResult(stream).then(r => r, () => null));
     let drainTimer: NodeJS.Timeout | undefined;
     const outcomes = await Promise.race([Promise.all(results), new Promise<null[]>(resolve => { drainTimer = setTimeout(() => resolve([]),40000); })]);
@@ -155,11 +170,23 @@ for (const v of variants) defineSpecialty({
       if(["node-cut","browser-cut","all-cut"].includes(v.scenario))t.assertions.assert(!ingress.some(e=>e.code?.endsWith("full")),"ordinary recovery produced ingress-overflow disconnects");
     }
     const summary = { phase: "result", variant: v.name, rpc: quantiles(rpc), errors, exact24MiB: exact, uploadOk, canceledPids,
-      interruptMs, interruptOk, ackHoldMs,
+      interruptMs, interruptOk, ackHoldMs, ackFault,
       sourceStarts: starts, sourceExactlyOnce: starts.join(",") === "0,1,2", retained: clients.map((c,i) => c.logicalConnectionId === owners[i]),
       localOk: local?.type === "workspaces", localMs, lateFrameTail: (pool.relay.logTail().match(/lateFrameOverflow/g)??[]).length, diagnostics: pool.diagnostics.slice(-10) };
     t.note(JSON.stringify(summary));
     t.assertions.assert(pool.nodeFlowIds.length === v.nodes && new Set(owners).size === v.browsers, "physical node channels or independent client journals did not match the requested topology");
+    if (v.interactiveP95Ms !== undefined) {
+      t.assertions.assert(quantiles(rpc).p95 <= v.interactiveP95Ms, "management p95 exceeded the interactive budget during duplex/preview pressure");
+      t.assertions.assert(clients.every((c, i) => c.logicalConnectionId === owners[i]) && pool.browserFaults.length === v.browsers && pool.browserFaults.every(fault => fault.connections() === 1), "interactive topology replaced an owner or browser TCP");
+    }
+    if (v.independent) {
+      t.assertions.assert(!!browserBusy && !!browserBefore && browserBusy.accepted === v.browsers && busy.accepted === v.nodes, "each independent WAN leg must carry exactly its requested physical sockets");
+      const bound = 2_000_000 / 8 * (shapedMs / 1000) * 1.15;
+      for (const [now, prior] of ([[busy, before], [browserBusy!, browserBefore!]] as const)) {
+        t.assertions.assert(now.forwardedBytes.every((bytes, direction) => bytes - prior.forwardedBytes[direction]! <= bound), "opening channels multiplied one WAN leg's aggregate capacity");
+      }
+      if (v.scenario === "duplex") t.assertions.assert(browserBusy!.peakQueuedBytes[0]! < 512 * 1024, "upload queued half a MiB on the browser WAN leg");
+    }
     t.assertions.assert(starts.join(",") === "0,1,2" && uploadOk && (narrow ? canceledPids : exact), "output, upload, source-process uniqueness or intentional cancellation did not complete correctly");
     t.assertions.assert(rpc.length >= 3 && errors === 0 && Math.max(...rpc) < 10000, "management RPC exceeded the bounded interaction budget");
     if (v.scenario === "duplex") t.assertions.assert(busy.peakQueuedBytes[1]! < 512 * 1024,
@@ -168,7 +195,7 @@ for (const v of variants) defineSpecialty({
       typeof event.capBytes === "number" && event.capBytes >= 32768 && event.capBytes <= 3 * 1024 * 1024 &&
       typeof event.inFlightBytes === "number" && Number.isFinite(event.inFlightBytes) && event.inFlightBytes >= 0),
       "public bounded sender-window diagnostics were unavailable or invalid");
-    if (v.ackDelay) t.assertions.assert(faultApplied && ackHoldMs !== undefined && ackHoldMs >= v.ackDelay && ackHoldMs < v.ackDelay + 800,
+    if (v.ackDelay) t.assertions.assert(faultApplied && ackFault !== undefined && pool.nodeFlowIds.includes(ackFault.nodeFlowId) && ackFault.heldForwarded === ackFault.beforeForwarded && ackHoldMs !== undefined && ackHoldMs >= v.ackDelay && ackHoldMs < v.ackDelay + 800,
       "the declared forward-only ACK-path pause was not applied and restored on time");
     if (controlSession) {
       const stopped = await o.client.call({ type: "session.get", payload: { sessionId: controlSession } });

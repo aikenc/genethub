@@ -611,7 +611,10 @@ async fn ready_claude(journey: &Journey) -> genehub_proto::AgentInfo {
 fn configure_claude_backend() {
     // The daemon may start CLI children during Journey::start; establish the
     // real backend before that boundary, while mock runs remain isolated.
-    if !matches!(genehub_testing::Mode::from_env(), genehub_testing::Mode::Real) {
+    if !matches!(
+        genehub_testing::Mode::from_env(),
+        genehub_testing::Mode::Real
+    ) {
         return;
     }
     // Reuse an already configured backend without changing host settings or
