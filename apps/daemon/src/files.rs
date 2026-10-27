@@ -295,11 +295,12 @@ pub async fn preview(
     let mut step = vec![0u8; PREVIEW_STEP_BYTES];
     let scan_limit = genehub_proto::MAX_PREVIEW_SOURCE_BYTES + 1;
     let mut source_bytes = 0usize;
+    let mut work_step_bytes = 0usize;
     while source_bytes < scan_limit {
         let remaining = scan_limit - source_bytes;
         let reading = timer();
         let read = source
-            .read(&mut step[..remaining.min(PREVIEW_STEP_BYTES)])
+            .read(&mut step[..remaining.min(PREVIEW_STEP_BYTES - work_step_bytes)])
             .map_err(map_preview_io)?;
         scan_timings.read_us += elapsed(reading);
         if read == 0 {
@@ -321,6 +322,19 @@ pub async fn preview(
         scan_timings.snapshot_us += elapsed(copying);
         scan_timings.steps += 1;
         source_bytes += read;
+        work_step_bytes += read;
+        // WASI may return less than the requested buffer (often 64KiB).
+        // Yield after one bounded work step, rather than after each short read.
+        // The next read is capped to the remaining step, so this never runs
+        // more than PREVIEW_STEP_BYTES of synchronous work between yields.
+        if work_step_bytes == PREVIEW_STEP_BYTES {
+            let yielding = timer();
+            crate::blocking::breathe().await;
+            scan_timings.yield_us += elapsed(yielding);
+            work_step_bytes = 0;
+        }
+    }
+    if work_step_bytes > 0 {
         let yielding = timer();
         crate::blocking::breathe().await;
         scan_timings.yield_us += elapsed(yielding);
