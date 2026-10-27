@@ -19,8 +19,9 @@ for (const [browsers,nodes,automatic,members] of [[1,1,false,20],[2,1,false,20],
 }, async t => {
   const started = new Map<string, { machine: number; at: number; operation: string }>();
   const measured: Array<{ machine: number; requestId: string; operation: string; outcome: unknown; start: number; finish: number; duration: number }> = [];
+  const observeTimings = automatic || browsers > 1;
   const fleet=await t.stage("fleet",()=>openScaleFleet(t,10,members,!automatic && browsers > 1,{ nodeChannels:nodes,dataChannels:browsers === 4 ? 3 : 1,automatic,bothLegs:automatic,
-    ...(automatic ? { nativeLog: "warn,diagnostic=debug", onDiagnostic(machine, event) {
+    ...(observeTimings ? { nativeLog: "warn,diagnostic=debug", onDiagnostic(machine, event) {
       if (event.kind !== "operation" || !["workspace.list", "session.get"].includes(String(event.detail.operation)) || typeof event.detail.requestId !== "string") return;
       const id=event.detail.requestId;
       if (event.detail.phase === "start") started.set(id,{ machine, at: Date.parse(event.at), operation: String(event.detail.operation) });
@@ -50,7 +51,7 @@ for (const [browsers,nodes,automatic,members] of [[1,1,false,20],[2,1,false,20],
       sourceAnswered:fleet.nodes.map(n=>readControlledAgentJournal(n.agent).filter(e=>e.event==="answered").length),nodeTcpAccepted:busy.accepted,
       bytes:busy.forwardedBytes.map((v,i)=>v-before.forwardedBytes[i]!),peakQueuedBytes:busy.peakQueuedBytes}));
     fleet.link.setProfile({bandwidthMbps:1000,rttMs:0});
-    if (automatic) {
+    if (observeTimings) {
       const logs=fleet.nodes.map(node=>stripVTControlCharacters(readFileSync(join(node.lease.data,"logs","daemon.log"),"utf8")).split("\n"));
       const timings=measured.filter(call=>call.operation==="workspace.list").sort((a,b)=>b.duration-a.duration).slice(0,2).map(call=>{
         const lines=logs[call.machine]!.filter(line=>line.includes(call.requestId));
@@ -85,7 +86,7 @@ for (const [browsers,nodes,automatic,members] of [[1,1,false,20],[2,1,false,20],
     }).catch(error=>{verificationError=error instanceof Error?error.message:String(error);});
     const sourceCounts=fleet.nodes.map(node=>{const journal=readControlledAgentJournal(node.agent);return {prompt:journal.filter(e=>e.event==="prompt").length,answered:journal.filter(e=>e.event==="answered").length};});
     t.note(JSON.stringify({phase:"result",browsers,nodes,rpc:q(rpc),errors,sends:sent.filter(s=>s.status==="fulfilled").length,remoteCompleted,exactReplies,sourceCounts,liveCompletions,repairCompletions,repairs,verificationError}));
-    if (automatic) {
+    if (observeTimings) {
       // Read existing public-operation/Native RPC timing before fixture disposal.
       // Bound evidence to four slow reads and two old catalog samples; keep
       // the original workload, failure and all protection assertions intact.
