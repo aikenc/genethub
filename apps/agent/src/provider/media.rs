@@ -94,3 +94,11 @@ pub fn historical_note(attachment: &MediaAttachment, kind: &str) -> String {
         if kind == "image" { "图片" } else { "视频" }
     )
 }
+
+/// Explain unavailable media to the model without exposing local OS paths.
+pub fn unavailable_note(attachment: &MediaAttachment) -> String {
+    format!(
+        "附件「{}」无法读取或不受支持。如仍需该内容，请重新附加。",
+        attachment.name
+    )
+}
