@@ -21,7 +21,7 @@ pub const ATTACHMENT_DETAIL: &str = "mediaAttachment";
 pub fn definition() -> Value {
     json!({
         "name": NAME,
-        "description": "Read an image or video file so you can see its content. Supported: jpg/jpeg/png/webp/gif up to 8MB, mp4/webm/mov/mpg/mpeg/avi up to 64MB. Files inside the workspace are attached by reference, anything else you can read is attached inline; the media becomes visible to you on the next model call. Use `read` for text files.",
+        "description": "Read an image or video file so you can see its content. Supported: jpg/jpeg/png/webp/gif up to 8MB, mp4/webm/mov/mpg/mpeg/avi up to 64MB. Images are attached inline; workspace videos are attached by reference; the media becomes visible to you on the next model call. Use `read` for text files.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -55,14 +55,9 @@ fn encode_root(cwd: &Path) -> PathBuf {
         .unwrap_or_else(|| cwd.to_path_buf())
 }
 
-/// Validates the file and returns the attachment for the agent loop to inject.
-/// Files inside the provider's encode root are attached by reference and read
-/// when the next request is built, exactly like a chat upload. Files outside
-/// it are read here and attached inline — `read` and `bash` impose no
-/// workspace boundary either, so confining the agent's own media reads to one
-/// would only break legitimate paths (e.g. evidence-scope material living
-/// outside the AgentSpace root). The evidence-only boundary is enforced in
-/// `tools::execute` before this runs, the same as for `read`.
+/// Images are captured inline so subsequent requests do not depend on the file.
+/// Workspace videos remain relative paths; files outside the root are inline.
+/// The evidence-only boundary is enforced by `tools::execute`.
 pub fn read(args: &Value, cwd: &Path) -> ToolResult {
     let Some(raw_path) = arg_str(args, "path") else {
         return ToolResult::error("read_media: 'path' is required");
@@ -110,11 +105,10 @@ pub fn read(args: &Value, cwd: &Path) -> ToolResult {
             limit / 1024 / 1024
         ));
     }
-    // A path the provider can re-read is cheaper than carrying bytes in the
-    // session history; anything else still works, inlined.
-    let attachment = match encode_root(cwd)
-        .canonicalize()
-        .ok()
+    // Preserve images in the session; videos inside the workspace remain paths.
+    let attachment = match (kind == "video")
+        .then(|| encode_root(cwd))
+        .and_then(|root| root.canonicalize().ok())
         .and_then(|root| file.strip_prefix(&root).ok().map(Path::to_path_buf))
         .and_then(|relative| relative.to_str().map(str::to_string))
     {
@@ -129,6 +123,13 @@ pub fn read(args: &Value, cwd: &Path) -> ToolResult {
                     return ToolResult::error(format!("read_media: 读取 {raw_path} 失败：{error}"));
                 }
             };
+            if bytes.len() > limit {
+                return ToolResult::error(format!(
+                    "read_media: {} 超过 {}MB 的上限",
+                    name,
+                    limit / 1024 / 1024
+                ));
+            }
             MediaAttachment {
                 data_base64: Some(STANDARD.encode(bytes)),
                 ..probe
