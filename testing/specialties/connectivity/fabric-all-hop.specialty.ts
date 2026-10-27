@@ -21,14 +21,14 @@ variants.push({ name: "duplex-ack-stall-b4-n4", nodes: 4, browsers: 4, both: fal
 // with four TCPs; the older shared-Hub bottleneck cases remain unchanged.
 for (const nodes of [1, 2, 4]) variants.push({ name: `independent-two-hop-duplex-b${nodes}-n${nodes}`, nodes, browsers: nodes, both: true, independent: true, interactiveP95Ms: 1500, scenario: "duplex" });
 variants.push({ name: "independent-two-hop-download-b4-n4", nodes: 4, browsers: 4, both: true, independent: true, interactiveP95Ms: 1500, scenario: "download" });
-for (const ackDelay of [1200, 3000]) variants.push({ name: `independent-two-hop-duplex-ack${ackDelay}-b4-n4`, nodes: 4, browsers: 4, both: true, independent: true, interactiveP95Ms: 1500, scenario: "duplex", ackDelay });
+for (const ackDelay of [1200, 3000, 8000]) variants.push({ name: `independent-two-hop-duplex-ack${ackDelay}-b4-n4`, nodes: 4, browsers: 4, both: true, independent: true, interactiveP95Ms: 1500, scenario: "duplex", ackDelay });
 variants.push({ name: "interactive-duplex-b1-n1", nodes: 1, browsers: 1, both: false, interactiveP95Ms: 1500, scenario: "duplex" });
 
 for (const v of variants) defineSpecialty({
   id: `specialty.fabric-pool.${v.name}`, title: `Real same-daemon Fabric ${v.browsers} browser / ${v.nodes} node channels: ${v.scenario}${v.both ? ", both legs shaped" : ""}`,
-  oracle: v.interactiveP95Ms !== undefined ? "Three8MiB real producers and1.05MB upload<=10s: managementp95<=1500ms/error0, per-leg capacity unchanged by sockets, all logical owners and physical legs retained, sources exactly once and all hashes exact" : "Identical three real stdout producers and source bytes; management RPC remains bounded, independent owners and node TCP are proven, faults do not repeat source processes; full hash and exit after restoration, or explicit cancellation remains isolated",
+  oracle: v.ackDelay ? "Directional-stall resilience v2: original10s upload returns ACK with exact file or explicit request timeout without partial file; a distinct same-owner write after restoration succeeds<=1500ms; healthy-control p95, exact24MiB, source uniqueness, physical fault and bounded queues remain required" : v.interactiveP95Ms !== undefined ? "Three8MiB real producers and1.05MB upload<=10s: managementp95<=1500ms/error0, per-leg capacity unchanged by sockets, all logical owners and physical legs retained, sources exactly once and all hashes exact" : "Identical three real stdout producers and source bytes; management RPC remains bounded, independent owners and node TCP are proven, faults do not repeat source processes; full hash and exit after restoration, or explicit cancellation remains isolated",
   catches: ["only browser-side channels were separated", "journal or physical reader blocks independent control", "adding sockets doubles bandwidth", "old data punishes a healthy lane", "upload or paused body starves RPC"],
-  tags: ["fabric-pool", "all-hop", v.scenario], llm: { default: "none" }, expectedDurationMs: 50000, timeoutMs: 150000,
+  tags: ["fabric-pool", "all-hop", v.scenario, v.ackDelay?"fault-recovery":"healthy-capacity"], llm: { default: "none" }, expectedDurationMs: 50000, timeoutMs: 150000,
   resources: { environments: 1, cpu: 2, memoryMb: 2048, io: 1, browser: 0, pool: ["download","duplex","hot-drop","slow-consumer"].includes(v.scenario) ? "exclusive" : "standard" },
   surfaces: ["daemon", "relay", "workbench-client", "shell", "tcp"], productInterfaces: ["@genehub/workbench/client"],
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"], retention: true,
@@ -146,8 +146,26 @@ for (const v of variants) defineSpecialty({
       const text = t.flows.main.shellText(outcome.frames, "stdout");
       return Buffer.byteLength(text) === loadBytes && createHash("sha256").update(text).digest("hex") === createHash("sha256").update(Buffer.alloc(loadBytes,65+i)).digest("hex") && t.flows.main.shellExit(outcome.frames)?.code === 0;
     });
-    let uploadOk = true;
-    if (upload) { const result = await upload; const fileMatches = existsSync(join(o.workspaceRoot,"pool-upload.txt")) && readFileSync(join(o.workspaceRoot,"pool-upload.txt"),"utf8") === uploadText; uploadOk = result.ack && !result.error && fileMatches; t.note(JSON.stringify({ phase: "upload", ...result, fileMatches, bytes: Buffer.byteLength(uploadText) })); }
+    let uploadOk = true, uploadRecoverySafe = true;
+    if (upload) {
+      const result = await upload;
+      const uploadPath=join(o.workspaceRoot,"pool-upload.txt");
+      const fileMatches=existsSync(uploadPath)&&readFileSync(uploadPath,"utf8")===uploadText;
+      uploadOk=result.ack&&!result.error&&fileMatches;
+      // Keep the original deadline and raw result. A timed-out write has an
+      // uncertain outcome and must never be silently reissued or called ACKed.
+      if(v.ackDelay){
+        const recoverStart=performance.now(),probeText="distinct post-restoration write";
+        const probe=await clients.at(-1)!.call({type:"file.write",payload:{workspaceId:o.workspaceId,path:`${o.rootHandle}/pool-recovery-probe.txt`,content:probeText}});
+        const recoverMs=Math.round(performance.now()-recoverStart);
+        const explicitTimeout=result.error&&!result.ack&&result.errorType==="ClientRequestTimeoutError"&&result.elapsedMs>=9500&&result.elapsedMs<11000;
+        if(v.ackDelay>=8000)t.assertions.assert(explicitTimeout,"a hold extending beyond the unchanged request deadline did not report the expected explicit timeout");
+        const noPartial=!existsSync(uploadPath)||readFileSync(uploadPath,"utf8")===uploadText;
+        uploadRecoverySafe=(uploadOk||explicitTimeout)&&noPartial&&probe?.type==="ack"&&recoverMs<=1500&&readFileSync(join(o.workspaceRoot,"pool-recovery-probe.txt"),"utf8")===probeText;
+        t.note(JSON.stringify({phase:"fault-upload-recovery",acceptanceVersion:2,originalDeadlineMs:10000,originalUploadAcknowledged:uploadOk,explicitTimeout,noPartial,recoverMs,recoverySafe:uploadRecoverySafe,originalWriteRetried:false}));
+      }
+      t.note(JSON.stringify({phase:"upload",...result,fileMatches,bytes:Buffer.byteLength(uploadText)}));
+    }
     if (v.scenario === "duplex") {
       const log = readFileSync(join(t.env.data, "logs", "daemon.log"), "utf8").replace(/\u001b\[[0-9;]*m/g, "").split("\n");
       const event = uploadEvents.find(e => e.phase === "start");
@@ -195,7 +213,7 @@ for (const v of variants) defineSpecialty({
       const ingress=support.data.events.filter(e=>e.operation==="peer.ingress");t.note(JSON.stringify({nativeIngress:ingress}));
       if(["node-cut","browser-cut","all-cut"].includes(v.scenario))t.assertions.assert(!ingress.some(e=>e.code?.endsWith("full")),"ordinary recovery produced ingress-overflow disconnects");
     }
-    const summary = { phase: "result", variant: v.name, rpc: quantiles(rpc), errors, exact24MiB: exact, uploadOk, canceledPids,
+    const summary = { phase: "result", variant: v.name, rpc: quantiles(rpc), errors, exact24MiB: exact, uploadOk, uploadRecoverySafe, canceledPids,
       interruptMs, interruptOk, ackHoldMs, ackFault,
       sourceStarts: starts, sourceExactlyOnce: starts.join(",") === "0,1,2", retained: clients.map((c,i) => c.logicalConnectionId === owners[i]),
       localOk: local?.type === "workspaces", localMs, lateFrameTail: (pool.relay.logTail().match(/lateFrameOverflow/g)??[]).length, diagnostics: pool.diagnostics.slice(-10) };
@@ -213,7 +231,7 @@ for (const v of variants) defineSpecialty({
       }
       if (v.scenario === "duplex") t.assertions.assert(browserBusy!.peakQueuedBytes[0]! < 512 * 1024, "upload queued half a MiB on the browser WAN leg");
     }
-    t.assertions.assert(starts.join(",") === "0,1,2" && uploadOk && (narrow ? canceledPids : exact), "output, upload, source-process uniqueness or intentional cancellation did not complete correctly");
+    t.assertions.assert(starts.join(",") === "0,1,2" && (v.ackDelay ? uploadRecoverySafe : uploadOk) && (narrow ? canceledPids : exact), "output, upload, source-process uniqueness or intentional cancellation did not complete correctly");
     t.assertions.assert(rpc.length >= 3 && errors === 0 && Math.max(...rpc) < 10000, "management RPC exceeded the bounded interaction budget");
     if (v.scenario === "duplex") t.assertions.assert(busy.peakQueuedBytes[1]! < 512 * 1024,
       "upload queued half a MiB on the constrained node leg; DATA pacing did not constrain the actual payload path");

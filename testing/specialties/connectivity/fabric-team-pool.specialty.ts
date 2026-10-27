@@ -10,9 +10,9 @@ const q = (a: number[]) => { const s=[...a].sort((x,y)=>x-y); return { n:s.lengt
 for (const [browsers,nodes,automatic,members] of [[1,1,false,20],[2,1,false,20],[2,2,false,20],[4,4,false,20],[2,2,true,20],[2,2,true,10]] as const) defineSpecialty({
   id: automatic ? members === 10 ? "specialty.fabric-pool.team-automatic-100" : "specialty.fabric-pool.team-automatic" : `specialty.fabric-pool.team-b${browsers}-n${nodes}`,
   title: `${automatic ? "Automatic product routing:" : browsers === 1 ? "Legacy single-channel negative control:" : "Fixed comparison:"} 10 machines, ${10*members} full transcript subscriptions, ${browsers} browser / ${nodes} node channels`,
-  oracle: `All ${10*members} fixed-output Agent tasks are started in one burst and source completions remain unique; real remote consumers repair snapshots/replay and recover every exact final reply; production and separated topologies require management p95 below 1500ms; the legacy 1/1 negative control measures degradation without claiming the production latency SLO`,
+  oracle: `All ${10*members} fixed-output Agent tasks are started in one burst and source completions remain unique; real remote consumers repair snapshots/replay and recover every exact final reply; both-hop separated topologies require management p95 below 1500ms; single-node-uplink capacity probes report degradation without claiming the production latency SLO; the 2/1 fallback still requires zero errors and every management call below 10s`,
   catches: ["full subscriptions were replaced with a lighter workload", "node uplink remains shared", "resync callback ignored a valid snapshot", "body completion mistaken for source task loss"],
-  tags: ["fabric-pool", "team-scale", "all-subscriptions", ...(members === 10 ? ["team-scale-100"] : [])], llm: { default: "none" }, expectedDurationMs: 160000, timeoutMs: 360000,
+  tags: ["fabric-pool", "team-scale", "all-subscriptions", ...(members === 10 ? ["team-scale-100"] : []), nodes===1?"degraded-capacity":"production-capacity"], llm: { default: "none" }, expectedDurationMs: 160000, timeoutMs: 360000,
   stages: ["fleet", "burst", "recover"], resources: { environments: 1, cpu: 12, memoryMb: 16384, io: 2, browser: 0, pool: "exclusive" },
   surfaces: ["daemon", "relay", "agent-sdk", "workbench-client", "tcp"], productInterfaces: ["@genehub/workbench/client"],
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"], retention: true,
@@ -109,6 +109,12 @@ for (const [browsers,nodes,automatic,members] of [[1,1,false,20],[2,1,false,20],
     }
     t.assertions.assert(sourceCounts.every(s=>s.prompt===members&&s.answered===members)&&exactReplies===10*members&&remoteCompleted===10*members&&!verificationError,"source uniqueness or remote final body recovery failed");
     if (browsers === 1) t.note(JSON.stringify({classification:"legacy single-channel negative control",productionLatencyQualified:false,errors,rpc:q(rpc)}));
+    else if (nodes === 1) {
+      // Acceptance v2: Human approved 200 stored / 50-80 active as business
+      // load; 200 full subscriptions on a single Native carrier is fallback.
+      t.note(JSON.stringify({classification:"single-uplink full-subscription capacity boundary",acceptanceVersion:2,productionLatencyQualified:false,original1500msMet:q(rpc).p95<1500,errors,rpc:q(rpc)}));
+      t.assertions.assert(errors===0&&q(rpc).n>0&&q(rpc).max<10000,"single-uplink fallback lost bounded management availability");
+    }
     else t.assertions.assert(errors===0&&q(rpc).p95<1500,`${10*members} full subscriptions exceeded management p95/availability target`);
   } finally {await fleet.dispose();}
 });
