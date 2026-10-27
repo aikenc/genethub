@@ -3,7 +3,7 @@ import type { Endpoint, Target } from "./target";
 import { Client, type ClientOptions, type ProtocolDial } from "./client";
 
 export interface SummarySource { targets():Promise<Target[]>; openTarget(id:string,options?:{remember?:boolean}):Promise<Endpoint>; }
-export type SummaryState = "waiting" | "loading" | "ready" | "offline" | "denied" | "timeout" | "unavailable" | "notChecked" | "partial" | "rateLimited";
+export type SummaryState = "deferred" | "waiting" | "loading" | "ready" | "offline" | "denied" | "timeout" | "unavailable" | "notChecked" | "partial" | "rateLimited";
 export interface MachineSummary {
   target: Target;
   state: SummaryState;
@@ -37,7 +37,7 @@ export class MachineSummaryDirectory {
   private observer: ((value: SummaryDirectory) => void) | null = null;
   constructor(private source: SummarySource, private options: Pick<ClientOptions, "socketFactory" | "onDiagnostic"> = {}) {}
 
-  async refresh(onUpdate: (value: SummaryDirectory) => void, signal?: AbortSignal): Promise<SummaryDirectory> {
+  async refresh(onUpdate: (value: SummaryDirectory) => void, signal?: AbortSignal, sourceIds?: ReadonlySet<string>): Promise<SummaryDirectory> {
     if (this.disposed) throw new Error("summary directory is closed");
     this.controller?.abort();
     const controller = new AbortController(), generation = ++this.generation;
@@ -68,24 +68,27 @@ export class MachineSummaryDirectory {
       }
       const targets = [...unique.values()];
       const keys = new Set(targets.map(target => target.id));
-      const activeKeys = new Set(targets.slice(0, MAX_SOURCES).map(target => target.id));
-      for (const [id, client] of this.clients) if (!activeKeys.has(id)) { client.close(); this.clients.delete(id); this.previous.delete(id); }
+      // An omitted selection preserves the public bulk-directory API. The UI
+      // supplies its expanded sources, including an empty set on first open.
+      const activeKeys = new Set(targets.filter(target => !sourceIds || sourceIds.has(target.id)).slice(0, MAX_SOURCES).map(target => target.id));
+      for (const [id, client] of this.clients) if (!activeKeys.has(id)) { client.close(); this.clients.delete(id); }
       for (const id of this.previous.keys()) if (!keys.has(id)) this.previous.delete(id);
-      const rows = targets.map((target, index): MachineSummary => ({
-        target, stateSource: "directory", observedAt: new Date().toISOString(), state: index >= MAX_SOURCES ? "notChecked" : target.online === false ? "offline" : "waiting",
+      const rows = targets.map((target): MachineSummary => ({
+        target, stateSource: "directory", observedAt: new Date().toISOString(), state: sourceIds && !sourceIds.has(target.id) ? "deferred" : !activeKeys.has(target.id) ? "notChecked" : target.online === false ? "offline" : "waiting",
         updatedAt: this.previous.get(target.id)?.updatedAt ?? null,
         sessionTotal: this.previous.get(target.id)?.sessionTotal ?? 0, workspaceTotal: this.previous.get(target.id)?.workspaceTotal ?? 0,
         sessions: this.previous.get(target.id)?.sessions ?? [], workspaces: this.previous.get(target.id)?.workspaces ?? [],
       }));
       this.rows = rows;
       const emit = () => { if (!controller.signal.aborted && this.generation === generation) this.emit(); };
+      const pendingRows = rows.filter(row => activeKeys.has(row.target.id));
       let index = 0;
       emit();
       await Promise.all(Array.from({ length: CONCURRENCY }, async () => {
         while (!controller.signal.aborted && this.generation === generation) {
           const current = index++;
-          if (current >= Math.min(rows.length, MAX_SOURCES)) return;
-          const row = rows[current]!;
+          if (current >= pendingRows.length) return;
+          const row = pendingRows[current]!;
           if (row.state === "offline") { this.clients.get(row.target.id)?.close(); this.clients.delete(row.target.id); continue; }
           row.state = "loading"; emit();
           try {
@@ -128,7 +131,7 @@ export class MachineSummaryDirectory {
 
   private canPublish(row: MachineSummary): boolean { return !this.disposed && !this.directoryDenied && row.state !== "denied"; }
   private snapshot(): SummaryDirectory {
-    return { sources: this.rows.map(row => ({ ...row })), complete: !this.directoryDenied && this.rows.every(row => row.state === "ready"), checked: this.rows.filter(row => !["waiting","loading","notChecked"].includes(row.state)).length };
+    return { sources: this.rows.map(row => ({ ...row })), complete: !this.directoryDenied && this.rows.every(row => row.state === "ready"), checked: this.rows.filter(row => !["deferred","waiting","loading","notChecked"].includes(row.state)).length };
   }
   private emit(): void {
     if (this.disposed) return;

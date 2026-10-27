@@ -64,7 +64,7 @@ defineSpecialty({
     }},{socketFactory:u=>new WebSocket(u) as unknown as WebSocketLike});
     let latest:SummaryDirectory=await directory.refresh(()=>{});t.note(JSON.stringify({phase:"initial",complete:latest.complete,sources:latest.sources.map(s=>({state:s.state,sessions:s.sessions.length,projects:s.workspaces.length}))}));t.assertions.assert(latest.complete&&latest.sources.some(s=>s.sessions.length>0),"initial authorized summaries missing");
     const revoked=await owner.fetch(`/app/sessions/${session}/revoke`,{method:"POST"});await revoked.body?.cancel();t.assertions.assert(revoked.ok,"session revoke failed");
-    await directory.refresh(v=>{latest=v;}).catch(()=>{});
+    await directory.refresh(v=>{latest=v;},undefined,new Set()).catch(()=>{});
     t.note(JSON.stringify({complete:latest.complete,states:latest.sources.map(s=>s.state),remainingSessions:latest.sources.reduce((n,s)=>n+s.sessions.length,0)}));
     t.assertions.assert(!latest.complete&&latest.sources.every(s=>s.state==="denied"&&s.sessions.length===0&&s.workspaces.length===0&&s.updatedAt===null),"confirmed Hub denial retained cached source content");
   }finally{directory?.close();o.client.close();o.daemon.stop();await o.mock.stop();relay.stop();await hub.stop();}

@@ -3,7 +3,7 @@ import { WebSocket } from "ws";
 import { defineSpecialty, daemonEndpoint } from "../../framework/public.ts";
 
 defineSpecialty({
-  id:"specialty.team-summary.budgets-and-cancellation",title:"Real source summary budgets, stale offline data, alias deduplication and late-dial cancellation",
+  id:"specialty.team-summary.budgets-and-cancellation",title:"Real source summary budgets, stale offline data, alias deduplication and collapse/late-dial cancellation",
   oracle:"501 actual native sessions produce explicit 500/501 partial data; an offline directory entry keeps labeled stale content without another dial; 33 sources retain an unchecked row; aborted late endpoint lookup creates no socket",
   catches:["truncated results are reported complete", "offline cache is relabeled fresh", "duplicate device aliases multiply owners", "closing summary allows a late dial"],
   tags:["team-summary","boundaries"],llm:{default:"none"},resources:{environments:1,cpu:2,memoryMb:2048,io:1,browser:0},
@@ -29,9 +29,19 @@ defineSpecialty({
     t.assertions.assert(!budget.complete&&budget.checked===32&&budget.sources[32]?.state==="notChecked"&&sockets===3,"source read budget hid an unchecked source or dialed known-offline machines");
     let resolve!:(v:typeof endpoint)=>void,opened=false,lateSockets=0;
     late=new MachineSummaryDirectory({targets:async()=>[{id:"late",label:"Late source",kind:"local"}],openTarget:()=>{opened=true;return new Promise(r=>resolve=r);}},{socketFactory:u=>{lateSockets++;return new WebSocket(u) as unknown as WebSocketLike;}});
-    const pending=late.refresh(()=>{});void pending.catch(()=>{});await t.tools.waitUntil(()=>opened,1000);late.close();resolve(endpoint);
+    const collapsed=await late.refresh(()=>{},undefined,new Set());
+    t.assertions.assert(!opened&&lateSockets===0&&collapsed.checked===0&&collapsed.sources[0]?.state==="deferred","collapsed source created a connection or claimed fresh detail");
+    const pending=late.refresh(()=>{},undefined,new Set(["late"]));void pending.catch(()=>{});await t.tools.waitUntil(()=>opened,1000);
+    const folded=await late.refresh(()=>{},undefined,new Set());resolve(endpoint);
     await pending.catch(()=>{});await new Promise(r=>setTimeout(r,50));
-    t.assertions.assert(lateSockets===0,"cancelled endpoint lookup created a late source socket");
+    t.assertions.assert(lateSockets===0&&folded.sources[0]?.state==="deferred","collapsing an in-flight endpoint lookup created a late source socket or published detail");
+    // Retain the original close-during-dial regression independently of
+    // collapse cancellation: each lifecycle must block a late socket.
+    late.close();opened=false;
+    late=new MachineSummaryDirectory({targets:async()=>[{id:"late-close",label:"Late close source",kind:"local"}],openTarget:()=>{opened=true;return new Promise(r=>resolve=r);}},{socketFactory:u=>{lateSockets++;return new WebSocket(u) as unknown as WebSocketLike;}});
+    const closing=late.refresh(()=>{});void closing.catch(()=>{});await t.tools.waitUntil(()=>opened,1000);late.close();resolve(endpoint);
+    await closing.catch(()=>{});await new Promise(r=>setTimeout(r,50));
+    t.assertions.assert(lateSockets===0,"closed directory created a late source socket");
     t.note(JSON.stringify({nativeSessions:501,displayed:500,partial:true,offlineCacheLabeled:true,sourceBudget:32,unchecked:1,lateSockets}));
   }finally{late?.close();directory?.close();o.client.close();o.daemon.stop();await o.mock.stop();}
 });
