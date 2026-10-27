@@ -25,10 +25,16 @@ for (const mode of ["none", "catalog", "bulk"] as const) defineSpecialty({
   writeFileSync(join(o.workspaceRoot, "held-control.png"), bytes);
   writeFileSync(join(o.workspaceRoot, "held-peer.png"), bytes.subarray(0, 32 * 1024));
   const hash = (v: Uint8Array) => createHash("sha256").update(v).digest("hex");
-  const pace = () => readFileSync(join(t.env.data, "logs", "daemon.log"), "utf8")
-    .replace(/\u001b\[[0-9;]*m/g, "").split("\n")
-    .filter(line => /event="uplink_(pace|initial_sample|fill|delivery)"/.test(line))
-    .slice(-8).map(line => line.replace(/^.*?event=/, "event="));
+  const pace = () => {
+    const lines = readFileSync(join(t.env.data, "logs", "daemon.log"), "utf8")
+      .replace(/\u001b\[[0-9;]*m/g, "").split("\n")
+      .filter(line => /event="uplink_(pace|initial_sample|fill|delivery)"/.test(line));
+    // Keep the first flight and bounded window transitions: the final ACKs
+    // alone cannot explain time spent discovering capacity behind a held peer.
+    const selected = [...lines.filter(line => /event="uplink_fill"|acked_bytes=16320\b/.test(line)).slice(0, 4), ...lines.filter(line => /event="uplink_(pace|initial_sample)"/.test(line)).slice(0, 8), ...lines.slice(-2)];
+    const origin = Date.parse(lines[0]?.split(" ")[0] ?? "");
+    return [...new Set(selected)].map(line => `+${Date.parse(line.split(" ")[0]!) - origin}ms ${line.replace(/^.*?event=/, "event=")}`);
+  };
   let small: Promise<unknown> | undefined, preview: Promise<unknown> | undefined;
   let releaseTimer: NodeJS.Timeout | undefined, deadline: NodeJS.Timeout | undefined;
   try {
