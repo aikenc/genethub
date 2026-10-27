@@ -101,6 +101,7 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
     // source read; streaming must not turn one retained Vec into hundreds of
     // concurrent disk readers.
     let _slot = slot;
+    let scan = file.scan_timings;
     let send_started = Instant::now();
     let stats = send_file(stream, file, services, &authorized).await?;
     tracing::debug!(
@@ -111,6 +112,13 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
         source_bytes = stats.source_bytes,
         worker_wait_us,
         scan_us,
+        scan_open_us = scan.open_us,
+        scan_read_us = scan.read_us,
+        scan_hash_us = scan.hash_us,
+        scan_probe_us = scan.probe_us,
+        scan_snapshot_us = scan.snapshot_us,
+        scan_yield_us = scan.yield_us,
+        scan_steps = scan.steps,
         send_us = send_started.elapsed().as_micros() as u64,
         read_us = stats.read_us,
         hash_us = stats.hash_us,

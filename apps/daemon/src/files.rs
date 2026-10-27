@@ -3,6 +3,7 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use genehub_proto::FileNode;
@@ -155,6 +156,19 @@ pub struct PreviewFile {
     pub metadata: AssetPreviewMetadata,
     source: PreviewSource,
     expected_digest: [u8; 32],
+    pub(crate) scan_timings: PreviewScanTimings,
+}
+
+/// Cumulative first-pass timings; diagnostic only, never used for admission.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct PreviewScanTimings {
+    pub open_us: u64,
+    pub read_us: u64,
+    pub hash_us: u64,
+    pub probe_us: u64,
+    pub snapshot_us: u64,
+    pub yield_us: u64,
+    pub steps: u64,
 }
 
 impl PreviewFile {
@@ -244,10 +258,18 @@ pub async fn preview(
     root: &Path,
     relative_path: &str,
 ) -> std::result::Result<PreviewFile, PreviewFailure> {
+    let diagnostic =
+        tracing::enabled!(target: "genet_daemon::dataplane::preview", tracing::Level::DEBUG);
+    let timer = || diagnostic.then(Instant::now);
+    let elapsed =
+        |started: Option<Instant>| started.map_or(0, |at| at.elapsed().as_micros() as u64);
+    let mut scan_timings = PreviewScanTimings::default();
+    let opened = timer();
     validate_preview_path(relative_path)?;
     let relative = Path::new(relative_path);
     let (mut source, source_size, regular) =
         crate::fs_cap::open_preview(root, relative).map_err(map_preview_io)?;
+    scan_timings.open_us = elapsed(opened);
     if !regular {
         return Err(PreviewFailure::Unsupported);
     }
@@ -275,22 +297,33 @@ pub async fn preview(
     let mut source_bytes = 0usize;
     while source_bytes < scan_limit {
         let remaining = scan_limit - source_bytes;
+        let reading = timer();
         let read = source
             .read(&mut step[..remaining.min(PREVIEW_STEP_BYTES)])
             .map_err(map_preview_io)?;
+        scan_timings.read_us += elapsed(reading);
         if read == 0 {
             break;
         }
         if snapshot.is_some() && source_bytes + read > source_size as usize {
             return Err(PreviewFailure::SourceChanged);
         }
+        let hashing = timer();
         hasher.update(&step[..read]);
+        scan_timings.hash_us += elapsed(hashing);
+        let probing = timer();
         probe.update(&step[..read]);
+        scan_timings.probe_us += elapsed(probing);
+        let copying = timer();
         if let Some(bytes) = snapshot.as_mut() {
             bytes.extend_from_slice(&step[..read]);
         }
+        scan_timings.snapshot_us += elapsed(copying);
+        scan_timings.steps += 1;
         source_bytes += read;
+        let yielding = timer();
         crate::blocking::breathe().await;
+        scan_timings.yield_us += elapsed(yielding);
     }
     if source_bytes > genehub_proto::MAX_PREVIEW_SOURCE_BYTES {
         return Err(PreviewFailure::TooLarge {
@@ -333,6 +366,7 @@ pub async fn preview(
         },
         source,
         expected_digest: digest,
+        scan_timings,
     })
 }
 
