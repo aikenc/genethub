@@ -358,13 +358,20 @@ impl UplinkPace {
             (None, None) => true,
             _ => false,
         };
-        // A peer that stops acknowledging must not own measurement forever.
-        // Forget only its expired sample; all physical debits and ACK ages
-        // remain owned by the original transmissions, and no delivery is made up.
+        // A complete maximum DATA record is a full progress share even when
+        // retained bytes leave less than half the physical floor free.
+        let minimum_sample = (floor / 2).min(super::frame::MAX_PAYLOAD_BYTES as u64);
+        // A healthy peer can retire a zero-progress measurement after actually
+        // delivering a complete record. Its next flight will start a fresh
+        // sample; this ACK must never finish or grow the other peer's window.
+        // Retain the timeout fallback for partial or slow delivery. Neither
+        // path forgets physical debits or the original transmissions' ACK ages.
+        let healthy_record =
+            control.acked_since_fill == 0 && bytes >= minimum_sample && ack_age <= GROW_DRAIN_MAX;
         if !sample_matches
             && control
                 .filled_at
-                .is_some_and(|at| at.elapsed() > OPEN_DRAIN_MAX)
+                .is_some_and(|at| healthy_record || at.elapsed() > OPEN_DRAIN_MAX)
         {
             control.filled_at = None;
             control.filled_peer = None;
@@ -429,9 +436,6 @@ impl UplinkPace {
             None
         };
 
-        // One complete maximum DATA record is a full progress share even
-        // when retained bytes leave less than half the physical floor free.
-        let minimum_sample = (floor / 2).min(super::frame::MAX_PAYLOAD_BYTES as u64);
         let rate_grew = rate_window.is_some_and(|window| window > current);
         // Bound discovery to one fourfold probe per completed window, with a
         // tighter drain limit so narrow links do not justify a large queue.
