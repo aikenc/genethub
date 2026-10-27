@@ -48,6 +48,9 @@ export function trackResources(owner: string, rootPid: number) {
   function census(): ResourceCensus {
     const live = scan();
     if (!complete) return { processes: null, ports: null };
+    // No live owner can hold a socket descriptor. The clean teardown path
+    // therefore does not need to parse system-wide network tables.
+    if (live.length === 0) return { processes: 0, ports: 0 };
     const inodes = new Set<string>();
     let portsKnown = true;
     for (const p of live) {
