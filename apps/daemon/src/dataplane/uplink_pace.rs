@@ -144,6 +144,7 @@ impl UplinkPace {
             initial: Mutex::new(None),
             progress: Mutex::new(PeerProgress {
                 cap: PEER_PROGRESS_BYTES,
+                idle_since: Some(Instant::now()),
                 started: None,
                 acked: 0,
             }),
@@ -615,6 +616,7 @@ impl Drop for Charge {
 /// standby. Reattaching or cancelling drops charges without manufacturing ACKs.
 struct PeerProgress {
     cap: u64,
+    idle_since: Option<Instant>,
     started: Option<Instant>,
     acked: u64,
 }
@@ -688,7 +690,20 @@ impl PeerPace {
             }
         }
         let mut outstanding = self.outstanding.lock().unwrap();
-        let progress = outstanding.saturating_add(bytes) <= self.progress.lock().unwrap().cap;
+        let progress = {
+            let mut sample = self.progress.lock().unwrap();
+            // The shared path forgets its old fast budget after idle. A peer's
+            // extra progress allowance must expire with it, rather than
+            // admitting four stale records onto a newly slow ACK path.
+            if *outstanding == 0
+                && sample
+                    .idle_since
+                    .is_some_and(|at| at.elapsed() >= Duration::from_millis(100))
+            {
+                sample.cap = PEER_PROGRESS_BYTES;
+            }
+            outstanding.saturating_add(bytes) <= sample.cap
+        };
         if !self
             .shared
             .try_reserve_for(bytes, progress, Some((&self.sample_owner, *outstanding)))
@@ -697,6 +712,7 @@ impl PeerPace {
         }
         if *outstanding == 0 {
             let mut sample = self.progress.lock().unwrap();
+            sample.idle_since = None;
             sample.started = Some(Instant::now());
             sample.acked = 0;
         }
@@ -708,6 +724,9 @@ impl PeerPace {
         let mut outstanding = self.outstanding.lock().unwrap();
         *outstanding = outstanding.saturating_sub(bytes);
         let mut sample = self.progress.lock().unwrap();
+        if *outstanding == 0 {
+            sample.idle_since = Some(Instant::now());
+        }
         if !delivered {
             sample.started = None;
             sample.acked = 0;
