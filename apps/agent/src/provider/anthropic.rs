@@ -324,7 +324,13 @@ pub fn convert_messages(
                     blocks.push(json!({ "type": "text", "text": content }));
                 }
                 for attachment in attachments {
-                    let kind = media::kind(attachment)?;
+                    let kind = match media::kind(attachment) {
+                        Ok(kind) => kind,
+                        Err(_) => {
+                            blocks.push(json!({ "type": "text", "text": media::unavailable_note(attachment) }));
+                            continue;
+                        }
+                    };
                     if Some(index) != latest_user
                         && (kind == "video"
                             || !model.input_modalities.iter().any(|input| input == kind))
@@ -335,7 +341,18 @@ pub fn convert_messages(
                         }));
                         continue;
                     }
-                    let (kind, url) = media::data_url(model, cwd, attachment)?;
+                    // Preserve the existing hard error for unsupported model modalities.
+                    if !model.input_modalities.iter().any(|input| input == kind) {
+                        media::data_url(model, cwd, attachment)?;
+                    }
+                    let (kind, url) = match media::data_url(model, cwd, attachment) {
+                        Ok(media) => media,
+                        Err(error) => {
+                            eprintln!("attachment unavailable: {error:#}");
+                            blocks.push(json!({ "type": "text", "text": media::unavailable_note(attachment) }));
+                            continue;
+                        }
+                    };
                     if kind == "video" {
                         anyhow::bail!("Anthropic Messages API 不支持原生视频输入");
                     }
