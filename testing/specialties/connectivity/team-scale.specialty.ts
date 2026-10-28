@@ -41,7 +41,7 @@ for (const bodies of ["all", "focused", "focused-separate-control", "focused-bud
     const batchAt = performance.now();
     let batchBytes = 0;
     await Promise.all(fleet.nodes.map(async node => {
-      const reply = await node.control.call({ type: "session.list", payload: { workspaceId: null, includeArchived: false } });
+      const reply = await node.control.call({ type: "session.list", payload: { workspaceId: null, includeArchived: false, lean: true } });
       if (reply?.type !== "sessions" || reply.data.length !== 20) throw new Error("machine-wide batch omitted a member");
       batchBytes += Buffer.byteLength(JSON.stringify(reply));
     }));
@@ -52,7 +52,7 @@ for (const bodies of ["all", "focused", "focused-separate-control", "focused-bud
       // Same 200 rows, one request per member, 10 concurrent machine consumers.
       await Promise.all(fleet.nodes.map(async node => {
         for (const workspaceId of node.workspaces) {
-          const reply = await node.client.call({ type: "session.list", payload: { workspaceId, includeArchived: false } });
+          const reply = await node.client.call({ type: "session.list", payload: { workspaceId, includeArchived: false, lean: true } });
           if (reply?.type !== "sessions" || reply.data.length !== 1) throw new Error("per-member list omitted or mixed sessions");
         }
       }));
@@ -95,12 +95,12 @@ for (const bodies of ["all", "focused", "focused-separate-control", "focused-bud
     let completed = 0;
     let verificationError = "";
     await t.stage("verify-every-member", () => t.tools.waitUntil(async () => {
-      const replies = await Promise.all(fleet.nodes.map(node => node.control.call({ type: "session.list", payload: { workspaceId: null, includeArchived: false } })));
+      const replies = await Promise.all(fleet.nodes.map(node => node.control.call({ type: "session.list", payload: { workspaceId: null, includeArchived: false, lean: true } })));
       completed = replies.reduce((sum, reply, i) => sum + (reply?.type === "sessions" ? reply.data.filter(s => fleet.nodes[i]!.sessions.includes(s.id) && s.status === "idle" && !!s.latestReply).length : 0), 0);
       return completed === 200 && [...completions.values()].every(n => n === 1);
     }, 45000)).catch(error => { verificationError = error instanceof Error ? error.message : String(error); });
     const localCheck = await Promise.allSettled(fleet.nodes.map(async node => {
-      const start = performance.now(); const reply = await node.opened.client.call({ type: "session.list", payload: { workspaceId: null, includeArchived: false } });
+      const start = performance.now(); const reply = await node.opened.client.call({ type: "session.list", payload: { workspaceId: null, includeArchived: false, lean: true } });
       return { ms: Math.round(performance.now() - start), completed: reply?.type === "sessions" ? reply.data.filter(s => s.status === "idle" && !!s.latestReply).length : 0 };
     }));
     t.note(JSON.stringify({ phase: "local-diagnostic", verificationError, nodes: localCheck.map(r => r.status === "fulfilled" ? r.value : { error: "local list timed out" }) }));

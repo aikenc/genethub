@@ -151,14 +151,14 @@ treeCase(
     opened.mock.script({ tool: { name: "bash", arguments: { command } } }, { text: "started" }, { text: "ok" });
     await t.flows.main.sendPrompt(opened.client, parent.id, "start a child session", null, "u_" + randomBytes(16).toString("hex"));
     const children = async () => {
-      const reply = await opened.client.call({ type: "session.list", payload: { workspaceId: think.id, includeArchived: false } });
+      const reply = await opened.client.call({ type: "session.list", payload: { workspaceId: think.id, includeArchived: false, lean: true } });
       if (reply?.type !== "sessions") throw new Error(`session.list returned ${reply?.type}`);
       return reply.data as unknown as Array<{ id: string; labels?: string[] }>;
     };
     await t.tools.waitUntil(async () => (await children()).length > 0, 30_000);
     const started = (await children())[0]!;
     t.assertions.assert(started.labels?.includes("系统发起") === true, `child labels ${JSON.stringify(started.labels)}`);
-    const all = await opened.client.call({ type: "session.list", payload: { workspaceId: admin.id, includeArchived: false } });
+    const all = await opened.client.call({ type: "session.list", payload: { workspaceId: admin.id, includeArchived: false, lean: true } });
     const mine = (all?.type === "sessions" ? (all.data as unknown as Array<{ id: string; labels?: string[] }>) : []).find((s) => s.id === parent.id);
     t.assertions.assert(mine && !mine.labels?.includes("系统发起"), "the parent session must not be labelled");
   },

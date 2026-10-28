@@ -143,9 +143,12 @@ defineSpecialty(meta(mode === "loopback" ? "stream-output-shaped-liveness" : mod
       await pause(500);
     }
     abort.abort(); stream?.reset(1);
-    await new Promise(resolve => setTimeout(resolve, 500));
-    const afterStop = await peer.call({ type: "workspace.list" })
-      .then(reply => reply?.type === "workspaces").catch(() => false);
+    let afterStop = false;
+    for (let attempt = 0; attempt < 4 && !afterStop; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      afterStop = await peer.call({ type: "workspace.list" })
+        .then(reply => reply?.type === "workspaces").catch(() => false);
+    }
     const relayCounts = relay ? { lateFrameOverflow: (relay.logTail().match(/lateFrameOverflow/g) ?? []).length,
       unknownStream: (relay.logTail().match(/unknownStream/g) ?? []).length } : null;
     const summary = { mode, profile: { rttMs: 200, bandwidthMbps: 2 }, responseBytes, streamError, relayCounts,

@@ -66,7 +66,7 @@ defineSpecialty({
     const target = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
     const sender = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
     const listIds = async (): Promise<string[]> => {
-      const listed = await opened.client.call({ type: "session.list", payload: { workspaceId: opened.workspaceId, includeArchived: false } });
+      const listed = await opened.client.call({ type: "session.list", payload: { workspaceId: opened.workspaceId, includeArchived: false, lean: true } });
       if (listed?.type !== "sessions") throw new Error(`session.list returned ${listed?.type}`);
       return listed.data.map(session => session.id);
     };

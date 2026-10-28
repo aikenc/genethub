@@ -147,7 +147,7 @@ eventCase("title-stable-after-turn", "Completing a turn does not overwrite an ex
   const { id, events } = await create(opened, t);
   await opened.client.call({ type: "session.rename", payload: { sessionId: id, title: "explicit-stable-title" } });
   await complete(opened, t, id, events, "Do not retitle.", "completed");
-  const listed = await opened.client.call({ type: "session.list", payload: { workspaceId: opened.workspaceId, includeArchived: true } });
+  const listed = await opened.client.call({ type: "session.list", payload: { workspaceId: opened.workspaceId, includeArchived: true, lean: true } });
   const found = listed?.type === "sessions" ? listed.data.find((item) => item.id === id) : undefined;
   t.assertions.assert(found?.title === "explicit-stable-title", `title changed: ${JSON.stringify(found)}`);
 });

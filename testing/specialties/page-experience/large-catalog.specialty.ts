@@ -29,7 +29,7 @@ defineSpecialty({
       }));
       ids.push(...batch);
     }
-    const listed = await opened.client.call({ type: "session.list", payload: { workspaceId: null, includeArchived: false } });
+    const listed = await opened.client.call({ type: "session.list", payload: { workspaceId: null, includeArchived: false, lean: true } });
     t.assertions.assert(listed?.type === "sessions" && listed.data.length === 802, "fixture did not contain exactly 802 sessions");
     // This page scenario shapes a real local carrier. Both relay legs and
     // aggregate channel fairness are independently covered by team-mixed.

@@ -99,7 +99,7 @@ for (const [runningPerMachine, watchedPerMachine] of [[5, 5], [8, 8], [20, 8]] a
           let running = 0, bytes = 0, elapsed: number;
           try {
             const reply = sessions
-              ? await node.control.call({ type: "session.list", payload: { workspaceId: null, includeArchived: false } })
+              ? await node.control.call({ type: "session.list", payload: { workspaceId: null, includeArchived: false, lean: true } })
               : await node.control.call({ type: "workspace.list" });
             elapsed = performance.now() - began;
             bytes = Buffer.byteLength(JSON.stringify(reply) ?? "");
@@ -187,7 +187,7 @@ for (const [runningPerMachine, watchedPerMachine] of [[5, 5], [8, 8], [20, 8]] a
     let exactBodies = 0, idleUntouched = 0, catalogCount = 0;
     await t.stage("recover", async () => {
       await Promise.all(fleet.nodes.map(async node => {
-        const catalog = await node.control.call({ type: "session.list", payload: { workspaceId: null, includeArchived: false } });
+        const catalog = await node.control.call({ type: "session.list", payload: { workspaceId: null, includeArchived: false, lean: true } });
         if (catalog?.type === "sessions") catalogCount += catalog.data.length;
         for (let i = 0; i < node.sessions.length; i++) {
           const reply = await node.client.call({ type: "session.get", payload: { sessionId: node.sessions[i]!, recentRounds: 1 } });

@@ -118,7 +118,7 @@ for (const v of variants) defineSpecialty({
     const rpc: number[] = []; const wire: number[][] = []; let errors=0;
     while (performance.now()-start < (narrow ? 26000 : 20000)) {
       const began = performance.now();
-      try { const reply = await control.call({ type: rpc.length%2 ? "session.list" : "workspace.list", ...(rpc.length%2 ? { payload: { workspaceId: null, includeArchived: false } } : {}) } as Parameters<typeof control.call>[0]); if (reply?.type !== "workspaces" && reply?.type !== "sessions") errors++; }
+      try { const reply = await control.call({ type: rpc.length%2 ? "session.list" : "workspace.list", ...(rpc.length%2 ? { payload: { workspaceId: null, includeArchived: false, lean: true } } : {}) } as Parameters<typeof control.call>[0]); if (reply?.type !== "workspaces" && reply?.type !== "sessions") errors++; }
       catch { errors++; }
       rpc.push(performance.now()-began);
       if (v.scenario === "duplex" && wire.length < 8 && performance.now()-start >= (wire.length + 1) * 2000) {

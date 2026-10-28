@@ -27,7 +27,7 @@ defineJourney(
       t.assertions.assert(saved?.type === "sessionDrafts" && saved.data.length === 2, "draft replace did not return two drafts");
       const listed = await first.client.call({
         type: "session.list",
-        payload: { workspaceId: first.workspaceId, includeArchived: false },
+        payload: { workspaceId: first.workspaceId, includeArchived: false, lean: true },
       });
       t.assertions.assert(
         listed?.type === "sessions" && listed.data.find((item) => item.id === sessionId)?.draftCount === 2,

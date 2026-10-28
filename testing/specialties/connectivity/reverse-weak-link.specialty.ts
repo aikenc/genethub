@@ -73,7 +73,7 @@ for (const { warm, ackDelay, ackStart } of [{ warm: false, ackDelay: 0, ackStart
     const latency: number[] = [], replyBytes: Array<{ operation: string; bytes: number }> = []; let duringUpload = 0;
     for (let i = 0; i < 8; i++) {
       if (!finished) duringUpload++;
-      const at = performance.now(), r = await control.call({ type: i % 2 ? "session.list" : "workspace.list", ...(i % 2 ? { payload: { workspaceId: null, includeArchived: false } } : {}) } as Parameters<typeof control.call>[0]);
+      const at = performance.now(), r = await control.call({ type: i % 2 ? "session.list" : "workspace.list", ...(i % 2 ? { payload: { workspaceId: null, includeArchived: false, lean: true } } : {}) } as Parameters<typeof control.call>[0]);
       latency.push(Math.round(performance.now() - at));
       replyBytes.push({ operation: i % 2 ? "session.list" : "workspace.list", bytes: Buffer.byteLength(JSON.stringify(r)) });
       t.assertions.assert(r?.type === "workspaces" || r?.type === "sessions", "weak reverse-link management failed");

@@ -76,7 +76,7 @@ for (const [browsers,nodes,automatic,members] of [[1,1,false,20],[2,1,false,20],
     let exactReplies=0,remoteCompleted=0,verificationError="";
     await t.stage("recover",async()=>{
       await Promise.all(fleet.nodes.map(async node=>{
-        const r=await node.control.call({type:"session.list",payload:{workspaceId:null,includeArchived:false}});
+        const r=await node.control.call({type:"session.list",payload:{workspaceId:null,includeArchived: false, lean: true}});
         if(r?.type==="sessions") remoteCompleted+=r.data.filter(s=>s.status==="idle"&&!!s.latestReply).length;
         for(let i=0;i<node.sessions.length;i++) {
           const reply=await node.dataClients[i%node.dataClients.length]!.call({type:"session.get",payload:{sessionId:node.sessions[i]!,recentRounds:1}});

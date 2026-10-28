@@ -903,7 +903,7 @@ defineSpecialty(
     try {
       const cmd = procCmdline(Number(cliJson(t, ["daemon", "status"]).pid));
       t.assertions.assert(cmd.includes("genehub_guest.wasm"), `restarted as native: ${cmd}`);
-      const listed = await again.client.call({ type: "session.list", payload: { workspaceId: again.workspaceId, includeArchived: false } });
+      const listed = await again.client.call({ type: "session.list", payload: { workspaceId: again.workspaceId, includeArchived: false, lean: true } });
       t.assertions.assert(listed?.type === "sessions", `session.list ${listed?.type}`);
       const ids = listed?.type === "sessions" ? listed.data.map((row: { id: string }) => row.id) : [];
       t.assertions.assert(ids.includes(sessionId), `session ${sessionId} missing after restart: ${ids.join(",")}`);

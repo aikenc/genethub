@@ -159,7 +159,7 @@ lifecycleCase(
     await t.tools.waitUntil(() => logs.every((events) => events.some((event) => event.type === "turnStarted")), 30_000);
     const during = await opened.client.call({
       type: "session.list",
-      payload: { workspaceId: opened.workspaceId, includeArchived: true },
+      payload: { workspaceId: opened.workspaceId, includeArchived: true, lean: true },
     });
     t.assertions.assert(during?.type === "sessions", "session.list failed during activity");
     const duringIds = new Set(during?.type === "sessions" ? during.data.map((session) => session.id) : []);
@@ -167,7 +167,7 @@ lifecycleCase(
     await t.tools.waitUntil(() => logs.every((events) => events.some((event) => event.type === "turnCompleted")), 60_000);
     const after = await opened.client.call({
       type: "session.list",
-      payload: { workspaceId: opened.workspaceId, includeArchived: true },
+      payload: { workspaceId: opened.workspaceId, includeArchived: true, lean: true },
     });
     const afterIds = new Set(after?.type === "sessions" ? after.data.map((session) => session.id) : []);
     t.assertions.assert(sessions.every((session) => afterIds.has(session)), "completed list omitted a session");

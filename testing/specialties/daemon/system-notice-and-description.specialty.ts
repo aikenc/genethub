@@ -96,7 +96,7 @@ async function snapshot(session: Session): Promise<SessionSnapshot> {
 async function sessionIds(session: Session): Promise<string[]> {
   const reply = await session.client.call({
     type: "session.list",
-    payload: { workspaceId: session.workspaceId, includeArchived: false },
+    payload: { workspaceId: session.workspaceId, includeArchived: false, lean: true },
   });
   if (reply?.type !== "sessions") throw new Error(`session.list returned ${reply?.type}`);
   return reply.data.map((entry) => entry.id);

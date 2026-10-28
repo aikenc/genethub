@@ -84,7 +84,7 @@ defineJourney(
       const reflectSpace = listed.find((space) => space.name === "team-reflect" && space.agentSpace?.parentWorkspaceId === root!.id);
       t.assertions.assert(reflectSpace, "alice's reflect Space is not registered");
       const sessionsOf = async (workspaceId: string): Promise<Listed[]> => {
-        const reply = await opened.client.call({ type: "session.list", payload: { workspaceId, includeArchived: false } });
+        const reply = await opened.client.call({ type: "session.list", payload: { workspaceId, includeArchived: false, lean: true } });
         if (reply?.type !== "sessions") throw new Error(`session.list returned ${reply?.type}`);
         return reply.data as unknown as Listed[];
       };
