@@ -19,6 +19,10 @@ const CONNECT_TIMEOUT_MS = 20_000;
  * the usable route on a multi-interface peer.
  */
 export const GATHER_WAIT_MS = 12_000;
+/** When STUN is unreachable, waiting the full gather budget only delays the
+ * fallback. Proceed with the host candidates once the first STUN round has
+ * clearly not answered; a working STUN delivers srflx in well under this. */
+export const HOST_ONLY_GATHER_WAIT_MS = 3_000;
 export const ICE_SERVERS: RTCIceServer[] = [];
 const BUFFERED_HIGH = 256 * 1024;
 const BUFFERED_LOW = 64 * 1024;
@@ -482,16 +486,33 @@ function nextDataChannelMessage(channel: RTCDataChannel): Promise<Uint8Array> {
 export function iceGathered(peer: RTCPeerConnection, waitMs: number): Promise<void> {
   if (peer.iceGatheringState === "complete") return Promise.resolve();
   return new Promise((resolve) => {
+    let hostOnlyTimer: ReturnType<typeof setTimeout> | null = null;
+    let srflxGrace: ReturnType<typeof setTimeout> | null = null;
     const finish = () => {
       peer.removeEventListener("icegatheringstatechange", changed);
+      peer.removeEventListener("icecandidate", candidate);
       clearTimeout(timer);
+      if (hostOnlyTimer !== null) clearTimeout(hostOnlyTimer);
+      if (srflxGrace !== null) clearTimeout(srflxGrace);
       resolve();
     };
     const changed = () => {
       if (peer.iceGatheringState === "complete") finish();
     };
+    const candidate = (event: RTCPeerConnectionIceEvent) => {
+      const type = event.candidate?.type ||
+        / typ (host|srflx|prflx|relay)(?: |$)/.exec(event.candidate?.candidate ?? "")?.[1];
+      if (type === "srflx" || type === "relay") {
+        // A usable WAN candidate is in the SDP; a short grace lets the rest
+        // of that class land without repeating the whole gather budget.
+        if (srflxGrace === null) srflxGrace = setTimeout(finish, 150);
+      } else if (type === "host" && hostOnlyTimer === null) {
+        hostOnlyTimer = setTimeout(finish, HOST_ONLY_GATHER_WAIT_MS);
+      }
+    };
     const timer = setTimeout(finish, waitMs);
     peer.addEventListener("icegatheringstatechange", changed);
+    peer.addEventListener("icecandidate", candidate);
   });
 }
 

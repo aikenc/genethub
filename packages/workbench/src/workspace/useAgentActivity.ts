@@ -6,7 +6,12 @@ import { hasCurrentWork, pendingOwners, sessionAttention } from "../session/atte
 type Client = NonNullable<ReturnType<typeof useWorkbench.getState>["client"]>;
 type Activity = { count: number; recent: number; pending: number; running: boolean; ownRunning: boolean; teamRunning: boolean; tasks: boolean; blocked: boolean; label: string };
 const noSessions: Activity = { count: 0, recent: 0, pending: 0, running: false, ownRunning: false, teamRunning: false, tasks: false, blocked: false, label: "" };
-const polls = new WeakMap<Client, { users: number; timer: ReturnType<typeof setInterval>; visibilityChanged(): void }>();
+const MIN_POLL_MS = 5_000;
+const MAX_POLL_MS = 30_000;
+const SLOW_REFRESH_MS = 2_000;
+const FAST_REFRESH_MS = 500;
+type Poll = { users: number; timer: ReturnType<typeof setTimeout> | null; delay: number; visibilityChanged(): void };
+const polls = new WeakMap<Client, Poll>();
 const aggregates = new WeakMap<SessionSummary[], Map<string, Activity>>();
 
 /** The store owns the only summary snapshot. All mounted consumers share one
@@ -14,20 +19,50 @@ const aggregates = new WeakMap<SessionSummary[], Map<string, Activity>>();
 function subscribe(client: Client) {
   let poll = polls.get(client);
   if (!poll) {
-    const refresh = () => {
-      const wb = useWorkbench.getState();
-      if (wb.client === client && wb.connection === "ready" && document.visibilityState !== "hidden") void wb.refreshSessions();
+    const state: Poll = {
+      users: 0,
+      timer: null,
+      delay: MIN_POLL_MS,
+      visibilityChanged: () => {},
     };
-    refresh();
-    const visibilityChanged = () => { if (document.visibilityState !== "hidden") refresh(); };
-    document.addEventListener("visibilitychange", visibilityChanged);
-    poll = { users: 0, timer: setInterval(refresh, 5000), visibilityChanged };
+    const schedule = () => {
+      if (state.timer !== null) clearTimeout(state.timer);
+      state.timer = setTimeout(() => { void refresh(); }, state.delay);
+    };
+    const refresh = async () => {
+      state.timer = null;
+      const wb = useWorkbench.getState();
+      if (wb.client !== client || wb.connection !== "ready" || document.visibilityState === "hidden") {
+        schedule();
+        return;
+      }
+      const began = performance.now();
+      try {
+        await wb.refreshSessions();
+      } finally {
+        const elapsed = performance.now() - began;
+        // A list that already costs seconds must not be re-requested every
+        // five seconds: back off until it is cheap again.
+        if (elapsed >= SLOW_REFRESH_MS) state.delay = Math.min(MAX_POLL_MS, Math.max(MIN_POLL_MS * 2, state.delay * 2));
+        else if (elapsed <= FAST_REFRESH_MS) state.delay = MIN_POLL_MS;
+        schedule();
+      }
+    };
+    state.visibilityChanged = () => {
+      if (document.visibilityState === "hidden") return;
+      state.delay = MIN_POLL_MS;
+      if (state.timer !== null) { clearTimeout(state.timer); state.timer = null; }
+      void refresh();
+    };
+    document.addEventListener("visibilitychange", state.visibilityChanged);
+    poll = state;
     polls.set(client, poll);
+    void refresh();
   }
   poll.users++;
   return () => {
     if (--poll.users === 0) {
-      clearInterval(poll.timer);
+      if (poll.timer !== null) clearTimeout(poll.timer);
       document.removeEventListener("visibilitychange", poll.visibilityChanged);
       polls.delete(client);
     }

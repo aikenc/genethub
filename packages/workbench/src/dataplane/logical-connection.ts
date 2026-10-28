@@ -2,7 +2,6 @@ import { logicalAttachProof, logicalAttachedProof, randomNonce, type ChannelSess
 import { AuthenticatedChannel, type RecordCarrier } from "./authenticated-channel";
 import { ResumeJournal, ResumeError, encodeResumeControl, type ResumeFrame, type ResumeWatermark, type ResumePath, type ResumePolicy } from "./resume";
 import { DataKind } from "./frame";
-import { SendPace } from "./send-pace";
 
 const LIMITS = { dataBytes: 4 * 1024 * 1024, progressBytes: 64 * 1024 };
 type Position = { received: string; dataGrant: string; progressGrant: string };
@@ -42,7 +41,6 @@ function decode(bytes: Uint8Array): Record<string, unknown> {
 
 type Phase = "created" | "attached" | "activated" | "synced" | "ready" | "quiesced";
 interface Channel {
-  pace: SendPace | null;
   wire: AuthenticatedChannel;
   key: ChannelSessionKey;
   path: ResumePath;
@@ -118,7 +116,7 @@ export class LogicalConnection {
     if (this.journal.policy === "direct-only" && path === "fabric") return Promise.reject(new ResumeError("PolicyDenied"));
     let resolve!: () => void, reject!: (error: unknown) => void;
     const ready = new Promise<void>((yes, no) => { resolve = yes; reject = no; });
-    const channel: Channel = { key, path, pace: null, phase: "created", attempt: randomNonce(), expected: 0n, committed: false, reused: false,
+    const channel: Channel = { key, path, phase: "created", attempt: randomNonce(), expected: 0n, committed: false, reused: false,
       lastReceive: this.now(), resolve, reject, wire: null! };
     this.candidate = channel;
     channel.wire = new AuthenticatedChannel({ role: this.options.role, carrier, key,
@@ -155,12 +153,10 @@ export class LogicalConnection {
   }
   /** Physical DATA admission belongs before replay sequence allocation.
    * The endpoint's existing fair writer keeps ineligible frames in its queue. */
-  canSend(frame: { kind: number; payload: Uint8Array }, smallRequest = false): boolean {
+  canSend(frame: { kind: number; payload: Uint8Array }, _smallRequest = false): boolean {
     if (this.closed) return false;
     if (frame.kind !== DataKind.Data) return true;
-    const channel = this.active;
-    return channel?.phase === "ready" && (!channel.pace ||
-      (this.journal.peekNext() === null && channel.pace.canSend(frame.payload.length + 36, smallRequest)));
+    return this.active?.phase === "ready";
   }
   async send(frame: ResumeFrame, smallRequest = false): Promise<void> {
     this.live();
@@ -173,15 +169,6 @@ export class LogicalConnection {
   }
   private async sendOwned(frame: ResumeFrame, smallRequest: boolean): Promise<void> {
     if (frame.kind === DataKind.Open) {
-      // Finite small management requests do not invalidate another stream's
-      // active bulk sample. Large or unknown bodies restart discovery.
-      let small = false;
-      try {
-        const head = JSON.parse(decoder.decode(frame.payload)) as { bodyLength?: unknown };
-        small = typeof head.bodyLength === "number" && Number.isSafeInteger(head.bodyLength) && head.bodyLength >= 0 && head.bodyLength <= 8192;
-      } catch { /* Unknown heads retain conservative discovery. */ }
-      if (small) this.active?.pace?.noteInteractive();
-      else this.active?.pace?.beginStream();
     }
     let seq: bigint;
     for (;;) {
@@ -290,7 +277,6 @@ export class LogicalConnection {
       this.journal.receiveControl(bytes);
       if (bytes[1] === 2 && new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getBigUint64(4) === this.epoch) {
         const received = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getBigUint64(12);
-        channel.pace?.acknowledge(received);
         this.acknowledgeTerminals(received);
       }
       this.wake();
@@ -332,12 +318,9 @@ export class LogicalConnection {
     this.journal.activate(channel.path, epoch, peer, this.now());
     this.acknowledgeTerminals(peer.received);
     this.epoch = epoch; channel.phase = "synced"; channel.committed = true;
-    channel.pace = channel.path === "rtc" ? null : new SendPace(this.options.onDiagnostic
-      ? detail => this.options.onDiagnostic?.({ ...detail }) : undefined);
     const previous = this.active;
     this.active = channel;
     if (previous && previous !== channel) {
-      previous.pace = null;
       if (previous.path !== channel.path) {
         this.standby?.wire.close();
         previous.phase = "quiesced"; this.standby = previous;
@@ -366,10 +349,7 @@ export class LogicalConnection {
         if (this.ack) { this.ack = false; bytes = encodeResumeControl({ kind: "ack", epoch: this.epoch, received: mark.received }); }
         else if (this.budget) { this.budget = false; bytes = encodeResumeControl({ kind: "budget", epoch: this.epoch, dataGrant: mark.dataGrant, progressGrant: mark.progressGrant }); }
         else {
-          const next = this.journal.peekNext();
-          if (next?.kind === DataKind.Data && channel.pace && !channel.pace.canSend(next.bytes, this.controlSequences.has(next.seq))) return;
           bytes = this.journal.next();
-          if (bytes && next?.kind === DataKind.Data) channel.pace?.record(next.seq, next.bytes, this.controlSequences.has(next.seq));
         }
         if (!bytes) return;
         await channel.wire.send(bytes);
@@ -392,7 +372,6 @@ export class LogicalConnection {
   }
   private lost(channel: Channel, error: unknown): void {
     if (!this.owns(channel)) return;
-    channel.pace = null;
     if (this.standby === channel) {
       this.standby = null; channel.wire.close(); this.options.onReady?.(); return;
     }

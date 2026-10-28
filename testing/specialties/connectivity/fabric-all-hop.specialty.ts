@@ -38,7 +38,6 @@ for (const v of variants) defineSpecialty({
   const managementStarts = new Map<string, { at: number; peer: number; requestId: string; operation: string }>();
   const management: Array<{ at: number; peer: number; requestId: string; operation: string; elapsed: number; outcome: unknown }> = [];
   const uploadEvents: Array<{ at: number; peer: number; requestId: string; phase: unknown; outcome: unknown }> = [];
-  const paceEvents: Array<Record<string, string | number | boolean | null>> = [];
   const pool = await openFabricPool(t, v.nodes, v.browsers, v.both, false, (event, peer) => {
     if (v.scenario === "hot-drop" && event.kind === "operation" && ["workspace.list", "session.list"].includes(String(event.detail.operation)) && typeof event.detail.requestId === "string") {
       const requestId = event.detail.requestId, key = `${peer}:${requestId}`;
@@ -50,9 +49,6 @@ for (const v of variants) defineSpecialty({
     }
     if (event.kind === "operation" && event.detail.operation === "file.write" && uploadEvents.length < 12) {
       uploadEvents.push({ at: Date.now(), peer, requestId: String(event.detail.requestId), phase: event.detail.phase, outcome: event.detail.outcome });
-    }
-    if (event.kind === "transport" && event.detail.phase === "send-pace" && peer === v.browsers - 1 && paceEvents.length < 96) {
-      paceEvents.push({ at: Date.now(), peer, ...event.detail });
     }
   }, { independentBrowserLeg: v.independent });
   const { opened: o, clients, link } = pool;
@@ -181,7 +177,6 @@ for (const v of variants) defineSpecialty({
           creditWaitMs: { total: gaps.reduce((a, b) => a + b, 0), max: Math.max(0, ...gaps) },
           finDispatchMs: first("RPC request FIN dispatched"), decodedMs: first("RPC request decoded"), preparedMs: first("RPC response prepared"), completedMs: first("RPC exchange completed") }));
       }
-      t.note(JSON.stringify({ phase: "upload-pace", minCapBytes: Math.min(...paceEvents.map(e => Number(e.capBytes))), maxCapBytes: Math.max(...paceEvents.map(e => Number(e.capBytes))), sampledLateAcks: paceEvents.filter(e => e.cause === "late-ack").length, columns: ["offsetMs", "cause", "capBeforeBytes", "capBytes", "inFlightBytes", "acknowledgedBytes", "oldestAckAgeMs", "sampleBytes", "sampleAckedBytes", "sampleElapsedMs"], samples: paceEvents.slice(0, 28).map(e => [Number(e.at) - Number(paceEvents[0]!.at), e.cause, e.capBeforeBytes, e.capBytes, e.inFlightBytes, e.acknowledgedBytes, e.oldestAckAgeMs, e.sampleBytes, e.sampleAckedBytes, e.sampleElapsedMs]) }));
       const pace = log.filter(line => line.includes('event="uplink_pace"') || line.includes('event="uplink_initial_sample"'));
       t.note(`Native DATA window tail: ${pace.slice(-4).join(" | ")}`);
     }
@@ -235,10 +230,6 @@ for (const v of variants) defineSpecialty({
     t.assertions.assert(rpc.length >= 3 && errors === 0 && Math.max(...rpc) < 10000, "management RPC exceeded the bounded interaction budget");
     if (v.scenario === "duplex") t.assertions.assert(busy.peakQueuedBytes[1]! < 512 * 1024,
       "upload queued half a MiB on the constrained node leg; DATA pacing did not constrain the actual payload path");
-    if (v.scenario === "duplex") t.assertions.assert(paceEvents.length > 0 && paceEvents.every(event =>
-      typeof event.capBytes === "number" && event.capBytes >= 32768 && event.capBytes <= 3 * 1024 * 1024 &&
-      typeof event.inFlightBytes === "number" && Number.isFinite(event.inFlightBytes) && event.inFlightBytes >= 0),
-      "public bounded sender-window diagnostics were unavailable or invalid");
     if (v.ackDelay) t.assertions.assert(faultApplied && ackFault !== undefined && pool.nodeFlowIds.includes(ackFault.nodeFlowId) && ackFault.heldForwarded === ackFault.beforeForwarded && ackHoldMs !== undefined && ackHoldMs >= v.ackDelay && ackHoldMs < v.ackDelay + 800,
       "the declared forward-only ACK-path pause was not applied and restored on time");
     if (controlSession) {

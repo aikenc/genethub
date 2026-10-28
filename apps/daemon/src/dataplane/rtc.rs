@@ -22,8 +22,10 @@ pub(crate) const RTC_SIGNAL_BYTES: usize = 64 * 1024;
 /// connection may exist at all.
 pub(crate) const RTC_ADMISSION_LIFETIME: Duration = Duration::from_secs(30);
 /// How long to gather candidates before answering with what there is.
-/// Non-trickle SDP waits for completion, not the first server-reflexive candidate.
-pub(crate) const RTC_GATHER_TIMEOUT: Duration = Duration::from_secs(12);
+/// Non-trickle SDP waits for completion, but a dead STUN server must not hold
+/// the whole negotiation for the full budget: a working one answers in well
+/// under three seconds, and the Fabric path stays usable in the meantime.
+pub(crate) const RTC_GATHER_TIMEOUT: Duration = Duration::from_secs(3);
 /// Records held for the endpoint in either direction. Small: this is a
 /// backpressure point, not a buffer.
 pub(crate) const RTC_CHANNEL_QUEUE: usize = 16;

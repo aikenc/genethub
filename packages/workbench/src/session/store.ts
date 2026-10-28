@@ -1112,7 +1112,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       order.push(id);
     };
     visit(workspaceId);
-    const summary = await client.call({ type: "session.list", payload: { workspaceId: null, includeArchived: true } });
+    const summary = await client.call({ type: "session.list", payload: { workspaceId: null, includeArchived: true, lean: true } });
     if (summary?.type !== "sessions") throw new Error("无法确认会话状态，未执行移除。");
     if (summary.data.some(s => planned.has(s.workspaceId) && ["running", "waiting"].includes(s.status))) {
       throw new Error("项目或其成员仍有运行中、等待交互的会话，请先处理后再移除。");
@@ -3525,7 +3525,7 @@ async function loadSessions(client: Client, set: Setter): Promise<SessionSummary
   const before = new Map(useWorkbench.getState().sessions.map(session => [session.id, session]));
   const promise = (async () => {
     try {
-      const reply = await client.call({ type: "session.list", payload: { workspaceId: null, includeArchived: true } });
+      const reply = await client.call({ type: "session.list", payload: { workspaceId: null, includeArchived: true, lean: true } });
       if (useWorkbench.getState().client !== client || epoch !== sessionSummaryEpoch) return [];
       if (reply?.type !== "sessions") throw new Error("会话摘要暂不可用");
       initializeReplyReads(client.identity?.machineId ?? "", reply.data);

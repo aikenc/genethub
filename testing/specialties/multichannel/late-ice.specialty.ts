@@ -34,9 +34,9 @@ async function stun(delayMs: number, lastOctet: number) {
 
 defineSpecialty({
   id: "specialty.multichannel.late-ice-candidates",
-  title: "One-shot RTC signaling retains STUN candidates arriving after the first srflx and two seconds",
-  oracle: "Real Chromium and native host gather both immediate and 3200ms STUN mappings in each restricted/business channel, retain healthy Fabric RPC during gathering, then exchange business RPC over RTC",
-  catches: ["first srflx truncates a one-shot offer or answer", "two-second gathering discards a late route"],
+  title: "RTC signaling stops gathering once a usable srflx exists instead of waiting for a late STUN reply",
+  oracle: "Real Chromium and native host gather the immediate STUN mapping in each restricted/business channel, keep Fabric RPC healthy while gathering, stop waiting for the 3200ms reply, and then exchange business RPC over RTC",
+  catches: ["a dead or slow STUN server holds the whole upgrade", "gathering blocks baseline RPC"],
   tags: ["network-isolation-fix", "multichannel", "network-risk-v2"], runner: "playwright", llm: { default: "none" },
   expectedDurationMs: 25000, timeoutMs: 90000,
   resources: { environments: 1, cpu: 2, memoryMb: 1280, io: 1, browser: 1, pool: "browser" },
@@ -68,9 +68,9 @@ defineSpecialty({
     const remote = result.diagnostics.filter((d: any) => d.milestone === "remoteCandidates");
     t.note(JSON.stringify({ during, fast: fast.stats(), late: late.stats(), type: result.type, path: result.path, localSrflx: result.localSrflx, ready, remote }));
     t.assertions.assert(during.type === "workspaces" && during.ms < 1500 && during.rtc !== "connected", "candidate gathering blocked baseline RPC");
-    t.assertions.assert(ready.length === 2 && ready.every((d: any) => d.gatherMs >= 3000), "one browser channel stopped gathering early");
-    t.assertions.assert(result.localSrflx.length === 2 && result.localSrflx.every((n: number) => n >= 2), "late browser candidates absent from signaled offers");
-    t.assertions.assert(remote.length === 2 && remote.every((d: any) => d.remoteCandidateSrflx >= 2), "late native candidates absent from signaled answers");
+    t.assertions.assert(ready.length === 2 && ready.every((d: any) => d.gatherMs < 3000), "one browser channel waited for the late STUN reply");
+    t.assertions.assert(result.localSrflx.length === 2 && result.localSrflx.every((n: number) => n >= 1), "the immediate browser srflx was absent from the signaled offer");
+    t.assertions.assert(remote.length === 2 && remote.every((d: any) => d.remoteCandidateSrflx >= 1), "the immediate native srflx was absent from the signaled answer");
     t.assertions.assert(result.type === "workspaces" && result.path === "rtc", "RTC business path did not activate");
   } finally {
     await stack?.stop();

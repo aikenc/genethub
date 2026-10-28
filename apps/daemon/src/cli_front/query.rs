@@ -187,6 +187,7 @@ enum Query {
         labels: Vec<String>,
         source_kind: Option<String>,
         include_archived: bool,
+        lean: bool,
     },
     SessionGet {
         session_id: String,
@@ -396,6 +397,7 @@ fn parse_session(args: &[String]) -> Result<Query, CliFailure> {
             let mut labels = Vec::new();
             let mut source_kind = None;
             let mut include_archived = false;
+            let mut lean = false;
             let mut index = 1;
             while index < args.len() {
                 match args[index].as_str() {
@@ -447,6 +449,9 @@ fn parse_session(args: &[String]) -> Result<Query, CliFailure> {
                     "--include-archived" => {
                         include_archived = true;
                     }
+                    "--lean" => {
+                        lean = true;
+                    }
                     other => {
                         return Err(CliFailure::invalid_args(format!(
                             "unknown session list argument: {other}"
@@ -460,6 +465,7 @@ fn parse_session(args: &[String]) -> Result<Query, CliFailure> {
                 labels,
                 source_kind,
                 include_archived,
+                lean,
             })
         }
         "get" => match &args[1..] {
@@ -770,6 +776,7 @@ async fn execute(
             labels,
             source_kind,
             include_archived,
+            lean,
         } => {
             let rpc = connect_selected(selection).await?;
             if let Some(id) = workspace_id.as_deref() {
@@ -783,6 +790,7 @@ async fn execute(
                 rpc.call(Request::SessionList {
                     workspace_id: workspace_id.clone(),
                     include_archived,
+                    lean: Some(lean),
                 })
                 .await
                 .map_err(rpc_error)?,
@@ -1365,7 +1373,7 @@ fn command_schema(name: &str) -> Value {
             ),
         ),
         "session.list" => (
-            "genet session list [--workspace <id>] [--label <label>]... [--source-kind <kind>] [--include-archived]",
+            "genet session list [--workspace <id>] [--label <label>]... [--source-kind <kind>] [--include-archived] [--lean]",
             true,
             object_input(
                 json!({
@@ -2362,6 +2370,7 @@ mod tests {
                 labels: Vec::new(),
                 source_kind: None,
                 include_archived: false,
+                lean: false,
             }
         );
         assert_eq!(
@@ -2384,6 +2393,7 @@ mod tests {
                 labels: vec!["4090".into(), "pm".into()],
                 source_kind: Some("system".into()),
                 include_archived: true,
+                lean: false,
             }
         );
         let duplicate = parse(&words(&[

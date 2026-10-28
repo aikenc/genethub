@@ -118,7 +118,7 @@ describe("iceGathered", () => {
     await expect(waited).resolves.toBeUndefined();
   });
 
-  it("keeps gathering after an early srflx and beyond the old two-second cutoff", async () => {
+  it("stops gathering shortly after a usable srflx candidate", async () => {
     vi.useFakeTimers();
     try {
       const peer = fakePeer();
@@ -128,34 +128,28 @@ describe("iceGathered", () => {
       peer.fire("icecandidate", {
         candidate: { candidate: "candidate:2 1 udp 1 203.0.113.7 9 typ srflx" },
       });
-      await vi.advanceTimersByTimeAsync(3_000);
-      expect(settled).toBe(false);
-      peer.fire("icecandidate", {
-        candidate: { candidate: "candidate:3 1 udp 1 203.0.113.8 9 typ srflx" },
-      });
-      peer.iceGatheringState = "complete";
-      peer.fire("icegatheringstatechange");
+      await vi.advanceTimersByTimeAsync(200);
       await waited;
       expect(settled).toBe(true);
       expect(vi.getTimerCount()).toBe(0);
     } finally { vi.useRealTimers(); }
   });
 
-  it("waits out a hung STUN gather instead of sending a host-only offer", async () => {
+  it("proceeds with host candidates after the STUN grace instead of the full budget", async () => {
     vi.useFakeTimers();
     const peer = fakePeer();
-    const waited = iceGathered(peer as unknown as RTCPeerConnection, 2_000);
+    const waited = iceGathered(peer as unknown as RTCPeerConnection, GATHER_WAIT_MS);
     peer.fire("icecandidate", {
       candidate: { candidate: "candidate:1 1 udp 1 192.0.2.1 9 typ host" },
     });
-    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(2_000);
     let settled = false;
     void waited.then(() => {
       settled = true;
     });
     await Promise.resolve();
     expect(settled).toBe(false);
-    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(1_100);
     await expect(waited).resolves.toBeUndefined();
     vi.useRealTimers();
   });

@@ -412,6 +412,24 @@ async fn send_file(
             stream.write(&step[..read]).await?;
         }
         stats.write_us += began.elapsed().as_micros() as u64;
+        if stats.chunks % 64 == 0 {
+            tracing::debug!(
+                event = "preview_progress",
+                sent,
+                chunks = stats.chunks,
+                read_us = stats.read_us,
+                write_us = stats.write_us,
+                credit_us = stats.write_timings.credit_us,
+                budget_us = stats.write_timings.budget_us,
+                enqueue_us = stats.write_timings.enqueue_us,
+                completion_us = stats.write_timings.completion_us,
+                actor_queue_us = stats.write_timings.actor_queue_us,
+                actor_send_us = stats.write_timings.actor_send_us,
+                wake_us = stats.write_timings.wake_us,
+                frames = stats.write_timings.frames,
+                carrier = services.carrier_kind.as_str()
+            );
+        }
         // `write` already waits on the socket, so another yield here only
         // inserts a scheduler hop between source chunks. On a 200ms high-BDP
         // link those hops dominate the transfer and the protocol window never

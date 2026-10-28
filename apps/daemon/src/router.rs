@@ -1211,10 +1211,15 @@ async fn dispatch(
         Request::SessionList {
             workspace_id,
             include_archived,
+            lean,
         } => Box::pin(async move {
             match state
                 .sessions
-                .list(workspace_id.as_deref(), include_archived)
+                .list_with_projection(
+                    workspace_id.as_deref(),
+                    include_archived,
+                    lean.unwrap_or(false),
+                )
                 .await
             {
                 Ok(sessions) => {
