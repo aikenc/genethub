@@ -4,26 +4,13 @@ import path from "node:path";
 
 import { defineSpecialty } from "../../framework/public.ts";
 
-/**
- * Writes a PipeBuilder v1 source contract. The test then asks the product
- * AgentSpaceBuilder to materialize and own the projection.
- */
+/** Writes the descriptor the product reads for a Space on disk. */
 function writeAgentSpaceSource(root: string, name: string): string {
   mkdirSync(root, { recursive: true });
-  const manifest = path.join(root, "pipespace.json");
-  const workspace = path.join(root, `${name}.code-workspace`);
   writeFileSync(
-    manifest,
-    JSON.stringify({
-      schema: "pipespace.v1",
-      name,
-      agents: ["codex"],
-      skills: [],
-      tags: [],
-      skillProviders: [],
-    }),
+    path.join(root, "agent-space.genet.json"),
+    JSON.stringify({ name, tags: [], folders: [{ path: "." }] }),
   );
-  writeFileSync(workspace, JSON.stringify({ folders: [{ path: "." }] }));
   return root;
 }
 
@@ -87,18 +74,6 @@ defineSpecialty(
       const projectRoot = writeAgentSpaceSource(
         path.join(opened.workspaceRoot, "spaces", "project"),
         "project",
-      );
-      const projectBuild = space([
-        "builder",
-        "build",
-        "--workspace",
-        opened.workspaceId,
-        "--name",
-        "project",
-      ]);
-      t.assertions.assert(
-        projectBuild.status === 0,
-        `AgentSpaceBuilder build failed for project: ${projectBuild.text}`,
       );
       const projectReply = await opened.client.call({
         type: "workspace.open",
@@ -178,15 +153,6 @@ defineSpecialty(
       for (const [key, root] of Object.entries(childRoots) as Array<
         [Exclude<SpaceKey, "project">, string]
       >) {
-        const built = space([
-          "builder",
-          "build",
-          "--workspace",
-          ids.project,
-          "--name",
-          key,
-        ]);
-        t.assertions.assert(built.status === 0, `AgentSpaceBuilder build failed for ${key}: ${built.text}`);
         const reply = await opened.client.call({ type: "workspace.open", payload: { root } });
         t.assertions.assert(reply?.type === "workspace", `workspace.open failed for ${key}`);
         ids[key] = reply?.type === "workspace" ? reply.data.id : "";

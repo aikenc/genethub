@@ -2207,7 +2207,6 @@ pub fn reply_kind(reply: &Reply) -> &'static str {
         Reply::WorkflowRun(_) => "workflow run",
         Reply::WorkflowJournal(_) => "workflow journal",
         Reply::WorkflowRuns(_) => "workflow runs",
-        Reply::AgentSpaceBuilder(_) => "agent space builder",
         Reply::AgentSpaceChangePlan(_) => "agent space change plan",
         Reply::WorkflowPackages(_) => "workflow packages",
         Reply::WorkflowBuild(_) => "workflow build",

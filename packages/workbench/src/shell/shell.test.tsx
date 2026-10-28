@@ -85,7 +85,6 @@ beforeEach(() => {
     renameWorkspace: vi.fn(async () => {}),
     removeWorkspace: vi.fn(async () => {}),
     configureAgentSpace: vi.fn(async () => {}),
-    inspectAgentSpaceBuild: vi.fn(async () => null),
     deleteSession: vi.fn(async () => {}),
   });
 });

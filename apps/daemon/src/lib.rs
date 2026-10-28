@@ -6,7 +6,6 @@
 pub mod adapter;
 pub(crate) mod agent_routing;
 pub mod agent_space;
-pub mod agent_space_builder;
 pub mod authz;
 pub(crate) mod blocking;
 pub mod builtin_expert;

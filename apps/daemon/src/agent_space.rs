@@ -88,7 +88,7 @@ pub fn has_enabled_component(entry: &AgentSpaceEntry, component_id: &str) -> boo
 /// Pure: it validates the component contract and produces the next entry
 /// without touching the tree, the filesystem or the revision. Tree-wide rules
 /// need the whole registry and live in [`check_tree`]; the caller owns the
-/// PipeBuilder lock digest and the revision bump.
+/// revision bump.
 pub fn apply(
     current: &AgentSpaceEntry,
     operation: &AgentSpaceOperation,

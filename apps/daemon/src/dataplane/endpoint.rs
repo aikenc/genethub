@@ -1703,7 +1703,6 @@ fn request_workspace(request: &Request) -> Option<&str> {
         | Request::SpeechFeedbackRecord { workspace_id, .. }
         | Request::AgentSpaceChangePlan { workspace_id, .. }
         | Request::AgentSpaceConfigure { workspace_id, .. }
-        | Request::AgentSpaceBuilder { workspace_id, .. }
         | Request::WorkflowList { workspace_id }
         | Request::WorkflowBuild { workspace_id, .. }
         | Request::WorkflowHistory { workspace_id, .. }

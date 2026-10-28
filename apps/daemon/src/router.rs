@@ -241,10 +241,6 @@ async fn authorize_pm_space_open(
     if space_root.parent() != Some(spaces.as_path()) {
         anyhow::bail!("prepared Space must be a direct child of this project's spaces directory");
     }
-    let verified = crate::agent_space_builder::verify_space(&project.root, &space_root)?;
-    if requested.is_file() && requested != verified.workspace_path.canonicalize()? {
-        anyhow::bail!("open the Builder-verified workspace entry");
-    }
     Ok(())
 }
 
@@ -832,7 +828,6 @@ async fn dispatch(
                     "asset.preview.image.v1".to_string(),
                     "service.preview.v1".to_string(),
                     "process.services.v1".to_string(),
-                    "agentSpace.builderPlans.v1".to_string(),
                     "session.input.v1".to_string(),
                     "provider.configuration.v1".to_string(),
                     "session.previewAnnotations.v1".to_string(),
@@ -2561,138 +2556,6 @@ async fn dispatch(
             }
         }).await,
 
-        Request::AgentSpaceBuilder {
-            workspace_id,
-            target_workspace_id,
-            space_name,
-            operation,
-            plan,
-            plan_digest,
-            action_id,
-            expected_revision,
-        } => Box::pin(async move {
-            let plan = plan.unwrap_or(false);
-            let managed_build = plan || plan_digest.is_some() || action_id.is_some();
-            let read_only = matches!(
-                &operation,
-                genehub_proto::AgentSpaceBuilderOperation::Check
-                    | genehub_proto::AgentSpaceBuilderOperation::Explain
-                    | genehub_proto::AgentSpaceBuilderOperation::Verify
-                    | genehub_proto::AgentSpaceBuilderOperation::Build { dry_run: true, .. }
-            );
-            let recovery = false;
-            if let Some(session_id) = caller.session_controller_id() {
-                if !(read_only
-                    || recovery
-                    || managed_build
-                        && session_belongs_to_project(state, &workspace_id, session_id).await)
-                {
-                    return Handled::err(
-                        ErrorCode::Forbidden,
-                        "AgentSpaceBuilder: 已授权项目 PM 请先使用 space builder build --plan，再带计划身份 apply；初始化和清理由用户入口或异常恢复执行",
-                    );
-                }
-            }
-            if let Err(message) =
-                authorize_project_mutation(state, caller, &workspace_id).await
-            {
-                return Handled::err(ErrorCode::Forbidden, message);
-            }
-            if !crate::agent_space_builder::valid_space_name(&space_name) {
-                return Handled::err(
-                    ErrorCode::BadRequest,
-                    "AgentSpace name must be lowercase kebab-case",
-                );
-            }
-            // Builder repairs source/projection drift. Verify project ownership
-            // here, not the old projection that this operation must rebuild.
-            // Workflow execution/activation still requires project_entry().
-            match state.workspaces.project_root(&workspace_id).await {
-                Ok(project_id) if project_id == workspace_id => {}
-                Ok(_) => {
-                    return Handled::err(
-                        ErrorCode::Forbidden,
-                        "Builder must be called from the project root",
-                    )
-                }
-                Err(error) => return failed(error),
-            }
-            let project = match state.workspaces.get(&workspace_id).await {
-                Ok(project) => project,
-                Err(error) => return failed(error),
-            };
-            let space_root = match target_workspace_id {
-                Some(target_workspace_id) => {
-                    let target = match state.workspaces.get(&target_workspace_id).await {
-                        Ok(target) => target,
-                        Err(error) => return failed(error),
-                    };
-                    if target.root != project.root
-                        && !target.root.starts_with(project.root.join("spaces"))
-                    {
-                        return Handled::err(
-                            ErrorCode::Forbidden,
-                            "AgentSpaceBuilder target is outside the project boundary",
-                        );
-                    }
-                    target.root
-                }
-                None => project.root.join("spaces").join(&space_name),
-            };
-            if managed_build {
-                return match crate::agent_space_builder::management::build(
-                    state,
-                    &workspace_id,
-                    &space_root,
-                    &operation,
-                    caller.session_controller_id(),
-                    plan,
-                    plan_digest.as_deref(),
-                    action_id.as_deref(),
-                    expected_revision,
-                    recovery,
-                )
-                .await
-                {
-                    Ok(report) => Handled::ok(Reply::AgentSpaceBuilder(report)),
-                    Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
-                };
-            }
-            let (command, require_no_post_commands) = match operation {
-                genehub_proto::AgentSpaceBuilderOperation::Init => {
-                    (crate::agent_space_builder::Command::Init, true)
-                }
-                genehub_proto::AgentSpaceBuilderOperation::Check => {
-                    (crate::agent_space_builder::Command::Check, true)
-                }
-                genehub_proto::AgentSpaceBuilderOperation::Explain => {
-                    (crate::agent_space_builder::Command::Explain, true)
-                }
-                genehub_proto::AgentSpaceBuilderOperation::Build {
-                    dry_run,
-                    require_no_post_commands,
-                } => (
-                    crate::agent_space_builder::Command::Build { dry_run },
-                    require_no_post_commands,
-                ),
-                genehub_proto::AgentSpaceBuilderOperation::Verify => {
-                    (crate::agent_space_builder::Command::Verify, true)
-                }
-                genehub_proto::AgentSpaceBuilderOperation::Clean => {
-                    (crate::agent_space_builder::Command::Clean, true)
-                }
-            };
-            match crate::agent_space_builder::run(
-                &project.root,
-                &space_root,
-                command,
-                require_no_post_commands,
-            ) {
-                Ok(report) => Handled::ok(Reply::AgentSpaceBuilder(report.into())),
-                Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error}")),
-            }
-        }).await,
-
         Request::AgentSpaceChildren { workspace_id } => Box::pin(async move {
             match state.workspaces.schedulable_children(&workspace_id).await {
                 Ok(children) => Handled::ok(Reply::Workspaces(children)),
@@ -3047,7 +2910,6 @@ fn diagnostic_operation(request: &Request) -> Option<&'static str> {
         Request::WorkflowHuman { .. } => Some("workflow.human"),
         Request::WorkflowRecoveryReset { .. } => Some("workflow.recovery.reset"),
         Request::WorkflowBudget { .. } => Some("workflow.budget"),
-        Request::AgentSpaceBuilder { .. } => Some("agentSpace.builder"),
         Request::AgentSpaceChangePlan { .. } => Some("agentSpace.changePlan"),
         Request::AgentSpaceChildren { .. } => Some("agentSpace.children"),
         Request::SessionSend { .. } => Some("session.send"),

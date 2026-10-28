@@ -67,6 +67,6 @@ GeneHub 中使用内置 `$GENEHUB_PYTHON` 启动，Python hook 通过 `{python}`
 
 压缩包放输出目录外，排除构建期间的 `.spacebuilder/build.lock`、`tree-build.lock`；包开始传输后不再修改，保留到接收方确认终态。不要把本机解释器或 CLI 路径用作远端命令。Agent/定时 hook 提供平台变量，普通 remote shell 不保证带 `GENEHUB_PYTHON`；先在目标机核对内置 runtime 登记，再显式传目标解释器绑定。安装脚本须按已有回执恢复、备份及替换受管文件，不整目录删除。
 
-## 与 Rust 版的关系
+## 与 daemon 的关系
 
-`genet space builder …` 仍由 daemon 里的 Rust 版处理 `pipespace.json` 的 Space（已标废弃，保留到 workflow 取消）。有 `agent-space.genet.json` 的 Space 用本脚本。
+Rust 版构建器已移除（2026-10-28），`genet space builder …` 与 `agentSpace.builder` RPC 都不再存在。所有 Space 由本脚本构建；daemon 只读取 `agent-space.genet.json` 并维护注册/组合。

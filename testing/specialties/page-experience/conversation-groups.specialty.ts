@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { SessionSnapshot, WorkspaceInfo } from "@genehub/proto";
-import { defineSpecialty, daemonEndpoint, openWorkbenchPage, runGenetAsync } from "../../framework/public.ts";
+import { defineSpecialty, daemonEndpoint, openWorkbenchPage } from "../../framework/public.ts";
 
 for (const width of [390, 1280]) defineSpecialty({
   id: `specialty.page-experience.conversation-groups.${width}`,
@@ -12,7 +12,7 @@ for (const width of [390, 1280]) defineSpecialty({
   expectedDurationMs: 45_000, timeoutMs: 180_000,
   resources: { environments: 1, cpu: 2, memoryMb: 1536, io: 1, browser: 1, pool: "browser" },
   surfaces: ["workbench-ui", "daemon", "agent", "asset-preview"],
-  productInterfaces: ["@genehub/workbench", "workspace.list", "workspace.rename", "agentSpace.configure", "session.create", "session.send", "session.archive", "asset.preview", "genet space builder"],
+  productInterfaces: ["@genehub/workbench", "workspace.list", "workspace.rename", "agentSpace.configure", "session.create", "session.send", "session.archive", "asset.preview"],
 }, async t => {
   const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
   let browser: Awaited<ReturnType<typeof openWorkbenchPage>> | undefined;
@@ -21,10 +21,7 @@ for (const width of [390, 1280]) defineSpecialty({
     await opened.client.call({ type: "workspace.rename", payload: { workspaceId: opened.workspaceId, name: "观察项目" } });
     const project = { id: opened.workspaceId };
     const root = opened.workspaceRoot;
-    writeFileSync(path.join(root, "pipespace.json"), JSON.stringify({ schema: "pipespace.v1", name: "observation-project", agents: ["codex"], skills: [], skillProviders: [], tags: [] }));
-    writeFileSync(path.join(root, "observation-project.code-workspace"), JSON.stringify({ folders: [{ path: "." }] }));
-    const rootBuild = await runGenetAsync(opened.daemon.genet, ["space", "builder", "build", "--workspace", project.id, "--target-workspace", project.id, "--name", "observation-project", "--require-no-post-commands"], opened.daemon.env, { cwd: root });
-    t.assertions.assert(rootBuild.code === 0, rootBuild.stderr || rootBuild.stdout);
+    writeFileSync(path.join(root, "agent-space.genet.json"), JSON.stringify({ name: "observation-project", tags: [], folders: [{ path: "." }] }));
     const registered = await opened.client.call({ type: "agentSpace.configure", payload: { workspaceId: project.id,
       expectedRevision: 0, operation: { kind: "setLifecycle", lifecycle: "persistent" } } });
     t.assertions.assert(registered?.type === "workspace", "root registration failed");
@@ -32,12 +29,8 @@ for (const width of [390, 1280]) defineSpecialty({
     const createSpace = async (name: string, parentWorkspaceId: string): Promise<WorkspaceInfo> => {
       const dir = path.join(root, "spaces", name);
       mkdirSync(dir, { recursive: true });
-      writeFileSync(path.join(dir, "pipespace.json"), JSON.stringify({ schema: "pipespace.v1", name, agents: ["codex"], skills: [], skillProviders: [], tags: [] }));
-      const entry = path.join(dir, `${name}.code-workspace`);
-      writeFileSync(entry, JSON.stringify({ folders: [{ path: "." }] }));
-      const built = await runGenetAsync(opened.daemon.genet, ["space", "builder", "build", "--workspace", project.id, "--name", name, "--require-no-post-commands"], opened.daemon.env, { cwd: root });
-      t.assertions.assert(built.code === 0, built.stderr || built.stdout);
-      const reply = await opened.client.call({ type: "workspace.open", payload: { root: entry } });
+      writeFileSync(path.join(dir, "agent-space.genet.json"), JSON.stringify({ name, tags: [], folders: [{ path: "." }] }));
+      const reply = await opened.client.call({ type: "workspace.open", payload: { root: dir } });
       if (reply?.type !== "workspace") throw new Error(`Could not open ${name}`);
       const attached = await opened.client.call({ type: "agentSpace.configure", payload: { workspaceId: reply.data.id,
         expectedRevision: reply.data.agentSpace?.revision ?? 0, operation: { kind: "setParent", parentWorkspaceId } } });

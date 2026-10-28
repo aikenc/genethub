@@ -1,8 +1,6 @@
 import type { ProviderOperationReceipt } from "@genehub/proto";
 import { savedInputReceipts, saveInputReceipt, rememberDraftIdentity, draftIdentities, forgetDraftIdentity, saveLocalValue, localValue, initializeReplyReads, hasUnreadReply } from "./localConversation";
 import type {
-  AgentSpaceBuilderOperation,
-  AgentSpaceBuilderReport,
   AgentSpaceOperation,
   AgentInfo,
   AgentRequestOutcome,
@@ -391,12 +389,6 @@ interface WorkbenchState {
     expectedRevision: number,
     operation: AgentSpaceOperation,
   ): Promise<void>;
-  /** Checks or verifies one existing Space through the daemon-owned builder. */
-  inspectAgentSpaceBuild(
-    projectWorkspaceId: string,
-    targetWorkspaceId: string,
-    operation: AgentSpaceBuilderOperation,
-  ): Promise<AgentSpaceBuilderReport | null>;
   loadTree(path?: string): Promise<void>;
   refreshGit(): Promise<void>;
   loadDiff(path?: string): Promise<void>;
@@ -1180,20 +1172,6 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       });
     if (reply?.type !== "workspace") throw new Error("未收到项目配置更新结果");
     await get().refreshWorkspaces();
-  },
-
-  async inspectAgentSpaceBuild(projectWorkspaceId, targetWorkspaceId, operation) {
-    const reply = await require_(get().client).call({
-        type: "agentSpace.builder",
-        payload: {
-          workspaceId: projectWorkspaceId,
-          targetWorkspaceId,
-          spaceName: "existing",
-          operation,
-        },
-      });
-    if (reply?.type !== "agentSpaceBuilder") throw new Error("未收到构建配置结果");
-    return reply.data;
   },
 
   newSession(workspaceId, agentId, options) {
