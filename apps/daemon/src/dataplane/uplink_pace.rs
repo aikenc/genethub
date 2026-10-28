@@ -675,6 +675,7 @@ impl PeerPace {
             <= PEER_PROGRESS_BYTES
     }
 
+    #[allow(deprecated)] // `fetch_update` is renamed to `try_update` on newer Rust.
     pub(crate) fn try_acquire_control(self: &Arc<Self>, bytes: u64) -> Option<Charge> {
         self.control_outstanding
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
