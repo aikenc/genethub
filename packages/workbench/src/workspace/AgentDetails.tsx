@@ -20,7 +20,7 @@ export function AgentDetails({ workspace, deviceName, compact = false }: { works
     let cancelled = false;
     setResult(null);
     if (!client || connection !== "ready") return;
-    void client.call({ type: "session.list", payload: { workspaceId: workspace.id, includeArchived: true } }).then((reply) => {
+    void client.call({ type: "session.list", payload: { workspaceId: workspace.id, includeArchived: true, lean: true } }).then((reply) => {
       if (cancelled) return;
       if (reply?.type !== "sessions") throw new Error("设备未返回会话数量");
       setResult({ owner: workspace.id, sessions: reply.data.filter((s) => s.workspaceId === workspace.id) });

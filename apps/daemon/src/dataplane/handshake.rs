@@ -10,7 +10,6 @@ pub struct AcceptedPeer {
     pub welcome: PeerWelcome,
     pub key: SessionKey,
     pub access: PeerAccess,
-    pub packet_pair_probe: bool,
 }
 
 /// Performs one PSK mutual handshake before any business stream exists.
@@ -36,17 +35,10 @@ pub fn accept(
     if hello.client_name.is_empty() || hello.client_name.len() > 80 {
         anyhow::bail!("invalid peer client name");
     }
-    let bulk_stream_window = match hello.max_bulk_stream_window_bytes {
-        None => genehub_proto::INITIAL_STREAM_WINDOW_BYTES,
-        Some(value)
-            if (genehub_proto::INITIAL_STREAM_WINDOW_BYTES
-                ..=genehub_proto::INITIAL_STREAM_WINDOW_BYTES)
-                .contains(&value) =>
-        {
-            value
-        }
-        Some(_) => anyhow::bail!("invalid peer finite-bulk receive lease"),
-    };
+    let bulk_stream_window = hello.max_bulk_stream_window_bytes;
+    if bulk_stream_window != genehub_proto::INITIAL_STREAM_WINDOW_BYTES {
+        anyhow::bail!("invalid peer finite-bulk receive lease");
+    }
     let server_nonce = crate::devices::random_token();
     let (proof, key, device_id, bootstrap_invite) = match (&hello.auth, &admission) {
         (
@@ -157,12 +149,11 @@ pub fn accept(
     };
 
     Ok(AcceptedPeer {
-        packet_pair_probe: hello.packet_pair_probe_supported == Some(true),
         welcome: PeerWelcome {
             version: genehub_proto::DATA_PLANE_VERSION,
             server_nonce,
             proof,
-            max_bulk_stream_window_bytes: Some(bulk_stream_window),
+            max_bulk_stream_window_bytes: bulk_stream_window,
         },
         key: key.clone(),
         access: PeerAccess {
@@ -210,8 +201,7 @@ mod tests {
                 proof: channel_auth::client_proof(secret, "loopback", nonce),
             },
             rtc_supported: true,
-            max_bulk_stream_window_bytes: Some(genehub_proto::INITIAL_STREAM_WINDOW_BYTES),
-            packet_pair_probe_supported: None,
+            max_bulk_stream_window_bytes: genehub_proto::INITIAL_STREAM_WINDOW_BYTES,
         };
         let accepted = accept(
             &state,
@@ -231,7 +221,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             accepted.welcome.max_bulk_stream_window_bytes,
-            Some(genehub_proto::INITIAL_STREAM_WINDOW_BYTES)
+            genehub_proto::INITIAL_STREAM_WINDOW_BYTES
         );
     }
 
@@ -254,8 +244,7 @@ mod tests {
                 proof: channel_auth::client_proof(secret, &context, nonce),
             },
             rtc_supported: false,
-            max_bulk_stream_window_bytes: None,
-            packet_pair_probe_supported: None,
+            max_bulk_stream_window_bytes: genehub_proto::INITIAL_STREAM_WINDOW_BYTES,
         };
         let accepted = accept(
             &state,
@@ -275,7 +264,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             accepted.welcome.max_bulk_stream_window_bytes,
-            Some(genehub_proto::INITIAL_STREAM_WINDOW_BYTES)
+            genehub_proto::INITIAL_STREAM_WINDOW_BYTES
         );
         assert_eq!(accepted.access.bootstrap_invite.as_deref(), Some(invite_id));
     }

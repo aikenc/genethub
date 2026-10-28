@@ -12,7 +12,7 @@ import { preparePeerHandshake } from "./handshake";
 const SECRET = "finite-bulk-handshake-secret";
 const SERVER_NONCE = "ffeeddccbbaa99887766554433221100";
 
-async function welcome(window?: number) {
+async function welcome(window = INITIAL_STREAM_WINDOW_BYTES) {
   const prepared = await preparePeerHandshake({ kind: "loopback", secret: SECRET });
   const auth = prepared.hello.auth;
   if (auth.type !== "loopback") throw new Error("unexpected auth kind");
@@ -28,7 +28,7 @@ async function welcome(window?: number) {
       version: DATA_PLANE_VERSION,
       serverNonce: SERVER_NONCE,
       proof,
-      ...(window === undefined ? {} : { maxBulkStreamWindowBytes: window }),
+      maxBulkStreamWindowBytes: window,
     },
   };
 }
@@ -45,7 +45,7 @@ describe("the peer handshake finite-bulk capability", () => {
     );
   });
 
-  it("uses the v4 default window when the field is omitted", async () => {
+  it("accepts only the bounded v4 stream window", async () => {
     const fixture = await welcome();
     const result = await fixture.prepared.complete(fixture.value);
     expect(result.maxBulkStreamWindowBytes).toBe(INITIAL_STREAM_WINDOW_BYTES);

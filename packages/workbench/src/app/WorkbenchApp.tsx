@@ -662,7 +662,7 @@ export function App({
         return onMachine(machine, async (client) => {
           const reply = await client.call({
             type: "session.list",
-            payload: { workspaceId: null, includeArchived: false },
+            payload: { workspaceId: null, includeArchived: false, lean: true },
           });
           if (reply?.type !== "sessions") {
             throw new Error("目标机器没有返回可用的会话列表。");

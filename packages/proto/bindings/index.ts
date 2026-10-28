@@ -1064,22 +1064,15 @@ export type PeerHello = { version: number, clientName: string, auth: PeerAuth,
  */
 rtcSupported: boolean, 
 /**
- * Optional bounded stream-window advertisement. v4 uses
- * [`INITIAL_STREAM_WINDOW_BYTES`] when omitted and no Preview exception.
+ * Bounded finite-bulk stream-window advertisement.
  */
-maxBulkStreamWindowBytes?: number, 
-/**
- * Understands bounded encrypted Ping controls during logical admission.
- * Missing advertisements retain the legacy possession-proof sample.
- */
-packetPairProbeSupported?: boolean, };
+maxBulkStreamWindowBytes: number, };
 
 export type PeerWelcome = { version: number, serverNonce: string, proof: string, 
 /**
- * Optional bounded stream-window advertisement. A missing field uses
- * the v4 default; all stream methods share the same maximum.
+ * Bounded finite-bulk stream-window advertisement.
  */
-maxBulkStreamWindowBytes?: number, };
+maxBulkStreamWindowBytes: number, };
 
 export type PermissionOption = { id: string, label: string, kind: PermissionOptionKind, };
 
@@ -1372,7 +1365,7 @@ targetWorkspaceId: string | null, spaceName: string, operation: AgentSpaceBuilde
 /**
  * Preview an exact build under the existing PM management binding.
  */
-plan?: boolean, planDigest?: string, actionId?: string, expectedRevision?: number, } } | { "type": "project.approval.request", "payload": { challengeId: string, } } | { "type": "agentSpace.children", "payload": { workspaceId: string, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, lean?: boolean, } } | { "type": "session.get", "payload": { sessionId: string, recentRounds?: number, beforeItemId?: string, } } | { "type": "session.drafts", "payload": { sessionId: string, } } | { "type": "session.drafts.replace", "payload": { sessionId: string, drafts: Array<SessionDraft>, } } | { "type": "session.previewAnnotations.get", "payload": { sessionId: string, } } | { "type": "session.previewAnnotations.upsert", "payload": { sessionId: string, annotation: PreviewAnnotation, expectedRevision: number, } } | { "type": "session.previewAnnotations.remove", "payload": { sessionId: string, ids: Array<string>, 
+plan?: boolean, planDigest?: string, actionId?: string, expectedRevision?: number, } } | { "type": "project.approval.request", "payload": { challengeId: string, } } | { "type": "agentSpace.children", "payload": { workspaceId: string, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, lean: boolean, } } | { "type": "session.get", "payload": { sessionId: string, recentRounds?: number, beforeItemId?: string, } } | { "type": "session.drafts", "payload": { sessionId: string, } } | { "type": "session.drafts.replace", "payload": { sessionId: string, drafts: Array<SessionDraft>, } } | { "type": "session.previewAnnotations.get", "payload": { sessionId: string, } } | { "type": "session.previewAnnotations.upsert", "payload": { sessionId: string, annotation: PreviewAnnotation, expectedRevision: number, } } | { "type": "session.previewAnnotations.remove", "payload": { sessionId: string, ids: Array<string>, 
 /**
  * Present for an explicit delete. Omitted after a confirmed send so a
  * note added during send is not rejected as a stale revision.

@@ -86,16 +86,8 @@ pub struct PeerHello {
     /// Capability advertisement only.  Signaling remains encrypted data-plane
     /// traffic and no RTC address is ever placed in this hello.
     pub rtc_supported: bool,
-    /// Optional bounded stream-window advertisement. v4 uses
-    /// [`INITIAL_STREAM_WINDOW_BYTES`] when omitted and no Preview exception.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub max_bulk_stream_window_bytes: Option<u32>,
-    /// Understands bounded encrypted Ping controls during logical admission.
-    /// Missing advertisements retain the legacy possession-proof sample.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub packet_pair_probe_supported: Option<bool>,
+    /// Bounded finite-bulk stream-window advertisement.
+    pub max_bulk_stream_window_bytes: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -105,11 +97,8 @@ pub struct PeerWelcome {
     pub version: u32,
     pub server_nonce: String,
     pub proof: String,
-    /// Optional bounded stream-window advertisement. A missing field uses
-    /// the v4 default; all stream methods share the same maximum.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub max_bulk_stream_window_bytes: Option<u32>,
+    /// Bounded finite-bulk stream-window advertisement.
+    pub max_bulk_stream_window_bytes: u32,
 }
 
 /// Non-trickle RTC signaling carried inside an already E2EE Exchange.

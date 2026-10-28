@@ -790,7 +790,7 @@ async fn execute(
                 rpc.call(Request::SessionList {
                     workspace_id: workspace_id.clone(),
                     include_archived,
-                    lean: Some(lean),
+                    lean,
                 })
                 .await
                 .map_err(rpc_error)?,

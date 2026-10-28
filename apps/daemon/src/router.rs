@@ -1215,11 +1215,7 @@ async fn dispatch(
         } => Box::pin(async move {
             match state
                 .sessions
-                .list_with_projection(
-                    workspace_id.as_deref(),
-                    include_archived,
-                    lean.unwrap_or(false),
-                )
+                .list_with_projection(workspace_id.as_deref(), include_archived, lean)
                 .await
             {
                 Ok(sessions) => {
