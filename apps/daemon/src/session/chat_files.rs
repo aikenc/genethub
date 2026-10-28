@@ -266,19 +266,17 @@ fn relative_path(path: &Path, base: &Path) -> Option<PathBuf> {
 }
 
 pub(crate) fn sanitize_name(name: &str) -> String {
-    let mut out = String::new();
-    let mut count = 0;
-    for character in name.chars() {
-        if count >= MAX_MANIFEST_NAME_CHARS {
-            break;
-        }
-        out.push(if character.is_control() {
-            ' '
-        } else {
-            character
-        });
-        count += 1;
-    }
+    let out: String = name
+        .chars()
+        .take(MAX_MANIFEST_NAME_CHARS)
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
     let collapsed = out.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.is_empty() {
         "未命名文件".into()
