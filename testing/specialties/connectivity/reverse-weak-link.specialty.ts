@@ -14,14 +14,7 @@ for (const { warm, ackDelay, ackStart } of [{ warm: false, ackDelay: 0, ackStart
   resources: { environments: 1, cpu: 2, memoryMb: 2048, io: 1, browser: 0, pool: "exclusive" },
   expectedDurationMs: 15000, timeoutMs: 90000, retention: true,
 }, async t => {
-  const caps: number[] = [], paceSamples: unknown[] = [];
-  let shapedAt: number | undefined;
-  const pool = await openFabricPool(t, 1, 2, false, false, (event, peer) => {
-    if (peer === 1 && event.kind === "transport" && event.detail.phase === "send-pace" && typeof event.detail.capBytes === "number") {
-      if (caps.length < 48) caps.push(event.detail.capBytes);
-      if (shapedAt !== undefined && paceSamples.length < 96) paceSamples.push({ atMs: Math.round(performance.now() - shapedAt), cause: event.detail.cause, capBefore: event.detail.capBeforeBytes, cap: event.detail.capBytes, inFlight: event.detail.inFlightBytes, oldestAgeMs: event.detail.oldestAckAgeMs, sampleBytes: event.detail.sampleBytes, sampleAckedBytes: event.detail.sampleAckedBytes, sampleMs: event.detail.sampleElapsedMs });
-    }
-  });
+  const pool = await openFabricPool(t, 1, 2, false, false);
   const { clients, link, opened: o } = pool;
   const eventAt = performance.now(), eventBytes: Array<{ peer: number; kind: string; bytes: number; atMs: number; sameValue: boolean | null; changedFields: string[]; fieldBytes: Record<string, number> }> = [];
   const previousAgents = new Map<number, string>();
@@ -54,7 +47,6 @@ for (const { warm, ackDelay, ackStart } of [{ warm: false, ackDelay: 0, ackStart
     } else await new Promise(resolve => setTimeout(resolve, 150));
     const primedAt = performance.now();
     link.resetTrafficStats();
-    shapedAt = performance.now();
     link.setProfile({ bandwidthMbps: .5, rttMs: 200 });
     const before = link.stats(), browserBefore = pool.browserFaults.map(fault => fault.bytes()), began = performance.now();
     let finished = false, uploadElapsedMs: number | undefined;
@@ -82,7 +74,7 @@ for (const { warm, ackDelay, ackStart } of [{ warm: false, ackDelay: 0, ackStart
     const r = await upload as { type?: string };
     const scenarioMs = Math.round(performance.now() - began), after = link.stats();
     const exact = readFileSync(join(o.workspaceRoot, "weak-upload.txt"), "utf8") === content;
-    t.note(JSON.stringify({ warm, ackDelay, ackStart, heldMs, heldBytes, bytes: Buffer.byteLength(content), scenarioMs, uploadElapsedMs, phaseGapMs, latency, replyBytes, eventBytes, browserBytes: pool.browserFaults.map((fault, i) => { const now = fault.bytes(), prior = browserBefore[i]!; return { client: now.client - prior.client, server: now.server - prior.server }; }), duringUpload, caps, paceSamples, before, after, exact, retained: clients.map((c, i) => c.logicalConnectionId === owners[i]) }));
+    t.note(JSON.stringify({ warm, ackDelay, ackStart, heldMs, heldBytes, bytes: Buffer.byteLength(content), scenarioMs, uploadElapsedMs, phaseGapMs, latency, replyBytes, eventBytes, browserBytes: pool.browserFaults.map((fault, i) => { const now = fault.bytes(), prior = browserBefore[i]!; return { client: now.client - prior.client, server: now.server - prior.server }; }) , duringUpload, before, after, exact, retained: clients.map((c, i) => c.logicalConnectionId === owners[i]) }));
     t.assertions.assert(eventBytes.every(event => event.sameValue !== true), "unchanged agent catalog snapshot was broadcast repeatedly");
     if (ackDelay) t.assertions.assert(heldMs !== undefined && heldMs >= ackDelay && heldMs < ackDelay + 800 && heldBytes > 0, "declared ACK-return pause did not hold real browser bytes for its duration");
     t.assertions.assert(r?.type === "ack" && exact, "weak-link upload was not acknowledged with exact disk content");

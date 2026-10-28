@@ -14,6 +14,10 @@ use std::time::Instant;
 use tokio::sync::{mpsc, oneshot, Notify, OwnedSemaphorePermit, Semaphore};
 
 const DATA_BYTES: usize = 4 * 1024 * 1024;
+/// Local fairness bound: a bulk stream may not journal more than this ahead of
+/// a control reply. It is released by the same journal ACK path as before, but
+/// it is a fixed scheduling budget, not an RTT-adaptive congestion window.
+const BULK_LOOKAHEAD_BYTES: usize = 2 * 1024 * 1024;
 const PROGRESS_BYTES: usize = 64 * 1024;
 fn error(e: resume::Error) -> anyhow::Error {
     anyhow!("logical connection: {e:?}")
@@ -421,6 +425,10 @@ async fn run(
                 pending.push_back(write);
                 continue;
             }
+            if write.class == WriteClass::Bulk && journal.stats().log_bytes >= BULK_LOOKAHEAD_BYTES {
+                pending.push_back(write);
+                continue;
+            }
             let frame = resume::Frame {
                 kind: write.frame.kind as u8,
                 stream_id: write.frame.stream_id,
@@ -625,8 +633,14 @@ async fn run(
                     _ => { standby.take(); }
                 }
             }
-            write = writes.recv(), if pending.len() < 256 && !writes.is_closed() => {
-                match write { Some(write) => pending.push_back(write), None => continue }
+            write = writes.recv(), if !writes.is_closed() => {
+                match write {
+                    // Control replies jump unjournaled bulk work so a pause,
+                    // cancel or small RPC gets the next send opportunity.
+                    Some(write) if write.class == WriteClass::Control => pending.push_front(write),
+                    Some(write) => pending.push_back(write),
+                    None => continue,
+                }
             }
             _ = async {
                 if let Some(writable) = writable {

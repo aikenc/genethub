@@ -34,7 +34,7 @@ for (const v of variants) defineSpecialty({
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"], retention: true,
 }, async t => {
   if (v.scenario === "interrupt") registerControlledAgent(t.env, { id: "pool-control", profile: "accept-then-silent" });
-  if (v.scenario === "duplex" || v.scenario === "hot-drop") t.env.env.GENEHUB_LOCAL_LOG = "warn,diagnostic=debug,genet_daemon::dataplane::uplink_pace=info";
+  if (v.scenario === "duplex" || v.scenario === "hot-drop") t.env.env.GENEHUB_LOCAL_LOG = "warn,diagnostic=debug";
   const managementStarts = new Map<string, { at: number; peer: number; requestId: string; operation: string }>();
   const management: Array<{ at: number; peer: number; requestId: string; operation: string; elapsed: number; outcome: unknown }> = [];
   const uploadEvents: Array<{ at: number; peer: number; requestId: string; phase: unknown; outcome: unknown }> = [];
@@ -177,8 +177,6 @@ for (const v of variants) defineSpecialty({
           creditWaitMs: { total: gaps.reduce((a, b) => a + b, 0), max: Math.max(0, ...gaps) },
           finDispatchMs: first("RPC request FIN dispatched"), decodedMs: first("RPC request decoded"), preparedMs: first("RPC response prepared"), completedMs: first("RPC exchange completed") }));
       }
-      const pace = log.filter(line => line.includes('event="uplink_pace"') || line.includes('event="uplink_initial_sample"'));
-      t.note(`Native DATA window tail: ${pace.slice(-4).join(" | ")}`);
     }
     if (v.scenario === "hot-drop") {
       const log = readFileSync(join(t.env.data, "logs", "daemon.log"), "utf8").replace(/\u001b\[[0-9;]*m/g, "").split("\n");
@@ -208,8 +206,19 @@ for (const v of variants) defineSpecialty({
       const ingress=support.data.events.filter(e=>e.operation==="peer.ingress");t.note(JSON.stringify({nativeIngress:ingress}));
       if(["node-cut","browser-cut","all-cut"].includes(v.scenario))t.assertions.assert(!ingress.some(e=>e.code?.endsWith("full")),"ordinary recovery produced ingress-overflow disconnects");
     }
+    // Recovery must be observable from a remote owner, not only from the
+    // local control client: a local-only probe can pass while the browser
+    // lane is still blocked behind the bulk backlog.
+    const remoteRecoverAt = performance.now();
+    let remoteRecoverOk = false;
+    while (performance.now() - remoteRecoverAt < 15000) {
+      try { const reply = await control.call({ type: "workspace.list" }); if (reply?.type === "workspaces") { remoteRecoverOk = true; break; } } catch {}
+      await pause(250);
+    }
+    const remoteRecoverMs = Math.round(performance.now() - remoteRecoverAt);
+    t.note(JSON.stringify({ phase: "remote-recovery", ok: remoteRecoverOk, ms: remoteRecoverMs, lane: `${v.browsers} browser / ${v.nodes} node` }));
     const summary = { phase: "result", variant: v.name, rpc: quantiles(rpc), errors, exact24MiB: exact, uploadOk, uploadRecoverySafe, canceledPids,
-      interruptMs, interruptOk, ackHoldMs, ackFault,
+      interruptMs, interruptOk, ackHoldMs, ackFault, remoteRecoverOk, remoteRecoverMs,
       sourceStarts: starts, sourceExactlyOnce: starts.join(",") === "0,1,2", retained: clients.map((c,i) => c.logicalConnectionId === owners[i]),
       localOk: local?.type === "workspaces", localMs, lateFrameTail: (pool.relay.logTail().match(/lateFrameOverflow/g)??[]).length, diagnostics: pool.diagnostics.slice(-10) };
     t.note(JSON.stringify(summary));
@@ -236,6 +245,11 @@ for (const v of variants) defineSpecialty({
     // retained here is recovery, ownership and exactness, not a 10s bound.
     t.assertions.assert(local?.type === "workspaces",
       "management never recovered under the shared bottleneck");
+    // A single browser physical lane carrying a permanently blocked
+    // slow consumer is the declared degraded shape; every other topology
+    // must show management recovery from the remote owner itself.
+    if (!(v.browsers === 1 && v.scenario === "slow-consumer")) t.assertions.assert(remoteRecoverOk,
+      "the remote management lane never recovered after bulk stopped");
     if (v.ackDelay) t.assertions.assert(faultApplied && ackFault !== undefined && pool.nodeFlowIds.includes(ackFault.nodeFlowId) && ackFault.heldForwarded === ackFault.beforeForwarded && ackHoldMs !== undefined && ackHoldMs >= v.ackDelay && ackHoldMs < v.ackDelay + 800,
       "the declared forward-only ACK-path pause was not applied and restored on time");
     if (controlSession) {

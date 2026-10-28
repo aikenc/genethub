@@ -10,7 +10,7 @@ const MIN_POLL_MS = 5_000;
 const MAX_POLL_MS = 30_000;
 const SLOW_REFRESH_MS = 2_000;
 const FAST_REFRESH_MS = 500;
-type Poll = { users: number; timer: ReturnType<typeof setTimeout> | null; delay: number; visibilityChanged(): void };
+type Poll = { users: number; timer: ReturnType<typeof setTimeout> | null; delay: number; closed: boolean; visibilityChanged(): void };
 const polls = new WeakMap<Client, Poll>();
 const aggregates = new WeakMap<SessionSummary[], Map<string, Activity>>();
 
@@ -23,14 +23,17 @@ function subscribe(client: Client) {
       users: 0,
       timer: null,
       delay: MIN_POLL_MS,
+      closed: false,
       visibilityChanged: () => {},
     };
     const schedule = () => {
+      if (state.closed) return;
       if (state.timer !== null) clearTimeout(state.timer);
       state.timer = setTimeout(() => { void refresh(); }, state.delay);
     };
     const refresh = async () => {
       state.timer = null;
+      if (state.closed) return;
       const wb = useWorkbench.getState();
       if (wb.client !== client || wb.connection !== "ready" || document.visibilityState === "hidden") {
         schedule();
@@ -40,6 +43,7 @@ function subscribe(client: Client) {
       try {
         await wb.refreshSessions();
       } finally {
+        if (state.closed) return;
         const elapsed = performance.now() - began;
         // A list that already costs seconds must not be re-requested every
         // five seconds: back off until it is cheap again.
@@ -49,7 +53,7 @@ function subscribe(client: Client) {
       }
     };
     state.visibilityChanged = () => {
-      if (document.visibilityState === "hidden") return;
+      if (state.closed || document.visibilityState === "hidden") return;
       state.delay = MIN_POLL_MS;
       if (state.timer !== null) { clearTimeout(state.timer); state.timer = null; }
       void refresh();
@@ -62,6 +66,7 @@ function subscribe(client: Client) {
   poll.users++;
   return () => {
     if (--poll.users === 0) {
+      poll.closed = true;
       if (poll.timer !== null) clearTimeout(poll.timer);
       document.removeEventListener("visibilitychange", poll.visibilityChanged);
       polls.delete(client);

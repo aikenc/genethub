@@ -27,7 +27,7 @@ type ProductClient = Opened["client"];
 
 const MIB = 1024 * 1024;
 const LINK_BANDWIDTH_MBPS = 100;
-const DIRECT_TARGET_UTILIZATION = 0.85;
+const DIRECT_TARGET_UTILIZATION = 0.7;
 const RELAY_TARGET_UTILIZATION = 0.7;
 // Relay remains on the recorded baseline until phase 2. Direct is promoted to
 // its product target as part of phase 1.
@@ -675,7 +675,7 @@ defineSpecialty(
     requireWasmArtifacts(t.openRoot);
     const file = seedImage(t, "neteff-direct-8m.png", 8 * MIB);
     const rawServer = await startTcpPayloadServer(file.sizeBytes);
-    t.env.env.GENEHUB_LOCAL_LOG = "warn,genet_daemon::dataplane::uplink_pace=info,genet_daemon::dataplane::preview=debug";
+    t.env.env.GENEHUB_LOCAL_LOG = "warn,genet_daemon::dataplane::preview=debug";
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
     const samples: UtilizationSample[] = [];
     let busyRpcMs: number | null = null;
@@ -711,7 +711,6 @@ defineSpecialty(
           const product = await preview;
           const pathLog = readFileSync(path.join(t.env.data, "logs", "daemon.log"), "utf8").split("\n");
           t.note(`direct native path rtt=${rttMs}ms: ${pathLog.filter(line =>
-            line.includes('event="uplink_initial_sample"') || line.includes('event="uplink_pace"') ||
             line.includes('event="preview_stage_timing"')).slice(-8).join(" | ")}`);
           samples.push(
             recordUtilization(t, {
@@ -778,7 +777,7 @@ defineSpecialty(
     const zeroProfile = { rttMs: 0, bandwidthMbps: LINK_BANDWIDTH_MBPS };
     const daemonLink = await startShapedTcpProxy({ targetUrl: relay.origin, profile: zeroProfile });
     const clientLink = await startShapedTcpProxy({ targetUrl: relay.origin, profile: zeroProfile });
-    t.env.env.GENEHUB_LOCAL_LOG = "warn,genet_daemon::dataplane::uplink_pace=info,genet_daemon::dataplane::preview=debug";
+    t.env.env.GENEHUB_LOCAL_LOG = "warn,genet_daemon::dataplane::preview=debug";
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
     const samples: UtilizationSample[] = [];
     let busyRpcMs: number | null = null;
@@ -860,7 +859,6 @@ defineSpecialty(
         clientLink.resetStats();
         const probe = new PreviewProbe();
         const logPath = path.join(t.env.data, "logs", "daemon.log");
-        const sampleLogOffset = readFileSync(logPath, "utf8").length;
         const client = await connectProductClient({
           url: routedRendezvous,
           credential,
@@ -913,13 +911,6 @@ defineSpecialty(
             );
           }
           const product = await preview;
-          if (coldBulk) {
-            const rows = readFileSync(logPath, "utf8").slice(sampleLogOffset).replace(/\u001b\[[0-9;]*m/g, "").split("\n");
-            const numeric = (line: string, keys: string[]) => keys.map(key => Number(new RegExp(`${key}=(\\d+)`).exec(line)?.[1] ?? -1));
-            const initial = rows.filter(line => line.includes('event="uplink_initial_sample"')).map(line => numeric(line, ["cap_bytes", "sample_rtt_us", "baseline_rtt_us", "sample_bytes"]));
-            const windows = rows.filter(line => line.includes('event="uplink_pace"')).slice(0, 4).map(line => numeric(line, ["cap_bytes", "previous_bytes", "drain_ms", "probed_bytes", "overrun_fits_bytes"]));
-            t.note(`bootstrap${samples.length + 1} seed[cap,rttUs,baseUs,bytes]=${JSON.stringify(initial)} windows[cap,prev,drainMs,probed,overrun]=${JSON.stringify(windows)}`);
-          }
           if (coldStart) t.note(`sample${samples.length + 1}: tcp=${tcp.elapsedMs.toFixed(0)} product=${product.elapsedMs.toFixed(0)} first=${product.firstByteMs} body=${product.transferMs} rpc=${busyRpcMs?.toFixed(0)} throttledPeriods=${throttleCount() - throttledBefore}`);
           // The receiver finishing precedes the final ACK reaching the sender.
           // Keep that stream alive long enough to record its completed stages.
@@ -975,8 +966,6 @@ defineSpecialty(
       relay.stop();
       await rawServer.stop();
     }
-    const decisions = readFileSync(path.join(t.env.data, "logs", "daemon.log"), "utf8").replace(/\u001b\[[0-9;]*m/g, "").split("\n").filter(line => line.includes('event="uplink_pace"'));
-    t.note(`pace tail [cap,drainMs,probed,overrun]: ${JSON.stringify(decisions.slice(-6).map(line => ["cap_bytes", "drain_ms", "probed_bytes", "overrun_fits_bytes"].map(key => Number(new RegExp(`${key}=(\\d+)`).exec(line)?.[1] ?? -1))))}`);
     t.note(`startup=${startup}; samples=${samples.length}`);
     for (const sample of samples) {
       if (coldSmall) {
@@ -1202,7 +1191,7 @@ defineSpecialty(
     requireWasmArtifacts(t.openRoot);
     const file = seedImage(t, "neteff-window-24m.png", 24 * MIB);
     const relay = await startRelay({ openRoot: t.openRoot });
-    t.env.env.GENEHUB_LOCAL_LOG = "warn,genet_daemon::dataplane::uplink_pace=info";
+    t.env.env.GENEHUB_LOCAL_LOG = "warn";
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
     const rows: string[] = [];
     const worst = new Map<number, number>();

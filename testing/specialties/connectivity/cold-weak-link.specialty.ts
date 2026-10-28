@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { WebSocket } from "ws";
 import { Client, type WebSocketLike } from "@genehub/workbench/client";
@@ -17,7 +17,7 @@ for (const relayed of [false, true]) for (const bandwidthMbps of [0.5, 5]) defin
   resources: { environments: 1, cpu: 2, memoryMb: 1024, io: 1, browser: 0, pool: "exclusive" },
   expectedDurationMs: 55000, timeoutMs: 120000, retention: true,
 }, async t => {
-  t.env.env.GENEHUB_LOCAL_LOG = "warn,genet_daemon::dataplane::uplink_pace=info";
+  t.env.env.GENEHUB_LOCAL_LOG = "warn";
   const o = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
   const links: Array<Awaited<ReturnType<typeof startShapedTcpProxy>>> = [];
   let relay: Awaited<ReturnType<typeof startRelay>> | undefined;
@@ -67,8 +67,7 @@ for (const relayed of [false, true]) for (const bandwidthMbps of [0.5, 5]) defin
     const result = await preview;
     const recovered = await client.call({ type: "workspace.list" })
       .then(reply => reply?.type === "workspaces").catch(() => false);
-    const pace = readFileSync(join(t.env.data, "logs", "daemon.log"), "utf8").split("\n").filter(line => line.includes('event="uplink_initial_sample"') || line.includes('event="uplink_pace"')).slice(-8);
-    t.note(JSON.stringify({ relayed, bandwidthMbps, connectMs: Math.round(connectMs), rpcMs: latency.map(Math.round), rpcErrors, recovered, underBody, bytes: result.bytes.length, physical, additionalPhysical: links.map(link => link.stats().acceptedConnections), pace }));
+    t.note(JSON.stringify({ relayed, bandwidthMbps, connectMs: Math.round(connectMs), rpcMs: latency.map(Math.round), rpcErrors, recovered, underBody, bytes: result.bytes.length , physical, additionalPhysical: links.map(link => link.stats().acceptedConnections) }));
     t.assertions.assert(result.bytes.length === bytes.length && hash(result.bytes) === hash(bytes), "cold-link preview changed bytes");
     t.assertions.assert(!!owner && client.logicalConnectionId === owner && client.connectionState === "ready", "cold link replaced its logical owner");
     t.assertions.assert(underBody >= 1 && links.every(link => link.stats().acceptedConnections === 0), "cold fixture lost contention or replaced a physical carrier");
