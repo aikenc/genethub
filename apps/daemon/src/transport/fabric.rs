@@ -4,7 +4,7 @@
 //! mutually authenticated v3 peer link; the peer link then multiplexes all
 //! business exchanges with its own bounded, fair frames.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -32,6 +32,31 @@ const TRANSPORT_FLOW: &str = "transport-v1";
 const MAX_PEERS: usize = 32;
 const MAX_PENDING: usize = 8;
 const WRITER_QUEUE: usize = 256;
+// 1 MiB payload maximum, inside the existing per-owner 20 MiB reservation.
+// The independent record cap also bounds metadata for tiny hostile records.
+// Legitimate ACK bursts are small bytes, not 64 full-sized DATA records.
+const PEER_INGRESS_BYTES: usize = 1024 * 1024;
+const PEER_INGRESS_QUEUE: usize = 4096;
+struct IngressRecord {
+    payload: Vec<u8>,
+    _budget: tokio::sync::OwnedSemaphorePermit,
+}
+
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+#[derive(Default)]
+struct PeerTasks(Mutex<Vec<tokio::task::JoinHandle<()>>>);
+impl Drop for PeerTasks {
+    fn drop(&mut self) {
+        for task in self.0.get_mut().unwrap().drain(..) {
+            task.abort();
+        }
+    }
+}
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Matches the browser half of this wire (`packages/workbench/src/fabric/frame.ts`).
 const MAX_ROUTE_TICKET_BYTES: usize = 4096;
@@ -221,14 +246,26 @@ impl StreamFlow {
 }
 
 struct PeerSlot {
+    cancelled: Arc<Notify>,
     generation: u64,
-    inbound: mpsc::Sender<Vec<u8>>,
+    inbound: mpsc::Sender<IngressRecord>,
+    ingress_budget: Arc<tokio::sync::Semaphore>,
     remote_sequence: u64,
     outbound_flow: StreamFlow,
 }
 
+impl Drop for PeerSlot {
+    fn drop(&mut self) {
+        self.cancelled.notify_one();
+    }
+}
+
 type Peers = Arc<tokio::sync::Mutex<HashMap<[u8; STREAM_ID_BYTES], PeerSlot>>>;
-type Pending = Arc<tokio::sync::Mutex<HashSet<[u8; STREAM_ID_BYTES]>>>;
+struct PendingPeer {
+    generation: u64,
+    cancelled: Arc<Notify>,
+}
+type Pending = Arc<tokio::sync::Mutex<HashMap<[u8; STREAM_ID_BYTES], PendingPeer>>>;
 
 pub struct FabricUplink {
     task: tokio::task::JoinHandle<()>,
@@ -239,22 +276,45 @@ impl FabricUplink {
     /// Managed Hub: refresh the one-use endpoint admission before every dial
     /// and redeem every incoming peer capability directly with Control.
     pub fn start(state: Shared, enrollment: Enrollment) -> Self {
+        Self::start_hosted_lane(state, enrollment, 0)
+    }
+
+    fn start_hosted_lane(state: Shared, enrollment: Enrollment, lane: u8) -> Self {
         let online = Arc::new(AtomicBool::new(false));
         let task_online = online.clone();
         let task = tokio::spawn(async move {
             let client = crate::hub::Client::new(&enrollment.hub_url);
             let mut backoff = UplinkBackoff::default();
+            let mut bulk: Option<FabricUplink> = None;
+            let operation = if lane == 0 {
+                "managed.uplink"
+            } else {
+                "managed.bulk"
+            };
             loop {
                 let mut connected_at = None;
                 let mut close_reason = None;
                 let result = async {
-                    let admission = client.fabric_admission(&enrollment).await?;
+                    let admission = client.fabric_admission_lane(&enrollment, lane).await?;
+                    if lane == 0 {
+                        if admission.node_channel_count.is_some_and(|count| count >= 2) {
+                            if bulk.is_none() {
+                                bulk = Some(Self::start_hosted_lane(
+                                    state.clone(),
+                                    enrollment.clone(),
+                                    1,
+                                ));
+                            }
+                        } else if let Some(previous) = bulk.take() {
+                            previous.stop();
+                        }
+                    }
                     run_once(
                         state.clone(),
                         &admission.url,
                         PeerAdmissionSource::Hosted(enrollment.clone()),
                         &task_online,
-                        "managed.uplink",
+                        operation,
                         &mut connected_at,
                         &mut close_reason,
                     )
@@ -264,7 +324,7 @@ impl FabricUplink {
                 task_online.store(false, Ordering::Relaxed);
                 state.diagnostics.record(
                     "fabric",
-                    "managed.uplink",
+                    operation,
                     "offline",
                     Some(close_reason.unwrap_or(if result.is_err() {
                         "connection"
@@ -333,6 +393,12 @@ impl FabricUplink {
     }
 }
 
+impl Drop for FabricUplink {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 async fn run_once(
     state: Shared,
     url: &str,
@@ -369,10 +435,12 @@ async fn run_once(
         }
         Result::<()>::Ok(())
     });
+    let socket_writer = AbortOnDrop(socket_writer);
     let peers: Peers = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-    let pending: Pending = Arc::new(tokio::sync::Mutex::new(HashSet::new()));
+    let pending: Pending = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let admission_slots = Arc::new(tokio::sync::Semaphore::new(MAX_PENDING));
     let generation = Arc::new(AtomicU64::new(0));
-    let tasks = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let tasks = PeerTasks::default();
 
     let read_result = async {
         loop {
@@ -387,23 +455,31 @@ async fn run_once(
             match message? {
                 Message::Binary(bytes) => {
                     let frame = decode(&bytes).ok_or_else(|| anyhow!("malformed Fabric frame"))?;
-                    receive(
-                        frame,
-                        &state,
-                        &admission_source,
-                        &writer,
-                        &peers,
-                        &pending,
-                        &generation,
-                        &tasks,
+                    tokio::time::timeout(
+                        UPLINK_IDLE_TIMEOUT,
+                        receive(
+                            frame,
+                            &state,
+                            &admission_source,
+                            &writer,
+                            &peers,
+                            &pending,
+                            &admission_slots,
+                            &generation,
+                            &tasks,
+                        ),
                     )
-                    .await?;
+                    .await
+                    .context("Fabric dispatcher stalled")??;
                 }
                 Message::Ping(payload) => {
-                    messages_tx
-                        .send(Message::Pong(payload))
-                        .await
-                        .map_err(|_| anyhow!("Fabric writer stopped"))?;
+                    tokio::time::timeout(
+                        UPLINK_IDLE_TIMEOUT,
+                        messages_tx.send(Message::Pong(payload)),
+                    )
+                    .await
+                    .context("Fabric heartbeat writer stalled")?
+                    .map_err(|_| anyhow!("Fabric writer stopped"))?;
                 }
                 Message::Close(frame) => {
                     *close_reason = Some(uplink_close_code(frame.as_ref()));
@@ -419,10 +495,10 @@ async fn run_once(
 
     online.store(false, Ordering::Relaxed);
     peers.lock().await.clear();
-    for task in tasks.lock().await.drain(..) {
+    for task in tasks.0.lock().unwrap().drain(..) {
         task.abort();
     }
-    socket_writer.abort();
+    socket_writer.0.abort();
     read_result?;
     anyhow::bail!("Fabric WebSocket ended")
 }
@@ -446,8 +522,9 @@ async fn receive(
     writer: &Writer,
     peers: &Peers,
     pending: &Pending,
+    admission_slots: &Arc<tokio::sync::Semaphore>,
     generation: &Arc<AtomicU64>,
-    tasks: &Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    tasks: &PeerTasks,
 ) -> Result<()> {
     match frame.kind {
         Kind::Incoming => {
@@ -459,38 +536,46 @@ async fn receive(
                 writer.reset(frame.stream_id, 3).await;
                 return Ok(());
             }
+            let peer_generation = generation.fetch_add(1, Ordering::Relaxed) + 1;
+            let cancelled = Arc::new(Notify::new());
             {
                 let peers = peers.lock().await;
                 let mut pending = pending.lock().await;
                 if peers.contains_key(&frame.stream_id)
-                    || pending.contains(&frame.stream_id)
+                    || pending.contains_key(&frame.stream_id)
                     || peers.len() + pending.len() >= MAX_PEERS
-                    || pending.len() >= MAX_PENDING
                 {
                     drop(pending);
                     drop(peers);
                     writer.reset(frame.stream_id, 10).await;
                     return Ok(());
                 }
-                pending.insert(frame.stream_id);
+                pending.insert(
+                    frame.stream_id,
+                    PendingPeer {
+                        generation: peer_generation,
+                        cancelled: cancelled.clone(),
+                    },
+                );
             }
-            let peer_generation = generation.fetch_add(1, Ordering::Relaxed) + 1;
             let task = tokio::spawn(serve_peer(
                 state.clone(),
                 admission_source.clone(),
                 writer.clone(),
                 peers.clone(),
                 pending.clone(),
+                admission_slots.clone(),
+                cancelled,
                 frame,
                 peer_generation,
             ));
-            let mut tasks = tasks.lock().await;
+            let mut tasks = tasks.0.lock().unwrap();
             tasks.retain(|task| !task.is_finished());
             tasks.push(task);
         }
         Kind::Data => {
             let bytes = u64::try_from(frame.payload.len())?;
-            let (inbound, peer_generation, transport_flow) = {
+            let (inbound, ingress_budget, peer_generation, transport_flow) = {
                 let mut peers = peers.lock().await;
                 let Some(slot) = peers.get_mut(&frame.stream_id) else {
                     drop(peers);
@@ -506,14 +591,38 @@ async fn receive(
                 slot.remote_sequence = frame.value;
                 (
                     slot.inbound.clone(),
+                    slot.ingress_budget.clone(),
                     slot.generation,
                     slot.outbound_flow.is_transport(),
                 )
             };
-            // A full bounded carrier queue is backpressure, not a protocol
-            // violation. Waiting here also stops this socket reader from
-            // acknowledging bytes it has nowhere bounded to place.
-            if inbound.send(frame.payload).await.is_err() {
+            // Isolate bounded ingress per peer. Never acknowledge bytes that
+            // were not accepted, and never silently discard an application
+            // frame. Overload detaches this physical carrier; the logical
+            // owner's journal remains responsible for authenticated recovery.
+            let admitted = ingress_budget
+                .try_acquire_many_owned(u32::try_from(bytes)?)
+                .map_err(|_| "byte-budget-full")
+                .and_then(|permit| {
+                    inbound
+                        .try_send(IngressRecord {
+                            payload: frame.payload,
+                            _budget: permit,
+                        })
+                        .map_err(|error| match error {
+                            mpsc::error::TrySendError::Full(record)
+                                if record.payload.len() <= 256 =>
+                            {
+                                "small-record-queue-full"
+                            }
+                            mpsc::error::TrySendError::Full(_) => "data-record-queue-full",
+                            mpsc::error::TrySendError::Closed(_) => "queue-closed",
+                        })
+                });
+            if let Err(code) = admitted {
+                state
+                    .diagnostics
+                    .record("fabric", "peer.ingress", "detached", Some(code));
                 let mut peers = peers.lock().await;
                 if peers
                     .get(&frame.stream_id)
@@ -524,6 +633,12 @@ async fn receive(
                 drop(peers);
                 writer.reset(frame.stream_id, 6).await;
                 return Ok(());
+            }
+            // Yield a scheduling turn during bursts without awaiting one
+            // peer's consumer. This lets delivery/decryption run even when the
+            // WebSocket decoder already has many records buffered as Ready.
+            if inbound.capacity() <= PEER_INGRESS_QUEUE - 32 {
+                tokio::task::yield_now().await;
             }
             // The bounded carrier queue accepted ownership, so this outer
             // stream can return exactly the credit it consumed.
@@ -553,6 +668,9 @@ async fn receive(
         }
         Kind::Fin | Kind::Reset => {
             peers.lock().await.remove(&frame.stream_id);
+            if let Some(waiter) = pending.lock().await.remove(&frame.stream_id) {
+                waiter.cancelled.notify_one();
+            }
         }
         Kind::Ping => {
             if frame.stream_id != [0; STREAM_ID_BYTES] || !frame.payload.is_empty() {
@@ -577,20 +695,32 @@ async fn serve_peer(
     writer: Writer,
     peers: Peers,
     pending: Pending,
+    admission_slots: Arc<tokio::sync::Semaphore>,
+    cancelled: Arc<Notify>,
     frame: Frame,
     generation: u64,
 ) {
-    let result = serve_peer_inner(
-        state,
-        &admission_source,
-        &writer,
-        &peers,
-        &pending,
-        &frame,
-        generation,
-    )
-    .await;
-    pending.lock().await.remove(&frame.stream_id);
+    // Keep the existing eight executing handshakes, while bounded metadata
+    // waits inside the same 32-peer total. Never block the physical reader.
+    let result = tokio::select! {
+        _ = cancelled.notified() => Ok(()),
+        result = async {
+            let permit = tokio::time::timeout(CONNECT_TIMEOUT, admission_slots.acquire_owned())
+                .await.context("Fabric admission queue timed out")??;
+            serve_peer_inner(
+                state, &admission_source, &writer, &peers, &pending,
+                &frame, generation, permit, cancelled.clone(),
+            ).await
+        } => result,
+    };
+    let mut waiting = pending.lock().await;
+    if waiting
+        .get(&frame.stream_id)
+        .is_some_and(|slot| slot.generation == generation)
+    {
+        waiting.remove(&frame.stream_id);
+    }
+    drop(waiting);
     if let Err(error) = result {
         tracing::debug!(%error, "Fabric peer stream refused");
         writer.reset(frame.stream_id, 4).await;
@@ -612,6 +742,8 @@ async fn serve_peer_inner(
     pending: &Pending,
     frame: &Frame,
     generation: u64,
+    admission_permit: tokio::sync::OwnedSemaphorePermit,
+    cancelled: Arc<Notify>,
 ) -> Result<()> {
     let hello: PeerHello =
         serde_json::from_slice(&frame.payload).context("invalid Fabric peer hello")?;
@@ -661,18 +793,38 @@ async fn serve_peer_inner(
         });
     }
     let (inbound, mut outbound, mut carrier) = endpoint::carrier_channels();
+    carrier.packet_pair_probe = accepted.packet_pair_probe;
     carrier.uplink_pace = Some(writer.pace.peer());
     let flow = StreamFlow::from_wire(frame.value)?;
+    let ingress_budget = Arc::new(tokio::sync::Semaphore::new(PEER_INGRESS_BYTES));
+    let (ingress, mut queued) = mpsc::channel::<IngressRecord>(PEER_INGRESS_QUEUE);
+    let delivery = AbortOnDrop(tokio::spawn(async move {
+        while let Some(record) = queued.recv().await {
+            if inbound.send(record.payload).await.is_err() {
+                break;
+            }
+            drop(record._budget);
+        }
+    }));
     peers.lock().await.insert(
         frame.stream_id,
         PeerSlot {
+            cancelled: cancelled.clone(),
             generation,
-            inbound,
+            inbound: ingress,
+            ingress_budget,
             remote_sequence: 0,
             outbound_flow: flow.clone(),
         },
     );
-    pending.lock().await.remove(&frame.stream_id);
+    let mut waiting = pending.lock().await;
+    if waiting
+        .get(&frame.stream_id)
+        .is_some_and(|slot| slot.generation == generation)
+    {
+        waiting.remove(&frame.stream_id);
+    }
+    drop(waiting);
     writer
         .frame(Frame {
             kind: Kind::Accept,
@@ -685,10 +837,13 @@ async fn serve_peer_inner(
             payload: serde_json::to_vec(&accepted.welcome)?,
         })
         .await?;
+    // The peer is installed and ACCEPT is owned by the bounded writer; its
+    // long-lived business endpoint must not retain a handshake worker.
+    drop(admission_permit);
 
     let peer_writer = writer.clone();
     let stream_id = frame.stream_id;
-    let mut outgoing = tokio::spawn(async move {
+    let mut outgoing = AbortOnDrop(tokio::spawn(async move {
         let mut sequence = 0u64;
         while let Some(record) = outbound.recv().await {
             if record.is_empty() || record.len() > genehub_proto::MAX_DATA_FRAME_BYTES {
@@ -708,14 +863,14 @@ async fn serve_peer_inner(
                 .await?;
         }
         Result::<()>::Ok(())
-    });
-    let mut endpoint = tokio::spawn(endpoint::serve(
+    }));
+    let mut endpoint = AbortOnDrop(tokio::spawn(endpoint::serve(
         state,
         accepted.key,
         accepted.access,
         carrier,
         endpoint::CarrierKind::Fabric,
-    ));
+    )));
     let expiry = async move {
         match admitted.expires_at {
             Some(expires_at) => {
@@ -726,12 +881,14 @@ async fn serve_peer_inner(
     };
     tokio::pin!(expiry);
     let result = tokio::select! {
-        result = &mut endpoint => result.context("Fabric data endpoint stopped")?,
-        result = &mut outgoing => result.context("Fabric peer writer stopped")?,
+        result = &mut endpoint.0 => result.context("Fabric data endpoint stopped")?,
+        result = &mut outgoing.0 => result.context("Fabric peer writer stopped")?,
         _ = &mut expiry => Err(anyhow!("Fabric route expired")),
+        _ = cancelled.notified() => Err(anyhow!("Fabric peer detached")),
     };
-    endpoint.abort();
-    outgoing.abort();
+    drop(delivery);
+    endpoint.0.abort();
+    outgoing.0.abort();
     result
 }
 

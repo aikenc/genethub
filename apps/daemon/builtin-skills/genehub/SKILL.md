@@ -17,6 +17,7 @@ GeneHub 是端侧多机器 Agent 的 hub：每台机器上的 daemon 持有自�
 | workspace | 机器上的一个项目目录 | `--workspace <id>` 或 `--cwd <绝对路径>`，均不会被推断 |
 | session | 某台机器上的一次 Agent 会话 | 会话 ID，随会话所在机器解析 |
 | client | 一个已接入联调的页面实例 | `client list` 返回的 `clientId` |
+| 预览文件 | 源机器上的规范绝对路径 | 新设备按机器 ID＋绝对路径定位；有效目录来自已登记项目根与手工补充目录，仍与调用者权限取交集 |
 
 按具体命令返回的字段选择，不用一种身份代替另一种。同一台本机在 `context` 里的 `machineId` 与 Hub 目录里
 的 `mch_…` 可能不同；跨机命令只用 `machine list` 给出的值。
@@ -51,6 +52,7 @@ GeneHub 是端侧多机器 Agent 的 hub：每台机器上的 daemon 持有自�
 | 本地语音识别 runtime：测试、安装、登记、诊断、移除 | [speech-runtime.md](references/speech-runtime.md) |
 | 把一棵 Space 树（`agent-space.genet.json`、Skill、定时 hook）生成成 Agent 读的规则与 Skill 文件 | [spacebuilder.md](references/spacebuilder.md) |
 | 静态 H5、站点、相册，或影视/DCC/引擎的创作过程预览 | Skill `genehub-preview` |
+| 入口能读、二级链接或资源失败 | Skill `genehub-preview` 的 `references/static.md`：先分清父页 CSP、路径解析、文件授权与页面错误；不用嵌套 iframe 绕过 |
 | 会话历史、转发会话、来源引用 | Skill `genehub-introspect` |
 | 项目团队：建团队、定制与重写、派单、并发工位、看板与发版 | Skill `genehub-team` |
 | 产品反馈修复或 Beta 发布 | 当前 Space 选中的领域 Skill；没有时说明缺口，不凭本文执行发布 |

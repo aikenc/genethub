@@ -946,6 +946,7 @@ mod machine_state_tests {
         let rendezvous = Rendezvous {
             relay_url: "https://self-hosted.example".into(),
             join_token: Some("join".into()),
+            channel_count: 1,
         };
 
         let (hub, remote) = tokio::join!(

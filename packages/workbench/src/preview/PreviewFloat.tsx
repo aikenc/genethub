@@ -86,11 +86,8 @@ export function PreviewFloat({
   );
   const copyResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const externalUrl = assetPreviewUrl(
-    source.deviceHandle,
-    source.workspaceHandle,
-    source.path,
-  );
+  const externalSource = meta?.location ? {...source, ...meta.location} : source;
+  const externalUrl = assetPreviewUrl(externalSource.deviceHandle, externalSource.workspaceHandle, externalSource.path, undefined, undefined, externalSource);
   const fileName = useMemo(() => basename(source.path), [source.path]);
   const title = meta?.documentTitle?.trim() || fileName;
   const factor = SIZE_FACTORS[sizeLevel] ?? SIZE_FACTORS[0];
@@ -427,7 +424,7 @@ export function PreviewFloat({
             >
               <MinimizeIcon />
             </button>
-            {copyLinkMode && client?.identity?.features?.includes("preview.feedback.v1") ? <PreviewShareButton client={client} source={source} resources={meta?.resourcePaths} quick label="在浏览器打开预览" /> : <button
+            {copyLinkMode && client?.identity?.features?.includes("preview.feedback.v1") ? <PreviewShareButton client={client} source={externalSource} resources={meta?.resourcePaths} quick label="在浏览器打开预览" /> : <button
                 type="button"
                 aria-label={copyLinkMode ? "复制预览链接" : "新窗口打开"}
                 title={
@@ -447,7 +444,7 @@ export function PreviewFloat({
                   if (client) {
                     const release = registerPreviewPopoutClient(
                       { id: popout.id, sessionId: source.sessionId },
-                      source,
+                      externalSource,
                       client,
                     );
                     const timer = window.setTimeout(release, 60_000);

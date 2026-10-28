@@ -4,6 +4,9 @@ export interface AssetPreviewLocation {
   deviceHandle: string;
   workspaceHandle: string;
   path: string;
+  docQuery?: string;
+  docFragment?: string;
+  siteEntryPath?: string;
 }
 
 /** Stable locator shared by Files, Agent output and chat rendering. */
@@ -13,13 +16,20 @@ export function assetPreviewUrl(
   path: string,
   origin = typeof location === "undefined" ? "" : location.origin,
   basePath = previewBasePath(),
+  documentLocation?: Pick<AssetPreviewLocation, "docQuery" | "docFragment" | "siteEntryPath">,
 ): string {
+  if (isAbsoluteFilePath(path)) {
+    const absolute = absoluteFilePath(path);
+    const base = previewPrefix(basePath).replace("/v2/", "/v3/");
+    const pathname = `${base}${encodeURIComponent(locatorSegment(deviceHandle, "device handle"))}?path=${encodeURIComponent(absolute)}`;
+    return withDocumentLocation(origin ? new URL(pathname, origin).toString() : pathname, documentLocation);
+  }
   const relative = previewPath(path);
   const pathname = `${assetPreviewBasePath(deviceHandle, workspaceHandle, basePath)}${relative
     .split("/")
     .map((part) => encodeURIComponent(part))
     .join("/")}`;
-  return origin ? new URL(pathname, origin).toString() : pathname;
+  return withDocumentLocation(origin ? new URL(pathname, origin).toString() : pathname, documentLocation);
 }
 
 /**
@@ -55,7 +65,20 @@ function assetPreviewBasePath(
 export function parseAssetPreviewPath(
   pathname: string,
   basePath = previewBasePath(),
+  search = typeof location === "undefined" ? "" : location.search,
 ): AssetPreviewLocation | null {
+  const v3 = previewPrefix(basePath).replace("/v2/", "/v3/");
+  if (pathname.startsWith(v3)) {
+    try {
+      const deviceHandle = decodeCanonical(pathname.slice(v3.length), "device handle");
+      const params = new URLSearchParams(search);
+      if (params.getAll("path").length !== 1) return null;
+      return {deviceHandle: locatorSegment(deviceHandle, "device handle"), workspaceHandle: "", path: absoluteFilePath(params.get("path") ?? ""),
+        ...(params.has("docQuery") ? {docQuery: params.get("docQuery")!} : {}),
+        ...(params.has("docFragment") ? {docFragment: params.get("docFragment")!} : {}),
+        ...(params.has("siteEntryPath") ? {siteEntryPath: absoluteFilePath(params.get("siteEntryPath")!)} : {})};
+    } catch { return null; }
+  }
   const prefix = previewPrefix(basePath);
   if (!pathname.startsWith(prefix)) return null;
   const raw = pathname.slice(prefix.length).split("/");
@@ -76,6 +99,9 @@ export function parseAssetPreviewPath(
       deviceHandle: locatorSegment(deviceHandle, "device handle"),
       workspaceHandle: locatorSegment(workspaceHandle, "workspace handle"),
       path: previewPath(path),
+      ...(new URLSearchParams(search).has("siteEntryPath") ? {siteEntryPath: previewPath(new URLSearchParams(search).get("siteEntryPath")!)} : {}),
+      ...(new URLSearchParams(search).has("docQuery") ? {docQuery: new URLSearchParams(search).get("docQuery")!} : {}),
+      ...(new URLSearchParams(search).has("docFragment") ? {docFragment: new URLSearchParams(search).get("docFragment")!} : {}),
     };
   } catch {
     return null;
@@ -155,4 +181,30 @@ function decodeCanonical(raw: string, name: string): string {
   // marker is the file name itself, including CJK characters and spaces.
   if (!raw.includes("%")) return raw;
   throw new TypeError(`non-canonical ${name}`);
+}
+
+export function isAbsoluteFilePath(path: string): boolean {
+  return path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path);
+}
+
+/** Wire paths use native volume spelling with forward separators. */
+export function absoluteFilePath(value: string): string {
+  const path = /^[A-Za-z]:[\\/]/.test(value) ? value.replace(/\\/g, "/") : value;
+  if (!isAbsoluteFilePath(path) || path.startsWith("//") || path.includes("\\") || path.includes("\0") || path.length > 4096
+    || path.split("/").some(p => p === "." || p === "..") || path.endsWith("/")) {
+    throw new TypeError("preview requires a canonical absolute file path");
+  }
+  return path;
+}
+
+export function previewFilePath(value: string): string {
+  return isAbsoluteFilePath(value) ? absoluteFilePath(value) : previewPath(value);
+}
+
+function withDocumentLocation(href: string, target?: Pick<AssetPreviewLocation, "docQuery" | "docFragment" | "siteEntryPath">): string {
+  if (!target) return href;
+  const [pathname, query = ""] = href.split("?");
+  const params = new URLSearchParams(query);
+  for (const key of ["docQuery", "docFragment", "siteEntryPath"] as const) if (target[key]) params.set(key, target[key]!);
+  return `${pathname}${params.size ? `?${params}` : ""}`;
 }

@@ -93,9 +93,10 @@ describe("warm chat tabs", () => {
     expect(useWorkbench.getState().composerDraftInserts).toEqual([queued[1]]);
   });
 
-  it("keeps an opened session subscribed and reactivates it without another snapshot", async () => {
+  it("keeps cached tabs while releasing old bodies and reloading the selected snapshot", async () => {
     const other = { ...SESSION, id: "s2" };
     let subscriptions = 0;
+    const released: string[] = [];
     const client = {
       subscribe: async (sessionId: string) => {
         subscriptions += 1;
@@ -105,7 +106,7 @@ describe("warm chat tabs", () => {
           reset: false,
         };
       },
-      unsubscribe: async () => {},
+      unsubscribe: async (id: string) => { released.push(id); },
     } as unknown as Client;
     useWorkbench.setState({ client, sessions: [SESSION, other] });
 
@@ -113,7 +114,9 @@ describe("warm chat tabs", () => {
     await useWorkbench.getState().selectSession("s2");
     await useWorkbench.getState().selectSession("s1");
 
-    expect(subscriptions).toBe(2);
+    expect(subscriptions).toBe(3);
+    expect(released).toEqual(["s1", "s2"]);
+    expect(useWorkbench.getState().subscribedSessionIds).toEqual(["s1"]);
     expect(useWorkbench.getState().tabs.map((tab) => tab.id)).toEqual(["chat:s1", "chat:s2"]);
   });
 

@@ -89,6 +89,7 @@ function requiredArtifacts(units: WorkUnit[]): string[] {
 }
 
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { execFile } from "node:child_process";
 import path from "node:path";
 import type { CaseMeta } from "../types.ts";
@@ -115,6 +116,35 @@ export async function preflight(cases: CaseMeta[], environment: NodeJS.ProcessEn
   for (const item of cases) {
     const identities: string[] = [];
     for (const req of item.requirements ?? []) {
+      if (req.kind === "environment") {
+        if (!/^[A-Z][A-Z0-9_]*$/.test(req.env) || !["text","string-map"].includes(req.format)) throw new Error(`invalid environment requirement metadata: ${item.id}`);
+        const value = environment[req.env] ?? "", key = digest([req,value]);
+        let ok = value.length > 0;
+        if (ok && req.format === "string-map") {
+          try { const parsed:unknown=JSON.parse(value); ok=typeof parsed==="object"&&parsed!==null&&!Array.isArray(parsed)&&Object.values(parsed).every(v=>typeof v==="string"); } catch { ok=false; }
+        }
+        if (!probes.has(key)) probes.set(key,{ok,identity:key,reason:`${req.env} requires its declared nonempty ${req.format} value`});
+        identities.push(key); if(!ok)issues.push({caseId:item.id,reason:probes.get(key)!.reason});
+        continue;
+      }
+      if (req.kind === "command") {
+        if (!/^[A-Z][A-Z0-9_]*$/.test(req.env) || !Array.isArray(req.args) || req.args.some(arg => typeof arg !== "string")) throw new Error(`invalid command requirement metadata: ${item.id}`);
+        const executable = environment[req.env] ?? "";
+        const key = digest([req,executable]);
+        let probe = probes.get(key);
+        if (!probe) {
+          const reason = `${req.env} requires an absolute executable passing its declared capability probe`;
+          let fileHash: string | null = null;
+          try { if (path.isAbsolute(executable)) fileHash = createHash("sha256").update(readFileSync(executable)).digest("hex"); } catch { /* Report a missing dependency, never silently use PATH. */ }
+          const output = fileHash ? await new Promise<string | null>(resolve => execFile(executable, req.args,
+            { env: environment, timeout: 5000, maxBuffer: 64*1024, encoding: "utf8" }, (error,stdout) => resolve(error ? null : stdout))) : null;
+          probe = { ok: output !== null && (!req.contains || output.includes(req.contains)), identity: digest([key,fileHash,output]), reason };
+          probes.set(key,probe);
+        }
+        identities.push(probe.identity);
+        if (!probe.ok) issues.push({caseId:item.id,reason:probe.reason});
+        continue;
+      }
       if (req.kind !== "python" || !/^[A-Z][A-Z0-9_]*$/.test(req.env) ||
           req.minVersion.length !== 2 || !req.minVersion.every(n => Number.isInteger(n) && n >= 0) ||
           req.modules.some(m => !/^[A-Za-z_][A-Za-z0-9_.]*$/.test(m))) {
@@ -142,6 +172,7 @@ export async function preflight(cases: CaseMeta[], environment: NodeJS.ProcessEn
       identities.push(probe.identity);
       if (!probe.ok) issues.push({ caseId: item.id, reason: probe.reason });
     }
+    if (item.isolation?.networkNamespace && !["GENEHUB_TEST_UNSHARE","GENEHUB_TEST_IP"].every(env => item.requirements?.some(req => req.env === env))) throw new Error(`network namespace executables must be declared requirements: ${item.id}`);
     // Common environment is bound separately. Only explicitly declared dependencies may vary per case.
     fingerprints[item.id] = digest(identities);
   }

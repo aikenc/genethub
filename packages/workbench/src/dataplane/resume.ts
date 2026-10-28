@@ -140,6 +140,12 @@ export class ResumeJournal {
     this.allocated = seq; l.charged = charged; l.logBytes += size; l.logCount++;
     return seq;
   }
+  /** Read-only admission metadata; does not advance the replay cursor. */
+  peekNext(): { seq: bigint; kind: number; bytes: number } | null {
+    this.live(); if (!this.active) return null;
+    const seq = this.cursor + 1n, entry = this.log.get(seq);
+    return entry ? { seq, kind: entry.frame.kind, bytes: entry.size } : null;
+  }
   /** Marks a transmission attempt before handing bytes to an asynchronous writer.
    * A send failure suspends the journal; it must never roll back the logical seq.
    */

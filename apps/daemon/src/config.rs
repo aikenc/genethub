@@ -47,6 +47,7 @@ pub struct Config {
     #[serde(default)]
     pub workspace_roots: Vec<WorkspaceRootEntry>,
     pub workspaces: Vec<WorkspaceEntry>,
+    pub file_access: FileAccessConfig,
     /// AgentSpace tree position and mounted components keyed by workspace id.
     /// Kept outside WorkspaceEntry so ordinary folder registrations remain a
     /// neutral, backwards-compatible filesystem fact.
@@ -87,6 +88,7 @@ impl Default for Config {
             speech: SpeechConfig::default(),
             workspace_roots: Vec::new(),
             workspaces: Vec::new(),
+            file_access: FileAccessConfig::default(),
             agent_spaces: Vec::new(),
             legacy_pipe_spaces: Vec::new(),
             workspace_catalog_generation: String::new(),
@@ -633,6 +635,12 @@ pub struct Rendezvous {
     pub relay_url: String,
     #[serde(default)]
     pub join_token: Option<String>,
+    #[serde(default = "default_remote_channel_count")]
+    pub channel_count: u8,
+}
+
+fn default_remote_channel_count() -> u8 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1369,4 +1377,12 @@ mod tests {
         assert_eq!(first.fingerprint(), second.fingerprint());
         assert!(first.fingerprint().contains('-'));
     }
+}
+
+/// Automatic project roots are derived, never copied into this configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FileAccessConfig {
+    pub additional_directories: Vec<PathBuf>,
+    pub revision: u64,
 }

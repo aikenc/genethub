@@ -509,7 +509,17 @@ async fn connection(
     }
 
     let (mut sink, mut stream) = socket.split();
-    let (inbound, mut outbound, carrier) = endpoint::carrier_channels();
+    let (inbound, mut outbound, mut carrier) = endpoint::carrier_channels();
+    carrier.packet_pair_probe = accepted.packet_pair_probe;
+    // A direct WebSocket also multiplexes control and body over one TCP.
+    // Bind the existing ACK-trained budget to this physical carrier, just as
+    // Fabric does; a later RTC attachment keeps its own transport policy.
+    carrier.uplink_pace = Some(
+        Arc::new(crate::dataplane::uplink_pace::UplinkPace::new(
+            genehub_proto::INITIAL_STREAM_WINDOW_BYTES as u64,
+        ))
+        .peer(),
+    );
     let mut writer = tokio::spawn(async move {
         while let Some(record) = outbound.recv().await {
             if !matches!(
@@ -617,6 +627,7 @@ mod tests {
             },
             rtc_supported: false,
             max_bulk_stream_window_bytes: None,
+            packet_pair_probe_supported: None,
         };
         socket
             .send(tokio_tungstenite::tungstenite::Message::Binary(

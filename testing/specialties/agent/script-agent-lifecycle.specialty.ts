@@ -256,6 +256,8 @@ lifecycleCase(
         );
         await t.tools.waitUntil(() => pushes.requests.some((request) => request.agentId === agent.agentId), 10_000)
           .catch(() => { throw new Error("no agentRequest frame reached the client"); });
+        await t.tools.waitUntil(() => pushes.lists.some(agents => agents.some(info => info.id === agent.agentId && info.job?.phase === "waiting" && info.job.percent === 50)), 10_000)
+          .catch(() => { throw new Error("changed waiting job snapshot was not pushed to the client"); });
         const request = pushes.requests.find((item) => item.agentId === agent.agentId)!;
         t.assertions.assert(request.id === inJob.pendingRequests![0]!.id, "pushed request differs from the pending one");
         t.assertions.assert(request.questions[0]?.input === "secret" && request.display.some((item) => item.kind === "code"),
@@ -273,6 +275,8 @@ lifecycleCase(
           (info) => info.probe.state === "ready" && info.job?.done === true, { what: "logged in" });
         t.assertions.assert(!done.job?.error && (done.pendingRequests?.length ?? 0) === 0, `after answer ${JSON.stringify(t.flows.branches.summarizeAgent(done))}`);
 
+        await t.tools.waitUntil(() => pushes.lists.some(agents => agents.some(info => info.id === agent.agentId && info.probe.state === "ready" && info.job?.done === true)), 10_000)
+          .catch(() => { throw new Error("changed completed job snapshot was not pushed to the client"); });
         const marker = readFileSync(path.join(agent.stateDir, "login.sha256"), "utf8").trim();
         t.assertions.assert(marker === createHash("sha256").update(secret).digest("hex"), "the script received a different secret");
 

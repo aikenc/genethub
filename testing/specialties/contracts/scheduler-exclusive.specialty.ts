@@ -38,4 +38,18 @@ defineSpecialty({
   oversized.meta.resources.memoryMb = budget.memoryMb + 1;
   const limited = createScheduler([oversized], budget);
   t.assertions.assert(!hasClaimable(limited) && claimNext(limited) === undefined, "Exclusive pool bypassed actual resource limits");
+
+  // A large fleet needs memory and CPU without allowing dozens of unrelated
+  // native daemon startups to contend for the same container quota.
+  const reserved = defaultBudget(4, { cpu: 12, memoryMb: 24576 });
+  const fleet = unit("fleet", "exclusive", 300);
+  fleet.meta.resources.cpu = 12;
+  fleet.meta.resources.memoryMb = 16384;
+  const independent = createScheduler([fleet, a, b], reserved);
+  t.assertions.assert(claimNext(independent)?.id === fleet.id, "Memory reservation was coupled to parallel environment count");
+  t.assertions.assert(claimNext(independent) === undefined, "A fleet's reserved CPU was oversubscribed");
+  completeUnit(independent, fleet, 300);
+  t.assertions.assert(claimNext(independent)?.id === a.id && claimNext(independent)?.id === b.id, "Independent budget lost ordinary parallelism");
+  completeUnit(independent, a, 200); completeUnit(independent, b, 100);
+  t.assertions.assert(JSON.stringify(independent.available) === JSON.stringify(reserved), "Independent budget leaked tokens");
 });

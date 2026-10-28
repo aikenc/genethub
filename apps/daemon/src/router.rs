@@ -138,6 +138,16 @@ pub async fn handle(
     caller: &crate::authz::Principal,
     request: Request,
 ) -> Handled {
+    handle_in_workspace(state, transport, caller, None, request).await
+}
+
+pub(crate) async fn handle_in_workspace(
+    state: &Shared,
+    transport: TransportKind,
+    caller: &crate::authz::Principal,
+    workspace_scope: Option<&str>,
+    request: Request,
+) -> Handled {
     let needed = crate::authz::required(&request);
     let session_exception = if !caller.allows(needed) {
         match (&request, caller.session_controller_id()) {
@@ -182,7 +192,7 @@ pub async fn handle(
         return Handled::err(ErrorCode::Forbidden, message);
     }
     let operation = diagnostic_operation(&request);
-    let handled = dispatch(state, transport, caller, request).await;
+    let handled = dispatch(state, transport, caller, workspace_scope, request).await;
     if let Some(operation) = operation {
         let (outcome, code) = match &handled.reply {
             Ok(_) => ("ok", None),
@@ -280,8 +290,15 @@ async fn authorize_session_request(
     caller: &crate::authz::Principal,
     request: &Request,
 ) -> Result<(), String> {
-    if let (Some(controller), Request::PreviewFeedback(feedback)) =
-        (caller.session_controller_id(), request)
+    // Ordinary Agents have their OS account's file authority. Only managed
+    // children retain the legacy workspace-bound receipt restriction.
+    if let (
+        crate::authz::Principal::SessionController {
+            session_id: controller,
+            ordinary: false,
+        },
+        Request::PreviewFeedback(feedback),
+    ) = (caller, request)
     {
         let session = state
             .sessions
@@ -848,6 +865,7 @@ async fn dispatch(
     state: &Shared,
     transport: TransportKind,
     caller: &crate::authz::Principal,
+    workspace_scope: Option<&str>,
     request: Request,
 ) -> Handled {
     if matches!(caller, crate::authz::Principal::PreviewShare { .. })
@@ -863,7 +881,7 @@ async fn dispatch(
     }
     match request {
         Request::PreviewFeedback(request) => Box::pin(async move {
-            match crate::preview_feedback::handle(state, caller, request).await {
+            match crate::preview_feedback::handle(state, caller, workspace_scope, request).await {
                 Ok(reply) => Handled::ok(Reply::PreviewFeedback(reply)),
                 Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
             }
@@ -879,6 +897,12 @@ async fn dispatch(
         }).await,
         Request::ConnectionIdentity => Box::pin(async move {
             Handled::ok(Reply::Hello(HelloResult {
+                data_channel_url: match state.remote.get() {
+                    Some(remote) => remote.status().await.channels
+                        .and_then(|lanes| lanes.into_iter().find(|lane| lane.id == 1))
+                        .map(|lane| lane.url),
+                    None => None,
+                },
                 daemon_version: state.version.clone(),
                 web_protocol: WEB_PROTOCOL_VERSION,
                 machine_id: state.machine.machine_id.clone(),
@@ -887,6 +911,7 @@ async fn dispatch(
                 machine_name: crate::link::default_display_name(),
                 rtc_supported: crate::dataplane::rtc::SUPPORTED,
                 features: Some(vec![
+                    "fabric.channels.v1".to_string(),
                     "asset.preview.image.v1".to_string(),
                     "service.preview.v1".to_string(),
                     "process.services.v1".to_string(),
@@ -901,7 +926,7 @@ async fn dispatch(
                     genehub_proto::SPEECH_FEATURE_PARTIAL.to_string(),
                     genehub_proto::SPEECH_FEATURE_CONTEXT_PREVIEW.to_string(),
                     genehub_proto::SPEECH_FEATURE_FEEDBACK.to_string(),
-                ]),
+                ].into_iter().chain(crate::file_access::machine_files_supported().then(|| "asset.preview.machine-file.v1".to_string())).collect()),
                 isolation: Some(crate::isolation::report()),
             }))
         }).await,        Request::Subscribe {
@@ -2559,11 +2584,12 @@ async fn dispatch(
         Request::DeviceRemoteAttach {
             relay_url,
             join_token,
+            channel_count,
         } => Box::pin(async move {
             let Some(remote) = state.remote.get() else {
                 return Handled::err(ErrorCode::Internal, "the daemon is still starting up");
             };
-            match remote.set(&relay_url, join_token).await {
+            match remote.set_channels(&relay_url, join_token, channel_count.unwrap_or(1)).await {
                 Ok(status) => Handled::ok(Reply::RemoteAccess(status)),
                 Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
             }
@@ -2578,11 +2604,22 @@ async fn dispatch(
                 None => Handled::ok(Reply::RemoteAccess(genehub_proto::RemoteAccess {
                     relay_url: None,
                     rendezvous_url: None,
+                    channels: None,
                     online: false,
                 })),
             }
         }).await,
 
+        Request::FileAccessList => Box::pin(async move {
+            Handled::ok(Reply::FileAccess(crate::file_access::info(&*state.config.read().await)))
+        }).await,
+        Request::FileAccessConfigure { expected_revision, additional_directories } => Box::pin(async move {
+            match crate::file_access::configure(state, &expected_revision, additional_directories).await {
+                Ok(info) => Handled::ok(Reply::FileAccess(info)),
+                Err(error) if error.to_string().contains("revision conflict") => Handled::err(ErrorCode::Conflict, error.to_string()),
+                Err(error) => Handled::err(ErrorCode::BadRequest, error.to_string()),
+            }
+        }).await,
         Request::WorkspaceList => Box::pin(async move {
             // Spaces written into <data>/spaces/ become projects the next time
             // anyone looks; throttled, and a no-op when there is nothing there.
@@ -3492,6 +3529,7 @@ async fn remote_status(state: &Shared) -> genehub_proto::RemoteAccess {
         None => genehub_proto::RemoteAccess {
             relay_url: None,
             rendezvous_url: None,
+            channels: None,
             online: false,
         },
     }

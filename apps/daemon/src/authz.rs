@@ -410,7 +410,8 @@ pub fn required(request: &Request) -> Capability {
         | Request::UpdateAppCheck
         | Request::UpdateDownloadState => Capability::Read,
 
-        Request::FileWrite { .. }
+        Request::FileAccessList
+        | Request::FileWrite { .. }
         | Request::FileMkdir { .. }
         | Request::FileCopy { .. }
         | Request::FileMove { .. }
@@ -502,6 +503,7 @@ pub fn required(request: &Request) -> Capability {
         | Request::AgentSpaceConfigure { .. }
         | Request::WorkspaceRename { .. }
         | Request::WorkspaceRemove { .. }
+        | Request::FileAccessConfigure { .. }
         | Request::SettingsGet
         // Script Agent lifecycle: actions install and log in software, and a
         // request answer may carry a credential. Machine configuration.

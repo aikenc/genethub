@@ -449,6 +449,8 @@ class FixtureSession(Session):
         if profile == "flood-events":
             for index in range(FLOODS):
                 self.say(turn_id, item, "f%d " % index, index == 0)
+                if CONTROL.get("floodIntervalMs", 0) > 0:
+                    await asyncio.sleep(float(CONTROL["floodIntervalMs"]) / 1000.0)
             self.complete(turn_id, floods=FLOODS)
             return
 

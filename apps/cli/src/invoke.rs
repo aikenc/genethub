@@ -129,6 +129,55 @@ mod version_tests {
     }
 }
 
+/// A 401 with this exact daemon response is produced before `cli_front`
+/// starts the invocation. Only that refusal permits a fresh admission and
+/// one new attempt. A transport error can follow a completed mutation.
+async fn request_cli(
+    body: &Value,
+    timeout: Option<Duration>,
+) -> Result<genet_http::Response, String> {
+    let client = Client::builder()
+        .build()
+        .map_err(|error| format!("build http client: {error}"))?;
+    for attempt in 0..2 {
+        let (url, _) = admission()?;
+        let mut request = client.post(&url).json(body);
+        if let Some(timeout) = timeout {
+            request = request.timeout(timeout);
+        }
+        let response = request.send().await.map_err(|error| {
+            format!(
+                "the local CLI connection failed; the request outcome may be unknown; inspect existing receipts before retrying: {}",
+                error.without_url()
+            )
+        })?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(response);
+        }
+        // Never echo arbitrary response bytes: an unverified listener could
+        // put sensitive data in them. These are the daemon's fixed reasons.
+        let reason = if status.as_u16() == 401 {
+            response.text().await.unwrap_or_default()
+        } else {
+            String::new()
+        };
+        match reason.as_str() {
+            "invalid cli proof" if attempt == 0 => {
+                eprintln!("CLI admission was refused before execution; refreshing it once");
+            }
+            "invalid cli proof" => {
+                return Err("the local daemon refused CLI admission after one refresh; inspect its health before retrying".into());
+            }
+            "invalid session-controller CLI identity" => {
+                return Err(format!("the local daemon refused this Session's CLI identity ({status}); keep the bound CLI and inspect the Session's state"));
+            }
+            _ => return Err(format!("the local daemon refused /cli ({status})")),
+        }
+    }
+    unreachable!("the final refusal returns above")
+}
+
 async fn collect(argv: Vec<String>) -> Result<Vec<CliRecord>, String> {
     collect_inner(argv, true).await
 }
@@ -152,7 +201,6 @@ pub(crate) async fn update_call(argv: Vec<String>, scoped: bool) -> Result<Value
 }
 
 async fn collect_inner(argv: Vec<String>, scoped: bool) -> Result<Vec<CliRecord>, String> {
-    let (url, _) = admission()?;
     let cwd = caller_cwd();
     let mut body = serde_json::json!({
         "argv": argv,
@@ -161,19 +209,7 @@ async fn collect_inner(argv: Vec<String>, scoped: bool) -> Result<Vec<CliRecord>
     if scoped {
         add_session_controller_identity(&mut body);
     }
-    let response = Client::new()
-        .post(&url)
-        .timeout(Duration::from_secs(15))
-        .json(&body)
-        .send()
-        .await
-        .map_err(|error| format!("the local daemon did not accept /cli: {error}"))?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "the local daemon refused /cli ({})",
-            response.status()
-        ));
-    }
+    let response = request_cli(&body, Some(Duration::from_secs(15))).await?;
     let body = response
         .text()
         .await
@@ -191,7 +227,6 @@ async fn collect_inner(argv: Vec<String>, scoped: bool) -> Result<Vec<CliRecord>
 }
 
 async fn stream(argv: Vec<String>, stdin: Vec<u8>, cwd: String) -> Result<i32, String> {
-    let (url, _) = admission()?;
     let mut body = serde_json::json!({
         "argv": argv,
         "cwd": cwd,
@@ -201,26 +236,7 @@ async fn stream(argv: Vec<String>, stdin: Vec<u8>, cwd: String) -> Result<i32, S
         body["stdin"] = serde_json::json!(base64::engine::general_purpose::STANDARD.encode(stdin));
     }
     add_session_controller_identity(&mut body);
-    let response = Client::builder()
-        .build()
-        .map_err(|error| format!("build http client: {error}"))?
-        .post(&url)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|error| {
-            format!(
-                "{error}; run `{} daemon start`",
-                genet_frontdoor::channel::CLI_BINARY
-            )
-        })?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "the local daemon refused /cli ({}); run `{} daemon start`",
-            response.status(),
-            genet_frontdoor::channel::CLI_BINARY
-        ));
-    }
+    let response = request_cli(&body, None).await?;
 
     let mut exit = None;
     let mut leftover = String::new();

@@ -21,6 +21,14 @@ Selection output includes affected surfaces, declared dependencies and cumulativ
 Before sending new options to an older worktree, run `testctl capabilities` and require `feedbackGate=dev-feedback`.
 Old runners did not reject unknown gate names; do not probe support by attempting a run. Update the same slot's tooling source first.
 
+`plan` and `run` accept independent `--environments`, `--cpu` and `--memory-mb` budgets.
+For example, `--environments 4 --cpu 12 --memory-mb 24576` reserves enough memory for a
+large exclusive fleet without admitting dozens of unrelated daemon startups. Use the same budgets
+for planning and execution. Read the container's CPU quota and memory limit, reserve capacity for other work,
+and do not infer available capacity from the host's logical CPU count. These options control test scheduling;
+they do not change case workloads, product deadlines or resource limits. The plan and run manifest record
+the effective budget, and changing it invalidates prior resume evidence. All budget values must be positive safe integers.
+
 Selected cases can declare `requirements: [{kind: "python", env: "VARIABLE", minVersion: [3, 11], modules: ["aiohttp"]}]`.
 All consumers of that environment dependency must declare it. The coordinator probes only selected requirements before starting
 workers or hashing artifacts; a missing dependency blocks the run, including cases not started. It never installs dependencies.
@@ -32,7 +40,7 @@ The run path and phase are printed on stderr immediately, with 15-second progres
 is an observation to investigate, not proof of process death. Only a finalized manifest can qualify a run.
 
 `run --resume <finalized-dir>` creates a new record. Gate, selection/reason, exact source/dirty digest, artifact bytes, runtime,
-governance, runner/policy and common environment must match. Only passed results with complete zero-leak evidence are reused;
+governance, runner/policy, resource budgets and common environment must match. Only passed results with complete zero-leak evidence are reused;
 declared dependency changes invalidate the corresponding cases. Failed/unstable runs and already-started timed-out cases are refused, never silently retried. Only budget-interrupted cases that never started may resume.
 Preflight-only and old v1 runs have no reusable execution evidence. A crash before finalization also requires a fresh run.
 The original run remains unchanged; the new manifest lists reused units and their origin. Hashing saves only within one snapshot,

@@ -8,7 +8,7 @@ import {
   type FabricStream,
 } from "../fabric";
 import { FABRIC_TRANSPORT_FLOW } from "../fabric/frame";
-import { DataEndpoint, type RecordCarrier } from "./endpoint";
+import { DataEndpoint, type DataEndpointOptions, type RecordCarrier } from "./endpoint";
 import { MAX_DATA_FRAME_BYTES } from "./frame";
 import { preparePeerHandshake, type PeerCredential } from "./handshake";
 
@@ -31,6 +31,7 @@ export async function openFabricDataLink(options: {
   rtcSupported: boolean;
   socketFactory?: (url: string) => FabricSocketLike;
   onError?: (error: unknown) => void;
+  onDiagnostic?: DataEndpointOptions["onDiagnostic"];
 }): Promise<FabricDataLink> {
   const fabric = new FabricEndpoint({
     url: transportFlowUrl(options.url),
@@ -68,6 +69,7 @@ export async function openFabricDataLink(options: {
       maxBulkStreamWindowBytes: handshake.maxBulkStreamWindowBytes,
       maxReceiveBytesPerStream: 64 * 1024 * 1024,
       ...(options.onError ? { onError: options.onError } : {}),
+      ...(options.onDiagnostic ? { onDiagnostic: options.onDiagnostic } : {}),
     });
     if (options.endpoint) await endpoint.attach(carrier, handshake.key, "fabric");
     else await endpoint.ready();

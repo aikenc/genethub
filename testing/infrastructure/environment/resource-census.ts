@@ -61,11 +61,17 @@ export function trackResources(owner: string, rootPid: number) {
       } catch { if (identity(p.pid)?.birth === p.birth) portsKnown = false; }
     }
     const ports = new Set<string>();
-    for (const protocol of ["tcp", "tcp6", "udp", "udp6"]) {
+    const scopes = new Map<string,string>();
+    try { scopes.set(readlinkSync("/proc/self/ns/net"),"/proc/self/net"); } catch { portsKnown = false; }
+    for (const p of live) {
+      try { scopes.set(readlinkSync(`/proc/${p.pid}/ns/net`),`/proc/${p.pid}/net`); }
+      catch { if (identity(p.pid)?.birth === p.birth) portsKnown = false; }
+    }
+    for (const [scope,net] of scopes) for (const protocol of ["tcp", "tcp6", "udp", "udp6"]) {
       try {
-        for (const line of readFileSync(`/proc/net/${protocol}`, "utf8").trim().split("\n").slice(1)) {
+        for (const line of readFileSync(`${net}/${protocol}`, "utf8").trim().split("\n").slice(1)) {
           const f = line.trim().split(/\s+/);
-          if (inodes.has(f[9]!) && (protocol.startsWith("udp") || f[3] === "0A")) ports.add(protocol + ":" + f[1]);
+          if (inodes.has(f[9]!) && (protocol.startsWith("udp") || f[3] === "0A")) ports.add(scope + ":" + protocol + ":" + f[1]);
         }
       } catch { portsKnown = false; }
     }

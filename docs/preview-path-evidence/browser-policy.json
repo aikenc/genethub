@@ -1,0 +1,39 @@
+{
+  "method": "Isolated Chromium reproduction using current repository CSP and the same srcdoc allow-scripts sandbox; no product code changes",
+  "cases": [
+    {
+      "name": "current-workbench",
+      "baseURI": "https://preview-policy.test/owner/index.html",
+      "link": "https://preview-policy.test/releases/latest/index.html",
+      "platformWouldIntercept": false,
+      "baseBlocked": true,
+      "nestedFrameBlocked": true,
+      "violations": [
+        "Setting the document's base URI to 'https://preview.invalid/' violates the following Content Security Policy directive: \"base-uri 'self'\". The action has been blocked.",
+        "Framing 'https://preview-policy.test/' violates the following Content Security Policy directive: \"frame-src 'none'\". The request has been blocked.\n"
+      ]
+    },
+    {
+      "name": "proposed-base-policy",
+      "baseURI": "https://preview.invalid/",
+      "link": "https://preview.invalid/releases/latest/index.html",
+      "platformWouldIntercept": true,
+      "baseBlocked": false,
+      "nestedFrameBlocked": true,
+      "violations": [
+        "Framing 'https://preview-policy.test/' violates the following Content Security Policy directive: \"frame-src 'none'\". The request has been blocked.\n"
+      ]
+    },
+    {
+      "name": "current-popout",
+      "baseURI": "https://preview.invalid/",
+      "link": "https://preview.invalid/releases/latest/index.html",
+      "platformWouldIntercept": true,
+      "baseBlocked": false,
+      "nestedFrameBlocked": true,
+      "violations": [
+        "Framing 'https://preview-policy.test/' violates the following Content Security Policy directive: \"frame-src 'none'\". The request has been blocked.\n"
+      ]
+    }
+  ]
+}

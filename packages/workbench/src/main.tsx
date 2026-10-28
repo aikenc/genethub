@@ -4,7 +4,7 @@ import { createRoot } from "react-dom/client";
 
 import { App } from "./App";
 import { PRODUCT } from "./channel";
-import { parsePortablePreviewTicket, parsePreviewPopout } from "./preview/popout";
+import { parsePortablePreviewTicket, parsePreviewPopout, watchPreviewConnectionFragment } from "./preview/popout";
 import { PreviewPopoutPage } from "./preview/PreviewPopoutPage";
 import { parseAssetPreviewPath } from "./preview/url";
 import { watchViewport } from "./shell/viewport";
@@ -39,6 +39,7 @@ watchSystemTheme((theme) => useTheme.getState().systemChanged(theme));
 watchViewport();
 
 const preview = parseAssetPreviewPath(window.location.pathname);
+if (preview) watchPreviewConnectionFragment();
 const previewPopout = preview
   ? parsePreviewPopout(window.location.search, window.location.hash)
   : null;

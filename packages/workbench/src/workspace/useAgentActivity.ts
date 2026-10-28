@@ -6,7 +6,7 @@ import { hasCurrentWork, pendingOwners, sessionAttention } from "../session/atte
 type Client = NonNullable<ReturnType<typeof useWorkbench.getState>["client"]>;
 type Activity = { count: number; recent: number; pending: number; running: boolean; ownRunning: boolean; teamRunning: boolean; tasks: boolean; blocked: boolean; label: string };
 const noSessions: Activity = { count: 0, recent: 0, pending: 0, running: false, ownRunning: false, teamRunning: false, tasks: false, blocked: false, label: "" };
-const polls = new WeakMap<Client, { users: number; timer: ReturnType<typeof setInterval> }>();
+const polls = new WeakMap<Client, { users: number; timer: ReturnType<typeof setInterval>; visibilityChanged(): void }>();
 const aggregates = new WeakMap<SessionSummary[], Map<string, Activity>>();
 
 /** The store owns the only summary snapshot. All mounted consumers share one
@@ -16,15 +16,21 @@ function subscribe(client: Client) {
   if (!poll) {
     const refresh = () => {
       const wb = useWorkbench.getState();
-      if (wb.client === client && wb.connection === "ready") void wb.refreshSessions();
+      if (wb.client === client && wb.connection === "ready" && document.visibilityState !== "hidden") void wb.refreshSessions();
     };
     refresh();
-    poll = { users: 0, timer: setInterval(refresh, 5000) };
+    const visibilityChanged = () => { if (document.visibilityState !== "hidden") refresh(); };
+    document.addEventListener("visibilitychange", visibilityChanged);
+    poll = { users: 0, timer: setInterval(refresh, 5000), visibilityChanged };
     polls.set(client, poll);
   }
   poll.users++;
   return () => {
-    if (--poll.users === 0) { clearInterval(poll.timer); polls.delete(client); }
+    if (--poll.users === 0) {
+      clearInterval(poll.timer);
+      document.removeEventListener("visibilitychange", poll.visibilityChanged);
+      polls.delete(client);
+    }
   };
 }
 

@@ -1,8 +1,9 @@
-import { previewPath } from "./url";
+import { isAbsoluteFilePath, previewFilePath } from "./url";
 
 export type SiteAssetFetch = (
   path: string,
-) => Promise<{ bytes: Uint8Array; mediaType: string } | null>;
+  signal?: AbortSignal,
+) => Promise<{ bytes: Uint8Array; mediaType: string; status?: number; message?: string } | null>;
 
 const DEFAULT_MAX_FILES = 256;
 const DEFAULT_MAX_TOTAL_BYTES = 256 * 1024 * 1024;
@@ -18,13 +19,14 @@ type CachedAsset =
  * Rewrite static relative and site-root assets in an HTML document for
  * sandboxed srcdoc. Parent-created blob: URLs are unusable inside an
  * opaque-origin iframe, so CSS/JS are inlined. Media elements are NOT
- * fetched here: their URLs are rewritten to `https://preview.invalid/@root/...`
+ * fetched here: their URLs carry the full file identity under the virtual origin
  * placeholders that the in-iframe bridge resolves to blob: URLs on demand.
  * Runtime fetch/import of remaining assets goes through the same bridge.
  */
 export async function remapHtmlSite(options: {
   entryPath: string;
   html: string;
+  siteEntryPath?: string;
   fetchAsset: SiteAssetFetch;
   maxFiles?: number;
   maxTotalBytes?: number;
@@ -32,11 +34,12 @@ export async function remapHtmlSite(options: {
 }): Promise<{ html: string; blobUrls: string[]; warnings: string[] }> {
   const maxFiles = options.maxFiles ?? DEFAULT_MAX_FILES;
   const maxTotalBytes = options.maxTotalBytes ?? DEFAULT_MAX_TOTAL_BYTES;
-  const entry = previewPath(options.entryPath);
+  const entry = previewFilePath(options.entryPath);
+  const siteEntry = options.siteEntryPath ?? entry;
   const document_ = new DOMParser().parseFromString(options.html, "text/html");
   const warnings: string[] = [];
   const cache = new Map<string, Promise<CachedAsset | null>>();
-  const jsRewriteCache = new Map<string, string>();
+  const jsRewriteCache = new Map<string | symbol, string>();
   const fetchAsset = limitConcurrency(options.fetchAsset, options.maxConcurrent ?? 8);
   let files = 0;
   let totalBytes = 0;
@@ -50,7 +53,7 @@ export async function remapHtmlSite(options: {
         return null;
       }
       const loaded = await fetchAsset(target);
-      if (!loaded) {
+      if (!loaded || (loaded.status ?? 200) >= 400) {
         warnings.push(`missing ${target}`);
         return null;
       }
@@ -84,7 +87,7 @@ export async function remapHtmlSite(options: {
     raw: string | null,
     basePath: string,
   ): Promise<string | null> => {
-    const target = resolveTarget(raw, basePath, entry, warnings);
+    const target = resolveTarget(raw, basePath, siteEntry, warnings);
     if (!target) return null;
     const asset = await loadAsset(target);
     if (!asset) return null;
@@ -110,7 +113,7 @@ export async function remapHtmlSite(options: {
     const suffixMatch = trimmed.match(/^([^?#]*)([?#].*)?$/);
     const path = suffixMatch?.[1] ?? trimmed;
     const suffix = suffixMatch?.[2] ?? "";
-    const target = resolveTarget(path, basePath, entry, warnings);
+    const target = resolveTarget(path, basePath, siteEntry, warnings);
     if (!target) return null;
     const virtual = virtualMediaUrl(target, entry);
     if (virtual) return virtual + suffix;
@@ -135,10 +138,10 @@ export async function remapHtmlSite(options: {
     return rewritten.join(", ");
   };
 
-  const rewriteJs = async (filePath: string, text: string): Promise<string> => {
-    const cached = jsRewriteCache.get(filePath);
+  const rewriteJs = async (filePath: string, text: string, cacheKey: string | symbol = filePath): Promise<string> => {
+    const cached = jsRewriteCache.get(cacheKey);
     if (cached !== undefined) return cached;
-    jsRewriteCache.set(filePath, text);
+    jsRewriteCache.set(cacheKey, text);
     let out = text.replaceAll("import.meta.url", JSON.stringify(virtualAssetUrl(filePath, entry)));
     const specs = new Set<string>();
     for (const match of out.matchAll(IMPORT_SPECIFIER)) {
@@ -146,7 +149,7 @@ export async function remapHtmlSite(options: {
     }
     const replacements = await Promise.all(
       Array.from(specs).map(async (spec) => {
-        const target = resolveTarget(spec, filePath, entry, warnings);
+        const target = resolveTarget(spec, filePath, siteEntry, warnings);
         if (!target) return null;
         const asset = await loadAsset(target);
         if (!asset || asset.kind !== "js") return null;
@@ -157,7 +160,7 @@ export async function remapHtmlSite(options: {
     for (const replacement of replacements) {
       if (replacement) out = replaceSpecifiers(out, replacement.spec, replacement.url);
     }
-    jsRewriteCache.set(filePath, out);
+    jsRewriteCache.set(cacheKey, out);
     return out;
   };
 
@@ -166,7 +169,7 @@ export async function remapHtmlSite(options: {
       const rel = (node.getAttribute("rel") ?? "").toLowerCase();
       const href = node.getAttribute("href");
       if (rel.includes("stylesheet")) {
-        const target = resolveTarget(href, entry, entry, warnings);
+        const target = resolveTarget(href, entry, siteEntry, warnings);
         if (!target) return;
         const asset = await loadAsset(target);
         if (!asset || asset.kind !== "css") {
@@ -185,7 +188,7 @@ export async function remapHtmlSite(options: {
 
   await Promise.all(
     Array.from(document_.querySelectorAll("script[src]")).map(async (node) => {
-      const target = resolveTarget(node.getAttribute("src"), entry, entry, warnings);
+      const target = resolveTarget(node.getAttribute("src"), entry, siteEntry, warnings);
       if (!target) return;
       const asset = await loadAsset(target);
       if (!asset || asset.kind !== "js") {
@@ -205,7 +208,8 @@ export async function remapHtmlSite(options: {
   await Promise.all(
     Array.from(document_.querySelectorAll("script:not([src])")).map(async (node) => {
       if (node.getAttribute("type")?.toLowerCase() !== "module") return;
-      node.textContent = await rewriteJs(`${entry}#inline`, node.textContent ?? "");
+      // Inline modules share a directory base, never a source/cache identity.
+      node.textContent = await rewriteJs(entry, node.textContent ?? "", Symbol("inline-module"));
     }),
   );
 
@@ -262,59 +266,60 @@ export async function remapHtmlSite(options: {
   };
 }
 
-/** Same-site HTML navigation stays inside Preview. Other files stay on the asset bridge. */
-export function sameSiteHtmlPath(entryPath: string, rawUrl: string): string | null {
-  const resolved = resolveRuntimeAssetPath(entryPath, rawUrl);
-  if (!resolved) return null;
-  const lower = resolved.toLowerCase();
-  if (!lower.endsWith(".html") && !lower.endsWith(".htm")) return null;
-  return resolved;
-}
-
-export function resolveRuntimeAssetPath(entryPath: string, rawUrl: string): string | null {
+/** Resolve file identity separately from document query and fragment. */
+export function resolveSiteReference(entryPath: string, rawUrl: string, siteEntryPath = entryPath): {path: string; query: string; fragment: string} | null {
   try {
-    const parsed = new URL(rawUrl, PREVIEW_ORIGIN);
-    if (parsed.protocol !== "https:" || parsed.hostname !== "preview.invalid") return null;
-    const relative = decodeURIComponent(parsed.pathname.replace(/^\/+/, ""));
-    if (!relative) return null;
-    const entry = previewPath(entryPath);
-    // `@root/...` addresses a path absolute to the entry root (media
-    // placeholders). Everything else is joined against the entry directory.
-    // Both stay confined to the entry root: ".." cannot pop past it.
-    if (relative.startsWith("@root/")) {
-      const rootHandle = entry.split("/")[0]!;
-      return joinAgainstEntry(`${rootHandle}/-`, relative.slice("@root/".length));
+    const entry = previewFilePath(entryPath);
+    const raw = rawUrl.trim();
+    if (!raw || /^(?:data:|blob:|javascript:|mailto:|tel:)/i.test(raw) || raw.startsWith("//")) return null;
+    let pathname: string;
+    let query = "";
+    let fragment = "";
+    if (/^https?:/i.test(raw)) {
+      const url = new URL(raw);
+      if (url.origin !== new URL(PREVIEW_ORIGIN).origin) return null;
+      query = url.search;
+      fragment = url.hash;
+      const decoded = decodeVirtualPath(url.pathname);
+      if (decoded) return {path: previewFilePath(decoded), query, fragment};
+      // Old frames and root-relative URLs address the initial site directory.
+      pathname = decodeURIComponent(url.pathname);
+      if (pathname.startsWith("/@root/")) {
+        const root = entry.split("/")[0]!;
+        const path = joinAgainstEntry(`${root}/-`, pathname.slice(7));
+        return path ? {path, query, fragment} : null;
+      }
+    } else {
+      const hashAt = raw.indexOf("#");
+      const withoutHash = hashAt < 0 ? raw : raw.slice(0, hashAt);
+      fragment = hashAt < 0 ? "" : raw.slice(hashAt);
+      const queryAt = withoutHash.indexOf("?");
+      pathname = decodeURIComponent(queryAt < 0 ? withoutHash : withoutHash.slice(0, queryAt));
+      query = queryAt < 0 ? "" : withoutHash.slice(queryAt);
+      if (!pathname) return {path: entry, query, fragment};
     }
-    return joinAgainstEntry(entry, relative);
-  } catch {
-    return null;
-  }
+    const path = pathname.startsWith("/")
+      ? joinAgainstEntry(siteEntryPath, pathname.replace(/^\/+/, ""))
+      : joinAgainstEntry(entry, pathname);
+    return path ? {path, query, fragment} : null;
+  } catch { return null; }
 }
 
-function resolveTarget(
-  raw: string | null,
-  basePath: string,
-  entryPath: string,
-  warnings: string[],
-): string | null {
-  if (!raw) return null;
-  const trimmed = raw.trim();
-  if (
-    !trimmed ||
-    trimmed.startsWith("#") ||
-    /^(https?:|data:|blob:|javascript:|mailto:)/i.test(trimmed) ||
-    trimmed.startsWith("//")
-  ) {
-    return null;
-  }
-  const target = trimmed.startsWith("/")
-    ? joinAgainstEntry(entryPath, trimmed.replace(/^\/+/, ""))
-    : joinAgainstEntry(basePath, trimmed);
-  if (!target) {
-    warnings.push(`skipped ${trimmed}`);
-    return null;
-  }
-  return target;
+/** Legacy HTML-only helper. Unified navigation uses resolveSiteReference. */
+export function sameSiteHtmlPath(entryPath: string, rawUrl: string): string | null {
+  const path = resolveSiteReference(entryPath, rawUrl)?.path;
+  return path && /\.html?$/i.test(path) ? path : null;
+}
+
+export function resolveRuntimeAssetPath(entryPath: string, rawUrl: string, siteEntryPath = entryPath): string | null {
+  return resolveSiteReference(entryPath, rawUrl, siteEntryPath)?.path ?? null;
+}
+
+function resolveTarget(raw: string | null, basePath: string, entryPath: string, warnings: string[]): string | null {
+  if (!raw || raw.trim().startsWith("#")) return null;
+  const resolved = resolveSiteReference(basePath, raw, entryPath);
+  if (!resolved && !/^(?:https?:|data:|blob:|mailto:|javascript:)/i.test(raw)) warnings.push(`skipped ${raw}`);
+  return resolved?.path ?? null;
 }
 
 async function rewriteCssUrls(
@@ -361,45 +366,48 @@ function limitConcurrency(
 }
 
 function joinAgainstEntry(entryPath: string, relative: string): string | null {
-  const parts = entryPath.split("/");
-  const rootHandle = parts[0]!;
-  const dir = parts.slice(1, -1);
-  const stack = [...dir];
+  const entry = previewFilePath(entryPath);
+  const absolute = isAbsoluteFilePath(entry);
+  const windows = /^[A-Za-z]:\//.test(entry);
+  const parts = entry.split("/").slice(0, -1);
+  // Keep the volume/root-handle boundary. Absolute paths may cross projects;
+  // the daemon's live allowlist owns the actual authorization decision.
+  const minimum = absolute && !windows ? 1 : 1;
   for (const segment of relative.replace(/\\/g, "/").split("/")) {
     if (!segment || segment === ".") continue;
     if (segment === "..") {
-      if (stack.length === 0) return null;
-      stack.pop();
-      continue;
-    }
-    stack.push(segment);
+      if (parts.length <= minimum) return null;
+      parts.pop();
+    } else parts.push(segment);
   }
-  if (stack.length === 0) return null;
-  try {
-    return previewPath([rootHandle, ...stack].join("/"));
-  } catch {
-    return null;
-  }
+  try { return previewFilePath(parts.join("/")); } catch { return null; }
 }
 
-function virtualAssetUrl(filePath: string, entryPath: string): string {
-  const root = entryPath.split("/").slice(0, -1).join("/");
-  const prefix = `${root}/`;
-  const rel = filePath.startsWith(prefix)
-    ? filePath.slice(prefix.length)
-    : filePath.split("/").slice(1).join("/");
-  return `${PREVIEW_ORIGIN}${rel.split("#")[0]}`;
+/** Full file identity travels in the virtual URL, including CSS/module bases. */
+export function virtualFileUrl(filePath: string): string {
+  const path = previewFilePath(filePath);
+  const kind = path.startsWith("/") ? "posix" : /^[A-Za-z]:\//.test(path) ? "drive" : "root";
+  const tail = kind === "posix" ? path.slice(1) : path;
+  return `${PREVIEW_ORIGIN}@file/${kind}/${tail.split("/").map(encodeURIComponent).join("/")}`;
 }
 
-/**
- * Absolute-to-entry-root virtual URL for lazily resolved media. Returns null
- * for cross-root targets: runtime resolution is confined to the entry root,
- * so those keep the eager data: path.
- */
-function virtualMediaUrl(target: string, entryPath: string): string | null {
-  const rootHandle = entryPath.split("/")[0]!;
-  if (!target.startsWith(`${rootHandle}/`)) return null;
-  return `${PREVIEW_ORIGIN}@root/${target.slice(rootHandle.length + 1)}`;
+function decodeVirtualPath(pathname: string): string | null {
+  const match = pathname.match(/^\/@file\/(posix|drive|root)\/(.+)$/);
+  if (!match) return null;
+  const parts = match[2]!.split("/").map(part => {
+    const decoded = decodeURIComponent(part);
+    if (decoded.includes("/") || decoded.includes("\\")) throw new TypeError("encoded separator");
+    return decoded;
+  });
+  return (match[1] === "posix" ? "/" : "") + parts.join("/");
+}
+
+function virtualAssetUrl(filePath: string, _entryPath: string): string {
+  return virtualFileUrl(filePath);
+}
+
+function virtualMediaUrl(target: string, _entryPath: string): string | null {
+  return virtualFileUrl(target);
 }
 
 function replaceSpecifiers(source: string, spec: string, next: string): string {

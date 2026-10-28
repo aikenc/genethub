@@ -15,7 +15,7 @@ defineSpecialty({
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
 }, async t => {
   const paragraphs = Array.from({ length: 20 }, (_, n) => `<p id="paragraph-${n}" style="margin:24px 0;min-height:100px">Section ${n}: content for scrolling and annotation.</p>`).join("");
-  await writeFile(path.join(t.env.workspace, "review.html"), `<!doctype html><html><head><title>Review</title></head><body style="margin:24px"><button id="action" onclick="this.textContent='Activated'">Action</button>${paragraphs}</body></html>`);
+  await writeFile(path.join(t.env.workspace, "review.html"), `<!doctype html><html><head><title>Review</title></head><body style="margin:24px"><p id="stored"></p><button id="persist" onclick="localStorage.setItem('entry-identity','same-site')">Save identity</button><script>document.getElementById('stored').textContent=localStorage.getItem('entry-identity')||'empty';</script><button id="action" onclick="this.textContent='Activated'">Action</button><a href="review.md?view=raw#review-notes">Read notes</a>${paragraphs}</body></html>`);
   await writeFile(path.join(t.env.workspace, "review.md"), "# Review notes\n\nFirst paragraph.\n\n" + Array.from({ length: 20 }, (_, n) => `## Section ${n}\n\nContent for scrolling.\n`).join("\n"));
   const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
   let browser: Awaited<ReturnType<typeof openWorkbenchPage>> | undefined;
@@ -23,9 +23,9 @@ defineSpecialty({
     await t.flows.main.configureMockProvider(opened.client, opened.mock);
     await opened.client.call({ type: "workspace.rename", payload: { workspaceId: opened.workspaceId, name: "Preview regression" } });
     const session = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
-    opened.mock.script({ text: "[review.md](review.md) · [review.html](review.html)" });
+    opened.mock.script({ text: "[review.md](review.md?chat=yes#review-notes) · [review.html](review.html)" });
     await t.flows.main.sendPrompt(opened.client, session, "Show the two review files.");
-    browser = await openWorkbenchPage(t.openRoot, () => daemonEndpoint(opened.daemon), opened.workspaceId, session, { viewport: { width: 430, height: 775 }, hasTouch: true, isMobile: true });
+    browser = await openWorkbenchPage(t.openRoot, () => daemonEndpoint(opened.daemon), opened.workspaceId, session, { viewport: { width: 430, height: 775 }, hasTouch: true, isMobile: true }, { trace: false });
     const page = browser.page;
     const openFile = async (name: string) => {
       await page.getByRole("link", { name, exact: true }).first().click();
@@ -44,6 +44,7 @@ defineSpecialty({
       t.assertions.assert(geometry.scrollWidth <= geometry.width + 1 && geometry.height < 50, `toolbar geometry: ${JSON.stringify(geometry)} controls=${JSON.stringify(boxes)}`);
     };
     await openFile("review.md");
+    await page.getByRole("status").filter({hasText: "页面参数：?chat=yes"}).waitFor();
     for (const width of [320, 430]) { await page.setViewportSize({ width, height: 775 }); await checkRow(); }
     const heading = page.getByRole("heading", { name: "Review notes", exact: true });
     const header = await page.getByLabel("预览工具栏", { exact: true }).boundingBox();
@@ -52,6 +53,7 @@ defineSpecialty({
     await openFile("review.html");
     const frame = page.frameLocator('iframe[title="HTML 文件预览"]');
     await frame.locator("#paragraph-0").waitFor();
+    await frame.locator("#persist").click();
     for (const width of [320, 430]) { await page.setViewportSize({ width, height: 775 }); await checkRow(); }
     t.assertions.assert(!(await page.getByRole("button", { name: "截图", exact: true }).isVisible()), "low frequency action remains on toolbar");
     t.assertions.assert(!(await page.getByRole("button", { name: "分享预览", exact: true }).isVisible()), "share stays on the toolbar");
@@ -119,17 +121,40 @@ defineSpecialty({
     const receipt = page.getByRole("textbox", { name: "可复制的预览反馈", exact: true });
     await receipt.waitFor();
     const id = (await receipt.inputValue()).match(/pf_[a-f0-9]{32}/)![0];
-    const saved = await opened.client.call({ type: "preview.feedback", payload: { workspaceId: opened.workspaceId, operation: {kind: "read", id} } });
+    const saved = await opened.client.call({ type: "preview.feedback", payload: { workspaceId: "", operation: {kind: "read", id} } });
     t.assertions.assert(saved?.type === "previewFeedback" && saved.data.kind === "receipt" && saved.data.data.annotations.some(note => note.comment === "Keep this section readable" && note.target.kind === "htmlElement" && note.target.selector === "p#paragraph-0"), "selected HTML note was not persisted in file feedback");
     await page.getByRole("button", { name: "关闭反馈", exact: true }).click();
     t.assertions.assert(await page.getByRole("button", { name: "查看批注", exact: true }).count() === 0, "offscreen note stuck to viewport top");
     await frame.locator("#action").click();
     t.assertions.assert(await frame.locator("#action").innerText() === "Activated", "browse mode did not restore HTML interaction");
+    await frame.getByRole("link", {name: "Read notes"}).click();
+    await page.getByRole("heading", {name: "Review notes", exact: true}).waitFor().catch(() => {
+      throw new Error("HTML to Markdown navigation did not render the target in the original viewer");
+    });
     const popupEvent = page.waitForEvent("popup");
     await page.getByRole("button", {name: "新窗口打开", exact: true}).click();
     const popup = await popupEvent;
+    await popup.getByRole("heading", {name: "Review notes", exact: true}).waitFor().catch(async () => {
+      const url = new URL(popup.url());
+      throw new Error(`Popout did not render the current Markdown: route=${url.pathname.replace(/m_[a-f0-9]+/, "[machine]")} query=${url.searchParams.get("docQuery")} body=${(await popup.locator("body").innerText()).slice(0, 1500)}`);
+    });
+    t.assertions.assert(new URL(popup.url()).searchParams.get("docQuery") === "?view=raw", "popout lost the current document query");
     t.assertions.assert(await page.getByRole("dialog", {name: "文件预览", exact: true}).isVisible(), "external open minimized the original preview");
     await popup.close();
+    if (saved?.type !== "previewFeedback" || saved.data.kind !== "receipt") throw new Error("saved receipt missing");
+    await page.getByRole("button", {name: "关闭预览", exact: true}).click();
+    opened.mock.script({text: `[Open feedback record](${saved.data.data.workspacePath})`});
+    await t.flows.main.sendPrompt(opened.client, session, "Show the saved feedback record.");
+    await page.getByRole("link", {name: "Open feedback record", exact: true}).click();
+    await page.getByRole("dialog", {name: "文件预览", exact: true}).getByText(/Keep this section readable/).waitFor();
+    await page.getByRole("button", {name: "关闭预览", exact: true}).click();
+    await page.getByRole("button", {name: "当前项目", exact: true}).click();
+    await page.getByRole("button", {name: "项目菜单", exact: true}).click();
+    await page.getByRole("menuitem", {name: "文件", exact: true}).click();
+    const tree = page.getByRole("tree", {name: "文件树", exact: true}); await tree.waitFor();
+    if (!await tree.getByRole("treeitem", {name: "review.html", exact: true}).count()) await tree.getByRole("treeitem", {expanded: false}).first().click();
+    await tree.getByRole("treeitem", {name: "review.html", exact: true}).click();
+    await frame.locator("#stored").getByText("same-site", {exact: true}).waitFor();
     await page.screenshot({ path: path.join(process.env.TESTCTL_BROWSER_ARTIFACTS!, "preview-toolbar-430.png") });
     t.note("Real session MD/H5 links, 320/430px toolbar, menu, wheel/touch, moving selection, daemon note save and browse restore passed; Chromium, not real iPhone WebKit.");
   } finally { await browser?.close(); opened.client.close(); opened.daemon.stop(); await opened.mock.stop(); }

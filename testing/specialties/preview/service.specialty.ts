@@ -4,7 +4,7 @@ import { createServer } from "node:net";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ServicePreviewClient } from "@genehub/workbench/client";
-import { BlockedError, defineSpecialty } from "../../framework/public.ts";
+import { BlockedError, defineSpecialty, openWorkspacePeer } from "../../framework/public.ts";
 
 defineSpecialty(
   {
@@ -33,6 +33,7 @@ defineSpecialty(
     },
     surfaces: ["daemon", "workbench", "service-preview"],
     productInterfaces: ["@genehub/workbench/client"],
+    requiredRepos: ["cloud"],
     requiredArtifacts: ["genehub-host-local", "genehub_guest.wasm"],
   },
   async (t) => {
@@ -98,6 +99,7 @@ defineSpecialty(
       output = (output + b).slice(-4096);
     });
     let service: ServicePreviewClient | null = null;
+    let peer: Awaited<ReturnType<typeof openWorkspacePeer>> | undefined;
     try {
       await t.tools.waitUntil(async () => {
         if (runner.exitCode !== null)
@@ -109,7 +111,11 @@ defineSpecialty(
         );
         return service !== null;
       }, 20000);
-      const active = service as unknown as ServicePreviewClient;
+      (service as ServicePreviewClient | null)?.close();
+      peer = await openWorkspacePeer({openRoot: t.openRoot, lease: t.env, client: opened.client, workspaceId: opened.workspaceId});
+      service = await ServicePreviewClient.discover(peer.client, "", entry);
+      if (!service) throw new Error("scoped absolute service discovery failed");
+      const active = service;
       const inventory = await opened.client.call({type:"process.workspaceList",payload:{workspaceId:opened.workspaceId}});
       t.assertions.assert(inventory?.type === "processes", "missing workspace process tree");
       if(inventory?.type === "processes") {
@@ -213,6 +219,7 @@ defineSpecialty(
       },10000);
     } finally {
       (service as ServicePreviewClient | null)?.close();
+      await peer?.close();
       runner.kill("SIGTERM");
       opened.client.close();
       opened.daemon.stop();

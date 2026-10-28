@@ -13464,6 +13464,7 @@ mod tests {
             &genehub_proto::RemoteAccess {
                 relay_url: None,
                 rendezvous_url: None,
+                channels: None,
                 online: false,
             },
         );

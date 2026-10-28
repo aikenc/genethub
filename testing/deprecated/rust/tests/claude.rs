@@ -30,10 +30,10 @@ macro_rules! needs_claude {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn claude_code_reaches_the_same_timeline_as_the_built_in_agent() {
+    configure_claude_backend();
     let journey = Journey::start().await.expect("journey starts");
     real_only!(journey);
     needs_claude!(journey);
-    configure_claude_backend();
 
     const PROMPT: &str = "Reply with exactly one word: pong";
     let session = journey
@@ -57,10 +57,10 @@ async fn claude_code_reaches_the_same_timeline_as_the_built_in_agent() {
 /// tool execution, real permission grant, real file on disk.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn accept_edits_mode_lets_a_real_tool_call_through_without_a_prompt() {
+    configure_claude_backend();
     let journey = Journey::start().await.expect("journey starts");
     real_only!(journey);
     needs_claude!(journey);
-    configure_claude_backend();
 
     let session = journey
         .session_with_model("claude", "default")
@@ -116,10 +116,10 @@ async fn accept_edits_mode_lets_a_real_tool_call_through_without_a_prompt() {
 /// `--permission-mode manual` already cost one user a working Claude Code.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_model_and_mode_pickers_offer_what_this_cli_actually_accepts() {
+    configure_claude_backend();
     let journey = Journey::start().await.expect("journey starts");
     real_only!(journey);
     needs_claude!(journey);
-    configure_claude_backend();
 
     let claude = ready_claude(&journey).await;
     let claude = &claude;
@@ -262,10 +262,10 @@ async fn the_model_and_mode_pickers_offer_what_this_cli_actually_accepts() {
 /// just a process kill, actually reaches a running Claude Code turn.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interrupting_claude_code_ends_the_turn_as_canceled() {
+    configure_claude_backend();
     let journey = Journey::start().await.expect("journey starts");
     real_only!(journey);
     needs_claude!(journey);
-    configure_claude_backend();
 
     let session = journey
         .session_with_model("claude", "default")
@@ -324,10 +324,10 @@ async fn interrupting_claude_code_ends_the_turn_as_canceled() {
 /// clears the request without resuming the write.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn denying_a_permission_request_stops_the_tool_without_touching_disk() {
+    configure_claude_backend();
     let journey = Journey::start().await.expect("journey starts");
     real_only!(journey);
     needs_claude!(journey);
-    configure_claude_backend();
 
     let session = journey
         .session_with_model("claude", "default")
@@ -432,10 +432,10 @@ async fn denying_a_permission_request_stops_the_tool_without_touching_disk() {
 /// rather than passing quietly on nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_sub_agents_work_stays_inside_the_call_that_dispatched_it() {
+    configure_claude_backend();
     let journey = Journey::start().await.expect("journey starts");
     real_only!(journey);
     needs_claude!(journey);
-    configure_claude_backend();
 
     let session = journey
         .session_with_model("claude", "default")
@@ -609,6 +609,14 @@ async fn ready_claude(journey: &Journey) -> genehub_proto::AgentInfo {
 /// Without a host override, Claude Code uses its own backend configuration.
 /// Neither host configuration nor run artifacts receive credentials.
 fn configure_claude_backend() {
+    // The daemon may start CLI children during Journey::start; establish the
+    // real backend before that boundary, while mock runs remain isolated.
+    if !matches!(
+        genehub_testing::Mode::from_env(),
+        genehub_testing::Mode::Real
+    ) {
+        return;
+    }
     // Reuse an already configured backend without changing host settings or
     // copying credentials into run artifacts. Each case has its own process.
     if let Ok(home) = std::env::var("TESTCTL_HOST_HOME") {

@@ -15,6 +15,7 @@ defineJourney(
     expectedDurationMs: 20_000,
     timeoutMs: 60_000,
     surfaces: ["daemon", "workbench-client"],
+    requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
     productInterfaces: ["@genehub/workbench/client"],
   },
   async (t) => {

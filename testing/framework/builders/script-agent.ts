@@ -120,6 +120,8 @@ export interface ScriptAgentControl {
   usage?: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; llmRounds: number; tokenUsageStatus: "reported" | "partial" | "unavailable" };
   delayMs?: number;
   floods?: number;
+  /** Space flood events over time instead of one synchronous output burst. */
+  floodIntervalMs?: number;
   processTree?: boolean;
   /** The profile's fault fires once per state directory, then the Agent behaves normally. */
   once?: boolean;

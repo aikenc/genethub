@@ -288,7 +288,13 @@ pub fn convert_messages(
                         parts.push(json!({ "type": "text", "text": content }));
                     }
                     for attachment in attachments {
-                        let kind = media::kind(attachment)?;
+                        let kind = match media::kind(attachment) {
+                            Ok(kind) => kind,
+                            Err(_) => {
+                                parts.push(json!({ "type": "text", "text": media::unavailable_note(attachment) }));
+                                continue;
+                            }
+                        };
                         if Some(index) != latest_user
                             && !model.input_modalities.iter().any(|input| input == kind)
                         {
@@ -298,7 +304,18 @@ pub fn convert_messages(
                             }));
                             continue;
                         }
-                        let (kind, url) = media::data_url(model, cwd, attachment)?;
+                        // Preserve the existing hard error for unsupported model modalities.
+                        if !model.input_modalities.iter().any(|input| input == kind) {
+                            media::data_url(model, cwd, attachment)?;
+                        }
+                        let (kind, url) = match media::data_url(model, cwd, attachment) {
+                            Ok(media) => media,
+                            Err(error) => {
+                                eprintln!("attachment unavailable: {error:#}");
+                                parts.push(json!({ "type": "text", "text": media::unavailable_note(attachment) }));
+                                continue;
+                            }
+                        };
                         parts.push(if kind == "image" {
                             json!({ "type": "image_url", "image_url": { "url": url } })
                         } else {

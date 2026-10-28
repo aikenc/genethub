@@ -100,6 +100,10 @@ defineSpecialty({
           && context.data.authority.sessionId === sessionId && context.data.authority.grants?.includes("devices"),
         "the Agent lost its owner device capability or its authenticated session identity",
       );
+      const restricted = await t.flows.main.pairDevice(opened.client, opened.daemon, ["read"], "read-only");
+      try {
+        await t.assertions.expectProtocolCode(() => restricted.client.call({ type: "device.list" }), "forbidden");
+      } finally { restricted.client.close(); }
     });
   } finally {
     opened.client.close();

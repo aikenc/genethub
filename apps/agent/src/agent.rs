@@ -668,7 +668,7 @@ async fn stream_assistant(
                 http_status = Some(http.status);
                 retry_after_ms = http.retry_after_ms;
             }
-            Some(err.to_string())
+            Some(format!("{err:#}"))
         }
         Err(err) if aborted && err.is_cancelled() => None,
         Err(err) => Some(format!("provider task failed: {err}")),
@@ -907,9 +907,12 @@ fn fresh_attachments(
         .into_iter()
         .filter(|attachment| {
             !session.messages.iter().any(|message| match message {
-                Message::User { attachments, .. } => attachments
-                    .iter()
-                    .any(|existing| existing.path.is_some() && existing.path == attachment.path),
+                Message::User { attachments, .. } => attachments.iter().any(|existing| {
+                    (existing.path.is_some() && existing.path == attachment.path)
+                        || (existing.data_base64.is_some()
+                            && existing.mime == attachment.mime
+                            && existing.data_base64 == attachment.data_base64)
+                }),
                 _ => false,
             })
         })

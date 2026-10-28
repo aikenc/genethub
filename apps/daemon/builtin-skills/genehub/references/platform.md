@@ -74,7 +74,7 @@ WASM 里，没有原生回退。CLI `genet` 很薄，只把命令转给本机 da
 
 - **多机**：每台机器各自持有数据；`--machine <ID>` 把 shell、会话、`agent run`、文件下载派给持有资源的那台，
   而不是把数据搬过来。用法见同目录 [multi-machine.md](multi-machine.md)、[file-transfer.md](file-transfer.md)。
-- **预览**：工作区里的普通文件（HTML、Markdown、图片、视频、WASM）由所在机器的 daemon 读取，经加密通道送到
+- **预览**：源机器有效目录名单内的普通文件（HTML、Markdown、图片、视频、WASM）由 daemon 按机器与绝对路径定位；名单自动包含已登记项目根，也可配置补充目录，仍受当前连接与分享范围约束。文件经加密通道送到
   任意已授权设备，HTML 在无同源权限的沙箱里运行；创作软件的实时画面走登记服务与原生媒体。用法见 Skill `genehub-preview`。
 
 链接：[Asset Preview](https://github.com/aikenc/genethub/blob/main/docs/assets-quick-preview.md) ·

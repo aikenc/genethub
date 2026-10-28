@@ -29,7 +29,8 @@ const _: () = assert!(GLOBAL_PERMITS <= (u32::MAX >> 3) as usize);
 pub(crate) const CONNECTION_BYTES: usize = 20 * 1024 * 1024;
 // 4 MiB each for receive custody, replay log, queued writes and the bounded
 // 256 producer frames awaiting admission; progress buckets + the three
-// 16-record carrier queues fit in the remaining 4 MiB. Endpoint/actor queues
+// 16-record carrier queues plus the 1 MiB Fabric ingress queue fit in the
+// remaining 4 MiB. Endpoint/actor queues
 // transfer the same frame, and the endpoint's permit survives until custody.
 // This is a transmission-byte reservation, not a claim about allocator/RSS.
 

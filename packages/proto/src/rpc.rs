@@ -1007,6 +1007,10 @@ pub enum Request {
         relay_url: String,
         #[serde(default)]
         join_token: Option<String>,
+        /// Independent node uplinks, 1..4. Omission preserves one-channel access.
+        #[serde(default)]
+        #[ts(optional)]
+        channel_count: Option<u8>,
     },
     /// Stops being reachable from outside. Authorized devices stay authorized.
     #[serde(rename = "device.remoteDetach")]
@@ -1039,6 +1043,16 @@ pub enum Request {
     /// Creates a folder on the daemon machine (project picker, outside a workspace).
     #[serde(rename = "directory.mkdir", rename_all = "camelCase")]
     DirectoryMkdir { parent: String, name: String },
+
+    /// Effective machine directory allowlist. Paths remain on the authenticated peer.
+    #[serde(rename = "fileAccess.list")]
+    FileAccessList,
+    /// Replace only manually configured directories, with optimistic concurrency.
+    #[serde(rename = "fileAccess.configure", rename_all = "camelCase")]
+    FileAccessConfigure {
+        expected_revision: String,
+        additional_directories: Vec<String>,
+    },
 
     // -- files -------------------------------------------------------------
     #[serde(rename = "file.tree", rename_all = "camelCase")]
@@ -1237,6 +1251,7 @@ pub enum Reply {
     Workspace(WorkspaceInfo),
     Workspaces(Vec<WorkspaceInfo>),
     Directory(DirectoryListing),
+    FileAccess(FileAccessInfo),
     FileTree(FileNode),
     GitStatus(GitStatus),
     #[serde(rename_all = "camelCase")]
@@ -1516,4 +1531,22 @@ impl ServerFrame {
             payload: event,
         }
     }
+}
+
+/// A directory can have several registrations; removing one does not revoke others.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct FileAccessDirectory {
+    pub absolute_path: String,
+    pub workspace_ids: Vec<String>,
+    pub additional: bool,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct FileAccessInfo {
+    pub revision: String,
+    pub directories: Vec<FileAccessDirectory>,
+    pub additional_directories: Vec<String>,
 }

@@ -91,6 +91,11 @@ pub struct PeerHello {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub max_bulk_stream_window_bytes: Option<u32>,
+    /// Understands bounded encrypted Ping controls during logical admission.
+    /// Missing advertisements retain the legacy possession-proof sample.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub packet_pair_probe_supported: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -159,12 +164,16 @@ pub struct ExchangeResponseHead {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
+#[serde(tag = "kind", rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
-pub struct WorkspaceFileSource {
-    pub kind: WorkspaceFileSourceKind,
-    pub workspace_handle: String,
-    pub path: String,
+pub enum WorkspaceFileSource {
+    #[serde(rename_all = "camelCase")]
+    WorkspaceFile {
+        workspace_handle: String,
+        path: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    MachineFile { absolute_path: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -328,6 +337,14 @@ pub struct AssetPreviewMetadata {
     /// Stable enough to make a stale viewer response detectable without
     /// exposing an operating-system path.
     pub version: String,
+    /// Native absolute locator, returned only to machine-authorized peers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub absolute_path: Option<String>,
+    /// Opaque hash of the authenticated principal, for sandbox store isolation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub storage_scope: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub representation: Option<AssetPreviewRepresentation>,
@@ -358,8 +375,7 @@ mod tests {
     #[test]
     fn preview_source_has_exactly_one_mvp_kind() {
         let value = serde_json::to_value(AssetPreviewRequest {
-            source: WorkspaceFileSource {
-                kind: WorkspaceFileSourceKind::WorkspaceFile,
+            source: WorkspaceFileSource::WorkspaceFile {
                 workspace_handle: "w_one".into(),
                 path: "docs/readme.md".into(),
             },

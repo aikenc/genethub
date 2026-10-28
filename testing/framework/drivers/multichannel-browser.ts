@@ -15,7 +15,7 @@ import { allocatePort } from "../../infrastructure/public.ts";
  * The page uses the same Client as the workbench; the only browser fault seam
  * records native RTCPeerConnections and closes them without altering behavior.
  */
-export async function openMultichannelBrowser(t: CaseContext, mode: "rendezvous" | "hosted" = "rendezvous", browser = t.browser) {
+export async function openMultichannelBrowser(t: CaseContext, mode: "rendezvous" | "hosted" = "rendezvous", browser = t.browser, nodeChannels: 1 | 2 = 1) {
   if (!browser) throw new BlockedError("native Chromium WebRTC is required");
   let hub: Awaited<ReturnType<typeof startHub>> | undefined;
   let fabric: Awaited<ReturnType<typeof startFaultLink>> | undefined;
@@ -69,15 +69,17 @@ export async function openMultichannelBrowser(t: CaseContext, mode: "rendezvous"
       input = async () => {
         const response = await owner.fetch(`/app/machines/${machineId}/connect`, { method: "POST" });
         if (!response.ok) throw Object.assign(new Error(`public hosted connect failed: ${response.status}`), { status: response.status });
-        const ticket = await response.json() as { url: string; channelCapability: string; channelSecret: string; fabricRouteTicket: string; fabricRouteExpiresAt: string; fabricAuthorizationExpiresAt: string };
+        type Ticket = { url: string; channelCapability: string; channelSecret: string; fabricRouteTicket: string; fabricRouteExpiresAt: string; fabricAuthorizationExpiresAt: string; bulk?: Ticket };
+        const ticket = await response.json() as Ticket;
+        const dial = (t: Ticket) => ({url:t.url,channelCredential:{capabilityId:t.channelCapability,secret:t.channelSecret},fabricRouteTicket:t.fabricRouteTicket,fabricAuthorizationExpiresAt:t.fabricAuthorizationExpiresAt});
         issued++; expiresAt ??= ticket.fabricAuthorizationExpiresAt;
         leases.push({ receivedAt: Date.now(), expiresAt: ticket.fabricAuthorizationExpiresAt });
-        return { url: ticket.url, channelCredential: { capabilityId: ticket.channelCapability, secret: ticket.channelSecret }, fabricRouteTicket: ticket.fabricRouteTicket, fabricAuthorizationExpiresAt: ticket.fabricAuthorizationExpiresAt };
+        return { ...dial(ticket), ...(nodeChannels === 2 && ticket.bulk ? {bulk:dial(ticket.bulk)} : {}) };
       };
     } else {
       relay = await startRelay({ openRoot: t.openRoot });
       opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
-      const remote = await opened.client.call({ type: "device.remoteAttach", payload: { relayUrl: relay.origin, joinToken: relay.joinToken } });
+      const remote = await opened.client.call({ type: "device.remoteAttach", payload: { relayUrl: relay.origin, joinToken: relay.joinToken, ...(nodeChannels > 1 ? {channelCount:nodeChannels} : {}) } });
       if (remote?.type !== "remoteAccess" || !remote.data.rendezvousUrl) throw new Error("remote attachment failed");
       const url = remote.data.rendezvousUrl;
       await t.tools.waitUntil(async () => {

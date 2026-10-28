@@ -18,6 +18,7 @@ pub mod config;
 pub mod dataplane;
 pub mod devices;
 pub mod diagnostics;
+pub(crate) mod file_access;
 pub mod files;
 pub(crate) mod fs_cap;
 pub mod git;
@@ -190,7 +191,11 @@ impl Daemon {
 /// streaming its log) collapse into one list push per interval.
 async fn push_agent_changes(state: Shared) {
     use adapter::script::RegistryEvent;
+    use sha2::{Digest, Sha256};
     let mut events = state.registry.subscribe();
+    // Keep one fixed-size fingerprint, not another full catalog per peer.
+    // Request open/close events below retain their independent delivery.
+    let mut last_snapshot: Option<[u8; 32]> = None;
     loop {
         let event = match events.recv().await {
             Ok(event) => event,
@@ -228,6 +233,19 @@ async fn push_agent_changes(state: Shared) {
                     }
                 }
                 let agents = router::agent_infos(&state, false).await;
+                // Registry changes can yield the same public snapshot again.
+                // Repeated full catalogs compete with RPCs on every peer.
+                if let Ok(encoded) = serde_json::to_vec(&agents) {
+                    let fingerprint: [u8; 32] = Sha256::digest(&encoded).into();
+                    if last_snapshot == Some(fingerprint) {
+                        continue;
+                    }
+                    last_snapshot = Some(fingerprint);
+                } else {
+                    // Fingerprinting must not suppress the normal publication
+                    // path if serialization is unavailable.
+                    last_snapshot = None;
+                }
                 state.push(genehub_proto::ServerFrame::AgentsChanged { agents });
             }
         }

@@ -105,6 +105,8 @@ export interface InviteChannelCredential {
 }
 
 export interface ProtocolDial {
+  /** Independently admitted body carrier, advertised by the endpoint owner. */
+  bulk?: ProtocolDial;
   url: string;
   fabricRouteTicket?: string;
   fabricAuthorizationExpiresAt?: string;
@@ -138,6 +140,9 @@ export interface ClientDiagnosticEvent {
 }
 
 export interface ClientOptions {
+  /** Opt out when a deployment intentionally budgets one physical carrier. */
+  separateDataChannel?: boolean;
+  bulk?: ProtocolDial;
   url: string;
   redial?: (signal?: AbortSignal) => Promise<string | ProtocolDial>;
   clientName?: string;
@@ -287,6 +292,12 @@ function sessionOf(topic: string): string {
  * RPC, events and Preview each use independent E2EE logical streams.
  */
 export class Client {
+  private bodyOnly = false;
+  private bulkDial: ProtocolDial | undefined;
+  private bulkClient: Client | null = null;
+  private bulkReady: Promise<Client | null> | null = null;
+  private bulkRetryAt = 0;
+  private readonly bulkSubscriptions = new Map<string, symbol>();
   private socket: WebSocketLike | null = null;
   private fabricLink: FabricDataLink | null = null;
   private dialingTransport = false;
@@ -352,6 +363,7 @@ export class Client {
   identity: HelloResult | null = null;
 
   constructor(private readonly options: ClientOptions) {
+    this.bulkDial = options.separateDataChannel === false ? undefined : options.bulk;
     this.activeChannelCredential = options.channelCredential;
     this.authorizationExpiresAt = options.fabricAuthorizationExpiresAt;
     this.activeLocalServerProof = options.localServerProof;
@@ -390,6 +402,7 @@ export class Client {
   }
 
   setRtcEnabled(enabled: boolean): void {
+    this.bulkClient?.setRtcEnabled(enabled);
     if (this.rtcEnabled === enabled) return;
     this.rtcEnabled = enabled;
     if (!enabled) {
@@ -465,6 +478,9 @@ export class Client {
   close(): void {
     if (this.stopped && this.state === "closed") return;
     this.stopped = true;
+    this.bulkClient?.close();
+    this.bulkClient = null;
+    this.bulkSubscriptions.clear();
     this.renewalAbort?.abort();
     this.renewalAbort = null;
     this.redialGeneration += 1;
@@ -494,10 +510,17 @@ export class Client {
   }
 
   async call(request: Request): Promise<Reply | undefined> {
+    // Decide before opening an operation. A failed operation is never retried
+    // on another owner: it may already have executed on the daemon.
+    if (this.bulkDial && /^(file\.(read|write)|session\.(get|export|import))$/.test(request.type)) {
+      const body = await this.prepareDataChannel();
+      if (body !== this) return body.call(request);
+    }
     const operation = request.type;
     const id = diagnosticId("op");
     const queuedAt = this.now();
-    const bytes = encoder.encode(JSON.stringify(request)).byteLength;
+    const serializedRequest = JSON.stringify(request);
+    const bytes = encoder.encode(serializedRequest).byteLength;
     if (bytes > MAX_RPC_BODY_BYTES) {
       this.diagnostic("operation", {
         operation,
@@ -536,7 +559,10 @@ export class Client {
         id,
         operation,
         queuedAt,
-        request,
+        // Keep the admitted JSON and its byte charge together. Callers may
+        // reuse their object while this request waits for an execution slot.
+        // The negotiated protocol codec still runs when the call starts.
+        request: JSON.parse(serializedRequest) as Request,
         bytes,
         resolve,
         reject,
@@ -546,7 +572,7 @@ export class Client {
       this.pendingBytes += bytes;
       const endpoint = this.state === "ready" ? this.requestEndpoint() : null;
       const epoch = endpoint ? this.epoch : null;
-      if (endpoint && epoch) {
+      if (endpoint && epoch && this.canStartCall(pending)) {
         this.startCall(pending, endpoint, epoch);
       } else {
         pending.queueTimer = setTimeout(() => {
@@ -562,7 +588,7 @@ export class Client {
             queueMs: Math.round(this.now() - queuedAt),
             requestBytes: bytes,
           });
-          reject(new ClientRequestTimeoutError("the request waited too long for a connection"));
+          reject(new ClientRequestTimeoutError("the request waited too long for admission"));
         }, this.options.maxQueueAgeMs ?? 30_000);
         this.queue.push(pending);
       }
@@ -625,9 +651,13 @@ export class Client {
     if (representation !== "original" && !this.identity?.features?.includes("asset.preview.image.v1")) {
       throw new DataPlaneError("当前设备不支持图片缩略图预览");
     }
+    if (isMachinePath(path) && !this.identity?.features?.includes("asset.preview.machine-file.v1")) {
+      throw new DataPlaneError("当前设备尚不支持机器绝对路径预览，请更新源设备或使用原项目链接");
+    }
     const remaining = deadline - this.now();
     if (remaining <= 0) throw new ClientRequestTimeoutError("asset preview response head timed out");
-    const endpoint = this.requireReadyEndpoint();
+    const body = await this.prepareDataChannel();
+    const endpoint = body.requireReadyEndpoint();
     const requestId = diagnosticId("preview");
     const started = this.now();
     const transport = this.transportFor(endpoint);
@@ -642,7 +672,9 @@ export class Client {
       version: DATA_PLANE_VERSION,
       method: "asset.preview",
       metadata: {
-        source: { kind: "workspaceFile", workspaceHandle, path },
+        source: isMachinePath(path)
+          ? { kind: "machineFile", absolutePath: path }
+          : { kind: "workspaceFile", workspaceHandle, path },
         ...(representation !== "original" ? { representation } : {}),
         diagnosticId: requestId,
       },
@@ -826,7 +858,7 @@ export class Client {
     env?: Record<string, string>;
     timeoutMs?: number | null;
   }): DataStream {
-    return this.requireReadyEndpoint().open({
+    return (this.bulkClient?.connectionState === "ready" ? this.bulkClient : this).requireReadyEndpoint().open({
       version: DATA_PLANE_VERSION,
       method: "shell.run",
       metadata: {
@@ -844,6 +876,17 @@ export class Client {
     handlers: Pick<Subscription, "onEvent" | "onResync">,
     options: { expandLastRound?: boolean; recentRounds?: number } = {},
   ): Promise<{ snapshot: unknown; replayed: SequencedEvent[]; reset: boolean }> {
+    const body = this.bulkSubscriptions.has(sessionId) && this.bulkClient
+      ? this.bulkClient : this.subscriptions.has(sessionId) ? this : await this.prepareDataChannel();
+    if (body !== this) {
+      const attempt = Symbol("body-subscription");
+      this.bulkSubscriptions.set(sessionId, attempt);
+      try { return await body.subscribe(sessionId, handlers, options); }
+      catch (error) {
+        if (this.bulkSubscriptions.get(sessionId) === attempt) this.bulkSubscriptions.delete(sessionId);
+        throw error;
+      }
+    }
     const subscription: Subscription = {
       seq: 0,
       ...handlers,
@@ -876,13 +919,77 @@ export class Client {
   }
 
   async unsubscribe(sessionId: string): Promise<void> {
+    if (this.bulkSubscriptions.delete(sessionId)) {
+      await this.bulkClient?.unsubscribe(sessionId);
+      return;
+    }
     const subscription = this.subscriptions.get(sessionId);
+    if (!subscription) return;
     if (subscription?.retry != null) clearTimeout(subscription.retry);
     this.subscriptions.delete(sessionId);
     await this.call({ type: "unsubscribe", payload: { sessionId } });
   }
 
+  /** Warm the advertised data lane. Admission is best effort and globally bounded. */
+  async prepareDataChannel(): Promise<Client> {
+    if (this.stopped || this.state !== "ready" || !this.identity || !this.bulkDial || this.options.separateDataChannel === false) return this;
+    if (this.bulkClient?.connectionState === "ready") return this.bulkClient;
+    if (this.bulkReady) return (await this.bulkReady) ?? this;
+    // A recovering owner retains its streams. Do not replace it with a fresh
+    // owner or replay its operations simply because admission is slow.
+    if (this.bulkClient || this.now() < this.bulkRetryAt) return this;
+    const dial = this.bulkDial;
+    let dataAttempt = 0;
+    const child = new Client({
+      ...this.options, ...dial, bulk: undefined, separateDataChannel: false, rtcEnabled: this.rtcEnabled,
+      redial: async (signal) => {
+        const next = this.options.redial ? await this.options.redial(signal) : { url: this.options.url };
+        const fresh = typeof next === "string" ? { url: next } : next;
+        if (fresh.bulk) return { ...fresh.bulk, bulk: undefined };
+        // Reattach the SAME logical owner on another admitted carrier. This
+        // never resends a shell/RPC and never strips a required credential.
+        // Paired routes alternate so a removed tail cannot strand the body.
+        if (dial.fabricRouteTicket || ++dataAttempt % 2 === 1) {
+          this.diagnostic("transport", { phase: "data-node-fallback", cause: "preferred-node-unavailable" });
+          return { ...fresh, bulk: undefined };
+        }
+        return { ...dial, bulk: undefined };
+      },
+      onDiagnostic: (event) => this.options.onDiagnostic?.({ ...event, detail: { ...event.detail, lane: "body" } }),
+    });
+    child.bodyOnly = true;
+    this.bulkClient = child;
+    this.bulkReady = new Promise<Client | null>((resolve) => {
+      let finished = false;
+      let stop = () => {};
+      const finish = (ready: boolean) => {
+        if (finished) return;
+        finished = true; clearTimeout(timer); stop();
+        if (!ready) {
+          child.close();
+          if (this.bulkClient === child) this.bulkClient = null;
+          if (!this.stopped) {
+            this.bulkRetryAt = this.now() + 60_000;
+            this.diagnostic("transport", { phase: "data-fallback", cause: "admission-unavailable" });
+          }
+        }
+        resolve(ready ? child : null);
+      };
+      const timer = setTimeout(() => finish(false), 3000);
+      stop = child.onStateChange((state) => {
+        if (state === "ready") {
+          // A second route must terminate on the same authenticated machine.
+          finish(!this.stopped && !!this.identity && child.identity?.machineId === this.identity.machineId && child.identity?.fingerprint === this.identity.fingerprint);
+        } else if (state === "closed") finish(false);
+      });
+      child.connect();
+    });
+    try { return (await this.bulkReady) ?? this; }
+    finally { this.bulkReady = null; }
+  }
+
   private dial(dial: ProtocolDial): void {
+    if (Object.hasOwn(dial, "bulk") && this.options.separateDataChannel !== false) this.bulkDial = dial.bulk;
     if (
       this.endpoint?.state === "open" &&
       this.endpoint.logicalId !== null &&
@@ -987,6 +1094,7 @@ export class Client {
         ? { socketFactory: this.options.socketFactory as unknown as (url: string) => import("../fabric").FabricSocketLike }
         : {}),
       onError: (error) => this.report(error),
+      onDiagnostic: this.options.onDiagnostic ? detail => this.diagnostic("transport", detail) : undefined,
     }).then(
       async (link) => {
         if (!this.finishFabricDial(epoch)) {
@@ -1015,7 +1123,9 @@ export class Client {
       (error: unknown) => {
         if (!this.finishFabricDial(epoch)) return;
         this.report(error);
-        this.droppedTransport(epoch, undefined, Boolean(previous));
+        // A transient route/admission failure does not prove SessionLost.
+        // Authenticated SessionLost already closes the old endpoint itself.
+        this.droppedTransport(epoch);
       },
     );
   }
@@ -1082,6 +1192,7 @@ export class Client {
       maxBulkStreamWindowBytes: handshake.maxBulkStreamWindowBytes,
       maxReceiveBytesPerStream: 64 * 1024 * 1024,
       onError: (error) => this.report(error),
+      onDiagnostic: this.options.onDiagnostic ? detail => this.diagnostic("transport", detail) : undefined,
     });
     this.endpoint = endpoint;
     this.bindEndpoint(endpoint, epoch);
@@ -1157,12 +1268,16 @@ export class Client {
     this.verifyIdentity(identity.data);
     if (!this.isCurrentEpoch(epoch) || this.endpoint !== endpoint) return;
     this.identity = identity.data;
+    if (!this.bulkDial && identity.data.transport === "forwarded" && this.options.credential && identity.data.dataChannelUrl && this.options.separateDataChannel !== false) {
+      this.bulkDial = { url: identity.data.dataChannelUrl };
+    }
     this.failure = null;
     // Completing E2EE proves identity, but not that the carrier is healthy.
     // A relay that kills every fresh channel must keep escalating backoff
     // instead of returning to a one-second reconnect loop after each Hello.
     this.markStableAfterGrace();
     this.setState("ready");
+    void this.prepareDataChannel();
     this.scheduleHeartbeat();
     this.flushQueue(endpoint, epoch);
     void this.runEvents(endpoint, epoch);
@@ -1269,6 +1384,8 @@ export class Client {
       .finally(() => {
         this.active.delete(pending);
         this.release(pending);
+        const next = this.state === "ready" ? this.requestEndpoint() : null;
+        if (next && this.epoch) this.flushQueue(next, this.epoch);
       });
   }
 
@@ -1518,14 +1635,42 @@ export class Client {
     subscription.retryDelay = Math.min(5_000, subscription.retryDelay * 2);
   }
 
-  private flushQueue(_endpoint: DataEndpoint, epoch: symbol): void {
-    for (const pending of this.queue.splice(0)) {
-      const endpoint = this.requestEndpoint();
-      if (endpoint) this.startCall(pending, endpoint, epoch);
-      else {
-        this.release(pending);
-        pending.reject(new DataPlaneError("the peer is not ready"));
+  private isManagementCall(pending: PendingCall): boolean {
+    return ["workspace.list", "session.list", "connection.identity"].includes(pending.operation);
+  }
+
+  private canStartCall(pending: PendingCall): boolean {
+    // Bound the request burst before it acquires ordered replay sequences.
+    // Leave two slots for small directory reads while task starts are queued.
+    if (this.active.size >= 8) return false;
+    const request = pending.request;
+    if (request.type === "subscribe" || request.type === "unsubscribe") {
+      const sessionId = request.payload.sessionId;
+      const sameSession = (other: PendingCall) => {
+        const next = other.request;
+        return (next.type === "subscribe" || next.type === "unsubscribe") && next.payload.sessionId === sessionId;
+      };
+      // These RPCs change one server-side consumer. Await its previous reply
+      // before canceling or replacing it; independent streams can otherwise
+      // register an old subscription after its cancellation has completed.
+      if ([...this.active].some(sameSession)) return false;
+      for (const queued of this.queue) {
+        if (queued === pending) break;
+        if (sameSession(queued)) return false;
       }
+    }
+    return this.isManagementCall(pending) ||
+      [...this.active].filter(call => !this.isManagementCall(call)).length < 6;
+  }
+
+  private flushQueue(_endpoint: DataEndpoint, epoch: symbol): void {
+    while (this.queue.length && this.state === "ready" && this.epoch === epoch) {
+      const endpoint = this.requestEndpoint();
+      if (!endpoint) return;
+      const index = this.queue.findIndex(pending => this.canStartCall(pending));
+      if (index < 0) return;
+      const [pending] = this.queue.splice(index, 1);
+      this.startCall(pending!, endpoint, epoch);
     }
   }
 
@@ -1745,8 +1890,15 @@ export class Client {
       }
     } catch (error) {
       if (this.epoch !== epoch || this.stopped) return;
-      if (error instanceof ClientRequestTimeoutError) this.reconnectCause = "heartbeat-timeout";
       this.report(error);
+      if (error instanceof ClientRequestTimeoutError) {
+        // An application response can wait behind DATA or receive custody.
+        // Authenticated per-channel probes own physical liveness; an RPC
+        // deadline alone must not dismantle a carrier that still progresses.
+        this.diagnostic("connection", { state: this.state, phase: "application-heartbeat-delayed" });
+        if (this.state === "ready") this.scheduleHeartbeat();
+        return;
+      }
       // Fail only the probed physical path. The logical owner authenticates
       // and synchronizes its standby before attempting an external redial.
       endpoint.failActivePath(error);
@@ -1846,6 +1998,7 @@ export class Client {
       this.setRtcState("standby");
       return;
     }
+    if (this.bodyOnly) return this.startBodyRtc(base, epoch);
     const generation = ++this.rtcGeneration;
     this.rtcNegotiating = true;
     const requestId = diagnosticId("rtc");
@@ -1993,6 +2146,38 @@ export class Client {
     } finally {
       if (generation === this.rtcGeneration) this.rtcNegotiating = false;
     }
+  }
+
+  /** A data companion upgrades its existing owner, without a service-preview owner. */
+  private async startBodyRtc(base: DataEndpoint, epoch: symbol): Promise<void> {
+    const generation = ++this.rtcGeneration;
+    this.rtcNegotiating = true;
+    this.setRtcState("connecting");
+    const started = this.now();
+    const previous = this.dataRtcLink;
+    try {
+      const factory = this.options.rtcFactory ?? openRtcDataLink;
+      const link = await factory(base, diagnosticId("rtc-body"), detail => this.diagnostic("rtc", { channelRole: "body", ...detail }), { endpoint: base });
+      if (generation !== this.rtcGeneration || this.stopped || this.endpoint !== base || this.epoch !== epoch) { link.close(); return; }
+      if (link.endpoint !== base) { link.close(); throw new DataPlaneError("RTC provider did not retain the body owner"); }
+      this.dataRtcLink = link;
+      previous?.close();
+      this.rtcFailures = 0;
+      this.rtcPaused = false;
+      this.rtcRetryDelay = 1000;
+      this.rtcFailure_ = null;
+      this.setRtcState("connected");
+    } catch (error) {
+      if (generation !== this.rtcGeneration || this.stopped || this.endpoint !== base) return;
+      this.report(error);
+      this.rtcFailure_ = { phase: rtcPhaseOf(error), message: error instanceof Error ? error.message : String(error), durationMs: Math.round(this.now() - started) };
+      this.setRtcState(base.activePath === "rtc" ? "connected" : "failed");
+      this.rtcFailures += 1;
+      if (this.rtcFailures >= 3) {
+        this.rtcPaused = true;
+        this.diagnostic("rtc", { phase: "paused", outcome: "failed" });
+      } else this.scheduleRtcRetry();
+    } finally { if (generation === this.rtcGeneration) this.rtcNegotiating = false; }
   }
 
   private scheduleRtcRetry(): void {
@@ -2328,6 +2513,9 @@ function errorName(error: unknown): string {
 /** Only stable opaque ids and workspace-relative paths leave request payloads. */
 function diagnosticContext(request: Request): ClientDiagnosticDetail {
   switch (request.type) {
+    case "subscribe":
+    case "unsubscribe":
+      return { sessionId: request.payload.sessionId };
     case "file.tree":
     case "file.write":
     case "git.diff":
@@ -2473,7 +2661,7 @@ function previewErrorMessage(error: AssetPreviewError, sourceBytes?: number): st
     case "notFound":
       return "找不到这个文件";
     case "forbidden":
-      return "这个路径不在当前工作区内";
+      return "当前连接的可访问目录或分享授权不包含这个文件";
     case "unsupported":
       return "这种文件暂不支持预览";
     case "tooLarge":
@@ -2488,3 +2676,5 @@ function previewErrorMessage(error: AssetPreviewError, sourceBytes?: number): st
 function rtcAvailableHere(): boolean {
   return typeof globalThis.RTCPeerConnection === "function";
 }
+
+function isMachinePath(path: string): boolean { return path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path); }

@@ -21,6 +21,7 @@ type Props = {
   hidden?: boolean;
   sessionOnly?: boolean;
   onPickTarget?(target: Target, endpoint: Endpoint): void;
+  onOpenOverview?(): void;
   onNavigate(): void;
 };
 /** Device changes discard selection and editing state, never retarget queued actions. */
@@ -29,13 +30,14 @@ export function ConversationList(props: Props) {
   return <ConversationListContent key={machine} {...props} machine={machine} />;
 }
 
-function ConversationListContent({ host, endpoint, open, hidden, onNavigate, machine }: Props & { machine: string }) {
+function ConversationListContent({ host, endpoint, open, hidden, onNavigate, onOpenOverview, machine }: Props & { machine: string }) {
   const wb = useWorkbench();
   const activity = useAgentActivities();
   useConversationLocalChanges();
   const [query, setQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [listMenuOpen, setListMenuOpen] = useState(false);
+  const listMenuTrigger = useRef<HTMLButtonElement>(null);
   const [agentId, setAgentId] = useState(() => localValue<string>(`agent-filter-view:${machine}`) ?? "");
   useEffect(() => { if (machine) saveLocalValue(`agent-filter-view:${machine}`, agentId); }, [machine, agentId]);
   const selectedWorkspace = wb.workspaces.find((w) => w.id === agentId);
@@ -141,7 +143,7 @@ function ConversationListContent({ host, endpoint, open, hidden, onNavigate, mac
         </ListToolbar>
         <FilterBar<AttentionFilter> label="会话状态工具栏" options={attentionFilters} value={state} onChange={setState} actions={<>
           <button type="button" aria-label="会话筛选" aria-expanded={advanced} className={`flex h-9 w-8 shrink-0 items-center justify-center ${agentId || ownership !== "all" ? "text-accent" : "text-muted"}`} onClick={() => setAdvanced(true)}><ListFilter size={16} /></button>
-          <button type="button" aria-label="会话列表选项" aria-expanded={listMenuOpen} className="flex h-9 w-8 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-raised" onClick={() => setListMenuOpen(!listMenuOpen)}><MoreHorizontal size={20} /></button>
+          <button ref={listMenuTrigger} type="button" aria-label="会话列表选项" aria-expanded={listMenuOpen} className="flex h-9 w-8 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-raised" onClick={() => setListMenuOpen(!listMenuOpen)}><MoreHorizontal size={20} /></button>
         </>} />
         {searchOpen && <ListSearch label="搜索会话" value={query} onChange={setQuery} onClose={() => { setSearchOpen(false); setQuery(""); }}/>}
         {wb.includeArchived && state !== "pending" && state !== "running" && <div className="flex items-center justify-between text-xs text-muted"><span>已归档会话</span><button className="min-h-9 px-2 text-accent" onClick={() => { useWorkbench.setState({includeArchived: false}); void wb.refreshSessions(); }}>返回当前会话</button></div>}
@@ -150,6 +152,7 @@ function ConversationListContent({ host, endpoint, open, hidden, onNavigate, mac
       {listMenuOpen && <>
         <button type="button" aria-label="收起会话列表选项" className="fixed inset-0 z-40 cursor-default" onClick={() => setListMenuOpen(false)} />
         <div role="menu" aria-label="会话列表选项" className="absolute right-3 top-full z-50 w-40 rounded-xl border border-line bg-surface p-1 shadow-xl" onKeyDown={(e) => { if (e.key === "Escape") setListMenuOpen(false); }}>
+          {onOpenOverview && <button type="button" role="menuitem" className="min-h-11 w-full rounded-lg px-3 text-left text-sm hover:bg-raised" onClick={()=>{listMenuTrigger.current?.focus();setListMenuOpen(false);onOpenOverview();}}>跨设备项目与会话</button>}
           <button type="button" role="menuitem" className="min-h-11 w-full rounded-lg px-3 text-left text-sm hover:bg-raised" onClick={() => { setListMenuOpen(false); setSearchOpen(true); }}>搜索会话</button>
           <button type="button" role="menuitem" disabled={busy} className="min-h-11 w-full rounded-lg px-3 text-left text-sm hover:bg-raised" onClick={() => { setListMenuOpen(false); setManaging(!managing); setSelected(new Set()); }}>{managing ? "结束管理" : "管理列表"}</button>
           <button type="button" role="menuitem" disabled={busy} className="min-h-11 w-full rounded-lg px-3 text-left text-sm hover:bg-raised" onClick={() => { setListMenuOpen(false); setState("all"); useWorkbench.setState({includeArchived: !wb.includeArchived}); void wb.refreshSessions(); }}>{wb.includeArchived ? "当前会话" : "已归档列表"}</button>

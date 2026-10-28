@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 import { join, dirname } from "node:path";
 import type { Page } from "playwright";
 import type { EnvironmentLease } from "../../infrastructure/public.ts";
-import type { DaemonEndpoint } from "./daemon.ts";
+import type { ProtocolDial } from "@genehub/workbench/client";
 
 /** Real package consumer, compiled by the product's Vite installation. No UI
  * replacements: AssetPreviewPage owns its normal iframe, bridge and media UI. */
@@ -13,10 +13,12 @@ export async function openPreviewBrowser(input: {
   openRoot: string;
   lease: EnvironmentLease;
   page: Page;
-  endpoint: DaemonEndpoint;
-  refreshEndpoint?: () => DaemonEndpoint;
+  endpoint: ProtocolDial;
+  refreshEndpoint?: () => ProtocolDial;
   workspaceId: string;
+  workspaceLabel?: string;
   entryPath: string;
+  contentSecurityPolicy?: string;
   surface?: "preview" | "processes" | "client-debug";
 }) {
   const errors: string[] = [];
@@ -54,7 +56,11 @@ if(input.surface==='client-debug'){
 }else if(input.surface==='processes'){
  const host={...browserHost(),endpoint:async()=>({...((await window.previewInput()).endpoint),via:'loopback'})};
  createRoot(document.getElementById('root')).render(<App host={host}/>);
- while(useWorkbench.getState().connection!=='ready'||useWorkbench.getState().activeWorkspaceId!==input.workspaceId||(!useWorkbench.getState().draft&&!useWorkbench.getState().activeSessionId))await new Promise(r=>setTimeout(r,50));
+ while(useWorkbench.getState().connection!=='ready'){
+  const state=useWorkbench.getState();
+  window.previewAppStartup={connection:state.connection,workspaceReady:state.activeWorkspaceId===input.workspaceId,hasDraft:!!state.draft,hasSession:!!state.activeSessionId};
+  await new Promise(r=>setTimeout(r,50));
+ }
  window.previewAppReady=true;
 }else{
  const client=new Client({...input.endpoint,rtcEnabled:false});client.connect();
@@ -100,6 +106,7 @@ if(input.surface==='client-debug'){
       host: "127.0.0.1",
       port: 0,
       fs: { allow: [root, input.openRoot] },
+      ...(input.contentSecurityPolicy ? {headers: {"Content-Security-Policy": input.contentSecurityPolicy}} : {}),
     },
   });
   await server.listen();
@@ -118,9 +125,25 @@ if(input.surface==='client-debug'){
     entryPath: input.entryPath,
     surface: input.surface,
   }));
-  await input.page.goto(server.resolvedUrls.local[0]);
+  try {
+    // Readiness belongs to the page assertions; waiting for every subresource
+    // also waits for nested preview work and makes cold parallel Vite builds
+    // look like navigation failures. The case deadline still bounds startup.
+    await input.page.goto(server.resolvedUrls.local[0], {waitUntil: "domcontentloaded", timeout: 45_000});
+  } catch (error) { await server.close(); throw error; }
   if (input.surface === "processes") {
-    await input.page.waitForFunction(() => (window as any).previewAppReady === true, null, { timeout: 30000 });
+    await input.page.waitForFunction(() => (window as any).previewAppReady === true, null, { timeout: 30000 }).catch(async error => {
+      const startup = await input.page.evaluate(() => (window as any).previewAppStartup ?? null);
+      throw new Error(`process consumer readiness: ${error instanceof Error ? error.message : String(error)}; ${JSON.stringify({ startup, errors: errors.slice(-4).map(e => e.slice(0, 300)), body: (await input.page.locator('body').innerText()).slice(-1500) })}`);
+    });
+    // The workbench lands on all conversations. Select the target project
+    // through its real UI instead of assuming an automatically opened draft.
+    if (!input.workspaceLabel) throw new Error("process preview requires its target workspace label");
+    const projectNavigation = input.page.getByRole("navigation", { name: "工作台导航", exact: true });
+    if (!(await projectNavigation.isVisible())) await input.page.getByRole("button", { name: /^(会话列表|返回)$/ }).first().click();
+    await projectNavigation.getByRole("button", { name: "项目", exact: true }).click();
+    await input.page.getByRole("button", { name: input.workspaceLabel, exact: true }).click();
+    await input.page.getByRole("region", { name: "项目页面", exact: true }).getByRole("heading", { name: input.workspaceLabel, exact: true }).waitFor({ timeout: 30000 });
     const menu = input.page.getByRole("button", { name: "此电脑的后台进程", exact: true });
     if (!(await menu.isVisible())) {
       // Global tools now live in the workbench navigation's Settings page.

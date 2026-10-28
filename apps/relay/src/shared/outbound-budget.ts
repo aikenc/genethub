@@ -6,9 +6,9 @@ interface SocketAccount {
 }
 
 /**
- * One process-wide bound for payloads handed to `ws.send` but not yet
- * acknowledged by its callback. The same instance must be shared by every
- * forwarding surface in a Relay process.
+ * One process-wide bound for waiting forwards and payloads handed to
+ * `ws.send` but not yet acknowledged by its callback. Every forwarding
+ * surface in a Relay process shares the same instance.
  *
  * A socket also has its own tracked allowance. `bufferedAmount` remains part
  * of that check so bytes queued by the WebSocket implementation cannot hide
@@ -39,6 +39,20 @@ export class OutboundByteBudget {
 
   get bytes(): number {
     return this.usedBytes;
+  }
+
+  /** Waiting forwards share the process limit with actual socket writes. */
+  reservePending(bytes: number): (() => void) | null {
+    if (!Number.isSafeInteger(bytes) || bytes < 0) return null;
+    const charge = Math.max(bytes, this.minimumChargeBytes);
+    if (charge > this.globalLimit - this.usedBytes) return null;
+    this.usedBytes += charge;
+    let active = true;
+    return () => {
+      if (!active) return;
+      active = false;
+      this.usedBytes -= charge;
+    };
   }
 
   /** Returns an idempotent release, or null without changing either budget. */

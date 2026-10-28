@@ -3,6 +3,7 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use genehub_proto::FileNode;
@@ -155,6 +156,19 @@ pub struct PreviewFile {
     pub metadata: AssetPreviewMetadata,
     source: PreviewSource,
     expected_digest: [u8; 32],
+    pub(crate) scan_timings: PreviewScanTimings,
+}
+
+/// Cumulative first-pass timings; diagnostic only, never used for admission.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct PreviewScanTimings {
+    pub open_us: u64,
+    pub read_us: u64,
+    pub hash_us: u64,
+    pub probe_us: u64,
+    pub snapshot_us: u64,
+    pub yield_us: u64,
+    pub steps: u64,
 }
 
 impl PreviewFile {
@@ -169,7 +183,7 @@ static PREVIEW_SNAPSHOT_BUDGET: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
 #[derive(Debug)]
 pub(crate) enum PreviewSource {
-    File(std::fs::File),
+    File(crate::fs_cap::PreviewReader),
     Snapshot {
         bytes: std::io::Cursor<Vec<u8>>,
         _budget: OwnedSemaphorePermit,
@@ -244,55 +258,86 @@ pub async fn preview(
     root: &Path,
     relative_path: &str,
 ) -> std::result::Result<PreviewFile, PreviewFailure> {
+    let diagnostic =
+        tracing::enabled!(target: "genet_daemon::dataplane::preview", tracing::Level::DEBUG);
+    let timer = || diagnostic.then(Instant::now);
+    let elapsed =
+        |started: Option<Instant>| started.map_or(0, |at| at.elapsed().as_micros() as u64);
+    let mut scan_timings = PreviewScanTimings::default();
+    let opened = timer();
     validate_preview_path(relative_path)?;
-    let directory = workspace_dir(root).map_err(|_| PreviewFailure::Forbidden)?;
     let relative = Path::new(relative_path);
-    let file = directory.open(relative).map_err(map_preview_io)?;
-    let before = file.metadata().map_err(map_preview_io)?;
-    if !before.is_file() {
+    let (mut source, source_size, regular) =
+        crate::fs_cap::open_preview(root, relative).map_err(map_preview_io)?;
+    scan_timings.open_us = elapsed(opened);
+    if !regular {
         return Err(PreviewFailure::Unsupported);
     }
-    if before.len() > genehub_proto::MAX_PREVIEW_SOURCE_BYTES as u64 {
+    if source_size > genehub_proto::MAX_PREVIEW_SOURCE_BYTES as u64 {
         return Err(PreviewFailure::TooLarge {
-            source_bytes: before.len(),
+            source_bytes: source_size,
         });
     }
-    let mut source = file.into_std();
-    let snapshot_budget = if before.len() <= PREVIEW_SNAPSHOT_FILE_BYTES as u64 {
+    let snapshot_budget = if source_size <= PREVIEW_SNAPSHOT_FILE_BYTES as u64 {
         PREVIEW_SNAPSHOT_BUDGET
             .get_or_init(|| Arc::new(Semaphore::new(PREVIEW_SNAPSHOT_BUDGET_BYTES)))
             .clone()
-            .try_acquire_many_owned(before.len().max(1) as u32)
+            .try_acquire_many_owned(source_size.max(1) as u32)
             .ok()
     } else {
         None
     };
     let mut snapshot = snapshot_budget
         .as_ref()
-        .map(|_| Vec::with_capacity(before.len() as usize));
+        .map(|_| Vec::with_capacity(source_size as usize));
     let mut hasher = Sha256::new();
     let mut probe = PreviewProbe::default();
     let mut step = vec![0u8; PREVIEW_STEP_BYTES];
     let scan_limit = genehub_proto::MAX_PREVIEW_SOURCE_BYTES + 1;
     let mut source_bytes = 0usize;
+    let mut work_step_bytes = 0usize;
     while source_bytes < scan_limit {
         let remaining = scan_limit - source_bytes;
+        let reading = timer();
         let read = source
-            .read(&mut step[..remaining.min(PREVIEW_STEP_BYTES)])
+            .read(&mut step[..remaining.min(PREVIEW_STEP_BYTES - work_step_bytes)])
             .map_err(map_preview_io)?;
+        scan_timings.read_us += elapsed(reading);
         if read == 0 {
             break;
         }
-        if snapshot.is_some() && source_bytes + read > before.len() as usize {
+        if snapshot.is_some() && source_bytes + read > source_size as usize {
             return Err(PreviewFailure::SourceChanged);
         }
+        let hashing = timer();
         hasher.update(&step[..read]);
+        scan_timings.hash_us += elapsed(hashing);
+        let probing = timer();
         probe.update(&step[..read]);
+        scan_timings.probe_us += elapsed(probing);
+        let copying = timer();
         if let Some(bytes) = snapshot.as_mut() {
             bytes.extend_from_slice(&step[..read]);
         }
+        scan_timings.snapshot_us += elapsed(copying);
+        scan_timings.steps += 1;
         source_bytes += read;
+        work_step_bytes += read;
+        // WASI may return less than the requested buffer (often 64KiB).
+        // Yield after one bounded work step, rather than after each short read.
+        // The next read is capped to the remaining step, so this never runs
+        // more than PREVIEW_STEP_BYTES of synchronous work between yields.
+        if work_step_bytes == PREVIEW_STEP_BYTES {
+            let yielding = timer();
+            crate::blocking::breathe().await;
+            scan_timings.yield_us += elapsed(yielding);
+            work_step_bytes = 0;
+        }
+    }
+    if work_step_bytes > 0 {
+        let yielding = timer();
         crate::blocking::breathe().await;
+        scan_timings.yield_us += elapsed(yielding);
     }
     if source_bytes > genehub_proto::MAX_PREVIEW_SOURCE_BYTES {
         return Err(PreviewFailure::TooLarge {
@@ -303,7 +348,7 @@ pub async fn preview(
     // complete file into a prefix. Length catches the portable, meaningful
     // race; the hash taken as it was read makes the successful response version
     // exact.
-    if source_bytes as u64 != before.len() {
+    if source_bytes as u64 != source_size {
         return Err(PreviewFailure::SourceChanged);
     }
     let (kind, media_type) = preview_type(relative, probe.prefix(), probe.is_text())?;
@@ -327,12 +372,15 @@ pub async fn preview(
             media_type: media_type.to_string(),
             source_bytes: source_bytes as u64,
             version,
+            absolute_path: None,
+            storage_scope: None,
             representation: None,
             width: None,
             height: None,
         },
         source,
         expected_digest: digest,
+        scan_timings,
     })
 }
 
@@ -644,10 +692,6 @@ fn copy_recursive(directory: &Dir, from: &Path, to: &Path) -> Result<()> {
         return Ok(());
     }
     anyhow::bail!("unsupported file type: {}", from.display())
-}
-
-fn workspace_dir(root: &Path) -> Result<crate::fs_cap::Dir> {
-    crate::fs_cap::open_workspace_root(root)
 }
 
 fn workspace_relative(root: &Path, path: &Path) -> Result<PathBuf> {

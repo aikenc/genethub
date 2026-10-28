@@ -189,3 +189,202 @@ pub fn open_workspace_root(root: &Path) -> Result<Dir> {
             .with_context(|| format!("opening workspace root {}", root.display()))
     }
 }
+
+#[cfg(not(target_family = "wasm"))]
+pub(crate) type PreviewReader = std::fs::File;
+
+/// Open the source once under a directory capability. The returned descriptor
+/// owns metadata, hashing and streaming; callers never reopen an ambient path.
+#[cfg(not(target_family = "wasm"))]
+pub(crate) fn open_preview(
+    root: &Path,
+    relative: &Path,
+) -> std::io::Result<(PreviewReader, u64, bool)> {
+    let directory = open_workspace_root(root).map_err(std::io::Error::other)?;
+    let mut options = cap_std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        // A raced FIFO must not block before the regular-file check below.
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = directory.open_with(relative, &options)?;
+    let metadata = file.metadata()?;
+    Ok((file.into_std(), metadata.len(), metadata.is_file()))
+}
+
+/// Enumerate a legacy feedback store under its registered project capability.
+/// A replaced ancestor cannot turn migration into an ambient disk scan.
+#[cfg(not(target_family = "wasm"))]
+pub(crate) fn preview_entries(
+    root: &Path,
+    relative: &Path,
+) -> std::io::Result<Vec<(String, bool)>> {
+    let directory = open_workspace_root(root).map_err(std::io::Error::other)?;
+    let mut names = Vec::new();
+    for entry in directory.read_dir(relative)? {
+        let entry = entry?;
+        if names.len() >= 100_000 {
+            return Err(std::io::Error::other("too many feedback entries"));
+        }
+        let kind = entry.file_type()?;
+        if kind.is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "legacy feedback contains a link",
+            ));
+        }
+        if kind.is_dir() || kind.is_file() {
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| std::io::Error::other("non-UTF8 feedback name"))?;
+            names.push((name, kind.is_dir()));
+        }
+    }
+    Ok(names)
+}
+
+#[cfg(target_family = "wasm")]
+pub(crate) fn preview_entries(
+    root: &Path,
+    relative: &Path,
+) -> std::io::Result<Vec<(String, bool)>> {
+    use wasi::filesystem::types::DescriptorType;
+    let (reader, _, _) = open_preview(root, relative)?;
+    let entries = reader.descriptor.read_directory().map_err(wasi_io)?;
+    let mut names = Vec::new();
+    while let Some(entry) = entries.read_directory_entry().map_err(wasi_io)? {
+        if entry.name == "." || entry.name == ".." {
+            continue;
+        }
+        if names.len() >= 100_000 {
+            return Err(std::io::Error::other("too many feedback entries"));
+        }
+        if entry.type_ == DescriptorType::SymbolicLink {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "legacy feedback contains a link",
+            ));
+        }
+        if matches!(
+            entry.type_,
+            DescriptorType::Directory | DescriptorType::RegularFile
+        ) {
+            names.push((entry.name, entry.type_ == DescriptorType::Directory));
+        }
+    }
+    Ok(names)
+}
+
+/// WASI's ambient std::fs starts at the whole-volume preopen. Hold each child
+/// directory descriptor instead, and never follow a symlink while descending.
+/// This closes the check/open race even when a directory is replaced mid-read.
+#[cfg(target_family = "wasm")]
+#[derive(Debug)]
+pub(crate) struct PreviewReader {
+    descriptor: wasi::filesystem::types::Descriptor,
+    offset: u64,
+    length: u64,
+}
+
+#[cfg(target_family = "wasm")]
+fn wasi_io(error: wasi::filesystem::types::ErrorCode) -> std::io::Error {
+    use wasi::filesystem::types::ErrorCode;
+    let kind = match error {
+        ErrorCode::NoEntry => std::io::ErrorKind::NotFound,
+        ErrorCode::Access | ErrorCode::NotPermitted | ErrorCode::Loop => {
+            std::io::ErrorKind::PermissionDenied
+        }
+        _ => std::io::ErrorKind::Other,
+    };
+    std::io::Error::new(kind, format!("capability file open: {error:?}"))
+}
+
+#[cfg(target_family = "wasm")]
+pub(crate) fn open_preview(
+    root: &Path,
+    relative: &Path,
+) -> std::io::Result<(PreviewReader, u64, bool)> {
+    use wasi::filesystem::{
+        preopens,
+        types::{DescriptorFlags, DescriptorType, OpenFlags, PathFlags},
+    };
+    let mut mounts = preopens::get_directories();
+    mounts.sort_by_key(|(_, name)| std::cmp::Reverse(name.len()));
+    let (mut directory, tail) = mounts
+        .into_iter()
+        .find_map(|(dir, name)| {
+            root.strip_prefix(Path::new(&name))
+                .ok()
+                .map(|tail| (dir, tail.to_owned()))
+        })
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "root has no preopen")
+        })?;
+    for component in tail.components().chain(relative.components()) {
+        let std::path::Component::Normal(name) = component else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "non-canonical capability path",
+            ));
+        };
+        let name = name.to_str().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "non-UTF8 path")
+        })?;
+        // Empty PathFlags means NO symlink-follow, on every component. A held
+        // parent descriptor also prevents an ancestor rename escaping the root.
+        directory = directory
+            .open_at(
+                PathFlags::empty(),
+                name,
+                OpenFlags::empty(),
+                DescriptorFlags::READ,
+            )
+            .map_err(wasi_io)?;
+    }
+    let stat = directory.stat().map_err(wasi_io)?;
+    let regular = stat.type_ == DescriptorType::RegularFile;
+    Ok((
+        PreviewReader {
+            descriptor: directory,
+            offset: 0,
+            length: stat.size,
+        },
+        stat.size,
+        regular,
+    ))
+}
+
+#[cfg(target_family = "wasm")]
+impl std::io::Read for PreviewReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let (bytes, _) = self
+            .descriptor
+            .read(buffer.len() as u64, self.offset)
+            .map_err(wasi_io)?;
+        if bytes.len() > buffer.len() {
+            return Err(std::io::Error::other("oversized descriptor read"));
+        }
+        buffer[..bytes.len()].copy_from_slice(&bytes);
+        self.offset += bytes.len() as u64;
+        Ok(bytes.len())
+    }
+}
+
+#[cfg(target_family = "wasm")]
+impl std::io::Seek for PreviewReader {
+    fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+        let next = match position {
+            std::io::SeekFrom::Start(offset) => Some(offset),
+            std::io::SeekFrom::Current(delta) => self.offset.checked_add_signed(delta),
+            std::io::SeekFrom::End(delta) => self.length.checked_add_signed(delta),
+        }
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid file offset")
+        })?;
+        self.offset = next;
+        Ok(next)
+    }
+}

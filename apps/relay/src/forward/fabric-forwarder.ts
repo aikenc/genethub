@@ -11,6 +11,7 @@ import { endpointDiagnosticRef } from "../shared/diagnostic-ref.js";
 import { isDefinitiveAuthorityError } from "../shared/authority-error.js";
 import { log } from "../shared/log.js";
 import { OutboundByteBudget } from "../shared/outbound-budget.js";
+import { TransportFlowQueue } from "./transport-flow-queue.js";
 import { presenceRefreshDelaySeconds } from "../shared/presence-lease.js";
 import { admissionCredential, requestTarget } from "../shared/request-target.js";
 import {
@@ -377,6 +378,31 @@ export class FabricForwarder {
       presenceDeadlineMs: Date.now() + context.presenceLeaseSeconds * 1000,
       presenceRefresh: null,
     };
+    const handlingFailed = (frame: FabricFrame, error: unknown) => {
+      log.warn("fabric: frame handling failed", {
+        ...this.diagnosticFields(socket),
+        streamId: frame.streamId,
+        frameKind: fabricKindName(frame.kind),
+        errorType: diagnosticErrorType(error),
+      });
+      this.closeSocket(socket, 1011, "frame handling failed");
+    };
+    const flowQueue = new TransportFlowQueue(
+      this.outboundBudget,
+      // A peer RESET or expiry may close the binding while DATA waits here.
+      // These previously admitted frames must not become late-frame strikes.
+      frame => this.core.usesTransportFlow(connection, frame.streamId)
+        ? this.core.handle(connection, frame) : Promise.resolve(),
+      streamId => {
+        const reset: FabricFrame = {
+          kind: FabricKind.Reset, streamId, value: BigInt(FabricReset.TooSlow),
+          payload: Buffer.alloc(0),
+        };
+        connection.send(reset);
+        void this.core.handle(connection, reset).catch(error => handlingFailed(reset, error));
+      },
+      handlingFailed,
+    );
 
     // Admission can be rejected synchronously by a revocation tombstone. An
     // error listener must already exist even though that socket never enters
@@ -441,27 +467,15 @@ export class FabricForwarder {
         });
       }
       const transportFlow =
-        frame.kind === FabricKind.Data &&
+        (frame.kind === FabricKind.Data || frame.kind === FabricKind.Fin) &&
         this.core.usesTransportFlow(connection, frame.streamId);
-      if (transportFlow) socket.pause();
-      void this.core.handle(connection, frame).then(
-        () => {
-          if (transportFlow && socket.readyState === socket.OPEN) socket.resume();
-        },
-        (error: unknown) => {
-          if (transportFlow && socket.readyState === socket.OPEN) socket.resume();
-          log.warn("fabric: frame handling failed", {
-            ...this.diagnosticFields(socket),
-            streamId: frame.streamId,
-            frameKind: fabricKindName(frame.kind),
-            errorType: diagnosticErrorType(error),
-          });
-          this.closeSocket(socket, 1011, "frame handling failed");
-        },
-      );
+      if (frame.kind === FabricKind.Reset) flowQueue.cancel(frame.streamId);
+      if (transportFlow) flowQueue.push(frame, buffer.length);
+      else void this.core.handle(connection, frame).catch(error => handlingFailed(frame, error));
     });
 
     const shutdown = (code: number, reason: Buffer) => {
+      flowQueue.close();
       if (!this.peers.delete(peer)) return;
       if (peer.presenceRefresh) clearTimeout(peer.presenceRefresh);
       peer.presenceRefresh = null;
@@ -534,8 +548,8 @@ export class FabricForwarder {
 
   /**
    * DATA in transport-flow mode resolves only when `ws` drained the frame into
-   * this TCP leg. Pausing the source socket while this promise is pending makes
-   * TCP, not a remote application acknowledgement, carry the backpressure.
+   * this TCP leg. Per-stream input queues retain order while this promise is
+   * pending, without stopping unrelated streams on the source socket.
    */
   private deliverFlow(socket: WebSocket, payload: Buffer): Promise<void> {
     if (socket.readyState !== socket.OPEN) {

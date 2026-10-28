@@ -162,7 +162,11 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
                 identity: identity.clone(),
                 sha256: None,
             })?,
-            body_length: Some(remaining),
+            // Large files use the existing streaming envelope; the receiver
+            // still checks the advertised file identity, final size and hash.
+            // Keep the finite-exchange limit for bounded response heads.
+            body_length: (remaining <= genehub_proto::MAX_FINITE_EXCHANGE_BODY_BYTES as u64)
+                .then_some(remaining),
             error: None,
         })
         .await?;

@@ -1,0 +1,26 @@
+{
+  "method": "Current main htmlSite.ts functions loaded and executed in memory using the same synthetic base URL as the injected bridge",
+  "cases": [
+    {
+      "entry": "r_docs/datas/board/index.html",
+      "href": "../releases/latest/index.html",
+      "expected": "r_docs/datas/releases/latest/index.html",
+      "actual": "r_docs/datas/board/releases/latest/index.html",
+      "matches": false
+    },
+    {
+      "entry": "r_docs/datas/board/index.html",
+      "href": "room.html",
+      "expected": "r_docs/datas/board/room.html",
+      "actual": "r_docs/datas/board/room.html",
+      "matches": true
+    },
+    {
+      "entry": "r_docs/datas/releases/latest/index.html",
+      "href": "../v0.5-preview/index.html",
+      "expected": "r_docs/datas/releases/v0.5-preview/index.html",
+      "actual": "r_docs/datas/releases/latest/v0.5-preview/index.html",
+      "matches": false
+    }
+  ]
+}

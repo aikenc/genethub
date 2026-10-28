@@ -79,6 +79,7 @@ enum Incoming {
 }
 
 struct StreamState {
+    diagnostic_id: Option<String>,
     handler: Option<tokio::task::AbortHandle>,
     inbound: mpsc::Sender<Incoming>,
     inbound_budget: Arc<Semaphore>,
@@ -149,7 +150,7 @@ impl Credit {
 }
 
 struct WriterCommand {
-    bulk: bool,
+    class: super::logical_connection::WriteClass,
     stream_id: u32,
     frame: Frame,
     complete: oneshot::Sender<Result<WriterCompletion>>,
@@ -189,14 +190,15 @@ pub(crate) struct WriteTimings {
 
 impl Writer {
     async fn send(&self, frame: Frame) -> Result<()> {
-        self.send_inner(frame, None, false).await
+        self.send_inner(frame, None, super::logical_connection::WriteClass::Ordinary)
+            .await
     }
 
     async fn send_inner(
         &self,
         frame: Frame,
         mut timings: Option<&mut WriteTimings>,
-        bulk: bool,
+        class: super::logical_connection::WriteClass,
     ) -> Result<()> {
         let stream_id = frame.stream_id;
         let (complete, answer) = oneshot::channel();
@@ -217,7 +219,7 @@ impl Writer {
         let count = self.count.clone().acquire_owned().await?;
         self.commands
             .send(WriterCommand {
-                bulk,
+                class,
                 stream_id,
                 frame,
                 complete,
@@ -259,7 +261,7 @@ impl Writer {
         let count = self.count.clone().try_acquire_owned()?;
         self.commands
             .try_send(WriterCommand {
-                bulk: false,
+                class: super::logical_connection::WriteClass::Ordinary,
                 stream_id,
                 frame,
                 complete,
@@ -313,6 +315,11 @@ impl ServerStream {
                 drop(_lease);
                 let credit = bytes.len() as u32;
                 drop(_permit);
+                if self.head.method == "rpc" {
+                    tracing::debug!(target: "diagnostic",
+                        request_id = diagnostic_id(&self.head.metadata), request_bytes = bytes.len(),
+                        "RPC request chunk received");
+                }
                 self.writer
                     .send(Frame {
                         kind: Kind::WindowUpdate,
@@ -321,6 +328,11 @@ impl ServerStream {
                         payload: Vec::new(),
                     })
                     .await?;
+                if self.head.method == "rpc" {
+                    tracing::debug!(target: "diagnostic",
+                        request_id = diagnostic_id(&self.head.metadata),
+                        "RPC request credit returned");
+                }
                 Ok(StreamInput::Chunk(bytes))
             }
             Some(Incoming::Fin) => Ok(StreamInput::Fin),
@@ -390,7 +402,8 @@ impl ServerStream {
     }
 
     pub(crate) async fn write(&mut self, bytes: &[u8]) -> Result<()> {
-        self.write_inner(bytes, None).await
+        self.write_inner(bytes, None, super::logical_connection::WriteClass::Bulk)
+            .await
     }
 
     pub(crate) async fn write_measured(
@@ -398,13 +411,19 @@ impl ServerStream {
         bytes: &[u8],
         timings: &mut WriteTimings,
     ) -> Result<()> {
-        self.write_inner(bytes, Some(timings)).await
+        self.write_inner(
+            bytes,
+            Some(timings),
+            super::logical_connection::WriteClass::Bulk,
+        )
+        .await
     }
 
     async fn write_inner(
         &mut self,
         bytes: &[u8],
         mut timings: Option<&mut WriteTimings>,
+        class: super::logical_connection::WriteClass,
     ) -> Result<()> {
         if !self.local_head_sent || self.local_finished {
             anyhow::bail!("response body cannot be written in this stream state");
@@ -442,7 +461,7 @@ impl ServerStream {
                         payload: bytes[offset..offset + length].to_vec(),
                     },
                     timings.as_deref_mut(),
-                    self.head.method == "asset.preview",
+                    class,
                 )
                 .await?;
             if let Some(timings) = timings.as_mut() {
@@ -876,18 +895,22 @@ fn dispatch(
         let credit = Credit::new(frame.value)?;
         // Logical DATA (including replay) is paced at the active carrier's
         // send pump. Bootstrap physical streams retain their fixed owner.
-        let pace = (head.method == "asset.preview")
-            .then(|| services.physical_pace.as_ref())
-            .flatten()
-            .map(|pace| {
-                Arc::new(super::uplink_pace::PaceShare::new(
-                    pace.clone(),
-                    genehub_proto::INITIAL_STREAM_WINDOW_BYTES as u64,
-                ))
-            });
+        let pace = services.physical_pace.as_ref().map(|pace| {
+            Arc::new(super::uplink_pace::PaceShare::new(
+                pace.clone(),
+                genehub_proto::INITIAL_STREAM_WINDOW_BYTES as u64,
+            ))
+        });
         streams.insert(
             frame.stream_id,
             StreamState {
+                diagnostic_id: if head.method == "rpc"
+                    && tracing::enabled!(target: "diagnostic", tracing::Level::DEBUG)
+                {
+                    diagnostic_id(&head.metadata)
+                } else {
+                    None
+                },
                 handler: None,
                 inbound,
                 inbound_budget,
@@ -997,6 +1020,10 @@ fn dispatch(
                 .inbound
                 .try_send(Incoming::Fin)
                 .map_err(|_| anyhow!("stream handler receive queue is full"))?;
+            if let Some(request_id) = &stream.diagnostic_id {
+                tracing::debug!(target: "diagnostic", request_id,
+                    "RPC request FIN dispatched");
+            }
             stream.remote_finished = true;
         }
         Kind::Reset => {
@@ -1072,6 +1099,18 @@ async fn handle_stream(mut stream: ServerStream, services: Arc<PeerServices>) ->
                 request_bytes,
                 response_bytes = stream.local_bytes,
                 "data operation failed"
+            );
+        } else if exchange_method == "rpc" && duration_ms >= 250 {
+            tracing::debug!(
+                target: "diagnostic",
+                operation,
+                request_id,
+                transport = services.carrier_kind.as_str(),
+                status,
+                duration_ms,
+                request_bytes,
+                response_bytes = stream.local_bytes,
+                "RPC exchange completed"
             );
         } else if exchange_method == "asset.preview" || exchange_method == "rtc.negotiate" {
             tracing::info!(
@@ -1234,6 +1273,13 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
         }
     };
     stream.diagnostic_operation = diagnostic_operation(&stream.head.metadata);
+    tracing::debug!(
+        target: "diagnostic",
+        operation = stream.diagnostic_operation.as_deref().unwrap_or("rpc"),
+        request_id = diagnostic_id(&stream.head.metadata),
+        request_bytes = body.len(),
+        "RPC request decoded"
+    );
     if let Some(scope) = &services.access.workspace_id {
         if matches!(request, Request::ClientDebug(_)) {
             return send_error(
@@ -1241,6 +1287,18 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
                 403,
                 ErrorCode::Forbidden,
                 "client debugging requires a machine capability, not a workspace capability",
+            )
+            .await;
+        }
+        if matches!(
+            request,
+            Request::FileAccessList | Request::FileAccessConfigure { .. }
+        ) {
+            return send_error(
+                stream,
+                403,
+                ErrorCode::Forbidden,
+                "directory settings require a machine capability",
             )
             .await;
         }
@@ -1367,8 +1425,14 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
         return refuse(stream, needed).await;
     }
 
-    let handled =
-        router::handle(&services.state, services.access.transport, &caller, request).await;
+    let handled = router::handle_in_workspace(
+        &services.state,
+        services.access.transport,
+        &caller,
+        services.access.workspace_id.as_deref(),
+        request,
+    )
+    .await;
     match handled.reply {
         Ok(mut reply) => {
             if let Reply::Agents(agents) = &mut reply {
@@ -1457,6 +1521,13 @@ fn support_status_code(status: Option<u16>, transport_error: bool) -> Option<&'s
 
 async fn send_reply(stream: &mut ServerStream, reply: Reply) -> Result<()> {
     let body = serde_json::to_vec(&reply)?;
+    tracing::debug!(
+        target: "diagnostic",
+        operation = stream.diagnostic_operation.as_deref().unwrap_or("rpc"),
+        request_id = diagnostic_id(&stream.head.metadata),
+        response_bytes = body.len(),
+        "RPC response prepared"
+    );
     stream
         .respond(&ExchangeResponseHead {
             status: 200,
@@ -1465,7 +1536,16 @@ async fn send_reply(stream: &mut ServerStream, reply: Reply) -> Result<()> {
             error: None,
         })
         .await?;
-    stream.write(&body).await?;
+    // Small RPC replies must progress even while this same peer's preview
+    // fills its bulk quota. The physical actor grants at most one additional
+    // record per peer, and keeps DATA credit, journal and byte accounting.
+    if stream.head.method == "rpc" && body.len() <= genehub_proto::MAX_EXCHANGE_HEAD_BYTES {
+        stream
+            .write_inner(&body, None, super::logical_connection::WriteClass::Control)
+            .await?;
+    } else {
+        stream.write(&body).await?;
+    }
     stream.finish().await
 }
 
@@ -1591,7 +1671,11 @@ async fn handle_events(stream: &mut ServerStream, services: &PeerServices) -> Re
 
 fn request_workspace(request: &Request) -> Option<&str> {
     match request {
-        Request::PreviewFeedback(request) => Some(&request.workspace_id),
+        // Machine feedback has no workspace identity. Its handler intersects
+        // every source/record/manifest with the admission's physical scope.
+        Request::PreviewFeedback(request) => {
+            (!request.workspace_id.is_empty()).then_some(request.workspace_id.as_str())
+        }
         Request::SessionFork {
             target: Some(target),
             ..
@@ -1748,7 +1832,7 @@ async fn run_logical_writer(
                         .zip(actor_started)
                         .map(|(queued, started)| started.duration_since(queued).as_micros() as u64)
                         .unwrap_or_default();
-                    let result = writer.send_classified(command.frame, command.bulk).await;
+                    let result = writer.send_classified(command.frame, command.class).await;
                     let report = result
                         .as_ref()
                         .map(|_| WriterCompletion {
@@ -1805,7 +1889,7 @@ mod tests {
     #[test]
     fn writer_queue_rotates_streams_without_business_priorities() {
         let command = |stream_id| WriterCommand {
-            bulk: false,
+            class: crate::dataplane::logical_connection::WriteClass::Ordinary,
             stream_id,
             frame: Frame {
                 kind: Kind::Data,

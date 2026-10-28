@@ -118,7 +118,10 @@ async fn load(services: &PeerServices, req: &Request) -> Result<Option<Run>> {
     let access = &services.access;
     let workspace_id = match access.workspace_id.as_deref() {
         Some(id) => {
-            if req.workspace_handle != access.workspace_handle.as_deref().unwrap_or(id) {
+            if !(req.workspace_handle.is_empty()
+                && crate::file_access::absolute(&req.entry_path).is_ok())
+                && req.workspace_handle != access.workspace_handle.as_deref().unwrap_or(id)
+            {
                 anyhow::bail!("workspace denied");
             }
             id
@@ -132,7 +135,7 @@ async fn load_entry(
     workspace_id: &str,
     entry_path: &str,
 ) -> Result<Option<Run>> {
-    let resolved = state.workspaces.resolve(workspace_id, entry_path).await?;
+    let resolved = crate::file_access::resolve_source(state, workspace_id, entry_path).await?;
     let entry = std::fs::canonicalize(resolved.absolute)?;
     let native = crate::guest_paths::host_form(&entry.to_string_lossy()).into_owned();
     let entry_identity = if crate::guest_paths::windows_host() {

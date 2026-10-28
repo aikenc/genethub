@@ -14,6 +14,7 @@ pub struct Carrier {
     pub inbound: mpsc::Receiver<Vec<u8>>,
     pub outbound: mpsc::Sender<Vec<u8>>,
     pub(crate) uplink_pace: Option<std::sync::Arc<super::uplink_pace::PeerPace>>,
+    pub(crate) packet_pair_probe: bool,
 }
 
 pub fn carrier_channels() -> (mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>, Carrier) {
@@ -26,6 +27,7 @@ pub fn carrier_channels() -> (mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>, Ca
             inbound,
             outbound,
             uplink_pace: None,
+            packet_pair_probe: false,
         },
     )
 }

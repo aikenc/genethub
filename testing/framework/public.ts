@@ -39,6 +39,7 @@ export { openBrowser, openWorkbenchPage } from "./drivers/browser.ts";
 export { assertions } from "./assertions/index.ts";
 export { BUILTIN_AGENT_ATTEMPTS, startMockLlm } from "../infrastructure/public.ts";
 export { connectProductClient } from "./drivers/client.ts";
+export { openWorkspacePeer } from "./drivers/workspace-peer.ts";
 export type { ClientDiagnosticEvent } from "@genehub/workbench/client";
 export { createLatencyInjector, type LatencyInjector, type LatencyStats } from "./drivers/latency.ts";
 export {
@@ -53,7 +54,7 @@ export {
 } from "./drivers/network-link.ts";
 export { daemonEndpoint, waitForDaemonEndpoint, type DaemonEndpoint, type DaemonHandle } from "./drivers/daemon.ts";
 export { startRelay, type RelayHandle } from "./drivers/relay.ts";
-export { startHub, type HubBrowser, type HubHandle } from "./drivers/hub.ts";
+export { startHub, enrollCatalogSource, type HubBrowser, type HubHandle } from "./drivers/hub.ts";
 export { data } from "./builders/index.ts";
 export { compareQueueTails } from "./queue.ts";
 export { qualificationReasons } from "../policies/gates.ts";
@@ -100,6 +101,9 @@ export {
 export { allocatePort } from "../infrastructure/public.ts";
 export { openPreviewBrowser } from './drivers/preview-browser.ts';
 export { startFaultLink } from "./drivers/fault-link.ts";
+export { collectShellResult } from "./flows/main/index.ts";
+export { startSharedBottleneck } from "./drivers/shared-bottleneck.ts";
+export { runBoundRemoteCli } from "./drivers/remote-shell.ts";
 export { openMultichannelBrowser } from "./drivers/multichannel-browser.ts";
 
 export { repoIdentity } from "../infrastructure/public.ts";

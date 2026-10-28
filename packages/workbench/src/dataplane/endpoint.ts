@@ -36,6 +36,8 @@ export interface DataEndpointOptions {
   /** Negotiated receive lease for allowlisted finite bulk responses. */
   maxBulkStreamWindowBytes?: number;
   onError?: (error: unknown) => void;
+  /** Bounded read-only transport evidence; contains no payloads or credentials. */
+  onDiagnostic?: (detail: Record<string, string | number | boolean | null>) => void;
 }
 
 export class DataPlaneError extends Error {
@@ -91,6 +93,7 @@ export class DataStream {
   private closed = false;
   private sentBytes = 0;
   private receivedBytes = 0;
+  private consumedCredit = 0;
   private totalReceivedBytes = 0;
   private readonly chunks: DataChunk[] = [];
   private readonly chunkWaiters: Array<ReturnType<typeof deferred<IteratorResult<Uint8Array>>>> = [];
@@ -335,11 +338,18 @@ export class DataStream {
   private returnCredit(value: number): void {
     this.receivedBytes -= value;
     if (this.closed) return;
+    this.consumedCredit += value;
+    // Small streamed events share one bounded credit update. Logical delivery
+    // credit is still released immediately by the chunk's existing lease.
+    const threshold = Math.min(8 * 1024, Math.floor(this.endpoint.maxReceiveBytesPerStream / 2));
+    if (this.consumedCredit < threshold) return;
+    const returned = this.consumedCredit;
+    this.consumedCredit = 0;
     void this.endpoint
       .sendFrame(this, {
         kind: DataKind.WindowUpdate,
         streamId: this.id,
-        value,
+        value: returned,
         payload: EMPTY,
       })
       .catch((error: unknown) => this.fail(error));
@@ -443,6 +453,8 @@ export class DataEndpoint {
         onClose: (reason) => this.closeFromCarrier(reason),
         onRecovering: () => { for (const handler of this.recoveringHandlers) handler(); },
         onReady: () => { for (const handler of this.pathHandlers) handler(); },
+        onDiagnostic: options.onDiagnostic,
+        onWritable: () => this.pump(),
       });
     }
   }
@@ -685,6 +697,11 @@ export class DataEndpoint {
         if (this.transmitting.has(id)) { this.runnable.push(id); continue; }
         const queue = this.queues.get(id);
         if (!queue?.length) continue;
+        // Keep blocked DATA in this existing per-stream round-robin queue,
+        // before assigning a replay sequence. Reset/retire already cancels it.
+        if (this.channel instanceof LogicalConnection && !this.channel.canSend(queue[0]!.frame, this.smallRequestData(queue[0]!.frame))) {
+          this.runnable.push(id); continue;
+        }
         const pending = queue.shift()!;
         if (queue.length) this.runnable.push(id);
         else this.queues.delete(id);
@@ -714,9 +731,16 @@ export class DataEndpoint {
     if (this.state_ !== "open") return Promise.reject(new DataPlaneError("data endpoint is closed"));
     if (this.channel instanceof LogicalConnection) {
       if (frame.kind > 6) return Promise.reject(new DataPlaneError("channel controls do not use stream frames"));
-      return this.channel.send(frame as ResumeFrame);
+      return this.channel.send(frame as ResumeFrame, this.smallRequestData(frame));
     }
     return this.channel.send(encodeDataFrame(frame));
+  }
+
+  private smallRequestData(frame: DataFrame): boolean {
+    if (frame.kind !== DataKind.Data) return false;
+    const stream = this.streams.get(frame.streamId), length = stream?.requestHead.bodyLength;
+    return stream?.direction === "outgoing" && typeof length === "number" &&
+      Number.isSafeInteger(length) && length >= 0 && length <= 8192;
   }
 
   private allocateStreamId(): number {

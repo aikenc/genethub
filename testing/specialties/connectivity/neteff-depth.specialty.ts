@@ -675,6 +675,7 @@ defineSpecialty(
     requireWasmArtifacts(t.openRoot);
     const file = seedImage(t, "neteff-direct-8m.png", 8 * MIB);
     const rawServer = await startTcpPayloadServer(file.sizeBytes);
+    t.env.env.GENEHUB_LOCAL_LOG = "warn,genet_daemon::dataplane::uplink_pace=info,genet_daemon::dataplane::preview=debug";
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
     const samples: UtilizationSample[] = [];
     let busyRpcMs: number | null = null;
@@ -708,6 +709,10 @@ defineSpecialty(
             );
           }
           const product = await preview;
+          const pathLog = readFileSync(path.join(t.env.data, "logs", "daemon.log"), "utf8").split("\n");
+          t.note(`direct native path rtt=${rttMs}ms: ${pathLog.filter(line =>
+            line.includes('event="uplink_initial_sample"') || line.includes('event="uplink_pace"') ||
+            line.includes('event="preview_stage_timing"')).slice(-8).join(" | ")}`);
           samples.push(
             recordUtilization(t, {
               label: `direct rtt=${rttMs}ms`,
@@ -854,6 +859,8 @@ defineSpecialty(
         daemonLink.resetStats();
         clientLink.resetStats();
         const probe = new PreviewProbe();
+        const logPath = path.join(t.env.data, "logs", "daemon.log");
+        const sampleLogOffset = readFileSync(logPath, "utf8").length;
         const client = await connectProductClient({
           url: routedRendezvous,
           credential,
@@ -867,7 +874,6 @@ defineSpecialty(
             // not after samples from a different RTT or expired idle state.
             await measurePreview(t, {client, opened, file, probe});
           }
-          const logPath = path.join(t.env.data, "logs", "daemon.log");
           const timingsBefore = readFileSync(logPath, "utf8").split("\n").filter(line => line.includes("preview_stage_timing")).length;
           const throttleCount = () => {
             try { return Number(/nr_throttled (\d+)/.exec(readFileSync("/sys/fs/cgroup/cpu/cpu.stat", "utf8"))?.[1] ?? 0); }
@@ -907,13 +913,21 @@ defineSpecialty(
             );
           }
           const product = await preview;
+          if (coldBulk) {
+            const rows = readFileSync(logPath, "utf8").slice(sampleLogOffset).replace(/\u001b\[[0-9;]*m/g, "").split("\n");
+            const numeric = (line: string, keys: string[]) => keys.map(key => Number(new RegExp(`${key}=(\\d+)`).exec(line)?.[1] ?? -1));
+            const initial = rows.filter(line => line.includes('event="uplink_initial_sample"')).map(line => numeric(line, ["cap_bytes", "sample_rtt_us", "baseline_rtt_us", "sample_bytes"]));
+            const windows = rows.filter(line => line.includes('event="uplink_pace"')).slice(0, 4).map(line => numeric(line, ["cap_bytes", "previous_bytes", "drain_ms", "probed_bytes", "overrun_fits_bytes"]));
+            t.note(`bootstrap${samples.length + 1} seed[cap,rttUs,baseUs,bytes]=${JSON.stringify(initial)} windows[cap,prev,drainMs,probed,overrun]=${JSON.stringify(windows)}`);
+          }
           if (coldStart) t.note(`sample${samples.length + 1}: tcp=${tcp.elapsedMs.toFixed(0)} product=${product.elapsedMs.toFixed(0)} first=${product.firstByteMs} body=${product.transferMs} rpc=${busyRpcMs?.toFixed(0)} throttledPeriods=${throttleCount() - throttledBefore}`);
           // The receiver finishing precedes the final ACK reaching the sender.
           // Keep that stream alive long enough to record its completed stages.
           if (startup !== "cold-abrupt") await t.tools.waitUntil(() => readFileSync(logPath, "utf8").split("\n").filter(line => line.includes("preview_stage_timing")).length > timingsBefore, 3000);
           if (product.elapsedMs > 2800) {
-            const line = readFileSync(logPath, "utf8").split("\n").filter(line => line.includes("preview_stage_timing")).at(-1);
-            t.note(`slow stages: ${line}`);
+            const line = readFileSync(logPath, "utf8").replace(/\u001b\[[0-9;]*m/g, "").split("\n").filter(line => line.includes("preview_stage_timing")).at(-1) ?? "";
+            const keys = ["scan_us", "send_us", "write_credit_us", "write_completion_us", "write_actor_send_us", "write_wake_us", "finish_us"];
+            t.note(`slow stages ${samples.length + 1}: ${JSON.stringify(Object.fromEntries(keys.map(key => [key, Number(new RegExp(`${key}=(\\d+)`).exec(line)?.[1] ?? -1)])))}`);
           }
           samples.push(
             recordUtilization(t, {
@@ -961,9 +975,9 @@ defineSpecialty(
       relay.stop();
       await rawServer.stop();
     }
-    const decisions = readFileSync(path.join(t.env.data, "logs", "daemon.log"), "utf8").split("\n").filter(line => (line.includes('event="uplink_pace"') || line.includes('preview_stage_timing')));
-    t.note(`pace decisions: ${decisions.slice(-8).join(" | ")}`);
-    t.note(`startup=${startup}; ${samples.map(sample => sample.line).join("; ")}`);
+    const decisions = readFileSync(path.join(t.env.data, "logs", "daemon.log"), "utf8").replace(/\u001b\[[0-9;]*m/g, "").split("\n").filter(line => line.includes('event="uplink_pace"'));
+    t.note(`pace tail [cap,drainMs,probed,overrun]: ${JSON.stringify(decisions.slice(-6).map(line => ["cap_bytes", "drain_ms", "probed_bytes", "overrun_fits_bytes"].map(key => Number(new RegExp(`${key}=(\\d+)`).exec(line)?.[1] ?? -1))))}`);
+    t.note(`startup=${startup}; samples=${samples.length}`);
     for (const sample of samples) {
       if (coldSmall) {
         // Cold budget discovery costs at most one RTT plus the actor's 100ms
@@ -1029,7 +1043,7 @@ defineSpecialty({
   requireWasmArtifacts(t.openRoot);
   const file = seedImage(t, "cancel-review.png", 24 * MIB);
   const relay = await startRelay({openRoot: t.openRoot});
-  const link = await startShapedTcpProxy({targetUrl: relay.origin, profile: {rttMs: 40, bandwidthMbps: 5}});
+  const link = await startShapedTcpProxy({targetUrl: relay.origin, profile: {rttMs: 40, bandwidthMbps: .5}});
   t.env.env.GENEHUB_LOCAL_LOG = "warn,genet_daemon::dataplane::uplink_pace=info";
   const opened = await t.flows.main.openWorkspace({openRoot: t.openRoot, lease: t.env});
   let client: ProductClient | undefined;
@@ -1049,7 +1063,7 @@ defineSpecialty({
     let completed = false, settled = false;
     const transfer = measurePreview(t, {client, opened, file, probe})
       .then(() => { settled = true; completed = true; return "completed"; }, () => { settled = true; return "cancelled"; });
-    await t.tools.waitUntil(() => link.stats().clientToTargetBytes >= 64 * 1024, 10000);
+    await t.tools.waitUntil(() => link.stats().clientToTargetBytes >= 16 * 1024, 10000);
     const before = link.stats();
     const elapsed = performance.now() - began;
     const logPath = path.join(t.env.data, "logs", "daemon.log");
@@ -1064,7 +1078,7 @@ defineSpecialty({
     const summary = `closeAfterMs=${elapsed.toFixed(0)} sentWireBytes=${before.clientToTargetBytes} completedBeforeClose=${completed} outcome=${outcome} eventsBefore=${earlier.length} after=${after.join(" | ")}`;
     t.note(summary);
     t.assertions.assert(!completed && elapsed < 900 && earlier.length === 0, `slow first-window cancellation precondition not met: ${summary}`);
-    t.assertions.assert(!after.some(line => line.includes("cap_bytes=3145728")), `cancelled bytes opened pacing ceiling: ${summary}`);
+    t.assertions.assert(!after.some(line => { const cap = /cap_bytes=(\d+)/.exec(line); const previous = /previous_bytes=(\d+)/.exec(line); return cap && previous && Number(cap[1]) > Number(previous[1]); }), `cancelled bytes grew pacing window: ${summary}`);
   } finally { client?.close(); opened.client.close(); opened.daemon.stop(); await opened.mock.stop(); await link.stop(); relay.stop(); }
 });
 

@@ -46,7 +46,7 @@ defineSpecialty({
   // The source sits outside every registered workspace on purpose.
   const sourceDir = join(t.env.root, "source-outside-workspaces"); mkdirSync(sourceDir, { recursive: true });
   const source = join(sourceDir, "payload.bin");
-  writeFileSync(source, randomBytes(48 * MIB));
+  writeFileSync(source, randomBytes(80 * MIB));
   const sourceDigest = sha256(source);
   const landing = join(t.env.root, "landing"); mkdirSync(landing, { recursive: true });
   const partials = () => readdirSync(landing).filter(name => name.includes(".genet-partial-"));
@@ -101,7 +101,7 @@ defineSpecialty({
 
     await t.stage("resume-after-restart", async () => {
       const { id, onDisk } = await interrupt("second.bin");
-      t.assertions.assert(onDisk > 0 && onDisk < 48 * MIB, `the stall did not leave a partial file: ${onDisk}`);
+      t.assertions.assert(onDisk > 0 && onDisk < 80 * MIB, `the stall did not leave a partial file: ${onDisk}`);
       const resumed = await genet(["file", "download", "--from", machineId, source, join(landing, "second.bin"), "--timeout", "120"]);
       const transfer = records(resumed.stdout).find(record => record.type === "transfer.result")?.data?.transfer;
       t.assertions.assert(

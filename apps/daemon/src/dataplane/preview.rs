@@ -6,7 +6,7 @@ use std::time::Instant;
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
     AssetPreviewError, AssetPreviewKind, AssetPreviewMetadata, AssetPreviewRepresentation,
-    AssetPreviewRequest, ExchangeResponseHead, WorkspaceFileSourceKind,
+    AssetPreviewRequest, ExchangeResponseHead,
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
@@ -23,7 +23,9 @@ const IMAGE_CACHE_BYTES: usize = 128 * 1024 * 1024;
 /// On-demand preview loading fetches many small sub-resources in parallel;
 /// two slots serialized whole sites behind each other.
 const PREVIEW_WORKERS: usize = 8;
-const PREVIEW_SEND_STEP_BYTES: usize = 64 * 1024;
+// Whole resume payloads avoid a tiny fifth record after each 64KiB source
+// read, reducing per-record crypto/actor handoffs without enlarging buffers.
+const PREVIEW_SEND_STEP_BYTES: usize = 4 * genehub_proto::resume::MAX_PAYLOAD;
 
 pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -> Result<()> {
     if !stream.read_body(0).await?.is_empty() {
@@ -31,51 +33,21 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
     }
     let request: AssetPreviewRequest = serde_json::from_value(stream.head.metadata.clone())
         .context("invalid asset.preview metadata")?;
-    if request.source.kind != WorkspaceFileSourceKind::WorkspaceFile {
-        return preview_error(stream, 400, AssetPreviewError::Forbidden, None).await;
-    }
-    if crate::files::validate_preview_path(&request.source.path).is_err() {
-        return preview_error(stream, 403, AssetPreviewError::Forbidden, None).await;
-    }
-
-    let (workspace_id, expected_handle) = match (
-        services.access.workspace_id.as_deref(),
-        services.access.workspace_handle.as_deref(),
-    ) {
-        (Some(id), Some(handle)) => (id, handle),
-        (Some(id), None) => (id, id),
-        (None, _) => (
-            request.source.workspace_handle.as_str(),
-            request.source.workspace_handle.as_str(),
-        ),
-    };
-    if request.source.workspace_handle != expected_handle {
-        return preview_error(stream, 403, AssetPreviewError::Forbidden, None).await;
-    }
-    if services.state.workspaces.get(workspace_id).await.is_err() {
-        return preview_error(stream, 404, AssetPreviewError::NotFound, None).await;
-    }
-    let caller = crate::authz::Principal::of(&services.state, &services.access);
-    if crate::preview_feedback::authorize_asset(
-        &services.state,
-        &caller,
-        workspace_id,
-        &request.source.path,
-    )
-    .await
-    .is_err()
+    if matches!(
+        request.source,
+        genehub_proto::WorkspaceFileSource::MachineFile { .. }
+    ) && !crate::file_access::machine_files_supported()
     {
-        return preview_error(stream, 403, AssetPreviewError::Forbidden, None).await;
+        return preview_error(stream, 415, AssetPreviewError::Unsupported, None).await;
     }
-    let resolved = match services
-        .state
-        .workspaces
-        .resolve(workspace_id, &request.source.path)
-        .await
-    {
-        Ok(resolved) => resolved,
-        Err(_) => return preview_error(stream, 403, AssetPreviewError::Forbidden, None).await,
-    };
+    let authorized =
+        match crate::file_access::authorize(&services.state, &services.access, &request.source)
+            .await
+        {
+            Ok(file) => file,
+            Err(_) => return preview_error(stream, 403, AssetPreviewError::Forbidden, None).await,
+        };
+    let resolved = &authorized.resolved;
 
     let worker_started = Instant::now();
     let slot = match tokio::time::timeout(
@@ -92,15 +64,29 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
         Err(_) => return preview_error(stream, 408, AssetPreviewError::SourceChanged, None).await,
     };
     let worker_wait_us = worker_started.elapsed().as_micros() as u64;
-    let root = resolved.root;
+    let root = &resolved.root;
     let path = resolved.relative.to_string_lossy().replace('\\', "/");
     let scan_started = Instant::now();
-    let read = crate::files::preview(&root, &path);
-    let file = match tokio::time::timeout(PREVIEW_IO_TIMEOUT, read).await {
+    let read = crate::files::preview(root, &path);
+    let mut file = match tokio::time::timeout(PREVIEW_IO_TIMEOUT, read).await {
         Ok(Ok(file)) => file,
         Ok(Err(failure)) => return failure_response(stream, failure).await,
         Err(_) => return preview_error(stream, 408, AssetPreviewError::SourceChanged, None).await,
     };
+    authorized
+        .recheck(&services.state, &services.access)
+        .await?;
+    // Shares deliberately keep their narrow, path-free public v2 metadata.
+    if !matches!(
+        crate::authz::Principal::of(&services.state, &services.access),
+        crate::authz::Principal::PreviewShare { .. }
+    ) {
+        file.metadata.absolute_path = Some(crate::file_access::display(&resolved.absolute));
+    }
+    file.metadata.storage_scope = Some(format!(
+        "{:x}",
+        Sha256::digest(services.access.principal.as_bytes())
+    ));
     let scan_us = scan_started.elapsed().as_micros() as u64;
     if let Some(
         representation @ (AssetPreviewRepresentation::Image128
@@ -108,14 +94,16 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
     ) = request.representation
     {
         drop(slot);
-        return send_image_representation(stream, file, representation).await;
+        return send_image_representation(stream, file, representation, services, &authorized)
+            .await;
     }
     // The bounded worker permit covers both the metadata scan and the actual
     // source read; streaming must not turn one retained Vec into hundreds of
     // concurrent disk readers.
     let _slot = slot;
+    let scan = file.scan_timings;
     let send_started = Instant::now();
-    let stats = send_file(stream, file, services, workspace_id, &request.source.path).await?;
+    let stats = send_file(stream, file, services, &authorized).await?;
     tracing::debug!(
         event = "preview_stage_timing",
         request_id = super::endpoint::diagnostic_id(&stream.head.metadata),
@@ -124,6 +112,13 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
         source_bytes = stats.source_bytes,
         worker_wait_us,
         scan_us,
+        scan_open_us = scan.open_us,
+        scan_read_us = scan.read_us,
+        scan_hash_us = scan.hash_us,
+        scan_probe_us = scan.probe_us,
+        scan_snapshot_us = scan.snapshot_us,
+        scan_yield_us = scan.yield_us,
+        scan_steps = scan.steps,
         send_us = send_started.elapsed().as_micros() as u64,
         read_us = stats.read_us,
         hash_us = stats.hash_us,
@@ -193,6 +188,8 @@ async fn send_image_representation(
     stream: &mut ServerStream,
     file: PreviewFile,
     representation: AssetPreviewRepresentation,
+    services: &PeerServices,
+    authorized: &crate::file_access::AuthorizedFile,
 ) -> Result<()> {
     if file.metadata.kind != AssetPreviewKind::Image {
         return preview_error(stream, 415, AssetPreviewError::Unsupported, None).await;
@@ -214,7 +211,10 @@ async fn send_image_representation(
         metadata.representation = Some(representation);
         metadata.width = Some(result.width);
         metadata.height = Some(result.height);
-        return send_image_bytes(stream, metadata, &result.bytes).await;
+        authorized
+            .recheck(&services.state, &services.access)
+            .await?;
+        return send_image_bytes(stream, metadata, &result.bytes, services, authorized).await;
     }
     let _queue_slot = match IMAGE_QUEUE_SLOTS
         .get_or_init(|| Arc::new(Semaphore::new(8)))
@@ -302,13 +302,18 @@ async fn send_image_representation(
     metadata.representation = Some(representation);
     metadata.width = Some(result.width);
     metadata.height = Some(result.height);
-    send_image_bytes(stream, metadata, &result.bytes).await
+    authorized
+        .recheck(&services.state, &services.access)
+        .await?;
+    send_image_bytes(stream, metadata, &result.bytes, services, authorized).await
 }
 
 async fn send_image_bytes(
     stream: &mut ServerStream,
     metadata: AssetPreviewMetadata,
     bytes: &[u8],
+    services: &PeerServices,
+    authorized: &crate::file_access::AuthorizedFile,
 ) -> Result<()> {
     let started = Instant::now();
     let source_bytes = metadata.source_bytes;
@@ -321,6 +326,9 @@ async fn send_image_bytes(
         })
         .await?;
     for chunk in bytes.chunks(PREVIEW_SEND_STEP_BYTES) {
+        authorized
+            .recheck(&services.state, &services.access)
+            .await?;
         stream.write(chunk).await?;
     }
     stream.finish().await?;
@@ -349,8 +357,7 @@ async fn send_file(
     stream: &mut ServerStream,
     file: PreviewFile,
     services: &PeerServices,
-    workspace: &str,
-    path: &str,
+    authorized: &crate::file_access::AuthorizedFile,
 ) -> Result<PreviewSendStats> {
     let (metadata, mut source, expected_digest) = file.into_parts();
     let snapshot = source.is_snapshot();
@@ -373,8 +380,9 @@ async fn send_file(
     let mut sent = 0u64;
     let mut step = vec![0u8; PREVIEW_SEND_STEP_BYTES];
     loop {
-        let caller = crate::authz::Principal::of(&services.state, &services.access);
-        crate::preview_feedback::authorize_asset(&services.state, &caller, workspace, path).await?;
+        authorized
+            .recheck(&services.state, &services.access)
+            .await?;
         let began = Instant::now();
         let read = source
             .read(&mut step)
@@ -405,7 +413,7 @@ async fn send_file(
         }
         stats.write_us += began.elapsed().as_micros() as u64;
         // `write` already waits on the socket, so another yield here only
-        // inserts a scheduler hop between every 64KiB. On a 200ms high-BDP
+        // inserts a scheduler hop between source chunks. On a 200ms high-BDP
         // link those hops dominate the transfer and the protocol window never
         // reaches the shaped rate.
     }

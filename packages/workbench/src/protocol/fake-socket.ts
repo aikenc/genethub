@@ -70,7 +70,7 @@ export class FakeSocket implements WebSocketLike {
   private readonly streams = new Map<string, DataStream>();
   private recordHandler: ((record: Uint8Array) => void) | null = null;
   private readonly carrierCloseHandlers = new Set<(reason?: unknown) => void>();
-  /** A suspended page's carrier: records arrive, nothing ever answers. */
+  /** Application RPC replies can stall while channel-level records still progress. */
   private silent = false;
 
   constructor(private readonly options: FakePeerOptions = {},
@@ -82,8 +82,8 @@ export class FakeSocket implements WebSocketLike {
   /** Forget the logical owner without telling the client, like an expired daemon registry entry. */
   forgetSession(): void { this.peer.endpoint = undefined; }
 
-  /** Stops answering RPCs without closing, the way a frozen carrier does. */
-  silence(): void {
+  /** Stops only RPC replies; this deliberately does not blackhole the physical carrier. */
+  silenceRpc(): void {
     this.silent = true;
   }
 

@@ -1,5 +1,5 @@
 import type { Client } from "../protocol/client";
-import type { AssetPreviewLocation } from "./url";
+import { isAbsoluteFilePath, type AssetPreviewLocation } from "./url";
 
 const POPOUT_PARAM = "genehubPreviewPopout";
 const SESSION_PARAM = "genehubPreviewSession";
@@ -11,6 +11,22 @@ const PORTABLE_ENDPOINT_PARAM = "endpoint";
 const PORTABLE_ROUTE_PARAM = "genehubPreviewRoute";
 const PORTABLE_CAPABILITY_PARAM = "genehubPreviewCapability";
 const PORTABLE_SECRET_PARAM = "genehubPreviewSecret";
+
+/** Fragment credentials can change without a document navigation. Re-enter
+ * the normal authenticated bootstrap instead of retaining the old peer and
+ * its rendered/cache state under a new share URL. No credential is logged. */
+export function watchPreviewConnectionFragment(): () => void {
+  const keys = [POPOUT_PARAM, SESSION_PARAM, PORTABLE_ENDPOINT_PARAM,
+    PORTABLE_ROUTE_PARAM, PORTABLE_CAPABILITY_PARAM, PORTABLE_SECRET_PARAM,
+    "genehubPreviewShare", "genehubPreviewRedeem"];
+  const changed = (event: HashChangeEvent) => {
+    const before = new URLSearchParams(new URL(event.oldURL).hash.slice(1));
+    const after = new URLSearchParams(new URL(event.newURL).hash.slice(1));
+    if (keys.some(key => before.get(key) !== after.get(key))) window.location.reload();
+  };
+  window.addEventListener("hashchange", changed);
+  return () => window.removeEventListener("hashchange", changed);
+}
 
 export type PreviewPopoutContext = {
   id: string;
@@ -335,7 +351,7 @@ function safeSecret(value: unknown): string | null {
 function sameSource(left: AssetPreviewLocation, right: AssetPreviewLocation): boolean {
   return (
     left.deviceHandle === right.deviceHandle &&
-    left.workspaceHandle === right.workspaceHandle &&
+    (isAbsoluteFilePath(left.path) && isAbsoluteFilePath(right.path) || left.workspaceHandle === right.workspaceHandle) &&
     left.path === right.path
   );
 }

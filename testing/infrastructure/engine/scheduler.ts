@@ -24,14 +24,21 @@ const POOL_WEIGHT: Record<ResourcePool, Partial<TokenBudget>> = {
   "real-llm": {},
 };
 
-export function defaultBudget(environments: number): TokenBudget {
-  return {
+export function defaultBudget(
+  environments: number,
+  overrides: Partial<Pick<TokenBudget, "cpu" | "memoryMb">> = {},
+): TokenBudget {
+  const budget = {
     environments,
-    cpu: Math.max(environments, 8),
-    memoryMb: Math.max(environments * 768, 2048),
+    cpu: overrides.cpu ?? Math.max(environments, 8),
+    memoryMb: overrides.memoryMb ?? Math.max(environments * 768, 2048),
     io: environments,
     browser: Math.min(4, Math.max(1, Math.floor(environments / 4))),
   };
+  for (const [name, value] of Object.entries(budget)) {
+    if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${name} budget must be a positive safe integer`);
+  }
+  return budget;
 }
 
 export function createScheduler(units: WorkUnit[], budget: TokenBudget): SchedulerState {

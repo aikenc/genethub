@@ -5,6 +5,7 @@ import type {
 } from "@genehub/proto";
 import { useEffect, useState } from "react";
 
+import { FileAccessSettings } from "./FileAccessSettings";
 import { AgentConfigEntry } from "../agents/AgentConfigEntry";
 import { BUILD, PRODUCT_VERSION } from "../build";
 import { CHANNEL, type BuildIdentity } from "../channel";
@@ -49,6 +50,8 @@ export function SettingsPanel({ host, endpoint }: { host: Host; endpoint?: Endpo
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-6 overflow-y-auto p-4">
       <Machine identity={client?.identity ?? null} expected={endpoint?.fingerprint} />
+
+      {client?.identity?.features?.includes("asset.preview.machine-file.v1") ? <FileAccessSettings client={client} /> : null}
 
       <Appearance />
 
