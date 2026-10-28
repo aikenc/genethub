@@ -181,8 +181,13 @@ export class FabricCore {
     this.onStrike = options.onStrike;
     this.tombstoneMs = options.tombstoneMs ?? 60_000;
     this.maxTombstones = options.maxTombstonesPerEndpoint ?? 512;
+    // A legitimate close tail is bounded by the sender's journal and carrier
+    // queues, not by a small frame count: small-line output can put tens of
+    // thousands of frames in flight. Keep a generous grace so closing a
+    // transfer does not evict the whole node; the strike window still bounds
+    // an actual flood.
     this.maxLateFramesPerClosedStream =
-      options.maxLateFramesPerClosedStream ?? 256;
+      options.maxLateFramesPerClosedStream ?? 65_536;
     this.revocationTombstoneMs = options.revocationTombstoneMs ?? 5 * 60_000;
     this.maxRevocationTombstones = options.maxRevocationTombstones ?? 4_096;
     this.maxConnectionGenerations = options.maxConnectionGenerations ?? 100_000;
