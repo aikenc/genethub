@@ -1030,6 +1030,7 @@ export function App({
                         persistenceKey={`${workbench.client?.identity?.machineId ?? endpoint.label}:${session?.id ?? draft?.localId ?? "empty"}`}
                         phase={phase}
                         durableInput={durableInput}
+                        fileUploadAllowed={Boolean(workbench.client?.identity?.features?.includes("session.file-upload.v1"))}
                         lastActivityAtMs={session?.lastActivityAtMs ?? null}
                         disabled={sessionReadOnly}
                         disabledReason={
@@ -1099,8 +1100,8 @@ export function App({
                         onHeightChange={setComposerHeight}
                         minimized={composerMinimized}
                         onExpand={() => setComposerMinimized(false)}
-                        onSend={async (text, attachments, videoFiles) => {
-                          if (!await workbench.send(text, attachments, videoFiles)) throw new Error("消息尚未发送");
+                        onSend={async (text, attachments, videoFiles, files) => {
+                          if (!await workbench.send(text, attachments, videoFiles, files)) throw new Error("消息尚未发送");
                         }}
                         onInterrupt={() => void workbench.interrupt()}
                         onPickTarget={(target, tags) =>

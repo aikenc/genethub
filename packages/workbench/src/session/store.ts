@@ -56,6 +56,7 @@ import { resolveWorkspacePath } from "../preview/resolveArtifactRef";
 import { isAbsoluteFilePath } from "../preview/url";
 import { uploadSessionArtifact } from "../preview/sessionArtifactUpload";
 import { ClientRequestTimeoutError, ConnectionOutcomeUnknownError, ProtocolError_ } from "../protocol/client";
+import { resolveFileMime, stagedFileName } from "./attachments";
 import { canStartAgent } from "../presentation/catalog/resolve";
 import {
   configuredMediaInputSupport,
@@ -308,7 +309,7 @@ interface WorkbenchState {
    * returned for editing through a channel like this one; whoever picks it up
    * clears it with `restoredDraft`.
    */
-  restoreDraft: { text: string; attachments: Attachment[]; videoFiles?: File[] } | null;
+  restoreDraft: { text: string; attachments: Attachment[]; videoFiles?: File[]; files?: File[] } | null;
   /** Lines waiting to be appended to a session's composer without sending it. */
   composerDraftInserts: ComposerDraftInsert[];
   /** The forward capsule parked on a composer, if any. One at a time. */
@@ -484,7 +485,7 @@ interface WorkbenchState {
   setRightPanel(panel: RightPanel): void;
   openPreviewFloat(target: PreviewFloatRequest): void;
   closePreviewFloat(): void;
-  send(text: string, attachments?: Attachment[], videoFiles?: File[]): Promise<boolean>;
+  send(text: string, attachments?: Attachment[], videoFiles?: File[], files?: File[]): Promise<boolean>;
   /** Sends a failed message again, unchanged. */
   retryPending(messageId?: string): Promise<void>;
   /** Takes a failed message back into the composer instead of resending it. */
@@ -502,9 +503,9 @@ interface WorkbenchState {
   consumedComposerDraftInsert(id: string): void;
   /** Parks (or clears, with `null`) the forward capsule on a composer. */
   setForwardDraft(draft: ForwardDraft | null): Promise<void>;
-  saveComposerDraft(text: string, attachments: Attachment[], videoFiles?: File[]): Promise<boolean>;
+  saveComposerDraft(text: string, attachments: Attachment[], videoFiles?: File[], files?: File[]): Promise<boolean>;
   replaceSessionDrafts(drafts: SessionDraft[]): Promise<boolean>;
-  updateSessionDraft(draft: SessionDraft, videoFiles?: File[]): Promise<boolean>;
+  updateSessionDraft(draft: SessionDraft, videoFiles?: File[], files?: File[]): Promise<boolean>;
   /** Drops sent preview notes without a revision, so notes added during send stay. */
   consumePreviewAnnotations(ids: string[]): Promise<boolean>;
   /** Shows (or clears, with `null`) the completed-work banner. */
@@ -1753,9 +1754,13 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     set({ previewFloat: null });
   },
 
-  async send(text, attachments = [], videoFiles = []) {
+  async send(text, attachments = [], videoFiles = [], files = []) {
+    if (files.length > 0 && !get().client?.identity?.features?.includes("session.file-upload.v1")) {
+      set({ notice: "当前 daemon 不支持文件上传，请升级后重试" });
+      return false;
+    }
     if (get().client?.identity?.features?.includes("session.input.v1")) {
-      return await sendDurableInput(get, set, text, attachments, undefined, videoFiles);
+      return await sendDurableInput(get, set, text, attachments, undefined, videoFiles, files);
     }
     // The previous complaint goes away as the next attempt starts, so a stale
     // line does not get read as a description of what just happened.
@@ -1781,6 +1786,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       text,
       attachments,
       videoFiles,
+      ...(files.length > 0 ? { files } : {}),
       sentAtMs: Date.now(),
       error: null,
     };
@@ -1813,7 +1819,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       if (active) failPending(active, set, get().notice ?? "无法开始会话");
       else if (get().draft?.localId === originDraft)
         set((state) => ({
-          restoreDraft: { text, attachments, ...(videoFiles.length > 0 ? { videoFiles } : {}) },
+          restoreDraft: { text, attachments, ...(videoFiles.length > 0 ? { videoFiles } : {}), ...(files.length > 0 ? { files } : {}) },
           timeline: { ...state.timeline, pending: null },
         }));
       return false;
@@ -1825,27 +1831,9 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     if (machine && originDraft && !active) forgetDraftIdentity(machine, originDraft);
     try {
       await ensureWorkbenchTagRoute(get, set, require_(originClient), sessionId, pending);
-      // Artifact storage requires ASCII file names. Keep the original names in
-      // chat while using fixed names for the files the Agent reads.
-      const stagedVideos = videoFiles.map((file, index) => ({
-        name: `video-${index + 1}.${videoExtension(file.type)}`,
-        mime: file.type,
-        blob: file,
-      }));
-      let uploaded: Attachment[] = [];
-      if (stagedVideos.length > 0) {
-        const bundle = await uploadSessionArtifact(require_(get().client), sessionId, {
-          files: stagedVideos,
-          metadata: { kind: "chat-video-input" },
-          summary: { eventCount: 0, frameCount: 0, recording: null },
-        });
-        uploaded = stagedVideos.map((staged, index) => ({
-          name: videoFiles[index]!.name,
-          mime: staged.mime,
-          path: `${bundle.workspacePath}/${staged.name}`,
-        }));
-      }
-      const sentAttachments = [...attachments, ...uploaded];
+      const uploadedVideos = await uploadChatVideos(get, sessionId, videoFiles);
+      const uploadedFiles = await uploadChatFiles(get, sessionId, files);
+      const sentAttachments = [...attachments, ...uploadedVideos, ...uploadedFiles];
       // Artifact Preview URLs are bound at chat/document render time from the
       // current workspace roots. Agents emit relative/absolute file paths; the
       // daemon teaches path-linking rules (not a deployment-specific prefix).
@@ -1900,7 +1888,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     if (!pending?.error) return;
     // Cleared first, or `send` would take this for a message already in flight.
     patchTimeline(sessionId, set, () => ({ pending: null }));
-    await get().send(pending.text, pending.attachments, pending.videoFiles);
+    await get().send(pending.text, pending.attachments, pending.videoFiles, pending.files);
   },
 
   editPending(messageId) {
@@ -1920,6 +1908,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         text: pending.text,
         attachments: pending.attachments,
         ...(pending.videoFiles?.length ? { videoFiles: pending.videoFiles } : {}),
+        ...(pending.files?.length ? { files: pending.files } : {}),
       },
     });
   },
@@ -1993,7 +1982,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     }
   },
 
-  async saveComposerDraft(text, attachments, videoFiles = []) {
+  async saveComposerDraft(text, attachments, videoFiles = [], files = []) {
     try {
       let sessionId = get().activeSessionId;
       if (!sessionId) sessionId = await start(get, set, null);
@@ -2004,6 +1993,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         : text.trim();
       let savedAttachments = [...(forward?.attachments ?? []), ...attachments];
       if (videoFiles.length > 0) savedAttachments = [...savedAttachments, ...await uploadChatVideos(get, sessionId, videoFiles)];
+      if (files.length > 0) savedAttachments = [...savedAttachments, ...await uploadChatFiles(get, sessionId, files)];
       if (!payload && savedAttachments.length === 0) return false;
       if (get().sessionDrafts.length >= 5) throw new Error("每个会话最多保存 5 条草稿");
       const next = [...get().sessionDrafts, {
@@ -2061,11 +2051,13 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     }
   },
 
-  async updateSessionDraft(draft, videoFiles = []) {
+  async updateSessionDraft(draft, videoFiles = [], files = []) {
     const sessionId = get().activeSessionId;
     if (!sessionId) return false;
     try {
-      const uploaded = videoFiles.length > 0 ? await uploadChatVideos(get, sessionId, videoFiles) : [];
+      const uploadedVideos = videoFiles.length > 0 ? await uploadChatVideos(get, sessionId, videoFiles) : [];
+      const uploadedFiles = files.length > 0 ? await uploadChatFiles(get, sessionId, files) : [];
+      const uploaded = [...uploadedVideos, ...uploadedFiles];
       const nextDraft = uploaded.length > 0 ? { ...draft, attachments: [...draft.attachments, ...uploaded] } : draft;
       return await get().replaceSessionDrafts(get().sessionDrafts.map((item) => item.id === draft.id ? nextDraft : item));
     } catch (error) {
@@ -3161,20 +3153,22 @@ function openLandingPreview(get: () => WorkbenchState, intent: LandingIntent | n
  * is a caller that should quietly do nothing: `asked` has already said why if a
  * request was made and refused.
  */
-async function sendDurableInput(get: () => WorkbenchState, set: Setter, text: string, attachments: Attachment[], retry?: PendingMessage, videoFiles: File[] = []): Promise<boolean> {
+async function sendDurableInput(get: () => WorkbenchState, set: Setter, text: string, attachments: Attachment[], retry?: PendingMessage, videoFiles: File[] = [], files: File[] = []): Promise<boolean> {
   const client = get().client;
   const machine = client?.identity?.machineId;
   const pendingVideos = retry?.videoFiles ?? videoFiles;
-  if (!client || !machine) { set({ notice: "连接恢复后再发送。", restoreDraft: { text, attachments, ...(pendingVideos.length > 0 ? { videoFiles: pendingVideos } : {}) } }); return false; }
+  const pendingFiles = retry?.files ?? files;
+  const restore = { text, attachments, ...(pendingVideos.length > 0 ? { videoFiles: pendingVideos } : {}), ...(pendingFiles.length > 0 ? { files: pendingFiles } : {}) };
+  if (!client || !machine) { set({ notice: "连接恢复后再发送。", restoreDraft: restore }); return false; }
   const origin = get().activeSessionId;
-  if (!origin && get().timeline.pending) { set({ restoreDraft: { text, attachments, ...(pendingVideos.length > 0 ? { videoFiles: pendingVideos } : {}) } }); return false; }
+  if (!origin && get().timeline.pending) { set({ restoreDraft: restore }); return false; }
   // A Session can receive a new independent request while its squad works.
   // Do not silently bind arbitrary chat to the sole existing task. Explicit
   // task references and retries retain the target captured at admission.
-  const input: PendingMessage = retry ?? { messageId: `u_${crypto.randomUUID().replaceAll("-", "")}`, text, attachments, videoFiles: pendingVideos.length > 0 ? pendingVideos : undefined, sentAtMs: Date.now(), error: null };
+  const input: PendingMessage = retry ?? { messageId: `u_${crypto.randomUUID().replaceAll("-", "")}`, text, attachments, videoFiles: pendingVideos.length > 0 ? pendingVideos : undefined, files: pendingFiles.length > 0 ? pendingFiles : undefined, sentAtMs: Date.now(), error: null };
   if (!origin) set(state => ({ timeline: { ...state.timeline, pending: input } }));
   const sessionId = origin ?? await start(get, set, input);
-  if (!sessionId || get().client !== client) { if (get().client === client) set({ restoreDraft: { text, attachments, ...(pendingVideos.length > 0 ? { videoFiles: pendingVideos } : {}) } }); return false; }
+  if (!sessionId || get().client !== client) { if (get().client === client) set({ restoreDraft: restore }); return false; }
   patchTimeline(sessionId, set, timeline => ({ pending: timeline.pending?.messageId === input.messageId ? null : timeline.pending,
     inputOutbox: [...(timeline.inputOutbox ?? []).filter(item => item.messageId !== input.messageId), { ...input, error: null }] }));
   saveInputReceipt(machine, sessionId, input);
@@ -3202,9 +3196,15 @@ async function sendDurableInput(get: () => WorkbenchState, set: Setter, text: st
     let sentAttachments = input.attachments;
     if ((input.videoFiles?.length ?? 0) > 0) {
       const uploaded = await uploadChatVideos(get, sessionId, input.videoFiles ?? []);
-      sentAttachments = [...input.attachments, ...uploaded];
+      sentAttachments = [...sentAttachments, ...uploaded];
       input.attachments = sentAttachments;
       input.videoFiles = undefined;
+    }
+    if ((input.files?.length ?? 0) > 0) {
+      const uploaded = await uploadChatFiles(get, sessionId, input.files ?? []);
+      sentAttachments = [...sentAttachments, ...uploaded];
+      input.attachments = sentAttachments;
+      input.files = undefined;
     }
     await client.call({ type: "session.send", payload: { sessionId, messageId: input.messageId, taskRunId: input.taskRunId, text: input.text, attachments: sentAttachments, artifactPreviewBaseUrl: null, continuesRound: null } });
     saveInputReceipt(machine, sessionId, input, true);
@@ -3813,6 +3813,7 @@ async function uploadChatVideos(
     name: videoFiles[index]!.name,
     mime: staged.mime,
     path: `${bundle.workspacePath}/${staged.name}`,
+    bytes: videoFiles[index]!.size,
   }));
 }
 
@@ -3825,6 +3826,39 @@ function videoExtension(mime: string): string {
     case "video/x-msvideo": return "avi";
     default: throw new Error(`视频格式当前不支持：${mime}`);
   }
+}
+
+/** Uploads arbitrary chat files into the session's artifact tree. The Agent
+ * receives their paths in the prompt manifest; bytes never enter the timeline. */
+async function uploadChatFiles(
+  get: () => WorkbenchState,
+  sessionId: string,
+  files: File[],
+): Promise<Attachment[]> {
+  if (files.length === 0) return [];
+  const staged = files.map((file, index) => {
+    const mime = resolveFileMime(file);
+    return { name: stagedFileName(index, file.name, mime), mime, blob: file };
+  });
+  const bundle = await uploadSessionArtifact(require_(get().client), sessionId, {
+    files: staged,
+    metadata: {
+      kind: "chat-file-input",
+      files: staged.map((file, index) => ({
+        staged: file.name,
+        original: files[index]!.name,
+        mime: file.mime,
+        bytes: files[index]!.size,
+      })),
+    },
+    summary: { eventCount: 0, frameCount: 0, recording: null },
+  });
+  return staged.map((file, index) => ({
+    name: files[index]!.name,
+    mime: file.mime,
+    path: `${bundle.workspacePath}/${file.name}`,
+    bytes: files[index]!.size,
+  }));
 }
 
 /**

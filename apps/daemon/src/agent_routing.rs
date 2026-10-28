@@ -128,12 +128,40 @@ fn validate_tag_shape(tags: &[String], minimum: usize, maximum: usize) -> Result
     Ok(())
 }
 
+/// The media formats the built-in Agent can actually materialize. Anything
+/// else -- including `image/tiff` or `video/x-matroska` -- is stored as a
+/// chat file and must not require an image/video route.
+const SUPPORTED_IMAGE_MIMES: &[&str] = &["image/jpeg", "image/png", "image/webp", "image/gif"];
+const SUPPORTED_VIDEO_MIMES: &[&str] = &[
+    "video/mp4",
+    "video/webm",
+    "video/quicktime",
+    "video/mpeg",
+    "video/x-msvideo",
+];
+
+pub(crate) fn is_supported_image_mime(mime: &str) -> bool {
+    SUPPORTED_IMAGE_MIMES
+        .iter()
+        .any(|candidate| mime.eq_ignore_ascii_case(candidate))
+}
+
+pub(crate) fn is_supported_video_mime(mime: &str) -> bool {
+    SUPPORTED_VIDEO_MIMES
+        .iter()
+        .any(|candidate| mime.eq_ignore_ascii_case(candidate))
+}
+
+pub(crate) fn is_supported_media_mime(mime: &str) -> bool {
+    is_supported_image_mime(mime) || is_supported_video_mime(mime)
+}
+
 pub(crate) fn media_tags_for_mimes<'a>(mimes: impl IntoIterator<Item = &'a str>) -> Vec<String> {
     let mut image = false;
     let mut video = false;
     for mime in mimes {
-        image |= mime.to_ascii_lowercase().starts_with("image/");
-        video |= mime.to_ascii_lowercase().starts_with("video/");
+        image |= is_supported_image_mime(mime);
+        video |= is_supported_video_mime(mime);
     }
     [
         image.then(|| TAG_IMAGE.to_string()),
@@ -1117,12 +1145,14 @@ mod tests {
                     mime: "image/png".into(),
                     path: None,
                     data_base64: None,
+                    bytes: None,
                 },
                 Attachment {
                     name: "clip.mp4".into(),
                     mime: "video/mp4".into(),
                     path: None,
                     data_base64: None,
+                    bytes: None,
                 },
             ],
         }];
@@ -1130,6 +1160,16 @@ mod tests {
             media_tags_for_timeline(&items),
             vec![TAG_IMAGE.to_string(), TAG_VIDEO.to_string()]
         );
+    }
+
+    #[test]
+    fn unsupported_media_mimes_do_not_add_media_requirements() {
+        // These are stored as chat files, so routing must not demand a model
+        // that understands them.
+        assert!(media_tags_for_mimes(["image/tiff", "video/x-matroska"]).is_empty());
+        assert!(is_supported_media_mime("image/png"));
+        assert!(is_supported_media_mime("video/mp4"));
+        assert!(!is_supported_media_mime("application/pdf"));
     }
 
     #[test]

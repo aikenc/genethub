@@ -85,7 +85,7 @@ export function savedInputReceipts(machine: string, session: string): import("./
   try {
     return Object.keys(localStorage).filter(key => key.startsWith(scope)).slice(0, 32).flatMap(key => {
       const value = JSON.parse(localStorage.getItem(key) ?? "null");
-      return value && typeof value.messageId === "string" && typeof value.text === "string" ? [{ ...value, attachments: [], error: "上次接收结果待核对；重试会使用原消息 ID。" }] : [];
+      return value && typeof value.messageId === "string" && typeof value.text === "string" ? [{ ...value, attachments: [], videoFiles: undefined, files: undefined, error: "上次接收结果待核对；重试会使用原消息 ID。" }] : [];
     });
   } catch { return []; }
 }
@@ -93,6 +93,6 @@ export function saveInputReceipt(machine: string, session: string, input: import
   const key = `${prefix}input:${machine}:${session}:${input.messageId}`;
   try {
     if (remove) localStorage.removeItem(key);
-    else localStorage.setItem(key, JSON.stringify({ ...input, attachments: [], missingAttachments: input.attachments.length || input.missingAttachments || 0 }));
+    else localStorage.setItem(key, JSON.stringify({ ...input, attachments: [], videoFiles: undefined, files: undefined, missingAttachments: input.attachments.length + (input.videoFiles?.length ?? 0) + (input.files?.length ?? 0) || input.missingAttachments || 0 }));
   } catch { /* Server acceptance remains durable; unsent data stays in this tab. */ }
 }

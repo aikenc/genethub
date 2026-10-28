@@ -1,5 +1,6 @@
 pub mod artifact_links;
 pub(crate) mod artifacts;
+pub(crate) mod chat_files;
 pub mod components;
 mod context_seed;
 pub mod images;
