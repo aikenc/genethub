@@ -18,15 +18,15 @@ function needsRealModel(row: { suite: string; testName: string }): boolean {
 }
 
 for (const row of parity.cases) {
-  // A retired row no longer runs the frozen Rust implementation; its coverage
-  // is either owned by an equivalent TS case or deleted with the harness it
-  // tested. The parity file keeps the evidence for audit.
-  if (row.legacyExecution === "retired") continue;
   const real = needsRealModel(row);
+  // Retired rows stay registered only so the gate can report them as skipped
+  // with their retirement evidence; the runner itself never executes them.
+  const executionTag = row.legacyExecution === "suspended" ? "legacy-suspended"
+    : row.legacyExecution === "retired" ? "legacy-retired" : "legacy-required";
   defineSpecialty({
     id: row.oldId, title: row.testName, oracle: row.assertionDelta,
     catches: ["legacy behavior lost before independently verified parity"],
-    runner: "rust-legacy", tags: [row.legacyExecution === "suspended" ? "legacy-suspended" : "legacy-required", "legacy-suite-" + row.suite, row.oldId], llm: { default: real ? "real" : "mock" },
+    runner: "rust-legacy", tags: [executionTag, "legacy-suite-" + row.suite, row.oldId], llm: { default: real ? "real" : "mock" },
     expectedDurationMs: 30000, timeoutMs: 180000,
     resources: { pool: real ? "real-llm" : "heavy", cpu: 4, memoryMb: 2048, io: 2 }, surfaces: ["frozen-legacy"],
   }, async () => { throw new Error("frozen cases require the rust-legacy process adapter"); });
