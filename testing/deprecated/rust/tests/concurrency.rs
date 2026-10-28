@@ -839,6 +839,7 @@ async fn poll_browser(
                 Request::SessionList {
                     workspace_id: None,
                     include_archived: false,
+                    lean: true,
                 },
             )
             .await?,

@@ -1589,6 +1589,7 @@ async fn a_session_found_in_the_list_can_be_reopened_and_continued() {
         .call(Request::SessionList {
             workspace_id: Some(journey.workspace.id.clone()),
             include_archived: false,
+            lean: true,
         })
         .await
         .unwrap()
@@ -2162,6 +2163,7 @@ async fn sessions_list_per_workspace_and_can_be_archived() {
         .call(Request::SessionList {
             workspace_id: Some(journey.workspace.id.clone()),
             include_archived: false,
+            lean: true,
         })
         .await
         .unwrap()
@@ -2185,6 +2187,7 @@ async fn sessions_list_per_workspace_and_can_be_archived() {
         .call(Request::SessionList {
             workspace_id: Some(journey.workspace.id.clone()),
             include_archived: false,
+            lean: true,
         })
         .await
         .unwrap()

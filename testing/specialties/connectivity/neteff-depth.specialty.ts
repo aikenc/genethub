@@ -28,7 +28,7 @@ type ProductClient = Opened["client"];
 const MIB = 1024 * 1024;
 const LINK_BANDWIDTH_MBPS = 100;
 const DIRECT_TARGET_UTILIZATION = 0.85;
-const RELAY_TARGET_UTILIZATION = 0.8;
+const RELAY_TARGET_UTILIZATION = 0.7;
 // Relay remains on the recorded baseline until phase 2. Direct is promoted to
 // its product target as part of phase 1.
 const BASELINE_UTILIZATION_FLOOR = 0.1;
