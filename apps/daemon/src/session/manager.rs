@@ -1766,9 +1766,10 @@ impl SessionManager {
             .await
     }
 
-    /// `lean` keeps only the fields a sidebar needs: it drops fork lineage,
-    /// the last-reply cursor and the one-line description, and truncates the
-    /// message preview. Session detail reads remain complete.
+    /// `lean` keeps only the fields a sidebar needs: it drops fork lineage
+    /// and the last-reply cursor, and truncates the message preview. The
+    /// one-line description stays because expert directories read it. Session
+    /// detail reads remain complete.
     pub async fn list_with_projection(
         &self,
         workspace_id: Option<&str>,
@@ -1829,7 +1830,6 @@ impl SessionManager {
             if lean {
                 summary.lineage = None;
                 summary.latest_reply = None;
-                summary.description = None;
                 if let Some(preview) = &mut summary.message_preview {
                     if preview.text.chars().count() > 200 {
                         preview.text = preview.text.chars().take(200).collect::<String>() + "…";
