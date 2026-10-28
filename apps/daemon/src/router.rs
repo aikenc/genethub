@@ -917,6 +917,7 @@ async fn dispatch(
                     "process.services.v1".to_string(),
                     "agentSpace.builderPlans.v1".to_string(),
                     "session.input.v1".to_string(),
+                    "session.file-upload.v1".to_string(),
                     "provider.configuration.v1".to_string(),
                     "session.previewAnnotations.v1".to_string(),
                     "preview.feedback.v1".to_string(),
@@ -1438,13 +1439,22 @@ async fn dispatch(
             task_run_id,
             session_id,
             text,
-            attachments,
+            mut attachments,
             artifact_preview_base_url,
             continues_round,
             origin,
         } => Box::pin(async move {
             if text.trim().is_empty() && attachments.is_empty() {
                 return Handled::err(ErrorCode::BadRequest, "there is nothing to send");
+            }
+            // A stored file may only name this session's own upload. This also
+            // fills `bytes` from the filesystem before the message is logged.
+            if let Err(error) = state
+                .sessions
+                .validate_user_attachments(&session_id, &mut attachments)
+                .await
+            {
+                return failed(error);
             }
             let system = origin
                 .as_ref()
