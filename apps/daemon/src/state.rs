@@ -34,7 +34,6 @@ pub struct AppState {
     pub speech: Arc<crate::speech::SpeechBroker>,
     pub sessions: SessionManager,
     pub workspaces: Workspaces,
-    pub project_control: crate::project_control::Broker,
     pub(crate) provider_operations:
         std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Weak<Mutex<()>>>>,
     pub terminals: Arc<Terminals>,
@@ -147,15 +146,13 @@ impl AppState {
         let homes = WorkspaceHomes::default();
         let store = Store::new(homes.clone());
         let diagnostics = Arc::new(crate::diagnostics::Diagnostics::new());
-        let project_control = crate::project_control::Broker::new(&paths.root)?;
         let sessions = SessionManager::new_with_diagnostics(
             store,
             registry.clone(),
             config.replay_window,
             diagnostics.clone(),
         )
-        .with_builtin_skills(skills_dir, front_door_cli.clone())
-        .with_project_control(project_control.clone());
+        .with_builtin_skills(skills_dir, front_door_cli.clone());
 
         let config = Arc::new(RwLock::new(config));
         let workspaces = Workspaces::new(config.clone(), paths.config_file(), homes);
@@ -183,7 +180,6 @@ impl AppState {
             speech: Arc::new(crate::speech::SpeechBroker::new()),
             sessions,
             workspaces,
-            project_control,
             provider_operations: Default::default(),
             terminals,
             processes,

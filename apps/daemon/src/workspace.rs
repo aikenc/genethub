@@ -2881,9 +2881,14 @@ mod tests {
         let (spaces, ids) = open_verified(dir.path(), &["project", "executor"]).await;
         let (project, executor) = (ids[0].clone(), ids[1].clone());
 
-        mount(&spaces, &project, crate::agent_space::COMPONENT_PM, None)
-            .await
-            .unwrap();
+        mount(
+            &spaces,
+            &project,
+            crate::agent_space::COMPONENT_EXECUTOR,
+            None,
+        )
+        .await
+        .unwrap();
         attach(&spaces, &executor, &project).await.unwrap();
         mount(
             &spaces,
@@ -2911,9 +2916,9 @@ mod tests {
                 .iter()
                 .map(|component| component.component_id.as_str())
                 .collect::<Vec<_>>(),
-            vec![crate::agent_space::COMPONENT_PM]
+            vec![crate::agent_space::COMPONENT_EXECUTOR]
         );
-        assert!(find(&project).pipe_space.unwrap().pm);
+        assert!(!find(&project).pipe_space.unwrap().pm);
 
         let executor_space = find(&executor).agent_space.unwrap();
         assert_eq!(
@@ -2958,19 +2963,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn one_space_can_manage_the_project_and_drive_the_flow() {
+    async fn one_space_can_carry_the_executor_and_a_worker() {
         let dir = tempfile::tempdir().unwrap();
         let (spaces, ids) = open_verified(dir.path(), &["project"]).await;
         let project = ids[0].clone();
 
-        mount(&spaces, &project, crate::agent_space::COMPONENT_PM, None)
-            .await
-            .unwrap();
-        let info = mount(
+        mount(
             &spaces,
             &project,
             crate::agent_space::COMPONENT_EXECUTOR,
             None,
+        )
+        .await
+        .unwrap();
+        let info = mount(
+            &spaces,
+            &project,
+            crate::agent_space::COMPONENT_WORKER,
+            Some("planner"),
         )
         .await
         .unwrap();
@@ -3059,9 +3069,14 @@ mod tests {
             ids[3].clone(),
         );
 
-        mount(&spaces, &project, crate::agent_space::COMPONENT_PM, None)
-            .await
-            .unwrap();
+        mount(
+            &spaces,
+            &project,
+            crate::agent_space::COMPONENT_EXECUTOR,
+            None,
+        )
+        .await
+        .unwrap();
         attach(&spaces, &executor, &project).await.unwrap();
         mount(
             &spaces,
@@ -3112,9 +3127,14 @@ mod tests {
         let (spaces, ids) = open_verified(dir.path(), &["project", "coder"]).await;
         let (project, coder) = (ids[0].clone(), ids[1].clone());
 
-        mount(&spaces, &project, crate::agent_space::COMPONENT_PM, None)
-            .await
-            .unwrap();
+        mount(
+            &spaces,
+            &project,
+            crate::agent_space::COMPONENT_WORKER,
+            Some("planner"),
+        )
+        .await
+        .unwrap();
         attach(&spaces, &coder, &project).await.unwrap();
         mount(
             &spaces,
@@ -3138,9 +3158,14 @@ mod tests {
         let (spaces, ids) = open_verified(dir.path(), &["project"]).await;
         let project = ids[0].clone();
 
-        mount(&spaces, &project, crate::agent_space::COMPONENT_PM, None)
-            .await
-            .unwrap();
+        mount(
+            &spaces,
+            &project,
+            crate::agent_space::COMPONENT_EXECUTOR,
+            None,
+        )
+        .await
+        .unwrap();
         let error = spaces
             .configure_agent_space(
                 &project,
@@ -3198,9 +3223,14 @@ mod tests {
         std::fs::write(project.join("AGENTS.md"), "tampered\n").unwrap();
         let spaces = workspaces(dir.path()).await;
         let project = spaces.open(&project, None).await.unwrap();
-        let error = mount(&spaces, &project.id, crate::agent_space::COMPONENT_PM, None)
-            .await
-            .unwrap_err();
+        let error = mount(
+            &spaces,
+            &project.id,
+            crate::agent_space::COMPONENT_EXECUTOR,
+            None,
+        )
+        .await
+        .unwrap_err();
         assert!(error.to_string().contains("drifted"));
     }
 
@@ -3209,9 +3239,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (spaces, ids) = open_verified(dir.path(), &["project"]).await;
         let project = ids[0].clone();
-        mount(&spaces, &project, crate::agent_space::COMPONENT_PM, None)
-            .await
-            .unwrap();
+        mount(
+            &spaces,
+            &project,
+            crate::agent_space::COMPONENT_EXECUTOR,
+            None,
+        )
+        .await
+        .unwrap();
 
         std::fs::write(dir.path().join("project/AGENTS.md"), "tampered\n").unwrap();
         let error = mount(

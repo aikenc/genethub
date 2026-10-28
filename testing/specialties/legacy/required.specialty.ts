@@ -18,6 +18,10 @@ function needsRealModel(row: { suite: string; testName: string }): boolean {
 }
 
 for (const row of parity.cases) {
+  // A retired row no longer runs the frozen Rust implementation; its coverage
+  // is either owned by an equivalent TS case or deleted with the harness it
+  // tested. The parity file keeps the evidence for audit.
+  if (row.legacyExecution === "retired") continue;
   const real = needsRealModel(row);
   defineSpecialty({
     id: row.oldId, title: row.testName, oracle: row.assertionDelta,

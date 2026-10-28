@@ -298,6 +298,7 @@ pub(crate) struct LegacyPipeSpaceEntry {
     #[serde(default)]
     parent_workspace_id: Option<String>,
     #[serde(default)]
+    #[allow(dead_code)]
     pm: bool,
     #[serde(default)]
     worker_role: Option<String>,
@@ -367,14 +368,6 @@ impl Config {
                 continue;
             }
             let mut components = Vec::new();
-            if legacy.pm {
-                components.push(AgentComponentEntry {
-                    component_id: crate::agent_space::COMPONENT_PM.to_string(),
-                    schema_version: crate::agent_space::COMPONENT_SCHEMA_VERSION,
-                    enabled: true,
-                    role: None,
-                });
-            }
             match legacy.worker_role.as_deref() {
                 None => {}
                 Some(crate::agent_space::LEGACY_EXECUTOR_ROLE) => {
@@ -887,7 +880,10 @@ mod tests {
                 })
                 .unwrap()
         };
-        assert_eq!(components("ws_project"), vec![("pm".into(), None)]);
+        assert_eq!(
+            components("ws_project"),
+            Vec::<(String, Option<String>)>::new()
+        );
         assert_eq!(components("ws_executor"), vec![("executor".into(), None)]);
         assert_eq!(
             components("ws_tester"),

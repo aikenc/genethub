@@ -400,7 +400,7 @@ pub enum Request {
         target_workspace_id: Option<String>,
         space_name: String,
         operation: AgentSpaceBuilderOperation,
-        /// Preview an exact build under the existing PM management binding.
+        /// Preview an exact build before applying it.
         #[serde(default)]
         #[ts(optional)]
         plan: Option<bool>,
@@ -414,12 +414,6 @@ pub enum Request {
         #[ts(optional, type = "number")]
         expected_revision: Option<u64>,
     },
-    /// Presents one daemon-authored project mutation plan to the Human and
-    /// waits for their answer. A SessionController may request this card but
-    /// cannot answer it; approval authority remains Human-only and the
-    /// resulting grant never crosses this API.
-    #[serde(rename = "project.approval.request", rename_all = "camelCase")]
-    ProjectApprovalRequest { challenge_id: String },
     /// The direct child Spaces this one may dispatch to.
     ///
     /// Refused unless the Space mounts an enabled `executor`, and never

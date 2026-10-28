@@ -140,8 +140,6 @@ pub struct HumanContinuation {
     pub outcome: genehub_proto::PermissionOutcome,
     pub decided_at_ms: i64,
     #[serde(default)]
-    pub project_approval: bool,
-    #[serde(default)]
     pub grant_recorded: bool,
     #[serde(default)]
     pub completed: bool,
@@ -298,8 +296,6 @@ pub struct SessionMeta {
     /// Stored in meta so no live socket or Agent process is required.
     #[serde(default)]
     pub pending_permission: Option<PermissionRequest>,
-    #[serde(default)]
-    pub pending_project_approval: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub human_continuation: Option<HumanContinuation>,
     /// The Agent this session runs remains `agent_id`; lineage only describes
@@ -416,7 +412,6 @@ impl SessionMeta {
             persist: None,
             agent_pid: None,
             pending_permission: None,
-            pending_project_approval: false,
             human_continuation: None,
             lineage: None,
             managed: None,
@@ -2353,7 +2348,6 @@ mod project_home_tests {
             persist: None,
             agent_pid: None,
             pending_permission: None,
-            pending_project_approval: false,
             human_continuation: None,
             lineage: None,
             managed: None,

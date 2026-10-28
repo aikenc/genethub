@@ -33,14 +33,36 @@ export function checkGovernance(openRoot: string, cloudRoot?: string): Governanc
       cases?: Array<{
         oracleClass?: string; oldId?: string; legacyExecution?: string;
         suspension?: { approvedBy?: string; approvedAt?: string; reason?: string; resumeWhen?: string };
+        retirement?: {
+          type?: string; tsId?: string; tsRunId?: string; rustRunId?: string;
+          openSha?: string; cloudSha?: string; artifactSha?: string;
+          tsInputs?: unknown; rustInputs?: unknown; assertionDelta?: string;
+          coverageDelta?: string; fault?: string; reviewedIn?: string;
+          deletedDependency?: string; reason?: string;
+        };
       }>;
     };
     const recorded = (value?: string) => Boolean(value?.trim());
     const suspended = (item: NonNullable<typeof parity.cases>[number]) => item.legacyExecution === "suspended"
       && recorded(item.suspension?.approvedBy) && /^\d{4}-\d{2}-\d{2}$/.test(item.suspension?.approvedAt ?? "")
       && recorded(item.suspension?.reason) && recorded(item.suspension?.resumeWhen);
-    const stopped = (parity.cases ?? []).filter(item => item.legacyExecution !== "required" && !suspended(item));
-    if (stopped.length) findings.push({ rule: "L13", file: parityPath, message: stopped.length + " legacy rows are neither required nor suspended with approver, date, reason and resume condition" });
+    // A retired row means the Rust implementation is gone and its coverage is
+    // either taken over by an equivalent TS case or deleted with the harness it
+    // tested. It still needs traceable run/input identity; a bare "retired" is
+    // not evidence.
+    const retired = (item: NonNullable<typeof parity.cases>[number]) => {
+      if (item.legacyExecution !== "retired" || !item.retirement) return false;
+      const r = item.retirement;
+      if (!recorded(r.type) || !recorded(r.openSha) || !recorded(r.cloudSha)
+        || !recorded(r.artifactSha) || !recorded(r.reviewedIn)) return false;
+      if (r.type === "delete-with-harness") {
+        return recorded(r.deletedDependency) && recorded(r.reason);
+      }
+      return recorded(r.tsId) && recorded(r.tsRunId) && recorded(r.rustRunId)
+        && r.tsInputs !== undefined && r.rustInputs !== undefined;
+    };
+    const stopped = (parity.cases ?? []).filter(item => item.legacyExecution !== "required" && !suspended(item) && !retired(item));
+    if (stopped.length) findings.push({ rule: "L13", file: parityPath, message: stopped.length + " legacy rows are neither required, suspended with approval, nor retired with traceable parity evidence" });
     const stray = (parity.cases ?? []).filter(item => item.legacyExecution === "required" && item.suspension);
     if (stray.length) findings.push({ rule: "L13", file: parityPath, message: stray.length + " required legacy rows still carry a suspension record" });
     pending = (parity.cases ?? []).filter((item) => item.oracleClass === "pending-classification").length;

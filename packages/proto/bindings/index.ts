@@ -232,7 +232,7 @@ export type AgentSpaceBuilderReport = { managementPlan?: AgentSpaceBuilderPlan, 
 /**
  * Immutable, Human-reviewable plan for one Component/Parent/lifecycle CAS.
  */
-export type AgentSpaceChangePlan = { schema: string, workspaceId: string, planDigest: string, expectedRevision: number, operation: AgentSpaceOperation, approval?: BootstrapApprovalChallenge, };
+export type AgentSpaceChangePlan = { schema: string, workspaceId: string, planDigest: string, expectedRevision: number, operation: AgentSpaceOperation, };
 
 export type AgentSpaceHealth = { 
 /**
@@ -424,8 +424,6 @@ id: string, bytes: number,
  * files, verifying the id it finds there before answering.
  */
 at: string, };
-
-export type BootstrapApprovalChallenge = { challengeId: string, title: string, detail: string, expiresAtMs: number, };
 
 export type CallerAuthority = { principalType: string, sessionId?: string, grants: Array<string>, providerOperations: boolean, providerRequestCommand: string, };
 
@@ -1370,9 +1368,9 @@ workspaceId: string,
  */
 targetWorkspaceId: string | null, spaceName: string, operation: AgentSpaceBuilderOperation, 
 /**
- * Preview an exact build under the existing PM management binding.
+ * Preview an exact build before applying it.
  */
-plan?: boolean, planDigest?: string, actionId?: string, expectedRevision?: number, } } | { "type": "project.approval.request", "payload": { challengeId: string, } } | { "type": "agentSpace.children", "payload": { workspaceId: string, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, recentRounds?: number, beforeItemId?: string, } } | { "type": "session.drafts", "payload": { sessionId: string, } } | { "type": "session.drafts.replace", "payload": { sessionId: string, drafts: Array<SessionDraft>, } } | { "type": "session.previewAnnotations.get", "payload": { sessionId: string, } } | { "type": "session.previewAnnotations.upsert", "payload": { sessionId: string, annotation: PreviewAnnotation, expectedRevision: number, } } | { "type": "session.previewAnnotations.remove", "payload": { sessionId: string, ids: Array<string>, 
+plan?: boolean, planDigest?: string, actionId?: string, expectedRevision?: number, } } | { "type": "agentSpace.children", "payload": { workspaceId: string, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, recentRounds?: number, beforeItemId?: string, } } | { "type": "session.drafts", "payload": { sessionId: string, } } | { "type": "session.drafts.replace", "payload": { sessionId: string, drafts: Array<SessionDraft>, } } | { "type": "session.previewAnnotations.get", "payload": { sessionId: string, } } | { "type": "session.previewAnnotations.upsert", "payload": { sessionId: string, annotation: PreviewAnnotation, expectedRevision: number, } } | { "type": "session.previewAnnotations.remove", "payload": { sessionId: string, ids: Array<string>, 
 /**
  * Present for an explicit delete. Omitted after a confirmed send so a
  * note added during send is not rejected as a stale revision.
@@ -2391,10 +2389,6 @@ components: Array<string>, planDigest: string, expectedRevision: number,
  * Runs that must finish before a rebuild may replace shared carriers.
  */
 conflictRuns: Array<string>, 
-/**
- * Present when a human challenge is required and was issued.
- */
-approval?: BootstrapApprovalChallenge, 
 /**
  * Active Candidate digest after the build activated the package source.
  */

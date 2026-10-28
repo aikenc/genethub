@@ -627,17 +627,6 @@ pub struct AgentSpaceBuilderReport {
     pub details: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "index.ts")]
-pub struct BootstrapApprovalChallenge {
-    pub challenge_id: String,
-    pub title: String,
-    pub detail: String,
-    #[ts(type = "number")]
-    pub expires_at_ms: i64,
-}
-
 /// Immutable, Human-reviewable plan for one Component/Parent/lifecycle CAS.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -649,9 +638,6 @@ pub struct AgentSpaceChangePlan {
     #[ts(type = "number")]
     pub expected_revision: u64,
     pub operation: crate::rpc::AgentSpaceOperation,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub approval: Option<BootstrapApprovalChallenge>,
 }
 
 /// How a child session obtained the context that precedes its first new turn.
@@ -1558,10 +1544,6 @@ pub struct WorkflowBuildReport {
     pub expected_revision: u64,
     /// Runs that must finish before a rebuild may replace shared carriers.
     pub conflict_runs: Vec<String>,
-    /// Present when a human challenge is required and was issued.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub approval: Option<BootstrapApprovalChallenge>,
     /// Active Candidate digest after the build activated the package source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]

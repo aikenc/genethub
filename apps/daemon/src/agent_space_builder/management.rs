@@ -1,4 +1,4 @@
-//! PM build plans reuse project-control authority, receipts and source fences.
+//! AgentSpace Builder build plans.
 
 use std::path::Path;
 
@@ -7,9 +7,6 @@ use genehub_proto::{AgentSpaceBuilderOperation, AgentSpaceBuilderPlan, AgentSpac
 use serde_json::json;
 
 use crate::state::Shared;
-
-const ACTION: &str = "agentSpace.builder";
-const PACK: &str = "agent-space-builder";
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn build(
@@ -22,7 +19,7 @@ pub(crate) async fn build(
     plan_digest: Option<&str>,
     action_id: Option<&str>,
     expected_revision: Option<u64>,
-    recovery_authorized: bool,
+    _recovery_authorized: bool,
 ) -> Result<AgentSpaceBuilderReport> {
     let AgentSpaceBuilderOperation::Build {
         dry_run: false,
@@ -36,29 +33,9 @@ pub(crate) async fn build(
     if planning && (plan_digest.is_some() || action_id.is_some()) {
         bail!("Builder planning cannot apply a previous plan");
     }
-    let _mutation = state.project_control.mutation_lock().await;
     let project = state.workspaces.get(project_id).await?;
     let project_root = project.root.canonicalize()?;
     let root = space_root.canonicalize()?;
-
-    if !planning {
-        if let (Some(session), Some(digest), Some(action)) = (controller, plan_digest, action_id) {
-            if let Some(report) = state
-                .project_control
-                .completed_action::<AgentSpaceBuilderReport>(
-                    project_id, session, ACTION, digest, action,
-                )?
-            {
-                if !report.management_plan.as_ref().is_some_and(|plan| {
-                    plan.operation == *operation && plan.target_root == root.display().to_string()
-                }) {
-                    bail!("actionConflict: this Builder receipt identifies another operation or target");
-                }
-                return Ok(report);
-            }
-        }
-    }
-
     let project_space = state.workspaces.agent_space(project_id).await?;
     let revision = project_space.revision;
     if expected_revision.is_some_and(|expected| expected != revision) {
@@ -109,28 +86,7 @@ pub(crate) async fn build(
         target_root: root.display().to_string(),
         operation: operation.clone(),
     };
-    let canonical_root = project_root.display().to_string();
     if planning {
-        if let Some(session) = controller {
-            if !crate::router::session_may_manage_project(state, project_id, session).await
-                && !recovery_authorized
-            {
-                bail!("projectControlRequired: applying a Builder plan needs a taken-over project and a main Session that belongs to it");
-            }
-            let approval = state.project_control.issue_management(crate::project_control::ChallengeSpec {
-                controller_session_id: session.into(), workspace_id: project_id.into(),
-                canonical_root, action: ACTION.into(), pack_id: PACK.into(),
-                pack_digest: input_digest.clone(), plan_digest: digest,
-                expected_revision: revision, git_head: None, status_digest: input_digest,
-                title: "应用 AgentSpace Builder 计划".into(),
-                detail: format!("Build {} at project revision {revision}; only the previewed projections are written", root.display()),
-            }, project_id,
-                crate::router::session_may_manage_project(state, project_id, session).await,
-                recovery_authorized).await?;
-            if approval.is_some() {
-                bail!("projectControlRequired: project management binding changed; inspect the current authority");
-            }
-        }
         let mut report: AgentSpaceBuilderReport = preview.into();
         report.management_plan = Some(plan);
         return Ok(report);
@@ -159,32 +115,6 @@ pub(crate) async fn build(
         }
     }
 
-    let reservation = if let Some(session) = controller {
-        let action = action_id.context("Builder apply requires --action-id")?;
-        Some((
-            state
-                .project_control
-                .reserve(
-                    session,
-                    project_id,
-                    &canonical_root,
-                    ACTION,
-                    PACK,
-                    &input_digest,
-                    &digest,
-                    revision,
-                    None,
-                    &input_digest,
-                    action,
-                    crate::router::session_may_manage_project(state, project_id, session).await,
-                    recovery_authorized,
-                )
-                .await?,
-            action,
-        ))
-    } else {
-        None
-    };
     let result = super::run_bound(
         &project_root,
         &root,
@@ -192,27 +122,7 @@ pub(crate) async fn build(
         *require_no_post_commands,
         Some(&input_digest),
     );
-    let mut report: AgentSpaceBuilderReport = match result {
-        Ok(report) => report.into(),
-        Err(error) => {
-            if let Some((challenge, action)) = &reservation {
-                state
-                    .project_control
-                    .release_failed(challenge, action)
-                    .await?;
-            }
-            return Err(error.into());
-        }
-    };
+    let mut report: AgentSpaceBuilderReport = result?.into();
     report.management_plan = Some(plan);
-    if let (Some(session), Some((challenge, action))) = (controller, reservation) {
-        // A receipt failure leaves the applying fence set. Never blindly repeat
-        // an operation whose filesystem result may already exist.
-        state
-            .project_control
-            .record_completed_action(project_id, session, ACTION, &digest, action, &report)
-            .context("mutationReceiptFailed: inspect Builder outputs before recovery")?;
-        state.project_control.complete(&challenge, action).await?;
-    }
     Ok(report)
 }

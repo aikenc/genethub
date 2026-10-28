@@ -425,7 +425,6 @@ pub fn required(request: &Request) -> Capability {
         Request::SessionCreate { .. }
         | Request::SessionCreateRouted { .. }
         | Request::AgentSpaceBuilder { .. }
-        | Request::ProjectApprovalRequest { .. }
         | Request::WorkflowBuild { .. }
         | Request::WorkflowActivate { .. }
         | Request::WorkflowDispatch { .. }

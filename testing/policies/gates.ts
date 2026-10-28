@@ -27,6 +27,9 @@ export function selectForGate(
     if (item.tags.includes("legacy-suspended")) {
       return { include: false, reason: "L13 suspended: product capability removed by Human decision; see rust-parity.json suspension" };
     }
+    if (item.tags.includes("legacy-retired")) {
+      return { include: false, reason: "L13 retired: Rust implementation removed after verified per-case parity; see rust-parity.json retirement" };
+    }
     return { include: true, reason: "L13: frozen legacy required until verified parity" };
   }
   if (item.llm.default === "real" && gate !== "beta" && gate !== "stable") {

@@ -44,9 +44,6 @@ enum Command {
         action_id: Option<String>,
         expected_revision: Option<u64>,
     },
-    RequestApproval {
-        challenge_id: String,
-    },
 }
 
 pub async fn space(args: &[String], selection: &Selection) -> i32 {
@@ -226,28 +223,6 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
             );
             Ok(EXIT_OK)
         }
-        Command::RequestApproval { challenge_id } => {
-            let Reply::Ack = rpc
-                .call(Request::ProjectApprovalRequest {
-                    challenge_id: challenge_id.clone(),
-                })
-                .await
-                .map_err(query::rpc_error)?
-            else {
-                return Err(CliFailure::protocol(
-                    "the daemon answered project.approval.request with the wrong reply",
-                ));
-            };
-            output::succeed(
-                "space.approval.requested",
-                json!({
-                    "challengeId": challenge_id,
-                    "status": "waitingForHuman",
-                    "approved": false,
-                }),
-            );
-            Ok(EXIT_OK)
-        }
     }
 }
 
@@ -406,15 +381,8 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
                 expected_revision: values.expected_revision.or(values.revision),
             })
         }
-        ("approval", "request") => {
-            let mut values = Values::parse(rest(2))?;
-            let challenge_id = values.challenge.take().ok_or_else(|| {
-                CliFailure::invalid_args("space approval request 需要 --challenge <id>")
-            })?;
-            Ok(Command::RequestApproval { challenge_id })
-        }
         _ => Err(CliFailure::invalid_args(
-            "usage: genet space open <dir>|inspect|children|component set|component remove|parent set|lifecycle set|builder|approval request ...",
+            "usage: genet space open <dir>|inspect|children|component set|component remove|parent set|lifecycle set|builder ...",
         )),
     }
 }
@@ -684,28 +652,6 @@ mod tests {
             "--name".into(),
             "coder".into(),
             "--dry-run".into(),
-        ])
-        .is_err());
-    }
-
-    #[test]
-    fn approval_request_is_a_distinct_non_approving_command() {
-        let Command::RequestApproval { challenge_id } = parse(&[
-            "approval".into(),
-            "request".into(),
-            "--challenge".into(),
-            "pm-bootstrap-123".into(),
-        ])
-        .unwrap() else {
-            panic!("wrong command")
-        };
-        assert_eq!(challenge_id, "pm-bootstrap-123");
-        assert!(parse(&["approval".into(), "request".into()]).is_err());
-        assert!(parse(&[
-            "approval".into(),
-            "approve".into(),
-            "--challenge".into(),
-            "pm-bootstrap-123".into(),
         ])
         .is_err());
     }
