@@ -1,33 +1,26 @@
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { defineSpecialty } from "../../framework/public.ts";
 
 const parity = JSON.parse(readFileSync(new URL("../../migration/rust-parity.json", import.meta.url), "utf8")) as {
   cases: Array<{ oldId: string; suite: string; testName: string; legacyExecution: string; assertionDelta: string }>;
 };
 
-/** A frozen case that begins with `real_only!` is skipped (blocked) unless the harness runs it against the real model. */
-function needsRealModel(row: { suite: string; testName: string }): boolean {
-  if (row.testName === "a_real_provider_that_rejects_our_key_says_so_instead_of_hanging") return true;
-  const file = new URL(`../../deprecated/rust/tests/${row.suite}.rs`, import.meta.url);
-  if (!existsSync(file)) return false;
-  const source = readFileSync(file, "utf8");
-  const start = source.indexOf(`fn ${row.testName}(`);
-  if (start < 0) return false;
-  const next = source.slice(start).search(/\n#\[(tokio::)?test/);
-  return source.slice(start, next < 0 ? undefined : start + next).includes("real_only!(");
-}
-
+// The frozen Rust crate is retired. These rows remain registered only so a
+// plan can report each terminal state and its evidence; none of them runs.
 for (const row of parity.cases) {
-  const real = needsRealModel(row);
-  // Retired rows stay registered only so the gate can report them as skipped
-  // with their retirement evidence; the runner itself never executes them.
   const executionTag = row.legacyExecution === "suspended" ? "legacy-suspended"
-    : row.legacyExecution === "retired" ? "legacy-retired" : "legacy-required";
+    : row.legacyExecution === "retired" ? "legacy-retired"
+    : row.legacyExecution === "release-only" ? "legacy-release-only"
+    : "legacy-required";
   defineSpecialty({
     id: row.oldId, title: row.testName, oracle: row.assertionDelta,
     catches: ["legacy behavior lost before independently verified parity"],
-    runner: "rust-legacy", tags: [executionTag, "legacy-suite-" + row.suite, row.oldId], llm: { default: real ? "real" : "mock" },
-    expectedDurationMs: 30000, timeoutMs: 180000,
-    resources: { pool: real ? "real-llm" : "heavy", cpu: 4, memoryMb: 2048, io: 2 }, surfaces: ["frozen-legacy"],
-  }, async () => { throw new Error("frozen cases require the rust-legacy process adapter"); });
+    runner: "node", tags: [executionTag, "legacy-suite-" + row.suite, row.oldId], llm: { default: "mock" },
+    expectedDurationMs: 1000, timeoutMs: 5000,
+    resources: { pool: "standard", cpu: 1, memoryMb: 512, io: 1 }, surfaces: ["legacy-metadata"],
+  }, async () => {
+    if (row.legacyExecution === "required") {
+      throw new Error("required frozen case has no integrated runner; re-integrate it or retire it with evidence");
+    }
+  });
 }

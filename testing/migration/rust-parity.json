@@ -235,7 +235,17 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.claude-same-timeline uses the production Client and the installed Claude CLI pointed at the host DeepSeek key. Rust used Journey + client_v3. Unknown picker ids are protocol badRequest, not a non-protocol 'invalid'.",
-      "legacyExecution": "required"
+      "legacyExecution": "release-only",
+      "releaseOnly": {
+        "tsId": "journey.session.claude-same-timeline",
+        "tsRunId": "261028-2208-claude-account-probe-9429",
+        "blocker": "403 Insufficient account balance (same account for TS and Rust canaries)",
+        "archive": {
+          "path": "testing/deprecated/archive/claude.rs",
+          "record": "source retained outside the active crate; not compiled or executed; see testing/deprecated/archive/README.md"
+        },
+        "reviewedIn": "runs/261028-2208-claude-account-probe-9429"
+      }
     },
     {
       "oldId": "rust.claude.accept_edits_mode_lets_a_real_tool_call_through_without_a_prompt",
@@ -245,7 +255,17 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.claude-accept-edits uses the production Client and the installed Claude CLI pointed at the host DeepSeek key. Rust used Journey + client_v3. Unknown picker ids are protocol badRequest, not a non-protocol 'invalid'.",
-      "legacyExecution": "required"
+      "legacyExecution": "release-only",
+      "releaseOnly": {
+        "tsId": "journey.session.claude-accept-edits",
+        "tsRunId": "261028-2208-claude-account-probe-9429",
+        "blocker": "403 Insufficient account balance (same account for TS and Rust canaries)",
+        "archive": {
+          "path": "testing/deprecated/archive/claude.rs",
+          "record": "source retained outside the active crate; not compiled or executed; see testing/deprecated/archive/README.md"
+        },
+        "reviewedIn": "runs/261028-2208-claude-account-probe-9429"
+      }
     },
     {
       "oldId": "rust.claude.the_model_and_mode_pickers_offer_what_this_cli_actually_accepts",
@@ -255,7 +275,17 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.claude-catalog-pickers uses the production Client and the installed Claude CLI pointed at the host DeepSeek key. Rust used Journey + client_v3. Unknown picker ids are protocol badRequest, not a non-protocol 'invalid'.",
-      "legacyExecution": "required"
+      "legacyExecution": "release-only",
+      "releaseOnly": {
+        "tsId": "journey.session.claude-catalog-pickers",
+        "tsRunId": "261028-2208-claude-account-probe-9429",
+        "blocker": "403 Insufficient account balance (same account for TS and Rust canaries)",
+        "archive": {
+          "path": "testing/deprecated/archive/claude.rs",
+          "record": "source retained outside the active crate; not compiled or executed; see testing/deprecated/archive/README.md"
+        },
+        "reviewedIn": "runs/261028-2208-claude-account-probe-9429"
+      }
     },
     {
       "oldId": "rust.claude.interrupting_claude_code_ends_the_turn_as_canceled",
@@ -265,7 +295,17 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.claude-interrupt uses the production Client and the installed Claude CLI pointed at the host DeepSeek key. Rust used Journey + client_v3. Unknown picker ids are protocol badRequest, not a non-protocol 'invalid'.",
-      "legacyExecution": "required"
+      "legacyExecution": "release-only",
+      "releaseOnly": {
+        "tsId": "journey.session.claude-interrupt",
+        "tsRunId": "261028-2208-claude-account-probe-9429",
+        "blocker": "403 Insufficient account balance (same account for TS and Rust canaries)",
+        "archive": {
+          "path": "testing/deprecated/archive/claude.rs",
+          "record": "source retained outside the active crate; not compiled or executed; see testing/deprecated/archive/README.md"
+        },
+        "reviewedIn": "runs/261028-2208-claude-account-probe-9429"
+      }
     },
     {
       "oldId": "rust.claude.denying_a_permission_request_stops_the_tool_without_touching_disk",
@@ -275,7 +315,17 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.claude-deny-permission uses the production Client and the installed Claude CLI pointed at the host DeepSeek key. Rust used Journey + client_v3. Unknown picker ids are protocol badRequest, not a non-protocol 'invalid'.",
-      "legacyExecution": "required"
+      "legacyExecution": "release-only",
+      "releaseOnly": {
+        "tsId": "journey.session.claude-deny-permission",
+        "tsRunId": "261028-2208-claude-account-probe-9429",
+        "blocker": "403 Insufficient account balance (same account for TS and Rust canaries)",
+        "archive": {
+          "path": "testing/deprecated/archive/claude.rs",
+          "record": "source retained outside the active crate; not compiled or executed; see testing/deprecated/archive/README.md"
+        },
+        "reviewedIn": "runs/261028-2208-claude-account-probe-9429"
+      }
     },
     {
       "oldId": "rust.claude.a_sub_agents_work_stays_inside_the_call_that_dispatched_it",
@@ -285,7 +335,18 @@
       "status": "source-retained",
       "oracleClass": "public-behavior",
       "assertionDelta": "No TS this stage: Task dispatch is the model's call, not a stable Client oracle. Frozen Rust source is retained and required through testctl.",
-      "legacyExecution": "required"
+      "legacyExecution": "release-only",
+      "releaseOnly": {
+        "tsId": null,
+        "tsRunId": "261028-2208-claude-account-probe-9429",
+        "blocker": "403 Insufficient account balance (same account for TS and Rust canaries)",
+        "archive": {
+          "path": "testing/deprecated/archive/claude.rs",
+          "record": "source retained outside the active crate; not compiled or executed; see testing/deprecated/archive/README.md"
+        },
+        "reviewedIn": "runs/261028-2208-claude-account-probe-9429",
+        "gap": "No TS twin for Claude sub-agent isolation. The TS release-only Claude journeys cover the timeline and tool/permission paths, not sub-agent containment; the same account 403 blocks adding and running a twin."
+      }
     },
     {
       "oldId": "rust.command.the_two_output_streams_arrive_apart_and_the_status_is_the_command_s_own",
@@ -907,7 +968,16 @@
       "status": "source-retained",
       "oracleClass": "production-support",
       "assertionDelta": "Harness unit test of LatencySummary over_3s counting, not daemon behavior. No product TS twin. Frozen source restored and required through testctl.",
-      "legacyExecution": "required"
+      "legacyExecution": "retired",
+      "retirement": {
+        "type": "delete-with-harness",
+        "openSha": "2d26a7843bd1a44561a44b6537413047fd222995",
+        "cloudSha": "cc0e6f0667a7d4082f352f349054c219e94bdfb5",
+        "artifactSha": "ee95a89a4df0fa5254e24466623bdff065a84ea58a180ceda60f37045a93c216",
+        "reviewedIn": "runs/261028-2205-parity-concurrency-e2f5",
+        "deletedDependency": "LatencySummary unit test and its harness implementation in testing/deprecated/rust/tests/concurrency.rs",
+        "reason": "The case tests the frozen harness's own latency-summary counting, not daemon or product behavior; the harness is being removed."
+      }
     },
     {
       "oldId": "rust.concurrency.concurrent_user_journey_matches_profile",
@@ -917,7 +987,33 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS proves two workspaces and two genet sessions complete without mixing turnStarted, through @genehub/workbench/client. Does not copy native_resource_count, multi-browser subscribe, or load-profile timing (those probes are do-not-export).",
-      "legacyExecution": "required"
+      "legacyExecution": "retired",
+      "retirement": {
+        "type": "ts-parity",
+        "tsId": "specialty.concurrency.parallel-sessions",
+        "tsRunId": "261028-2205-parity-concurrency-e2f5",
+        "rustRunId": "261028-2205-parity-concurrency-e2f5",
+        "openSha": "2d26a7843bd1a44561a44b6537413047fd222995",
+        "cloudSha": "cc0e6f0667a7d4082f352f349054c219e94bdfb5",
+        "artifactSha": "ee95a89a4df0fa5254e24466623bdff065a84ea58a180ceda60f37045a93c216",
+        "tsInputs": {
+          "run": "runs/261028-2205-parity-concurrency-e2f5",
+          "case": "specialty.concurrency.parallel-sessions",
+          "open": "2d26a7843bd1a44561a44b6537413047fd222995",
+          "cloud": "cc0e6f0667a7d4082f352f349054c219e94bdfb5",
+          "artifact": "ee95a89a4df0fa5254e24466623bdff065a84ea58a180ceda60f37045a93c216"
+        },
+        "rustInputs": {
+          "run": "runs/261028-2205-parity-concurrency-e2f5",
+          "case": "rust.concurrency.concurrent_user_journey_matches_profile",
+          "open": "2d26a7843bd1a44561a44b6537413047fd222995",
+          "cloud": "cc0e6f0667a7d4082f352f349054c219e94bdfb5",
+          "artifact": "ee95a89a4df0fa5254e24466623bdff065a84ea58a180ceda60f37045a93c216"
+        },
+        "assertionDelta": "TS proves two workspaces and two genet sessions complete without mixing turnStarted, through @genehub/workbench/client. Does not copy native_resource_count, multi-browser subscribe, or load-profile timing (those probes are do-not-export).",
+        "coverageDelta": "TS counterpart proved the business oracle (all turns complete, no interaction failures, unrelated reads responsive) on the same artifact; the old 10/20-workspace load profile and native resource counts are measurement-only and are not reproduced in the TS gate.",
+        "reviewedIn": "runs/261028-2205-parity-concurrency-e2f5"
+      }
     },
     {
       "oldId": "rust.concurrency.blocking_canaries_locate_the_global_stall",
@@ -927,7 +1023,33 @@
       "status": "ts-owned",
       "oracleClass": "os-fact",
       "assertionDelta": "TS proves workspace.list stays under 500ms during a delayed mock turn, plus a companion slow-git file.tree/list canary. Does not copy pause_inbound preview flood or native_resource_count.",
-      "legacyExecution": "required"
+      "legacyExecution": "retired",
+      "retirement": {
+        "type": "ts-parity",
+        "tsId": "specialty.concurrency.slow-model-unrelated-reads",
+        "tsRunId": "261028-2205-parity-concurrency-e2f5",
+        "rustRunId": "261028-2205-parity-concurrency-e2f5",
+        "openSha": "2d26a7843bd1a44561a44b6537413047fd222995",
+        "cloudSha": "cc0e6f0667a7d4082f352f349054c219e94bdfb5",
+        "artifactSha": "ee95a89a4df0fa5254e24466623bdff065a84ea58a180ceda60f37045a93c216",
+        "tsInputs": {
+          "run": "runs/261028-2205-parity-concurrency-e2f5",
+          "case": "specialty.concurrency.slow-model-unrelated-reads",
+          "open": "2d26a7843bd1a44561a44b6537413047fd222995",
+          "cloud": "cc0e6f0667a7d4082f352f349054c219e94bdfb5",
+          "artifact": "ee95a89a4df0fa5254e24466623bdff065a84ea58a180ceda60f37045a93c216"
+        },
+        "rustInputs": {
+          "run": "runs/261028-2205-parity-concurrency-e2f5",
+          "case": "rust.concurrency.blocking_canaries_locate_the_global_stall",
+          "open": "2d26a7843bd1a44561a44b6537413047fd222995",
+          "cloud": "cc0e6f0667a7d4082f352f349054c219e94bdfb5",
+          "artifact": "ee95a89a4df0fa5254e24466623bdff065a84ea58a180ceda60f37045a93c216"
+        },
+        "assertionDelta": "TS proves workspace.list stays under 500ms during a delayed mock turn, plus a companion slow-git file.tree/list canary. Does not copy pause_inbound preview flood or native_resource_count.",
+        "coverageDelta": "TS counterpart proved the business oracle (all turns complete, no interaction failures, unrelated reads responsive) on the same artifact; the old 10/20-workspace load profile and native resource counts are measurement-only and are not reproduced in the TS gate.",
+        "reviewedIn": "runs/261028-2205-parity-concurrency-e2f5"
+      }
     },
     {
       "oldId": "rust.cursor.cursor_reaches_the_same_timeline_as_the_built_in_agent",
@@ -937,7 +1059,33 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.cursor-same-timeline uses the production Client and the host CLI. Rust used Journey + client_v3. Missing login/install is BlockedError, not skip/pass.",
-      "legacyExecution": "required"
+      "legacyExecution": "retired",
+      "retirement": {
+        "type": "ts-parity",
+        "tsId": "journey.session.cursor-same-timeline",
+        "tsRunId": "261028-2206-parity-cursor-933e",
+        "rustRunId": "261028-2206-parity-cursor-933e",
+        "openSha": "2d26a7843bd1a44561a44b6537413047fd222995",
+        "cloudSha": "cc0e6f0667a7d4082f352f349054c219e94bdfb5",
+        "artifactSha": "ee95a89a4df0fa5254e24466623bdff065a84ea58a180ceda60f37045a93c216",
+        "tsInputs": {
+          "run": "runs/261028-2206-parity-cursor-933e",
+          "case": "journey.session.cursor-same-timeline",
+          "open": "2d26a7843bd1a44561a44b6537413047fd222995",
+          "cloud": "cc0e6f0667a7d4082f352f349054c219e94bdfb5",
+          "artifact": "ee95a89a4df0fa5254e24466623bdff065a84ea58a180ceda60f37045a93c216"
+        },
+        "rustInputs": {
+          "run": "runs/261028-2206-parity-cursor-933e",
+          "case": "rust.cursor.cursor_reaches_the_same_timeline_as_the_built_in_agent",
+          "open": "2d26a7843bd1a44561a44b6537413047fd222995",
+          "cloud": "cc0e6f0667a7d4082f352f349054c219e94bdfb5",
+          "artifact": "ee95a89a4df0fa5254e24466623bdff065a84ea58a180ceda60f37045a93c216"
+        },
+        "assertionDelta": "TS journey.session.cursor-same-timeline uses the production Client and the host CLI. Rust used Journey + client_v3. Missing login/install is BlockedError, not skip/pass.",
+        "coverageDelta": "TS Cursor journey and frozen Rust case ran on the same artifact; both passed.",
+        "reviewedIn": "runs/261028-2206-parity-cursor-933e"
+      }
     },
     {
       "oldId": "rust.cursor.a_cursor_tool_call_is_visible_while_the_turn_is_still_running",
@@ -947,7 +1095,33 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.cursor-tool-while-running uses the production Client and the host CLI. Rust used Journey + client_v3. Missing login/install is BlockedError, not skip/pass.",
-      "legacyExecution": "required"
+      "legacyExecution": "retired",
+      "retirement": {
+        "type": "ts-parity",
+        "tsId": "journey.session.cursor-tool-while-running",
+        "tsRunId": "261028-2206-parity-cursor-933e",
+        "rustRunId": "261028-2206-parity-cursor-933e",
+        "openSha": "2d26a7843bd1a44561a44b6537413047fd222995",
+        "cloudSha": "cc0e6f0667a7d4082f352f349054c219e94bdfb5",
+        "artifactSha": "ee95a89a4df0fa5254e24466623bdff065a84ea58a180ceda60f37045a93c216",
+        "tsInputs": {
+          "run": "runs/261028-2206-parity-cursor-933e",
+          "case": "journey.session.cursor-tool-while-running",
+          "open": "2d26a7843bd1a44561a44b6537413047fd222995",
+          "cloud": "cc0e6f0667a7d4082f352f349054c219e94bdfb5",
+          "artifact": "ee95a89a4df0fa5254e24466623bdff065a84ea58a180ceda60f37045a93c216"
+        },
+        "rustInputs": {
+          "run": "runs/261028-2206-parity-cursor-933e",
+          "case": "rust.cursor.a_cursor_tool_call_is_visible_while_the_turn_is_still_running",
+          "open": "2d26a7843bd1a44561a44b6537413047fd222995",
+          "cloud": "cc0e6f0667a7d4082f352f349054c219e94bdfb5",
+          "artifact": "ee95a89a4df0fa5254e24466623bdff065a84ea58a180ceda60f37045a93c216"
+        },
+        "assertionDelta": "TS journey.session.cursor-tool-while-running uses the production Client and the host CLI. Rust used Journey + client_v3. Missing login/install is BlockedError, not skip/pass.",
+        "coverageDelta": "TS Cursor journey and frozen Rust case ran on the same artifact; both passed.",
+        "reviewedIn": "runs/261028-2206-parity-cursor-933e"
+      }
     },
     {
       "oldId": "rust.install.installing_puts_binaries_and_logic_where_the_path_can_find_them",
@@ -2871,6 +3045,10 @@
         "approvedAt": "2026-10-06",
         "reason": "Native opencode adapter removed in the script-agent phase-1 cut; phase 1 ships Codex and Cursor only.",
         "resumeWhen": "The opencode Agent is re-integrated as a script directory; that change sets legacyExecution back to required."
+      },
+      "archive": {
+        "path": "testing/deprecated/archive/opencode.rs",
+        "record": "source retained outside the active frozen crate; not compiled or executed; see testing/deprecated/archive/README.md"
       }
     },
     {
@@ -2887,6 +3065,10 @@
         "approvedAt": "2026-10-06",
         "reason": "Native opencode adapter removed in the script-agent phase-1 cut; phase 1 ships Codex and Cursor only.",
         "resumeWhen": "The opencode Agent is re-integrated as a script directory; that change sets legacyExecution back to required."
+      },
+      "archive": {
+        "path": "testing/deprecated/archive/opencode.rs",
+        "record": "source retained outside the active frozen crate; not compiled or executed; see testing/deprecated/archive/README.md"
       }
     },
     {

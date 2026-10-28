@@ -18,14 +18,17 @@ defineSpecialty(
   async (t) => {
     const crate = path.join(t.openRoot, "testing/deprecated/rust");
     const parity = JSON.parse(readFileSync(path.join(t.openRoot, "testing/migration/rust-parity.json"), "utf8")) as {
-      cases: Array<{ oldId: string; suite: string; legacyExecution?: string }>;
+      cases: Array<{ oldId: string; suite: string; legacyExecution?: string; archive?: { path?: string; record?: string } }>;
     };
     const stopped = parity.cases.filter(item =>
-      item.legacyExecution !== "required" && item.legacyExecution !== "suspended" && item.legacyExecution !== "retired");
-    t.assertions.assert(stopped.length === 0, "legacy cases stopped without required/suspended/retired state");
+      item.legacyExecution !== "required" && item.legacyExecution !== "suspended"
+      && item.legacyExecution !== "retired" && item.legacyExecution !== "release-only");
+    t.assertions.assert(stopped.length === 0, "legacy cases stopped without required/suspended/retired/release-only state");
     const crateExists = existsSync(path.join(crate, "Cargo.toml"));
     const activeSuites = new Set(
-      parity.cases.filter(item => item.legacyExecution !== "retired").map(item => `${item.suite}.rs`),
+      parity.cases
+        .filter(item => item.legacyExecution === "required" || (item.legacyExecution === "suspended" && !item.archive))
+        .map(item => `${item.suite}.rs`),
     );
     if (crateExists) {
       for (const suite of activeSuites) {
@@ -50,6 +53,9 @@ defineSpecialty(
         } else if (row.legacyExecution === "retired") {
           t.assertions.assert(!planned.has(row.oldId + "::default"), gate + " ran retired legacy " + row.oldId);
           t.assertions.assert(plan.skipped.some(s => s.id === row.oldId && s.reason.startsWith("L13 retired")), gate + " did not record retired legacy " + row.oldId);
+        } else if (row.legacyExecution === "release-only") {
+          t.assertions.assert(!planned.has(row.oldId + "::default"), gate + " ran release-only legacy " + row.oldId);
+          t.assertions.assert(plan.skipped.some(s => s.id === row.oldId && s.reason.startsWith("L13 release-only")), gate + " did not record release-only legacy " + row.oldId);
         } else {
           t.assertions.assert(planned.has(row.oldId + "::default"), gate + " omitted required legacy " + row.oldId);
         }

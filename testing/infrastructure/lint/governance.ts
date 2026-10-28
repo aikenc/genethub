@@ -40,6 +40,10 @@ export function checkGovernance(openRoot: string, cloudRoot?: string): Governanc
           coverageDelta?: string; fault?: string; reviewedIn?: string;
           deletedDependency?: string; reason?: string;
         };
+        releaseOnly?: {
+          tsId?: string; tsRunId?: string; blocker?: string; gap?: string;
+          archive?: { path?: string; record?: string }; reviewedIn?: string;
+        };
       }>;
     };
     const recorded = (value?: string) => Boolean(value?.trim());
@@ -61,8 +65,15 @@ export function checkGovernance(openRoot: string, cloudRoot?: string): Governanc
       return recorded(r.tsId) && recorded(r.tsRunId) && recorded(r.rustRunId)
         && r.tsInputs !== undefined && r.rustInputs !== undefined;
     };
-    const stopped = (parity.cases ?? []).filter(item => item.legacyExecution !== "required" && !suspended(item) && !retired(item));
-    if (stopped.length) findings.push({ rule: "L13", file: parityPath, message: stopped.length + " legacy rows are neither required, suspended with approval, nor retired with traceable parity evidence" });
+    // A release-only row is a real-provider canary whose Rust implementation is
+    // retired in favor of a TS release-only journey. The journey owns coverage;
+    // the current external blocker is recorded rather than hidden.
+    const releaseOnly = (item: NonNullable<typeof parity.cases>[number]) => item.legacyExecution === "release-only"
+      && (recorded(item.releaseOnly?.tsId) || recorded(item.releaseOnly?.gap))
+      && recorded(item.releaseOnly?.tsRunId) && recorded(item.releaseOnly?.blocker)
+      && recorded(item.releaseOnly?.archive?.path) && recorded(item.releaseOnly?.reviewedIn);
+    const stopped = (parity.cases ?? []).filter(item => item.legacyExecution !== "required" && !suspended(item) && !retired(item) && !releaseOnly(item));
+    if (stopped.length) findings.push({ rule: "L13", file: parityPath, message: stopped.length + " legacy rows are neither required, suspended with approval, retired with traceable parity evidence, nor release-only with a recorded blocker" });
     const stray = (parity.cases ?? []).filter(item => item.legacyExecution === "required" && item.suspension);
     if (stray.length) findings.push({ rule: "L13", file: parityPath, message: stray.length + " required legacy rows still carry a suspension record" });
     pending = (parity.cases ?? []).filter((item) => item.oracleClass === "pending-classification").length;

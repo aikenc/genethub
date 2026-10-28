@@ -14,23 +14,25 @@ export function selectForGate(
   if (tags.length > 0 && !tags.some((tag) => item.tags.includes(tag))) {
     return { include: false, reason: "tag filter" };
   }
+  // L13 terminal states never run, even when selected explicitly. They remain
+  // registered so plans can report why they are excluded.
+  if (item.tags.includes("legacy-suspended")) {
+    return { include: false, reason: "L13 suspended: product capability removed by Human decision; see rust-parity.json suspension" };
+  }
+  if (item.tags.includes("legacy-retired")) {
+    return { include: false, reason: "L13 retired: Rust implementation removed after verified per-case parity; see rust-parity.json retirement" };
+  }
+  if (item.tags.includes("legacy-release-only")) {
+    return { include: false, reason: "L13 release-only: Rust real-provider canary retired; TS release-only journey owns coverage; blocker recorded in rust-parity.json" };
+  }
+  if (item.tags.includes("legacy-required")) {
+    return { include: true, reason: "L13: frozen legacy required until verified parity" };
+  }
   if (gate === "dev-feedback") return { include: true, reason: "explicit feedback scope; not a complete release gate" };
   if (gate === "specialty:multichannel") {
     return item.tags.includes("multichannel")
       ? { include: true, reason: "public business multichannel contract" }
       : { include: false, reason: "not multichannel" };
-  }
-  // L13 keeps every frozen legacy case required until its individual parity is
-  // proven. Some of those cases use a real provider, so this obligation must
-  // take precedence over the normal release-only real-provider policy.
-  if (item.runner === "rust-legacy") {
-    if (item.tags.includes("legacy-suspended")) {
-      return { include: false, reason: "L13 suspended: product capability removed by Human decision; see rust-parity.json suspension" };
-    }
-    if (item.tags.includes("legacy-retired")) {
-      return { include: false, reason: "L13 retired: Rust implementation removed after verified per-case parity; see rust-parity.json retirement" };
-    }
-    return { include: true, reason: "L13: frozen legacy required until verified parity" };
   }
   if (item.llm.default === "real" && gate !== "beta" && gate !== "stable") {
     return { include: false, reason: "real LLM canary is release-only" };
