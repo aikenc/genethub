@@ -34,9 +34,22 @@ pub(crate) fn validate_attachments(
     for attachment in attachments.iter_mut() {
         if crate::agent_routing::is_supported_media_mime(&attachment.mime) {
             if let Some(path) = attachment.path.as_deref() {
-                validate_workspace_file(path, workspace_root)?;
-                if let Ok(metadata) = fs::metadata(workspace_root.join(path)) {
-                    attachment.bytes = Some(metadata.len());
+                let absolute = safe_join(workspace_root, path)?;
+                match fs::symlink_metadata(&absolute) {
+                    Ok(_) => {
+                        validate_workspace_file(path, workspace_root)?;
+                        if let Ok(metadata) = fs::metadata(&absolute) {
+                            attachment.bytes = Some(metadata.len());
+                        }
+                    }
+                    // A deleted or never-uploaded media path is not a send
+                    // failure: the Agent renders the bounded unavailable-media
+                    // explanation into the model history instead.
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(error)
+                            .with_context(|| format!("reading attachment path {path}"))
+                    }
                 }
             }
             continue;
