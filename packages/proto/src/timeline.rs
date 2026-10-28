@@ -341,6 +341,11 @@ pub struct Attachment {
     /// Inline payload, base64. Only set for small pastes such as screenshots.
     #[ts(optional)]
     pub data_base64: Option<String>,
+    /// Original file size in bytes, when the attachment is a stored file.
+    /// The daemon fills this from the filesystem before persisting the item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

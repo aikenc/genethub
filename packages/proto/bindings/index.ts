@@ -347,7 +347,12 @@ export type Attachment = { name: string, mime: string, path?: string,
 /**
  * Inline payload, base64. Only set for small pastes such as screenshots.
  */
-dataBase64?: string, };
+dataBase64?: string, 
+/**
+ * Original file size in bytes, when the attachment is a stored file.
+ * The daemon fills this from the filesystem before persisting the item.
+ */
+bytes?: number, };
 
 export type BackgroundProcess = { workspaceId?: string, service?: BackgroundService, 
 /**

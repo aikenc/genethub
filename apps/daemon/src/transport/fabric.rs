@@ -685,6 +685,7 @@ async fn receive(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn serve_peer(
     state: Shared,
     admission_source: PeerAdmissionSource,
@@ -730,6 +731,7 @@ async fn serve_peer(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn serve_peer_inner(
     state: Shared,
     admission_source: &PeerAdmissionSource,

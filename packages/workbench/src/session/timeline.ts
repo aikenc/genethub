@@ -33,6 +33,8 @@ export interface PendingMessage {
   attachments: Attachment[];
   /** Browser-owned videos awaiting chunk upload; never persisted in the log. */
   videoFiles?: File[];
+  /** Browser-owned arbitrary files awaiting chunk upload; never persisted. */
+  files?: File[];
   /** When it left the composer, so a slow agent start can be named. */
   sentAtMs: number;
   /** Set only when the send definitely failed, so the text stays recoverable. */

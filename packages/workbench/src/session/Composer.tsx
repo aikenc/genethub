@@ -29,10 +29,13 @@ import {
 import { PREVIEW_REVIEW_MESSAGE_LIMIT, previewReviewMessage } from "../preview/reviewDraft";
 import {
   attachmentPreviewUrl,
+  attachmentSizeLabel,
   classifyAttachmentFiles,
   fileToAttachment,
   imageFilesFromClipboard,
   IMAGE_ATTACHMENT_MIMES,
+  MAX_MESSAGE_ATTACHMENTS,
+  resolveFileMime,
   validateInlineAttachmentBudget,
   VIDEO_ATTACHMENT_MIMES,
 } from "./attachments";
@@ -146,6 +149,7 @@ export function Composer({
   persistenceKey,
   phase,
   durableInput = false,
+  fileUploadAllowed = false,
   disabled,
   disabledReason,
   agents,
@@ -185,6 +189,8 @@ export function Composer({
   persistenceKey?: string;
   phase: ComposerPhase;
   durableInput?: boolean;
+  /** The connected daemon accepts arbitrary chat files (`session.file-upload.v1`). */
+  fileUploadAllowed?: boolean;
   disabled?: boolean;
   /** Why this transcript cannot accept a new turn, when the state is durable. */
   disabledReason?: string;
@@ -201,7 +207,7 @@ export function Composer({
   /** The current agent's slash commands, if it named any. */
   commands?: CommandInfo[];
   /** A message coming back for editing after it failed to send. */
-  restoreDraft?: { text: string; attachments: Attachment[]; videoFiles?: File[] } | null;
+  restoreDraft?: { text: string; attachments: Attachment[]; videoFiles?: File[]; files?: File[] } | null;
   /** One line produced outside Chat that should be appended, never sent. */
   insertDraft?: ComposerDraftInsert | null;
   /** A forward capsule parked here, sent ahead of the user's own text. */
@@ -220,12 +226,12 @@ export function Composer({
    * have is someone who had no way to tell.
    */
   lastActivityAtMs?: number | null;
-  onSend(text: string, attachments: Attachment[], videoFiles?: File[]): void | Promise<void>;
-  onSaveDraft?(text: string, attachments: Attachment[], videoFiles?: File[]): Promise<boolean>;
+  onSend(text: string, attachments: Attachment[], videoFiles?: File[], files?: File[]): void | Promise<void>;
+  onSaveDraft?(text: string, attachments: Attachment[], videoFiles?: File[], files?: File[]): Promise<boolean>;
   onReplaceDrafts?(drafts: SessionDraft[]): Promise<boolean>;
   /** Removes the notes that were snapshotted into the message just sent. */
   onConsumePreviewReview?(ids: string[]): Promise<boolean>;
-  onUpdateDraft?(draft: SessionDraft, videoFiles?: File[]): Promise<boolean>;
+  onUpdateDraft?(draft: SessionDraft, videoFiles?: File[], files?: File[]): Promise<boolean>;
   onInterrupt(): void;
   onPickTarget?(target: SessionAgentTarget, filterTags: string[]): Promise<void> | void;
   /** Reports the complete overlay height in unzoomed layout pixels. */
@@ -257,6 +263,7 @@ export function Composer({
   const quiet = watchingQuiet ? quietFor(lastActivityAtMs, nowMs) : null;
   const [attachments, setAttachments] = useState<Attachment[]>(saved.attachments);
   const [videoFiles, setVideoFiles] = useState<File[]>([]);
+  const [files, setFiles] = useState<File[]>([]);
   const [mediaViewer, setMediaViewer] = useState<{ name: string; mime: string; url: string } | null>(null);
   const [draftSaveState, setDraftSaveState] = useState<"idle" | "saving" | "saved">("idle");
   const draftSavePending = useRef(false);
@@ -299,16 +306,22 @@ export function Composer({
   );
   const imageAllowed = routeMedia.image;
   const videoAllowed = routeMedia.video;
-  const fileActionLabel = imageAllowed && videoAllowed
-      ? "添加图片或视频"
-      : imageAllowed
-        ? "添加文件（当前仅支持图片）"
-        : videoAllowed
-          ? "添加视频"
-          : "添加文件（当前模型不支持媒体输入）";
+  const fileActionLabel = fileUploadAllowed
+      ? "添加图片、视频或文件"
+      : imageAllowed && videoAllowed
+        ? "添加图片或视频"
+        : imageAllowed
+          ? "添加文件（当前仅支持图片）"
+          : videoAllowed
+            ? "添加视频"
+            : "添加文件（当前模型不支持媒体输入）";
   const imageAccept = IMAGE_ATTACHMENT_MIMES.join(",");
   const videoAccept = VIDEO_ATTACHMENT_MIMES.join(",");
-  const fileAccept = videoAllowed ? (imageAllowed ? `${imageAccept},${videoAccept}` : videoAccept) : imageAccept;
+  const fileAccept = fileUploadAllowed
+    ? undefined
+    : videoAllowed
+      ? (imageAllowed ? `${imageAccept},${videoAccept}` : videoAccept)
+      : imageAccept;
   useEffect(() => {
     if (persistenceKey) saveLocalDraft(persistenceKey, { text: draft, attachments, missingAttachments });
   }, [persistenceKey, draft, attachments, missingAttachments]);
@@ -442,7 +455,7 @@ export function Composer({
       setPreviewReviewNotice("批注内容超过单条消息上限，请先在预览里删掉一部分。");
       return;
     }
-    if (!text && attachments.length === 0 && videoFiles.length === 0 && !forwardDraft && selectedDrafts.length === 0 && !previewText) return;
+    if (!text && attachments.length === 0 && videoFiles.length === 0 && files.length === 0 && !forwardDraft && selectedDrafts.length === 0 && !previewText) return;
     // The parked capsule travels ahead of the user's own words, inside the
     // same message, so the receiver sees history first and the ask second.
     const currentPayload = forwardDraft
@@ -464,13 +477,15 @@ export function Composer({
     setDraft("");
     setAttachments([]);
     setVideoFiles([]);
+    setFiles([]);
     setMissingAttachments(0);
     if (persistenceKey) saveLocalDraft(persistenceKey, { text: "", attachments: [], missingAttachments: 0 });
     setDismissed(false);
     const removing = new Set(selectedDrafts.map((item) => item.id));
     if (removing.size > 0) setHidingDraftIds(removing);
     try {
-      if (videoFiles.length > 0) await onSend(payload, outgoing, videoFiles);
+      if (files.length > 0) await onSend(payload, outgoing, videoFiles, files);
+      else if (videoFiles.length > 0) await onSend(payload, outgoing, videoFiles);
       else await onSend(payload, outgoing);
     } catch {
       // The owning store has already restored/reporting the live input. Saved
@@ -504,6 +519,7 @@ export function Composer({
     const text = draft.trim();
     const savedAttachments = attachments;
     const savedVideoFiles = videoFiles;
+    const savedFiles = files;
     try {
       validateInlineAttachmentBudget([...(drafts ?? []).flatMap((item) => item.attachments ?? []), ...savedAttachments]);
     } catch (error) {
@@ -513,11 +529,14 @@ export function Composer({
     draftSavePending.current = true;
     setDraftSaveState("saving");
     try {
-      const saved = await onSaveDraft(text, savedAttachments, savedVideoFiles);
+      const saved = savedFiles.length > 0
+        ? await onSaveDraft(text, savedAttachments, savedVideoFiles, savedFiles)
+        : await onSaveDraft(text, savedAttachments, savedVideoFiles);
       if (!saved) throw new Error("draft persistence was not confirmed");
       setDraft("");
       setAttachments([]);
       setVideoFiles([]);
+      setFiles([]);
       setMissingAttachments(0);
       if (persistenceKey) saveLocalDraft(persistenceKey, { text: "", attachments: [], missingAttachments: 0 });
       setDraftSaveState("saved");
@@ -543,6 +562,7 @@ export function Composer({
     setDraft(restoreDraft.text);
     setAttachments(restoreDraft.attachments);
     setVideoFiles(restoreDraft.videoFiles ?? []);
+    setFiles(restoreDraft.files ?? []);
     onRestoreDraft?.();
     textarea.current?.focus();
   }, [restoreDraft, onRestoreDraft]);
@@ -557,15 +577,23 @@ export function Composer({
     if (!speechInput.result) setActiveSpeechSpan(null);
   }, [speechInput.result]);
 
-  const addFiles = async (files: File[]) => {
-    if (!imageAllowed && !videoAllowed) {
+  const addFiles = async (picked: File[]) => {
+    if (!fileUploadAllowed && !imageAllowed && !videoAllowed) {
       setPasteNotice("没有同时匹配当前标签与媒体输入的 Agent 和模型");
       return;
     }
+    if (attachments.length + videoFiles.length + files.length + picked.length > MAX_MESSAGE_ATTACHMENTS) {
+      setPasteNotice(`单条消息最多 ${MAX_MESSAGE_ATTACHMENTS} 个附件`);
+      return;
+    }
     try {
-      const { images, videos } = classifyAttachmentFiles(files, imageAllowed, videoAllowed);
-      const requestedMediaTags = mediaTagsForMimes(files.map((file) => file.type));
+      const { images, videos, files: stored } = classifyAttachmentFiles(picked, imageAllowed, videoAllowed);
+      if (!fileUploadAllowed && stored.length > 0) {
+        throw new Error("当前 daemon 不支持文件上传，请升级后重试");
+      }
+      const requestedMediaTags = mediaTagsForMimes([...images, ...videos].map(resolveFileMime));
       if (
+        (images.length > 0 || videos.length > 0) &&
         !resolveTagRoute(
           preferences,
           [...effectiveTags, ...automaticMediaTags, ...requestedMediaTags],
@@ -578,22 +606,32 @@ export function Composer({
       validateInlineAttachmentBudget([...attachments, ...added]);
       setAttachments((current) => [...current, ...added]);
       setVideoFiles((current) => [...current, ...videos]);
+      setFiles((current) => [...current, ...stored]);
       setPasteNotice(null);
     } catch (error) {
       setPasteNotice(error instanceof Error ? error.message : "读取文件失败");
     }
   };
 
-  const addDraftFiles = async (draftId: string, files: File[]) => {
+  const addDraftFiles = async (draftId: string, picked: File[]) => {
     const item = (drafts ?? []).find((candidate) => candidate.id === draftId);
     if (!item || !onUpdateDraft) return;
+    if ((item.attachments?.length ?? 0) + picked.length > MAX_MESSAGE_ATTACHMENTS) {
+      setPasteNotice(`单条消息最多 ${MAX_MESSAGE_ATTACHMENTS} 个附件`);
+      return;
+    }
     try {
-      const { images, videos } = classifyAttachmentFiles(files, imageAllowed, videoAllowed);
+      const { images, videos, files: stored } = classifyAttachmentFiles(picked, imageAllowed, videoAllowed);
+      if (!fileUploadAllowed && stored.length > 0) {
+        throw new Error("当前 daemon 不支持文件上传，请升级后重试");
+      }
       const added = await Promise.all(images.map(fileToAttachment));
       const currentAttachments = item.attachments ?? [];
       const otherAttachments = (drafts ?? []).filter((draftItem) => draftItem.id !== draftId).flatMap((draftItem) => draftItem.attachments ?? []);
       validateInlineAttachmentBudget([...otherAttachments, ...currentAttachments, ...added]);
-      await onUpdateDraft({ ...item, attachments: [...currentAttachments, ...added] }, videos);
+      const nextDraft = { ...item, attachments: [...currentAttachments, ...added] };
+      if (stored.length > 0) await onUpdateDraft(nextDraft, videos, stored);
+      else await onUpdateDraft(nextDraft, videos);
       setPasteNotice(null);
     } catch (error) {
       setPasteNotice(error instanceof Error ? error.message : "读取文件失败");
@@ -889,7 +927,7 @@ export function Composer({
             </div>
           </div>
         ) : null}
-        {attachments.length > 0 || videoFiles.length > 0 ? (
+        {attachments.length > 0 || videoFiles.length > 0 || files.length > 0 ? (
           <div
             className={`flex flex-nowrap gap-2 overflow-x-auto px-4 pt-3 transition-opacity ${draftSaveState === "saving" ? "opacity-45" : ""}`}
             aria-label="待发送的文件"
@@ -918,6 +956,25 @@ export function Composer({
                 onOpen={(url) => setMediaViewer({ name: file.name, mime: file.type, url })}
                 onRemove={() => setVideoFiles((current) => current.filter((_, i) => i !== index))}
               />
+            ))}
+            {files.map((file, index) => (
+              <div
+                key={`file-${index}`}
+                className="group relative flex h-14 shrink-0 items-center gap-2 rounded-lg border border-line bg-surface px-2 pr-7 text-xs"
+              >
+                <span aria-hidden className="rounded bg-raised px-1.5 py-0.5 text-faint">文件</span>
+                <span className="max-w-40 truncate" title={file.name}>{file.name}</span>
+                <span className="shrink-0 text-faint">{attachmentSizeLabel(file.size)}</span>
+                <button
+                  type="button"
+                  aria-label={`移除 ${file.name}`}
+                  disabled={draftSaveState === "saving"}
+                  onClick={() => setFiles((current) => current.filter((_, i) => i !== index))}
+                  className="absolute -right-2 -top-2 flex h-6 w-6 items-center justify-center rounded-full border border-line bg-surface text-sm text-muted shadow group-hover:text-fg md:-right-1.5 md:-top-1.5 md:h-5 md:w-5 md:text-xs"
+                >
+                  ×
+                </button>
+              </div>
             ))}
           </div>
         ) : null}
@@ -1199,7 +1256,7 @@ export function Composer({
               type="button"
               aria-label={fileActionLabel}
               title={fileActionLabel}
-              disabled={disabled || (!durableInput && phase !== "idle") || speechInput.busy || draftSaveState === "saving" || (!imageAllowed && !videoAllowed)}
+              disabled={disabled || (!durableInput && phase !== "idle") || speechInput.busy || draftSaveState === "saving" || (!fileUploadAllowed && !imageAllowed && !videoAllowed)}
               onMouseDown={(event) => event.preventDefault()}
               onClick={() => {
                 setDismissed(true);
@@ -1219,7 +1276,7 @@ export function Composer({
                 speechInput.busy ||
                 draftSaveState === "saving" ||
                 (drafts?.length ?? 0) >= 5 ||
-                (draft.trim().length === 0 && attachments.length === 0 && videoFiles.length === 0 && !forwardDraft)
+                (draft.trim().length === 0 && attachments.length === 0 && videoFiles.length === 0 && files.length === 0 && !forwardDraft)
               }
               onMouseDown={(event) => event.preventDefault()}
               onClick={() => void saveDraft()}
@@ -1282,7 +1339,7 @@ export function Composer({
                   disabled ||
                   speechInput.busy ||
                   draftSaveState === "saving" ||
-                  (draft.trim().length === 0 && attachments.length === 0 && videoFiles.length === 0 && !forwardDraft && selectedDraftIds.size === 0 && !includePreviewReview)
+                  (draft.trim().length === 0 && attachments.length === 0 && videoFiles.length === 0 && files.length === 0 && !forwardDraft && selectedDraftIds.size === 0 && !includePreviewReview)
                 }
                 className="flex h-9 w-9 !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full bg-accent text-white focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 disabled:opacity-30 md:h-6 md:w-6"
               >
