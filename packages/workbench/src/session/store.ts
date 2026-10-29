@@ -3596,11 +3596,7 @@ function adoptSnapshotStatus(sessionId: string, snapshot: SessionSnapshot, set: 
   if (!status) return;
   set((state) => ({
     sessions: state.sessions.map((session) =>
-      session.id === sessionId ? { ...session, ...snapshot.summary,
-        interactionSummary: {
-          count: (snapshot.pendingPermissions ?? []).length,
-          requests: (snapshot.pendingPermissions ?? []).slice(0, 16).map(request => ({ requestId: request.id, kind: request.kind, title: request.title.slice(0, 160) })),
-        } } : session,
+      session.id === sessionId ? { ...session, ...snapshot.summary } : session,
     ),
   }));
 }

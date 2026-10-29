@@ -46,8 +46,11 @@ pub struct Workspaces {
     /// anything until it is told where each workspace is. Registration happens
     /// wherever an entry does, so the two can never disagree.
     homes: WorkspaceHomes,
-    /// When the last scan for Spaces on disk began; only a throttle, not state.
+    /// When the last scan for Spaces on disk finished; only a throttle, not state.
     scanned_at: std::sync::Mutex<Option<tokio::time::Instant>>,
+    /// A second `workspace.list` while one scan is still walking the tree
+    /// would repeat the same work, so it returns the previous answer instead.
+    scanning: std::sync::atomic::AtomicBool,
 }
 
 /// A scan looks at two directory levels, so asking more than this often only
@@ -279,6 +282,7 @@ impl Workspaces {
             config,
             homes,
             scanned_at: std::sync::Mutex::new(None),
+            scanning: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -298,13 +302,20 @@ impl Workspaces {
     /// from the directory layout alone: `<root>/spaces/<name>` is a child of
     /// `<root>`, which must itself be a Space. `force` skips the throttle.
     pub async fn scan_spaces(&self, spaces_root: &Path, force: bool) -> ScanReport {
+        if self
+            .scanning
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
         {
-            let mut at = self.scanned_at.lock().expect("never poisoned");
-            let now = tokio::time::Instant::now();
-            if !force && at.is_some_and(|last| now.duration_since(last) < SCAN_EVERY) {
+            return ScanReport::default();
+        }
+        if !force {
+            let at = self.scanned_at.lock().expect("never poisoned");
+            if at.is_some_and(|last| last.elapsed() < SCAN_EVERY) {
+                drop(at);
+                self.scanning
+                    .store(false, std::sync::atomic::Ordering::Release);
                 return ScanReport::default();
             }
-            *at = Some(now);
         }
         let discovery = crate::space_descriptor::discover(spaces_root);
         for problem in &discovery.problems {
@@ -324,6 +335,9 @@ impl Workspaces {
         if let Err(error) = self.retire_missing_scanned_children(spaces_root).await {
             tracing::warn!(%error, "retiring missing scanned child Spaces failed");
         }
+        *self.scanned_at.lock().expect("never poisoned") = Some(tokio::time::Instant::now());
+        self.scanning
+            .store(false, std::sync::atomic::Ordering::Release);
         report
     }
 
@@ -864,10 +878,7 @@ impl Workspaces {
         if cursor.parent_workspace_id.is_some() {
             anyhow::bail!("AgentSpace tree exceeds the supported depth");
         }
-        if !entries
-            .get(root_id)
-            .is_some_and(|entry| !entry.removed)
-        {
+        if !entries.get(root_id).is_some_and(|entry| !entry.removed) {
             anyhow::bail!("the project AgentSpace is not open");
         }
 
@@ -3084,5 +3095,4 @@ mod tests {
             "a directory project keeps the pre-AgentSpace in-place path"
         );
     }
-
 }

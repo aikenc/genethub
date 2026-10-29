@@ -878,10 +878,7 @@ describe("forking a completed turn", () => {
         target: { agentId: "claude", workspaceId: "w2" },
       },
     });
-    expect(useWorkbench.getState().sessions[0]).toEqual({
-      ...forked,
-      interactionSummary: { count: 0, requests: [] },
-    });
+    expect(useWorkbench.getState().sessions[0]).toEqual(forked);
     expect(useWorkbench.getState().activeSessionId).toBe(forked.id);
     expect(useWorkbench.getState().activeWorkspaceId).toBe("w2");
   });

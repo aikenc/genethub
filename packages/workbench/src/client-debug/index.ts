@@ -158,7 +158,8 @@ export function installClientDebug(): void {
     switch (action.kind) {
       case "inspect": {
         const active = activeDiagnosticClient();
-        return { title: document.title, url: location.href, visibility: document.visibilityState, viewport: { width: innerWidth, height: innerHeight, scale: devicePixelRatio }, connection: active?.connectionState, rtc: active?.rtcState, rtcFailure: active?.rtcFailure, contexts: Array.from(document.querySelectorAll("iframe")).map((frame, index) => ({ index, title: frame.title, sameOrigin: !!frame.contentDocument })) };
+        const inspected = new URL(location.href); inspected.search = ""; inspected.hash = "";
+        return { title: document.title, url: inspected.href, visibility: document.visibilityState, viewport: { width: innerWidth, height: innerHeight, scale: devicePixelRatio }, connection: active?.connectionState, rtc: active?.rtcState, rtcFailure: active?.rtcFailure, contexts: Array.from(document.querySelectorAll("iframe")).map((frame, index) => ({ index, title: frame.title, sameOrigin: !!frame.contentDocument })) };
       }
       case "eval": return await (0, eval)(action.script);
       case "events": return events.slice();

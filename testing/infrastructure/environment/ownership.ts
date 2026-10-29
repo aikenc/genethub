@@ -71,7 +71,7 @@ export async function recoverAbandonedLeases(parent = tmpdir()): Promise<LeaseRe
   if (!result.supported) return result;
   const boot = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
   for (const name of readdirSync(parent)) {
-    if (!/^genehub-(env|legacy)-/.test(name)) continue;
+    if (!/^(genehub-|summary-ui-)/.test(name)) continue;
     const root = path.join(parent, name);
     let record: Record | undefined;
     try { record = read(root); } catch (error) {

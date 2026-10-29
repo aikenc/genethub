@@ -2565,7 +2565,6 @@ mod tests {
         let summary = SessionSummary {
             cwd: None,
             interaction_summary: None,
-            work_summary: None,
             input_summary: None,
             message_preview: None,
             draft_count: None,

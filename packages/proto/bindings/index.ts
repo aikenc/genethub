@@ -326,7 +326,12 @@ export type Attachment = { name: string, mime: string, path?: string,
 /**
  * Inline payload, base64. Only set for small pastes such as screenshots.
  */
-dataBase64?: string, };
+dataBase64?: string, 
+/**
+ * Original file size in bytes, when the attachment is a stored file.
+ * The daemon fills this from the filesystem before persisting the item.
+ */
+bytes?: number, };
 
 export type BackgroundProcess = { workspaceId?: string, service?: BackgroundService, 
 /**
@@ -1041,22 +1046,15 @@ export type PeerHello = { version: number, clientName: string, auth: PeerAuth,
  */
 rtcSupported: boolean, 
 /**
- * Optional bounded stream-window advertisement. v4 uses
- * [`INITIAL_STREAM_WINDOW_BYTES`] when omitted and no Preview exception.
+ * Bounded finite-bulk stream-window advertisement.
  */
-maxBulkStreamWindowBytes?: number, 
-/**
- * Understands bounded encrypted Ping controls during logical admission.
- * Missing advertisements retain the legacy possession-proof sample.
- */
-packetPairProbeSupported?: boolean, };
+maxBulkStreamWindowBytes: number, };
 
 export type PeerWelcome = { version: number, serverNonce: string, proof: string, 
 /**
- * Optional bounded stream-window advertisement. A missing field uses
- * the v4 default; all stream methods share the same maximum.
+ * Bounded finite-bulk stream-window advertisement.
  */
-maxBulkStreamWindowBytes?: number, };
+maxBulkStreamWindowBytes: number, };
 
 export type PermissionOption = { id: string, label: string, kind: PermissionOptionKind, };
 
@@ -1336,7 +1334,7 @@ outcome?: WorkflowNodeOutcome, reason?: string, } } | { "type": "workflow.cancel
  * Required when the caller is a SessionController; omitted for a
  * direct authenticated Human UI action.
  */
-planDigest?: string, actionId?: string, } } | { "type": "agentSpace.changePlan", "payload": { workspaceId: string, expectedRevision: number, operation: AgentSpaceOperation, } } | { "type": "agentSpace.children", "payload": { workspaceId: string, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, recentRounds?: number, beforeItemId?: string, } } | { "type": "session.drafts", "payload": { sessionId: string, } } | { "type": "session.drafts.replace", "payload": { sessionId: string, drafts: Array<SessionDraft>, } } | { "type": "session.previewAnnotations.get", "payload": { sessionId: string, } } | { "type": "session.previewAnnotations.upsert", "payload": { sessionId: string, annotation: PreviewAnnotation, expectedRevision: number, } } | { "type": "session.previewAnnotations.remove", "payload": { sessionId: string, ids: Array<string>, 
+planDigest?: string, actionId?: string, } } | { "type": "agentSpace.changePlan", "payload": { workspaceId: string, expectedRevision: number, operation: AgentSpaceOperation, } } | { "type": "agentSpace.children", "payload": { workspaceId: string, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, lean: boolean, } } | { "type": "session.get", "payload": { sessionId: string, recentRounds?: number, beforeItemId?: string, } } | { "type": "session.drafts", "payload": { sessionId: string, } } | { "type": "session.drafts.replace", "payload": { sessionId: string, drafts: Array<SessionDraft>, } } | { "type": "session.previewAnnotations.get", "payload": { sessionId: string, } } | { "type": "session.previewAnnotations.upsert", "payload": { sessionId: string, annotation: PreviewAnnotation, expectedRevision: number, } } | { "type": "session.previewAnnotations.remove", "payload": { sessionId: string, ids: Array<string>, 
 /**
  * Present for an explicit delete. Omitted after a confirmed send so a
  * note added during send is not rejected as a stale revision.
@@ -1742,10 +1740,6 @@ interactionSummary?: SessionInteractionSummary,
  */
 latestReply?: SessionReplyCursor, inputSummary?: SessionInputSummary, 
 /**
- * Workflow facts are independent of this Session's active Agent turn.
- */
-workSummary?: SessionWorkSummary, 
-/**
  * Last durably stored visible message; absent for records not yet projected.
  */
 messagePreview?: SessionMessagePreview, 
@@ -1818,16 +1812,6 @@ lastActivityAtMs?: number, };
  * Whether human-facing clients may mutate a managed Session directly.
  */
 export type SessionUserInteraction = "normal" | "readOnly";
-
-/**
- * Bounded cards plus counts from every associated Run, not recent-history
- * pagination. Detailed evidence remains available through workflow.get.
- */
-export type SessionWorkSummary = { 
-/**
- * Runs with a live member turn actually executing, rather than just open.
- */
-executing?: number, running: number, stopping: number, blocked: number, tasks: Array<WorkflowTaskSummary>, more: number, checkedAtMs: number, error?: string, };
 
 /**
  * The machine-level settings a client may see and change.
@@ -2082,19 +2066,7 @@ count: number, };
  * local paths, URLs, identifiers, prompts, terminal output and Agent output do
  * not have a field in the schema.
  */
-export type SupportDiagnostics = { version: number, capturedAt: string, daemonVersion: string, os: string, arch: string, uptimeSeconds: number, hubState: string, remoteState: string, 
-/**
- * Milliseconds since the Workflow scheduler last completed a scan.
- */
-workflowPatrolLagMs?: number, 
-/**
- * Queued and running Workflow patrol jobs on this daemon.
- */
-workflowPatrolActiveJobs?: number, 
-/**
- * Age of the oldest queued or running patrol job.
- */
-workflowPatrolOldestJobMs?: number, events: Array<SupportDiagnosticEvent>, droppedEvents: number, };
+export type SupportDiagnostics = { version: number, capturedAt: string, daemonVersion: string, os: string, arch: string, uptimeSeconds: number, hubState: string, remoteState: string, events: Array<SupportDiagnosticEvent>, droppedEvents: number, };
 
 /**
  * One entry in a session's timeline.
@@ -2393,8 +2365,6 @@ export type WorkflowFinding = { runId: string, nodeId: string | null, code: stri
 
 export type WorkflowHumanExitStatus = { kind: string, requestId: string, pmSessionId: string, reason: string, createdAtMs: number, answer?: string, };
 
-export type WorkflowHumanWait = { nodeId: string, sessionId: string, requestId: string, title: string, };
-
 /**
  * A node's settled outcome, as a bare string on the wire and on disk.
  *
@@ -2641,8 +2611,6 @@ humanWaitMs: number,
  * Elapsed time the Run spent recoverable, awaiting a PM continue decision.
  */
 recoveryWaitMs: number, waiting: boolean, nodeWallMs: number, };
-
-export type WorkflowTaskSummary = { humanExit?: WorkflowHumanExitStatus, executing?: boolean, waiting?: Array<WorkflowHumanWait>, requestRunId?: string, reportPending?: boolean, runId: string, taskId: string, workflowId: string, status: string, revision: number, activeNodes: Array<string>, executorSessionId?: string, reason?: string, cleanupError?: string, updatedAtMs: number, };
 
 export type WorkspaceFileSource = { "kind": "workspaceFile", workspaceHandle: string, path: string, } | { "kind": "machineFile", absolutePath: string, };
 

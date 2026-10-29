@@ -449,6 +449,8 @@ pub struct SessionManager {
     registry: Arc<Registry>,
     diagnostics: Arc<Diagnostics>,
     sessions: RwLock<HashMap<String, Arc<Live>>>,
+    /// Serializes disk rehydration without holding the map's write lock.
+    live_load: Mutex<()>,
     /// What each session's agent has left running. Owned here because that is
     /// where the ownership is: a stray process belongs to the conversation
     /// whose agent started it, and there is no such thing as one without a
@@ -484,6 +486,7 @@ impl SessionManager {
             registry,
             diagnostics,
             sessions: RwLock::new(HashMap::new()),
+            live_load: Mutex::new(()),
             processes: crate::processes::Processes::new(),
             replay_window: replay_window.max(1),
             import_candidates: Mutex::new(HashMap::new()),
@@ -1529,9 +1532,12 @@ impl SessionManager {
         if let Some(live) = self.sessions.read().await.get(session_id).cloned() {
             return Ok(live);
         }
-        let mut sessions = self.sessions.write().await;
-        if let Some(live) = sessions.get(session_id) {
-            return Ok(live.clone());
+        // One rehydration at a time, but not under the map's write lock: the
+        // scan and chat read are slow, and other Session readers must not
+        // queue behind them.
+        let _loading = self.live_load.lock().await;
+        if let Some(live) = self.sessions.read().await.get(session_id).cloned() {
+            return Ok(live);
         }
         // Not in memory: rehydrate from disk so a restart does not lose access
         // to past conversations.
@@ -1600,6 +1606,10 @@ impl SessionManager {
         *live.rounds.lock().await = chat.rounds;
         *live.turn_items.lock().await = unsaved;
         *live.active_round.lock().await = restored_round;
+        let mut sessions = self.sessions.write().await;
+        if let Some(existing) = sessions.get(session_id) {
+            return Ok(existing.clone());
+        }
         sessions.insert(session_id.to_string(), live.clone());
         Ok(live)
     }

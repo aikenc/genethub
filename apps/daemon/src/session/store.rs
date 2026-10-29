@@ -465,7 +465,6 @@ impl SessionMeta {
                     error: self.inbox.error.clone(),
                 }
             }),
-            work_summary: None,
             message_preview: self.message_preview.clone(),
             draft_count: (!self.drafts.is_empty()).then_some(self.drafts.len() as u32),
             last_activity_at_ms,
@@ -1197,6 +1196,19 @@ impl Store {
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         let header: MetaHeader = serde_json::from_str(&raw)
             .with_context(|| format!("reading the header of {}", path.display()))?;
+        self.load_meta_from(workspace_id, session_id, &path, &raw, header)
+    }
+
+    /// Parses one already-read `meta.json`. `list_meta` reads and parses each
+    /// header once to find its owner, then reuses the same text here.
+    fn load_meta_from(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+        path: &Path,
+        raw: &str,
+        header: MetaHeader,
+    ) -> Result<SessionMeta> {
         if header.format > SESSION_FORMAT {
             if !header.project_key.is_empty()
                 && !self
@@ -1212,7 +1224,7 @@ impl Store {
                 header,
             ));
         }
-        let mut meta: SessionMeta = serde_json::from_str(&raw)?;
+        let mut meta: SessionMeta = serde_json::from_str(raw)?;
         if !header.project_key.is_empty()
             && !self
                 .homes
@@ -1288,14 +1300,14 @@ impl Store {
                 }) {
                     continue;
                 }
-                if !entry.path().join("meta.json").exists() {
+                let path = entry.path().join("meta.json");
+                let Ok(raw) = fs::read_to_string(&path) else {
                     continue;
-                }
-                let project_key = fs::read_to_string(entry.path().join("meta.json"))
-                    .ok()
-                    .and_then(|raw| serde_json::from_str::<MetaHeader>(&raw).ok())
-                    .map(|header| header.project_key)
-                    .unwrap_or_default();
+                };
+                let Ok(header) = serde_json::from_str::<MetaHeader>(&raw) else {
+                    continue;
+                };
+                let project_key = header.project_key.clone();
                 let owner = if project_key.is_empty() {
                     workspaces.first().map(|(id, _)| id.clone())
                 } else {
@@ -1310,7 +1322,7 @@ impl Store {
                 let Some(workspace_id) = owner else {
                     continue;
                 };
-                match self.load_meta(&workspace_id, &session_id) {
+                match self.load_meta_from(&workspace_id, &session_id, &path, &raw, header) {
                     Ok(meta) => out.push(meta),
                     Err(error) => tracing::warn!(
                         session = %session_id,

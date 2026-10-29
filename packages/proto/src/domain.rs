@@ -1036,10 +1036,6 @@ pub struct SessionSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub input_summary: Option<SessionInputSummary>,
-    /// Workflow facts are independent of this Session's active Agent turn.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub work_summary: Option<SessionWorkSummary>,
     /// Last durably stored visible message; absent for records not yet projected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -1170,28 +1166,6 @@ pub struct SessionInteractionRef {
     pub title: String,
 }
 
-/// Bounded cards plus counts from every associated Run, not recent-history
-/// pagination. Detailed evidence remains available through workflow.get.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "index.ts")]
-pub struct SessionWorkSummary {
-    /// Runs with a live member turn actually executing, rather than just open.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub executing: Option<u32>,
-    pub running: u32,
-    pub stopping: u32,
-    pub blocked: u32,
-    pub tasks: Vec<WorkflowTaskSummary>,
-    pub more: u32,
-    #[ts(type = "number")]
-    pub checked_at_ms: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub error: Option<String>,
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
@@ -1201,56 +1175,6 @@ pub struct SessionInputSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "index.ts")]
-pub struct WorkflowTaskSummary {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub human_exit: Option<WorkflowHumanExitStatus>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub executing: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub waiting: Option<Vec<WorkflowHumanWait>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub request_run_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub report_pending: Option<bool>,
-
-    pub run_id: String,
-    pub task_id: String,
-    pub workflow_id: String,
-    pub status: String,
-    #[ts(type = "number")]
-    pub revision: u64,
-    pub active_nodes: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub executor_session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub reason: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub cleanup_error: Option<String>,
-    #[ts(type = "number")]
-    pub updated_at_ms: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "index.ts")]
-pub struct WorkflowHumanWait {
-    pub node_id: String,
-    pub session_id: String,
-    pub request_id: String,
-    pub title: String,
 }
 
 /// Mutable limits shared by one Human request and all Workflow retry Runs.
@@ -2709,18 +2633,6 @@ pub struct SupportDiagnostics {
     pub uptime_seconds: u64,
     pub hub_state: String,
     pub remote_state: String,
-    /// Milliseconds since the Workflow scheduler last completed a scan.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional, type = "number")]
-    pub workflow_patrol_lag_ms: Option<u64>,
-    /// Queued and running Workflow patrol jobs on this daemon.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub workflow_patrol_active_jobs: Option<u32>,
-    /// Age of the oldest queued or running patrol job.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional, type = "number")]
-    pub workflow_patrol_oldest_job_ms: Option<u64>,
     pub events: Vec<SupportDiagnosticEvent>,
     #[ts(type = "number")]
     pub dropped_events: u64,
