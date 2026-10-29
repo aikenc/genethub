@@ -14,7 +14,7 @@ defineSpecialty(
     id: "specialty.concurrency.parallel-workspaces",
     title: "Ten and twenty workspaces complete their own turns without mixing",
     oracle:
-      "at the retired Rust profile's 10- and 20-workspace scale, every workspace's session completes exactly one turn and observes no other session's turnStarted",
+      "at the retired Rust profile's 10- and 20-workspace scale, every session completes exactly one turn and neither it nor 4/8 extra observer clients see another session's turnStarted; workspace.list and file.tree stay responsive",
     catches: [
       "shared session state starts one workspace's turn inside another",
       "the daemon stalls or drops sessions as workspace count grows",
@@ -40,6 +40,12 @@ defineSpecialty(
           })),
         );
         const workspaces: Array<{ id: string; session: string; events: Array<{ type?: string }> }> = [];
+        const observerCount = count === 10 ? 4 : 8;
+        const observers = await Promise.all(
+          Array.from({ length: observerCount }, (_, index) =>
+            t.flows.main.openSecondClient(opened, `workspace-observer-${count}-${index}`),
+          ),
+        );
         for (let index = 0; index < count; index += 1) {
           const root = path.join(t.env.workspace, `load-${count}-${index}`);
           mkdirSync(root, { recursive: true });
@@ -50,6 +56,11 @@ defineSpecialty(
           const events = await t.flows.main.attachEventLog(opened.client, session);
           workspaces.push({ id, session, events });
         }
+        const observerEvents = await Promise.all(
+          observers.map((observer) =>
+            Promise.all(workspaces.map((workspace) => t.flows.main.attachEventLog(observer, workspace.session))),
+          ),
+        );
         for (const workspace of workspaces) {
           await t.flows.main.sendPrompt(opened.client, workspace.session, "Say something.");
         }
@@ -59,6 +70,16 @@ defineSpecialty(
         t.assertions.assert(
           Date.now() - probeStarted < 3_000,
           `workspace.list took ${Date.now() - probeStarted}ms with ${count} in-flight turns`,
+        );
+        const treeStarted = Date.now();
+        const tree = await opened.client.call({
+          type: "file.tree",
+          payload: { workspaceId: workspaces[0]!.id, path: null, depth: 1 },
+        });
+        t.assertions.assert(tree?.type === "fileTree", `file.tree returned ${tree?.type}`);
+        t.assertions.assert(
+          Date.now() - treeStarted < 3_000,
+          `file.tree took ${Date.now() - treeStarted}ms with ${count} in-flight turns`,
         );
         await t.tools.waitUntil(
           () =>
@@ -76,6 +97,16 @@ defineSpecialty(
             `workspace ${workspace.id} saw ${started.length} turnStarted at scale ${count}`,
           );
         }
+        for (const [observer, logs] of observerEvents.entries()) {
+          for (const [index, log] of logs.entries()) {
+            const started = log.filter((item) => item.type === "turnStarted");
+            t.assertions.assert(
+              started.length === 1,
+              `observer ${observer} saw ${started.length} turnStarted for ${workspaces[index]!.id} at scale ${count}`,
+            );
+          }
+        }
+        for (const observer of observers) observer.close();
       }
     } finally {
       opened.client.close();

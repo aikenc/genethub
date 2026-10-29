@@ -183,9 +183,8 @@ impl Terminals {
                 let mut reader = reader;
                 let mut buffer = [0u8; 8192];
                 loop {
-                    if reader_closed.load(Ordering::Acquire) {
-                        break;
-                    }
+                    // Drain to EOF rather than stopping at the close flag: the
+                    // child's last output may still be in the ConPTY pipe.
                     match reader.read(&mut buffer) {
                         Ok(0) => break,
                         Ok(count) => {

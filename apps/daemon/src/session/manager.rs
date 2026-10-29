@@ -4833,12 +4833,16 @@ impl SessionManager {
                 "ended detached processes before stopping Agents"
             );
         }
-        for (session_id, live) in sessions {
+        let mut abandoned: Vec<String> = Vec::new();
+        let mut index = 0;
+        while index < sessions.len() {
+            let (session_id, live) = &sessions[index];
             if tokio::time::Instant::now() >= deadline {
                 tracing::error!(
                     sessions = total,
                     "daemon shutdown deadline reached; remaining sessions are abandoned"
                 );
+                abandoned.extend(sessions[index..].iter().map(|(id, _)| id.clone()));
                 break;
             }
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -4846,15 +4850,24 @@ impl SessionManager {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
                     tracing::error!(session = %session_id, %error, "session shutdown did not complete");
+                    abandoned.push(session_id.clone());
                 }
                 Err(_) => {
                     tracing::error!(
                         session = %session_id,
                         "daemon shutdown deadline reached inside a session; it was abandoned"
                     );
+                    abandoned.extend(sessions[index..].iter().map(|(id, _)| id.clone()));
                     break;
                 }
             }
+            index += 1;
+        }
+        if !abandoned.is_empty() {
+            // Their Agents were dropped without finishing their abort path;
+            // a plain kill_on_drop would stop only the leader. Take the whole
+            // watched group down so the host does not leave a tree behind.
+            self.processes.kill_watched_groups(&abandoned).await;
         }
     }
 }

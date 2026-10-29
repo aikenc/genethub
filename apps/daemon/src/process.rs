@@ -402,6 +402,25 @@ pub fn own_group(command: &mut crate::os_process::Command) {
 
 /// A running command, and everything it starts, held together.
 ///
+/// A forced group kill for shutdown paths that cannot wait. The caller has
+/// already decided the process tree is abandoned; no identity recheck applies.
+#[cfg(unix)]
+pub async fn kill_group(group: u32) {
+    signal_group(group, libc::SIGKILL);
+}
+
+#[cfg(target_family = "wasm")]
+pub async fn kill_group(group: u32) {
+    let mut command = crate::os_process::Command::new("kill");
+    command.args(["-KILL", &format!("-{group}")]);
+    let _ = command.output().await;
+}
+
+#[cfg(windows)]
+pub async fn kill_group(group: u32) {
+    stop_tree(group);
+}
+
 /// `tokio`'s own `kill_on_drop` stops the process it spawned and nothing
 /// below it, which for `bash -lc "npm run dev"` means it stops bash and
 /// leaves the server. This stops the group.

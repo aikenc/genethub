@@ -358,6 +358,20 @@ impl Processes {
         owned.len()
     }
 
+    /// Last-resort group kill for sessions abandoned by the shutdown deadline.
+    pub(crate) async fn kill_watched_groups(&self, session_ids: &[String]) {
+        let groups: Vec<u32> = {
+            let watched = self.agents.read().await;
+            session_ids
+                .iter()
+                .filter_map(|id| watched.get(id).map(|agent| agent.group))
+                .collect()
+        };
+        for group in groups {
+            crate::process::kill_group(group).await;
+        }
+    }
+
     /// Ends everything a session left running, but not the agent itself.
     pub async fn stop_all(&self, session_id: &str) -> usize {
         let Some(agent) = self.agents.read().await.get(session_id).copied() else {
