@@ -202,6 +202,7 @@ struct Live {
     /// When the turn in progress last had its narrative written out, which
     /// paces that write rather than doing it per streamed token.
     open_turn_written_ms: AtomicI64,
+    open_trunk_written_ms: AtomicI64,
     open_turn_dirty: AtomicBool,
     /// Work item ids belonging to the trunk currently open, in order. Cleared
     /// when that trunk is written out, so this stays bounded by a soft batch
@@ -4827,7 +4828,10 @@ impl SessionManager {
         // each Agent's own close, so they are deliberately left to it.
         let detached = self.processes.stop_detached_for(&ids).await;
         if detached > 0 {
-            tracing::info!(count = detached, "ended detached processes before stopping Agents");
+            tracing::info!(
+                count = detached,
+                "ended detached processes before stopping Agents"
+            );
         }
         for (session_id, live) in sessions {
             if tokio::time::Instant::now() >= deadline {
@@ -5219,6 +5223,7 @@ impl Live {
             continuation_dispatched: std::sync::atomic::AtomicBool::new(false),
             turn_items: Mutex::new(Vec::new()),
             open_turn_written_ms: AtomicI64::new(0),
+            open_trunk_written_ms: AtomicI64::new(0),
             open_turn_dirty: AtomicBool::new(false),
             open_trunk_items: Mutex::new(Vec::new()),
             llm_rounds: Mutex::new(LlmRounds::default()),
@@ -5583,6 +5588,29 @@ impl Live {
         ) {
             tracing::warn!("could not persist the open trunk of {}: {error}", meta.id);
         }
+    }
+
+    /// Rewrites the open trunk at most every thirty seconds.
+    ///
+    /// The flat narrative checkpoint cannot carry tool calls; without this a
+    /// crash loses everything since the last closed trunk. Thirty seconds is
+    /// long enough that the rewrite stays cheap and short enough that the
+    /// lost window is visible rather than a whole round.
+    async fn persist_open_trunk_if_due(&self) {
+        const EVERY_MS: i64 = 30_000;
+        let now = now_ms();
+        let last = self.open_trunk_written_ms.load(Ordering::SeqCst);
+        if now.saturating_sub(last) < EVERY_MS {
+            return;
+        }
+        if self
+            .open_trunk_written_ms
+            .compare_exchange(last, now, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+        self.persist_open_trunk().await;
     }
 
     /// Returns the round that was cut short, if any — `None` both when the
@@ -6516,6 +6544,7 @@ async fn pump_events(
             _ = checkpoint.tick() => {
                 let _owner = live.execution.lock().await;
                 live.persist_open_turn_if_due().await;
+                live.persist_open_trunk_if_due().await;
                 // Some adapters learn their native thread id only after the
                 // first event. Persist it during active work, not only when a
                 // Human pause happens or the next Session start occurs.

@@ -333,7 +333,9 @@ impl Processes {
     /// is enough to find the processes that left the Agent's own group.
     pub(crate) async fn stop_detached_for(&self, session_ids: &[String]) -> usize {
         let Some(census) = census().await else {
-            tracing::warn!("cannot end detached session processes: the operating system did not answer");
+            tracing::warn!(
+                "cannot end detached session processes: the operating system did not answer"
+            );
             return 0;
         };
         let agents: Vec<Agent> = {

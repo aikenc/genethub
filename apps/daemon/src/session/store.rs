@@ -1694,14 +1694,28 @@ impl Store {
                 serde_json::Value::String(round_id.to_string()),
             );
         }
-        let mut file = crate::config::open_append(&path)?;
-        crate::config::restrict_to_owner(&path)?;
-        writeln!(file, "{}", serde_json::to_string(&value)?)?;
-        file.flush()?;
-        // The trunk body is already fsynced above; the index row is the only
-        // thing that makes it reachable after a crash, so it gets the same
-        // treatment. One fsync per closed trunk, not per item.
-        file.sync_all()?;
+        // Upsert by trunk index: an open trunk is rewritten by each periodic
+        // checkpoint, and appending would leave several rows naming the same
+        // file. The index is one small file per round.
+        let index = summary.index as u64;
+        let mut body = Vec::new();
+        if let Ok(existing) = std::fs::read_to_string(&path) {
+            for line in existing.lines() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let same_index = serde_json::from_str::<serde_json::Value>(line)
+                    .ok()
+                    .and_then(|row| row.get("index").and_then(serde_json::Value::as_u64))
+                    == Some(index);
+                if !same_index {
+                    writeln!(body, "{line}")?;
+                }
+            }
+        }
+        writeln!(body, "{}", serde_json::to_string(&value)?)?;
+        // The trunk body is already fsynced; save_private fsyncs the index too.
+        crate::config::save_private(&path, &body)?;
         Ok(())
     }
 
