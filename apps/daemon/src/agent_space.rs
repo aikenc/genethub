@@ -339,7 +339,6 @@ pub fn describe(entry: &AgentSpaceEntry) -> AgentSpaceInfo {
         parent_workspace_id: entry.parent_workspace_id.clone(),
         revision: entry.revision,
         lifecycle: entry.lifecycle.clone(),
-        builder_lock_digest: entry.builder_lock_digest.clone(),
         components: entry
             .components
             .iter()
@@ -366,10 +365,8 @@ pub fn describe_legacy(entry: &AgentSpaceEntry) -> PipeSpaceInfo {
     };
     PipeSpaceInfo {
         parent_workspace_id: entry.parent_workspace_id.clone(),
-        pm: false,
         worker_role,
         lifecycle: entry.lifecycle.clone(),
-        builder_lock_digest: entry.builder_lock_digest.clone(),
     }
 }
 
@@ -383,7 +380,6 @@ mod tests {
             parent_workspace_id: parent.map(str::to_string),
             revision: 1,
             lifecycle: "persistent".into(),
-            builder_lock_digest: "sha256:lock".into(),
             components: Vec::new(),
             guidance: Vec::new(),
         }
@@ -680,7 +676,6 @@ mod tests {
     fn the_legacy_projection_states_the_old_shape_without_storing_it() {
         let project = entry("ws_project", None);
         let legacy = describe_legacy(&project);
-        assert!(!legacy.pm);
         assert_eq!(legacy.worker_role, None);
 
         let executor = set_component(

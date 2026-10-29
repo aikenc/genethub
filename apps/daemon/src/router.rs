@@ -221,8 +221,8 @@ async fn authorize_pm_space_open(
         .map_err(anyhow::Error::msg)?;
     if !session_belongs_to_project(state, project_id, session_id).await {
         anyhow::bail!(
-            "projectControlRequired: registering a prepared Space needs a taken-over project \
-             and a main Session that belongs to it"
+            "projectMembershipRequired: registering a prepared Space needs a Session that \
+             belongs to this project"
         );
     }
     let project = state.workspaces.project_entry(project_id).await?;
@@ -584,13 +584,8 @@ async fn agent_space_change_facts(
         );
     }
     let canonical_root = workspace.root.canonicalize()?.display().to_string();
-    let digest = agent_space_plan_digest(
-        workspace_id,
-        &canonical_root,
-        expected_revision,
-        &current.builder_lock_digest,
-        operation,
-    )?;
+    let digest =
+        agent_space_plan_digest(workspace_id, &canonical_root, expected_revision, operation)?;
     Ok((current, canonical_root, digest))
 }
 
@@ -598,7 +593,6 @@ fn agent_space_plan_digest(
     workspace_id: &str,
     canonical_root: &str,
     expected_revision: u64,
-    builder_lock_digest: &str,
     operation: &genehub_proto::AgentSpaceOperation,
 ) -> anyhow::Result<String> {
     use sha2::{Digest, Sha256};
@@ -608,8 +602,6 @@ fn agent_space_plan_digest(
     hash.update(canonical_root.as_bytes());
     hash.update([0]);
     hash.update(expected_revision.to_le_bytes());
-    hash.update([0]);
-    hash.update(builder_lock_digest.as_bytes());
     hash.update([0]);
     hash.update(serde_json::to_vec(operation)?);
     Ok(format!("sha256:{:x}", hash.finalize()))

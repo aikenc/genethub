@@ -128,7 +128,6 @@ export function AgentAdvancedSettings({ workspace, section = "all", inline = fal
                 onChange={(event) => setComponentId(event.target.value)}
                 className="min-w-0 rounded border border-line bg-raised min-h-10 px-2 py-2 text-fg"
               >
-                <option value="pm">PM</option>
                 <option value="executor">Executor</option>
                 <option value="worker">Worker</option>
                 <option value="reviewer">Reviewer</option>

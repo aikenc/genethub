@@ -261,8 +261,8 @@ defineSpecialty(
         `the component set is not the wire truth: ${JSON.stringify(projectInfo?.agentSpace)}`,
       );
       t.assertions.assert(
-        projectInfo?.pipeSpace?.pm === false &&
-          projectInfo?.pipeSpace?.workerRole === "workflow-executor",
+        projectInfo?.pipeSpace?.workerRole === "workflow-executor" &&
+          projectInfo?.pipeSpace?.lifecycle === "persistent",
         `the older exclusive-role shape stopped being readable: ${JSON.stringify(projectInfo?.pipeSpace)}`,
       );
 

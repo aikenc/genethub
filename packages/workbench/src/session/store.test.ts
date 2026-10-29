@@ -612,8 +612,7 @@ describe("live session status in the sidebar", () => {
       agentSpace: {
         revision: 1,
         lifecycle: "persistent",
-        builderLockDigest: "sha256:game",
-        components: [{ componentId: "pm", enabled: true, schemaVersion: 1 }],
+        components: [{ componentId: "executor", enabled: true, schemaVersion: 1 }],
         guidance: [],
       },
     };
@@ -633,7 +632,6 @@ describe("live session status in the sidebar", () => {
         revision: 1,
         parentWorkspaceId: root.id,
         lifecycle: "pooled",
-        builderLockDigest: "sha256:executor",
         components: [{ componentId: "executor", enabled: true, schemaVersion: 1 }],
         guidance: [],
       },

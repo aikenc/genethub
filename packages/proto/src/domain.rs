@@ -472,9 +472,6 @@ pub struct AgentSpaceInfo {
     /// persistent, pooled or ephemeral. Executors normally use persistent or
     /// pooled so a Workflow Run can reuse the Space.
     pub lifecycle: String,
-    /// SHA-256 identity of the PipeBuilder ownership lock verified when the
-    /// relationship was last registered.
-    pub builder_lock_digest: String,
     /// Sorted by `componentId`, so the projection is stable between reads.
     pub components: Vec<AgentComponentInfo>,
     /// Pack-authored prompts for a new Session in this Space. The daemon only
@@ -512,15 +509,12 @@ pub struct PipeSpaceInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub parent_workspace_id: Option<String>,
-    /// True when the `pm` component is mounted and enabled.
-    pub pm: bool,
     /// `workflow-executor` for an enabled `executor`, otherwise the enabled
     /// `worker` role. Absent when neither is mounted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub worker_role: Option<String>,
     pub lifecycle: String,
-    pub builder_lock_digest: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

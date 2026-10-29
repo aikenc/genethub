@@ -1012,7 +1012,9 @@
         },
         "assertionDelta": "TS proves two workspaces and two genet sessions complete without mixing turnStarted, through @genehub/workbench/client. Does not copy native_resource_count, multi-browser subscribe, or load-profile timing (those probes are do-not-export).",
         "coverageDelta": "TS counterpart proved the business oracle (all turns complete, no interaction failures, unrelated reads responsive) on the same artifact; the old 10/20-workspace load profile and native resource counts are measurement-only and are not reproduced in the TS gate.",
-        "reviewedIn": "runs/261028-2205-parity-concurrency-e2f5"
+        "reviewedIn": "runs/261028-2205-parity-concurrency-e2f5",
+        "evidenceStatus": "invalid",
+        "evidenceGap": "Run 261028-2205 recorded inputDrift=true (source changed during the run), so its qualification is false; the two TS counterparts also cover only 2 workspaces/2 sessions, not the old 10/20-workspace profile. Retirement stays recorded but is not accepted as parity evidence until a replacement run exists."
       }
     },
     {
@@ -1048,7 +1050,9 @@
         },
         "assertionDelta": "TS proves workspace.list stays under 500ms during a delayed mock turn, plus a companion slow-git file.tree/list canary. Does not copy pause_inbound preview flood or native_resource_count.",
         "coverageDelta": "TS counterpart proved the business oracle (all turns complete, no interaction failures, unrelated reads responsive) on the same artifact; the old 10/20-workspace load profile and native resource counts are measurement-only and are not reproduced in the TS gate.",
-        "reviewedIn": "runs/261028-2205-parity-concurrency-e2f5"
+        "reviewedIn": "runs/261028-2205-parity-concurrency-e2f5",
+        "evidenceStatus": "invalid",
+        "evidenceGap": "Run 261028-2205 recorded inputDrift=true (source changed during the run), so its qualification is false; the two TS counterparts also cover only 2 workspaces/2 sessions, not the old 10/20-workspace profile. Retirement stays recorded but is not accepted as parity evidence until a replacement run exists."
       }
     },
     {

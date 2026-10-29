@@ -1434,7 +1434,6 @@ fn existing_or_unregistered(config: &Config, workspace_id: &str) -> AgentSpaceEn
             parent_workspace_id: None,
             revision: 0,
             lifecycle: "persistent".into(),
-            builder_lock_digest: String::new(),
             components: Vec::new(),
             guidance: Vec::new(),
         })
@@ -2799,7 +2798,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![crate::agent_space::COMPONENT_EXECUTOR]
         );
-        assert!(!find(&project).pipe_space.unwrap().pm);
 
         let executor_space = find(&executor).agent_space.unwrap();
         assert_eq!(

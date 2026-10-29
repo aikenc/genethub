@@ -272,7 +272,6 @@ pub struct AgentSpaceEntry {
     pub parent_workspace_id: Option<String>,
     pub revision: u64,
     pub lifecycle: String,
-    pub builder_lock_digest: String,
     #[serde(default)]
     pub components: Vec<AgentComponentEntry>,
     /// User-facing Session starters supplied by the owning Workflow package.
@@ -298,12 +297,8 @@ pub(crate) struct LegacyPipeSpaceEntry {
     #[serde(default)]
     parent_workspace_id: Option<String>,
     #[serde(default)]
-    #[allow(dead_code)]
-    pm: bool,
-    #[serde(default)]
     worker_role: Option<String>,
     lifecycle: String,
-    builder_lock_digest: String,
 }
 
 impl Config {
@@ -391,7 +386,6 @@ impl Config {
                 parent_workspace_id: legacy.parent_workspace_id,
                 revision: 1,
                 lifecycle: legacy.lifecycle,
-                builder_lock_digest: legacy.builder_lock_digest,
                 components,
                 guidance: Vec::new(),
             });
@@ -842,7 +836,6 @@ mod tests {
                     "workspaceId": "ws_project",
                     "pm": true,
                     "lifecycle": "persistent",
-                    "builderLockDigest": "sha256:project",
                 },
                 {
                     "workspaceId": "ws_executor",
@@ -850,7 +843,6 @@ mod tests {
                     "pm": false,
                     "workerRole": "workflow-executor",
                     "lifecycle": "pooled",
-                    "builderLockDigest": "sha256:executor",
                 },
                 {
                     "workspaceId": "ws_tester",
@@ -858,7 +850,6 @@ mod tests {
                     "pm": false,
                     "workerRole": "tester",
                     "lifecycle": "persistent",
-                    "builderLockDigest": "sha256:tester",
                 },
             ]),
         );
@@ -890,10 +881,7 @@ mod tests {
             vec![("worker".into(), Some("tester".into()))],
             "an ordinary worker role becomes the worker component's role"
         );
-        assert!(loaded
-            .agent_spaces
-            .iter()
-            .all(|space| space.revision == 1 && !space.builder_lock_digest.is_empty()));
+        assert!(loaded.agent_spaces.iter().all(|space| space.revision == 1));
 
         loaded.save(&path).unwrap();
         let rewritten: serde_json::Value =
@@ -919,7 +907,6 @@ mod tests {
                 parent_workspace_id: None,
                 revision: 7,
                 lifecycle: "persistent".into(),
-                builder_lock_digest: "sha256:current".into(),
                 components: vec![AgentComponentEntry {
                     component_id: "executor".into(),
                     schema_version: 1,
@@ -937,7 +924,6 @@ mod tests {
                 "workspaceId": "ws_project",
                 "pm": true,
                 "lifecycle": "ephemeral",
-                "builderLockDigest": "sha256:stale",
             }]),
         );
         std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();

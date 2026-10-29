@@ -243,11 +243,6 @@ revision: number,
  */
 lifecycle: string, 
 /**
- * SHA-256 identity of the PipeBuilder ownership lock verified when the
- * relationship was last registered.
- */
-builderLockDigest: string, 
-/**
  * Sorted by `componentId`, so the projection is stable between reads.
  */
 components: Array<AgentComponentInfo>, 
@@ -1091,14 +1086,10 @@ export type PermissionRequestKind = "permission" | "question" | "planApproval" |
  */
 export type PipeSpaceInfo = { parentWorkspaceId?: string, 
 /**
- * True when the `pm` component is mounted and enabled.
- */
-pm: boolean, 
-/**
  * `workflow-executor` for an enabled `executor`, otherwise the enabled
  * `worker` role. Absent when neither is mounted.
  */
-workerRole?: string, lifecycle: string, builderLockDigest: string, };
+workerRole?: string, lifecycle: string, };
 
 /**
  * One confirmed note inside the session's single preview-annotation draft.
