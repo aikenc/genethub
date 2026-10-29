@@ -111,7 +111,7 @@ impl Terminals {
 
         let id = format!("pty_{}", uuid::Uuid::new_v4().simple());
         let writer = pair.master.take_writer()?;
-        let mut reader = nonblocking_reader(pair.master.as_ref())?;
+        let reader = duplicate_pty_reader(pair.master.as_ref())?;
         let terminal_closed = Arc::new(AtomicBool::new(false));
 
         self.sessions.lock().await.insert(
@@ -126,34 +126,79 @@ impl Terminals {
 
         let output = self.outbound.clone();
         let reader_id = id.clone();
-        // Blocking reads on a dedicated thread: the pty reader has no async
-        // form, and parking it on the runtime would stall other tasks.
+        // Reads run on a dedicated thread: the pty reader has no async form,
+        // and parking it on the runtime would stall other tasks. Polling keeps
+        // the fd blocking (so writes keep their normal backpressure) while
+        // still letting close wake the thread.
         let reader_closed = terminal_closed.clone();
         std::thread::spawn(move || {
-            let mut buffer = [0u8; 8192];
-            loop {
-                // Closing the terminal sets the flag; a descendant that keeps
-                // the slave open must not keep this thread (and its duplicated
-                // master fd) alive forever.
-                if reader_closed.load(Ordering::Acquire) {
-                    break;
-                }
-                match reader.read(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(count) => {
-                        let data = String::from_utf8_lossy(&buffer[..count]).to_string();
-                        // The fixed queue is the memory bound. Reader threads
-                        // provide backpressure when it fills; silently dropping
-                        // bytes would leave the terminal display corrupted with
-                        // no desync signal or way to recover them.
-                        if !send_pty_output(&output, &reader_id, data) {
+            #[cfg(unix)]
+            {
+                use std::os::fd::AsRawFd;
+                let fd = reader.as_raw_fd();
+                let mut buffer = [0u8; 8192];
+                let mut reader = reader;
+                loop {
+                    let timeout = if reader_closed.load(Ordering::Acquire) {
+                        100
+                    } else {
+                        500
+                    };
+                    let mut polled = libc::pollfd {
+                        fd,
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    let ready = unsafe { libc::poll(&mut polled, 1, timeout) };
+                    if ready < 0 {
+                        if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+                        {
+                            continue;
+                        }
+                        break;
+                    }
+                    if ready == 0 {
+                        // Closed and the kernel buffer is drained: nothing
+                        // more can arrive, so stop without losing the tail.
+                        if reader_closed.load(Ordering::Acquire) {
                             break;
                         }
+                        continue;
                     }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    match reader.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(count) => {
+                            let data = String::from_utf8_lossy(&buffer[..count]).to_string();
+                            if !send_pty_output(&output, &reader_id, data) {
+                                break;
+                            }
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                        Err(_) => break,
                     }
-                    Err(_) => break,
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let mut reader = reader;
+                let mut buffer = [0u8; 8192];
+                loop {
+                    if reader_closed.load(Ordering::Acquire) {
+                        break;
+                    }
+                    match reader.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(count) => {
+                            let data = String::from_utf8_lossy(&buffer[..count]).to_string();
+                            if !send_pty_output(&output, &reader_id, data) {
+                                break;
+                            }
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                        Err(_) => break,
+                    }
                 }
             }
         });
@@ -240,12 +285,13 @@ impl Terminals {
     }
 }
 
-/// A reader that does not park a thread forever after the terminal closes.
+/// A reader on its own description of the pty master.
 ///
-/// The blocking reader keeps a duplicate of the master fd, so dropping the
-/// master alone does not wake it when a descendant still holds the slave.
+/// `dup` shares the open file description's status flags, so the reader stays
+/// blocking: setting O_NONBLOCK here would also make the write side return
+/// EAGAIN under backpressure. Closing is handled by polling this fd.
 #[cfg(unix)]
-fn nonblocking_reader(master: &dyn portable_pty::MasterPty) -> Result<Box<dyn Read + Send>> {
+fn duplicate_pty_reader(master: &dyn portable_pty::MasterPty) -> Result<std::fs::File> {
     use std::os::fd::{FromRawFd, OwnedFd};
     let raw = master
         .as_raw_fd()
@@ -254,18 +300,12 @@ fn nonblocking_reader(master: &dyn portable_pty::MasterPty) -> Result<Box<dyn Re
     if duplicate < 0 {
         return Err(std::io::Error::last_os_error()).context("duplicating the pty reader");
     }
-    let flags = unsafe { libc::fcntl(duplicate, libc::F_GETFL) };
-    if flags < 0 || unsafe { libc::fcntl(duplicate, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
-        let error = std::io::Error::last_os_error();
-        unsafe { libc::close(duplicate) };
-        return Err(error).context("making the pty reader nonblocking");
-    }
     let fd = unsafe { OwnedFd::from_raw_fd(duplicate) };
-    Ok(Box::new(std::fs::File::from(fd)))
+    Ok(std::fs::File::from(fd))
 }
 
 #[cfg(not(unix))]
-fn nonblocking_reader(master: &dyn portable_pty::MasterPty) -> Result<Box<dyn Read + Send>> {
+fn duplicate_pty_reader(master: &dyn portable_pty::MasterPty) -> Result<Box<dyn Read + Send>> {
     master.try_clone_reader()
 }
 

@@ -4841,8 +4841,19 @@ impl SessionManager {
                 );
                 break;
             }
-            if let Err(error) = live.shutdown().await {
-                tracing::error!(session = %session_id, %error, "session shutdown did not complete");
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match tokio::time::timeout(remaining, live.shutdown()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::error!(session = %session_id, %error, "session shutdown did not complete");
+                }
+                Err(_) => {
+                    tracing::error!(
+                        session = %session_id,
+                        "daemon shutdown deadline reached inside a session; it was abandoned"
+                    );
+                    break;
+                }
             }
         }
     }

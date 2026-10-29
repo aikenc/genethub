@@ -1699,18 +1699,27 @@ impl Store {
         // file. The index is one small file per round.
         let index = summary.index as u64;
         let mut body = Vec::new();
-        if let Ok(existing) = std::fs::read_to_string(&path) {
-            for line in existing.lines() {
-                if line.trim().is_empty() {
-                    continue;
+        match std::fs::read_to_string(&path) {
+            Ok(existing) => {
+                for line in existing.lines() {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    let same_index = serde_json::from_str::<serde_json::Value>(line)
+                        .ok()
+                        .and_then(|row| row.get("index").and_then(serde_json::Value::as_u64))
+                        == Some(index);
+                    if !same_index {
+                        writeln!(body, "{line}")?;
+                    }
                 }
-                let same_index = serde_json::from_str::<serde_json::Value>(line)
-                    .ok()
-                    .and_then(|row| row.get("index").and_then(serde_json::Value::as_u64))
-                    == Some(index);
-                if !same_index {
-                    writeln!(body, "{line}")?;
-                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                // A readable index is the only copy of earlier trunks. Treating
+                // an I/O error as "empty" would overwrite them with nothing.
+                return Err(error)
+                    .with_context(|| format!("reading {} before rewriting it", path.display()));
             }
         }
         writeln!(body, "{}", serde_json::to_string(&value)?)?;

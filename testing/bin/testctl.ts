@@ -39,6 +39,23 @@ import {
 const TESTING_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const OPEN_DEFAULT = path.resolve(TESTING_ROOT, "..");
 
+/** Open parity gaps are not cases and must still appear in a plan's skipped
+ * list, otherwise "not executed" and "not selected" look identical. */
+function openGapSkips(openRoot: string): Array<{ id: string; reason: string }> {
+  const parityPath = path.join(openRoot, "testing/migration/rust-parity.json");
+  try {
+    const parity = JSON.parse(readFileSync(parityPath, "utf8")) as {
+      openGaps?: Array<{ oldId?: string; reason?: string }>;
+    };
+    return (parity.openGaps ?? []).map((gap) => ({
+      id: gap.oldId ?? "open-parity-gap",
+      reason: `open parity gap (not retired): ${gap.reason ?? "no accepted same-run evidence"}`,
+    }));
+  } catch {
+    return [];
+  }
+}
+
 function flag(args: string[], name: string, fallback = ""): string {
   const index = args.indexOf(name);
   if (index < 0) return fallback;
@@ -153,6 +170,7 @@ async function main(): Promise<number> {
     const budget = resourceBudget(args);
     const cases = await loadCatalog({ openRoot, cloudRoot });
     const plan = planCases(cases, gate, valuesOf(args, "--tags"), valuesOf(args, "--case"), flag(args, "--reason"));
+    plan.skipped.push(...openGapSkips(openRoot));
     process.stdout.write(
       `${JSON.stringify({ gate, scope: gate === "dev-feedback" ? "feedback" : "gate", budget, reason: flag(args, "--reason"), units: plan.units.map((unit) => ({ id: unit.id, ms: unit.meta.expectedDurationMs, runner: unit.meta.runner, surfaces: unit.meta.surfaces, requirements: unit.meta.requirements ?? [] })), skipped: plan.skipped, estimatedMs: plan.estimatedMs }, null, 2)}\n`,
     );
@@ -203,6 +221,7 @@ async function main(): Promise<number> {
     const cases = await loadCatalog({ openRoot, cloudRoot });
     const selection = { tags: valuesOf(args, "--tags"), cases: valuesOf(args, "--case"), reason: flag(args, "--reason").trim() };
     const plan = planCases(cases, gate, selection.tags, selection.cases, selection.reason);
+    plan.skipped.push(...openGapSkips(openRoot));
     const prerequisites = await preflight(plan.units.map(unit => unit.meta));
     const productPreflight = prerequisites.issues.length ? { refusals: [], unprovenArtifacts: [] } : preflightRun({
       units: plan.units, openRoot, cloudRoot, build: !has(args, "--no-build"),
