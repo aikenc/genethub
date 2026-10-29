@@ -304,11 +304,11 @@ impl Processes {
             .await
             .ok_or_else(|| anyhow::anyhow!("process census unavailable; cleanup is unconfirmed"))?;
         let claimed = claimed_by(&before, agent, agent.watched_at.elapsed().as_secs());
-        let mut ending = tokio::task::JoinSet::new();
-        for row in &claimed {
-            ending.spawn(end_observed((*row).clone()));
-        }
-        ending.join_all().await;
+        let owned: Vec<Row> = claimed.iter().map(|row| (*row).clone()).collect();
+        // Signal each verified pid, never its whole group: a row still in the
+        // Agent's group must not take the Agent down before its own abort
+        // protocol runs.
+        terminate_snapshot(&owned).await;
         let after = census()
             .await
             .ok_or_else(|| anyhow::anyhow!("process cleanup could not be verified"))?;
@@ -368,43 +368,6 @@ fn same_process(before: &Row, after: &Row) -> bool {
     before.pid == after.pid
         && before.group == after.group
         && after.running_for_seconds + CLOCK_SLACK >= before.running_for_seconds
-}
-
-#[cfg(not(target_family = "wasm"))]
-async fn end_observed(row: Row) {
-    crate::process::end_tree(row.pid).await;
-}
-
-/// The guest uses the existing nonblocking process import. Numeric pids are
-/// taken only from the ownership census; never signal an unverified group.
-#[cfg(target_family = "wasm")]
-async fn end_observed(row: Row) {
-    let signal = |signal: &'static str, pid: u32| async move {
-        let mut command = crate::os_process::Command::new("kill");
-        command
-            .args([signal, &pid.to_string()])
-            .stdin(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true);
-        let _ = tokio::time::timeout(CENSUS_TIMEOUT, command.output()).await;
-    };
-    signal("-TERM", row.pid).await;
-    let deadline = tokio::time::Instant::now() + crate::process::GRACE;
-    while tokio::time::Instant::now() < deadline {
-        let Some(current) = census().await else {
-            return;
-        };
-        if !current.iter().any(|now| same_process(&row, now)) {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    let Some(current) = census().await else {
-        return;
-    };
-    if current.iter().any(|now| same_process(&row, now)) {
-        signal("-KILL", row.pid).await;
-    }
 }
 
 /// The processes of a session's agent, excluding the agent.

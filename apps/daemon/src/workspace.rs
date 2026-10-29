@@ -1735,6 +1735,9 @@ fn resolve_entry(entry: &WorkspaceEntry, virtual_path: &str) -> Result<ResolvedW
         .strip_prefix(&folder.root)
         .map_err(|_| anyhow!("path escapes the workspace folder"))?
         .to_path_buf();
+    if relative.starts_with(std::path::Path::new(".genethub").join("sessions")) {
+        anyhow::bail!("session state is not a workspace file");
+    }
     Ok(ResolvedWorkspacePath {
         root: folder.root.clone(),
         absolute,
@@ -1931,6 +1934,29 @@ mod tests {
         assert_eq!(first.name, "project");
         assert_eq!(spaces.list().await.len(), 1);
         assert_eq!(spaces.project_entry(&first.id).await.unwrap().id, first.id);
+    }
+
+    #[tokio::test]
+    async fn session_state_is_not_a_workspace_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let spaces = workspaces(dir.path()).await;
+        let opened = spaces.open(&project, None).await.unwrap();
+        let handle = &opened.folders[0].root_handle;
+        let error = spaces
+            .resolve(
+                &opened.id,
+                &format!("{handle}/.genethub/sessions/s1/state/genet/models.json"),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("session state is not a workspace file"),
+            "{error}"
+        );
     }
 
     #[tokio::test]

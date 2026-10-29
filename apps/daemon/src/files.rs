@@ -147,7 +147,15 @@ fn tree_in(
 fn is_noise(path: &Path) -> bool {
     matches!(
         path.file_name().and_then(|n| n.to_str()),
-        Some(".git" | "node_modules" | "target" | ".venv" | "__pycache__" | ".DS_Store")
+        Some(
+            ".git"
+                | "node_modules"
+                | "target"
+                | ".venv"
+                | "__pycache__"
+                | ".DS_Store"
+                | ".genethub"
+        )
     )
 }
 

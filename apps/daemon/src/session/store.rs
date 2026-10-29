@@ -1698,6 +1698,10 @@ impl Store {
         crate::config::restrict_to_owner(&path)?;
         writeln!(file, "{}", serde_json::to_string(&value)?)?;
         file.flush()?;
+        // The trunk body is already fsynced above; the index row is the only
+        // thing that makes it reachable after a crash, so it gets the same
+        // treatment. One fsync per closed trunk, not per item.
+        file.sync_all()?;
         Ok(())
     }
 

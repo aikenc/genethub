@@ -6497,10 +6497,16 @@ async fn pump_events(
                 if let Some(handle) = handle {
                     meta.persist = Some(handle);
                 }
+                let changed_pid = pid.filter(|pid| meta.agent_pid != Some(*pid));
                 if let Some(pid) = pid {
                     meta.agent_pid = Some(pid);
                 }
                 if let Err(error) = store.save_meta(&meta) { tracing::error!(%error, "persisting execution checkpoint"); }
+                if let Some(pid) = changed_pid {
+                    let session_id = meta.id.clone();
+                    drop(meta);
+                    processes.watch(&session_id, pid).await;
+                }
                 continue;
             }
         };
