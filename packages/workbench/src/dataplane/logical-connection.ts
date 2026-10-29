@@ -372,6 +372,15 @@ export class LogicalConnection {
   }
   private lost(channel: Channel, error: unknown): void {
     if (!this.owns(channel)) return;
+    // Which carrier died, on which path, and whether it had completed admission
+    // is what explains the streams and requests that end with it.
+    this.options.onDiagnostic?.({
+      phase: "carrier-lost",
+      role: this.options.role,
+      path: channel.path,
+      committed: channel.committed,
+      reason: error instanceof Error ? error.message.slice(0, 200) : String(error).slice(0, 200),
+    });
     if (this.standby === channel) {
       this.standby = null; channel.wire.close(); this.options.onReady?.(); return;
     }

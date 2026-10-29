@@ -1416,6 +1416,31 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
     .await;
     match handled.reply {
         Ok(mut reply) => {
+            // A subscription the peer cannot actually get must be refused here,
+            // while the reply can still carry the reason. Answering success and
+            // then dropping the effect is what left a client waiting forever
+            // for events that were never going to be sent.
+            if let SideEffect::Subscribe { session_id, .. } = &handled.effect {
+                let at_capacity = {
+                    let subscriptions = services.subscriptions.lock().unwrap();
+                    subscription_capacity_refused(&subscriptions, session_id, MAX_SUBSCRIPTIONS)
+                };
+                if at_capacity {
+                    services.state.diagnostics.record(
+                        "dataplane",
+                        "subscription",
+                        "refused",
+                        Some("subscription-limit"),
+                    );
+                    return send_error(
+                        stream,
+                        409,
+                        ErrorCode::Conflict,
+                        "subscription capacity exhausted; close another session and retry",
+                    )
+                    .await;
+                }
+            }
             if let Reply::Agents(agents) = &mut reply {
                 filter_agent_logs(agents, &caller);
             }
@@ -1574,6 +1599,16 @@ pub(crate) async fn send_error(
         })
         .await?;
     stream.finish().await
+}
+
+/// A subscribe for a session this peer already follows is always allowed; a
+/// new one is refused once the peer has used its whole allowance.
+fn subscription_capacity_refused(
+    subscriptions: &SubscriptionTasks,
+    session_id: &str,
+    limit: usize,
+) -> bool {
+    !subscriptions.tasks.contains_key(session_id) && subscriptions.tasks.len() >= limit
 }
 
 async fn apply_side_effect(services: &PeerServices, effect: SideEffect) {
@@ -1861,6 +1896,21 @@ fn enqueue_writer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_new_subscription_is_refused_only_at_the_limit() {
+        let mut subscriptions = SubscriptionTasks {
+            stopped: false,
+            tasks: HashMap::new(),
+        };
+        assert!(!subscription_capacity_refused(&subscriptions, "s1", 2));
+        subscriptions.tasks.insert("s1".into(), tokio::spawn(async {}));
+        assert!(!subscription_capacity_refused(&subscriptions, "s2", 2));
+        subscriptions.tasks.insert("s2".into(), tokio::spawn(async {}));
+        // At the limit: a new session is refused, an existing one is not.
+        assert!(subscription_capacity_refused(&subscriptions, "s3", 2));
+        assert!(!subscription_capacity_refused(&subscriptions, "s1", 2));
+    }
 
     #[tokio::test]
     async fn credit_never_exceeds_its_negotiated_stream_window() {

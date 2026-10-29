@@ -355,7 +355,10 @@ fn start(
             position: None,
         };
         if let Err(error) = run(&lifetime, kind, policy, attachments, writes, deliver).await {
-            tracing::debug!(%error, "logical connection ended");
+            // A logical peer ending is the fact that explains every stream that
+            // was using it, so it is recorded at warn with the identity and the
+            // reason instead of disappearing at debug.
+            tracing::warn!(id = %lifetime.id, %error, "logical connection ended");
         }
     });
     (Handle { attach }, task)
@@ -405,6 +408,7 @@ async fn run(
                 let _ = active.outgoing.try_send(Message::Close.encode()?);
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
+            tracing::info!(id = %lifetime.id, reason = "business-ended", "logical connection closing");
             return Ok(());
         }
         if let Some(registry) = &lifetime.registry {
@@ -540,7 +544,18 @@ async fn run(
             incoming = async { match channel.as_mut() { Some(c) => c.reader.receive().await, None => std::future::pending().await } } => {
                 let bytes = match incoming {
                     Ok(Some(bytes)) => bytes,
-                    Ok(None) => { if let Some(active) = &channel { lifetime.path_event(active.path, "offline"); } channel.take(); journal.suspend(now()).map_err(error)?; if let Some(registry) = &lifetime.registry { registry.suspend(&lifetime.id, epoch, Instant::now()); } continue; }
+                    Ok(None) => {
+                        if let Some(active) = &channel {
+                            lifetime.path_event(active.path, "offline");
+                            tracing::info!(id = %lifetime.id, path = ?active.path, "logical carrier detached");
+                        }
+                        channel.take();
+                        journal.suspend(now()).map_err(error)?;
+                        if let Some(registry) = &lifetime.registry {
+                            registry.suspend(&lifetime.id, epoch, Instant::now());
+                        }
+                        continue;
+                    }
                     // Authentication/protocol failures are terminal; an attacker
                     // cannot turn a malformed record into endless recovery.
                     Err(e) => return Err(e),
@@ -555,7 +570,10 @@ async fn run(
                             active.synced = true;
                             lifetime.path_event(active.path, "online");
                         }
-                        Message::Close => return Ok(()),
+                        Message::Close => {
+                            tracing::info!(id = %lifetime.id, reason = "peer-closed", "logical connection closing");
+                            return Ok(());
+                        }
                         Message::Ping { nonce } if nonce.len() <= 32 => { pending_pong = Some(nonce); }
                         Message::Pong { .. } => {}
                         _ => bail!("invalid logical transition"),
