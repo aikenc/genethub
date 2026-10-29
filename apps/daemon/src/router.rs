@@ -381,31 +381,6 @@ async fn authorize_session_request(
         }
     };
     let Some(managed) = summary.managed else {
-        // Teams keep working inside one project. A Session-controlled Agent
-        // must not reach into an unrelated project's ordinary conversations.
-        if let Some(controller) = caller.session_controller_id() {
-            if controller == target {
-                return Ok(());
-            }
-            let caller_summary = state
-                .sessions
-                .summary(controller)
-                .await
-                .map_err(|error| format!("{error:#}"))?;
-            let caller_project = state
-                .workspaces
-                .project_root(&caller_summary.workspace_id)
-                .await
-                .map_err(|error| format!("{error:#}"))?;
-            let target_project = state
-                .workspaces
-                .project_root(&summary.workspace_id)
-                .await
-                .map_err(|error| format!("{error:#}"))?;
-            if caller_project != target_project {
-                return Err("跨项目的会话操作需要本机 Human 身份".into());
-            }
-        }
         return Ok(());
     };
     if let Some(controller) = caller.session_controller_id() {
