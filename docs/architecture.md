@@ -129,16 +129,14 @@ B3「两种形状截然不同的 agent」由 `codex`（JSON-RPC app-server，每
 
 ### 3.4 Agent 权限与暂停恢复
 
-GeneHub 面向长期无人值守的机器，默认权限不是“先拦住再等人点”，而是**在操作系统账户允许的范围内尽量放权**。已知 CLI 在启动层和 Agent 自身模式层都选择最高权限；daemon 不再添加工作区写入沙箱。用户显式选择只读或 plan 时才降低权限。
+GeneHub 面向长期无人值守的机器。**经认证且获准驱动完整 Agent 的连接，具有目标 daemon 所属 OS 用户的完整操作能力和资源访问能力**。仅限制文件、终端或某个项目的 RPC 无法隔离一个已可调用工具执行任意代码的 Agent，普通连接不另建按设备、项目或 Agent 角色降权的权限层。已知 CLI 在启动层和 Agent 自身模式层默认放权；用户显式选择只读或 plan 时由该运行模式表达。完整合同与当前实现差距见 [security-model.md](./security-model.md#full-agent-authority)（2026-10-29 产品决策，代码尚待对齐）。
 
 仍然出现的权限请求与真正的 Agent 问题都被建模成一个持久化的“暂停点”，但二者类型分开：批准权限时用 Agent 的最高默认模式恢复，回答问题时保持原模式。daemon 在写入 session meta 和原生 session handle 后终止当前 adapter turn 并关闭 Agent 子进程；同一用户业务 round 保留为等待状态，不保留等待中的 RPC、进程、WebSocket 或浏览器连接。稍后响应时，通过原生 session handle 开启新的 adapter turn，继续同一 Session / 用户 round。状态只有 `running → waiting → running/idle`，重启 daemon 也不丢请求。
 
-项目计划的 CLI 授权入口与原生授权事件使用同一个停止流程。`space approval request` 只提交请求；返回成功不代表批准，原 CLI 也可能随 Agent 关闭而被取消。Human 的计划回答先作为 session meta 中的一条持久续跑记录保存，再返回 Ack；后台派发与浏览器连接、旧 turn 和旧 CLI 完全解耦。daemon 启动时发现未完成记录，以保存的决策时间补齐项目 grant，并恢复原生会话；原生会话恢复失败会明确报告，不静默创建失去上下文的新会话。
-
-项目 challenge、决策和一次性 grant 由 daemon 的私有 `project-control/approvals.json` 原子保存。原生 Agent 计划与 GeneHub 项目计划都能暂停，但只有后者持有 daemon 签发的 challenge，才生成项目变更权限。重复 Human 回答必须相同；批准不能变成拒绝，拒绝不能被重放成批准。主动停止或关闭 Session 会取消续跑义务，daemon 正常退出则保留它。
-
-崩溃后的续跑是可重投递的，不承诺模型调用 exactly-once。项目变更通过稳定 action ID、已有 receipt 和 revision 检查抵抗重复执行。若崩溃发生在变更事务内部且没有完成 receipt，保留的 applying 标记拒绝盲目重放；这不是任意项目事务的自动恢复日志。当前故障专项分别覆盖批准前、批准后执行前、变更完成后回报前的 daemon 强杀恢复，并验证拒绝/主动停止不会在重启后执行。
-
+平台 PM 与项目 challenge/grant 已退役；`space approval request`、`project-control/approvals.json`
+不再是当前架构。原生 Agent 的问题、计划确认和 Provider 凭证输入继续使用持久暂停与续跑流程，
+用于表达用户意图，不扩展成项目角色授权体系。来源、稳定 action ID、已有结果与 revision 检查用于
+归属和防重复执行，不代表新增权限等级。
 
 这里的“全盘可写”不等于提权：子进程继承 daemon 登录用户的 OS 权限，GeneHub 不绕过 ACL、UAC、macOS 隐私授权、只读文件系统或设备管理策略。
 
@@ -223,7 +221,7 @@ enum ToolCallDetail {                // 决定前端用哪个渲染器
 
 ### 6.2 Relay 只做 opaque admission，不做业务鉴权
 
-Relay 必须防止任何人无限占用 endpoint/route，所以会向 authority 核验短期 opaque ticket；但**最终 peer 身份与 workspace/path 权限在 daemon 完成**。Relay 不持有 peer secret，也不解释 protocol-v3 record。
+Relay 必须防止任何人无限占用 endpoint/route，所以会向 authority 核验短期 opaque ticket；但**最终 peer 身份、连接授权/有效期与仅展示分享范围在 daemon 完成**。普通完整连接的资源访问遵循 §3.4，不因 relay/RTC 载体另建权限层。Relay 不持有 peer secret，也不解释 protocol-v3 record。
 
 两种部署使用同一个 FabricCore，只替换 authority：
 
