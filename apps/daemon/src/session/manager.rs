@@ -4821,6 +4821,14 @@ impl SessionManager {
         // letting one wedged Agent multiply its per-step timeouts.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         let total = sessions.len();
+        let ids: Vec<String> = sessions.iter().map(|(id, _)| id.clone()).collect();
+        // One census for every session, before any Agent closes: detached
+        // tools are still attributable here. Same-group tools are killed by
+        // each Agent's own close, so they are deliberately left to it.
+        let detached = self.processes.stop_detached_for(&ids).await;
+        if detached > 0 {
+            tracing::info!(count = detached, "ended detached processes before stopping Agents");
+        }
         for (session_id, live) in sessions {
             if tokio::time::Instant::now() >= deadline {
                 tracing::error!(
@@ -4829,7 +4837,6 @@ impl SessionManager {
                 );
                 break;
             }
-            self.end_what_it_left(&session_id).await;
             if let Err(error) = live.shutdown().await {
                 tracing::error!(session = %session_id, %error, "session shutdown did not complete");
             }

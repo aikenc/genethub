@@ -1896,6 +1896,10 @@ impl Store {
         file.write_all(&line)?;
         file.write_all(b"\n")?;
         file.flush()?;
+        // The trunk row that points at this offset is fsynced; without this
+        // the reference can survive a power loss while the bytes it names do
+        // not. Measured at ~0.6ms per blob on the data volume.
+        file.sync_all()?;
         Ok(BlobRef {
             id,
             bytes: encoded.len() as u64,

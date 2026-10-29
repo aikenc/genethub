@@ -581,6 +581,14 @@ impl AgentSession for GenetSession {
         Ok(())
     }
 
+    async fn pid(&self) -> Option<u32> {
+        self.child
+            .lock()
+            .await
+            .as_ref()
+            .and_then(|child| child.id())
+    }
+
     async fn set_model(&self, model_id: &str) -> Result<()> {
         let (provider, id) = model_id
             .split_once('/')

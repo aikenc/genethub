@@ -326,6 +326,36 @@ impl Processes {
         Ok(claimed.len())
     }
 
+    /// Ends detached descendants for several sessions in one census.
+    ///
+    /// Shutdown closes many Agents; paying for a process census per session
+    /// both slows the drain and starves the host's exit budget. One snapshot
+    /// is enough to find the processes that left the Agent's own group.
+    pub(crate) async fn stop_detached_for(&self, session_ids: &[String]) -> usize {
+        let Some(census) = census().await else {
+            tracing::warn!("cannot end detached session processes: the operating system did not answer");
+            return 0;
+        };
+        let agents: Vec<Agent> = {
+            let watched = self.agents.read().await;
+            session_ids
+                .iter()
+                .filter_map(|id| watched.get(id).copied())
+                .collect()
+        };
+        let mut owned = Vec::new();
+        for agent in agents {
+            owned.extend(
+                claimed_by(&census, agent, agent.watched_at.elapsed().as_secs())
+                    .into_iter()
+                    .filter(|row| row.group != agent.group)
+                    .cloned(),
+            );
+        }
+        let _ = terminate_snapshot(&owned).await;
+        owned.len()
+    }
+
     /// Ends everything a session left running, but not the agent itself.
     pub async fn stop_all(&self, session_id: &str) -> usize {
         let Some(agent) = self.agents.read().await.get(session_id).copied() else {
