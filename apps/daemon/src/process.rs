@@ -494,7 +494,7 @@ impl Group {
         // own — a script that ignores the timeout never does.
         #[cfg(windows)]
         let _ = self.child.start_kill();
-        let _ = self.wait().await;
+        let _ = tokio::time::timeout(GRACE, self.wait()).await;
         // Reaping the leader does not synchronously reap every descendant.
         // Wait until the killed group has actually disappeared so callers do
         // not observe a process tree that is already dead but still pending
@@ -521,7 +521,7 @@ impl Group {
             tokio::time::sleep(GRACE_POLL).await;
         }
         let _ = self.child.start_kill();
-        let _ = self.wait().await;
+        let _ = tokio::time::timeout(GRACE, self.wait()).await;
         self.status
     }
 }

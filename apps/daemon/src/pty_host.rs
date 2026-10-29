@@ -111,7 +111,7 @@ impl Terminals {
 
         let id = format!("pty_{}", uuid::Uuid::new_v4().simple());
         let writer = pair.master.take_writer()?;
-        let mut reader = pair.master.try_clone_reader()?;
+        let mut reader = nonblocking_reader(pair.master.as_ref())?;
         let terminal_closed = Arc::new(AtomicBool::new(false));
 
         self.sessions.lock().await.insert(
@@ -128,11 +128,18 @@ impl Terminals {
         let reader_id = id.clone();
         // Blocking reads on a dedicated thread: the pty reader has no async
         // form, and parking it on the runtime would stall other tasks.
+        let reader_closed = terminal_closed.clone();
         std::thread::spawn(move || {
             let mut buffer = [0u8; 8192];
             loop {
+                // Closing the terminal sets the flag; a descendant that keeps
+                // the slave open must not keep this thread (and its duplicated
+                // master fd) alive forever.
+                if reader_closed.load(Ordering::Acquire) {
+                    break;
+                }
                 match reader.read(&mut buffer) {
-                    Ok(0) | Err(_) => break,
+                    Ok(0) => break,
                     Ok(count) => {
                         let data = String::from_utf8_lossy(&buffer[..count]).to_string();
                         // The fixed queue is the memory bound. Reader threads
@@ -143,6 +150,10 @@ impl Terminals {
                             break;
                         }
                     }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(_) => break,
                 }
             }
         });
@@ -201,12 +212,18 @@ impl Terminals {
     /// any of this. Dropping the master hangs up the session; what chose to
     /// ignore the hangup chose it.
     pub async fn close(&self, pty_id: &str) -> Result<()> {
-        self.sessions.lock().await.remove(pty_id);
+        if let Some(terminal) = self.sessions.lock().await.remove(pty_id) {
+            terminal.closed.store(true, Ordering::Release);
+        }
         Ok(())
     }
 
     pub async fn close_all(&self) {
-        self.sessions.lock().await.clear();
+        let mut sessions = self.sessions.lock().await;
+        for terminal in sessions.values() {
+            terminal.closed.store(true, Ordering::Release);
+        }
+        sessions.clear();
     }
 
     async fn get(&self, pty_id: &str) -> Result<Arc<Terminal>> {
@@ -221,6 +238,35 @@ impl Terminals {
         }
         terminal.ok_or_else(|| anyhow!("no such terminal: {pty_id}"))
     }
+}
+
+/// A reader that does not park a thread forever after the terminal closes.
+///
+/// The blocking reader keeps a duplicate of the master fd, so dropping the
+/// master alone does not wake it when a descendant still holds the slave.
+#[cfg(unix)]
+fn nonblocking_reader(master: &dyn portable_pty::MasterPty) -> Result<Box<dyn Read + Send>> {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    let raw = master
+        .as_raw_fd()
+        .ok_or_else(|| anyhow!("the pty master has no file descriptor"))?;
+    let duplicate = unsafe { libc::dup(raw) };
+    if duplicate < 0 {
+        return Err(std::io::Error::last_os_error()).context("duplicating the pty reader");
+    }
+    let flags = unsafe { libc::fcntl(duplicate, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(duplicate, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        let error = std::io::Error::last_os_error();
+        unsafe { libc::close(duplicate) };
+        return Err(error).context("making the pty reader nonblocking");
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(duplicate) };
+    Ok(Box::new(std::fs::File::from(fd)))
+}
+
+#[cfg(not(unix))]
+fn nonblocking_reader(master: &dyn portable_pty::MasterPty) -> Result<Box<dyn Read + Send>> {
+    master.try_clone_reader()
 }
 
 fn send_pty_output(output: &mpsc::Sender<PtyMessage>, pty_id: &str, data: String) -> bool {

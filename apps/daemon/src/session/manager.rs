@@ -3518,9 +3518,11 @@ impl SessionManager {
         let live = self.live(session_id).await?;
         {
             let mut meta = live.meta.lock().await;
-            meta.drafts = drafts.clone();
-            meta.updated_at_ms = now_ms();
-            self.store.save_meta(&meta)?;
+            let mut next = meta.clone();
+            next.drafts = drafts.clone();
+            next.updated_at_ms = now_ms();
+            self.store.save_meta(&next)?;
+            *meta = next;
         }
         live.publish(SessionEvent::DraftsChanged {
             count: drafts.len() as u32,
@@ -4697,7 +4699,10 @@ impl SessionManager {
     /// to exist, and it does not — reporting that as a failure would only make
     /// two clients deleting the same row look broken.
     pub async fn delete(&self, session_id: &str) -> Result<()> {
-        let live = self.sessions.write().await.remove(session_id);
+        // Keep the session addressable until its files are actually gone. A
+        // cleanup failure then leaves a consistent, retryable row instead of
+        // an entry that vanished from the UI but still exists on disk.
+        let live = self.sessions.read().await.get(session_id).cloned();
         let workspace_id = match &live {
             Some(live) => Some(live.meta.lock().await.workspace_id.clone()),
             None => self
@@ -4812,7 +4817,18 @@ impl SessionManager {
     /// children survive the tray exiting.
     pub async fn shutdown(&self) {
         let sessions: Vec<(String, Arc<Live>)> = self.sessions.write().await.drain().collect();
+        // The host has its own exit budget. Bound the whole drain instead of
+        // letting one wedged Agent multiply its per-step timeouts.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let total = sessions.len();
         for (session_id, live) in sessions {
+            if tokio::time::Instant::now() >= deadline {
+                tracing::error!(
+                    sessions = total,
+                    "daemon shutdown deadline reached; remaining sessions are abandoned"
+                );
+                break;
+            }
             self.end_what_it_left(&session_id).await;
             if let Err(error) = live.shutdown().await {
                 tracing::error!(session = %session_id, %error, "session shutdown did not complete");
@@ -5793,11 +5809,19 @@ impl Live {
         self.pump_stop.send_replace(true);
         let mut held = self.pump.lock().await;
         if let Some(task) = held.as_mut() {
-            let joined = tokio::time::timeout(Duration::from_secs(5), task)
-                .await
-                .context("the timeline writer has not finished; stopping can be retried")?;
-            held.take();
-            joined.context("the timeline writer stopped unexpectedly")?;
+            match tokio::time::timeout(Duration::from_secs(5), &mut *task).await {
+                Ok(joined) => {
+                    held.take();
+                    joined.context("the timeline writer stopped unexpectedly")?;
+                }
+                Err(_) => {
+                    // Dropping a JoinHandle does not stop the task; abort it
+                    // so a wedged writer cannot keep the session alive.
+                    task.abort();
+                    held.take();
+                    anyhow::bail!("the timeline writer has not finished; it was aborted");
+                }
+            }
         }
         Ok(())
     }
