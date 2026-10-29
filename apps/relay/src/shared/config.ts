@@ -19,16 +19,23 @@ export function parseBoundedInteger(
 const boundedEnv = (name: string, fallback: number, min: number, max: number) =>
   parseBoundedInteger(name, process.env[name], fallback, min, max);
 
-const maxFrameBytes = boundedEnv("RELAY_MAX_FRAME_BYTES", 4 * 1024 * 1024, 1024, 16 * 1024 * 1024);
+// Inner data-plane frames are at most 16 KiB, operation metadata 16 KiB and
+// route tickets 4 KiB, so a 4 MiB frame ceiling only let a socket budget grow
+// far beyond what the protocol needs. That in turn let the relay queue many
+// megabytes ahead of a slow link: at 2 Mbps an 8 MiB per-socket budget is a
+// 32 second tail, which is what delayed management replies on a single
+// uplink. Keep the frame ceiling close to the real maximum and let the
+// kernel's own send buffer (autotuned to the path BDP) provide throughput.
+const maxFrameBytes = boundedEnv("RELAY_MAX_FRAME_BYTES", 256 * 1024, 1024, 16 * 1024 * 1024);
 const maxBufferedBytes = boundedEnv(
   "RELAY_MAX_BUFFERED_BYTES",
-  8 * 1024 * 1024,
+  1024 * 1024,
   1024,
   64 * 1024 * 1024,
 );
 const maxOutboundQueuedBytes = boundedEnv(
   "RELAY_MAX_OUTBOUND_QUEUED_BYTES",
-  64 * 1024 * 1024,
+  16 * 1024 * 1024,
   1024,
   512 * 1024 * 1024,
 );

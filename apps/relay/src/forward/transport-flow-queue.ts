@@ -32,7 +32,7 @@ export class TransportFlowQueue {
     const charge = Math.max(wireBytes, 1024);
     let queue = this.streams.get(frame.streamId);
     if (charge > FABRIC_MAX_STREAM_CREDIT - (queue?.bytes ?? 0)
-      || charge > 8 * 1024 * 1024 - this.bytes || this.records >= 4096) {
+      || charge > 4 * 1024 * 1024 - this.bytes || this.records >= 4096) {
       this.cancel(frame.streamId);
       this.overflow(frame.streamId);
       return;
