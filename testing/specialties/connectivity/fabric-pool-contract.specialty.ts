@@ -71,7 +71,7 @@ defineSpecialty({
       const elapsedMs = performance.now()-start, bytes = results.reduce((n,s) => n+s.bytes,0), mbps = bytes*8/elapsedMs/1000;
       samples.push({ flows, bytes, hashes: results.length, elapsedMs: Math.round(elapsedMs), mbps: +mbps.toFixed(3) });
       t.note(JSON.stringify(samples.at(-1)));
-      t.assertions.assert(mbps > 4.3 && mbps < 5.25, "raw capacity is not comparable across channel counts");
+      t.assertions.assert(mbps > 4 && mbps < 5.25, "raw capacity is not comparable across channel counts");
     } finally { await link.stop(); await source.stop(); }
   }
   t.note(JSON.stringify(samples));

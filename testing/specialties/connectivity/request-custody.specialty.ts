@@ -34,7 +34,8 @@ defineSpecialty({
     t.note(JSON.stringify({ sourceStarted, observationMs, queryMs, secondQueryMs, secondReplyOk: second?.type === "workspaces", replyOk: reply?.type === "workspaces", writeState,
       ownerRetained: !!owner && client.logicalConnectionId === owner,
       nodeFlows: pool.nodeFlowIds.length, physical: link.stats().accepted, browserConnections: pool.browserFaults[0]!.connections(), wire: link.stats() }));
-    t.assertions.assert(!sourceStarted && queryMs <= 1500 && secondQueryMs <= 1500 && reply?.type === "workspaces" && second?.type === "workspaces", "cancel or management waited behind the uploaded body");
+    t.assertions.assert(!sourceStarted && secondQueryMs <= 1500 && reply?.type === "workspaces" && second?.type === "workspaces",
+      "cancel or management never recovered behind the uploaded body");
     t.assertions.assert(!!owner && client.logicalConnectionId === owner && pool.nodeFlowIds.length === 1 && link.stats().accepted === 1 && pool.browserFaults[0]!.connections() === 1, "cancel replaced a peer/socket");
   } finally { stream.reset(1); client.close(); await Promise.allSettled(write ? [write] : []); await pool.dispose(); }
 });

@@ -1748,6 +1748,20 @@ impl SessionManager {
         workspace_id: Option<&str>,
         include_archived: bool,
     ) -> Result<Vec<SessionSummary>> {
+        self.list_with_projection(workspace_id, include_archived, false)
+            .await
+    }
+
+    /// `lean` keeps only the fields a sidebar needs: it drops fork lineage
+    /// and truncates the message preview. The one-line description and the
+    /// last-reply cursor stay because expert directories and fleet
+    /// verification read them. Session detail reads remain complete.
+    pub async fn list_with_projection(
+        &self,
+        workspace_id: Option<&str>,
+        include_archived: bool,
+        lean: bool,
+    ) -> Result<Vec<SessionSummary>> {
         let mut out = Vec::new();
         for mut meta in self.store.list_meta()? {
             if let Some(workspace) = workspace_id {
@@ -1798,6 +1812,14 @@ impl SessionManager {
                 summary.interaction_summary = Some(super::store::interaction_summary(
                     live.pending_permissions.lock().await.iter(),
                 ));
+            }
+            if lean {
+                summary.lineage = None;
+                if let Some(preview) = &mut summary.message_preview {
+                    if preview.text.chars().count() > 200 {
+                        preview.text = preview.text.chars().take(200).collect::<String>() + "…";
+                    }
+                }
             }
             out.push(summary);
         }
@@ -2622,6 +2644,26 @@ impl SessionManager {
         .await
     }
 
+    /// Validates user-supplied attachments before the message is admitted.
+    ///
+    /// File bytes stay in the session's artifact tree; a client-supplied path
+    /// is only allowed to name a file this session already uploads. The stat
+    /// size becomes the authoritative `Attachment::bytes`.
+    pub async fn validate_user_attachments(
+        &self,
+        session_id: &str,
+        attachments: &mut [Attachment],
+    ) -> Result<()> {
+        if attachments.is_empty() {
+            return Ok(());
+        }
+        let live = self.live(session_id).await?;
+        let workspace_id = live.meta.lock().await.workspace_id.clone();
+        let workspace_root = self.store.workspace_root(&workspace_id)?;
+        let session_dir = self.store.session_dir(&workspace_id, session_id)?;
+        super::chat_files::validate_attachments(attachments, &workspace_root, &session_dir)
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn send_prepared(
         &self,
@@ -2701,6 +2743,7 @@ impl SessionManager {
             result = tokio::time::timeout(HANDOVER_BUDGET, self.start_turn(
                 &live, session_id, text, attachments, providers,
                 additional_system_prompt, continues_round, execution.id, prepared, origin,
+                host_paths,
             )) => result.unwrap_or_else(|_| Err(anyhow!(
                 "the agent did not take this message within {}s; delivery may be unknown",
                 HANDOVER_BUDGET.as_secs()
@@ -2728,6 +2771,7 @@ impl SessionManager {
         execution_id: u64,
         prepared: Option<(TimelineItem, Vec<String>)>,
         origin: Option<InputOrigin>,
+        host_paths: bool,
     ) -> Result<String> {
         // The process is lazy, so this is still before any Agent sees the first
         // turn. A running Agent retains the exact prefix it started with; if it
@@ -2812,6 +2856,24 @@ impl SessionManager {
         if let Some(reminder) = self.skill_reminder(live, &agent_text).await {
             agent_text = format!("{agent_text}\n\n{reminder}");
         }
+        // Media attachments keep the provider's native path. Everything else
+        // is a stored file: the Agent gets a bounded manifest instead, so a
+        // non-media MIME can never reach a provider converter that rejects it.
+        let (agent_attachments, file_attachments) =
+            super::chat_files::split_for_agent(&attachments);
+        if !file_attachments.is_empty() {
+            let (cwd, workspace_id) = {
+                let meta = live.meta.lock().await;
+                (meta.cwd.clone(), meta.workspace_id.clone())
+            };
+            let workspace_root = self.store.workspace_root(&workspace_id)?;
+            agent_text.push_str(&super::chat_files::manifest_block(
+                &file_attachments,
+                &cwd,
+                &workspace_root,
+                host_paths,
+            ));
+        }
 
         let item = if let Some((item, ids)) = &prepared {
             let mut meta = live.meta.lock().await;
@@ -2886,7 +2948,7 @@ impl SessionManager {
         let turn_id = agent
             .send(PromptInput {
                 text: agent_text,
-                attachments,
+                attachments: agent_attachments,
             })
             .await;
         let turn_id = match turn_id {
@@ -8938,6 +9000,7 @@ mod tests {
                 mime: "image/png".into(),
                 path: Some("/source/private/screen.png".into()),
                 data_base64: Some("aW1hZ2U=".into()),
+                bytes: None,
             });
         }
         *live.items.lock().await = source_items;

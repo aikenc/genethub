@@ -88,7 +88,6 @@ struct StreamState {
     expected_remote_bytes: Option<u64>,
     remote_finished: bool,
     outbound_credit: Credit,
-    pace: Option<Arc<super::uplink_pace::PaceShare>>,
 }
 
 #[derive(Clone)]
@@ -291,7 +290,6 @@ pub(crate) struct ServerStream {
     diagnostic_operation: Option<String>,
     local_head_sent: bool,
     local_finished: bool,
-    pace: Option<Arc<super::uplink_pace::PaceShare>>,
 }
 
 pub(crate) enum StreamInput {
@@ -432,9 +430,6 @@ impl ServerStream {
         while offset < bytes.len() {
             let began = timings.as_ref().map(|_| Instant::now());
             let length = self.credit.take(bytes.len() - offset).await?;
-            if let Some(pace) = &self.pace {
-                pace.reserve(length as u64).await;
-            }
             if let (Some(timings), Some(began)) = (timings.as_mut(), began) {
                 timings.credit_us += began.elapsed().as_micros() as u64;
             }
@@ -539,7 +534,6 @@ pub(crate) struct PeerServices {
     event_receiver: tokio::sync::Mutex<Option<mpsc::Receiver<ServerFrame>>>,
     subscriptions: Mutex<SubscriptionTasks>,
     pub(crate) carrier_kind: CarrierKind,
-    physical_pace: Option<Arc<super::uplink_pace::PeerPace>>,
 }
 
 /// Logical peer state has one lifetime owner, independent of record crypto.
@@ -676,10 +670,6 @@ async fn serve_streams(
         count: Arc::new(Semaphore::new(256)),
     };
     let (writer_failed_tx, mut writer_failed) = oneshot::channel();
-    let physical_pace = match &channel_writer {
-        PeerWriter::Logical(_) => None,
-        PeerWriter::Physical(writer) => writer.uplink_pace.clone(),
-    };
     let writer_task = tokio::spawn(run_writer(channel_writer, writer_rx, writer_failed_tx));
     let (commands_tx, mut commands) = mpsc::channel::<EndpointCommand>(WRITER_COMMAND_QUEUE);
     let (event_sender, event_receiver) = mpsc::channel(EVENT_QUEUE);
@@ -690,7 +680,6 @@ async fn serve_streams(
         event_receiver: tokio::sync::Mutex::new(Some(event_receiver)),
         subscriptions: Mutex::new(SubscriptionTasks::default()),
         carrier_kind,
-        physical_pace,
     });
 
     // A terminal is shared across a user's own devices on purpose, but this
@@ -893,14 +882,6 @@ fn dispatch(
             genehub_proto::INITIAL_STREAM_WINDOW_BYTES as usize,
         ));
         let credit = Credit::new(frame.value)?;
-        // Logical DATA (including replay) is paced at the active carrier's
-        // send pump. Bootstrap physical streams retain their fixed owner.
-        let pace = services.physical_pace.as_ref().map(|pace| {
-            Arc::new(super::uplink_pace::PaceShare::new(
-                pace.clone(),
-                genehub_proto::INITIAL_STREAM_WINDOW_BYTES as u64,
-            ))
-        });
         streams.insert(
             frame.stream_id,
             StreamState {
@@ -919,7 +900,6 @@ fn dispatch(
                 expected_remote_bytes: head.body_length,
                 remote_finished: false,
                 outbound_credit: credit.clone(),
-                pace: pace.clone(),
             },
         );
         let stream = ServerStream {
@@ -936,7 +916,6 @@ fn dispatch(
             diagnostic_operation: None,
             local_head_sent: false,
             local_finished: false,
-            pace,
         };
         let services = services.clone();
         let handler = handlers.spawn(async move {
@@ -1001,9 +980,6 @@ fn dispatch(
         Kind::WindowUpdate => {
             if !frame.payload.is_empty() || !stream.outbound_credit.add(frame.value) {
                 anyhow::bail!("invalid stream window update");
-            }
-            if let Some(pace) = &stream.pace {
-                pace.release(frame.value as u64);
             }
         }
         Kind::Fin => {

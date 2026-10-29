@@ -14,11 +14,9 @@ import { binaryMessage } from "./websocket";
 
 const SIGNAL_LIMIT = 64 * 1024;
 const CONNECT_TIMEOUT_MS = 20_000;
-/** Non-trickle SDP must include every candidate gathered within this deadline.
- * Keep the Fabric path usable while waiting; the first srflx is not necessarily
- * the usable route on a multi-interface peer.
- */
-export const GATHER_WAIT_MS = 12_000;
+/** One bounded gather budget. A working STUN answers far sooner; when it is
+ * unreachable, waiting longer only delays the Fabric fallback. */
+export const GATHER_WAIT_MS = 3_000;
 export const ICE_SERVERS: RTCIceServer[] = [];
 const BUFFERED_HIGH = 256 * 1024;
 const BUFFERED_LOW = 64 * 1024;
@@ -472,26 +470,38 @@ function nextDataChannelMessage(channel: RTCDataChannel): Promise<Uint8Array> {
   });
 }
 
-/**
- * Send the offer after gathering completes so STUN srflx is in the SDP, or
- * after `waitMs` if STUN never answers. Do not send on host-only after a few
- * seconds — a phone on cellular cannot use those LAN addresses.
+/** Send the offer once a usable candidate is in the SDP, or after the bounded
+ * budget. No second host-only timer: the absolute budget already covers a
+ * dead STUN server.
  *
  * @internal Exported for tests.
  */
 export function iceGathered(peer: RTCPeerConnection, waitMs: number): Promise<void> {
   if (peer.iceGatheringState === "complete") return Promise.resolve();
   return new Promise((resolve) => {
+    let srflxGrace: ReturnType<typeof setTimeout> | null = null;
     const finish = () => {
       peer.removeEventListener("icegatheringstatechange", changed);
+      peer.removeEventListener("icecandidate", candidate);
       clearTimeout(timer);
+      if (srflxGrace !== null) clearTimeout(srflxGrace);
       resolve();
     };
     const changed = () => {
       if (peer.iceGatheringState === "complete") finish();
     };
+    const candidate = (event: RTCPeerConnectionIceEvent) => {
+      const type = event.candidate?.type ||
+        / typ (host|srflx|prflx|relay)(?: |$)/.exec(event.candidate?.candidate ?? "")?.[1];
+      if ((type === "srflx" || type === "relay") && srflxGrace === null) {
+        // A usable WAN candidate is in the SDP; a short grace lets the rest
+        // of that class land without repeating the whole gather budget.
+        srflxGrace = setTimeout(finish, 150);
+      }
+    };
     const timer = setTimeout(finish, waitMs);
     peer.addEventListener("icegatheringstatechange", changed);
+    peer.addEventListener("icecandidate", candidate);
   });
 }
 

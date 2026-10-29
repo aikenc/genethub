@@ -78,7 +78,7 @@ function modelCase(
         const sessionIds = async (): Promise<string[]> => {
           const reply = await opened.client.call({
             type: "session.list",
-            payload: { workspaceId: opened.workspaceId, includeArchived: false },
+            payload: { workspaceId: opened.workspaceId, includeArchived: false, lean: true },
           });
           if (reply?.type !== "sessions") throw new Error(`session.list returned ${reply?.type}`);
           return reply.data.map((entry) => entry.id);

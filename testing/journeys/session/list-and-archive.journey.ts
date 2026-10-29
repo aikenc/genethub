@@ -19,7 +19,7 @@ defineJourney(
       await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
       const listed = await opened.client.call({
         type: "session.list",
-        payload: { workspaceId: opened.workspaceId, includeArchived: false },
+        payload: { workspaceId: opened.workspaceId, includeArchived: false, lean: true },
       });
       t.assertions.assert(listed?.type === "sessions" && listed.data.length === 2, "expected two live sessions");
       await opened.client.call({
@@ -28,7 +28,7 @@ defineJourney(
       });
       const live = await opened.client.call({
         type: "session.list",
-        payload: { workspaceId: opened.workspaceId, includeArchived: false },
+        payload: { workspaceId: opened.workspaceId, includeArchived: false, lean: true },
       });
       t.assertions.assert(live?.type === "sessions" && live.data.length === 1, "archived session still listed");
       t.assertions.assert(
@@ -37,7 +37,7 @@ defineJourney(
       );
       const all = await opened.client.call({
         type: "session.list",
-        payload: { workspaceId: opened.workspaceId, includeArchived: true },
+        payload: { workspaceId: opened.workspaceId, includeArchived: true, lean: true },
       });
       t.assertions.assert(all?.type === "sessions" && all.data.length === 2, "includeArchived lost a session");
 

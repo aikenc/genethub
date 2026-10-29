@@ -399,6 +399,7 @@ pub enum Request {
         workspace_id: Option<String>,
         #[serde(default)]
         include_archived: bool,
+        lean: bool,
     },
     #[serde(rename = "session.get", rename_all = "camelCase")]
     SessionGet {

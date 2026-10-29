@@ -662,7 +662,7 @@ export function App({
         return onMachine(machine, async (client) => {
           const reply = await client.call({
             type: "session.list",
-            payload: { workspaceId: null, includeArchived: false },
+            payload: { workspaceId: null, includeArchived: false, lean: true },
           });
           if (reply?.type !== "sessions") {
             throw new Error("目标机器没有返回可用的会话列表。");
@@ -1057,6 +1057,7 @@ export function App({
                         persistenceKey={`${workbench.client?.identity?.machineId ?? endpoint.label}:${session?.id ?? draft?.localId ?? "empty"}`}
                         phase={phase}
                         durableInput={durableInput}
+                        fileUploadAllowed={Boolean(workbench.client?.identity?.features?.includes("session.file-upload.v1"))}
                         lastActivityAtMs={session?.lastActivityAtMs ?? null}
                         disabled={sessionReadOnly}
                         disabledReason={
@@ -1126,8 +1127,8 @@ export function App({
                         onHeightChange={setComposerHeight}
                         minimized={composerMinimized}
                         onExpand={() => setComposerMinimized(false)}
-                        onSend={async (text, attachments, videoFiles) => {
-                          if (!await workbench.send(text, attachments, videoFiles)) throw new Error("消息尚未发送");
+                        onSend={async (text, attachments, videoFiles, files) => {
+                          if (!await workbench.send(text, attachments, videoFiles, files)) throw new Error("消息尚未发送");
                         }}
                         onInterrupt={() => void workbench.interrupt()}
                         onPickTarget={(target, tags) =>

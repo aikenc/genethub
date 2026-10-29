@@ -47,7 +47,6 @@ export async function preparePeerHandshake(
     rtcSupported: options.rtcSupported ?? supportsRtc(),
     // v4 uses the same bounded per-stream window for finite and live flows.
     maxBulkStreamWindowBytes: INITIAL_STREAM_WINDOW_BYTES,
-    packetPairProbeSupported: true,
   };
   return {
     hello,
@@ -69,11 +68,9 @@ export async function preparePeerHandshake(
       if (!sameHex(welcome.proof, expected)) {
         throw new Error("the peer did not prove the expected E2EE secret");
       }
-      const advertised = welcome.maxBulkStreamWindowBytes;
-      const maxBulkStreamWindowBytes =
-        advertised === undefined
-          ? INITIAL_STREAM_WINDOW_BYTES
-          : validBulkWindow(advertised);
+      const maxBulkStreamWindowBytes = validBulkWindow(
+        welcome.maxBulkStreamWindowBytes,
+      );
       return {
         key: await deriveChannelSessionKey(
           credential.secret,

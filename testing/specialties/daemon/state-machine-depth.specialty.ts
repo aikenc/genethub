@@ -31,7 +31,7 @@ function stateCase(id: string, title: string, oracle: string, catches: string[],
 }
 
 async function sessions(opened: Opened, includeArchived: boolean) {
-  const reply = await opened.client.call({ type: "session.list", payload: { workspaceId: opened.workspaceId, includeArchived } });
+  const reply = await opened.client.call({ type: "session.list", payload: { workspaceId: opened.workspaceId, includeArchived, lean: true } });
   if (reply?.type !== "sessions") throw new Error(`session.list returned ${reply?.type}`);
   return reply.data;
 }

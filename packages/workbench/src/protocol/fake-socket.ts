@@ -21,6 +21,7 @@ import {
   type DataStream,
   type RecordCarrier,
 } from "../dataplane";
+import { INITIAL_STREAM_WINDOW_BYTES } from "../dataplane/frame";
 import { WEB_PROTOCOL_VERSION } from "./codec";
 import type { WebSocketLike } from "./client";
 
@@ -247,7 +248,7 @@ export class FakeSocket implements WebSocketLike {
       });
     }
     const welcome = new TextEncoder().encode(
-      JSON.stringify({ version: DATA_PLANE_VERSION, serverNonce, proof }),
+      JSON.stringify({ version: DATA_PLANE_VERSION, serverNonce, proof, maxBulkStreamWindowBytes: INITIAL_STREAM_WINDOW_BYTES }),
     );
     this.onmessage?.({ data: welcome });
   }

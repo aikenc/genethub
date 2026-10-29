@@ -15,6 +15,7 @@ import {
   resolveAgentProfile,
   resolveModeBadge,
 } from "../presentation/catalog/resolve";
+import { isSupportedImageMime, isSupportedVideoMime } from "./attachments";
 
 export const BUILTIN_TAGS = ["Ultra", "Max", "Pro", "Flash", "Mini", "视频理解", "图片理解"] as const;
 export type BuiltinAgentTag = (typeof BUILTIN_TAGS)[number];
@@ -227,10 +228,9 @@ export function toggleGroupedTag(
  * them before send so its affordances describe the route that will actually
  * be selected. Unknown MIME types deliberately add no capability claim. */
 export function mediaTagsForMimes(mimes: readonly string[]): string[] {
-  const lower = mimes.map((mime) => mime.toLocaleLowerCase());
   return [
-    ...(lower.some((mime) => mime.startsWith("image/")) ? [IMAGE_TAG] : []),
-    ...(lower.some((mime) => mime.startsWith("video/")) ? [VIDEO_TAG] : []),
+    ...(mimes.some(isSupportedImageMime) ? [IMAGE_TAG] : []),
+    ...(mimes.some(isSupportedVideoMime) ? [VIDEO_TAG] : []),
   ];
 }
 

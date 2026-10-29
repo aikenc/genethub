@@ -85,7 +85,7 @@ defineJourney(
       const root = listed.find((space) => space.name === "alice");
       t.assertions.assert(root, `alice is not registered: ${JSON.stringify(listed.map((s) => s.name))}`);
       const sessionsOf = async (workspaceId: string) => {
-        const reply = await opened.client.call({ type: "session.list", payload: { workspaceId, includeArchived: false } });
+        const reply = await opened.client.call({ type: "session.list", payload: { workspaceId, includeArchived: false, lean: true } });
         if (reply?.type !== "sessions") throw new Error(`session.list returned ${reply?.type}`);
         return reply.data as unknown as Array<{ id: string; title?: string; labels?: string[]; description?: string; status?: string }>;
       };

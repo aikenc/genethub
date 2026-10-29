@@ -341,17 +341,26 @@ fn render_item(index: usize, item: &TimelineItem) -> Option<RenderedItem> {
         TimelineItem::UserMessage {
             text,
             origin: Some(origin),
+            attachments,
             ..
         } => (
             RenderedKind::User,
             format!(
-                "[user origin=\"agent\" session=\"{}\" machine=\"{}\"]\n{text}\n[/user]",
-                origin.session_id, origin.machine_id
+                "[user origin=\"agent\" session=\"{}\" machine=\"{}\"]\n{text}{}\n[/user]",
+                origin.session_id,
+                origin.machine_id,
+                super::chat_files::history_note(attachments)
             ),
         ),
-        TimelineItem::UserMessage { text, .. } => {
-            (RenderedKind::User, format!("[user]\n{text}\n[/user]"))
-        }
+        TimelineItem::UserMessage {
+            text, attachments, ..
+        } => (
+            RenderedKind::User,
+            format!(
+                "[user]\n{text}{}\n[/user]",
+                super::chat_files::history_note(attachments)
+            ),
+        ),
         TimelineItem::AssistantMessage { text, .. } => (
             RenderedKind::Other,
             format!("[assistant]\n{text}\n[/assistant]"),

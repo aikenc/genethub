@@ -131,7 +131,7 @@ persistenceCase(
     opened = await harness.restart(opened);
     const listed = await opened.client.call({
       type: "session.list",
-      payload: { workspaceId, includeArchived: true },
+      payload: { workspaceId, includeArchived: true, lean: true },
     });
     t.assertions.assert(listed?.type === "sessions", `session.list returned ${listed?.type}`);
     for (const expected of sessions) {
@@ -208,11 +208,11 @@ persistenceCase(
     opened = await harness.restart(opened);
     const live = await opened.client.call({
       type: "session.list",
-      payload: { workspaceId: opened.workspaceId, includeArchived: false },
+      payload: { workspaceId: opened.workspaceId, includeArchived: false, lean: true },
     });
     const all = await opened.client.call({
       type: "session.list",
-      payload: { workspaceId: opened.workspaceId, includeArchived: true },
+      payload: { workspaceId: opened.workspaceId, includeArchived: true, lean: true },
     });
     t.assertions.assert(live?.type === "sessions" && !live.data.some((entry) => entry.id === sessionId), "archive state was lost");
     const archived = all?.type === "sessions" ? all.data.find((entry) => entry.id === sessionId) : undefined;

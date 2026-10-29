@@ -378,7 +378,7 @@ describe.skipIf(missingArtifacts(runtimeArtifacts(DAEMON)))(
 
       const sessionsBefore = await client.call({
         type: "session.list",
-        payload: { workspaceId, includeArchived: true },
+        payload: { workspaceId, includeArchived: true, lean: true },
       });
       expect(sessionsBefore?.type).toBe("sessions");
       if (sessionsBefore?.type !== "sessions") return;
@@ -396,7 +396,7 @@ describe.skipIf(missingArtifacts(runtimeArtifacts(DAEMON)))(
 
       const sessionsWhileRemoved = await client.call({
         type: "session.list",
-        payload: { workspaceId, includeArchived: true },
+        payload: { workspaceId, includeArchived: true, lean: true },
       });
       expect(sessionsWhileRemoved).toEqual({ type: "sessions", data: [] });
 
@@ -410,7 +410,7 @@ describe.skipIf(missingArtifacts(runtimeArtifacts(DAEMON)))(
 
       const sessionsAfter = await client.call({
         type: "session.list",
-        payload: { workspaceId, includeArchived: true },
+        payload: { workspaceId, includeArchived: true, lean: true },
       });
       expect(sessionsAfter).toEqual(sessionsBefore);
     }, 20_000);

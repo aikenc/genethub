@@ -1,5 +1,6 @@
 import type {
   AgentInfo,
+  Attachment,
   BlobOverview,
   RoundBatch,
   RoundBatchSummary,
@@ -33,7 +34,7 @@ import { CURRENT_MACHINE } from "./MachineCatalogPicker";
 import { Markdown } from "./Markdown";
 import { mediaTagsForTimeline, normalizeTags } from "./capability-preferences";
 
-import { attachmentPreviewUrl } from "./attachments";
+import { attachmentPreviewUrl, attachmentSizeLabel } from "./attachments";
 import {
   attributeRounds,
   splitForwardMessage,
@@ -65,6 +66,7 @@ import {
 import { buildSelectionCopy } from "./selectionCopy";
 import { localValue, saveLocalValue, markContentRead, type ReadingPosition } from "./localConversation";
 import { useWorkbench } from "./store";
+import { resolveArtifactRef } from "../preview/resolveArtifactRef";
 import type { PendingMessage, TimelineState } from "./timeline";
 import { kindEmoji, kindLabel, ToolCallView } from "./ToolCall";
 import { useSessionArtifact } from "./useSessionArtifact";
@@ -923,7 +925,7 @@ function PendingBubble({
 
   return (
     <div className="flex flex-col items-end gap-1.5" data-testid="pending-message">
-      {pending.attachments.length > 0 || (pending.videoFiles?.length ?? 0) > 0 ? (
+      {pending.attachments.length > 0 || (pending.videoFiles?.length ?? 0) > 0 || (pending.files?.length ?? 0) > 0 ? (
         <div className="flex max-w-[80%] flex-wrap justify-end gap-1.5">
           {pending.attachments.map((attachment, index) => {
             const url = attachmentPreviewUrl(attachment);
@@ -940,6 +942,11 @@ function PendingBubble({
           })}
           {pending.videoFiles?.map((file, index) => (
             <span key={`video-${index}`} className="rounded border border-line px-2 py-1 text-xs">视频 · {file.name}</span>
+          ))}
+          {pending.files?.map((file, index) => (
+            <span key={`file-${index}`} className="rounded border border-line px-2 py-1 text-xs">
+              文件 · {file.name}{attachmentSizeLabel(file.size) ? ` · ${attachmentSizeLabel(file.size)}` : ""}
+            </span>
           ))}
         </div>
       ) : null}
@@ -1064,6 +1071,36 @@ function SystemNotice({ text }: { text: string }) {
   );
 }
 
+/** A stored file or video chip. Clicking opens the original through Asset
+ * Preview; when the workspace context is unavailable it stays a plain label. */
+function FileAttachmentChip({ attachment }: { attachment: Attachment }) {
+  const artifact = useSessionArtifact();
+  const openPreviewFloat = useWorkbench((state) => state.openPreviewFloat);
+  const size = attachmentSizeLabel(attachment.bytes);
+  const label = `${attachment.mime.startsWith("video/") ? "视频 · " : "文件 · "}${attachment.name}${size ? ` · ${size}` : ""}`;
+  const resolved = attachment.path && artifact
+    ? resolveArtifactRef(attachment.path, artifact)
+    : null;
+  if (!artifact || !resolved || resolved.kind !== "preview") {
+    return <span className="rounded border border-line px-2 py-1 text-xs">{label}</span>;
+  }
+  return (
+    <button
+      type="button"
+      title="打开文件"
+      onClick={() => openPreviewFloat({
+        deviceHandle: artifact.deviceHandle,
+        workspaceHandle: artifact.workspaceHandle,
+        path: resolved.path,
+        sessionId: artifact.sessionId ?? null,
+      })}
+      className="rounded border border-line px-2 py-1 text-xs hover:bg-raised"
+    >
+      {label}
+    </button>
+  );
+}
+
 function Item({ item }: { item: TimelineItem }) {
   switch (item.type) {
     case "userMessage": {
@@ -1099,7 +1136,7 @@ function Item({ item }: { item: TimelineItem }) {
                     className="h-28 w-28 rounded-xl border border-line object-cover"
                   />
                 ) : (
-                  <span key={index} className="rounded border border-line px-2 py-1 text-xs">{attachment.mime.startsWith("video/") ? "视频 · " : ""}{attachment.name}</span>
+                  <FileAttachmentChip key={index} attachment={attachment} />
                 );
               })}
             </div>

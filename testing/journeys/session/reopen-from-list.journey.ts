@@ -26,7 +26,7 @@ defineJourney(
       await opened.client.call({ type: "session.close", payload: { sessionId } });
       const listed = await opened.client.call({
         type: "session.list",
-        payload: { workspaceId: opened.workspaceId, includeArchived: false },
+        payload: { workspaceId: opened.workspaceId, includeArchived: false, lean: true },
       });
       t.assertions.assert(listed?.type === "sessions", "session.list failed");
       const found = listed?.type === "sessions" ? listed.data.find((item) => item.id === sessionId) : undefined;

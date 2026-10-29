@@ -1,5 +1,5 @@
 import { randomBytes, createHash } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { WebSocket } from "ws";
 import { Client, type WebSocketLike, type ProtocolDial } from "@genehub/workbench/client";
@@ -23,7 +23,7 @@ for (const hosted of [false, true]) defineSpecialty({
   const hub = await startHub({ databasePath: join(t.env.root, "automatic.sqlite"), relayOrigin: hosted ? link.urlFor(origin) : origin, relayToken: token });
   const relay = await startRelay({ openRoot: t.openRoot, port, ...(hosted ? { control: { origin: hub.origin, token } } : {}) });
   t.env.env.GENEHUB_LOCAL_HUB_URL = hub.origin;
-  t.env.env.GENEHUB_LOCAL_LOG = "warn,genet_daemon::dataplane::uplink_pace=info";
+  t.env.env.GENEHUB_LOCAL_LOG = "warn";
   const o = await t.stage("workspace-ready", () => t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env }));
   let client: Client | undefined;
   const events: unknown[] = [];
@@ -78,8 +78,6 @@ for (const hosted of [false, true]) defineSpecialty({
     });
     const result=await t.stage("preview-complete", () => preview);
     t.assertions.assert(hash(result.bytes)===hash(bytes),"body bytes changed");
-    const pace = readFileSync(join(t.env.data, "logs", "daemon.log"), "utf8").split("\n").filter(line => line.includes('event="uplink_pace"'));
-    t.note(`Native DATA window tail: ${pace.slice(-6).join(" | ")}`);
     latency.sort((a,b)=>a-b); const p95=latency[Math.ceil(latency.length*.95)-1]!;
     t.note(JSON.stringify({hosted,physicalConnections:connections.length,bytes:result.bytes.length,p95,ownersDistinct:true}));
     t.assertions.assert(p95<1500,"automatic production routing exceeded control p95 target");

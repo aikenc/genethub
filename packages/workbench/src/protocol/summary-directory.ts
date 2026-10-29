@@ -192,7 +192,7 @@ export class MachineSummaryDirectory {
         throw Object.assign(new Error("summary source identity mismatch"),{code:"unauthorized"});
       }
       const [sessions, workspaces] = await Promise.all([
-        client.call({type:"session.list",payload:{workspaceId:null,includeArchived:false}}), client.call({type:"workspace.list"}),
+        client.call({type:"session.list",payload:{workspaceId:null,includeArchived:false,lean:true}}), client.call({type:"workspace.list"}),
       ]);
       check();
       if(sessions?.type!=="sessions" || workspaces?.type!=="workspaces") throw new Error("invalid source summary");

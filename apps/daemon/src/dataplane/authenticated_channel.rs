@@ -13,23 +13,12 @@ const CARRIER_QUEUE: usize = 16;
 pub struct Carrier {
     pub inbound: mpsc::Receiver<Vec<u8>>,
     pub outbound: mpsc::Sender<Vec<u8>>,
-    pub(crate) uplink_pace: Option<std::sync::Arc<super::uplink_pace::PeerPace>>,
-    pub(crate) packet_pair_probe: bool,
 }
 
 pub fn carrier_channels() -> (mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>, Carrier) {
     let (inbound_tx, inbound) = mpsc::channel(CARRIER_QUEUE);
     let (outbound, outbound_rx) = mpsc::channel(CARRIER_QUEUE);
-    (
-        inbound_tx,
-        outbound_rx,
-        Carrier {
-            inbound,
-            outbound,
-            uplink_pace: None,
-            packet_pair_probe: false,
-        },
-    )
+    (inbound_tx, outbound_rx, Carrier { inbound, outbound })
 }
 
 pub(crate) enum Role {
@@ -46,7 +35,6 @@ pub(crate) struct AuthenticatedReader {
 }
 
 pub(crate) struct AuthenticatedWriter {
-    pub(crate) uplink_pace: Option<std::sync::Arc<super::uplink_pace::PeerPace>>,
     outbound: mpsc::Sender<Vec<u8>>,
     key: SessionKey,
     direction: Direction,
@@ -72,7 +60,6 @@ pub(crate) fn authenticated_channel(
             closed: false,
         },
         AuthenticatedWriter {
-            uplink_pace: carrier.uplink_pace,
             outbound: carrier.outbound,
             key,
             direction: outbound,

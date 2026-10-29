@@ -147,7 +147,7 @@ livenessCase(
     const listed = await t.flows.branches.timeControlCall(() =>
       session.client.call({
         type: "session.list",
-        payload: { workspaceId: session.workspaceId, includeArchived: false },
+        payload: { workspaceId: session.workspaceId, includeArchived: false, lean: true },
       }),
     );
     const created = await t.flows.branches.timeControlCall(() =>

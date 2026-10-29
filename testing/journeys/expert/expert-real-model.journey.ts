@@ -91,7 +91,7 @@ defineJourney(
       t.assertions.assert(root && work, "alice is not registered with its work Space");
 
       const sessionsOf = async (workspaceId: string) => {
-        const reply = await opened.client.call({ type: "session.list", payload: { workspaceId, includeArchived: false } });
+        const reply = await opened.client.call({ type: "session.list", payload: { workspaceId, includeArchived: false, lean: true } });
         if (reply?.type !== "sessions") throw new Error(`session.list returned ${reply?.type}`);
         return reply.data as unknown as Array<{ id: string; labels?: string[]; description?: string; status: string }>;
       };

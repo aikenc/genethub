@@ -163,7 +163,7 @@ recoveryCase(
       t.assertions.assert(snapshot?.type === "snapshot" && snapshot.data.summary.title === "survives hard crash", "title was lost");
       const live = await second.client.call({
         type: "session.list",
-        payload: { workspaceId: first.workspaceId, includeArchived: false },
+        payload: { workspaceId: first.workspaceId, includeArchived: false, lean: true },
       });
       t.assertions.assert(live?.type === "sessions" && !live.data.some((item) => item.id === sessionId), "archive state was lost");
     } finally {

@@ -132,8 +132,7 @@ impl Rpc {
                 proof: crate::channel_auth::client_proof(&admission.server_proof, context, &nonce),
             },
             rtc_supported: false,
-            max_bulk_stream_window_bytes: None,
-            packet_pair_probe_supported: None,
+            max_bulk_stream_window_bytes: genehub_proto::INITIAL_STREAM_WINDOW_BYTES,
         };
         timeout_send(
             &mut socket,
@@ -654,8 +653,7 @@ async fn authenticated_fabric(
         client_name: format!("{}-cli", crate::channel::CLI_BINARY),
         auth,
         rtc_supported: false,
-        max_bulk_stream_window_bytes: None,
-        packet_pair_probe_supported: None,
+        max_bulk_stream_window_bytes: genehub_proto::INITIAL_STREAM_WINDOW_BYTES,
     };
     let mut transport_url = crate::http::Url::parse(endpoint)
         .map_err(|error| ConnectError::Protocol(error.to_string()))?;

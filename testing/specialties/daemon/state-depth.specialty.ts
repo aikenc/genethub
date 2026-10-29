@@ -197,7 +197,7 @@ daemonCase(
       await opened.client.call({ type: "session.archive", payload: { sessionId, archived: true } });
       const hidden = await opened.client.call({
         type: "session.list",
-        payload: { workspaceId: opened.workspaceId, includeArchived: false },
+        payload: { workspaceId: opened.workspaceId, includeArchived: false, lean: true },
       });
       t.assertions.assert(
         hidden?.type === "sessions" && !hidden.data.some((item) => item.id === sessionId),
@@ -206,7 +206,7 @@ daemonCase(
       await opened.client.call({ type: "session.archive", payload: { sessionId, archived: false } });
       const restored = await opened.client.call({
         type: "session.list",
-        payload: { workspaceId: opened.workspaceId, includeArchived: false },
+        payload: { workspaceId: opened.workspaceId, includeArchived: false, lean: true },
       });
       t.assertions.assert(
         restored?.type === "sessions" && restored.data.filter((item) => item.id === sessionId).length === 1,
@@ -229,7 +229,7 @@ daemonCase(
         await opened.client.call({ type: "session.delete", payload: { sessionId } });
         const listed = await observer.call({
           type: "session.list",
-          payload: { workspaceId: opened.workspaceId, includeArchived: true },
+          payload: { workspaceId: opened.workspaceId, includeArchived: true, lean: true },
         });
         t.assertions.assert(
           listed?.type === "sessions" && !listed.data.some((item) => item.id === sessionId),
