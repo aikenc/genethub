@@ -35,14 +35,13 @@ export async function openBrowser(options: BrowserContextOptions = {}, evidence:
       };
       stopNative = async () => {
         try {
-          if (child.exitCode === null && child.signalCode === null) {
-            const exited = waitForExit(child, 5000).catch(() => null);
-            signalGroup("SIGTERM");
-            if (await exited === null) {
-              signalGroup("SIGKILL");
-              await waitForExit(child, 1000).catch(() => null);
-            }
-          }
+          // The leader can already be gone while renderers or a crash handler
+          // still hold the profile. Signal the group unconditionally, then
+          // make sure the leader is reaped.
+          signalGroup("SIGTERM");
+          const exited = await waitForExit(child, 5000).catch(() => null);
+          signalGroup("SIGKILL");
+          if (exited === null) await waitForExit(child, 1000).catch(() => null);
         } finally { releaseLease(lease); }
       };
       const endpoint = await new Promise<string>((resolve, reject) => {

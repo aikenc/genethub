@@ -57,6 +57,15 @@ pub struct Workspaces {
 /// repeats the answer.
 const SCAN_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// Releases the in-flight slot on every exit, including a panic in discovery.
+struct ScanGuard<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl Drop for ScanGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
 /// What one scan changed.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct ScanReport {
@@ -308,12 +317,10 @@ impl Workspaces {
         {
             return ScanReport::default();
         }
+        let _inflight = ScanGuard(&self.scanning);
         if !force {
             let at = self.scanned_at.lock().expect("never poisoned");
             if at.is_some_and(|last| last.elapsed() < SCAN_EVERY) {
-                drop(at);
-                self.scanning
-                    .store(false, std::sync::atomic::Ordering::Release);
                 return ScanReport::default();
             }
         }
@@ -336,8 +343,6 @@ impl Workspaces {
             tracing::warn!(%error, "retiring missing scanned child Spaces failed");
         }
         *self.scanned_at.lock().expect("never poisoned") = Some(tokio::time::Instant::now());
-        self.scanning
-            .store(false, std::sync::atomic::Ordering::Release);
         report
     }
 

@@ -980,82 +980,6 @@
       }
     },
     {
-      "oldId": "rust.concurrency.concurrent_user_journey_matches_profile",
-      "suite": "concurrency",
-      "testName": "concurrent_user_journey_matches_profile",
-      "tsId": "specialty.concurrency.parallel-workspaces",
-      "status": "ts-owned",
-      "oracleClass": "public-behavior",
-      "assertionDelta": "TS proves two workspaces and two genet sessions complete without mixing turnStarted, through @genehub/workbench/client. Does not copy native_resource_count, multi-browser subscribe, or load-profile timing (those probes are do-not-export).",
-      "legacyExecution": "retired",
-      "retirement": {
-        "type": "ts-parity",
-        "tsId": "specialty.concurrency.parallel-workspaces",
-        "tsRunId": "261029-1532-change-41d3",
-        "rustRunId": "261028-2205-parity-concurrency-e2f5",
-        "openSha": "2d26a7843bd1a44561a44b6537413047fd222995",
-        "cloudSha": "cc0e6f0667a7d4082f352f349054c219e94bdfb5",
-        "artifactSha": "ee95a89a4df0fa5254e24466623bdff065a84ea58a180ceda60f37045a93c216",
-        "tsInputs": {
-          "run": "runs/261029-1532-change-41d3",
-          "case": "specialty.concurrency.parallel-workspaces",
-          "open": "bc62763789762bca5c818116f783eb80e0598745",
-          "cloud": "8323d6339876d21ca0e2b7826635fe5f7f2d4042",
-          "artifact": "e3eaaee63ac9c90e09487b894bab0fbf56c39d7eab872bbb30a56ff57a9f8480"
-        },
-        "rustInputs": {
-          "run": "runs/261028-2205-parity-concurrency-e2f5",
-          "case": "rust.concurrency.concurrent_user_journey_matches_profile",
-          "open": "2d26a7843bd1a44561a44b6537413047fd222995",
-          "cloud": "cc0e6f0667a7d4082f352f349054c219e94bdfb5",
-          "artifact": "ee95a89a4df0fa5254e24466623bdff065a84ea58a180ceda60f37045a93c216"
-        },
-        "assertionDelta": "TS proves two workspaces and two genet sessions complete without mixing turnStarted, through @genehub/workbench/client. Does not copy native_resource_count, multi-browser subscribe, or load-profile timing (those probes are do-not-export).",
-        "coverageDelta": "TS now opens 10 and 20 workspaces, runs one turn in each, and proves every session sees exactly one turnStarted; it does not copy native_resource_count, the 4/8-browser observer fleet, or poll-pause timing (those probes are do-not-export).",
-        "reviewedIn": "runs/261028-2205-parity-concurrency-e2f5",
-        "evidenceStatus": "invalid",
-        "evidenceGap": "Rust run 261028-2205 recorded inputDrift=true and never qualified; the TS counterpart now covers the 10/20-workspace business oracle, but no valid same-run Rust evidence exists. Retirement is recorded with invalid evidence, not accepted."
-      }
-    },
-    {
-      "oldId": "rust.concurrency.blocking_canaries_locate_the_global_stall",
-      "suite": "concurrency",
-      "testName": "blocking_canaries_locate_the_global_stall",
-      "tsId": "specialty.concurrency.parallel-workspaces",
-      "status": "ts-owned",
-      "oracleClass": "os-fact",
-      "assertionDelta": "TS proves workspace.list stays under 500ms during a delayed mock turn, plus a companion slow-git file.tree/list canary. Does not copy pause_inbound preview flood or native_resource_count.",
-      "legacyExecution": "retired",
-      "retirement": {
-        "type": "ts-parity",
-        "tsId": "specialty.concurrency.parallel-workspaces",
-        "tsRunId": "261029-1532-change-41d3",
-        "rustRunId": "261028-2205-parity-concurrency-e2f5",
-        "openSha": "2d26a7843bd1a44561a44b6537413047fd222995",
-        "cloudSha": "cc0e6f0667a7d4082f352f349054c219e94bdfb5",
-        "artifactSha": "ee95a89a4df0fa5254e24466623bdff065a84ea58a180ceda60f37045a93c216",
-        "tsInputs": {
-          "run": "runs/261029-1532-change-41d3",
-          "case": "specialty.concurrency.parallel-workspaces",
-          "open": "bc62763789762bca5c818116f783eb80e0598745",
-          "cloud": "8323d6339876d21ca0e2b7826635fe5f7f2d4042",
-          "artifact": "e3eaaee63ac9c90e09487b894bab0fbf56c39d7eab872bbb30a56ff57a9f8480"
-        },
-        "rustInputs": {
-          "run": "runs/261028-2205-parity-concurrency-e2f5",
-          "case": "rust.concurrency.blocking_canaries_locate_the_global_stall",
-          "open": "2d26a7843bd1a44561a44b6537413047fd222995",
-          "cloud": "cc0e6f0667a7d4082f352f349054c219e94bdfb5",
-          "artifact": "ee95a89a4df0fa5254e24466623bdff065a84ea58a180ceda60f37045a93c216"
-        },
-        "assertionDelta": "TS proves workspace.list stays under 500ms during a delayed mock turn, plus a companion slow-git file.tree/list canary. Does not copy pause_inbound preview flood or native_resource_count.",
-        "coverageDelta": "TS proves workspace.list stays responsive (<3s) while 10 and 20 workspace turns are in flight; it does not copy pause_inbound preview flood or native_resource_count.",
-        "reviewedIn": "runs/261028-2205-parity-concurrency-e2f5",
-        "evidenceStatus": "invalid",
-        "evidenceGap": "Rust run 261028-2205 recorded inputDrift=true and never qualified; the TS counterpart now covers the control-read canary at 10/20-workspace scale, but no valid same-run Rust evidence exists. Retirement is recorded with invalid evidence, not accepted."
-      }
-    },
-    {
       "oldId": "rust.cursor.cursor_reaches_the_same_timeline_as_the_built_in_agent",
       "suite": "cursor",
       "testName": "cursor_reaches_the_same_timeline_as_the_built_in_agent",
@@ -3251,5 +3175,24 @@
       "sourcePath": "testing/deprecated/rust/tests/concurrency.rs",
       "sourceFunction": "write_workload_fixture"
     }
-  ]
+  ],
+  "openGaps": [
+    {
+      "oldId": "rust.concurrency.concurrent_user_journey_matches_profile",
+      "suite": "concurrency",
+      "tsId": "specialty.concurrency.parallel-workspaces",
+      "tsRunId": "261029-1532-change-41d3",
+      "reason": "The retired Rust run 261028-2205 recorded inputDrift=true and never qualified; the runner and source are gone, so no accepted same-run parity evidence exists.",
+      "coverageDelta": "TS covers 10/20 workspaces, one own turn each, and workspace.list responsiveness; native resource counts, 4/8-browser observers and poll timing are not reproduced."
+    },
+    {
+      "oldId": "rust.concurrency.blocking_canaries_locate_the_global_stall",
+      "suite": "concurrency",
+      "tsId": "specialty.concurrency.parallel-workspaces",
+      "tsRunId": "261029-1532-change-41d3",
+      "reason": "The retired Rust run 261028-2205 recorded inputDrift=true and never qualified; the runner and source are gone, so no accepted same-run parity evidence exists.",
+      "coverageDelta": "TS covers 10/20 workspaces, one own turn each, and workspace.list responsiveness; native resource counts, 4/8-browser observers and poll timing are not reproduced."
+    }
+  ],
+  "openGapReview": "These rows are not retired and must not be counted as taken over. Replacing them needs a new same-artifact evidence run or an explicit Human decision to accept TS-only coverage."
 }

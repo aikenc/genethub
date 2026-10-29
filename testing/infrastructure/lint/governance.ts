@@ -28,8 +28,10 @@ export function checkGovernance(openRoot: string, cloudRoot?: string): Governanc
   }));
   const parityPath = path.join(openRoot, "testing", "migration", "rust-parity.json");
   let pending = 0;
+  let openGaps = 0;
   if (existsSync(parityPath)) {
     const parity = JSON.parse(readFileSync(parityPath, "utf8")) as {
+      openGaps?: unknown[];
       cases?: Array<{
         oracleClass?: string; oldId?: string; legacyExecution?: string;
         suspension?: { approvedBy?: string; approvedAt?: string; reason?: string; resumeWhen?: string };
@@ -76,6 +78,7 @@ export function checkGovernance(openRoot: string, cloudRoot?: string): Governanc
     if (stopped.length) findings.push({ rule: "L13", file: parityPath, message: stopped.length + " legacy rows are neither required, suspended with approval, retired with traceable parity evidence, nor release-only with a recorded blocker" });
     const stray = (parity.cases ?? []).filter(item => item.legacyExecution === "required" && item.suspension);
     if (stray.length) findings.push({ rule: "L13", file: parityPath, message: stray.length + " required legacy rows still carry a suspension record" });
+    openGaps = parity.openGaps?.length ?? 0;
     pending = (parity.cases ?? []).filter((item) => item.oracleClass === "pending-classification").length;
     if (pending > 0) {
       findings.push({
@@ -94,7 +97,7 @@ export function checkGovernance(openRoot: string, cloudRoot?: string): Governanc
       { id: "L16", result: findings.some((item) => item.rule === "L16") ? "fail" : "ok", note: "no private product source imports" },
       { id: "P06", result: findings.some((item) => item.rule === "L03" || item.rule === "L04") ? "fail" : "ok", note: "three-layer dependency" },
       { id: "L13", result: findings.some(item => item.rule === "L13") ? "fail" : "ok", note: "legacy required metadata; parity retirement is not automatically certified" },
-      { id: "P01", result: pending > 0 ? "fail" : "ok", note: "legacy rust oracle classification" },
+      { id: "P01", result: pending > 0 ? "fail" : "ok", note: openGaps > 0 ? `${openGaps} legacy rows are open coverage gaps, not retired` : "legacy rust oracle classification" },
     ],
   };
 }
