@@ -983,22 +983,22 @@
       "oldId": "rust.concurrency.concurrent_user_journey_matches_profile",
       "suite": "concurrency",
       "testName": "concurrent_user_journey_matches_profile",
-      "tsId": "specialty.concurrency.parallel-sessions",
+      "tsId": "specialty.concurrency.parallel-workspaces",
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS proves two workspaces and two genet sessions complete without mixing turnStarted, through @genehub/workbench/client. Does not copy native_resource_count, multi-browser subscribe, or load-profile timing (those probes are do-not-export).",
       "legacyExecution": "retired",
       "retirement": {
         "type": "ts-parity",
-        "tsId": "specialty.concurrency.parallel-sessions",
-        "tsRunId": "261028-2205-parity-concurrency-e2f5",
+        "tsId": "specialty.concurrency.parallel-workspaces",
+        "tsRunId": "261029-1525-change-5dd1",
         "rustRunId": "261028-2205-parity-concurrency-e2f5",
         "openSha": "2d26a7843bd1a44561a44b6537413047fd222995",
         "cloudSha": "cc0e6f0667a7d4082f352f349054c219e94bdfb5",
         "artifactSha": "ee95a89a4df0fa5254e24466623bdff065a84ea58a180ceda60f37045a93c216",
         "tsInputs": {
-          "run": "runs/261028-2205-parity-concurrency-e2f5",
-          "case": "specialty.concurrency.parallel-sessions",
+          "run": "runs/261029-1525-change-5dd1",
+          "case": "specialty.concurrency.parallel-workspaces",
           "open": "2d26a7843bd1a44561a44b6537413047fd222995",
           "cloud": "cc0e6f0667a7d4082f352f349054c219e94bdfb5",
           "artifact": "ee95a89a4df0fa5254e24466623bdff065a84ea58a180ceda60f37045a93c216"
@@ -1011,32 +1011,32 @@
           "artifact": "ee95a89a4df0fa5254e24466623bdff065a84ea58a180ceda60f37045a93c216"
         },
         "assertionDelta": "TS proves two workspaces and two genet sessions complete without mixing turnStarted, through @genehub/workbench/client. Does not copy native_resource_count, multi-browser subscribe, or load-profile timing (those probes are do-not-export).",
-        "coverageDelta": "TS counterpart proved the business oracle (all turns complete, no interaction failures, unrelated reads responsive) on the same artifact; the old 10/20-workspace load profile and native resource counts are measurement-only and are not reproduced in the TS gate.",
+        "coverageDelta": "TS now opens 10 and 20 workspaces, runs one turn in each, and proves every session sees exactly one turnStarted; it does not copy native_resource_count, the 4/8-browser observer fleet, or poll-pause timing (those probes are do-not-export).",
         "reviewedIn": "runs/261028-2205-parity-concurrency-e2f5",
         "evidenceStatus": "invalid",
-        "evidenceGap": "Run 261028-2205 recorded inputDrift=true (source changed during the run), so its qualification is false; the two TS counterparts also cover only 2 workspaces/2 sessions, not the old 10/20-workspace profile. Retirement stays recorded but is not accepted as parity evidence until a replacement run exists."
+        "evidenceGap": "Rust run 261028-2205 recorded inputDrift=true and never qualified; the TS counterpart now covers the 10/20-workspace business oracle, but no valid same-run Rust evidence exists. Retirement is recorded with invalid evidence, not accepted."
       }
     },
     {
       "oldId": "rust.concurrency.blocking_canaries_locate_the_global_stall",
       "suite": "concurrency",
       "testName": "blocking_canaries_locate_the_global_stall",
-      "tsId": "specialty.concurrency.slow-model-unrelated-reads",
+      "tsId": "specialty.concurrency.parallel-workspaces",
       "status": "ts-owned",
       "oracleClass": "os-fact",
       "assertionDelta": "TS proves workspace.list stays under 500ms during a delayed mock turn, plus a companion slow-git file.tree/list canary. Does not copy pause_inbound preview flood or native_resource_count.",
       "legacyExecution": "retired",
       "retirement": {
         "type": "ts-parity",
-        "tsId": "specialty.concurrency.slow-model-unrelated-reads",
-        "tsRunId": "261028-2205-parity-concurrency-e2f5",
+        "tsId": "specialty.concurrency.parallel-workspaces",
+        "tsRunId": "261029-1525-change-5dd1",
         "rustRunId": "261028-2205-parity-concurrency-e2f5",
         "openSha": "2d26a7843bd1a44561a44b6537413047fd222995",
         "cloudSha": "cc0e6f0667a7d4082f352f349054c219e94bdfb5",
         "artifactSha": "ee95a89a4df0fa5254e24466623bdff065a84ea58a180ceda60f37045a93c216",
         "tsInputs": {
-          "run": "runs/261028-2205-parity-concurrency-e2f5",
-          "case": "specialty.concurrency.slow-model-unrelated-reads",
+          "run": "runs/261029-1525-change-5dd1",
+          "case": "specialty.concurrency.parallel-workspaces",
           "open": "2d26a7843bd1a44561a44b6537413047fd222995",
           "cloud": "cc0e6f0667a7d4082f352f349054c219e94bdfb5",
           "artifact": "ee95a89a4df0fa5254e24466623bdff065a84ea58a180ceda60f37045a93c216"
@@ -1049,10 +1049,10 @@
           "artifact": "ee95a89a4df0fa5254e24466623bdff065a84ea58a180ceda60f37045a93c216"
         },
         "assertionDelta": "TS proves workspace.list stays under 500ms during a delayed mock turn, plus a companion slow-git file.tree/list canary. Does not copy pause_inbound preview flood or native_resource_count.",
-        "coverageDelta": "TS counterpart proved the business oracle (all turns complete, no interaction failures, unrelated reads responsive) on the same artifact; the old 10/20-workspace load profile and native resource counts are measurement-only and are not reproduced in the TS gate.",
+        "coverageDelta": "TS proves workspace.list stays responsive (<3s) while 10 and 20 workspace turns are in flight; it does not copy pause_inbound preview flood or native_resource_count.",
         "reviewedIn": "runs/261028-2205-parity-concurrency-e2f5",
         "evidenceStatus": "invalid",
-        "evidenceGap": "Run 261028-2205 recorded inputDrift=true (source changed during the run), so its qualification is false; the two TS counterparts also cover only 2 workspaces/2 sessions, not the old 10/20-workspace profile. Retirement stays recorded but is not accepted as parity evidence until a replacement run exists."
+        "evidenceGap": "Rust run 261028-2205 recorded inputDrift=true and never qualified; the TS counterpart now covers the control-read canary at 10/20-workspace scale, but no valid same-run Rust evidence exists. Retirement is recorded with invalid evidence, not accepted."
       }
     },
     {
