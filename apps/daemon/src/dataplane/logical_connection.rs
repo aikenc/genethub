@@ -14,10 +14,6 @@ use std::time::Instant;
 use tokio::sync::{mpsc, oneshot, Notify, OwnedSemaphorePermit, Semaphore};
 
 const DATA_BYTES: usize = 4 * 1024 * 1024;
-/// Local fairness bound: a bulk stream may not journal more than this ahead of
-/// a control reply. It is released by the same journal ACK path as before, but
-/// it is a fixed scheduling budget, not an RTT-adaptive congestion window.
-const BULK_LOOKAHEAD_BYTES: usize = 2 * 1024 * 1024;
 const PROGRESS_BYTES: usize = 64 * 1024;
 fn error(e: resume::Error) -> anyhow::Error {
     anyhow!("logical connection: {e:?}")
@@ -422,45 +418,6 @@ async fn run(
             journal.release(seq).map_err(error)?;
             budget = true;
         }
-        let mut blocked_streams = std::collections::HashSet::new();
-        for _ in 0..pending.len() {
-            let write = pending.pop_front().unwrap();
-            if blocked_streams.contains(&write.frame.stream_id) {
-                pending.push_back(write);
-                continue;
-            }
-            if write.class == WriteClass::Bulk && journal.stats().log_bytes >= BULK_LOOKAHEAD_BYTES {
-                pending.push_back(write);
-                continue;
-            }
-            let frame = resume::Frame {
-                kind: write.frame.kind as u8,
-                stream_id: write.frame.stream_id,
-                value: write.frame.value,
-                payload: write.frame.payload.clone(),
-            };
-            match journal.enqueue(frame) {
-                Ok(seq) => {
-                    if matches!(write.frame.kind, Kind::Fin | Kind::Reset) {
-                        terminals.insert(seq, write.complete);
-                    } else {
-                        // Bulk data completes when the logical journal accepts
-                        // it. Waiting for the carrier queue here exposes the
-                        // socket's per-record cadence to the producer and
-                        // serializes every 16KiB against a round trip.
-                        let _ = write.complete.send(Ok(()));
-                    }
-                }
-                Err(resume::Error::Backpressure) => {
-                    blocked_streams.insert(write.frame.stream_id);
-                    pending.push_back(write);
-                }
-                Err(e) => {
-                    let _ = write.complete.send(Err(error(e)));
-                    return Err(error(e));
-                }
-            }
-        }
         let mut pump_blocked = false;
         if let Some(active) = channel.as_mut().filter(|c| c.synced) {
             // Try-reserve before consuming a replay cursor. Control traffic has
@@ -497,8 +454,43 @@ async fn run(
                         .encode()
                         .map_err(error)?,
                     )
+                } else if let Some(record) = journal.next_record().map_err(error)? {
+                    // Replay of an already-journaled frame keeps its order.
+                    Some(record)
                 } else {
-                    journal.next_record().map_err(error)?
+                    // A write is journaled only when the scheduler is about to
+                    // send it. Journaling it on arrival made the send order the
+                    // arrival order, so a control reply waited behind every bulk
+                    // write that had arrived before it.
+                    let Some(write) = pending.pop_front() else { break };
+                    let frame = resume::Frame {
+                        kind: write.frame.kind as u8,
+                        stream_id: write.frame.stream_id,
+                        value: write.frame.value,
+                        payload: write.frame.payload.clone(),
+                    };
+                    match journal.enqueue(frame) {
+                        Ok(seq) => {
+                            if matches!(write.frame.kind, Kind::Fin | Kind::Reset) {
+                                terminals.insert(seq, write.complete);
+                            } else {
+                                let _ = write.complete.send(Ok(()));
+                            }
+                            journal.next_record().map_err(error)?
+                        }
+                        Err(resume::Error::Backpressure) => {
+                            // The journal holds bytes the peer has not
+                            // acknowledged yet; wait for releases rather than
+                            // dropping the write.
+                            pending.push_front(write);
+                            pump_blocked = true;
+                            break;
+                        }
+                        Err(e) => {
+                            let _ = write.complete.send(Err(error(e)));
+                            return Err(error(e));
+                        }
+                    }
                 };
                 let Some(bytes) = bytes else {
                     break;
