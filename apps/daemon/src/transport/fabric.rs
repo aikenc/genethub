@@ -32,14 +32,23 @@ const TRANSPORT_FLOW: &str = "transport-v1";
 const MAX_PEERS: usize = 32;
 const MAX_PENDING: usize = 8;
 const WRITER_QUEUE: usize = 256;
-// 1 MiB payload maximum, inside the existing per-owner 20 MiB reservation.
+// The ingress budget bounds bytes accepted from one peer but not yet consumed
+// by the data plane. It must not be smaller than what a legitimate sender can
+// have in flight: the inner per-stream credit alone allows 3 MiB, so a 1 MiB
+// queue let an ordinary upload trip the overflow path and detach the peer
+// stream. Size it above the largest single-stream window and bound the total
+// across peers separately.
 // The independent record cap also bounds metadata for tiny hostile records.
-// Legitimate ACK bursts are small bytes, not 64 full-sized DATA records.
-const PEER_INGRESS_BYTES: usize = 1024 * 1024;
+// Legitimate ACK bursts are small bytes, not thousands of full-sized records.
+const PEER_INGRESS_BYTES: usize = 8 * 1024 * 1024;
+/// Total bytes queued across every peer on this uplink. Without this, 32
+/// peers could each hold their own per-peer allowance at the same time.
+const MAX_TOTAL_INGRESS_BYTES: usize = 64 * 1024 * 1024;
 const PEER_INGRESS_QUEUE: usize = 4096;
 struct IngressRecord {
     payload: Vec<u8>,
     _budget: tokio::sync::OwnedSemaphorePermit,
+    _shared: tokio::sync::OwnedSemaphorePermit,
 }
 
 struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
@@ -249,6 +258,7 @@ struct PeerSlot {
     generation: u64,
     inbound: mpsc::Sender<IngressRecord>,
     ingress_budget: Arc<tokio::sync::Semaphore>,
+    shared_ingress: Arc<tokio::sync::Semaphore>,
     remote_sequence: u64,
     outbound_flow: StreamFlow,
 }
@@ -434,6 +444,7 @@ async fn run_once(
     let socket_writer = AbortOnDrop(socket_writer);
     let peers: Peers = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let pending: Pending = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let shared_ingress = Arc::new(tokio::sync::Semaphore::new(MAX_TOTAL_INGRESS_BYTES));
     let admission_slots = Arc::new(tokio::sync::Semaphore::new(MAX_PENDING));
     let generation = Arc::new(AtomicU64::new(0));
     let tasks = PeerTasks::default();
@@ -461,6 +472,7 @@ async fn run_once(
                             &peers,
                             &pending,
                             &admission_slots,
+                            &shared_ingress,
                             &generation,
                             &tasks,
                         ),
@@ -519,6 +531,7 @@ async fn receive(
     peers: &Peers,
     pending: &Pending,
     admission_slots: &Arc<tokio::sync::Semaphore>,
+    shared_ingress: &Arc<tokio::sync::Semaphore>,
     generation: &Arc<AtomicU64>,
     tasks: &PeerTasks,
 ) -> Result<()> {
@@ -561,6 +574,7 @@ async fn receive(
                 peers.clone(),
                 pending.clone(),
                 admission_slots.clone(),
+                shared_ingress.clone(),
                 cancelled,
                 frame,
                 peer_generation,
@@ -571,7 +585,7 @@ async fn receive(
         }
         Kind::Data => {
             let bytes = u64::try_from(frame.payload.len())?;
-            let (inbound, ingress_budget, peer_generation, transport_flow) = {
+            let (inbound, ingress_budget, shared_budget, peer_generation, transport_flow) = {
                 let mut peers = peers.lock().await;
                 let Some(slot) = peers.get_mut(&frame.stream_id) else {
                     drop(peers);
@@ -588,6 +602,7 @@ async fn receive(
                 (
                     slot.inbound.clone(),
                     slot.ingress_budget.clone(),
+                    slot.shared_ingress.clone(),
                     slot.generation,
                     slot.outbound_flow.is_transport(),
                 )
@@ -596,25 +611,32 @@ async fn receive(
             // were not accepted, and never silently discard an application
             // frame. Overload detaches this physical carrier; the logical
             // owner's journal remains responsible for authenticated recovery.
-            let admitted = ingress_budget
-                .try_acquire_many_owned(u32::try_from(bytes)?)
-                .map_err(|_| "byte-budget-full")
-                .and_then(|permit| {
-                    inbound
-                        .try_send(IngressRecord {
-                            payload: frame.payload,
-                            _budget: permit,
-                        })
-                        .map_err(|error| match error {
-                            mpsc::error::TrySendError::Full(record)
-                                if record.payload.len() <= 256 =>
-                            {
-                                "small-record-queue-full"
-                            }
-                            mpsc::error::TrySendError::Full(_) => "data-record-queue-full",
-                            mpsc::error::TrySendError::Closed(_) => "queue-closed",
-                        })
-                });
+            // Take the shared allowance first so one peer cannot occupy the
+            // whole uplink's queue, then the per-peer allowance. Both permits
+            // travel with the record and are released once it is consumed.
+            let amount = u32::try_from(bytes)?;
+            let admitted: Result<(), &'static str> =
+                match shared_budget.try_acquire_many_owned(amount) {
+                    Err(_) => Err("shared-byte-budget-full"),
+                    Ok(shared) => match ingress_budget.try_acquire_many_owned(amount) {
+                        Err(_) => Err("peer-byte-budget-full"),
+                        Ok(permit) => inbound
+                            .try_send(IngressRecord {
+                                payload: frame.payload,
+                                _budget: permit,
+                                _shared: shared,
+                            })
+                            .map_err(|error| match error {
+                                mpsc::error::TrySendError::Full(record)
+                                    if record.payload.len() <= 256 =>
+                                {
+                                    "small-record-queue-full"
+                                }
+                                mpsc::error::TrySendError::Full(_) => "data-record-queue-full",
+                                mpsc::error::TrySendError::Closed(_) => "queue-closed",
+                            }),
+                    },
+                };
             if let Err(code) = admitted {
                 state
                     .diagnostics
@@ -693,6 +715,7 @@ async fn serve_peer(
     peers: Peers,
     pending: Pending,
     admission_slots: Arc<tokio::sync::Semaphore>,
+    shared_ingress: Arc<tokio::sync::Semaphore>,
     cancelled: Arc<Notify>,
     frame: Frame,
     generation: u64,
@@ -706,7 +729,7 @@ async fn serve_peer(
                 .await.context("Fabric admission queue timed out")??;
             serve_peer_inner(
                 state, &admission_source, &writer, &peers, &pending,
-                &frame, generation, permit, cancelled.clone(),
+                &frame, generation, permit, cancelled.clone(), &shared_ingress,
             ).await
         } => result,
     };
@@ -742,6 +765,7 @@ async fn serve_peer_inner(
     generation: u64,
     admission_permit: tokio::sync::OwnedSemaphorePermit,
     cancelled: Arc<Notify>,
+    shared_ingress: &Arc<tokio::sync::Semaphore>,
 ) -> Result<()> {
     let hello: PeerHello =
         serde_json::from_slice(&frame.payload).context("invalid Fabric peer hello")?;
@@ -809,6 +833,7 @@ async fn serve_peer_inner(
             generation,
             inbound: ingress,
             ingress_budget,
+            shared_ingress: shared_ingress.clone(),
             remote_sequence: 0,
             outbound_flow: flow.clone(),
         },
@@ -1500,6 +1525,26 @@ mod tests {
         assert_eq!(
             transport_flow_url("wss://relay.example/fabric/v2?ticket=one-use").unwrap(),
             "wss://relay.example/fabric/v2?ticket=one-use&flow=transport-v1"
+        );
+    }
+
+    #[test]
+    fn ingress_budget_covers_a_full_legitimate_stream_window() {
+        // A sender may legally have one full stream window in flight, so the
+        // queue that receives it must be able to hold at least that much.
+        // Otherwise ordinary uploads trip the overflow path and the peer
+        // stream is detached for no protocol reason.
+        assert!(
+            PEER_INGRESS_BYTES >= 2 * genehub_proto::INITIAL_STREAM_WINDOW_BYTES as usize,
+            "per-peer ingress must hold a full stream window with headroom"
+        );
+        assert!(
+            MAX_TOTAL_INGRESS_BYTES > PEER_INGRESS_BYTES,
+            "the shared budget must bound more than one peer"
+        );
+        assert!(
+            MAX_TOTAL_INGRESS_BYTES >= 4 * PEER_INGRESS_BYTES,
+            "the shared budget must allow several concurrent peers"
         );
     }
 

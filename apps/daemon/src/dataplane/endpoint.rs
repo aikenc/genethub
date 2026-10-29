@@ -22,7 +22,12 @@ const WRITER_COMMAND_QUEUE: usize = 1024;
 const STREAM_CHUNK_QUEUE: usize = 256;
 const EVENT_QUEUE: usize = 256;
 const MAX_RPC_BODY_BYTES: usize = 3 * 1024 * 1024;
-const MAX_SUBSCRIPTIONS: usize = 64;
+// One logical peer may follow many sessions at once: a single browser window
+// can open a transcript per visible session, and the team view follows every
+// member's session. The previous cap of 64 was silently enforced — a 65th
+// subscribe was answered successfully and then dropped, so the client waited
+// forever for events that never came.
+const MAX_SUBSCRIPTIONS: usize = 512;
 
 pub const RESET_CANCELLED: u32 = 1;
 pub const RESET_PROTOCOL: u32 = 2;
@@ -1590,6 +1595,12 @@ async fn apply_side_effect(services: &PeerServices, effect: SideEffect) {
             if !subscriptions.tasks.contains_key(&session_id)
                 && subscriptions.tasks.len() >= MAX_SUBSCRIPTIONS
             {
+                services.state.diagnostics.record(
+                    "dataplane",
+                    "subscription",
+                    "refused",
+                    Some("subscription-limit"),
+                );
                 return;
             }
             if let Some(previous) = subscriptions.tasks.remove(&session_id) {
