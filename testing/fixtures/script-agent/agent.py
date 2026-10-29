@@ -292,6 +292,16 @@ class FixtureSession(Session):
 
     async def turn(self, turn_id: str, text: str) -> None:
         item = turn_id + "-reply"
+        # Optional single tool item per turn, so a round has visible process
+        # content even when the profile only emits text. Tests that check
+        # process ownership per user message need this; everything else leaves
+        # it off.
+        if CONTROL.get("tool"):
+            tool_id = turn_id + "-tool"
+            command = "echo " + str(CONTROL["tool"])
+            self.ctx.emit(events.item(turn_id, events.tool_call(
+                tool_id, str(CONTROL["tool"]), "ok", events.shell_detail(command, str(CONTROL["tool"]), 0),
+            )))
         if CONTROL.get("processTree") and not self.agent.tree_started:
             self.agent.tree_started = True
             tree = await self.cli.tree()
@@ -397,6 +407,8 @@ class FixtureSession(Session):
                 journal("continuation-received", matched=CONTROL["expectedResume"] in text)
             for index in range(CHUNKS):
                 self.say(turn_id, item, "chunk-%d " % index, index == 0)
+                if CONTROL.get("chunkIntervalMs", 0) > 0:
+                    await asyncio.sleep(float(CONTROL["chunkIntervalMs"]) / 1000.0)
             self.complete(turn_id)
             return
 

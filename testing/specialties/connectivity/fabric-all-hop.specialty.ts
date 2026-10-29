@@ -254,8 +254,12 @@ for (const v of variants) defineSpecialty({
       "the declared forward-only ACK-path pause was not applied and restored on time");
     if (controlSession) {
       const stopped = await o.client.call({ type: "session.get", payload: { sessionId: controlSession } });
-      const singlePhysical = v.nodes === 1 && v.browsers === 1;
-      t.assertions.assert((interruptOk || (singlePhysical && interruptMs !== null)) && stopped?.type === "snapshot" && (!interruptOk || !!stopped.data.summary.inputSummary?.paused), "remote interrupt failed to retain the Human pause");
+      // Every topology must actually pause, including the single-physical
+      // fallback: a slow but successful interrupt is degradation, a refused one
+      // is a defect. The single-lane case keeps its own latency budget in the
+      // rpc measurement above; it does not get an exemption here.
+      t.assertions.assert(interruptOk && stopped?.type === "snapshot" && !!stopped.data.summary.inputSummary?.paused,
+        `remote interrupt failed to retain the Human pause (ok=${interruptOk}, ms=${interruptMs})`);
     }
     t.assertions.assert(v.scenario !== "hot-drop" || hotBusy, "hot-drop happened only after bulk output had already completed");
     t.assertions.assert(summary.lateFrameTail === 0, "cancelled old data was charged as a node-wide protocol violation");

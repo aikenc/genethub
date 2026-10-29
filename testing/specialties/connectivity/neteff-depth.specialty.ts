@@ -27,7 +27,11 @@ type ProductClient = Opened["client"];
 
 const MIB = 1024 * 1024;
 const LINK_BANDWIDTH_MBPS = 100;
-const DIRECT_TARGET_UTILIZATION = 0.7;
+// Direct paths must reach the same share of plain TCP as before the pacing
+// removal. Measured samples at the 2MiB local lookahead are 94.6% (0ms RTT),
+// 96.0% (100ms) and 85.8% (200ms), so 85% is the honest floor rather than a
+// relaxed target.
+const DIRECT_TARGET_UTILIZATION = 0.85;
 const RELAY_TARGET_UTILIZATION = 0.7;
 // Relay remains on the recorded baseline until phase 2. Direct is promoted to
 // its product target as part of phase 1.
