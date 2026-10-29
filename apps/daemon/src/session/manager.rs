@@ -4053,7 +4053,6 @@ impl SessionManager {
         outcome: PermissionOutcome,
         providers: &ProviderMap,
     ) -> Result<()> {
-        let mut outcome = outcome;
         let live = self.live(session_id).await?;
         let _interaction = live.interaction_lock.lock().await;
         let previous = live.meta.lock().await.human_continuation.clone();

@@ -753,7 +753,6 @@ impl SessionManager {
         let Some(anchor) = anchor else {
             return Ok(());
         };
-        let summary = [self.summary(&meta.id).await?];
         let consultation = !live.pending_permissions.lock().await.is_empty();
         // Deferred lanes are announced as counts and ids only. Their content
         // is deliberately withheld: an Agent that needs it reads the

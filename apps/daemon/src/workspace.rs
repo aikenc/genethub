@@ -883,7 +883,7 @@ impl Workspaces {
         if cursor.parent_workspace_id.is_some() {
             anyhow::bail!("AgentSpace tree exceeds the supported depth");
         }
-        if !entries.get(root_id).is_some_and(|entry| !entry.removed) {
+        if entries.get(root_id).is_none_or(|entry| entry.removed) {
             anyhow::bail!("the project AgentSpace is not open");
         }
 

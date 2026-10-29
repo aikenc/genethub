@@ -1196,7 +1196,7 @@ impl Store {
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         let header: MetaHeader = serde_json::from_str(&raw)
             .with_context(|| format!("reading the header of {}", path.display()))?;
-        self.load_meta_from(workspace_id, session_id, &path, &raw, header)
+        self.load_meta_from(workspace_id, session_id, &raw, header)
     }
 
     /// Parses one already-read `meta.json`. `list_meta` reads and parses each
@@ -1205,7 +1205,6 @@ impl Store {
         &self,
         workspace_id: &str,
         session_id: &str,
-        path: &Path,
         raw: &str,
         header: MetaHeader,
     ) -> Result<SessionMeta> {
@@ -1322,7 +1321,7 @@ impl Store {
                 let Some(workspace_id) = owner else {
                     continue;
                 };
-                match self.load_meta_from(&workspace_id, &session_id, &path, &raw, header) {
+                match self.load_meta_from(&workspace_id, &session_id, &raw, header) {
                     Ok(meta) => out.push(meta),
                     Err(error) => tracing::warn!(
                         session = %session_id,
