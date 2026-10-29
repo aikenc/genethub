@@ -405,20 +405,42 @@ pub fn own_group(command: &mut crate::os_process::Command) {
 /// A forced group kill for shutdown paths that cannot wait. The caller has
 /// already decided the process tree is abandoned; no identity recheck applies.
 #[cfg(unix)]
-pub async fn kill_group(group: u32) {
+pub async fn kill_group(group: u32) -> std::io::Result<()> {
     signal_group(group, libc::SIGKILL);
+    Ok(())
 }
 
 #[cfg(target_family = "wasm")]
-pub async fn kill_group(group: u32) {
-    let mut command = crate::os_process::Command::new("kill");
-    command.args(["-KILL", &format!("-{group}")]);
-    let _ = command.output().await;
+pub async fn kill_group(group: u32) -> std::io::Result<()> {
+    // The guest runs on Linux and Windows hosts. `kill -KILL -pgid` is not a
+    // Windows command, and a failed kill must not be swallowed: shutdown then
+    // reports what it could not stop instead of leaving a silent orphan.
+    let mut command = if crate::guest_paths::windows_host() {
+        let mut command = crate::os_process::Command::new("taskkill.exe");
+        command.args(["/T", "/F", "/PID", &group.to_string()]);
+        command
+    } else {
+        let mut command = crate::os_process::Command::new("kill");
+        command.args(["-KILL", &format!("-{group}")]);
+        command
+    };
+    command.kill_on_drop(true);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(5), command.output())
+        .await
+        .map_err(|_| std::io::Error::other("the group kill did not finish within 5s"))??;
+    if !output.status.success() {
+        return Err(std::io::Error::other(format!(
+            "the group kill failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
-pub async fn kill_group(group: u32) {
+pub async fn kill_group(group: u32) -> std::io::Result<()> {
     stop_tree(group);
+    Ok(())
 }
 
 /// `tokio`'s own `kill_on_drop` stops the process it spawned and nothing

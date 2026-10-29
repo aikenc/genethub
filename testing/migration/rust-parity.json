@@ -3183,15 +3183,22 @@
       "tsId": "specialty.concurrency.parallel-workspaces",
       "tsRunId": "261029-2042-change-6ccf",
       "reason": "The retired Rust run 261028-2205 recorded inputDrift=true and never qualified; the runner and source are gone, so no accepted same-run Rust evidence exists. The TS business oracle is covered; only measurement-only deltas remain.",
-      "coverageDelta": "TS covers 10/20 workspaces, one own turn each, 4/8 extra observer clients, and workspace.list plus file.tree responsiveness under load; native resource counts, a real 4/8-browser fleet and poll timing are not reproduced."
+      "coverageDelta": "TS covers 10/20 workspaces, one own turn each, 4/8 extra observer clients, and workspace.list plus file.tree responsiveness under load; native resource counts, a real 4/8-browser fleet and poll timing are not reproduced.",
+      "tsIds": [
+        "specialty.concurrency.parallel-workspaces"
+      ]
     },
     {
       "oldId": "rust.concurrency.blocking_canaries_locate_the_global_stall",
       "suite": "concurrency",
-      "tsId": "specialty.concurrency.parallel-workspaces",
-      "tsRunId": "261029-2042-change-6ccf",
+      "tsId": "specialty.concurrency.slow-model-unrelated-reads",
+      "tsRunId": "261029-2102-change-68aa",
       "reason": "The retired Rust run 261028-2205 recorded inputDrift=true and never qualified; the runner and source are gone, so no accepted same-run Rust evidence exists. The TS business oracle is covered; only measurement-only deltas remain.",
-      "coverageDelta": "TS covers 10/20 workspaces, one own turn each, 4/8 extra observer clients, and workspace.list plus file.tree responsiveness under load; native resource counts, a real 4/8-browser fleet and poll timing are not reproduced."
+      "coverageDelta": "TS proves workspace.list stays under 500ms during a delayed mock turn and during a 900ms git.status wrapper; slow-git also proves file.tree under 500ms. It does not copy pause_inbound preview flood or native_resource_count.",
+      "tsIds": [
+        "specialty.concurrency.slow-model-unrelated-reads",
+        "specialty.concurrency.slow-git-unrelated-reads"
+      ]
     }
   ],
   "openGapReview": "These rows are not retired and must not be counted as taken over. Replacing them needs a new same-artifact evidence run or an explicit Human decision to accept TS-only coverage."

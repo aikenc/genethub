@@ -359,17 +359,37 @@ impl Processes {
     }
 
     /// Last-resort group kill for sessions abandoned by the shutdown deadline.
-    pub(crate) async fn kill_watched_groups(&self, session_ids: &[String]) {
-        let groups: Vec<u32> = {
+    pub(crate) async fn kill_watched_groups(&self, session_ids: &[String]) -> usize {
+        let agents: Vec<Agent> = {
             let watched = self.agents.read().await;
             session_ids
                 .iter()
-                .filter_map(|id| watched.get(id).map(|agent| agent.group))
+                .filter_map(|id| watched.get(id).copied())
                 .collect()
         };
-        for group in groups {
-            crate::process::kill_group(group).await;
+        let Some(census) = census().await else {
+            tracing::warn!(
+                "cannot verify groups for forced shutdown: the operating system did not answer"
+            );
+            return 0;
+        };
+        let mut stopped = 0;
+        for agent in agents {
+            // Recheck that the group still exists before aiming a SIGKILL at
+            // the number. A group id outlives its leader only while members
+            // remain; a reused number with no matching group is skipped.
+            let present = census.iter().any(|row| row.group == agent.group);
+            if !present {
+                continue;
+            }
+            match crate::process::kill_group(agent.group).await {
+                Ok(()) => stopped += 1,
+                Err(error) => {
+                    tracing::warn!(group = agent.group, %error, "forced group kill failed");
+                }
+            }
         }
+        stopped
     }
 
     /// Ends everything a session left running, but not the agent itself.

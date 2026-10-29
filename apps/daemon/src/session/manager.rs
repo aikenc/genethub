@@ -4826,7 +4826,12 @@ impl SessionManager {
         // One census for every session, before any Agent closes: detached
         // tools are still attributable here. Same-group tools are killed by
         // each Agent's own close, so they are deliberately left to it.
-        let detached = self.processes.stop_detached_for(&ids).await;
+        let detached = tokio::time::timeout(
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
+            self.processes.stop_detached_for(&ids),
+        )
+        .await
+        .unwrap_or(0);
         if detached > 0 {
             tracing::info!(
                 count = detached,
@@ -4867,7 +4872,23 @@ impl SessionManager {
             // Their Agents were dropped without finishing their abort path;
             // a plain kill_on_drop would stop only the leader. Take the whole
             // watched group down so the host does not leave a tree behind.
-            self.processes.kill_watched_groups(&abandoned).await;
+            // Five seconds on top of the 30s drain is the hard ceiling.
+            match tokio::time::timeout(
+                Duration::from_secs(5),
+                self.processes.kill_watched_groups(&abandoned),
+            )
+            .await
+            {
+                Ok(stopped) => tracing::warn!(
+                    stopped,
+                    abandoned = abandoned.len(),
+                    "forced shutdown ended watched groups"
+                ),
+                Err(_) => tracing::error!(
+                    abandoned = abandoned.len(),
+                    "forced group kill exceeded its 5s budget"
+                ),
+            }
         }
     }
 }
