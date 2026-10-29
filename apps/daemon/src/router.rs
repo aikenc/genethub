@@ -2009,6 +2009,17 @@ async fn dispatch(
             {
                 return Handled::err(ErrorCode::Forbidden, "provider 配置须由 Human 通过专用提交入口确认；普通会话答案不能保存密钥或授予配置权限");
             }
+            // A tool permission is addressed to the Human. A Session
+            // Controller (the Agent's own CLI or another Agent) must not be
+            // able to approve the request it caused.
+            if kind == Some(genehub_proto::PermissionRequestKind::Permission)
+                && caller.session_controller_id().is_some()
+            {
+                return Handled::err(
+                    ErrorCode::Forbidden,
+                    "Agent/CLI 不能替用户批准工具权限",
+                );
+            }
             // A question in the caller's own Session is addressed to its
             // Human. Answering another Session's question (a PM deciding a
             // reviewer's recovery choice) stays an Agent-to-Agent path.

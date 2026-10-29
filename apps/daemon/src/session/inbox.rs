@@ -295,45 +295,57 @@ impl SessionManager {
 
     pub(crate) async fn recover_deliveries(&self) -> Result<()> {
         for meta in self.store.list_meta()? {
-            let has_input = meta
-                .inbox
-                .entries
-                .iter()
-                .any(|entry| entry.state != "handled");
-            let has_decision = meta
-                .human_continuation
-                .as_ref()
-                .is_some_and(|c| !c.completed);
             if !meta.openable() {
                 continue;
             }
-            if let Some(decision) = &meta.human_continuation {
+            let session_id = meta.id.clone();
+            let recovered: Result<()> = async {
+                let has_input = meta
+                    .inbox
+                    .entries
+                    .iter()
+                    .any(|entry| entry.state != "handled");
+                let has_decision = meta
+                    .human_continuation
+                    .as_ref()
+                    .is_some_and(|c| !c.completed);
+                if let Some(decision) = &meta.human_continuation {
+                    let live = self.live(&meta.id).await?;
+                    self.record_human_response(&live, decision).await?;
+                }
+                let provider_pending = meta.pending_permission.as_ref().is_some_and(|request| {
+                    request.kind == PermissionRequestKind::ProviderConfiguration
+                });
+                if !(has_input || has_decision || provider_pending) {
+                    return Ok(());
+                }
                 let live = self.live(&meta.id).await?;
-                self.record_human_response(&live, decision).await?;
-            }
-            let provider_pending = meta.pending_permission.as_ref().is_some_and(|request| {
-                request.kind == PermissionRequestKind::ProviderConfiguration
-            });
-            if !(has_input || has_decision || provider_pending) {
-                continue;
-            }
-            let live = self.live(&meta.id).await?;
-            let chat = self.store.load_chat(&meta.workspace_id, &meta.id)?;
-            let mut current = live.meta.lock().await;
-            let mut next = current.clone();
-            for entry in &mut next.inbox.entries {
-                if entry.state == "receiving"
-                    && chat.items.iter().any(|item| item.id() == entry.message_id)
-                {
-                    entry.state = "queued".into();
+                let chat = self.store.load_chat(&meta.workspace_id, &meta.id)?;
+                let mut current = live.meta.lock().await;
+                let mut next = current.clone();
+                for entry in &mut next.inbox.entries {
+                    if entry.state == "receiving"
+                        && chat.items.iter().any(|item| item.id() == entry.message_id)
+                    {
+                        entry.state = "queued".into();
+                    }
+                    if entry.state == "sent" && entry.turn_id.as_ref().is_some_and(|turn_id| chat.items.iter().any(|item|
+                        matches!(item, TimelineItem::TurnSummary { stats, .. } if &stats.turn_id == turn_id && stats.outcome == TurnOutcome::Completed))) {
+                        entry.state = "handled".into();
+                    }
                 }
-                if entry.state == "sent" && entry.turn_id.as_ref().is_some_and(|turn_id| chat.items.iter().any(|item|
-                    matches!(item, TimelineItem::TurnSummary { stats, .. } if &stats.turn_id == turn_id && stats.outcome == TurnOutcome::Completed))) {
-                    entry.state = "handled".into();
-                }
+                self.store.save_meta(&next)?;
+                *current = next;
+                Ok(())
             }
-            self.store.save_meta(&next)?;
-            *current = next;
+            .await;
+            if let Err(error) = recovered {
+                tracing::warn!(
+                    session = %session_id,
+                    %error,
+                    "recovering accepted input failed; continuing with the other sessions"
+                );
+            }
         }
         Ok(())
     }
