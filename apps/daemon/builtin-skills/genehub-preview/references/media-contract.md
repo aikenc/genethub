@@ -1,5 +1,9 @@
 # 媒体架构与适配契约
 
+本页描述 `media.client` 缺省时的既有可信媒体面板。`client:"html"` / `remote-desktop/1` 为可选扩展：
+普通 H5 拥有 PeerConnection，使用登记的 session/control WS 交换候选与控制，见
+[远程桌面](remote-desktop.md)。两种模式共用既有登记、services 权限、HTTP/WS 桥和 ICE/TURN。
+
 ## 三条独立路径
 
 ```text

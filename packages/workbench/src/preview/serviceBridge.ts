@@ -1,5 +1,11 @@
-import { useEffect, type RefObject } from "react";
-import type { ServicePreviewClient } from "./serviceClient";
+import { useEffect, useRef, type RefObject } from "react";
+import { htmlServiceMedia, servicePathname, type ServicePreviewClient } from "./serviceClient";
+
+export type ServiceBridgePolicy = {
+  allowTurn: boolean;
+  allowControl: boolean;
+  onControlState?: (state: "granted" | "released" | "waiting-for-yield" | "release-pending" | "release-unconfirmed") => void;
+};
 
 const SOURCE = "genehub-service-v1";
 /** The frame never receives a Client or a registration credential. Each operation
@@ -8,9 +14,20 @@ export function useServiceBridge(
   frame: RefObject<HTMLIFrameElement>,
   service: ServicePreviewClient | null | undefined,
   generation: string | null,
+  policy?: ServiceBridgePolicy,
 ) {
+  const policyRef = useRef(policy);
+  policyRef.current = policy;
+  const serviceRef = useRef(service);
+  serviceRef.current = service;
+  const controls = useRef(new Set<() => void>());
+  useEffect(() => {
+    if (!policy?.allowControl) for (const close of controls.current) close();
+    frame.current?.contentWindow?.postMessage({ source: SOURCE, kind: "available" }, "*");
+  }, [frame, policy?.allowControl, policy?.allowTurn]);
   useEffect(() => {
     if (!service) return;
+    const media = htmlServiceMedia(service.descriptor);
     const active = new Set<() => void>();
     const receive = (event: MessageEvent) => {
       if (
@@ -20,11 +37,38 @@ export function useServiceBridge(
         return;
       const port = event.ports[0];
       if (!port) return;
+      if (serviceRef.current !== service) {
+        port.postMessage({ kind: "error", message: "本次预览服务已变化，请重新启用" });
+        port.close();
+        return;
+      }
       const data = event.data;
+      if (data.kind === "describe" || data.kind === "ice") {
+        if (!media || active.size >= 10) {
+          port.postMessage({ kind: "error", message: "本次预览未启用 HTML 媒体" });
+          port.close();
+          return;
+        }
+        let closed = false;
+        const close = () => { closed = true; active.delete(close); port.close(); };
+        active.add(close);
+        const result = data.kind === "describe"
+          ? Promise.resolve({ descriptor: service.descriptor, controlAllowed: !!policyRef.current?.allowControl })
+          : service.ice(!!policyRef.current?.allowTurn).then(iceServers => ({ iceServers }));
+        void result.then(value => {
+          if (!closed && serviceRef.current === service) port.postMessage({ kind: "result", value });
+        }).catch(() => {
+          if (!closed) port.postMessage({ kind: "error", message: "媒体配置不可用，请检查服务或中继设置" });
+        }).finally(close);
+        return;
+      }
+      const path = typeof data.path === "string" ? servicePathname(data.path) : null;
+      const control = !!media && path === media.controlPath;
       if (
         active.size >= 10 ||
         typeof data.path !== "string" ||
-        !service.allows(data.path, data.kind === "ws")
+        !service.allows(data.path, data.kind === "ws") ||
+        (media && (!path || (control && (data.kind !== "ws" || !policyRef.current?.allowControl))))
       ) {
         port.postMessage({
           kind: "error",
@@ -45,6 +89,12 @@ export function useServiceBridge(
       const close = () => {
         if (closed) return;
         closed = true;
+        // MessagePort.close() has no remote close event. Tell the opaque
+        // client's WS shim before retiring the port, otherwise it stays OPEN
+        // after the trusted toolbar has already revoked its source bridge.
+        if (data.kind === "ws") port.postMessage({
+          kind: "error", message: "本次服务连接已关闭，请重新连接",
+        });
         acknowledge?.();
         acknowledge = null;
         controller.abort();
@@ -52,8 +102,11 @@ export function useServiceBridge(
         ws?.close();
         port.close();
         active.delete(close);
+        controls.current.delete(close);
+        if (control) policyRef.current?.onControlState?.("release-pending");
       };
       active.add(close);
+      if (control) controls.current.add(close);
       const error = () => {
         if (!closed)
           port.postMessage({
@@ -64,6 +117,7 @@ export function useServiceBridge(
       };
       port.onmessage = (message) => {
         if (closed) return;
+        if (serviceRef.current !== service) { close(); return; }
         if (message.data?.kind === "cancel") {
           close();
           return;
@@ -93,6 +147,7 @@ export function useServiceBridge(
             .catch(error);
         }
         if (message.data?.kind === "send" && ws) {
+          if (control && !policyRef.current?.allowControl) { close(); return; }
           const payload =
             message.data.bytes instanceof ArrayBuffer
               ? new Uint8Array(message.data.bytes)
@@ -137,6 +192,18 @@ export function useServiceBridge(
         } else if (data.kind === "ws") {
           ws = await service.websocket(data.path, async (packet) => {
             if (closed) return;
+            if (serviceRef.current !== service) { close(); return; }
+            if (media && (control || path === media.sessionPath) && packet[0] === 0) {
+              // Only source-app events on the protected control WS may update
+              // trusted chrome. Messages posted by the page never enter here.
+              try {
+                const outer = JSON.parse(new TextDecoder().decode(packet.subarray(1)));
+                const event = outer.kind === "text" ? JSON.parse(outer.text) : null;
+                const state = event?.params?.state;
+                if (event?.event === "control.state" && ["granted", "released", "waiting-for-yield", "release-unconfirmed"].includes(state) && (state !== "granted" || policyRef.current?.allowControl))
+                  policyRef.current?.onControlState?.(state);
+              } catch { /* Application data still goes to its own client. */ }
+            }
             const bytes = packet.slice();
             await new Promise<void>((resolve) => {
               const timer = setTimeout(close, 30000);
@@ -172,6 +239,9 @@ const SOURCE=${JSON.stringify(SOURCE)};
 const nativeFetch=window.fetch.bind(window), NativeWebSocket=window.WebSocket;
 const pathOf=input=>{try{const raw=typeof input==='string'?input:input.url;if(raw.startsWith('/api/'))return raw;const u=new URL(raw,document.baseURI);return u.hostname==='preview.invalid'&&u.pathname.startsWith('/api/')?u.pathname+u.search:null;}catch{return null;}};
 function open(data){const c=new MessageChannel();parent.postMessage({...data,source:SOURCE},'*',[c.port2]);c.port1.start();return c.port1;}
+function call(kind){return new Promise((resolve,reject)=>{const port=open({kind});const timer=setTimeout(()=>{port.close();reject(new Error('请先启用本次登记服务'));},15000);port.onmessage=e=>{const m=e.data;if(m.kind!=='result'&&m.kind!=='error')return;clearTimeout(timer);port.close();if(m.kind==='error')reject(new Error(m.message));else resolve(m.value);};});}
+Object.defineProperty(window,'genehubServicePreview',{value:Object.freeze({describe:()=>call('describe'),ice:()=>call('ice')}),configurable:false});
+window.addEventListener('message',event=>{if(event.source===parent&&event.data?.source===SOURCE&&event.data?.kind==='available')window.dispatchEvent(new Event('genehub-service-change'));});
 window.fetch=async function(input,init={}){
  const path=pathOf(input);if(!path)return nativeFetch(input,init);
  const original=input instanceof Request?new Request(input,init):null;

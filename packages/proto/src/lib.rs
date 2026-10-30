@@ -15,6 +15,8 @@ pub mod event;
 pub mod resume;
 pub mod rpc;
 pub mod speech;
+pub mod remote_desktop;
+pub use remote_desktop::*;
 pub mod timeline;
 
 pub use data::*;

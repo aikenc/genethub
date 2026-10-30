@@ -180,6 +180,13 @@ async fn load_entry(
     {
         anyhow::bail!("invalid service registration");
     }
+    // Only the new mode tightens media validation. Existing v1 services retain
+    // their original public representation and trusted-panel behaviour.
+    if run.media.get("client").is_some() {
+        let media: genehub_proto::ServicePreviewMedia = serde_json::from_value(run.media.clone())?;
+        let routes: Vec<genehub_proto::ServicePreviewRoute> = serde_json::from_value(run.routes.clone())?;
+        media.validate_client(&routes).map_err(|reason| anyhow!(reason))?;
+    }
     Ok(Some(run))
 }
 pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -> Result<()> {

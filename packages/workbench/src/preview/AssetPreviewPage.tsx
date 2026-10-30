@@ -3,10 +3,10 @@ import { PreviewFeedbackPanel } from "./PreviewFeedbackPanel";
 import { PreviewShareButton, PreviewShareCopyButton } from "./PreviewShareButton";
 import { PreviewFileFeedbackOpenContext, PreviewShareOpenContext } from "./PreviewToolbar";
 import type { PreviewSourceInfo } from "@genehub/proto";
-import { ServicePreviewClient, classifyServiceFailure } from "./serviceClient";
+import { ServicePreviewClient, classifyServiceFailure, htmlServiceMedia } from "./serviceClient";
 import { previewServiceInfo, PreviewServiceSection, type PreviewServiceInfo, type ServiceMark } from "./ServiceStatusMenu";
 import { ServiceMediaPanel } from "./ServiceMediaPanel";
-import { serviceBridgeScript, useServiceBridge } from "./serviceBridge";
+import { serviceBridgeScript, useServiceBridge, type ServiceBridgePolicy } from "./serviceBridge";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { AssetPreviewMetadata, SessionArtifactBundle } from "@genehub/proto";
@@ -46,7 +46,7 @@ import {
 import type { PixelSnapshot } from "./runtimeCapture";
 import { isAbsoluteFilePath, type AssetPreviewLocation } from "./url";
 import { uploadSessionArtifact } from "./sessionArtifactUpload";
-import { PreviewToolbarContext } from "./PreviewToolbar";
+import { PreviewToolbarContext, PreviewToolbarPortal } from "./PreviewToolbar";
 
 type ViewState =
   | { kind: "loading" }
@@ -709,13 +709,50 @@ function ServiceHtmlDocument(props: React.ComponentProps<typeof HtmlDocument> & 
   const [mark,setMark]=useState<ServiceMark|null>(null);
   const [generation,setGeneration]=useState(0);
   const [enabled,setEnabled]=useState(false);
+  const enabledBinding = useRef<{client: Client; key: string} | null>(null);
+  const bindingKey = JSON.stringify([props.workspaceHandle,props.entryPath,props.metadata.version,generation]);
+  const accessEnabled = enabled && enabledBinding.current?.client === props.client && enabledBinding.current?.key === bindingKey;
+  const [allowTurn,setAllowTurn]=useState(false);
+  const [allowControl,setAllowControl]=useState(false);
+  const [controlState,setControlState]=useState("released");
+  const htmlMedia = candidate ? htmlServiceMedia(candidate.descriptor) : null;
+  const releaseControl = useCallback(() => { setAllowControl(false); setControlState(state => state === "granted" || state === "waiting-for-yield" ? "release-pending" : state); }, []);
+  const onControlState = useCallback((state: "granted" | "released" | "waiting-for-yield" | "release-pending" | "release-unconfirmed") => {
+    setControlState(previous => state === "release-pending" && (previous === "released" || previous === "release-unconfirmed") ? previous : state);
+    if (state === "released" || state === "release-unconfirmed") setAllowControl(false);
+  }, []);
+  useEffect(() => {
+    if (controlState !== "release-pending") return;
+    // Closing a bridge is not proof of OS key release. If its confirmation
+    // path has also closed, show uncertainty instead of waiting indefinitely.
+    const timer=window.setTimeout(() => setControlState(state => state === "release-pending" ? "release-unconfirmed" : state),6000);
+    return () => window.clearTimeout(timer);
+  }, [controlState]);
+  useEffect(() => { if (!accessEnabled) releaseControl(); }, [accessEnabled, releaseControl]);
+  useEffect(() => {
+    if (!allowControl) return;
+    const lostFocus = () => { if (document.visibilityState === "hidden" || !document.hasFocus()) releaseControl(); };
+    const blur = () => { window.setTimeout(lostFocus, 0); };
+    const pointer = () => { if (!document.pointerLockElement) releaseControl(); };
+    window.addEventListener("blur", blur);
+    document.addEventListener("visibilitychange", lostFocus);
+    document.addEventListener("pointerlockchange", pointer);
+    return () => {
+      window.removeEventListener("blur", blur);
+      document.removeEventListener("visibilitychange", lostFocus);
+      document.removeEventListener("pointerlockchange", pointer);
+    };
+  }, [allowControl, releaseControl]);
   const supported = !!props.client.identity?.features?.includes("service.preview.v1");
-  const onToggle = useCallback(() => setEnabled(value => !value), []);
+  const onToggle = useCallback(() => {
+    if (accessEnabled) setEnabled(false);
+    else { enabledBinding.current={client:props.client,key:bindingKey}; setEnabled(true); }
+  }, [accessEnabled,props.client,bindingKey]);
   const onRecheck = useCallback(() => setGeneration(n => n + 1), []);
   const { onServiceChange } = props;
   useEffect(() => {
-    onServiceChange?.(mark ? previewServiceInfo(mark, enabled, onToggle, onRecheck) : null);
-  }, [enabled, mark, onRecheck, onServiceChange, onToggle]);
+    onServiceChange?.(mark ? previewServiceInfo(mark, accessEnabled, onToggle, onRecheck) : null);
+  }, [accessEnabled, mark, onRecheck, onServiceChange, onToggle]);
   useEffect(() => () => onServiceChange?.(null), [onServiceChange]);
   useEffect(() => props.client.onStateChange(state => {
     setEnabled(false);
@@ -729,9 +766,14 @@ function ServiceHtmlDocument(props: React.ComponentProps<typeof HtmlDocument> & 
     if(!supported)return;
     void ServicePreviewClient.discover(props.client,isAbsoluteFilePath(props.entryPath) ? "" : props.workspaceHandle,props.entryPath).then(value=>{loaded=value;if(cancelled || props.client.connectionState!=="ready")value?.close();else { setCandidate(value); setMark(value ? serviceMark(value) : { state: "absent" }); }}).catch(error=>{if(!cancelled)setMark(classifyServiceFailure(error));});
     return()=>{cancelled=true;loaded?.close();};
-  },[props.client,props.workspaceHandle,props.entryPath,generation,supported]);
-  return <>{enabled&&candidate?<ServiceMediaPanel service={candidate}/>:null}
-  <HtmlDocument {...props} service={enabled?candidate:null}/></>;
+  },[props.client,props.workspaceHandle,props.entryPath,props.metadata.version,generation,supported]);
+  return <>{htmlMedia ? <PreviewToolbarPortal>
+    <span className="truncate" title={candidate?.descriptor.name}>桌面共享 · {controlState === "granted" ? "正在控制" : controlState === "waiting-for-yield" ? "等待交还" : controlState === "release-pending" ? "等待源端释放" : controlState === "release-unconfirmed" ? "释放未确认，请检查源端" : "仅观看"}</span>
+    <label className="ml-2 flex items-center gap-1"><input type="checkbox" checked={allowTurn} onChange={event => { setAllowTurn(event.target.checked); setEnabled(false); setGeneration(n => n + 1); }}/>允许媒体中继</label>
+    <button type="button" disabled={!accessEnabled} className="ml-2 rounded border border-line px-2 py-1 disabled:opacity-40" onClick={() => allowControl ? releaseControl() : setAllowControl(true)}>{allowControl ? "交还控制" : "允许本页接管"}</button>
+    <button type="button" disabled={!accessEnabled} className="rounded border border-line px-2 py-1 disabled:opacity-40" onClick={() => setEnabled(false)}>停止观看</button>
+  </PreviewToolbarPortal> : accessEnabled&&candidate?<ServiceMediaPanel service={candidate}/>:null}
+  <HtmlDocument {...props} service={accessEnabled?candidate:null} servicePolicy={{allowTurn,allowControl:allowControl&&accessEnabled,onControlState}}/></>;
 }
 
 /** Exported for tests. */
@@ -752,8 +794,10 @@ export function HtmlDocument({
   onRuntimeReady,
   onOpenHtml,
   service = null,
+  servicePolicy,
 }: {
   service?: ServicePreviewClient | null;
+  servicePolicy?: ServiceBridgePolicy;
   bytes: Uint8Array;
   metadata: AssetPreviewMetadata;
   transfer?: AssetPreviewTransferStats;
@@ -780,7 +824,8 @@ export function HtmlDocument({
   const onScrollRef = useRef(onScroll); onScrollRef.current = onScroll;
   const onOpenHtmlRef = useRef(onOpenHtml);
   onOpenHtmlRef.current = onOpenHtml;
-  useServiceBridge(frameRef, service, srcDoc);
+  useServiceBridge(frameRef, service, srcDoc, servicePolicy);
+  const htmlMedia = service ? htmlServiceMedia(service.descriptor) : null;
   const eventsRef = useRef<PreviewRuntimeEvent[]>([]);
   const collectorReadyRef = useRef(false);
   const domRequestsRef = useRef(
@@ -1148,9 +1193,9 @@ export function HtmlDocument({
               key={srcDoc}
               ref={frameRef}
               title="HTML 文件预览"
-              sandbox="allow-scripts"
+              sandbox={htmlMedia ? "allow-scripts allow-pointer-lock" : "allow-scripts"}
               referrerPolicy="no-referrer"
-              allow="camera 'none'; microphone 'none'; geolocation 'none'; clipboard-read 'none'; clipboard-write 'none'; usb 'none'; serial 'none'; display-capture 'none'; fullscreen 'none'; presentation 'none'"
+              allow={`camera 'none'; microphone 'none'; geolocation 'none'; clipboard-read 'none'; clipboard-write 'none'; usb 'none'; serial 'none'; display-capture 'none'; fullscreen 'none'; presentation 'none'${htmlMedia ? "; autoplay *" : ""}`}
               srcDoc={srcDoc}
               onLoad={() => setFrameReady(true)}
               className="absolute inset-0 h-full w-full border-0 bg-white [isolation:isolate]"

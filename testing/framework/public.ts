@@ -143,3 +143,5 @@ export { recoverAbandonedLeases, registerLeaseWorker } from "../infrastructure/p
 
 export { openProviderSession } from "./flows/branches/provider.ts";
 export { openTeam } from "./flows/branches/team.ts";
+
+export { openCapturePreview, captureSocket } from "./drivers/capture.ts";

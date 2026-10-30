@@ -26,7 +26,7 @@ defineSpecialty(
     tags: ["network-risk-v2", "page-experience", "service-preview-media"],
     runner: "playwright",
     llm: { default: "none" },
-    expectedDurationMs: 15000,
+    expectedDurationMs: 35000,
     timeoutMs: 120000,
     resources: {
       environments: 1,
@@ -218,11 +218,17 @@ defineSpecialty(
       const health = await (await active.fetch("/api/media/health")).json();
       t.assertions.assert(health.sessions === 0, "media session leaked");
       const uiPage = await t.browser.newPage();
+      // A public one-use admission can expire while the consumer prepares.
+      // Force that failure precondition rather than depending on cold Vite
+      // timing, then obtain fresh admission at actual browser consumption.
+      const bootstrap = daemonEndpoint(opened.daemon);
+      await t.tools.waitUntil(() => Date.now() > bootstrap.localServerProof.expiresAt * 1000, 20000);
       const consumer = await openPreviewBrowser({
         openRoot: t.openRoot,
         lease: t.env,
         page: uiPage,
-        endpoint: daemonEndpoint(opened.daemon),
+        endpoint: bootstrap,
+        refreshEndpoint: () => daemonEndpoint(opened.daemon),
         workspaceId: opened.workspaceId,
         entryPath: `${opened.rootHandle}/index.html`,
       });

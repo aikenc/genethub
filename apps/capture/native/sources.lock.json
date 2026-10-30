@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "patch": "preflight-baseline-h264-input-display-identity-repeat/4",
+  "sources": [
+    {
+      "name": "directx-headers",
+      "repository": "https://github.com/microsoft/DirectX-Headers",
+      "revision": "27d63115c1037d0e4e119085f34345bd9ecf7ada",
+      "url": "https://codeload.github.com/microsoft/DirectX-Headers/tar.gz/27d63115c1037d0e4e119085f34345bd9ecf7ada",
+      "sha256": "b4306895ea8f768f7099ad4d016bad47ceaa46f3a36ca62835a1f5109b529a02",
+      "destination": "third_party/directx-headers",
+      "subtree": "",
+      "platforms": ["Windows"]
+    },
+    {
+      "name": "mw-native-host",
+      "repository": "https://github.com/linckosz/moonlight-web",
+      "revision": "ccd2f0566336fa78674fab66d5250725b12a98f5",
+      "url": "https://codeload.github.com/linckosz/moonlight-web/tar.gz/ccd2f0566336fa78674fab66d5250725b12a98f5",
+      "sha256": "4c5d3319d08122c191bc1c3729e0d39768f6d16c9ce4e98301d797dcabc06cc5",
+      "destination": ".",
+      "subtree": "backend/native-host"
+    },
+    {
+      "name": "opus",
+      "repository": "https://github.com/xiph/opus",
+      "revision": "ddbe48383984d56acd9e1ab6a090c54ca6b735a6",
+      "url": "https://codeload.github.com/xiph/opus/tar.gz/ddbe48383984d56acd9e1ab6a090c54ca6b735a6",
+      "sha256": "18e9d9e26565e279753aafb6823a482ef85ea9fddbfdcdbff8fd095b12dd96b6",
+      "destination": "third_party/opus",
+      "subtree": ""
+    },
+    {
+      "name": "openh264",
+      "repository": "https://github.com/cisco/openh264",
+      "revision": "652bdb7719f30b52b08e506645a7322ff1b2cc6f",
+      "url": "https://codeload.github.com/cisco/openh264/tar.gz/652bdb7719f30b52b08e506645a7322ff1b2cc6f",
+      "sha256": "7a060916a9fcb63ba51d83a4f2388660c0b58797be547c4fa5c52e8d65660a85",
+      "destination": "third_party/openh264",
+      "subtree": ""
+    }
+  ]
+}
