@@ -552,6 +552,11 @@ export type Confinement = { backend: IsolationBackend,
 roots: Array<string>, };
 
 /**
+ * Encrypted admission for one connection; no cross-carrier recovery identity.
+ */
+export type ConnectionAdmission = { "op": "create", policy: string, } | { "op": "created", id: string, } | { "op": "error", code: string, };
+
+/**
  * A client proving it is on the authorized list, without sending its secret.
  */
 export type DeviceAuth = { deviceId: string, 

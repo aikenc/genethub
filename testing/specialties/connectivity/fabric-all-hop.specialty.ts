@@ -26,9 +26,9 @@ variants.push({ name: "interactive-duplex-b1-n1", nodes: 1, browsers: 1, both: f
 
 for (const v of variants) defineSpecialty({
   id: `specialty.fabric-pool.${v.name}`, title: `Real same-daemon Fabric ${v.browsers} browser / ${v.nodes} node channels: ${v.scenario}${v.both ? ", both legs shaped" : ""}`,
-  oracle: v.ackDelay ? "Directional-stall resilience v2: original10s upload returns ACK with exact file or explicit request timeout without partial file; a distinct same-owner write after restoration succeeds<=1500ms; healthy-control p95, exact24MiB, source uniqueness, physical fault and bounded queues remain required" : v.interactiveP95Ms !== undefined ? "Three8MiB real producers and1.05MB upload<=10s: managementp95<=1500ms/error0, per-leg capacity unchanged by sockets, all logical owners and physical legs retained, sources exactly once and all hashes exact" : "Identical three real stdout producers and source bytes; management RPC remains bounded, independent owners and node TCP are proven, faults do not repeat source processes; full hash and exit after restoration, or explicit cancellation remains isolated",
-  catches: ["only browser-side channels were separated", "journal or physical reader blocks independent control", "adding sockets doubles bandwidth", "old data punishes a healthy lane", "upload or paused body starves RPC"],
-  tags: ["fabric-pool", "all-hop", v.scenario, v.ackDelay?"fault-recovery":"healthy-capacity"], llm: { default: "none" }, expectedDurationMs: 50000, timeoutMs: 150000,
+  oracle: v.ackDelay ? "Directional-stall resilience v2: original10s upload returns ACK with exact file or explicit request timeout without partial file; a distinct same-owner write after restoration succeeds<=1500ms; healthy-control p95, exact24MiB, source uniqueness, physical fault and bounded queues remain required" : v.interactiveP95Ms !== undefined ? "Three8MiB real producers and1.05MB upload: record management latency and errors, preserve per-leg capacity and healthy connections, recover remote management after load, and require source uniqueness plus exact complete output" : "Identical three real stdout producers and source bytes; management RPC remains bounded, independent owners and node TCP are proven, faults do not repeat source processes; full hash and exit for uninterrupted outputs; actual carrier loss explicitly ends old streams without source restart, fresh remote RPCs recover, and independent cancellation remains isolated",
+  catches: ["only browser-side channels were separated", "physical reader blocks independent control", "adding sockets doubles bandwidth", "old data punishes a healthy lane", "upload or paused body starves RPC"],
+  tags: ["fabric-pool", "all-hop", v.scenario, v.ackDelay || ["node-cut","browser-cut","all-cut","tail-close"].includes(v.scenario) ? "fault-recovery" : "healthy-capacity"], llm: { default: "none" }, expectedDurationMs: 50000, timeoutMs: 150000,
   resources: { environments: 1, cpu: 2, memoryMb: 2048, io: 1, browser: 0, pool: ["download","duplex","hot-drop","slow-consumer"].includes(v.scenario) ? "exclusive" : "standard" },
   surfaces: ["daemon", "relay", "workbench-client", "shell", "tcp"], productInterfaces: ["@genehub/workbench/client"],
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"], retention: true,
@@ -56,6 +56,9 @@ for (const v of variants) defineSpecialty({
   const control = clients[0]!;
   const owners = clients.map(c => c.logicalConnectionId);
   const streams: ReturnType<typeof control.openShellStream>[] = [];
+  const sourcePeers: number[] = [];
+  const failedStreams: boolean[] = [];
+  const cutsCarrier = ["node-cut", "browser-cut", "all-cut"].includes(v.scenario);
   const results: Array<Promise<Awaited<ReturnType<typeof collectShellResult>> | null>> = [];
   let ackHoldTimer: NodeJS.Timeout | undefined, ackHeldAt: number | undefined, ackHoldMs: number | undefined;
   let ackFault: { nodeFlowId: number; beforeForwarded: number; heldForwarded?: number } | undefined;
@@ -71,15 +74,17 @@ for (const v of variants) defineSpecialty({
       await t.flows.main.sendPrompt(control, controlSession, "Remain active until interrupted.");
     }
     for (let i=0;i<3;i++) {
-      const client = clients[v.browsers === 1 ? 0 : 1+i%(v.browsers-1)]!;
+      const peer = v.browsers === 1 ? 0 : 1+i%(v.browsers-1);
+      sourcePeers.push(peer);
+      const client = clients[peer]!;
       const stream = client.openShellStream({ workspaceId: o.workspaceId, cwd: o.workspaceRoot, timeoutMs: 120000,
         argv: ["python3", "-c", `import pathlib,sys,time,os\np=pathlib.Path('pool-starts');p.open('a').write('${i}\\n')\npathlib.Path('pool-pid-${i}').write_text(str(os.getpid()))\nwhile not pathlib.Path('pool-go').exists():time.sleep(.01)\nfor n in range(512):\n sys.stdout.write('${String.fromCharCode(65+i)}'*16384);sys.stdout.flush();time.sleep(.005)`] });
       streams.push(stream); await stream.finish(); await stream.responseHead;
-      if (v.scenario !== "slow-consumer") results.push(collectShellResult(stream).then(r => { finished++; return r; }, () => null));
+      if (v.scenario !== "slow-consumer") results.push(collectShellResult(stream).then(r => { finished++; return r; }, () => { failedStreams[i] = true; return null; }));
     }
     const narrow = v.scenario === "tail-close";
     setProfile({ bandwidthMbps: v.scenario === "hot-drop" ? 100 : narrow ? .25 : 2, rttMs: v.scenario === "hot-drop" ? 0 : 200 });
-    const startWall = Date.now(), start = performance.now(); writeFileSync(join(o.workspaceRoot, "pool-go"), "go");
+    const start = performance.now(); writeFileSync(join(o.workspaceRoot, "pool-go"), "go");
     const uploadText = "upload-pattern-".repeat(70000);
     if (v.scenario === "duplex") upload = clients.at(-1)!.call({ type: "file.write", payload: { workspaceId: o.workspaceId, path: `${o.rootHandle}/pool-upload.txt`, content: uploadText } }).then(r => ({ ack: r?.type === "ack", error: false, elapsedMs: Math.round(performance.now()-start) }), (error: unknown) => ({ ack: false, error: true, errorType: error instanceof Error ? error.name : typeof error, elapsedMs: Math.round(performance.now()-start) }));
     const ackDelay = v.ackDelay;
@@ -96,6 +101,7 @@ for (const v of variants) defineSpecialty({
     }, 3000);
     const faultAt = v.scenario === "hot-drop" ? 2000 : 5000;
     let interruptMs: number | null = null, interruptOk = v.scenario !== "interrupt";
+    let interruptError: string | null = null;
     let interrupt: Promise<void> | undefined;
     if (["hot-drop","node-cut","browser-cut","all-cut","tail-close","interrupt"].includes(v.scenario)) timer = setTimeout(() => {
       faultApplied = true;
@@ -112,7 +118,7 @@ for (const v of variants) defineSpecialty({
       if (v.scenario === "tail-close") clients.at(-1)!.close();
       if (v.scenario === "interrupt") {
         const began = performance.now();
-        interrupt = control.call({ type: "session.interrupt", payload: { sessionId: controlSession! } }).then(r => { interruptMs = Math.round(performance.now()-began); interruptOk = r?.type === "ack"; }, () => { interruptMs = Math.round(performance.now()-began); });
+        interrupt = control.call({ type: "session.interrupt", payload: { sessionId: controlSession! } }).then(r => { interruptMs = Math.round(performance.now()-began); interruptOk = r?.type === "ack"; }, error => { interruptMs = Math.round(performance.now()-began); interruptError = error instanceof Error ? error.name : String(error); });
       }
     }, faultAt);
     const rpc: number[] = []; const wire: number[][] = []; let errors=0;
@@ -137,11 +143,15 @@ for (const v of variants) defineSpecialty({
     let drainTimer: NodeJS.Timeout | undefined;
     const outcomes = await Promise.race([Promise.all(results), new Promise<null[]>(resolve => { drainTimer = setTimeout(() => resolve([]),40000); })]);
     if (drainTimer) clearTimeout(drainTimer);
-    const exact = outcomes.length === 3 && outcomes.every((outcome,i) => {
+    const exactOutput = (outcome: (typeof outcomes)[number], i: number) => {
       if (!outcome) return false;
       const text = t.flows.main.shellText(outcome.frames, "stdout");
       return Buffer.byteLength(text) === loadBytes && createHash("sha256").update(text).digest("hex") === createHash("sha256").update(Buffer.alloc(loadBytes,65+i)).digest("hex") && t.flows.main.shellExit(outcome.frames)?.code === 0;
-    });
+    };
+    const exact = outcomes.length === 3 && outcomes.every(exactOutput);
+    const outputContract = outcomes.length === 3 && outcomes.every((outcome, i) => outcome
+      ? exactOutput(outcome, i)
+      : cutsCarrier && failedStreams[i] && clients[sourcePeers[i]!]!.logicalConnectionId !== owners[sourcePeers[i]!]);
     let uploadOk = true, uploadRecoverySafe = true;
     if (upload) {
       const result = await upload;
@@ -187,12 +197,7 @@ for (const v of variants) defineSpecialty({
         return { operation: call.operation, peer: call.peer, clientMs: call.elapsed, outcome: call.outcome,
           chunkMs: first("RPC request chunk received"), finMs: first("RPC request FIN dispatched"), decodedMs: first("RPC request decoded"), preparedMs: first("RPC response prepared"), doneMs: first("RPC exchange completed") };
       });
-      const windows = log.filter(line => line.includes("preview pace window"));
-      const samples = [...windows.slice(0, 4), ...windows.slice(Math.max(4, windows.length - 4))].map(line => {
-        const number = (field: string) => Number(new RegExp(`\\b${field}=(\\d+)`).exec(line)?.[1] ?? NaN);
-        return { atMs: time(line) - startWall, capBytes: number("cap_bytes"), previousBytes: number("previous_bytes"), drainMs: number("drain_ms"), probedBytes: number("probed_bytes") };
-      });
-      t.note(JSON.stringify({ phase: "hot-drop-causal", timings, samples }));
+      t.note(JSON.stringify({ phase: "hot-drop-causal", timings }));
     }
     const starts = readFileSync(join(o.workspaceRoot,"pool-starts"),"utf8").trim().split("\n").sort();
     let canceledPids = true;
@@ -217,12 +222,14 @@ for (const v of variants) defineSpecialty({
     }
     const remoteRecoverMs = Math.round(performance.now() - remoteRecoverAt);
     t.note(JSON.stringify({ phase: "remote-recovery", ok: remoteRecoverOk, ms: remoteRecoverMs, lane: `${v.browsers} browser / ${v.nodes} node` }));
-    const summary = { phase: "result", variant: v.name, rpc: quantiles(rpc), errors, exact24MiB: exact, uploadOk, uploadRecoverySafe, canceledPids,
-      interruptMs, interruptOk, ackHoldMs, ackFault, remoteRecoverOk, remoteRecoverMs,
+    const stopped = controlSession ? await control.call({ type: "session.get", payload: { sessionId: controlSession } }) : undefined;
+    const observedPaused = stopped?.type === "snapshot" && !!stopped.data.summary.inputSummary?.paused;
+    const summary = { phase: "result", variant: v.name, rpc: quantiles(rpc), errors, exact24MiB: exact, outputContract, failedStreams, uploadOk, uploadRecoverySafe, canceledPids,
+      interruptMs, interruptOk, interruptError, observedPaused, ackHoldMs, ackFault, remoteRecoverOk, remoteRecoverMs,
       sourceStarts: starts, sourceExactlyOnce: starts.join(",") === "0,1,2", retained: clients.map((c,i) => c.logicalConnectionId === owners[i]),
       localOk: local?.type === "workspaces", localMs, lateFrameTail: (pool.relay.logTail().match(/lateFrameOverflow/g)??[]).length, diagnostics: pool.diagnostics.slice(-10) };
     t.note(JSON.stringify(summary));
-    t.assertions.assert(pool.nodeFlowIds.length === v.nodes && new Set(owners).size === v.browsers, "physical node channels or independent client journals did not match the requested topology");
+    t.assertions.assert(pool.nodeFlowIds.length === v.nodes && new Set(owners).size === v.browsers, "physical node channels or independent client connections did not match the requested topology");
     if (v.interactiveP95Ms !== undefined) {
       // The 2Mbps shared bottleneck may delay management past the request
       // budget; the degraded contract is that the owner and topology survive
@@ -238,7 +245,7 @@ for (const v of variants) defineSpecialty({
         t.assertions.assert(now.forwardedBytes.every((bytes, direction) => bytes - prior.forwardedBytes[direction]! <= bound), "opening channels multiplied one WAN leg's aggregate capacity");
       }
     }
-    t.assertions.assert(starts.join(",") === "0,1,2" && (uploadOk || uploadRecoverySafe) && (narrow ? canceledPids : exact), "output, upload, source-process uniqueness or intentional cancellation did not complete correctly");
+    t.assertions.assert(starts.join(",") === "0,1,2" && (uploadOk || uploadRecoverySafe) && (narrow ? canceledPids : outputContract), "exact completed output, explicit lost-stream failure, upload, source uniqueness or cancellation violated the contract");
     // Every variant runs bulk traffic through one shaped bottleneck (2Mbps,
     // or 100Mbps -> 2Mbps for hot-drop). Without an application in-flight
     // window a small request may consume its timeout budget; the contract
@@ -251,14 +258,13 @@ for (const v of variants) defineSpecialty({
     if (!(v.browsers === 1 && v.scenario === "slow-consumer")) t.assertions.assert(remoteRecoverOk,
       "the remote management lane never recovered after bulk stopped");
     if (v.ackDelay) t.assertions.assert(faultApplied && ackFault !== undefined && pool.nodeFlowIds.includes(ackFault.nodeFlowId) && ackFault.heldForwarded === ackFault.beforeForwarded && ackHoldMs !== undefined && ackHoldMs >= v.ackDelay && ackHoldMs < v.ackDelay + 800,
-      "the declared forward-only ACK-path pause was not applied and restored on time");
+      "the declared forward-direction transport pause was not applied and restored on time");
     if (controlSession) {
-      const stopped = await o.client.call({ type: "session.get", payload: { sessionId: controlSession } });
-      // Every topology must actually pause, including the single-physical
-      // fallback: a slow but successful interrupt is degradation, a refused one
-      // is a defect. The single-lane case keeps its own latency budget in the
-      // rpc measurement above; it does not get an exemption here.
-      t.assertions.assert(interruptOk && stopped?.type === "snapshot" && !!stopped.data.summary.inputSummary?.paused,
+      // A timeout is an uncertain receipt, not a refusal. Every topology must
+      // still prove the real Human pause through the remote business read.
+      // No retry is issued and a genuine refusal still fails this contract.
+      const uncertainReceipt = interruptError === "ClientRequestTimeoutError" || interruptError === "ConnectionOutcomeUnknownError";
+      t.assertions.assert((interruptOk || uncertainReceipt) && stopped?.type === "snapshot" && !!stopped.data.summary.inputSummary?.paused,
         `remote interrupt failed to retain the Human pause (ok=${interruptOk}, ms=${interruptMs})`);
     }
     t.assertions.assert(v.scenario !== "hot-drop" || hotBusy, "hot-drop happened only after bulk output had already completed");

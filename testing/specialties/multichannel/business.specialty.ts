@@ -76,33 +76,30 @@ defineSpecialty(meta("saturated-capacity-releases-slot", "Closing a client relea
     } finally { peers.forEach(peer => peer.close()); }
   });
 });
-defineSpecialty(meta("repeated-loss-one-operation", "Repeated physical losses preserve one running business operation",
-  "Three opaque TCP disconnects preserve ordered stdout and one disk start marker; a new RPC succeeds after every reconnect"), async t => {
+defineSpecialty(meta("repeated-loss-one-operation", "Repeated physical losses end old streams without restarting a source",
+  "The first real disconnect rejects the old output, every new connection serves a fresh RPC, and the disk source marker remains exactly once"), async t => {
   await withWorkspace(t, async o => {
     const link = await startFaultLink(daemonEndpoint(o.daemon).url);
     let peer: Client | undefined;
     try {
       peer = await connect(t, o, link);
       const marker = join(o.workspaceRoot, "starts");
-      const result = t.flows.main.startShell(peer, { workspaceId: o.workspaceId, cwd: o.workspaceRoot, timeoutMs: 25000,
-        argv: ["python3", "-c", "import pathlib,time; p=pathlib.Path('starts'); p.open('a').write('start\\n'); [(print(i,flush=True),time.sleep(1)) for i in range(10)]"] });
+      const operation = t.flows.main.startShell(peer, { workspaceId: o.workspaceId, cwd: o.workspaceRoot, timeoutMs: 25000,
+        argv: ["python3", "-c", "import pathlib,time; pathlib.Path('starts').open('a').write('start\\n'); [(print(i,flush=True),time.sleep(1)) for i in range(10)]"] });
       await t.tools.waitUntil(() => existsSync(marker), 10000);
-      const id = peer.logicalConnectionId;
       for (let n = 0; n < 3; n++) {
-        const before = link.connections(); link.cut();
-        await t.tools.waitUntil(() => link.connections() > before && peer!.connectionState === "ready", 10000);
-        t.assertions.assert((await peer.call({ type: "workspace.list" }))?.type === "workspaces", "new RPC failed after recovery");
+        const before = link.connections(), oldId = peer.logicalConnectionId; link.cut();
+        await t.tools.waitUntil(() => link.connections() > before && peer!.connectionState === "ready" && peer!.logicalConnectionId !== oldId, 10000);
+        t.assertions.assert((await peer.call({ type: "workspace.list" }))?.type === "workspaces", "new RPC failed after a new admission");
       }
-      const done = await result.result;
-      t.assertions.assert(t.flows.main.shellText(done.frames, "stdout") === Array.from({ length: 10 }, (_, i) => `${i}\n`).join(""), "output missing, duplicated or reordered");
-      t.assertions.assert(t.flows.main.shellExit(done.frames)?.code === 0, "operation did not complete");
-      t.assertions.assert(readFileSync(marker, "utf8") === "start\n", "operation restarted");
-      t.assertions.assert(peer.logicalConnectionId === id, "business owner replaced");
+      const failed = await operation.result.then(() => false, () => true);
+      t.assertions.assert(failed, "an interrupted output was reported as a complete result");
+      t.assertions.assert(readFileSync(marker, "utf8") === "start\n", "reconnect restarted the source");
     } finally { peer?.close(); await link.stop(); }
   });
 });
-defineSpecialty(meta("deadline-includes-outage", "A business deadline is not extended by network recovery",
-  "A 2-second command cannot create its delayed side effect after a 4-second outage; the connection remains usable"), async t => {
+defineSpecialty(meta("deadline-includes-outage", "Connection loss does not extend a command's deadline",
+  "A running two-second command ends explicitly after socket loss, never performs its delayed disk mutation, and new RPCs work after reconnection"), async t => {
   await withWorkspace(t, async o => {
     const link = await startFaultLink(daemonEndpoint(o.daemon).url);
     let peer: Client | undefined;
@@ -112,18 +109,18 @@ defineSpecialty(meta("deadline-includes-outage", "A business deadline is not ext
       const operation = t.flows.main.startShell(peer, { workspaceId: o.workspaceId, cwd: o.workspaceRoot, timeoutMs: 2000,
         argv: ["python3", "-c", "import pathlib,time; pathlib.Path('deadline-start').write_text('start'); time.sleep(5); pathlib.Path('late-side-effect').write_text('bad')"] });
       await t.tools.waitUntil(() => existsSync(marker), 10000);
-      const faultAt = Date.now();
-      link.block(); await new Promise(r => setTimeout(r, 4000)); link.unblock();
-      const result = await operation.result;
-      t.assertions.assert(t.flows.main.shellTimedOut(result.frames), "business deadline restarted across recovery");
+      const faultAt = Date.now(); link.block();
+      t.assertions.assert(await operation.result.then(() => false, () => true), "lost output did not fail explicitly");
+      await new Promise(r => setTimeout(r, 4000)); link.unblock();
+      await t.tools.waitUntil(() => peer!.connectionState === "ready", 15000);
       await new Promise(r => setTimeout(r, Math.max(0, faultAt + 6000 - Date.now())));
-      t.assertions.assert(!existsSync(join(o.workspaceRoot, "late-side-effect")), "timed-out operation still performed its side effect");
-      t.assertions.assert((await peer.call({ type: "workspace.list" }))?.type === "workspaces", "timeout destroyed unrelated RPC");
+      t.assertions.assert(!existsSync(join(o.workspaceRoot, "late-side-effect")), "lost command performed its delayed mutation");
+      t.assertions.assert((await peer.call({ type: "workspace.list" }))?.type === "workspaces", "new connection is unusable");
     } finally { peer?.close(); await link.stop(); }
   });
 });
-defineSpecialty(meta("recovery-expiry-terminal", "An outage beyond the retention window terminates the original stream",
-  "After the retention deadline the original stream and command terminate; later connection recovery is a new owner", 80000), async t => {
+defineSpecialty(meta("recovery-expiry-terminal", "Connection loss promptly terminates the original stream and process",
+  "Physical closure terminates the old stream within5s and reaps its original process; later recovery is a new connection without a60s retention lease", 20000), async t => {
   if (process.platform !== "linux") throw new BlockedError("expiry process birth oracle requires Linux");
   await withWorkspace(t, async o => {
     const link = await startFaultLink(daemonEndpoint(o.daemon).url);
@@ -141,10 +138,10 @@ defineSpecialty(meta("recovery-expiry-terminal", "An outage beyond the retention
       t.assertions.assert(!!birth, "expiry command was not alive before loss");
       let terminalAt: number | undefined; void operation.stream.done.catch(() => { terminalAt = Date.now(); });
       const blockedAt = Date.now(); link.block();
-      await t.tools.waitUntil(() => terminalAt !== undefined, 65000);
+      await t.tools.waitUntil(() => terminalAt !== undefined, 5000);
       const retainedMs = terminalAt! - blockedAt;
       t.note("originalStreamRetainedMs=" + retainedMs);
-      t.assertions.assert(retainedMs >= 55000 && retainedMs <= 65000, "original stream expired outside the 60-second window: " + retainedMs + "ms");
+      t.assertions.assert(retainedMs >= 0 && retainedMs <= 5000, "old stream waited for a removed retention lease: " + retainedMs + "ms");
       await t.tools.waitUntil(() => processBirth() !== birth, 5000);
       t.assertions.assert(readFileSync(marker, "utf8") === "start\n", "expired operation restarted");
       link.unblock();
@@ -222,25 +219,25 @@ defineSpecialty(meta("pty-input-resize-isolation", "Two terminals keep distinct 
     }
   });
 });
-defineSpecialty(meta("file-write-under-loss", "A public file write survives a mid-transfer disconnect",
-  "A 1 MiB UTF-8 public file.write produces exactly the expected bytes on disk after the opaque network link is cut"), async t => {
+defineSpecialty(meta("file-write-under-loss", "An interrupted file request is not replayed and a business can explicitly save again",
+  "Cut a1MiB write before its JSON is complete: the old call reports unknown, no file appears, then an explicit new save writes exact bytes"), async t => {
   await withWorkspace(t, async o => {
     const link = await startFaultLink(daemonEndpoint(o.daemon).url);
     let peer: Client | undefined;
     try {
       peer = await connect(t, o, link);
-      const content = "0123456789abcdef".repeat(65536);
+      const content = "0123456789abcdef".repeat(65536), oldId = peer.logicalConnectionId;
+      const request = { type: "file.write" as const, payload: { workspaceId: o.workspaceId, path: `${o.rootHandle}/network-file.txt`, content } };
       link.cutAfterClientBytes(256 * 1024);
-      const operation = peer.call({ type: "file.write", payload: { workspaceId: o.workspaceId, path: `${o.rootHandle}/network-file.txt`, content } });
-      void operation.catch(() => {});
-      const result = await operation;
-      t.assertions.assert(link.injectedCuts() === 1, "file transfer never crossed the actual injected fault");
-      t.assertions.assert(result?.type === "ack", "file write did not acknowledge completion");
-      t.assertions.assert(readFileSync(join(o.workspaceRoot, "network-file.txt"), "utf8") === content, "file length or bytes changed");
+      const error = await peer.call(request).then(() => null, e => e as Error);
+      t.assertions.assert(link.injectedCuts() === 1 && error?.name === "ConnectionOutcomeUnknownError", "the partial write was replayed or not reported unknown");
+      await t.tools.waitUntil(() => peer!.connectionState === "ready" && peer!.logicalConnectionId !== oldId, 15000);
+      t.assertions.assert(!existsSync(join(o.workspaceRoot, "network-file.txt")), "an incomplete request was executed or automatically replayed");
+      t.assertions.assert((await peer.call(request))?.type === "ack", "explicit business save failed");
+      t.assertions.assert(readFileSync(join(o.workspaceRoot, "network-file.txt"), "utf8") === content, "explicit save changed the bytes");
     } finally { peer?.close(); await link.stop(); }
   });
 });
-
 defineSpecialty(meta("slow-stream-cancel-fairness", "A paused consumer does not indefinitely block unrelated RPC and can be cancelled",
   "An infinite real stdout producer with an unconsumed body coexists with five workspace RPCs below 2 seconds; RESET retires the observed process within 5 seconds"), async t => {
   if (process.platform !== "linux") throw new BlockedError("process identity and zombie oracle requires Linux procfs");
@@ -321,55 +318,60 @@ defineSpecialty(meta("connection-churn-resources", "Repeated tab churn leaves bo
   });
 });
 
-defineSpecialty(meta("response-loss-one-execution", "Lost responses do not execute a command twice",
-  "Cut actual downstream bytes after a shell command starts; original stdout and exit complete and disk contains exactly one start"), async t => {
+defineSpecialty(meta("response-loss-one-execution", "Lost output reports failure without executing a command twice",
+  "Cut real downstream bytes after a source starts; incomplete output rejects, a fresh RPC works, and the disk contains exactly one source start"), async t => {
   await withWorkspace(t, async o => {
     const link = await startFaultLink(daemonEndpoint(o.daemon).url);
     let peer: Client | undefined;
     try {
       peer = await connect(t, o, link);
-      const marker = join(o.workspaceRoot, "response-starts");
+      const marker = join(o.workspaceRoot, "response-starts"), oldId = peer.logicalConnectionId;
       const operation = t.flows.main.startShell(peer, { workspaceId: o.workspaceId, cwd: o.workspaceRoot, timeoutMs: 15000,
         argv: ["python3", "-c", "import pathlib,time; pathlib.Path('response-starts').open('a').write('once\\n'); time.sleep(1); print('x'*131072,flush=True)"] });
       await t.tools.waitUntil(() => existsSync(marker), 8000);
       link.cutAfterServerBytes(8192);
-      const result = await operation.result;
-      t.assertions.assert(link.injectedCuts() === 1, "response never crossed armed downstream fault");
-      t.assertions.assert(readFileSync(marker, "utf8") === "once\n", "lost response replayed a command");
-      t.assertions.assert(t.flows.main.shellText(result.frames, "stdout") === "x".repeat(131072) + "\n" && t.flows.main.shellExit(result.frames)?.code === 0, "original response was truncated or duplicated");
+      t.assertions.assert(await operation.result.then(() => false, () => true), "a truncated output was called complete");
+      t.assertions.assert(link.injectedCuts() === 1 && readFileSync(marker, "utf8") === "once\n", "response fault was missed or source was repeated");
+      await t.tools.waitUntil(() => peer!.connectionState === "ready" && peer!.logicalConnectionId !== oldId, 15000);
+      t.assertions.assert((await peer.call({ type: "workspace.list" }))?.type === "workspaces", "new RPC failed");
     } finally { peer?.close(); await link.stop(); }
   });
 });
-
-defineSpecialty(meta("concurrent-writes-under-loss", "Concurrent saves retain their own payloads across recovery",
-  "Twenty-four distinct public writes cross a real socket cut; every acknowledged file has its matching UTF-8 payload and an independent client remains responsive"), async t => {
+defineSpecialty(meta("concurrent-writes-under-loss", "Concurrent saves keep payload ownership and report unknown outcomes under loss",
+  "Twenty-four writes cross a real cut; successful receipts and any persisted unknown writes have exact own bytes, lost calls are not replayed, and an independent client stays responsive"), async t => {
   await withWorkspace(t, async o => {
     const link = await startFaultLink(daemonEndpoint(o.daemon).url);
     let peer: Client | undefined;
     try {
       peer = await connect(t, o, link);
+      const oldId = peer.logicalConnectionId;
       const entries = Array.from({ length: 24 }, (_, n) => ({ name: "save-" + n + ".txt", text: (n + ":中文🙂\n").repeat(4096) }));
       link.blackhole("client");
       let settled = false;
-      const writes = Promise.all(entries.map(e => peer!.call({ type: "file.write", payload: { workspaceId: o.workspaceId, path: o.rootHandle + "/" + e.name, content: e.text } })));
-      void writes.then(() => { settled = true; }, () => { settled = true; });
+      const writes = Promise.allSettled(entries.map(e => peer!.call({ type: "file.write", payload: { workspaceId: o.workspaceId, path: o.rootHandle + "/" + e.name, content: e.text } })));
+      void writes.then(() => { settled = true; });
       await t.tools.waitUntil(() => link.heldBytes().client > 0, 5000);
       for (let n = 0; n < 5; n++) {
         t.assertions.assert(!settled, "independent RPC did not overlap outstanding saves");
         const start = performance.now();
-        t.assertions.assert((await o.client.call({ type: "workspace.list" }))?.type === "workspaces" && performance.now() - start < 2000, "another connection was starved during recovery");
+        t.assertions.assert((await o.client.call({ type: "workspace.list" }))?.type === "workspaces" && performance.now() - start < 2000, "another connection was starved");
       }
-      link.cutAfterClientBytes(128 * 1024);
-      link.clearBlackhole();
+      link.cutAfterClientBytes(128 * 1024); link.clearBlackhole();
       const results = await writes;
-      t.assertions.assert(link.injectedCuts() === 1 && results.every(r => r?.type === "ack"), "save burst did not complete through the fault");
-      for (const e of entries) t.assertions.assert(readFileSync(join(o.workspaceRoot, e.name), "utf8") === e.text, "wrong payload for " + e.name);
+      t.assertions.assert(link.injectedCuts() === 1 && results.some(r => r.status === "rejected"), "the fault did not terminate any in-flight call");
+      for (const [n, r] of results.entries()) {
+        const e = entries[n]!, file = join(o.workspaceRoot, e.name);
+        if (r.status === "fulfilled") t.assertions.assert(r.value?.type === "ack" && existsSync(file), "success was reported without a saved file");
+        else t.assertions.assert(r.reason instanceof Error && r.reason.name === "ConnectionOutcomeUnknownError", "lost write did not report its uncertain outcome");
+        if (existsSync(file)) t.assertions.assert(readFileSync(file, "utf8") === e.text, "partial or crossed payload for " + e.name);
+      }
+      await t.tools.waitUntil(() => peer!.connectionState === "ready" && peer!.logicalConnectionId !== oldId, 15000);
+      t.assertions.assert((await peer.call({ type: "workspace.list" }))?.type === "workspaces", "new connection was unusable");
     } finally { peer?.close(); await link.stop(); }
   });
 });
-
-defineSpecialty(meta("offline-cancel-no-side-effect", "Cancelling while offline prevents a delayed business mutation",
-  "An already-started command is reset while its network path is blocked; after reconnect its delayed disk effect never occurs, and other commands still work", 30000), async t => {
+defineSpecialty(meta("offline-cancel-no-side-effect", "Loss cancels its shell while an independent command remains alive",
+  "A command on the lost endpoint is canceled without its delayed disk effect; an independent uncanceled command completes and the new connection works", 30000), async t => {
   await withWorkspace(t, async o => {
     const link = await startFaultLink(daemonEndpoint(o.daemon).url);
     let peer: Client | undefined;
@@ -380,9 +382,9 @@ defineSpecialty(meta("offline-cancel-no-side-effect", "Cancelling while offline 
       void stream.done.catch(() => {});
       await stream.finish(); await stream.responseHead;
       await t.tools.waitUntil(() => existsSync(join(o.workspaceRoot, "cancel-start")), 8000);
-      // The same path must preserve a second command that was NOT cancelled.
-      // Otherwise killing every command on disconnect would falsely pass.
-      const control = t.flows.main.startShell(peer, { workspaceId: o.workspaceId, cwd: o.workspaceRoot, timeoutMs: 20000,
+      // A lost endpoint ends all its streams. Only an independent endpoint
+      // may promise to preserve an uncancelled command.
+      const control = t.flows.main.startShell(o.client, { workspaceId: o.workspaceId, cwd: o.workspaceRoot, timeoutMs: 20000,
         argv: ["python3", "-c", "import pathlib,time; pathlib.Path('control-start').write_text('started'); time.sleep(8); pathlib.Path('control-effect').write_text('kept')"] });
       await t.tools.waitUntil(() => existsSync(join(o.workspaceRoot, "control-start")), 8000);
       const started = Date.now(), connections = link.connections();
@@ -398,8 +400,8 @@ defineSpecialty(meta("offline-cancel-no-side-effect", "Cancelling while offline 
   });
 });
 
-defineSpecialty(meta("subscriptions-isolated-under-loss", "Recovery keeps two business subscriptions isolated",
-  "Two original subscriptions replay only their own ordered changes after a TCP outage; unsubscribing one does not silence the other"), async t => {
+defineSpecialty(meta("subscriptions-isolated-under-loss", "Business resubscription keeps two sessions isolated",
+  "Two business subscriptions recover their own ordered missed events on a new endpoint after TCP loss; unsubscribing one does not silence the other"), async t => {
   await withWorkspace(t, async o => {
     const link = await startFaultLink(daemonEndpoint(o.daemon).url);
     let peer: Client | undefined;
@@ -409,8 +411,16 @@ defineSpecialty(meta("subscriptions-isolated-under-loss", "Recovery keeps two bu
       const observed: string[][] = [[], []]; let repairs = 0;
       for (let n = 0; n < 2; n++) await peer.subscribe(ids[n]!, {
         onEvent(e) { if (e.event.type === "titleChanged") observed[n]!.push(e.event.title); },
-        onResync() { repairs++; },
+        onResync(_snapshot, replayed) {
+          repairs++;
+          for (const e of replayed) if (e.event.type === "titleChanged") observed[n]!.push(e.event.title);
+        },
       });
+      // Establish a real positive business cursor; cursor0 means an explicit
+      // initial snapshot in this API, not retained event history.
+      for (const id of ids) await o.client.call({type: "session.rename", payload: {sessionId: id, title: "before-outage"}});
+      await t.tools.waitUntil(() => observed.every(events => events.includes("before-outage")), 5000);
+      observed.forEach(events => { events.length = 0; });
       const connections = link.connections(); link.block();
       for (let n = 0; n < 6; n++) for (let s = 0; s < 2; s++) {
         await o.client.call({ type: "session.rename", payload: { sessionId: ids[s]!, title: s + ":" + n } });
@@ -419,7 +429,7 @@ defineSpecialty(meta("subscriptions-isolated-under-loss", "Recovery keeps two bu
       link.unblock();
       await t.tools.waitUntil(() => observed.every(a => a.length >= 6), 15000);
       for (let s = 0; s < 2; s++) t.assertions.assert(JSON.stringify(observed[s]) === JSON.stringify(Array.from({ length: 6 }, (_, n) => s + ":" + n)), "subscription contents crossed, duplicated or reordered");
-      t.assertions.assert(repairs === 0 && link.connections() > connections, "business subscription was rebuilt or no new path used");
+      t.assertions.assert(repairs > 0 && link.connections() > connections, "business did not rebuild on a new physical connection");
       await peer.unsubscribe(ids[0]!);
       await o.client.call({ type: "session.rename", payload: { sessionId: ids[0]!, title: "forbidden-after-unsubscribe" } });
       await o.client.call({ type: "session.rename", payload: { sessionId: ids[1]!, title: "survivor" } });
@@ -430,33 +440,38 @@ defineSpecialty(meta("subscriptions-isolated-under-loss", "Recovery keeps two bu
   });
 });
 
-defineSpecialty(meta("distinct-replies-under-loss", "Concurrent reads retain response ownership through response loss",
-  "Twelve different session snapshots arrive at their matching request after a downstream cut; identical workspace.list replies cannot establish this"), async t => {
+defineSpecialty(meta("distinct-replies-under-loss", "Concurrent reads preserve response ownership and business can explicitly refresh after loss",
+  "Successful snapshots belong to their original requests; interrupted calls report unknown without hidden replay; explicit new reads recover all twelve distinct snapshots"), async t => {
   await withWorkspace(t, async o => {
     const ids: string[] = [];
     for (let n = 0; n < 12; n++) {
       const id = await t.flows.main.createBuiltinSession(o.client, o.workspaceId);
-      await o.client.call({ type: "session.rename", payload: { sessionId: id, title: "owner-" + n } });
-      ids.push(id);
+      await o.client.call({ type: "session.rename", payload: { sessionId: id, title: "owner-" + n } }); ids.push(id);
     }
     const link = await startFaultLink(daemonEndpoint(o.daemon).url);
     let peer: Client | undefined;
     try {
       peer = await connect(t, o, link);
+      const oldId = peer.logicalConnectionId;
       link.cutAfterServerBytes(256);
-      await Promise.all(ids.map(async (id, n) => {
-        const reply = await peer!.call({ type: "session.get", payload: { sessionId: id } });
-        t.assertions.assert(reply?.type === "snapshot" && reply.data.summary.id === id && reply.data.summary.title === "owner-" + n,
-          "response routed to a different request: index=" + n);
-      }));
-      t.assertions.assert(link.injectedCuts() === 1, "snapshot requests did not cross the downstream fault");
+      const replies = await Promise.allSettled(ids.map(id => peer!.call({ type: "session.get", payload: { sessionId: id } })));
+      t.assertions.assert(link.injectedCuts() === 1 && replies.some(r => r.status === "rejected"), "reads did not encounter the armed loss");
+      for (const [n, r] of replies.entries()) {
+        if (r.status === "fulfilled") t.assertions.assert(r.value?.type === "snapshot" && r.value.data.summary.id === ids[n] && r.value.data.summary.title === "owner-" + n, "response crossed request ownership");
+        else t.assertions.assert(r.reason instanceof Error && r.reason.name === "ConnectionOutcomeUnknownError", "interrupted read was hidden or misclassified");
+      }
+      await t.tools.waitUntil(() => peer!.connectionState === "ready" && peer!.logicalConnectionId !== oldId, 15000);
+      for (const [n, id] of ids.entries()) {
+        const r = await peer.call({ type: "session.get", payload: { sessionId: id } });
+        t.assertions.assert(r?.type === "snapshot" && r.data.summary.id === id && r.data.summary.title === "owner-" + n, "explicit refresh returned another session");
+      }
     } finally { peer?.close(); await link.stop(); }
   });
 });
 
 for (const direction of ["client", "server", "both"] as const) {
-  defineSpecialty(meta("blackhole-" + direction, "A silent " + direction + " outage preserves one business operation",
-    "A real shell spans stalled bytes on a still-open TCP path; restored transport delivers exact stdout once and one disk start, with a healthy independent client", 30000), async t => {
+  defineSpecialty(meta("blackhole-" + direction, "A silent " + direction + " outage ends the old endpoint without source replay",
+    "Channel liveness detects a real silent stall; incomplete output fails explicitly, any completed output is exact, source starts once, independent control stays usable and a new connection recovers", 30000), async t => {
     await withWorkspace(t, async o => {
       const link = await startFaultLink(daemonEndpoint(o.daemon).url);
       let peer: Client | undefined;
@@ -469,14 +484,15 @@ for (const direction of ["client", "server", "both"] as const) {
         link.blackhole(direction);
         const read = peer.call({ type: "workspace.list" }); void read.catch(() => {});
         await t.tools.waitUntil(() => direction === "server" ? link.heldBytes().server > 0 : link.heldBytes().client > 0, 5000);
-        t.assertions.assert((await o.client.call({ type: "workspace.list" }))?.type === "workspaces", "independent owner was also unavailable");
+        t.assertions.assert((await o.client.call({ type: "workspace.list" }))?.type === "workspaces", "independent connection was also unavailable");
         await new Promise(r => setTimeout(r, 20000));
+        t.assertions.assert(await read.then(() => false, () => true), "a request lost in the silent outage was transparently replayed");
+        const result = await operation.result.then(value => ({value}), () => ({value: null}));
+        if (result.value) t.assertions.assert(direction === "client" && t.flows.main.shellText(result.value.frames, "stdout") === Array.from({ length: 32 }, (_, i) => i + "\n").join("") && t.flows.main.shellExit(result.value.frames)?.code === 0, "an incomplete response was called successful");
+        t.assertions.assert(readFileSync(join(o.workspaceRoot, "blackhole-start"), "utf8") === "one\n", "silent outage repeated the source");
         link.clearBlackhole();
-        // Do not turn this into a disconnect test: the product must detect the silent loss.
-        const result = await operation.result;
-        t.assertions.assert(t.flows.main.shellText(result.frames, "stdout") === Array.from({ length: 32 }, (_, i) => i + "\n").join(""), "silent outage lost or duplicated stdout");
-        t.assertions.assert(t.flows.main.shellExit(result.frames)?.code === 0 && readFileSync(join(o.workspaceRoot, "blackhole-start"), "utf8") === "one\n", "silent outage restarted or killed the command");
-        t.assertions.assert(peer.logicalConnectionId === oldId, "silent outage replaced the business owner");
+        await t.tools.waitUntil(() => peer!.connectionState === "ready" && peer!.logicalConnectionId !== oldId, 20000);
+        t.assertions.assert((await peer.call({ type: "workspace.list" }))?.type === "workspaces", "business cannot use the new connection");
       } finally { peer?.close(); await link.stop(); }
     });
   });

@@ -74,16 +74,9 @@ export class FakeSocket implements WebSocketLike {
   /** Application RPC replies can stall while channel-level records still progress. */
   private silent = false;
 
-  constructor(private readonly options: FakePeerOptions = {},
-    private readonly peer: { endpoint?: DataEndpoint; socket?: FakeSocket } = {}) {}
+  constructor(private readonly options: FakePeerOptions = {}) {}
 
-  /** End the logical owner, as distinct from losing one physical carrier. */
-  endSession(): void { this.endpoint?.close("fake peer session ended"); }
-
-  /** Forget the logical owner without telling the client, like an expired daemon registry entry. */
-  forgetSession(): void { this.peer.endpoint = undefined; }
-
-  /** Stops only RPC replies; this deliberately does not blackhole the physical carrier. */
+  /** Stops only RPC replies; channel-level records still progress. */
   silenceRpc(): void {
     this.silent = true;
   }
@@ -233,20 +226,10 @@ export class FakeSocket implements WebSocketLike {
       },
       close: (reason) => this.close(1000, reason),
     };
-    this.peer.socket = this;
-    if (this.peer.endpoint?.state === "open") {
-      this.endpoint = this.peer.endpoint;
-      // Attach installs record callbacks synchronously; the welcome must precede
-      // the asynchronous logical resume exchange on the client side.
-      this.background(this.endpoint.attach(carrier, key));
-    } else {
-      this.endpoint = this.peer.endpoint = new DataEndpoint({
-        role: "server", carrier, key, maxReceiveBytesPerStream: 64 * 1024 * 1024,
-      });
-      this.endpoint.onIncoming((stream) => {
-        void this.peer.socket!.handle(stream, identity).catch(() => {});
-      });
-    }
+    this.endpoint = new DataEndpoint({
+      role: "server", carrier, key, maxReceiveBytesPerStream: 64 * 1024 * 1024,
+    });
+    this.endpoint.onIncoming(stream => { void this.handle(stream, identity).catch(() => {}); });
     const welcome = new TextEncoder().encode(
       JSON.stringify({ version: DATA_PLANE_VERSION, serverNonce, proof, maxBulkStreamWindowBytes: INITIAL_STREAM_WINDOW_BYTES }),
     );
@@ -381,13 +364,12 @@ export function socketQueue(options: FakePeerOptions = {}): {
   urls: string[];
   latest(): FakeSocket;
 } {
-  const peer: { endpoint?: DataEndpoint; socket?: FakeSocket } = {};
   const sockets: FakeSocket[] = [];
   const urls: string[] = [];
   return {
     factory: (url) => {
       urls.push(url);
-      const socket = new FakeSocket(options, peer);
+      const socket = new FakeSocket(options);
       sockets.push(socket);
       return socket;
     },

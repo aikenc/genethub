@@ -36,7 +36,9 @@ pub fn accept(
         anyhow::bail!("invalid peer client name");
     }
     let bulk_stream_window = hello.max_bulk_stream_window_bytes;
-    if bulk_stream_window != genehub_proto::INITIAL_STREAM_WINDOW_BYTES {
+    if !(genehub_proto::INITIAL_STREAM_WINDOW_BYTES..=genehub_proto::MAX_BULK_STREAM_WINDOW_BYTES)
+        .contains(&bulk_stream_window)
+    {
         anyhow::bail!("invalid peer finite-bulk receive lease");
     }
     let server_nonce = crate::devices::random_token();
@@ -267,5 +269,24 @@ mod tests {
             genehub_proto::INITIAL_STREAM_WINDOW_BYTES
         );
         assert_eq!(accepted.access.bootstrap_invite.as_deref(), Some(invite_id));
+        // WELCOME can reach a browser before its asynchronous key derivation
+        // finishes. Bootstrap must not send an encrypted Ping in that gap.
+        let (_inbound, mut outbound, carrier) =
+            crate::dataplane::authenticated_channel::carrier_channels();
+        let server = tokio::spawn(crate::dataplane::endpoint::serve(
+            state,
+            accepted.key,
+            accepted.access,
+            carrier,
+            crate::dataplane::endpoint::CarrierKind::WebSocket,
+        ));
+        let unsolicited =
+            tokio::time::timeout(std::time::Duration::from_millis(25), outbound.recv()).await;
+        server.abort();
+        let _ = server.await;
+        assert!(
+            unsolicited.is_err(),
+            "bootstrap emitted encrypted bytes before the client was ready"
+        );
     }
 }

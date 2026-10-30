@@ -23,9 +23,9 @@ const IMAGE_CACHE_BYTES: usize = 128 * 1024 * 1024;
 /// On-demand preview loading fetches many small sub-resources in parallel;
 /// two slots serialized whole sites behind each other.
 const PREVIEW_WORKERS: usize = 8;
-// Whole resume payloads avoid a tiny fifth record after each 64KiB source
+// Complete data frames avoid a tiny fifth record after each 64KiB source
 // read, reducing per-record crypto/actor handoffs without enlarging buffers.
-const PREVIEW_SEND_STEP_BYTES: usize = 4 * genehub_proto::resume::MAX_PAYLOAD;
+const PREVIEW_SEND_STEP_BYTES: usize = 4 * super::frame::MAX_PAYLOAD_BYTES;
 
 pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -> Result<()> {
     if !stream.read_body(0).await?.is_empty() {

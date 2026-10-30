@@ -4,7 +4,6 @@ import { channelServerProof } from "../devices/proof";
 import {
   DATA_PLANE_VERSION,
   INITIAL_STREAM_WINDOW_BYTES,
-  LEGACY_BULK_STREAM_WINDOW_BYTES,
   MAX_BULK_STREAM_WINDOW_BYTES,
 } from "./frame";
 import { preparePeerHandshake } from "./handshake";
@@ -12,7 +11,7 @@ import { preparePeerHandshake } from "./handshake";
 const SECRET = "finite-bulk-handshake-secret";
 const SERVER_NONCE = "ffeeddccbbaa99887766554433221100";
 
-async function welcome(window = INITIAL_STREAM_WINDOW_BYTES) {
+async function welcome(window = MAX_BULK_STREAM_WINDOW_BYTES) {
   const prepared = await preparePeerHandshake({ kind: "loopback", secret: SECRET });
   const auth = prepared.hello.auth;
   if (auth.type !== "loopback") throw new Error("unexpected auth kind");
@@ -38,26 +37,21 @@ describe("the peer handshake finite-bulk capability", () => {
     const fixture = await welcome();
     await expect(fixture.prepared.complete({ ...fixture.value, version: 3 })).rejects.toThrow("invalid data-plane welcome");
   });
-  it("advertises the bounded v4 stream window", async () => {
+  it("advertises the complete legal finite Preview response", async () => {
     const fixture = await welcome();
     expect(fixture.prepared.hello.maxBulkStreamWindowBytes).toBe(
-      INITIAL_STREAM_WINDOW_BYTES,
+      MAX_BULK_STREAM_WINDOW_BYTES,
     );
   });
 
-  it("accepts only the bounded v4 stream window", async () => {
+  it("authenticates the finite Preview receive capability", async () => {
     const fixture = await welcome();
     const result = await fixture.prepared.complete(fixture.value);
-    expect(result.maxBulkStreamWindowBytes).toBe(INITIAL_STREAM_WINDOW_BYTES);
+    expect(result.maxBulkStreamWindowBytes).toBe(MAX_BULK_STREAM_WINDOW_BYTES);
   });
 
-  it("rejects the old 8 MiB bulk exception", async () => {
-    const fixture = await welcome(LEGACY_BULK_STREAM_WINDOW_BYTES);
-    await expect(fixture.prepared.complete(fixture.value)).rejects.toThrow("invalid finite-bulk receive lease");
-  });
-
-  it("rejects the old 64 MiB bulk exception", async () => {
-    const fixture = await welcome(MAX_BULK_STREAM_WINDOW_BYTES);
+  it("rejects a lease smaller than the ordinary stream window", async () => {
+    const fixture = await welcome(INITIAL_STREAM_WINDOW_BYTES - 1);
     await expect(fixture.prepared.complete(fixture.value)).rejects.toThrow("invalid finite-bulk receive lease");
   });
 

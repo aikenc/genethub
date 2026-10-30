@@ -22,10 +22,9 @@ const boundedEnv = (name: string, fallback: number, min: number, max: number) =>
 // Inner data-plane frames are at most 16 KiB, operation metadata 16 KiB and
 // route tickets 4 KiB, so a 4 MiB frame ceiling only let a socket budget grow
 // far beyond what the protocol needs. That in turn let the relay queue many
-// megabytes ahead of a slow link: at 2 Mbps an 8 MiB per-socket budget is a
-// 32 second tail, which is what delayed management replies on a single
-// uplink. Keep the frame ceiling close to the real maximum and let the
-// kernel's own send buffer (autotuned to the path BDP) provide throughput.
+// megabytes ahead of a slow link. Keep the frame ceiling close to the real
+// maximum. These local bounds reduce application buffering; they do not
+// guarantee end-to-end control latency or a particular path throughput.
 const maxFrameBytes = boundedEnv("RELAY_MAX_FRAME_BYTES", 256 * 1024, 1024, 16 * 1024 * 1024);
 const maxBufferedBytes = boundedEnv(
   "RELAY_MAX_BUFFERED_BYTES",

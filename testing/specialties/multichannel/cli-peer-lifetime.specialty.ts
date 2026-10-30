@@ -5,7 +5,7 @@ import { defineSpecialty, parseJson, runGenetAsync, startRelay } from "../../fra
 defineSpecialty({
   id: "specialty.multichannel.native-cli-peer-lifetime",
   title: "Completed remote CLI calls release logical peers instead of exhausting admission",
-  oracle: "64 sequential real workspace-list commands finish through a real relay in less than the 60s recovery retention; every reply contains the target-only workspace, exceeding the daemon's 32 retained-peer budget without errors",
+  oracle: "64 sequential real workspace-list commands finish through a real relay within60s; every reply contains target-only data and completed calls promptly release the daemon's32 live admission slots",
   catches: ["normal CLI exit leaves resumable logical peers retained", "remote CLI falls back to the local daemon", "connection cleanup disables recovery for running commands"],
   tags: ["core", "cli", "multichannel", "peer-lifetime"], llm: { default: "none" },
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
@@ -38,7 +38,7 @@ defineSpecialty({
       t.assertions.assert(answer.data.workspaces.some((w: any) => w.id === o.workspaceId && w.root === o.workspaceRoot), "command did not reach the target-only workspace");
     }
     t.assertions.assert(Date.now() - start < 60000, "test did not exceed admission within the retained-peer lifetime");
-    t.note("64 real remote CLI calls completed against target-only data within one recovery retention interval");
+    t.note("64 real remote CLI calls completed against target-only data within60s without retaining completed peers");
   } finally {
     if (started) await cli(["daemon", "stop"]);
     relay.stop(); o.client.close(); o.daemon.stop(); await o.mock.stop();

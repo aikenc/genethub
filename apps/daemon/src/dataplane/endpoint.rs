@@ -14,13 +14,15 @@ use super::authenticated_channel::{authenticated_channel, AuthenticatedWriter, R
 pub use super::authenticated_channel::{carrier_channels, Carrier};
 use crate::authz::{self, Capability, Principal, StreamMethod};
 use crate::channel_auth::SessionKey;
-use crate::dataplane::frame::{Frame, Kind, MAX_PAYLOAD_BYTES};
+use crate::dataplane::frame::{Frame, Kind, HEADER_BYTES, MAX_PAYLOAD_BYTES};
 use crate::router::{self, SideEffect};
 use crate::state::Shared;
 
 const WRITER_COMMAND_QUEUE: usize = 1024;
 const STREAM_CHUNK_QUEUE: usize = 256;
 const EVENT_QUEUE: usize = 256;
+pub(crate) const SEND_QUEUE_BYTES: usize = 4 * 1024 * 1024;
+pub(crate) const RECEIVE_QUEUE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_RPC_BODY_BYTES: usize = 3 * 1024 * 1024;
 // One logical peer may follow many sessions at once: a single browser window
 // can open a transcript per visible session, and the team view follows every
@@ -74,7 +76,7 @@ pub struct PeerAccess {
 struct IncomingChunk {
     bytes: Vec<u8>,
     _permit: OwnedSemaphorePermit,
-    _lease: Option<super::logical_connection::Lease>,
+    _connection_budget: OwnedSemaphorePermit,
 }
 
 enum Incoming {
@@ -167,7 +169,7 @@ struct WriterCommand {
 struct WriterCompletion {
     actor_queue_us: u64,
     actor_send_us: u64,
-    acknowledged_at: Option<Instant>,
+    accepted_at: Option<Instant>,
 }
 
 #[derive(Clone)]
@@ -214,7 +216,7 @@ impl Writer {
         let began = timings.as_ref().map(|_| Instant::now());
         let budget = budget
             .clone()
-            .acquire_many_owned((frame.payload.len() + 36) as u32)
+            .acquire_many_owned((frame.payload.len() + HEADER_BYTES) as u32)
             .await?;
         if let (Some(timings), Some(began)) = (timings.as_mut(), began) {
             timings.budget_us += began.elapsed().as_micros() as u64;
@@ -244,8 +246,8 @@ impl Writer {
             timings.completion_us += began.elapsed().as_micros() as u64;
             timings.actor_queue_us += completion.actor_queue_us;
             timings.actor_send_us += completion.actor_send_us;
-            if let Some(acknowledged_at) = completion.acknowledged_at {
-                timings.wake_us += acknowledged_at.elapsed().as_micros() as u64;
+            if let Some(accepted_at) = completion.accepted_at {
+                timings.wake_us += accepted_at.elapsed().as_micros() as u64;
             }
         }
         Ok(())
@@ -261,7 +263,7 @@ impl Writer {
         };
         let budget = budget
             .clone()
-            .try_acquire_many_owned((frame.payload.len() + 36) as u32)?;
+            .try_acquire_many_owned((frame.payload.len() + HEADER_BYTES) as u32)?;
         let count = self.count.clone().try_acquire_owned()?;
         self.commands
             .try_send(WriterCommand {
@@ -313,9 +315,9 @@ impl ServerStream {
                 let IncomingChunk {
                     bytes,
                     _permit,
-                    _lease,
+                    _connection_budget,
                 } = chunk;
-                drop(_lease);
+                drop(_connection_budget);
                 let credit = bytes.len() as u32;
                 drop(_permit);
                 if self.head.method == "rpc" {
@@ -541,9 +543,8 @@ pub(crate) struct PeerServices {
     pub(crate) carrier_kind: CarrierKind,
 }
 
-/// Logical peer state has one lifetime owner, independent of record crypto.
-/// The registry retains this owner across detach and destroys it at logical
-/// termination; invitation bootstrap deliberately retains physical lifetime.
+/// Endpoint state has the physical carrier lifetime. Teardown fences handlers
+/// and subscriptions before releasing their queues and authentication owner.
 struct PeerRuntime {
     streams: HashMap<u32, StreamState>,
     handlers: JoinSet<()>,
@@ -579,41 +580,6 @@ impl Drop for PeerRuntime {
     }
 }
 
-/// Serves one already mutually-authenticated peer until its carrier closes.
-pub(crate) enum PeerReader {
-    Physical(super::authenticated_channel::AuthenticatedReader),
-    Logical(super::logical_connection::Reader),
-}
-impl PeerReader {
-    pub(crate) async fn receive(
-        &mut self,
-    ) -> Result<Option<(Frame, Option<super::logical_connection::Lease>)>> {
-        match self {
-            Self::Physical(reader) => reader
-                .receive()
-                .await?
-                .map(|bytes| Frame::decode(&bytes).map(|frame| (frame, None)))
-                .transpose(),
-            Self::Logical(reader) => Ok(reader
-                .receive()
-                .await
-                .map(|received| (received.frame, Some(received.lease)))),
-        }
-    }
-}
-pub(crate) enum PeerWriter {
-    Physical(AuthenticatedWriter),
-    Logical(super::logical_connection::Writer),
-}
-impl PeerWriter {
-    pub(crate) async fn send(&mut self, frame: Frame) -> Result<()> {
-        match self {
-            Self::Physical(writer) => writer.send(&frame.encode()?).await,
-            Self::Logical(writer) => writer.send(frame).await,
-        }
-    }
-}
-
 pub async fn serve(
     state: Shared,
     key: SessionKey,
@@ -625,38 +591,15 @@ pub async fn serve(
     // engine with physical lifetime; it cannot create registry credentials.
     if access.bootstrap_invite.is_some() {
         let (reader, writer) = authenticated_channel(key, carrier, Role::Server);
-        return serve_streams(
-            state,
-            access,
-            PeerReader::Physical(reader),
-            PeerWriter::Physical(writer),
-            carrier_kind,
-        )
-        .await;
+        return serve_streams(state, access, reader, writer, carrier_kind).await;
     }
     super::logical_connection::serve(state, key, access, carrier, carrier_kind).await
 }
-pub(crate) async fn serve_logical(
+pub(crate) async fn serve_streams(
     state: Shared,
     access: PeerAccess,
-    reader: super::logical_connection::Reader,
-    writer: super::logical_connection::Writer,
-    carrier_kind: CarrierKind,
-) -> Result<()> {
-    serve_streams(
-        state,
-        access,
-        PeerReader::Logical(reader),
-        PeerWriter::Logical(writer),
-        carrier_kind,
-    )
-    .await
-}
-async fn serve_streams(
-    state: Shared,
-    access: PeerAccess,
-    mut channel_reader: PeerReader,
-    channel_writer: PeerWriter,
+    mut channel_reader: super::authenticated_channel::AuthenticatedReader,
+    channel_writer: AuthenticatedWriter,
     carrier_kind: CarrierKind,
 ) -> Result<()> {
     let mut revocations = state.devices.subscribe_revocations();
@@ -670,7 +613,7 @@ async fn serve_streams(
     let (writer_tx, writer_rx) = mpsc::channel(WRITER_COMMAND_QUEUE);
     let writer = Writer {
         commands: writer_tx,
-        budget: Arc::new(Semaphore::new(4 * 1024 * 1024)),
+        budget: Arc::new(Semaphore::new(SEND_QUEUE_BYTES)),
         progress: Arc::new(Semaphore::new(64 * 1024)),
         count: Arc::new(Semaphore::new(256)),
     };
@@ -698,9 +641,12 @@ async fn serve_streams(
     // and revoking one drops its connections rather than editing them.
     let watcher = Principal::of(&state, &access);
     let scoped_processes = access.workspace_id.is_some();
-    state
-        .diagnostics
-        .record("stream", "data.endpoint", "online", None);
+    state.diagnostics.record(
+        "stream",
+        "data.endpoint",
+        "online",
+        Some(carrier_kind.as_str()),
+    );
     let fanout_task = state.fanout.get().map(|fanout| {
         let mut receiver = fanout.subscribe();
         let events = services.event_sender.clone();
@@ -751,14 +697,18 @@ async fn serve_streams(
         fanout_task,
     };
 
+    let receive_budget = Arc::new(Semaphore::new(RECEIVE_QUEUE_BYTES));
+    let mut clock = tokio::time::interval(std::time::Duration::from_secs(5));
+    let mut last_received = Instant::now();
     let outcome = async {
         loop {
             tokio::select! {
                 plaintext = channel_reader.receive() => {
-                    let Some((frame, lease)) = plaintext? else { break Ok(()); };
+                    let Some(bytes) = plaintext? else { break Ok(()); };
+                    last_received = Instant::now();
                     dispatch(
-                        frame,
-                        lease,
+                        Frame::decode(&bytes)?,
+                        &receive_budget,
                         &mut peer.streams,
                         &writer,
                         &commands_tx,
@@ -779,10 +729,22 @@ async fn serve_streams(
                 failed = &mut writer_failed => {
                     break Err(failed.unwrap_or_else(|_| anyhow!("data-plane writer stopped")));
                 }
+                _ = clock.tick() => {
+                    super::logical_registry::validate_access(&access)?;
+                    if last_received.elapsed() >= std::time::Duration::from_secs(15) {
+                        break Err(anyhow!("peer heartbeat timed out"));
+                    }
+                    // Bootstrap has no encrypted admission round trip. Its peer
+                    // may still be deriving keys after WELCOME; do not emit an
+                    // unsolicited record before its one claim. The idle expiry
+                    // above still bounds an abandoned invitation connection.
+                    if access.bootstrap_invite.is_none() {
+                        writer.try_send(Frame { kind: Kind::Ping, stream_id: 0, value: 0, payload: Vec::new() })?;
+                    }
+                }
                 revoked = revocations.recv(), if access.device_id.is_some() => {
                     match revoked {
                         Ok(id) if access.device_id.as_ref() == Some(&id) => {
-                            state.logical_connections.revoke_device(&id);
                             break Err(anyhow!("the peer device was revoked"));
                         }
                         Ok(_) => {}
@@ -815,7 +777,7 @@ async fn serve_streams(
 
 fn dispatch(
     frame: Frame,
-    lease: Option<super::logical_connection::Lease>,
+    receive_budget: &Arc<Semaphore>,
     streams: &mut HashMap<u32, StreamState>,
     writer: &Writer,
     commands: &mpsc::Sender<EndpointCommand>,
@@ -872,7 +834,11 @@ fn dispatch(
             })?;
             return Ok(());
         }
-        let maximum_window = genehub_proto::INITIAL_STREAM_WINDOW_BYTES;
+        let maximum_window = if head.method == "asset.preview" {
+            genehub_proto::MAX_BULK_STREAM_WINDOW_BYTES
+        } else {
+            genehub_proto::INITIAL_STREAM_WINDOW_BYTES
+        };
         if frame.value == 0 || frame.value > maximum_window {
             writer.try_send(Frame {
                 kind: Kind::Reset,
@@ -966,6 +932,19 @@ fn dispatch(
                 anyhow::bail!("request body exceeds the length in its head");
             }
             let bytes = u32::try_from(frame.payload.len())?;
+            let Ok(connection_budget) = receive_budget.clone().try_acquire_many_owned(bytes) else {
+                if let Some(handler) = &stream.handler {
+                    handler.abort();
+                }
+                streams.remove(&frame.stream_id);
+                writer.try_send(Frame {
+                    kind: Kind::Reset,
+                    stream_id: frame.stream_id,
+                    value: RESET_REFUSED,
+                    payload: Vec::new(),
+                })?;
+                return Ok(());
+            };
             let permit = stream
                 .inbound_budget
                 .clone()
@@ -976,7 +955,7 @@ fn dispatch(
                 .try_send(Incoming::Chunk(IncomingChunk {
                     bytes: frame.payload,
                     _permit: permit,
-                    _lease: lease,
+                    _connection_budget: connection_budget,
                 }))
                 .map_err(|_| anyhow!("stream handler receive queue is full"))?;
             stream.remote_sequence = expected;
@@ -1523,8 +1502,8 @@ async fn send_reply(stream: &mut ServerStream, reply: Reply) -> Result<()> {
         })
         .await?;
     // Small RPC replies must progress even while this same peer's preview
-    // fills its bulk quota. The physical actor grants at most one additional
-    // record per peer, and keeps DATA credit, journal and byte accounting.
+    // is busy. Control priority applies before the physical write and still
+    // consumes DATA credit and locally owned byte permits.
     if stream.head.method == "rpc" && body.len() <= genehub_proto::MAX_EXCHANGE_HEAD_BYTES {
         stream
             .write_inner(&body, None, super::logical_connection::WriteClass::Control)
@@ -1718,14 +1697,10 @@ fn request_workspace(request: &Request) -> Option<&str> {
 }
 
 async fn run_writer(
-    mut channel: PeerWriter,
+    mut channel: AuthenticatedWriter,
     mut commands: mpsc::Receiver<WriterCommand>,
     failed: oneshot::Sender<anyhow::Error>,
 ) {
-    if let PeerWriter::Logical(writer) = channel {
-        run_logical_writer(writer, commands, failed).await;
-        return;
-    }
     let mut queues = HashMap::<u32, VecDeque<WriterCommand>>::new();
     let mut runnable = VecDeque::<u32>::new();
     let outcome: Result<()> = async {
@@ -1760,14 +1735,14 @@ async fn run_writer(
                 .zip(actor_started)
                 .map(|(queued, started)| started.duration_since(queued).as_micros() as u64)
                 .unwrap_or_default();
-            match channel.send(command.frame).await {
+            match channel.send(&command.frame.encode()?).await {
                 Ok(()) => {
                     let _ = command.complete.send(Ok(WriterCompletion {
                         actor_queue_us,
                         actor_send_us: actor_started
                             .map(|started| started.elapsed().as_micros() as u64)
                             .unwrap_or_default(),
-                        acknowledged_at: actor_started.map(|_| Instant::now()),
+                        accepted_at: actor_started.map(|_| Instant::now()),
                     }));
                 }
                 Err(_) => {
@@ -1790,76 +1765,6 @@ async fn run_writer(
     let _ = failed.send(error);
 }
 
-async fn run_logical_writer(
-    writer: super::logical_connection::Writer,
-    mut commands: mpsc::Receiver<WriterCommand>,
-    failed: oneshot::Sender<anyhow::Error>,
-) {
-    let mut active = std::collections::HashSet::new();
-    let mut queues = HashMap::<u32, VecDeque<WriterCommand>>::new();
-    let mut tasks = JoinSet::new();
-    let outcome: Result<()> = async {
-        loop {
-            tokio::select! {
-                command = commands.recv() => {
-                    let Some(command) = command else { return Ok(()); };
-                    queues.entry(command.stream_id).or_default().push_back(command);
-                }
-                done = tasks.join_next(), if !tasks.is_empty() => {
-                    let (id, result) = done.ok_or_else(|| anyhow!("logical writer stopped"))??;
-                    active.remove(&id);
-                    result?;
-                }
-            }
-            let runnable: Vec<_> = queues
-                .keys()
-                .filter(|id| !active.contains(*id))
-                .copied()
-                .collect();
-            for id in runnable {
-                let queue = queues.get_mut(&id).unwrap();
-                let Some(command) = queue.pop_front() else {
-                    continue;
-                };
-                if queue.is_empty() {
-                    queues.remove(&id);
-                }
-                active.insert(id);
-                let mut writer = writer.clone();
-                tasks.spawn(async move {
-                    let actor_started = command.measured_enqueued_at.map(|_| Instant::now());
-                    let actor_queue_us = command
-                        .measured_enqueued_at
-                        .zip(actor_started)
-                        .map(|(queued, started)| started.duration_since(queued).as_micros() as u64)
-                        .unwrap_or_default();
-                    let result = writer.send_classified(command.frame, command.class).await;
-                    let report = result
-                        .as_ref()
-                        .map(|_| WriterCompletion {
-                            actor_queue_us,
-                            actor_send_us: actor_started
-                                .map(|started| started.elapsed().as_micros() as u64)
-                                .unwrap_or_default(),
-                            acknowledged_at: actor_started.map(|_| Instant::now()),
-                        })
-                        .map_err(|e| anyhow!(e.to_string()));
-                    let _ = command.complete.send(report);
-                    drop(command._budget);
-                    drop(command._count);
-                    (id, result)
-                });
-            }
-        }
-    }
-    .await;
-    let _ = failed.send(
-        outcome
-            .err()
-            .unwrap_or_else(|| anyhow!("logical writer stopped")),
-    );
-}
-
 fn enqueue_writer(
     command: WriterCommand,
     queues: &mut HashMap<u32, VecDeque<WriterCommand>>,
@@ -1867,7 +1772,11 @@ fn enqueue_writer(
 ) {
     let queue = queues.entry(command.stream_id).or_default();
     if queue.is_empty() {
-        runnable.push_back(command.stream_id);
+        if command.class == super::logical_connection::WriteClass::Control {
+            runnable.push_front(command.stream_id);
+        } else {
+            runnable.push_back(command.stream_id);
+        }
     }
     queue.push_back(command);
 }
@@ -1883,9 +1792,13 @@ mod tests {
             tasks: HashMap::new(),
         };
         assert!(!subscription_capacity_refused(&subscriptions, "s1", 2));
-        subscriptions.tasks.insert("s1".into(), tokio::spawn(async {}));
+        subscriptions
+            .tasks
+            .insert("s1".into(), tokio::spawn(async {}));
         assert!(!subscription_capacity_refused(&subscriptions, "s2", 2));
-        subscriptions.tasks.insert("s2".into(), tokio::spawn(async {}));
+        subscriptions
+            .tasks
+            .insert("s2".into(), tokio::spawn(async {}));
         // At the limit: a new session is refused, an existing one is not.
         assert!(subscription_capacity_refused(&subscriptions, "s3", 2));
         assert!(!subscription_capacity_refused(&subscriptions, "s1", 2));

@@ -12,6 +12,7 @@ import {
 import {
   DATA_PLANE_VERSION,
   INITIAL_STREAM_WINDOW_BYTES,
+  MAX_BULK_STREAM_WINDOW_BYTES,
 } from "./frame";
 
 export type PeerCredential =
@@ -45,8 +46,8 @@ export async function preparePeerHandshake(
     clientName: boundedClientName(options.clientName),
     auth,
     rtcSupported: options.rtcSupported ?? supportsRtc(),
-    // v4 uses the same bounded per-stream window for finite and live flows.
-    maxBulkStreamWindowBytes: INITIAL_STREAM_WINDOW_BYTES,
+    // A finite Preview can fund its whole legal response at admission.
+    maxBulkStreamWindowBytes: MAX_BULK_STREAM_WINDOW_BYTES,
   };
   return {
     hello,
@@ -88,7 +89,7 @@ function validBulkWindow(value: number): number {
   if (
     !Number.isSafeInteger(value) ||
     value < INITIAL_STREAM_WINDOW_BYTES ||
-    value > INITIAL_STREAM_WINDOW_BYTES
+    value > MAX_BULK_STREAM_WINDOW_BYTES
   ) {
     throw new Error("the daemon advertised an invalid finite-bulk receive lease");
   }

@@ -12,7 +12,6 @@ pub use preview_feedback::*;
 pub mod data;
 pub mod domain;
 pub mod event;
-pub mod resume;
 pub mod rpc;
 pub mod speech;
 pub mod timeline;

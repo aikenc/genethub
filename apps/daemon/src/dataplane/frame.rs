@@ -6,7 +6,7 @@ pub const SECURE_RECORD_TAG_BYTES: usize = 16;
 pub const MAX_PAYLOAD_BYTES: usize = genehub_proto::MAX_DATA_FRAME_BYTES
     - SECURE_RECORD_HEADER_BYTES
     - SECURE_RECORD_TAG_BYTES
-    - genehub_proto::resume::HEADER_BYTES;
+    - HEADER_BYTES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -119,23 +119,13 @@ mod tests {
             value: 1,
             payload: vec![0; MAX_PAYLOAD_BYTES],
         };
-        // Ordinary records use the v4 resumable envelope, not the bootstrap header.
-        let wire = genehub_proto::resume::Payload {
-            epoch: 1,
-            seq: 1,
-            frame: genehub_proto::resume::Frame {
-                kind: frame.kind as u8,
-                stream_id: frame.stream_id,
-                value: frame.value,
-                payload: frame.payload,
-            },
-        };
+        let wire = frame;
         assert_eq!(
             wire.encode().unwrap().len() + SECURE_RECORD_HEADER_BYTES + SECURE_RECORD_TAG_BYTES,
             genehub_proto::MAX_DATA_FRAME_BYTES
         );
         let mut oversized = wire;
-        oversized.frame.payload.push(0);
+        oversized.payload.push(0);
         assert!(oversized.encode().is_err());
     }
 }

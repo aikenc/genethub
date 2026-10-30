@@ -25,7 +25,6 @@ export async function openFabricDataLink(options: {
   url: string;
   routeTicket: string;
   credential: PeerCredential;
-  endpoint?: DataEndpoint;
   signal?: AbortSignal;
   clientName?: string;
   rtcSupported: boolean;
@@ -61,7 +60,7 @@ export async function openFabricDataLink(options: {
     const handshake = await prepared.complete(welcome);
     if (options.signal?.aborted) throw new Error("Fabric admission cancelled");
     const carrier = new FabricRecordCarrier(fabric, stream);
-    const endpoint = options.endpoint ?? new DataEndpoint({
+    const endpoint = new DataEndpoint({
       role: "client",
       path: "fabric",
       carrier,
@@ -71,8 +70,7 @@ export async function openFabricDataLink(options: {
       ...(options.onError ? { onError: options.onError } : {}),
       ...(options.onDiagnostic ? { onDiagnostic: options.onDiagnostic } : {}),
     });
-    if (options.endpoint) await endpoint.attach(carrier, handshake.key, "fabric");
-    else await endpoint.ready();
+    await endpoint.ready();
     return {
       endpoint,
       fabric,

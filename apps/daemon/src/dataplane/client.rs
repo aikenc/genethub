@@ -11,11 +11,10 @@ use genehub_proto::{ExchangeRequestHead, ExchangeResponseHead};
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
-pub(crate) use super::logical_connection::Redial;
-
+use super::authenticated_channel::AuthenticatedWriter;
 use super::authenticated_channel::{authenticated_channel, Role};
 use crate::channel_auth::SessionKey;
-use crate::dataplane::endpoint::{Carrier, PeerReader, PeerWriter};
+use crate::dataplane::endpoint::Carrier;
 use crate::dataplane::frame::{Frame, Kind, MAX_PAYLOAD_BYTES};
 
 const COMMAND_QUEUE: usize = 256;
@@ -68,7 +67,6 @@ pub struct ClientEndpoint {
 
 struct ClientChunk {
     bytes: Vec<u8>,
-    lease: Option<super::logical_connection::Lease>,
     credit: mpsc::Sender<(u32, u32)>,
     stream_id: u32,
 }
@@ -90,7 +88,6 @@ impl ClientStream {
             Ok(chunk) => chunk,
             Err(error) => return Some(Err(error)),
         };
-        drop(chunk.lease);
         let _ = chunk
             .credit
             .send((chunk.stream_id, chunk.bytes.len() as u32))
@@ -102,17 +99,7 @@ impl ClientStream {
 impl ClientEndpoint {
     pub fn start(key: SessionKey, carrier: Carrier) -> (Self, tokio::task::JoinHandle<Result<()>>) {
         let (commands, receiver) = mpsc::channel(COMMAND_QUEUE);
-        let task = tokio::spawn(run(key, carrier, receiver, None));
-        (Self { commands }, task)
-    }
-
-    pub(crate) fn start_recovering(
-        key: SessionKey,
-        carrier: Carrier,
-        redial: super::logical_connection::Redial,
-    ) -> (Self, tokio::task::JoinHandle<Result<()>>) {
-        let (commands, receiver) = mpsc::channel(COMMAND_QUEUE);
-        let task = tokio::spawn(run(key, carrier, receiver, Some(redial)));
+        let task = tokio::spawn(run(key, carrier, receiver));
         (Self { commands }, task)
     }
 
@@ -213,30 +200,14 @@ impl ClientEndpoint {
     }
 }
 
-async fn run(
-    key: SessionKey,
-    carrier: Carrier,
-    mut commands: mpsc::Receiver<Call>,
-    redial: Option<super::logical_connection::Redial>,
-) -> Result<()> {
+async fn run(key: SessionKey, carrier: Carrier, mut commands: mpsc::Receiver<Call>) -> Result<()> {
     let mut streams = HashMap::<u32, Stream>::new();
     let mut next_stream_id = 1u32;
     let (returned_credit, mut credits) = mpsc::channel::<(u32, u32)>(256);
-    let (mut reader, mut writer, actor) = if key.principal().starts_with("invite:") {
-        let (reader, writer) = authenticated_channel(key, carrier, Role::Client);
-        (
-            PeerReader::Physical(reader),
-            PeerWriter::Physical(writer),
-            None,
-        )
+    let (mut reader, mut writer) = if key.principal().starts_with("invite:") {
+        authenticated_channel(key, carrier, Role::Client)
     } else {
-        let (reader, writer, task) =
-            super::logical_connection::client(key, carrier, redial).await?;
-        (
-            PeerReader::Logical(reader),
-            PeerWriter::Logical(writer),
-            Some(task),
-        )
+        super::logical_connection::client(key, carrier).await?
     };
 
     let outcome = async { loop {
@@ -296,7 +267,8 @@ async fn run(
                 ).await?;
             }
             plaintext = reader.receive() => {
-                let Some((frame, _lease)) = plaintext? else { break Ok(()); };
+                let Some(bytes) = plaintext? else { break Ok(()); };
+                let frame = Frame::decode(&bytes)?;
                 if frame.kind == Kind::Ping {
                     send(
                         &mut writer,
@@ -360,7 +332,7 @@ async fn run(
                         stream.remote_sequence = expected;
                         stream.received_response_bytes = next;
                         let credit = u32::try_from(frame.payload.len())?;
-                        if !stream.target.push(&frame.payload, _lease, returned_credit.clone(), frame.stream_id) {
+                        if !stream.target.push(&frame.payload, returned_credit.clone(), frame.stream_id) {
                             send_reset(
                                 &mut writer,
                                 frame.stream_id,
@@ -436,20 +408,6 @@ async fn run(
     for (_, mut stream) in streams {
         stream.target.fail(message.clone());
     }
-    // Closing dispatch tells the logical actor to send the existing CLOSE
-    // control message. Keep the endpoint (and its caller's carrier pump)
-    // alive until that actor flushes, instead of turning a normal CLI exit
-    // into an unexpected disconnect with a retained recovery lease.
-    drop(reader);
-    drop(writer);
-    if let Some(mut actor) = actor {
-        if tokio::time::timeout(std::time::Duration::from_secs(1), &mut actor)
-            .await
-            .is_err()
-        {
-            actor.abort();
-        }
-    }
     outcome
 }
 
@@ -466,19 +424,12 @@ impl ResponseTarget {
         }
     }
 
-    fn push(
-        &self,
-        bytes: &[u8],
-        lease: Option<super::logical_connection::Lease>,
-        credit: mpsc::Sender<(u32, u32)>,
-        stream_id: u32,
-    ) -> bool {
+    fn push(&self, bytes: &[u8], credit: mpsc::Sender<(u32, u32)>, stream_id: u32) -> bool {
         match self {
             Self::Unary(_) => true,
             Self::Streaming { chunks, .. } => chunks
                 .try_send(Ok(ClientChunk {
                     bytes: bytes.to_vec(),
-                    lease,
                     credit,
                     stream_id,
                 }))
@@ -516,7 +467,11 @@ impl ResponseTarget {
     }
 }
 
-async fn pump_request(writer: &mut PeerWriter, stream_id: u32, stream: &mut Stream) -> Result<()> {
+async fn pump_request(
+    writer: &mut AuthenticatedWriter,
+    stream_id: u32,
+    stream: &mut Stream,
+) -> Result<()> {
     while stream.request_offset < stream.request.len() && stream.outbound_credit > 0 {
         let length = (stream.request.len() - stream.request_offset)
             .min(stream.outbound_credit as usize)
@@ -555,7 +510,7 @@ async fn pump_request(writer: &mut PeerWriter, stream_id: u32, stream: &mut Stre
     Ok(())
 }
 
-async fn send_reset(writer: &mut PeerWriter, stream_id: u32, code: u32) -> Result<()> {
+async fn send_reset(writer: &mut AuthenticatedWriter, stream_id: u32, code: u32) -> Result<()> {
     send(
         writer,
         Frame {
@@ -568,6 +523,6 @@ async fn send_reset(writer: &mut PeerWriter, stream_id: u32, code: u32) -> Resul
     .await
 }
 
-async fn send(writer: &mut PeerWriter, frame: Frame) -> Result<()> {
-    writer.send(frame).await
+async fn send(writer: &mut AuthenticatedWriter, frame: Frame) -> Result<()> {
+    writer.send(&frame.encode()?).await
 }

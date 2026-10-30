@@ -21,52 +21,11 @@ const DATA_RECORD_HEADER_BYTES: usize = 12;
 pub struct SessionKey {
     encryption_key: [u8; 32],
     context: String,
-    binding: String,
 }
 
 impl SessionKey {
     pub(crate) fn principal(&self) -> &str {
         &self.context
-    }
-
-    pub(crate) fn resume_server_proof(
-        &self,
-        secret: &str,
-        id: &str,
-        incarnation: &str,
-        attempt: &str,
-        epoch: u64,
-    ) -> String {
-        authenticate(
-            secret.as_bytes(),
-            b"genehub-logical-attached-v1",
-            &[
-                id.as_bytes(),
-                incarnation.as_bytes(),
-                self.binding.as_bytes(),
-                attempt.as_bytes(),
-                epoch.to_string().as_bytes(),
-            ],
-        )
-    }
-
-    pub(crate) fn resume_proof(
-        &self,
-        secret: &str,
-        id: &str,
-        incarnation: &str,
-        attempt: &str,
-    ) -> String {
-        authenticate(
-            secret.as_bytes(),
-            b"genehub-logical-attach-v1",
-            &[
-                id.as_bytes(),
-                incarnation.as_bytes(),
-                self.binding.as_bytes(),
-                attempt.as_bytes(),
-            ],
-        )
     }
 }
 
@@ -126,16 +85,6 @@ pub fn derive_key(
             KEY_DOMAIN,
             &[
                 b"encryption",
-                context.as_bytes(),
-                client_nonce.as_bytes(),
-                server_nonce.as_bytes(),
-            ],
-        ),
-        binding: authenticate(
-            secret.as_bytes(),
-            KEY_DOMAIN,
-            &[
-                b"binding",
                 context.as_bytes(),
                 client_nonce.as_bytes(),
                 server_nonce.as_bytes(),

@@ -14,7 +14,7 @@ const meta = (name: string, oracle: string, ms: number) => ({
 });
 
 defineSpecialty(meta("rtc-preview-pacing",
-  "A preview proven to traverse native RTC does not open the shared Fabric pacing window", 30000), async t => {
+  "A complete preview crosses native RTC while the Fabric carrier is blocked", 30000), async t => {
   t.env.env.GENEHUB_LOCAL_LOG = "warn";
   const bytes = randomBytes(8 * 1024 * 1024);
   Buffer.from([137,80,78,71,13,10,26,10]).copy(bytes);
@@ -22,8 +22,8 @@ defineSpecialty(meta("rtc-preview-pacing",
   const digest = createHash("sha256").update(bytes).digest("hex");
   const stack = await openMultichannelBrowser(t);
   try {
-    const logical = await stack.page.evaluate(() => (window as any).mc.client.logicalConnectionId);
     await stack.rtc();
+    const logical = await stack.page.evaluate(() => (window as any).mc.client.logicalConnectionId);
     // Cut the real Fabric socket: a successful transfer now proves RTC, not
     // merely the label recorded at request start.
     stack.fabric.block();
@@ -97,7 +97,7 @@ defineSpecialty(meta("rtc-pause-survives-reconnect",
 
 
 defineSpecialty(meta("inflight-preview-rtc-fallback",
-  "An in-flight native RTC preview falls back through Fabric in the same logical session without refetching or corrupting content", 40000), async t => {
+  "An interrupted native RTC preview fails; an explicit fresh read over Fabric returns one complete version", 40000), async t => {
   const bytes = randomBytes(48 * 1024 * 1024);
   Buffer.from([137,80,78,71,13,10,26,10]).copy(bytes);
   writeFileSync(join(t.env.workspace, "fallback.png"), bytes);
@@ -127,19 +127,30 @@ defineSpecialty(meta("inflight-preview-rtc-fallback",
     const began = performance.now();
     await stack.cutRtc();
     await stack.page.waitForFunction(() => (window as any).mc.previewResult || (window as any).mc.previewError, null, {timeout: 45000});
-    const result = await stack.page.evaluate(() => ({result: (window as any).mc.previewResult, error: (window as any).mc.previewError}));
+    const interrupted = await stack.page.evaluate(() => ({result: (window as any).mc.previewResult, error: (window as any).mc.previewError,
+      attempts: (window as any).mc.operations.filter((o: any) => o.operation === "asset.preview").length}));
+    t.assertions.assert(!!interrupted.error && !interrupted.result && interrupted.attempts === 1,
+      `interrupted preview was replayed or reported partial success: ${JSON.stringify(interrupted)}`);
+    await stack.page.evaluate(() => (window as any).mc.client.setRtcEnabled(false));
+    await stack.page.waitForFunction(() => (window as any).mc.client.connectionState === "ready", null, {timeout: 30000});
+    const result = await stack.page.evaluate(async ({workspace, path}) => {
+      const m = (window as any).mc, r = await m.client.preview(workspace, path);
+      const hash = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", r.bytes))).map(n => n.toString(16).padStart(2, "0")).join("");
+      return {hash, bytes: r.bytes.length, logical: m.client.logicalConnectionId,
+        attempts: m.operations.filter((o: any) => o.operation === "asset.preview").length};
+    }, {workspace: stack.opened.workspaceId, path: `${stack.opened.rootHandle}/fallback.png`});
     const fabricBytes = stack.fabric.bytes().server - before.server;
-    t.note(JSON.stringify({result, fabricBytes, elapsedAfterFaultMs: Math.round(performance.now()-began)}));
-    t.assertions.assert(!result.error && result.result?.hash === digest && result.result?.logical === logical,
-      `in-flight fallback failed: ${JSON.stringify(result)}`);
-    t.assertions.assert(fabricBytes > 65536, "remaining preview never traversed Fabric");
+    t.note(JSON.stringify({interrupted, result, fabricBytes, elapsedAfterFaultMs: Math.round(performance.now()-began)}));
+    t.assertions.assert(result.hash === digest && result.bytes === bytes.length && result.logical !== logical && result.attempts === 2,
+      `explicit fallback read failed: ${JSON.stringify(result)}`);
+    t.assertions.assert(fabricBytes > 65536, "fresh preview never traversed Fabric");
   } finally { await stack.stop(); }
 });
 
 
 for (const losses of [1, 2]) {
 defineSpecialty({
-  ...meta(losses === 1 ? "preview-session-loss" : "preview-retry-bounded", "A read-only preview gets one fresh read after daemon session loss, without mixing file versions or waiting out the old head timeout", 20000),
+  ...meta(losses === 1 ? "preview-session-loss" : "preview-retry-bounded", "Daemon loss fails the old preview without replay; only an explicit business read starts another complete version", 20000),
   runner: "node", resources: {environments: 1, cpu: 2, memoryMb: 1024, io: 1, browser: 0, pool: "standard"},
 }, async t => {
   const file = join(t.env.workspace, "restart.png");
@@ -177,24 +188,29 @@ defineSpecialty({
     const restart = runGenet(opened.daemon.genet, ["daemon", "restart"], opened.daemon.env);
     t.assertions.assert(restart.code === 0, "isolated daemon restart failed");
     link.cut();
+    const outcome = await preview.then(() => "unexpected success", error => error instanceof Error ? error.message : String(error));
+    const attempts = () => diagnostics.filter(e => e.kind === "operation" && e.detail.operation === "asset.preview" && e.detail.phase === "start").length;
+    t.assertions.assert(outcome !== "unexpected success" && attempts() === 1, "lost preview must fail without a hidden fresh read");
+    await t.tools.waitUntil(() => client.connectionState === "ready" && client.logicalConnectionId !== oldId, 20000);
+    // This second call is the business decision; Client.preview never retries it.
+    const fresh = client.preview(opened.workspaceId, `${opened.rootHandle}/restart.png`);
+    void fresh.catch(() => {});
     if (losses === 2) {
-      await t.tools.waitUntil(() => activeLink !== link && activeLink.heldBytes().server > 0 && diagnostics.filter(e => e.kind === "operation" && e.detail.operation === "asset.preview" && e.detail.phase === "start").length === 2, 15000);
+      await t.tools.waitUntil(() => activeLink !== link && activeLink.heldBytes().server > 0 && attempts() === 2, 15000);
       const again = runGenet(opened.daemon.genet, ["daemon", "restart"], opened.daemon.env);
       t.assertions.assert(again.code === 0, "second isolated daemon restart failed");
       activeLink.cut();
-      const outcome = await preview.then(() => "unexpected success", error => error instanceof Error ? error.message : String(error));
-      const attempts = diagnostics.filter(e => e.kind === "operation" && e.detail.operation === "asset.preview" && e.detail.phase === "start").length;
-      t.note(JSON.stringify({attempts, outcome, elapsedMs: Math.round(performance.now() - began)}));
-      t.assertions.assert(outcome === "SessionLost" && attempts === 2, "a second lost session must fail without a third preview read");
+      const second = await fresh.then(() => "unexpected success", error => error instanceof Error ? error.message : String(error));
+      t.note(JSON.stringify({attempts: attempts(), outcome, second, elapsedMs: Math.round(performance.now() - began)}));
+      t.assertions.assert(second !== "unexpected success" && attempts() === 2, "second lost read must fail without a third preview call");
       return;
     }
-    const result = await preview;
+    const result = await fresh;
     const elapsedMs = performance.now() - began;
     const matches = createHash("sha256").update(result.bytes).digest("hex") === createHash("sha256").update(replacement).digest("hex");
-    const attempts = diagnostics.filter(e => e.kind === "operation" && e.detail.operation === "asset.preview" && e.detail.phase === "start").length;
-    t.note(JSON.stringify({matches, attempts, elapsedMs: Math.round(elapsedMs), changedSession: oldId !== client.logicalConnectionId}));
-    t.assertions.assert(matches && oldId !== client.logicalConnectionId && attempts === 2, "preview did not recover as one complete fresh version");
-    t.assertions.assert(elapsedMs < 15000, `preview waited ${elapsedMs}ms instead of failing/recovering promptly`);
+    t.note(JSON.stringify({matches, attempts: attempts(), elapsedMs: Math.round(elapsedMs), changedSession: oldId !== client.logicalConnectionId}));
+    t.assertions.assert(matches && oldId !== client.logicalConnectionId && attempts() === 2, "explicit preview did not return one complete fresh version");
+    t.assertions.assert(elapsedMs < 15000, `explicit preview waited ${elapsedMs}ms instead of failing/reopening promptly`);
   } finally {client.close(); await Promise.all(links.map(link => link.stop())); opened.client.close(); opened.daemon.stop(); await opened.mock.stop();}
 });
 }

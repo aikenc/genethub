@@ -40,6 +40,16 @@ pub const MAX_BULK_STREAM_WINDOW_BYTES: u32 = MAX_PREVIEW_SOURCE_BYTES as u32;
 pub const MAX_ACTIVE_DATA_STREAMS: usize = 256;
 const _: () = assert!(MAX_EXCHANGE_HEAD_BYTES < MAX_DATA_FRAME_BYTES);
 
+/// Encrypted admission for one connection; no cross-carrier recovery identity.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(tag = "op", rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export, export_to = "index.ts", tag = "op", rename_all = "camelCase")]
+pub enum ConnectionAdmission {
+    Create { policy: String },
+    Created { id: String },
+    Error { code: String },
+}
+
 /// How a peer proves possession of an end-to-end secret during carrier setup.
 ///
 /// Only a capability *name* is present for hosted sessions.  The daemon

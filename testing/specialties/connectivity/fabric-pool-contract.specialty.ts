@@ -42,7 +42,7 @@ defineSpecialty({
       const reply = await peer.call({ type: "workspace.list" });
       t.assertions.assert(reply?.type === "workspaces" && reply.data.some(w => w.id === o.workspaceId), "pool lane did not reach the original daemon workspace");
     }
-    t.assertions.assert(new Set(peers.map(p => p.logicalConnectionId)).size === 4 && new Set(peers.map(p => p.identity?.machineId)).size === 1, "channels did not retain distinct journals and same source identity");
+    t.assertions.assert(new Set(peers.map(p => p.logicalConnectionId)).size === 4 && new Set(peers.map(p => p.identity?.machineId)).size === 1, "channels did not retain distinct endpoints and same source identity");
     const readOnly = await t.flows.main.pairDevice(o.client, o.daemon, ["read"], "pool-read-only");
     try { await t.assertions.expectProtocolCode(() => readOnly.client.call({ type: "device.remoteAttach", payload: { relayUrl: relay.origin, joinToken: null, channelCount: 4 } }), "forbidden"); }
     finally { readOnly.client.close(); }
@@ -98,8 +98,8 @@ defineSpecialty({
 
 
 defineSpecialty({
-  id:"specialty.fabric-pool.resize-to-one-recovers-body",title:"Removing the data node lane retains its in-flight logical body on the surviving primary",
-  oracle:"A real in-flight 8 MiB shell output survives 2-to-1 node resize with the same logical owners, exact hash/exit and one source execution",
+  id:"specialty.fabric-pool.resize-to-one-recovers-body",title:"Removing the data lane ends its old stream; fresh body requests use the surviving primary",
+  oracle:"Real2-to1 resize fails the interrupted shell without replay, preserves the healthy primary and authenticates a new body endpoint on the surviving lane",
   catches:["companion redials a removed lane forever", "fallback replays the shell command", "shrinking a tail replaces the primary control owner"],
   tags:["fabric-pool","fabric-automatic"],llm:{default:"none"},resources:{environments:1,cpu:2,memoryMb:2048,io:1,browser:0,pool:"exclusive"},
   surfaces:["daemon","relay","workbench-client","shell","tcp"],productInterfaces:["@genehub/workbench/client"],requiredArtifacts:["genet","genehub-host-local","genehub_guest.wasm"],
@@ -120,9 +120,14 @@ defineSpecialty({
     p.link.setProfile({bandwidthMbps:1000,rttMs:0});
     await t.tools.waitUntil(()=>body.connectionState!=="ready",3000);
     await t.tools.waitUntil(()=>body.connectionState==="ready",15000);
-    const r=await result,text=t.flows.main.shellText(r.frames,"stdout");
-    t.assertions.assert(createHash("sha256").update(text).digest("hex")===createHash("sha256").update(Buffer.alloc(8*1024*1024,82)).digest("hex")&&t.flows.main.shellExit(r.frames)?.code===0,"fallback did not recover exact body and exit");
-    t.assertions.assert(readFileSync(join(p.opened.workspaceRoot,"resize-starts"),"utf8")==="once\n"&&client.logicalConnectionId===owners[0]&&body.logicalConnectionId===owners[1],"resize repeated source execution or replaced an owner");
-    t.note(JSON.stringify({bytes:Buffer.byteLength(text),sourceExecutions:1,retainedOwners:true,nodeChannels:1}));
+    const interrupted=await result.then(()=>false,()=>true);
+    t.assertions.assert(interrupted,"removed data lane silently continued the old shell response");
+    t.assertions.assert(readFileSync(join(p.opened.workspaceRoot,"resize-starts"),"utf8")==="once\n"&&client.logicalConnectionId===owners[0]&&body.logicalConnectionId!==owners[1],"resize replayed source or replaced the healthy primary");
+    t.assertions.assert((await body.call({type:"workspace.list"}))?.type==="workspaces","fresh body endpoint cannot use surviving primary");
+    // A new finite business command independently proves byte correctness.
+    const fresh=client.openShellStream({workspaceId:p.opened.workspaceId,cwd:p.opened.workspaceRoot,timeoutMs:15000,argv:["python3","-c","import sys;sys.stdout.write('R'*8388608)"]});
+    await fresh.finish();const r=await collectShellResult(fresh),text=t.flows.main.shellText(r.frames,"stdout");
+    t.assertions.assert(createHash("sha256").update(text).digest("hex")===createHash("sha256").update(Buffer.alloc(8*1024*1024,82)).digest("hex")&&t.flows.main.shellExit(r.frames)?.code===0,"fresh command lost body bytes or exit");
+    t.note(JSON.stringify({freshBytes:Buffer.byteLength(text),sourceExecutions:1,primaryRetained:true,bodyReplaced:true,nodeChannels:1}));
   }finally{stream?.reset(1);client?.close();await p.dispose();}
 });
