@@ -164,12 +164,14 @@ fn install_file(target: &Path, contents: &[u8]) -> std::io::Result<()> {
 /// Load exactly the product-owned Skill entrypoints compiled into this daemon.
 /// Unknown files in the data directory are never promoted into Agent context.
 pub fn load(skills_root: &Path) -> Vec<Skill> {
+    // A failure installing one file must not hide the files that are already
+    // there: the catalog is safety guidance, and a partial catalog is better
+    // than none. materialize() logs the specific file it could not write.
+    let _ = materialize(skills_root);
     let mut skills = Vec::new();
-    if materialize(skills_root).is_some() {
-        for entrypoint in BUILTIN_ENTRYPOINTS {
-            if let Some(skill) = parse_skill_file(&skills_root.join(entrypoint)) {
-                skills.push(skill);
-            }
+    for entrypoint in BUILTIN_ENTRYPOINTS {
+        if let Some(skill) = parse_skill_file(&skills_root.join(entrypoint)) {
+            skills.push(skill);
         }
     }
     skills.sort_by(|a, b| a.name.cmp(&b.name));

@@ -93,19 +93,47 @@ pub struct Devices {
     /// connections can be dropped instead of surviving until they feel like
     /// reconnecting.
     revoked: broadcast::Sender<String>,
+    /// False when the file exists but could not be read at startup. Pairing
+    /// then fails instead of persisting an empty list over the real one.
+    writable: bool,
 }
 
 impl Devices {
     pub fn load(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
-        let mut devices: Vec<Device> = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<Persisted>(&raw).ok())
-            .map(|file| file.devices)
-            .unwrap_or_default()
-            .into_iter()
-            .take(MAX_DEVICES)
-            .collect();
+        let (mut devices, writable) = match std::fs::read_to_string(&path) {
+            Ok(raw) => match serde_json::from_str::<Persisted>(&raw) {
+                Ok(file) => (file.devices, true),
+                Err(error) => {
+                    // Keep the bytes: starting from an empty list is fine,
+                    // but the next pairing must not overwrite the only copy.
+                    let backup = path.with_extension(format!(
+                        "corrupt-{}",
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|elapsed| elapsed.as_secs())
+                            .unwrap_or_default()
+                    ));
+                    let moved = std::fs::rename(&path, &backup);
+                    tracing::error!(
+                        %error,
+                        backup = %backup.display(),
+                        kept = moved.is_ok(),
+                        "devices.json is unreadable; starting from an empty list"
+                    );
+                    (Vec::new(), moved.is_ok())
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (Vec::new(), true),
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    "devices.json could not be read; refusing to overwrite it"
+                );
+                (Vec::new(), false)
+            }
+        };
+        devices = devices.into_iter().take(MAX_DEVICES).collect();
         for device in &mut devices {
             if device.grants_version == 0 {
                 device.grants.add_speech_to_legacy_full();
@@ -122,6 +150,7 @@ impl Devices {
                 connected: HashMap::new(),
             }),
             revoked,
+            writable,
         }
     }
 
@@ -344,6 +373,9 @@ impl Devices {
     }
 
     fn persist(&self, state: &State) -> Result<()> {
+        if !self.writable {
+            anyhow::bail!("devices.json could not be read at startup; refusing to overwrite it");
+        }
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -442,6 +474,28 @@ mod tests {
             .claim_authenticated(invite_id, name)
             .expect("the authenticated invitation is redeemable");
         (credential.device_id, credential.secret)
+    }
+
+    #[test]
+    fn a_corrupt_device_file_is_kept_aside_before_an_empty_list_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("devices.json");
+        std::fs::write(&path, "{not json").unwrap();
+
+        let devices = Devices::load(&path);
+
+        assert!(devices.writable, "a backed-up file can be replaced safely");
+        let backup = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("devices.corrupt-")
+            })
+            .expect("the unreadable file is kept aside");
+        assert_eq!(std::fs::read_to_string(backup.path()).unwrap(), "{not json");
     }
 
     #[test]

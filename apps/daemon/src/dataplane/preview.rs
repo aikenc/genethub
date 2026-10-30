@@ -412,7 +412,7 @@ async fn send_file(
             stream.write(&step[..read]).await?;
         }
         stats.write_us += began.elapsed().as_micros() as u64;
-        if stats.chunks % 64 == 0 {
+        if stats.chunks.is_multiple_of(64) {
             tracing::debug!(
                 event = "preview_progress",
                 sent,

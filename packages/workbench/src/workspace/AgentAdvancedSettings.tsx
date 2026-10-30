@@ -1,14 +1,12 @@
-import type { AgentSpaceBuilderOperation, WorkspaceInfo } from "@genehub/proto";
+import type { WorkspaceInfo } from "@genehub/proto";
 import { useEffect, useState, Fragment } from "react";
 import { useWorkbench } from "../session/store";
 import { ExpertPickerDialog } from "./ExpertPicker";
-import { buildAgentSpaceTree, isDescendant } from "./agent-space-tree";
+import { isDescendant } from "./agent-space-tree";
 
 /** Shared configuration, independent of the row or dialog that opened it. */
 export function AgentAdvancedSettings({ workspace, section = "all", inline = false }: { workspace: WorkspaceInfo; section?: "all" | "components" | "relations"; inline?: boolean }) {
   const workspaces = useWorkbench((s) => s.workspaces);
-  const tree = buildAgentSpaceTree(workspaces);
-  const projectWorkspaceId = tree.projectRootById[workspace.id] ?? workspace.id;
   const breadcrumb = workspace.name;
   const [spaceBusy, setSpaceBusy] = useState(false);
   const [choosingParent, setChoosingParent] = useState(false);
@@ -20,13 +18,9 @@ export function AgentAdvancedSettings({ workspace, section = "all", inline = fal
   const [lifecycle, setLifecycle] = useState(
     workspace.agentSpace?.lifecycle ?? "persistent",
   );
-  const [builderSummary, setBuilderSummary] = useState<string | null>(null);
   const [error, setError] = useState("");
   const configureAgentSpace = useWorkbench(
     (state) => state.configureAgentSpace,
-  );
-  const inspectAgentSpaceBuild = useWorkbench(
-    (state) => state.inspectAgentSpaceBuild,
   );
   const revision = workspace.agentSpace?.revision ?? 0;
   useEffect(() => {
@@ -40,22 +34,6 @@ export function AgentAdvancedSettings({ workspace, section = "all", inline = fal
     setError("");
     try {
       await configureAgentSpace(workspace.id, revision, operation);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "配置操作失败");
-    } finally {
-      setSpaceBusy(false);
-    }
-  };
-  const inspectBuild = async (operation: AgentSpaceBuilderOperation) => {
-    setSpaceBusy(true);
-    setError("");
-    try {
-      const report = await inspectAgentSpaceBuild(
-        projectWorkspaceId,
-        workspace.id,
-        operation,
-      );
-      setBuilderSummary(report ? `${report.status} · ${report.command}` : null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "配置操作失败");
     } finally {
@@ -92,10 +70,6 @@ export function AgentAdvancedSettings({ workspace, section = "all", inline = fal
                 <Detail
                   label="生命周期"
                   value={workspace.agentSpace.lifecycle}
-                />
-                <Detail
-                  label="Builder"
-                  value={workspace.agentSpace.builderLockDigest || "未验证"}
                 />
                 {section !== "relations" && <div className="mt-2 space-y-1" aria-label="Component 列表">
                   {workspace.agentSpace.components.map((component) => (
@@ -154,7 +128,6 @@ export function AgentAdvancedSettings({ workspace, section = "all", inline = fal
                 onChange={(event) => setComponentId(event.target.value)}
                 className="min-w-0 rounded border border-line bg-raised min-h-10 px-2 py-2 text-fg"
               >
-                <option value="pm">PM</option>
                 <option value="executor">Executor</option>
                 <option value="worker">Worker</option>
                 <option value="reviewer">Reviewer</option>
@@ -228,53 +201,6 @@ export function AgentAdvancedSettings({ workspace, section = "all", inline = fal
               </button>
             </div>
 
-            <div className="mt-2 grid grid-cols-2 gap-1">
-              {!workspace.agentSpace ? (
-                <>
-                  <button
-                    type="button"
-                    disabled={spaceBusy}
-                    className="rounded border border-line min-h-10 px-2 py-2 text-fg hover:bg-raised disabled:opacity-40"
-                    onClick={() => void inspectBuild({ kind: "init" })}
-                  >
-                    Builder 初始化
-                  </button>
-                  <button
-                    type="button"
-                    disabled={spaceBusy}
-                    className="rounded border border-line min-h-10 px-2 py-2 text-fg hover:bg-raised disabled:opacity-40"
-                    onClick={() =>
-                      void inspectBuild({
-                        kind: "build",
-                        dryRun: false,
-                        requireNoPostCommands: true,
-                      })
-                    }
-                  >
-                    Builder Build
-                  </button>
-                </>
-              ) : null}
-              <button
-                type="button"
-                disabled={spaceBusy}
-                className="flex-1 rounded border border-line min-h-10 px-2 py-2 text-fg hover:bg-raised disabled:opacity-40"
-                onClick={() => void inspectBuild({ kind: "check" })}
-              >
-                Builder Check
-              </button>
-              <button
-                type="button"
-                disabled={spaceBusy}
-                className="flex-1 rounded border border-line min-h-10 px-2 py-2 text-fg hover:bg-raised disabled:opacity-40"
-                onClick={() => void inspectBuild({ kind: "verify" })}
-              >
-                Builder Verify
-              </button>
-            </div>
-            {builderSummary ? (
-              <p className="mt-1 text-xs text-muted">{builderSummary}</p>
-            ) : null}
           </div>
           </Container>
 {error && <p role="alert" className="mt-3 text-danger">{error}</p>}

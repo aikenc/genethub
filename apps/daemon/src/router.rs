@@ -167,7 +167,7 @@ pub(crate) async fn handle_in_workspace(
                 Some(session_id),
             ) => {
                 match agent_space_management_project(state, caller, workspace_id, operation).await {
-                    Ok(project) => session_may_manage_project(state, &project, session_id).await,
+                    Ok(project) => session_belongs_to_project(state, &project, session_id).await,
                     Err(_) => false,
                 }
             }
@@ -219,10 +219,10 @@ async fn authorize_pm_space_open(
     authorize_project_mutation(state, caller, project_id)
         .await
         .map_err(anyhow::Error::msg)?;
-    if !session_may_manage_project(state, project_id, session_id).await {
+    if !session_belongs_to_project(state, project_id, session_id).await {
         anyhow::bail!(
-            "projectControlRequired: registering a prepared Space needs a taken-over project \
-             and a main Session that belongs to it"
+            "projectMembershipRequired: registering a prepared Space needs a Session that \
+             belongs to this project"
         );
     }
     let project = state.workspaces.project_entry(project_id).await?;
@@ -240,10 +240,6 @@ async fn authorize_pm_space_open(
     let spaces = project.root.join("spaces").canonicalize()?;
     if space_root.parent() != Some(spaces.as_path()) {
         anyhow::bail!("prepared Space must be a direct child of this project's spaces directory");
-    }
-    let verified = crate::agent_space_builder::verify_space(&project.root, &space_root)?;
-    if requested.is_file() && requested != verified.workspace_path.canonicalize()? {
-        anyhow::bail!("open the Builder-verified workspace entry");
     }
     Ok(())
 }
@@ -435,42 +431,12 @@ async fn authorize_project_mutation(
             if summary.workspace_id != workspace_id {
                 return Err("入口会话不属于请求的项目 Workspace".into());
             }
-            let space = state
-                .workspaces
-                .agent_space(workspace_id)
-                .await
-                .map_err(|error| format!("无法确认项目管理授权：{error:#}"))?;
-            if agent_space_requires_project_control(&space)
-                && !session_may_manage_project(state, workspace_id, session_id).await
-            {
-                return Err("这个项目尚未授权当前会话管理配置".into());
-            }
             Ok(())
         }
         _ => Err("只有认证用户或项目普通主会话可以修改项目配置".into()),
     }
 }
 
-fn agent_space_requires_project_control(space: &crate::config::AgentSpaceEntry) -> bool {
-    crate::agent_space::has_enabled_component(space, crate::agent_space::COMPONENT_PM)
-}
-
-/// Extends the acting Session's project management authority to a Session
-/// that just replaced it as the project's interaction endpoint.
-///
-/// `SessionCreate` already did this for a fresh main Session; a forked one is
-/// the same event from the project's perspective — a new conversation taking
-/// over where an old one left off — and must not be refused it. The prior
-/// asymmetry meant a fork could write session history but never manage the
-/// PM AgentSpace it forked out of, and the only way back was for a Run to
-/// break first (`exception_authority`). A no-op when the workspace is not
-/// PM-managed or was never bound: rebind only carries an existing grant
-/// forward, it never creates one.
-/// A session created by another session is the other session's work, not
-/// something a person started, so it carries the label that lets the default
-/// list leave it out. The caller is the session's own verified identity, never
-/// what it declares. A script with no session of its own (a timer hook) is not
-/// recognised here and labels what it creates itself.
 async fn mark_if_started_by_a_session(
     state: &Shared,
     caller: &crate::authz::Principal,
@@ -489,85 +455,13 @@ async fn mark_if_started_by_a_session(
     }
 }
 
-async fn rebind_project_control_if_pm(
-    state: &Shared,
-    summary: &genehub_proto::SessionSummary,
-) -> anyhow::Result<()> {
-    let Ok(space) = state.workspaces.agent_space(&summary.workspace_id).await else {
-        return Ok(());
-    };
-    if !agent_space_requires_project_control(&space) {
-        return Ok(());
-    }
-    state
-        .project_control
-        .rebind(&summary.workspace_id, &summary.id)
-}
-
-/// Moves a project's management binding off a Session that was just archived.
-///
-/// Dropping it instead would be worse than leaving it: `has_binding` would
-/// report the project as never taken over, and every management gate would
-/// close for the Sessions still working in it. So the binding is handed to
-/// another live, unarchived main Session when one exists, and only left in
-/// place when none does — a stale pointer is recoverable, a project that
-/// forgot it was ever taken over is not.
-async fn move_binding_off_archived_session(
-    state: &Shared,
-    workspace_id: &str,
-    archived_session_id: &str,
-) -> anyhow::Result<()> {
-    if !state
-        .project_control
-        .is_bound(workspace_id, archived_session_id)
-    {
-        return Ok(());
-    }
-    let successor = state
-        .sessions
-        .list(Some(workspace_id), false)
-        .await?
-        .into_iter()
-        .find(|candidate| candidate.id != archived_session_id && candidate.managed.is_none());
-    match successor {
-        Some(successor) => state.project_control.rebind(workspace_id, &successor.id),
-        None => Ok(()),
-    }
-}
-
-/// Whether `session_id` may act as this project's manager.
-///
-/// This is the J3 predicate: it asks whether the *project* has been taken
-/// over and whether this Session is entitled to speak for it — never whether
-/// the Session's id equals a stored string. Keying management on one id made
-/// a fork, and any second conversation, permanently powerless while
-/// `SessionCreate` silently moved the id anyway, so the stored id was never a
-/// boundary in the first place.
-///
-/// Two things it deliberately still refuses:
-///
-/// - a **managed** Session. A Worker the project itself dispatched must not
-///   be able to reconfigure the project that owns it, and the old
-///   `is_bound` check was the only thing standing in its way at the
-///   `AgentSpaceConfigure` gate.
-/// - a Session belonging to a **different** project. Management authority is
-///   per-project, and a conversation in project A says nothing about B.
-pub(crate) async fn session_may_manage_project(
-    state: &Shared,
-    project_id: &str,
-    session_id: &str,
-) -> bool {
-    if !state.project_control.has_binding(project_id) {
-        return false;
-    }
+async fn session_belongs_to_project(state: &Shared, project_id: &str, session_id: &str) -> bool {
     let Ok(summary) = state.sessions.summary(session_id).await else {
         return false;
     };
     if summary.managed.is_some() {
         return false;
     }
-    // The Session's own project, resolved the same way every caller does, so
-    // a Space nested under the project still resolves to the project itself.
     state
         .workspaces
         .project_root(&summary.workspace_id)
@@ -583,11 +477,6 @@ async fn authorize_agent_space_change(
     match caller {
         crate::authz::Principal::LocalUser => Ok(()),
         crate::authz::Principal::SessionController { session_id, .. } => {
-            if state.sessions.consulting(session_id).await {
-                return Err(
-                    "PM 正在咨询未决 Human 请求；不能以项目管理权替代该请求的正式决定".into(),
-                );
-            }
             let summary = state
                 .sessions
                 .summary(session_id)
@@ -601,15 +490,18 @@ async fn authorize_agent_space_change(
                 .project_root(workspace_id)
                 .await
                 .map_err(|error| format!("无法确认项目边界：{error:#}"))?;
-            if summary.workspace_id == workspace_id
-                || session_may_manage_project(state, &project_id, session_id).await
-            {
+            let session_project = state
+                .workspaces
+                .project_root(&summary.workspace_id)
+                .await
+                .map_err(|error| format!("无法确认会话项目边界：{error:#}"))?;
+            if summary.workspace_id == workspace_id || session_project == project_id {
                 Ok(())
             } else {
-                Err("当前 Session 既不属于目标 Space，也没有该项目的控制绑定".into())
+                Err("当前 Session 不属于目标 Space 或项目".into())
             }
         }
-        _ => Err("只有认证用户或获得项目控制绑定的普通 Session 可以改组 AgentSpace".into()),
+        _ => Err("只有认证用户或项目内普通 Session 可以改组 AgentSpace".into()),
     }
 }
 
@@ -646,7 +538,7 @@ async fn agent_space_management_project(
             if current.revision == 0
                 && current.parent_workspace_id.is_none()
                 && current.components.is_empty()
-                && session_may_manage_project(state, &destination, session).await
+                && session_belongs_to_project(state, &destination, session).await
             {
                 let child = state
                     .workspaces
@@ -692,14 +584,27 @@ async fn agent_space_change_facts(
         );
     }
     let canonical_root = workspace.root.canonicalize()?.display().to_string();
-    let digest = crate::project_control::agent_space_plan_digest(
-        workspace_id,
-        &canonical_root,
-        expected_revision,
-        &current.builder_lock_digest,
-        operation,
-    )?;
+    let digest =
+        agent_space_plan_digest(workspace_id, &canonical_root, expected_revision, operation)?;
     Ok((current, canonical_root, digest))
+}
+
+fn agent_space_plan_digest(
+    workspace_id: &str,
+    canonical_root: &str,
+    expected_revision: u64,
+    operation: &genehub_proto::AgentSpaceOperation,
+) -> anyhow::Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(workspace_id.as_bytes());
+    hash.update([0]);
+    hash.update(canonical_root.as_bytes());
+    hash.update([0]);
+    hash.update(expected_revision.to_le_bytes());
+    hash.update([0]);
+    hash.update(serde_json::to_vec(operation)?);
+    Ok(format!("sha256:{:x}", hash.finalize()))
 }
 
 /// Refuses to move an AgentSpace while a Run still depends on it.
@@ -915,7 +820,6 @@ async fn dispatch(
                     "asset.preview.image.v1".to_string(),
                     "service.preview.v1".to_string(),
                     "process.services.v1".to_string(),
-                    "agentSpace.builderPlans.v1".to_string(),
                     "session.input.v1".to_string(),
                     "session.file-upload.v1".to_string(),
                     "provider.configuration.v1".to_string(),
@@ -1127,12 +1031,9 @@ async fn dispatch(
                 )
                 .await
             {
-                Ok(summary) => match rebind_project_control_if_pm(state, &summary).await {
-                    Ok(()) => Handled::ok(Reply::Session(
-                        mark_if_started_by_a_session(state, caller, summary).await,
-                    )),
-                    Err(error) => failed(error),
-                },
+                Ok(summary) => Handled::ok(Reply::Session(
+                    mark_if_started_by_a_session(state, caller, summary).await,
+                )),
                 Err(error) => failed(error),
             }
         }).await,
@@ -1199,12 +1100,9 @@ async fn dispatch(
                 )
                 .await
             {
-                Ok(summary) => match rebind_project_control_if_pm(state, &summary).await {
-                    Ok(()) => Handled::ok(Reply::Session(
-                        mark_if_started_by_a_session(state, caller, summary).await,
-                    )),
-                    Err(error) => failed(error),
-                },
+                Ok(summary) => Handled::ok(Reply::Session(
+                    mark_if_started_by_a_session(state, caller, summary).await,
+                )),
                 Err(error) => failed(error),
             }
         }).await,
@@ -1656,10 +1554,7 @@ async fn dispatch(
                     )
                     .await
                 {
-                    Ok(summary) => match rebind_project_control_if_pm(state, &summary).await {
-                        Ok(()) => Handled::ok(Reply::Session(summary)),
-                        Err(error) => failed(error),
-                    },
+                    Ok(summary) => Handled::ok(Reply::Session(summary)),
                     Err(error) => failed(error),
                 };
             }
@@ -1668,10 +1563,7 @@ async fn dispatch(
                 .fork(&session_id, &turn_id, target, &providers)
                 .await
             {
-                Ok(summary) => match rebind_project_control_if_pm(state, &summary).await {
-                    Ok(()) => Handled::ok(Reply::Session(summary)),
-                    Err(error) => failed(error),
-                },
+                Ok(summary) => Handled::ok(Reply::Session(summary)),
                 Err(error) => failed(error),
             }
         }).await,
@@ -1745,10 +1637,7 @@ async fn dispatch(
                     .await
             };
             match result {
-                Ok(summary) => match rebind_project_control_if_pm(state, &summary).await {
-                    Ok(()) => Handled::ok(Reply::Session(summary)),
-                    Err(error) => failed(error),
-                },
+                Ok(summary) => Handled::ok(Reply::Session(summary)),
                 Err(error) => failed(error),
             }
         }).await,
@@ -1784,10 +1673,7 @@ async fn dispatch(
                 )
                 .await
             {
-                Ok(summary) => match rebind_project_control_if_pm(state, &summary).await {
-                    Ok(()) => Handled::ok(Reply::Session(summary)),
-                    Err(error) => failed(error),
-                },
+                Ok(summary) => Handled::ok(Reply::Session(summary)),
                 Err(error) => failed(error),
             }
         }).await,
@@ -1837,10 +1723,7 @@ async fn dispatch(
                 )
                 .await
             {
-                Ok(summary) => match rebind_project_control_if_pm(state, &summary).await {
-                    Ok(()) => Handled::ok(Reply::Session(summary)),
-                    Err(error) => failed(error),
-                },
+                Ok(summary) => Handled::ok(Reply::Session(summary)),
                 Err(error) => failed(error),
             }
         }).await,
@@ -1889,9 +1772,6 @@ async fn dispatch(
         }).await,
 
         Request::SessionClose { session_id } => Box::pin(async move {
-            if let Err(error) = state.project_control.revoke_session(&session_id).await {
-                return failed(error);
-            }
             match state.sessions.close(&session_id).await {
                 Ok(()) => Handled::ok(Reply::Ack),
                 Err(error) => failed(error),
@@ -1903,23 +1783,7 @@ async fn dispatch(
             archived,
         } => Box::pin(async move {
             match state.sessions.archive(&session_id, archived).await {
-                Ok(summary) => {
-                    // Archiving retires a conversation, so a binding still naming
-                    // it would record the takeover against a Session nobody
-                    // reads. The binding is moved rather than dropped: deleting
-                    // it would make `has_binding` report the project as never
-                    // taken over and close every gate for the Sessions that are
-                    // still live.
-                    if archived {
-                        if let Err(error) =
-                            move_binding_off_archived_session(state, &summary.workspace_id, &session_id)
-                                .await
-                        {
-                            return failed(error);
-                        }
-                    }
-                    Handled::ok(Reply::Session(summary))
-                }
+                Ok(summary) => Handled::ok(Reply::Session(summary)),
                 Err(error) => failed(error),
             }
         }).await,
@@ -1946,38 +1810,9 @@ async fn dispatch(
         }).await,
 
         Request::SessionDelete { session_id } => Box::pin(async move {
-            if let Err(error) = state.project_control.revoke_session(&session_id).await {
-                return failed(error);
-            }
-            let summary = match state.sessions.summary(&session_id).await {
-                Ok(summary) => summary,
-                Err(error) => return failed(error),
-            };
-            let binding_snapshot = match state
-                .project_control
-                .remove_binding_for_session(&summary.workspace_id, &session_id)
-            {
-                Ok(snapshot) => snapshot,
-                Err(error) => return failed(error),
-            };
             match state.sessions.delete(&session_id).await {
                 Ok(()) => Handled::ok(Reply::Ack),
-                Err(error) => {
-                    if let Some(snapshot) = binding_snapshot.as_deref() {
-                        if let Err(restore) = state
-                            .project_control
-                            .restore_binding_snapshot(&summary.workspace_id, Some(snapshot))
-                        {
-                            return Handled::err(
-                                ErrorCode::Internal,
-                                format!(
-                                    "sessionDeleteRollbackIncomplete: {error:#}; restoring project control binding failed: {restore:#}"
-                                ),
-                            );
-                        }
-                    }
-                    failed(error)
-                }
+                Err(error) => failed(error),
             }
         }).await,
 
@@ -2173,6 +2008,17 @@ async fn dispatch(
                     || !matches!(outcome, genehub_proto::PermissionOutcome::Canceled))
             {
                 return Handled::err(ErrorCode::Forbidden, "provider 配置须由 Human 通过专用提交入口确认；普通会话答案不能保存密钥或授予配置权限");
+            }
+            // A tool permission is addressed to the Human. A Session
+            // Controller (the Agent's own CLI or another Agent) must not be
+            // able to approve the request it caused.
+            if kind == Some(genehub_proto::PermissionRequestKind::Permission)
+                && caller.session_controller_id().is_some()
+            {
+                return Handled::err(
+                    ErrorCode::Forbidden,
+                    "Agent/CLI 不能替用户批准工具权限",
+                );
             }
             // A question in the caller's own Session is addressed to its
             // Human. Answering another Session's question (a PM deciding a
@@ -2678,51 +2524,16 @@ async fn dispatch(
             expected_revision,
             operation,
         } => Box::pin(async move {
-            let project_id = match agent_space_management_project(
-                state,
-                caller,
-                &workspace_id,
-                &operation,
-            )
-            .await
+            if let Err(message) =
+                agent_space_management_project(state, caller, &workspace_id, &operation).await
             {
-                Ok(project) => project,
-                Err(message) => return Handled::err(ErrorCode::Forbidden, message),
-            };
-            let (current, canonical_root, plan_digest) =
-                match agent_space_change_facts(state, &workspace_id, expected_revision, &operation)
-                    .await
-                {
+                return Handled::err(ErrorCode::Forbidden, message);
+            }
+            let (_current, _canonical_root, plan_digest) =
+                match agent_space_change_facts(state, &workspace_id, expected_revision, &operation).await {
                     Ok(facts) => facts,
-                    Err(error) => {
-                        return Handled::err(ErrorCode::Conflict, format!("{error:#}"));
-                    }
+                    Err(error) => return Handled::err(ErrorCode::Conflict, format!("{error:#}")),
                 };
-            let approval = if let Some(session_id) = caller.session_controller_id() {
-                let detail = serde_json::to_string_pretty(&operation)
-                    .unwrap_or_else(|_| format!("{operation:?}"));
-                match state.project_control.issue_management(crate::project_control::ChallengeSpec {
-                            controller_session_id: session_id.into(),
-                            workspace_id: workspace_id.clone(),
-                            canonical_root,
-                            action: "agentSpace.configure".into(),
-                            pack_id: "agent-space-control".into(),
-                            pack_digest: plan_digest.clone(),
-                            plan_digest: plan_digest.clone(),
-                            expected_revision,
-                            git_head: None,
-                            status_digest: current.builder_lock_digest,
-                            title: "应用这次 AgentSpace 变更？".into(),
-                            detail: format!(
-                                "只对 Workspace {workspace_id} 执行一次 revision {expected_revision} CAS：\n{detail}\nplan: {plan_digest}"
-                            ),
-                        }, &project_id,
-                        session_may_manage_project(state, &project_id, session_id).await,
-                        false)
-                        .await { Ok(challenge) => challenge, Err(error) => return failed(error) }
-            } else {
-                None
-            };
             Handled::ok(Reply::AgentSpaceChangePlan(
                 genehub_proto::AgentSpaceChangePlan {
                     schema: "genehub.agent-space-change-plan.v1".into(),
@@ -2730,7 +2541,6 @@ async fn dispatch(
                     plan_digest,
                     expected_revision,
                     operation,
-                    approval,
                 },
             ))
         }).await,
@@ -2739,346 +2549,24 @@ async fn dispatch(
             workspace_id,
             expected_revision,
             operation,
-            plan_digest,
-            action_id,
+            plan_digest: _,
+            action_id: _,
         } => Box::pin(async move {
-            let project_id = match agent_space_management_project(
-                state,
-                caller,
-                &workspace_id,
-                &operation,
-            )
-            .await
+            if let Err(message) =
+                agent_space_management_project(state, caller, &workspace_id, &operation).await
             {
-                Ok(project) => project,
-                Err(message) => return Handled::err(ErrorCode::Forbidden, message),
-            };
-            if let (Some(session_id), Some(plan_digest), Some(action_id)) = (
-                caller.session_controller_id(),
-                plan_digest.as_deref(),
-                action_id.as_deref(),
-            ) {
-                match state
-                    .project_control
-                    .completed_action::<genehub_proto::WorkspaceInfo>(
-                        &workspace_id,
-                        session_id,
-                        "agentSpace.configure",
-                        plan_digest,
-                        action_id,
-                    ) {
-                    Ok(Some(workspace)) => return Handled::ok(Reply::Workspace(workspace)),
-                    Ok(None) => {}
-                    Err(error) => {
-                        return Handled::err(ErrorCode::Conflict, format!("{error:#}"));
-                    }
-                }
+                return Handled::err(ErrorCode::Forbidden, message);
             }
-            let mut reserved = None;
-            let _mutation = if let Some(session_id) = caller.session_controller_id() {
-                let mutation = state.project_control.mutation_lock().await;
-                let (current, canonical_root, current_plan) = match agent_space_change_facts(
-                    state,
-                    &workspace_id,
-                    expected_revision,
-                    &operation,
-                )
-                .await
-                {
-                    Ok(facts) => facts,
-                    Err(error) => {
-                        return Handled::err(ErrorCode::Conflict, format!("{error:#}"));
-                    }
-                };
-                let Some(plan_digest) = plan_digest.as_deref() else {
-                    return Handled::err(
-                        ErrorCode::Forbidden,
-                        "approvalRequired: Agent 修改 Component 或 Parent 前必须先使用 --plan；仅在计划返回 challenge 时请求对应授权",
-                    );
-                };
-                let Some(action_id) = action_id.as_deref() else {
-                    return Handled::err(ErrorCode::BadRequest, "apply requires --action-id");
-                };
-                if current_plan != plan_digest {
-                    return Handled::err(
-                        ErrorCode::Conflict,
-                        "approvalStale: AgentSpace facts changed; create a fresh plan and resolve any returned authorization challenge",
-                    );
-                }
-                let challenge = match state
-                    .project_control
-                    .reserve(
-                        session_id,
-                        &workspace_id,
-                        &canonical_root,
-                        "agentSpace.configure",
-                        "agent-space-control",
-                        plan_digest,
-                        plan_digest,
-                        expected_revision,
-                        None,
-                        &current.builder_lock_digest,
-                        action_id,
-                        session_may_manage_project(state, &project_id, session_id).await,
-                        false,
-                    )
-                    .await
-                {
-                    Ok(challenge) => challenge,
-                    Err(error) => {
-                        return Handled::err(ErrorCode::Forbidden, format!("{error:#}"));
-                    }
-                };
-                reserved = Some((challenge, action_id.to_string()));
-                Some(mutation)
-            } else {
-                None
-            };
             if let Err(error) = guard_agent_space_mutation(state, &workspace_id, &operation).await {
-                if let Some((challenge, action_id)) = &reserved {
-                    if let Err(error) = state
-                        .project_control
-                        .release_failed(challenge, action_id)
-                        .await
-                    {
-                        return failed(error);
-                    }
-                }
                 return Handled::err(ErrorCode::Conflict, format!("{error:#}"));
             }
-            let config_snapshot = reserved
-                .as_ref()
-                .map(|_| state.workspaces.config_snapshot());
-            let config_snapshot = match config_snapshot {
-                Some(snapshot) => Some(snapshot.await),
-                None => None,
-            };
             match state
                 .workspaces
                 .configure_agent_space(&workspace_id, expected_revision, &operation)
                 .await
             {
-                Ok(workspace) => {
-                    if let Some((challenge, action_id)) = &reserved {
-                        let session_id = caller
-                            .session_controller_id()
-                            .expect("reserved changes have a Session controller");
-                        let plan_digest = plan_digest
-                            .as_deref()
-                            .expect("reserved changes have a plan digest");
-                        if let Err(error) = state.project_control.record_completed_action(
-                            &workspace_id,
-                            session_id,
-                            "agentSpace.configure",
-                            plan_digest,
-                            action_id,
-                            &workspace,
-                        ) {
-                            let rollback = match config_snapshot {
-                                Some(snapshot) => state
-                                    .workspaces
-                                    .restore_config_snapshot(snapshot)
-                                    .await
-                                    .map_err(|rollback| format!("; rollback failed: {rollback:#}")),
-                                None => Ok(()),
-                            };
-                            if let Err(error) = state
-                                .project_control
-                                .release_failed(challenge, action_id)
-                                .await
-                            {
-                                return failed(error);
-                            }
-                            return Handled::err(
-                                ErrorCode::Internal,
-                                format!(
-                                    "mutationReceiptFailed: {error:#}{}",
-                                    rollback.err().unwrap_or_default()
-                                ),
-                            );
-                        }
-                        if let Err(error) =
-                            state.project_control.complete(challenge, action_id).await
-                        {
-                            return failed(error);
-                        }
-                    }
-                    Handled::ok(Reply::Workspace(workspace))
-                }
-                Err(error) => {
-                    if let Some((challenge, action_id)) = &reserved {
-                        if let Err(error) = state
-                            .project_control
-                            .release_failed(challenge, action_id)
-                            .await
-                        {
-                            return failed(error);
-                        }
-                    }
-                    Handled::err(ErrorCode::BadRequest, format!("{error:#}"))
-                }
-            }
-        }).await,
-
-        Request::AgentSpaceBuilder {
-            workspace_id,
-            target_workspace_id,
-            space_name,
-            operation,
-            plan,
-            plan_digest,
-            action_id,
-            expected_revision,
-        } => Box::pin(async move {
-            let plan = plan.unwrap_or(false);
-            let managed_build = plan || plan_digest.is_some() || action_id.is_some();
-            let read_only = matches!(
-                &operation,
-                genehub_proto::AgentSpaceBuilderOperation::Check
-                    | genehub_proto::AgentSpaceBuilderOperation::Explain
-                    | genehub_proto::AgentSpaceBuilderOperation::Verify
-                    | genehub_proto::AgentSpaceBuilderOperation::Build { dry_run: true, .. }
-            );
-            let recovery = false;
-            if let Some(session_id) = caller.session_controller_id() {
-                if !(read_only
-                    || recovery
-                    || managed_build
-                        && session_may_manage_project(state, &workspace_id, session_id).await)
-                {
-                    return Handled::err(
-                        ErrorCode::Forbidden,
-                        "AgentSpaceBuilder: 已授权项目 PM 请先使用 space builder build --plan，再带计划身份 apply；初始化和清理由用户入口或异常恢复执行",
-                    );
-                }
-            }
-            if let Err(message) =
-                authorize_project_mutation(state, caller, &workspace_id).await
-            {
-                return Handled::err(ErrorCode::Forbidden, message);
-            }
-            if !crate::agent_space_builder::valid_space_name(&space_name) {
-                return Handled::err(
-                    ErrorCode::BadRequest,
-                    "AgentSpace name must be lowercase kebab-case",
-                );
-            }
-            // Builder repairs source/projection drift. Verify project ownership
-            // here, not the old projection that this operation must rebuild.
-            // Workflow execution/activation still requires project_entry().
-            match state.workspaces.project_root(&workspace_id).await {
-                Ok(project_id) if project_id == workspace_id => {}
-                Ok(_) => {
-                    return Handled::err(
-                        ErrorCode::Forbidden,
-                        "Builder must be called from the project root",
-                    )
-                }
-                Err(error) => return failed(error),
-            }
-            let project = match state.workspaces.get(&workspace_id).await {
-                Ok(project) => project,
-                Err(error) => return failed(error),
-            };
-            let space_root = match target_workspace_id {
-                Some(target_workspace_id) => {
-                    let target = match state.workspaces.get(&target_workspace_id).await {
-                        Ok(target) => target,
-                        Err(error) => return failed(error),
-                    };
-                    if target.root != project.root
-                        && !target.root.starts_with(project.root.join("spaces"))
-                    {
-                        return Handled::err(
-                            ErrorCode::Forbidden,
-                            "AgentSpaceBuilder target is outside the project boundary",
-                        );
-                    }
-                    target.root
-                }
-                None => project.root.join("spaces").join(&space_name),
-            };
-            if managed_build {
-                return match crate::agent_space_builder::management::build(
-                    state,
-                    &workspace_id,
-                    &space_root,
-                    &operation,
-                    caller.session_controller_id(),
-                    plan,
-                    plan_digest.as_deref(),
-                    action_id.as_deref(),
-                    expected_revision,
-                    recovery,
-                )
-                .await
-                {
-                    Ok(report) => Handled::ok(Reply::AgentSpaceBuilder(report)),
-                    Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
-                };
-            }
-            let (command, require_no_post_commands) = match operation {
-                genehub_proto::AgentSpaceBuilderOperation::Init => {
-                    (crate::agent_space_builder::Command::Init, true)
-                }
-                genehub_proto::AgentSpaceBuilderOperation::Check => {
-                    (crate::agent_space_builder::Command::Check, true)
-                }
-                genehub_proto::AgentSpaceBuilderOperation::Explain => {
-                    (crate::agent_space_builder::Command::Explain, true)
-                }
-                genehub_proto::AgentSpaceBuilderOperation::Build {
-                    dry_run,
-                    require_no_post_commands,
-                } => (
-                    crate::agent_space_builder::Command::Build { dry_run },
-                    require_no_post_commands,
-                ),
-                genehub_proto::AgentSpaceBuilderOperation::Verify => {
-                    (crate::agent_space_builder::Command::Verify, true)
-                }
-                genehub_proto::AgentSpaceBuilderOperation::Clean => {
-                    (crate::agent_space_builder::Command::Clean, true)
-                }
-            };
-            match crate::agent_space_builder::run(
-                &project.root,
-                &space_root,
-                command,
-                require_no_post_commands,
-            ) {
-                Ok(report) => Handled::ok(Reply::AgentSpaceBuilder(report.into())),
-                Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error}")),
-            }
-        }).await,
-
-        Request::ProjectApprovalRequest { challenge_id } => Box::pin(async move {
-            let Some(session_id) = caller.session_controller_id() else {
-                return Handled::err(
-                    ErrorCode::Forbidden,
-                    "只有生成该计划的 Agent Session 可以请求用户确认",
-                );
-            };
-            let (request, expires_at_ms) = match state
-                .project_control
-                .request_permission(session_id, &challenge_id)
-                .await
-            {
-                Ok(interaction) => interaction,
-                Err(error) => {
-                    return Handled::err(ErrorCode::Conflict, format!("{error:#}"));
-                }
-            };
-            match state
-                .sessions
-                .request_project_approval(session_id, request, expires_at_ms)
-                .await
-            {
-                Ok(()) => Handled::ok(Reply::Ack),
-                // Presentation may already be durable even if closing the
-                // old Agent failed. Keep its identity for recovery/retry;
-                // presenting a challenge never grants authority.
-                Err(error) => Handled::err(ErrorCode::Conflict, format!("{error:#}")),
+                Ok(workspace) => Handled::ok(Reply::Workspace(workspace)),
+                Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
             }
         }).await,
 
@@ -3112,32 +2600,9 @@ async fn dispatch(
                     "stop the workspace's running or waiting sessions before removing it",
                 );
             }
-            let binding_snapshot = match state.project_control.binding_snapshot(&workspace_id) {
-                Ok(snapshot) => snapshot,
-                Err(error) => return failed(error),
-            };
-            if let Err(error) = state.project_control.remove_binding(&workspace_id) {
-                return failed(error);
-            }
-            if let Err(error) = state.project_control.revoke_workspace(&workspace_id).await {
-                return failed(error);
-            }
             match state.workspaces.remove(&workspace_id).await {
                 Ok(workspaces) => Handled::ok(Reply::Workspaces(workspaces)),
-                Err(error) => {
-                    if let Err(restore) = state
-                        .project_control
-                        .restore_binding_snapshot(&workspace_id, binding_snapshot.as_deref())
-                    {
-                        return Handled::err(
-                            ErrorCode::Internal,
-                            format!(
-                                "workspaceRemoveRollbackIncomplete: {error:#}; restoring project control binding failed: {restore:#}"
-                            ),
-                        );
-                    }
-                    Handled::err(ErrorCode::BadRequest, format!("{error:#}"))
-                }
+                Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
             }
         }).await,
 
@@ -3459,9 +2924,8 @@ fn diagnostic_operation(request: &Request) -> Option<&'static str> {
         Request::WorkflowHuman { .. } => Some("workflow.human"),
         Request::WorkflowRecoveryReset { .. } => Some("workflow.recovery.reset"),
         Request::WorkflowBudget { .. } => Some("workflow.budget"),
-        Request::AgentSpaceBuilder { .. } => Some("agentSpace.builder"),
         Request::AgentSpaceChangePlan { .. } => Some("agentSpace.changePlan"),
-        Request::ProjectApprovalRequest { .. } => Some("project.approval.request"),
+        Request::AgentSpaceChildren { .. } => Some("agentSpace.children"),
         Request::SessionSend { .. } => Some("session.send"),
         Request::SessionDraftsReplace { .. } => Some("session.drafts.replace"),
         Request::SessionPreviewAnnotationUpsert { .. } => Some("session.previewAnnotations.upsert"),
@@ -3561,235 +3025,14 @@ mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
 
-    fn unregistered_space() -> crate::config::AgentSpaceEntry {
-        crate::config::AgentSpaceEntry {
-            workspace_id: "w_project".into(),
-            parent_workspace_id: None,
-            revision: 0,
-            lifecycle: "persistent".into(),
-            builder_lock_digest: String::new(),
-            components: Vec::new(),
-            guidance: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn only_pm_managed_projects_require_a_project_control_binding() {
-        let legacy = unregistered_space();
-        assert!(!agent_space_requires_project_control(&legacy));
-
-        let pm = crate::agent_space::apply(
-            &legacy,
-            &genehub_proto::AgentSpaceOperation::SetComponent {
-                component_id: crate::agent_space::COMPONENT_PM.into(),
-                enabled: true,
-                role: None,
-            },
-        )
-        .expect("mounting PM should be valid");
-        assert!(agent_space_requires_project_control(&pm));
-    }
-
-    /// Builder-verifiable project root for testing management authority independently
-    /// of the retired Workflow bootstrapper.
-    fn seed_pm_project_manifest(project_root: &std::path::Path) {
-        std::fs::write(
-            project_root.join("pipespace.json"),
-            serde_json::to_vec_pretty(&serde_json::json!({
-                "schema": "pipespace.v1",
-                "name": "project",
-                "agents": ["codex", "cursor", "codebuddy", "claude-code"],
-                "skills": [],
-                "tags": ["project", "pm"],
-                "skillProviders": [],
-                "children": { "scanDepth": 0 },
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        std::fs::write(
-            project_root.join("project.code-workspace"),
-            serde_json::to_vec_pretty(&serde_json::json!({
-                "folders": [{ "name": "project", "path": "." }],
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-    }
-
-    /// The mechanism `SessionFork` and `SessionForkImport` now share with
-    /// `SessionCreate`: a Session that just became the project's interaction
-    /// endpoint inherits management authority from whichever Session held it,
-    /// the same way a fresh main Session already did. Before this, a forked
-    /// Session could write history but never manage the PM AgentSpace it
-    /// forked out of, and the only way back was for a Run to break first.
     #[tokio::test]
-    async fn a_forked_session_inherits_project_control_the_same_way_a_fresh_one_does() {
-        let home = tempfile::tempdir().unwrap();
-        let project = home.path().join("project");
-        std::fs::create_dir_all(&project).unwrap();
-        seed_pm_project_manifest(&project);
-        let paths = crate::config::Paths::new(home.path().join("data"));
-        let (state, _pty) = crate::state::AppState::build(paths).await.unwrap();
-        let workspace = state.workspaces.open(&project, None).await.unwrap();
-        crate::agent_space_builder::run(
-            &project,
-            &project,
-            crate::agent_space_builder::Command::Build { dry_run: false },
-            true,
-        )
-        .expect("the seeded PM root must be buildable");
-        state
-            .workspaces
-            .configure_agent_space(
-                &workspace.id,
-                0,
-                &genehub_proto::AgentSpaceOperation::SetComponent {
-                    component_id: crate::agent_space::COMPONENT_PM.into(),
-                    enabled: true,
-                    role: None,
-                },
-            )
-            .await
-            .unwrap();
-
-        let original = state
-            .sessions
-            .create(
-                &workspace.id,
-                project.clone(),
-                "genet",
-                None,
-                None,
-                None,
-                None,
-                Default::default(),
-                None,
-            )
-            .await
-            .unwrap();
-        state
-            .project_control
-            .bind(&workspace.id, &original.id, "test-pack", "sha256:test")
-            .unwrap();
-        assert!(state.project_control.is_bound(&workspace.id, &original.id));
-
-        // A second Session standing in for a fork target: rebind must move
-        // authority to it exactly as SessionCreate would for a fresh one.
-        let forked = state
-            .sessions
-            .create(
-                &workspace.id,
-                project.clone(),
-                "genet",
-                None,
-                None,
-                None,
-                None,
-                Default::default(),
-                None,
-            )
-            .await
-            .unwrap();
-        rebind_project_control_if_pm(&state, &forked).await.unwrap();
-
-        assert!(
-            state.project_control.is_bound(&workspace.id, &forked.id),
-            "the forked Session must inherit project control"
-        );
-        assert!(
-            !state.project_control.is_bound(&workspace.id, &original.id),
-            "control moves to the new endpoint; it does not fork into two holders"
-        );
-    }
-
-    /// J3 in one case: management is a question about the project, so a
-    /// second main Session in a taken-over project may manage it, while a
-    /// managed Worker the project itself dispatched still may not.
-    #[tokio::test]
-    async fn management_follows_the_project_not_one_session_id() {
-        let home = tempfile::tempdir().unwrap();
-        let project = home.path().join("project");
-        std::fs::create_dir_all(&project).unwrap();
-        seed_pm_project_manifest(&project);
-        let paths = crate::config::Paths::new(home.path().join("data"));
-        let (state, _pty) = crate::state::AppState::build(paths).await.unwrap();
-        let workspace = state.workspaces.open(&project, None).await.unwrap();
-        crate::agent_space_builder::run(
-            &project,
-            &project,
-            crate::agent_space_builder::Command::Build { dry_run: false },
-            true,
-        )
-        .expect("the seeded PM root must be buildable");
-        state
-            .workspaces
-            .configure_agent_space(
-                &workspace.id,
-                0,
-                &genehub_proto::AgentSpaceOperation::SetComponent {
-                    component_id: crate::agent_space::COMPONENT_PM.into(),
-                    enabled: true,
-                    role: None,
-                },
-            )
-            .await
-            .unwrap();
-
-        let open = |id: &str| {
-            let state = state.clone();
-            let project = project.clone();
-            let id = id.to_string();
-            async move {
-                state
-                    .sessions
-                    .create(
-                        &id,
-                        project,
-                        "genet",
-                        None,
-                        None,
-                        None,
-                        None,
-                        Default::default(),
-                        None,
-                    )
-                    .await
-                    .unwrap()
-            }
-        };
-        let holder = open(&workspace.id).await;
-        let other = open(&workspace.id).await;
-
-        // Nothing may manage a project nobody has taken over yet.
-        assert!(!session_may_manage_project(&state, &workspace.id, &holder.id).await);
-
-        state
-            .project_control
-            .bind(&workspace.id, &holder.id, "test-pack", "sha256:test")
-            .unwrap();
-        assert!(session_may_manage_project(&state, &workspace.id, &holder.id).await);
-        assert!(
-            session_may_manage_project(&state, &workspace.id, &other.id).await,
-            "a second main Session in the same taken-over project may manage it"
-        );
-        assert!(
-            !session_may_manage_project(&state, &workspace.id, "s_not_a_session").await,
-            "an unknown Session never manages a project"
-        );
-    }
-
-    /// Archiving the holder must not strand the takeover on a conversation
-    /// nobody reads, and must not erase it either.
-    #[tokio::test]
-    async fn archiving_the_holder_moves_the_binding_instead_of_erasing_it() {
+    async fn session_membership_is_checked_by_project() {
         let home = tempfile::tempdir().unwrap();
         let project = home.path().join("project");
         std::fs::create_dir_all(&project).unwrap();
         let paths = crate::config::Paths::new(home.path().join("data"));
         let (state, _pty) = crate::state::AppState::build(paths).await.unwrap();
         let workspace = state.workspaces.open(&project, None).await.unwrap();
-
         let holder = state
             .sessions
             .create(
@@ -3805,7 +3048,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let successor = state
+        let other = state
             .sessions
             .create(
                 &workspace.id,
@@ -3820,58 +3063,9 @@ mod tests {
             )
             .await
             .unwrap();
-        state
-            .project_control
-            .bind(&workspace.id, &holder.id, "test-pack", "sha256:test")
-            .unwrap();
-
-        state.sessions.archive(&holder.id, true).await.unwrap();
-        move_binding_off_archived_session(&state, &workspace.id, &holder.id)
-            .await
-            .unwrap();
-
-        assert!(
-            state.project_control.has_binding(&workspace.id),
-            "the project must still read as taken over"
-        );
-        assert!(
-            state.project_control.is_bound(&workspace.id, &successor.id),
-            "the binding moves to a live main Session"
-        );
-    }
-
-    #[tokio::test]
-    async fn rebinding_a_non_pm_workspace_is_a_no_op() {
-        let home = tempfile::tempdir().unwrap();
-        let project = home.path().join("project");
-        std::fs::create_dir_all(&project).unwrap();
-        let paths = crate::config::Paths::new(home.path().join("data"));
-        let (state, _pty) = crate::state::AppState::build(paths).await.unwrap();
-        let workspace = state.workspaces.open(&project, None).await.unwrap();
-
-        let session = state
-            .sessions
-            .create(
-                &workspace.id,
-                project,
-                "genet",
-                None,
-                None,
-                None,
-                None,
-                Default::default(),
-                None,
-            )
-            .await
-            .unwrap();
-        rebind_project_control_if_pm(&state, &session)
-            .await
-            .unwrap();
-
-        assert!(
-            !state.project_control.has_binding(&workspace.id),
-            "an ordinary Workspace never gains a project control binding"
-        );
+        assert!(session_belongs_to_project(&state, &workspace.id, &holder.id).await);
+        assert!(session_belongs_to_project(&state, &workspace.id, &other.id).await);
+        assert!(!session_belongs_to_project(&state, &workspace.id, "s_not_a_session").await);
     }
 
     #[test]

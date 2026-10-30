@@ -255,7 +255,7 @@ client.connect();
       t.assertions.assert(evidence.operations.some((e: any) => e.operation === "subscribe" && e.transport === "rtc" && e.outcome === "ok"), "subscription still used the temporary baseline selector");
       await page.evaluate(() => (window as any).probe.client.close());
       await page.close();
-      t.note("Actual Chromium: native RTC stayed usable for 20 seconds with periodic RPCs; one logical identity for RPC/subscription/events; empty session, Agent completion, reopen, configured fallback, live events during relay pause, native RTC failure without resubscription, and cancellation verified.");
+      t.note("Actual Chromium: native RTC stayed usable for 20 seconds with periodic RPCs; one logical identity for RPC/subscription/events; empty session, Agent completion, reopen, configured fallback, live events during relay pause, native RTC failure followed by business cursor repair on a fresh endpoint, and cancellation verified.");
       } catch (error) { await diagnosticFailure(error); }
     } finally {
       await server?.close();

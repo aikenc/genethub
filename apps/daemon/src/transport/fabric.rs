@@ -45,6 +45,21 @@ pub(crate) const PEER_INGRESS_BYTES: usize = 8 * 1024 * 1024;
 /// peers could each hold their own per-peer allowance at the same time.
 const MAX_TOTAL_INGRESS_BYTES: usize = 64 * 1024 * 1024;
 const PEER_INGRESS_QUEUE: usize = 4096;
+// Keep receive-capacity assumptions true in every build, not just unit runs.
+const _: () = {
+    assert!(
+        PEER_INGRESS_BYTES >= 2 * genehub_proto::INITIAL_STREAM_WINDOW_BYTES as usize,
+        "per-peer ingress must hold a full stream window with headroom"
+    );
+    assert!(
+        MAX_TOTAL_INGRESS_BYTES > PEER_INGRESS_BYTES,
+        "the shared budget must bound more than one peer"
+    );
+    assert!(
+        MAX_TOTAL_INGRESS_BYTES >= 4 * PEER_INGRESS_BYTES,
+        "the shared budget must allow several concurrent peers"
+    );
+};
 struct IngressRecord {
     payload: Vec<u8>,
     _budget: tokio::sync::OwnedSemaphorePermit,
@@ -419,7 +434,12 @@ async fn run_once(
 ) -> Result<()> {
     let endpoint_url = transport_flow_url(url)?;
     validate_fabric_url(&endpoint_url)?;
-    tracing::debug!(url = %endpoint_url, "dialing the Fabric relay");
+    let relay = crate::http::Url::parse(&endpoint_url).ok();
+    tracing::debug!(
+        host = relay.as_ref().and_then(|url| url.host_str()).unwrap_or("?"),
+        port = relay.as_ref().and_then(|url| url.port_or_known_default()),
+        "dialing the Fabric relay"
+    );
     let socket = tokio::time::timeout(CONNECT_TIMEOUT, ws::connect(&endpoint_url, socket_config()))
         .await
         .context("Fabric WebSocket handshake timed out")??;
@@ -1525,26 +1545,6 @@ mod tests {
         assert_eq!(
             transport_flow_url("wss://relay.example/fabric/v2?ticket=one-use").unwrap(),
             "wss://relay.example/fabric/v2?ticket=one-use&flow=transport-v1"
-        );
-    }
-
-    #[test]
-    fn ingress_budget_covers_a_full_legitimate_stream_window() {
-        // A sender may legally have one full stream window in flight, so the
-        // queue that receives it must be able to hold at least that much.
-        // Otherwise ordinary uploads trip the overflow path and the peer
-        // stream is detached for no protocol reason.
-        assert!(
-            PEER_INGRESS_BYTES >= 2 * genehub_proto::INITIAL_STREAM_WINDOW_BYTES as usize,
-            "per-peer ingress must hold a full stream window with headroom"
-        );
-        assert!(
-            MAX_TOTAL_INGRESS_BYTES > PEER_INGRESS_BYTES,
-            "the shared budget must bound more than one peer"
-        );
-        assert!(
-            MAX_TOTAL_INGRESS_BYTES >= 4 * PEER_INGRESS_BYTES,
-            "the shared budget must allow several concurrent peers"
         );
     }
 

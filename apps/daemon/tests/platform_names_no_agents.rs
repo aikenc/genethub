@@ -21,13 +21,7 @@ const NAMES: [&str; 6] = [
 ];
 
 /// Source paths (relative to the repository root) that may still name Agents.
-const ALLOWED: [(&str, &str); 2] = [
-    (
-        "apps/daemon/src/agent_space_builder/",
-        "deprecated; removed with the subsystem (docs/deprecated.md)",
-    ),
-    ("apps/daemon/src/speech/", "speech models, not Agents"),
-];
+const ALLOWED: [(&str, &str); 1] = [("apps/daemon/src/speech/", "speech models, not Agents")];
 
 /// Whole lines that are model or provider identifiers, not Agent logic.
 fn is_model_identifier(line: &str) -> bool {

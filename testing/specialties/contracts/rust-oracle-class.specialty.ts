@@ -27,6 +27,16 @@ defineSpecialty(
         tsId?: string | null;
         legacyExecution?: string;
         suspension?: { approvedBy?: string; approvedAt?: string; reason?: string; resumeWhen?: string };
+        retirement?: {
+          type?: string; tsId?: string; tsRunId?: string; rustRunId?: string;
+          openSha?: string; cloudSha?: string; artifactSha?: string;
+          tsInputs?: unknown; rustInputs?: unknown; reviewedIn?: string;
+          deletedDependency?: string; reason?: string;
+        };
+        releaseOnly?: {
+          tsId?: string; tsRunId?: string; blocker?: string; gap?: string;
+          archive?: { path?: string; record?: string }; reviewedIn?: string;
+        };
       }>;
     };
     const probes = JSON.parse(readFileSync(probesPath, "utf8")) as {
@@ -65,14 +75,53 @@ defineSpecialty(
     );
     const suspended = parity.cases.filter((item) => item.legacyExecution === "suspended");
     t.assertions.assert(
-      parity.cases.every((item) => item.legacyExecution === "required" || item.legacyExecution === "suspended"),
-      "frozen legacy execution must remain required pending verified parity or be suspended under L13",
+      parity.cases.every((item) => item.legacyExecution === "required" || item.legacyExecution === "suspended"
+        || item.legacyExecution === "retired" || item.legacyExecution === "release-only"),
+      "frozen legacy execution must be required, suspended, retired with evidence, or release-only with a blocker",
     );
     t.assertions.assert(
       suspended.every((item) => item.status === "source-retained" && !item.tsId
         && Boolean(item.suspension?.approvedBy?.trim() && item.suspension.approvedAt?.trim()
           && item.suspension.reason?.trim() && item.suspension.resumeWhen?.trim())),
       `suspended row without retained source or a complete suspension record: ${suspended.filter((item) => item.status !== "source-retained" || !item.suspension?.resumeWhen).map((item) => item.oldId).join(",")}`,
+    );
+    const releaseOnly = parity.cases.filter((item) => item.legacyExecution === "release-only");
+    t.assertions.assert(
+      releaseOnly.every((item) => {
+        const owned = item.tsId
+          ? item.status === "ts-owned" && item.releaseOnly?.tsId === item.tsId
+          : item.status === "source-retained" && Boolean(item.releaseOnly?.gap?.trim());
+        return owned && Boolean(item.releaseOnly?.tsRunId?.trim()
+          && item.releaseOnly?.blocker?.trim() && item.releaseOnly?.archive?.path?.trim()
+          && item.releaseOnly?.reviewedIn?.trim());
+      }),
+      `release-only row without a TS owner or recorded gap, archive, and blocker: ${releaseOnly.filter((item) => {
+        const owned = item.tsId ? item.status === "ts-owned" && item.releaseOnly?.tsId === item.tsId : item.status === "source-retained" && Boolean(item.releaseOnly?.gap?.trim());
+        return !owned || !item.releaseOnly?.archive?.path || !item.releaseOnly?.blocker;
+      }).map((item) => item.oldId).join(",")}`,
+    );
+    const retired = parity.cases.filter((item) => item.legacyExecution === "retired");
+    t.assertions.assert(
+      retired.every((item) => {
+        const r = item.retirement;
+        if (!r?.type?.trim() || !r.openSha?.trim() || !r.cloudSha?.trim()
+          || !r.artifactSha?.trim() || !r.reviewedIn?.trim()) return false;
+        if (r.type === "delete-with-harness") {
+          return Boolean(r.deletedDependency?.trim() && r.reason?.trim());
+        }
+        return item.status === "ts-owned" && Boolean(item.tsId)
+          && r.tsId === item.tsId && Boolean(r.tsRunId?.trim() && r.rustRunId?.trim())
+          && r.tsInputs !== undefined && r.rustInputs !== undefined;
+      }),
+      `retired row without traceable parity evidence: ${retired.filter((item) => {
+        const r = item.retirement;
+        return !r?.type?.trim() || !r.openSha?.trim() || !r.cloudSha?.trim()
+          || !r.artifactSha?.trim() || !r.reviewedIn?.trim();
+      }).map((item) => item.oldId).join(",")}`,
+    );
+    t.assertions.assert(
+      parity.cases.every((item) => !(item.legacyExecution === "retired" && item.suspension)),
+      "retired row still carries a suspension record",
     );
     t.assertions.assert(
       Boolean(parity.parityEvidence?.tsCore && parity.parityEvidence.rustLegacy && parity.parityEvidence.openSha && parity.parityEvidence.artifact),

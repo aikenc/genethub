@@ -140,8 +140,6 @@ pub struct HumanContinuation {
     pub outcome: genehub_proto::PermissionOutcome,
     pub decided_at_ms: i64,
     #[serde(default)]
-    pub project_approval: bool,
-    #[serde(default)]
     pub grant_recorded: bool,
     #[serde(default)]
     pub completed: bool,
@@ -298,8 +296,6 @@ pub struct SessionMeta {
     /// Stored in meta so no live socket or Agent process is required.
     #[serde(default)]
     pub pending_permission: Option<PermissionRequest>,
-    #[serde(default)]
-    pub pending_project_approval: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub human_continuation: Option<HumanContinuation>,
     /// The Agent this session runs remains `agent_id`; lineage only describes
@@ -416,7 +412,6 @@ impl SessionMeta {
             persist: None,
             agent_pid: None,
             pending_permission: None,
-            pending_project_approval: false,
             human_continuation: None,
             lineage: None,
             managed: None,
@@ -470,7 +465,6 @@ impl SessionMeta {
                     error: self.inbox.error.clone(),
                 }
             }),
-            work_summary: None,
             message_preview: self.message_preview.clone(),
             draft_count: (!self.drafts.is_empty()).then_some(self.drafts.len() as u32),
             last_activity_at_ms,
@@ -1202,6 +1196,18 @@ impl Store {
             fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         let header: MetaHeader = serde_json::from_str(&raw)
             .with_context(|| format!("reading the header of {}", path.display()))?;
+        self.load_meta_from(workspace_id, session_id, &raw, header)
+    }
+
+    /// Parses one already-read `meta.json`. `list_meta` reads and parses each
+    /// header once to find its owner, then reuses the same text here.
+    fn load_meta_from(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+        raw: &str,
+        header: MetaHeader,
+    ) -> Result<SessionMeta> {
         if header.format > SESSION_FORMAT {
             if !header.project_key.is_empty()
                 && !self
@@ -1217,7 +1223,7 @@ impl Store {
                 header,
             ));
         }
-        let mut meta: SessionMeta = serde_json::from_str(&raw)?;
+        let mut meta: SessionMeta = serde_json::from_str(raw)?;
         if !header.project_key.is_empty()
             && !self
                 .homes
@@ -1293,14 +1299,14 @@ impl Store {
                 }) {
                     continue;
                 }
-                if !entry.path().join("meta.json").exists() {
+                let path = entry.path().join("meta.json");
+                let Ok(raw) = fs::read_to_string(&path) else {
                     continue;
-                }
-                let project_key = fs::read_to_string(entry.path().join("meta.json"))
-                    .ok()
-                    .and_then(|raw| serde_json::from_str::<MetaHeader>(&raw).ok())
-                    .map(|header| header.project_key)
-                    .unwrap_or_default();
+                };
+                let Ok(header) = serde_json::from_str::<MetaHeader>(&raw) else {
+                    continue;
+                };
+                let project_key = header.project_key.clone();
                 let owner = if project_key.is_empty() {
                     workspaces.first().map(|(id, _)| id.clone())
                 } else {
@@ -1315,7 +1321,7 @@ impl Store {
                 let Some(workspace_id) = owner else {
                     continue;
                 };
-                match self.load_meta(&workspace_id, &session_id) {
+                match self.load_meta_from(&workspace_id, &session_id, &raw, header) {
                     Ok(meta) => out.push(meta),
                     Err(error) => tracing::warn!(
                         session = %session_id,
@@ -1687,10 +1693,37 @@ impl Store {
                 serde_json::Value::String(round_id.to_string()),
             );
         }
-        let mut file = crate::config::open_append(&path)?;
-        crate::config::restrict_to_owner(&path)?;
-        writeln!(file, "{}", serde_json::to_string(&value)?)?;
-        file.flush()?;
+        // Upsert by trunk index: an open trunk is rewritten by each periodic
+        // checkpoint, and appending would leave several rows naming the same
+        // file. The index is one small file per round.
+        let index = summary.index as u64;
+        let mut body = Vec::new();
+        match std::fs::read_to_string(&path) {
+            Ok(existing) => {
+                for line in existing.lines() {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    let same_index = serde_json::from_str::<serde_json::Value>(line)
+                        .ok()
+                        .and_then(|row| row.get("index").and_then(serde_json::Value::as_u64))
+                        == Some(index);
+                    if !same_index {
+                        writeln!(body, "{line}")?;
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                // A readable index is the only copy of earlier trunks. Treating
+                // an I/O error as "empty" would overwrite them with nothing.
+                return Err(error)
+                    .with_context(|| format!("reading {} before rewriting it", path.display()));
+            }
+        }
+        writeln!(body, "{}", serde_json::to_string(&value)?)?;
+        // The trunk body is already fsynced; save_private fsyncs the index too.
+        crate::config::save_private(&path, &body)?;
         Ok(())
     }
 
@@ -1885,6 +1918,10 @@ impl Store {
         file.write_all(&line)?;
         file.write_all(b"\n")?;
         file.flush()?;
+        // The trunk row that points at this offset is fsynced; without this
+        // the reference can survive a power loss while the bytes it names do
+        // not. Measured at ~0.6ms per blob on the data volume.
+        file.sync_all()?;
         Ok(BlobRef {
             id,
             bytes: encoded.len() as u64,
@@ -2353,7 +2390,6 @@ mod project_home_tests {
             persist: None,
             agent_pid: None,
             pending_permission: None,
-            pending_project_approval: false,
             human_continuation: None,
             lineage: None,
             managed: None,

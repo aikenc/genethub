@@ -612,8 +612,7 @@ describe("live session status in the sidebar", () => {
       agentSpace: {
         revision: 1,
         lifecycle: "persistent",
-        builderLockDigest: "sha256:game",
-        components: [{ componentId: "pm", enabled: true, schemaVersion: 1 }],
+        components: [{ componentId: "executor", enabled: true, schemaVersion: 1 }],
         guidance: [],
       },
     };
@@ -633,7 +632,6 @@ describe("live session status in the sidebar", () => {
         revision: 1,
         parentWorkspaceId: root.id,
         lifecycle: "pooled",
-        builderLockDigest: "sha256:executor",
         components: [{ componentId: "executor", enabled: true, schemaVersion: 1 }],
         guidance: [],
       },
@@ -878,10 +876,7 @@ describe("forking a completed turn", () => {
         target: { agentId: "claude", workspaceId: "w2" },
       },
     });
-    expect(useWorkbench.getState().sessions[0]).toEqual({
-      ...forked,
-      interactionSummary: { count: 0, requests: [] },
-    });
+    expect(useWorkbench.getState().sessions[0]).toEqual(forked);
     expect(useWorkbench.getState().activeSessionId).toBe(forked.id);
     expect(useWorkbench.getState().activeWorkspaceId).toBe("w2");
   });

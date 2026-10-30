@@ -1,5 +1,5 @@
 export type CaseKind = "journey" | "specialty" | "e2e";
-export type RunnerKind = "node" | "playwright" | "rust-legacy";
+export type RunnerKind = "node" | "playwright";
 export type CaseStatus =
   | "passed"
   | "failed"

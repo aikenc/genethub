@@ -20,7 +20,6 @@ use genehub_proto::{AgentComponentInfo, AgentSpaceInfo, AgentSpaceOperation, Pip
 
 use crate::config::{AgentComponentEntry, AgentSpaceEntry};
 
-pub const COMPONENT_PM: &str = "pm";
 pub const COMPONENT_EXECUTOR: &str = "executor";
 pub const COMPONENT_WORKER: &str = "worker";
 pub const COMPONENT_REVIEWER: &str = "reviewer";
@@ -32,8 +31,7 @@ pub const COMPONENT_DIAGNOSTIC: &str = "diagnostic";
 /// Every component the first batch defines a contract for. Unknown ids are
 /// refused rather than stored, so a typo cannot become a durable relationship
 /// that nothing will ever schedule.
-pub const COMPONENT_IDS: [&str; 5] = [
-    COMPONENT_PM,
+pub const COMPONENT_IDS: [&str; 4] = [
     COMPONENT_EXECUTOR,
     COMPONENT_WORKER,
     COMPONENT_REVIEWER,
@@ -90,7 +88,7 @@ pub fn has_enabled_component(entry: &AgentSpaceEntry, component_id: &str) -> boo
 /// Pure: it validates the component contract and produces the next entry
 /// without touching the tree, the filesystem or the revision. Tree-wide rules
 /// need the whole registry and live in [`check_tree`]; the caller owns the
-/// PipeBuilder lock digest and the revision bump.
+/// revision bump.
 pub fn apply(
     current: &AgentSpaceEntry,
     operation: &AgentSpaceOperation,
@@ -341,7 +339,6 @@ pub fn describe(entry: &AgentSpaceEntry) -> AgentSpaceInfo {
         parent_workspace_id: entry.parent_workspace_id.clone(),
         revision: entry.revision,
         lifecycle: entry.lifecycle.clone(),
-        builder_lock_digest: entry.builder_lock_digest.clone(),
         components: entry
             .components
             .iter()
@@ -368,10 +365,8 @@ pub fn describe_legacy(entry: &AgentSpaceEntry) -> PipeSpaceInfo {
     };
     PipeSpaceInfo {
         parent_workspace_id: entry.parent_workspace_id.clone(),
-        pm: has_enabled_component(entry, COMPONENT_PM),
         worker_role,
         lifecycle: entry.lifecycle.clone(),
-        builder_lock_digest: entry.builder_lock_digest.clone(),
     }
 }
 
@@ -385,7 +380,6 @@ mod tests {
             parent_workspace_id: parent.map(str::to_string),
             revision: 1,
             lifecycle: "persistent".into(),
-            builder_lock_digest: "sha256:lock".into(),
             components: Vec::new(),
             guidance: Vec::new(),
         }
@@ -409,11 +403,11 @@ mod tests {
     #[test]
     fn one_space_can_carry_several_responsibilities() {
         let space = entry("ws_a", None);
-        let space = set_component(&space, COMPONENT_PM, None).unwrap();
         let space = set_component(&space, COMPONENT_EXECUTOR, None).unwrap();
         let space = set_component(&space, COMPONENT_WORKER, Some("coder")).unwrap();
+        let space = set_component(&space, COMPONENT_REVIEWER, None).unwrap();
 
-        assert!(has_enabled_component(&space, COMPONENT_PM));
+        assert!(has_enabled_component(&space, COMPONENT_REVIEWER));
         assert!(has_enabled_component(&space, COMPONENT_EXECUTOR));
         assert_eq!(
             enabled_component(&space, COMPONENT_WORKER)
@@ -426,7 +420,7 @@ mod tests {
                 .iter()
                 .map(|component| component.component_id.as_str())
                 .collect::<Vec<_>>(),
-            vec![COMPONENT_EXECUTOR, COMPONENT_PM, COMPONENT_WORKER],
+            vec![COMPONENT_EXECUTOR, COMPONENT_REVIEWER, COMPONENT_WORKER],
             "the projection is sorted so repeated reads are stable"
         );
     }
@@ -680,9 +674,8 @@ mod tests {
 
     #[test]
     fn the_legacy_projection_states_the_old_shape_without_storing_it() {
-        let project = set_component(&entry("ws_project", None), COMPONENT_PM, None).unwrap();
+        let project = entry("ws_project", None);
         let legacy = describe_legacy(&project);
-        assert!(legacy.pm);
         assert_eq!(legacy.worker_role, None);
 
         let executor = set_component(

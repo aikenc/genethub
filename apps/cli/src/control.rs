@@ -247,9 +247,6 @@ fn facts(paths: &Paths) -> serde_json::Value {
         "versionSource": "installed-cli",
         "cliVersion": env!("CARGO_PKG_VERSION"),
         "daemonVersion": serde_json::Value::Null,
-        "workflowPatrolLagMs": serde_json::Value::Null,
-        "workflowPatrolActiveJobs": serde_json::Value::Null,
-        "workflowPatrolOldestJobMs": serde_json::Value::Null,
         "channel": channel::CHANNEL,
     })
 }
@@ -265,9 +262,6 @@ async fn add_runtime_version(value: &mut serde_json::Value) {
     if value["running"].as_bool() == Some(true) {
         if let Some(runtime) = crate::invoke::daemon_context().await {
             value["daemonVersion"] = runtime["version"].clone();
-            value["workflowPatrolLagMs"] = runtime["workflowPatrolLagMs"].clone();
-            value["workflowPatrolActiveJobs"] = runtime["workflowPatrolActiveJobs"].clone();
-            value["workflowPatrolOldestJobMs"] = runtime["workflowPatrolOldestJobMs"].clone();
         }
     }
 }

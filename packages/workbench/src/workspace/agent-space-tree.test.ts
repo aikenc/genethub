@@ -13,7 +13,6 @@ const workspace = (id: string, parentWorkspaceId?: string): WorkspaceInfo => ({
     parentWorkspaceId,
     revision: 1,
     lifecycle: "persistent",
-    builderLockDigest: `digest-${id}`,
     components: [],
     guidance: [],
   },

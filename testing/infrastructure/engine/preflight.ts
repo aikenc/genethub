@@ -74,7 +74,7 @@ export function preflightRun(input: PreflightInput): PreflightReport {
 function requiredArtifacts(units: WorkUnit[]): string[] {
   const needed = new Set<string>();
   for (const unit of units) {
-    if (unit.meta.runner !== "rust-legacy" && unit.meta.requiredArtifacts?.length !== 0) {
+    if (unit.meta.requiredArtifacts?.length !== 0) {
       needed.add(GENET);
       needed.add(DAEMON_COMPONENT);
     }

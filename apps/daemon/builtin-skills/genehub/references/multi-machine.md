@@ -122,14 +122,15 @@ Hub 查询失败会返回非零退出码和 `complete: false` 的已知条目，
 ```bash
 "$GENEHUB_CLI" machine pair <code> --endpoint <url> [--name <label>]   # 直接配对另一台机器
 "$GENEHUB_CLI" machine forget <machineId>                                # 解除配对
-"$GENEHUB_CLI" device invite --grant read --grant session [--machine <id>]  # 为新设备生成邀请
+"$GENEHUB_CLI" device invite [--machine <id>]  # 为新设备生成完整执行授权邀请，须有用户的配对授权
 "$GENEHUB_CLI" device list [--machine <id>]
 "$GENEHUB_CLI" device revoke <deviceId> [--machine <id>]
 ```
 
 - 授权项：`handshake`、`read`、`session`、`files`、`git`、`pty`、`pty:unconfined`、`devices`、`settings`、
-  `speech`、`services`、`update`。**不带 `--grant` 的邀请是不受限设备**。始终给最小范围；`pty:unconfined`、
-  `devices`、`settings`、`update` 影响最大，需要用户逐项确认。
+  `speech`、`services`、`update`。**不带 `--grant` 的邀请是不受限设备**。这些是当前 CLI 的历史范围机制；
+  包含完整 Agent/任意工具执行时，不构成按接口隔离。完整连接契约见 [platform.md](platform.md) 第 4 节。
+  向新设备开放机器访问须有用户的配对授权，不另外引入逐能力审批流程，也不自行改变已有设备授权。
 - 生成链接即批准：链接是短期、一次性的 bearer 凭证，谁先打开谁获得设备登记机会。只交给用户本人，
   不写入文件、提交或日志。
 - 调用身份缺少相应能力时（例如 `device list` 报 `caller lacks the devices capability`），不要尝试提权，

@@ -6,7 +6,7 @@
 //! component or grow a subteam belongs in the project's own Skill assets, not
 //! in this parser.
 
-use genehub_proto::{AgentSpaceBuilderOperation, AgentSpaceOperation, Reply, Request};
+use genehub_proto::{AgentSpaceOperation, Reply, Request};
 use serde_json::json;
 
 use super::output::{self, CliFailure};
@@ -33,19 +33,6 @@ enum Command {
         plan: bool,
         plan_digest: Option<String>,
         action_id: Option<String>,
-    },
-    Builder {
-        workspace_id: Option<String>,
-        target_workspace_id: Option<String>,
-        space_name: String,
-        operation: AgentSpaceBuilderOperation,
-        plan: bool,
-        plan_digest: Option<String>,
-        action_id: Option<String>,
-        expected_revision: Option<u64>,
-    },
-    RequestApproval {
-        challenge_id: String,
     },
 }
 
@@ -191,63 +178,6 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
             }
             Ok(EXIT_OK)
         }
-        Command::Builder {
-            workspace_id,
-            target_workspace_id,
-            space_name,
-            operation,
-            plan,
-            plan_digest,
-            action_id,
-            expected_revision,
-        } => {
-            let workspace_id = resolve_workspace(rpc, workspace_id).await?;
-            let Reply::AgentSpaceBuilder(report) = rpc
-                .call(Request::AgentSpaceBuilder {
-                    workspace_id,
-                    target_workspace_id,
-                    space_name,
-                    operation,
-                    plan: plan.then_some(true),
-                    plan_digest,
-                    action_id,
-                    expected_revision,
-                })
-                .await
-                .map_err(query::rpc_error)?
-            else {
-                return Err(CliFailure::protocol(
-                    "the daemon answered agentSpace.builder with the wrong reply",
-                ));
-            };
-            output::succeed(
-                "space.builder",
-                serde_json::to_value(report).expect("Builder reports serialize"),
-            );
-            Ok(EXIT_OK)
-        }
-        Command::RequestApproval { challenge_id } => {
-            let Reply::Ack = rpc
-                .call(Request::ProjectApprovalRequest {
-                    challenge_id: challenge_id.clone(),
-                })
-                .await
-                .map_err(query::rpc_error)?
-            else {
-                return Err(CliFailure::protocol(
-                    "the daemon answered project.approval.request with the wrong reply",
-                ));
-            };
-            output::succeed(
-                "space.approval.requested",
-                json!({
-                    "challengeId": challenge_id,
-                    "status": "waitingForHuman",
-                    "approved": false,
-                }),
-            );
-            Ok(EXIT_OK)
-        }
     }
 }
 
@@ -361,60 +291,8 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
                 operation: AgentSpaceOperation::SetLifecycle { lifecycle },
             })
         }
-        ("builder", action) => {
-            let mut values = Values::parse(rest(2))?;
-            values.validate_change_mode()?;
-            let space_name = values.name.take().ok_or_else(|| {
-                CliFailure::invalid_args("space builder 需要 --name <agent-space>")
-            })?;
-            let operation = match action {
-                "init" => AgentSpaceBuilderOperation::Init,
-                "check" => AgentSpaceBuilderOperation::Check,
-                "explain" => AgentSpaceBuilderOperation::Explain,
-                "build" => AgentSpaceBuilderOperation::Build {
-                    dry_run: values.dry_run,
-                    require_no_post_commands: values.require_no_post_commands,
-                },
-                "verify" => AgentSpaceBuilderOperation::Verify,
-                "clean" => AgentSpaceBuilderOperation::Clean,
-                _ => {
-                    return Err(CliFailure::invalid_args(
-                        "usage: genet space builder init|check|explain|build|verify|clean --name <agent-space>",
-                    ));
-                }
-            };
-            if action != "build" && (values.dry_run || values.require_no_post_commands) {
-                return Err(CliFailure::invalid_args(
-                    "--dry-run 与 --require-no-post-commands 只用于 space builder build",
-                ));
-            }
-            if (values.plan || values.plan_digest.is_some() || values.action_id.is_some())
-                && (action != "build" || values.dry_run)
-            {
-                return Err(CliFailure::invalid_args(
-                    "Builder management plans require space builder build (without --dry-run)",
-                ));
-            }
-            Ok(Command::Builder {
-                workspace_id: values.workspace.take(),
-                target_workspace_id: values.target_workspace.take(),
-                space_name,
-                operation,
-                plan: values.plan,
-                plan_digest: values.plan_digest.take(),
-                action_id: values.action_id.take(),
-                expected_revision: values.expected_revision.or(values.revision),
-            })
-        }
-        ("approval", "request") => {
-            let mut values = Values::parse(rest(2))?;
-            let challenge_id = values.challenge.take().ok_or_else(|| {
-                CliFailure::invalid_args("space approval request 需要 --challenge <id>")
-            })?;
-            Ok(Command::RequestApproval { challenge_id })
-        }
         _ => Err(CliFailure::invalid_args(
-            "usage: genet space open <dir>|inspect|children|component set|component remove|parent set|lifecycle set|builder|approval request ...",
+            "usage: genet space open <dir>|inspect|children|component set|component remove|parent set|lifecycle set",
         )),
     }
 }
@@ -422,25 +300,16 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
 #[derive(Default)]
 struct Values {
     workspace: Option<String>,
-    target_workspace: Option<String>,
     component: Option<String>,
     role: Option<String>,
     parent: Option<String>,
     lifecycle: Option<String>,
-    name: Option<String>,
-    pack: Option<String>,
-    agent: Option<String>,
-    model: Option<String>,
     plan_digest: Option<String>,
     action_id: Option<String>,
-    expected_revision: Option<u64>,
-    challenge: Option<String>,
     plan: bool,
     revision: Option<u64>,
     disabled: bool,
     detach: bool,
-    dry_run: bool,
-    require_no_post_commands: bool,
 }
 
 impl Values {
@@ -472,24 +341,12 @@ impl Values {
             };
             match flag {
                 "--workspace" => values.workspace = Some(next(&mut index)?),
-                "--target-workspace" => values.target_workspace = Some(next(&mut index)?),
                 "--component" => values.component = Some(next(&mut index)?),
                 "--role" => values.role = Some(next(&mut index)?),
                 "--parent" => values.parent = Some(next(&mut index)?),
                 "--lifecycle" => values.lifecycle = Some(next(&mut index)?),
-                "--name" => values.name = Some(next(&mut index)?),
-                "--pack" => values.pack = Some(next(&mut index)?),
-                "--agent" => values.agent = Some(next(&mut index)?),
-                "--model" => values.model = Some(next(&mut index)?),
                 "--plan-digest" => values.plan_digest = Some(next(&mut index)?),
                 "--action-id" => values.action_id = Some(next(&mut index)?),
-                "--expected-revision" => {
-                    let value = next(&mut index)?;
-                    values.expected_revision = Some(value.parse().map_err(|_| {
-                        CliFailure::invalid_args("--expected-revision 需要非负整数")
-                    })?);
-                }
-                "--challenge" => values.challenge = Some(next(&mut index)?),
                 "--plan" => values.plan = true,
                 "--revision" => {
                     let value = next(&mut index)?;
@@ -501,8 +358,6 @@ impl Values {
                 }
                 "--disabled" => values.disabled = true,
                 "--detach" => values.detach = true,
-                "--dry-run" => values.dry_run = true,
-                "--require-no-post-commands" => values.require_no_post_commands = true,
                 other => {
                     return Err(CliFailure::invalid_args(format!("未知选项：{other}")));
                 }
@@ -650,63 +505,5 @@ mod tests {
                 lifecycle: "pooled".into(),
             }
         );
-    }
-
-    #[test]
-    fn builder_flags_are_scoped_to_the_build_operation() {
-        let Command::Builder {
-            space_name,
-            operation,
-            ..
-        } = parse(&[
-            "builder".into(),
-            "build".into(),
-            "--name".into(),
-            "coder".into(),
-            "--dry-run".into(),
-            "--require-no-post-commands".into(),
-        ])
-        .unwrap()
-        else {
-            panic!("wrong command")
-        };
-        assert_eq!(space_name, "coder");
-        assert_eq!(
-            operation,
-            AgentSpaceBuilderOperation::Build {
-                dry_run: true,
-                require_no_post_commands: true,
-            }
-        );
-        assert!(parse(&[
-            "builder".into(),
-            "verify".into(),
-            "--name".into(),
-            "coder".into(),
-            "--dry-run".into(),
-        ])
-        .is_err());
-    }
-
-    #[test]
-    fn approval_request_is_a_distinct_non_approving_command() {
-        let Command::RequestApproval { challenge_id } = parse(&[
-            "approval".into(),
-            "request".into(),
-            "--challenge".into(),
-            "pm-bootstrap-123".into(),
-        ])
-        .unwrap() else {
-            panic!("wrong command")
-        };
-        assert_eq!(challenge_id, "pm-bootstrap-123");
-        assert!(parse(&["approval".into(), "request".into()]).is_err());
-        assert!(parse(&[
-            "approval".into(),
-            "approve".into(),
-            "--challenge".into(),
-            "pm-bootstrap-123".into(),
-        ])
-        .is_err());
     }
 }

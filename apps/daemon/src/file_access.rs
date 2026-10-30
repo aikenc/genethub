@@ -202,6 +202,9 @@ pub async fn resolve(
     {
         for folder in &workspace.folders {
             if let Some(relative) = relative_to(&path, &folder.root) {
+                if relative.starts_with(std::path::Path::new(".genethub").join("sessions")) {
+                    continue;
+                }
                 candidates.push(ResolvedWorkspacePath {
                     root: folder.root.clone(),
                     absolute: path.clone(),
