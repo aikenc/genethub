@@ -144,6 +144,7 @@ defineSpecialty(meta(
       if (receipt?.updateState === "succeeded" && receipt.continuation.state === "resumed" && session?.summary.status === "idle") break;
       await new Promise(resolve => setTimeout(resolve, 250));
     }
+    t.note(JSON.stringify({stage: "self-update-resume", updateState: receipt?.updateState, phase: receipt?.phase, error: receipt?.error, continuation: receipt?.continuation, sends, session: session?.summary}));
     t.assertions.assert(Boolean(run) && receipt?.updateState === "succeeded" && receipt.continuation.state === "resumed", "self-update did not finish and resume");
     t.assertions.assert(sends.length === 2 && sends[1].hasUpdateReceipt && sends[0].sessionId === sends[1].sessionId, "original Session was not resumed once with its receipt");
     t.assertions.assert(session?.summary.status === "idle" && session.summary.inputSummary.pendingMessageIds.length === 0 && session.items.filter((x: any) => x.type === "assistantMessage").length === 1 && f.downloads() === 1, "original goal did not finish exactly once");

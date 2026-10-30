@@ -40,6 +40,13 @@ workers or hashing artifacts; a missing dependency blocks the run, including cas
 Runtime service availability and undeclared dependencies still require case-level checks; preflight is not a promise that every
 possible environment error is eliminated.
 
+Build selected JavaScript products in the paired candidate before a run: `npm --prefix <open>/apps/relay run build`,
+`npm --prefix <open>/packages/workbench run build`, `npm --prefix <cloud>/server run build`, and
+`npm --prefix <cloud>/console run build` when those surfaces are used. Cargo preflight refreshes native/guest outputs;
+it does not compile these JavaScript bundles. The manifest fingerprints the bytes it executes, so a stable hash alone
+is not proof that an existing `dist` matches source. Freeze source and all built artifacts throughout execution;
+if either needs correction, preserve the failed run, rebuild, and start a new run. Do not rebuild during an active gate.
+
 The run path and phase are printed on stderr immediately, with 15-second progress and immediate failure notices.
 `inspect --run <dir>` works before completion, returning `progress`, partial `results`, and null qualification. An old heartbeat
 is an observation to investigate, not proof of process death. Only a finalized manifest can qualify a run.

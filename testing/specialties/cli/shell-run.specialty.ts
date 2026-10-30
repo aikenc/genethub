@@ -101,7 +101,7 @@ cli(
   "specialty.cli.confined-or-refused",
   "A paired command can access a sibling OS account file",
   "paired shell reads the known sibling file with exit 0",
-  ["remote command is an unconstrained login"],
+  ["full paired command is silently sandboxed"],
   async (t) => {
     await withWorkspace(t, async (opened) => {
       const outside = path.join(path.dirname(opened.workspaceRoot), "outside.txt");
@@ -123,17 +123,13 @@ cli(
   "specialty.cli.confined-works-inside",
   "A paired command still works inside its workspace",
   "paired device reads a relative workspace file",
-  ["confinement breaks the workspace itself"],
+  ["full paired command loses its workspace placement"],
   async (t) => {
     await withWorkspace(t, async (opened) => {
       writeFileSync(path.join(opened.workspaceRoot, "inside.txt"), "in the workspace");
       const device = await t.flows.main.pairDevice(opened.client, opened.daemon);
       try {
         const result = await t.flows.main.runShell(device.client, ask(opened.workspaceId, ["/bin/cat", "inside.txt"]));
-        if (result.status === 501) {
-          t.assertions.assert(result.frames.length === 0, "501 still produced frames");
-          return;
-        }
         t.assertions.assert(result.status === 200, `status ${result.status}`);
         t.assertions.assert(
           t.flows.main.shellText(result.frames, "stdout").includes("in the workspace"),
@@ -149,9 +145,9 @@ cli(
 
 cli(
   "specialty.cli.confined-is-announced",
-  "A confined command is told it is confined and where it may go",
-  "GENEHUB_CONFINEMENT and response metadata name the workspace root, or the stream is 501",
-  ["process infers ENOENT as a missing directory"],
+  "A complete paired command carries no obsolete device confinement claim",
+  "the command sees empty confinement markers and no confinement metadata while executing successfully",
+  ["full connection is silently assigned a device sandbox"],
   async (t) => {
     await withWorkspace(t, async (opened) => {
       const device = await t.flows.main.pairDevice(opened.client, opened.daemon);
@@ -160,22 +156,12 @@ cli(
           device.client,
           ask(opened.workspaceId, ["/bin/sh", "-c", 'echo "$GENEHUB_CONFINEMENT|$GENEHUB_CONFINED_ROOTS"']),
         );
-        if (result.status === 501) {
-          t.assertions.assert(result.frames.length === 0, "501 still produced frames");
-          return;
-        }
         t.assertions.assert(result.status === 200, `status ${result.status}`);
         const said = t.flows.main.shellText(result.frames, "stdout").trim();
-        const [backend, roots] = said.split("|");
-        t.assertions.assert(Boolean(backend) && backend !== "none", `told nothing: ${said}`);
-        t.assertions.assert((roots ?? "").split(":").includes(opened.workspaceRoot), `roots ${roots}`);
-        t.assertions.assert(!(roots ?? "").includes("/dev/"), `plumbing leaked: ${roots}`);
-        const metadata = result.metadata as { confinement?: { backend?: string; roots?: string[] } } | null;
-        t.assertions.assert(metadata?.confinement?.backend === backend, `metadata ${JSON.stringify(metadata)}`);
-        t.assertions.assert(
-          metadata?.confinement?.roots?.includes(opened.workspaceRoot) === true,
-          `metadata roots ${JSON.stringify(metadata)}`,
-        );
+        t.assertions.assert(said === "|", `full command inherited confinement markers: ${said}`);
+        const metadata = result.metadata as { confinement?: unknown } | null;
+        t.assertions.assert(metadata?.confinement == null, `full command claimed confinement: ${JSON.stringify(metadata)}`);
+        t.assertions.assert(t.flows.main.shellExit(result.frames)?.code === 0, "paired environment probe failed");
       } finally {
         device.client.close();
       }
@@ -186,7 +172,7 @@ cli(
 cli(
   "specialty.cli.unconfined-does-not-claim",
   "A command that is not confined does not claim to be",
-  "pty:unconfined grant leaves confinement metadata null and empty roots",
+  "a complete connection leaves confinement metadata null and empty roots",
   ["unconfined process handed a fence"],
   async (t) => {
     await withWorkspace(t, async (opened) => {
@@ -209,9 +195,9 @@ cli(
 
 cli(
   "specialty.cli.multi-root-confinement",
-  "Every folder of a multi-root workspace is inside the confinement",
-  "the second folder is writable and a sibling directory stays unread, or the stream is 501",
-  ["only the first folder is confined"],
+  "A complete paired command keeps multi-root placement and OS-account file access",
+  "explicit cwd selects the second folder, exact bytes are written there, and the same complete connection reads a sibling OS-account file",
+  ["multi-root cwd falls back to the first folder"],
   async (t) => {
     await withWorkspace(t, async (opened) => {
       const home = path.dirname(opened.workspaceRoot);
@@ -233,17 +219,11 @@ cli(
           argv: ["/bin/sh", "-c", "echo written > note.txt && cat note.txt"],
           cwd: docs,
         });
-        if (write.status === 501) {
-          t.assertions.assert(write.frames.length === 0, "501 still produced frames");
-          return;
-        }
         t.assertions.assert(write.status === 200, `status ${write.status}`);
         t.assertions.assert(t.flows.main.shellText(write.frames, "stdout").includes("written"), "second folder was not writable");
         const sneak = await t.flows.main.runShell(device.client, ask(workspaceId, ["/bin/cat", path.join(elsewhere, "secret.txt")]));
-        t.assertions.assert(
-          !t.flows.main.shellText(sneak.frames, "stdout").includes("OUT-OF-BOUNDS"),
-          "a third directory came along",
-        );
+        t.assertions.assert(readFileSync(path.join(docs, "note.txt"), "utf8") === "written\n", "explicit second-folder cwd did not select its real directory");
+        t.assertions.assert(sneak.status === 200 && t.flows.main.shellExit(sneak.frames)?.code === 0 && t.flows.main.shellText(sneak.frames, "stdout") === "OUT-OF-BOUNDS", "complete multi-root command lost OS-account sibling file access");
       } finally {
         device.client.close();
       }

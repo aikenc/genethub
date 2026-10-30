@@ -100,6 +100,7 @@ defineSpecialty(
     });
     let service: ServicePreviewClient | null = null;
     let peer: Awaited<ReturnType<typeof openWorkspacePeer>> | undefined;
+    let phase = "discover-local";
     try {
       await t.tools.waitUntil(async () => {
         if (runner.exitCode !== null)
@@ -112,16 +113,19 @@ defineSpecialty(
         return service !== null;
       }, 20000);
       (service as ServicePreviewClient | null)?.close();
+      phase = "discover-hosted";
       peer = await openWorkspacePeer({openRoot: t.openRoot, lease: t.env, client: opened.client, workspaceId: opened.workspaceId});
       service = await ServicePreviewClient.discover(peer.client, "", entry);
       if (!service) throw new Error("scoped absolute service discovery failed");
       const active = service;
+      phase = "inventory";
       const inventory = await opened.client.call({type:"process.workspaceList",payload:{workspaceId:opened.workspaceId}});
       t.assertions.assert(inventory?.type === "processes", "missing workspace process tree");
       if(inventory?.type === "processes") {
         t.assertions.assert(inventory.data.some(p=>p.pid===runner.pid&&p.service?.runId===active.descriptor.runId), "runner missing service metadata");
         t.assertions.assert(inventory.data.some(p=>p.parentPid===runner.pid), "backend missing from runner process tree");
       }
+      phase = "paired-access";
       const narrow = await t.flows.main.pairDevice(
         opened.client,
         opened.daemon,
@@ -133,6 +137,7 @@ defineSpecialty(
           entryPath: `${opened.rootHandle}/index.html`,
           operation: "describe",
         });
+        await probe.finish();
         const head = await probe.responseHead;
         t.assertions.assert(
           head.status === 200,
@@ -142,6 +147,7 @@ defineSpecialty(
       } finally {
         narrow.client.close();
       }
+      phase = "http";
       const body = new Uint8Array(90000);
       for (let i = 0; i < body.length; i++) body[i] = i % 251;
       const response = await active.fetch("/api/demo/echo", {
@@ -158,6 +164,7 @@ defineSpecialty(
         result.length === body.length && result.every((v, i) => v === body[i]),
         "binary HTTP response changed",
       );
+      phase = "sse";
       const stream = await active.fetch("/api/demo/stream");
       const reader = stream.body!.getReader();
       let text = "",
@@ -172,6 +179,7 @@ defineSpecialty(
         chunks >= 2 && text === Array.from({ length: 5 }, (_, n) => "data: " + (n + 1) + "\n\n").join(""),
         "SSE lost, duplicated or reordered a progress event",
       );
+      phase = "websocket";
       const received: Uint8Array[] = [];
       const socket = await active.websocket("/api/demo/ws", async (packet) => {
         received.push(packet);
@@ -201,6 +209,7 @@ defineSpecialty(
         "WS binary payload changed",
       );
       socket.close();
+      phase = "unregistered-route";
       let denied = false;
       try {
         await active.fetch("/api/unregistered/");
@@ -208,6 +217,7 @@ defineSpecialty(
         denied = true;
       }
       t.assertions.assert(denied, "undeclared route accepted");
+      phase = "stop";
       await opened.client.call({type:"process.serviceStop",payload:{workspaceId:opened.workspaceId,entryPath:`${opened.rootHandle}/index.html`,runId:active.descriptor.runId}});
       await t.tools.waitUntil(() => runner.exitCode !== null,10000);
       await t.tools.waitUntil(async () => {
@@ -216,6 +226,9 @@ defineSpecialty(
           remaining?.close();return remaining===null;
         } catch { return false; } // Closed socket may precede unlink; only 404/null is success.
       },10000);
+    } catch (error) {
+      t.note(JSON.stringify({phase, runnerExit: runner.exitCode, runnerOutput: output.slice(-1500), connection: peer?.client.connectionState, closeReason: peer?.client.lastCloseReason}));
+      throw error;
     } finally {
       (service as ServicePreviewClient | null)?.close();
       await peer?.close();

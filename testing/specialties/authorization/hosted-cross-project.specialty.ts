@@ -1,3 +1,4 @@
+import type { Request } from "@genehub/proto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { defineSpecialty, openWorkspacePeer } from "../../framework/public.ts";
@@ -37,5 +38,31 @@ defineSpecialty({
     const handle=other.data.folders[0]!.rootHandle;
     const result=await routed.client.preview(other.data.id,`${handle}/channel-result.txt`);
     t.assertions.assert(Buffer.from(result.bytes).toString()==="written in second project","workspace locator still confines full file reads");
+    const completed = (events.find(event => event.type === "turnCompleted")?.raw as {event?:{turnId?:string}})?.event;
+    if (!completed?.turnId) throw new Error("source turn identity absent");
+    const exported = await routed.client.call({type:"session.forkExport",payload:{sessionId:session,turnId:completed.turnId}});
+    if (exported?.type !== "forkTransfer") throw new Error("portable fork transfer absent");
+    // Replace the deleted request_workspace ACL projection with actual public
+    // create/fork/import behavior. The connection arrived through the first
+    // workspace; every explicit destination below must remain the second one.
+    const target = {agentId:"genet",workspaceId:other.data.id,runtimeValues:{}};
+    const operations: Request[] = [
+      {type:"session.createRouted",payload:{workspaceId:other.data.id,tags:["Flash"],mediaTags:[],title:null,cwd:null}},
+      {type:"session.fork",payload:{sessionId:session,turnId:completed.turnId,target}},
+      {type:"session.forkImport",payload:{transfer:exported.data,target}},
+      {type:"session.forkRouted",payload:{sessionId:session,turnId:completed.turnId,workspaceId:other.data.id,tags:["Flash"]}},
+      {type:"session.forkImportRouted",payload:{transfer:exported.data,workspaceId:other.data.id,tags:["Flash"]}},
+    ];
+    const ids = new Set<string>();
+    for (const operation of operations) {
+      const reply = await routed.client.call(operation);
+      t.assertions.assert(reply?.type === "session" && reply.data.workspaceId === other.data.id, `${operation.type} lost its destination to the connection locator`);
+      if (reply?.type !== "session") throw new Error(`${operation.type} returned no Session`);
+      ids.add(reply.data.id);
+      const snapshot = await opened.client.call({type:"session.get",payload:{sessionId:reply.data.id}});
+      t.assertions.assert(snapshot?.type === "snapshot" && snapshot.data.summary.workspaceId === other.data.id && snapshot.data.summary.cwd === root, `${operation.type} persisted in the wrong workspace`);
+    }
+    t.assertions.assert(ids.size === operations.length, "independent create/fork/import operations reused a Session identity");
+    t.note("Full Cloud connection: cross-project Space, actual Agent file effect, preview and all five routed/concrete create/fork/import destination paths. Share identity restrictions are covered separately.");
   }finally{await routed?.close();opened.client.close();opened.daemon.stop();await opened.mock.stop();}
 });
