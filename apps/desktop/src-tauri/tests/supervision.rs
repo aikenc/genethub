@@ -7,7 +7,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-#[cfg(unix)]
 use std::time::Instant;
 
 use genethub_desktop_lib::daemon::{Daemon, Origin, Watch};
@@ -184,14 +183,17 @@ fn stopping_releases_the_kernel_lock_and_allows_the_next_start() {
     let daemon = Daemon::new(binary.clone(), dir.path().to_path_buf());
 
     let first = daemon.start().expect("first start");
+    let stopping = Instant::now();
     daemon.stop();
+    let stop_elapsed = stopping.elapsed();
 
     // The endpoint is removed by the daemon on its way out, so its absence is
     // proof it was asked to stop and did, rather than being killed mid-session
     // with agents still running.
     assert!(
         !dir.path().join("endpoint.json").exists(),
-        "a killed daemon would have left this behind"
+        "graceful stop left endpoint.json after {}ms; a forced stop must not be mistaken for clean shutdown",
+        stop_elapsed.as_millis()
     );
     // The lock pathname deliberately keeps one stable inode for the lifetime
     // of the data directory. Removing it after unlock would let racing starts
