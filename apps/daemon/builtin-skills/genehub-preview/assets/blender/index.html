@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Blender 场景预览</title>
+<style>body{margin:0;background:#16181d;color:#e6e8ee;font:14px system-ui}#view{display:block;width:100%;max-height:80vh;object-fit:contain;touch-action:none;cursor:grab;background:#000}
+#bar{display:flex;gap:12px;align-items:center;padding:8px 12px}input[type=range]{flex:1}</style>
+<img id="view" alt="Blender 预览（拖动旋转，滚轮缩放）">
+<div id="bar"><span id="info">等待启用本次登记服务…</span><label>帧 <input id="frame" type="range" min="1" max="1" value="1"></label></div>
+<script>
+const view = document.getElementById('view'), info = document.getElementById('info'), slider = document.getElementById('frame');
+const pose = { az: 35, el: 25, zoom: 1, frame: null };
+let shown = '', busy = false;
+async function refresh() {
+  if (busy) return;
+  const key = JSON.stringify(pose);
+  if (key === shown) return;
+  busy = true; shown = key;
+  const started = performance.now();
+  try {
+    const query = new URLSearchParams({ az: pose.az, el: pose.el, zoom: pose.zoom, w: Math.min(960, Math.round(view.clientWidth * devicePixelRatio) || 640), ...(pose.frame ? { frame: pose.frame } : {}) });
+    const response = await fetch('/api/blender/frame?' + query);
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    const url = URL.createObjectURL(await response.blob());
+    const old = view.src; view.src = url; if (old.startsWith('blob:')) URL.revokeObjectURL(old);
+    info.textContent = `渲染 ${Math.round(performance.now() - started)} ms · az ${Math.round(pose.az)}° el ${Math.round(pose.el)}°`;
+  } catch (error) { info.textContent = '预览不可用：' + error.message + '（请先在预览信息中允许本次登记服务）'; shown = ''; }
+  busy = false; refresh();
+}
+let drag = null;
+view.addEventListener('pointerdown', e => { drag = { x: e.clientX, y: e.clientY }; view.setPointerCapture(e.pointerId); view.style.cursor = 'grabbing'; });
+view.addEventListener('pointermove', e => {
+  if (!drag) return;
+  pose.az -= (e.clientX - drag.x) * 0.5; pose.el = Math.max(-85, Math.min(85, pose.el + (e.clientY - drag.y) * 0.5));
+  drag = { x: e.clientX, y: e.clientY }; refresh();
+});
+view.addEventListener('pointerup', () => { drag = null; view.style.cursor = 'grab'; });
+view.addEventListener('wheel', e => { e.preventDefault(); pose.zoom = Math.max(0.2, Math.min(8, pose.zoom * (e.deltaY < 0 ? 1.1 : 1 / 1.1))); refresh(); }, { passive: false });
+slider.addEventListener('input', () => { pose.frame = Number(slider.value); refresh(); });
+(async function start() {
+  try {
+    const state = await (await fetch('/api/blender/state')).json();
+    slider.min = state.start; slider.max = state.end; slider.value = pose.frame = state.frame;
+    refresh();
+  } catch { setTimeout(start, 1500); }
+})();
+window.addEventListener('genehub-service-change', () => { shown = ''; refresh(); });
+</script></html>

@@ -23,7 +23,7 @@
 | port | 应用协议 WebSocket 的 loopback 监听端口 |
 | name | 显示名称，最多 120 字符 |
 | routes | `[{prefix:"/api/example/",websocket:true}]`，只声明应用实际提供的路径 |
-| media | 无媒体时 null；否则 `{offerPath,stopPath,microphone:"none"或"webrtc"}` |
+| media | 无媒体时 null；否则 `{offerPath,stopPath,microphone:"none"或"webrtc"}`。可选 HTML 模式：`client:"html"` 加 `protocol`（`remote-desktop/1` 见[远程桌面](remote-desktop.md)，`pixel-streaming/1` 见[离屏应用](offscreen-apps.md)）与对应路径 |
 | iceServers | 无自定义配置时 `[]` |
 | dataPolicy | `auto` 或 `direct-only`，只约束业务数据传输 |
 | pid | 可选，当前登记程序真实 PID；新版后台运行列表使用它关联进程树，不作为终止授权 |

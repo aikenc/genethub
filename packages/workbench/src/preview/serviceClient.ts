@@ -17,19 +17,22 @@ export function servicePathname(path: string): string | null {
   } catch { return null; }
 }
 
+/** `remote-desktop/1` (Capture) needs session, control and stop routes;
+ * `pixel-streaming/1` (an engine's own signalling) needs only the session WS. */
 export type HtmlServiceMedia = ServicePreviewMedia & {
-  client: "html"; protocol: "remote-desktop/1";
-  sessionPath: string; controlPath: string; stopPath: string;
+  client: "html"; protocol: "remote-desktop/1" | "pixel-streaming/1";
+  sessionPath: string; controlPath?: string; stopPath?: string;
 };
 export function htmlServiceMedia(descriptor: ServicePreviewDescriptor): HtmlServiceMedia | null {
   const media = descriptor.media;
   if (!media?.client) return null;
-  if (media.client !== "html" || media.protocol !== "remote-desktop/1")
+  if (media.client !== "html" || (media.protocol !== "remote-desktop/1" && media.protocol !== "pixel-streaming/1"))
     throw new Error("不支持此服务的媒体客户端版本");
-  const paths = [media.offerPath, media.stopPath, media.sessionPath, media.controlPath];
-  if (new Set(paths).size !== 4 || paths.some((path, i) =>
+  const pixel = media.protocol === "pixel-streaming/1";
+  const paths = pixel ? [media.sessionPath] : [media.offerPath, media.stopPath, media.sessionPath, media.controlPath];
+  if (new Set(paths).size !== paths.length || paths.some((path, i) =>
     typeof path !== "string" || path.length > 256 || servicePathname(path) !== path || /[%?]/.test(path) ||
-    !descriptor.routes.some(route => path.startsWith(route.prefix) && (i < 2 || route.websocket))))
+    !descriptor.routes.some(route => path.startsWith(route.prefix) && (route.websocket || !(pixel || i >= 2)))))
     throw new Error("HTML 媒体路径无效或未登记");
   if (media.microphone && media.microphone !== "none")
     throw new Error("HTML 媒体不支持本地麦克风采集");

@@ -768,9 +768,9 @@ function ServiceHtmlDocument(props: React.ComponentProps<typeof HtmlDocument> & 
     return()=>{cancelled=true;loaded?.close();};
   },[props.client,props.workspaceHandle,props.entryPath,props.metadata.version,generation,supported]);
   return <>{htmlMedia ? <PreviewToolbarPortal>
-    <span className="truncate" title={candidate?.descriptor.name}>桌面共享 · {controlState === "granted" ? "正在控制" : controlState === "waiting-for-yield" ? "等待交还" : controlState === "release-pending" ? "等待源端释放" : controlState === "release-unconfirmed" ? "释放未确认，请检查源端" : "仅观看"}</span>
+    <span className="truncate" title={candidate?.descriptor.name}>{htmlMedia.protocol === "pixel-streaming/1" ? "引擎串流" : `桌面共享 · ${controlState === "granted" ? "正在控制" : controlState === "waiting-for-yield" ? "等待交还" : controlState === "release-pending" ? "等待源端释放" : controlState === "release-unconfirmed" ? "释放未确认，请检查源端" : "仅观看"}`}</span>
     <label className="ml-2 flex items-center gap-1"><input type="checkbox" checked={allowTurn} onChange={event => { setAllowTurn(event.target.checked); setEnabled(false); setGeneration(n => n + 1); }}/>允许媒体中继</label>
-    <button type="button" disabled={!accessEnabled} className="ml-2 rounded border border-line px-2 py-1 disabled:opacity-40" onClick={() => allowControl ? releaseControl() : setAllowControl(true)}>{allowControl ? "交还控制" : "允许本页接管"}</button>
+    {htmlMedia.protocol === "pixel-streaming/1" ? null : <button type="button" disabled={!accessEnabled} className="ml-2 rounded border border-line px-2 py-1 disabled:opacity-40" onClick={() => allowControl ? releaseControl() : setAllowControl(true)}>{allowControl ? "交还控制" : "允许本页接管"}</button>}
     <button type="button" disabled={!accessEnabled} className="rounded border border-line px-2 py-1 disabled:opacity-40" onClick={() => setEnabled(false)}>停止观看</button>
   </PreviewToolbarPortal> : accessEnabled&&candidate?<ServiceMediaPanel service={candidate}/>:null}
   <HtmlDocument {...props} service={accessEnabled?candidate:null} servicePolicy={{allowTurn,allowControl:allowControl&&accessEnabled,onControlState}}/></>;

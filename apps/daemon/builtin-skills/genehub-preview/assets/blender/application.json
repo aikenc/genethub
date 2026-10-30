@@ -1,0 +1,13 @@
+{
+  "name": "Blender 场景预览",
+  "entry": "index.html",
+  "backends": [
+    {
+      "origin": "http://127.0.0.1:18082",
+      "command": ["C:/path/to/blender.exe", "-b", "C:/path/to/scene.blend", "--python", "blender_server.py"],
+      "env": { "PREVIEW_BLENDER_PORT": "18082", "PREVIEW_BLENDER_ENGINE": "EEVEE" },
+      "health": "/health",
+      "routes": [{ "prefix": "/api/blender/" }]
+    }
+  ]
+}
