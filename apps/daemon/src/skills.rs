@@ -537,7 +537,10 @@ mod tests {
         .unwrap();
         assert!(multi.contains("machineNotPaired"));
         assert!(multi.contains("--cwd"));
-        assert!(multi.contains("不带 `--grant` 的邀请是不受限设备"));
+        assert!(multi.contains("新邀请是完整 Agent 访问权，不接受 `--grant`/scope"));
+        assert!(multi.contains("用户明确的配对授权"));
+        assert!(multi.contains("不写入文件、提交或日志"));
+        assert!(!multi.contains("不带 `--grant` 的邀请是不受限设备"));
     }
 
     #[test]
