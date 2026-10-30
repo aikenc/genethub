@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Client, type WebSocketLike } from "@genehub/workbench/client";
 import { WebSocket } from "ws";
@@ -238,56 +238,53 @@ defineSpecialty(meta("file-write-under-loss", "An interrupted file request is no
     } finally { peer?.close(); await link.stop(); }
   });
 });
-defineSpecialty(meta("slow-stream-cancel-fairness", "A paused consumer does not indefinitely block unrelated RPC and can be cancelled",
-  "An infinite real stdout producer with an unconsumed body coexists with five workspace RPCs below 2 seconds; RESET retires the observed process within 5 seconds"), async t => {
+defineSpecialty(meta("slow-stream-cancel-fairness", "An unread infinite stream is refused locally while RPC and the carrier remain usable",
+  "A real stdout producer fills its unread body's bounded queue: only typed capacity Refused(3) is accepted, five unrelated RPCs finish below2s, the producer is reaped within5s, and the original carrier stays usable"), async t => {
   if (process.platform !== "linux") throw new BlockedError("process identity and zombie oracle requires Linux procfs");
   await withWorkspace(t, async o => {
     const peer = await connect(t, o);
+    const owner = peer.logicalConnectionId;
     const marker = join(o.workspaceRoot, "slow-start");
     const stream = peer.openShellStream({ workspaceId: o.workspaceId, cwd: o.workspaceRoot, timeoutMs: 20000,
-      argv: ["python3", "-c", "import pathlib,sys,time,os\npathlib.Path('slow-start').write_text(str(os.getpid()))\nn=0\nwhile True:\n sys.stdout.write('x'*16384+'\\n'); sys.stdout.flush(); n+=1; pathlib.Path('slow-progress').write_text(str(n)); time.sleep(0.001)"] });
+      argv: ["python3", "-c", "import pathlib,sys,time,os\npathlib.Path('slow-start').open('a').write(str(os.getpid())+'\\n')\nwhile not pathlib.Path('slow-go').exists():time.sleep(.01)\nn=0\nwhile True:\n sys.stdout.write('x'*16384+'\\n'); sys.stdout.flush(); n+=1; pathlib.Path('slow-progress').write_text(str(n)); time.sleep(0.001)"] });
+    let ended = false, refusal: unknown;
+    const terminal = stream.done.then(() => { ended = true; }, (error: unknown) => { refusal = error; ended = true; });
+    const capacityRefused = (error: unknown) => error instanceof Error && error.name === "DataStreamResetError"
+      && "code" in error && error.code === 3;
     try {
       await stream.finish(); await stream.responseHead;
       await t.tools.waitUntil(() => existsSync(marker), 10000);
-      const progress = () => { try { return Number(readFileSync(join(o.workspaceRoot, "slow-progress"), "utf8")); } catch { return 0; } };
-      let last = 0, stableSince = performance.now();
-      await t.tools.waitUntil(() => {
-        const current = progress();
-        if (current !== last || current === 0) { last = current; stableSince = performance.now(); }
-        return last > 0 && performance.now() - stableSince >= 750;
-      }, 12000);
-      const pausedAt = last;
-      // Resume consumption through the public stream until the producer moves.
-      // A stalled process unrelated to backpressure cannot satisfy this control.
-      const iterator = stream.body()[Symbol.asyncIterator]();
-      const drainDeadline = performance.now() + 5000;
-      while (progress() <= pausedAt && performance.now() < drainDeadline) {
-        const chunk = await iterator.next();
-        t.assertions.assert(!chunk.done, "producer terminated instead of applying backpressure");
-        await new Promise(r => setTimeout(r, 1));
-      }
-      t.assertions.assert(progress() > pausedAt, "consumption did not release producer backpressure");
-      t.note(`producerPausedAt=${pausedAt} resumedAt=${progress()}`);
-      for (let n = 0; n < 5; n++) {
-        const start = performance.now();
-        const result = await peer.call({ type: "workspace.list" });
-        t.assertions.assert(result?.type === "workspaces" && performance.now() - start < 2000, "slow stream starved an unrelated RPC");
-      }
-      const pid = Number(readFileSync(marker, "utf8"));
+      const pid = Number(readFileSync(marker, "utf8").trim());
       const observed = () => {
         try { const stat = readFileSync(`/proc/${pid}/stat`, "utf8").split(") ")[1]!.split(" "); return { state: stat[0], birth: stat[19] }; }
         catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return null; throw e; }
       };
       const initial = observed();
-      t.assertions.assert(Number.isSafeInteger(pid) && pid > 1 && initial !== null && initial.state !== "Z", "producer was not live at cancellation");
-      stream.reset(1);
+      t.assertions.assert(Number.isSafeInteger(pid) && pid > 1 && initial !== null && initial.state !== "Z", "producer was not live before the unread fault");
+      writeFileSync(join(o.workspaceRoot, "slow-go"), "go");
+      const progress = () => { try { return Number(readFileSync(join(o.workspaceRoot, "slow-progress"), "utf8")); } catch { return 0; } };
+      await t.tools.waitUntil(() => progress() >= 32, 5000);
+      const rpcMs = await Promise.all(Array.from({ length: 5 }, async () => {
+        const start = performance.now();
+        const result = await peer.call({ type: "workspace.list" });
+        const ms = performance.now() - start;
+        t.assertions.assert(result?.type === "workspaces" && ms < 2000, "unread stream starved an unrelated RPC");
+        return Math.round(ms);
+      }));
+      await t.tools.waitUntil(() => ended, 12000); await terminal;
+      t.assertions.assert(capacityRefused(refusal), "unread stream must fail explicitly with capacity Refused(3), not EOF or another error");
+      const lateFailure = await (async () => { for await (const _chunk of stream.body()) { /* Observe the real public late-read terminal. */ } })()
+        .then(() => null, (error: unknown) => error);
+      t.assertions.assert(capacityRefused(lateFailure), "late body read hid its capacity refusal");
       await t.tools.waitUntil(() => { const p = observed(); return p === null || p.birth !== initial!.birth; }, 5000).catch(() => {
         const p = observed();
         t.note(`cancelProcessState=${p?.state} sameProcess=${p?.birth === initial!.birth}`);
-        throw new Error(p?.state === "Z" ? "cancelled producer exited but was not reaped within 5 seconds" : "cancelled producer remains a live process after 5 seconds; state=" + p?.state + " sameBirth=" + (p?.birth === initial!.birth));
+        throw new Error(p?.state === "Z" ? "refused producer exited but was not reaped within5s" : "refused producer remains alive after5s");
       });
-      t.assertions.assert((await peer.call({ type: "workspace.list" }))?.type === "workspaces", "cancellation destroyed connection");
-    } finally { stream.reset(1); peer.close(); }
+      t.assertions.assert(readFileSync(marker, "utf8").trim().split("\n").length === 1, "refusal repeated the source process");
+      t.assertions.assert(peer.logicalConnectionId === owner && (await peer.call({ type: "workspace.list" }))?.type === "workspaces", "stream refusal replaced or destroyed the carrier");
+      t.note(JSON.stringify({ producerChunks: progress(), rpcMs, capacityRefused: true, lateReadRefused: true, sourceStarts: 1, producerReaped: true, ownerRetained: true }));
+    } finally { stream.reset(1); peer.close(); await terminal; }
   });
 });
 

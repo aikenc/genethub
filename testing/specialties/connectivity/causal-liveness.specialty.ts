@@ -78,9 +78,10 @@ defineSpecialty(meta("multi-agent-burst-liveness",
 for (const mode of ["loopback", "fabric", "preview"] as const) {
 defineSpecialty({ ...meta(mode === "loopback" ? "stream-output-shaped-liveness" : mode === "fabric" ? "fabric-sustained-output-liveness" : "fabric-preview-shaped-control",
   "Continuously consumed output on a narrow TCP path keeps its owner and restores interaction after cancellation"),
-  // A complete 24MiB finite body takes ~101s to serialize at 2Mbps. Include
-  // setup and cancellation cleanup in the harness budget, not the RPC deadline.
-  timeoutMs: mode === "preview" ? 180000 : 120000,
+  // Both the 24MiB file and shell output need ~101s plus framing at 2Mbps.
+  // Local cancellation cannot remove bytes already accepted by the socket.
+  // Keep each RPC's deadline; bound the whole finite-drain observation here.
+  timeoutMs: mode === "loopback" ? 120000 : 180000,
 }, async t => {
   const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
   let relay: Awaited<ReturnType<typeof startRelay>> | undefined;
@@ -150,7 +151,7 @@ defineSpecialty({ ...meta(mode === "loopback" ? "stream-output-shaped-liveness" 
     abort.abort(); stream?.reset(1);
     t.note(JSON.stringify({ phase: "cancelled", mode, elapsedMs: Math.round(performance.now() - began), samples, diagnostics }));
     let afterStop = false;
-    for (let attempt = 0; attempt < 4 && !afterStop; attempt++) {
+    for (let attempt = 0; attempt < 5 && !afterStop; attempt++) {
       await new Promise(resolve => setTimeout(resolve, 5000));
       afterStop = await peer.call({ type: "workspace.list" })
         .then(reply => reply?.type === "workspaces").catch(() => false);

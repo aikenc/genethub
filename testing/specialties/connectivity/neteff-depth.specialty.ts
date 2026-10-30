@@ -124,13 +124,9 @@ function seedImage(t: CaseContext, name: string, sizeBytes: number): FileFixture
 
 class PreviewProbe {
   private readonly errors: string[] = [];
-  private readonly bulkWindows: number[] = [];
   summary(): string { return this.errors.join("; "); }
   private readonly durationsMs: number[] = [];
   readonly onDiagnostic = (event: ClientDiagnosticEvent): void => {
-    if (event.kind === "connection" && event.detail.milestone === "peerHandshake") {
-      this.bulkWindows.push(Number(event.detail.negotiatedBulkWindowBytes));
-    }
     if (event.kind === "error" || event.detail.phase === "carrier-lost" || event.detail.state === "reconnecting") {
       const d = event.detail;
       this.errors.push(JSON.stringify({ kind: event.kind, phase: d.phase, state: d.state,
@@ -148,7 +144,6 @@ class PreviewProbe {
   latestMs(): number | null {
     return this.durationsMs.at(-1) ?? null;
   }
-  latestBulkWindow(): number | null { return this.bulkWindows.at(-1) ?? null; }
 }
 
 async function measurePreview(
@@ -542,7 +537,7 @@ defineSpecialty(
     } catch { /* The product timings above remain valid without a local log. */ }
     t.assertions.assert(previewStages.length >= 6 && previewStages.every((line) =>
       ["request_id=", "transport=", "source_mode=", "worker_wait_us=",
-        "write_credit_us=", "write_budget_us=", "write_enqueue_us=",
+        "write_budget_us=", "write_enqueue_us=",
         "write_completion_us=", "write_actor_queue_us=", "write_actor_send_us=", "write_wake_us=",
         "write_frames="].every((field) => line.includes(field))),
     "real preview transfers did not emit complete stage diagnostics");
@@ -599,7 +594,6 @@ defineSpecialty(
             ` firstByteMs=${product.firstByteMs?.toFixed(0) ?? "unknown"}` +
             ` transferMs=${product.transferMs.toFixed(0)}` +
             ` chunks=${product.chunkCount}` +
-            ` negotiatedWindow=${probe.latestBulkWindow() ?? "unknown"}` +
             ` idleP95=${percentile(idle, 0.95).toFixed(0)}ms` +
             ` busyP95=${percentile(busy, 0.95).toFixed(0)}ms` +
             ` daemonCpuTicks=${daemonTicksBefore === null || daemonTicksAfter === null ? "unknown" : daemonTicksAfter - daemonTicksBefore}` +
@@ -646,7 +640,7 @@ defineSpecialty(
             target: 0.8,
           });
           lines.push(
-            `${sample.line} negotiatedWindow=${probe.latestBulkWindow() === null ? "unknown" : `${probe.latestBulkWindow()! / MIB}MiB`} idleP50=${percentile(idle, 0.5).toFixed(0)}ms` +
+            `${sample.line} idleP50=${percentile(idle, 0.5).toFixed(0)}ms` +
             ` idleP95=${percentile(idle, 0.95).toFixed(0)}ms` +
             ` busyP50=${percentile(busy, 0.5).toFixed(0)}ms` +
             ` busyP95=${percentile(busy, 0.95).toFixed(0)}ms` +
@@ -926,7 +920,7 @@ defineSpecialty(
           if (startup !== "cold-abrupt") await t.tools.waitUntil(() => readFileSync(logPath, "utf8").split("\n").filter(line => line.includes("preview_stage_timing")).length > timingsBefore, 3000);
           if (product.elapsedMs > 2800) {
             const line = readFileSync(logPath, "utf8").replace(/\u001b\[[0-9;]*m/g, "").split("\n").filter(line => line.includes("preview_stage_timing")).at(-1) ?? "";
-            const keys = ["scan_us", "send_us", "write_credit_us", "write_completion_us", "write_actor_send_us", "write_wake_us", "finish_us"];
+            const keys = ["scan_us", "send_us", "write_completion_us", "write_actor_send_us", "write_wake_us", "finish_us"];
             t.note(`slow stages ${samples.length + 1}: ${JSON.stringify(Object.fromEntries(keys.map(key => [key, Number(new RegExp(`${key}=(\\d+)`).exec(line)?.[1] ?? -1)])))}`);
           }
           samples.push(

@@ -173,15 +173,16 @@ for (const v of variants) defineSpecialty({
       const uploadPath=join(o.workspaceRoot,"pool-upload.txt");
       const fileMatches=existsSync(uploadPath)&&readFileSync(uploadPath,"utf8")===uploadText;
       uploadOk=result.ack&&!result.error&&fileMatches;
+      const explicitTimeout=result.error&&!result.ack&&result.errorType==="ClientRequestTimeoutError"&&result.elapsedMs>=9500&&result.elapsedMs<11000;
+      const noPartial=!existsSync(uploadPath)||fileMatches;
+      uploadRecoverySafe=explicitTimeout&&noPartial;
       // Keep the original deadline and raw result. A timed-out write has an
       // uncertain outcome and must never be silently reissued or called ACKed.
       if(v.ackDelay){
         const recoverStart=performance.now(),probeText="distinct post-restoration write";
         const probe=await clients.at(-1)!.call({type:"file.write",payload:{workspaceId:o.workspaceId,path:`${o.rootHandle}/pool-recovery-probe.txt`,content:probeText}});
         const recoverMs=Math.round(performance.now()-recoverStart);
-        const explicitTimeout=result.error&&!result.ack&&result.errorType==="ClientRequestTimeoutError"&&result.elapsedMs>=9500&&result.elapsedMs<11000;
         if(v.ackDelay>=8000)t.assertions.assert(explicitTimeout,"a hold extending beyond the unchanged request deadline did not report the expected explicit timeout");
-        const noPartial=!existsSync(uploadPath)||readFileSync(uploadPath,"utf8")===uploadText;
         uploadRecoverySafe=(uploadOk||explicitTimeout)&&noPartial&&probe?.type==="ack"&&recoverMs<=1500&&readFileSync(join(o.workspaceRoot,"pool-recovery-probe.txt"),"utf8")===probeText;
         t.note(JSON.stringify({phase:"fault-upload-recovery",acceptanceVersion:2,originalDeadlineMs:10000,originalUploadAcknowledged:uploadOk,explicitTimeout,noPartial,recoverMs,recoverySafe:uploadRecoverySafe,originalWriteRetried:false}));
       }
@@ -194,12 +195,9 @@ for (const v of variants) defineSpecialty({
         const rows = log.filter(line => line.includes(event.requestId));
         const time = (line: string) => Date.parse(line.match(/\d{4}-\d{2}-\d{2}T[^ ]+Z/)?.[0] ?? "");
         const chunks = rows.filter(line => line.includes("RPC request chunk received"));
-        const credits = rows.filter(line => line.includes("RPC request credit returned"));
-        const gaps = credits.map((line, i) => time(line) - time(chunks[i] ?? "")).filter(Number.isFinite);
         const first = (text: string) => { const line = rows.find(row => row.includes(text)); return line && Number.isFinite(time(line)) ? time(line) - event.at : null; };
-        t.note(JSON.stringify({ phase: "upload-causal", client: uploadEvents, chunks: chunks.length, credits: credits.length,
+        t.note(JSON.stringify({ phase: "upload-causal", client: uploadEvents, chunks: chunks.length,
           chunkFirstMs: first("RPC request chunk received"), chunkLastMs: chunks.length ? time(chunks.at(-1)!) - event.at : null,
-          creditWaitMs: { total: gaps.reduce((a, b) => a + b, 0), max: Math.max(0, ...gaps) },
           finDispatchMs: first("RPC request FIN dispatched"), decodedMs: first("RPC request decoded"), preparedMs: first("RPC response prepared"), completedMs: first("RPC exchange completed") }));
       }
     }
