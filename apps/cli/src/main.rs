@@ -229,7 +229,7 @@ fn print_usage() {
   genet speech runtime unregister  remove the adapter registration only
   genet space inspect              which responsibilities this AgentSpace carries
   genet space children             the direct Workers this Executor may dispatch to
-  genet space component set --component <pm|executor|worker|reviewer> [--role <r>]
+  genet space component set --component <executor|worker|reviewer> [--role <r>]
                               [--disabled] [--revision <n>]
                                     mount or reconfigure one responsibility
   genet space component remove --component <id> [--revision <n>]
@@ -237,10 +237,6 @@ fn print_usage() {
   genet space parent set (--parent <id> | --detach) [--revision <n>]
                                     move this AgentSpace in the ownership tree
   genet space lifecycle set --lifecycle <persistent|pooled|ephemeral> [--revision <n>]
-  genet space builder init|check|explain|build|verify|clean --name <agent-space>
-                                    run the daemon-owned AgentSpaceBuilder inside this project
-  genet space approval request --challenge <id>
-                                    ask the Human to approve one daemon-authored plan; never approves it
   genet session components <id>     which responsibilities are live in this session
   genet session flow <id>           read an Executor Session's structured DCG timeline
   genet session send <id> \"<text>\"  continue a session

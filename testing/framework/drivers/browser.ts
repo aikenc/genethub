@@ -24,14 +24,24 @@ export async function openBrowser(options: BrowserContextOptions = {}, evidence:
       const lease = createLease("genehub-browser-");
       const child = spawn(chromium.executablePath(), ["--no-sandbox", "--no-first-run", "--disable-dev-shm-usage", "--remote-debugging-port=0", `--user-data-dir=${path.join(lease.data, "profile")}`, "about:blank"], {
         env: { ...process.env, ...lease.env }, stdio: ["ignore", "ignore", "pipe"],
+        // Its own group so a renderer or crash handler cannot outlive the
+        // browser when the case is cancelled or times out.
+        detached: process.platform !== "win32",
       });
+      const signalGroup = (signal: NodeJS.Signals) => {
+        if (child.pid !== undefined) {
+          try { process.kill(-child.pid, signal); } catch { /* already gone */ }
+        }
+      };
       stopNative = async () => {
         try {
-          if (child.exitCode === null && child.signalCode === null) {
-            const exited = waitForExit(child, 5000);
-            child.kill("SIGTERM");
-            await exited;
-          }
+          // The leader can already be gone while renderers or a crash handler
+          // still hold the profile. Signal the group unconditionally, then
+          // make sure the leader is reaped.
+          signalGroup("SIGTERM");
+          const exited = await waitForExit(child, 5000).catch(() => null);
+          signalGroup("SIGKILL");
+          if (exited === null) await waitForExit(child, 1000).catch(() => null);
         } finally { releaseLease(lease); }
       };
       const endpoint = await new Promise<string>((resolve, reject) => {

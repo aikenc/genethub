@@ -101,9 +101,6 @@ impl Diagnostics {
             uptime_seconds: self.started.elapsed().as_secs(),
             hub_state: hub_state(hub).to_string(),
             remote_state: remote_state(remote).to_string(),
-            workflow_patrol_lag_ms: None,
-            workflow_patrol_active_jobs: None,
-            workflow_patrol_oldest_job_ms: None,
             events: record.events.iter().cloned().collect(),
             dropped_events: record.dropped,
         }

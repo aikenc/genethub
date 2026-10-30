@@ -10,9 +10,10 @@ Normative design lives in Cloud:
 
 This package does not copy those checklists. `testctl governance check` only implements mechanical mappings and cites IDs.
 
-`testing/deprecated/rust/` is frozen legacy. The crate stays on disk and can be invoked by hand with
-`cargo test -p genehub-testing`; complete `testctl` gates retain required legacy cases according to policy and parity metadata.
-New business cases belong in `journeys/`, `specialties/`, or `e2e/`.
+The frozen Rust integration crate is retired. Its cases are recorded in `testing/migration/rust-parity.json`
+as `retired`, `release-only`, or `suspended` with their evidence, and the source that remains for audit lives under
+`testing/deprecated/archive/`; `testctl` no longer executes a Rust legacy runner. New business cases belong in
+`journeys/`, `specialties/`, or `e2e/`.
 
 For a bounded dev feedback, use `plan` then `run --gate dev-feedback --case <id> --reason <scope>`
 (repeat `--case`, or select with `--tags`). Use absolute `--open`, `--cloud` and `--space` paths:

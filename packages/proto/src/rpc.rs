@@ -386,40 +386,6 @@ pub enum Request {
         expected_revision: u64,
         operation: AgentSpaceOperation,
     },
-    /// Runs one deterministic AgentSpaceBuilder operation inside the
-    /// authenticated project's `spaces/` boundary. The operation never
-    /// chooses a role or team shape; those decisions come from a Bootstrap
-    /// Pack or the caller's project Skill.
-    #[serde(rename = "agentSpace.builder", rename_all = "camelCase")]
-    AgentSpaceBuilder {
-        /// Project boundary that owns the target Space.
-        workspace_id: String,
-        /// Existing Workspace to check/build. Absent preserves the CLI's
-        /// `<project>/spaces/<spaceName>` creation contract.
-        #[serde(default)]
-        target_workspace_id: Option<String>,
-        space_name: String,
-        operation: AgentSpaceBuilderOperation,
-        /// Preview an exact build under the existing PM management binding.
-        #[serde(default)]
-        #[ts(optional)]
-        plan: Option<bool>,
-        #[serde(default)]
-        #[ts(optional)]
-        plan_digest: Option<String>,
-        #[serde(default)]
-        #[ts(optional)]
-        action_id: Option<String>,
-        #[serde(default)]
-        #[ts(optional, type = "number")]
-        expected_revision: Option<u64>,
-    },
-    /// Presents one daemon-authored project mutation plan to the Human and
-    /// waits for their answer. A SessionController may request this card but
-    /// cannot answer it; approval authority remains Human-only and the
-    /// resulting grant never crosses this API.
-    #[serde(rename = "project.approval.request", rename_all = "camelCase")]
-    ProjectApprovalRequest { challenge_id: String },
     /// The direct child Spaces this one may dispatch to.
     ///
     /// Refused unless the Space mounts an enabled `executor`, and never
@@ -1247,7 +1213,6 @@ pub enum Reply {
     WorkflowJournal(Vec<serde_json::Value>),
     WorkflowCheck(WorkflowCheckReport),
     WorkflowRuns(Vec<WorkflowRunStatus>),
-    AgentSpaceBuilder(AgentSpaceBuilderReport),
     AgentSpaceChangePlan(AgentSpaceChangePlan),
     Workspace(WorkspaceInfo),
     Workspaces(Vec<WorkspaceInfo>),

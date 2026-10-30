@@ -9,6 +9,14 @@ GeneHub 是端侧多机器 Agent 的 hub：每台机器上的 daemon 持有自�
 只是经授权的操作界面。多机是常态，本机只是延迟最低的一项。浏览器所在设备、对话所在工作区与实际执行机器
 可以不同；用户无需因为远程执行而迁移对话。PipeSpace 提供项目角色和流程，不是另一台机器。架构、原理与开源仓链接见 [platform.md](references/platform.md)。
 
+## 完整 Agent 连接的产品权限
+
+经账号/设备认证且获准驱动完整 Agent 的连接，按目标 OS 用户能力操作全部可访问资源；
+Agent 已能通过工具执行的事，不应另按项目、设备或角色降权。仅展示分享不是完整连接，
+认证、撤销、过期、OS 权限与来源追踪仍保留。详见 [platform.md](references/platform.md) 第 4 节。
+这是 2026-10-29 产品契约；当前版本仍有旧 grants 和请求检查时，报告实际拒绝，不能换身份或读取 token 绕过。
+该定位不扩大当前用户任务范围，也不代替发布、重启、配对等动作授权。
+
 ## 身份不能互换
 
 | 身份 | 含义 | 选择方式 |
@@ -29,10 +37,8 @@ GeneHub 是端侧多机器 Agent 的 hub：每台机器上的 daemon 持有自�
   不要换身份或猜别的路径。`machineNotPaired` 表示指定的直连记录不存在，不代表 Hub 目标不可达。
 - 可路由到其他机器：`context`、`shell`、`workspace`、`session`、`agent`（含 `agent run`）、`device`、
   `client`、`process`。只能在本机：`machine`、`speech`、`file`、`daemon` 生命周期、`update`。
-- 配对、`device invite`、授权范围属于授权变更，只在用户明确要求时执行；授权只给所需最小范围，不要生成
-  不限范围的设备，也不要把邀请链接或码贴进聊天以外的地方。
-- 会话控制本机与跨机同规则：Agent 可创建并控制普通会话；已移除的 Workflow 留下的只读受管子会话只由委托它的 PM
-  （或项目例外权限）写入。Agent 发出的消息带来源，按 Agent 输入而非 Human 决定对待。多会话协作用团队机制（Skill `genehub-team`）。
+- 配对、`device invite`、授权范围属于授权变更，只在用户明确要求时执行；完整 Agent 连接按上述全权契约理解；不要把包含 Session/任意工具执行的授权称作只读隔离，也不要把邀请链接或码贴进聊天以外的地方。当前 CLI 的旧范围参数按实际版本解释，不自行改变既有设备授权。
+- 会话控制本机与跨机同规则：完整连接的 Agent 可创建并控制普通会话，来源与真实 Session ID 保留。旧 Workflow 受管限制和新增跨项目拒绝属于待迁移实现，不是继续增加权限等级的依据；当前命令若拒绝，保留真实错误。Agent 消息按 Agent 来源处理，多会话协作用团队机制（Skill `genehub-team`）。
 - 用会话标签（`session label`、`agent run --label`、`session list --label`）标明会话的设备、角色或分工，
   不要把 `[标签]` 写进标题；见 [multi-machine.md](references/multi-machine.md)。
 - 数据留在所属机器：不要为了“方便”把工作区或密钥搬到别的机器；把任务派给持有资源的那台机器。
@@ -86,7 +92,7 @@ GeneHub 是端侧多机器 Agent 的 hub：每台机器上的 daemon 持有自�
 
 `--model` 可重复；不指定时先发现模型。同一 action ID 只能对应完全相同草案。configure 保存请求，
 工作台呈现具体配置和密钥输入；等待前停止当前执行，Human 提交后恢复原会话。CLI 不接受密钥参数。
-当前身份与有效权限看 `context.authority`；普通会话可准备请求，不能自行批准或取得整个 Settings 权限。
+当前身份与有效权限看 `context.authority`；当前 Provider 提交流程由 Human 完成；这是业务交互约束，不应解读为普通 Agent 已被 OS 隔离或整个 Settings 都不可用。
 不要读取机器 config.json、请求用户把密钥发进对话、修改其他 Agent 配置或轮询等待。
 续跑时先读回执：saved 表示配置保存，validation.status=ready 才表示模型调用通过；其余状态按 detail 处理。
 stale 需取消旧请求并用新 action ID 重建；unknown 不得重放配置。验证中断可显式 verify；已完成配置不可重复执行。

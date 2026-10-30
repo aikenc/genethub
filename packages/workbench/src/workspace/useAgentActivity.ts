@@ -85,10 +85,9 @@ function summarize(sessions: SessionSummary[]) {
     activity.count++;
     activity.recent = Math.max(activity.recent, session.messagePreview?.atMs ?? session.updatedAtMs);
     const facts = sessionAttention(session, sessions);
-    activity.running ||= facts.pmRunning || facts.teamRunning;
-    activity.ownRunning ||= facts.pmRunning && !session.managed;
-    activity.teamRunning ||= facts.teamRunning || facts.pmRunning && !!session.managed;
-    activity.blocked ||= (session.workSummary?.blocked ?? 0) > 0;
+    activity.running ||= facts.running;
+    activity.ownRunning ||= facts.running && !session.managed;
+    activity.teamRunning ||= facts.running && !!session.managed;
     activity.tasks ||= facts.inProgress;
     const pending = owners.get(session.workspaceId) ?? new Map<string, SessionSummary>();
     for (const owner of pendingOwners(session, sessions)) pending.set(owner.id, owner);

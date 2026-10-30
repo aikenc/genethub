@@ -409,7 +409,12 @@ async fn run_once(
 ) -> Result<()> {
     let endpoint_url = transport_flow_url(url)?;
     validate_fabric_url(&endpoint_url)?;
-    tracing::debug!(url = %endpoint_url, "dialing the Fabric relay");
+    let relay = crate::http::Url::parse(&endpoint_url).ok();
+    tracing::debug!(
+        host = relay.as_ref().and_then(|url| url.host_str()).unwrap_or("?"),
+        port = relay.as_ref().and_then(|url| url.port_or_known_default()),
+        "dialing the Fabric relay"
+    );
     let socket = tokio::time::timeout(CONNECT_TIMEOUT, ws::connect(&endpoint_url, socket_config()))
         .await
         .context("Fabric WebSocket handshake timed out")??;

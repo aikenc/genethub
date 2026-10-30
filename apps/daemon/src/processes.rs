@@ -304,11 +304,11 @@ impl Processes {
             .await
             .ok_or_else(|| anyhow::anyhow!("process census unavailable; cleanup is unconfirmed"))?;
         let claimed = claimed_by(&before, agent, agent.watched_at.elapsed().as_secs());
-        let mut ending = tokio::task::JoinSet::new();
-        for row in &claimed {
-            ending.spawn(end_observed((*row).clone()));
-        }
-        ending.join_all().await;
+        let owned: Vec<Row> = claimed.iter().map(|row| (*row).clone()).collect();
+        // Signal each verified pid, never its whole group: a row still in the
+        // Agent's group must not take the Agent down before its own abort
+        // protocol runs.
+        terminate_snapshot(&owned).await;
         let after = census()
             .await
             .ok_or_else(|| anyhow::anyhow!("process cleanup could not be verified"))?;
@@ -324,6 +324,72 @@ impl Processes {
             );
         }
         Ok(claimed.len())
+    }
+
+    /// Ends detached descendants for several sessions in one census.
+    ///
+    /// Shutdown closes many Agents; paying for a process census per session
+    /// both slows the drain and starves the host's exit budget. One snapshot
+    /// is enough to find the processes that left the Agent's own group.
+    pub(crate) async fn stop_detached_for(&self, session_ids: &[String]) -> usize {
+        let Some(census) = census().await else {
+            tracing::warn!(
+                "cannot end detached session processes: the operating system did not answer"
+            );
+            return 0;
+        };
+        let agents: Vec<Agent> = {
+            let watched = self.agents.read().await;
+            session_ids
+                .iter()
+                .filter_map(|id| watched.get(id).copied())
+                .collect()
+        };
+        let mut owned = Vec::new();
+        for agent in agents {
+            owned.extend(
+                claimed_by(&census, agent, agent.watched_at.elapsed().as_secs())
+                    .into_iter()
+                    .filter(|row| row.group != agent.group)
+                    .cloned(),
+            );
+        }
+        let _ = terminate_snapshot(&owned).await;
+        owned.len()
+    }
+
+    /// Last-resort group kill for sessions abandoned by the shutdown deadline.
+    pub(crate) async fn kill_watched_groups(&self, session_ids: &[String]) -> usize {
+        let agents: Vec<Agent> = {
+            let watched = self.agents.read().await;
+            session_ids
+                .iter()
+                .filter_map(|id| watched.get(id).copied())
+                .collect()
+        };
+        let Some(census) = census().await else {
+            tracing::warn!(
+                "cannot verify groups for forced shutdown: the operating system did not answer"
+            );
+            return 0;
+        };
+        let mut stopped = 0;
+        for agent in agents {
+            // Recheck that the group still exists before aiming a SIGKILL at
+            // the number. A group id outlives its leader only while members
+            // remain; a reused number with no matching group is skipped.
+            let present = census.iter().any(|row| row.group == agent.group);
+            if !present {
+                continue;
+            }
+            match crate::process::kill_group(agent.group).await {
+                Ok(()) => stopped += 1,
+                Err(error) => {
+                    tracing::warn!(group = agent.group, %error, "forced group kill failed");
+                }
+            }
+        }
+        stopped
     }
 
     /// Ends everything a session left running, but not the agent itself.
@@ -368,43 +434,6 @@ fn same_process(before: &Row, after: &Row) -> bool {
     before.pid == after.pid
         && before.group == after.group
         && after.running_for_seconds + CLOCK_SLACK >= before.running_for_seconds
-}
-
-#[cfg(not(target_family = "wasm"))]
-async fn end_observed(row: Row) {
-    crate::process::end_tree(row.pid).await;
-}
-
-/// The guest uses the existing nonblocking process import. Numeric pids are
-/// taken only from the ownership census; never signal an unverified group.
-#[cfg(target_family = "wasm")]
-async fn end_observed(row: Row) {
-    let signal = |signal: &'static str, pid: u32| async move {
-        let mut command = crate::os_process::Command::new("kill");
-        command
-            .args([signal, &pid.to_string()])
-            .stdin(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true);
-        let _ = tokio::time::timeout(CENSUS_TIMEOUT, command.output()).await;
-    };
-    signal("-TERM", row.pid).await;
-    let deadline = tokio::time::Instant::now() + crate::process::GRACE;
-    while tokio::time::Instant::now() < deadline {
-        let Some(current) = census().await else {
-            return;
-        };
-        if !current.iter().any(|now| same_process(&row, now)) {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    let Some(current) = census().await else {
-        return;
-    };
-    if current.iter().any(|now| same_process(&row, now)) {
-        signal("-KILL", row.pid).await;
-    }
 }
 
 /// The processes of a session's agent, excluding the agent.

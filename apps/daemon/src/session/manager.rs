@@ -202,6 +202,7 @@ struct Live {
     /// When the turn in progress last had its narrative written out, which
     /// paces that write rather than doing it per streamed token.
     open_turn_written_ms: AtomicI64,
+    open_trunk_written_ms: AtomicI64,
     open_turn_dirty: AtomicBool,
     /// Work item ids belonging to the trunk currently open, in order. Cleared
     /// when that trunk is written out, so this stays bounded by a soft batch
@@ -449,6 +450,8 @@ pub struct SessionManager {
     registry: Arc<Registry>,
     diagnostics: Arc<Diagnostics>,
     sessions: RwLock<HashMap<String, Arc<Live>>>,
+    /// Serializes disk rehydration without holding the map's write lock.
+    live_load: Mutex<()>,
     /// What each session's agent has left running. Owned here because that is
     /// where the ownership is: a stray process belongs to the conversation
     /// whose agent started it, and there is no such thing as one without a
@@ -466,9 +469,6 @@ pub struct SessionManager {
     /// Agent processes receive a fresh proof, so it never becomes project
     /// source or durable user data.
     controller_secret: String,
-    /// Shared with the request router: it associates an Agent-native question
-    /// with a daemon-authored mutation plan before the card reaches a Human.
-    project_control: Option<crate::project_control::Broker>,
 }
 
 impl SessionManager {
@@ -487,13 +487,13 @@ impl SessionManager {
             registry,
             diagnostics,
             sessions: RwLock::new(HashMap::new()),
+            live_load: Mutex::new(()),
             processes: crate::processes::Processes::new(),
             replay_window: replay_window.max(1),
             import_candidates: Mutex::new(HashMap::new()),
             skills_dir: None,
             front_door_cli: None,
             controller_secret: uuid::Uuid::new_v4().simple().to_string(),
-            project_control: None,
         }
     }
 
@@ -504,11 +504,6 @@ impl SessionManager {
     ) -> Self {
         self.skills_dir = Some(dir.into());
         self.front_door_cli = front_door_cli;
-        self
-    }
-
-    pub fn with_project_control(mut self, broker: crate::project_control::Broker) -> Self {
-        self.project_control = Some(broker);
         self
     }
 
@@ -567,7 +562,6 @@ impl SessionManager {
             persist: None,
             agent_pid: None,
             pending_permission: None,
-            pending_project_approval: false,
             human_continuation: None,
             lineage: None,
             managed: None,
@@ -742,7 +736,6 @@ impl SessionManager {
             persist: None,
             agent_pid: None,
             pending_permission: None,
-            pending_project_approval: false,
             human_continuation: None,
             lineage: None,
             managed: Some(managed),
@@ -1002,7 +995,6 @@ impl SessionManager {
             persist,
             agent_pid: None,
             pending_permission: None,
-            pending_project_approval: false,
             human_continuation: None,
             lineage: Some(SessionLineage {
                 source_session_id: session_id.to_string(),
@@ -1267,7 +1259,6 @@ impl SessionManager {
             persist: None,
             agent_pid: None,
             pending_permission: None,
-            pending_project_approval: false,
             human_continuation: None,
             lineage: Some(SessionLineage {
                 source_session_id: transfer.source_session_id,
@@ -1489,7 +1480,6 @@ impl SessionManager {
             persist: history.persist,
             agent_pid: None,
             pending_permission: None,
-            pending_project_approval: false,
             human_continuation: None,
             lineage: None,
             managed: None,
@@ -1543,9 +1533,12 @@ impl SessionManager {
         if let Some(live) = self.sessions.read().await.get(session_id).cloned() {
             return Ok(live);
         }
-        let mut sessions = self.sessions.write().await;
-        if let Some(live) = sessions.get(session_id) {
-            return Ok(live.clone());
+        // One rehydration at a time, but not under the map's write lock: the
+        // scan and chat read are slow, and other Session readers must not
+        // queue behind them.
+        let _loading = self.live_load.lock().await;
+        if let Some(live) = self.sessions.read().await.get(session_id).cloned() {
+            return Ok(live);
         }
         // Not in memory: rehydrate from disk so a restart does not lose access
         // to past conversations.
@@ -1614,6 +1607,10 @@ impl SessionManager {
         *live.rounds.lock().await = chat.rounds;
         *live.turn_items.lock().await = unsaved;
         *live.active_round.lock().await = restored_round;
+        let mut sessions = self.sessions.write().await;
+        if let Some(existing) = sessions.get(session_id) {
+            return Ok(existing.clone());
+        }
         sessions.insert(session_id.to_string(), live.clone());
         Ok(live)
     }
@@ -3330,7 +3327,6 @@ impl SessionManager {
             self.replay_window,
             self.processes.clone(),
             self.diagnostics.clone(),
-            self.project_control.clone(),
         ));
         *live.pump.lock().await = Some(pump);
         Ok(())
@@ -3369,9 +3365,6 @@ impl SessionManager {
             };
             if had_interaction {
                 cancel_human_continuation(&live, &self.store).await?;
-                if let Some(broker) = &self.project_control {
-                    broker.revoke_session(session_id).await?;
-                }
                 if live.execution.lock().await.is_none() {
                     if let Some(round) = live
                         .settle_round(Settling::Kernel, RoundOutcome::Canceled)
@@ -3526,9 +3519,11 @@ impl SessionManager {
         let live = self.live(session_id).await?;
         {
             let mut meta = live.meta.lock().await;
-            meta.drafts = drafts.clone();
-            meta.updated_at_ms = now_ms();
-            self.store.save_meta(&meta)?;
+            let mut next = meta.clone();
+            next.drafts = drafts.clone();
+            next.updated_at_ms = now_ms();
+            self.store.save_meta(&next)?;
+            *meta = next;
         }
         live.publish(SessionEvent::DraftsChanged {
             count: drafts.len() as u32,
@@ -4058,7 +4053,6 @@ impl SessionManager {
         outcome: PermissionOutcome,
         providers: &ProviderMap,
     ) -> Result<()> {
-        let mut outcome = outcome;
         let live = self.live(session_id).await?;
         let _interaction = live.interaction_lock.lock().await;
         let previous = live.meta.lock().await.human_continuation.clone();
@@ -4101,21 +4095,10 @@ impl SessionManager {
         ) || request.id.starts_with("workflow-human-")
             || !live.meta.lock().await.inbox.entries.is_empty()
         {
-            let mut project_approval = live.meta.lock().await.pending_project_approval;
-            if let Some(broker) = &self.project_control {
-                if project_approval || broker.is_plan_request(session_id, request_id).await {
-                    project_approval = true;
-                    let validation = broker
-                        .validate_human_response(session_id, request_id, &outcome)
-                        .await?;
-                    outcome = validated_project_approval_outcome(outcome, validation);
-                }
-            }
             let decision = HumanContinuation {
                 request: request.clone(),
                 outcome: outcome.clone(),
                 decided_at_ms: now_ms(),
-                project_approval,
                 grant_recorded: false,
                 completed: false,
             };
@@ -4136,7 +4119,6 @@ impl SessionManager {
             next.format = SESSION_FORMAT;
             next.human_continuation = Some(decision);
             next.pending_permission = None;
-            next.pending_project_approval = false;
             self.store.save_meta(&next)?;
             *meta = next;
             drop(meta);
@@ -4169,7 +4151,6 @@ impl SessionManager {
                 request: request.clone(),
                 outcome: outcome.clone(),
                 decided_at_ms: now_ms(),
-                project_approval: false,
                 grant_recorded: false,
                 completed: false,
             },
@@ -4341,52 +4322,6 @@ impl SessionManager {
 
     /// Persist and stop before exposing the Human card. The CLI is a submission,
     /// never a waiter or an approval result channel.
-    pub async fn request_project_approval(
-        &self,
-        session_id: &str,
-        request: PermissionRequest,
-        expires_at_ms: i64,
-    ) -> Result<()> {
-        if request.kind != PermissionRequestKind::PlanApproval {
-            bail!("expected a daemon-authored plan approval");
-        }
-        if expires_at_ms <= now_ms() {
-            bail!("approvalStale: create a new plan");
-        }
-        let live = self.live(session_id).await?;
-        let _interaction = live.interaction_lock.lock().await;
-        {
-            let pending = live.pending_permissions.lock().await;
-            if pending.iter().any(|p| p.id == request.id) {
-                return Ok(());
-            }
-            if !pending.is_empty() {
-                bail!("answer or cancel the pending Agent interaction first");
-            }
-        }
-        if let Err(error) = stop_agent_for_interaction(&live, &self.store, &request, true).await {
-            let message = format!("{error:#}");
-            fail_human_pause(&live, &self.store, error).await;
-            return Err(anyhow!(message));
-        }
-        // Stop and drain the same writer before releasing this execution.
-        live.stop_pump().await?;
-        let mut owner = live.execution.lock().await;
-        let turn = owner
-            .as_ref()
-            .and_then(|execution| execution.turn_id.clone());
-        if let Some(turn_id) = turn {
-            live.publish(SessionEvent::TurnCanceled { turn_id }).await;
-        }
-        live.finish_execution(
-            &mut owner,
-            SessionEvent::PermissionRequested { request },
-            false,
-        )
-        .await?;
-        Ok(())
-    }
-
     pub(crate) async fn request_conversation_question(
         &self,
         session_id: &str,
@@ -4466,7 +4401,7 @@ impl SessionManager {
         if require_running && live.execution.lock().await.is_none() {
             bail!("只能在当前执行中发起会话提问");
         }
-        if let Err(error) = stop_agent_for_interaction(&live, &self.store, &request, false).await {
+        if let Err(error) = stop_agent_for_interaction(&live, &self.store, &request).await {
             let message = format!("{error:#}");
             fail_human_pause(&live, &self.store, error).await;
             return Err(anyhow!(message));
@@ -4506,21 +4441,6 @@ impl SessionManager {
             return Ok(None);
         };
         if !decision.grant_recorded {
-            let session = live.meta.lock().await.id.clone();
-            if decision.project_approval {
-                let broker = self
-                    .project_control
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("project approval authority unavailable"))?;
-                broker
-                    .record_human_response_at(
-                        &session,
-                        &decision.request.id,
-                        &decision.outcome,
-                        decision.decided_at_ms,
-                    )
-                    .await?;
-            }
             decision.grant_recorded = true;
             let mut meta = live.meta.lock().await;
             let mut next = meta.clone();
@@ -4528,12 +4448,7 @@ impl SessionManager {
             self.store.save_meta(&next)?;
             *meta = next;
         }
-        if let Some(mut continuation) = continuation_for(&decision.request, &decision.outcome)? {
-            if decision.project_approval && !is_expired_plan_refresh(&decision.outcome) {
-                continuation.prompt.push_str(&format!(
-                "\nDurable GeneHub interaction {}. Plan details:\n{}\nOnly if approved, use action ID {} for the mutation and any retry. Inspect existing results before acting; completed mutations must not be repeated.",
-                decision.request.id, decision.request.detail.as_deref().unwrap_or(""), decision.request.id));
-            }
+        if let Some(continuation) = continuation_for(&decision.request, &decision.outcome)? {
             Ok(Some((decision.request.id, continuation)))
         } else {
             finish_human_continuation(live, &self.store, &decision.request.id).await?;
@@ -4784,7 +4699,10 @@ impl SessionManager {
     /// to exist, and it does not — reporting that as a failure would only make
     /// two clients deleting the same row look broken.
     pub async fn delete(&self, session_id: &str) -> Result<()> {
-        let live = self.sessions.write().await.remove(session_id);
+        // Keep the session addressable until its files are actually gone. A
+        // cleanup failure then leaves a consistent, retryable row instead of
+        // an entry that vanished from the UI but still exists on disk.
+        let live = self.sessions.read().await.get(session_id).cloned();
         let workspace_id = match &live {
             Some(live) => Some(live.meta.lock().await.workspace_id.clone()),
             None => self
@@ -4800,9 +4718,6 @@ impl SessionManager {
         if let Some(live) = live {
             let _interaction = live.interaction_lock.lock().await;
             cancel_human_continuation(&live, &self.store).await?;
-            if let Some(broker) = &self.project_control {
-                broker.revoke_session(session_id).await?;
-            }
             self.end_what_it_left(session_id).await;
             live.shutdown().await?;
         }
@@ -4839,9 +4754,6 @@ impl SessionManager {
         };
         let _interaction = live.interaction_lock.lock().await;
         cancel_human_continuation(&live, &self.store).await?;
-        if let Some(broker) = &self.project_control {
-            broker.revoke_session(session_id).await?;
-        }
         let saved = live
             .meta
             .lock()
@@ -4905,10 +4817,76 @@ impl SessionManager {
     /// children survive the tray exiting.
     pub async fn shutdown(&self) {
         let sessions: Vec<(String, Arc<Live>)> = self.sessions.write().await.drain().collect();
-        for (session_id, live) in sessions {
-            self.end_what_it_left(&session_id).await;
-            if let Err(error) = live.shutdown().await {
-                tracing::error!(session = %session_id, %error, "session shutdown did not complete");
+        // The host has its own exit budget. Bound the whole drain instead of
+        // letting one wedged Agent multiply its per-step timeouts.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let total = sessions.len();
+        let ids: Vec<String> = sessions.iter().map(|(id, _)| id.clone()).collect();
+        // One census for every session, before any Agent closes: detached
+        // tools are still attributable here. Same-group tools are killed by
+        // each Agent's own close, so they are deliberately left to it.
+        let detached = tokio::time::timeout(
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
+            self.processes.stop_detached_for(&ids),
+        )
+        .await
+        .unwrap_or(0);
+        if detached > 0 {
+            tracing::info!(
+                count = detached,
+                "ended detached processes before stopping Agents"
+            );
+        }
+        let mut abandoned: Vec<String> = Vec::new();
+        let mut index = 0;
+        while index < sessions.len() {
+            let (session_id, live) = &sessions[index];
+            if tokio::time::Instant::now() >= deadline {
+                tracing::error!(
+                    sessions = total,
+                    "daemon shutdown deadline reached; remaining sessions are abandoned"
+                );
+                abandoned.extend(sessions[index..].iter().map(|(id, _)| id.clone()));
+                break;
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match tokio::time::timeout(remaining, live.shutdown()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::error!(session = %session_id, %error, "session shutdown did not complete");
+                    abandoned.push(session_id.clone());
+                }
+                Err(_) => {
+                    tracing::error!(
+                        session = %session_id,
+                        "daemon shutdown deadline reached inside a session; it was abandoned"
+                    );
+                    abandoned.extend(sessions[index..].iter().map(|(id, _)| id.clone()));
+                    break;
+                }
+            }
+            index += 1;
+        }
+        if !abandoned.is_empty() {
+            // Their Agents were dropped without finishing their abort path;
+            // a plain kill_on_drop would stop only the leader. Take the whole
+            // watched group down so the host does not leave a tree behind.
+            // Five seconds on top of the 30s drain is the hard ceiling.
+            match tokio::time::timeout(
+                Duration::from_secs(5),
+                self.processes.kill_watched_groups(&abandoned),
+            )
+            .await
+            {
+                Ok(stopped) => tracing::warn!(
+                    stopped,
+                    abandoned = abandoned.len(),
+                    "forced shutdown ended watched groups"
+                ),
+                Err(_) => tracing::error!(
+                    abandoned = abandoned.len(),
+                    "forced group kill exceeded its 5s budget"
+                ),
             }
         }
     }
@@ -5289,6 +5267,7 @@ impl Live {
             continuation_dispatched: std::sync::atomic::AtomicBool::new(false),
             turn_items: Mutex::new(Vec::new()),
             open_turn_written_ms: AtomicI64::new(0),
+            open_trunk_written_ms: AtomicI64::new(0),
             open_turn_dirty: AtomicBool::new(false),
             open_trunk_items: Mutex::new(Vec::new()),
             llm_rounds: Mutex::new(LlmRounds::default()),
@@ -5655,6 +5634,29 @@ impl Live {
         }
     }
 
+    /// Rewrites the open trunk at most every thirty seconds.
+    ///
+    /// The flat narrative checkpoint cannot carry tool calls; without this a
+    /// crash loses everything since the last closed trunk. Thirty seconds is
+    /// long enough that the rewrite stays cheap and short enough that the
+    /// lost window is visible rather than a whole round.
+    async fn persist_open_trunk_if_due(&self) {
+        const EVERY_MS: i64 = 30_000;
+        let now = now_ms();
+        let last = self.open_trunk_written_ms.load(Ordering::SeqCst);
+        if now.saturating_sub(last) < EVERY_MS {
+            return;
+        }
+        if self
+            .open_trunk_written_ms
+            .compare_exchange(last, now, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+        self.persist_open_trunk().await;
+    }
+
     /// Returns the round that was cut short, if any — `None` both when the
     /// round continues and when there was nothing open to cut short (an
     /// already-settled round is just replaced, not "superseded": nothing was
@@ -5886,11 +5888,19 @@ impl Live {
         self.pump_stop.send_replace(true);
         let mut held = self.pump.lock().await;
         if let Some(task) = held.as_mut() {
-            let joined = tokio::time::timeout(Duration::from_secs(5), task)
-                .await
-                .context("the timeline writer has not finished; stopping can be retried")?;
-            held.take();
-            joined.context("the timeline writer stopped unexpectedly")?;
+            match tokio::time::timeout(Duration::from_secs(5), &mut *task).await {
+                Ok(joined) => {
+                    held.take();
+                    joined.context("the timeline writer stopped unexpectedly")?;
+                }
+                Err(_) => {
+                    // Dropping a JoinHandle does not stop the task; abort it
+                    // so a wedged writer cannot keep the session alive.
+                    task.abort();
+                    held.take();
+                    anyhow::bail!("the timeline writer has not finished; it was aborted");
+                }
+            }
         }
         Ok(())
     }
@@ -6039,20 +6049,6 @@ fn is_expired_plan_refresh(outcome: &PermissionOutcome) -> bool {
         PermissionOutcome::TimedOut { applied_default }
             if applied_default == REFRESH_EXPIRED_PLAN
     )
-}
-
-fn validated_project_approval_outcome(
-    outcome: PermissionOutcome,
-    validation: crate::project_control::HumanResponseValidation,
-) -> PermissionOutcome {
-    match validation {
-        crate::project_control::HumanResponseValidation::Accepted => outcome,
-        crate::project_control::HumanResponseValidation::ApprovalExpired => {
-            PermissionOutcome::TimedOut {
-                applied_default: REFRESH_EXPIRED_PLAN.into(),
-            }
-        }
-    }
 }
 
 fn is_plan_approval_selection(request: &PermissionRequest, outcome: &PermissionOutcome) -> bool {
@@ -6323,7 +6319,6 @@ async fn stop_agent_for_interaction(
     live: &Arc<Live>,
     store: &Store,
     request: &PermissionRequest,
-    project_approval: bool,
 ) -> Result<()> {
     if live
         .meta
@@ -6346,7 +6341,6 @@ async fn stop_agent_for_interaction(
         }
         next.format = SESSION_FORMAT;
         next.pending_permission = Some(request.clone());
-        next.pending_project_approval = project_approval;
         next.human_continuation = None;
         next.updated_at_ms = now_ms();
         store
@@ -6378,7 +6372,6 @@ async fn cancel_human_continuation(live: &Arc<Live>, store: &Store) -> Result<()
     let mut meta = live.meta.lock().await;
     let mut next = meta.clone();
     let pending = next.pending_permission.take();
-    next.pending_project_approval = false;
     if let Some(decision) = &mut next.human_continuation {
         decision.completed = true;
     }
@@ -6518,7 +6511,6 @@ async fn pump_events(
     replay_window: usize,
     processes: Arc<crate::processes::Processes>,
     diagnostics: Arc<Diagnostics>,
-    project_control: Option<crate::project_control::Broker>,
 ) {
     let (workspace_id, session_id) = {
         let meta = live.meta.lock().await;
@@ -6596,6 +6588,7 @@ async fn pump_events(
             _ = checkpoint.tick() => {
                 let _owner = live.execution.lock().await;
                 live.persist_open_turn_if_due().await;
+                live.persist_open_trunk_if_due().await;
                 // Some adapters learn their native thread id only after the
                 // first event. Persist it during active work, not only when a
                 // Human pause happens or the next Session start occurs.
@@ -6608,10 +6601,16 @@ async fn pump_events(
                 if let Some(handle) = handle {
                     meta.persist = Some(handle);
                 }
+                let changed_pid = pid.filter(|pid| meta.agent_pid != Some(*pid));
                 if let Some(pid) = pid {
                     meta.agent_pid = Some(pid);
                 }
                 if let Err(error) = store.save_meta(&meta) { tracing::error!(%error, "persisting execution checkpoint"); }
+                if let Some(pid) = changed_pid {
+                    let session_id = meta.id.clone();
+                    drop(meta);
+                    processes.watch(&session_id, pid).await;
+                }
                 continue;
             }
         };
@@ -7029,22 +7028,6 @@ async fn pump_events(
             }
         };
 
-        if let (Some(project_control), SessionEvent::PermissionRequested { request }) =
-            (&project_control, &event)
-        {
-            match project_control
-                .normalize_request(&session_id, request)
-                .await
-            {
-                Ok(request) => event = SessionEvent::PermissionRequested { request },
-                Err(error) => {
-                    drop(owner);
-                    fail_human_pause(&live, &store, error).await;
-                    break;
-                }
-            }
-        }
-
         if let SessionEvent::PermissionRequested { request } = &event {
             if let Some(execution) = owner.as_mut() {
                 execution.phase = ExecutionPhase::Stopping;
@@ -7056,13 +7039,7 @@ async fn pump_events(
                 _ = async { let _ = stopping.wait_for(|stop| *stop).await; } => break 'events,
                 guard = live.interaction_lock.lock() => guard,
             };
-            let project_approval = match &project_control {
-                Some(broker) => broker.is_plan_request(&session_id, &request.id).await,
-                None => false,
-            };
-            if let Err(error) =
-                stop_agent_for_interaction(&live, &store, request, project_approval).await
-            {
+            if let Err(error) = stop_agent_for_interaction(&live, &store, request).await {
                 fail_human_pause(&live, &store, error).await;
                 break;
             }
@@ -7902,7 +7879,6 @@ mod tests {
             persist: None,
             agent_pid: None,
             pending_permission: None,
-            pending_project_approval: false,
             human_continuation: None,
             lineage: None,
             managed: None,
@@ -10520,55 +10496,6 @@ mod tests {
         assert_eq!(*live.status.lock().await, SessionStatus::Idle);
     }
 
-    /// Regression: a Human wait must release the provider process, even if
-    /// the CLI's caller would otherwise stay attached indefinitely.
-    #[tokio::test]
-    async fn cli_requested_plan_approval_stops_before_presenting_the_card() {
-        let workspace = tempfile::tempdir().unwrap();
-        let sessions = Arc::new(manager(workspace.path()));
-        sessions.store.save_meta(&meta()).unwrap();
-        let live = sessions.live("s1").await.unwrap();
-        let interrupted = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (events, _) = broadcast::channel(1);
-        *live.agent.lock().await = Some(Arc::new(StoppingSession {
-            events,
-            interrupted: interrupted.clone(),
-            closed: closed.clone(),
-        }));
-        live.begin_round(None, "t-original", "u-original").await;
-        let request = interaction(PermissionRequestKind::PlanApproval);
-        sessions
-            .request_project_approval("s1", request.clone(), now_ms() + 60_000)
-            .await
-            .unwrap();
-        assert!(interrupted.load(Ordering::SeqCst));
-        assert!(closed.load(Ordering::SeqCst));
-        assert!(live.agent().await.is_none());
-        assert_eq!(
-            sessions.summary("s1").await.unwrap().status,
-            SessionStatus::Waiting
-        );
-        assert_eq!(
-            sessions
-                .store
-                .load_meta("w1", "s1")
-                .unwrap()
-                .pending_permission
-                .unwrap()
-                .id,
-            request.id
-        );
-        assert!(live
-            .active_round
-            .lock()
-            .await
-            .as_ref()
-            .unwrap()
-            .outcome
-            .is_none());
-    }
-
     /// Regression for the detached CLI: delivery is driven by the persisted
     /// decision, independent of whether the previous adapter turn had ended.
     #[tokio::test]
@@ -10579,7 +10506,7 @@ mod tests {
         let live = sessions.live("s1").await.unwrap();
         live.begin_round(None, "t-original", "u-original").await;
         let request = interaction(PermissionRequestKind::PlanApproval);
-        stop_agent_for_interaction(&live, &sessions.store, &request, false)
+        stop_agent_for_interaction(&live, &sessions.store, &request)
             .await
             .unwrap();
         let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -10901,7 +10828,7 @@ mod tests {
         }));
         let request = interaction(PermissionRequestKind::Permission);
 
-        stop_agent_for_interaction(&live, &store, &request, false)
+        stop_agent_for_interaction(&live, &store, &request)
             .await
             .unwrap();
 
@@ -11073,15 +11000,12 @@ mod tests {
     #[test]
     fn an_expired_plan_approval_resumes_only_to_request_a_fresh_plan() {
         let request = interaction(PermissionRequestKind::PlanApproval);
-        let expired = validated_project_approval_outcome(
-            PermissionOutcome::Selected {
-                option_id: "yes".into(),
-            },
-            crate::project_control::HumanResponseValidation::ApprovalExpired,
-        );
+        let expired = PermissionOutcome::TimedOut {
+            applied_default: REFRESH_EXPIRED_PLAN.into(),
+        };
         let continuation = continuation_for(&request, &expired)
             .unwrap()
-            .expect("an expired card resumes the PM to prepare a replacement");
+            .expect("an expired card resumes the plan to prepare a replacement");
 
         assert!(!continuation.elevated);
         assert!(continuation
@@ -11246,7 +11170,6 @@ mod tests {
             64,
             crate::processes::Processes::new(),
             Arc::new(Diagnostics::new()),
-            Some(crate::project_control::Broker::new(dir.path()).unwrap()),
         ));
         for event in script {
             agent_events.send(event).expect("the pump is listening");
@@ -11889,7 +11812,6 @@ mod tests {
             64,
             sessions.processes(),
             sessions.diagnostics.clone(),
-            sessions.project_control.clone(),
         ));
         *live.pump.lock().await = Some(pump);
         (sessions, events, turn_ids)
@@ -12360,7 +12282,6 @@ mod tests {
             64,
             sessions.processes(),
             sessions.diagnostics.clone(),
-            sessions.project_control.clone(),
         ));
         *live.pump.lock().await = Some(pump);
         let turn2 = sessions
@@ -12794,7 +12715,6 @@ mod tests {
             64,
             sessions.processes(),
             sessions.diagnostics.clone(),
-            sessions.project_control.clone(),
         ));
         *live.pump.lock().await = Some(pump);
 
@@ -13494,7 +13414,6 @@ mod tests {
             64,
             crate::processes::Processes::new(),
             diagnostics.clone(),
-            Some(crate::project_control::Broker::new(dir.path()).unwrap()),
         ));
 
         agent_events
@@ -13568,7 +13487,6 @@ mod tests {
             64,
             crate::processes::Processes::new(),
             diagnostics.clone(),
-            None,
         ));
 
         // Start turn with model-a

@@ -2215,7 +2215,6 @@ pub fn reply_kind(reply: &Reply) -> &'static str {
         Reply::WorkflowRun(_) => "workflow run",
         Reply::WorkflowJournal(_) => "workflow journal",
         Reply::WorkflowRuns(_) => "workflow runs",
-        Reply::AgentSpaceBuilder(_) => "agent space builder",
         Reply::AgentSpaceChangePlan(_) => "agent space change plan",
         Reply::WorkflowPackages(_) => "workflow packages",
         Reply::WorkflowBuild(_) => "workflow build",
@@ -2566,7 +2565,6 @@ mod tests {
         let summary = SessionSummary {
             cwd: None,
             interaction_summary: None,
-            work_summary: None,
             input_summary: None,
             message_preview: None,
             draft_count: None,

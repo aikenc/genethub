@@ -4,26 +4,13 @@ import path from "node:path";
 
 import { defineSpecialty } from "../../framework/public.ts";
 
-/**
- * Writes a PipeBuilder v1 source contract. The test then asks the product
- * AgentSpaceBuilder to materialize and own the projection.
- */
+/** Writes the descriptor the product reads for a Space on disk. */
 function writeAgentSpaceSource(root: string, name: string): string {
   mkdirSync(root, { recursive: true });
-  const manifest = path.join(root, "pipespace.json");
-  const workspace = path.join(root, `${name}.code-workspace`);
   writeFileSync(
-    manifest,
-    JSON.stringify({
-      schema: "pipespace.v1",
-      name,
-      agents: ["codex"],
-      skills: [],
-      tags: [],
-      skillProviders: [],
-    }),
+    path.join(root, "agent-space.genet.json"),
+    JSON.stringify({ name, tags: [], folders: [{ path: "." }] }),
   );
-  writeFileSync(workspace, JSON.stringify({ folders: [{ path: "." }] }));
   return root;
 }
 
@@ -38,11 +25,11 @@ defineSpecialty(
     id: "specialty.agent-space.composition-boundary",
     title: "AgentSpace composition answers ownership and scheduling separately",
     oracle:
-      "one open AgentSpace carries any combination of pm/executor/worker/reviewer through `genet space`; only a Space mounting an enabled executor can enumerate its direct Workers, and that enumeration never reaches past a child that is itself an Executor; every change requires the revision the caller read, and a refused change leaves the registration byte-identical",
+      "one open AgentSpace carries any combination of executor/worker/reviewer through `genet space`; only a Space mounting an enabled executor can enumerate its direct Workers, and that enumeration never reaches past a child that is itself an Executor; every change requires the revision the caller read, and a refused change leaves the registration byte-identical",
     catches: [
       "a parent relationship is treated as permission to dispatch",
       "an Executor enumerates grandchildren and crosses a subteam's boundary",
-      "a Space is forced into one exclusive role so PM cannot also drive the flow",
+      "a Space is forced into one exclusive role so it cannot also drive the flow",
       "concurrent configuration silently overwrites another caller's change",
       "a refused configuration leaves a half-written registration",
       "a cycle in the ownership tree is accepted",
@@ -88,18 +75,6 @@ defineSpecialty(
         path.join(opened.workspaceRoot, "spaces", "project"),
         "project",
       );
-      const projectBuild = space([
-        "builder",
-        "build",
-        "--workspace",
-        opened.workspaceId,
-        "--name",
-        "project",
-      ]);
-      t.assertions.assert(
-        projectBuild.status === 0,
-        `AgentSpaceBuilder build failed for project: ${projectBuild.text}`,
-      );
       const projectReply = await opened.client.call({
         type: "workspace.open",
         payload: { root: projectRoot },
@@ -109,20 +84,22 @@ defineSpecialty(
 
       // One Space, two responsibilities. The exclusive model this replaced
       // could not express it at all.
-      const mountedPm = space([
+      const mountedWorker = space([
         "component",
         "set",
         "--workspace",
         ids.project,
         "--component",
-        "pm",
+        "worker",
+        "--role",
+        "planner",
         "--revision",
         "0",
       ]);
-      t.assertions.assert(mountedPm.status === 0, `mounting pm failed: ${mountedPm.text}`);
+      t.assertions.assert(mountedWorker.status === 0, `mounting worker failed: ${mountedWorker.text}`);
       t.assertions.assert(
-        registration(mountedPm).revision === 1,
-        `first registration did not land on revision 1: ${mountedPm.text}`,
+        registration(mountedWorker).revision === 1,
+        `first registration did not land on revision 1: ${mountedWorker.text}`,
       );
       const mountedExecutor = space([
         "component",
@@ -164,7 +141,7 @@ defineSpecialty(
       ).map((component) => component.componentId);
       t.assertions.assert(
         registration(afterStale).revision === 2 &&
-          projectComponents.join(",") === "executor,pm",
+          projectComponents.join(",") === "executor,worker",
         `the refused change was not a no-op: ${afterStale.text}`,
       );
 
@@ -176,15 +153,6 @@ defineSpecialty(
       for (const [key, root] of Object.entries(childRoots) as Array<
         [Exclude<SpaceKey, "project">, string]
       >) {
-        const built = space([
-          "builder",
-          "build",
-          "--workspace",
-          ids.project,
-          "--name",
-          key,
-        ]);
-        t.assertions.assert(built.status === 0, `AgentSpaceBuilder build failed for ${key}: ${built.text}`);
         const reply = await opened.client.call({ type: "workspace.open", payload: { root } });
         t.assertions.assert(reply?.type === "workspace", `workspace.open failed for ${key}`);
         ids[key] = reply?.type === "workspace" ? reply.data.id : "";
@@ -293,8 +261,8 @@ defineSpecialty(
         `the component set is not the wire truth: ${JSON.stringify(projectInfo?.agentSpace)}`,
       );
       t.assertions.assert(
-        projectInfo?.pipeSpace?.pm === true &&
-          projectInfo?.pipeSpace?.workerRole === "workflow-executor",
+        projectInfo?.pipeSpace?.workerRole === "workflow-executor" &&
+          projectInfo?.pipeSpace?.lifecycle === "persistent",
         `the older exclusive-role shape stopped being readable: ${JSON.stringify(projectInfo?.pipeSpace)}`,
       );
 

@@ -1388,6 +1388,28 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
         .await;
     }
 
+    // The admission's expiry is checked on every request, not only when the
+    // logical connection is attached: a hostile carrier can keep an expired
+    // stream open and would otherwise keep its capability.
+    if services
+        .access
+        .authorization_expires_at
+        .is_some_and(|at| at <= std::time::Instant::now())
+    {
+        services.state.diagnostics.record(
+            "rpc",
+            "authorization",
+            "error",
+            Some("admissionExpired"),
+        );
+        return send_error(
+            stream,
+            401,
+            ErrorCode::Unauthorized,
+            "hosted admission expired; reconnect".to_string(),
+        )
+        .await;
+    }
     // Resolved once and carried into the router: a request that decides what
     // to enforce on a spawned process must be looking at the same caller the
     // gate just admitted, not at a second lookup that could disagree with it.
@@ -1679,7 +1701,6 @@ fn request_workspace(request: &Request) -> Option<&str> {
         | Request::SpeechFeedbackRecord { workspace_id, .. }
         | Request::AgentSpaceChangePlan { workspace_id, .. }
         | Request::AgentSpaceConfigure { workspace_id, .. }
-        | Request::AgentSpaceBuilder { workspace_id, .. }
         | Request::WorkflowList { workspace_id }
         | Request::WorkflowBuild { workspace_id, .. }
         | Request::WorkflowHistory { workspace_id, .. }

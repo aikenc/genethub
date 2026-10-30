@@ -425,7 +425,8 @@ async fn run(
                 pending.push_back(write);
                 continue;
             }
-            if write.class == WriteClass::Bulk && journal.stats().log_bytes >= BULK_LOOKAHEAD_BYTES {
+            if write.class == WriteClass::Bulk && journal.stats().log_bytes >= BULK_LOOKAHEAD_BYTES
+            {
                 pending.push_back(write);
                 continue;
             }

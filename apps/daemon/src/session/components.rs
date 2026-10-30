@@ -119,9 +119,7 @@ pub fn instance_dirs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_space::{
-        COMPONENT_EXECUTOR, COMPONENT_PM, COMPONENT_REVIEWER, COMPONENT_WORKER,
-    };
+    use crate::agent_space::{COMPONENT_EXECUTOR, COMPONENT_REVIEWER, COMPONENT_WORKER};
 
     fn component(id: &str, enabled: bool, role: Option<&str>) -> AgentComponentEntry {
         AgentComponentEntry {
@@ -145,7 +143,7 @@ mod tests {
             &space_home,
             &session_dir,
             &[
-                component(COMPONENT_PM, true, None),
+                component(COMPONENT_REVIEWER, true, None),
                 component(COMPONENT_EXECUTOR, true, None),
                 component(COMPONENT_WORKER, false, Some("coder")),
             ],
@@ -156,7 +154,7 @@ mod tests {
             .iter()
             .map(|instance| instance.component_id.as_str())
             .collect();
-        assert_eq!(ids, vec![COMPONENT_EXECUTOR, COMPONENT_PM]);
+        assert_eq!(ids, vec![COMPONENT_EXECUTOR, COMPONENT_REVIEWER]);
         for instance in &instances {
             assert!(instance.space_dir.is_dir(), "space scope was not created");
             assert!(

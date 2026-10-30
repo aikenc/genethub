@@ -6,7 +6,7 @@
 | 部分 | 位置 | 日期 | 说明 |
 |---|---|---|---|
 | Workflow 子系统 | 原 `apps/daemon/src/workflow/`、`packages/workflow-engine/` | 2026-10-24 | 已按用户决定彻底退役：引擎、后台巡查、CLI 命令、UI、内置包及专属测试移除。旧协议请求仅返回 `workflowRetired`；历史磁盘文件及会话保留，不执行或自动迁移。 |
-| Agent Space 构建器（Rust 版 PipeBuilder 移植） | `apps/daemon/src/agent_space_builder/` | 2026-10-10 | 退役中；它按名字写死 4 个 Agent 的目录布局，不再改造成数据驱动 |
+| Agent Space 构建器（Rust 版 PipeBuilder 移植） | 原 `apps/daemon/src/agent_space_builder/` | 2026-10-10 | 已移除（2026-10-28）：构建职责归 Python SpaceBuilder；daemon 不再提供 `agentSpace.builder` RPC、`space builder` CLI 或 lock 校验 |
 | 单人专家形态 | 团队样板 `team-template` 的旧用法：一个专家 = 前台 + 研究 + 工作 + 反思 | 2026-10-19 | 已废弃；每次 `init` 都建 1+N 团队，`init --team` 保留但无作用 |
 | 团队样板的旧名 | `tools/expert.py`、`EXPERT_*`、`.genethub/expert/`、`expert` 标签、样板 Skill `expert-*`、`--expert` 参数、`posts/` | 2026-10-19 起 | 兼容中：`expert.py` 是转发到 `team.py` 的壳，旧变量、目录、标签与 Skill 名由 `team.py` 读取或迁移，`--expert` 是 `--team` 的别名，`posts/` 不再创建但保留；已有团队的钩子迁完前不删 |
 
