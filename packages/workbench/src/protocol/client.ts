@@ -903,17 +903,16 @@ export class Client {
     if (previous?.retry != null) clearTimeout(previous.retry);
     this.subscriptions.set(sessionId, subscription);
     const connection = this.connectionEpoch;
-    let refused: unknown;
     const reply = await this.call({
       type: "subscribe",
       payload: { sessionId, sinceSeq: 0, expandLastRound: subscription.expandLastRound, recentRounds: subscription.recentRounds },
-    }).catch((error: unknown) => { refused = error; return undefined; });
+    }).catch((error: unknown) => {
+      if (this.subscriptions.get(sessionId) === subscription) this.subscriptions.delete(sessionId);
+      throw error;
+    });
     if (this.subscriptions.get(sessionId) !== subscription || connection !== this.connectionEpoch || reply?.type !== "subscribed") {
       if (this.subscriptions.get(sessionId) === subscription) this.subscriptions.delete(sessionId);
-      // Keep the daemon's reason: "capacity exhausted" must reach the caller
-      // instead of collapsing into an anonymous unexpected reply.
-      const reason = refused instanceof Error && refused.message ? `: ${refused.message}` : "";
-      throw new Error(`unexpected reply to subscribe: ${reply?.type ?? "none"}${reason}`);
+      throw new Error(`unexpected reply to subscribe: ${reply?.type ?? "none"}`);
     }
     this.acceptCursor(subscription, reply.data);
     subscription.initializing = false;

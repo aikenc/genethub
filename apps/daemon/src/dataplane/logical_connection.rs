@@ -51,7 +51,6 @@ impl Reader {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WriteClass {
     Ordinary,
-    Bulk,
     Control,
 }
 

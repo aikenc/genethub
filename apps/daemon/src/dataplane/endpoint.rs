@@ -405,7 +405,7 @@ impl ServerStream {
     }
 
     pub(crate) async fn write(&mut self, bytes: &[u8]) -> Result<()> {
-        self.write_inner(bytes, None, super::logical_connection::WriteClass::Bulk)
+        self.write_inner(bytes, None, super::logical_connection::WriteClass::Ordinary)
             .await
     }
 
@@ -417,7 +417,7 @@ impl ServerStream {
         self.write_inner(
             bytes,
             Some(timings),
-            super::logical_connection::WriteClass::Bulk,
+            super::logical_connection::WriteClass::Ordinary,
         )
         .await
     }
@@ -1416,36 +1416,16 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
     .await;
     match handled.reply {
         Ok(mut reply) => {
-            // A subscription the peer cannot actually get must be refused here,
-            // while the reply can still carry the reason. Answering success and
-            // then dropping the effect is what left a client waiting forever
-            // for events that were never going to be sent.
-            if let SideEffect::Subscribe { session_id, .. } = &handled.effect {
-                let at_capacity = {
-                    let subscriptions = services.subscriptions.lock().unwrap();
-                    subscription_capacity_refused(&subscriptions, session_id, MAX_SUBSCRIPTIONS)
-                };
-                if at_capacity {
-                    services.state.diagnostics.record(
-                        "dataplane",
-                        "subscription",
-                        "refused",
-                        Some("subscription-limit"),
-                    );
-                    return send_error(
-                        stream,
-                        409,
-                        ErrorCode::Conflict,
-                        "subscription capacity exhausted; close another session and retry",
-                    )
-                    .await;
-                }
+            // Accept the effect under its owner's lock before acknowledging it.
+            // Checking capacity before an async reply left a race: concurrent
+            // subscriptions could all receive success and then lose admission.
+            if let Err(reason) = apply_side_effect(services, handled.effect) {
+                return send_error(stream, 409, ErrorCode::Conflict, reason).await;
             }
             if let Reply::Agents(agents) = &mut reply {
                 filter_agent_logs(agents, &caller);
             }
             send_reply(stream, reply).await?;
-            apply_side_effect(services, handled.effect).await;
             Ok(())
         }
         Err(error) => send_protocol_error(stream, error).await,
@@ -1611,10 +1591,10 @@ fn subscription_capacity_refused(
     !subscriptions.tasks.contains_key(session_id) && subscriptions.tasks.len() >= limit
 }
 
-async fn apply_side_effect(services: &PeerServices, effect: SideEffect) {
+fn apply_side_effect(services: &PeerServices, effect: SideEffect) -> Result<(), &'static str> {
     let mut subscriptions = services.subscriptions.lock().unwrap();
     if subscriptions.stopped {
-        return;
+        return Err("this connection is closing");
     }
     match effect {
         SideEffect::None => {}
@@ -1627,16 +1607,14 @@ async fn apply_side_effect(services: &PeerServices, effect: SideEffect) {
             session_id,
             mut receiver,
         } => {
-            if !subscriptions.tasks.contains_key(&session_id)
-                && subscriptions.tasks.len() >= MAX_SUBSCRIPTIONS
-            {
+            if subscription_capacity_refused(&subscriptions, &session_id, MAX_SUBSCRIPTIONS) {
                 services.state.diagnostics.record(
                     "dataplane",
                     "subscription",
                     "refused",
                     Some("subscription-limit"),
                 );
-                return;
+                return Err("subscription capacity exhausted; close another session and retry");
             }
             if let Some(previous) = subscriptions.tasks.remove(&session_id) {
                 previous.abort();
@@ -1661,6 +1639,7 @@ async fn apply_side_effect(services: &PeerServices, effect: SideEffect) {
             subscriptions.tasks.insert(session_id, task);
         }
     }
+    Ok(())
 }
 
 async fn handle_events(stream: &mut ServerStream, services: &PeerServices) -> Result<()> {

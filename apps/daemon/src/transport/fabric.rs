@@ -40,7 +40,7 @@ const WRITER_QUEUE: usize = 256;
 // across peers separately.
 // The independent record cap also bounds metadata for tiny hostile records.
 // Legitimate ACK bursts are small bytes, not thousands of full-sized records.
-const PEER_INGRESS_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const PEER_INGRESS_BYTES: usize = 8 * 1024 * 1024;
 /// Total bytes queued across every peer on this uplink. Without this, 32
 /// peers could each hold their own per-peer allowance at the same time.
 const MAX_TOTAL_INGRESS_BYTES: usize = 64 * 1024 * 1024;

@@ -26,11 +26,12 @@ const CONNECTION_PERMITS: u32 = (CONNECTION_BYTES / PERMIT_BYTES) as u32;
 const _: () = assert!(GLOBAL_PERMITS <= (u32::MAX >> 3) as usize);
 // Reserve conservatively for both journals, receive custody, physical crypto
 // queues and stream command queues before creating any of those owners.
-pub(crate) const CONNECTION_BYTES: usize = 20 * 1024 * 1024;
+pub(crate) const CONNECTION_BYTES: usize =
+    19 * 1024 * 1024 + crate::transport::fabric::PEER_INGRESS_BYTES;
 // 4 MiB each for receive custody, replay log, queued writes and the bounded
 // 256 producer frames awaiting admission; progress buckets + the three
-// 16-record carrier queues plus the 1 MiB Fabric ingress queue fit in the
-// remaining 4 MiB. Endpoint/actor queues
+// 16-record carrier queues fit in 3 MiB, plus the actual per-peer Fabric
+// ingress allowance. Endpoint/actor queues
 // transfer the same frame, and the endpoint's permit survives until custody.
 // This is a transmission-byte reservation, not a claim about allocator/RSS.
 
