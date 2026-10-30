@@ -1,0 +1,33 @@
+[package]
+name = "genehub-capture"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+description = "Independent native desktop capture provider for GeneHub Service Preview"
+
+# Independent app: native capture does not enter the daemon/guest build graph.
+[workspace]
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+bytes = "1"
+futures-util = "0.3"
+fs2 = "0.4"
+dirs = "6"
+genehub-proto = { path = "../../packages/proto" }
+genet-frontdoor = { path = "../../packages/frontdoor" }
+hmac = "0.12"
+libloading = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "io-util", "time", "signal", "process"] }
+tokio-tungstenite = "0.24"
+uuid = { version = "1", features = ["v4"] }
+webrtc = "0.17.2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true

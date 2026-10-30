@@ -1,10 +1,40 @@
-import type { ServicePreviewDescriptor } from "@genehub/proto/service-preview";
+import type { ServicePreviewDescriptor, ServicePreviewMedia } from "@genehub/proto/service-preview";
 import type { Client } from "../protocol/client";
 import type { DataStream } from "../dataplane/endpoint";
 import { DataReset } from "../dataplane/frame";
 import { collectBody } from "../dataplane/exchange";
 
 export const SERVICE_PACKET_LIMIT = 256 * 1024;
+
+/** Equivalent path spellings must not bypass the HTML control-WS gate. */
+export function servicePathname(path: string): string | null {
+  if (!path.startsWith("/api/") || /[\\\r\n#]/.test(path)) return null;
+  try {
+    const url = new URL(path, "https://preview.invalid");
+    const decoded = decodeURIComponent(url.pathname);
+    return url.origin === "https://preview.invalid" && !/[\\%]/.test(decoded)
+      ? decoded : null;
+  } catch { return null; }
+}
+
+export type HtmlServiceMedia = ServicePreviewMedia & {
+  client: "html"; protocol: "remote-desktop/1";
+  sessionPath: string; controlPath: string; stopPath: string;
+};
+export function htmlServiceMedia(descriptor: ServicePreviewDescriptor): HtmlServiceMedia | null {
+  const media = descriptor.media;
+  if (!media?.client) return null;
+  if (media.client !== "html" || media.protocol !== "remote-desktop/1")
+    throw new Error("不支持此服务的媒体客户端版本");
+  const paths = [media.offerPath, media.stopPath, media.sessionPath, media.controlPath];
+  if (new Set(paths).size !== 4 || paths.some((path, i) =>
+    typeof path !== "string" || path.length > 256 || servicePathname(path) !== path || /[%?]/.test(path) ||
+    !descriptor.routes.some(route => path.startsWith(route.prefix) && (i < 2 || route.websocket))))
+    throw new Error("HTML 媒体路径无效或未登记");
+  if (media.microphone && media.microphone !== "none")
+    throw new Error("HTML 媒体不支持本地麦克风采集");
+  return media as HtmlServiceMedia;
+}
 export function servicePacket(value: unknown | Uint8Array): Uint8Array {
   const bytes =
     value instanceof Uint8Array
@@ -113,6 +143,7 @@ export class ServicePreviewClient {
         !Array.isArray(value.routes)
       )
         throw new Error("服务预览版本或身份无效");
+      htmlServiceMedia(value);
       return new ServicePreviewClient(
         client,
         workspaceHandle,

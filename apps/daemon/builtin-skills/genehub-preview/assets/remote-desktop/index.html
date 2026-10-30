@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>工程实时预览</title><link rel="stylesheet" href="./style.css"></head>
+<body><main>
+<header><h1>工程实时预览</h1><button id="connect">连接画面</button><button id="control">申请控制</button><button id="release">交还控制</button><button id="stop">断开</button></header>
+<p id="status" role="status">请在 GeneHub 预览信息中允许本次登记服务，然后连接画面。</p>
+<div class="viewport"><video id="screen" tabindex="0" playsinline autoplay aria-label="源端实时画面"></video></div>
+<div class="footer"><button id="lock">锁定鼠标</button><input id="text" type="text" maxlength="4096" placeholder="输入需要提交到源端的文本" aria-label="源端文本"><button id="send-text">发送文本</button><span id="stats"></span><span id="source"></span></div>
+<details><summary>使用与定制</summary><p>源端需要运行 Capture 并开启指定显示器共享。工作台外侧的接管/交还/停止始终有效。控制关闭、失焦或断线时会话停止续期。按 Esc 退出鼠标锁定；部分系统快捷键不能透传。</p><p>此客户端会接收已授权的画面和声音。共享范围及是否允许控制由源端决定。可编辑本目录的 HTML、client.js、input.js 和 CSS；重新加载后重新启用服务。直接本地打开只展示界面，不自动连接源机器。</p></details>
+</main>
+<script type="module">
+import { RemoteDesktopClient } from './client.js';
+import { attachInput } from './input.js';
+const $ = id => document.getElementById(id);
+const client = new RemoteDesktopClient($('screen'));
+const input = attachInput(client, $('screen'));
+const status = message => { $('status').textContent = message; };
+const attempt = work => Promise.resolve().then(work).catch(error => status(error.message || String(error)));
+client.addEventListener('status', event => status(event.detail));
+client.addEventListener('control', () => status('已取得控制权，点击画面操作；失焦会交还。'));
+client.addEventListener('released', () => status(client.session ? '仅观看，控制已停止续期' : '未连接'));
+client.addEventListener('source', event => {
+  const s = event.detail || {}; const audio = s.audio || {};
+  $('source').dataset.health = JSON.stringify(s);
+  const parts = [s.state === 'starting' ? '等待源端首帧' : s.state === 'idle' ? '桌面静止' : ''];
+  if (audio.state === 'unavailable') parts.push(`源端无可用声音输出（${audio.reason || '设备不可用'}）`);
+  $('source').textContent = parts.filter(Boolean).join(' · ');
+});
+client.addEventListener('stats', event => { const s=event.detail; $('stats').textContent = [s.path, s.fps == null ? '' : `${s.fps} fps`, s.rttMs == null ? '' : `${s.rttMs} ms RTT`].filter(Boolean).join(' · '); });
+$('connect').onclick = () => attempt(() => client.connect());
+$('screen').onclick = () => { if ($('screen').paused) void $('screen').play().catch(() => status('请允许当前页面播放声音')); };
+$('control').onclick = () => attempt(() => client.acquireControl());
+$('release').onclick = () => client.releaseControl();
+$('stop').onclick = () => { client.close(); status('已停止本页连接'); };
+$('lock').onclick = () => { try { input.lock()?.catch?.(error => status(error.message)); } catch(error) { status(error.message); } };
+$('send-text').onclick = () => { input.text($('text').value); $('text').value=''; };
+window.addEventListener('genehub-service-change', () => { void attempt(async () => {
+  const state = await client.pageState();
+  if (!state.controlAllowed) client.releaseControl();
+  else if (client.session && !client.control) await client.acquireControl();
+}); });
+window.addEventListener('pagehide', () => { input.dispose(); client.close(); });
+</script></body></html>

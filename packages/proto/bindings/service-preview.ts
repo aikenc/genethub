@@ -4,6 +4,11 @@ export type ServicePreviewDescriptor = { version: number, runId: string, name: s
 
 export type ServicePreviewIceServer = { urls: Array<string>, username: string | null, credential: string | null, };
 
-export type ServicePreviewMedia = { offerPath: string, stopPath: string | null, microphone: string | null, };
+export type ServicePreviewMedia = { offerPath: string, stopPath: string | null, microphone: string | null, client?: string, protocol?: string, sessionPath?: string, controlPath?: string, };
+
+/**
+ * The small page API is scoped to the enabled entry, never a daemon Client.
+ */
+export type ServicePreviewPageState = { descriptor: ServicePreviewDescriptor, controlAllowed: boolean, };
 
 export type ServicePreviewRoute = { prefix: string, websocket: boolean, };
