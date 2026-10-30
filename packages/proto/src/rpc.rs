@@ -146,216 +146,6 @@ pub enum Request {
         #[serde(default)]
         cwd: Option<String>,
     },
-    /// Reads and validates one Workflow package's source under
-    /// `.genethub/workflows/<id>/`. The target must be a non-worker project
-    /// entry; its optional PM marker is irrelevant. This is a pure projection
-    /// and starts no Agent.
-    #[serde(rename = "workflow.inspect", rename_all = "camelCase")]
-    WorkflowInspect {
-        workspace_id: String,
-        /// Required once a project holds more than one package.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
-        package_id: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
-        candidate_digest: Option<String>,
-    },
-    /// Read-only facts about every Workflow package cloned into this project:
-    /// provenance, compile state, product drift and authorization. It never
-    /// executes package content.
-    #[serde(rename = "workflow.list", rename_all = "camelCase")]
-    WorkflowList { workspace_id: String },
-    /// Materializes one package's Space sources into product Spaces and
-    /// authorizes their component topology. `apply` without an approved plan
-    /// is refused; this is the only path by which a cloned package gains
-    /// scheduling rights.
-    #[serde(rename = "workflow.build", rename_all = "camelCase")]
-    WorkflowBuild {
-        workspace_id: String,
-        package_id: String,
-        apply: bool,
-        /// Required for apply and copied verbatim from the preceding plan.
-        #[serde(default)]
-        plan_digest: Option<String>,
-        /// Stable id chosen by the Agent for idempotent apply replay.
-        #[serde(default)]
-        action_id: Option<String>,
-        /// CAS value copied from the preceding plan.
-        #[serde(default)]
-        #[ts(type = "number | null")]
-        expected_revision: Option<u64>,
-    },
-    /// Promotes the current source Candidate or rolls back to a persisted one.
-    /// `expectedRevision` is the activation CAS and is never optional.
-    #[serde(rename = "workflow.activate", rename_all = "camelCase")]
-    WorkflowActivate {
-        workspace_id: String,
-        /// Required once a project holds more than one package.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
-        package_id: Option<String>,
-        #[serde(default)]
-        candidate_digest: Option<String>,
-        #[ts(type = "number")]
-        expected_revision: u64,
-    },
-    /// Starts one package-defined flow. The durable parent Session comes
-    /// from the authenticated session-bound CLI identity, never this payload.
-    #[serde(rename = "workflow.dispatch", rename_all = "camelCase")]
-    WorkflowDispatch {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
-        retry_of: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
-        resume_cancelled: Option<bool>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
-        candidate_digest: Option<String>,
-        workspace_id: String,
-        /// Required once a project holds more than one package.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
-        package_id: Option<String>,
-        /// Flow id inside the package. Optional when the package has one flow.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
-        workflow_id: Option<String>,
-        /// Project-relative task directory for this Run. Defaults to the
-        /// project root; a trial pins its own material directory here.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
-        execution_root: Option<String>,
-        task_id: String,
-        prompt: String,
-    },
-    #[serde(rename = "workflow.check", rename_all = "camelCase")]
-    WorkflowCheck {
-        workspace_id: String,
-        run_id: Option<String>,
-        /// Which package `--draft` validates. Required once a project holds
-        /// more than one.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
-        package_id: Option<String>,
-        /// Validate current source without creating a Candidate, Run or Worker.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
-        draft: Option<bool>,
-    },
-    #[serde(rename = "workflow.get", rename_all = "camelCase")]
-    WorkflowGet {
-        workspace_id: String,
-        run_id: String,
-    },
-    #[serde(rename = "workflow.journal", rename_all = "camelCase")]
-    WorkflowJournal {
-        workspace_id: String,
-        run_id: String,
-        since: u64,
-        limit: u32,
-    },
-    /// Lists recent Runs for project-side Workflow analysis. This is a
-    /// read-only projection; detailed structured messages remain Session-owned.
-    #[serde(rename = "workflow.history", rename_all = "camelCase")]
-    WorkflowHistory {
-        workspace_id: String,
-        #[serde(default)]
-        limit: Option<u32>,
-    },
-    /// Supplies explicit evidence for the node owned by this managed Session.
-    /// `expectedRevision` is a project-run CAS, not a best-effort hint.
-    #[serde(rename = "workflow.complete", rename_all = "camelCase")]
-    WorkflowComplete {
-        workspace_id: String,
-        run_id: String,
-        node_id: String,
-        #[ts(type = "number")]
-        expected_revision: u64,
-        evidence: std::collections::BTreeMap<String, String>,
-        /// Bounded business data, checked against the node's declared output shape.
-        #[serde(
-            default,
-            deserialize_with = "crate::deserialize_present_json",
-            skip_serializing_if = "Option::is_none"
-        )]
-        #[ts(optional, type = "unknown")]
-        output: Option<serde_json::Value>,
-        /// Absent retains the existing successful-completion contract.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
-        outcome: Option<WorkflowNodeOutcome>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
-        reason: Option<String>,
-    },
-    /// Persist the stop decision before reclaiming Executor/Worker resources.
-    /// Repeating cancellation is safe; completion is observed through the Run.
-    #[serde(rename = "workflow.cancel", rename_all = "camelCase")]
-    WorkflowCancel {
-        workspace_id: String,
-        run_id: String,
-        #[ts(type = "number")]
-        expected_revision: u64,
-    },
-    /// Continue unfinished Worker Sessions in the same structured Run after a
-    /// daemon restart. The original Session and write lease are kept; completed
-    /// predecessors are not replayed. A still-running previous process is refused.
-    #[serde(rename = "workflow.recover", rename_all = "camelCase")]
-    WorkflowRecover {
-        workspace_id: String,
-        run_id: String,
-        #[ts(type = "number")]
-        expected_revision: u64,
-    },
-    /// Start a new recovery Run for one blocked business Run. The actor is
-    /// bound to the authenticated ordinary PM Session by the daemon.
-    #[serde(rename = "workflow.recovery.start", rename_all = "camelCase")]
-    WorkflowRecoveryStart {
-        workspace_id: String,
-        run_id: String,
-        reason: String,
-    },
-    /// Ask the Human to decide one classified exit for a blocked Run.
-    #[serde(rename = "workflow.human", rename_all = "camelCase")]
-    WorkflowHuman {
-        workspace_id: String,
-        run_id: String,
-        #[ts(type = "number")]
-        expected_revision: u64,
-        kind: String,
-        reason: String,
-    },
-    /// Override only future recovery Runs to use the built-in flow.
-    #[serde(rename = "workflow.recovery.reset", rename_all = "camelCase")]
-    WorkflowRecoveryReset {
-        workspace_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
-        package_id: Option<String>,
-        #[ts(type = "number")]
-        expected_revision: u64,
-    },
-    /// Changes the finite budget shared by an original request and every
-    /// retry. `expectedRevision` is the budget revision exposed by
-    /// `workflow.get`, independent of a Run's graph revision.
-    #[serde(rename = "workflow.budget", rename_all = "camelCase")]
-    WorkflowBudget {
-        workspace_id: String,
-        run_id: String,
-        #[ts(type = "number")]
-        expected_revision: u64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
-        max_runs: Option<u32>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional, type = "number")]
-        deadline_seconds: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional, type = "number")]
-        max_llm_rounds: Option<u64>,
-    },
     /// Mounts, configures or removes one responsibility on an already-open,
     /// PipeBuilder-verified AgentSpace, or moves it in the ownership tree.
     ///
@@ -442,9 +232,6 @@ pub enum Request {
     /// write. Read-only: composition is changed on the Space, not here.
     #[serde(rename = "session.components", rename_all = "camelCase")]
     SessionComponents { session_id: String },
-    /// Reads the structured DCG timeline owned by an Executor Session.
-    #[serde(rename = "session.flow", rename_all = "camelCase")]
-    SessionFlow { session_id: String },
     #[serde(rename = "session.inspect", rename_all = "camelCase")]
     SessionInspect {
         session_id: String,
@@ -960,7 +747,7 @@ pub enum Request {
     /// and pairing is the one exchange that must keep working on the machine
     /// nobody can walk over to and fix.
     #[serde(rename = "device.invite")]
-    DeviceInvite(Option<InviteScope>),
+    DeviceInvite(Option<serde_json::Value>),
     /// Redeems an invite. The only request a stranger may send, and only once
     /// per invite: everything else needs a credential this call hands out.
     #[serde(rename = "device.claim", rename_all = "camelCase")]
@@ -1192,7 +979,6 @@ pub enum Reply {
     SessionDrafts(Vec<crate::SessionDraft>),
     PreviewAnnotations(crate::PreviewReviewDraft),
     SessionComponents(Vec<ComponentInstanceInfo>),
-    SessionFlow(ExecutorFlowStatus),
     SessionImports(SessionImportListing),
     Snapshot(SessionSnapshot),
     SessionInspection(SessionInspection),
@@ -1206,13 +992,6 @@ pub enum Reply {
     Blobs(Vec<BlobPayload>),
     SessionArtifactUpload(SessionArtifactUpload),
     SessionArtifact(SessionArtifactBundle),
-    WorkflowProject(WorkflowProjectStatus),
-    WorkflowPackages(WorkflowPackageList),
-    WorkflowBuild(WorkflowBuildReport),
-    WorkflowRun(WorkflowRunStatus),
-    WorkflowJournal(Vec<serde_json::Value>),
-    WorkflowCheck(WorkflowCheckReport),
-    WorkflowRuns(Vec<WorkflowRunStatus>),
     AgentSpaceChangePlan(AgentSpaceChangePlan),
     Workspace(WorkspaceInfo),
     Workspaces(Vec<WorkspaceInfo>),

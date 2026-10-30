@@ -89,7 +89,6 @@ fn main() -> Result<(), ts_rs::ExportError> {
     HubTicket::export_all_to(dir)?;
     DeviceInfo::export_all_to(dir)?;
     DeviceInvite::export_all_to(dir)?;
-    InviteScope::export_all_to(dir)?;
     DeviceCredential::export_all_to(dir)?;
     RemoteAccess::export_all_to(dir)?;
     DeviceAuth::export_all_to(dir)?;

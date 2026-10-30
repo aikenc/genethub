@@ -61,7 +61,7 @@ OS 用户的完整操作能力与资源访问能力。Agent 可以经工具间�
 普通文件/终端/会话接口不应再按项目、Agent 或设备分级制造另一套隔离。完整权限受实际 OS
 边界约束；Session ID 用于归属，不通过冒充 Human 隐去来源。
 仅展示分享、未认证入口、账号/机器不匹配、撤销与过期仍有明确边界。密钥不进入日志或未授权页面。
-当前版本的旧 grants、Workflow 特例及跨项目检查仍须按实际返回说明，文档更新不等于代码已迁移。
+当前候选删除普通 grants 与旧 Workflow 授权；旧受限设备需重新配对，旧 Workflow 历史从 fork 继续。已发布旧版本仍以实际返回为准。
 
 
 - daemon 只监听本机，主动向外连 Relay；**谁能连这台机器由 daemon 的本地已授权设备表决定**，撤销即时生效。
@@ -95,7 +95,7 @@ OS 用户的完整操作能力与资源访问能力。Agent 可以经工具间�
   SpaceBuilder 把描述里的身份文件、Skill 和定时 hook 编译成各 Agent 原生读取的文件。
 - 内置 Skill 是随包分发的普通文件，按会话列出，任务匹配时 Agent 自己去读。
 - 团队 = Space 树 + 定时 hook + 系统通知 + 会话控制搭出来的接力队伍；内置的 1+N 团队只是可替换的样板，
-  建出来就归用户。Workflow 是退役中的旧机制。用法见 Skill `genehub-team`，构建规则见 [spacebuilder.md](spacebuilder.md)。
+  建出来就归用户。旧 Workflow 仅保留历史数据，不再承担执行。用法见 Skill `genehub-team`，构建规则见 [spacebuilder.md](spacebuilder.md)。
 
 链接：[团队机制](https://github.com/aikenc/genethub/blob/main/docs/teams.md) ·
 [内置 Skill](https://github.com/aikenc/genethub/blob/main/docs/builtin-skills.md) ·

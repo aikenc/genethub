@@ -36,9 +36,9 @@ defineSpecialty({
       { type: "session.flow", payload: { sessionId: "missing" } },
     ] as const) {
       let refusal = "";
-      try { await opened.client.call(request as Parameters<typeof opened.client.call>[0]); }
+      try { await opened.client.call(request as unknown as Parameters<typeof opened.client.call>[0]); }
       catch (error) { refusal = String(error); }
-      t.assertions.assert(refusal.includes("workflowRetired"), `legacy operation did not report retirement: ${request.type}: ${refusal}`);
+      t.assertions.assert(refusal.includes("invalid RPC operation body") || refusal.includes("unknown variant"), `legacy operation was not rejected as an unknown operation: ${request.type}: ${refusal}`);
     }
     t.assertions.assert(readFileSync(file, "utf8") === contents, "user Workflow file changed");
   } finally {

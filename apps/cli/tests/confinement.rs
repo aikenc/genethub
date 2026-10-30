@@ -8,7 +8,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use genet_daemon::isolation::{self, Policy, CONFINE_COMMAND_ENV};
+use genet_native::confine::{self as isolation, Policy, CONFINE_COMMAND_ENV};
 
 fn genet() -> &'static str {
     env!("CARGO_BIN_EXE_genet-local")

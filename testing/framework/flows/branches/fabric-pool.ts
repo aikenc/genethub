@@ -20,7 +20,7 @@ export async function openFabricPool(t: CaseContext, nodeChannels: number, brows
   }
   try {
     if (options.independentBrowserLeg) browserLink = await startSharedBottleneck(relay.origin, { bandwidthMbps: 1000, rttMs: 0 });
-    const paired = await t.flows.main.pairDevice(opened.client, opened.daemon, [], "all-hop-pool"); paired.client.close();
+    const paired = await t.flows.main.pairDevice(opened.client, opened.daemon, "all-hop-pool"); paired.client.close();
     const reply = await opened.client.call({ type: "device.remoteAttach", payload: { relayUrl: nativePath ? relay.origin : link.urlFor(relay.origin), joinToken: relay.joinToken, channelCount: nodeChannels } });
     if (reply?.type !== "remoteAccess") throw new Error("node pool attachment did not return metadata");
     let lanes = reply.data.channels ?? [];

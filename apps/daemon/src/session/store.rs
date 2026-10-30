@@ -29,9 +29,9 @@ use std::sync::{Arc, RwLock};
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
     BlobKind, BlobOverview, BlobPayload, BlobRef, HistoryCoverage, ImageThumb, ImportContinuation,
-    ManagedSessionInfo, PermissionRequest, RoundBatch, RoundBatchSummary, RoundTrunk,
-    RoundTrunkSummary, SessionImportOrigin, SessionLineage, SessionStatus, SessionSummary,
-    TimelineItem, UnsupportedFormat,
+    PermissionRequest, RoundBatch, RoundBatchSummary, RoundTrunk, RoundTrunkSummary,
+    SessionImportOrigin, SessionLineage, SessionStatus, SessionSummary, TimelineItem,
+    UnsupportedFormat,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -100,7 +100,8 @@ const MAX_BLOB_BYTES: u64 = 512 * 1024 * 1024;
 ///     acknowledged continuation when rewriting metadata.
 /// 9 — durable input, execution fences and cleanup receipts. Older writers
 ///     would discard acknowledged messages or unfinished cancellation.
-pub const SESSION_FORMAT: u32 = 9;
+// 10 — explicit history-only continuation; older writers must not resume it.
+pub const SESSION_FORMAT: u32 = 10;
 
 /// What a `meta.json` from before versioning is: the layout numbered 4, which
 /// is the only one that has ever been written into a workspace.
@@ -302,14 +303,9 @@ pub struct SessionMeta {
     /// where inherited history came from and how it reached this Agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineage: Option<SessionLineage>,
-    /// Optional Workflow ownership on an otherwise ordinary Session.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub managed: Option<ManagedSessionInfo>,
-    /// Project-versioned role/node contract captured when the managed Session
-    /// is created. Private to the daemon because it is execution context, not
-    /// a second user-authored message.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub managed_system_prompt: Option<String>,
+    /// Retired execution context is history, never a source of queued work.
+    #[serde(default)]
+    pub history_only: bool,
     /// Provider source identity stays private to the daemon. It is also the
     /// durable duplicate key, while the public summary exposes only the Agent
     /// and whether native continuation survived.
@@ -414,8 +410,7 @@ impl SessionMeta {
             pending_permission: None,
             human_continuation: None,
             lineage: None,
-            managed: None,
-            managed_system_prompt: None,
+            history_only: false,
             imported: None,
         }
     }
@@ -427,7 +422,7 @@ impl SessionMeta {
     }
 
     pub fn derived_source_kind(&self) -> Option<String> {
-        Some(derived_source_kind_for(&self.labels, self.managed.is_some()).to_string())
+        Some(derived_source_kind_for(&self.labels).to_string())
     }
 
     pub fn summary(&self, status: SessionStatus) -> SessionSummary {
@@ -473,7 +468,7 @@ impl SessionMeta {
             agent_id: self.agent_id.clone(),
             routing_tags: self.routing_tags.clone(),
             media_tags: self.media_tags.clone(),
-            managed: self.managed.clone(),
+            history_only: self.history_only.then_some(true),
             title: self.title.clone(),
             labels: self.labels.clone(),
             description: self.description.clone(),
@@ -501,10 +496,10 @@ impl SessionMeta {
     }
 }
 
-pub fn derived_source_kind_for(labels: &[String], managed: bool) -> &'static str {
+pub fn derived_source_kind_for(labels: &[String]) -> &'static str {
     // Labels are display text. Only the generic platform-created marker and
-    // managed execution distinguish automated sessions, never business roles.
-    if managed || labels.iter().any(|label| label == SESSION_STARTED_LABEL) {
+    // labels distinguish automated sessions, never business roles.
+    if labels.iter().any(|label| label == SESSION_STARTED_LABEL) {
         "system"
     } else {
         "human"
@@ -1180,6 +1175,27 @@ impl Store {
             &meta.id,
             path.parent().expect("meta.json always has a parent"),
         )?;
+        if meta.history_only {
+            let raw = match fs::read(&path) {
+                Ok(raw) => Some(raw),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error.into()),
+            };
+            if let Some(raw) = raw {
+                let original: Value = serde_json::from_slice(&raw)?;
+                if original.get("managed").is_some_and(|v| !v.is_null())
+                    || original
+                        .get("managedSystemPrompt")
+                        .is_some_and(|v| !v.is_null())
+                {
+                    let backup = path.with_file_name(format!(
+                        "meta.legacy-workflow-{}.json",
+                        uuid::Uuid::new_v4().simple()
+                    ));
+                    crate::config::save_private(&backup, &raw)?;
+                }
+            }
+        }
         let stamped = SessionMeta {
             format: SESSION_FORMAT,
             ..meta.clone()
@@ -1224,6 +1240,32 @@ impl Store {
             ));
         }
         let mut meta: SessionMeta = serde_json::from_str(raw)?;
+        // A legacy execution binding is interpreted only by this disk reader.
+        // No old prompt, native continuation or delivery obligation is executed.
+        let legacy: Value = serde_json::from_str(raw)?;
+        if legacy.get("managed").is_some_and(|v| !v.is_null())
+            || legacy
+                .get("managedSystemPrompt")
+                .is_some_and(|v| !v.is_null())
+        {
+            meta.history_only = true;
+            if !meta
+                .labels
+                .iter()
+                .any(|label| label == SESSION_STARTED_LABEL)
+            {
+                meta.labels.push(SESSION_STARTED_LABEL.into());
+            }
+        }
+        if meta.history_only {
+            meta.inbox = Default::default();
+            meta.persist = None;
+            meta.pending_permission = None;
+            meta.human_continuation = None;
+            meta.open_turn = None;
+            meta.agent_pid = None;
+        }
+
         if !header.project_key.is_empty()
             && !self
                 .homes
@@ -2392,8 +2434,7 @@ mod project_home_tests {
             pending_permission: None,
             human_continuation: None,
             lineage: None,
-            managed: None,
-            managed_system_prompt: None,
+            history_only: false,
             imported: None,
         }
     }

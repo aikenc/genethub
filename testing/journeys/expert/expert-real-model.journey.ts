@@ -1,10 +1,10 @@
-// The expert with a real model: the shipped template, SpaceBuilder, daemon, timer and `tools/expert.py`, driven
+// The expert with a real model: the shipped template, SpaceBuilder, daemon, timer and `tools/team.py`, driven
 // by the built-in Agent on the cheapest model the Beta channel's provider configuration offers. Nothing is
 // scripted: the front reads the rules and Skills SpaceBuilder wrote under `front/`, decides for itself, and the
 // background session it starts is a real model session too.
 //
 //   1. a trivial question is answered by the front alone, with no background session;
-//   2. a task for the background is delegated with `expert.py spawn`, the work is really done, the timer
+//   2. a task for the background is delegated with `team.py spawn`, the work is really done, the timer
 //      reports the result to the front, and the front tells the person.
 //
 // Cost is bounded: two tiny requests, a work task that writes one short file, and the model is the cheapest
@@ -44,9 +44,9 @@ defineJourney(
     id: "journey.expert.real-model",
     title: "with a real cheap model the front answers simple things itself and delegates real work, and is told when it is done",
     oracle:
-      "a trivial question starts no background session; a delegated task is started with expert.py spawn under the work Space with a description, the real work session writes the file, the front's timeline gets one system result notice, and the front then answers the person with the outcome",
+      "a trivial question starts no background session; a delegated task is started with team.py spawn under the work Space with a description, the real work session writes the file, the front's timeline gets one system result notice, and the front then answers the person with the outcome",
     catches: [
-      "Skills that do not make a real model use expert.py",
+      "Skills that do not make a real model use team.py",
       "the front doing long work itself instead of delegating",
       "a real background session whose completion never reaches the front",
       "the front ignoring the system notice instead of telling the person",
@@ -57,7 +57,7 @@ defineJourney(
     expectedDurationMs: 180_000,
     timeoutMs: 600_000,
     surfaces: ["daemon", "spacebuilder", "builtin-agent", "real-model", "timer-hook"],
-    productInterfaces: ["tools/expert.py", "session.send", "session.get"],
+    productInterfaces: ["tools/team.py", "session.send", "session.get"],
   },
   async (t) => {
     t.flows.main.seedHostBetaProviders(t.env);
@@ -166,7 +166,7 @@ defineJourney(
       if (workerModel.modelId !== MODEL) await fail(`the background session is on ${String(workerModel.modelId)}, not ${MODEL}`, [front, worker.id]);
       metrics.delegated = { afterMs: Date.now() - started2, description: worker.description, labels: worker.labels, frontUsageBeforeResult: await usage(front) };
       if (!worker.description || !worker.labels?.includes("系统发起") || !worker.labels?.includes("组长")) {
-        await fail(`the background session is not labelled and described by expert.py: ${JSON.stringify(worker)}`, [front, worker.id]);
+        await fail(`the background session is not labelled and described by team.py: ${JSON.stringify(worker)}`, [front, worker.id]);
       }
 
       const results = async () => (await snapshot(front)).items.filter((item) => isSystem(item) && (item.text ?? "").includes("用途: result"));

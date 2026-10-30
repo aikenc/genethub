@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 import type { SessionSnapshot, TimelineItem } from "@genehub/proto";
@@ -63,7 +63,10 @@ defineSpecialty({
       if (reply?.type !== "snapshot") throw new Error(`missing Session ${sessionId}`);
       return reply.data;
     };
-    const target = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
+    const otherRoot=join(t.env.workspace,"other-project");mkdirSync(otherRoot,{recursive:true});
+    const other=await opened.client.call({type:"workspace.open",payload:{root:otherRoot}});
+    if(other?.type!=="workspace")throw new Error("other project not opened");
+    const target = await t.flows.main.createBuiltinSession(opened.client, other.data.id);
     const sender = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
     const listIds = async (): Promise<string[]> => {
       const listed = await opened.client.call({ type: "session.list", payload: { workspaceId: opened.workspaceId, includeArchived: false, lean: true } });

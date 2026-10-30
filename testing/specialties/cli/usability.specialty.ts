@@ -120,5 +120,27 @@ check("capability-denial", "An ordinary Agent has owner capabilities and retains
     const read = (file: string) => parseJson(readFileSync(path.join(opened.workspaceRoot, file), "utf8")) as unknown as Envelope;
     t.assertions.assert(read("owner-clients.json").type === "client.debug", "ordinary Agent could not list clients");
     const authority = read("owner-context.json").data.authority;
-    t.assertions.assert(authority.principalType === "sessionController" && authority.sessionId === sid && authority.grants.includes("settings") && authority.grants.includes("pty"), "owner parity lost scope or identity");
+    t.assertions.assert(authority.principalType === "sessionController" && authority.sessionId === sid && authority.providerOperations === true, "owner parity lost scope or identity");
   }), true);
+
+
+check("forwarded-contracts", "Forwarded schema, capabilities and selector failures preserve the native CLI contract",
+  "each schema routable flag matches its machine input; capabilities expose actual remote/isolation facts; unsupported machine/cwd and missing Hub discovery fail explicitly without local fallback",
+  ["schema advertises a silently ignored selector", "capabilities claim a parsing sandbox", "remote failure falls back to local data"],
+  async t => workspace(t, async opened => {
+    const schema=(await json(opened,["schema"])).data.commands;
+    t.assertions.assert(schema.length>0,"empty command schema");
+    for(const entry of schema)t.assertions.assert(typeof entry.routable==="boolean"&&entry.routable===Object.hasOwn(entry.inputSchema.properties,"machine"),`routing schema differs for ${entry.name}`);
+    const caps=(await json(opened,["capabilities"])).data;
+    t.assertions.assert(caps.remoteExec===true&&caps.remote.hostedHub===true&&caps.remote.transports.includes("rendezvous")&&caps.remote.selector.flag==="--machine"&&caps.remote.selector.implicitDefault===false,"remote capabilities changed");
+    t.assertions.assert(caps.isolation.arbitraryCommands===true&&caps.isolation.commandLineParsing===false&&caps.isolation.engine===null&&caps.isolation.reportedBy==="context.daemon.isolation"&&caps.workingDirectory.inferred===false,"OS capability reporting changed");
+    for(const args of [["daemon","stop","--machine","m_other"],["schema","--machine","m_other"]]){
+      const reply=await command(opened,args);const error=records(reply.stdout).at(-1)?.error;
+      t.assertions.assert(reply.code===2&&error?.code==="commandNotRoutable","local-only selector was ignored");
+    }
+    const missing=await command(opened,["session","list","--machine=m_other"]);
+    const failure=parseJson(missing.stdout) as {error?:{code:string;retryable:boolean;details?:{stage:string;machineId:string}}};
+    t.assertions.assert(missing.code===4&&failure.error?.code==="internal"&&!failure.error.retryable&&failure.error.details?.stage==="hubTicket"&&failure.error.details.machineId==="m_other","missing account route silently used local data or hid upstream failure");
+    const cwd=await command(opened,["workspace","list","--cwd","/srv/app"]);
+    t.assertions.assert(cwd.code===2&&String((parseJson(cwd.stdout).error as {message:string}).message).includes("--cwd"),"ignored working directory was accepted");
+  }));

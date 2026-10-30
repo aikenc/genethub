@@ -44,7 +44,7 @@ export function ProviderConfigurationCard({ request, sessionId }: { request: Per
     } catch { setError("未完成操作，请重新连接并检查原配置回执。"); }
     finally { inFlight.current = false; setBusy(false); }
   };
-  const canSubmit = authority?.grants.includes("settings") === true;
+  const canSubmit = authority != null && ["localUser", "pairedDevice", "channel"].includes(authority.principalType);
   return <section className="rounded-xl border border-accent/60 bg-raised px-4 py-4" aria-label="模型服务配置确认">
     <h2 className="text-base font-semibold">{request.title}</h2>
     <p className="mt-1 text-sm text-muted">确认后保存到当前连接的机器，并验证模型调用；原会话会自动继续。</p>
@@ -57,7 +57,7 @@ export function ProviderConfigurationCard({ request, sessionId }: { request: Per
           className="mt-1 block w-full rounded border border-line bg-surface px-3 py-2" />
       </label>
       <p className="text-xs text-muted">密钥直接交给机器保存，不发送给 Agent，也不写入对话记录。</p>
-      {authority && !canSubmit && <p role="status" className="text-sm text-muted">当前设备没有提交模型配置的权限，请在已有配置权限的设备上处理。</p>}
+      {authority && !canSubmit && <p role="status" className="text-sm text-muted">请在用户界面确认模型配置。</p>}
       {operation?.state === "unknown" && <p role="alert" className="text-sm text-muted">保存结果不确定，请核查机器配置；本请求不会重复执行。</p>}
       {error && <p role="alert" className="text-sm text-danger">{error}</p>}
       <div className="flex gap-3">

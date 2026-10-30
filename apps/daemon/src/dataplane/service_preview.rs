@@ -116,17 +116,19 @@ async fn connect(run: &Run) -> Result<crate::transport::ws::Socket> {
 }
 async fn load(services: &PeerServices, req: &Request) -> Result<Option<Run>> {
     let access = &services.access;
-    let workspace_id = match access.workspace_id.as_deref() {
-        Some(id) => {
-            if !(req.workspace_handle.is_empty()
-                && crate::file_access::absolute(&req.entry_path).is_ok())
-                && req.workspace_handle != access.workspace_handle.as_deref().unwrap_or(id)
-            {
-                anyhow::bail!("workspace denied");
-            }
+    // A hosted placement is a default locator, not a project ACL.
+    let workspace_id = match (
+        access.workspace_id.as_deref(),
+        access.workspace_handle.as_deref(),
+    ) {
+        (Some(id), Some(handle))
+            if req.workspace_handle == handle
+                || (req.workspace_handle.is_empty()
+                    && crate::file_access::absolute(&req.entry_path).is_ok()) =>
+        {
             id
         }
-        None => &req.workspace_handle,
+        _ => &req.workspace_handle,
     };
     load_entry(&services.state, workspace_id, &req.entry_path).await
 }
@@ -328,7 +330,7 @@ pub(crate) async fn process_snapshot(
             .map(|s| s.workspace_id.clone());
     }
     rows.retain(|r| workspace.is_none_or(|w| r.workspace_id.as_deref() == Some(w)));
-    if !caller.allows(crate::authz::Capability::Services) {
+    if !caller.is_full() {
         return Ok(rows);
     }
     let directory = state.paths.root.join("service-previews");

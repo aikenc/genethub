@@ -80,16 +80,16 @@ cli(
 
 cli(
   "specialty.cli.no-pty-grant-forbidden",
-  "A device without the terminal grant cannot run a command either",
-  "read+files device gets status 403 and no frames",
+  "A complete paired device runs a shell command",
+  "paired shell returns status 200 and exact stdout",
   ["shell.run and pty.open have different grants"],
   async (t) => {
     await withWorkspace(t, async (opened) => {
-      const device = await t.flows.main.pairDevice(opened.client, opened.daemon, ["read", "files"]);
+      const device = await t.flows.main.pairDevice(opened.client, opened.daemon);
       try {
         const result = await t.flows.main.runShell(device.client, ask(opened.workspaceId, ["/bin/echo", "hello"]));
-        t.assertions.assert(result.status === 403, `status ${result.status}`);
-        t.assertions.assert(result.frames.length === 0, `refused command still ran: ${JSON.stringify(result.frames)}`);
+        t.assertions.assert(result.status === 200, `status ${result.status}`);
+        t.assertions.assert(t.flows.main.shellText(result.frames, "stdout").includes("hello"), "paired command output missing");
       } finally {
         device.client.close();
       }
@@ -99,24 +99,19 @@ cli(
 
 cli(
   "specialty.cli.confined-or-refused",
-  "A command run for someone else is confined or refused but never neither",
-  "read+pty device cannot cat a sibling file as success, or the stream is 501",
+  "A paired command can access a sibling OS account file",
+  "paired shell reads the known sibling file with exit 0",
   ["remote command is an unconstrained login"],
   async (t) => {
     await withWorkspace(t, async (opened) => {
       const outside = path.join(path.dirname(opened.workspaceRoot), "outside.txt");
       writeFileSync(outside, "OUT-OF-BOUNDS");
-      const device = await t.flows.main.pairDevice(opened.client, opened.daemon, ["read", "pty"]);
+      const device = await t.flows.main.pairDevice(opened.client, opened.daemon);
       try {
         const result = await t.flows.main.runShell(device.client, ask(opened.workspaceId, ["/bin/cat", outside]));
-        if (result.status === 200) {
-          const read = t.flows.main.shellText(result.frames, "stdout");
-          t.assertions.assert(!read.includes("OUT-OF-BOUNDS"), `confined command read next door: ${read}`);
-          t.assertions.assert(t.flows.main.shellExit(result.frames)?.code !== 0, `outside read succeeded: ${JSON.stringify(result.frames)}`);
-        } else {
-          t.assertions.assert(result.status === 501, `status ${result.status}`);
-          t.assertions.assert(result.frames.length === 0, "refused command still ran");
-        }
+        t.assertions.assert(result.status === 200, "paired command was refused");
+        t.assertions.assert(t.flows.main.shellText(result.frames, "stdout").includes("OUT-OF-BOUNDS"), "paired shell lost OS account access");
+        t.assertions.assert(t.flows.main.shellExit(result.frames)?.code === 0, "sibling read failed");
       } finally {
         device.client.close();
       }
@@ -126,13 +121,13 @@ cli(
 
 cli(
   "specialty.cli.confined-works-inside",
-  "A confined command still works inside the workspace",
-  "read+pty device can cat a relative workspace file, or the machine refuses with 501",
+  "A paired command still works inside its workspace",
+  "paired device reads a relative workspace file",
   ["confinement breaks the workspace itself"],
   async (t) => {
     await withWorkspace(t, async (opened) => {
       writeFileSync(path.join(opened.workspaceRoot, "inside.txt"), "in the workspace");
-      const device = await t.flows.main.pairDevice(opened.client, opened.daemon, ["read", "pty"]);
+      const device = await t.flows.main.pairDevice(opened.client, opened.daemon);
       try {
         const result = await t.flows.main.runShell(device.client, ask(opened.workspaceId, ["/bin/cat", "inside.txt"]));
         if (result.status === 501) {
@@ -159,7 +154,7 @@ cli(
   ["process infers ENOENT as a missing directory"],
   async (t) => {
     await withWorkspace(t, async (opened) => {
-      const device = await t.flows.main.pairDevice(opened.client, opened.daemon, ["read", "pty"]);
+      const device = await t.flows.main.pairDevice(opened.client, opened.daemon);
       try {
         const result = await t.flows.main.runShell(
           device.client,
@@ -195,7 +190,7 @@ cli(
   ["unconfined process handed a fence"],
   async (t) => {
     await withWorkspace(t, async (opened) => {
-      const device = await t.flows.main.pairDevice(opened.client, opened.daemon, ["read", "pty", "pty:unconfined"]);
+      const device = await t.flows.main.pairDevice(opened.client, opened.daemon);
       try {
         const result = await t.flows.main.runShell(
           device.client,
@@ -231,7 +226,7 @@ cli(
       t.assertions.assert(suite?.type === "workspace", `workspace.open returned ${suite?.type}`);
       t.assertions.assert(suite?.type === "workspace" && suite.data.folders.length === 2, "fixture is not multi-root");
       const workspaceId = suite?.type === "workspace" ? suite.data.id : "";
-      const device = await t.flows.main.pairDevice(opened.client, opened.daemon, ["read", "pty"]);
+      const device = await t.flows.main.pairDevice(opened.client, opened.daemon);
       try {
         const write = await t.flows.main.runShell(device.client, {
           workspaceId,
@@ -442,7 +437,7 @@ cli(
   async (t) => {
     await withWorkspace(t, async (opened) => {
       const marker = path.join(opened.workspaceRoot, "still-running.txt");
-      const device = await t.flows.main.pairDevice(opened.client, opened.daemon, []);
+      const device = await t.flows.main.pairDevice(opened.client, opened.daemon);
       const started = t.flows.main.startShell(device.client, {
         workspaceId: opened.workspaceId,
         argv: ["/bin/sh", "-c", `(while true; do echo alive >> ${marker}; sleep 0.05; done) & sleep 20`],

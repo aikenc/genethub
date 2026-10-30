@@ -57,7 +57,7 @@ for (const scenario of ["answer", "cancel", "uncertain"] as const) {
       await t.flows.branches.waitForAgent(client, agent.agentId, a => a.probe.state === "ready");
       await restart();
       t.assertions.assert((await requests())[0]?.id === request.id, "restart lost or re-created the question");
-      second = await t.flows.main.pairDevice(client, opened.daemon, ["read", "settings"], "durable-second-device");
+      second = await t.flows.main.pairDevice(client, opened.daemon, "durable-second-device");
       const response = { agentId: agent.agentId, requestId: request.id, outcome: scenario === "cancel"
         ? { type: "canceled" as const }
         : { type: "answered" as const, optionId: "ok", answers: [{ questionId: "token", selectedOptionIds: [], freeformText: secret },

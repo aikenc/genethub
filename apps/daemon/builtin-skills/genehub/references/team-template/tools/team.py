@@ -3985,12 +3985,37 @@ def migrate_skill_names(root):
     return migrated
 
 
+def migrate_hook_name(root):
+    """Only rewrite the known product timer command; preserve every other field.
+
+    Custom scripts and hook commands are left for the team's three-way upgrade.
+    A copied legacy expert.py may remain in user data, but new packages omit it.
+    """
+    for skill in ("team-front", "expert-front"):
+        relative = "skills/%s/hooks/timer.genet.json" % skill
+        target = os.path.join(root, relative)
+        record = read_json(target, None)
+        if not isinstance(record, dict):
+            continue
+        command = record.get("exec")
+        if not (record.get("event") == "timer" and isinstance(command, list)
+                and len(command) == 3 and command[0] in ("${GENEHUB_PYTHON}", "python3")
+                and command[1:] == ["tools/expert.py", "hook"]):
+            continue
+        backup = state_dir(root, "hook-name-backups", skill + ".json")
+        if not os.path.exists(backup):
+            write_json(backup, record)
+        record["exec"] = [command[0], "tools/team.py", "hook"]
+        write_json(target, record)
+
+
 def sync_identity(root):
     """Identity files and Skills are compiled into the instruction files Agents read natively; when any of them changes, compile again.
 
     Returns "none" (the team declares no identity), "unchanged", or "rebuilt". A failed build is remembered by the
     digest it failed on so the five-second tick does not rerun it more than once a minute.
     """
+    migrate_hook_name(root)
     migrate_skill_names(root)
     heal_identity_aliases(root)
     digest, label = identity_inputs_digest(root)

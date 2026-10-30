@@ -3,8 +3,8 @@ import { defineJourney } from "../../framework/public.ts";
 defineJourney(
   {
     id: "journey.authorization.no-pty-grant-no-bytes",
-    title: "A device without a terminal grant is not sent the terminal anyway",
-    oracle: "owner sees pty echo; a read+session device's onPty stays empty",
+    title: "Complete paired devices receive the terminal shared by their OS account",
+    oracle: "owner and paired device both receive the same terminal marker",
     catches: ["pty fanout ignores grants"],
     tags: ["core", "authorization", "parity"],
     expectedDurationMs: 35_000,
@@ -14,7 +14,7 @@ defineJourney(
   },
   async (t) => {
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
-    const device = await t.flows.main.pairDevice(opened.client, opened.daemon, ["read", "session"]);
+    const device = await t.flows.main.pairDevice(opened.client, opened.daemon);
     const ownerChunks: string[] = [];
     const deviceChunks: string[] = [];
     const stopOwner = opened.client.onPty((_id, data) => {
@@ -32,10 +32,10 @@ defineJourney(
       const ptyId = pty?.type === "pty" ? pty.data.ptyId : "";
       await opened.client.call({ type: "pty.write", payload: { ptyId, data: "echo grant-marker\n" } });
       await t.tools.waitUntil(() => ownerChunks.join("").includes("grant-marker"), 20_000);
-      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      await t.tools.waitUntil(() => deviceChunks.join("").includes("grant-marker"), 20_000);
       t.assertions.assert(
-        !deviceChunks.join("").includes("grant-marker"),
-        `a device without the pty grant received terminal output: ${deviceChunks.join("")}`,
+        deviceChunks.join("").includes("grant-marker"),
+        `paired device lost shared terminal output: ${deviceChunks.join("")}`,
       );
     } finally {
       stopOwner();

@@ -200,14 +200,12 @@ pub(crate) fn select_tag_route(
     required_tags: &[String],
     agents: &[AgentInfo],
     registry: &Registry,
-    evidence_only: bool,
 ) -> Result<ResolvedAgentRoute> {
     select_tag_route_excluding(
         preferences,
         required_tags,
         agents,
         registry,
-        evidence_only,
         &BTreeSet::new(),
     )
 }
@@ -222,11 +220,10 @@ pub(crate) fn select_tag_route_excluding(
     required_tags: &[String],
     agents: &[AgentInfo],
     registry: &Registry,
-    evidence_only: bool,
     excluded: &BTreeSet<(String, Option<String>)>,
 ) -> Result<ResolvedAgentRoute> {
     let required = normalize_tags(required_tags.iter().cloned());
-    let mut candidates = collect_candidates(preferences, agents, registry, evidence_only);
+    let mut candidates = collect_candidates(preferences, agents, registry);
     let mut dropped = Vec::new();
     candidates.retain(|candidate| {
         if excluded.contains(&(
@@ -314,7 +311,6 @@ fn collect_candidates(
     preferences: &AgentSelectionPreferences,
     agents: &[AgentInfo],
     registry: &Registry,
-    evidence_only: bool,
 ) -> Vec<Candidate> {
     let disabled: BTreeSet<String> = preferences
         .disabled_agent_ids
@@ -330,14 +326,6 @@ fn collect_candidates(
         if !matches!(agent.probe, ProbeState::Ready) {
             continue;
         }
-        if evidence_only
-            && registry
-                .get(&agent.id)
-                .is_none_or(|adapter| !adapter.supports_evidence_scope())
-        {
-            continue;
-        }
-
         if agent.catalog.models.is_empty() {
             if !registry
                 .get(&agent.id)
@@ -385,7 +373,7 @@ pub(crate) fn route_infos(
     agent: &AgentInfo,
     registry: &Registry,
 ) -> Vec<AgentRouteInfo> {
-    collect_candidates(preferences, std::slice::from_ref(agent), registry, false)
+    collect_candidates(preferences, std::slice::from_ref(agent), registry)
         .into_iter()
         .map(|candidate| AgentRouteInfo {
             model_id: candidate.route.model_id,
@@ -414,15 +402,13 @@ fn is_auto_model(model: &ModelInfo) -> bool {
 pub(crate) async fn resolve_live_route(
     state: &Shared,
     required_tags: &[String],
-    evidence_only: bool,
 ) -> Result<(ResolvedAgentRoute, ProviderMap)> {
-    resolve_live_route_excluding(state, required_tags, evidence_only, &BTreeSet::new()).await
+    resolve_live_route_excluding(state, required_tags, &BTreeSet::new()).await
 }
 
 pub(crate) async fn resolve_live_route_excluding(
     state: &Shared,
     required_tags: &[String],
-    evidence_only: bool,
     excluded: &BTreeSet<(String, Option<String>)>,
 ) -> Result<(ResolvedAgentRoute, ProviderMap)> {
     let providers = state.providers().await;
@@ -442,7 +428,6 @@ pub(crate) async fn resolve_live_route_excluding(
         required_tags,
         &agents,
         state.registry.as_ref(),
-        evidence_only,
         excluded,
     )?;
     Ok((route, providers))
@@ -662,7 +647,7 @@ pub(crate) async fn route_session(
     // mandatory tags only inside that routed conversation.
     if selected_tags.is_none() && !routing_enabled {
         let summary = state.sessions.summary(session_id).await?;
-        if summary.managed.is_none() {
+        if summary.history_only != Some(true) {
             let resolved_model =
                 ensure_concrete_route_allowed(state, &summary.agent_id, summary.model_id.clone())
                     .await?;
@@ -697,7 +682,7 @@ pub(crate) async fn route_session(
     let routing_tags = normalize_tags(selected_tags.unwrap_or(stored_tags));
     let media_tags = normalize_tags(stored_media.into_iter().chain(incoming_media_tags));
     let required = normalize_tags(routing_tags.iter().chain(media_tags.iter()).cloned());
-    let (route, providers) = resolve_live_route(state, &required, false).await?;
+    let (route, providers) = resolve_live_route(state, &required).await?;
     state
         .sessions
         .switch_agent_routed(
@@ -968,7 +953,6 @@ mod tests {
             &[TAG_MAX.into(), TAG_IMAGE.into()],
             std::slice::from_ref(&candidate),
             &registry,
-            false,
         )
         .expect("both inferred tags match");
         assert_eq!(route.model_id.as_deref(), Some("model-max"));
@@ -977,7 +961,6 @@ mod tests {
             &[TAG_MAX.into(), TAG_VIDEO.into()],
             &[candidate],
             &registry,
-            false,
         )
         .is_err());
     }
@@ -1010,7 +993,6 @@ mod tests {
                 &listed.tags,
                 std::slice::from_ref(&info),
                 &registry,
-                false,
             )
             .expect("a listed route's tags select a live pair");
             assert_eq!(selected.model_id, listed.model_id);
@@ -1058,7 +1040,6 @@ mod tests {
             &[TAG_FLASH.into()],
             &[candidate],
             &registry,
-            false,
             &excluded,
         )
         .expect("the higher-cost matching route remains eligible");
@@ -1092,7 +1073,6 @@ mod tests {
             &[TAG_MAX.into()],
             std::slice::from_ref(&candidate),
             &registry,
-            false,
         )
         .is_err());
 
@@ -1111,7 +1091,6 @@ mod tests {
             &[TAG_MAX.into()],
             std::slice::from_ref(&candidate),
             &registry,
-            false,
         )
         .expect("explicitly added fourth model is eligible");
         assert_eq!(route.model_id.as_deref(), Some("m4-max"));
@@ -1121,14 +1100,7 @@ mod tests {
             .models
             .retain(|model| model.id != "m4-max");
         assert!(
-            select_tag_route(
-                &preferences,
-                &[TAG_FLASH.into()],
-                &[candidate],
-                &registry,
-                false,
-            )
-            .is_err(),
+            select_tag_route(&preferences, &[TAG_FLASH.into()], &[candidate], &registry,).is_err(),
             "a stale configured row must not enable unconfigured defaults"
         );
     }

@@ -14,14 +14,14 @@ use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine as _;
 use genehub_proto::{
     Attachment, BlobOverview, BlobPayload, BlobRef, Catalog, ForkMethod, ForkTarget, ForkTransfer,
-    HistoryCoverage, ImportContinuation, InputOrigin, ItemDelta, ManagedSessionInfo,
-    PermissionOptionKind, PermissionOutcome, PermissionRequest, PermissionRequestKind, ProbeState,
-    RetrievalCapability, RoundLayer, RoundLayerOutcome, RoundSummary, RoundTrunk, SequencedEvent,
-    SessionAgentTarget, SessionArtifactBundle, SessionArtifactFile, SessionArtifactUpload,
-    SessionContext, SessionEvent, SessionImportCandidate, SessionImportListing,
-    SessionImportSource, SessionInspection, SessionLineage, SessionNarrativePage,
-    SessionReadSource, SessionRoundPage, SessionSnapshot, SessionStatus, SessionSummary,
-    TimelineItem, ToolStatus, TrunkLocator, TurnErrorCode, TurnOutcome, TurnStats, Usage,
+    HistoryCoverage, ImportContinuation, InputOrigin, ItemDelta, PermissionOptionKind,
+    PermissionOutcome, PermissionRequest, PermissionRequestKind, ProbeState, RetrievalCapability,
+    RoundLayer, RoundLayerOutcome, RoundSummary, RoundTrunk, SequencedEvent, SessionAgentTarget,
+    SessionArtifactBundle, SessionArtifactFile, SessionArtifactUpload, SessionContext,
+    SessionEvent, SessionImportCandidate, SessionImportListing, SessionImportSource,
+    SessionInspection, SessionLineage, SessionNarrativePage, SessionReadSource, SessionRoundPage,
+    SessionSnapshot, SessionStatus, SessionSummary, TimelineItem, ToolStatus, TrunkLocator,
+    TurnErrorCode, TurnOutcome, TurnStats, Usage,
 };
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -564,8 +564,7 @@ impl SessionManager {
             pending_permission: None,
             human_continuation: None,
             lineage: None,
-            managed: None,
-            managed_system_prompt: None,
+            history_only: false,
             imported: None,
         };
         self.store.save_meta(&meta)?;
@@ -642,119 +641,11 @@ impl SessionManager {
         Ok(next.summary(SessionStatus::Idle))
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub async fn create_managed(
-        &self,
-        workspace_id: &str,
-        cwd: PathBuf,
-        agent_id: &str,
-        model_id: Option<String>,
-        mode_id: Option<String>,
-        runtime_values: std::collections::BTreeMap<String, String>,
-        title: Option<String>,
-        managed: ManagedSessionInfo,
-        managed_system_prompt: String,
-    ) -> Result<SessionSummary> {
-        self.create_managed_named(
-            workspace_id,
-            cwd,
-            agent_id,
-            model_id,
-            None,
-            mode_id,
-            runtime_values,
-            title,
-            managed,
-            managed_system_prompt,
-            None,
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn create_managed_named(
-        &self,
-        workspace_id: &str,
-        cwd: PathBuf,
-        agent_id: &str,
-        model_id: Option<String>,
-        effort_id: Option<String>,
-        mode_id: Option<String>,
-        runtime_values: std::collections::BTreeMap<String, String>,
-        title: Option<String>,
-        managed: ManagedSessionInfo,
-        managed_system_prompt: String,
-        stable_id: Option<String>,
-    ) -> Result<SessionSummary> {
-        if managed.evidence_scope.is_some() {
-            self.registry.require_evidence_scope(agent_id)?;
-        }
-        if let Some(id) = &stable_id {
-            if let Ok(existing) = self.summary(id).await {
-                if existing.workspace_id != workspace_id
-                    || existing.managed.as_ref().is_none_or(|info| {
-                        info.workflow_run_id != managed.workflow_run_id
-                            || info.node_id != managed.node_id
-                    })
-                {
-                    bail!("diagnostic Session identity conflict");
-                }
-                return Ok(existing);
-            }
-        }
-        self.registry.require(agent_id)?;
-        let now = now_ms();
-        let meta = SessionMeta {
-            inbox: Default::default(),
-            execution_retired: false,
-            execution_cleanup: None,
-            activity: Default::default(),
-            message_preview: None,
-            latest_reply: None,
-            open_turn: None,
-            drafts: vec![],
-            effort_id,
-            fast: None,
-            runtime_values,
-            id: stable_id.unwrap_or_else(|| format!("s_{}", uuid::Uuid::new_v4().simple())),
-            workspace_id: workspace_id.to_string(),
-            format: SESSION_FORMAT,
-            agent_id: agent_id.to_string(),
-            tag_routing: false,
-            routing_tags: Vec::new(),
-            media_tags: Vec::new(),
-            title,
-            title_locked: false,
-            labels: Vec::new(),
-            description: None,
-            cwd,
-            model_id,
-            mode_id,
-            created_at_ms: now,
-            updated_at_ms: now,
-            archived: false,
-            persist: None,
-            agent_pid: None,
-            pending_permission: None,
-            human_continuation: None,
-            lineage: None,
-            managed: Some(managed),
-            managed_system_prompt: Some(managed_system_prompt),
-            imported: None,
-        };
-        self.store.save_meta(&meta)?;
-        let summary = meta.summary(SessionStatus::Idle);
-        self.sessions.write().await.insert(
-            meta.id.clone(),
-            Arc::new(Live::new(meta, self.store.clone())),
-        );
-        Ok(summary)
-    }
-
     /// Authenticates a local Agent CLI as exactly one durable Session. The
     /// proof becomes invalid when the Session no longer exists or is unreadable.
     pub async fn authenticate_controller(&self, session_id: &str, token: &str) -> bool {
-        if self.summary(session_id).await.is_err() {
+        if !matches!(self.summary(session_id).await, Ok(summary) if summary.history_only != Some(true))
+        {
             return false;
         }
         let Ok(presented) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(token) else {
@@ -835,7 +726,7 @@ impl SessionManager {
             fork_history(&items, turn_id, busy)?
         };
 
-        let explicit_target = target.is_some();
+        let explicit_target = target.is_some() || source_meta.history_only;
         let target = target.unwrap_or_else(|| ForkTarget {
             agent_id: source_meta.agent_id.clone(),
             workspace_id: None,
@@ -848,8 +739,11 @@ impl SessionManager {
         let same_agent = target.agent_id == source_meta.agent_id;
         // A live turn still has usable history, but the agent is mid-prompt.
         // Reconstruct from the selected boundary instead of asking it to fork.
-        let native_candidate =
-            !busy && same_agent && source_adapter.capabilities().fork && checkpoint.is_some();
+        let native_candidate = !source_meta.history_only
+            && !busy
+            && same_agent
+            && source_adapter.capabilities().fork
+            && checkpoint.is_some();
         let native = if native_candidate {
             match self
                 .store
@@ -1003,8 +897,7 @@ impl SessionManager {
                 method,
                 context,
             }),
-            managed: None,
-            managed_system_prompt: None,
+            history_only: false,
             imported: None,
         };
         let write = || -> Result<()> {
@@ -1267,8 +1160,7 @@ impl SessionManager {
                 method: ForkMethod::ReconstructedContext,
                 context: Some(built.stats),
             }),
-            managed: None,
-            managed_system_prompt: None,
+            history_only: false,
             imported: None,
         };
         let write = || -> Result<()> {
@@ -1482,8 +1374,7 @@ impl SessionManager {
             pending_permission: None,
             human_continuation: None,
             lineage: None,
-            managed: None,
-            managed_system_prompt: None,
+            history_only: false,
             imported: Some(ImportedSessionMeta {
                 source_key: candidate.source_key,
                 agent_id: candidate.agent_id,
@@ -2688,6 +2579,10 @@ impl SessionManager {
         origin: Option<InputOrigin>,
     ) -> Result<String> {
         let live = self.live(session_id).await?;
+        anyhow::ensure!(
+            !live.meta.lock().await.history_only,
+            "this is retired execution history; fork to continue"
+        );
         if live
             .meta
             .lock()
@@ -2717,17 +2612,13 @@ impl SessionManager {
                 .map(|adapter| adapter.host_form_payloads())
                 .unwrap_or(true)
         };
-        let mut additional_system_prompt = crate::skills::session_guidance(
+        let additional_system_prompt = crate::skills::session_guidance(
             self.skills_dir.as_deref(),
             self.front_door_cli.as_deref(),
             self.registry.python().as_deref(),
             host_paths,
         );
         let meta = live.meta.lock().await.clone();
-        if let Some(managed) = meta.managed_system_prompt.as_deref() {
-            additional_system_prompt.push_str("\n\n");
-            additional_system_prompt.push_str(managed);
-        }
         let additional_system_prompt = Some(additional_system_prompt);
         let execution = live.claim_execution(prepared.is_some()).await?;
         if let Some((_, ids)) = &prepared {
@@ -3104,15 +2995,11 @@ impl SessionManager {
             return Ok(());
         }
         let mut meta = live.meta.lock().await.clone();
-        let adapter = if meta
-            .managed
-            .as_ref()
-            .is_some_and(|managed| managed.evidence_scope.is_some())
-        {
-            self.registry.require_evidence_scope(&meta.agent_id)?
-        } else {
-            self.registry.require(&meta.agent_id)?
-        };
+        anyhow::ensure!(
+            !meta.history_only,
+            "this is retired execution history; fork to continue"
+        );
+        let adapter = self.registry.require(&meta.agent_id)?;
         let offered = adapter.catalog(providers).await;
         // A session that named no model still runs on one. Record which, so
         // `session list/get`, the review of a conversation and anyone asking
@@ -3197,23 +3084,15 @@ impl SessionManager {
                 .await
                 .clone()
                 .or_else(|| {
-                    let mut guidance = crate::skills::session_guidance(
+                    let guidance = crate::skills::session_guidance(
                         self.skills_dir.as_deref(),
                         self.front_door_cli.as_deref(),
                         self.registry.python().as_deref(),
                         adapter.host_form_payloads(),
                     );
-                    if let Some(managed) = meta.managed_system_prompt.as_deref() {
-                        guidance.push_str("\n\n");
-                        guidance.push_str(managed);
-                    }
                     Some(guidance)
                 });
         let config = |resume: Option<PersistHandle>| SessionConfig {
-            evidence_scope: meta
-                .managed
-                .as_ref()
-                .and_then(|managed| managed.evidence_scope.clone()),
             session_id: meta.id.clone(),
             cwd: meta.cwd.clone(),
             model_id: meta.model_id.clone(),
@@ -3657,7 +3536,7 @@ impl SessionManager {
         target: SessionAgentTarget,
         providers: &ProviderMap,
     ) -> Result<SessionSummary> {
-        self.switch_agent_with_routing(session_id, target, providers, None, false)
+        self.switch_agent_with_routing(session_id, target, providers, None)
             .await
     }
 
@@ -3674,7 +3553,6 @@ impl SessionManager {
             target,
             providers,
             Some((routing_tags, media_tags)),
-            false,
         )
         .await
     }
@@ -3685,7 +3563,6 @@ impl SessionManager {
         target: SessionAgentTarget,
         providers: &ProviderMap,
         routing: Option<(Vec<String>, Vec<String>)>,
-        allow_managed: bool,
     ) -> Result<SessionSummary> {
         let live = self.live(session_id).await?;
         let _interaction = live.interaction_lock.lock().await;
@@ -3710,12 +3587,10 @@ impl SessionManager {
         }
 
         let source_meta = live.meta.lock().await.clone();
-        if source_meta.managed.is_some() && !allow_managed {
-            bail!("Workflow-managed Sessions keep the Agent chosen by their tag contract");
-        }
-        if source_meta.managed.is_none() && allow_managed {
-            bail!("only Workflow-managed Sessions can use automatic Worker failover");
-        }
+        anyhow::ensure!(
+            !source_meta.history_only,
+            "this is retired execution history; fork to continue"
+        );
         if source_meta
             .imported
             .as_ref()
@@ -4092,8 +3967,7 @@ impl SessionManager {
             PermissionRequestKind::PlanApproval
                 | PermissionRequestKind::Question
                 | PermissionRequestKind::ProviderConfiguration
-        ) || request.id.starts_with("workflow-human-")
-            || !live.meta.lock().await.inbox.entries.is_empty()
+        ) || !live.meta.lock().await.inbox.entries.is_empty()
         {
             let decision = HumanContinuation {
                 request: request.clone(),
@@ -4732,19 +4606,6 @@ impl SessionManager {
         // arriving after the tombstone finds nothing to rehydrate, so this closes the window.
         self.sessions.write().await.remove(session_id);
         Ok(())
-    }
-
-    pub(crate) async fn consulting(&self, session_id: &str) -> bool {
-        let Ok(live) = self.live(session_id).await else {
-            return false;
-        };
-        let consulting = live
-            .execution
-            .lock()
-            .await
-            .as_ref()
-            .is_some_and(|execution| execution.consultation);
-        consulting
     }
 
     pub async fn close(&self, session_id: &str) -> Result<()> {
@@ -7881,8 +7742,7 @@ mod tests {
             pending_permission: None,
             human_continuation: None,
             lineage: None,
-            managed: None,
-            managed_system_prompt: None,
+            history_only: false,
             imported: None,
         }
     }

@@ -13,7 +13,9 @@ This package does not copy those checklists. `testctl governance check` only imp
 The frozen Rust integration crate is retired. Its cases are recorded in `testing/migration/rust-parity.json`
 as `retired`, `release-only`, or `suspended` with their evidence, and the source that remains for audit lives under
 `testing/deprecated/archive/`; `testctl` no longer executes a Rust legacy runner. New business cases belong in
-`journeys/`, `specialties/`, or `e2e/`.
+`journeys/`, `specialties/`, or `e2e/`. CLI remote and forwarded contracts now use public TS cases;
+the last `genehub-testing` helper, its workspace member and CI exclusion are removed together.
+Native argument, redaction and intrinsic confinement checks remain in `apps/cli/tests`.
 
 For a bounded dev feedback, use `plan` then `run --gate dev-feedback --case <id> --reason <scope>`
 (repeat `--case`, or select with `--tags`). Use absolute `--open`, `--cloud` and `--space` paths:

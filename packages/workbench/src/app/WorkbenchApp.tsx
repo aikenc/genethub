@@ -258,7 +258,7 @@ export function App({
   // `activeTurn` is safe to consult here, unlike on its own, because it is only
   // asked about while this client is holding a message: a reconnect into a
   // running session has no pending message and still resolves to `running`.
-  const durableInput = !!workbench.client?.identity?.features?.includes("session.input.v1") && !session?.managed;
+  const durableInput = !!workbench.client?.identity?.features?.includes("session.input.v1") && !session?.historyOnly;
   const pending = workbench.timeline.pending;
   const phase = resolveComposerPhase({
     pending,
@@ -287,8 +287,8 @@ export function App({
     ...mediaTagsForTimeline(workbench.timeline.items),
   ]);
   const importedReadOnly = session?.imported?.continuation === "readOnly";
-  const managedReadOnly = session?.managed?.userInteraction === "readOnly";
-  const sessionReadOnly = importedReadOnly || managedReadOnly;
+  const historyOnly = session?.historyOnly === true;
+  const sessionReadOnly = importedReadOnly || historyOnly;
   const composing = Boolean(workbench.activeSessionId || draft);
   // An unstarted conversation: no session on the machine, and so nothing a
   // transcript could be drawn from.
@@ -957,9 +957,9 @@ export function App({
               ) : null}
             </div>
           ) : null}
-          {session?.managed ? (
+          {session?.historyOnly ? (
             <div className="shrink-0 border-b border-line bg-raised px-3 py-1.5 text-xs text-muted">
-              Workflow 受管会话 · {session.managed.role} · {managedReadOnly ? "人类只读" : "可直接交互"}
+              历史会话 · 原执行机制已退役，可 fork 后继续
             </div>
           ) : null}
 
@@ -1002,7 +1002,7 @@ export function App({
                         </div>
                       )}
                     </div>
-                    {workbench.timeline.pendingPermission && managedReadOnly ? (
+                    {workbench.timeline.pendingPermission && historyOnly ? (
                       <div className="z-20 shrink-0 px-4 pb-4 pt-2">
                         <div
                           role="status"
@@ -1061,8 +1061,8 @@ export function App({
                         lastActivityAtMs={session?.lastActivityAtMs ?? null}
                         disabled={sessionReadOnly}
                         disabledReason={
-                          managedReadOnly
-                            ? "这是 Workflow 管理的只读子会话；请在根会话控制任务，或 fork 为普通会话。"
+                          historyOnly
+                            ? "原执行机制已退役；请 fork 为普通会话后继续。"
                             : importedReadOnly
                             ? "这是只读导入历史：原项目没有提供可恢复会话。"
                             : undefined

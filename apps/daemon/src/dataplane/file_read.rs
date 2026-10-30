@@ -13,12 +13,11 @@ use genehub_proto::{ErrorCode, ExchangeResponseHead};
 use sha2::{Digest, Sha256};
 
 use super::endpoint::{send_error, PeerServices, ServerStream};
-use crate::authz::{Capability, Principal};
 use crate::transfer::wire::{FileIdentity, FileReadHead, FileReadRequest};
 
 const READ_STEP_BYTES: usize = 256 * 1024;
 
-pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -> Result<()> {
+pub(super) async fn handle(stream: &mut ServerStream, _services: &PeerServices) -> Result<()> {
     if !stream.read_body(0).await?.is_empty() {
         anyhow::bail!("file.read accepts no request body");
     }
@@ -43,22 +42,6 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
         )
         .await;
     };
-    // A paired device keeps exactly what it was granted: reading anywhere on
-    // the machine is what an unconfined terminal could do, so a device that
-    // was only given workspace files still only reads workspace files.
-    let caller = Principal::of(&services.state, &services.access);
-    if matches!(caller, Principal::Device { .. })
-        && !caller.allows(Capability::PtyUnconfined)
-        && !inside_a_workspace(services, &path).await
-    {
-        return send_error(
-            stream,
-            403,
-            ErrorCode::Forbidden,
-            "this device may read workspace files only; reading elsewhere needs `pty:unconfined`",
-        )
-        .await;
-    }
     let mut file = match std::fs::File::open(&path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -184,28 +167,6 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
         sent += read as u64;
     }
     stream.finish().await
-}
-
-async fn inside_a_workspace(services: &PeerServices, path: &std::path::Path) -> bool {
-    let Ok(path) = path.canonicalize() else {
-        return false;
-    };
-    for workspace in services.state.workspaces.list().await {
-        let roots = std::iter::once(workspace.root.clone())
-            .chain(workspace.folders.iter().map(|folder| folder.root.clone()));
-        for root in roots {
-            let Some(root) = crate::guest_paths::inbound_absolute(&root) else {
-                continue;
-            };
-            if root
-                .canonicalize()
-                .is_ok_and(|root| path.starts_with(&root))
-            {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 fn hex(bytes: &[u8]) -> String {

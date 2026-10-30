@@ -98,18 +98,6 @@ const COMMAND_NAMES: [&str; 79] = [
     "speech.runtime.unregister",
 ];
 
-/// The capability vocabulary a machine grants a device, named here so `genet
-/// schema` can offer it as an enum rather than leaving an agent to discover the
-/// spelling by being refused. Derived from the same set `Capability::parse`
-/// accepts: a hand-written copy drifted, and published a shorter enum than the
-/// daemon would have honoured, which is the refusal this list exists to avoid.
-fn grants() -> Vec<&'static str> {
-    crate::authz::Capability::ALL
-        .iter()
-        .map(|capability| capability.as_str())
-        .collect()
-}
-
 /// Commands that change something on the target machine. Read by agents that
 /// need to know what is safe to retry, so it is a property of the command
 /// rather than a judgement made at each call site.
@@ -680,7 +668,7 @@ async fn execute(
                 .map_err(rpc_error)?
             {
                 Reply::CallerAuthority(authority) => {
-                    value["principal"] = serde_json::json!({"type":authority.principal_type,"sessionId":authority.session_id,"grants":authority.grants});
+                    value["principal"] = serde_json::json!({"type":authority.principal_type,"sessionId":authority.session_id,"providerOperations":authority.provider_operations});
                     value["authority"] =
                         serde_json::to_value(authority).expect("serializable authority");
                 }
@@ -798,10 +786,7 @@ async fn execute(
             sessions.retain(|session| {
                 labels.iter().all(|label| session.labels.contains(label))
                     && source_kind.as_deref().is_none_or(|kind| {
-                        crate::session::store::derived_source_kind_for(
-                            &session.labels,
-                            session.managed.is_some(),
-                        ) == kind
+                        crate::session::store::derived_source_kind_for(&session.labels) == kind
                     })
             });
             Ok((
@@ -1768,18 +1753,7 @@ fn command_schema(name: &str) -> Value {
             ),
         ),
         "device.list" => ("genet device list", true, object_input(json!({}), &[])),
-        "device.invite" => (
-            "genet device invite [--grant <capability>]…",
-            true,
-            object_input(
-                json!({"grants": {
-                    "type": ["array", "null"],
-                    "items": {"type": "string", "enum": grants()},
-                    "description": "absent means an unrestricted device",
-                }}),
-                &[],
-            ),
-        ),
+        "device.invite" => ("genet device invite", true, object_input(json!({}), &[])),
         "device.revoke" => (
             "genet device revoke <deviceId>",
             true,
@@ -2196,7 +2170,6 @@ pub fn reply_kind(reply: &Reply) -> &'static str {
         Reply::SessionDrafts(_) => "session drafts",
         Reply::PreviewAnnotations(_) => "preview annotations",
         Reply::SessionComponents(_) => "session components",
-        Reply::SessionFlow(_) => "session flow",
         Reply::SessionImports(_) => "session imports",
         Reply::Snapshot(_) => "session snapshot",
         Reply::SessionInspection(_) => "session inspection",
@@ -2210,14 +2183,7 @@ pub fn reply_kind(reply: &Reply) -> &'static str {
         Reply::Blobs(_) => "blobs",
         Reply::SessionArtifactUpload(_) => "session artifact upload",
         Reply::SessionArtifact(_) => "session artifact",
-        Reply::WorkflowCheck(_) => "workflow check",
-        Reply::WorkflowProject(_) => "workflow project",
-        Reply::WorkflowRun(_) => "workflow run",
-        Reply::WorkflowJournal(_) => "workflow journal",
-        Reply::WorkflowRuns(_) => "workflow runs",
         Reply::AgentSpaceChangePlan(_) => "agent space change plan",
-        Reply::WorkflowPackages(_) => "workflow packages",
-        Reply::WorkflowBuild(_) => "workflow build",
         Reply::Workspace(_) => "workspace",
         Reply::Workspaces(_) => "workspaces",
         Reply::Directory(_) => "directory",
@@ -2590,7 +2556,7 @@ mod tests {
             lineage: None,
             imported: None,
             last_activity_at_ms: None,
-            managed: None,
+            history_only: None,
         };
         assert_eq!(
             sessions(Reply::Sessions(vec![summary.clone()])).unwrap(),

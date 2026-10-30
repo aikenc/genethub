@@ -222,23 +222,6 @@ impl Registry {
         all
     }
 
-    /// Used both before authoring succeeds and before a restricted Session is
-    /// created/resumed. Agent-specific support stays inside the adapter layer.
-    pub(crate) fn require_evidence_scope(&self, id: &str) -> Result<SharedAdapter> {
-        let adapter = self.require(id)?;
-        if !adapter.supports_evidence_scope() {
-            let supported = self
-                .adapters()
-                .iter()
-                .filter(|adapter| adapter.supports_evidence_scope())
-                .map(|adapter| adapter.id().to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            anyhow::bail!("evidenceOnlyUnsupported: Agent '{id}' cannot enforce a bounded read-only evidence scope. Keep evidenceOnly enabled and select a supported Agent ({supported}) with a compatible model; do not widen workspace folders or disable the evidence boundary.");
-        }
-        Ok(adapter)
-    }
-
     /// Every Agent as it stands now. Waits on a native adapter only the first
     /// time, bounded by its own deadline, and on a script only until it has
     /// said something at all — an Agent that has not sent its first `state`

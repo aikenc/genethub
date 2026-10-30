@@ -39,16 +39,16 @@ function authCase(
   );
 }
 
-function devicesOf(reply: unknown): Array<{ id: string; name: string; grants?: string[]; connected: boolean }> {
-  const typed = reply as { type?: string; data?: { devices?: Array<{ id: string; name: string; grants?: string[]; connected: boolean }> } };
+function devicesOf(reply: unknown): Array<{ id: string; name: string; connected: boolean }> {
+  const typed = reply as { type?: string; data?: { devices?: Array<{ id: string; name: string; connected: boolean }> } };
   if (typed.type !== "devices" || !Array.isArray(typed.data?.devices)) {
     throw new Error(`device.list failed: ${JSON.stringify(reply)}`);
   }
   return typed.data.devices;
 }
 
-async function inviteCode(opened: Opened, grants: string[] = []): Promise<string> {
-  const reply = await opened.client.call({ type: "device.invite", payload: grants.length ? { grants } : null });
+async function inviteCode(opened: Opened): Promise<string> {
+  const reply = await opened.client.call({ type: "device.invite", payload: null });
   if (reply?.type !== "invite") throw new Error(`device.invite failed: ${JSON.stringify(reply)}`);
   return reply.data.code;
 }
@@ -72,20 +72,22 @@ function restartDaemon(daemon: Opened["daemon"]): void {
 
 authCase(
   "specialty.authorization.multiple-devices-unique",
-  "Multiple authorized devices retain distinct identities and grants",
-  "device.list contains both exact names under different ids with their independent grant sets",
-  ["device name used as identity", "later claim overwrites earlier device", "grants copied between devices"],
+  "Multiple full devices retain distinct authenticated identities",
+  "device.list contains both exact names under different ids and both devices independently read settings",
+  ["device name used as identity", "later claim overwrites earlier device", "one credential replaces another"],
   async (t, opened) => {
-    const first = await t.flows.main.pairDevice(opened.client, opened.daemon, ["read"], "shared-name");
-    const second = await t.flows.main.pairDevice(opened.client, opened.daemon, ["read", "files"], "shared-name");
+    const first = await t.flows.main.pairDevice(opened.client, opened.daemon, "shared-name");
+    const second = await t.flows.main.pairDevice(opened.client, opened.daemon, "shared-name");
     try {
       t.assertions.assert(first.deviceId !== second.deviceId, "duplicate display names reused a device id");
       const listed = devicesOf(await opened.client.call({ type: "device.list" }));
       const a = listed.find((entry) => entry.id === first.deviceId);
       const b = listed.find((entry) => entry.id === second.deviceId);
       t.assertions.assert(a?.name === "shared-name" && b?.name === "shared-name", `missing devices: ${JSON.stringify(listed)}`);
-      t.assertions.assert(JSON.stringify(a?.grants) === JSON.stringify(["handshake", "read"]), `wrong first grants: ${JSON.stringify(a)}`);
-      t.assertions.assert(JSON.stringify(b?.grants) === JSON.stringify(["handshake", "read", "files"]), `wrong second grants: ${JSON.stringify(b)}`);
+      t.assertions.assert(a && b && !("grants" in a) && !("grants" in b), "live devices retain obsolete grant levels");
+      t.assertions.assert(first.credential.secret !== second.credential.secret, "distinct devices shared a credential");
+      const replies = await Promise.all([first.client.call({ type: "settings.get" }), second.client.call({ type: "settings.get" })]);
+      t.assertions.assert(replies.every(reply => reply?.type === "settings"), "one full device could not read settings");
     } finally {
       first.client.close(); second.client.close();
     }
@@ -98,7 +100,7 @@ authCase(
   "the first claim returns a credential and replaying the same code is rejected",
   ["invite retained after claim", "claim replay issues a second credential"],
   async (t, opened) => {
-    const code = await inviteCode(opened, ["read"]);
+    const code = await inviteCode(opened);
     const credential = await t.flows.main.claimDeviceInvite(opened.daemon, code, "first-claim");
     t.assertions.assert(Boolean(credential.deviceId && credential.secret), "first claim did not return a credential");
     await mustReject(
@@ -129,7 +131,7 @@ authCase(
   "the same device id reconnects and lists workspaces after restart",
   ["authorized devices only in memory", "restart rotates device secret", "reconnect silently becomes owner"],
   async (t, opened) => {
-    const paired = await t.flows.main.pairDevice(opened.client, opened.daemon, ["read"], "persistent");
+    const paired = await t.flows.main.pairDevice(opened.client, opened.daemon, "persistent");
     paired.client.close();
     const beforeRestart = daemonEndpoint(opened.daemon);
     restartDaemon(opened.daemon);
@@ -161,7 +163,7 @@ authCase(
   "a revoked stored credential cannot reconnect after the daemon restarts",
   ["revocation only disconnects current socket", "restart resurrects authorization", "stale credential cache accepted"],
   async (t, opened) => {
-    const paired = await t.flows.main.pairDevice(opened.client, opened.daemon, ["read"], "revoked");
+    const paired = await t.flows.main.pairDevice(opened.client, opened.daemon, "revoked");
     paired.client.close();
     await opened.client.call({ type: "device.revoke", payload: { deviceId: paired.deviceId } });
     restartDaemon(opened.daemon);
@@ -178,8 +180,8 @@ authCase(
   "the target loses access while a separately paired device remains ready and authorized",
   ["global authorization epoch invalidates peers", "wrong device removed", "revoke restarts transport"],
   async (t, opened) => {
-    const target = await t.flows.main.pairDevice(opened.client, opened.daemon, ["read"], "target");
-    const survivor = await t.flows.main.pairDevice(opened.client, opened.daemon, ["read"], "survivor");
+    const target = await t.flows.main.pairDevice(opened.client, opened.daemon, "target");
+    const survivor = await t.flows.main.pairDevice(opened.client, opened.daemon, "survivor");
     try {
       await opened.client.call({ type: "device.revoke", payload: { deviceId: target.deviceId } });
       await mustReject(() => target.client.call({ type: "workspace.list" }), "revoked target still acted");
@@ -195,7 +197,7 @@ authCase(
   "serialized device.list output contains identity and grants but neither credential secret nor invite code",
   ["credential serialized in DeviceInfo", "invite code retained in listing", "secret hidden only by TypeScript type"],
   async (t, opened) => {
-    const paired = await t.flows.main.pairDevice(opened.client, opened.daemon, ["read"], "private");
+    const paired = await t.flows.main.pairDevice(opened.client, opened.daemon, "private");
     try {
       const reply = await opened.client.call({ type: "device.list" });
       const serialized = JSON.stringify(reply);
@@ -208,21 +210,21 @@ authCase(
 
 authCase(
   "specialty.authorization.narrow-device-cannot-administer",
-  "A read-only device cannot administer device authorization",
-  "device.list, device.invite, and device.revoke are all rejected for the narrow credential",
-  ["read grant implies device administration", "list leaks peer identities", "revoke lacks owner check"],
+  "A full paired device administers authorization and revokes itself",
+  "complete device can list, invite and revoke itself; the owner confirms removal",
+  ["full device cannot administer", "self-revocation leaves a reusable credential"],
   async (t, opened) => {
-    const narrow = await t.flows.main.pairDevice(opened.client, opened.daemon, ["read"], "narrow");
+    const narrow = await t.flows.main.pairDevice(opened.client, opened.daemon, "narrow");
     try {
-      await t.assertions.expectProtocolCode(() => narrow.client.call({ type: "device.list" }), "forbidden");
-      await t.assertions.expectProtocolCode(
-        () => narrow.client.call({ type: "device.invite", payload: null }),
-        "forbidden",
-      );
-      await t.assertions.expectProtocolCode(
-        () => narrow.client.call({ type: "device.revoke", payload: { deviceId: narrow.deviceId } }),
-        "forbidden",
-      );
+      t.assertions.assert((await narrow.client.call({type:"device.list"}))?.type === "devices", "paired device lost administration");
+      t.assertions.assert((await narrow.client.call({type:"device.invite",payload:null}))?.type === "invite", "paired device lost invitation");
+      // Revocation fences the caller socket before an ACK can arrive. Observe
+      // the durable effect through the independent owner, not that socket.
+      const revoke = narrow.client.call({type:"device.revoke",payload:{deviceId:narrow.deviceId}}).then(() => undefined, () => undefined);
+      await t.tools.waitUntil(async () => !devicesOf(await opened.client.call({type:"device.list"})).some(d=>d.id===narrow.deviceId), 10000);
+      narrow.client.close();
+      await revoke;
+      await mustReject(() => t.flows.main.connectDevice(opened.daemon, narrow.credential, "revoked-self"), "self-revoked credential reconnected");
     } finally { narrow.client.close(); }
   },
 );
@@ -233,7 +235,7 @@ authCase(
   "exactly one claimant receives a credential and device.list records exactly that one authorization",
   ["claim check and consume race", "two credentials minted for one invite", "losing claim leaves phantom device"],
   async (t, opened) => {
-    const code = await inviteCode(opened, ["read"]);
+    const code = await inviteCode(opened);
     const settled = await Promise.allSettled([
       t.flows.main.claimDeviceInvite(opened.daemon, code, "racer-a"),
       t.flows.main.claimDeviceInvite(opened.daemon, code, "racer-b"),

@@ -125,7 +125,6 @@ defineSpecialty(
       const narrow = await t.flows.main.pairDevice(
         opened.client,
         opened.daemon,
-        ["read", "files"],
         "files-only",
       );
       try {
@@ -136,8 +135,8 @@ defineSpecialty(
         });
         const head = await probe.responseHead;
         t.assertions.assert(
-          head.status === 403,
-          "files-only grant gained service access",
+          head.status === 200,
+          "complete paired device lost service access",
         );
         probe.reset(1);
       } finally {

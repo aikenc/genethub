@@ -1,5 +1,5 @@
 // An expert made from the template stays on that template; the product never rewrites it behind the owner's back.
-// A reset happens only when the user asks, through `tools/expert.py reset`: an expert resets itself or another one,
+// A reset happens only when the user asks, through `tools/team.py reset`: an expert resets itself or another one,
 // soul.md included. A team made before the template's Skills were renamed still selects `expert-core`; a reset or
 // the timer's identity sync moves it onto `team-core`. These cases run the real script and the real SpaceBuilder on experts laid out as the daemon lays
 // them out (<data>/spaces/<name> next to <data>/builtin-skills), with no daemon and no model.
@@ -51,8 +51,8 @@ defineSpecialty(
     timeoutMs: 90_000,
     requiredArtifacts: [],
     resources: { environments: 1, cpu: 1 },
-    surfaces: ["tools/expert.py", "spacebuilder.py"],
-    productInterfaces: ["tools/expert.py", "spacebuilder.py"],
+    surfaces: ["tools/team.py", "spacebuilder.py"],
+    productInterfaces: ["tools/team.py", "spacebuilder.py"],
   },
   async (t) => {
     const data = join(t.env.root, "expert-reset");
@@ -95,7 +95,7 @@ defineSpecialty(
     t.assertions.assert(read(alpha, "front/AGENTS.md").includes("只说方言"), "the soul was not compiled before the reset");
 
     const reset = (from: string, ...args: string[]) => {
-      const done = spawnSync("python3", ["tools/expert.py", "reset", ...args], { cwd: from, env, encoding: "utf8" });
+      const done = spawnSync("python3", ["tools/team.py", "reset", ...args], { cwd: from, env, encoding: "utf8" });
       return { code: done.status ?? -1, out: done.stdout.trim(), err: done.stderr };
     };
 

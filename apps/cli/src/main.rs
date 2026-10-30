@@ -28,8 +28,6 @@ const FORWARDED: &[&str] = &[
     "file",
     "speech",
     "client",
-    // Preserve the explicit workflowRetired reply for legacy callers.
-    "workflow",
     "process",
     "machine",
     "device",
@@ -190,7 +188,7 @@ fn print_usage() {
   genet session context <id>        build bounded, cited context without an LLM
   genet agent list                  agents installed on this machine
   genet agent show <id>             one agent: state, actions, job, requests
-  genet agent action <id> <action>  run an install/login/... action (settings grant)
+  genet agent action <id> <action>  run an install/login/... action
   genet agent reload <id>           restart a script agent from its directory
   genet agent reset <id>            delete user/<id> and use the built-in copy
   genet agent test <id> [--live]    run a script agent's own tests
@@ -254,8 +252,8 @@ fn print_usage() {
                                     one machine from the directory or direct store
   genet machine forget <machineId>  drop the local credential for a machine
   genet device list                 clients authorized on the target machine
-  genet device invite [--grant read,session,files,git,pty,devices,settings,update]
-                                    mint a pairing code; no --grant means no limits
+  genet device invite
+                                    mint a pairing code for full machine access
   genet device revoke <deviceId>    withdraw one client's authorization
   genet <any of the above> --machine <machineId>
                                     run it on a paired machine instead

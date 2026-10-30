@@ -119,11 +119,13 @@ pub(crate) async fn start(
         }
     };
 
-    let confinement = match crate::isolation::required_for(caller, &workspace) {
-        Ok(confinement) => confinement,
-        Err(refusal) => return Err(protocol(ErrorCode::IsolationUnavailable, refusal)),
-    };
-
+    if !caller.is_full() {
+        return Err(protocol(
+            ErrorCode::Forbidden,
+            "this connection cannot execute commands",
+        ));
+    }
+    let confinement = None;
     let argv = crate::process::launch_argv(program, confinement.as_ref())
         .map_err(|error| StartError::Transport(format!("{program}: {error:#}")))?;
     let mut command = crate::process::command(&argv, arguments, &cwd);
@@ -168,7 +170,7 @@ pub(crate) async fn start(
     }
     drop(sender);
 
-    let described = crate::isolation::describe(confinement.as_ref());
+    let described = None;
     let (out, rx) = mpsc::channel(FRAME_QUEUE);
     let timeout_ms = request.timeout_ms;
     let argv_log = request.argv.clone();
@@ -254,17 +256,6 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
             .await
         }
     };
-    if let Some(scope) = &services.access.workspace_id {
-        if scope != &request.workspace_id {
-            return send_error(
-                stream,
-                403,
-                ErrorCode::Forbidden,
-                "the routed capability does not cover this workspace",
-            )
-            .await;
-        }
-    }
     let caller = Principal::of(&services.state, &services.access);
     let mut started = match start(&services.state, &caller, request, stdin).await {
         Ok(started) => started,

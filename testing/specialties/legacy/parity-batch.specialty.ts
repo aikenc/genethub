@@ -7,7 +7,7 @@ import { defineSpecialty } from "../../framework/public.ts";
 defineSpecialty(
   {
     id: "specialty.contracts.rust-crate-retained",
-    title: "Frozen Rust cases are required, retired with evidence, or suspended",
+    title: "Rust cases retain traceable ownership after the helper and active suites exit",
     oracle: "Every rust-parity row is required, retired with traceable parity evidence, or suspended under L13; active suites remain in the frozen crate",
     catches: ["crate deleted without retiring active rows", "legacy case silently removed from required execution"],
     tags: ["core", "contract"],
@@ -61,23 +61,12 @@ defineSpecialty(
         }
       }
     }
-    if (crateExists) {
-      const cargoToml = readFileSync(path.join(t.openRoot, "Cargo.toml"), "utf8");
-      t.assertions.assert(
-        cargoToml.includes('"testing/deprecated/rust"'),
-        "frozen crate dropped from workspace members",
-      );
-      const defaultMembers = cargoToml.match(/default-members\s*=\s*\[[^\]]*\]/s)?.[0] ?? "";
-      t.assertions.assert(defaultMembers.length > 0, "workspace default-members missing");
-      t.assertions.assert(
-        !defaultMembers.includes("testing/deprecated/rust"),
-        "frozen crate is still a default cargo test member",
-      );
-      const ci = readFileSync(path.join(t.openRoot, ".github/workflows/ci.yml"), "utf8");
-      t.assertions.assert(
-        ci.includes("cargo test --workspace --exclude genehub-testing"),
-        "CI still runs cargo test --workspace without excluding genehub-testing",
-      );
+    if (activeSuites.size === 0) {
+      t.assertions.assert(!crateExists, "retired Rust helper crate returned without a required suite");
+      const cliCargo = readFileSync(path.join(t.openRoot,"apps/cli/Cargo.toml"),"utf8");
+      t.assertions.assert(!cliCargo.includes("genehub-testing"),"CLI still links the retired business harness");
+      const ci = readFileSync(path.join(t.openRoot,".github/workflows/ci.yml"),"utf8");
+      t.assertions.assert(!ci.includes("--exclude genehub-testing"),"CI still excludes a deleted crate");
     }
   },
 );

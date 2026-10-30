@@ -387,7 +387,7 @@ defineSpecialty(
   async (t) => {
     await withOpened(t, async (opened) => {
       const marker = path.join(opened.workspaceRoot, "still-running.txt");
-      const device = await t.flows.main.pairDevice(opened.client, opened.daemon, []);
+      const device = await t.flows.main.pairDevice(opened.client, opened.daemon);
       const started = t.flows.main.startShell(device.client, {
         workspaceId: opened.workspaceId,
         argv: ["/bin/sh", "-c", `(while true; do echo alive >> ${marker}; sleep 0.05; done) & sleep 20`],

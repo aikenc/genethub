@@ -41,7 +41,6 @@ fn main() -> Result<(), ts_rs::ExportError> {
     SpeechSpanAlternative::export_all_to(directory)?;
     SpeechStart::export_all_to(directory)?;
     SpeechUncertainSpan::export_all_to(directory)?;
-    WorkflowRequestBudgetSnapshot::export_all_to(directory)?;
     WorkspaceFileSource::export_all_to(directory)?;
     WorkspaceFileSourceKind::export_all_to(directory)?;
     Ok(())
