@@ -4674,6 +4674,13 @@ impl SessionManager {
         }
     }
 
+    /// Records shutdown intent before the registry can close script hosts.
+    pub(crate) async fn prepare_shutdown(&self) {
+        for live in self.sessions.read().await.values() {
+            live.closing.store(true, Ordering::SeqCst);
+        }
+    }
+
     /// Stops every agent process. Called on daemon shutdown so no orphan
     /// children survive the tray exiting.
     pub async fn shutdown(&self) {
@@ -6542,6 +6549,19 @@ async fn pump_events(
             continue;
         }
 
+        // Registry shutdown deliberately ends script hosts. Preserve accepted
+        // inputs for restart instead of treating that expected exit as a failed
+        // business turn; Live::shutdown owns the actual retirement and flush.
+        if live.closing.load(Ordering::SeqCst)
+            && matches!(&event, SessionEvent::TurnFailed { error, .. }
+                if error.code == TurnErrorCode::AgentCrashed)
+        {
+            if let Some(execution) = owner.as_ref() {
+                execution.terminal.send_replace(true);
+            }
+            continue;
+        }
+
         activity::observe(&live, &event).await;
         if let SessionEvent::TurnProgress { turn_id, usage } = &event {
             token_usage::merge_progress(live_usage.entry(turn_id.clone()).or_default(), usage);
@@ -7448,6 +7468,9 @@ async fn apply(live: &Live, event: &SessionEvent) {
 /// shutdown`) aborts the pump task outright rather than letting `recv` see
 /// `Closed`, and a round that already settled has nothing left to clean up.
 async fn finalize_after_channel_closed(live: &Arc<Live>, _store: &Store) {
+    if live.closing.load(Ordering::SeqCst) {
+        return;
+    }
     let mut owner = live.execution.lock().await;
     let Some(execution) = owner.as_ref() else {
         return;
