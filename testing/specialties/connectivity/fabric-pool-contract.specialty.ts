@@ -56,23 +56,30 @@ defineSpecialty({
 
 defineSpecialty({
   id: "specialty.fabric-pool.calibration", title: "Revised shared bottleneck conserves capacity for one, two and four physical flows",
-  oracle: "Identical exact payload totals and hashes cross 1/2/4 TCP flows near the same 5Mbps aggregate rate",
+  oracle: "Identical exact payload totals and hashes cross 1/2/4 TCP flows near the same 5Mbps aggregate rate, including bounded event-loop stalls",
   catches: ["timer-per-record overhead changes the experiment", "adding channels multiplies offered bandwidth"],
-  tags: ["fabric-pool", "calibration"], llm: { default: "none" }, expectedDurationMs: 25000, timeoutMs: 40000,
+  tags: ["fabric-pool", "calibration"], llm: { default: "none" }, expectedDurationMs: 30000, timeoutMs: 40000,
   resources: { environments: 1, cpu: 2, memoryMb: 512, io: 1, browser: 0, pool: "exclusive" }, surfaces: ["tcp"], retention: true,
 }, async t => {
   const samples: unknown[] = [];
-  for (const flows of [1, 2, 4]) {
+  for (const { flows, stallMs } of [{ flows: 1, stallMs: 0 }, { flows: 2, stallMs: 0 }, { flows: 4, stallMs: 0 }, { flows: 1, stallMs: 20 }]) {
     const source = await startTcpPayloadServer(4*1024*1024/flows);
     const link = await startSharedBottleneck(source.url, { bandwidthMbps: 5, rttMs: 200 });
+    let stall: NodeJS.Timeout | undefined;
     try {
+      // A real scheduler pause must delay delivery, not erase link capacity
+      // on every later packet. Keep the same payload and capacity bounds.
+      if (stallMs) stall = setInterval(() => {
+        const until = performance.now() + stallMs;
+        while (performance.now() < until) { /* Inject bounded scheduling delay. */ }
+      }, 50);
       const start = performance.now();
       const results = await Promise.all(Array.from({ length: flows }, () => measureTcpTransfer({ url: link.urlFor(source.url), expectedBytes: source.sizeBytes, expectedSha256: source.sha256 })));
       const elapsedMs = performance.now()-start, bytes = results.reduce((n,s) => n+s.bytes,0), mbps = bytes*8/elapsedMs/1000;
-      samples.push({ flows, bytes, hashes: results.length, elapsedMs: Math.round(elapsedMs), mbps: +mbps.toFixed(3) });
+      samples.push({ flows, stallMs, bytes, hashes: results.length, elapsedMs: Math.round(elapsedMs), mbps: +mbps.toFixed(3) });
       t.note(JSON.stringify(samples.at(-1)));
       t.assertions.assert(mbps > 4 && mbps < 5.25, "raw capacity is not comparable across channel counts");
-    } finally { await link.stop(); await source.stop(); }
+    } finally { if (stall) clearInterval(stall); await link.stop(); await source.stop(); }
   }
   t.note(JSON.stringify(samples));
 });

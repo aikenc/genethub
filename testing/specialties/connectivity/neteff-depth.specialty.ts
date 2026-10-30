@@ -684,7 +684,9 @@ defineSpecialty(
     let busyRpcMs: number | null = null;
     try {
       const endpoint = daemonEndpoint(opened.daemon);
-      for (const rttMs of [0, 100, 200]) {
+      // Fixed paired samples, not retries: every transfer must be exact and
+      // every raw control must independently pass the existing calibration.
+      for (const rttMs of [0, 100, 200].flatMap(rtt => [rtt, rtt, rtt])) {
         const profile = { rttMs, bandwidthMbps: LINK_BANDWIDTH_MBPS };
         const tcp = await measureRawOneLeg(t, rawServer, profile, `direct tcp rtt=${rttMs}ms`);
         const productLink = await startShapedTcpProxy({ targetUrl: endpoint.url, profile });
@@ -713,11 +715,13 @@ defineSpecialty(
           }
           const product = await preview;
           const pathLog = readFileSync(path.join(t.env.data, "logs", "daemon.log"), "utf8").split("\n");
-          t.note(`direct native path rtt=${rttMs}ms: ${pathLog.filter(line =>
-            line.includes('event="preview_stage_timing"')).slice(-8).join(" | ")}`);
+          const stage = pathLog.filter(line => line.includes('event="preview_stage_timing"')).at(-1) ?? "";
+          t.note(JSON.stringify({rttMs, sample:samples.length%3+1, stages:Object.fromEntries(
+            ["scan_us","scan_read_us","scan_hash_us","send_us","write_actor_send_us"].map(key =>
+              [key,Number(new RegExp(`${key}=(\\d+)`).exec(stage)?.[1]??-1)]))}));
           samples.push(
             recordUtilization(t, {
-              label: `direct rtt=${rttMs}ms`,
+              label: `direct rtt=${rttMs}ms sample=${samples.length%3+1}`,
               file,
               clientRttMs: rttMs,
               daemonRttMs: 0,
@@ -742,7 +746,7 @@ defineSpecialty(
       `neteff preview-direct-bandwidth-utilization (daemon=wasm guest, link=${LINK_BANDWIDTH_MBPS}Mbps)\n` +
         `${headline("直连", samples, DIRECT_TARGET_UTILIZATION)}\n` +
         `fairness rpcDuring8MiBAt200ms=${busyRpcMs?.toFixed(0) ?? "-"}ms target<=1500ms\n` +
-        samples.map((sample) => sample.line).join("\n"),
+        JSON.stringify(samples.map(s => ({rtt:s.clientRttMs,tcpMs:Math.round(s.tcp.elapsedMs),productMs:Math.round(s.product.elapsedMs),utilization:+s.utilization.toFixed(4)}))),
     );
     for (const sample of samples) {
       t.assertions.assert(
@@ -840,7 +844,7 @@ defineSpecialty(
         { clientRttMs: 50, daemonRttMs: 50 },
         { clientRttMs: 0, daemonRttMs: 100 },
         { clientRttMs: 100, daemonRttMs: 100 },
-      ];
+      ].flatMap(point => [point, point, point]);
       for (const point of points) {
         const clientProfile = {
           rttMs: point.clientRttMs,
@@ -850,7 +854,7 @@ defineSpecialty(
           rttMs: point.daemonRttMs,
           bandwidthMbps: LINK_BANDWIDTH_MBPS,
         };
-        const label = `relay rtt=${point.clientRttMs}+${point.daemonRttMs}ms`;
+        const label = `relay rtt=${point.clientRttMs}+${point.daemonRttMs}ms${coldStart?"":` sample=${samples.length%3+1}`}`;
         const tcp = await measureRawTwoLegs(t, rawServer, {
           client: clientProfile,
           daemon: daemonProfile,
@@ -970,6 +974,7 @@ defineSpecialty(
       await rawServer.stop();
     }
     t.note(`startup=${startup}; samples=${samples.length}`);
+    if (!coldStart) t.note(JSON.stringify(samples.map(s => ({rtt:[s.clientRttMs,s.daemonRttMs],tcpMs:Math.round(s.tcp.elapsedMs),productMs:Math.round(s.product.elapsedMs),utilization:+s.utilization.toFixed(4)}))));
     for (const sample of samples) {
       if (coldSmall) {
         // Cold budget discovery costs at most one RTT plus the actor's 100ms

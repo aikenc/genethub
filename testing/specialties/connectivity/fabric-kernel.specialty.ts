@@ -50,7 +50,8 @@ for(const nodes of [1,2])for(const outage of [false,true])defineSpecialty({
       try{ok=(await control.call({type:"workspace.list"}))?.type==="workspaces";}catch{/* A full outage may exceed a single bounded RPC. */}
       samples.push({atMs,ms:Math.round(performance.now()-began),ok});await pause(250);
     }
-    const kernel=netem.stats();netem.stop();
+    const kernel=netem.stats();netem.restore();
+    t.note(JSON.stringify({phase:"restored-without-queue-destruction",before:kernel,after:netem.stats()}));
     t.note(JSON.stringify({phase:"loaded",nodes,outage,blackoutApplied,blackoutRestored,kernel,samples,outputErrors,closes}));
     const results=await Promise.race([Promise.all(outputs),new Promise<null>(resolve=>{drainTimer=setTimeout(()=>resolve(null),40000);})]);if(drainTimer)clearTimeout(drainTimer);
     const exactBody=(r:NonNullable<Awaited<ReturnType<typeof collectShellResult>>>,i:number)=>{
