@@ -16,8 +16,7 @@ async fn stopping_a_command_stops_what_the_command_started() {
         marker.display()
     );
 
-    let argv = launch_argv("/bin/sh", None).expect("an unconfined launcher");
-    let mut command = command(&argv, &["-c".to_string(), script], directory.path());
+    let mut command = command("/bin/sh", &["-c".to_string(), script], directory.path());
     let group = Group::spawn(&mut command).expect("the shell starts");
 
     // Long enough that the grandchild is certainly writing.
@@ -50,9 +49,8 @@ async fn stopping_a_command_stops_what_the_command_started() {
 #[tokio::test]
 async fn a_command_is_over_when_it_exits_not_when_its_pipe_closes() {
     let directory = tempfile::tempdir().expect("a temporary directory");
-    let argv = launch_argv("/bin/sh", None).expect("an unconfined launcher");
     let mut command = command(
-        &argv,
+        "/bin/sh",
         // The `sleep` inherits stdout and keeps it open long after `sh` is
         // gone; reading to end-of-file first would wait for the sleep.
         &["-c".to_string(), "sleep 30 & exit 7".to_string()],
@@ -88,8 +86,7 @@ async fn a_process_that_leaves_the_group_on_purpose_is_left_alone() {
         marker.display()
     );
 
-    let argv = launch_argv("/bin/sh", None).expect("an unconfined launcher");
-    let mut command = command(&argv, &["-c".to_string(), script], directory.path());
+    let mut command = command("/bin/sh", &["-c".to_string(), script], directory.path());
     let group = Group::spawn(&mut command).expect("the shell starts");
     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
     assert!(
@@ -132,8 +129,7 @@ async fn a_process_asked_to_finish_gets_to_clean_up_after_itself() {
         marker.display()
     );
 
-    let argv = launch_argv("/bin/sh", None).expect("an unconfined launcher");
-    let mut command = command(&argv, &["-c".to_string(), script], directory.path());
+    let mut command = command("/bin/sh", &["-c".to_string(), script], directory.path());
     let mut group = Group::spawn(&mut command).expect("the shell starts");
     // The trap has to be installed before the signal arrives, or this would
     // pass by killing a process that had no handler yet.
@@ -160,9 +156,8 @@ async fn a_process_asked_to_finish_gets_to_clean_up_after_itself() {
 #[tokio::test]
 async fn a_process_that_refuses_to_finish_is_stopped_anyway() {
     let directory = tempfile::tempdir().expect("a temporary directory");
-    let argv = launch_argv("/bin/sh", None).expect("an unconfined launcher");
     let mut command = command(
-        &argv,
+        "/bin/sh",
         &[
             "-c".to_string(),
             "trap '' TERM; while true; do sleep 0.05; done".to_string(),
@@ -180,10 +175,4 @@ async fn a_process_that_refuses_to_finish_is_stopped_anyway() {
         !tree_exists(pid),
         "the process survived being stopped after ignoring the request"
     );
-}
-
-#[test]
-fn an_unconfined_launcher_is_just_the_program() {
-    let argv = launch_argv("/bin/sh", None).expect("an unconfined launcher");
-    assert_eq!(argv, vec![std::path::PathBuf::from("/bin/sh")]);
 }

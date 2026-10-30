@@ -35,22 +35,8 @@ const FORWARDED: &[&str] = &[
     "desktop",
 ];
 
-/// Deliberately not the async entry point, and deliberately doing one thing
-/// before the runtime exists.
-///
-/// The confinement wrapper has to run in a process that has never started a
-/// thread: creating a user namespace is refused outright for a multi-threaded
-/// caller, so the same code that works here fails with `EINVAL` if it is moved
-/// a few lines down into `#[tokio::main]`, where the worker pool is already up
-/// (`apps/daemon/src/isolation.rs`).
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-
-    if args.first().map(String::as_str) == Some(genet_native::confine::CONFINE_ARG) {
-        std::process::exit(genet_native::confine::confine_and_exec(&args[1..]));
-    }
-
-    run(args)
+    run(std::env::args().skip(1).collect())
 }
 
 // A front door waits on one forwarded command; it does not run the daemon.

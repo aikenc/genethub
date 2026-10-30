@@ -506,24 +506,6 @@ spaceDir: string,
 sessionDir: string, };
 
 /**
- * What the operating system is holding a process to, told to whoever asked
- * for the process.
- *
- * Without this a confined caller has to infer the rule from the symptoms, and
- * the symptoms differ by backend: a namespace makes the rest of the filesystem
- * *absent* (`ENOENT`), Landlock leaves it there and *refuses* it (`EACCES`).
- * An agent reading "no such file" concludes the directory does not exist and
- * sets about creating it. Saying the rule up front is cheaper than every
- * caller guessing it wrong differently.
- */
-export type Confinement = { backend: IsolationBackend, 
-/**
- * Absolute paths the process can reach and write. Everything outside them
- * is absent or refused; which of the two depends on `backend`.
- */
-roots: Array<string>, };
-
-/**
  * A client proving it is on the authorized list, without sending its secret.
  */
 export type DeviceAuth = { deviceId: string, 
@@ -587,7 +569,7 @@ workspaceFiles: Array<DirectoryEntry>,
  */
 roots: boolean, };
 
-export type ErrorCode = "badRequest" | "unauthorized" | "notFound" | "conflict" | "unsupported" | "forbidden" | "internal" | "webProtocol" | "isolationUnavailable";
+export type ErrorCode = "badRequest" | "unauthorized" | "notFound" | "conflict" | "unsupported" | "forbidden" | "internal" | "webProtocol";
 
 /**
  * The first encrypted record on a client-opened logical stream.
@@ -687,8 +669,8 @@ rtcSupported: boolean,
  */
 features?: Array<string>, 
 /**
- * What this machine can actually enforce on a process it starts on a
- * caller's behalf. Absent from older daemons, which is why it is optional.
+ * Native kernel capability diagnostics, not applied Agent isolation.
+ * Absent from older daemons, which is why it is optional.
  */
 isolation?: IsolationInfo, };
 
@@ -841,17 +823,14 @@ export type InviteAuth = { inviteId: string, nonce: string, proof: string, };
 export type IsolationBackend = "landlock" | "namespaces" | "seatbelt" | "appContainer" | "none";
 
 /**
- * The operating system confinement this machine can put a spawned process in.
+ * Kernel isolation capability diagnostics for this machine.
  *
- * Reported rather than promised. A caller decides whether to run something it
- * does not fully trust by reading this, so it has to describe what is actually
- * in force on this kernel right now — not what the build supports and not what
- * a configuration file asked for.
+ * Diagnostic capability only: Agent commands run as the daemon OS user
+ * without an additional GeneHub sandbox.
  */
 export type IsolationInfo = { backend: IsolationBackend, 
 /**
- * Whether a confined process would really be confined. False means every
- * request that needs confinement is refused, never quietly downgraded.
+ * Whether the kernel capability probe succeeded; not applied Agent isolation.
  */
 enforced: boolean, 
 /**

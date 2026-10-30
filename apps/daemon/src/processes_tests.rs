@@ -191,8 +191,8 @@ async fn what_an_agent_leaves_running_can_be_found_and_ended() {
         "(while true; do echo alive >> {}; sleep 0.05; done) & sleep 60",
         marker.display()
     );
-    let argv = crate::process::launch_argv("/bin/sh", None).expect("an unconfined launcher");
-    let mut command = crate::process::command(&argv, &["-c".to_string(), script], directory.path());
+    let mut command =
+        crate::process::command("/bin/sh", &["-c".to_string(), script], directory.path());
     let agent = crate::process::Group::spawn(&mut command).expect("the stand-in agent starts");
     let agent_pid = agent.pid().expect("the agent has a pid");
 

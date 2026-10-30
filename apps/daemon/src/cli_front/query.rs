@@ -1210,10 +1210,8 @@ fn capabilities_data() -> Value {
             "pairing": ["machine.pair", "device.invite"],
             "credentialStore": "machines.json",
         },
-        // What the target machine will let a command touch. `genet shell` runs
-        // an argv list, never a command line, so this binary never parses a
-        // shell and there is no interpreter of ours to sandbox — what holds is
-        // the operating system confinement on the machine that runs it.
+        // Commands run as the target daemon OS user. The separate machine
+        // report describes kernel capabilities, not applied confinement.
         "isolation": {
             "arbitraryCommands": true,
             "commandLineParsing": false,
@@ -1894,13 +1892,6 @@ fn command_output() -> Value {
                         ones after it are the end, and droppedBytes is what was in \
                         between. The kept end arrives after this record rather than \
                         in its place in the stream.",
-        "x-confinement": "shell.started.data.confinement: null, or the backend and \
-                          the roots the command can reach. Read every missing path \
-                          outside those roots as out of bounds, not as absent: with \
-                          the namespaces backend the rest of the filesystem is not \
-                          there at all, so the machine reports no such file rather \
-                          than permission denied. The command itself is told the \
-                          same thing in GENEHUB_CONFINEMENT and GENEHUB_CONFINED_ROOTS.",
     })
 }
 
@@ -2231,12 +2222,6 @@ pub fn rpc_error(error: RpcError) -> CliFailure {
             ErrorCode::Forbidden => CliFailure::business("forbidden", message, None),
             ErrorCode::Internal => CliFailure::business("internal", message, None),
             ErrorCode::WebProtocol => CliFailure::protocol(message),
-            // Not retryable and not fixable by asking for more: this machine
-            // cannot confine a process, and an agent told to wait would wait
-            // forever (`genet-remote-execution.md` §7.5).
-            ErrorCode::IsolationUnavailable => {
-                CliFailure::business("isolationUnavailable", message, None)
-            }
         },
     }
 }

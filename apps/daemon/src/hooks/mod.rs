@@ -458,18 +458,12 @@ impl Hooks {
         let mut stdin_bytes = envelope.to_string().into_bytes();
         stdin_bytes.push(b'\n');
 
-        let argv = match crate::process::launch_argv(&program, None) {
-            Ok(argv) => argv,
-            Err(error) => {
-                return Outcome::failed(format!("could not start `{program}`: {error:#}"))
-            }
-        };
         let mut environment: HashMap<String, String> = open_env.vars.clone().into_iter().collect();
         // What GeneHub sets wins over anything the project file says.
         for (name, value) in &platform {
             environment.insert((*name).to_string(), value.clone());
         }
-        let mut command = crate::process::command(&argv, &arguments, &cwd);
+        let mut command = crate::process::command(&program, &arguments, &cwd);
         command
             .envs(&environment)
             .stdin(std::process::Stdio::piped())

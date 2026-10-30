@@ -1,23 +1,13 @@
-//! The `isolation` import: what this kernel will hold a started process to.
-//!
-//! The guest decides *who* must run confined and over *which* directories, and
-//! builds the wrapper invocation itself. What it cannot do is find out whether
-//! this machine can enforce anything: the answer is an LSM version syscall and
-//! a fork that tries to unshare, neither of which a component can make. So the
-//! shell probes, and the guest refuses or proceeds on a real answer instead of
-//! on the flat "no backend here" a component would otherwise have to give.
-//!
-//! Probed once and memoised in `genet_native`, so two callers never get two
-//! different stories — including the callers in the *other* process, since the
-//! wrapper this answer describes is a native binary of ours.
+//! Host kernel capability report for machine diagnostics.
+//! No process policy or wrapper is selected by the guest.
 
-use genet_native::confine::IsolationBackend;
+use genet_native::isolation::IsolationBackend;
 
 use crate::bindings::genehub::host::isolation as wit;
 
 impl wit::Host for crate::load::Host {
     async fn machine(&mut self) -> wit::Report {
-        let report = genet_native::confine::report();
+        let report = genet_native::isolation::report();
         wit::Report {
             backend: match report.backend {
                 IsolationBackend::Landlock => wit::Mechanism::Landlock,

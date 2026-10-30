@@ -2391,14 +2391,12 @@ async fn dispatch(
                 Ok(workspace) => workspace,
                 Err(error) => return failed(error),
             };
-            let confinement = None;
             match state
                 .terminals
                 .open(
                     &workspace.root,
                     cols.unwrap_or(80),
                     rows.unwrap_or(24),
-                    confinement,
                 )
                 .await
             {
@@ -2570,7 +2568,6 @@ fn error_code_name(code: ErrorCode) -> &'static str {
         ErrorCode::Forbidden => "forbidden",
         ErrorCode::Internal => "internal",
         ErrorCode::WebProtocol => "webProtocol",
-        ErrorCode::IsolationUnavailable => "isolationUnavailable",
     }
 }
 

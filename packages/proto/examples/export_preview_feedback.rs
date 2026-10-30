@@ -10,7 +10,6 @@ fn main() -> Result<(), ts_rs::ExportError> {
     AssetPreviewKind::export_all_to(directory)?;
     AssetPreviewMetadata::export_all_to(directory)?;
     AssetPreviewRequest::export_all_to(directory)?;
-    Confinement::export_all_to(directory)?;
     DeviceAuth::export_all_to(directory)?;
     ErrorCode::export_all_to(directory)?;
     ExchangeRequestHead::export_all_to(directory)?;

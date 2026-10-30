@@ -16,7 +16,6 @@ fn main() -> Result<(), ts_rs::ExportError> {
     WorkspaceFileSource::export_all_to(dir)?;
     WorkspaceFileSourceKind::export_all_to(dir)?;
     AssetPreviewRequest::export_all_to(dir)?;
-    Confinement::export_all_to(dir)?;
     ShellFrame::export_all_to(dir)?;
     AssetPreviewKind::export_all_to(dir)?;
     AssetPreviewMetadata::export_all_to(dir)?;

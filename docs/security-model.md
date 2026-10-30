@@ -223,3 +223,5 @@ Relay 维护 Control 签发的 endpoint presence lease，并订阅 endpoint/rout
 回滚先停新版本，保留升级后的新增数据，再检查旧版本可读性并恢复对应私有原件。
 不能直接恢复受限设备旧备份而重新授权，也不能用旧会话快照覆盖 fork 后的新输入。
 本候选验证状态以对应 run 与候选 SHA 为准；本文不宣称完成发布。
+
+机器信息中的 `isolation` 仅报告内核能力探测结果（`enforced` 表示探测成功），不代表 Agent 已被隔离。完整连接的命令和终端直接以 daemon OS 用户运行；旧 `__confine` 包装入口与隐式设备隔离执行链已移除。

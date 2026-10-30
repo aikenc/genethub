@@ -39,7 +39,6 @@ genet <argv>  ──(loopback /cli)──►  本机 daemon
 | --- | --- |
 | `--version` / `-V` | 不碰磁盘，release 冒烟也问它 |
 | `daemon run/start/stop/restart/status/endpoint` | daemon 挂了也得能停它；不能转发给它自己 |
-| confine 隐藏参数 | Linux user namespace 必须在从未起过线程的进程里创建 |
 | `agent-serve` | 前门 exec 壳的 agent 入口，不是用户动词 |
 | 无参数 usage | 没 daemon 也要能读用法 |
 | `update` | 针对**这个**原生二进制的 fail-closed 声明 |
@@ -112,10 +111,10 @@ stdin 只用于 `genet shell` 的管道输入，上限仍是 1 MiB。更大的�
 
 | 模式 | 编什么 | 覆盖什么 |
 | --- | --- | --- |
-| 1. host + guest + 官网 | 原生 CLI/host 变了才编 | confine、daemon 启停、壳、装载 |
+| 1. host + guest + 官网 | 原生 CLI/host 变了才编 | daemon 启停、壳、装载 |
 | 2. guest + 官网（高频） | `genehub_guest.wasm` | 几乎全部产品动词、会话、工作区、本机 shell |
 
-模式 2 不再漏 CLI 业务面。原生 `genet` 与 `genehub-host` 只在启停/装载/隔离语义变时才需要重发。
+模式 2 不再漏 CLI 业务面。原生 `genet` 与 `genehub-host` 只在原生启停、装载或 host ABI 变化时才需要重发。
 
 这是源码边界已经具备的能力，不是当前发布能力：现有 `release.yml` 仍只有 tag/full release，没有独立的 guest+website Live workflow。非 stable 的 guest 编译已改走 `[profile.iterate]`（`opt-level=3` + `strip`），不再为热改付 fat LTO；Stable 安装包仍用 `[profile.release]`。客户端也还没有签名组件 manifest、自动应用或回滚。只有这些门关闭后，表里的模式 2 才能计入 95% 的端到端交付分子。
 
@@ -129,7 +128,6 @@ stdin 只用于 `genet shell` 的管道输入，上限仍是 1 MiB。更大的�
 | loopback 控制面证明 | `packages/frontdoor::proof` |
 | 退出码与答复信封形状 | `packages/frontdoor::envelope` |
 | `--machine` / `--cwd` 解析 | `packages/frontdoor::selectors` |
-| confine | 直接用 `genet_native::confine`，不再经 daemon 转手 |
 
 信封只共享**形状**，不共享**去处**：前门打到自己的 stdout，guest 里的动词打到 `POST /cli` 的 NDJSON 流。动词路由表（`RESERVED` / `ROUTABLE` / `canonical` / `routing`）留在 `apps/daemon/src/cli_front/target.rs`，因为那是业务。
 

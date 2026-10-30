@@ -7,7 +7,7 @@
 //! (`transport/ws.rs`). The CLI process is not an endpoint on either path.
 
 use genehub_proto::{
-    Confinement, HelloResult, HubTicket, ProtocolError, Reply, Request, SequencedEvent, ShellFrame,
+    HelloResult, HubTicket, ProtocolError, Reply, Request, SequencedEvent, ShellFrame,
     ShellRunRequest, TransportKind,
 };
 use tokio::sync::{broadcast, mpsc, Mutex};
@@ -256,9 +256,8 @@ impl Rpc {
                 let started =
                     crate::dataplane::exec::start(&local.state, &principal, request.clone(), stdin)
                         .await
-                        .map_err(start_error)?;
+                        .map_err(RpcError::Remote)?;
                 Ok(Running {
-                    confinement: started.confinement,
                     inner: RunningInner::Local {
                         frames: started.frames,
                     },
@@ -267,7 +266,6 @@ impl Rpc {
             Inner::Remote(remote) => {
                 let running = remote.run_command(request, stdin).await?;
                 Ok(Running {
-                    confinement: running.confinement.clone(),
                     inner: RunningInner::Remote(running),
                 })
             }
@@ -297,16 +295,7 @@ fn pump_subscription(
     });
 }
 
-fn start_error(error: crate::dataplane::exec::StartError) -> RpcError {
-    use crate::dataplane::exec::StartError;
-    match error {
-        StartError::Protocol(error) => RpcError::Remote(error),
-        StartError::Transport(message) => RpcError::Transport(message),
-    }
-}
-
 pub struct Running {
-    pub confinement: Option<Confinement>,
     inner: RunningInner,
 }
 
@@ -390,7 +379,6 @@ fn error_code_name(code: genehub_proto::ErrorCode) -> &'static str {
         Forbidden => "forbidden",
         Internal => "internal",
         WebProtocol => "protocol_mismatch",
-        IsolationUnavailable => "isolation_unavailable",
     }
 }
 

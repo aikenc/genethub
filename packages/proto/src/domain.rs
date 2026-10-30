@@ -1529,26 +1529,23 @@ pub struct HelloResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub features: Option<Vec<String>>,
-    /// What this machine can actually enforce on a process it starts on a
-    /// caller's behalf. Absent from older daemons, which is why it is optional.
+    /// Native kernel capability diagnostics, not applied Agent isolation.
+    /// Absent from older daemons, which is why it is optional.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub isolation: Option<IsolationInfo>,
 }
 
-/// The operating system confinement this machine can put a spawned process in.
+/// Kernel isolation capability diagnostics for this machine.
 ///
-/// Reported rather than promised. A caller decides whether to run something it
-/// does not fully trust by reading this, so it has to describe what is actually
-/// in force on this kernel right now — not what the build supports and not what
-/// a configuration file asked for.
+/// Diagnostic capability only: Agent commands run as the daemon OS user
+/// without an additional GeneHub sandbox.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct IsolationInfo {
     pub backend: IsolationBackend,
-    /// Whether a confined process would really be confined. False means every
-    /// request that needs confinement is refused, never quietly downgraded.
+    /// Whether the kernel capability probe succeeded; not applied Agent isolation.
     pub enforced: bool,
     /// Why, in a sentence a person can act on. Present whether or not it worked,
     /// because "landlock, abi 4" is as worth saying as "kernel 5.4 has none".

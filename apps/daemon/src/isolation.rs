@@ -1,18 +1,10 @@
 //! OS isolation diagnostics, shared by native and WASM daemons.
 //!
 //! Complete connections use the daemon OS account; no identity tier selects
-//! an implicit sandbox here. The existing native wrapper and kernel report
-//! remain available to their explicit native consumers. WASM asks the host
-//! for the machine's report rather than claiming a guest owns a kernel.
+//! an implicit sandbox here. The kernel report describes available capabilities
+//! only. WASM asks the host rather than claiming a guest owns a kernel.
 
 use genehub_proto::IsolationInfo;
-
-pub use genet_native::confine::{
-    Policy, CONFINED_BACKEND_ENV, CONFINED_ROOTS_ENV, CONFINE_ARG, CONFINE_COMMAND_ENV,
-};
-
-#[cfg(not(target_family = "wasm"))]
-pub use genet_native::confine::{confine, confine_and_exec};
 
 /// What this machine can enforce, asked once and answered the same way every
 /// time so that two callers never get two different stories.
@@ -27,9 +19,9 @@ pub fn report() -> IsolationInfo {
 #[cfg(not(target_family = "wasm"))]
 fn probe() -> IsolationInfo {
     use genehub_proto::IsolationBackend;
-    use genet_native::confine::IsolationBackend as Native;
+    use genet_native::isolation::IsolationBackend as Native;
 
-    let report = genet_native::confine::report();
+    let report = genet_native::isolation::report();
     IsolationInfo {
         backend: match report.backend {
             Native::Landlock => IsolationBackend::Landlock,
@@ -67,8 +59,7 @@ mod tests {
 
     #[test]
     fn a_machine_reports_the_same_thing_every_time_it_is_asked() {
-        // Two callers deciding whether to run something they do not trust must
-        // not be able to get two different answers.
+        // Machine diagnostics must return the same capability observation.
         assert_eq!(report(), report());
     }
 

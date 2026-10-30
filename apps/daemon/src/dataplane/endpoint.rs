@@ -1403,10 +1403,6 @@ async fn send_protocol_error(stream: &mut ServerStream, error: ProtocolError) ->
         ErrorCode::Unsupported => 422,
         ErrorCode::WebProtocol => 426,
         ErrorCode::Internal => 500,
-        // Not 403: the caller is allowed, the machine is unable. Retrying with
-        // a wider grant would not help, and neither would retrying at all
-        // until this machine gains a backend.
-        ErrorCode::IsolationUnavailable => 501,
     };
     stream
         .respond(&ExchangeResponseHead {

@@ -11,15 +11,13 @@
 //! omission (`genet-remote-execution.md` §7.1). A list of permitted command
 //! names cannot survive `python -c`, so a layer that reads the argv would offer
 //! a guarantee it could not keep. What holds instead is the same thing that
-//! holds for a terminal: who may ask at all (`authz.rs`), and what the process
-//! can touch once it is running (`isolation.rs`). The argv is passed to the
+//! holds for a terminal: authenticated access (`authz.rs`) and the target OS account
+//! permissions. The argv is passed to the
 //! operating system as a list and never through a shell, so nothing in it can
 //! become a second command on the way.
 
 use anyhow::Result;
-use genehub_proto::{
-    Confinement, ErrorCode, ExchangeResponseHead, ProtocolError, ShellFrame, ShellRunRequest,
-};
+use genehub_proto::{ErrorCode, ExchangeResponseHead, ProtocolError, ShellFrame, ShellRunRequest};
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 
@@ -51,21 +49,15 @@ const SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
 /// and name it.
 const MAX_STDIN_BYTES: usize = 1024 * 1024;
 
-pub(crate) enum StartError {
-    Protocol(ProtocolError),
-    Transport(String),
-}
-
 pub(crate) struct Started {
-    pub confinement: Option<Confinement>,
     pub frames: mpsc::Receiver<ShellFrame>,
 }
 
-fn protocol(code: ErrorCode, message: impl Into<String>) -> StartError {
-    StartError::Protocol(ProtocolError {
+fn protocol(code: ErrorCode, message: impl Into<String>) -> ProtocolError {
+    ProtocolError {
         code,
         message: message.into(),
-    })
+    }
 }
 
 /// Starts a command for a local caller and yields its frames, including Exit.
@@ -76,7 +68,7 @@ pub(crate) async fn start(
     caller: &Principal,
     request: ShellRunRequest,
     stdin: Vec<u8>,
-) -> Result<Started, StartError> {
+) -> Result<Started, ProtocolError> {
     if stdin.len() > MAX_STDIN_BYTES {
         return Err(protocol(
             ErrorCode::BadRequest,
@@ -125,10 +117,7 @@ pub(crate) async fn start(
             "this connection cannot execute commands",
         ));
     }
-    let confinement = None;
-    let argv = crate::process::launch_argv(program, confinement.as_ref())
-        .map_err(|error| StartError::Transport(format!("{program}: {error:#}")))?;
-    let mut command = crate::process::command(&argv, arguments, &cwd);
+    let mut command = crate::process::command(program, arguments, &cwd);
     command
         .envs(&request.env)
         .stdout(std::process::Stdio::piped())
@@ -170,7 +159,6 @@ pub(crate) async fn start(
     }
     drop(sender);
 
-    let described = None;
     let (out, rx) = mpsc::channel(FRAME_QUEUE);
     let timeout_ms = request.timeout_ms;
     let argv_log = request.argv.clone();
@@ -232,10 +220,7 @@ pub(crate) async fn start(
         let _ = out.send(exit_frame(status.as_ref(), timed_out)).await;
     });
 
-    Ok(Started {
-        confinement: described,
-        frames: rx,
-    })
+    Ok(Started { frames: rx })
 }
 
 pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -> Result<()> {
@@ -259,18 +244,14 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
     let caller = Principal::of(&services.state, &services.access);
     let mut started = match start(&services.state, &caller, request, stdin).await {
         Ok(started) => started,
-        Err(StartError::Protocol(error)) => {
+        Err(error) => {
             let status = match error.code {
                 ErrorCode::BadRequest => 400,
                 ErrorCode::Forbidden => 403,
                 ErrorCode::NotFound => 404,
-                ErrorCode::IsolationUnavailable => 501,
                 _ => 500,
             };
             return send_error(stream, status, error.code, error.message).await;
-        }
-        Err(StartError::Transport(message)) => {
-            return send_error(stream, 500, ErrorCode::Internal, message).await
         }
     };
 
@@ -279,7 +260,6 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
             status: 200,
             metadata: serde_json::json!({
                 "codec": "json-u32be",
-                "confinement": started.confinement,
             }),
             body_length: None,
             error: None,

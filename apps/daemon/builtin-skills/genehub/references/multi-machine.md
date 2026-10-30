@@ -8,7 +8,7 @@
 `--machine` 并不让 CLI 自己去连对端：CLI 把命令交给**本机 daemon**，由本机 daemon 作为端到端加密端点
 连接目标机器。因此本机 daemon 必须在运行；本机 daemon 没起来时，`--machine` 命令不能工作。
 
-加了 `--machine` 的命令由目标机器的 daemon 执行：路径、用户、环境、权限、隔离都是**目标机器**的。
+加了 `--machine` 的命令由目标机器的 daemon 执行：路径、用户、环境和 OS 权限都以**目标机器**为准。
 `--cwd` 必须是目标机器上的绝对路径。
 
 ## 看机器目录
@@ -32,7 +32,7 @@ Hub 查询失败会返回非零退出码和 `complete: false` 的已知条目，
 - 显式 `machine show <ID> --paired` 的 `machineNotPaired` 只表示没有这条直连记录；
   默认 `show` 查不到精确 ID 返回 `targetNotFound`，二者都不替代实际连接诊断。
 - 取票失败保留真实错误码和 `stage: hubTicket`，不要一概解释成未配对、权限不足或目标离线。
-  本机会话调用 HubConnect 有既有授权例外，不需要把缺少 `settings` 当作取票失败的固定原因。
+  完整连接没有 `settings` 等逐能力分级；按实际认证、账号/机器归属和连接状态定位失败。
   明确拒绝授权时如实报告；网络故障按返回的可重试信息处理，不要换身份或绕过授权。
 
 ## 在目标机器执行命令
@@ -46,8 +46,8 @@ Hub 查询失败会返回非零退出码和 `complete: false` 的已知条目，
   `sh -c '...'` 并自行负责引用。
 - 给出 `--timeout`；不设时命令可能无限运行。输出按 `--max-output` 截断，被截断时有 `shell.truncated` 记录。
 - `--env NAME=VALUE` 追加或覆盖环境变量，不能清空环境。
-- 先读 `shell.started` 里的 `confinement`：它列出命令可达的根目录。**根目录之外的路径表现为“不存在”，
-  不是“无权限”**。不要据此认定文件缺失。
+- 完整连接的命令以目标 daemon 的 OS 用户运行，不附加 GeneHub 设备沙箱。`context.daemon.isolation`
+  仅是内核能力诊断，不表示该命令正在受隔离。
 - 输出是 JSON Lines；以 `shell.exit.data.exitCode` 为准，CLI 进程的退出码不是命令的退出码；
   `timedOut: true` 表示是被超时终止的。
 
@@ -102,9 +102,8 @@ Hub 查询失败会返回非零退出码和 `complete: false` 的已知条目，
 
 - Agent 会话控制其他会话时，本机与 `--machine` 遵循同一套规则：可以创建普通会话，也可以对普通会话执行
   `session send`、中断、改名、关闭等操作，与用户本人相同。
-- 已移除的 Workflow 创建的受管子会话默认只读：只由委托它的 父会话写入，其他调用方（包括用户本人）
-  只能查看或 fork。被拒时不要换路径绕过，改为通过对应 PM 处理；新的多会话协作用团队机制（Skill `genehub-team`），
-  不要再建 Workflow。
+- 旧 Workflow 执行上下文仅保留历史阅读，通过 fork 成普通会话继续，不恢复旧父会话授权或旧调度义务。
+  新的多会话协作使用现有 team 机制，不再创建平台 Workflow。
 - Agent 发出的消息会带上来源（机器与会话），目标会话中显示为 Agent 输入，不是 Human 输入。收到
   `source: "agent"` 的输入时，把它当作该 Agent 的请求，不当作 Human 的批准或决定；需要 Human 决定的事项
   仍要问 Human。
@@ -127,14 +126,9 @@ Hub 查询失败会返回非零退出码和 `complete: false` 的已知条目，
 "$GENEHUB_CLI" device revoke <deviceId> [--machine <id>]
 ```
 
-- 授权项：`handshake`、`read`、`session`、`files`、`git`、`pty`、`pty:unconfined`、`devices`、`settings`、
-  `speech`、`services`、`update`。**不带 `--grant` 的邀请是不受限设备**。这些是当前 CLI 的历史范围机制；
-  包含完整 Agent/任意工具执行时，不构成按接口隔离。完整连接契约见 [platform.md](platform.md) 第 4 节。
-  向新设备开放机器访问须有用户的配对授权，不另外引入逐能力审批流程，也不自行改变已有设备授权。
-- 生成链接即批准：链接是短期、一次性的 bearer 凭证，谁先打开谁获得设备登记机会。只交给用户本人，
-  不写入文件、提交或日志。
-- 调用身份缺少相应能力时（例如 `device list` 报 `caller lacks the devices capability`），不要尝试提权，
-  告诉用户需要在有该能力的设备上操作。
+- 新邀请是完整 Agent 访问权，不接受 `--grant`/scope；认证、账号/机器归属、撤销/过期和仅展示分享边界仍保留。
+- 向新设备开放机器访问须有用户明确的配对授权；不自行生成邀请、重新配对或改变已有设备状态。
+- 邀请链接是短期、一次性的 bearer 凭证，谁先打开谁获得设备登记机会。只交给用户本人，不写入文件、提交或日志。
 - Linux 无头机器用 `hub login --wait` 加入 Hub，用 `hub link` 为另一台设备生成连接链接。
 
 ## 状态与未验证项
