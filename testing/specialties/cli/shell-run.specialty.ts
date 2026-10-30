@@ -82,7 +82,7 @@ cli(
   "specialty.cli.no-pty-grant-forbidden",
   "A complete paired device runs a shell command",
   "paired shell returns status 200 and exact stdout",
-  ["shell.run and pty.open have different grants"],
+  ["full paired shell loses OS-account capability"],
   async (t) => {
     await withWorkspace(t, async (opened) => {
       const device = await t.flows.main.pairDevice(opened.client, opened.daemon);

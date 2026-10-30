@@ -194,7 +194,7 @@ authCase(
 authCase(
   "specialty.authorization.list-does-not-leak-secrets",
   "Authorized-device listings do not expose credentials",
-  "serialized device.list output contains identity and grants but neither credential secret nor invite code",
+  "serialized device.list output contains identity but neither credential secret nor invite code",
   ["credential serialized in DeviceInfo", "invite code retained in listing", "secret hidden only by TypeScript type"],
   async (t, opened) => {
     const paired = await t.flows.main.pairDevice(opened.client, opened.daemon, "private");

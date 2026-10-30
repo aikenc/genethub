@@ -5,7 +5,7 @@ defineJourney(
     id: "journey.authorization.no-pty-grant-no-bytes",
     title: "Complete paired devices receive the terminal shared by their OS account",
     oracle: "owner and paired device both receive the same terminal marker",
-    catches: ["pty fanout ignores grants"],
+    catches: ["full paired connection misses shared terminal output"],
     tags: ["core", "authorization", "parity"],
     expectedDurationMs: 35_000,
     timeoutMs: 100_000,

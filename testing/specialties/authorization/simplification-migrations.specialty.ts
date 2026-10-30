@@ -11,35 +11,47 @@ function migration(id: string, oracle: string, run: (t: CaseContext) => Promise<
     surfaces: ["daemon", "genet-cli", "filesystem"], productInterfaces: ["genet-cli", "@genehub/workbench/client"] }, run);
 }
 
-migration("devices", "Old full credentials survive; restricted credentials are revoked with a private original and cannot reconnect", async t => {
+migration("devices", "Old full credentials survive; restricted and unknown credentials cannot reconnect, and migration is private and idempotent", async t => {
   const opened = await t.flows.main.openWorkspace({openRoot:t.openRoot,lease:t.env});
   const full = await t.flows.main.pairDevice(opened.client,opened.daemon,"legacy-full");
   const limited = await t.flows.main.pairDevice(opened.client,opened.daemon,"legacy-limited");
+  const future = await t.flows.main.pairDevice(opened.client,opened.daemon,"future-version");
+  const unknown = await t.flows.main.pairDevice(opened.client,opened.daemon,"unknown-grant");
   let fresh: Awaited<ReturnType<typeof connectProductClient>> | undefined;
   try {
-    full.client.close(); limited.client.close(); opened.client.close(); opened.daemon.stop();
+    full.client.close(); limited.client.close(); future.client.close(); unknown.client.close(); opened.client.close(); opened.daemon.stop();
     const file=path.join(t.env.data,"devices.json");
     const old=JSON.parse(readFileSync(file,"utf8")); delete old.authorityVersion;
     for(const row of old.devices) {
       row.grantsVersion=1;
       row.grants=row.id===full.deviceId ? ["handshake","read","session","files","git","pty","pty:unconfined","devices","settings","speech","services","update"] : ["handshake","read"];
     }
+    old.devices.find((d:{id:string})=>d.id===future.deviceId).grantsVersion=99;
+    old.devices.find((d:{id:string})=>d.id===unknown.deviceId).grants=["handshake","read","unknown-future-grant"];
     writeFileSync(file,JSON.stringify(old));
     const start=runGenet(opened.daemon.genet,["daemon","start"],opened.daemon.env);
     t.assertions.assert(start.code===0,"migration prevented startup");
     fresh=await connectProductClient({...daemonEndpoint(opened.daemon)});
     const list=await fresh.call({type:"device.list"});
-    t.assertions.assert(list?.type==="devices"&&list.data.devices.some(d=>d.id===full.deviceId)&&!list.data.devices.some(d=>d.id===limited.deviceId),"old restricted authority widened or full identity lost");
+    t.assertions.assert(list?.type==="devices"&&list.data.devices.length===1&&list.data.devices[0]?.id===full.deviceId,"old restricted authority widened or full identity lost");
     const preserved=await t.flows.main.connectDevice(opened.daemon,full.credential,"returning-full");
     try { t.assertions.assert((await preserved.call({type:"settings.get"}))?.type==="settings","full credential could not configure"); } finally {preserved.close();}
-    let refused=false;
-    try {const wronglyAccepted=await t.flows.main.connectDevice(opened.daemon,limited.credential,"retired-limited");wronglyAccepted.close();} catch {refused=true;}
-    t.assertions.assert(refused,"retired limited credential reconnected");
+    await Promise.all([limited.credential,future.credential,unknown.credential].map(async credential => {
+      let refused=false;
+      try {const wronglyAccepted=await t.flows.main.connectDevice(opened.daemon,credential,"retired-legacy");wronglyAccepted.close();} catch {refused=true;}
+      t.assertions.assert(refused,"restricted or unknown legacy credential reconnected");
+    }));
     const backups=readdirSync(t.env.data).filter(name=>name.startsWith("devices.pre-full-access-"));
     t.assertions.assert(backups.some(name=>JSON.parse(readFileSync(path.join(t.env.data,name),"utf8")).devices.some((d:{id:string})=>d.id===limited.deviceId)),"original limited authorization was not backed up");
     const now=JSON.parse(readFileSync(file,"utf8"));
     t.assertions.assert(now.authorityVersion===1&&now.devices.every((d:Record<string,unknown>)=>!("grants"in d)),"live grant model survived migration");
-  } finally {fresh?.close();full.client.close();limited.client.close();opened.client.close();opened.daemon.stop();await opened.mock.stop();}
+    fresh.close();opened.daemon.stop();
+    t.assertions.assert(runGenet(opened.daemon.genet,["daemon","start"],opened.daemon.env).code===0,"second migration startup failed");
+    fresh=await connectProductClient({...daemonEndpoint(opened.daemon)});
+    const again=await fresh.call({type:"device.list"});
+    t.assertions.assert(again?.type==="devices"&&again.data.devices.length===1&&again.data.devices[0]?.id===full.deviceId,"second startup changed migrated authority");
+    t.assertions.assert(readdirSync(t.env.data).filter(name=>name.startsWith("devices.pre-full-access-")).length===backups.length,"second startup repeated migration or backup");
+  } finally {fresh?.close();full.client.close();limited.client.close();future.client.close();unknown.client.close();opened.client.close();opened.daemon.stop();await opened.mock.stop();}
 });
 
 migration("history", "Legacy Workflow context is readable and forkable but neither queued inputs nor old instructions execute", async t => {

@@ -58,11 +58,11 @@ check("shell-io","Remote shell preserves file bytes, stdin, stderr, child exit a
   const cat=await shell(["--","cat","remote.txt"]);
   if(cat.code!==0||records(cat.stdout).filter(r=>r.type==="shell.output"&&r.data.stream==="stdout").map(r=>r.data.data).join("")!=="on remote")throw new Error("remote file output differs");
   const piped=await shell(["--","cat"],"piped from caller");
-  if(piped.code!==0||!piped.stdout.includes("piped from caller"))throw new Error("stdin lost");
+  if(piped.code!==0||records(piped.stdout).filter(r=>r.type==="shell.output"&&r.data.stream==="stdout").map(r=>r.data.data).join("")!=="piped from caller")throw new Error("stdin lost");
   const failed=await shell(["--","sh","-c","echo failed 1>&2; exit 7"]);const failedRows=records(failed.stdout);
   if(failed.code!==0||failedRows.at(-1)?.data.exitCode!==7||!failedRows.some(r=>r.type==="shell.output"&&r.data.stream==="stderr"&&r.data.data.includes("failed")))throw new Error("child failure became transport failure");
   const timeout=await shell(["--timeout","1","--","sleep","60"]);
-  if(timeout.code!==0||records(timeout.stdout).at(-1)?.data.timedOut!==true)throw new Error("remote timeout not reported");
+  if(timeout.code!==0||records(timeout.stdout).at(-1)?.type!=="shell.exit"||records(timeout.stdout).at(-1)?.data.timedOut!==true||records(timeout.stdout).at(-1)?.data.exitCode===0)throw new Error("remote timeout not reported");
 });
 check("revoked","Revoked remote CLI asks to pair again without retrying",async({opened,machine,device,cli})=>{
   await opened.client.call({type:"device.revoke",payload:{deviceId:device}});
@@ -87,7 +87,7 @@ check("background-replay","Remote Agent works after CLI exits and replays only m
   if(background.code!==0||backgroundResult?.type!=="session.result"||backgroundResult.data.status!=="running"||backgroundResult.data.waited!==false)throw new Error("background send did not leave a running turn");
   if(await settled(session)<=seen)throw new Error("background turn made no events");
   const resumed=await cli(["session","send",session,"Third answer","--machine",machine,"--since-seq",String(seen)]);const rows=records(resumed.stdout);
-  if(resumed.code!==0||!resumed.stdout.includes("second unwatched answer")||rows.some(r=>r.type==="session.desync")||rows.filter(r=>r.type==="session.event").some(r=>r.data.seq<=seen)||rows.at(-1)?.data.status!=="completed")throw new Error("replay lost missed events or repeated known events");
+  if(resumed.code!==0||!resumed.stdout.includes("second unwatched answer")||!resumed.stdout.includes("third resumed answer")||rows.some(r=>r.type==="session.desync")||rows.filter(r=>r.type==="session.event").some(r=>r.data.seq<=seen)||rows.at(-1)?.data.status!=="completed")throw new Error("replay lost missed events or repeated known events");
   const zero=await cli(["session","send",session,"Fourth answer","--machine",machine,"--since-seq","0"]);const zeroRows=records(zero.stdout);
-  if(zero.code!==0||zeroRows[0]?.type!=="session.attached"||zeroRows[1]?.type!=="session.desync"||zero.stdout.includes("second unwatched answer")||opened.mock.requests.length!==4)throw new Error("reset replay or model request count differs");
+  if(zero.code!==0||zeroRows[0]?.type!=="session.attached"||zeroRows[1]?.type!=="session.desync"||zero.stdout.includes("second unwatched answer")||!zero.stdout.includes("fourth reset answer")||opened.mock.requests.length!==4)throw new Error("reset replay or model request count differs");
 },true);

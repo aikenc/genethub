@@ -8,7 +8,7 @@ defineJourney(
     id: "journey.authorization.files-grant-preview",
     title: "A complete paired device reads the exact preview bytes",
     oracle: "paired preview returns the same bytes as the workspace file",
-    catches: ["files grant only gates RPC"],
+    catches: ["full paired preview loses or changes file bytes"],
     tags: ["core", "authorization", "parity"],
     expectedDurationMs: 35_000,
     timeoutMs: 100_000,

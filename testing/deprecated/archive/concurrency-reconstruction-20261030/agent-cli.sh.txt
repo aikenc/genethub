@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /data/workspace/genethub-work/genethub-spaces/worktrees/dev-3/genethub/target/iterate/genet-local agent-serve "$@"

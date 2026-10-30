@@ -1,9 +1,7 @@
-// Agent-level requests carry login links, device codes and secret prompts.
-// The daemon hands them, and the verbs that act on script Agents, only to a
-// client granted `settings`; the Agent list itself is `read`. These cases pair
-// real devices through the production invite/claim flow and hold each one to
-// what its grants allow, on both the push and the request path. The daemon,
-// the SDK and the fixture script are real; no LLM is involved.
+// Full paired connections follow and answer the same machine's Agent requests.
+// Authentication, request identity and exactly-once completion remain real
+// boundaries. These cases use the shipped daemon and public client; only the
+// login Agent is a scripted external-process fixture.
 
 import { createHash, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -105,10 +103,10 @@ authzCase(
   "A complete paired device follows and answers the Agent login request",
   "paired device receives Agent request/list/closed pushes, cancels one request, and the script records one login action",
   [
-    "login links or secret prompts pushed to a device without settings",
-    "a read-only device runs install/login actions or resets an override",
-    "a read-only device answers or cancels a person's pending request",
-    "a missing grant reported as unauthorized, so the client treats it as a bad credential",
+    "full paired device misses login request lifecycle",
+    "paired login cancellation repeats the action",
+    "paired answer cannot complete the original request",
+    "full authenticated identity is treated as an invalid credential",
   ],
   async (t) => {
     await withLoginAgent(t, async (opened, agent) => {
@@ -128,7 +126,7 @@ authzCase(
         await t.tools.waitUntil(() => readerPushes.lists.slice(listsBefore).some(agents=>agents.some(item=>item.id===agent.agentId&&item.job?.done===true)),10_000);
         t.assertions.assert(readScriptAgentJournal(agent).filter(entry=>entry.event==="action").length===1,"paired answer replayed the login action");
         const ownLogs = await t.flows.branches.agentLogs(opened.client, agent.agentId);
-        t.assertions.assert(JSON.stringify(ownLogs).includes("fixture-private-cli-output"), "log grant positive control has no private line");
+        t.assertions.assert(JSON.stringify(ownLogs).includes("fixture-private-cli-output"), "owner log positive control has no private line");
         t.assertions.assert(readerPushes.requests.length > 0 && readerPushes.closed.some(item=>item.requestId===request.id), "paired device lost request lifecycle pushes");
       } finally {
         readerPushes.stop();
@@ -205,8 +203,8 @@ authzCase(
   "A complete device lists requests while a login action is pending",
   "paired device and owner see the same pending Agent request",
   [
-    "session grant treated as enough to read login links or secret prompts",
-    "a missing grant reported as unauthorized",
+    "full paired device cannot list pending machine requests",
+    "pending request identity changes across authenticated devices",
   ],
   async (t) => {
     await withLoginAgent(t, async (opened, agent) => {

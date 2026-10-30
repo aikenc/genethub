@@ -1,0 +1,29 @@
+// Temporary frozen-legacy adapter for one matching-input comparison. Archive
+// with the frozen source after evidence is produced; no new Rust business logic.
+import {spawn} from "node:child_process";
+import {createHash} from "node:crypto";
+import {readFileSync} from "node:fs";
+import path from "node:path";
+import {defineSpecialty} from "../../framework/public.ts";
+const binaryRelative="target/debug/deps/concurrency-3e1220e2d7da24b6";
+const binaryHash="c582d3655f0437db19a52e1ae53e27dac5cd365d6344d95a8411acc74c8e66a5";
+const shim="/data/workspace/genethub-work/genethub-spaces/spaces/dev-3/parity-reconstruction/agent-cli.sh";
+const shimHash="d3d6eb6cf7b73a0d51621cdff308922afcf4f640ef31264167d8b8d52100d126";
+for(const name of ["concurrent_user_journey_matches_profile","blocking_canaries_locate_the_global_stall"]){
+ defineSpecialty({id:`specialty.parity-reconstruction.${name}`,title:`Frozen Rust ${name} against the common current CLI/guest`,oracle:"the unchanged frozen business assertions pass on the same source and current Agent artifact as their TS twins",catches:["legacy assertions fail against the current source","source or executable identity differs"],tags:["parity-reconstruction"],llm:{default:"mock"},expectedDurationMs:90000,timeoutMs:420000,resources:{environments:1,cpu:4,memoryMb:4096,io:2,browser:0},requiredArtifacts:["genet","genehub-host-local","genehub_guest.wasm"],surfaces:["legacy-rust"],productInterfaces:["frozen-legacy"]},async t=>{
+  const binary=path.join(t.openRoot,binaryRelative);
+  const digest=(file:string)=>createHash("sha256").update(readFileSync(file)).digest("hex");
+  t.assertions.assert(digest(binary)===binaryHash&&digest(shim)===shimHash,"frozen native executable or Agent launch alias changed");
+  const report=path.join(t.env.root,"frozen-comparison.json");
+  const env:NodeJS.ProcessEnv={...process.env,...t.env.env,JOURNEY_LLM:"mock",GENET_CONCURRENCY_PROFILE:"moderate",GENET_CONCURRENCY_MOCK_PROFILE:"normal",GENET_AGENT_BINARY:shim,GENEHUB_LOCAL_COMPONENT:path.join(t.openRoot,"target/wasm32-wasip2/iterate/genehub_guest.wasm"),GENEHUB_HOST:path.join(t.openRoot,"target/iterate/genehub-host-local"),GENET_CONCURRENCY_REPORT:report,TMPDIR:t.env.root};
+  delete env.GENEHUB_SESSION_ID;delete env.GENEHUB_CONTROLLER_TOKEN;delete env.GENEHUB_NETWORK_CALLER_ENV;
+  const result=await new Promise<{code:number;tail:string}>((resolve,reject)=>{
+    const child=spawn(binary,["--exact",name,"--ignored","--nocapture"],{cwd:t.env.workspace,env,stdio:["ignore","pipe","pipe"]});let tail="";
+    const receive=(chunk:Buffer)=>{tail=(tail+chunk.toString()).slice(-32768);};child.stdout.on("data",receive);child.stderr.on("data",receive);
+    child.once("error",reject);child.once("close",code=>resolve({code:code??1,tail}));
+  });
+  t.assertions.assert(result.code===0,`frozen Rust ${name} exit=${result.code}: ${result.tail}`);
+  t.note(`frozenCase=${name}; nativeBinarySha256=${binaryHash}; agentLaunchAliasSha256=${shimHash}; CLI/guest are this run's standard artifact bundle; Rust change from 01b545a6 only supplies the newly required lean=false field`);
+  t.note(readFileSync(report,"utf8"));
+ });
+}

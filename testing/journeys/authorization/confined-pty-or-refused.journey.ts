@@ -9,7 +9,7 @@ defineJourney(
     title: "A paired terminal retains the OS account filesystem capability",
     oracle:
       "paired and local terminals open; the paired terminal reads a known sibling file",
-    catches: ["remote pty is an unconstrained login shell", "isolation failure reported as forbidden"],
+    catches: ["paired terminal loses OS-account access", "successful PTY open fails to deliver exact output"],
     tags: ["core", "authorization", "parity"],
     resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
     expectedDurationMs: 40_000,
