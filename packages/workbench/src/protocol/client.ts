@@ -1097,7 +1097,6 @@ export class Client {
       role: "client",
       carrier,
       key: handshake.key,
-      maxBulkStreamWindowBytes: handshake.maxBulkStreamWindowBytes,
       maxReceiveBytesPerStream: 64 * 1024 * 1024,
       onError: (error) => this.report(error),
       onDiagnostic: this.options.onDiagnostic ? detail => this.diagnostic("transport", detail) : undefined,
@@ -1144,6 +1143,10 @@ export class Client {
     }
     this.verifyIdentity(identity.data);
     if (!this.isCurrentEpoch(epoch) || this.endpoint !== endpoint) return;
+    // Session sequences restart with the daemon, not with a carrier or RTC path.
+    if (this.identity && this.identity.daemonInstanceId !== identity.data.daemonInstanceId) {
+      for (const subscription of this.subscriptions.values()) subscription.resetRequired = true;
+    }
     this.identity = identity.data;
     if (!this.bulkDial && identity.data.transport === "forwarded" && this.options.credential && identity.data.dataChannelUrl && this.options.separateDataChannel !== false) {
       this.bulkDial = { url: identity.data.dataChannelUrl };
@@ -1186,6 +1189,9 @@ export class Client {
   }
 
   private verifyIdentity(identity: HelloResult): void {
+    if (typeof identity.daemonInstanceId !== "string" || !identity.daemonInstanceId) {
+      throw new PeerAuthenticationError("daemon identity is missing its run identifier");
+    }
     const expected = this.activeLocalServerProof;
     if (
       expected &&

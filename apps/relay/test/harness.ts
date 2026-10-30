@@ -156,7 +156,9 @@ export function connect(
   init: { headers?: Record<string, string> } = {},
 ): Promise<{ socket: WebSocket } | { error: string }> {
   return new Promise((resolve) => {
-    const socket = new WebSocket(url, init);
+    const target = new URL(url);
+    if (!target.searchParams.has("flow")) target.searchParams.set("flow", "transport-v1");
+    const socket = new WebSocket(target, init);
     socket.on("close", (code) => closeCodes.set(socket, code));
     socket.once("open", () => resolve({ socket }));
     socket.once("unexpected-response", (_request, response) => {

@@ -8,9 +8,8 @@ import {
   FabricReset,
   newFabricStreamId,
   FABRIC_HEADER_BYTES,
-  FABRIC_INITIAL_STREAM_CREDIT,
+  FABRIC_TRANSPORT_FLOW,
   FABRIC_MAX_OPERATION_METADATA_BYTES,
-  FABRIC_MAX_STREAM_CREDIT,
   FABRIC_ZERO_STREAM_ID,
 } from "./frame";
 
@@ -93,10 +92,6 @@ export interface FabricEndpointOptions {
   maxQueuedInboundBytes?: number;
   /** Bounds browser WebSocket buffering when a Relay stops reading. */
   maxBufferedBytes?: number;
-  /** Bytes this endpoint is prepared to buffer independently for each stream. */
-  initialStreamCredit?: number;
-  /** Allows Relay-negotiated transport flow: TCP backpressure without WINDOW_UPDATE. */
-  transportFlow?: boolean;
   onError?: (error: unknown) => void;
 }
 
@@ -142,6 +137,7 @@ const DEFAULT_MAX_REMEMBERED_STREAM_IDS = 4096;
 const DEFAULT_MAX_QUEUED_INBOUND_FRAMES = 64;
 const DEFAULT_MAX_QUEUED_INBOUND_BYTES = 8 * 1024 * 1024;
 const DEFAULT_MAX_BUFFERED_BYTES = 8 * 1024 * 1024;
+const MAX_PENDING_STREAM_BYTES = 4 * 1024 * 1024;
 const MAX_REMEMBERED_LOCAL_IDS = 4096;
 const DEFAULT_RECONNECT_INITIAL_MS = 250;
 const DEFAULT_RECONNECT_MAX_MS = 10_000;
@@ -175,19 +171,16 @@ export class FabricStream {
   private remoteSequence = 0n;
   private localFin = false;
   private remoteFin = false;
-  private outboundCredit = 0n;
-  private outboundWindow = 0n;
-  private transportFlow_ = false;
-  private inboundCredit: bigint;
-  private readonly inboundWindow: bigint;
-  private inboundTail: Promise<void> = Promise.resolve();
+  private remoteFinDelivered = false;
   private acceptedSettled = false;
   private completed = false;
+  private draining = false;
+  private pendingBytes = 0;
+  private readonly pending: Array<{ payload: Uint8Array; charge: number; release(): void }> = [];
   private readonly acceptance = deferred<Uint8Array>();
   private readonly completion = deferred<FabricStreamResult>();
   private readonly dataHandlers = new Set<DataHandler>();
   private readonly finishHandlers = new Set<FinishHandler>();
-  private readonly creditWaiters = new Set<ReturnType<typeof deferred<void>>>();
 
   readonly accepted = this.acceptance.promise;
   readonly done = this.completion.promise;
@@ -197,203 +190,96 @@ export class FabricStream {
     readonly id: string,
     readonly direction: FabricStreamDirection,
     readonly connectionEpoch: symbol,
-    inboundWindow: bigint,
-    initialOutboundCredit = 0n,
-    transportFlow = false,
   ) {
     this.phase_ = direction === "outgoing" ? "opening" : "incoming";
-    this.inboundWindow = inboundWindow;
-    this.inboundCredit = inboundWindow;
-    this.outboundCredit = initialOutboundCredit;
-    this.outboundWindow = initialOutboundCredit;
-    this.transportFlow_ = transportFlow;
-    // A caller is free to observe only `done`. Marking the internal promise as
-    // handled prevents a reset-before-accept from becoming a global unhandled
-    // rejection; awaiting `accepted` still receives the same rejection.
     void this.accepted.catch(() => {});
   }
 
-  get phase(): FabricStreamPhase {
-    return this.phase_;
-  }
-
-  /** Bytes that may be sent immediately without exceeding peer credit. */
-  get availableSendCredit(): bigint {
-    return this.outboundCredit;
-  }
-
-  /** @internal */
-  get transportFlow(): boolean {
-    return this.transportFlow_;
-  }
-
-  /** Accepts an INCOMING stream. Outgoing streams are accepted by their peer. */
-  accept(opaqueReply: Uint8Array = EMPTY): void {
-    this.endpoint.accept(this, opaqueReply);
-  }
-
-  /** Sends one opaque DATA record with a stream-local monotonic sequence. */
-  send(payload: Uint8Array): void {
-    this.endpoint.sendData(this, payload);
-  }
-
-  /** Waits only for this stream's credit; other Fabric operations keep moving. */
-  async sendAsync(payload: Uint8Array): Promise<void> {
-    if (payload.byteLength === 0 || BigInt(payload.byteLength) > this.inboundWindow) {
-      throw new FabricStateError("Fabric DATA must fit the negotiated stream window");
-    }
-    if (this.transportFlow_) {
-      await this.endpoint.sendDataAsync(this, payload);
-      return;
-    }
-    while (BigInt(payload.byteLength) > this.outboundCredit) {
-      if (!this.canSend() || this.completed) {
-        throw new FabricStateError("Fabric stream closed while waiting for credit");
-      }
-      const waiter = deferred<void>();
-      this.creditWaiters.add(waiter);
-      try {
-        await waiter.promise;
-      } finally {
-        this.creditWaiters.delete(waiter);
-      }
-    }
-    this.send(payload);
-  }
-
-  /** Half-closes this direction. The peer may continue sending until its FIN. */
-  finish(): void {
-    this.endpoint.finish(this);
-  }
-
-  /** Aborts this operation without affecting other streams on the endpoint. */
-  reset(code: FabricReset = FabricReset.EndpointClosed): void {
-    this.endpoint.reset(this, BigInt(code));
-  }
-
+  get phase(): FabricStreamPhase { return this.phase_; }
+  accept(opaqueReply: Uint8Array = EMPTY): void { this.endpoint.accept(this, opaqueReply); }
+  send(payload: Uint8Array): void { this.endpoint.sendData(this, payload); }
+  sendAsync(payload: Uint8Array): Promise<void> { return this.endpoint.sendDataAsync(this, payload); }
+  finish(): void { this.endpoint.finish(this); }
+  reset(code: FabricReset = FabricReset.EndpointClosed): void { this.endpoint.reset(this, BigInt(code)); }
   onData(handler: DataHandler): () => void {
     this.dataHandlers.add(handler);
     return () => this.dataHandlers.delete(handler);
   }
-
   onRemoteFinish(handler: FinishHandler): () => void {
     this.finishHandlers.add(handler);
     return () => this.finishHandlers.delete(handler);
   }
 
   /** @internal */
-  activate(payload: Uint8Array, outboundCredit?: bigint): void {
+  activate(payload: Uint8Array): void {
     if (this.phase_ !== "opening" && this.phase_ !== "incoming") return;
-    if (outboundCredit !== undefined) {
-      if (outboundCredit === 0n) {
-        this.transportFlow_ = true;
-      } else {
-        this.outboundCredit = outboundCredit;
-        this.outboundWindow = outboundCredit;
-      }
-    }
     this.phase_ = "active";
     if (!this.acceptedSettled) {
       this.acceptedSettled = true;
       this.acceptance.resolve(payload.slice());
     }
   }
-
   /** @internal */
-  nextLocalSequence(): bigint {
-    this.localSequence += 1n;
-    return this.localSequence;
-  }
-
-  /** @internal */
-  takeOutboundCredit(byteLength: number): boolean {
-    const cost = BigInt(byteLength);
-    if (this.transportFlow_) return cost > 0n;
-    if (cost <= 0n || cost > this.outboundCredit) return false;
-    this.outboundCredit -= cost;
-    return true;
-  }
-
-  /** @internal */
-  addOutboundCredit(credit: bigint): boolean {
-    if (credit <= 0n || this.outboundCredit + credit > this.outboundWindow) {
-      return false;
-    }
-    this.outboundCredit += credit;
-    for (const waiter of this.creditWaiters) waiter.resolve();
-    return true;
-  }
-
+  nextLocalSequence(): bigint { return ++this.localSequence; }
   /** @internal */
   receiveData(sequence: bigint, payload: Uint8Array): boolean {
-    const cost = BigInt(payload.byteLength);
-    if (
-      (this.phase_ !== "active" && this.phase_ !== "halfClosedLocal") ||
-      this.remoteFin ||
-      sequence !== this.remoteSequence + 1n ||
-      cost <= 0n ||
-      (!this.transportFlow_ && cost > this.inboundCredit)
-    ) {
-      return false;
-    }
+    if ((this.phase_ !== "active" && this.phase_ !== "halfClosedLocal") || this.remoteFin ||
+        sequence !== this.remoteSequence + 1n || payload.byteLength === 0) return false;
     this.remoteSequence = sequence;
-    if (!this.transportFlow_) this.inboundCredit -= cost;
-    const handlers = [...this.dataHandlers];
-    const delivered = this.inboundTail.then(async () => {
-      if (this.completed) return;
-      for (const handler of handlers) await handler(payload.slice());
-      if (!this.completed && !this.transportFlow_) {
-        this.endpoint.returnCredit(this, cost);
-      }
-    });
-    this.inboundTail = delivered.catch((error: unknown) => {
-      this.endpoint.failConsumer(this, error);
-    });
+    const charge = Math.max(64, payload.byteLength);
+    const release = this.pending.length < DEFAULT_MAX_QUEUED_INBOUND_FRAMES &&
+      this.pendingBytes + charge <= MAX_PENDING_STREAM_BYTES
+      ? this.endpoint.retainConsumer(charge) : null;
+    if (!release) {
+      this.endpoint.failConsumer(this, new FabricStateError("Fabric consumer queue is full"));
+      return true; // Valid frame; only its overloaded stream was retired.
+    }
+    this.pending.push({ payload, charge, release });
+    this.pendingBytes += charge;
+    if (!this.draining) void this.drain();
     return true;
   }
 
-  /** @internal */
-  restoreInboundCredit(credit: bigint): boolean {
-    if (credit <= 0n || this.inboundCredit + credit > this.inboundWindow) return false;
-    this.inboundCredit += credit;
-    return true;
+  private async drain(): Promise<void> {
+    this.draining = true;
+    try {
+      while (!this.completed && this.pending.length) {
+        const next = this.pending.shift()!;
+        try {
+          for (const handler of [...this.dataHandlers]) await handler(next.payload.slice());
+        } finally {
+          this.pendingBytes -= next.charge;
+          next.release();
+        }
+      }
+    } catch (error) { this.endpoint.failConsumer(this, error); }
+    finally { this.draining = false; this.deliverFin(); }
   }
 
   /** @internal */
   markLocalFin(): boolean {
-    if (
-      this.localFin ||
-      (this.phase_ !== "active" && this.phase_ !== "halfClosedRemote")
-    ) {
-      return false;
-    }
+    if (this.localFin || (this.phase_ !== "active" && this.phase_ !== "halfClosedRemote")) return false;
     this.localFin = true;
-    if (this.remoteFin) this.complete({ type: "finished" });
+    if (this.remoteFinDelivered) this.complete({ type: "finished" });
     else this.phase_ = "halfClosedLocal";
     return true;
   }
-
   /** @internal */
   markRemoteFin(): boolean {
-    if (
-      this.remoteFin ||
-      (this.phase_ !== "active" && this.phase_ !== "halfClosedLocal")
-    ) {
-      return false;
-    }
+    if (this.remoteFin || (this.phase_ !== "active" && this.phase_ !== "halfClosedLocal")) return false;
     this.remoteFin = true;
-    for (const handler of this.finishHandlers) {
-      try {
-        handler();
-      } catch (error) {
-        this.endpoint.reportListenerError(error);
-      }
-    }
-    if (this.localFin) this.complete({ type: "finished" });
-    else this.phase_ = "halfClosedRemote";
+    if (!this.localFin) this.phase_ = "halfClosedRemote";
+    this.deliverFin();
     return true;
   }
-
+  private deliverFin(): void {
+    if (!this.remoteFin || this.remoteFinDelivered || this.draining || this.completed) return;
+    this.remoteFinDelivered = true;
+    for (const handler of this.finishHandlers) {
+      try { handler(); } catch (error) { this.endpoint.reportListenerError(error); }
+    }
+    if (this.localFin) this.complete({ type: "finished" });
+  }
   /** @internal */
   failReset(code: bigint): void {
     if (this.completed) return;
@@ -403,7 +289,6 @@ export class FabricStream {
     }
     this.complete({ type: "reset", code });
   }
-
   /** @internal */
   failConnection(error: FabricConnectionError): void {
     if (this.completed) return;
@@ -413,24 +298,19 @@ export class FabricStream {
     }
     this.complete({ type: "connectionClosed", error });
   }
-
   /** @internal */
-  canSend(): boolean {
-    return !this.localFin && (this.phase_ === "active" || this.phase_ === "halfClosedRemote");
-  }
-
+  canSend(): boolean { return !this.localFin && (this.phase_ === "active" || this.phase_ === "halfClosedRemote"); }
   /** @internal */
-  isCompleted(): boolean {
-    return this.completed;
-  }
-
+  isCompleted(): boolean { return this.completed; }
   private complete(result: FabricStreamResult): void {
     if (this.completed) return;
     this.completed = true;
     this.phase_ = "closed";
-    const error = new FabricStateError("Fabric stream closed");
-    for (const waiter of this.creditWaiters) waiter.reject(error);
-    this.creditWaiters.clear();
+    for (const record of this.pending.splice(0)) {
+      this.pendingBytes -= record.charge;
+      record.release();
+    }
+    this.endpoint.retire(this);
     this.completion.resolve(result);
   }
 }
@@ -470,12 +350,13 @@ export class FabricEndpoint {
     queuedFrames: number;
     queuedBytes: number;
   } | null = null;
-  private readonly initialCredit: bigint;
+  private consumerBytes = 0;
+  private heartbeat: ReturnType<typeof setInterval> | null = null;
+  private lastReceived = 0;
 
   constructor(private readonly options: FabricEndpointOptions) {
     this.validateReconnectOptions();
     this.validateResourceOptions();
-    this.initialCredit = this.validateInitialCredit();
   }
 
   get connectionState(): FabricConnectionState {
@@ -544,14 +425,13 @@ export class FabricEndpoint {
       streamId,
       "outgoing",
       this.epoch!,
-      this.initialCredit,
     );
     this.streams.set(streamId, stream);
     try {
       this.sendFrame({
         kind: FabricKind.Open,
         streamId,
-        value: this.initialCredit,
+        value: 0n,
         payload,
       });
     } catch (error) {
@@ -591,7 +471,7 @@ export class FabricEndpoint {
     this.sendFrame({
       kind: FabricKind.Accept,
       streamId: stream.id,
-      value: stream.transportFlow ? 0n : this.initialCredit,
+      value: 0n,
       payload: opaqueReply,
     });
     stream.activate(opaqueReply);
@@ -599,9 +479,7 @@ export class FabricEndpoint {
 
   /** @internal */
   async sendDataAsync(stream: FabricStream, payload: Uint8Array): Promise<void> {
-    if (stream.transportFlow) {
-      await this.waitForSocketCapacity(payload.byteLength + FABRIC_HEADER_BYTES);
-    }
+    await this.waitForSocketCapacity(payload.byteLength + FABRIC_HEADER_BYTES);
     this.sendData(stream, payload);
   }
 
@@ -611,9 +489,9 @@ export class FabricEndpoint {
     if (!stream.canSend()) {
       throw new FabricStateError(`cannot send DATA while stream is ${stream.phase}`);
     }
-    if (!stream.takeOutboundCredit(payload.byteLength)) {
+    if (payload.byteLength === 0) {
       throw new FabricStateError(
-        "cannot send empty DATA or DATA beyond this stream's available credit",
+        "cannot send empty DATA",
       );
     }
     this.sendFrame({
@@ -665,20 +543,11 @@ export class FabricEndpoint {
     }
   }
 
-  /** @internal */
-  returnCredit(stream: FabricStream, credit: bigint): void {
-    if (this.streams.get(stream.id) !== stream || stream.isCompleted()) return;
-    if (stream.transportFlow) return;
-    if (!stream.restoreInboundCredit(credit)) {
-      this.failProtocol(stream);
-      return;
-    }
-    this.sendFrame({
-      kind: FabricKind.WindowUpdate,
-      streamId: stream.id,
-      value: credit,
-      payload: EMPTY,
-    });
+  /** Owns actual undelivered bytes, never a remote ACK or receive window. @internal */
+  retainConsumer(bytes: number): (() => void) | null {
+    if (this.consumerBytes + bytes > (this.options.maxQueuedInboundBytes ?? DEFAULT_MAX_QUEUED_INBOUND_BYTES)) return null;
+    this.consumerBytes += bytes;
+    return () => { this.consumerBytes -= bytes; };
   }
 
   /** @internal */
@@ -700,6 +569,13 @@ export class FabricEndpoint {
         );
       }
       if (!url) throw new FabricStateError("Fabric endpoint URL is empty");
+      const target = new URL(url);
+      const modes = target.searchParams.getAll("flow");
+      if (modes.length > 1 || modes.some(mode => mode !== FABRIC_TRANSPORT_FLOW)) {
+        throw new FabricStateError("unsupported Fabric flow mode");
+      }
+      target.searchParams.set("flow", FABRIC_TRANSPORT_FLOW);
+      url = target.toString();
       if (this.stopped) {
         throw new FabricStateError("this Fabric endpoint was closed permanently");
       }
@@ -763,6 +639,7 @@ export class FabricEndpoint {
         opened = true;
         settled = true;
         this.setState("open");
+        this.startHeartbeat();
         resolve();
       };
       socket.onmessage = (event) => this.enqueueMessage(socket, epoch, event.data);
@@ -864,6 +741,7 @@ export class FabricEndpoint {
   }
 
   private receive(frame: FabricFrame): void {
+    this.lastReceived = performance.now();
     switch (frame.kind) {
       case FabricKind.Incoming:
         this.receiveIncoming(frame);
@@ -873,9 +751,6 @@ export class FabricEndpoint {
         return;
       case FabricKind.Data:
         this.receiveData(frame);
-        return;
-      case FabricKind.WindowUpdate:
-        this.receiveWindowUpdate(frame);
         return;
       case FabricKind.Fin:
         this.receiveFin(frame);
@@ -909,10 +784,8 @@ export class FabricEndpoint {
   }
 
   private receiveIncoming(frame: FabricFrame): void {
-    const transportFlow = frame.value === 0n && this.options.transportFlow === true;
     if (
-      (!transportFlow &&
-        (frame.value <= 0n || frame.value > BigInt(FABRIC_MAX_STREAM_CREDIT))) ||
+      frame.value !== 0n ||
       frame.payload.byteLength > FABRIC_MAX_OPERATION_METADATA_BYTES
     ) {
       this.sendUnknownReset(frame.streamId, FabricReset.ProtocolViolation);
@@ -943,9 +816,6 @@ export class FabricEndpoint {
       frame.streamId,
       "incoming",
       this.epoch!,
-      this.initialCredit,
-      transportFlow ? 0n : frame.value,
-      transportFlow,
     );
     this.streams.set(frame.streamId, stream);
     const handler = this.incomingHandler;
@@ -972,38 +842,19 @@ export class FabricEndpoint {
     if (
       stream.direction !== "outgoing" ||
       stream.phase !== "opening" ||
-      (frame.value === 0n
-        ? this.options.transportFlow !== true
-        : frame.value > BigInt(FABRIC_MAX_STREAM_CREDIT)) ||
+      frame.value !== 0n ||
       frame.payload.byteLength > FABRIC_MAX_OPERATION_METADATA_BYTES
     ) {
       this.failProtocol(stream);
       return;
     }
-    stream.activate(frame.payload, frame.value);
+    stream.activate(frame.payload);
   }
 
   private receiveData(frame: FabricFrame): void {
     const stream = this.streams.get(frame.streamId);
     if (!stream) return this.sendUnknownReset(frame.streamId);
     if (!stream.receiveData(frame.value, frame.payload)) this.failProtocol(stream);
-  }
-
-  private receiveWindowUpdate(frame: FabricFrame): void {
-    const stream = this.streams.get(frame.streamId);
-    if (!stream) return this.sendUnknownReset(frame.streamId);
-    if (
-      (stream.phase !== "active" &&
-        stream.phase !== "halfClosedLocal" &&
-        stream.phase !== "halfClosedRemote") ||
-      frame.value === 0n ||
-      frame.payload.byteLength !== 0 ||
-      stream.transportFlow ||
-      !stream.addOutboundCredit(frame.value)
-    ) {
-      this.failProtocol(stream);
-      return;
-    }
   }
 
   private receiveFin(frame: FabricFrame): void {
@@ -1093,6 +944,7 @@ export class FabricEndpoint {
    */
   private async waitForSocketCapacity(wireBytes: number): Promise<void> {
     const high = this.options.maxBufferedBytes ?? DEFAULT_MAX_BUFFERED_BYTES;
+    if (wireBytes > high) throw new FabricStateError("Fabric record exceeds its local socket budget");
     const low = Math.floor(high / 2);
     for (;;) {
       const socket = this.socket;
@@ -1116,10 +968,11 @@ export class FabricEndpoint {
       if (wire.byteLength > maxFrameBytes) {
         throw new FabricStateError("Fabric frame is too large");
       }
-      if (
-        socket.bufferedAmount + wire.byteLength >
-        (this.options.maxBufferedBytes ?? DEFAULT_MAX_BUFFERED_BYTES)
-      ) {
+      // Two bounded control headers fit even when DATA owns its local high
+      // water mark. PING/PONG must not turn ordinary write pressure into loss.
+      const control = frame.kind === FabricKind.Ping || frame.kind === FabricKind.Pong;
+      const capacity = (this.options.maxBufferedBytes ?? DEFAULT_MAX_BUFFERED_BYTES) + (control ? 2 * FABRIC_HEADER_BYTES : 0);
+      if (socket.bufferedAmount + wire.byteLength > capacity) {
         throw new FabricStateError("Fabric WebSocket peer is too slow");
       }
       socket.send(wire);
@@ -1130,6 +983,23 @@ export class FabricEndpoint {
       socket.close();
       throw error;
     }
+  }
+
+  private startHeartbeat(): void {
+    if (this.heartbeat !== null) clearInterval(this.heartbeat);
+    this.lastReceived = performance.now();
+    this.heartbeat = setInterval(() => {
+      const socket = this.socket, epoch = this.epoch;
+      if (!socket || !epoch || this.state_ !== "open") return;
+      if (performance.now() - this.lastReceived >= 15000) {
+        const error = new FabricConnectionError("Fabric socket heartbeat timed out", null, "heartbeat-timeout");
+        this.disconnect(epoch, error);
+        socket.close(4008, "heartbeat-timeout");
+        return;
+      }
+      try { this.sendFrame({ kind: FabricKind.Ping, streamId: FABRIC_ZERO_STREAM_ID, value: BigInt(Date.now()), payload: EMPTY }); }
+      catch (error) { this.reportListenerError(error); }
+    }, 5000);
   }
 
   private requireOpen(): void {
@@ -1149,7 +1019,8 @@ export class FabricEndpoint {
     }
   }
 
-  private retire(stream: FabricStream): void {
+  /** @internal */
+  retire(stream: FabricStream): void {
     if (this.streams.get(stream.id) === stream) this.streams.delete(stream.id);
   }
 
@@ -1166,6 +1037,8 @@ export class FabricEndpoint {
   private drop(epoch: symbol, error: FabricConnectionError): boolean {
     if (this.epoch !== epoch) return false;
     this.clearConnectTimer();
+    if (this.heartbeat !== null) clearInterval(this.heartbeat);
+    this.heartbeat = null;
     this.socket = null;
     this.epoch = null;
     this.inbound = null;
@@ -1376,20 +1249,6 @@ export class FabricEndpoint {
 
   private maxRememberedStreamIds(): number {
     return this.options.maxRememberedStreamIds ?? DEFAULT_MAX_REMEMBERED_STREAM_IDS;
-  }
-
-  private validateInitialCredit(): bigint {
-    const credit = this.options.initialStreamCredit ?? FABRIC_INITIAL_STREAM_CREDIT;
-    if (
-      !Number.isSafeInteger(credit) ||
-      credit <= 0 ||
-      credit > FABRIC_MAX_STREAM_CREDIT
-    ) {
-      throw new FabricStateError(
-        `Fabric initial stream credit must be an integer from 1 through ${FABRIC_MAX_STREAM_CREDIT}`,
-      );
-    }
-    return BigInt(credit);
   }
 
   private isTransient(cause: unknown): boolean {

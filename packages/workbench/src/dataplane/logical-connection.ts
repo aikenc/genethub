@@ -93,6 +93,9 @@ export class LogicalConnection {
       } else throw new Error("invalid connection admission transition");
       if (this.closed) return;
       this.admitted = true;
+      // Fabric socket probes own liveness for all routed peers; one peer
+      // waiting behind another peer's DATA is not a lost physical path.
+      if (this.options.path === "fabric") clearInterval(this.clock);
       for (const waiter of this.waiters) waiter.resolve();
       this.waiters.clear();
       this.options.onReady?.(); this.options.onWritable?.();

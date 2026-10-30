@@ -3334,13 +3334,7 @@ impl SessionManager {
 
     pub async fn interrupt(&self, session_id: &str) -> Result<()> {
         let live = self.live(session_id).await?;
-        {
-            let mut meta = live.meta.lock().await;
-            let mut next = meta.clone();
-            next.inbox.paused = true;
-            self.store.save_meta(&next)?;
-            *meta = next;
-        }
+        inbox::pause_delivery(&live).await?;
         let _interaction = live.interaction_lock.lock().await;
         // Fieldless clients retain their historical stop-waiting contract.
         // A durable-input PM instead preserves the Human card during a stop.
@@ -4716,6 +4710,7 @@ impl SessionManager {
         // appending to a timeline we just removed, and the session would
         // reappear a moment after being deleted.
         if let Some(live) = live {
+            inbox::pause_delivery(&live).await?;
             let _interaction = live.interaction_lock.lock().await;
             cancel_human_continuation(&live, &self.store).await?;
             self.end_what_it_left(session_id).await;
@@ -4752,6 +4747,7 @@ impl SessionManager {
             Some(live) => live,
             None => return Ok(()),
         };
+        inbox::pause_delivery(&live).await?;
         let _interaction = live.interaction_lock.lock().await;
         cancel_human_continuation(&live, &self.store).await?;
         let saved = live
@@ -4810,6 +4806,14 @@ impl SessionManager {
         let ended = self.processes.stop_all(session_id).await;
         if ended > 0 {
             tracing::info!(session = %session_id, count = ended, "ended what the session left running");
+        }
+    }
+
+    /// Fence delivery before the daemon concurrently stops Registry processes.
+    /// Their terminal events are shutdown, not a new Human pause or crash.
+    pub(crate) async fn prepare_shutdown(&self) {
+        for live in self.sessions.read().await.values() {
+            live.closing.store(true, Ordering::SeqCst);
         }
     }
 

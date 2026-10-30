@@ -7,8 +7,6 @@ import { DataEndpoint, type RecordCarrier } from "./endpoint";
 import {
   DataKind,
   DATA_PLANE_VERSION,
-  INITIAL_STREAM_WINDOW_BYTES,
-  MAX_BULK_STREAM_WINDOW_BYTES,
 } from "./frame";
 import { decodeDataFrame } from "./frame";
 import { openDataRecord } from "./secure";
@@ -81,21 +79,6 @@ async function endpoints() {
   return { client, server, clientCarrier, serverCarrier, key };
 }
 
-async function bulkEndpoints() {
-  const [clientCarrier, serverCarrier] = carriers();
-  const key = await deriveChannelSessionKey(
-    "0123456789abcdef".repeat(4),
-    "hosted:test",
-    "00112233445566778899aabbccddeeff",
-    "ffeeddccbbaa99887766554433221100",
-  );
-  const options = { key, maxBulkStreamWindowBytes: MAX_BULK_STREAM_WINDOW_BYTES };
-  const client = new DataEndpoint({ role: "client", carrier: clientCarrier, ...options });
-  const server = new DataEndpoint({ role: "server", carrier: serverCarrier, ...options });
-  cleanup.push(client, server);
-  return { client, server, clientCarrier, serverCarrier, key };
-}
-
 const cleanup: DataEndpoint[] = [];
 const handlerTasks: Promise<void>[] = [];
 afterEach(async () => {
@@ -104,32 +87,34 @@ afterEach(async () => {
 });
 
 describe("the E2EE data endpoint", () => {
-  it("transfers a complete finite Preview without consumption ACKs and keeps ordinary flow control", async () => {
-    const stack = await bulkEndpoints();
+  it("transfers finite and unknown-length bodies beyond the former credit without ACKs", async () => {
+    const stack = await endpoints();
     const bytes = new Uint8Array(4 * 1024 * 1024).fill(73);
     stack.server.onIncoming((stream) => {
       handlerTasks.push((async () => {
         await collectBody(stream.body(), 0);
-        const preview = stream.requestHead.method === "asset.preview";
-        await stream.respond({ status: 200, metadata: null, bodyLength: preview ? bytes.length : 0 });
+        const preview = stream.requestHead.method !== "workspace.list";
+        await stream.respond({ status: 200, metadata: null, ...(stream.requestHead.method === "duplex-output" ? {} : { bodyLength: preview ? bytes.length : 0 }) });
         if (preview) for (let at = 0; at < bytes.length; at += 65536) await stream.write(bytes.subarray(at, at + 65536));
         await stream.finish();
       })());
     });
 
-    const preview = stack.client.open(head("asset.preview", 0));
-    await preview.finish();
-    await preview.responseHead;
-    const actual = await collectBody(preview.body(), bytes.length);
-    expect(actual.length).toBe(bytes.length);
-    expect(actual.every(byte => byte === 73)).toBe(true);
-    await preview.done;
+    for (const method of ["asset.preview", "duplex-output"]) {
+      const stream = stack.client.open(head(method, 0));
+      await stream.finish();
+      await stream.responseHead;
+      const actual = await collectBody(stream.body(), bytes.length);
+      expect(actual.length).toBe(bytes.length);
+      expect(actual.every(byte => byte === 73)).toBe(true);
+      await stream.done;
+    }
     const regular = stack.client.open(head("workspace.list", 0));
     await regular.finish();
     await regular.done;
 
     const opens: Array<{ method: string; window: number }> = [];
-    let previewUpdates = 0;
+    let updates = 0;
     for (const [index, record] of stack.clientCarrier.sent.entries()) {
       const plaintext = await openDataRecord(
         stack.key,
@@ -139,19 +124,47 @@ describe("the E2EE data endpoint", () => {
       );
       if (plaintext[1] === 16) continue;
       const frame = decodeDataFrame(plaintext)!;
-      if (frame.kind === DataKind.WindowUpdate && frame.streamId === preview.id) previewUpdates++;
+      if (plaintext[1] === 4) updates++; // Former consumption ACK kind is no longer accepted.
       if (frame.kind !== DataKind.Open) continue;
       const request = JSON.parse(new TextDecoder().decode(frame.payload)) as {
         method: string;
       };
       opens.push({ method: request.method, window: frame.value });
     }
-    expect(previewUpdates).toBe(0);
+    expect(updates).toBe(0);
     expect(opens).toEqual([
-      { method: "asset.preview", window: MAX_BULK_STREAM_WINDOW_BYTES },
-      { method: "workspace.list", window: INITIAL_STREAM_WINDOW_BYTES },
+      { method: "asset.preview", window: 0 },
+      { method: "duplex-output", window: 0 },
+      { method: "workspace.list", window: 0 },
     ]);
-  });
+  }, 20_000);
+
+  it("refuses an unread overfull stream while a healthy sibling continues", async () => {
+    const stack = await endpoints();
+    let refused = false;
+    stack.server.onIncoming(stream => {
+      handlerTasks.push((async () => {
+        await collectBody(stream.body(), 0);
+        await stream.respond({ status: 200, metadata: null });
+        if (stream.requestHead.method === "slow-output") {
+          try {
+            for (let i = 0; i < 80; i++) await stream.write(new Uint8Array(65536));
+          } catch (error) {
+            expect(error).toBeInstanceOf(Error);
+            refused = true;
+          }
+        } else await stream.finish();
+      })());
+    });
+    const slow = stack.client.open(head("slow-output", 0));
+    await slow.finish(); await slow.responseHead;
+    await expect(slow.done).rejects.toThrow("reset");
+    await expect(collectBody(slow.body(), 4 * 1024 * 1024)).rejects.toThrow("reset");
+    await waitFor(() => refused);
+    const healthy = stack.client.open(head("healthy", 0));
+    await healthy.finish(); await healthy.responseHead; await healthy.done;
+    expect(stack.client.state).toBe("open"); expect(stack.server.state).toBe("open");
+  }, 20_000);
 
   it("retains unread completed response bytes until consumption or cancellation", async () => {
     const stack = await endpoints();

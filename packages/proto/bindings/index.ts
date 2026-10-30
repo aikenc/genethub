@@ -700,7 +700,11 @@ export type HelloResult = {
 /**
  * Optional second rendezvous carrier; it grants no authority by itself.
  */
-dataChannelUrl?: string, daemonVersion: string, webProtocol: number, machineId: string, 
+dataChannelUrl?: string, daemonVersion: string, 
+/**
+ * Identity of this daemon run; event cursors cannot cross its lifetime.
+ */
+daemonInstanceId: string, webProtocol: number, machineId: string, 
 /**
  * Short human-comparable form of the daemon key, for out-of-band checking.
  */
@@ -1044,17 +1048,9 @@ export type PeerHello = { version: number, clientName: string, auth: PeerAuth,
  * Capability advertisement only.  Signaling remains encrypted data-plane
  * traffic and no RTC address is ever placed in this hello.
  */
-rtcSupported: boolean, 
-/**
- * Bounded finite-bulk stream-window advertisement.
- */
-maxBulkStreamWindowBytes: number, };
+rtcSupported: boolean, };
 
-export type PeerWelcome = { version: number, serverNonce: string, proof: string, 
-/**
- * Bounded finite-bulk stream-window advertisement.
- */
-maxBulkStreamWindowBytes: number, };
+export type PeerWelcome = { version: number, serverNonce: string, proof: string, };
 
 export type PermissionOption = { id: string, label: string, kind: PermissionOptionKind, };
 

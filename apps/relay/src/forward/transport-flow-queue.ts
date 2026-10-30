@@ -1,5 +1,5 @@
 import type { OutboundByteBudget } from "../shared/outbound-budget.js";
-import { FABRIC_MAX_STREAM_CREDIT, type FabricFrame } from "./fabric-frame.js";
+import type { FabricFrame } from "./fabric-frame.js";
 
 interface PendingFrame {
   readonly frame: FabricFrame;
@@ -8,7 +8,6 @@ interface PendingFrame {
 }
 interface StreamQueue {
   readonly frames: PendingFrame[];
-  bytes: number;
   running: boolean;
   cancelled: boolean;
 }
@@ -31,8 +30,7 @@ export class TransportFlowQueue {
     if (this.closed) return;
     const charge = Math.max(wireBytes, 1024);
     let queue = this.streams.get(frame.streamId);
-    if (charge > FABRIC_MAX_STREAM_CREDIT - (queue?.bytes ?? 0)
-      || charge > 4 * 1024 * 1024 - this.bytes || this.records >= 4096) {
+    if (charge > 4 * 1024 * 1024 - this.bytes || this.records >= 4096) {
       this.cancel(frame.streamId);
       this.overflow(frame.streamId);
       return;
@@ -44,11 +42,10 @@ export class TransportFlowQueue {
       return;
     }
     if (!queue) {
-      queue = { frames: [], bytes: 0, running: false, cancelled: false };
+      queue = { frames: [], running: false, cancelled: false };
       this.streams.set(frame.streamId, queue);
     }
     queue.frames.push({ frame, charge, release });
-    queue.bytes += charge;
     this.bytes += charge;
     this.records++;
     if (!queue.running) void this.drain(frame.streamId, queue);
@@ -58,7 +55,7 @@ export class TransportFlowQueue {
     const queue = this.streams.get(streamId);
     if (!queue) return;
     queue.cancelled = true;
-    for (const pending of queue.frames.splice(0)) this.release(queue, pending);
+    for (const pending of queue.frames.splice(0)) this.release(pending);
     this.streams.delete(streamId);
   }
 
@@ -67,8 +64,7 @@ export class TransportFlowQueue {
     for (const streamId of this.streams.keys()) this.cancel(streamId);
   }
 
-  private release(queue: StreamQueue, pending: PendingFrame): void {
-    queue.bytes -= pending.charge;
+  private release(pending: PendingFrame): void {
     this.bytes -= pending.charge;
     this.records--;
     pending.release();
@@ -81,7 +77,7 @@ export class TransportFlowQueue {
         const pending = queue.frames.shift();
         if (!pending) break;
         // Transfer custody synchronously to sendFlow's socket reservation.
-        this.release(queue, pending);
+        this.release(pending);
         try { await this.forward(pending.frame); }
         catch (error) { this.failed(pending.frame, error); break; }
       }

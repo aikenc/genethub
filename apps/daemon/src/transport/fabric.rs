@@ -27,19 +27,12 @@ const VERSION: u8 = 2;
 const HEADER_BYTES: usize = 28;
 const STREAM_ID_BYTES: usize = 16;
 const MAX_WIRE_FRAME_BYTES: usize = genehub_proto::MAX_DATA_FRAME_BYTES + HEADER_BYTES;
-const INITIAL_CREDIT: u64 = genehub_proto::INITIAL_STREAM_WINDOW_BYTES as u64;
 const TRANSPORT_FLOW: &str = "transport-v1";
 const MAX_PEERS: usize = 32;
 const MAX_PENDING: usize = 8;
 const WRITER_QUEUE: usize = 256;
-// The ingress budget bounds bytes accepted from one peer but not yet consumed
-// by the data plane. It must not be smaller than what a legitimate sender can
-// have in flight: the inner per-stream credit alone allows 3 MiB, so a 1 MiB
-// queue let an ordinary upload trip the overflow path and detach the peer
-// stream. Size it above the largest single-stream window and bound the total
-// across peers separately.
-// The independent record cap also bounds metadata for tiny hostile records.
-// Legitimate ACK bursts are small bytes, not thousands of full-sized records.
+// Actual unconsumed ingress is bounded per peer and per uplink. These are
+// local byte/record ownership limits, never a feedback window or retry budget.
 pub(crate) const PEER_INGRESS_BYTES: usize = 8 * 1024 * 1024;
 /// Total bytes queued across every peer on this uplink. Without this, 32
 /// peers could each hold their own per-peer allowance at the same time.
@@ -48,8 +41,8 @@ const PEER_INGRESS_QUEUE: usize = 4096;
 // Keep receive-capacity assumptions true in every build, not just unit runs.
 const _: () = {
     assert!(
-        PEER_INGRESS_BYTES >= 2 * genehub_proto::INITIAL_STREAM_WINDOW_BYTES as usize,
-        "per-peer ingress must hold a full stream window with headroom"
+        PEER_INGRESS_BYTES >= 2 * genehub_proto::MAX_DATA_FRAME_BYTES,
+        "per-peer ingress must hold complete records with headroom"
     );
     assert!(
         MAX_TOTAL_INGRESS_BYTES > PEER_INGRESS_BYTES,
@@ -131,7 +124,6 @@ enum Kind {
     Incoming = 2,
     Accept = 3,
     Data = 4,
-    WindowUpdate = 5,
     Fin = 6,
     Reset = 7,
     Ping = 8,
@@ -171,103 +163,6 @@ impl Writer {
     }
 }
 
-#[derive(Clone)]
-struct Credit {
-    inner: Arc<CreditInner>,
-}
-
-struct CreditInner {
-    value: Mutex<u64>,
-    maximum: u64,
-    notify: Notify,
-}
-
-impl Credit {
-    fn new(value: u64) -> Result<Self> {
-        if value == 0 || value > genehub_proto::INITIAL_STREAM_WINDOW_BYTES as u64 {
-            anyhow::bail!("invalid Fabric stream credit");
-        }
-        Ok(Self {
-            inner: Arc::new(CreditInner {
-                value: Mutex::new(value),
-                maximum: value,
-                notify: Notify::new(),
-            }),
-        })
-    }
-
-    async fn take(&self, bytes: usize) -> Result<()> {
-        let bytes = u64::try_from(bytes)?;
-        if bytes == 0 || bytes > self.inner.maximum {
-            anyhow::bail!("Fabric record does not fit its stream window");
-        }
-        loop {
-            let notified = self.inner.notify.notified();
-            {
-                let mut value = self.inner.value.lock().unwrap();
-                if *value >= bytes {
-                    *value -= bytes;
-                    return Ok(());
-                }
-            }
-            notified.await;
-        }
-    }
-
-    fn add(&self, value: u64) -> bool {
-        if value == 0 {
-            return false;
-        }
-        let mut current = self.inner.value.lock().unwrap();
-        let Some(next) = current.checked_add(value) else {
-            return false;
-        };
-        if next > self.inner.maximum {
-            return false;
-        }
-        *current = next;
-        drop(current);
-        self.inner.notify.notify_waiters();
-        true
-    }
-}
-
-#[derive(Clone)]
-enum StreamFlow {
-    Legacy(Credit),
-    /// DATA follows only local bounded queues and the TCP/WebSocket drain.
-    Transport,
-}
-
-impl StreamFlow {
-    fn from_wire(value: u64) -> Result<Self> {
-        if value == 0 {
-            Ok(Self::Transport)
-        } else {
-            Credit::new(value).map(Self::Legacy)
-        }
-    }
-
-    async fn take(&self, bytes: usize) -> Result<()> {
-        match self {
-            Self::Legacy(credit) => credit.take(bytes).await,
-            Self::Transport if bytes > 0 => Ok(()),
-            Self::Transport => anyhow::bail!("Fabric record cannot be empty"),
-        }
-    }
-
-    fn add(&self, value: u64) -> bool {
-        match self {
-            Self::Legacy(credit) => credit.add(value),
-            Self::Transport => false,
-        }
-    }
-
-    fn is_transport(&self) -> bool {
-        matches!(self, Self::Transport)
-    }
-}
-
 struct PeerSlot {
     cancelled: Arc<Notify>,
     generation: u64,
@@ -275,7 +170,6 @@ struct PeerSlot {
     ingress_budget: Arc<tokio::sync::Semaphore>,
     shared_ingress: Arc<tokio::sync::Semaphore>,
     remote_sequence: u64,
-    outbound_flow: StreamFlow,
 }
 
 impl Drop for PeerSlot {
@@ -558,7 +452,7 @@ async fn receive(
     match frame.kind {
         Kind::Incoming => {
             if frame.stream_id == [0; STREAM_ID_BYTES]
-                || frame.value > INITIAL_CREDIT
+                || frame.value != 0
                 || frame.payload.is_empty()
                 || frame.payload.len() > genehub_proto::MAX_EXCHANGE_HEAD_BYTES
             {
@@ -605,7 +499,7 @@ async fn receive(
         }
         Kind::Data => {
             let bytes = u64::try_from(frame.payload.len())?;
-            let (inbound, ingress_budget, shared_budget, peer_generation, transport_flow) = {
+            let (inbound, ingress_budget, shared_budget, peer_generation) = {
                 let mut peers = peers.lock().await;
                 let Some(slot) = peers.get_mut(&frame.stream_id) else {
                     drop(peers);
@@ -624,13 +518,10 @@ async fn receive(
                     slot.ingress_budget.clone(),
                     slot.shared_ingress.clone(),
                     slot.generation,
-                    slot.outbound_flow.is_transport(),
                 )
             };
-            // Isolate bounded ingress per peer. Never acknowledge bytes that
-            // were not accepted, and never silently discard an application
-            // frame. Overload detaches this physical carrier; the logical
-            // owner's journal remains responsible for authenticated recovery.
+            // Isolate bounded ingress per peer without blocking shared reads.
+            // Overload ends this routed peer; business recovery is explicit.
             // Take the shared allowance first so one peer cannot occupy the
             // whole uplink's queue, then the per-peer allowance. Both permits
             // travel with the record and are released once it is consumed.
@@ -677,31 +568,6 @@ async fn receive(
             // WebSocket decoder already has many records buffered as Ready.
             if inbound.capacity() <= PEER_INGRESS_QUEUE - 32 {
                 tokio::task::yield_now().await;
-            }
-            // The bounded carrier queue accepted ownership, so this outer
-            // stream can return exactly the credit it consumed.
-            if !transport_flow {
-                let update = Frame {
-                    kind: Kind::WindowUpdate,
-                    stream_id: frame.stream_id,
-                    value: bytes,
-                    payload: Vec::new(),
-                };
-                writer.frame(update).await?;
-            }
-        }
-        Kind::WindowUpdate => {
-            if !frame.payload.is_empty() || frame.value == 0 {
-                anyhow::bail!("invalid Fabric WINDOW_UPDATE");
-            }
-            let peers = peers.lock().await;
-            let Some(slot) = peers.get(&frame.stream_id) else {
-                drop(peers);
-                writer.reset(frame.stream_id, 1).await;
-                return Ok(());
-            };
-            if !slot.outbound_flow.add(frame.value) {
-                anyhow::bail!("Fabric peer exceeded its credit window");
             }
         }
         Kind::Fin | Kind::Reset => {
@@ -835,7 +701,7 @@ async fn serve_peer_inner(
         });
     }
     let (inbound, mut outbound, carrier) = endpoint::carrier_channels();
-    let flow = StreamFlow::from_wire(frame.value)?;
+    anyhow::ensure!(frame.value == 0, "unsupported Fabric flow mode");
     let ingress_budget = Arc::new(tokio::sync::Semaphore::new(PEER_INGRESS_BYTES));
     let (ingress, mut queued) = mpsc::channel::<IngressRecord>(PEER_INGRESS_QUEUE);
     let delivery = AbortOnDrop(tokio::spawn(async move {
@@ -855,7 +721,6 @@ async fn serve_peer_inner(
             ingress_budget,
             shared_ingress: shared_ingress.clone(),
             remote_sequence: 0,
-            outbound_flow: flow.clone(),
         },
     );
     let mut waiting = pending.lock().await;
@@ -870,11 +735,7 @@ async fn serve_peer_inner(
         .frame(Frame {
             kind: Kind::Accept,
             stream_id: frame.stream_id,
-            value: if flow.is_transport() {
-                0
-            } else {
-                INITIAL_CREDIT
-            },
+            value: 0,
             payload: serde_json::to_vec(&accepted.welcome)?,
         })
         .await?;
@@ -890,7 +751,6 @@ async fn serve_peer_inner(
             if record.is_empty() || record.len() > genehub_proto::MAX_DATA_FRAME_BYTES {
                 anyhow::bail!("data-plane record exceeds the Fabric bound");
             }
-            flow.take(record.len()).await?;
             sequence = sequence
                 .checked_add(1)
                 .context("Fabric sequence exhausted")?;
@@ -1027,7 +887,6 @@ fn decode(bytes: &[u8]) -> Option<Frame> {
         2 => Kind::Incoming,
         3 => Kind::Accept,
         4 => Kind::Data,
-        5 => Kind::WindowUpdate,
         6 => Kind::Fin,
         7 => Kind::Reset,
         8 => Kind::Ping,
@@ -1206,7 +1065,7 @@ pub async fn dial(
     let open = Frame {
         kind: Kind::Open,
         stream_id,
-        value: INITIAL_CREDIT,
+        value: 0,
         payload: open_payload(route_ticket, &hello_wire)
             .map_err(|error| DialError::Protocol(format!("{error:#}")))?,
     };
@@ -1229,8 +1088,9 @@ pub async fn dial(
     }
     let welcome: genehub_proto::PeerWelcome = serde_json::from_slice(&accept.payload)
         .map_err(|_| DialError::Protocol("that machine returned an invalid peer welcome".into()))?;
-    let flow = StreamFlow::from_wire(accept.value)
-        .map_err(|error| DialError::Protocol(format!("{error:#}")))?;
+    if accept.value != 0 {
+        return Err(DialError::Protocol("unsupported Fabric flow mode".into()));
+    }
 
     let (messages_tx, mut messages_rx) = mpsc::channel::<Message>(WRITER_QUEUE);
     let socket_writer = tokio::spawn(async move {
@@ -1246,7 +1106,6 @@ pub async fn dial(
     let (inbound, mut outbound, carrier) = endpoint::carrier_channels();
 
     let reader_writer = writer.clone();
-    let reader_flow = flow.clone();
     let reader = tokio::spawn(async move {
         let mut sequence = 0u64;
         while let Ok(frame) = next_frame(&mut source, stream_id).await {
@@ -1261,27 +1120,6 @@ pub async fn dial(
                     }
                     sequence = frame.value;
                     if inbound.send(frame.payload).await.is_err() {
-                        return;
-                    }
-                    // Returned only once the bounded carrier queue has taken
-                    // ownership, so credit tracks what was consumed rather
-                    // than what was merely read off the socket.
-                    if !reader_flow.is_transport()
-                        && reader_writer
-                            .frame(Frame {
-                                kind: Kind::WindowUpdate,
-                                stream_id,
-                                value: bytes,
-                                payload: Vec::new(),
-                            })
-                            .await
-                            .is_err()
-                    {
-                        return;
-                    }
-                }
-                Kind::WindowUpdate => {
-                    if !reader_flow.add(frame.value) {
                         return;
                     }
                 }
@@ -1303,9 +1141,6 @@ pub async fn dial(
         let mut sequence = 0u64;
         while let Some(record) = outbound.recv().await {
             if record.is_empty() || record.len() > genehub_proto::MAX_DATA_FRAME_BYTES {
-                return;
-            }
-            if flow.take(record.len()).await.is_err() {
                 return;
             }
             sequence += 1;
@@ -1425,9 +1260,9 @@ where
     S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
 {
     loop {
-        let message = source
-            .next()
+        let message = next_or_silent(source, UPLINK_IDLE_TIMEOUT)
             .await
+            .context("Fabric route stopped receiving physical traffic")?
             .ok_or_else(|| anyhow!("the Fabric route closed"))??;
         match message {
             Message::Binary(bytes) => {

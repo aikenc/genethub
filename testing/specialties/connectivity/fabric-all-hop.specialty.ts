@@ -26,7 +26,7 @@ variants.push({ name: "interactive-duplex-b1-n1", nodes: 1, browsers: 1, both: f
 
 for (const v of variants) defineSpecialty({
   id: `specialty.fabric-pool.${v.name}`, title: `Real same-daemon Fabric ${v.browsers} browser / ${v.nodes} node channels: ${v.scenario}${v.both ? ", both legs shaped" : ""}`,
-  oracle: v.ackDelay ? "Directional-stall resilience v2: original10s upload returns ACK with exact file or explicit request timeout without partial file; a distinct same-owner write after restoration succeeds<=1500ms; healthy-control p95, exact24MiB, source uniqueness, physical fault and bounded queues remain required" : v.interactiveP95Ms !== undefined ? "Three8MiB real producers and1.05MB upload: record management latency and errors, preserve per-leg capacity and healthy connections, recover remote management after load, and require source uniqueness plus exact complete output" : "Identical three real stdout producers and source bytes; management RPC remains bounded, independent owners and node TCP are proven, faults do not repeat source processes; full hash and exit for uninterrupted outputs; actual carrier loss explicitly ends old streams without source restart, fresh remote RPCs recover, and independent cancellation remains isolated",
+  oracle: v.ackDelay ? "Directional-stall resilience v2: original10s upload returns ACK with exact file or explicit request timeout without partial file; a distinct same-owner write after restoration succeeds<=1500ms; healthy-control p95, exact24MiB, source uniqueness, physical fault and bounded queues remain required" : v.interactiveP95Ms !== undefined ? "Three8MiB real producers and1.05MB upload: record management latency and errors, preserve per-leg capacity and healthy connections, recover remote management after load, and require source uniqueness plus exact complete output" : "Identical three real stdout producers and source bytes; management RPC remains bounded, independent owners and node TCP are proven, faults do not repeat source processes; full hash and exit for completed outputs; intentionally unread consumers permit only explicit capacity refusal with the owner retained; actual carrier loss explicitly ends old streams without source restart, fresh remote RPCs recover, and independent cancellation remains isolated",
   catches: ["only browser-side channels were separated", "physical reader blocks independent control", "adding sockets doubles bandwidth", "old data punishes a healthy lane", "upload or paused body starves RPC"],
   tags: ["fabric-pool", "all-hop", v.scenario, v.ackDelay || ["node-cut","browser-cut","all-cut","tail-close"].includes(v.scenario) ? "fault-recovery" : "healthy-capacity"], llm: { default: "none" }, expectedDurationMs: 50000, timeoutMs: 150000,
   resources: { environments: 1, cpu: 2, memoryMb: 2048, io: 1, browser: 0, pool: ["download","duplex","hot-drop","slow-consumer"].includes(v.scenario) ? "exclusive" : "standard" },
@@ -58,6 +58,7 @@ for (const v of variants) defineSpecialty({
   const streams: ReturnType<typeof control.openShellStream>[] = [];
   const sourcePeers: number[] = [];
   const failedStreams: boolean[] = [];
+  const streamErrors: Array<{ name: string; code?: number }> = [];
   const cutsCarrier = ["node-cut", "browser-cut", "all-cut"].includes(v.scenario);
   const results: Array<Promise<Awaited<ReturnType<typeof collectShellResult>> | null>> = [];
   let ackHoldTimer: NodeJS.Timeout | undefined, ackHeldAt: number | undefined, ackHoldMs: number | undefined;
@@ -139,7 +140,16 @@ for (const v of variants) defineSpecialty({
       wire, browserNodeFlowIds: pool.browserNodeFlowIds, ackFault, independentBrowserLeg: !!pool.browserLink, browserWire: browserBusy, nodeChannels: pool.nodeFlowIds.length, browserChannels: clients.length, shapedConnections: busy.accepted,
       bytes: busy.forwardedBytes.map((b,i) => b-before.forwardedBytes[i]!), peakQueuedBytes: busy.peakQueuedBytes, logicalOwners: new Set(owners).size }));
     setProfile({ bandwidthMbps: 1000, rttMs: 0 });
-    if (v.scenario === "slow-consumer") for (const stream of streams) results.push(collectShellResult(stream).then(r => r, () => null));
+    if (v.scenario === "slow-consumer") for (const [i, stream] of streams.entries()) {
+      results.push(collectShellResult(stream).catch((error: unknown) => {
+        failedStreams[i] = true;
+        streamErrors[i] = {
+          name: error instanceof Error ? error.name : typeof error,
+          ...(error instanceof Error && "code" in error && typeof error.code === "number" ? { code: error.code } : {}),
+        };
+        return null;
+      }));
+    }
     let drainTimer: NodeJS.Timeout | undefined;
     const outcomes = await Promise.race([Promise.all(results), new Promise<null[]>(resolve => { drainTimer = setTimeout(() => resolve([]),40000); })]);
     if (drainTimer) clearTimeout(drainTimer);
@@ -151,7 +161,12 @@ for (const v of variants) defineSpecialty({
     const exact = outcomes.length === 3 && outcomes.every(exactOutput);
     const outputContract = outcomes.length === 3 && outcomes.every((outcome, i) => outcome
       ? exactOutput(outcome, i)
-      : cutsCarrier && failedStreams[i] && clients[sourcePeers[i]!]!.logicalConnectionId !== owners[sourcePeers[i]!]);
+      : v.scenario === "slow-consumer"
+        // Refused (3) is the protocol's explicit local receive-capacity reset.
+        // An incomplete successful body, timeout or carrier loss is not accepted.
+        ? failedStreams[i] && streamErrors[i]?.name === "DataStreamResetError" && streamErrors[i]?.code === 3
+          && clients[sourcePeers[i]!]!.logicalConnectionId === owners[sourcePeers[i]!]
+        : cutsCarrier && failedStreams[i] && clients[sourcePeers[i]!]!.logicalConnectionId !== owners[sourcePeers[i]!]);
     let uploadOk = true, uploadRecoverySafe = true;
     if (upload) {
       const result = await upload;
@@ -224,7 +239,7 @@ for (const v of variants) defineSpecialty({
     t.note(JSON.stringify({ phase: "remote-recovery", ok: remoteRecoverOk, ms: remoteRecoverMs, lane: `${v.browsers} browser / ${v.nodes} node` }));
     const stopped = controlSession ? await control.call({ type: "session.get", payload: { sessionId: controlSession } }) : undefined;
     const observedPaused = stopped?.type === "snapshot" && !!stopped.data.summary.inputSummary?.paused;
-    const summary = { phase: "result", variant: v.name, rpc: quantiles(rpc), errors, exact24MiB: exact, outputContract, failedStreams, uploadOk, uploadRecoverySafe, canceledPids,
+    const summary = { phase: "result", variant: v.name, rpc: quantiles(rpc), errors, exact24MiB: exact, outputContract, failedStreams, streamErrors, uploadOk, uploadRecoverySafe, canceledPids,
       interruptMs, interruptOk, interruptError, observedPaused, ackHoldMs, ackFault, remoteRecoverOk, remoteRecoverMs,
       sourceStarts: starts, sourceExactlyOnce: starts.join(",") === "0,1,2", retained: clients.map((c,i) => c.logicalConnectionId === owners[i]),
       localOk: local?.type === "workspaces", localMs, lateFrameTail: (pool.relay.logTail().match(/lateFrameOverflow/g)??[]).length, diagnostics: pool.diagnostics.slice(-10) };
@@ -245,17 +260,16 @@ for (const v of variants) defineSpecialty({
         t.assertions.assert(now.forwardedBytes.every((bytes, direction) => bytes - prior.forwardedBytes[direction]! <= bound), "opening channels multiplied one WAN leg's aggregate capacity");
       }
     }
-    t.assertions.assert(starts.join(",") === "0,1,2" && (uploadOk || uploadRecoverySafe) && (narrow ? canceledPids : outputContract), "exact completed output, explicit lost-stream failure, upload, source uniqueness or cancellation violated the contract");
+    t.assertions.assert(starts.join(",") === "0,1,2" && (uploadOk || uploadRecoverySafe) && (narrow ? canceledPids : outputContract), "exact completed output, explicit capacity refusal or lost-stream failure, upload, source uniqueness or cancellation violated the contract");
     // Every variant runs bulk traffic through one shaped bottleneck (2Mbps,
     // or 100Mbps -> 2Mbps for hot-drop). Without an application in-flight
     // window a small request may consume its timeout budget; the contract
     // retained here is recovery, ownership and exactness, not a 10s bound.
     t.assertions.assert(local?.type === "workspaces",
       "management never recovered under the shared bottleneck");
-    // A single browser physical lane carrying a permanently blocked
-    // slow consumer is the declared degraded shape; every other topology
-    // must show management recovery from the remote owner itself.
-    if (!(v.browsers === 1 && v.scenario === "slow-consumer")) t.assertions.assert(remoteRecoverOk,
+    // A bounded slow consumer may lose its own stream, but every topology
+    // must recover a fresh management request through the remote client.
+    t.assertions.assert(remoteRecoverOk,
       "the remote management lane never recovered after bulk stopped");
     if (v.ackDelay) t.assertions.assert(faultApplied && ackFault !== undefined && pool.nodeFlowIds.includes(ackFault.nodeFlowId) && ackFault.heldForwarded === ackFault.beforeForwarded && ackHoldMs !== undefined && ackHoldMs >= v.ackDelay && ackHoldMs < v.ackDelay + 800,
       "the declared forward-direction transport pause was not applied and restored on time");

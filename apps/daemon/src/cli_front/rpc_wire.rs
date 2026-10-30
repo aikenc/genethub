@@ -132,7 +132,6 @@ impl Rpc {
                 proof: crate::channel_auth::client_proof(&admission.server_proof, context, &nonce),
             },
             rtc_supported: false,
-            max_bulk_stream_window_bytes: genehub_proto::INITIAL_STREAM_WINDOW_BYTES,
         };
         timeout_send(
             &mut socket,
@@ -620,7 +619,6 @@ async fn authenticated_fabric(
         client_name: format!("{}-cli", crate::channel::CLI_BINARY),
         auth,
         rtc_supported: false,
-        max_bulk_stream_window_bytes: genehub_proto::INITIAL_STREAM_WINDOW_BYTES,
     };
     let mut transport_url = crate::http::Url::parse(endpoint)
         .map_err(|error| ConnectError::Protocol(error.to_string()))?;
@@ -880,6 +878,7 @@ mod tests {
         let hello = HelloResult {
             data_channel_url: None,
             daemon_version: "test".into(),
+            daemon_instance_id: "test-daemon-instance".into(),
             web_protocol: genehub_proto::WEB_PROTOCOL_VERSION,
             machine_id: admission.machine_id.clone(),
             fingerprint: admission.fingerprint.clone(),

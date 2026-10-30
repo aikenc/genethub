@@ -94,65 +94,6 @@ struct StreamState {
     remote_bytes: u64,
     expected_remote_bytes: Option<u64>,
     remote_finished: bool,
-    outbound_credit: Credit,
-}
-
-#[derive(Clone)]
-struct Credit {
-    inner: Arc<CreditInner>,
-}
-
-struct CreditInner {
-    value: Mutex<u32>,
-    maximum: u32,
-    notify: tokio::sync::Notify,
-}
-
-impl Credit {
-    fn new(value: u32) -> Result<Self> {
-        if value == 0 || value > genehub_proto::MAX_BULK_STREAM_WINDOW_BYTES {
-            anyhow::bail!("invalid initial stream credit");
-        }
-        Ok(Self {
-            inner: Arc::new(CreditInner {
-                value: Mutex::new(value),
-                maximum: value,
-                notify: tokio::sync::Notify::new(),
-            }),
-        })
-    }
-
-    async fn take(&self, maximum: usize) -> Result<usize> {
-        loop {
-            let notified = self.inner.notify.notified();
-            {
-                let mut value = self.inner.value.lock().unwrap();
-                if *value > 0 {
-                    let taken = maximum.min(*value as usize).min(MAX_PAYLOAD_BYTES);
-                    *value -= taken as u32;
-                    return Ok(taken);
-                }
-            }
-            notified.await;
-        }
-    }
-
-    fn add(&self, value: u32) -> bool {
-        if value == 0 {
-            return false;
-        }
-        let mut current = self.inner.value.lock().unwrap();
-        let Some(next) = current.checked_add(value) else {
-            return false;
-        };
-        if next > self.inner.maximum {
-            return false;
-        }
-        *current = next;
-        drop(current);
-        self.inner.notify.notify_waiters();
-        true
-    }
 }
 
 struct WriterCommand {
@@ -184,7 +125,6 @@ struct Writer {
 /// pay for per-frame clocks; ordinary business streams use `write` unchanged.
 #[derive(Default)]
 pub(crate) struct WriteTimings {
-    pub(crate) credit_us: u64,
     pub(crate) budget_us: u64,
     pub(crate) enqueue_us: u64,
     pub(crate) completion_us: u64,
@@ -289,7 +229,6 @@ pub(crate) struct ServerStream {
     inbound: mpsc::Receiver<Incoming>,
     writer: Writer,
     commands: mpsc::Sender<EndpointCommand>,
-    credit: Credit,
     local_sequence: u32,
     local_bytes: u64,
     expected_local_bytes: Option<u64>,
@@ -306,9 +245,7 @@ pub(crate) enum StreamInput {
 }
 
 impl ServerStream {
-    /// Reads one request-side chunk and returns its stream credit immediately
-    /// after ownership has moved into the business handler. Duplex handlers
-    /// use this instead of waiting for a finite request body.
+    /// Moves one request chunk into the handler and releases local queue custody.
     pub(crate) async fn next_input(&mut self) -> Result<StreamInput> {
         match self.inbound.recv().await {
             Some(Incoming::Chunk(chunk)) => {
@@ -318,25 +255,11 @@ impl ServerStream {
                     _connection_budget,
                 } = chunk;
                 drop(_connection_budget);
-                let credit = bytes.len() as u32;
                 drop(_permit);
                 if self.head.method == "rpc" {
                     tracing::debug!(target: "diagnostic",
                         request_id = diagnostic_id(&self.head.metadata), request_bytes = bytes.len(),
                         "RPC request chunk received");
-                }
-                self.writer
-                    .send(Frame {
-                        kind: Kind::WindowUpdate,
-                        stream_id: self.id,
-                        value: credit,
-                        payload: Vec::new(),
-                    })
-                    .await?;
-                if self.head.method == "rpc" {
-                    tracing::debug!(target: "diagnostic",
-                        request_id = diagnostic_id(&self.head.metadata),
-                        "RPC request credit returned");
                 }
                 Ok(StreamInput::Chunk(bytes))
             }
@@ -396,7 +319,7 @@ impl ServerStream {
             .send(Frame {
                 kind: Kind::Head,
                 stream_id: self.id,
-                value: genehub_proto::INITIAL_STREAM_WINDOW_BYTES,
+                value: 0,
                 payload,
             })
             .await?;
@@ -435,11 +358,7 @@ impl ServerStream {
         }
         let mut offset = 0;
         while offset < bytes.len() {
-            let began = timings.as_ref().map(|_| Instant::now());
-            let length = self.credit.take(bytes.len() - offset).await?;
-            if let (Some(timings), Some(began)) = (timings.as_mut(), began) {
-                timings.credit_us += began.elapsed().as_micros() as u64;
-            }
+            let length = (bytes.len() - offset).min(MAX_PAYLOAD_BYTES);
             let next = self
                 .local_bytes
                 .checked_add(length as u64)
@@ -731,14 +650,14 @@ pub(crate) async fn serve_streams(
                 }
                 _ = clock.tick() => {
                     super::logical_registry::validate_access(&access)?;
-                    if last_received.elapsed() >= std::time::Duration::from_secs(15) {
+                    if (!matches!(carrier_kind, CarrierKind::Fabric) || access.bootstrap_invite.is_some()) && last_received.elapsed() >= std::time::Duration::from_secs(15) {
                         break Err(anyhow!("peer heartbeat timed out"));
                     }
                     // Bootstrap has no encrypted admission round trip. Its peer
                     // may still be deriving keys after WELCOME; do not emit an
                     // unsolicited record before its one claim. The idle expiry
                     // above still bounds an abandoned invitation connection.
-                    if access.bootstrap_invite.is_none() {
+                    if !matches!(carrier_kind, CarrierKind::Fabric) && access.bootstrap_invite.is_none() {
                         writer.try_send(Frame { kind: Kind::Ping, stream_id: 0, value: 0, payload: Vec::new() })?;
                     }
                 }
@@ -834,12 +753,7 @@ fn dispatch(
             })?;
             return Ok(());
         }
-        let maximum_window = if head.method == "asset.preview" {
-            genehub_proto::MAX_BULK_STREAM_WINDOW_BYTES
-        } else {
-            genehub_proto::INITIAL_STREAM_WINDOW_BYTES
-        };
-        if frame.value == 0 || frame.value > maximum_window {
+        if frame.value != 0 {
             writer.try_send(Frame {
                 kind: Kind::Reset,
                 stream_id: frame.stream_id,
@@ -849,10 +763,7 @@ fn dispatch(
             return Ok(());
         }
         let (inbound, receiver) = mpsc::channel(STREAM_CHUNK_QUEUE);
-        let inbound_budget = Arc::new(Semaphore::new(
-            genehub_proto::INITIAL_STREAM_WINDOW_BYTES as usize,
-        ));
-        let credit = Credit::new(frame.value)?;
+        let inbound_budget = Arc::new(Semaphore::new(MAX_RPC_BODY_BYTES));
         streams.insert(
             frame.stream_id,
             StreamState {
@@ -870,7 +781,6 @@ fn dispatch(
                 remote_bytes: 0,
                 expected_remote_bytes: head.body_length,
                 remote_finished: false,
-                outbound_credit: credit.clone(),
             },
         );
         let stream = ServerStream {
@@ -879,7 +789,6 @@ fn dispatch(
             inbound: receiver,
             writer: writer.clone(),
             commands: commands.clone(),
-            credit,
             local_sequence: 0,
             local_bytes: 0,
             expected_local_bytes: None,
@@ -899,10 +808,7 @@ fn dispatch(
     }
 
     let Some(stream) = streams.get_mut(&frame.stream_id) else {
-        // Consumption credit can arrive after our response FIN retired the stream.
-        // It has no receiver left to credit. Resetting every late update creates
-        // a control-frame storm and can disconnect unrelated active previews.
-        if !matches!(frame.kind, Kind::Reset | Kind::WindowUpdate) {
+        if !matches!(frame.kind, Kind::Reset) {
             writer.try_send(Frame {
                 kind: Kind::Reset,
                 stream_id: frame.stream_id,
@@ -932,7 +838,24 @@ fn dispatch(
                 anyhow::bail!("request body exceeds the length in its head");
             }
             let bytes = u32::try_from(frame.payload.len())?;
-            let Ok(connection_budget) = receive_budget.clone().try_acquire_many_owned(bytes) else {
+            let queued = (|| {
+                let connection_budget =
+                    receive_budget.clone().try_acquire_many_owned(bytes).ok()?;
+                let permit = stream
+                    .inbound_budget
+                    .clone()
+                    .try_acquire_many_owned(bytes)
+                    .ok()?;
+                stream
+                    .inbound
+                    .try_send(Incoming::Chunk(IncomingChunk {
+                        bytes: frame.payload,
+                        _permit: permit,
+                        _connection_budget: connection_budget,
+                    }))
+                    .ok()
+            })();
+            if queued.is_none() {
                 if let Some(handler) = &stream.handler {
                     handler.abort();
                 }
@@ -944,27 +867,9 @@ fn dispatch(
                     payload: Vec::new(),
                 })?;
                 return Ok(());
-            };
-            let permit = stream
-                .inbound_budget
-                .clone()
-                .try_acquire_many_owned(bytes)
-                .map_err(|_| anyhow!("peer exceeded its stream receive window"))?;
-            stream
-                .inbound
-                .try_send(Incoming::Chunk(IncomingChunk {
-                    bytes: frame.payload,
-                    _permit: permit,
-                    _connection_budget: connection_budget,
-                }))
-                .map_err(|_| anyhow!("stream handler receive queue is full"))?;
+            }
             stream.remote_sequence = expected;
             stream.remote_bytes = next_bytes;
-        }
-        Kind::WindowUpdate => {
-            if !frame.payload.is_empty() || !stream.outbound_credit.add(frame.value) {
-                anyhow::bail!("invalid stream window update");
-            }
         }
         Kind::Fin => {
             if stream.remote_finished
@@ -976,10 +881,19 @@ fn dispatch(
             {
                 anyhow::bail!("malformed stream FIN");
             }
-            stream
-                .inbound
-                .try_send(Incoming::Fin)
-                .map_err(|_| anyhow!("stream handler receive queue is full"))?;
+            if stream.inbound.try_send(Incoming::Fin).is_err() {
+                if let Some(handler) = &stream.handler {
+                    handler.abort();
+                }
+                streams.remove(&frame.stream_id);
+                writer.try_send(Frame {
+                    kind: Kind::Reset,
+                    stream_id: frame.stream_id,
+                    value: RESET_REFUSED,
+                    payload: Vec::new(),
+                })?;
+                return Ok(());
+            }
             if let Some(request_id) = &stream.diagnostic_id {
                 tracing::debug!(target: "diagnostic", request_id,
                     "RPC request FIN dispatched");
@@ -1525,7 +1439,7 @@ async fn send_reply(stream: &mut ServerStream, reply: Reply) -> Result<()> {
         .await?;
     // Small RPC replies must progress even while this same peer's preview
     // is busy. Control priority applies before the physical write and still
-    // consumes DATA credit and locally owned byte permits.
+    // uses locally owned byte permits.
     if stream.head.method == "rpc" && body.len() <= genehub_proto::MAX_EXCHANGE_HEAD_BYTES {
         stream
             .write_inner(&body, None, super::logical_connection::WriteClass::Control)
@@ -1823,17 +1737,6 @@ mod tests {
         // At the limit: a new session is refused, an existing one is not.
         assert!(subscription_capacity_refused(&subscriptions, "s3", 2));
         assert!(!subscription_capacity_refused(&subscriptions, "s1", 2));
-    }
-
-    #[tokio::test]
-    async fn credit_never_exceeds_its_negotiated_stream_window() {
-        let credit = Credit::new(10).unwrap();
-        assert_eq!(credit.take(7).await.unwrap(), 7);
-        assert!(credit.add(7));
-        assert!(!credit.add(1));
-        let bulk = Credit::new(genehub_proto::MAX_BULK_STREAM_WINDOW_BYTES).unwrap();
-        assert_eq!(bulk.take(1).await.unwrap(), 1);
-        assert!(bulk.add(1));
     }
 
     #[test]

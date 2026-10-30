@@ -1,15 +1,16 @@
-//! Carrier-neutral client half of the v3 data plane.
+//! Carrier-neutral client half of the current data plane.
 //!
 //! The browser has the equivalent implementation in `packages/workbench`.  This
 //! small Rust half keeps CLI and integration clients on the exact same binary
-//! frame, flow-control and E2EE contract as every other peer.
+//! framing, bounded queue and E2EE contract as every other peer.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{ExchangeRequestHead, ExchangeResponseHead};
 use serde_json::Value;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 
 use super::authenticated_channel::AuthenticatedWriter;
 use super::authenticated_channel::{authenticated_channel, Role};
@@ -40,7 +41,8 @@ enum ResponseTarget {
     Unary(Option<oneshot::Sender<Result<ExchangeResponse>>>),
     Streaming {
         head: Option<oneshot::Sender<Result<ExchangeResponseHead>>>,
-        chunks: mpsc::Sender<Result<ClientChunk>>,
+        chunks: mpsc::Sender<ClientChunk>,
+        terminal: Option<oneshot::Sender<Result<()>>>,
     },
 }
 
@@ -48,7 +50,7 @@ struct Stream {
     request: Vec<u8>,
     request_offset: usize,
     local_sequence: u32,
-    outbound_credit: u32,
+    receive_budget: Arc<Semaphore>,
     local_finished: bool,
     response_head: Option<ExchangeResponseHead>,
     response: Vec<u8>,
@@ -67,13 +69,15 @@ pub struct ClientEndpoint {
 
 struct ClientChunk {
     bytes: Vec<u8>,
-    credit: mpsc::Sender<(u32, u32)>,
-    stream_id: u32,
+    _stream_budget: OwnedSemaphorePermit,
+    _endpoint_budget: OwnedSemaphorePermit,
 }
 
 pub struct ClientStream {
     head: oneshot::Receiver<Result<ExchangeResponseHead>>,
-    chunks: mpsc::Receiver<Result<ClientChunk>>,
+    chunks: mpsc::Receiver<ClientChunk>,
+    terminal: oneshot::Receiver<Result<()>>,
+    ended: bool,
 }
 
 impl ClientStream {
@@ -84,15 +88,24 @@ impl ClientStream {
     }
 
     pub async fn next_chunk(&mut self) -> Option<Result<Vec<u8>>> {
-        let chunk = match self.chunks.recv().await? {
-            Ok(chunk) => chunk,
-            Err(error) => return Some(Err(error)),
-        };
-        let _ = chunk
-            .credit
-            .send((chunk.stream_id, chunk.bytes.len() as u32))
-            .await;
-        Some(Ok(chunk.bytes))
+        if self.ended {
+            return None;
+        }
+        if let Some(chunk) = self.chunks.recv().await {
+            let ClientChunk {
+                bytes,
+                _stream_budget,
+                _endpoint_budget,
+            } = chunk;
+            drop((_stream_budget, _endpoint_budget));
+            return Some(Ok(bytes));
+        }
+        self.ended = true;
+        match (&mut self.terminal).await {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(Err(error)),
+            Err(_) => Some(Err(anyhow!("the data endpoint closed before response FIN"))),
+        }
     }
 }
 
@@ -175,6 +188,7 @@ impl ClientEndpoint {
         }
         let (head, head_receiver) = oneshot::channel();
         let (chunks, chunk_receiver) = mpsc::channel(STREAM_QUEUE);
+        let (terminal, terminal_receiver) = oneshot::channel();
         self.commands
             .send(Call {
                 head: ExchangeRequestHead {
@@ -189,6 +203,7 @@ impl ClientEndpoint {
                 target: ResponseTarget::Streaming {
                     head: Some(head),
                     chunks,
+                    terminal: Some(terminal),
                 },
             })
             .await
@@ -196,6 +211,8 @@ impl ClientEndpoint {
         Ok(ClientStream {
             head: head_receiver,
             chunks: chunk_receiver,
+            terminal: terminal_receiver,
+            ended: false,
         })
     }
 }
@@ -203,7 +220,7 @@ impl ClientEndpoint {
 async fn run(key: SessionKey, carrier: Carrier, mut commands: mpsc::Receiver<Call>) -> Result<()> {
     let mut streams = HashMap::<u32, Stream>::new();
     let mut next_stream_id = 1u32;
-    let (returned_credit, mut credits) = mpsc::channel::<(u32, u32)>(256);
+    let receive_budget = Arc::new(Semaphore::new(super::endpoint::RECEIVE_QUEUE_BYTES));
     let (mut reader, mut writer) = if key.principal().starts_with("invite:") {
         authenticated_channel(key, carrier, Role::Client)
     } else {
@@ -212,13 +229,6 @@ async fn run(key: SessionKey, carrier: Carrier, mut commands: mpsc::Receiver<Cal
 
     let outcome = async { loop {
         tokio::select! {
-            returned = credits.recv() => {
-                if let Some((stream_id, value)) = returned {
-                    if streams.contains_key(&stream_id) {
-                        send(&mut writer, Frame { kind: Kind::WindowUpdate, stream_id, value, payload: Vec::new() }).await?;
-                    }
-                }
-            }
             command = commands.recv() => {
                 let Some(mut call) = command else { break Ok(()); };
                 if streams.len() >= genehub_proto::MAX_ACTIVE_DATA_STREAMS {
@@ -242,7 +252,7 @@ async fn run(key: SessionKey, carrier: Carrier, mut commands: mpsc::Receiver<Cal
                     request: call.body,
                     request_offset: 0,
                     local_sequence: 0,
-                    outbound_credit: genehub_proto::INITIAL_STREAM_WINDOW_BYTES,
+                    receive_budget: Arc::new(Semaphore::new(MAX_REQUEST_BODY_BYTES)),
                     local_finished: false,
                     response_head: None,
                     response: Vec::new(),
@@ -256,7 +266,7 @@ async fn run(key: SessionKey, carrier: Carrier, mut commands: mpsc::Receiver<Cal
                     Frame {
                         kind: Kind::Open,
                         stream_id,
-                        value: genehub_proto::INITIAL_STREAM_WINDOW_BYTES,
+                        value: 0,
                         payload,
                     },
                 ).await?;
@@ -293,8 +303,7 @@ async fn run(key: SessionKey, carrier: Carrier, mut commands: mpsc::Receiver<Cal
                 match frame.kind {
                     Kind::Head => {
                         if stream.response_head.is_some()
-                            || frame.value == 0
-                            || frame.value > genehub_proto::INITIAL_STREAM_WINDOW_BYTES
+                            || frame.value != 0
                             || frame.payload.is_empty()
                             || frame.payload.len() > genehub_proto::MAX_EXCHANGE_HEAD_BYTES
                         {
@@ -315,7 +324,6 @@ async fn run(key: SessionKey, carrier: Carrier, mut commands: mpsc::Receiver<Cal
                         } else {
                             stream.target.accept_head(&head);
                             stream.response_head = Some(head);
-                            stream.outbound_credit = frame.value;
                         }
                     }
                     Kind::Data => {
@@ -331,8 +339,8 @@ async fn run(key: SessionKey, carrier: Carrier, mut commands: mpsc::Receiver<Cal
                         }
                         stream.remote_sequence = expected;
                         stream.received_response_bytes = next;
-                        let credit = u32::try_from(frame.payload.len())?;
-                        if !stream.target.push(&frame.payload, returned_credit.clone(), frame.stream_id) {
+                        if !stream.target.push(&frame.payload, &stream.receive_budget, &receive_budget) {
+                            stream.target.fail("response consumer queue is full");
                             send_reset(
                                 &mut writer,
                                 frame.stream_id,
@@ -342,28 +350,6 @@ async fn run(key: SessionKey, carrier: Carrier, mut commands: mpsc::Receiver<Cal
                         } else if stream.target.is_unary() {
                             stream.response.extend_from_slice(&frame.payload);
                         }
-                        if keep && stream.target.is_unary() {
-                            send(
-                                &mut writer,
-                                Frame {
-                                    kind: Kind::WindowUpdate,
-                                    stream_id: frame.stream_id,
-                                    value: credit,
-                                    payload: Vec::new(),
-                                },
-                            ).await?;
-                        }
-                    }
-                    Kind::WindowUpdate => {
-                        let Some(next) = stream.outbound_credit.checked_add(frame.value) else {
-                            anyhow::bail!("invalid stream credit");
-                        };
-                        if !frame.payload.is_empty() || frame.value == 0
-                            || next > genehub_proto::INITIAL_STREAM_WINDOW_BYTES
-                        {
-                            anyhow::bail!("invalid stream credit");
-                        }
-                        stream.outbound_credit = next;
                     }
                     Kind::Fin => {
                         if frame.value != 0 || !frame.payload.is_empty() || stream.response_head.is_none() {
@@ -424,16 +410,35 @@ impl ResponseTarget {
         }
     }
 
-    fn push(&self, bytes: &[u8], credit: mpsc::Sender<(u32, u32)>, stream_id: u32) -> bool {
+    fn push(
+        &self,
+        bytes: &[u8],
+        stream_budget: &Arc<Semaphore>,
+        endpoint_budget: &Arc<Semaphore>,
+    ) -> bool {
         match self {
             Self::Unary(_) => true,
-            Self::Streaming { chunks, .. } => chunks
-                .try_send(Ok(ClientChunk {
-                    bytes: bytes.to_vec(),
-                    credit,
-                    stream_id,
-                }))
-                .is_ok(),
+            Self::Streaming { chunks, .. } => {
+                let Ok(stream_permit) = stream_budget
+                    .clone()
+                    .try_acquire_many_owned(bytes.len() as u32)
+                else {
+                    return false;
+                };
+                let Ok(endpoint_permit) = endpoint_budget
+                    .clone()
+                    .try_acquire_many_owned(bytes.len() as u32)
+                else {
+                    return false;
+                };
+                chunks
+                    .try_send(ClientChunk {
+                        bytes: bytes.to_vec(),
+                        _stream_budget: stream_permit,
+                        _endpoint_budget: endpoint_permit,
+                    })
+                    .is_ok()
+            }
         }
     }
 
@@ -444,7 +449,11 @@ impl ResponseTarget {
                     let _ = answer.send(Ok(ExchangeResponse { head, body }));
                 }
             }
-            Self::Streaming { .. } => {}
+            Self::Streaming { terminal, .. } => {
+                if let Some(done) = terminal.take() {
+                    let _ = done.send(Ok(()));
+                }
+            }
         }
     }
 
@@ -456,11 +465,12 @@ impl ResponseTarget {
                     let _ = answer.send(Err(anyhow!(message)));
                 }
             }
-            Self::Streaming { head, chunks } => {
+            Self::Streaming { head, terminal, .. } => {
                 if let Some(head) = head.take() {
                     let _ = head.send(Err(anyhow!(message.clone())));
-                } else {
-                    let _ = chunks.try_send(Err(anyhow!(message)));
+                }
+                if let Some(done) = terminal.take() {
+                    let _ = done.send(Err(anyhow!(message)));
                 }
             }
         }
@@ -472,10 +482,8 @@ async fn pump_request(
     stream_id: u32,
     stream: &mut Stream,
 ) -> Result<()> {
-    while stream.request_offset < stream.request.len() && stream.outbound_credit > 0 {
-        let length = (stream.request.len() - stream.request_offset)
-            .min(stream.outbound_credit as usize)
-            .min(MAX_PAYLOAD_BYTES);
+    while stream.request_offset < stream.request.len() {
+        let length = (stream.request.len() - stream.request_offset).min(MAX_PAYLOAD_BYTES);
         stream.local_sequence = stream
             .local_sequence
             .checked_add(1)
@@ -492,7 +500,6 @@ async fn pump_request(
         )
         .await?;
         stream.request_offset += length;
-        stream.outbound_credit -= length as u32;
     }
     if stream.request_offset == stream.request.len() && !stream.local_finished {
         stream.local_finished = true;
@@ -525,4 +532,43 @@ async fn send_reset(writer: &mut AuthenticatedWriter, stream_id: u32, code: u32)
 
 async fn send(writer: &mut AuthenticatedWriter, frame: Frame) -> Result<()> {
     writer.send(&frame.encode()?).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_full_chunk_queue_cannot_hide_its_terminal_error() {
+        let (chunks, receiver) = mpsc::channel(1);
+        let (terminal, outcome) = oneshot::channel();
+        let mut target = ResponseTarget::Streaming {
+            head: None,
+            chunks,
+            terminal: Some(terminal),
+        };
+        let local = Arc::new(Semaphore::new(16));
+        let shared = Arc::new(Semaphore::new(16));
+        assert!(target.push(&[1; 8], &local, &shared));
+        assert!(!target.push(&[2; 8], &local, &shared));
+        target.fail("consumer queue is full");
+        drop(target);
+        let (_, head) = oneshot::channel();
+        let mut stream = ClientStream {
+            head,
+            chunks: receiver,
+            terminal: outcome,
+            ended: false,
+        };
+        assert_eq!(stream.next_chunk().await.unwrap().unwrap(), vec![1; 8]);
+        assert_eq!(shared.available_permits(), 16);
+        assert!(stream
+            .next_chunk()
+            .await
+            .unwrap()
+            .unwrap_err()
+            .to_string()
+            .contains("consumer queue is full"));
+        assert!(stream.next_chunk().await.is_none());
+    }
 }

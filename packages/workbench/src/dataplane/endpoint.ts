@@ -10,8 +10,6 @@ import {
   DataReset,
   decodeDataFrame,
   encodeDataFrame,
-  INITIAL_STREAM_WINDOW_BYTES,
-  MAX_BULK_STREAM_WINDOW_BYTES,
   MAX_DATA_PAYLOAD_BYTES,
   MAX_FINITE_EXCHANGE_BODY_BYTES,
   type DataFrame,
@@ -33,8 +31,6 @@ export interface DataEndpointOptions {
   maxActiveStreams?: number;
   maxQueuedBytes?: number;
   maxReceiveBytesPerStream?: number;
-  /** Negotiated receive lease for allowlisted finite bulk responses. */
-  maxBulkStreamWindowBytes?: number;
   onError?: (error: unknown) => void;
   /** Bounded read-only transport evidence; contains no payloads or credentials. */
   onDiagnostic?: (detail: Record<string, string | number | boolean | null>) => void;
@@ -63,7 +59,6 @@ interface PendingFrame {
 
 interface DataChunk {
   bytes: Uint8Array;
-  credit: number;
   release(): void;
 }
 
@@ -81,8 +76,6 @@ function deferred<T>() {
 export class DataStream {
   private localSequence = 0;
   private remoteSequence = 0;
-  private outboundCredit = INITIAL_STREAM_WINDOW_BYTES;
-  private outboundWindow = INITIAL_STREAM_WINDOW_BYTES;
   private localFin = false;
   private localFinWritten = false;
   private bodyClaimed = false;
@@ -94,11 +87,9 @@ export class DataStream {
   private failure: unknown = null;
   private sentBytes = 0;
   private receivedBytes = 0;
-  private consumedCredit = 0;
   private totalReceivedBytes = 0;
   private readonly chunks: DataChunk[] = [];
   private readonly chunkWaiters: Array<ReturnType<typeof deferred<IteratorResult<Uint8Array>>>> = [];
-  private readonly creditWaiters: Array<() => void> = [];
   private readonly responseHead_ = deferred<ExchangeResponseHead>();
   private responseHeadSettled = false;
   private responseHeadValue: ExchangeResponseHead | null = null;
@@ -112,10 +103,7 @@ export class DataStream {
     readonly id: number,
     readonly direction: "outgoing" | "incoming",
     readonly requestHead: ExchangeRequestHead,
-    initialOutboundCredit = INITIAL_STREAM_WINDOW_BYTES,
   ) {
-    this.outboundCredit = initialOutboundCredit;
-    this.outboundWindow = initialOutboundCredit;
     // A consumer may only await `done`; resets before a response head must not
     // become a process-wide unhandled rejection.
     void this.responseHead.catch(() => {});
@@ -132,15 +120,15 @@ export class DataStream {
     await this.endpoint.sendFrame(this, {
       kind: DataKind.Head,
       streamId: this.id,
-      value: INITIAL_STREAM_WINDOW_BYTES,
+      value: 0,
       payload: encodeHead(head),
     });
   }
 
-  /** Writes bytes with stream-local credit and automatic bounded slicing. */
+  /** Writes bounded local chunks; progress never waits for consumption ACKs. */
   write(bytes: Uint8Array): Promise<void> {
     if (this.closed || this.localFin || this.finishPromise) return Promise.reject(new DataPlaneError("stream write side is closed"));
-    if (this.pendingWriteBytes + bytes.length > INITIAL_STREAM_WINDOW_BYTES) return Promise.reject(new DataPlaneError("pending per-stream write capacity exhausted"));
+    if (this.pendingWriteBytes + bytes.length > 3 * 1024 * 1024) return Promise.reject(new DataPlaneError("pending per-stream write capacity exhausted"));
     let release: () => void;
     try { release = this.endpoint.reserveWrite(bytes.length); } catch (error) { return Promise.reject(error); }
     this.pendingWriteBytes += bytes.length;
@@ -159,14 +147,11 @@ export class DataStream {
     }
     let offset = 0;
     while (offset < bytes.byteLength) {
-      while (this.outboundCredit === 0) await this.waitForCredit();
       const length = Math.min(
         MAX_DATA_PAYLOAD_BYTES,
-        this.outboundCredit,
         bytes.byteLength - offset,
       );
       const payload = bytes.slice(offset, offset + length);
-      this.outboundCredit -= length;
       this.localSequence += 1;
       await this.endpoint.sendFrame(this, {
         kind: DataKind.Data,
@@ -214,7 +199,7 @@ export class DataStream {
     this.fail(new DataStreamResetError(code));
   }
 
-  /** Body chunks; consuming one returns its credit independently of handlers. */
+  /** Body chunks release only locally held receive custody. */
   body(): AsyncIterable<Uint8Array> {
     const stream = this;
     return {
@@ -233,20 +218,16 @@ export class DataStream {
   }
 
   /** @internal */
-  receiveHead(head: ExchangeResponseHead, credit: number): boolean {
+  receiveHead(head: ExchangeResponseHead, reserved: number): boolean {
     if (
       this.direction !== "outgoing" ||
       this.responseHeadSettled ||
-      credit < 1 ||
-      credit > this.endpoint.maxBulkStreamWindowBytes
+      reserved !== 0
     ) {
       return false;
     }
     this.responseHeadSettled = true;
     this.responseHeadValue = head;
-    this.outboundCredit = credit;
-    this.outboundWindow = credit;
-    this.wakeCredit();
     this.responseHead_.resolve(head);
     return true;
   }
@@ -259,7 +240,6 @@ export class DataStream {
       (this.direction === "outgoing" && !this.responseHeadSettled) ||
       sequence !== this.remoteSequence + 1 ||
       bytes.byteLength === 0 ||
-      this.receivedBytes + bytes.byteLength > this.endpoint.maxReceiveBytesPerStream ||
       !Number.isSafeInteger(this.totalReceivedBytes + bytes.byteLength)
     ) {
       return false;
@@ -270,25 +250,11 @@ export class DataStream {
     const waiter = this.chunkWaiters.shift();
     if (waiter) {
       release();
-      this.returnCredit(bytes.byteLength);
+      this.releaseBytes(bytes.byteLength);
       waiter.resolve({ done: false, value: bytes });
     } else {
-      this.chunks.push({ bytes, credit: bytes.byteLength, release });
+      this.chunks.push({ bytes, release });
     }
-    return true;
-  }
-
-  /** @internal */
-  addCredit(value: number): boolean {
-    if (
-      this.closed ||
-      value < 1 ||
-      this.outboundCredit + value > this.outboundWindow
-    ) {
-      return false;
-    }
-    this.outboundCredit += value;
-    this.wakeCredit();
     return true;
   }
 
@@ -321,7 +287,6 @@ export class DataStream {
     for (const chunk of this.chunks.splice(0)) chunk.release();
     this.receivedBytes = 0;
     this.completion.reject(error);
-    this.wakeCredit();
     this.endpoint.retire(this);
   }
 
@@ -330,7 +295,7 @@ export class DataStream {
     const chunk = this.chunks.shift();
     if (chunk) {
       chunk.release();
-      this.returnCredit(chunk.credit);
+      this.releaseBytes(chunk.bytes.byteLength);
       this.maybeComplete();
       return { done: false, value: chunk.bytes };
     }
@@ -340,38 +305,11 @@ export class DataStream {
     return waiter.promise;
   }
 
-  private returnCredit(value: number): void {
-    this.receivedBytes -= value;
-    if (this.closed) return;
-    // The complete legal Preview body was granted up front. Consumption does
-    // not need to clock that finite response through acknowledgement frames.
-    if (this.requestHead.method === "asset.preview" &&
-        this.endpoint.maxBulkStreamWindowBytes === MAX_BULK_STREAM_WINDOW_BYTES) return;
-    this.consumedCredit += value;
-    // Small streamed events share one bounded credit update. Logical delivery
-    // credit is still released immediately by the chunk's existing lease.
-    const threshold = Math.min(8 * 1024, Math.floor(this.endpoint.maxReceiveBytesPerStream / 2));
-    if (this.consumedCredit < threshold) return;
-    const returned = this.consumedCredit;
-    this.consumedCredit = 0;
-    void this.endpoint
-      .sendFrame(this, {
-        kind: DataKind.WindowUpdate,
-        streamId: this.id,
-        value: returned,
-        payload: EMPTY,
-      })
-      .catch((error: unknown) => this.fail(error));
+  /** @internal */
+  hasReceiveCapacity(bytes: number): boolean {
+    return this.chunks.length < 256 && this.receivedBytes + bytes <= this.endpoint.maxReceiveBytesPerStream;
   }
-
-  private waitForCredit(): Promise<void> {
-    if (this.closed) return Promise.reject(new DataPlaneError("stream is closed"));
-    return new Promise((resolve) => this.creditWaiters.push(resolve));
-  }
-
-  private wakeCredit(): void {
-    for (const wake of this.creditWaiters.splice(0)) wake();
-  }
+  private releaseBytes(value: number): void { this.receivedBytes -= value; }
 
   private maybeComplete(): void {
     // Keep unread chunks owned by this endpoint so reset/close can release
@@ -422,26 +360,16 @@ export class DataEndpoint {
   private readonly pathHandlers = new Set<() => void>();
 
   readonly maxReceiveBytesPerStream: number;
-  readonly maxBulkStreamWindowBytes: number;
 
   constructor(private readonly options: DataEndpointOptions) {
     this.nextStreamId = options.role === "client" ? 1 : 2;
     this.maxReceiveBytesPerStream =
-      options.maxReceiveBytesPerStream ?? INITIAL_STREAM_WINDOW_BYTES;
-    this.maxBulkStreamWindowBytes =
-      options.maxBulkStreamWindowBytes ?? INITIAL_STREAM_WINDOW_BYTES;
+      options.maxReceiveBytesPerStream ?? 3 * 1024 * 1024;
     if (
       this.maxReceiveBytesPerStream < MAX_DATA_PAYLOAD_BYTES ||
       this.maxReceiveBytesPerStream > 64 * 1024 * 1024
     ) {
       throw new RangeError("invalid per-stream receive budget");
-    }
-    if (
-      !Number.isSafeInteger(this.maxBulkStreamWindowBytes) ||
-      this.maxBulkStreamWindowBytes < INITIAL_STREAM_WINDOW_BYTES ||
-      this.maxBulkStreamWindowBytes > MAX_BULK_STREAM_WINDOW_BYTES
-    ) {
-      throw new RangeError("invalid finite-bulk receive lease");
     }
     if (options.key.context.startsWith("invite:")) {
       this.channel = new AuthenticatedChannel({
@@ -494,15 +422,11 @@ export class DataEndpoint {
     const payload = encodeHead(canonicalHead);
     const id = this.allocateStreamId();
     const stream = new DataStream(this, id, "outgoing", canonicalHead);
-    const receiveWindow = receiveWindowFor(
-      canonicalHead,
-      this.maxBulkStreamWindowBytes,
-    );
     this.streams.set(id, stream);
     void this.sendFrame(stream, {
       kind: DataKind.Open,
       streamId: id,
-      value: receiveWindow,
+      value: 0,
       payload,
     }).catch((error: unknown) => stream.fail(error));
     return stream;
@@ -621,18 +545,12 @@ export class DataEndpoint {
         return;
       }
       const head = requestHeadOf(decodeHead(frame.payload));
-      if (
-        frame.value < 1 ||
-        frame.value > receiveWindowFor(head, this.maxBulkStreamWindowBytes)
-      ) {
-        throw new DataPlaneError("peer advertised an invalid stream window");
-      }
+      if (frame.value !== 0) throw new DataPlaneError("unsupported stream admission value");
       const stream = new DataStream(
         this,
         frame.streamId,
         "incoming",
         head,
-        frame.value,
       );
       this.streams.set(frame.streamId, stream);
       queueMicrotask(() => {
@@ -670,11 +588,9 @@ export class DataEndpoint {
         );
         break;
       case DataKind.Data:
+        if (!stream.hasReceiveCapacity(frame.payload.byteLength)) { stream.reset(DataReset.Refused); return; }
         valid = stream.receiveData(frame.value, frame.payload, release);
         if (valid) retain();
-        break;
-      case DataKind.WindowUpdate:
-        valid = frame.payload.byteLength === 0 && stream.addCredit(frame.value);
         break;
       case DataKind.Fin:
         valid =
@@ -848,21 +764,6 @@ function requestHeadOf(value: unknown): ExchangeRequestHead {
     throw new DataPlaneError("invalid exchange request head");
   }
   return value as unknown as ExchangeRequestHead;
-}
-
-/**
- * A finite Preview may be fully prefunded at stream creation. Framing and the
- * fair writer remain unchanged; only the feedback clock leaves its healthy
- * transfer path. Unknown-length and duplex methods keep the conservative
- * stream-consumption credit.
- */
-function receiveWindowFor(
-  head: ExchangeRequestHead,
-  maxBulkStreamWindowBytes: number,
-): number {
-  return head.method === "asset.preview"
-    ? maxBulkStreamWindowBytes
-    : INITIAL_STREAM_WINDOW_BYTES;
 }
 
 function responseHeadOf(value: unknown): ExchangeResponseHead {

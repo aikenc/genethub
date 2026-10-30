@@ -2109,6 +2109,8 @@ pub struct HelloResult {
     #[ts(optional)]
     pub data_channel_url: Option<String>,
     pub daemon_version: String,
+    /// Identity of this daemon run; event cursors cannot cross its lifetime.
+    pub daemon_instance_id: String,
     pub web_protocol: u32,
     pub machine_id: String,
     /// Short human-comparable form of the daemon key, for out-of-band checking.

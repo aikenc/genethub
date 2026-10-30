@@ -35,12 +35,6 @@ pub fn accept(
     if hello.client_name.is_empty() || hello.client_name.len() > 80 {
         anyhow::bail!("invalid peer client name");
     }
-    let bulk_stream_window = hello.max_bulk_stream_window_bytes;
-    if !(genehub_proto::INITIAL_STREAM_WINDOW_BYTES..=genehub_proto::MAX_BULK_STREAM_WINDOW_BYTES)
-        .contains(&bulk_stream_window)
-    {
-        anyhow::bail!("invalid peer finite-bulk receive lease");
-    }
     let server_nonce = crate::devices::random_token();
     let (proof, key, device_id, bootstrap_invite) = match (&hello.auth, &admission) {
         (
@@ -155,7 +149,6 @@ pub fn accept(
             version: genehub_proto::DATA_PLANE_VERSION,
             server_nonce,
             proof,
-            max_bulk_stream_window_bytes: bulk_stream_window,
         },
         key: key.clone(),
         access: PeerAccess {
@@ -203,7 +196,6 @@ mod tests {
                 proof: channel_auth::client_proof(secret, "loopback", nonce),
             },
             rtc_supported: true,
-            max_bulk_stream_window_bytes: genehub_proto::INITIAL_STREAM_WINDOW_BYTES,
         };
         let accepted = accept(
             &state,
@@ -221,10 +213,6 @@ mod tests {
             &accepted.welcome.proof,
         )
         .unwrap();
-        assert_eq!(
-            accepted.welcome.max_bulk_stream_window_bytes,
-            genehub_proto::INITIAL_STREAM_WINDOW_BYTES
-        );
     }
 
     #[tokio::test]
@@ -246,7 +234,6 @@ mod tests {
                 proof: channel_auth::client_proof(secret, &context, nonce),
             },
             rtc_supported: false,
-            max_bulk_stream_window_bytes: genehub_proto::INITIAL_STREAM_WINDOW_BYTES,
         };
         let accepted = accept(
             &state,
@@ -264,10 +251,6 @@ mod tests {
             &accepted.welcome.proof,
         )
         .unwrap();
-        assert_eq!(
-            accepted.welcome.max_bulk_stream_window_bytes,
-            genehub_proto::INITIAL_STREAM_WINDOW_BYTES
-        );
         assert_eq!(accepted.access.bootstrap_invite.as_deref(), Some(invite_id));
         // WELCOME can reach a browser before its asynchronous key derivation
         // finishes. Bootstrap must not send an encrypted Ping in that gap.

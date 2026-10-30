@@ -209,7 +209,7 @@ export async function openRtcDataLink(
       role: "client",
       carrier,
       key: handshake.key,
-      maxBulkStreamWindowBytes: handshake.maxBulkStreamWindowBytes,
+
       maxReceiveBytesPerStream: 64 * 1024 * 1024,
     });
     await endpoint.ready();

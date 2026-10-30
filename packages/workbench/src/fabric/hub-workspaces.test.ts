@@ -290,7 +290,7 @@ describe("the resource-first Hub workspace Fabric adapter", () => {
       { sourceEndpointId: "fep_one", target: { workspaceId: "ws_beta" } },
     ]);
     // Resource changes affected only OPENs; no target was ever put in a socket URL.
-    expect(stack.urls).toEqual(["wss://relay.test/fabric/v2?ticket=admit-1"]);
+    expect(stack.urls).toEqual(["wss://relay.test/fabric/v2?ticket=admit-1&flow=transport-v1"]);
     stack.fabric.close();
   });
 
@@ -368,7 +368,7 @@ describe("the resource-first Hub workspace Fabric adapter", () => {
       {},
       { endpointId: "fep_stable" },
     ]);
-    expect(stack.urls.at(-1)).toBe("wss://relay.test/fabric/v2?ticket=admit-2");
+    expect(stack.urls.at(-1)).toBe("wss://relay.test/fabric/v2?ticket=admit-2&flow=transport-v1");
     expect(freshSocket.sent).toHaveLength(0);
 
     // Even a deliberately delivered old-epoch frame cannot attach itself to

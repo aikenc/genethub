@@ -18,14 +18,11 @@ import {
   encodeFabricOpenPayload,
   FabricKind,
   type FabricFrame,
-  FABRIC_INITIAL_STREAM_CREDIT,
-  FABRIC_MAX_STREAM_CREDIT,
   FabricReset,
   MAX_OPERATION_METADATA_BYTES,
 } from "../src/forward/fabric-frame.js";
 
 const NEVER = "2099-01-01T00:00:00.000Z";
-const CREDIT = BigInt(FABRIC_INITIAL_STREAM_CREDIT);
 
 function id(value: number): string {
   return value.toString(16).padStart(32, "0");
@@ -55,7 +52,6 @@ class TestConnection implements FabricEndpointConnection {
       epoch?: string;
       expiresAt?: string | null;
       connectionGeneration?: number;
-      transportFlow?: boolean;
     } = {},
   ) {
     this.context = Object.freeze({
@@ -65,7 +61,6 @@ class TestConnection implements FabricEndpointConnection {
       connectionGeneration: options.connectionGeneration ?? 1,
       presenceLeaseSeconds: 90,
       connectionEpoch: options.epoch ?? `epoch:${handle}`,
-      transportFlow: options.transportFlow ?? false,
     });
   }
 
@@ -135,7 +130,7 @@ function open(
   streamId: string,
   ticket: string,
   hello = ticket,
-  credit = CREDIT,
+  credit = 0n,
 ): FabricFrame {
   return frame(
     FabricKind.Open,
@@ -160,7 +155,7 @@ async function establish(
   ticket: string,
   routeHandle = `route:${ticket}`,
   expiresAt = NEVER,
-  credit = CREDIT,
+  credit = 0n,
   acceptCredit = credit,
 ): Promise<string> {
   authority.grant(ticket, target.context.endpointHandle, routeHandle, expiresAt);
@@ -179,14 +174,12 @@ async function establish(
 }
 
 describe("Fabric endpoint-neutral routing", () => {
-  it("negotiates transport flow only when both physical endpoints opt in", async () => {
+  it("uses only socket drain without application consumption acknowledgements", async () => {
     const authority = new TestAuthority();
     const core = new FabricCore(authority, { streamId: () => id(900) });
     const source = new TestConnection("endpoint:flow-source", {
-      transportFlow: true,
     });
     const target = new TestConnection("endpoint:flow-target", {
-      transportFlow: true,
     });
     core.register(source);
     core.register(target);
@@ -219,28 +212,14 @@ describe("Fabric endpoint-neutral routing", () => {
     );
   });
 
-  it("falls back to legacy credit when either endpoint lacks the capability", async () => {
-    const authority = new TestAuthority();
-    const core = new FabricCore(authority, { streamId: () => id(899) });
-    const source = new TestConnection("endpoint:new", { transportFlow: true });
-    const target = new TestConnection("endpoint:old");
-    core.register(source);
-    core.register(target);
-    const peer = await establish(core, authority, source, target, id(92), "legacy");
-    assert.equal(target.sent[0]?.value, CREDIT);
-    assert.equal(last(source).value, CREDIT);
-    assert.equal(core.usesTransportFlow(source, id(92)), false);
-    assert.equal(core.usesTransportFlow(target, peer), false);
-  });
+
 
   it("keeps the source endpoint when a transport-flow peer disappears mid-drain", async () => {
     const authority = new TestAuthority();
     const core = new FabricCore(authority, { streamId: () => id(901) });
     const source = new TestConnection("endpoint:flow-source", {
-      transportFlow: true,
     });
     const target = new TestConnection("endpoint:flow-target", {
-      transportFlow: true,
     });
     core.register(source);
     core.register(target);
@@ -253,7 +232,7 @@ describe("Fabric endpoint-neutral routing", () => {
       "flow-drop",
       "route:flow-drop",
       NEVER,
-      CREDIT,
+      0n,
       0n,
     );
 
@@ -542,67 +521,25 @@ describe("Fabric endpoint-neutral routing", () => {
 });
 
 describe("Fabric protocol violations stay scoped", () => {
-  it("enforces each leg's credit without stalling or closing a healthy binding", async () => {
+  it("keeps sequence validation and sibling progress without any credit updates", async () => {
     const authority = new TestAuthority();
-    const generated = [id(901), id(902)];
-    const core = new FabricCore(authority, { streamId: () => generated.shift()! });
-    const source = new TestConnection("endpoint:source");
-    const target = new TestConnection("endpoint:target");
-    core.register(source);
-    core.register(target);
-
-    const floodedPeer = await establish(
-      core,
-      authority,
-      source,
-      target,
-      id(21),
-      "flooded",
-      "route:flooded",
-      NEVER,
-      4n,
-    );
-    const healthyPeer = await establish(
-      core,
-      authority,
-      source,
-      target,
-      id(22),
-      "healthy",
-      "route:healthy",
-      NEVER,
-      4n,
-    );
-
-    await core.handle(source, frame(FabricKind.Data, id(21), 1n, Buffer.from("flood")));
-    assert.equal(source.closeCodes.length, 0);
-    assert.equal(target.closed, false);
-    assert.equal(core.stats().streams, 1);
-    assert.deepEqual(last(source), frame(
-      FabricKind.Reset,
-      id(21),
-      BigInt(FabricReset.ProtocolViolation),
-    ));
-
-    await core.handle(source, frame(FabricKind.Data, id(22), 1n, Buffer.from("full")));
-    assert.deepEqual(last(target), frame(FabricKind.Data, healthyPeer, 1n, Buffer.from("full")));
-    await core.handle(target, frame(FabricKind.WindowUpdate, healthyPeer, 4n));
-    assert.deepEqual(last(source), frame(FabricKind.WindowUpdate, id(22), 4n));
-    await core.handle(source, frame(FabricKind.Data, id(22), 2n, Buffer.from("x")));
-    assert.deepEqual(last(target), frame(FabricKind.Data, healthyPeer, 2n, Buffer.from("x")));
-
-    // The peer now has only three bytes available. Granting two would overflow
-    // its negotiated window, so only this binding is reset.
-    await core.handle(target, frame(FabricKind.WindowUpdate, healthyPeer, 2n));
-    assert.equal(core.stats().streams, 0);
-    assert.equal(source.closed, false);
-    assert.equal(target.closed, false);
+    let seq = 800;
+    const core = new FabricCore(authority, { streamId: () => id(seq++) });
+    const source = new TestConnection("endpoint:source"), target = new TestConnection("endpoint:target");
+    core.register(source); core.register(target);
+    await establish(core, authority, source, target, id(21), "bad-sequence");
+    const healthy = await establish(core, authority, source, target, id(22), "healthy");
+    await core.handle(source, frame(FabricKind.Data, id(21), 2n, Buffer.from("gap")));
     assert.equal(last(source).value, BigInt(FabricReset.ProtocolViolation));
-    assert.equal(last(target).value, BigInt(FabricReset.ProtocolViolation));
-    assert.notEqual(floodedPeer, healthyPeer);
+    const body = Buffer.alloc(128 * 1024, 7);
+    for (let n = 1; n <= 5; n++) await core.handle(source, frame(FabricKind.Data, id(22), BigInt(n), body));
+    assert.equal(core.stats().streams, 1);
+    assert.equal(source.closed, false); assert.equal(target.closed, false);
+    assert.deepEqual(last(target), frame(FabricKind.Data, healthy, 5n, body));
+    assert.equal(target.sent.filter(frame => frame.kind === FabricKind.Data).length, 5);
   });
 
-  it("rejects zero or excessive negotiated windows without closing endpoints", async () => {
+  it("rejects legacy nonzero flow values without closing endpoints", async () => {
     const authority = new TestAuthority();
     const core = new FabricCore(authority, { streamId: () => id(903) });
     const source = new TestConnection("endpoint:source");
@@ -610,14 +547,14 @@ describe("Fabric protocol violations stay scoped", () => {
     core.register(source);
     core.register(target);
 
-    await core.handle(source, open(id(23), "zero", "hello", 0n));
+    await core.handle(source, open(id(23), "legacy", "hello", 1n));
     await core.handle(
       source,
       open(
         id(24),
         "overflow",
         "hello",
-        BigInt(FABRIC_MAX_STREAM_CREDIT) + 1n,
+        0xffff_ffffn,
       ),
     );
     assert.equal(authority.calls.length, 0);
@@ -648,7 +585,7 @@ describe("Fabric protocol violations stay scoped", () => {
       frame(
         FabricKind.Accept,
         incoming.streamId,
-        CREDIT,
+        0n,
         Buffer.alloc(MAX_OPERATION_METADATA_BYTES + 1),
       ),
     );
@@ -732,7 +669,7 @@ describe("Fabric protocol violations stay scoped", () => {
     );
     await core.handle(
       target,
-      frame(FabricKind.WindowUpdate, targetStream, 12n),
+      frame(FabricKind.Data, targetStream, 2n, Buffer.alloc(12)),
     );
     assert.equal(target.strikes, 0);
     assert.equal(source.sent.length, sourceFrames);
@@ -980,7 +917,7 @@ describe("Fabric protocol violations stay scoped", () => {
     );
     payload.writeUInt16BE(ticket.length, 0);
     ticket.copy(payload, 2);
-    await core.handle(source, frame(FabricKind.Open, id(18), CREDIT, payload));
+    await core.handle(source, frame(FabricKind.Open, id(18), 0n, payload));
 
     assert.equal(authority.calls.length, 0);
     assert.equal(core.stats().pendingOpens, 0);

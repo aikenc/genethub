@@ -76,8 +76,12 @@ defineSpecialty(meta("multi-agent-burst-liveness",
 });
 
 for (const mode of ["loopback", "fabric", "preview"] as const) {
-defineSpecialty(meta(mode === "loopback" ? "stream-output-shaped-liveness" : mode === "fabric" ? "fabric-sustained-output-liveness" : "fabric-preview-shaped-control",
-  "Continuously consumed shell output on a narrow TCP path keeps the owner and at least one interaction alive"), async t => {
+defineSpecialty({ ...meta(mode === "loopback" ? "stream-output-shaped-liveness" : mode === "fabric" ? "fabric-sustained-output-liveness" : "fabric-preview-shaped-control",
+  "Continuously consumed output on a narrow TCP path keeps its owner and restores interaction after cancellation"),
+  // A complete 24MiB finite body takes ~101s to serialize at 2Mbps. Include
+  // setup and cancellation cleanup in the harness budget, not the RPC deadline.
+  timeoutMs: mode === "preview" ? 180000 : 120000,
+}, async t => {
   const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
   let relay: Awaited<ReturnType<typeof startRelay>> | undefined;
   let endpoint: { url: string; localServerProof?: ReturnType<typeof daemonEndpoint>["localServerProof"]; credential?: { deviceId: string; secret: string } } = daemonEndpoint(opened.daemon);
@@ -105,9 +109,9 @@ defineSpecialty(meta(mode === "loopback" ? "stream-output-shaped-liveness" : mod
   const peer = new Client({ ...input(), rtcEnabled: false, requestTimeoutMs: 10000,
     socketFactory: url => new WebSocket(url) as unknown as WebSocketLike, redial: async () => input(),
     onDiagnostic(e) {
-      if (!["connection", "error"].includes(e.kind)) return;
+      if (!["connection", "error", "transport"].includes(e.kind)) return;
       diagnostics.push({ atMs: Math.round(performance.now() - began), kind: e.kind,
-        detail: Object.fromEntries(Object.entries(e.detail).filter(([k]) => ["state", "phase", "closeReason", "errorName"].includes(k))) });
+        detail: Object.fromEntries(Object.entries(e.detail).filter(([k]) => ["state", "phase", "closeReason", "errorName", "reason", "path"].includes(k))) });
       if (diagnostics.length > 50) diagnostics.shift();
     },
   });
@@ -119,6 +123,7 @@ defineSpecialty(meta(mode === "loopback" ? "stream-output-shaped-liveness" : mod
   try {
     peer.connect(); await t.tools.waitUntil(() => peer.connectionState === "ready", 15000);
     const owner = peer.logicalConnectionId;
+    t.note(JSON.stringify({ phase: "ready", mode, elapsedMs: Math.round(performance.now() - began) }));
     if (mode === "preview") {
       const bytes = randomBytes(24 * 1024 * 1024);
       Buffer.from([137,80,78,71,13,10,26,10]).copy(bytes);
@@ -143,11 +148,13 @@ defineSpecialty(meta(mode === "loopback" ? "stream-output-shaped-liveness" : mod
       await pause(500);
     }
     abort.abort(); stream?.reset(1);
+    t.note(JSON.stringify({ phase: "cancelled", mode, elapsedMs: Math.round(performance.now() - began), samples, diagnostics }));
     let afterStop = false;
     for (let attempt = 0; attempt < 4 && !afterStop; attempt++) {
       await new Promise(resolve => setTimeout(resolve, 5000));
       afterStop = await peer.call({ type: "workspace.list" })
         .then(reply => reply?.type === "workspaces").catch(() => false);
+      t.note(JSON.stringify({ phase: "after-stop", mode, attempt, afterStop, elapsedMs: Math.round(performance.now() - began), diagnostics }));
     }
     const relayCounts = relay ? { lateFrameOverflow: (relay.logTail().match(/lateFrameOverflow/g) ?? []).length,
       unknownStream: (relay.logTail().match(/unknownStream/g) ?? []).length } : null;
@@ -159,8 +166,8 @@ defineSpecialty(meta(mode === "loopback" ? "stream-output-shaped-liveness" : mod
       "real producer bytes did not cross the shaped path");
     // A 2Mbps single path is the documented degraded case: sustained bulk may
     // consume the 10s request budget, but the path must stay owned and usable.
-    t.assertions.assert(samples.some(x => x.type === "workspaces") || afterStop,
-      "stream output never completed an interactive request, before or after stop");
+    t.assertions.assert(afterStop,
+      "stream output did not restore an interactive request after cancellation");
     t.assertions.assert(summary.ownerRetained && summary.state === "ready", "stream output discarded the logical owner");
   } finally {
     abort.abort(); stream?.reset(1); peer.close(); await drain; await proxy.stop();

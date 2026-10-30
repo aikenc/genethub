@@ -62,9 +62,13 @@ impl SessionManager {
             let dir=records::job(&state.paths.root,&c.request_id)?;
             let request:Request=records::read(&dir.join("request.json"))?;
             let progress:Progress=records::read(&dir.join("progress.json"))?;
-            if meta.inbox.paused || *live.status.lock().await==SessionStatus::Closed || live.closing.load(Ordering::SeqCst) {
+            let closing=live.closing.load(Ordering::SeqCst);
+            if meta.inbox.paused || (!closing && *live.status.lock().await==SessionStatus::Closed) {
                 c.state="skipped".into();records::write_continuation(&state.paths.root,&c)?;return Ok(false);
             }
+            // An old guest draining for reload is not a Human pause/close.
+            // Leave its handoff for the next instance instead of retiring it.
+            if closing {return Ok(true);}
             if !progress.terminal() {
                 let heartbeat=records::read::<serde_json::Value>(&dir.join("heartbeat.json")).ok()
                     .and_then(|v|v["atMs"].as_u64()).unwrap_or(request.created_at_ms);

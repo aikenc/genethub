@@ -2465,6 +2465,7 @@ mod tests {
         HelloResult {
             data_channel_url: None,
             daemon_version: "1.2.3".into(),
+            daemon_instance_id: "test-daemon-instance".into(),
             web_protocol: genehub_proto::DATA_PLANE_VERSION,
             machine_id: "m_local".into(),
             fingerprint: "AA-BB".into(),

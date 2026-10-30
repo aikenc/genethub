@@ -278,6 +278,9 @@ export class FabricForwarder {
     }
     const credential = credentialOf(request);
     if (!credential) return reject(socket, 401, "Unauthorized");
+    if (requestTarget(request.url)?.searchParams.get("flow") !== FABRIC_TRANSPORT_FLOW) {
+      return reject(socket, 400, "Unsupported Fabric flow");
+    }
     if (this.pendingSockets.size >= config.limits.maxFabricPendingUpgrades) {
       return reject(socket, 503, "Service Unavailable");
     }
@@ -332,7 +335,6 @@ export class FabricForwarder {
     }
 
     this.sockets.handleUpgrade(request, socket, head, (ws) => {
-      const requestUrl = requestTarget(request.url);
       this.register(ws, {
         endpointHandle: grant.endpointHandle,
         revocationHandle: grant.revocationHandle,
@@ -340,8 +342,6 @@ export class FabricForwarder {
         connectionGeneration: grant.connectionGeneration,
         presenceLeaseSeconds: grant.presenceLeaseSeconds,
         connectionEpoch: randomBytes(16).toString("hex"),
-        transportFlow:
-          requestUrl?.searchParams.get("flow") === FABRIC_TRANSPORT_FLOW,
       }, revocationCheckpoint);
     });
   }
@@ -391,7 +391,7 @@ export class FabricForwarder {
       this.outboundBudget,
       // A peer RESET or expiry may close the binding while DATA waits here.
       // These previously admitted frames must not become late-frame strikes.
-      frame => this.core.usesTransportFlow(connection, frame.streamId)
+      frame => connection.streams.has(frame.streamId)
         ? this.core.handle(connection, frame) : Promise.resolve(),
       streamId => {
         const reset: FabricFrame = {
@@ -466,11 +466,9 @@ export class FabricForwarder {
           frameBytes: buffer.length,
         });
       }
-      const transportFlow =
-        (frame.kind === FabricKind.Data || frame.kind === FabricKind.Fin) &&
-        this.core.usesTransportFlow(connection, frame.streamId);
+      const queuedData = (frame.kind === FabricKind.Data || frame.kind === FabricKind.Fin) && connection.streams.has(frame.streamId);
       if (frame.kind === FabricKind.Reset) flowQueue.cancel(frame.streamId);
-      if (transportFlow) flowQueue.push(frame, buffer.length);
+      if (queuedData) flowQueue.push(frame, buffer.length);
       else void this.core.handle(connection, frame).catch(error => handlingFailed(frame, error));
     });
 
@@ -810,7 +808,6 @@ function fabricKindName(kind: FabricFrame["kind"]): string {
     case FabricKind.Incoming: return "incoming";
     case FabricKind.Accept: return "accept";
     case FabricKind.Data: return "data";
-    case FabricKind.WindowUpdate: return "window-update";
     case FabricKind.Fin: return "fin";
     case FabricKind.Reset: return "reset";
     case FabricKind.Ping: return "ping";
