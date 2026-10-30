@@ -328,7 +328,9 @@ describe("a browser Fabric endpoint", () => {
       const stream = stack.endpoint.open("route:one-attempt");
       socket.receive({ kind: FabricKind.Accept, streamId: stream.id, value: 0n, payload: bytes() });
       await vi.advanceTimersByTimeAsync(0); await stream.accepted;
-      await vi.advanceTimersByTimeAsync(16000);
+      await vi.advanceTimersByTimeAsync(119000);
+      expect(stack.endpoint.connectionState).toBe("open");
+      await vi.advanceTimersByTimeAsync(2000);
       expect((await stream.done).type).toBe("connectionClosed");
       expect(stack.endpoint.connectionState).toBe("closed");
       expect(stack.sockets).toHaveLength(1);

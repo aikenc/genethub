@@ -620,6 +620,11 @@ async fn windows_census() -> Option<Vec<Row>> {
 /// Only terminate members observed in an owned subtree; never kill the agent's whole group.
 /// Recheck age and command before each signal so a recycled PID is not adopted.
 async fn terminate_snapshot(owned: &[Row]) -> bool {
+    // There is no observed process to signal or wait for. Checked cleanup
+    // callers still obtain a fresh census for newly created descendants.
+    if owned.is_empty() {
+        return true;
+    }
     let started = std::time::Instant::now();
     for force in [false, true] {
         let Some(current) = census().await else {

@@ -991,7 +991,9 @@ export class FabricEndpoint {
     this.heartbeat = setInterval(() => {
       const socket = this.socket, epoch = this.epoch;
       if (!socket || !epoch || this.state_ !== "open") return;
-      if (performance.now() - this.lastReceived >= 15000) {
+      // Match the native Fabric uplink silence budget. TCP loss recovery
+      // can pause traffic beyond an RPC deadline without ending the socket.
+      if (performance.now() - this.lastReceived >= 120000) {
         const error = new FabricConnectionError("Fabric socket heartbeat timed out", null, "heartbeat-timeout");
         this.disconnect(epoch, error);
         socket.close(4008, "heartbeat-timeout");

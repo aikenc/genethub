@@ -22,8 +22,9 @@ export class TransportFlowQueue {
   constructor(
     private readonly budget: OutboundByteBudget,
     private readonly forward: (frame: FabricFrame) => Promise<void>,
-    private readonly overflow: (streamId: string) => void,
+    private readonly overflow: (streamId: string, reason: "source-budget" | "process-budget") => void,
     private readonly failed: (frame: FabricFrame, error: unknown) => void,
+    private readonly pendingChanged?: (bytes: number) => void,
   ) {}
 
   push(frame: FabricFrame, wireBytes: number): void {
@@ -32,13 +33,13 @@ export class TransportFlowQueue {
     let queue = this.streams.get(frame.streamId);
     if (charge > 4 * 1024 * 1024 - this.bytes || this.records >= 4096) {
       this.cancel(frame.streamId);
-      this.overflow(frame.streamId);
+      this.overflow(frame.streamId, "source-budget");
       return;
     }
     const release = this.budget.reservePending(wireBytes);
     if (!release) {
       this.cancel(frame.streamId);
-      this.overflow(frame.streamId);
+      this.overflow(frame.streamId, "process-budget");
       return;
     }
     if (!queue) {
@@ -48,6 +49,7 @@ export class TransportFlowQueue {
     queue.frames.push({ frame, charge, release });
     this.bytes += charge;
     this.records++;
+    this.pendingChanged?.(this.bytes);
     if (!queue.running) void this.drain(frame.streamId, queue);
   }
 
@@ -68,6 +70,7 @@ export class TransportFlowQueue {
     this.bytes -= pending.charge;
     this.records--;
     pending.release();
+    this.pendingChanged?.(this.bytes);
   }
 
   private async drain(streamId: string, queue: StreamQueue): Promise<void> {

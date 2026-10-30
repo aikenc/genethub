@@ -4,6 +4,7 @@ import type { PeerWelcome } from "@genehub/proto";
 import {
   FabricEndpoint,
   FabricReset,
+  FabricStreamResetError,
   type FabricSocketLike,
   type FabricStream,
 } from "../fabric";
@@ -97,7 +98,8 @@ class FabricRecordCarrier implements RecordCarrier {
     stream.onData((record) => this.inbox.push(record));
     stream.onRemoteFinish(() => this.fail(new Error("Fabric peer finished the carrier")));
     void stream.done.then((result) => {
-      if (result.type !== "finished") this.fail(result);
+      if (result.type === "connectionClosed") this.fail(result.error);
+      else if (result.type === "reset") this.fail(new FabricStreamResetError(result.code));
     });
   }
 

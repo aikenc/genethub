@@ -95,6 +95,10 @@ function parseExpiry(value: string | null): number | null {
 export class FabricForwarder {
   private readonly sockets = new WebSocketServer({
     noServer: true,
+    // Let pending socket writes drain between messages from one TCP burst.
+    // Synchronous emission can fill the bounded forwarding queue before any
+    // write callback runs, even when the destination itself is reading.
+    allowSynchronousEvents: false,
     maxPayload: config.limits.maxFrameBytes,
     perMessageDeflate: false,
   });
@@ -365,7 +369,12 @@ export class FabricForwarder {
       lateFrameBudgets: new Map(),
       closed: false,
       strikes: 0,
-      send: (frame) => this.deliver(socket, encodeFabricFrame(frame)),
+      send: (frame) => {
+        // A newly routed peer makes the source shared; do not leave it paused
+        // behind the former peer's destination before its handshake can reply.
+        if (frame.kind === FabricKind.Incoming && socket.isPaused) socket.resume();
+        this.deliver(socket, encodeFabricFrame(frame));
+      },
       sendFlow: (frame) => this.deliverFlow(socket, encodeFabricFrame(frame)),
       close: (code, reason) => this.closeSocket(socket, code, reason ?? ""),
     };
@@ -393,7 +402,11 @@ export class FabricForwarder {
       // These previously admitted frames must not become late-frame strikes.
       frame => connection.streams.has(frame.streamId)
         ? this.core.handle(connection, frame) : Promise.resolve(),
-      streamId => {
+      (streamId, reason) => {
+        log.warn("fabric: transport-flow capacity refused", {
+          ...this.diagnosticFields(socket), streamId, reason,
+          pendingBytes: this.outboundBudget.bytes,
+        });
         const reset: FabricFrame = {
           kind: FabricKind.Reset, streamId, value: BigInt(FabricReset.TooSlow),
           payload: Buffer.alloc(0),
@@ -402,6 +415,14 @@ export class FabricForwarder {
         void this.core.handle(connection, reset).catch(error => handlingFailed(reset, error));
       },
       handlingFailed,
+      bytes => {
+        if (socket.readyState !== socket.OPEN) return;
+        // Only an unshared outer peer may backpressure this TCP source.
+        // With multiple peers, retain stream-local refusal and keep reading
+        // siblings, Reset and heartbeats. This is a local queue, not credit.
+        if (connection.streams.size === 1 && bytes >= 3 * 1024 * 1024) socket.pause();
+        else if (bytes <= 1024 * 1024 || connection.streams.size !== 1) socket.resume();
+      },
     );
 
     // Admission can be rejected synchronously by a revocation tombstone. An
