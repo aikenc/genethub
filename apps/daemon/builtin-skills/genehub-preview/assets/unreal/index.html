@@ -8,14 +8,21 @@
 import { Config, PixelStreaming, Flags, NumericParameters, TextParameters } from './pixelstreaming.esm.js';
 const bar = document.getElementById('bar');
 const say = text => { bar.textContent = text; };
-// The platform decides the ICE servers (including relay when the viewer allows it);
-// when it names any, they replace whatever the signalling server sends in its own config.
+// The platform decides the ICE servers (STUN, and relay when the viewer allows it). Both ends
+// use them: they replace what the signalling server's config names for this page, and the
+// first message on the signalling socket hands them to signalling.py, which passes them to
+// Unreal before the game creates its side of the connection. Without that, a game behind
+// another network's NAT only offers LAN addresses and the picture never arrives.
 let iceServers = null;
 try { ({ iceServers } = await window.genehubServicePreview.ice()); }
 catch { say('请先在预览信息中允许本次登记服务'); }
 if (iceServers?.length) {
   const Native = window.RTCPeerConnection;
   window.RTCPeerConnection = class extends Native { constructor(cfg = {}) { super({ ...cfg, iceServers }); } };
+  const Socket = window.WebSocket;
+  window.WebSocket = class extends Socket {
+    constructor(...args) { super(...args); this.addEventListener('open', () => this.send(JSON.stringify({ type: 'iceServers', iceServers }))); }
+  };
 }
 // Locked mouse is what a third-person game expects; the page sandbox allows it. The signalling
 // address is one relative path through the preview bridge; the runner forwards it to the signalling

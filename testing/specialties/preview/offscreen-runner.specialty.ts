@@ -138,11 +138,12 @@ defineSpecialty(
     id: "specialty.preview.pixel-streaming-signalling",
     title: "The shipped Python signalling server pairs a streamer with a player and relays the WebRTC handshake",
     oracle:
-      "the streamer gets config+identify and registers; a player lists and subscribes; the streamer sees playerConnected with the player id; offer/answer/iceCandidate cross in both directions with the player id added toward the streamer and removed toward the player; losing the streamer closes the player",
+      "the streamer gets config+identify and registers; a player hands over the platform ICE servers, lists and subscribes; the streamer gets a config naming exactly those servers before playerConnected with the player id; offer/answer/iceCandidate cross in both directions with the player id added toward the streamer and removed toward the player; a malformed ICE list closes that player; losing the streamer closes the player",
     catches: [
       "the signalling server stops speaking the UE 5.4 message flow",
       "player ids leak to the browser or are missing toward Unreal",
       "a lost streamer leaves players attached",
+      "Unreal never learns the platform STUN/TURN servers, so a game on another network offers only LAN candidates",
     ],
     tags: ["network-risk-v2", "service-preview"],
     llm: { default: "none" },
@@ -183,9 +184,13 @@ defineSpecialty(
       streamer.socket.send(JSON.stringify({ type: "endpointId", id: "DefaultStreamer" }));
       const player = await connect(`ws://127.0.0.1:${ports[0]}/ws`);
       await player.next("config");
+      const ice = [{ urls: ["stun:stun.example:3478"] }, { urls: ["turn:turn.example:3478?transport=udp"], username: "u", credential: "p" }];
+      player.socket.send(JSON.stringify({ type: "iceServers", iceServers: ice }));
       player.socket.send(JSON.stringify({ type: "listStreamers" }));
       t.assertions.assert(JSON.stringify((await player.next("streamerList")).ids) === '["DefaultStreamer"]', "the registered streamer was not listed");
       player.socket.send(JSON.stringify({ type: "subscribe", streamerId: "DefaultStreamer" }));
+      const reconfigured = await streamer.next("config");
+      t.assertions.assert(JSON.stringify((reconfigured.peerConnectionOptions as { iceServers?: unknown })?.iceServers) === JSON.stringify(ice), `Unreal did not get the page's ICE servers: ${JSON.stringify(reconfigured)}`);
       const connected = await streamer.next("playerConnected");
       t.assertions.assert(typeof connected.playerId === "string" && connected.sendOffer === true, `unexpected playerConnected: ${JSON.stringify(connected)}`);
       streamer.socket.send(JSON.stringify({ type: "offer", playerId: connected.playerId, sdp: "v=0" }));
@@ -196,6 +201,9 @@ defineSpecialty(
       t.assertions.assert(answer.sdp === "v=1" && answer.playerId === connected.playerId, "the answer did not reach Unreal tagged with the player id");
       player.socket.send(JSON.stringify({ type: "iceCandidate", candidate: { candidate: "c" } }));
       t.assertions.assert((await streamer.next("iceCandidate")).playerId === connected.playerId, "the ICE candidate was not tagged with the player id");
+      const bad = await connect(`ws://127.0.0.1:${ports[0]}/ws`);
+      bad.socket.send(JSON.stringify({ type: "iceServers", iceServers: [{ urls: ["http://not-ice"] }] }));
+      t.assertions.assert(await Promise.race([bad.closed, new Promise<number>((resolve) => setTimeout(() => resolve(0), 5000))]) === 1008, "a malformed ICE list was accepted");
       streamer.socket.close();
       await Promise.race([player.closed, t.tools.waitUntil(async () => false, 5000).then(() => Promise.reject(new Error("the player stayed attached after the streamer was lost")))]);
     } finally {

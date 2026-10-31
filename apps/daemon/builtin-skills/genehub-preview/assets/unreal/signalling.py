@@ -6,6 +6,11 @@ Unreal connects to the streamer port (-PixelStreamingURL=ws://127.0.0.1:<streame
 preview bridge connects to the HTTP port. Both are loopback only. This is a faithful subset of
 Epic's reference server (cirrus): config, identify/endpointId, listStreamers, subscribe,
 offer/answer/iceCandidate forwarding, ping/pong, player counts. No SFU, matchmaker or static files.
+
+One addition: the page may send {"type": "iceServers", "iceServers": [...]} (the platform's STUN, and
+TURN when the viewer allowed relay). Before telling Unreal about that player the server re-sends
+Unreal its `config` with those servers, so the engine side gathers the same candidates the browser
+does. Unreal applies the latest `config` to each new peer connection.
 """
 import argparse
 import asyncio
@@ -29,6 +34,27 @@ def unique_streamer_id(wanted):
     while f'{wanted}{n}' in taken:
         n += 1
     return f'{wanted}{n}'
+
+
+def ice_servers(value):
+    """Bounded RTCIceServer list from the page; raises ValueError on anything else."""
+    if not isinstance(value, list) or len(value) > 8:
+        raise ValueError
+    servers = []
+    for item in value:
+        urls = item.get('urls') if isinstance(item, dict) else None
+        urls = [urls] if isinstance(urls, str) else urls
+        if not isinstance(urls, list) or not 0 < len(urls) <= 8 or not all(
+                isinstance(u, str) and len(u) <= 256 and u.split(':', 1)[0] in ('stun', 'turn', 'turns') for u in urls):
+            raise ValueError
+        server = {'urls': urls}
+        for key in ('username', 'credential'):
+            if key in item:
+                if not isinstance(item[key], str) or len(item[key]) > 256:
+                    raise ValueError
+                server[key] = item[key]
+        servers.append(server)
+    return servers
 
 
 async def send(ws, message):
@@ -108,7 +134,7 @@ async def player_socket(request):
     pid = str(next_player)
     next_player += 1
     offer = request.query.get('OfferToReceive', 'false') not in ('false', '')
-    players[pid] = {'ws': ws, 'streamer': None, 'browser_offers': offer}
+    players[pid] = {'ws': ws, 'streamer': None, 'browser_offers': offer, 'ice': None}
 
     async def keepalive():
         while True:
@@ -128,8 +154,13 @@ async def player_socket(request):
             elif kind == 'subscribe':
                 if message.get('streamerId') in streamers:
                     players[pid]['streamer'] = message['streamerId']
+                    if players[pid]['ice'] is not None:
+                        await send(streamers[message['streamerId']],
+                                   {'type': 'config', 'peerConnectionOptions': {'iceServers': players[pid]['ice']}})
                     await to_streamer(pid, {'type': 'playerConnected', 'dataChannel': True, 'sfu': False,
                                             'sendOffer': not offer})
+            elif kind == 'iceServers':
+                players[pid]['ice'] = ice_servers(message.get('iceServers'))
             elif kind == 'unsubscribe':
                 await to_streamer(pid, {'type': 'playerDisconnected'})
                 players[pid]['streamer'] = None
@@ -137,7 +168,7 @@ async def player_socket(request):
                 await to_streamer(pid, message)
             elif kind not in ('stats', 'pong'):
                 await ws.close(code=1008, message=b'Unsupported message type')
-    except (json.JSONDecodeError, KeyError, TypeError):
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
         await ws.close(code=1008, message=b'Cannot parse')
     finally:
         ping.cancel()

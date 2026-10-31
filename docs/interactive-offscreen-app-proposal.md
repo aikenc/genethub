@@ -1,6 +1,6 @@
 # 离屏应用的远程预览与游玩：沿用现有服务运行器的最小方案
 
-- 状态：第 1 期已实现并在 Windows RTX 4090 上用真实 Preview 验证（见第 10 节；运行器为 Python 版）；第 2–4 期待做
+- 状态：第 1 期已实现并在 Windows RTX 4090 上用真实 Preview 验证（见第 10 节；运行器为 Python 版）；锁屏已实测通过、UE 一侧已接入平台 ICE（第 11 节）；跨网络媒体受平台 TURN 只有 UDP 所限，待基础设施决定（§11.3）
 - 日期：2026-10-30
 - 适用范围：GeneHub Service Preview、`genehub-preview` Skill、在内置 Python 适配器旁新增 `run.py` 服务运行器；首批适配 Unreal Engine 5.4.4（游玩）与 Blender（Agent 驱动的预览），之后可接入任何支持离屏渲染的软件
 - 事实基线：`main` 的 `baae72ae`（含远程桌面 Capture）；UE 实验在 PC-4090-1（RTX 4090 D、驱动 591.74、Windows 11、Edge 142 无头）上完成
@@ -145,7 +145,7 @@ Capture 有控制租约、纪元号和独立的输入守护进程，是因为它
 
 ### 5.4 网络与 ICE
 
-仅对 UE 这类 WebRTC 直连的后端有意义；Blender 走预览的 WebSocket，不需要 TURN。同机回环不需要。跨网络时：浏览器侧由前端用预览页 `ice()` 的平台配置替换信令 `config` 里的 `iceServers`（客户端改写）；UE 侧的 ICE 来自信令服务下发的配置，需要在启动信令服务时传入平台 ICE。TURN 短期凭据的刷新**尚未验证**，放第 2 期。
+仅对 UE 这类 WebRTC 直连的后端有意义；Blender 走预览的 WebSocket，不需要 TURN。同机回环不需要。跨网络时两端都用预览页 `ice()` 的平台配置：浏览器侧直接替换；页面再经信令把同一份服务器交给 `signalling.py`，由它在通知 UE 有新玩家前重发 `config`（§11.1）。短期 TURN 凭据随每次允许重新获取。网络是否允许到达 TURN 见 §11.3。
 
 ### 5.5 Agent 编辑与迭代
 
@@ -213,8 +213,8 @@ Agent 工作流验收看最终环境状态（实例在跑、行为变了、进�
 
 **未决问题**
 1. 接受"没有只看模式"吗？若需要，最简单的做法也是页面层的约定，不是平台强制。
-2. 锁屏下 UE 与 Windows 上 Blender 是否可用：需要把会话锁住的实测，需 Human 在场解锁。
-3. TURN 短期凭据如何交给 UE 侧信令并刷新（第 2 期）。
+2. ~~锁屏下 UE 与 Windows 上 Blender 是否可用~~：Windows 上已实测可用（§11.2）。
+3. ~~TURN 短期凭据如何交给 UE 侧~~：已由页面经信令转交（§11.1）；只放行 TCP 443 的网络需要 `turns:` 443（§11.3，待基础设施决定）。
 4. Blender 帧编码：JPEG 够用，还是需要软件内 H.264；白名单指令集由后端作者定，还是平台统一。
 5. 是否把 4090 按"专用 Agent 工作站"处理（自动登录、不休眠），这决定 Capture 路径在该机上的可用性。
 
@@ -255,3 +255,53 @@ Agent 工作流验收看最终环境状态（实例在跑、行为变了、进�
 **未验证，不能外推**：锁屏下的 UE 与 Windows Blender、跨网络与强制中继（页面已把平台 ICE 换入，但本次平台 ICE 为空，只测了本机回环）、手柄、有声游戏（模板工程无声）、30 分钟稳定性、输入到画面延迟、Safari/手机、Mac 上的 UE、真实滚轮（无头驱动的滚轮事件到不了沙箱 iframe，只验证了页面的滚轮处理函数）、撤销之外的释放路径（运行器被杀、浏览器崩溃、断网）。UE 冷启动约 4 分钟（第一次，来自此前的 spike），运行器 `readyTimeoutMs` 上限 300 秒只覆盖信令服务，UE 就绪由页面等待（页面会提示"等待游戏启动"并持续重试约 5 分钟）。
 
 **Python 运行器复验（2026-10-31，同一台 4090）。** 产品内置的是 Python 环境而非 Node，运行器因此迁为 `python-adapter/run.py`，原 Node 示例整体删除。同一套真机脚本在 Python 运行器上重跑：UE 允许服务后约 21 秒首帧、指针锁定、按住 W 画面变化 6.9（空闲 0.43）、锁定鼠标帧差 9.2、第二个观看者被 `viewer_limit` 拒绝、撤销后 8 秒内无新帧、重新允许后恢复，UE 与 Blender 进程均无残留；Blender 首帧 1.5 秒、拖动与滚轮处理函数改变画面、撤销后不可达、重新允许后恢复。Linux 专项（`offscreen-runner-viewer-limit`、`engine-streaming-page-mode`）在 Python 运行器上通过，前者新增断言：正常停止会删除登记并结束全部后端进程。随后把 Epic 的 Node 信令服务也换成 Python（`assets/unreal/signalling.py`，UE 5.4 消息流：config/identify/endpointId、listStreamers、subscribe、offer/answer/iceCandidate 转发、ping/pong、人数；不含 SFU 与 matchmaker），专项 `pixel-streaming-signalling` 用替身 streamer 与 player 走完整握手并在移除 playerId 转发时失败；4090 上再跑一遍真实 UE：首帧 18.3 秒、指针锁定、按住 W 画面变化 6.5、锁定鼠标帧差 9.2、第二个观看者被拒绝、撤销后画面停止、重新允许后恢复，Python 运行器与 Python 信令服务之外没有 Node 进程参与，UE 与监听端口均无残留。示例运行不再依赖 Node；仅 `pixelstreaming.esm.js` 当初用 npm 构建过一次，它是预构建的浏览器模块。
+
+## 11. 云端游玩与锁屏实测（2026-10-31）
+
+### 11.1 改动：UE 一侧拿到平台 ICE
+
+此前页面只把平台 ICE 换进浏览器，`signalling.py` 发给 UE 的 `config` 是空的，UE 在 NAT 后只会报局域网地址。查 UE 5.4 源码（`PixelStreamingSignallingConnection.cpp::OnConfig` → `SignallingConnectionObserver::OnSignallingConfig`）：UE 每收到一次 `config` 就覆盖 `Streamer.PeerConnectionConfig`，之后每个新玩家的连接都用它（`Streamer.cpp` 创建 `FPixelStreamingPeerConnection` 处）。所以不需要改引擎、也不需要命令行参数：
+
+- 页面拿到 `ice()` 后，在信令连接打开时先发 `{"type":"iceServers","iceServers":[…]}`；
+- `signalling.py` 校验（≤8 项，`stun:`/`turn:`/`turns:`，字符串长度上限，错误即 1008 关闭该玩家），在向 UE 发 `playerConnected` **之前**重发 `config`；
+- 每次重新允许都会带新的短期 TURN 凭据，凭据过期不影响下一次连接。
+
+专项 `pixel-streaming-signalling` 增加断言：UE 在 `playerConnected` 之前收到的 `config` 恰为页面给的服务器；非法列表被 1008 拒绝。真机上 UE 日志显示 ICE 收集从“立即完成”变为等待 STUN/TURN 超时（约 40 秒），说明配置已生效。
+
+### 11.2 锁屏（Windows，PC-4090-1）
+
+会话为 RDP 会话；用 `LockWorkStation` 锁定，运行前后均确认会话 1 中有 `LogonUI`。同一套真机脚本（真实 Preview + 本机 daemon + Python 运行器 + Python 信令）：
+
+| 项 | 解锁（基线 k1） | 锁定（k2/kb2） |
+| --- | --- | --- |
+| UE 首帧 | 26.7 秒 | 20.3 秒 |
+| 键盘（按住 W 帧差，空闲约 0.41） | 6.61 | 6.67 |
+| 锁定鼠标转视角 | 9.15 | 9.18 |
+| 第二个观看者 | 1013 `viewer_limit` | 1013 `viewer_limit` |
+| 撤销 / 重新允许 | 停止 / 恢复 | 停止 / 恢复 |
+| Blender 首帧、拖动、滚轮、撤销 | — | 1.5 秒、变化、变化、不可达后恢复 |
+| `UnrealEditor-Cmd -run=pythonscript` | 约 20 秒 | 18 秒，“executed successfully” |
+
+结论：在这台机器上，**锁屏不影响 UE 离屏串流、Blender 后台渲染和 Agent 的 Python 编辑**。Mac 上的 UE 未测。
+
+### 11.3 云端（跨网络）实测与阻塞
+
+**环境。** 观看端：开发云 Linux（出口 14.22.11.167），真实 Workbench `AssetPreviewPage`（无头 Chromium），经 **Beta Hub** 的 Fabric 连到办公室的 PC-4090-1（出口 43.132.141.25）；两台机器上跑的是 dev-4 构建的 daemon（Windows 端为交叉编译），配对进 Beta Hub 的一个试用身份（实验用，未用任何人的账号）。
+
+**结果。**
+
+- 发现服务、打开工作区、允许服务、信令往返（offer/answer/候选）全部经 Hub 通过；页面拿到 Beta 的 STUN + 带凭据的 TURN 并交给了 UE。
+- **媒体没有建立**（连接状态 `failed`）。逐层排查：开发云主机没有任何 UDP 出口；办公网 UDP 只放行白名单（Google STUN 19302、DNSPod 可达，Beta 的 `rtc-beta:3479`、Cloudflare/腾讯的 STUN、NTP 都不可达）；在 Beta 服务器上抓包，办公网与开发云发往 `1.13.182.31` 的 UDP（任意端口）和 3479/3480/5349 的 TCP SYN 一个都没到。两边都只有 TCP 443（经透明代理）能出去。
+- Beta 的 coturn 是 `no-tcp`/`no-tls`、只听 UDP 3479，且 `max-bps=1250000`、`bps-capacity=10000000`（coturn 按字节计：单会话约 10 Mbit/s，整台约 80 Mbit/s）。这与 `genethub-cloud/deploy/rtc/README.md` 的既定范围一致：“只放行 80/443 的传统企业不在 P0”，`turns:` TCP 443 明确不做。
+
+**结论。** 平台和 UE 这一侧的代码已就绪；**在只放行 TCP 443 的网络里（包括本团队办公网和开发云），任何 WebRTC 媒体（UE 串流、Capture 远程桌面）都到不了 Beta TURN**，这是基础设施范围问题，不是引擎问题。家庭网络等允许出站 UDP 的环境理论上可用，但本次没有这样的观看端，未实测。
+
+**要让办公网也能云端游玩，需要决定一项基础设施改动（需要 Beta/Stable 发布 owner 授权）：**
+
+1. 给 TURN 增加 **TLS on TCP 443**（`turns:rtc-beta.genethub.com:443?transport=tcp`）。443 已被同机 Caddy 占用，可选：(a) 为 `rtc-beta` 加一个独立公网 IP，coturn 独占其 443；(b) 换带 layer4 的 Caddy 按 SNI 分流（改动现网入口，风险较高）；(c) 独立小主机。Control 侧只需在 `HUB_BETA_TURN_URLS` 增加该 URL（`rtc.ts` 已允许 `turns:` 与 `?transport=tcp`）。
+2. 评估中继带宽：现配置单会话约 10 Mbit/s、整台约 80 Mbit/s；本机回环时 720p 串流约 58 Mbit/s，走中继会被码率自适应压到 10 Mbit/s 以内，画质下降，同时游玩的人数也有上限。
+
+### 11.4 Unity
+
+PC-4090-1 未安装 Unity，Unity 编辑器需要账号登录激活，无法由 Agent 自行完成。接入路径与 UE 相同（Unity Render Streaming：一条 WebSocket 信令路由 + 引擎侧拿平台 ICE + 页面），信令协议不同，需要一个与 `signalling.py` 同样大小的 Python 实现。需要 Human 提供已激活 Unity（版本与示例工程）后才能实测。
+
