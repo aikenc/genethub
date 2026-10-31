@@ -245,13 +245,15 @@ for (const rtc of [false, true]) {
           },
           onResync(snapshot, replayed) {
             m.repairs++;
-            m.observedTitles.push((snapshot as SessionSnapshot).summary.title);
+            const title = (snapshot as SessionSnapshot).summary.title;
+            if (title !== null) m.observedTitles.push(title);
             m.events.push(...replayed);
             for (const e of replayed) if (e.event.type === "titleChanged") m.observedTitles.push(e.event.title);
           },
         };
         const initial = await m.client.subscribe(id, handlers);
-        m.observedTitles.push((initial.snapshot as SessionSnapshot).summary.title);
+        const title = (initial.snapshot as SessionSnapshot).summary.title;
+        if (title !== null) m.observedTitles.push(title);
       }, id);
       if (rtc) await stack.rtc();
       await stack.opened.client.call({ type: "session.rename", payload: { sessionId: id, title: "authorized-event" } });
@@ -274,7 +276,13 @@ for (const rtc of [false, true]) {
       const revokedAt = Date.now(); await stack.revoke!();
       const status = await stack.admissionStatus!();
       t.assertions.assert(status === 401 || status === 403, "revoked session retained admission");
-      await stack.page.waitForFunction(() => (window as any).mc.client.connectionState === "closed" && (window as any).mc.streamEnded, null, { timeout: 5500 });
+      await stack.page.waitForFunction(() => (window as any).mc.client.connectionState === "closed" && (window as any).mc.streamEnded, null, { timeout: 5500 }).catch(async error => {
+        const state = await stack.page.evaluate(() => {
+          const m = (window as any).mc;
+          return { connection: m.client.connectionState, rtc: m.client.rtcState, streamEnded: m.streamEnded, states: m.states };
+        });
+        throw new Error("revoked subscription or command remained open: " + JSON.stringify(state) + "; " + error);
+      });
       for (let n = 0; n < 3; n++) await stack.opened.client.call({ type: "session.rename", payload: { sessionId: id, title: "denied-event-" + n } });
       await new Promise(r => setTimeout(r, Math.max(1000, revokedAt + 9000 - Date.now())));
       t.assertions.assert(!existsSync(join(stack.opened.workspaceRoot, "revoked-effect")), "revoked running command still mutated disk");
