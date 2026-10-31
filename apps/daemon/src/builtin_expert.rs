@@ -142,6 +142,31 @@ pub fn refresh(admin: &Path, name: &str) -> std::io::Result<bool> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
+        // SpaceBuilder treats each provider child as a Skill. Leaving an empty
+        // retired Skill directory makes the next identity build fail with SB008.
+        // Only walk ancestors of a previously owned file; remove_dir preserves
+        // every nonempty directory, including unrelated user content.
+        let mut parent = path.parent();
+        while let Some(relative) = parent.filter(|p| !p.as_os_str().is_empty()) {
+            if is_preserved_runtime_or_build_path(&relative.to_string_lossy(), &owned) {
+                break;
+            }
+            match std::fs::remove_dir(admin.join(relative)) {
+                Ok(()) => changed = true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    // The Wasm host may report NotEmpty as a generic OS error.
+                    // Directory contents are the portable reason to stop pruning.
+                    if std::fs::read_dir(admin.join(relative))
+                        .is_ok_and(|mut entries| entries.next().is_some())
+                    {
+                        break;
+                    }
+                    return Err(error);
+                }
+            }
+            parent = relative.parent();
+        }
     }
     if previous != shipped {
         crate::config::save_private(

@@ -1455,7 +1455,6 @@ export function isolatedHtml(
     "worker-src blob: data:",
     "form-action 'none'",
     "base-uri https://preview.invalid",
-    "navigate-to 'none'",
   ].join("; ");
   const base = document_.createElement("base");
   base.href = documentLocation ? virtualFileUrl(documentLocation.entryPath) : "https://preview.invalid/";

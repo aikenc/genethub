@@ -98,6 +98,7 @@ defineSpecialty({
     await frame().getByRole("heading", {name: "Second page target"}).waitFor();
     t.assertions.assert(escaped.length === 0, "local file requests escaped to the Cloud origin");
     t.assertions.assert(!consumer.errors.some(error => /base-uri|SyntaxError|Unexpected token/.test(error)), `runtime failed under parent policy: ${consumer.errors.join("; ")}`);
+    t.assertions.assert(!consumer.errors.some(error => error.includes("Unrecognized Content-Security-Policy directive")), `unsupported Preview policy: ${consumer.errors.join("; ")}`);
     await page.getByRole("button", {name: "后退", exact: true}).click();
     await frame().getByRole("heading", {name: "Start", exact: true}).waitFor();
     await frame().getByRole("button", {name: "Submit externally", exact: true}).click();
