@@ -132,7 +132,7 @@ export function resolveWorkspacePath(
       if (folder) return joinFilesystem(folder.root, normalized.slice(folder.rootHandle.length + 1));
       const base = context.documentPath && isAbsoluteFilePath(context.documentPath)
         ? context.documentPath.split("/").slice(0, -1).join("/")
-        : context.cwd ?? context.folders[0]?.root;
+        : context.folders[0]?.root ?? context.cwd;
       return base ? joinFilesystem(base, normalized) : null;
     } catch { return null; }
   }

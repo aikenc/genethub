@@ -3,7 +3,7 @@
 // ordinary scan. These cases start the shipped daemon on an empty data directory and look at what is there.
 // No model is involved.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { defineSpecialty, localGenetCli, type CaseContext } from "../../framework/public.ts";
@@ -117,6 +117,9 @@ adminCase(
     writeFileSync(script, "# damaged\n");
     const stale = path.join(admin, "front", "soul.mirror.md");
     const ownedPath = path.join(admin, ".genethub/bootstrap-owned.json");
+    const generatedAdminSkill = path.join(admin, "front/.agents/skills/team-admin/SKILL.md");
+    const originalAdminSkill = readFileSync(generatedAdminSkill, "utf8");
+    rmSync(generatedAdminSkill);
     const legacySkill = path.join(admin, "skills", "expert-core", "SKILL.md");
     mkdirSync(path.dirname(legacySkill), { recursive: true });
     writeFileSync(legacySkill, "---\nname: expert-core\ndescription: an older template\n---\n");
@@ -136,6 +139,8 @@ adminCase(
       t.assertions.assert(readFileSync(unknown, "utf8") === "untracked user content", "unknown user file was pruned");
       t.assertions.assert(!existsSync(stale), "a stale file from an older template was not pruned");
       t.assertions.assert(!existsSync(legacySkill), "a Skill under its pre-team name was not pruned");
+      t.assertions.assert(!existsSync(path.dirname(legacySkill)), "the empty retired Skill provider child remains and causes SB008");
+      t.assertions.assert(readFileSync(generatedAdminSkill, "utf8") === originalAdminSkill, "administrator identity was not rebuilt after the upgrade");
       const skills = (JSON.parse(readFileSync(path.join(admin, "agent-space.genet.json"), "utf8")) as { skills: string[] }).skills;
       t.assertions.assert(skills.includes("team-admin") && !skills.some((name) => name.startsWith("expert-")), `administrator skills: ${JSON.stringify(skills)}`);
       t.assertions.assert(readFileSync(post, "utf8") === "keep me\n", "posts/ was pruned");

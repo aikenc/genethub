@@ -9,4 +9,6 @@
 5. 通过后回到团队根目录：`git fetch T/x platform:platform && git pull --ff-only T/x main`，运行 `"$GENEHUB_PYTHON" <团队根目录>/tools/team.py sync-identity`（编译并更新身份指纹），再把 `upgrade` 留言标为 `notes done`。
 6. 提交说明写升级了什么、保留了哪些团队定制；无法决定的冲突写成外部问题交给用户，不要硬合。
 
+关闭升级留言必须在正式团队回写、编译身份和快照之后，使用 `notes ls` 中本条升级留言的实际编号。临时克隆合并通过或 `platform` 分支已刷新，都不等于正式团队已应用；核对正式团队源文件、编译身份和提交后才报告升级完成。若 `notes done` 报编号不存在/已处理，重新核对待办与已处理回执以及实际应用状态，不能凭这条错误就把未回写的升级当成功，也不要重复已经完成的合入。
+
 `team.py reset` 是用户明确要求时的强制手段，会覆盖平台文件和 `soul.md`（默认保留 `memory.md` 与各岗位 `index.md`）；默认走上面的三方合并。

@@ -5,8 +5,8 @@ import {defineSpecialty, daemonEndpoint, openBrowser, openPreviewBrowser} from "
 defineSpecialty({
   id: "specialty.page-experience.machine-preview-navigation",
   title: "Secondary links and runtime reads work inside a real opaque Preview iframe",
-  oracle: "A real browser under the deployed workbench base-uri policy loads ../ fetch, XHR and module-relative data, navigates HTML to Markdown to text, preserves query/fragment and returns through history without requests escaping to Cloud",
-  catches: ["parent base-uri rejects virtual origin", "runtime URL normalization loses ..", "XHR bypasses the file bridge", "standalone Markdown opens an unmounted float", "query becomes a filename", "HTML-only navigation filter discards other file types"],
+  oracle: "A real browser loads relative data and secondary documents, preserves query/history, runs local form submit handlers through button and Enter, and blocks external form submission",
+  catches: ["parent base-uri rejects virtual origin", "runtime URL normalization loses ..", "XHR bypasses the file bridge", "standalone Markdown opens an unmounted float", "query becomes a filename", "HTML-only navigation filter discards other file types", "opaque iframe blocks local form submit handlers before JavaScript can cancel navigation", "form action escapes the Preview CSP"],
   tags: ["page-experience", "machine-preview", "filesystem"], runner: "playwright", llm: {default: "none"},
   expectedDurationMs: 40_000, timeoutMs: 150_000,
   resources: {environments: 1, cpu: 2, memoryMb: 1536, io: 1, browser: 1, pool: "browser"},
@@ -27,8 +27,11 @@ defineSpecialty({
   await writeFile(path.join(site, "scripts", "module.js"), 'fetch(new URL("../data.json", import.meta.url)).then(r=>r.json()).then(x=>document.getElementById("module").textContent=x.label);');
   await writeFile(path.join(pages, "start.html"), `<!doctype html><html><head><title>Nested entry</title></head><body>
     <h1>Start</h1><p id="fetch"></p><p id="xhr"></p><p id="module"></p><p id="encoded-module"></p><p id="missing"></p><p id="head"></p><p id="abort"></p>
+    <form id="tasks"><input aria-label="Task title" required><button>Add task</button></form><ul id="task-list"></ul>
+    <form action="https://must-not-submit.invalid/preview-form" method="post"><button>Submit externally</button></form>
     <a href="deep/next.html?view=wide#anchor">Second page</a><a href="missing.md">Missing document</a>
     <script type="module" src="../scripts/module.js"></script><script type="module" src="../scripts%23part/module%3F.js"></script><script>
+    document.getElementById("tasks").addEventListener("submit",function(event){event.preventDefault();const input=this.querySelector("input");const item=document.createElement("li");item.textContent=input.value;document.getElementById("task-list").appendChild(item);input.value="";});
     fetch("../data.json").then(r=>r.json()).then(x=>document.getElementById("fetch").textContent=x.label);
     const xhr=new XMLHttpRequest();xhr.open("GET","../data.json");xhr.responseType="json";xhr.onload=()=>document.getElementById("xhr").textContent=xhr.response.label;xhr.send();
     const missing=new XMLHttpRequest();missing.open("GET","absent.json");missing.onload=()=>document.getElementById("missing").textContent=String(missing.status);missing.send();
@@ -48,6 +51,8 @@ defineSpecialty({
     browser = await openBrowser({}, {trace: false});
     const page = browser.page;
     const escaped: string[] = [];
+    const formRequests: string[] = [];
+    page.on("request", request => {if(request.url().includes("must-not-submit.invalid"))formRequests.push(request.url());});
     page.on("request", request => { if (/\/(?:data\.json|absent\.json|missing\.md)(?:[?#]|$)/.test(request.url()) && !request.url().includes("preview.invalid")) escaped.push(request.url()); });
     const endpoint = daemonEndpoint(opened.daemon);
     const testPolicy = workbenchPolicy!.replace("connect-src 'self'", `connect-src 'self' ${new URL(endpoint.url).origin}`);
@@ -60,6 +65,15 @@ defineSpecialty({
     await t.tools.waitUntil(async () => await frame().locator("#missing").textContent() === "404", 15_000);
     await t.tools.waitUntil(async () => await frame().locator("#head").textContent() === "200:0", 15_000);
     await t.tools.waitUntil(async () => await frame().locator("#abort").textContent() === "aborted", 15_000);
+    await frame().getByRole("textbox", {name: "Task title"}).fill("Button-created task");
+    await frame().getByRole("button", {name: "Add task", exact: true}).click();
+    await t.tools.waitUntil(async () => await frame().locator("#task-list li").count() === 1, 5_000);
+    await frame().getByRole("textbox", {name: "Task title"}).fill("Enter-created task");
+    await frame().getByRole("textbox", {name: "Task title"}).press("Enter");
+    await t.tools.waitUntil(async () => await frame().locator("#task-list li").count() === 2, 5_000);
+    t.assertions.assert((await frame().locator("#task-list li").allTextContents()).join("|") === "Button-created task|Enter-created task", "form handlers did not add the entered tasks");
+    await frame().getByRole("button", {name: "Add task", exact: true}).click();
+    t.assertions.assert(await frame().locator("#task-list li").count() === 2, "empty required title submitted");
     await frame().getByRole("link", {name: "Missing document"}).click();
     await page.getByRole("alert").first().waitFor();
     t.assertions.assert(Boolean((await page.getByRole("alert").first().textContent())?.trim()), "missing document error was not visible");
@@ -84,6 +98,14 @@ defineSpecialty({
     await frame().getByRole("heading", {name: "Second page target"}).waitFor();
     t.assertions.assert(escaped.length === 0, "local file requests escaped to the Cloud origin");
     t.assertions.assert(!consumer.errors.some(error => /base-uri|SyntaxError|Unexpected token/.test(error)), `runtime failed under parent policy: ${consumer.errors.join("; ")}`);
-    t.note("Actual local WASI plus Chromium, deployed workbench CSP, opaque iframe, fetch/XHR/module/HEAD/abort, visible missing file, query/anchor, HTML→Markdown→text and history.");
+    t.assertions.assert(!consumer.errors.some(error => error.includes("Unrecognized Content-Security-Policy directive")), `unsupported Preview policy: ${consumer.errors.join("; ")}`);
+    await page.getByRole("button", {name: "后退", exact: true}).click();
+    await frame().getByRole("heading", {name: "Start", exact: true}).waitFor();
+    await frame().getByRole("button", {name: "Submit externally", exact: true}).click();
+    // A blocked navigation may replace Chromium's iframe with an error document.
+    // Assert the browser's policy violation and the absence of outgoing requests.
+    await t.tools.waitUntil(() => consumer!.errors.some(error => error.includes("form-action 'none'") && error.includes("request has been blocked")), 5_000);
+    t.assertions.assert(formRequests.length === 0, "a form request escaped the Preview policy");
+    t.note("Actual local WASI plus Chromium, deployed workbench CSP, opaque iframe, local form button/Enter/required validation with blocked external submission, fetch/XHR/module/HEAD/abort, visible missing file, query/anchor, HTML→Markdown→text and history.");
   } finally { await consumer?.close(); await browser?.close(); opened.client.close(); opened.daemon.stop(); await opened.mock.stop(); }
 });
