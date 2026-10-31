@@ -4,13 +4,13 @@ import { defineSpecialty, startRelay, startFaultLink, runGenetAsync, parseJson }
 
 defineSpecialty({
   id: "specialty.multichannel.native-cli-resume",
-  title: "The native CLI preserves a running remote command through one socket loss",
-  oracle: "The actual CLI pairs through a public endpoint, executes shell once and emits both output markers plus successful exit after an opaque TCP disconnect",
-  catches: ["browser recovery falsely claimed for native CLI", "native channel loss aborts original command"],
+  title: "The native CLI reports interruption after socket loss without re-executing the command",
+  oracle: "The actual CLI pairs publicly; opaque TCP loss fails the old command, its source runs once and a fresh public RPC succeeds",
+  catches: ["browser recovery falsely claimed for native CLI", "native channel loss reported as success"],
   tags: ["network-risk-v2", "multichannel", "native-cli-resume"], llm: { default: "none" }, expectedDurationMs: 20000, timeoutMs: 90000,
   resources: { environments: 1, cpu: 2, memoryMb: 1024, io: 1, browser: 0, pool: "standard" },
   surfaces: ["genet-cli", "daemon", "websocket"], productInterfaces: ["genet-cli", "@genehub/workbench/client"],
-  stages: ["pair", "start-command", "recover-original-command"],
+  stages: ["pair", "start-command", "fail-original-and-open-fresh-request"],
   requiredArtifacts: ["genehub-host-local", "genehub_guest.wasm"],
 }, async t => {
   const cliData = join(t.env.root, "remote-cli"); mkdirSync(cliData, { recursive: true });
@@ -41,15 +41,19 @@ defineSpecialty({
       t.tools.waitUntil(() => existsSync(marker), 10000),
       result.then(r => { if (!existsSync(marker)) throw new Error("native command ended before execution: exit=" + r.code + " " + r.stdout.replace(/https?:\/\/\S+|wss?:\/\/\S+/g, "[endpoint]").slice(-1500)); }),
     ]));
-    await t.stage("recover-original-command", async () => {
+    await t.stage("fail-original-and-open-fresh-request", async () => {
     link.cut();
     const completed = await result;
     t.assertions.assert(readFileSync(marker, "utf8") === "start\n", "CLI recovery repeated command execution");
     const records = completed.stdout.trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
     const output = records.filter(r => r.type === "shell.output" && r.data?.stream === "stdout").map(r => r.data.data).join("");
     const exits = records.filter(r => r.type === "shell.exit");
-    t.assertions.assert(completed.code === 0 && output === "before-cli\nafter-cli\n" && exits.length === 1 && exits[0].data.exitCode === 0 && exits[0].data.timedOut === false,
-      `native CLI lost or duplicated its original result (exit=${completed.code})`);
+    t.assertions.assert(completed.code !== 0 && !exits.some(r => r.data.exitCode === 0) && !output.includes("after-cli"),
+      `native CLI reported an interrupted command as success (exit=${completed.code})`);
+    const fresh = await runGenetAsync(o.daemon.genet, ["--machine", data.machine.machineId, "workspace", "list"], cliEnv);
+    t.assertions.assert(fresh.code === 0, "fresh native CLI request failed after socket loss");
+    t.assertions.assert(readFileSync(marker, "utf8") === "start\n", "fresh RPC replayed the old command");
+    t.note(`interruptedExit=${completed.code} oldExitFrames=${exits.length} freshRequestExit=${fresh.code} sourceExecutions=1`);
     });
   } finally { await runGenetAsync(o.daemon.genet, ["daemon", "stop"], cliEnv); await link.stop(); relay.stop(); o.client.close(); o.daemon.stop(); await o.mock.stop(); }
 });

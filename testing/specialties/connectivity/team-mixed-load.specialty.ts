@@ -163,7 +163,7 @@ for (const [runningPerMachine, watchedPerMachine] of [[5, 5], [8, 8], [20, 8]] a
       const firstBodyWaitMs = typeof finished?.firstByteMs === "number" && headWaitMs !== null ? finished.firstByteMs - headWaitMs : null;
       t.note(JSON.stringify({ phase: "preview-start-causal", machine, nativeLogsReady, headWaitMs, firstBodyWaitMs, serverMs,
         ingressToHandlerMs: serverEndAt !== null && serverMs !== null && typeof began?.at === "number" ? serverEndAt - serverMs - began.at : null,
-        native: Object.fromEntries(["worker_wait_us", "scan_us", "scan_open_us", "scan_read_us", "scan_hash_us", "scan_probe_us", "scan_snapshot_us", "scan_yield_us", "scan_steps", "send_us", "read_us", "write_credit_us", "write_budget_us", "write_enqueue_us", "write_completion_us", "write_actor_queue_us", "write_actor_send_us", "write_wake_us", "finish_us"].map(key => [key, field(stage, key)])) }));
+        native: Object.fromEntries(["worker_wait_us", "scan_us", "scan_open_us", "scan_read_us", "scan_hash_us", "scan_probe_us", "scan_snapshot_us", "scan_yield_us", "scan_steps", "send_us", "read_us", "write_budget_us", "write_enqueue_us", "write_completion_us", "write_actor_queue_us", "write_actor_send_us", "write_wake_us", "finish_us"].map(key => [key, field(stage, key)])) }));
     }
     for (const operation of ["workspace.list", "session.list"]) {
       const causal = measured.filter(call => call.operation === operation).sort((a, b) => b.duration - a.duration).slice(0, 1).map(call => {

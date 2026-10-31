@@ -54,12 +54,6 @@ const decoder = new TextDecoder("utf-8", { fatal: true });
 
 /** A carrier that dies before this point is flapping, not a healthy recovery. */
 const STABLE_AFTER_MS = 30_000;
-/**
- * The daemon forgets a suspended logical peer 60s after it notices the loss,
- * and the Relay needs up to two 30s heartbeats to notice. Past this much
- * silence an ATTACH can only be refused.
- */
-const RESUME_STALE_MS = 180_000;
 /** A carrier lost this soon after the page returns ended with the suspension. */
 const REVIVE_GRACE_MS = 10_000;
 /**
@@ -292,7 +286,6 @@ function sessionOf(topic: string): string {
  * RPC, events and Preview each use independent E2EE logical streams.
  */
 export class Client {
-  private bodyOnly = false;
   private bulkDial: ProtocolDial | undefined;
   private bulkClient: Client | null = null;
   private bulkReady: Promise<Client | null> | null = null;
@@ -326,10 +319,7 @@ export class Client {
   private connectTimer: ReturnType<typeof setTimeout> | null = null;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private readyAt: number | null = null;
-  private lastHeardAt: number | null = null;
   private revivedAt: number | null = null;
-  private sessionLost = false;
-  private sessionLostRedialSpent = false;
   private authorizationExpiresAt: string | undefined;
   private authorizationTimer: ReturnType<typeof setTimeout> | null = null;
   private renewalAbort: AbortController | null = null;
@@ -345,13 +335,11 @@ export class Client {
   private rtcState_: RtcState;
   private rtcFailure_: RtcFailure | null = null;
   private rtcLink: RtcDataLink | null = null;
-  private dataRtcLink: RtcDataLink | null = null;
   private rtcRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private rtcRetryDelay = 1000;
   private rtcFailures = 0;
   private rtcPaused = false;
-  private reconnectCause: "resume-rejected" | "heartbeat-timeout" | "page-resume" | "session-lost" | null = null;
-  private rtcLifecycleCleanup: (() => void) | null = null;
+  private reconnectCause: "page-resume" | null = null;
   private rtcGeneration = 0;
   private rtcNegotiating = false;
   private connectionEpoch = 0;
@@ -601,49 +589,7 @@ export class Client {
       throw new DataPlaneError("当前设备不支持图片缩略图预览");
     }
     const deadline = this.now() + PREVIEW_HEAD_TIMEOUT_MS;
-    try {
-      return await this.previewAttempt(workspaceHandle, path, representation, deadline, signal);
-    } catch (error) {
-      // Resume replays records without reinvoking the handler. Only an explicit
-      // loss of that logical session permits one fresh read. Discard the whole
-      // old body: never splice bytes from two file versions. Writes use rpc()
-      // and retain their outcome-unknown contract.
-      if (this.stopped || !(error instanceof Error) ||
-          (error.message !== "SessionLost" && error.message !== "ResumeExpired")) throw error;
-      if (signal?.aborted) throw new DOMException("Preview cancelled", "AbortError");
-      await this.waitForPreviewRecovery(deadline, signal);
-      return this.previewAttempt(workspaceHandle, path, representation, deadline, signal);
-    }
-  }
-
-  private waitForPreviewRecovery(deadline: number, signal?: AbortSignal): Promise<void> {
-    if (signal?.aborted) return Promise.reject(new DOMException("Preview cancelled", "AbortError"));
-    return new Promise((resolve, reject) => {
-      const remaining = deadline - this.now();
-      if (remaining <= 0) { reject(new ClientRequestTimeoutError("asset preview recovery timed out")); return; }
-      const finish = (error?: Error) => {
-        clearTimeout(timer);
-        stop();
-        signal?.removeEventListener("abort", onAbort);
-        if (error) reject(error);
-        else resolve();
-      };
-      const onAbort = () => finish(new DOMException("Preview cancelled", "AbortError"));
-      const timer = setTimeout(() => {
-        finish(new ClientRequestTimeoutError("asset preview recovery timed out"));
-      }, remaining);
-      const check = () => {
-        if (this.stopped) {
-          finish(new DataPlaneError("client closed"));
-        } else if (this.state === "ready" && this.endpoint?.state === "open") {
-          finish();
-        }
-      };
-      const stop = this.onStateChange(check);
-      signal?.addEventListener("abort", onAbort, { once: true });
-      if (signal?.aborted) onAbort();
-      else check();
-    });
+    return this.previewAttempt(workspaceHandle, path, representation, deadline, signal);
   }
 
   private async previewAttempt(workspaceHandle: string, path: string, representation: AssetPreviewRepresentation, deadline: number, signal?: AbortSignal): Promise<AssetPreviewResult> {
@@ -797,16 +743,17 @@ export class Client {
       });
       return result;
     } catch (error) {
+      const failure = signal?.aborted ? new DOMException("Preview cancelled", "AbortError") : error;
       this.diagnostic("operation", {
         operation: "asset.preview",
         requestId,
         phase: "finish",
-        outcome: errorName(error),
+        outcome: errorName(failure),
         transport,
         path,
         durationMs: Math.round(this.now() - started),
       });
-      throw error;
+      throw failure;
     } finally {
       signal?.removeEventListener("abort", cancel);
     }
@@ -829,7 +776,7 @@ export class Client {
   /** Public, permission-gated service Preview stream. Targets are daemon registrations. */
   openServicePreview(request: { workspaceHandle: string; entryPath: string; operation: "describe" | "connect" | "ice"; runId?: string; allowTurn?: boolean }, options: { policy: "relay-allowed" | "direct-only" } = { policy: "direct-only" }): DataStream {
     const direct = request.operation === "describe" || options.policy === "relay-allowed" || this.identity?.transport === "loopback" ? this.endpoint : this.rtcLink?.endpoint;
-    if (this.state !== "ready" || !direct || direct.state !== "open" || direct.recovering) throw new DataPlaneError("the service requires an available direct connection");
+    if (this.state !== "ready" || !direct || direct.state !== "open") throw new DataPlaneError("the service requires an available direct connection");
     return direct.open({
       version: DATA_PLANE_VERSION,
       method: "service.preview",
@@ -906,10 +853,13 @@ export class Client {
     const reply = await this.call({
       type: "subscribe",
       payload: { sessionId, sinceSeq: 0, expandLastRound: subscription.expandLastRound, recentRounds: subscription.recentRounds },
-    }).catch(() => undefined);
+    }).catch((error: unknown) => {
+      if (this.subscriptions.get(sessionId) === subscription) this.subscriptions.delete(sessionId);
+      throw error;
+    });
     if (this.subscriptions.get(sessionId) !== subscription || connection !== this.connectionEpoch || reply?.type !== "subscribed") {
       if (this.subscriptions.get(sessionId) === subscription) this.subscriptions.delete(sessionId);
-      throw new Error(`unexpected reply to subscribe: ${reply?.type}`);
+      throw new Error(`unexpected reply to subscribe: ${reply?.type ?? "none"}`);
     }
     this.acceptCursor(subscription, reply.data);
     subscription.initializing = false;
@@ -935,8 +885,8 @@ export class Client {
     if (this.stopped || this.state !== "ready" || !this.identity || !this.bulkDial || this.options.separateDataChannel === false) return this;
     if (this.bulkClient?.connectionState === "ready") return this.bulkClient;
     if (this.bulkReady) return (await this.bulkReady) ?? this;
-    // A recovering owner retains its streams. Do not replace it with a fresh
-    // owner or replay its operations simply because admission is slow.
+    // Reuse a live data companion. It owns its own reconnect and reports lost
+    // in-flight operations; do not start another companion during admission.
     if (this.bulkClient || this.now() < this.bulkRetryAt) return this;
     const dial = this.bulkDial;
     let dataAttempt = 0;
@@ -946,8 +896,8 @@ export class Client {
         const next = this.options.redial ? await this.options.redial(signal) : { url: this.options.url };
         const fresh = typeof next === "string" ? { url: next } : next;
         if (fresh.bulk) return { ...fresh.bulk, bulk: undefined };
-        // Reattach the SAME logical owner on another admitted carrier. This
-        // never resends a shell/RPC and never strips a required credential.
+        // Authenticate a fresh endpoint without replaying any old stream.
+        // Preserve the admission credential returned by the route provider.
         // Paired routes alternate so a removed tail cannot strand the body.
         if (dial.fabricRouteTicket || ++dataAttempt % 2 === 1) {
           this.diagnostic("transport", { phase: "data-node-fallback", cause: "preferred-node-unavailable" });
@@ -957,7 +907,6 @@ export class Client {
       },
       onDiagnostic: (event) => this.options.onDiagnostic?.({ ...event, detail: { ...event.detail, lane: "body" } }),
     });
-    child.bodyOnly = true;
     this.bulkClient = child;
     this.bulkReady = new Promise<Client | null>((resolve) => {
       let finished = false;
@@ -990,29 +939,11 @@ export class Client {
 
   private dial(dial: ProtocolDial): void {
     if (Object.hasOwn(dial, "bulk") && this.options.separateDataChannel !== false) this.bulkDial = dial.bulk;
-    if (
-      this.endpoint?.state === "open" &&
-      this.endpoint.logicalId !== null &&
-      this.lastHeardAt !== null &&
-      this.now() - this.lastHeardAt > RESUME_STALE_MS
-    ) {
-      this.diagnostic("connection", {
-        state: this.state,
-        phase: "resume-skipped",
-        cause: "stale",
-        silentMs: Math.round(this.now() - this.lastHeardAt),
-      });
-      this.discardLogicalPeer("the logical peer outlived its resume window");
-    }
-    // Sequence numbers are scoped to a daemon lifetime. A reconnect cannot
-    // infer that lifetime from numeric ordering, even if the ranges overlap.
-    const resuming = this.endpoint?.state === "open" && this.endpoint.logicalId !== null;
-    if (!resuming) for (const subscription of this.subscriptions.values()) subscription.resetRequired = true;
     this.activeChannelCredential = dial.channelCredential;
     this.authorizationExpiresAt = dial.fabricAuthorizationExpiresAt;
     this.activeLocalServerProof = dial.localServerProof;
     this.activeFabricRouteTicket = dial.fabricRouteTicket;
-    if (!resuming) this.connectionEpoch += 1;
+    this.connectionEpoch += 1;
     this.connectionAttemptId = diagnosticId("conn");
     this.carrier = dial.fabricRouteTicket ? "fabric" : "websocket";
     this.diagnostic("transport", {
@@ -1039,10 +970,10 @@ export class Client {
       return;
     }
     if ("binaryType" in socket) socket.binaryType = "arraybuffer";
-    const epoch = resuming && this.epoch ? this.epoch : Symbol("data-plane-peer");
+    const epoch = Symbol("data-plane-peer");
     this.socket = socket;
     this.epoch = epoch;
-    if (!resuming) this.endpoint = null;
+    this.endpoint = null;
     this.connectTimer = setTimeout(
       () => this.dropSocket(socket, epoch),
       this.options.connectTimeoutMs ?? 5_000,
@@ -1065,10 +996,9 @@ export class Client {
   }
 
   private dialFabric(dial: ProtocolDial): void {
-    const previous = this.endpoint?.state === "open" && this.endpoint.logicalId ? this.endpoint : null;
-    const epoch = previous && this.epoch ? this.epoch : Symbol("fabric-data-peer");
+    const epoch = Symbol("fabric-data-peer");
     this.epoch = epoch;
-    if (!previous) this.endpoint = null;
+    this.endpoint = null;
     this.dialingTransport = true;
     let credential: PeerCredential;
     try {
@@ -1084,7 +1014,6 @@ export class Client {
       return;
     }
     void openFabricDataLink({
-      ...(previous ? { endpoint: previous } : {}),
       url: dial.url,
       routeTicket: dial.fabricRouteTicket!,
       credential,
@@ -1105,34 +1034,30 @@ export class Client {
         this.endpoint = link.endpoint;
         this.bindEndpoint(link.endpoint, epoch);
         try {
-          if (previous) this.resumedEndpoint(link.endpoint, epoch);
-          else await this.activateEndpoint(link.endpoint, epoch);
+          await this.activateEndpoint(link.endpoint, epoch);
         } catch (error) {
           if (!this.isCurrentEpoch(epoch)) return;
           if (fatalConnectionError(error)) this.failClosed(error.message);
           else {
             this.report(error);
             link.close();
-            // A daemon replacement has no record of the old logical peer.
-            // Its authenticated Fabric carrier is still valid, but an attach
-            // cannot succeed. Drop that stale peer and establish a new one.
-            this.droppedTransport(epoch, undefined, Boolean(previous));
+            // Failed activation ends this endpoint; a later dial starts fresh.
+            this.droppedTransport(epoch);
           }
         }
       },
       (error: unknown) => {
         if (!this.finishFabricDial(epoch)) return;
         this.report(error);
-        // A transient route/admission failure does not prove SessionLost.
-        // Authenticated SessionLost already closes the old endpoint itself.
+        // No stream exists yet; report the admission failure and redial.
         this.droppedTransport(epoch);
       },
     );
   }
 
   private finishFabricDial(epoch: symbol): boolean {
-    // A terminal logical-session error can clear the endpoint while attach is
-    // still pending. Its close callback cannot redial until this attempt ends.
+    // Admission may close the endpoint while the dial is pending.
+    // Its close callback cannot redial until this attempt ends.
     // A callback from an older attempt must never clear a newer dial's guard.
     if (this.epoch !== null && this.epoch !== epoch) return false;
     this.dialingTransport = false;
@@ -1168,28 +1093,10 @@ export class Client {
     if (!this.isCurrent(socket, epoch)) return;
 
     const carrier = new WebSocketRecordCarrier(socket);
-    if (this.endpoint?.state === "open" && this.endpoint.logicalId) {
-      const endpoint = this.endpoint;
-      try {
-        await endpoint.attach(carrier, handshake.key);
-      } catch (error) {
-        if (this.isCurrent(socket, epoch)) {
-          this.report(error);
-          // The authenticated daemon has rejected the old logical peer,
-          // which happens after it restarts. Retrying the same logical id
-          // would loop forever; reconnect from a fresh endpoint instead.
-          this.dropSocket(socket, epoch, true);
-        }
-        return;
-      }
-      if (this.isCurrent(socket, epoch)) this.resumedEndpoint(endpoint, epoch);
-      return;
-    }
     const endpoint = new DataEndpoint({
       role: "client",
       carrier,
       key: handshake.key,
-      maxBulkStreamWindowBytes: handshake.maxBulkStreamWindowBytes,
       maxReceiveBytesPerStream: 64 * 1024 * 1024,
       onError: (error) => this.report(error),
       onDiagnostic: this.options.onDiagnostic ? detail => this.diagnostic("transport", detail) : undefined,
@@ -1203,48 +1110,17 @@ export class Client {
 
   private bindEndpoint(endpoint: DataEndpoint, epoch: symbol): void {
     this.endpointLifecycleCleanup?.();
-    const stopRecovering = endpoint.onRecovering(() => {
-      if (this.endpoint === endpoint && this.epoch === epoch) this.droppedTransport(epoch);
-    });
-    const stopClose = endpoint.onClose((reason) => {
+    this.endpointLifecycleCleanup = endpoint.onClose((reason) => {
       if (this.endpoint !== endpoint || this.epoch !== epoch) return;
-      // The daemon answered an ATTACH, so its carrier works; only the old
-      // logical peer is gone.
-      if (reason instanceof Error && reason.message === "SessionLost") {
-        this.sessionLost = true;
-        this.reconnectCause = "session-lost";
-      }
       this.report(reason);
       this.droppedTransport(epoch, closeReasonFromUnknown(reason) ?? this.lastClose);
     });
-    const stopPath = endpoint.onPathChange(() => {
-      if (this.endpoint !== endpoint || this.epoch !== epoch || this.stopped) return;
-      if (this.rtcEnabled) {
-        this.setRtcState(endpoint.activePath === "rtc" ? "connected" : "standby");
-        if (endpoint.activePath !== "rtc") this.scheduleRtcRetry();
-      }
-      if (this.state === "ready") { this.scheduleHeartbeat(); this.flushQueue(endpoint, epoch); }
-      if (endpoint.activePath === "rtc" && !endpoint.hasPath(this.carrier === "fabric" ? "fabric" : "loopback")) this.droppedTransport(epoch);
-    });
-    this.endpointLifecycleCleanup = () => { stopRecovering(); stopClose(); stopPath(); };
   }
 
   private markStableAfterGrace(): void {
     // Suspended pages run no timers, so the grace period is judged from the
     // wall clock when the next loss is scheduled.
     this.readyAt = this.now();
-    this.lastHeardAt = this.readyAt;
-    this.sessionLostRedialSpent = false;
-  }
-
-  private resumedEndpoint(endpoint: DataEndpoint, epoch: symbol): void {
-    if (this.endpoint !== endpoint || this.epoch !== epoch || this.stopped) return;
-    this.failure = null;
-    this.markStableAfterGrace();
-    this.setState("ready");
-    this.scheduleHeartbeat();
-    this.flushQueue(endpoint, epoch);
-    if (this.rtcEnabled) void this.startRtc(endpoint, epoch);
   }
 
   private async activateEndpoint(endpoint: DataEndpoint, epoch: symbol): Promise<void> {
@@ -1267,6 +1143,10 @@ export class Client {
     }
     this.verifyIdentity(identity.data);
     if (!this.isCurrentEpoch(epoch) || this.endpoint !== endpoint) return;
+    // Session sequences restart with the daemon, not with a carrier or RTC path.
+    if (this.identity && this.identity.daemonInstanceId !== identity.data.daemonInstanceId) {
+      for (const subscription of this.subscriptions.values()) subscription.resetRequired = true;
+    }
     this.identity = identity.data;
     if (!this.bulkDial && identity.data.transport === "forwarded" && this.options.credential && identity.data.dataChannelUrl && this.options.separateDataChannel !== false) {
       this.bulkDial = { url: identity.data.dataChannelUrl };
@@ -1309,6 +1189,9 @@ export class Client {
   }
 
   private verifyIdentity(identity: HelloResult): void {
+    if (typeof identity.daemonInstanceId !== "string" || !identity.daemonInstanceId) {
+      throw new PeerAuthenticationError("daemon identity is missing its run identifier");
+    }
     const expected = this.activeLocalServerProof;
     if (
       expected &&
@@ -1408,7 +1291,6 @@ export class Client {
       if (body.byteLength > 0) await stream.write(body);
       await stream.finish();
       const head = await stream.responseHead;
-      this.lastHeardAt = this.now();
       if (head.error) throw new ProtocolError_(head.error);
       if (head.status !== 200) {
         throw new ProtocolError_({ code: "internal", message: `RPC failed (${head.status})` });
@@ -1495,7 +1377,6 @@ export class Client {
     let buffered = new Uint8Array();
     for await (const chunk of stream.body()) {
       if (this.endpoint !== endpoint || this.epoch !== epoch) return;
-      this.lastHeardAt = this.now();
       const joined = new Uint8Array(buffered.byteLength + chunk.byteLength);
       joined.set(buffered);
       joined.set(chunk, buffered.byteLength);
@@ -1635,14 +1516,7 @@ export class Client {
     subscription.retryDelay = Math.min(5_000, subscription.retryDelay * 2);
   }
 
-  private isManagementCall(pending: PendingCall): boolean {
-    return ["workspace.list", "session.list", "connection.identity"].includes(pending.operation);
-  }
-
   private canStartCall(pending: PendingCall): boolean {
-    // Bound the request burst before it acquires ordered replay sequences.
-    // Leave two slots for small directory reads while task starts are queued.
-    if (this.active.size >= 8) return false;
     const request = pending.request;
     if (request.type === "subscribe" || request.type === "unsubscribe") {
       const sessionId = request.payload.sessionId;
@@ -1659,8 +1533,7 @@ export class Client {
         if (sameSession(queued)) return false;
       }
     }
-    return this.isManagementCall(pending) ||
-      [...this.active].filter(call => !this.isManagementCall(call)).length < 6;
+    return true;
   }
 
   private flushQueue(_endpoint: DataEndpoint, epoch: symbol): void {
@@ -1678,24 +1551,13 @@ export class Client {
     socket: WebSocketLike,
     epoch: symbol,
     close?: CloseReason,
-    abandonLogical = false,
   ): void {
     if (!this.isCurrent(socket, epoch) || this.stopped) return;
-    this.droppedTransport(epoch, close, abandonLogical);
+    this.droppedTransport(epoch, close);
   }
 
-  private droppedTransport(epoch: symbol, close?: CloseReason, abandonLogical = false): void {
+  private droppedTransport(epoch: symbol, close?: CloseReason): void {
     if (!this.isCurrentEpoch(epoch)) return;
-    if (abandonLogical) this.reconnectCause = "resume-rejected";
-    // A physical base socket can close while the logical peer is served by RTC.
-    // Keep its streams and subscriptions; refresh the missing base in the background.
-    if (this.endpoint?.state === "open" && !this.endpoint.recovering && this.endpoint.activePath === "rtc") {
-      const socket = this.socket, fabric = this.fabricLink?.fabric;
-      this.socket = null; this.fabricLink = null;
-      socket?.close(); fabric?.close();
-      this.scheduleReconnect();
-      return;
-    }
     this.renewalAbort?.abort();
     this.renewalAbort = null;
     this.lastClose = close;
@@ -1712,14 +1574,12 @@ export class Client {
     }
     this.clearConnectTimer();
     this.clearHeartbeat();
-    const resumable = !abandonLogical && this.endpoint?.state === "open" && this.endpoint.logicalId !== null;
     const socket = this.socket, fabric = this.fabricLink?.fabric;
-    this.dataRtcLink = null;
     this.socket = null;
     this.fabricLink = null;
     socket?.close();
     fabric?.close();
-    if (!resumable) this.discardLogicalPeer("logical admission or session ended");
+    this.discardLogicalPeer("carrier ended; in-flight outcomes may be unknown");
     this.setState("reconnecting");
     this.scheduleReconnect();
   }
@@ -1733,14 +1593,14 @@ export class Client {
     if (this.rtcEnabled) this.setRtcState("standby");
   }
 
-  private dropSocket(socket: WebSocketLike, epoch: symbol, abandonLogical = false): void {
+  private dropSocket(socket: WebSocketLike, epoch: symbol): void {
     if (!this.isCurrent(socket, epoch)) return;
     socket.onopen = null;
     socket.onclose = null;
     socket.onerror = null;
     socket.onmessage = null;
     socket.close();
-    this.dropped(socket, epoch, undefined, abandonLogical);
+    this.dropped(socket, epoch);
   }
 
   private redial(): void {
@@ -1800,7 +1660,7 @@ export class Client {
       this.retryTimer !== null ||
       this.redialing
     ) return;
-    if (!this.endpoint || this.endpoint.recovering) this.setState("reconnecting");
+    if (!this.endpoint) this.setState("reconnecting");
     const now = this.now();
     if (
       (this.readyAt !== null && now - this.readyAt >= STABLE_AFTER_MS) ||
@@ -1810,26 +1670,6 @@ export class Client {
     }
     this.readyAt = null;
     this.revivedAt = null;
-    if (this.sessionLost) {
-      this.sessionLost = false;
-      // Once per healthy connection, so a daemon that keeps refusing cannot
-      // turn this into a loop without backoff.
-      if (!this.sessionLostRedialSpent) {
-        this.sessionLostRedialSpent = true;
-        this.diagnostic("connection", {
-          state: "reconnecting",
-          phase: "retry-scheduled",
-          delayMs: 0,
-          attempt: this.attempt,
-          cause: "session-lost",
-        });
-        this.retryTimer = setTimeout(() => {
-          this.retryTimer = null;
-          this.connect();
-        }, 0);
-        return;
-      }
-    }
     const backoff =
       this.options.backoffMs ?? ((attempt: number) => Math.min(1000 * 2 ** attempt, 15_000));
     const base = backoff(this.attempt++);
@@ -1899,8 +1739,8 @@ export class Client {
         if (this.state === "ready") this.scheduleHeartbeat();
         return;
       }
-      // Fail only the probed physical path. The logical owner authenticates
-      // and synchronizes its standby before attempting an external redial.
+      // Fail this endpoint. A later dial authenticates a new connection;
+      // the framework does not replay pending calls.
       endpoint.failActivePath(error);
       if (this.state === "ready") this.scheduleHeartbeat();
     } finally {
@@ -1979,205 +1819,66 @@ export class Client {
     return this.endpoint?.state === "open" ? this.endpoint : null;
   }
 
-  private async startRtc(base: DataEndpoint, epoch: symbol): Promise<void> {
-    if (this.rtcNegotiating || this.rtcPaused || this.stopped) return;
-    if (!this.rtcEnabled) {
-      this.rtcFailure_ = null;
-      this.setRtcState("disabled");
-      return;
-    }
-    if (!this.identity?.rtcSupported || !rtcAvailableHere()) {
-      this.rtcFailure_ = null;
-      this.setRtcState("unavailable");
-      return;
-    }
-    // A loopback WebSocket is already direct, private and lower overhead. RTC
-    // is an upgrade for network carriers, not a replacement for localhost.
-    if (this.identity.transport === "loopback") {
-      this.rtcFailure_ = null;
-      this.setRtcState("standby");
-      return;
-    }
-    if (this.bodyOnly) return this.startBodyRtc(base, epoch);
-    const generation = ++this.rtcGeneration;
-    this.rtcNegotiating = true;
-    const requestId = diagnosticId("rtc");
-    const started = this.now();
-    const previousDirectLink = this.rtcLink;
-    const previousDirect = this.rtcLink?.endpoint.state === "open" ? this.rtcLink.endpoint : undefined;
-    const previousData = this.dataRtcLink;
-    this.setRtcState(base.activePath === "rtc" ? "connected" : "connecting");
-    this.diagnostic("operation", {
-      operation: "rtc.negotiate",
-      requestId,
-      phase: "start",
-      transport: this.carrier,
-    });
-    const factory = this.options.rtcFactory ?? openRtcDataLink;
-    let allowBusiness!: () => void;
-    let rejectBusiness!: (reason: unknown) => void;
-    const attachWhen = new Promise<void>((resolve, reject) => {
-      allowBusiness = resolve;
-      rejectBusiness = reject;
-    });
-    // The business carrier may finish before the restricted carrier. Keep its
-    // rejection observed until both negotiations have been joined below.
-    void attachWhen.catch(() => {});
-    const directTask = Promise.resolve().then(() => factory(
-      base, requestId,
-      (detail) => this.diagnostic("rtc", { channelRole: "restricted", ...detail }),
-      previousDirect ? { endpoint: previousDirect, policy: "direct-only" } : { policy: "direct-only" },
-    ));
-    const businessTask = Promise.resolve().then(() => factory(
-      base, requestId,
-      (detail) => this.diagnostic("rtc", { channelRole: "business", ...detail }),
-      { endpoint: base, attachWhen },
-    ));
-    void businessTask.catch(() => {});
-    const discardBusiness = (reason: unknown) => {
-      rejectBusiness(reason);
-      void businessTask.then((link) => link.close(), () => {});
-    };
-    try {
-      const link = await directTask;
-      if (
-        generation !== this.rtcGeneration ||
-        this.stopped ||
-        this.endpoint !== base ||
-        this.epoch !== epoch
-      ) {
-        link.close();
-        discardBusiness(new Error("RTC upgrade was superseded"));
-        return;
-      }
-      const identity = await this.rpc(link.endpoint, { type: "connection.identity" });
-      if (
-        identity?.type !== "hello" ||
-        identity.data.machineId !== this.identity?.machineId ||
-        identity.data.fingerprint !== this.identity.fingerprint
-      ) {
-        link.close();
-        throw Object.assign(new PeerAuthenticationError("RTC 直连返回了不匹配的 daemon 身份"), {
-          phase: "identity" as const,
-        });
-      }
-      if (generation !== this.rtcGeneration || this.endpoint !== base || this.epoch !== epoch) {
-        link.close();
-        discardBusiness(new Error("RTC upgrade was superseded"));
-        return;
-      }
-      this.rtcFailure_ = null;
-      this.rtcLink = link;
-      this.rtcLifecycleCleanup?.();
-      const stopRecovering = link.endpoint.onRecovering(() => {
-        if (this.rtcLink !== link) return;
-        this.setRtcState(base.activePath === "rtc" ? "connected" : "standby");
-        // Keep the restricted logical owner; only a new authenticated RTC can attach.
-        // Restricted Preview recovery is independent of ordinary business traffic.
-        this.scheduleRtcRetry();
-      });
-      const stopClose = link.endpoint.onClose((reason) => {
-        if (this.rtcLink !== link) return;
-        this.rtcLink = null;
-        this.report(reason);
-        if (this.rtcEnabled && this.state === "ready" && !this.dataRtcLink) {
-          this.rtcFailure_ = {
-            phase: "upgrade",
-            message: reason instanceof Error ? reason.message : String(reason ?? "RTC closed"),
-            durationMs: Math.round(this.now() - started),
-          };
-          this.setRtcState("failed");
-        }
-      });
-      this.rtcLifecycleCleanup = () => { stopRecovering(); stopClose(); };
-      // Restricted service bytes have their own immutable direct-only journal.
-      // The second channel activates the existing ordinary logical peer, including events.
-      allowBusiness();
-      const dataLink = await businessTask;
-      if (dataLink.endpoint !== base) {
-        dataLink.close();
-        throw new DataPlaneError("RTC provider did not retain the logical endpoint");
-      }
-      if (generation !== this.rtcGeneration || this.stopped || this.endpoint !== base || this.epoch !== epoch) {
-        dataLink.close();
-        return;
-      }
-      this.dataRtcLink = dataLink;
-      previousData?.close();
-      this.rtcFailures = 0;
-      this.rtcPaused = false;
-      this.rtcRetryDelay = 1000;
-      this.setRtcState("connected");
-      this.diagnostic("operation", {
-        operation: "rtc.negotiate",
-        requestId,
-        phase: "finish",
-        outcome: "ok",
-        transport: "rtc",
-        durationMs: Math.round(this.now() - started),
-      });
-    } catch (error) {
-      discardBusiness(error);
-      if (generation !== this.rtcGeneration || this.stopped || this.endpoint !== base) return;
-      if (!this.rtcLink && previousDirect?.state === "open") this.rtcLink = previousDirectLink;
-      this.report(error);
-      this.rtcFailure_ = {
-        phase: rtcPhaseOf(error),
-        message: error instanceof Error ? error.message : String(error),
-        durationMs: Math.round(this.now() - started),
-      };
-      this.setRtcState(base.activePath === "rtc" ? "connected" : "failed");
-      this.rtcFailures += 1;
-      if (this.rtcFailures >= 3) {
-        this.rtcPaused = true;
-        this.diagnostic("rtc", { phase: "paused", outcome: "failed" });
-      } else {
-        this.scheduleRtcRetry();
-      }
-      this.diagnostic("operation", {
-        operation: "rtc.negotiate",
-        requestId,
-        phase: "finish",
-        outcome: errorName(error),
-        transport: this.carrier,
-        durationMs: Math.round(this.now() - started),
-        rtcPhase: this.rtcFailure_.phase,
-      });
-    } finally {
-      if (generation === this.rtcGeneration) this.rtcNegotiating = false;
-    }
+  private async switchEndpoint(next: DataEndpoint, base: DataEndpoint, epoch: symbol): Promise<boolean> {
+    if (next === base) throw new DataPlaneError("RTC provider must create a fresh endpoint");
+    await next.ready();
+    const identity = await this.rpc(next, { type: "connection.identity" });
+    if (identity?.type !== "hello" || identity.data.machineId !== this.identity?.machineId ||
+        identity.data.fingerprint !== this.identity.fingerprint) throw new PeerAuthenticationError("replacement connection identity mismatch");
+    if (this.stopped || this.endpoint !== base || this.epoch !== epoch) return false;
+    // The ordinary events stream is long lived; every other in-flight stream
+    // delays upgrades and prepared authorization replacements alike.
+    if (this.active.size > 0 || base.activeStreamCount > 1) return false;
+    const socket = this.socket, fabric = this.fabricLink;
+    this.endpointLifecycleCleanup?.(); this.endpointLifecycleCleanup = null;
+    const nextEpoch = Symbol("new-carrier-endpoint");
+    this.endpoint = next; this.epoch = nextEpoch; this.connectionEpoch++;
+    this.socket = null; this.fabricLink = null;
+    this.bindEndpoint(next, nextEpoch);
+    base.close("connection path replaced; business subscriptions will rebuild");
+    socket?.close(); fabric?.fabric.close();
+    await this.activateEndpoint(next, nextEpoch);
+    return true;
   }
 
-  /** A data companion upgrades its existing owner, without a service-preview owner. */
-  private async startBodyRtc(base: DataEndpoint, epoch: symbol): Promise<void> {
+  private async startRtc(base: DataEndpoint, epoch: symbol): Promise<void> {
+    if (this.rtcNegotiating || this.rtcPaused || this.stopped) return;
+    if (!this.rtcEnabled) { this.setRtcState("disabled"); return; }
+    if (!this.identity?.rtcSupported || !rtcAvailableHere()) { this.setRtcState("unavailable"); return; }
+    if (base.activePath === "rtc") { this.setRtcState("connected"); return; }
+    if (this.identity.transport === "loopback") { this.setRtcState("standby"); return; }
     const generation = ++this.rtcGeneration;
-    this.rtcNegotiating = true;
-    this.setRtcState("connecting");
-    const started = this.now();
-    const previous = this.dataRtcLink;
+    this.rtcNegotiating = true; this.setRtcState("connecting");
+    const started = this.now(), requestId = diagnosticId("rtc");
+    let outcome = "deferred";
+    this.diagnostic("operation", { operation: "rtc.negotiate", requestId, phase: "start" });
+    let link: RtcDataLink | undefined;
     try {
       const factory = this.options.rtcFactory ?? openRtcDataLink;
-      const link = await factory(base, diagnosticId("rtc-body"), detail => this.diagnostic("rtc", { channelRole: "body", ...detail }), { endpoint: base });
-      if (generation !== this.rtcGeneration || this.stopped || this.endpoint !== base || this.epoch !== epoch) { link.close(); return; }
-      if (link.endpoint !== base) { link.close(); throw new DataPlaneError("RTC provider did not retain the body owner"); }
-      this.dataRtcLink = link;
-      previous?.close();
-      this.rtcFailures = 0;
-      this.rtcPaused = false;
-      this.rtcRetryDelay = 1000;
-      this.rtcFailure_ = null;
-      this.setRtcState("connected");
+      link = await factory(base, requestId, detail => this.diagnostic("rtc", detail), { policy: "relay-allowed" });
+      if (generation !== this.rtcGeneration || !await this.switchEndpoint(link.endpoint, base, epoch)) {
+        link.close();
+        if (this.rtcEnabled && !this.stopped && this.endpoint === base) this.scheduleRtcRetry();
+        return;
+      }
+      this.rtcLink?.close(); this.rtcLink = link;
+      this.rtcFailure_ = null; this.rtcFailures = 0; this.rtcPaused = false; this.rtcRetryDelay = 1000;
+      this.setRtcState("connected"); outcome = "ok";
     } catch (error) {
-      if (generation !== this.rtcGeneration || this.stopped || this.endpoint !== base) return;
+      link?.close();
+      if (generation !== this.rtcGeneration || this.stopped) return;
       this.report(error);
       this.rtcFailure_ = { phase: rtcPhaseOf(error), message: error instanceof Error ? error.message : String(error), durationMs: Math.round(this.now() - started) };
-      this.setRtcState(base.activePath === "rtc" ? "connected" : "failed");
-      this.rtcFailures += 1;
-      if (this.rtcFailures >= 3) {
+      this.setRtcState("failed");
+      outcome = errorName(error);
+      if (++this.rtcFailures >= 3) {
         this.rtcPaused = true;
-        this.diagnostic("rtc", { phase: "paused", outcome: "failed" });
+        this.diagnostic("rtc", { phase: "paused", failures: this.rtcFailures });
       } else this.scheduleRtcRetry();
-    } finally { if (generation === this.rtcGeneration) this.rtcNegotiating = false; }
+    } finally {
+      this.diagnostic("operation", { operation: "rtc.negotiate", requestId, phase: "finish", outcome, durationMs: Math.round(this.now() - started) });
+      if (generation === this.rtcGeneration) this.rtcNegotiating = false;
+    }
   }
 
   private scheduleRtcRetry(): void {
@@ -2187,10 +1888,10 @@ export class Client {
     this.rtcRetryTimer = setTimeout(() => {
       this.rtcRetryTimer = null;
       if (!this.rtcEnabled || this.stopped || this.state !== "ready" || !this.endpoint || !this.epoch) return;
-      if (this.renewalAbort || this.rtcNegotiating || this.endpoint.recovering) {
+      if (this.renewalAbort || this.rtcNegotiating) {
         this.scheduleRtcRetry(); return;
       }
-      if (this.endpoint.activePath === "rtc" && this.rtcLink?.endpoint.state === "open" && !this.rtcLink.endpoint.recovering) return;
+      if (this.endpoint.activePath === "rtc" && this.rtcLink?.endpoint.state === "open") return;
       void this.startRtc(this.endpoint, this.epoch);
     }, delay);
   }
@@ -2198,13 +1899,11 @@ export class Client {
   private closeRtc(increment = true): void {
     if (this.rtcRetryTimer !== null) clearTimeout(this.rtcRetryTimer);
     this.rtcRetryTimer = null;
-    this.rtcLifecycleCleanup?.(); this.rtcLifecycleCleanup = null;
     if (increment) { this.rtcGeneration += 1; this.rtcNegotiating = false; }
-    const link = this.rtcLink, dataLink = this.dataRtcLink;
-    this.rtcLink = null; this.dataRtcLink = null;
+    const link = this.rtcLink;
+    this.rtcLink = null;
     link?.endpoint.close("RTC disabled or client closed");
     link?.close();
-    dataLink?.close();
   }
 
   private release(pending: PendingCall): void {
@@ -2246,11 +1945,11 @@ export class Client {
   }
 
   /** Prepare authenticated replacement admission while the current path keeps serving.
-   * Only a successful logical handoff retires the previous carrier. */
+   * Only a successfully authenticated replacement retires the previous carrier. */
   private async renewAuthorization(): Promise<void> {
     const endpoint = this.endpoint, epoch = this.epoch, redial = this.options.redial;
     if (!endpoint || !epoch || !redial || this.stopped || this.state !== "ready") return;
-    // RTC upgrades use the same ordinary journal's single candidate slot.
+    // Renew one physical connection at a time; do not race an RTC upgrade.
     if (this.renewalAbort || this.redialing || this.rtcNegotiating) {
       this.scheduleAuthorizationRenewal(1000); return;
     }
@@ -2274,26 +1973,28 @@ export class Client {
       }
       const previous = this.fabricLink;
       const link = await openFabricDataLink({
-        endpoint, url: dial.url, routeTicket: dial.fabricRouteTicket,
+        url: dial.url, routeTicket: dial.fabricRouteTicket,
         credential: { kind: "hosted", ...dial.channelCredential },
         clientName: this.options.clientName, rtcSupported: this.rtcEnabled && rtcAvailableHere(),
         signal: controller.signal,
         ...(this.options.socketFactory ? { socketFactory: this.options.socketFactory as unknown as (url: string) => import("../fabric").FabricSocketLike } : {}),
         onError: error => this.report(error),
       });
-      if (!current()) { link.fabric.close(); return; }
-      this.fabricLink = link;
+      if (!current()) { link.close(); return; }
+      if (!await this.switchEndpoint(link.endpoint, endpoint, epoch)) {
+        link.close();
+        // Keep serving busy work under its original server-enforced lease.
+        // No credential/expiry mutation until the replacement is accepted.
+        this.scheduleAuthorizationRenewal(1000);
+        return;
+      }
       this.activeChannelCredential = dial.channelCredential;
       this.activeFabricRouteTicket = dial.fabricRouteTicket;
       this.authorizationExpiresAt = dial.fabricAuthorizationExpiresAt;
-      previous?.fabric.close();
+      this.fabricLink = link;
+      previous?.close();
+      this.rtcLink?.close(); this.rtcLink = null;
       this.scheduleAuthorizationRenewal();
-      if (this.rtcEnabled) {
-        const retainedRtc = this.dataRtcLink && this.rtcLink?.endpoint.state === "open"
-          ? await endpoint.promoteStandby("rtc").catch((error: unknown) => { this.report(error); return false; })
-          : false;
-        if (!retainedRtc && current()) void this.startRtc(endpoint, epoch);
-      }
     } catch (error) {
       if (this.stopped || this.endpoint !== endpoint || this.epoch !== epoch) return;
       const status = error && typeof error === "object" && "status" in error ? error.status : undefined;

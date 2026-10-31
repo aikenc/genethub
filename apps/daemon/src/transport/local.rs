@@ -616,7 +616,6 @@ mod tests {
                 ),
             },
             rtc_supported: false,
-            max_bulk_stream_window_bytes: genehub_proto::INITIAL_STREAM_WINDOW_BYTES,
         };
         socket
             .send(tokio_tungstenite::tungstenite::Message::Binary(

@@ -158,6 +158,9 @@ impl Daemon {
     /// Ordering matters: sessions first, so agents get their shutdown before
     /// the runtime goes away and leaves them orphaned.
     pub async fn shutdown(self) {
+        // Registry shutdown can end an Agent before its Live is visited below.
+        // Fence every Session first so those events cannot persist a crash pause.
+        self.state.sessions.prepare_shutdown().await;
         self.session_deliveries.abort();
         let _ = self.session_deliveries.await;
         self.hook_timer.abort();

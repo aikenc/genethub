@@ -109,7 +109,7 @@ authStateCase("read-grants-survive-recovery", "A recovered read-only device neve
       await deniedWrite();
       const old = client.logicalConnectionId, count = link.connections(); link.cut();
       await t.tools.waitUntil(() => link.connections() > count && client.connectionState === "ready", 15000);
-      t.assertions.assert(client.logicalConnectionId === old, "credential recovery replaced logical owner");
+      t.assertions.assert(client.logicalConnectionId !== old, "physical loss retained the old endpoint");
       t.assertions.assert((await client.call({ type: "workspace.list" }))?.type === "workspaces", "legal read lost after recovery");
       await deniedWrite();
       t.assertions.assert(!existsSync(path.join(opened.workspaceRoot, "recovery-forbidden.txt")), "denied mutation reached disk");

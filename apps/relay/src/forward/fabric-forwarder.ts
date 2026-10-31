@@ -95,6 +95,10 @@ function parseExpiry(value: string | null): number | null {
 export class FabricForwarder {
   private readonly sockets = new WebSocketServer({
     noServer: true,
+    // Let pending socket writes drain between messages from one TCP burst.
+    // Synchronous emission can fill the bounded forwarding queue before any
+    // write callback runs, even when the destination itself is reading.
+    allowSynchronousEvents: false,
     maxPayload: config.limits.maxFrameBytes,
     perMessageDeflate: false,
   });
@@ -278,6 +282,9 @@ export class FabricForwarder {
     }
     const credential = credentialOf(request);
     if (!credential) return reject(socket, 401, "Unauthorized");
+    if (requestTarget(request.url)?.searchParams.get("flow") !== FABRIC_TRANSPORT_FLOW) {
+      return reject(socket, 400, "Unsupported Fabric flow");
+    }
     if (this.pendingSockets.size >= config.limits.maxFabricPendingUpgrades) {
       return reject(socket, 503, "Service Unavailable");
     }
@@ -332,7 +339,6 @@ export class FabricForwarder {
     }
 
     this.sockets.handleUpgrade(request, socket, head, (ws) => {
-      const requestUrl = requestTarget(request.url);
       this.register(ws, {
         endpointHandle: grant.endpointHandle,
         revocationHandle: grant.revocationHandle,
@@ -340,8 +346,6 @@ export class FabricForwarder {
         connectionGeneration: grant.connectionGeneration,
         presenceLeaseSeconds: grant.presenceLeaseSeconds,
         connectionEpoch: randomBytes(16).toString("hex"),
-        transportFlow:
-          requestUrl?.searchParams.get("flow") === FABRIC_TRANSPORT_FLOW,
       }, revocationCheckpoint);
     });
   }
@@ -365,7 +369,12 @@ export class FabricForwarder {
       lateFrameBudgets: new Map(),
       closed: false,
       strikes: 0,
-      send: (frame) => this.deliver(socket, encodeFabricFrame(frame)),
+      send: (frame) => {
+        // A newly routed peer makes the source shared; do not leave it paused
+        // behind the former peer's destination before its handshake can reply.
+        if (frame.kind === FabricKind.Incoming && socket.isPaused) socket.resume();
+        this.deliver(socket, encodeFabricFrame(frame));
+      },
       sendFlow: (frame) => this.deliverFlow(socket, encodeFabricFrame(frame)),
       close: (code, reason) => this.closeSocket(socket, code, reason ?? ""),
     };
@@ -391,9 +400,13 @@ export class FabricForwarder {
       this.outboundBudget,
       // A peer RESET or expiry may close the binding while DATA waits here.
       // These previously admitted frames must not become late-frame strikes.
-      frame => this.core.usesTransportFlow(connection, frame.streamId)
+      frame => connection.streams.has(frame.streamId)
         ? this.core.handle(connection, frame) : Promise.resolve(),
-      streamId => {
+      (streamId, reason) => {
+        log.warn("fabric: transport-flow capacity refused", {
+          ...this.diagnosticFields(socket), streamId, reason,
+          pendingBytes: this.outboundBudget.bytes,
+        });
         const reset: FabricFrame = {
           kind: FabricKind.Reset, streamId, value: BigInt(FabricReset.TooSlow),
           payload: Buffer.alloc(0),
@@ -402,6 +415,14 @@ export class FabricForwarder {
         void this.core.handle(connection, reset).catch(error => handlingFailed(reset, error));
       },
       handlingFailed,
+      bytes => {
+        if (socket.readyState !== socket.OPEN) return;
+        // Only an unshared outer peer may backpressure this TCP source.
+        // With multiple peers, retain stream-local refusal and keep reading
+        // siblings, Reset and heartbeats. This is a local queue, not credit.
+        if (connection.streams.size === 1 && bytes >= 3 * 1024 * 1024) socket.pause();
+        else if (bytes <= 1024 * 1024 || connection.streams.size !== 1) socket.resume();
+      },
     );
 
     // Admission can be rejected synchronously by a revocation tombstone. An
@@ -466,11 +487,9 @@ export class FabricForwarder {
           frameBytes: buffer.length,
         });
       }
-      const transportFlow =
-        (frame.kind === FabricKind.Data || frame.kind === FabricKind.Fin) &&
-        this.core.usesTransportFlow(connection, frame.streamId);
+      const queuedData = (frame.kind === FabricKind.Data || frame.kind === FabricKind.Fin) && connection.streams.has(frame.streamId);
       if (frame.kind === FabricKind.Reset) flowQueue.cancel(frame.streamId);
-      if (transportFlow) flowQueue.push(frame, buffer.length);
+      if (queuedData) flowQueue.push(frame, buffer.length);
       else void this.core.handle(connection, frame).catch(error => handlingFailed(frame, error));
     });
 
@@ -810,7 +829,6 @@ function fabricKindName(kind: FabricFrame["kind"]): string {
     case FabricKind.Incoming: return "incoming";
     case FabricKind.Accept: return "accept";
     case FabricKind.Data: return "data";
-    case FabricKind.WindowUpdate: return "window-update";
     case FabricKind.Fin: return "fin";
     case FabricKind.Reset: return "reset";
     case FabricKind.Ping: return "ping";

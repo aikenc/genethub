@@ -5,7 +5,7 @@ import type {
   RtcNegotiationResponse,
 } from "@genehub/proto";
 
-import type { ResumePolicy } from "./resume";
+import type { ConnectionPolicy } from "./frame";
 import { DataEndpoint, type RecordCarrier } from "./endpoint";
 import { collectBody } from "./exchange";
 import { DATA_PLANE_VERSION, DataReset, MAX_DATA_FRAME_BYTES } from "./frame";
@@ -51,10 +51,7 @@ export interface RtcDataLink {
 }
 
 export interface RtcLinkOptions {
-  endpoint?: DataEndpoint;
-  policy?: ResumePolicy;
-  /** Finish ICE and the E2EE handshake, but wait to activate an existing owner. */
-  attachWhen?: Promise<void>;
+  policy?: ConnectionPolicy;
 }
 
 /** Negotiates one reliable ordered DataChannel through the base E2EE link. */
@@ -206,27 +203,21 @@ export async function openRtcDataLink(
       totalMs: Math.round(performance.now() - startedAt),
     });
     const carrier = new RtcRecordCarrier(peer, channel);
-    const endpoint = options.endpoint ?? new DataEndpoint({
+    const endpoint = new DataEndpoint({
       path: "rtc",
       policy: options.policy ?? "direct-only",
       role: "client",
       carrier,
       key: handshake.key,
-      maxBulkStreamWindowBytes: handshake.maxBulkStreamWindowBytes,
+
       maxReceiveBytesPerStream: 64 * 1024 * 1024,
     });
-    if (options.endpoint) {
-      await options.attachWhen;
-      if (channel.readyState !== "open") fail("RTC DataChannel closed before activation");
-      await endpoint.attach(carrier, handshake.key, "rtc");
-    }
-    else await endpoint.ready();
+    await endpoint.ready();
     return {
       endpoint,
       peer,
       close() {
-        if (options.endpoint) { channel.close(); peer.close(); }
-        else endpoint.close("RTC provider closed");
+        endpoint.close("RTC provider closed");
       },
     };
   } catch (error) {

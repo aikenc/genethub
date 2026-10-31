@@ -114,6 +114,8 @@ export interface ScriptAgentControl {
   providerBaseUrl?: string;
   providerDialect?: "openai" | "anthropic";
   chunks?: number;
+  /** Space the normal profile's chunks over time so a turn stays active. */
+  chunkIntervalMs?: number;
   /** Non-secret expected text in a resumed public conversation question. */
   expectedResume?: string;
   questionCount?: number;
@@ -123,6 +125,8 @@ export interface ScriptAgentControl {
   /** Space flood events over time instead of one synchronous output burst. */
   floodIntervalMs?: number;
   processTree?: boolean;
+  /** Emit one completed tool item per turn, named by this value. */
+  tool?: string;
   /** The profile's fault fires once per state directory, then the Agent behaves normally. */
   once?: boolean;
   ignoreSigterm?: boolean;

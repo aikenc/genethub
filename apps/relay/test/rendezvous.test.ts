@@ -6,7 +6,6 @@ import {
   decodeFabricFrame,
   encodeFabricFrame,
   encodeFabricOpenPayload,
-  FABRIC_INITIAL_STREAM_CREDIT,
   FabricKind,
 } from "../src/forward/fabric-frame.js";
 import {
@@ -40,7 +39,7 @@ describe("the endpoint-neutral rendezvous Fabric", () => {
       encodeFabricFrame({
         kind: FabricKind.Open,
         streamId: "00000000000000000000000000000001",
-        value: BigInt(FABRIC_INITIAL_STREAM_CREDIT),
+        value: 0n,
         payload: encodeFabricOpenPayload(SLOT, Buffer.from("opaque hello")),
       }),
     );
