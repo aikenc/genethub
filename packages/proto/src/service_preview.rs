@@ -23,12 +23,26 @@ impl ServicePreviewMedia {
         let required: Vec<(&str, bool)> = match (client, self.protocol.as_deref()) {
             ("html", Some("remote-desktop/1")) => {
                 let stop = self.stop_path.as_deref().ok_or("missing media stop path")?;
-                let session = self.session_path.as_deref().ok_or("missing media session path")?;
-                let control = self.control_path.as_deref().ok_or("missing media control path")?;
-                vec![(self.offer_path.as_str(), false), (stop, false), (session, true), (control, true)]
+                let session = self
+                    .session_path
+                    .as_deref()
+                    .ok_or("missing media session path")?;
+                let control = self
+                    .control_path
+                    .as_deref()
+                    .ok_or("missing media control path")?;
+                vec![
+                    (self.offer_path.as_str(), false),
+                    (stop, false),
+                    (session, true),
+                    (control, true),
+                ]
             }
             ("html", Some("pixel-streaming/1")) => {
-                let session = self.session_path.as_deref().ok_or("missing media session path")?;
+                let session = self
+                    .session_path
+                    .as_deref()
+                    .ok_or("missing media session path")?;
                 vec![(session, true)]
             }
             _ => return Err("unsupported service media client or protocol"),
@@ -65,7 +79,10 @@ mod tests {
     use super::*;
 
     fn route(prefix: &str, websocket: bool) -> ServicePreviewRoute {
-        ServicePreviewRoute { prefix: prefix.into(), websocket }
+        ServicePreviewRoute {
+            prefix: prefix.into(),
+            websocket,
+        }
     }
     fn media(protocol: &str, session: &str) -> ServicePreviewMedia {
         ServicePreviewMedia {
@@ -82,20 +99,30 @@ mod tests {
     #[test]
     fn pixel_streaming_needs_one_websocket_route_and_nothing_else() {
         let ws = [route("/api/ue/", true)];
-        assert!(media("pixel-streaming/1", "/api/ue/ws").validate_client(&ws).is_ok());
+        assert!(media("pixel-streaming/1", "/api/ue/ws")
+            .validate_client(&ws)
+            .is_ok());
         assert!(media("pixel-streaming/1", "/api/ue/ws")
             .validate_client(&[route("/api/ue/", false)])
             .is_err());
-        assert!(media("pixel-streaming/1", "/api/other/ws").validate_client(&ws).is_err());
-        assert!(media("pixel-streaming/1", "/api/ue/../ws").validate_client(&ws).is_err());
+        assert!(media("pixel-streaming/1", "/api/other/ws")
+            .validate_client(&ws)
+            .is_err());
+        assert!(media("pixel-streaming/1", "/api/ue/../ws")
+            .validate_client(&ws)
+            .is_err());
     }
 
     #[test]
     fn unknown_protocols_and_missing_remote_desktop_paths_are_refused() {
         let ws = [route("/api/ue/", true)];
-        assert!(media("pixel-streaming/2", "/api/ue/ws").validate_client(&ws).is_err());
+        assert!(media("pixel-streaming/2", "/api/ue/ws")
+            .validate_client(&ws)
+            .is_err());
         // remote-desktop/1 still requires its stop and control paths.
-        assert!(media("remote-desktop/1", "/api/ue/ws").validate_client(&ws).is_err());
+        assert!(media("remote-desktop/1", "/api/ue/ws")
+            .validate_client(&ws)
+            .is_err());
         let mut plain = media("remote-desktop/1", "/api/ue/ws");
         plain.client = None;
         assert!(plain.validate_client(&ws).is_ok());
