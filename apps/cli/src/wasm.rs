@@ -224,14 +224,18 @@ pub fn become_agent(args: &[String]) -> i32 {
 }
 
 pub fn spawn_command() -> Result<Command, String> {
-    if let Ok(override_command) = std::env::var(channel::ENV_DAEMON_COMMAND) {
-        if !override_command.is_empty() {
+    let mut command = match std::env::var(channel::ENV_DAEMON_COMMAND) {
+        Ok(override_command) if !override_command.is_empty() => {
             let mut command = Command::new(override_command);
             cli_env(&mut command);
-            return Ok(command);
+            command
         }
+        _ => host_command(&locate()?),
+    };
+    for key in genet_frontdoor::launch_env::SESSION_SCOPED {
+        command.env_remove(key);
     }
-    Ok(host_command(&locate()?))
+    Ok(command)
 }
 
 // Mirror of the shell's own `load::Entry`, spelled out here so the CLI does

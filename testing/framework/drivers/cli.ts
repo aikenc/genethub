@@ -171,8 +171,7 @@ export function genetEnv(openRoot: string, extra: NodeJS.ProcessEnv = {}): NodeJ
   };
   // A test lease is a fresh local user, even when testctl itself runs inside
   // an Agent Session. Never send the outer controller identity to its daemon.
-  delete env.GENEHUB_SESSION_ID;
-  delete env.GENEHUB_CONTROLLER_TOKEN;
+  for (const key of ["GENEHUB_SESSION_ID", "GENEHUB_CONTROLLER_TOKEN", "GENEHUB_AGENT_PID", "GENEHUB_HOST_PID", "GENEHUB_ALLOW_FOREGROUND_IN_SESSION"]) delete env[key];
   return env;
 }
 

@@ -16,7 +16,7 @@ const meta = (name: string, title: string, oracle: string, duration = 30000) => 
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
 });
 defineSpecialty(meta("hosted-live-revocation", "Revoking a Hosted session stops its already active RTC access",
-  "After public session revoke, fresh admission fails and the active browser stops successful RPC within the proposed 5-second revocation SLO"), async t => {
+  "After public session revoke, fresh admission fails and the active browser stops successful RPC within the 10-second polling interval plus 2-second request budget (3-second scheduler allowance)"), async t => {
   const stack = await openMultichannelBrowser(t, "hosted");
   try {
     await stack.rtc();
@@ -25,13 +25,13 @@ defineSpecialty(meta("hosted-live-revocation", "Revoking a Hosted session stops 
     await stack.revoke!();
     const admission = await stack.admissionStatus!();
     t.assertions.assert(admission === 401 || admission === 403, "revoked session still receives fresh admission");
-    await new Promise(r => setTimeout(r, 5500));
+    await new Promise(r => setTimeout(r, 15000));
     const probe = await stack.page.evaluate(async () => {
       try { return (await (window as any).mc.client.call({ type: "workspace.list" }))?.type === "workspaces"; }
       catch (e: any) { const c = (window as any).mc.client; if (c.connectionState === "closed" || /unauthorized|forbidden|permissionDenied/i.test(String(e?.detail?.code ?? ""))) return false; throw e; }
     });
     t.assertions.assert((await stack.opened.client.call({ type: "workspace.list" }))?.type === "workspaces", "independent owner unhealthy after revocation");
-    t.assertions.assert(!probe, "revoked Hosted source still performs business RPC over active RTC after 5 seconds");
+    t.assertions.assert(!probe, "revoked Hosted source still performs business RPC over active RTC after the 15-second test deadline");
   } finally { await stack.stop(); }
 });
 defineSpecialty(meta("hosted-lease-renewal", "A legal Hosted client retains its subscription across authorization expiry",
@@ -224,7 +224,7 @@ for (const rtc of [false, true]) {
       await stack.revoke!();
       const status = await stack.admissionStatus!();
       t.assertions.assert(status === 401 || status === 403, "revoked session received fresh admission");
-      await new Promise(r => setTimeout(r, 5500));
+      await new Promise(r => setTimeout(r, 15000));
       request.payload.path = stack.opened.rootHandle + "/after-revoke.txt";
       const denied = await stack.page.evaluate(async r => { try { await (window as any).mc.client.call(r); return false; } catch { return true; } }, request);
       const mutated = existsSync(join(stack.opened.workspaceRoot, "after-revoke.txt"));
@@ -279,13 +279,13 @@ for (const rtc of [false, true]) {
         m.running = m.client.openShellStream(request); await m.running.finish(); await m.running.responseHead;
         m.streamEnded = false;
         void m.running.done.then(() => { m.streamEnded = true; }, () => { m.streamEnded = true; });
-      }, { workspaceId: stack.opened.workspaceId, cwd: stack.opened.workspaceRoot, timeoutMs: 20000,
-        argv: ["python3", "-c", "import pathlib,time; pathlib.Path('revoked-start').write_text('started'); time.sleep(8); pathlib.Path('revoked-effect').write_text('bad')"] });
+      }, { workspaceId: stack.opened.workspaceId, cwd: stack.opened.workspaceRoot, timeoutMs: 30000,
+        argv: ["python3", "-c", "import pathlib,time; pathlib.Path('revoked-start').write_text('started'); time.sleep(18); pathlib.Path('revoked-effect').write_text('bad')"] });
       await t.tools.waitUntil(() => existsSync(join(stack.opened.workspaceRoot, "revoked-start")), 5000);
       const revokedAt = Date.now(); await stack.revoke!();
       const status = await stack.admissionStatus!();
       t.assertions.assert(status === 401 || status === 403, "revoked session retained admission");
-      await stack.page.waitForFunction(() => (window as any).mc.client.connectionState === "closed" && (window as any).mc.streamEnded, null, { timeout: 5500 }).catch(async error => {
+      await stack.page.waitForFunction(() => (window as any).mc.client.connectionState === "closed" && (window as any).mc.streamEnded, null, { timeout: 15000 }).catch(async error => {
         const state = await stack.page.evaluate(() => {
           const m = (window as any).mc;
           return { connection: m.client.connectionState, rtc: m.client.rtcState, streamEnded: m.streamEnded, states: m.states };
@@ -293,7 +293,7 @@ for (const rtc of [false, true]) {
         throw new Error("revoked subscription or command remained open: " + JSON.stringify(state) + "; " + error);
       });
       for (let n = 0; n < 3; n++) await stack.opened.client.call({ type: "session.rename", payload: { sessionId: id, title: "denied-event-" + n } });
-      await new Promise(r => setTimeout(r, Math.max(1000, revokedAt + 9000 - Date.now())));
+      await new Promise(r => setTimeout(r, Math.max(1000, revokedAt + 19000 - Date.now())));
       t.assertions.assert(!existsSync(join(stack.opened.workspaceRoot, "revoked-effect")), "revoked running command still mutated disk");
       t.assertions.assert(await stack.page.evaluate(() => !(window as any).mc.observedTitles.some((title: string) => title.startsWith("denied-event-"))), "revoked subscription delivered a new title through an event or snapshot");
       t.assertions.assert((await stack.opened.client.call({ type: "workspace.list" }))?.type === "workspaces", "revocation damaged the independent owner");

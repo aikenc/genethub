@@ -29,6 +29,7 @@
 pub mod channel;
 pub mod envelope;
 pub mod fs_lock;
+pub mod launch_env;
 pub mod lifecycle;
 pub mod managed_update;
 pub mod paths;

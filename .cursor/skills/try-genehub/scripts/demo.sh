@@ -141,7 +141,10 @@ start_daemon() {
   write_config "$key"
   free_port "$DAEMON_PORT"
   log "starting daemon on port $DAEMON_PORT"
-  GENEHUB_DATA_DIR="$DATA_DIR" GENEHUB_WORKSPACE_DIR="$WORKSPACE_DIR" \
+  # The demo daemon is not part of the Agent session that may run this script;
+  # `daemon run` refuses to start under inherited session context.
+  env -u GENEHUB_SESSION_ID -u GENEHUB_CONTROLLER_TOKEN -u GENEHUB_AGENT_PID -u GENEHUB_HOST_PID \
+    GENEHUB_DATA_DIR="$DATA_DIR" GENEHUB_WORKSPACE_DIR="$WORKSPACE_DIR" \
     setsid "$DAEMON_BIN" daemon run >"$DEMO_DIR/daemon.log" 2>&1 < /dev/null &
   echo $! > "$DAEMON_PID_FILE"
   stat -c %Y "$DAEMON_BIN" > "$DEMO_DIR/daemon.bin.mtime"
