@@ -319,4 +319,4 @@ PC-4090-1 未安装 Unity，Unity 编辑器需要账号登录激活，无法由 
 - 现网改动：`genehub-rtc-beta` 改用 `/var/lib/genehub-rtc-beta/candidate-20261031/`（监听 49359，中继 49260–49358，`max-bps` 约 25 Mbit/s/会话、`bps-capacity` 约 100 Mbit/s），Control 的 `HUB_BETA_ICE_SERVERS`/`HUB_BETA_TURN_URLS` 改为 `:49359` 并重启。原配置与 env 备份在服务器 `staging/release-beta/maintenance/turn-49359-20261031/`，上一版候选保留可回滚。Cloud 仓 `deploy/rtc/render.mjs` 已按同一布局生成，新增 `deploy/rtc/probe.mjs`。腾讯云安全组未改（该段原已放行）。
 - 可达性：`probe.mjs` 从 Mac mini 与 PC-4090-1 均得到 Binding（映射到 183.60.2.26）；切换前对 3479 两台都无响应。
 - 端到端（未修改的示例页面，平台签发的 TURN 凭据，UE 加 `-PixelStreamingWebRTCMaxBitrate=20000000`，PC 锁屏中）：Mac mini 真实 Preview 玩 PC-4090-1 上的 UE 5 分钟，候选对 relay/udp（`turn:rtc-beta.genethub.com:49359`）↔ prflx，首帧 3.0 秒，平均约 58 fps、720p、RTT 约 72 ms、平均约 6 Mbit/s（编码器自适应），按住 W 画面变化 5.57（空闲 0.17）；5 分钟内 33 次短冻结，集中在 1.5–2.5 分钟一段丢包期，其余时段平稳；第二个观看者被拒、撤销后停止、重新允许恢复。
-- 仍需注意：观看端必须勾选“允许媒体中继”，否则在公司网络里一直“连接中”（页面目前没有提示，待补）；丢包期原因未查明。
+- 观看端必须勾选“允许媒体中继”。示例页面以浏览器 `RTCPeerConnection.connectionState` 为准（Epic 库的 `webRtcConnected` 在媒体通之前就会触发），12 秒未连通且未允许中继时提示勾选；实测未勾选时 20 秒内出现提示，勾选后正常出画。丢包期原因未查明。

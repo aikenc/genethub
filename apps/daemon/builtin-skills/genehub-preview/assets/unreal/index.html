@@ -16,9 +16,26 @@ const say = text => { bar.textContent = text; };
 let iceServers = null;
 try { ({ iceServers } = await window.genehubServicePreview.ice()); }
 catch { say('请先在预览信息中允许本次登记服务'); }
+// Viewers on another machine (including the same company network, whose tunnel blocks direct
+// paths) only get a picture through the platform relay, which the viewer grants in the toolbar.
+// The library reports "connected" before media flows, so the peer connection's own state decides.
+const relayGranted = !!iceServers?.some(server => server.username);
+const relayHint = '画面连不上：请在预览工具栏勾选“允许媒体中继”后重新启用本次登记服务';
+let hintTimer = 0;
+const peerState = pc => {
+  if (pc.connectionState === 'connected') { clearTimeout(hintTimer); say('已连接。点击画面开始，Esc 退出鼠标锁定，点击画面可开启声音'); }
+  else if (pc.connectionState === 'failed') { clearTimeout(hintTimer); say(relayGranted ? '连接失败，请重新启用本次登记服务' : relayHint); }
+};
+const Native = window.RTCPeerConnection;
+window.RTCPeerConnection = class extends Native {
+  constructor(cfg = {}) {
+    super(iceServers?.length ? { ...cfg, iceServers } : cfg);
+    this.addEventListener('connectionstatechange', () => peerState(this));
+    clearTimeout(hintTimer);
+    if (!relayGranted) hintTimer = setTimeout(() => say(relayHint), 12000);
+  }
+};
 if (iceServers?.length) {
-  const Native = window.RTCPeerConnection;
-  window.RTCPeerConnection = class extends Native { constructor(cfg = {}) { super({ ...cfg, iceServers }); } };
   const Socket = window.WebSocket;
   window.WebSocket = class extends Socket {
     constructor(...args) { super(...args); this.addEventListener('open', () => this.send(JSON.stringify({ type: 'iceServers', iceServers }))); }
@@ -37,8 +54,7 @@ const config = new Config({ useUrlParams: false, initialSettings: {
 const stream = new PixelStreaming(config, { videoElementParent: document.getElementById('stream') });
 stream.addEventListener('streamerListMessage', e => { if (!e.data?.messageStreamerList?.ids?.length) say('等待游戏启动（首次可能需要几分钟）…'); });
 stream.addEventListener('webRtcConnecting', () => say('正在连接游戏…'));
-stream.addEventListener('webRtcConnected', () => say('已连接。点击画面开始，Esc 退出鼠标锁定，点击画面可开启声音'));
-stream.addEventListener('webRtcFailed', () => say('连接失败，请重新启用本次登记服务'));
+stream.addEventListener('webRtcFailed', () => { clearTimeout(hintTimer); say(relayGranted ? '连接失败，请重新启用本次登记服务' : relayHint); });
 stream.addEventListener('webRtcDisconnected', () => say('连接已断开；若是撤销或停止，请重新启用本次登记服务'));
 stream.addEventListener('playStreamRejected', () => say('点击画面开始播放'));
 stream.connect();

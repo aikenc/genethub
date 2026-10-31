@@ -23,7 +23,7 @@
 4. 页面入口 `index.html` 与 `pixelstreaming.esm.js` 放在工作区入口目录。
 5. 登记 `media` 用 `client:"html"`、`protocol:"pixel-streaming/1"`、`sessionPath` 指向信令 WebSocket 路由（见示例）。这会让沙箱允许指针锁定和自动播放，并给页面 `window.genehubServicePreview.describe()/ice()`。没有控制权开关：允许服务就是允许玩。
 6. 启动：`-game -RenderOffScreen -PixelStreamingURL=ws://127.0.0.1:<信令端口>`，直接读未 cook 内容；示例另加 `-PixelStreamingWebRTCMaxBitrate=20000000`，让走中继时码率不超过平台单会话上限（约 25 Mbit/s）。冷启动（shader 与缓存为空）实测约 4 分钟，之后约 20 秒；首次使用前先预热一次。
-7. 网络：示例页面向平台要 ICE（`ice()`），**两端都用它**：浏览器一侧直接替换；再在信令连接上发 `{"type":"iceServers"}` 给 `signalling.py`，后者在通知 UE 有新玩家之前把这些服务器作为 `config` 重发给 UE，UE 用最新的 `config` 建这条连接。不要删掉这一步，否则 UE 在 NAT 后只报局域网地址。浏览器与 UE 不在同一台机器时（包括同一公司网络：办公室机器之间走 iOA 隧道，点对点不通），用户需在预览工具栏勾选“允许媒体中继”；页面一直显示“连接中”时先提示用户勾选它。
+7. 网络：示例页面向平台要 ICE（`ice()`），**两端都用它**：浏览器一侧直接替换；再在信令连接上发 `{"type":"iceServers"}` 给 `signalling.py`，后者在通知 UE 有新玩家之前把这些服务器作为 `config` 重发给 UE，UE 用最新的 `config` 建这条连接。不要删掉这一步，否则 UE 在 NAT 后只报局域网地址。浏览器与 UE 不在同一台机器时（包括同一公司网络：办公室机器之间走 iOA 隧道，点对点不通），用户需在预览工具栏勾选“允许媒体中继”；示例页面在 12 秒内没有建立媒体连接且用户未允许中继时，会直接提示勾选；改写页面时保留这一提示。
 
 Agent 改工程不需要桌面：`UnrealEditor-Cmd.exe 工程 -run=pythonscript -script=脚本.py -unattended -nullrhi`（保存资源实测约 20 秒），改完重启后端，预览入口不变。
 
