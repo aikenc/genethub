@@ -591,7 +591,18 @@ pub(crate) async fn serve_streams(
     };
 
     let receive_budget = Arc::new(Semaphore::new(RECEIVE_QUEUE_BYTES));
-    let mut clock = tokio::time::interval(std::time::Duration::from_secs(5));
+    let heartbeat_period = std::time::Duration::from_secs(5);
+    // Hosted revocation is already checked by the control-plane monitor.
+    // Do not add a whole physical heartbeat period before retiring RTC work.
+    // Reuse this clock, while keeping physical probes at their existing rate.
+    let clock_period =
+        if access.hosted_authority.is_some() || access.authorization_expires_at.is_some() {
+            std::time::Duration::from_secs(1)
+        } else {
+            heartbeat_period
+        };
+    let mut clock = tokio::time::interval(clock_period);
+    let mut next_heartbeat = Instant::now();
     let mut last_received = Instant::now();
     let outcome = async {
         loop {
@@ -631,8 +642,9 @@ pub(crate) async fn serve_streams(
                     // may still be deriving keys after WELCOME; do not emit an
                     // unsolicited record before its one claim. The idle expiry
                     // above still bounds an abandoned invitation connection.
-                    if !matches!(carrier_kind, CarrierKind::Fabric) && access.bootstrap_invite.is_none() {
+                    if !matches!(carrier_kind, CarrierKind::Fabric) && access.bootstrap_invite.is_none() && Instant::now() >= next_heartbeat {
                         writer.try_send(Frame { kind: Kind::Ping, stream_id: 0, value: 0, payload: Vec::new() })?;
+                        next_heartbeat = Instant::now() + heartbeat_period;
                     }
                 }
                 revoked = revocations.recv(), if access.device_id.is_some() => {
