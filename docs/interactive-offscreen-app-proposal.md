@@ -1,6 +1,6 @@
 # 离屏应用的远程预览与游玩：沿用现有服务运行器的最小方案
 
-- 状态：第 1 期已实现并在 Windows RTX 4090 上用真实 Preview 验证（见第 10 节；运行器为 Python 版）；锁屏已实测通过、UE 一侧已接入平台 ICE、公司网络内经 UDP 中继实测可玩（第 11 节）；现网 Beta TURN 的 3479/udp 不可达，待放行（§11.5）
+- 状态：第 1 期已实现并在 Windows RTX 4090 上用真实 Preview 验证（见第 10 节；运行器为 Python 版）；锁屏已实测通过、UE 一侧已接入平台 ICE、公司网络内经 Beta 平台 UDP TURN 实测可玩（第 11 节，TURN 已迁到 49359）
 - 日期：2026-10-30
 - 适用范围：GeneHub Service Preview、`genehub-preview` Skill、在内置 Python 适配器旁新增 `run.py` 服务运行器；首批适配 Unreal Engine 5.4.4（游玩）与 Blender（Agent 驱动的预览），之后可接入任何支持离屏渲染的软件
 - 事实基线：`main` 的 `baae72ae`（含远程桌面 Capture）；UE 实验在 PC-4090-1（RTX 4090 D、驱动 591.74、Windows 11、Edge 142 无头）上完成
@@ -214,7 +214,7 @@ Agent 工作流验收看最终环境状态（实例在跑、行为变了、进�
 **未决问题**
 1. 接受"没有只看模式"吗？若需要，最简单的做法也是页面层的约定，不是平台强制。
 2. ~~锁屏下 UE 与 Windows 上 Blender 是否可用~~：Windows 上已实测可用（§11.2）。
-3. ~~TURN 短期凭据如何交给 UE 侧~~：已由页面经信令转交（§11.1）；现网 TURN 的 3479/udp 需放行（§11.5）。
+3. ~~TURN 短期凭据如何交给 UE 侧~~：已由页面经信令转交（§11.1）；Beta TURN 已迁到办公网可达的 49359/udp（§11.6）。
 4. Blender 帧编码：JPEG 够用，还是需要软件内 H.264；白名单指令集由后端作者定，还是平台统一。
 5. 是否把 4090 按"专用 Agent 工作站"处理（自动登录、不休眠），这决定 Capture 路径在该机上的可用性。
 
@@ -289,7 +289,7 @@ Agent 工作流验收看最终环境状态（实例在跑、行为变了、进�
 **先前判断有误，已更正。** 第一轮把“办公网只放行 TCP 443”当成原因，是因为抓包过滤器按 TCP 的出口地址过滤，而办公网 UDP 走的是另一个出口（183.60.2.26）。重测后：
 
 - **办公网出站 UDP 正常**：PC-4090-1、Mac mini 向 Beta 服务器（1.13.182.31）任意端口发 UDP，服务器网卡上看得到；在中继端口段内起临时回显，两台机器都收到回包。
-- **Beta 的 TURN 端口 3479/udp 收不到任何包**：同一轮探测中服务器 `eth0` 只出现发往中继段（49260–49359）的包。最可能是云安全组只放行了中继段、漏了 3479（`genethub-cloud/deploy/rtc/README.md` 要求两者都放行）。这意味着**现网 Beta TURN 对任何网络的 UDP 用户都不可用**，而不只是办公网。
+- **Beta 的 TURN 端口 3479/udp 收不到任何包**：同一轮探测中服务器 `eth0` 只出现发往中继段（49260–49359）的包。原因是**办公网丢弃知名 STUN/TURN 端口**：同轮探测里同一家 Google STUN，19302 可达、3478 不可达，Cloudflare/腾讯/Twilio 的 3478 也都不可达（早先曾猜测为安全组漏放，这一判断有误）。
 - 开发云 Linux 本身没有 UDP 出口，它作为观看端的结论只适用于它自己。
 
 ### 11.4 Unity
@@ -312,9 +312,11 @@ PC-4090-1 未安装 Unity，Unity 编辑器需要账号登录激活，无法由 
 | 鼠标视角 | 未测得（Mac 无头浏览器不支持指针锁定，属测试环境限制） |
 | 第二个观看者 / 撤销 / 重新允许 | 1013 `viewer_limit` / 画面停止 / 恢复 |
 
-**结论：用户要的“只用 UDP”在公司网络里可行**，前提是现网 TURN 的 UDP 端口真的可达。需要两项改动（Beta 发布 owner）：
+**结论：用户要的“只用 UDP”在公司网络里可行**，前提是 TURN 监听在办公网放行的高位端口上（见 §11.6，已改）。`turns:` TCP 443 不是必需项，只在只放行 TCP 的网络（酒店、访客网）才需要。
 
-1. **安全组放行 `3479/udp`**（或把 TURN 监听改到已放行端口）。改完用办公网机器做一次 STUN Binding 即可验证。
-2. **调整中继带宽**：现网 `max-bps=1250000`（约 10 Mbit/s/会话），本次未限速时 UE 用了约 41 Mbit/s。要么提高 `max-bps`/`bps-capacity`，要么给 UE 加 `-PixelStreamingEncoderMaxBitrate`（例如 15–20 Mbit/s）并实测画质与丢包（本次的丢包与冻结可能与码率过高有关，未验证）。
+### 11.6 Beta TURN 迁到 49359 并实测（2026-10-31，经用户授权）
 
-`turns:` TCP 443 不是必需项，只在只放行 TCP 的网络（酒店、访客网）才需要。
+- 现网改动：`genehub-rtc-beta` 改用 `/var/lib/genehub-rtc-beta/candidate-20261031/`（监听 49359，中继 49260–49358，`max-bps` 约 25 Mbit/s/会话、`bps-capacity` 约 100 Mbit/s），Control 的 `HUB_BETA_ICE_SERVERS`/`HUB_BETA_TURN_URLS` 改为 `:49359` 并重启。原配置与 env 备份在服务器 `staging/release-beta/maintenance/turn-49359-20261031/`，上一版候选保留可回滚。Cloud 仓 `deploy/rtc/render.mjs` 已按同一布局生成，新增 `deploy/rtc/probe.mjs`。腾讯云安全组未改（该段原已放行）。
+- 可达性：`probe.mjs` 从 Mac mini 与 PC-4090-1 均得到 Binding（映射到 183.60.2.26）；切换前对 3479 两台都无响应。
+- 端到端（未修改的示例页面，平台签发的 TURN 凭据，UE 加 `-PixelStreamingWebRTCMaxBitrate=20000000`，PC 锁屏中）：Mac mini 真实 Preview 玩 PC-4090-1 上的 UE 5 分钟，候选对 relay/udp（`turn:rtc-beta.genethub.com:49359`）↔ prflx，首帧 3.0 秒，平均约 58 fps、720p、RTT 约 72 ms、平均约 6 Mbit/s（编码器自适应），按住 W 画面变化 5.57（空闲 0.17）；5 分钟内 33 次短冻结，集中在 1.5–2.5 分钟一段丢包期，其余时段平稳；第二个观看者被拒、撤销后停止、重新允许恢复。
+- 仍需注意：观看端必须勾选“允许媒体中继”，否则在公司网络里一直“连接中”（页面目前没有提示，待补）；丢包期原因未查明。

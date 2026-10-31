@@ -54,11 +54,13 @@ POST stopPath   {sessionId}
 
 STUN/TURN 与 Fabric Relay 是独立监听服务，可以共用腾讯云机器；普通 Web/Relay 发布不重启 ICE 实例。域名通过显式环境配置选择，不从页面 Host 猜测，不改写 DNS。
 
-| Channel | Control 环境前缀 | 默认 UDP 监听 | 可选 TURN relay UDP 范围 |
+| Channel | Control 环境前缀 | UDP 监听 | TURN relay UDP 范围 |
 |---|---|---:|---:|
-| stable | `HUB_` | 3478 | 49160–49259 |
-| beta | `HUB_BETA_` | 3479 | 49260–49359 |
-| dev | `HUB_DEV_` | 3480 | 49360–49459 |
+| stable | `HUB_` | 49259 | 49160–49258 |
+| beta | `HUB_BETA_` | 49359 | 49260–49358 |
+| dev | `HUB_DEV_` | 49459 | 49360–49458 |
+
+监听放在各自整段的末端，而不是 3478/3479：公司防火墙常丢弃知名 STUN/TURN 端口而放行高位 UDP（2026-10-31 办公网实测），整段一条安全组规则即可。可达性从用户网络用 Cloud 仓 `deploy/rtc/probe.mjs` 验证。
 
 Cloud 仓 `deploy/rtc/render.mjs` 生成独立 coturn 配置和 systemd unit 候选；README 说明安装、权限、网络规则和回滚步骤。`RTC_HOSTNAME` 必须是运维已经确认的域名；上述端口是候选默认值，不表示公网已经开放。首先部署 STUN-only。TURN 需要显式开启、独立签发 secret、带宽/配额与 UDP 范围，再验证真实 allocation。
 

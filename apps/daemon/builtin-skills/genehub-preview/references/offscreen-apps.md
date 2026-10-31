@@ -22,8 +22,8 @@
 3. 复制 `assets/unreal/` 到工作区，改 `application.json` 里的路径：`UnrealEditor.exe`、工程与地图。
 4. 页面入口 `index.html` 与 `pixelstreaming.esm.js` 放在工作区入口目录。
 5. 登记 `media` 用 `client:"html"`、`protocol:"pixel-streaming/1"`、`sessionPath` 指向信令 WebSocket 路由（见示例）。这会让沙箱允许指针锁定和自动播放，并给页面 `window.genehubServicePreview.describe()/ice()`。没有控制权开关：允许服务就是允许玩。
-6. 启动：`-game -RenderOffScreen -PixelStreamingURL=ws://127.0.0.1:<信令端口>`，直接读未 cook 内容。冷启动（shader 与缓存为空）实测约 4 分钟，之后约 20 秒；首次使用前先预热一次。
-7. 网络：示例页面向平台要 ICE（`ice()`），**两端都用它**：浏览器一侧直接替换；再在信令连接上发 `{"type":"iceServers"}` 给 `signalling.py`，后者在通知 UE 有新玩家之前把这些服务器作为 `config` 重发给 UE，UE 用最新的 `config` 建这条连接。不要删掉这一步，否则 UE 在 NAT 后只报局域网地址。浏览器与 UE 不在同一网络时，用户需在预览工具栏勾选“允许媒体中继”。
+6. 启动：`-game -RenderOffScreen -PixelStreamingURL=ws://127.0.0.1:<信令端口>`，直接读未 cook 内容；示例另加 `-PixelStreamingWebRTCMaxBitrate=20000000`，让走中继时码率不超过平台单会话上限（约 25 Mbit/s）。冷启动（shader 与缓存为空）实测约 4 分钟，之后约 20 秒；首次使用前先预热一次。
+7. 网络：示例页面向平台要 ICE（`ice()`），**两端都用它**：浏览器一侧直接替换；再在信令连接上发 `{"type":"iceServers"}` 给 `signalling.py`，后者在通知 UE 有新玩家之前把这些服务器作为 `config` 重发给 UE，UE 用最新的 `config` 建这条连接。不要删掉这一步，否则 UE 在 NAT 后只报局域网地址。浏览器与 UE 不在同一台机器时（包括同一公司网络：办公室机器之间走 iOA 隧道，点对点不通），用户需在预览工具栏勾选“允许媒体中继”；页面一直显示“连接中”时先提示用户勾选它。
 
 Agent 改工程不需要桌面：`UnrealEditor-Cmd.exe 工程 -run=pythonscript -script=脚本.py -unattended -nullrhi`（保存资源实测约 20 秒），改完重启后端，预览入口不变。
 
@@ -41,5 +41,5 @@ Agent 改工程不需要桌面：`UnrealEditor-Cmd.exe 工程 -run=pythonscript 
 
 - 同机/同局域网：UE 与 Blender 经真实 Preview 可玩、可撤销、单观看者，进程无残留。
 - **Windows 会话锁定时**（RDP 会话，`LogonUI` 在场）：UE 出画、键盘、锁定鼠标、单观看者、撤销/恢复，Blender 出图、拖动、撤销/恢复，以及 `UnrealEditor-Cmd -run=pythonscript`，全部照常。
-- 跨网络：信令经 Hub 已通，UE 已拿到平台 STUN/TURN。公司网络（iOA 隧道）里点对点 WebRTC 不通，必须经 TURN；用 UDP TURN 实测 Mac mini 玩 PC 上的 UE：720p、约 56 fps、RTT 约 75 ms。遇到“信令已通、一直连接中/连接失败”时，先确认平台 TURN 的 UDP 端口可达（用 STUN Binding 探测），不要当成引擎问题。
+- 跨网络：信令经 Hub、UE 拿到平台 STUN/TURN。公司网络里点对点 WebRTC 不通，必须经 TURN；平台 TURN 走高位 UDP 端口（Beta 49359），办公网可达。实测 Mac mini 经 Beta 平台 TURN 玩 PC 上的 UE 5 分钟：720p 约 58 fps、RTT 约 72 ms。遇到“信令已通、一直连接中/连接失败”时先确认已勾选“允许媒体中继”，再从同一网络用 Cloud 仓 `deploy/rtc/probe.mjs` 查 TURN 可达性，不要当成引擎问题。
 - 未验证：手柄、有声游戏、30 分钟稳定性、输入延迟、Safari/手机、Unity。

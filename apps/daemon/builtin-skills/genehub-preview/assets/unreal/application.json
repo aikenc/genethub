@@ -40,7 +40,8 @@
         "-PixelStreamingURL=ws://127.0.0.1:18888",
         "-PixelStreamingEncoderCodec=H264",
         "-ResX=1280",
-        "-ResY=720"
+        "-ResY=720",
+        "-PixelStreamingWebRTCMaxBitrate=20000000"
       ]
     }
   ]
