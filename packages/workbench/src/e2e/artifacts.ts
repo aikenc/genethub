@@ -92,6 +92,18 @@ export type StartedDaemon = {
   };
 };
 
+/** Mirrors `genet_frontdoor::launch_env::SESSION_SCOPED`. */
+const AGENT_SESSION_CONTEXT = [
+  "GENEHUB_SESSION_ID",
+  "GENEHUB_CONTROLLER_TOKEN",
+  "GENEHUB_EVIDENCE_SCOPE",
+  "GENEHUB_SKILLS_DIR",
+  "GENET_WORKSPACE_ROOT",
+  "GENEHUB_AGENT_PID",
+  "GENEHUB_HOST_PID",
+  "GENEHUB_ALLOW_FOREGROUND_IN_SESSION",
+];
+
 /** Spawn `daemon run` and wait for the listening JSON line on stdout. */
 export function startListeningDaemon(
   daemon: string,
@@ -106,11 +118,15 @@ export function startListeningDaemon(
   return new Promise((resolve, reject) => {
     const stderr: string[] = [];
     let settled = false;
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      ...daemonEnvironment(daemon, values),
+    };
+    // The runner may be an Agent's tool. This daemon belongs to the test, and
+    // `daemon run` refuses to start under an inherited Agent session.
+    for (const key of AGENT_SESSION_CONTEXT) delete env[key];
     const child = spawn(daemon, ["daemon", "run"], {
-      env: {
-        ...process.env,
-        ...daemonEnvironment(daemon, values),
-      },
+      env,
       stdio: ["ignore", "pipe", "pipe"],
     });
     const fail = (error: Error) => {
