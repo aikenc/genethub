@@ -68,30 +68,39 @@ defineSpecialty(meta("hosted-lease-renewal", "A legal Hosted client retains its 
     t.assertions.assert(retained, "authorization renewal did not obtain a fresh endpoint and repair the business subscription");
   } finally { await stack.stop(); }
 });
-defineSpecialty(meta("direct-preview-resume", "Direct-only preview fails after RTC loss and permits an explicit fresh HTTP read",
-  "The old direct HTTP response fails without replay; a business-triggered fresh GET returns 0..19 exactly once", 40000), async t => {
+defineSpecialty({ ...meta("direct-preview-resume", "Direct-only preview fails after RTC loss and permits an explicit fresh HTTP read",
+  "The old direct HTTP response fails without replay; a business-triggered fresh GET returns 0..19 exactly once", 40000),
+  requirements: [{ kind: "python" as const, env: "GENEHUB_PREVIEW_MEDIA_PYTHON", minVersion: [3, 11] as [number, number], modules: ["aiohttp"] }] }, async t => {
   const stack = await openMultichannelBrowser(t);
   let runner: ReturnType<typeof spawn> | undefined;
   try {
     const port = await allocatePort();
-    const backendFile = join(t.env.workspace, "backend.mjs");
+    const python = process.env.GENEHUB_PREVIEW_MEDIA_PYTHON;
+    if (!python) throw new Error("GENEHUB_PREVIEW_MEDIA_PYTHON must point to Python 3.11+ with aiohttp");
+    const backendFile = join(t.env.workspace, "backend.py");
     const starts = join(t.env.workspace, "http-requests");
     await writeFile(backendFile, `
-import {createServer} from 'node:http';
-import {appendFileSync} from 'node:fs';
-createServer((req,res)=>{
- if(req.url==='/health'){res.end('ok');return}
- appendFileSync('http-requests','request\\n');
- res.writeHead(200,{'content-type':'text/plain'});let n=0;res.write(n+++'\\n');
- const timer=setInterval(()=>{res.write(n+++'\\n');if(n===20){clearInterval(timer);res.end()}},500);
- res.on('close',()=>clearInterval(timer));
-}).listen(${port},'127.0.0.1');
+import asyncio
+from aiohttp import web
+async def slow(request):
+    if request.path == '/health':
+        return web.Response(text='ok')
+    open('http-requests', 'a').write('request\\n')
+    response = web.StreamResponse(headers={'content-type': 'text/plain'})
+    await response.prepare(request)
+    for n in range(20):
+        await response.write(f'{n}\\n'.encode())
+        await asyncio.sleep(0.5)
+    return response
+app = web.Application()
+app.router.add_get('/{tail:.*}', slow)
+web.run_app(app, host='127.0.0.1', port=${port}, print=None)
 `);
     await writeFile(join(t.env.workspace, "index.html"), "<!doctype html><title>Direct service</title>");
     const config = join(t.env.workspace, "preview.json");
     await writeFile(config, JSON.stringify({ entry: "index.html", dataPolicy: "direct-only",
-      backends: [{ command: [process.execPath, backendFile], origin: `http://127.0.0.1:${port}`, health: "/health", routes: [{ prefix: "/api/stream/" }] }] }));
-    runner = spawn(process.execPath, [join(t.openRoot, "apps/daemon/builtin-skills/genehub-preview/assets/node-adapter/run.mjs"), "--config", config, "--daemon-root", t.env.data], { stdio: ["ignore", "pipe", "pipe"] });
+      backends: [{ command: ["python", backendFile], origin: `http://127.0.0.1:${port}`, health: "/health", routes: [{ prefix: "/api/stream/" }] }] }));
+    runner = spawn(python, [join(t.openRoot, "apps/daemon/builtin-skills/genehub-preview/assets/python-adapter/run.py"), "--config", config, "--daemon-root", t.env.data], { stdio: ["ignore", "pipe", "pipe"] });
     let tail = ""; runner.stderr?.on("data", b => { tail = (tail + b).slice(-1000); });
     await stack.rtc();
     await stack.page.evaluate(async ({ workspace, entry }) => {

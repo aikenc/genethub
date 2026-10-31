@@ -2,10 +2,23 @@
   "name": "服务 Preview 接入示例",
   "entry": "index.html",
   "dataPolicy": "auto",
-  "backends": [{
-    "origin": "http://127.0.0.1:18010",
-    "command": ["node", "backend.mjs"],
-    "health": "/health",
-    "routes": [{"prefix": "/api/demo/", "websocket": true}]
-  }]
+  "backends": [
+    {
+      "origin": "http://127.0.0.1:18010",
+      "command": [
+        "python",
+        "backend.py"
+      ],
+      "health": "/health",
+      "routes": [
+        {
+          "prefix": "/api/demo/",
+          "websocket": true
+        }
+      ],
+      "env": {
+        "PREVIEW_DEMO_PORT": "18010"
+      }
+    }
+  ]
 }

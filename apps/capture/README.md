@@ -1,7 +1,7 @@
 # GeneHub Capture
 
 Independent desktop provider for existing Service Preview. The daemon handles
-registration, the existing services grant and HTTP/WS transport. Capture owns
+registration, the full-connection authentication and HTTP/WS transport. Capture owns
 OS capture, H.264/Opus encoding, native WebRTC and input. No raw desktop frames
 are sent through the daemon. One OS account, one Capture process, one display,
 one viewer and one control lease are supported in this first implementation.

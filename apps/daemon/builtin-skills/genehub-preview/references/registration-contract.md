@@ -1,6 +1,6 @@
 # 应用登记与接入协议 v1
 
-本协议由 daemon 以 Rust 实现，与 Node/Python 无关。外部程序可直接实现；[Python 示例](../assets/python-adapter/app.py) 与 [Node 多后端示例](../assets/node-adapter/run.mjs) 是可选参考源码，不是 GeneHub 运行依赖。
+本协议由 daemon 以 Rust 实现，与具体语言无关。外部程序可直接实现；[Python 示例](../assets/python-adapter/app.py) 与 [多后端运行器](../assets/python-adapter/run.py) 是可选参考源码，不是 GeneHub 运行依赖。
 
 ## 登记与发现
 

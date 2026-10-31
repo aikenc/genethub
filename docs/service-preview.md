@@ -18,7 +18,7 @@ UE 接入需要版本匹配的信令适配；当前可信媒体面板没有 Pixe
 
 ## 开始使用
 
-GeneHub 本体不依赖 Node.js/Python。应用可直接实现[语言无关登记与访问协议](../apps/daemon/builtin-skills/genehub-preview/references/registration-contract.md)，也可将内置 Skill 携带的 [Python 示例](../apps/daemon/builtin-skills/genehub-preview/assets/python-adapter/app.py) 或 [Node 多后端示例](../apps/daemon/builtin-skills/genehub-preview/assets/node-adapter/run.mjs) 复制到用户工作区改写。示例依赖只安装在外部项目，不需要 GeneHub 源码环境。
+GeneHub 本体不依赖外部运行时。应用可直接实现[语言无关登记与访问协议](../apps/daemon/builtin-skills/genehub-preview/references/registration-contract.md)，也可将内置 Skill 携带的 [Python 示例](../apps/daemon/builtin-skills/genehub-preview/assets/python-adapter/app.py) 或 [多后端运行器](../apps/daemon/builtin-skills/genehub-preview/assets/python-adapter/run.py) 复制到用户工作区改写。示例依赖只安装在外部项目，不需要 GeneHub 源码环境。
 
 完整步骤见[启动与手机预览](../apps/daemon/builtin-skills/genehub-preview/references/getting-started.md)。Workspace 后台运行列表将显式登记关联到进程树，显示服务入口。停止应用通过认证运行身份发出 shutdown；关闭预览只清理访问。重新启动后用“重新检查服务”发现新的 runId。
 

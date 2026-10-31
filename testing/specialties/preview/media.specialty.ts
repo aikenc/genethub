@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { writeFile, copyFile, cp } from "node:fs/promises";
 import { join } from "node:path";
 import { ServicePreviewClient } from "@genehub/workbench/client";
@@ -48,16 +48,12 @@ defineSpecialty(
       throw new BlockedError(
         "set GENEHUB_PREVIEW_MEDIA_PYTHON to Python with apps/daemon/builtin-skills/genehub-preview/assets/demo/requirements.txt",
       );
-    // Run the shipped example as documented, with its locked dependencies
-    // installed only in this case's workspace, never in product source.
+    // Run the shipped example as documented, copied into this case's workspace.
     const example = join(t.env.workspace, "service-example");
-    for (const folder of ["node-adapter", "demo"]) await cp(
+    for (const folder of ["python-adapter", "demo"]) await cp(
       join(t.openRoot, "apps/daemon/builtin-skills/genehub-preview/assets", folder),
-      join(example, folder), { recursive: true, filter: source => !source.split(/[\\/]/).includes("node_modules") },
+      join(example, folder), { recursive: true },
     );
-    const installed = spawnSync("npm", ["--prefix", join(example, "node-adapter"), "ci", "--ignore-scripts", "--no-audit", "--no-fund", "--prefer-offline"],
-      { encoding: "utf8", timeout: 30_000 });
-    if (installed.status !== 0) throw new BlockedError(`copied media adapter dependencies unavailable (exit ${installed.status}); npm and its package-lock.json are required`);
     const opened = await t.flows.main.openWorkspace({
       openRoot: t.openRoot,
       lease: t.env,
@@ -75,10 +71,7 @@ defineSpecialty(
         entry: "index.html",
         backends: [
           {
-            command: [
-              process.execPath,
-              join(example, "demo/backend.mjs"),
-            ],
+            command: ["python", join(example, "demo/backend.py")],
             origin: `http://127.0.0.1:${demoPort}`,
             env: { PREVIEW_DEMO_PORT: String(demoPort) },
             health: "/health",
@@ -103,9 +96,9 @@ defineSpecialty(
       }),
     );
     const runner = spawn(
-      process.execPath,
+      python,
       [
-        join(example, "node-adapter/run.mjs"),
+        join(example, "python-adapter/run.py"),
         "--config",
         config,
         "--daemon-root",
