@@ -1,4 +1,4 @@
-import { Client, type WebSocketLike } from "@genehub/workbench/client";
+import { Client, ClientRequestTimeoutError, type WebSocketLike } from "@genehub/workbench/client";
 import { WebSocket } from "ws";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -35,7 +35,7 @@ for (const route of ["direct", "fabric"] as const) for (const peers of [1, 2]) {
         await t.tools.waitUntil(async () => { const r = await opened.client.call({ type: "device.list" }); return r?.type === "devices" && r.data.remote.online; }, 15000);
       } else link = await startSharedBottleneck(daemonEndpoint(opened.daemon).url, { rttMs: 0, bandwidthMbps: 1000 });
       for (let n = 0; n < peers; n++) {
-        const paired = await t.flows.main.pairDevice(opened.client, opened.daemon, [], `network-lane-${n}`);
+        const paired = await t.flows.main.pairDevice(opened.client, opened.daemon, `network-lane-${n}`);
         paired.client.close();
         const fresh = () => ({ url: route === "fabric" ? fabricUrl! : link!.urlFor(daemonEndpoint(opened.daemon).url), credential: paired.credential });
         const client = new Client({ ...fresh(), rtcEnabled: false, requestTimeoutMs: 10000,
@@ -54,12 +54,12 @@ for (const route of ["direct", "fabric"] as const) for (const peers of [1, 2]) {
         argv: ["python3", "-c", "import sys,time\nfor n in range(1536):\n sys.stdout.write('x'*16384);sys.stdout.flush();time.sleep(0.001)"] });
       let done = false;
       const resultTask = operation.result.then(result => { done = true; return { result }; }, () => { done = true; return { result: null }; });
-      const samples: Array<{ ms: number; ok: boolean }> = [];
+      const samples: Array<{ ms: number; ok: boolean; timeout?: boolean }> = [];
       const interactive = clients.at(-1)!;
       while (performance.now() - began < 40000) {
         const start = performance.now();
         try { const reply = await interactive.call({ type: "workspace.list" }); samples.push({ ms: Math.round(performance.now() - start), ok: reply?.type === "workspaces" }); }
-        catch { samples.push({ ms: Math.round(performance.now() - start), ok: false }); }
+        catch (error) { samples.push({ ms: Math.round(performance.now() - start), ok: false, timeout: error instanceof ClientRequestTimeoutError }); }
         await pause(500);
       }
       const busy = link.stats(); const windowMs = performance.now() - began;
@@ -96,7 +96,7 @@ for (const route of ["direct", "fabric"] as const) for (const peers of [1, 2]) {
       t.note(JSON.stringify(summary));
       const delivered = Math.max(...summary.forwardedUnderLoad);
       t.assertions.assert(delivered > 1024 * 1024 && delivered * 8 / windowMs / 1000 <= 2.05, "load did not cross one aggregate 2Mbps bottleneck");
-      t.assertions.assert(samples.every(s => s.ok || s.ms >= 10000) && afterRestore
+      t.assertions.assert(samples.every(s => s.ok || s.timeout === true) && afterRestore
         && summary.heartbeats === 0 && summary.nodeDisconnects === 0,
         "ordinary output evicted a usable path or never recovered after restore");
       t.assertions.assert(summary.shellBytes === 24 * 1024 * 1024 && summary.shellExit === 0 && summary.retained,

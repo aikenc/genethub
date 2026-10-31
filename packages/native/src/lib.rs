@@ -6,14 +6,13 @@
 //! borrow the other's copy — the shell would drag in the whole daemon, and the
 //! daemon cannot link Wasmtime — so the answers live here once.
 //!
-//! What the kernel will hold a process to ([`confine`]), process-group
+//! Kernel isolation diagnostics ([`isolation`]), process-group
 //! ownership, and where a program is installed ([`locate`]). What they share is
-//! that a WASI guest cannot work either one out: confinement is applied by the
-//! process being confined, and `PATH` is a native concept the guest cannot
-//! even split. The guest asks the shell over the `genehub:host` imports, and
+//! that a WASI guest cannot work either one out: kernel capabilities require
+//! native syscalls, and `PATH` is a native concept the guest cannot even split. The guest asks the shell over the `genehub:host` imports, and
 //! the shell answers from here.
 
-pub mod confine;
+pub mod isolation;
 
 #[cfg(not(target_family = "wasm"))]
 pub mod locate;

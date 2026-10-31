@@ -1,3 +1,5 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { randomBytes } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -12,14 +14,20 @@ defineSpecialty({
   catches: ["fragment share credential ignored by Cloud entry", "portable annotations read-only", "logs require original session window", "expired connection proof cannot refresh", "share grants whole machine", "revocation only applies after reconnect"],
   tags: ["page-experience", "preview-feedback", "authorization"],
   runner: "playwright", requiredRepos: ["cloud"], llm: { default: "mock" },
-  expectedDurationMs: 45_000, timeoutMs: 180_000,
-  resources: { environments: 1, cpu: 2, memoryMb: 1536, io: 1, browser: 1, pool: "browser" },
+  expectedDurationMs: 65_000, timeoutMs: 180_000,
+  resources: { environments: 1, cpu: 2, memoryMb: 3072, io: 1, browser: 1, pool: "browser" },
   surfaces: ["cloud-console", "cloud-server", "relay", "daemon", "asset-preview"],
   productInterfaces: ["@genehub/workbench", "hub-http", "preview.feedback", "asset.preview"],
 }, async t => {
   const relayPort = await allocatePort();
   const relayToken = randomBytes(24).toString("hex");
-  const hub = await startHub({ databasePath: path.join(t.env.root, "hub.sqlite"), relayOrigin: `http://127.0.0.1:${relayPort}`, relayToken, consoleDir: path.join(process.env.TESTCTL_CLOUD_ROOT!, "console/dist") });
+  const consoleDir = path.join(t.env.root, "console");
+  const consoleRoot = path.join(process.env.TESTCTL_CLOUD_ROOT!, "console");
+  // Build the actual consumer in this lease; a dev deployment dist may carry
+  // another base path or the old wire protocol even when source is current.
+  await promisify(execFile)(process.execPath, [path.join(consoleRoot, "node_modules/vite/bin/vite.js"), "build", "--base", "/", "--outDir", consoleDir],
+    { cwd: consoleRoot, env: { ...process.env, VITE_GENEHUB_SUBPATH: "" }, timeout: 60_000, maxBuffer: 4 * 1024 * 1024 });
+  const hub = await startHub({ databasePath: path.join(t.env.root, "hub.sqlite"), relayOrigin: `http://127.0.0.1:${relayPort}`, relayToken, consoleDir });
   let relay: Awaited<ReturnType<typeof startRelay>> | undefined;
   let opened: Awaited<ReturnType<typeof t.flows.main.openWorkspace>> | undefined;
   let owner: Awaited<ReturnType<typeof openBrowser>> | undefined;
@@ -46,6 +54,7 @@ defineSpecialty({
     const entryPath = `${opened.rootHandle}/review.html`;
     consumer = await openPreviewBrowser({ openRoot: t.openRoot, lease: t.env, page: owner.page, endpoint: daemonEndpoint(opened.daemon), refreshEndpoint: () => daemonEndpoint(opened!.daemon), workspaceId: opened.workspaceId, entryPath });
     const page = owner.page;
+    t.note("share-phase: owner-resource");
     await page.frameLocator('iframe[title="HTML 文件预览"]').locator("#data").getByText("Unicode resource loaded").waitFor();
     await page.getByLabel("更多预览操作", { exact: true }).click();
     await page.getByRole("button", { name: "分享预览", exact: true }).click();
@@ -56,6 +65,7 @@ defineSpecialty({
     await link.waitFor();
     const shareUrl = await link.inputValue();
     visitor = await openBrowser({ permissions: ["clipboard-read", "clipboard-write"], viewport: { width: 430, height: 800 } }, { trace: false });
+    t.note("share-phase: anonymous-entry");
     await visitor.page.goto(shareUrl);
     const v = visitor.page;
     const frame = v.frameLocator('iframe[title="HTML 文件预览"]');
@@ -125,7 +135,7 @@ defineSpecialty({
     const dial = await (await redeem()).json();
     shared = new Client({ url: dial.url, fabricRouteTicket: dial.fabricRouteTicket, fabricAuthorizationExpiresAt: dial.fabricAuthorizationExpiresAt, channelCredential: { capabilityId: dial.channelCapability, secret: dial.channelSecret }, rtcEnabled: false, socketFactory: url => new WebSocket(url) as unknown as WebSocketLike });
     shared.connect(); await t.tools.waitUntil(() => shared!.connectionState === "ready", 45_000);
-    for (const request of [{ type: "workspace.list" as const }, { type: "session.list" as const, payload: { workspaceId: opened.workspaceId, includeArchived: false, lean: true } }]) {
+    for (const request of [{ type: "workspace.list" as const }, { type: "session.list" as const, payload: { workspaceId: opened.workspaceId, includeArchived: false, lean: true } }, {type:"settings.get" as const}, {type:"pty.open" as const,payload:{workspaceId:opened.workspaceId,cols:80,rows:24}}]) {
       let denied = false; try { await shared.call(request); } catch { denied = true; }
       t.assertions.assert(denied, `share admitted machine RPC ${request.type}`);
     }
@@ -182,6 +192,7 @@ defineSpecialty({
     await pwa.page.getByRole("button", {name: "最大化预览", exact: true}).waitFor();
     t.note("Fresh anonymous Cloud console and real Fabric peer: Unicode H5 fetch, annotation, bounded logs, persistent copied receipt, reload redemption, outside-file/machine-RPC rejection and immediate revocation. iOS standalone branch creates a 1h link and stays expanded until explicit minimize. Chromium platform simulation; no real iPhone certification.");
   } finally {
+    if (consumer?.errors.length) t.note(`owner-preview-errors: ${JSON.stringify(consumer.errors)}`);
     shared?.close(); await pwa?.close(); await consumer?.close(); await visitor?.close(); await owner?.close();
     opened?.client.close(); opened?.daemon.stop(); await opened?.mock.stop(); relay?.stop(); await hub.stop();
   }

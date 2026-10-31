@@ -4,10 +4,10 @@ import type { PeerWelcome } from "@genehub/proto";
 import {
   FabricEndpoint,
   FabricReset,
+  FabricStreamResetError,
   type FabricSocketLike,
   type FabricStream,
 } from "../fabric";
-import { FABRIC_TRANSPORT_FLOW } from "../fabric/frame";
 import { DataEndpoint, type DataEndpointOptions, type RecordCarrier } from "./endpoint";
 import { MAX_DATA_FRAME_BYTES } from "./frame";
 import { preparePeerHandshake, type PeerCredential } from "./handshake";
@@ -25,7 +25,6 @@ export async function openFabricDataLink(options: {
   url: string;
   routeTicket: string;
   credential: PeerCredential;
-  endpoint?: DataEndpoint;
   signal?: AbortSignal;
   clientName?: string;
   rtcSupported: boolean;
@@ -34,11 +33,10 @@ export async function openFabricDataLink(options: {
   onDiagnostic?: DataEndpointOptions["onDiagnostic"];
 }): Promise<FabricDataLink> {
   const fabric = new FabricEndpoint({
-    url: transportFlowUrl(options.url),
+    url: options.url,
     reconnect: false,
     maxFrameBytes: MAX_DATA_FRAME_BYTES + 28,
     maxBufferedBytes: 256 * 1024,
-    transportFlow: true,
     ...(options.socketFactory ? { socketFactory: options.socketFactory } : {}),
     ...(options.onError ? { onError: options.onError } : {}),
   });
@@ -61,18 +59,17 @@ export async function openFabricDataLink(options: {
     const handshake = await prepared.complete(welcome);
     if (options.signal?.aborted) throw new Error("Fabric admission cancelled");
     const carrier = new FabricRecordCarrier(fabric, stream);
-    const endpoint = options.endpoint ?? new DataEndpoint({
+    const endpoint = new DataEndpoint({
       role: "client",
       path: "fabric",
       carrier,
       key: handshake.key,
-      maxBulkStreamWindowBytes: handshake.maxBulkStreamWindowBytes,
+
       maxReceiveBytesPerStream: 64 * 1024 * 1024,
       ...(options.onError ? { onError: options.onError } : {}),
       ...(options.onDiagnostic ? { onDiagnostic: options.onDiagnostic } : {}),
     });
-    if (options.endpoint) await endpoint.attach(carrier, handshake.key, "fabric");
-    else await endpoint.ready();
+    await endpoint.ready();
     return {
       endpoint,
       fabric,
@@ -88,14 +85,6 @@ export async function openFabricDataLink(options: {
   }
 }
 
-function transportFlowUrl(value: string): string {
-  const url = new URL(value);
-  if (!url.searchParams.has("flow")) {
-    url.searchParams.set("flow", FABRIC_TRANSPORT_FLOW);
-  }
-  return url.toString();
-}
-
 class FabricRecordCarrier implements RecordCarrier {
   private recordHandler: RecordReader | null = null;
   private readonly inbox = new RecordInbox(record => this.recordHandler?.(record), error => this.fail(error));
@@ -109,7 +98,8 @@ class FabricRecordCarrier implements RecordCarrier {
     stream.onData((record) => this.inbox.push(record));
     stream.onRemoteFinish(() => this.fail(new Error("Fabric peer finished the carrier")));
     void stream.done.then((result) => {
-      if (result.type !== "finished") this.fail(result);
+      if (result.type === "connectionClosed") this.fail(result.error);
+      else if (result.type === "reset") this.fail(new FabricStreamResetError(result.code));
     });
   }
 

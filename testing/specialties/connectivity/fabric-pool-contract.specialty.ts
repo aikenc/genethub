@@ -32,7 +32,7 @@ defineSpecialty({
     await t.tools.waitUntil(async () => { const r = await o.client.call({ type: "device.list" }); if (r?.type === "devices") lanes = r.data.remote.channels ?? []; return lanes.length === 4 && lanes.every(c => c.online); }, 15000);
     t.assertions.assert(new Set(lanes.map(c => c.url)).size === 4 && new URL(lanes[0]!.url).searchParams.get("route") === primary, "pool replaced the legacy slot or duplicated a node route");
     for (const channelCount of [0, 5]) await t.assertions.expectProtocolCode(() => attach(channelCount), "badRequest");
-    const paired = await t.flows.main.pairDevice(o.client, o.daemon, [], "pool-authority"); paired.client.close();
+    const paired = await t.flows.main.pairDevice(o.client, o.daemon, "pool-authority"); paired.client.close();
     const accepted = link.stats().accepted;
     for (const lane of lanes) {
       const url = new URL(lane.url); url.host = new URL(relay.origin).host;
@@ -42,37 +42,44 @@ defineSpecialty({
       const reply = await peer.call({ type: "workspace.list" });
       t.assertions.assert(reply?.type === "workspaces" && reply.data.some(w => w.id === o.workspaceId), "pool lane did not reach the original daemon workspace");
     }
-    t.assertions.assert(new Set(peers.map(p => p.logicalConnectionId)).size === 4 && new Set(peers.map(p => p.identity?.machineId)).size === 1, "channels did not retain distinct journals and same source identity");
-    const readOnly = await t.flows.main.pairDevice(o.client, o.daemon, ["read"], "pool-read-only");
-    try { await t.assertions.expectProtocolCode(() => readOnly.client.call({ type: "device.remoteAttach", payload: { relayUrl: relay.origin, joinToken: null, channelCount: 4 } }), "forbidden"); }
+    t.assertions.assert(new Set(peers.map(p => p.logicalConnectionId)).size === 4 && new Set(peers.map(p => p.identity?.machineId)).size === 1, "channels did not retain distinct endpoints and same source identity");
+    const readOnly = await t.flows.main.pairDevice(o.client, o.daemon, "pool-read-only");
+    try { t.assertions.assert((await readOnly.client.call({type:"device.list"}))?.type === "devices", "paired pool peer lost identity"); }
     finally { readOnly.client.close(); }
     await o.client.call({ type: "device.revoke", payload: { deviceId: paired.deviceId } });
     await t.tools.waitUntil(() => peers.every(p => p.connectionState !== "ready"), 5000);
     const status = await o.client.call({ type: "device.list" });
     t.assertions.assert(status?.type === "devices" && status.data.remote.channels?.length === 4, "invalid requests or revocation mutated node configuration");
-    t.note(JSON.stringify({ legacyPrimaryStable: true, channels: 4, independentOwners: 4, machineIdentities: 1, nodeTcpBeforeClients: accepted, nodeTcpAfterClients: link.stats().accepted, invalidSizesRejected: true, readOnlyDenied: true, revokedAllLanes: true }));
+    t.note(JSON.stringify({ legacyPrimaryStable: true, channels: 4, independentOwners: 4, machineIdentities: 1, nodeTcpBeforeClients: accepted, nodeTcpAfterClients: link.stats().accepted, invalidSizesRejected: true, pairedDeviceFull: true, revokedAllLanes: true }));
   } finally { peers.forEach(p => p.close()); await link.stop(); relay.stop(); o.client.close(); o.daemon.stop(); await o.mock.stop(); }
 });
 
 defineSpecialty({
   id: "specialty.fabric-pool.calibration", title: "Revised shared bottleneck conserves capacity for one, two and four physical flows",
-  oracle: "Identical exact payload totals and hashes cross 1/2/4 TCP flows near the same 5Mbps aggregate rate",
+  oracle: "Identical exact payload totals and hashes cross 1/2/4 TCP flows near the same 5Mbps aggregate rate, including bounded event-loop stalls",
   catches: ["timer-per-record overhead changes the experiment", "adding channels multiplies offered bandwidth"],
-  tags: ["fabric-pool", "calibration"], llm: { default: "none" }, expectedDurationMs: 25000, timeoutMs: 40000,
+  tags: ["fabric-pool", "calibration"], llm: { default: "none" }, expectedDurationMs: 30000, timeoutMs: 40000,
   resources: { environments: 1, cpu: 2, memoryMb: 512, io: 1, browser: 0, pool: "exclusive" }, surfaces: ["tcp"], retention: true,
 }, async t => {
   const samples: unknown[] = [];
-  for (const flows of [1, 2, 4]) {
+  for (const { flows, stallMs } of [{ flows: 1, stallMs: 0 }, { flows: 2, stallMs: 0 }, { flows: 4, stallMs: 0 }, { flows: 1, stallMs: 20 }]) {
     const source = await startTcpPayloadServer(4*1024*1024/flows);
     const link = await startSharedBottleneck(source.url, { bandwidthMbps: 5, rttMs: 200 });
+    let stall: NodeJS.Timeout | undefined;
     try {
+      // A real scheduler pause must delay delivery, not erase link capacity
+      // on every later packet. Keep the same payload and capacity bounds.
+      if (stallMs) stall = setInterval(() => {
+        const until = performance.now() + stallMs;
+        while (performance.now() < until) { /* Inject bounded scheduling delay. */ }
+      }, 50);
       const start = performance.now();
       const results = await Promise.all(Array.from({ length: flows }, () => measureTcpTransfer({ url: link.urlFor(source.url), expectedBytes: source.sizeBytes, expectedSha256: source.sha256 })));
       const elapsedMs = performance.now()-start, bytes = results.reduce((n,s) => n+s.bytes,0), mbps = bytes*8/elapsedMs/1000;
-      samples.push({ flows, bytes, hashes: results.length, elapsedMs: Math.round(elapsedMs), mbps: +mbps.toFixed(3) });
+      samples.push({ flows, stallMs, bytes, hashes: results.length, elapsedMs: Math.round(elapsedMs), mbps: +mbps.toFixed(3) });
       t.note(JSON.stringify(samples.at(-1)));
       t.assertions.assert(mbps > 4 && mbps < 5.25, "raw capacity is not comparable across channel counts");
-    } finally { await link.stop(); await source.stop(); }
+    } finally { if (stall) clearInterval(stall); await link.stop(); await source.stop(); }
   }
   t.note(JSON.stringify(samples));
 });
@@ -98,8 +105,8 @@ defineSpecialty({
 
 
 defineSpecialty({
-  id:"specialty.fabric-pool.resize-to-one-recovers-body",title:"Removing the data node lane retains its in-flight logical body on the surviving primary",
-  oracle:"A real in-flight 8 MiB shell output survives 2-to-1 node resize with the same logical owners, exact hash/exit and one source execution",
+  id:"specialty.fabric-pool.resize-to-one-recovers-body",title:"Removing the data lane ends its old stream; fresh body requests use the surviving primary",
+  oracle:"Real2-to1 resize fails the interrupted shell without replay, preserves the healthy primary and authenticates a new body endpoint on the surviving lane",
   catches:["companion redials a removed lane forever", "fallback replays the shell command", "shrinking a tail replaces the primary control owner"],
   tags:["fabric-pool","fabric-automatic"],llm:{default:"none"},resources:{environments:1,cpu:2,memoryMb:2048,io:1,browser:0,pool:"exclusive"},
   surfaces:["daemon","relay","workbench-client","shell","tcp"],productInterfaces:["@genehub/workbench/client"],requiredArtifacts:["genet","genehub-host-local","genehub_guest.wasm"],
@@ -120,9 +127,14 @@ defineSpecialty({
     p.link.setProfile({bandwidthMbps:1000,rttMs:0});
     await t.tools.waitUntil(()=>body.connectionState!=="ready",3000);
     await t.tools.waitUntil(()=>body.connectionState==="ready",15000);
-    const r=await result,text=t.flows.main.shellText(r.frames,"stdout");
-    t.assertions.assert(createHash("sha256").update(text).digest("hex")===createHash("sha256").update(Buffer.alloc(8*1024*1024,82)).digest("hex")&&t.flows.main.shellExit(r.frames)?.code===0,"fallback did not recover exact body and exit");
-    t.assertions.assert(readFileSync(join(p.opened.workspaceRoot,"resize-starts"),"utf8")==="once\n"&&client.logicalConnectionId===owners[0]&&body.logicalConnectionId===owners[1],"resize repeated source execution or replaced an owner");
-    t.note(JSON.stringify({bytes:Buffer.byteLength(text),sourceExecutions:1,retainedOwners:true,nodeChannels:1}));
+    const interrupted=await result.then(()=>false,()=>true);
+    t.assertions.assert(interrupted,"removed data lane silently continued the old shell response");
+    t.assertions.assert(readFileSync(join(p.opened.workspaceRoot,"resize-starts"),"utf8")==="once\n"&&client.logicalConnectionId===owners[0]&&body.logicalConnectionId!==owners[1],"resize replayed source or replaced the healthy primary");
+    t.assertions.assert((await body.call({type:"workspace.list"}))?.type==="workspaces","fresh body endpoint cannot use surviving primary");
+    // A new finite business command independently proves byte correctness.
+    const fresh=client.openShellStream({workspaceId:p.opened.workspaceId,cwd:p.opened.workspaceRoot,timeoutMs:15000,argv:["python3","-c","import sys;sys.stdout.write('R'*8388608)"]});
+    await fresh.finish();const r=await collectShellResult(fresh),text=t.flows.main.shellText(r.frames,"stdout");
+    t.assertions.assert(createHash("sha256").update(text).digest("hex")===createHash("sha256").update(Buffer.alloc(8*1024*1024,82)).digest("hex")&&t.flows.main.shellExit(r.frames)?.code===0,"fresh command lost body bytes or exit");
+    t.note(JSON.stringify({freshBytes:Buffer.byteLength(text),sourceExecutions:1,primaryRetained:true,bodyReplaced:true,nodeChannels:1}));
   }finally{stream?.reset(1);client?.close();await p.dispose();}
 });

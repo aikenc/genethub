@@ -4,13 +4,13 @@ import { WebSocket } from "ws";
 import type { WebSocketLike } from "@genehub/workbench/client";
 import { defineSpecialty } from "../../framework/public.ts";
 
-// Fault fb_XR0qEbstIxjW/fb_dr_jQLe1lL3t: physical loss used to destroy the
-// stream owner. A real process provides an independent exactly-once oracle.
+// The historical catalog ID is retained; byte resume is intentionally removed.
+// A real process append proves reconnect does not repeat the command.
 defineSpecialty({
   id: "specialty.connectivity.logical-resume",
-  title: "A running shell stream survives a physical socket loss without restarting its process",
-  oracle: "The same public DataStream completes with before/after stdout, one exit and one append to a real file after a real WebSocket terminate and fresh admission",
-  catches: ["carrier abort destroys handler", "recovery replays business request", "FIN lost across resume", "client opens a replacement event stream"],
+  title: "A lost shell stream ends explicitly and new requests use a fresh connection",
+  oracle: "After a real WebSocket is terminated, the old shell stream rejects, a fresh authenticated connection serves new RPCs, and the source process append proves no automatic re-execution",
+  catches: ["carrier loss leaves a stream pending", "reconnect replays a business request", "new requests use a closed owner"],
   tags: ["network-risk-v2", "multichannel","core", "connectivity", "logical-resume"],
   llm: { default: "none" },
   expectedDurationMs: 20000, timeoutMs: 90000,
@@ -37,22 +37,21 @@ defineSpecialty({
       cwd: opened.workspaceRoot,
       timeoutMs: 20000,
     });
-    const streamId = operation.stream.id;
     // Observe the process's own disk side effect before breaking the socket.
     await t.tools.waitUntil(() => existsSync(marker), 10000);
     t.assertions.assert(sockets.length === 1, "unexpected pre-fault redial");
     sockets[0]!.terminate();
-    const result = await operation.result;
+    const outcome = await operation.result.then(() => ({ failed: false }), () => ({ failed: true }));
+    t.assertions.assert(outcome.failed, "the lost stream did not report its incomplete result");
     await t.tools.waitUntil(() => client!.connectionState === "ready", 15000);
-    t.assertions.assert(sockets.length === 2, "unexpected redial beyond the injected socket loss and channel probe");
-    t.assertions.assert(client.logicalConnectionId === logicalId, "probe or recovery replaced the logical owner");
-    t.assertions.assert(operation.stream.id === streamId, "the application stream was replaced");
-    t.assertions.assert(t.flows.main.shellText(result.frames, "stdout") === "before\nafter\n", "stream bytes were lost or repeated across reconnect");
-    t.assertions.assert(t.flows.main.shellExit(result.frames)?.code === 0, "the retained process did not exit successfully");
-    t.assertions.assert(readFileSync(marker, "utf8") === "started\n", "recovery restarted the business operation");
+    t.assertions.assert(sockets.length === 2, "unexpected redial beyond the injected socket loss");
+    t.assertions.assert(client.logicalConnectionId !== logicalId, "the new carrier retained the closed endpoint owner");
+    const terminated = await operation.stream.done.then(() => false, () => true);
+    t.assertions.assert(terminated, "the old stream remained successful after an incomplete body was lost");
+    t.assertions.assert(readFileSync(marker, "utf8") === "started\n", "reconnect restarted the business operation");
     const listed = await client.call({ type: "workspace.list" });
-    t.assertions.assert(listed?.type === "workspaces", "the resumed connection could not serve a new RPC");
-    t.note("Real socket termination; one process start, complete retained stream, and successful post-resume RPC.");
+    t.assertions.assert(listed?.type === "workspaces", "the new connection could not serve a new RPC");
+    t.note("Real socket termination; explicit old-stream failure, one source start, and successful RPC on a new connection.");
   } finally {
     client?.close();
     for (const socket of sockets) socket.close();

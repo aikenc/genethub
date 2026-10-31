@@ -4,43 +4,17 @@ async fn session_project(
     state: &crate::state::Shared,
     summary: &genehub_proto::SessionSummary,
 ) -> Result<String, CliFailure> {
-    let mut current = summary.clone();
-    let mut seen = std::collections::BTreeSet::new();
-    for _ in 0..32 {
-        if !seen.insert(current.id.clone()) {
-            break;
-        }
-        if let Some(managed) = &current.managed {
-            current = state
-                .sessions
-                .summary(&managed.parent_session_id)
-                .await
-                .map_err(|error| {
-                    CliFailure::business(
-                        "projectBindingUnavailable",
-                        format!("无法读取项目归属会话：{error:#}"),
-                        None,
-                    )
-                })?;
-        } else {
-            return state
-                .workspaces
-                .project_root(&current.workspace_id)
-                .await
-                .map_err(|error| {
-                    CliFailure::business(
-                        "projectBindingUnavailable",
-                        format!("无法解析所属项目：{error:#}"),
-                        None,
-                    )
-                });
-        }
-    }
-    Err(CliFailure::business(
-        "projectBindingUnavailable",
-        "项目归属链无效或超过上限",
-        None,
-    ))
+    state
+        .workspaces
+        .project_root(&summary.workspace_id)
+        .await
+        .map_err(|error| {
+            CliFailure::business(
+                "projectBindingUnavailable",
+                format!("无法解析所属项目：{error:#}"),
+                None,
+            )
+        })
 }
 
 pub(super) async fn resolve_workspace(

@@ -29,7 +29,7 @@ for (const manualClose of [false, true]) defineSpecialty({
     if (attached?.type !== "remoteAccess" || !attached.data.rendezvousUrl) throw new Error("relay attach failed");
     const url = new URL(attached.data.rendezvousUrl); url.host = new URL(relay.origin).host;
     await t.tools.waitUntil(async () => { const r = await opened.client.call({ type: "device.list" }); return r?.type === "devices" && r.data.remote.online; }, 15000);
-    const paired = await t.flows.main.pairDevice(opened.client, opened.daemon, [], "extreme-uplink"); paired.client.close();
+    const paired = await t.flows.main.pairDevice(opened.client, opened.daemon, "extreme-uplink"); paired.client.close();
     const began = performance.now();
     peer = new Client({ url: url.toString(), credential: paired.credential, rtcEnabled: false,
       ...(manualClose ? { heartbeatMs: 0 } : {}), requestTimeoutMs: 10000,

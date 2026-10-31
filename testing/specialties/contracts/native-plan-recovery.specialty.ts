@@ -4,21 +4,20 @@ import { join } from "node:path";
 import { defineSpecialty } from "../../framework/public.ts";
 
 defineSpecialty({
-  id: "specialty.contracts.project-approval-recovery",
-  title: "Expired project approval cards recover without granting stale authority",
-  oracle: "The daemon retires an expired challenge, never spends it, and resumes the PM only to prepare a fresh Human-confirmed plan",
-  catches: ["expired confirmation card retries forever", "expired plan gains mutation authority", "PM reuses an expired action id"],
+  id: "specialty.contracts.native-plan-recovery",
+  title: "Expired Human plan cards request a fresh plan without applying the expired one",
+  oracle: "A Human plan timeout resumes only to request a fresh plan; the session timeline retains the correct expired-card state",
+  catches: ["expired card retries forever", "expired plan is applied", "timeline hides the expired interaction"],
   tags: ["contract", "core", "durable-approval", "approval-recovery"],
   llm: { default: "none" },
   expectedDurationMs: 30_000,
   timeoutMs: 180_000,
   resources: { environments: 1, cpu: 2, memoryMb: 2048, io: 1, browser: 0 },
-  surfaces: ["daemon-project-control", "session-human-continuation"],
-  productInterfaces: ["session.respondPermission", "project-control-plan"],
+  surfaces: ["session-human-continuation", "workbench"],
+  productInterfaces: ["session.respondPermission", "planApproval"],
 }, async (t) => {
   const run = promisify(execFile);
   for (const filter of [
-    "project_control::tests::an_expired_challenge_is_retired_without_becoming_approved",
     "session::manager::tests::an_expired_plan_approval_resumes_only_to_request_a_fresh_plan",
   ]) {
     const { stdout } = await run("cargo", [

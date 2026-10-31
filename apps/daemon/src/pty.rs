@@ -82,24 +82,14 @@ mod guest {
             )
         }
 
-        pub async fn open(
-            &self,
-            cwd: &Path,
-            cols: u16,
-            rows: u16,
-            confinement: Option<crate::isolation::Policy>,
-        ) -> Result<String> {
+        pub async fn open(&self, cwd: &Path, cols: u16, rows: u16) -> Result<String> {
             validate_dimensions(cols, rows)?;
             let mut sessions = self.sessions.lock().await;
             if sessions.len() >= MAX_TERMINALS {
                 return Err(anyhow!("too many terminals are already open"));
             }
 
-            let argv = crate::process::launch_argv(&default_shell(), confinement.as_ref())?;
-            let argv: Vec<String> = argv
-                .iter()
-                .map(|part| part.to_string_lossy().into_owned())
-                .collect();
+            let argv = vec![default_shell()];
             let session = Arc::new(Session::open(
                 &argv,
                 &cwd.to_string_lossy(),

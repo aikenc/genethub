@@ -36,7 +36,7 @@ export interface ScriptedTurn {
    * challenges). Baking those values into a fixture would bypass the product
    * contract the journey is meant to exercise.
    */
-  respond?: (request: unknown) => Omit<ScriptedTurn, "respond">;
+  respond?: (request: unknown) => Omit<ScriptedTurn, "respond"> | Promise<Omit<ScriptedTurn, "respond">>;
 }
 
 /** One inbound HTTP request, as far as it can be recorded without a secret. */
@@ -267,7 +267,7 @@ export async function startMockLlm(): Promise<MockLlmHandle> {
     const scripted = queue.shift() ?? { text: "ok" };
     let turn: Omit<ScriptedTurn, "respond">;
     try {
-      turn = scripted.respond ? scripted.respond(body) : scripted;
+      turn = scripted.respond ? await scripted.respond(body) : scripted;
     } catch (error) {
       response.writeHead(500, { "content-type": "application/json" }).end(
         JSON.stringify({

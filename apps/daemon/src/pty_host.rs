@@ -56,21 +56,8 @@ impl Terminals {
         )
     }
 
-    /// Opens a terminal, optionally one the operating system holds to a policy.
-    ///
-    /// `portable_pty` owns everything between fork and exec, so a confined
-    /// terminal is not this shell with restrictions bolted on: it is a small
-    /// re-run of our own binary that restricts itself and then becomes the
-    /// shell (`isolation.rs`). That indirection is the whole reason the
-    /// restriction cannot be skipped — there is no path from here to an exec
-    /// that has not gone through it.
-    pub async fn open(
-        &self,
-        cwd: &Path,
-        cols: u16,
-        rows: u16,
-        confinement: Option<crate::isolation::Policy>,
-    ) -> Result<String> {
+    /// Opens a terminal running directly as the daemon OS user.
+    pub async fn open(&self, cwd: &Path, cols: u16, rows: u16) -> Result<String> {
         validate_dimensions(cols, rows)?;
         self.sessions
             .lock()
@@ -91,14 +78,7 @@ impl Terminals {
             })
             .context("allocating a pty")?;
 
-        let argv = crate::process::launch_argv(&default_shell(), confinement.as_ref())?;
-        let (helper, arguments) = argv
-            .split_first()
-            .ok_or_else(|| anyhow!("the confinement wrapper has no command"))?;
-        let mut command = CommandBuilder::new(helper);
-        for argument in arguments {
-            command.arg(argument);
-        }
+        let mut command = CommandBuilder::new(default_shell());
         command.cwd(cwd);
         // Without this many tools emit escape sequences xterm.js cannot render.
         command.env("TERM", "xterm-256color");
@@ -439,7 +419,7 @@ mod tests {
     async fn a_terminal_echoes_what_it_is_given() {
         let dir = tempfile::tempdir().unwrap();
         let (terminals, mut inbound) = Terminals::new();
-        let id = terminals.open(dir.path(), 80, 24, None).await.unwrap();
+        let id = terminals.open(dir.path(), 80, 24).await.unwrap();
 
         wait_until_ready(&terminals, &id, &mut inbound).await;
         terminals.write(&id, "echo genehub-marker\r").await.unwrap();
@@ -453,7 +433,7 @@ mod tests {
     async fn a_closed_terminal_reports_it_and_stops_accepting_writes() {
         let dir = tempfile::tempdir().unwrap();
         let (terminals, mut inbound) = Terminals::new();
-        let id = terminals.open(dir.path(), 80, 24, None).await.unwrap();
+        let id = terminals.open(dir.path(), 80, 24).await.unwrap();
         wait_until_ready(&terminals, &id, &mut inbound).await;
         // xterm sends carriage return for Enter. A bare line feed is output
         // translation on a terminal, not the key that submits the command.
@@ -485,7 +465,7 @@ mod tests {
     async fn resizing_an_open_terminal_succeeds_and_an_unknown_one_fails() {
         let dir = tempfile::tempdir().unwrap();
         let (terminals, _inbound) = Terminals::new();
-        let id = terminals.open(dir.path(), 80, 24, None).await.unwrap();
+        let id = terminals.open(dir.path(), 80, 24).await.unwrap();
         assert!(terminals.resize(&id, 120, 40).await.is_ok());
         assert!(terminals.resize("nope", 120, 40).await.is_err());
     }
@@ -494,13 +474,13 @@ mod tests {
     async fn terminal_dimensions_and_input_are_bounded() {
         let dir = tempfile::tempdir().unwrap();
         let (terminals, _inbound) = Terminals::new();
-        assert!(terminals.open(dir.path(), 0, 24, None).await.is_err());
+        assert!(terminals.open(dir.path(), 0, 24).await.is_err());
         assert!(terminals
-            .open(dir.path(), 80, MAX_DIMENSION + 1, None)
+            .open(dir.path(), 80, MAX_DIMENSION + 1)
             .await
             .is_err());
 
-        let id = terminals.open(dir.path(), 80, 24, None).await.unwrap();
+        let id = terminals.open(dir.path(), 80, 24).await.unwrap();
         assert!(terminals
             .write(&id, &"x".repeat(MAX_INPUT_BYTES + 1))
             .await

@@ -86,8 +86,8 @@ function summarize(sessions: SessionSummary[]) {
     activity.recent = Math.max(activity.recent, session.messagePreview?.atMs ?? session.updatedAtMs);
     const facts = sessionAttention(session, sessions);
     activity.running ||= facts.running;
-    activity.ownRunning ||= facts.running && !session.managed;
-    activity.teamRunning ||= facts.running && !!session.managed;
+    activity.ownRunning ||= facts.running && !session.labels?.includes("系统发起");
+    activity.teamRunning ||= facts.running && !!session.labels?.includes("系统发起");
     activity.tasks ||= facts.inProgress;
     const pending = owners.get(session.workspaceId) ?? new Map<string, SessionSummary>();
     for (const owner of pendingOwners(session, sessions)) pending.set(owner.id, owner);

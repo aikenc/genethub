@@ -7,6 +7,7 @@ fn main() -> Result<(), ts_rs::ExportError> {
     ClientDebugAction::export_all_to(dir)?;
     ClientDebugResponse::export_all_to(dir)?;
     PeerAuth::export_all_to(dir)?;
+    ConnectionAdmission::export_all_to(dir)?;
     PeerHello::export_all_to(dir)?;
     PeerWelcome::export_all_to(dir)?;
     RtcNegotiationRequest::export_all_to(dir)?;
@@ -16,11 +17,11 @@ fn main() -> Result<(), ts_rs::ExportError> {
     WorkspaceFileSource::export_all_to(dir)?;
     WorkspaceFileSourceKind::export_all_to(dir)?;
     AssetPreviewRequest::export_all_to(dir)?;
-    Confinement::export_all_to(dir)?;
     ShellFrame::export_all_to(dir)?;
     AssetPreviewKind::export_all_to(dir)?;
     AssetPreviewMetadata::export_all_to(dir)?;
     AssetPreviewError::export_all_to(dir)?;
+    AgentCapability::export_all_to(dir)?;
     Capabilities::export_all_to(dir)?;
     ModelInfo::export_all_to(dir)?;
     ModeInfo::export_all_to(dir)?;
@@ -89,7 +90,6 @@ fn main() -> Result<(), ts_rs::ExportError> {
     HubTicket::export_all_to(dir)?;
     DeviceInfo::export_all_to(dir)?;
     DeviceInvite::export_all_to(dir)?;
-    InviteScope::export_all_to(dir)?;
     DeviceCredential::export_all_to(dir)?;
     RemoteAccess::export_all_to(dir)?;
     DeviceAuth::export_all_to(dir)?;

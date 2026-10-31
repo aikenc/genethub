@@ -20,7 +20,7 @@ export function startKernelNetem(port: number) {
     const section=text.split("qdisc ").find(part=>part.startsWith("netem 30:"))??"";
     const sent=/Sent (\d+) bytes (\d+) pkt \(dropped (\d+)/.exec(section);
     const current=tcp();
-    return {active,bytes:Number(sent?.[1]??0),packets:Number(sent?.[2]??0),dropped:Number(sent?.[3]??0),retransmits:(current.RetransSegs??0)-(before.RetransSegs??0),outSegments:(current.OutSegs??0)-(before.OutSegs??0)};
+    return {active,bytes:Number(sent?.[1]??0),packets:Number(sent?.[2]??0),dropped:Number(sent?.[3]??0),backlog:/backlog\s+(\S+\s+\S+)/.exec(section)?.[1]??null,retransmits:(current.RetransSegs??0)-(before.RetransSegs??0),outSegments:(current.OutSegs??0)-(before.OutSegs??0)};
   };
   const setLoss=(loss:number)=>run("qdisc","change","dev","lo","parent","1:3","handle","30:","netem","limit","10000","delay","80ms","20ms","loss",`${loss}%`,"rate","5mbit");
   try {
@@ -28,5 +28,9 @@ export function startKernelNetem(port: number) {
     run("qdisc","add","dev","lo","parent","1:3","handle","30:","netem","limit","10000","delay","80ms","20ms","loss","1%","rate","5mbit");
     for(const direction of ["sport","dport"])run("filter","add","dev","lo","protocol","ip","parent","1:","prio","1","u32","match","ip",direction,String(port),"0xffff","flowid","1:3");
   } catch(error){if(active)run("qdisc","del","dev","lo","root");throw error;}
-  return {stats,setLoss,stop(){if(active){run("qdisc","del","dev","lo","root");active=false;}}};
+  return {stats,setLoss,
+    // New packets bypass impairment; queued packets keep draining. Deleting
+    // the qdisc here would inject an extra, unmeasured burst of packet loss.
+    restore(){if(active)run("filter","del","dev","lo","parent","1:");},
+    stop(){if(active){run("qdisc","del","dev","lo","root");active=false;}}};
 }

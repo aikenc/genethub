@@ -179,8 +179,8 @@ impl SessionManager {
         }
         {
             let mut meta = live.meta.lock().await;
-            if meta.managed.is_some() {
-                bail!("durable consultation is available on ordinary sessions");
+            if meta.history_only {
+                bail!("this is retired execution history; fork to continue");
             }
             if meta
                 .imported
@@ -295,7 +295,7 @@ impl SessionManager {
 
     pub(crate) async fn recover_deliveries(&self) -> Result<()> {
         for meta in self.store.list_meta()? {
-            if !meta.openable() {
+            if !meta.openable() || meta.history_only {
                 continue;
             }
             let session_id = meta.id.clone();
@@ -619,7 +619,7 @@ impl SessionManager {
             }
         }
         let meta = live.meta.lock().await.clone();
-        if meta.inbox.paused {
+        if meta.inbox.paused || meta.history_only {
             return Ok(());
         }
         let execution = live.execution.lock().await.clone();
@@ -814,6 +814,19 @@ impl SessionManager {
     }
 }
 
+/// An explicit user stop/close blocks queued delivery until new user input.
+pub(super) async fn pause_delivery(live: &Live) -> Result<()> {
+    let mut meta = live.meta.lock().await;
+    if meta.inbox.paused {
+        return Ok(());
+    }
+    let mut next = meta.clone();
+    next.inbox.paused = true;
+    live.store.save_meta(&next)?;
+    *meta = next;
+    Ok(())
+}
+
 pub(super) async fn settle_inputs(
     live: &Live,
     execution: Option<&Execution>,
@@ -825,6 +838,11 @@ pub(super) async fn settle_inputs(
     let completed = matches!(event, SessionEvent::TurnCompleted { .. });
     let failed = matches!(event, SessionEvent::TurnFailed { .. });
     if !completed && !failed {
+        return Ok(());
+    }
+    // Retiring a daemon intentionally ends its Agent process. Its pending
+    // input stays recoverable; explicit Human stop already persisted pause.
+    if failed && live.closing.load(Ordering::SeqCst) {
         return Ok(());
     }
     let mut meta = live.meta.lock().await;

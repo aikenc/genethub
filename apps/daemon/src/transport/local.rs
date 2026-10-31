@@ -298,13 +298,6 @@ async fn cli(
         {
             crate::authz::Principal::SessionController {
                 session_id: session_id.to_string(),
-                ordinary: context
-                    .state
-                    .sessions
-                    .summary(session_id)
-                    .await
-                    .map(|summary| summary.managed.is_none())
-                    .unwrap_or(false),
             }
         }
         _ => {
@@ -616,7 +609,6 @@ mod tests {
                 ),
             },
             rtc_supported: false,
-            max_bulk_stream_window_bytes: genehub_proto::INITIAL_STREAM_WINDOW_BYTES,
         };
         socket
             .send(tokio_tungstenite::tungstenite::Message::Binary(

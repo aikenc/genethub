@@ -152,8 +152,8 @@ defineSpecialty(
 defineSpecialty(
   meta(
     "specialty.wasm.authz.invite-read-cannot-write",
-    "A read-only paired device cannot file.write on the wasm daemon",
-    "file.write is forbidden for a read grant and the disk is unchanged",
+    "A complete paired device writes through the wasm daemon",
+    "paired file.write produces exact bytes on the host",
     ["grants ignored in the guest", "authz short-circuited because WASI has no bits"],
   ),
   async (t) => {
@@ -161,21 +161,10 @@ defineSpecialty(
     writeFileSync(path.join(t.env.workspace, "owned.txt"), "owner\n");
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
     try {
-      const device = await t.flows.main.pairDevice(opened.client, opened.daemon, ["read"]);
+      const device = await t.flows.main.pairDevice(opened.client, opened.daemon);
       try {
-        await t.assertions.expectProtocolCode(
-          () =>
-            device.client.call({
-              type: "file.write",
-              payload: {
-                workspaceId: opened.workspaceId,
-                path: `${opened.rootHandle}/owned.txt`,
-                content: "intruder\n",
-              },
-            }),
-          "forbidden",
-        );
-        t.assertions.fileEquals(opened.workspaceRoot, "owned.txt", "owner\n");
+        await device.client.call({type:"file.write",payload:{workspaceId:opened.workspaceId,path:`${opened.rootHandle}/owned.txt`,content:"paired\n"}});
+        t.assertions.fileEquals(opened.workspaceRoot,"owned.txt","paired\n");
       } finally {
         device.client.close();
       }

@@ -607,12 +607,11 @@ export async function openSecondClient(
 export async function pairDevice(
   owner: ProductSession["client"],
   daemon: DaemonHandle,
-  grants: string[] = [],
   name = "ported-laptop",
 ): Promise<{ client: ProductSession["client"]; deviceId: string; credential: DeviceCredential }> {
   const invite = await owner.call({
     type: "device.invite",
-    payload: grants.length > 0 ? { grants } : null,
+    payload: null,
   });
   if (invite?.type !== "invite") throw new Error("device.invite failed");
   const code = invite.data.code;

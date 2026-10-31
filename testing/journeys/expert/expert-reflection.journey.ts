@@ -51,7 +51,7 @@ defineJourney(
     expectedDurationMs: 90_000,
     timeoutMs: 600_000,
     surfaces: ["daemon", "spacebuilder", "genet-cli", "script-agent", "timer-hook"],
-    productInterfaces: ["tools/expert.py", "genet session rounds", "genet hook list", "session.send --queue"],
+    productInterfaces: ["tools/team.py", "genet session rounds", "genet hook list", "session.send --queue"],
   },
   async (t) => {
     hideHostAgentClis(t.env);
@@ -117,7 +117,7 @@ defineJourney(
       const genet = locateGenet(t.openRoot);
       const env = { ...genetEnv(t.openRoot, { ...t.env.env, GENEHUB_LOCAL_DATA_DIR: t.env.data }), GENEHUB_CLI: genet };
       const expert = (...args: string[]) => {
-        const done = spawnSync("python3", [path.join(alice, "tools", "expert.py"), ...args], { cwd: path.join(alice, "front"), env, encoding: "utf8" });
+        const done = spawnSync("python3", [path.join(alice, "tools", "team.py"), ...args], { cwd: path.join(alice, "front"), env, encoding: "utf8" });
         return { code: done.status ?? -1, out: done.stdout.trim(), err: done.stderr.trim() };
       };
       const say = async (text: string): Promise<void> => {

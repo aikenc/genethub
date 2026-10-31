@@ -48,17 +48,17 @@ defineSpecialty({
       const result = await opened.client.call({ type: "device.list" });
       return result?.type === "devices" && result.data.remote.online;
     }, 20000);
-    const first = await t.flows.main.pairDevice(opened.client, opened.daemon, [], "stalled-client");
+    const first = await t.flows.main.pairDevice(opened.client, opened.daemon, "stalled-client");
     first.client.close();
-    const second = await t.flows.main.pairDevice(opened.client, opened.daemon, [], "healthy-client");
+    const second = await t.flows.main.pairDevice(opened.client, opened.daemon, "healthy-client");
     second.client.close();
     a = await connectProductClient({
       url: stalledLeg.urlFor(attached.data.rendezvousUrl), credential: first.credential,
     });
     b = await connectProductClient({ url: attached.data.rendezvousUrl, credential: second.credential });
     // Independent browser connections may share one paired device identity.
-    // Avoid creating and abandoning extra local logical sessions while seeding
-    // the cohort: those correctly retain resume slots after their sockets close.
+    // Seed additional authenticated peers directly; each owns only its live
+    // physical carrier, with no retained recovery slot after closure.
     for (let i = 1; i < peers; i++) {
       extra.push(await connectProductClient({ url: attached.data.rendezvousUrl, credential: second.credential }));
     }
@@ -71,7 +71,7 @@ defineSpecialty({
     const baseline = await b.preview(opened.workspaceId, path("isolated-small.png"));
     const baselineMs = performance.now() - baselineStarted;
     t.assertions.assert(digest(baseline.bytes) === smallHash && baselineMs < 1200, "healthy preview baseline failed");
-    // Allow the baseline's final ACK and idle interval to precede the fault.
+    // Separate the completed baseline from the downstream fault.
     await new Promise(resolve => setTimeout(resolve, 250));
     uplink.resetStats();
     stalledLeg.blackhole("server");

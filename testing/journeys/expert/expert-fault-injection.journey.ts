@@ -1,5 +1,5 @@
 // What the expert's timer hook does when a background session does not simply finish. Each branch of
-// `tools/expert.py hook` is driven by a real session that misbehaves in one named way (the script Agent
+// `tools/team.py hook` is driven by a real session that misbehaves in one named way (the script Agent
 // fixture), through the shipped daemon, template and SpaceBuilder; the front must be told exactly once,
 // in words that say what happened and what to do, and what cannot be delivered must say so to the caller.
 //
@@ -50,7 +50,7 @@ defineJourney(
     expectedDurationMs: 90_000,
     timeoutMs: 360_000,
     surfaces: ["daemon", "spacebuilder", "genet-cli", "script-agent", "timer-hook"],
-    productInterfaces: ["tools/expert.py", "genet hook list", "session.send --system"],
+    productInterfaces: ["tools/team.py", "genet hook list", "session.send --system"],
   },
   async (t) => {
     hideHostAgentClis(t.env);
@@ -102,7 +102,7 @@ defineJourney(
       const genet = locateGenet(t.openRoot);
       const env = { ...genetEnv(t.openRoot, { ...t.env.env, GENEHUB_LOCAL_DATA_DIR: t.env.data }), GENEHUB_CLI: genet };
       const expert = (...args: string[]) => {
-        const done = spawnSync("python3", [path.join(alice, "tools", "expert.py"), ...args], { cwd: path.join(alice, "front"), env, encoding: "utf8" });
+        const done = spawnSync("python3", [path.join(alice, "tools", "team.py"), ...args], { cwd: path.join(alice, "front"), env, encoding: "utf8" });
         return { code: done.status ?? -1, out: done.stdout, err: done.stderr };
       };
       const spawnWith = async (agent: string, desc: string): Promise<string> => {

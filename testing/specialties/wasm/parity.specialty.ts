@@ -1,28 +1,18 @@
-import { spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import path from "node:path";
 
 import {
   BlockedError,
   defineSpecialty,
-  genetEnv,
-  locateGenet,
   registerScriptedCodex,
   tryLocateDaemonComponent,
   tryLocateHost,
   type CaseContext,
 } from "../../framework/public.ts";
 
-/**
- * The guest is the daemon now, and the questions below are ones a component
- * cannot answer for itself: where a program is installed, and what this kernel
- * will hold a process to. Both were quietly lost when the daemon moved inside
- * the component — the first hid every third-party agent, the second refused
- * every narrowed device — and both are answered by the shell. These cases care
- * about the product outcome, not the import: an agent that is installed shows
- * up, and a device that may not have an unconfined terminal gets a confined
- * one rather than a refusal.
- */
+/** The component delegates OS facts to the native host. Installed CLIs are
+ * discovered through that host, and a full paired connection has the same
+ * OS-account command capability on native and guest paths. */
 
 type Opened = Awaited<ReturnType<CaseContext["flows"]["main"]["openWorkspace"]>>;
 
@@ -100,83 +90,31 @@ defineSpecialty(
 defineSpecialty(
   parityMeta(
     "specialty.wasm.isolation.narrowed-device-gets-a-real-sandbox",
-    "A device without pty:unconfined runs commands the kernel is holding to the workspace",
-    "on a machine whose own wrapper can confine, the command reports GENEHUB_CONFINEMENT and cannot read a file one directory outside the workspace; on a machine that cannot, the request is refused rather than run loose",
+    "A full paired device has the same OS command capability in the wasm guest",
+    "paired shell reads the known sibling file with exit 0; guest architecture does not change full connection authority",
     [
-      "the guest reports no isolation backend on every machine and refuses every narrowed device",
+      "the guest refuses full paired commands based on obsolete device tiers",
       "the wrapper argv names the component instead of a native binary",
-      "confinement is claimed but the process can still read the whole account",
-      "an unconfinable machine runs the command anyway",
+      "full paired commands lose OS-account access",
+      "a successful shell receipt hides a failed command",
     ],
   ),
   async (t) => {
     requireWasmArtifacts(t.openRoot);
-    const genet = locateGenet(t.openRoot);
-    // The machine's own answer, taken from the same wrapper the daemon uses,
-    // so this case cannot pass by agreeing with a guess. Anything the policy
-    // does not name is unreachable, hence the loader directories.
-    const probe = spawnSync(
-      genet,
-      [
-        "__confine",
-        "--root",
-        t.env.root,
-        "--rw",
-        "/dev/null",
-        "--ro",
-        "/usr",
-        "--ro",
-        "/bin",
-        "--ro",
-        "/lib",
-        "--ro",
-        "/lib64",
-        "--ro",
-        "/etc",
-        "--",
-        "/bin/true",
-      ],
-      { env: genetEnv(t.openRoot, t.env.env), encoding: "utf8" },
-    );
-    const machineCanConfine = probe.status === 0;
-
     const outside = path.join(t.env.root, "not-the-workspace.txt");
     writeFileSync(outside, "outside-the-workspace\n");
 
     await withOpened(t, async (opened) => {
-      // Everything but the unconfined terminal: the narrowing is the point,
-      // and a device paired with the default full grant set would never reach
-      // the confinement path at all.
-      const device = await t.flows.main.pairDevice(opened.client, opened.daemon, [
-        "read",
-        "session",
-        "files",
-        "pty",
-      ]);
+      const device = await t.flows.main.pairDevice(opened.client, opened.daemon);
       try {
         const result = await t.flows.main.runShell(device.client, {
           workspaceId: opened.workspaceId,
           argv: ["/bin/sh", "-c", `printf %s "$GENEHUB_CONFINEMENT"; cat ${outside} 2>/dev/null`],
         });
 
-        if (!machineCanConfine) {
-          t.assertions.assert(
-            result.status === 403 || result.status === 503,
-            `an unconfinable machine ran the command anyway: ${result.status} ${JSON.stringify(result.frames)}`,
-          );
-          return;
-        }
-
-        t.assertions.assert(result.status === 200, `confined run refused: ${result.status}`);
-        const stdout = t.flows.main.shellText(result.frames, "stdout");
-        t.assertions.assert(
-          /^(landlock|namespaces)/.test(stdout),
-          `the process was not told it is confined, so it was not: ${JSON.stringify(stdout)}`,
-        );
-        t.assertions.assert(
-          !stdout.includes("outside-the-workspace"),
-          `a confined process read a file outside the workspace: ${JSON.stringify(stdout)}`,
-        );
+        t.assertions.assert(result.status === 200, "complete paired shell refused");
+        t.assertions.assert(t.flows.main.shellText(result.frames,"stdout").includes("outside-the-workspace"),"paired shell lost OS account file access");
+        t.assertions.assert(t.flows.main.shellExit(result.frames)?.code===0,"paired sibling read failed");
       } finally {
         device.client.close();
       }

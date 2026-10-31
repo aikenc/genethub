@@ -1,0 +1,23 @@
+// One-off existing Rust CLI case comparison; archived after the TS takeover.
+import {spawn} from "node:child_process";
+import {createHash} from "node:crypto";
+import {readFileSync} from "node:fs";
+import path from "node:path";
+import {defineSpecialty} from "../../framework/public.ts";
+const binarySha256="d5d6edc197e92a8bde7b2a11e0bf83f8d6ebcf15a7e4f2f9af2a606ccf28bd90";
+defineSpecialty({id:"specialty.parity-reconstruction.cli-remote",title:"Existing seven Rust CLI contracts run through the same current CLI and guest as TS",oracle:"all seven existing native-side CLI contracts pass with the common CLI/guest Agent; no ignored or unselected tests count as passing",catches:["native CLI cases were never executed","current CLI differs at the same public action boundary"],tags:["parity-reconstruction"],llm:{default:"mock"},expectedDurationMs:60000,timeoutMs:300000,resources:{environments:1,cpu:2,memoryMb:2048,io:1,browser:0},requiredArtifacts:["genet","genehub-host-local","genehub_guest.wasm"],surfaces:["legacy-rust","genet-cli"],productInterfaces:["frozen-legacy","genet-cli"]},async t=>{
+ const binary=path.join(t.openRoot,"target/debug/deps/remote-7f0981ce2c65e585");
+ t.assertions.assert(createHash("sha256").update(readFileSync(binary)).digest("hex")===binarySha256,"native executable differs from the source reconstruction");
+ t.assertions.assert(readFileSync(path.join(t.openRoot,"apps/relay/dist/main.js")).length>0,"the native cases would silently return without the Relay bundle");
+ const alias="/data/workspace/genethub-work/genethub-spaces/spaces/dev-3/parity-reconstruction/agent-cli.sh";
+ t.assertions.assert(createHash("sha256").update(readFileSync(alias)).digest("hex")==="d3d6eb6cf7b73a0d51621cdff308922afcf4f640ef31264167d8b8d52100d126","common Agent launch alias changed");
+ const env:NodeJS.ProcessEnv={...process.env,...t.env.env,GENET_PARITY_CLI:path.join(t.openRoot,"target/iterate/genet-local"),GENET_AGENT_BINARY:"/data/workspace/genethub-work/genethub-spaces/spaces/dev-3/parity-reconstruction/agent-cli.sh",GENEHUB_LOCAL_COMPONENT:path.join(t.openRoot,"target/wasm32-wasip2/iterate/genehub_guest.wasm"),GENEHUB_HOST:path.join(t.openRoot,"target/iterate/genehub-host-local"),TMPDIR:t.env.root};
+ delete env.GENEHUB_SESSION_ID;delete env.GENEHUB_CONTROLLER_TOKEN;delete env.GENEHUB_NETWORK_CALLER_ENV;
+ const result=await new Promise<{code:number;output:string}>((resolve,reject)=>{
+  const child=spawn(binary,["--nocapture"],{env,cwd:t.env.workspace,stdio:["ignore","pipe","pipe"]});let output="";
+  const receive=(chunk:Buffer)=>{output=(output+chunk.toString()).slice(-49152);};child.stdout.on("data",receive);child.stderr.on("data",receive);child.once("error",reject);child.once("close",code=>resolve({code:code??1,output}));
+ });
+ t.assertions.assert(result.code===0&&result.output.includes("7 passed; 0 failed; 0 ignored"),`native CLI contracts did not all pass: ${result.output}`);
+ t.note(`nativeBinarySha256=${binarySha256}; common CLI/guest bundle is recorded in manifest; native-daemon and WASM-daemon executables differ but use this same source.`);
+ t.note(result.output);
+});

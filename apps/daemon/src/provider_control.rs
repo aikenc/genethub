@@ -356,8 +356,8 @@ pub(crate) async fn execute(
     );
     let summary = state.sessions.summary(session_id).await?;
     ensure!(
-        summary.managed.is_none(),
-        "provider configuration needs an ordinary Human-controlled Session"
+        summary.history_only != Some(true),
+        "retired execution history cannot configure providers; fork to continue"
     );
     let path = state
         .sessions

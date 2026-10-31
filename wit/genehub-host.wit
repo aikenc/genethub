@@ -76,18 +76,11 @@ interface process {
   scratch-dir: func() -> string;
 }
 
-/// What the kernel will hold a started process to, when the daemon runs
-/// something for somebody who is not sitting at this machine.
-///
-/// WASI cannot ask. The answer is an LSM version syscall and a fork that tries
-/// to unshare, and a component has neither — so a guest left to itself must
-/// report "nothing is enforced here" on every machine, and refuse every remote
-/// terminal on the machines that could in fact have confined it. Permanent
-/// while confinement is a native mechanism applied by the process being
-/// confined (`packages/native/src/confine.rs`).
+/// Native kernel capability diagnostics. No sandbox is applied to Agent commands.
+/// WASI asks the host because these probes require native syscalls.
 interface isolation {
   enum mechanism {
-    /// Nothing is in force. Callers that need confinement are refused.
+    /// No capability was detected by this probe.
     absent,
     landlock,
     namespaces,
@@ -95,7 +88,7 @@ interface isolation {
 
   record report {
     backend: mechanism,
-    /// Whether a confined process would really be confined.
+    /// Whether the capability probe succeeded, not applied Agent isolation.
     enforced: bool,
     /// Why, in a sentence a person can act on, whether or not it worked.
     detail: string,

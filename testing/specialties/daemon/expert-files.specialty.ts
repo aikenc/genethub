@@ -1,6 +1,6 @@
 // An expert keeps its files in its own directory: `datas/` for what it wants to maintain, `temp/` for what may
 // be cleaned at any time. Names in `temp/` are the only index the expert has, so they are made by the script
-// (`tools/expert.py temp new`) and checked there. These cases run the real script on a copy of the shipped
+// (`tools/team.py temp new`) and checked there. These cases run the real script on a copy of the shipped
 // expert template, in-process where time or a second caller has to be controlled, and through the command
 // line where the Agent's own interface is what is under test. No daemon and no model are involved.
 
@@ -16,16 +16,16 @@ const DAY = 86400;
 const DRIVER = `
 import json, os, sys, time
 sys.path.insert(0, os.path.join(os.environ["EXPERT"], "tools"))
-import expert
+import team
 steps = json.loads(os.environ["STEPS"])
 root = os.environ["EXPERT"]
 out = []
 for step in steps:
     try:
         if step["do"] == "new":
-            out.append({"path": expert.temp_new(root, step["slug"], step.get("purpose", "p"), step["now"], step["caller"])})
+            out.append({"path": team.temp_new(root, step["slug"], step.get("purpose", "p"), step["now"], step["caller"])})
         elif step["do"] == "clean":
-            removed = expert.temp_clean(root, step.get("keep"), step.get("dry", False), step["now"])
+            removed = team.temp_clean(root, step.get("keep"), step.get("dry", False), step["now"])
             out.append({"removed": sorted(os.path.relpath(p, root) for p, _ in removed)})
         elif step["do"] == "age":
             target = os.path.join(root, step["path"])
@@ -47,7 +47,7 @@ for step in steps:
             open(target, "w").write("x")
             os.utime(target, (step["at"], step["at"]))
             out.append({})
-    except expert.ExpertError as error:
+    except team.ExpertError as error:
         out.append({"error": error.what, "next": error.next})
 print(json.dumps(out))
 `;
@@ -66,7 +66,7 @@ function setup(t: CaseContext, name: string): { expert: string; run: (steps: unk
       return JSON.parse(done.stdout) as Outcome[];
     },
     cli: (args, session = "s_aaaa") => {
-      const done = spawnSync("python3", ["tools/expert.py", ...args], { cwd: expert, env: { ...env, GENEHUB_SESSION_ID: session }, encoding: "utf8" });
+      const done = spawnSync("python3", ["tools/team.py", ...args], { cwd: expert, env: { ...env, GENEHUB_SESSION_ID: session }, encoding: "utf8" });
       return { code: done.status ?? -1, out: done.stdout.trim(), err: done.stderr };
     },
   };
@@ -79,8 +79,8 @@ const base = {
   timeoutMs: 60_000,
   requiredArtifacts: [],
   resources: { environments: 1, cpu: 1 },
-  surfaces: ["tools/expert.py"],
-  productInterfaces: ["tools/expert.py"],
+  surfaces: ["tools/team.py"],
+  productInterfaces: ["tools/team.py"],
 };
 
 // 2026-10-13 14:05:00 local time; only differences and the printed date parts matter.
@@ -262,7 +262,7 @@ defineSpecialty(
       t.assertions.assert(words.every((word) => text.includes(word)), `${file} does not state its rules`);
     }
 
-    // `expert.py init`: refuses bad names/existing directories, and scaffolds a complete expert with git + compiled identity.
+    // `team.py init`: refuses bad names/existing directories, and scaffolds a complete expert with git + compiled identity.
     const builder = join(t.openRoot, "apps/daemon/builtin-skills/genehub/references/spacebuilder/spacebuilder.py");
     const initEnv = {
       PATH: process.env.PATH ?? "",
@@ -271,17 +271,17 @@ defineSpecialty(
       EXPERT_SPACEBUILDER: builder,
     };
     for (const badName of ["", "expert", "../escape", ".hidden"]) {
-      const refused = spawnSync("python3", ["tools/expert.py", "init", badName, "--desc", "x"], { cwd: expert, env: initEnv, encoding: "utf8" });
+      const refused = spawnSync("python3", ["tools/team.py", "init", badName, "--desc", "x"], { cwd: expert, env: initEnv, encoding: "utf8" });
       t.assertions.assert(refused.status !== 0 && refused.stderr.includes("不合法"), `init accepted bad name ${JSON.stringify(badName)}: ${refused.stdout}`);
     }
     const inited = spawnSync(
       "python3",
-      ["tools/expert.py", "init", "game-qa", "--desc", "QA自动化专家", "--soul", "使用Playwright真实操作与截图核验"],
+      ["tools/team.py", "init", "game-qa", "--desc", "QA自动化专家", "--soul", "使用Playwright真实操作与截图核验"],
       { cwd: expert, env: initEnv, encoding: "utf8" },
     );
     t.assertions.assert(inited.status === 0 && inited.stdout.includes("已创建并初始化团队 game-qa"), `init game-qa: ${inited.stdout} ${inited.stderr}`);
     const qaDir = join(t.env.root, "expert-datas-paths", "game-qa");
-    const dupInit = spawnSync("python3", ["tools/expert.py", "init", "game-qa", "--desc", "x"], { cwd: expert, env: initEnv, encoding: "utf8" });
+    const dupInit = spawnSync("python3", ["tools/team.py", "init", "game-qa", "--desc", "x"], { cwd: expert, env: initEnv, encoding: "utf8" });
     t.assertions.assert(dupInit.status !== 0 && dupInit.stderr.includes("已存在"), "duplicate init succeeded");
     const qaSoul = readFileSync(join(qaDir, "soul.md"), "utf8");
     t.assertions.assert(

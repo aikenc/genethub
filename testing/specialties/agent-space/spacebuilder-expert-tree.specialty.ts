@@ -56,7 +56,7 @@ function expertTree(t: CaseContext): string {
   space(path.join(root, "spaces", "work"), "work", ["worker"]);
   write(
     path.join(root, ".spacebuilder", "skills", "core", "hooks", "tick.genet.json"),
-    JSON.stringify({ event: "timer", every: "5s", exec: ["python3", "tools/expert.py", "hook"] }),
+    JSON.stringify({ event: "timer", every: "5s", exec: ["python3", "tools/team.py", "hook"] }),
   );
   return root;
 }

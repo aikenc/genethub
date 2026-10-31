@@ -12,17 +12,24 @@ use tokio::task::JoinSet;
 
 use super::authenticated_channel::{authenticated_channel, AuthenticatedWriter, Role};
 pub use super::authenticated_channel::{carrier_channels, Carrier};
-use crate::authz::{self, Capability, Principal, StreamMethod};
+use crate::authz::{Principal, StreamMethod};
 use crate::channel_auth::SessionKey;
-use crate::dataplane::frame::{Frame, Kind, MAX_PAYLOAD_BYTES};
+use crate::dataplane::frame::{Frame, Kind, HEADER_BYTES, MAX_PAYLOAD_BYTES};
 use crate::router::{self, SideEffect};
 use crate::state::Shared;
 
 const WRITER_COMMAND_QUEUE: usize = 1024;
 const STREAM_CHUNK_QUEUE: usize = 256;
 const EVENT_QUEUE: usize = 256;
+pub(crate) const SEND_QUEUE_BYTES: usize = 4 * 1024 * 1024;
+pub(crate) const RECEIVE_QUEUE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_RPC_BODY_BYTES: usize = 3 * 1024 * 1024;
-const MAX_SUBSCRIPTIONS: usize = 64;
+// One logical peer may follow many sessions at once: a single browser window
+// can open a transcript per visible session, and the team view follows every
+// member's session. The previous cap of 64 was silently enforced — a 65th
+// subscribe was answered successfully and then dropped, so the client waited
+// forever for events that never came.
+const MAX_SUBSCRIPTIONS: usize = 512;
 
 pub const RESET_CANCELLED: u32 = 1;
 pub const RESET_PROTOCOL: u32 = 2;
@@ -58,7 +65,8 @@ pub struct PeerAccess {
     pub(crate) authorization_expires_at: Option<std::time::Instant>,
     pub transport: TransportKind,
     pub device_id: Option<String>,
-    /// A resource-routed peer may operate only this daemon-local workspace.
+    /// Default placement for a resource-routed full peer; a PreviewShare uses
+    /// the same locator with its separately verified preview scope.
     pub workspace_id: Option<String>,
     /// The locator visible to the browser. Hosted routes use a Hub workspace
     /// handle while local routes use the daemon-local id.
@@ -69,7 +77,7 @@ pub struct PeerAccess {
 struct IncomingChunk {
     bytes: Vec<u8>,
     _permit: OwnedSemaphorePermit,
-    _lease: Option<super::logical_connection::Lease>,
+    _connection_budget: OwnedSemaphorePermit,
 }
 
 enum Incoming {
@@ -87,65 +95,6 @@ struct StreamState {
     remote_bytes: u64,
     expected_remote_bytes: Option<u64>,
     remote_finished: bool,
-    outbound_credit: Credit,
-}
-
-#[derive(Clone)]
-struct Credit {
-    inner: Arc<CreditInner>,
-}
-
-struct CreditInner {
-    value: Mutex<u32>,
-    maximum: u32,
-    notify: tokio::sync::Notify,
-}
-
-impl Credit {
-    fn new(value: u32) -> Result<Self> {
-        if value == 0 || value > genehub_proto::MAX_BULK_STREAM_WINDOW_BYTES {
-            anyhow::bail!("invalid initial stream credit");
-        }
-        Ok(Self {
-            inner: Arc::new(CreditInner {
-                value: Mutex::new(value),
-                maximum: value,
-                notify: tokio::sync::Notify::new(),
-            }),
-        })
-    }
-
-    async fn take(&self, maximum: usize) -> Result<usize> {
-        loop {
-            let notified = self.inner.notify.notified();
-            {
-                let mut value = self.inner.value.lock().unwrap();
-                if *value > 0 {
-                    let taken = maximum.min(*value as usize).min(MAX_PAYLOAD_BYTES);
-                    *value -= taken as u32;
-                    return Ok(taken);
-                }
-            }
-            notified.await;
-        }
-    }
-
-    fn add(&self, value: u32) -> bool {
-        if value == 0 {
-            return false;
-        }
-        let mut current = self.inner.value.lock().unwrap();
-        let Some(next) = current.checked_add(value) else {
-            return false;
-        };
-        if next > self.inner.maximum {
-            return false;
-        }
-        *current = next;
-        drop(current);
-        self.inner.notify.notify_waiters();
-        true
-    }
 }
 
 struct WriterCommand {
@@ -162,7 +111,7 @@ struct WriterCommand {
 struct WriterCompletion {
     actor_queue_us: u64,
     actor_send_us: u64,
-    acknowledged_at: Option<Instant>,
+    accepted_at: Option<Instant>,
 }
 
 #[derive(Clone)]
@@ -177,7 +126,6 @@ struct Writer {
 /// pay for per-frame clocks; ordinary business streams use `write` unchanged.
 #[derive(Default)]
 pub(crate) struct WriteTimings {
-    pub(crate) credit_us: u64,
     pub(crate) budget_us: u64,
     pub(crate) enqueue_us: u64,
     pub(crate) completion_us: u64,
@@ -209,7 +157,7 @@ impl Writer {
         let began = timings.as_ref().map(|_| Instant::now());
         let budget = budget
             .clone()
-            .acquire_many_owned((frame.payload.len() + 36) as u32)
+            .acquire_many_owned((frame.payload.len() + HEADER_BYTES) as u32)
             .await?;
         if let (Some(timings), Some(began)) = (timings.as_mut(), began) {
             timings.budget_us += began.elapsed().as_micros() as u64;
@@ -239,8 +187,8 @@ impl Writer {
             timings.completion_us += began.elapsed().as_micros() as u64;
             timings.actor_queue_us += completion.actor_queue_us;
             timings.actor_send_us += completion.actor_send_us;
-            if let Some(acknowledged_at) = completion.acknowledged_at {
-                timings.wake_us += acknowledged_at.elapsed().as_micros() as u64;
+            if let Some(accepted_at) = completion.accepted_at {
+                timings.wake_us += accepted_at.elapsed().as_micros() as u64;
             }
         }
         Ok(())
@@ -256,7 +204,7 @@ impl Writer {
         };
         let budget = budget
             .clone()
-            .try_acquire_many_owned((frame.payload.len() + 36) as u32)?;
+            .try_acquire_many_owned((frame.payload.len() + HEADER_BYTES) as u32)?;
         let count = self.count.clone().try_acquire_owned()?;
         self.commands
             .try_send(WriterCommand {
@@ -282,7 +230,6 @@ pub(crate) struct ServerStream {
     inbound: mpsc::Receiver<Incoming>,
     writer: Writer,
     commands: mpsc::Sender<EndpointCommand>,
-    credit: Credit,
     local_sequence: u32,
     local_bytes: u64,
     expected_local_bytes: Option<u64>,
@@ -299,37 +246,21 @@ pub(crate) enum StreamInput {
 }
 
 impl ServerStream {
-    /// Reads one request-side chunk and returns its stream credit immediately
-    /// after ownership has moved into the business handler. Duplex handlers
-    /// use this instead of waiting for a finite request body.
+    /// Moves one request chunk into the handler and releases local queue custody.
     pub(crate) async fn next_input(&mut self) -> Result<StreamInput> {
         match self.inbound.recv().await {
             Some(Incoming::Chunk(chunk)) => {
                 let IncomingChunk {
                     bytes,
                     _permit,
-                    _lease,
+                    _connection_budget,
                 } = chunk;
-                drop(_lease);
-                let credit = bytes.len() as u32;
+                drop(_connection_budget);
                 drop(_permit);
                 if self.head.method == "rpc" {
                     tracing::debug!(target: "diagnostic",
                         request_id = diagnostic_id(&self.head.metadata), request_bytes = bytes.len(),
                         "RPC request chunk received");
-                }
-                self.writer
-                    .send(Frame {
-                        kind: Kind::WindowUpdate,
-                        stream_id: self.id,
-                        value: credit,
-                        payload: Vec::new(),
-                    })
-                    .await?;
-                if self.head.method == "rpc" {
-                    tracing::debug!(target: "diagnostic",
-                        request_id = diagnostic_id(&self.head.metadata),
-                        "RPC request credit returned");
                 }
                 Ok(StreamInput::Chunk(bytes))
             }
@@ -389,7 +320,7 @@ impl ServerStream {
             .send(Frame {
                 kind: Kind::Head,
                 stream_id: self.id,
-                value: genehub_proto::INITIAL_STREAM_WINDOW_BYTES,
+                value: 0,
                 payload,
             })
             .await?;
@@ -400,7 +331,7 @@ impl ServerStream {
     }
 
     pub(crate) async fn write(&mut self, bytes: &[u8]) -> Result<()> {
-        self.write_inner(bytes, None, super::logical_connection::WriteClass::Bulk)
+        self.write_inner(bytes, None, super::logical_connection::WriteClass::Ordinary)
             .await
     }
 
@@ -412,7 +343,7 @@ impl ServerStream {
         self.write_inner(
             bytes,
             Some(timings),
-            super::logical_connection::WriteClass::Bulk,
+            super::logical_connection::WriteClass::Ordinary,
         )
         .await
     }
@@ -428,11 +359,7 @@ impl ServerStream {
         }
         let mut offset = 0;
         while offset < bytes.len() {
-            let began = timings.as_ref().map(|_| Instant::now());
-            let length = self.credit.take(bytes.len() - offset).await?;
-            if let (Some(timings), Some(began)) = (timings.as_mut(), began) {
-                timings.credit_us += began.elapsed().as_micros() as u64;
-            }
+            let length = (bytes.len() - offset).min(MAX_PAYLOAD_BYTES);
             let next = self
                 .local_bytes
                 .checked_add(length as u64)
@@ -536,9 +463,8 @@ pub(crate) struct PeerServices {
     pub(crate) carrier_kind: CarrierKind,
 }
 
-/// Logical peer state has one lifetime owner, independent of record crypto.
-/// The registry retains this owner across detach and destroys it at logical
-/// termination; invitation bootstrap deliberately retains physical lifetime.
+/// Endpoint state has the physical carrier lifetime. Teardown fences handlers
+/// and subscriptions before releasing their queues and authentication owner.
 struct PeerRuntime {
     streams: HashMap<u32, StreamState>,
     handlers: JoinSet<()>,
@@ -574,41 +500,6 @@ impl Drop for PeerRuntime {
     }
 }
 
-/// Serves one already mutually-authenticated peer until its carrier closes.
-pub(crate) enum PeerReader {
-    Physical(super::authenticated_channel::AuthenticatedReader),
-    Logical(super::logical_connection::Reader),
-}
-impl PeerReader {
-    pub(crate) async fn receive(
-        &mut self,
-    ) -> Result<Option<(Frame, Option<super::logical_connection::Lease>)>> {
-        match self {
-            Self::Physical(reader) => reader
-                .receive()
-                .await?
-                .map(|bytes| Frame::decode(&bytes).map(|frame| (frame, None)))
-                .transpose(),
-            Self::Logical(reader) => Ok(reader
-                .receive()
-                .await
-                .map(|received| (received.frame, Some(received.lease)))),
-        }
-    }
-}
-pub(crate) enum PeerWriter {
-    Physical(AuthenticatedWriter),
-    Logical(super::logical_connection::Writer),
-}
-impl PeerWriter {
-    pub(crate) async fn send(&mut self, frame: Frame) -> Result<()> {
-        match self {
-            Self::Physical(writer) => writer.send(&frame.encode()?).await,
-            Self::Logical(writer) => writer.send(frame).await,
-        }
-    }
-}
-
 pub async fn serve(
     state: Shared,
     key: SessionKey,
@@ -620,52 +511,29 @@ pub async fn serve(
     // engine with physical lifetime; it cannot create registry credentials.
     if access.bootstrap_invite.is_some() {
         let (reader, writer) = authenticated_channel(key, carrier, Role::Server);
-        return serve_streams(
-            state,
-            access,
-            PeerReader::Physical(reader),
-            PeerWriter::Physical(writer),
-            carrier_kind,
-        )
-        .await;
+        return serve_streams(state, access, reader, writer, carrier_kind).await;
     }
     super::logical_connection::serve(state, key, access, carrier, carrier_kind).await
 }
-pub(crate) async fn serve_logical(
+pub(crate) async fn serve_streams(
     state: Shared,
     access: PeerAccess,
-    reader: super::logical_connection::Reader,
-    writer: super::logical_connection::Writer,
-    carrier_kind: CarrierKind,
-) -> Result<()> {
-    serve_streams(
-        state,
-        access,
-        PeerReader::Logical(reader),
-        PeerWriter::Logical(writer),
-        carrier_kind,
-    )
-    .await
-}
-async fn serve_streams(
-    state: Shared,
-    access: PeerAccess,
-    mut channel_reader: PeerReader,
-    channel_writer: PeerWriter,
+    mut channel_reader: super::authenticated_channel::AuthenticatedReader,
+    channel_writer: AuthenticatedWriter,
     carrier_kind: CarrierKind,
 ) -> Result<()> {
     let mut revocations = state.devices.subscribe_revocations();
     if access
         .device_id
         .as_ref()
-        .is_some_and(|id| state.devices.grants(id).is_none())
+        .is_some_and(|id| !state.devices.authorized(id))
     {
         anyhow::bail!("the peer device was revoked");
     }
     let (writer_tx, writer_rx) = mpsc::channel(WRITER_COMMAND_QUEUE);
     let writer = Writer {
         commands: writer_tx,
-        budget: Arc::new(Semaphore::new(4 * 1024 * 1024)),
+        budget: Arc::new(Semaphore::new(SEND_QUEUE_BYTES)),
         progress: Arc::new(Semaphore::new(64 * 1024)),
         count: Arc::new(Semaphore::new(256)),
     };
@@ -682,58 +550,34 @@ async fn serve_streams(
         carrier_kind,
     });
 
-    // A terminal is shared across a user's own devices on purpose, but this
-    // fanout reaches every authenticated peer, and a device that was never
-    // granted `pty` must not be sent the terminal anyway. Gating only
-    // `pty.open` would leave the output arriving unasked, which is the half
-    // that matters: a shell shows keystrokes, paths, and whatever the user
-    // pastes into it.
-    //
-    // Decided once, at connection: grants are fixed when a device is paired,
-    // and revoking one drops its connections rather than editing them.
     let watcher = Principal::of(&state, &access);
-    let scoped_processes = access.workspace_id.is_some();
-    state
-        .diagnostics
-        .record("stream", "data.endpoint", "online", None);
-    let fanout_task = state.fanout.get().map(|fanout| {
-        let mut receiver = fanout.subscribe();
-        let events = services.event_sender.clone();
-        tokio::spawn(async move {
-            loop {
-                match receiver.recv().await {
-                    Ok(frame) => {
-                        if matches!(watcher, Principal::PreviewShare { .. }) {
-                            continue;
-                        }
-                        if frame_requires(&frame)
-                            .is_some_and(|capability| !watcher.allows(capability))
-                        {
-                            continue;
-                        }
-                        let mut frame = if scoped_processes
-                            && matches!(frame, ServerFrame::BackgroundProcesses { .. })
-                        {
-                            // A notification only; the client refetches its scoped snapshot.
-                            ServerFrame::BackgroundProcesses {
-                                processes: Vec::new(),
+    state.diagnostics.record(
+        "stream",
+        "data.endpoint",
+        "online",
+        Some(carrier_kind.as_str()),
+    );
+    let fanout_task = state
+        .fanout
+        .get()
+        .filter(|_| watcher.is_full())
+        .map(|fanout| {
+            let mut receiver = fanout.subscribe();
+            let events = services.event_sender.clone();
+            tokio::spawn(async move {
+                loop {
+                    match receiver.recv().await {
+                        Ok(frame) => {
+                            if events.send(frame).await.is_err() {
+                                return;
                             }
-                        } else {
-                            frame
-                        };
-                        if let ServerFrame::AgentsChanged { agents } = &mut frame {
-                            filter_agent_logs(agents, &watcher);
                         }
-                        if events.send(frame).await.is_err() {
-                            return;
-                        }
+                        Err(broadcast::error::RecvError::Closed) => return,
+                        Err(broadcast::error::RecvError::Lagged(_)) => return,
                     }
-                    Err(broadcast::error::RecvError::Closed) => return,
-                    Err(broadcast::error::RecvError::Lagged(_)) => return,
                 }
-            }
-        })
-    });
+            })
+        });
 
     if let Some(device_id) = &access.device_id {
         state.devices.mark_connected(device_id);
@@ -746,14 +590,24 @@ async fn serve_streams(
         fanout_task,
     };
 
+    let receive_budget = Arc::new(Semaphore::new(RECEIVE_QUEUE_BYTES));
+    let mut clock = tokio::time::interval(std::time::Duration::from_secs(5));
+    // Hosted revocation is already checked by the control-plane monitor.
+    // Do not add a whole physical heartbeat period before retiring RTC work.
+    // Keep physical probes on their original clock; only admitted Hosted or
+    // expiring access needs the shorter authorization check in this same task.
+    let mut authorization_clock = tokio::time::interval(std::time::Duration::from_secs(1));
+    authorization_clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last_received = Instant::now();
     let outcome = async {
         loop {
             tokio::select! {
                 plaintext = channel_reader.receive() => {
-                    let Some((frame, lease)) = plaintext? else { break Ok(()); };
+                    let Some(bytes) = plaintext? else { break Ok(()); };
+                    last_received = Instant::now();
                     dispatch(
-                        frame,
-                        lease,
+                        Frame::decode(&bytes)?,
+                        &receive_budget,
                         &mut peer.streams,
                         &writer,
                         &commands_tx,
@@ -774,10 +628,24 @@ async fn serve_streams(
                 failed = &mut writer_failed => {
                     break Err(failed.unwrap_or_else(|_| anyhow!("data-plane writer stopped")));
                 }
+                _ = authorization_clock.tick(), if access.hosted_authority.is_some() || access.authorization_expires_at.is_some() => {
+                    super::logical_registry::validate_access(&access)?;
+                }
+                _ = clock.tick() => {
+                    if (!matches!(carrier_kind, CarrierKind::Fabric) || access.bootstrap_invite.is_some()) && last_received.elapsed() >= std::time::Duration::from_secs(15) {
+                        break Err(anyhow!("peer heartbeat timed out"));
+                    }
+                    // Bootstrap has no encrypted admission round trip. Its peer
+                    // may still be deriving keys after WELCOME; do not emit an
+                    // unsolicited record before its one claim. The idle expiry
+                    // above still bounds an abandoned invitation connection.
+                    if !matches!(carrier_kind, CarrierKind::Fabric) && access.bootstrap_invite.is_none() {
+                        writer.try_send(Frame { kind: Kind::Ping, stream_id: 0, value: 0, payload: Vec::new() })?;
+                    }
+                }
                 revoked = revocations.recv(), if access.device_id.is_some() => {
                     match revoked {
                         Ok(id) if access.device_id.as_ref() == Some(&id) => {
-                            state.logical_connections.revoke_device(&id);
                             break Err(anyhow!("the peer device was revoked"));
                         }
                         Ok(_) => {}
@@ -810,7 +678,7 @@ async fn serve_streams(
 
 fn dispatch(
     frame: Frame,
-    lease: Option<super::logical_connection::Lease>,
+    receive_budget: &Arc<Semaphore>,
     streams: &mut HashMap<u32, StreamState>,
     writer: &Writer,
     commands: &mpsc::Sender<EndpointCommand>,
@@ -867,8 +735,7 @@ fn dispatch(
             })?;
             return Ok(());
         }
-        let maximum_window = genehub_proto::INITIAL_STREAM_WINDOW_BYTES;
-        if frame.value == 0 || frame.value > maximum_window {
+        if frame.value != 0 {
             writer.try_send(Frame {
                 kind: Kind::Reset,
                 stream_id: frame.stream_id,
@@ -878,10 +745,7 @@ fn dispatch(
             return Ok(());
         }
         let (inbound, receiver) = mpsc::channel(STREAM_CHUNK_QUEUE);
-        let inbound_budget = Arc::new(Semaphore::new(
-            genehub_proto::INITIAL_STREAM_WINDOW_BYTES as usize,
-        ));
-        let credit = Credit::new(frame.value)?;
+        let inbound_budget = Arc::new(Semaphore::new(MAX_RPC_BODY_BYTES));
         streams.insert(
             frame.stream_id,
             StreamState {
@@ -899,7 +763,6 @@ fn dispatch(
                 remote_bytes: 0,
                 expected_remote_bytes: head.body_length,
                 remote_finished: false,
-                outbound_credit: credit.clone(),
             },
         );
         let stream = ServerStream {
@@ -908,7 +771,6 @@ fn dispatch(
             inbound: receiver,
             writer: writer.clone(),
             commands: commands.clone(),
-            credit,
             local_sequence: 0,
             local_bytes: 0,
             expected_local_bytes: None,
@@ -928,10 +790,7 @@ fn dispatch(
     }
 
     let Some(stream) = streams.get_mut(&frame.stream_id) else {
-        // Consumption credit can arrive after our response FIN retired the stream.
-        // It has no receiver left to credit. Resetting every late update creates
-        // a control-frame storm and can disconnect unrelated active previews.
-        if !matches!(frame.kind, Kind::Reset | Kind::WindowUpdate) {
+        if !matches!(frame.kind, Kind::Reset) {
             writer.try_send(Frame {
                 kind: Kind::Reset,
                 stream_id: frame.stream_id,
@@ -961,26 +820,38 @@ fn dispatch(
                 anyhow::bail!("request body exceeds the length in its head");
             }
             let bytes = u32::try_from(frame.payload.len())?;
-            let permit = stream
-                .inbound_budget
-                .clone()
-                .try_acquire_many_owned(bytes)
-                .map_err(|_| anyhow!("peer exceeded its stream receive window"))?;
-            stream
-                .inbound
-                .try_send(Incoming::Chunk(IncomingChunk {
-                    bytes: frame.payload,
-                    _permit: permit,
-                    _lease: lease,
-                }))
-                .map_err(|_| anyhow!("stream handler receive queue is full"))?;
+            let queued = (|| {
+                let connection_budget =
+                    receive_budget.clone().try_acquire_many_owned(bytes).ok()?;
+                let permit = stream
+                    .inbound_budget
+                    .clone()
+                    .try_acquire_many_owned(bytes)
+                    .ok()?;
+                stream
+                    .inbound
+                    .try_send(Incoming::Chunk(IncomingChunk {
+                        bytes: frame.payload,
+                        _permit: permit,
+                        _connection_budget: connection_budget,
+                    }))
+                    .ok()
+            })();
+            if queued.is_none() {
+                if let Some(handler) = &stream.handler {
+                    handler.abort();
+                }
+                streams.remove(&frame.stream_id);
+                writer.try_send(Frame {
+                    kind: Kind::Reset,
+                    stream_id: frame.stream_id,
+                    value: RESET_REFUSED,
+                    payload: Vec::new(),
+                })?;
+                return Ok(());
+            }
             stream.remote_sequence = expected;
             stream.remote_bytes = next_bytes;
-        }
-        Kind::WindowUpdate => {
-            if !frame.payload.is_empty() || !stream.outbound_credit.add(frame.value) {
-                anyhow::bail!("invalid stream window update");
-            }
         }
         Kind::Fin => {
             if stream.remote_finished
@@ -992,10 +863,19 @@ fn dispatch(
             {
                 anyhow::bail!("malformed stream FIN");
             }
-            stream
-                .inbound
-                .try_send(Incoming::Fin)
-                .map_err(|_| anyhow!("stream handler receive queue is full"))?;
+            if stream.inbound.try_send(Incoming::Fin).is_err() {
+                if let Some(handler) = &stream.handler {
+                    handler.abort();
+                }
+                streams.remove(&frame.stream_id);
+                writer.try_send(Frame {
+                    kind: Kind::Reset,
+                    stream_id: frame.stream_id,
+                    value: RESET_REFUSED,
+                    payload: Vec::new(),
+                })?;
+                return Ok(());
+            }
             if let Some(request_id) = &stream.diagnostic_id {
                 tracing::debug!(target: "diagnostic", request_id,
                     "RPC request FIN dispatched");
@@ -1132,15 +1012,14 @@ async fn serve_stream(stream: &mut ServerStream, services: &PeerServices) -> Res
         )
         .await;
     }
-    let needed = method.required();
-    if !Principal::of(&services.state, &services.access).allows(needed) {
-        services.state.diagnostics.record(
-            "stream",
-            "authorization",
-            "error",
-            Some(needed.as_str()),
-        );
-        return refuse(stream, needed).await;
+    if !Principal::of(&services.state, &services.access).permits_stream(method) {
+        return send_error(
+            stream,
+            403,
+            ErrorCode::Forbidden,
+            "this connection does not permit this stream",
+        )
+        .await;
     }
     match method {
         StreamMethod::Events => handle_events(stream, services).await,
@@ -1157,63 +1036,20 @@ async fn serve_stream(stream: &mut ServerStream, services: &PeerServices) -> Res
     }
 }
 
-/// What a peer must have been granted to be told this.
-///
-/// Matched by name with no wildcard so that a new frame has to be classified
-/// here before it can be broadcast. Anything unsaid would be broadcast to
-/// every authenticated peer, which is the wrong default for a push: the peer
-/// never asked, so it never had a request for the usual check to refuse.
-fn frame_requires(frame: &ServerFrame) -> Option<Capability> {
-    match frame {
-        ServerFrame::PtyOutput { .. } | ServerFrame::PtyClosed { .. } => Some(Capability::Pty),
-        // Command lines of what an agent ran. The same material as the tool
-        // calls in a timeline, and gated the same way.
-        ServerFrame::BackgroundProcesses { .. } => Some(Capability::Session),
-        // What Agents exist and their state: the same as `agent.list`.
-        ServerFrame::AgentsChanged { .. } => Some(Capability::Read),
-        // A login link, a device code, a prompt for a key: only for a client
-        // that may change this machine's configuration.
-        ServerFrame::AgentRequestOpened { .. } | ServerFrame::AgentRequestClosed { .. } => {
-            Some(Capability::Settings)
-        }
-        ServerFrame::Event { .. }
-        | ServerFrame::Desync { .. }
-        | ServerFrame::Notice { .. }
-        | ServerFrame::UpdateDownloadChanged { .. } => None,
-    }
-}
-
-/// The one wording for "you are authenticated, and this is still not yours".
-///
-/// It names the missing capability rather than the request, so that a caller
-/// that was narrowed on purpose can tell that apart from a request it got
-/// wrong, and ask for the right invitation instead of retrying.
-async fn refuse(stream: &mut ServerStream, needed: Capability) -> Result<()> {
-    send_error(
-        stream,
-        403,
-        ErrorCode::Forbidden,
-        format!(
-            "this device was not granted `{}` on this machine",
-            needed.as_str()
-        ),
-    )
-    .await
-}
-
 async fn handle_protocol_identity(
     stream: &mut ServerStream,
     services: &PeerServices,
 ) -> Result<()> {
-    let needed = StreamMethod::ProtocolIdentity.required();
-    if !Principal::of(&services.state, &services.access).allows(needed) {
-        services.state.diagnostics.record(
-            "stream",
-            "authorization",
-            "error",
-            Some(needed.as_str()),
-        );
-        return refuse(stream, needed).await;
+    if !Principal::of(&services.state, &services.access)
+        .permits_stream(StreamMethod::ProtocolIdentity)
+    {
+        return send_error(
+            stream,
+            401,
+            ErrorCode::Unauthorized,
+            "connection authorization revoked",
+        )
+        .await;
     }
     let body = stream.read_body(0).await?;
     if !body.is_empty() {
@@ -1236,7 +1072,7 @@ async fn handle_protocol_identity(
 
 async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Result<()> {
     let body = stream.read_body(MAX_RPC_BODY_BYTES).await?;
-    let request: Request = match serde_json::from_slice(&body) {
+    let mut request: Request = match serde_json::from_slice(&body) {
         Ok(request) => request,
         Err(error) => {
             return send_error(
@@ -1256,95 +1092,6 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
         request_bytes = body.len(),
         "RPC request decoded"
     );
-    if let Some(scope) = &services.access.workspace_id {
-        if matches!(request, Request::ClientDebug(_)) {
-            return send_error(
-                stream,
-                403,
-                ErrorCode::Forbidden,
-                "client debugging requires a machine capability, not a workspace capability",
-            )
-            .await;
-        }
-        if matches!(
-            request,
-            Request::FileAccessList | Request::FileAccessConfigure { .. }
-        ) {
-            return send_error(
-                stream,
-                403,
-                ErrorCode::Forbidden,
-                "directory settings require a machine capability",
-            )
-            .await;
-        }
-        if matches!(request, Request::ProcessList) {
-            return send_error(
-                stream,
-                403,
-                ErrorCode::Forbidden,
-                "use workspace-scoped process listing",
-            )
-            .await;
-        }
-        if let Request::ProcessKill { session_id, .. } | Request::ProcessKillAll { session_id } =
-            &request
-        {
-            let allowed = services
-                .state
-                .sessions
-                .list(Some(scope), true)
-                .await?
-                .iter()
-                .any(|session| &session.id == session_id);
-            if !allowed {
-                return send_error(
-                    stream,
-                    403,
-                    ErrorCode::Forbidden,
-                    "session outside workspace capability",
-                )
-                .await;
-            }
-        }
-        if let Some(requested) = request_workspace(&request) {
-            if requested != scope {
-                return send_error(
-                    stream,
-                    403,
-                    ErrorCode::Forbidden,
-                    "the routed capability does not cover this workspace",
-                )
-                .await;
-            }
-        }
-        if let Request::AgentSpaceConfigure {
-            operation:
-                genehub_proto::AgentSpaceOperation::SetParent {
-                    parent_workspace_id: Some(parent),
-                },
-            ..
-        }
-        | Request::AgentSpaceChangePlan {
-            operation:
-                genehub_proto::AgentSpaceOperation::SetParent {
-                    parent_workspace_id: Some(parent),
-                },
-            ..
-        } = &request
-        {
-            if parent != scope {
-                return send_error(
-                    stream,
-                    403,
-                    ErrorCode::Forbidden,
-                    "the routed capability does not cover the parent workspace",
-                )
-                .await;
-            }
-        }
-    }
-
     if let (
         Some(invite_id),
         Request::DeviceClaim {
@@ -1388,14 +1135,23 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
         .await;
     }
 
-    // The admission's expiry is checked on every request, not only when the
-    // logical connection is attached: a hostile carrier can keep an expired
-    // stream open and would otherwise keep its capability.
-    if services
-        .access
-        .authorization_expires_at
-        .is_some_and(|at| at <= std::time::Instant::now())
-    {
+    // Each endpoint owns one admission. Check its live registry entry on
+    // every RPC; authorization renewal admits a fresh endpoint.
+    let admission_valid = match &services.access.logical_id {
+        Some(id) => services.state.logical_connections.access(id).is_ok(),
+        None => {
+            services
+                .access
+                .authorization_expires_at
+                .is_none_or(|at| at > Instant::now())
+                && services
+                    .access
+                    .hosted_authority
+                    .as_ref()
+                    .is_none_or(|a| a.load(std::sync::atomic::Ordering::Acquire))
+        }
+    };
+    if !admission_valid {
         services.state.diagnostics.record(
             "rpc",
             "authorization",
@@ -1406,7 +1162,7 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
             stream,
             401,
             ErrorCode::Unauthorized,
-            "hosted admission expired; reconnect".to_string(),
+            "hosted admission expired or revoked; reconnect".to_string(),
         )
         .await;
     }
@@ -1414,55 +1170,37 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
     // to enforce on a spawned process must be looking at the same caller the
     // gate just admitted, not at a second lookup that could disagree with it.
     let caller = Principal::of(&services.state, &services.access);
-    let needed = authz::required(&request);
-    if !caller.allows(needed) {
-        services
-            .state
-            .diagnostics
-            .record("rpc", "authorization", "error", Some(needed.as_str()));
-        return refuse(stream, needed).await;
+    if caller.is_full() {
+        if let Request::PreviewFeedback(feedback) = &mut request {
+            if services.access.workspace_handle.as_deref() == Some(feedback.workspace_id.as_str()) {
+                if let Some(local) = &services.access.workspace_id {
+                    feedback.workspace_id = local.clone();
+                }
+            }
+        }
     }
-
     let handled = router::handle_in_workspace(
         &services.state,
         services.access.transport,
         &caller,
-        services.access.workspace_id.as_deref(),
+        if matches!(caller, Principal::PreviewShare { .. }) {
+            services.access.workspace_id.as_deref()
+        } else {
+            None
+        },
         request,
     )
     .await;
     match handled.reply {
-        Ok(mut reply) => {
-            if let Reply::Agents(agents) = &mut reply {
-                filter_agent_logs(agents, &caller);
+        Ok(reply) => {
+            // Admission must succeed before the caller receives its acknowledgement.
+            if let Err(reason) = apply_side_effect(services, handled.effect) {
+                return send_error(stream, 409, ErrorCode::Conflict, reason).await;
             }
             send_reply(stream, reply).await?;
-            apply_side_effect(services, handled.effect).await;
             Ok(())
         }
         Err(error) => send_protocol_error(stream, error).await,
-    }
-}
-
-/// List/push carry public readiness, but the text a script obtains from CLI
-/// output has the same Session grant as agent.logs. Apply one projection at
-/// both peer boundaries, rather than relying on scripts to classify stderr.
-fn filter_agent_logs(agents: &mut [genehub_proto::AgentInfo], caller: &Principal) {
-    if caller.allows(authz::Capability::Session) {
-        return;
-    }
-    for agent in agents {
-        agent.message = None;
-        if let genehub_proto::ProbeState::Unavailable { reason } = &mut agent.probe {
-            *reason = "当前不可用；需要会话权限查看详细原因".into();
-        }
-        if let Some(job) = &mut agent.job {
-            job.log_tail.clear();
-            job.message = None;
-            if job.error.is_some() {
-                job.error = Some("动作失败；需要会话权限查看详细原因".into());
-            }
-        }
     }
 }
 
@@ -1535,8 +1273,8 @@ async fn send_reply(stream: &mut ServerStream, reply: Reply) -> Result<()> {
         })
         .await?;
     // Small RPC replies must progress even while this same peer's preview
-    // fills its bulk quota. The physical actor grants at most one additional
-    // record per peer, and keeps DATA credit, journal and byte accounting.
+    // is busy. Control priority applies before the physical write and still
+    // uses locally owned byte permits.
     if stream.head.method == "rpc" && body.len() <= genehub_proto::MAX_EXCHANGE_HEAD_BYTES {
         stream
             .write_inner(&body, None, super::logical_connection::WriteClass::Control)
@@ -1557,10 +1295,6 @@ async fn send_protocol_error(stream: &mut ServerStream, error: ProtocolError) ->
         ErrorCode::Unsupported => 422,
         ErrorCode::WebProtocol => 426,
         ErrorCode::Internal => 500,
-        // Not 403: the caller is allowed, the machine is unable. Retrying with
-        // a wider grant would not help, and neither would retrying at all
-        // until this machine gains a backend.
-        ErrorCode::IsolationUnavailable => 501,
     };
     stream
         .respond(&ExchangeResponseHead {
@@ -1593,10 +1327,20 @@ pub(crate) async fn send_error(
     stream.finish().await
 }
 
-async fn apply_side_effect(services: &PeerServices, effect: SideEffect) {
+/// A subscribe for a session this peer already follows is always allowed; a
+/// new one is refused once the peer has used its whole allowance.
+fn subscription_capacity_refused(
+    subscriptions: &SubscriptionTasks,
+    session_id: &str,
+    limit: usize,
+) -> bool {
+    !subscriptions.tasks.contains_key(session_id) && subscriptions.tasks.len() >= limit
+}
+
+fn apply_side_effect(services: &PeerServices, effect: SideEffect) -> Result<(), &'static str> {
     let mut subscriptions = services.subscriptions.lock().unwrap();
     if subscriptions.stopped {
-        return;
+        return Err("this connection is closing");
     }
     match effect {
         SideEffect::None => {}
@@ -1609,10 +1353,14 @@ async fn apply_side_effect(services: &PeerServices, effect: SideEffect) {
             session_id,
             mut receiver,
         } => {
-            if !subscriptions.tasks.contains_key(&session_id)
-                && subscriptions.tasks.len() >= MAX_SUBSCRIPTIONS
-            {
-                return;
+            if subscription_capacity_refused(&subscriptions, &session_id, MAX_SUBSCRIPTIONS) {
+                services.state.diagnostics.record(
+                    "dataplane",
+                    "subscription",
+                    "refused",
+                    Some("subscription-limit"),
+                );
+                return Err("subscription capacity exhausted; close another session and retry");
             }
             if let Some(previous) = subscriptions.tasks.remove(&session_id) {
                 previous.abort();
@@ -1637,6 +1385,7 @@ async fn apply_side_effect(services: &PeerServices, effect: SideEffect) {
             subscriptions.tasks.insert(session_id, task);
         }
     }
+    Ok(())
 }
 
 async fn handle_events(stream: &mut ServerStream, services: &PeerServices) -> Result<()> {
@@ -1667,61 +1416,11 @@ async fn handle_events(stream: &mut ServerStream, services: &PeerServices) -> Re
     stream.finish().await
 }
 
-fn request_workspace(request: &Request) -> Option<&str> {
-    match request {
-        // Machine feedback has no workspace identity. Its handler intersects
-        // every source/record/manifest with the admission's physical scope.
-        Request::PreviewFeedback(request) => {
-            (!request.workspace_id.is_empty()).then_some(request.workspace_id.as_str())
-        }
-        Request::SessionFork {
-            target: Some(target),
-            ..
-        }
-        | Request::SessionForkImport { target, .. } => target.workspace_id.as_deref(),
-        Request::SessionForkRouted { workspace_id, .. }
-        | Request::SessionForkImportRouted { workspace_id, .. } => Some(workspace_id),
-        Request::ProcessWorkspaceList { workspace_id }
-        | Request::ProcessServiceStop { workspace_id, .. }
-        | Request::SessionCreate { workspace_id, .. }
-        | Request::SessionCreateRouted { workspace_id, .. }
-        | Request::SessionImportList { workspace_id, .. }
-        | Request::SessionImport { workspace_id, .. }
-        | Request::FileTree { workspace_id, .. }
-        | Request::FileWrite { workspace_id, .. }
-        | Request::FileMkdir { workspace_id, .. }
-        | Request::FileCopy { workspace_id, .. }
-        | Request::FileMove { workspace_id, .. }
-        | Request::FileDelete { workspace_id, .. }
-        | Request::GitStatus { workspace_id }
-        | Request::GitDiff { workspace_id, .. }
-        | Request::GitCommit { workspace_id, .. }
-        | Request::PtyOpen { workspace_id, .. }
-        | Request::SpeechContextPreview { workspace_id, .. }
-        | Request::SpeechFeedbackRecord { workspace_id, .. }
-        | Request::AgentSpaceChangePlan { workspace_id, .. }
-        | Request::AgentSpaceConfigure { workspace_id, .. }
-        | Request::WorkflowList { workspace_id }
-        | Request::WorkflowBuild { workspace_id, .. }
-        | Request::WorkflowHistory { workspace_id, .. }
-        | Request::WorkflowJournal { workspace_id, .. }
-        | Request::AgentSpaceChildren { workspace_id }
-        | Request::WorkspaceAddRoot { workspace_id, .. }
-        | Request::WorkspaceRename { workspace_id, .. }
-        | Request::WorkspaceRemove { workspace_id } => Some(workspace_id),
-        _ => None,
-    }
-}
-
 async fn run_writer(
-    mut channel: PeerWriter,
+    mut channel: AuthenticatedWriter,
     mut commands: mpsc::Receiver<WriterCommand>,
     failed: oneshot::Sender<anyhow::Error>,
 ) {
-    if let PeerWriter::Logical(writer) = channel {
-        run_logical_writer(writer, commands, failed).await;
-        return;
-    }
     let mut queues = HashMap::<u32, VecDeque<WriterCommand>>::new();
     let mut runnable = VecDeque::<u32>::new();
     let outcome: Result<()> = async {
@@ -1756,14 +1455,14 @@ async fn run_writer(
                 .zip(actor_started)
                 .map(|(queued, started)| started.duration_since(queued).as_micros() as u64)
                 .unwrap_or_default();
-            match channel.send(command.frame).await {
+            match channel.send(&command.frame.encode()?).await {
                 Ok(()) => {
                     let _ = command.complete.send(Ok(WriterCompletion {
                         actor_queue_us,
                         actor_send_us: actor_started
                             .map(|started| started.elapsed().as_micros() as u64)
                             .unwrap_or_default(),
-                        acknowledged_at: actor_started.map(|_| Instant::now()),
+                        accepted_at: actor_started.map(|_| Instant::now()),
                     }));
                 }
                 Err(_) => {
@@ -1786,76 +1485,6 @@ async fn run_writer(
     let _ = failed.send(error);
 }
 
-async fn run_logical_writer(
-    writer: super::logical_connection::Writer,
-    mut commands: mpsc::Receiver<WriterCommand>,
-    failed: oneshot::Sender<anyhow::Error>,
-) {
-    let mut active = std::collections::HashSet::new();
-    let mut queues = HashMap::<u32, VecDeque<WriterCommand>>::new();
-    let mut tasks = JoinSet::new();
-    let outcome: Result<()> = async {
-        loop {
-            tokio::select! {
-                command = commands.recv() => {
-                    let Some(command) = command else { return Ok(()); };
-                    queues.entry(command.stream_id).or_default().push_back(command);
-                }
-                done = tasks.join_next(), if !tasks.is_empty() => {
-                    let (id, result) = done.ok_or_else(|| anyhow!("logical writer stopped"))??;
-                    active.remove(&id);
-                    result?;
-                }
-            }
-            let runnable: Vec<_> = queues
-                .keys()
-                .filter(|id| !active.contains(*id))
-                .copied()
-                .collect();
-            for id in runnable {
-                let queue = queues.get_mut(&id).unwrap();
-                let Some(command) = queue.pop_front() else {
-                    continue;
-                };
-                if queue.is_empty() {
-                    queues.remove(&id);
-                }
-                active.insert(id);
-                let mut writer = writer.clone();
-                tasks.spawn(async move {
-                    let actor_started = command.measured_enqueued_at.map(|_| Instant::now());
-                    let actor_queue_us = command
-                        .measured_enqueued_at
-                        .zip(actor_started)
-                        .map(|(queued, started)| started.duration_since(queued).as_micros() as u64)
-                        .unwrap_or_default();
-                    let result = writer.send_classified(command.frame, command.class).await;
-                    let report = result
-                        .as_ref()
-                        .map(|_| WriterCompletion {
-                            actor_queue_us,
-                            actor_send_us: actor_started
-                                .map(|started| started.elapsed().as_micros() as u64)
-                                .unwrap_or_default(),
-                            acknowledged_at: actor_started.map(|_| Instant::now()),
-                        })
-                        .map_err(|e| anyhow!(e.to_string()));
-                    let _ = command.complete.send(report);
-                    drop(command._budget);
-                    drop(command._count);
-                    (id, result)
-                });
-            }
-        }
-    }
-    .await;
-    let _ = failed.send(
-        outcome
-            .err()
-            .unwrap_or_else(|| anyhow!("logical writer stopped")),
-    );
-}
-
 fn enqueue_writer(
     command: WriterCommand,
     queues: &mut HashMap<u32, VecDeque<WriterCommand>>,
@@ -1863,7 +1492,11 @@ fn enqueue_writer(
 ) {
     let queue = queues.entry(command.stream_id).or_default();
     if queue.is_empty() {
-        runnable.push_back(command.stream_id);
+        if command.class == super::logical_connection::WriteClass::Control {
+            runnable.push_front(command.stream_id);
+        } else {
+            runnable.push_back(command.stream_id);
+        }
     }
     queue.push_back(command);
 }
@@ -1873,14 +1506,22 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn credit_never_exceeds_its_negotiated_stream_window() {
-        let credit = Credit::new(10).unwrap();
-        assert_eq!(credit.take(7).await.unwrap(), 7);
-        assert!(credit.add(7));
-        assert!(!credit.add(1));
-        let bulk = Credit::new(genehub_proto::MAX_BULK_STREAM_WINDOW_BYTES).unwrap();
-        assert_eq!(bulk.take(1).await.unwrap(), 1);
-        assert!(bulk.add(1));
+    async fn a_new_subscription_is_refused_only_at_the_limit() {
+        let mut subscriptions = SubscriptionTasks {
+            stopped: false,
+            tasks: HashMap::new(),
+        };
+        assert!(!subscription_capacity_refused(&subscriptions, "s1", 2));
+        subscriptions
+            .tasks
+            .insert("s1".into(), tokio::spawn(async {}));
+        assert!(!subscription_capacity_refused(&subscriptions, "s2", 2));
+        subscriptions
+            .tasks
+            .insert("s2".into(), tokio::spawn(async {}));
+        // At the limit: a new session is refused, an existing one is not.
+        assert!(subscription_capacity_refused(&subscriptions, "s3", 2));
+        assert!(!subscription_capacity_refused(&subscriptions, "s1", 2));
     }
 
     #[test]
@@ -1916,77 +1557,6 @@ mod tests {
         assert_eq!(
             diagnostic_operation(&serde_json::json!({ "operation": "settings/get?token=x" })),
             None
-        );
-    }
-
-    #[test]
-    fn routed_session_operations_are_scoped_to_the_destination_workspace() {
-        let transfer = genehub_proto::ForkTransfer {
-            source_session_id: "source".into(),
-            source_turn_id: "turn".into(),
-            source_agent_id: "codex".into(),
-            source_round_id: None,
-            title: None,
-            items: Vec::new(),
-            coverage: genehub_proto::HistoryCoverage {
-                source_item_count: Some(0),
-                retained_item_count: 0,
-                omitted_item_count: 0,
-                retrieval: genehub_proto::RetrievalCapability::Genehub,
-                reason: None,
-            },
-            blob_appendix: vec![],
-        };
-        let target = genehub_proto::ForkTarget {
-            agent_id: "codex".into(),
-            workspace_id: Some("target-workspace".into()),
-            model_id: None,
-            mode_id: None,
-            effort_id: None,
-            fast: None,
-            runtime_values: Default::default(),
-        };
-        assert_eq!(
-            request_workspace(&Request::SessionFork {
-                session_id: "source".into(),
-                turn_id: "turn".into(),
-                target: Some(target.clone()),
-            }),
-            Some("target-workspace")
-        );
-        assert_eq!(
-            request_workspace(&Request::SessionForkImport {
-                transfer: transfer.clone(),
-                target,
-            }),
-            Some("target-workspace")
-        );
-        assert_eq!(
-            request_workspace(&Request::SessionCreateRouted {
-                workspace_id: "created-workspace".into(),
-                tags: vec!["Flash".into()],
-                media_tags: Vec::new(),
-                title: None,
-                cwd: None,
-            }),
-            Some("created-workspace")
-        );
-        assert_eq!(
-            request_workspace(&Request::SessionForkRouted {
-                session_id: "source".into(),
-                turn_id: "turn".into(),
-                workspace_id: "routed-workspace".into(),
-                tags: vec!["Max".into()],
-            }),
-            Some("routed-workspace")
-        );
-        assert_eq!(
-            request_workspace(&Request::SessionForkImportRouted {
-                transfer,
-                workspace_id: "remote-workspace".into(),
-                tags: vec!["Flash".into()],
-            }),
-            Some("remote-workspace")
         );
     }
 }

@@ -9,7 +9,7 @@
     "cloudSha": "6a32f010147cbc0b62dae1c3ae36c4dc1694fab2",
     "artifact": "4ae8a6ff7d5203b763487f30e35c81f232ffe6dda978e64eb221a8f788cf33da"
   },
-  "notes": "Historical parityEvidence is retained for audit, not accepted as blanket retirement proof. All frozen cases remain required pending per-case matching-input parity and fault evidence, except rows marked suspended under L13: the OpenCode native adapter was removed in the script-agent phase-1 cut, so its frozen cases keep their source and rows, are listed as not executed in every gate, and return to required when that Agent is re-integrated as a script directory. The Claude Agent was re-integrated as a script directory, so its cases are required again.",
+  "notes": "Historical parityEvidence is not blanket proof. 86 rows are retired with per-case evidence, six Claude canaries are TS release-only with the current 403 blocker, and two OpenCode rows remain suspended. The two concurrency gaps closed in new qualified run 261030-1019-parity-reconstruction-execute-4898; its archived frozen source and matching inputs are retained. CLI helper consumers were separately compared and ported in 261030-1030-cli-parity-c417, then the active crate was removed. Current full-Agent authorization test contracts supersede old grant grading; historical retirement claims are not rewritten as current authorization behavior.",
   "cases": [
     {
       "oldId": "rust.authorization.a_device_gets_what_its_invitation_named_and_nothing_else",
@@ -239,12 +239,13 @@
       "releaseOnly": {
         "tsId": "journey.session.claude-same-timeline",
         "tsRunId": "261028-2208-claude-account-probe-9429",
-        "blocker": "403 Insufficient account balance (same account for TS and Rust canaries)",
+        "blocker": "Current probe: 403 Insufficient account balance; not a pass.",
         "archive": {
           "path": "testing/deprecated/archive/claude.rs",
           "record": "source retained outside the active crate; not compiled or executed; see testing/deprecated/archive/README.md"
         },
-        "reviewedIn": "runs/261028-2208-claude-account-probe-9429"
+        "reviewedIn": "runs/261028-2208-claude-account-probe-9429",
+        "currentProbeRun": "261030-1019-claude-current-probe-eb4e"
       }
     },
     {
@@ -259,12 +260,13 @@
       "releaseOnly": {
         "tsId": "journey.session.claude-accept-edits",
         "tsRunId": "261028-2208-claude-account-probe-9429",
-        "blocker": "403 Insufficient account balance (same account for TS and Rust canaries)",
+        "blocker": "Current probe: 403 Insufficient account balance; not a pass.",
         "archive": {
           "path": "testing/deprecated/archive/claude.rs",
           "record": "source retained outside the active crate; not compiled or executed; see testing/deprecated/archive/README.md"
         },
-        "reviewedIn": "runs/261028-2208-claude-account-probe-9429"
+        "reviewedIn": "runs/261028-2208-claude-account-probe-9429",
+        "currentProbeRun": "261030-1019-claude-current-probe-eb4e"
       }
     },
     {
@@ -279,12 +281,13 @@
       "releaseOnly": {
         "tsId": "journey.session.claude-catalog-pickers",
         "tsRunId": "261028-2208-claude-account-probe-9429",
-        "blocker": "403 Insufficient account balance (same account for TS and Rust canaries)",
+        "blocker": "Current probe: 403 Insufficient account balance; not a pass.",
         "archive": {
           "path": "testing/deprecated/archive/claude.rs",
           "record": "source retained outside the active crate; not compiled or executed; see testing/deprecated/archive/README.md"
         },
-        "reviewedIn": "runs/261028-2208-claude-account-probe-9429"
+        "reviewedIn": "runs/261028-2208-claude-account-probe-9429",
+        "currentProbeRun": "261030-1019-claude-current-probe-eb4e"
       }
     },
     {
@@ -299,12 +302,13 @@
       "releaseOnly": {
         "tsId": "journey.session.claude-interrupt",
         "tsRunId": "261028-2208-claude-account-probe-9429",
-        "blocker": "403 Insufficient account balance (same account for TS and Rust canaries)",
+        "blocker": "Current probe: 403 Insufficient account balance; not a pass.",
         "archive": {
           "path": "testing/deprecated/archive/claude.rs",
           "record": "source retained outside the active crate; not compiled or executed; see testing/deprecated/archive/README.md"
         },
-        "reviewedIn": "runs/261028-2208-claude-account-probe-9429"
+        "reviewedIn": "runs/261028-2208-claude-account-probe-9429",
+        "currentProbeRun": "261030-1019-claude-current-probe-eb4e"
       }
     },
     {
@@ -319,33 +323,34 @@
       "releaseOnly": {
         "tsId": "journey.session.claude-deny-permission",
         "tsRunId": "261028-2208-claude-account-probe-9429",
-        "blocker": "403 Insufficient account balance (same account for TS and Rust canaries)",
+        "blocker": "Current probe: 403 Insufficient account balance; not a pass.",
         "archive": {
           "path": "testing/deprecated/archive/claude.rs",
           "record": "source retained outside the active crate; not compiled or executed; see testing/deprecated/archive/README.md"
         },
-        "reviewedIn": "runs/261028-2208-claude-account-probe-9429"
+        "reviewedIn": "runs/261028-2208-claude-account-probe-9429",
+        "currentProbeRun": "261030-1019-claude-current-probe-eb4e"
       }
     },
     {
       "oldId": "rust.claude.a_sub_agents_work_stays_inside_the_call_that_dispatched_it",
       "suite": "claude",
       "testName": "a_sub_agents_work_stays_inside_the_call_that_dispatched_it",
-      "tsId": null,
-      "status": "source-retained",
+      "tsId": "journey.session.claude-subagent-isolation",
+      "status": "ts-owned",
       "oracleClass": "public-behavior",
-      "assertionDelta": "No TS this stage: Task dispatch is the model's call, not a stable Client oracle. Frozen Rust source is retained and required through testctl.",
+      "assertionDelta": "TS release-only journey dispatches a real Claude sub-agent and asserts nested work stays under its dispatch call. Current account probe is blocked (403); this is a TS owner, not parity qualification.",
       "legacyExecution": "release-only",
       "releaseOnly": {
-        "tsId": null,
-        "tsRunId": "261028-2208-claude-account-probe-9429",
-        "blocker": "403 Insufficient account balance (same account for TS and Rust canaries)",
+        "tsId": "journey.session.claude-subagent-isolation",
+        "tsRunId": "261030-1019-claude-current-probe-eb4e",
+        "blocker": "Current probe: 403 Insufficient account balance; not a pass.",
         "archive": {
           "path": "testing/deprecated/archive/claude.rs",
           "record": "source retained outside the active crate; not compiled or executed; see testing/deprecated/archive/README.md"
         },
-        "reviewedIn": "runs/261028-2208-claude-account-probe-9429",
-        "gap": "No TS twin for Claude sub-agent isolation. The TS release-only Claude journeys cover the timeline and tool/permission paths, not sub-agent containment; the same account 403 blocks adding and running a twin."
+        "reviewedIn": "runs/261030-1019-claude-current-probe-eb4e",
+        "currentProbeRun": "261030-1019-claude-current-probe-eb4e"
       }
     },
     {
@@ -3165,6 +3170,120 @@
         "deletedDependency": "release.yml stale comment text; current signing contract covered by specialty.contracts.release-signed-component",
         "reason": "stale source-fact assertion; the frozen test fails on current main because the referenced comment was removed"
       }
+    },
+    {
+      "oldId": "rust.concurrency.concurrent_user_journey_matches_profile",
+      "suite": "concurrency",
+      "testName": "concurrent_user_journey_matches_profile",
+      "tsId": "specialty.concurrency.parallel-workspaces",
+      "tsIds": [
+        "specialty.concurrency.parallel-workspaces"
+      ],
+      "status": "ts-owned",
+      "oracleClass": "public-behavior",
+      "assertionDelta": "Default old moderate profile is 10 workspaces x 2 sessions, four protocol observers at 20ms; both execute four phases and four model/tool rounds (six calls) per turn. TS also proves all first requests overlap and verifies actual tool file effects; separate qualified run 261030-1000-concurrency-profiles-30b3 covers 60/80 sessions and 8 observers. session.list is full (lean=false) for the common comparison. Native resource counts were None, and old browsers were protocol clients.",
+      "legacyExecution": "retired",
+      "archive": {
+        "path": "testing/deprecated/archive/concurrency-reconstruction-20261030",
+        "record": "Frozen source, one-field protocol adaptation, one-off adapter, exact manifest/results and launch alias retained; no permanent Rust runner."
+      },
+      "retirement": {
+        "type": "ts-parity",
+        "tsId": "specialty.concurrency.parallel-workspaces",
+        "tsRunId": "261030-1019-parity-reconstruction-execute-4898",
+        "rustRunId": "261030-1019-parity-reconstruction-execute-4898",
+        "openSha": "c1ba53e388a0647957dcfa69122fccb835e4ffbd",
+        "cloudSha": "023c7d14744d6ee498823eaf6e4e03d33e9ecc33",
+        "artifactSha": "a570657aa2ccb91f7790b96abf40f855ac54f1d3ce1245e7a94e07cd98a054d8",
+        "tsInputs": {
+          "run": "runs/261030-1019-parity-reconstruction-execute-4898",
+          "open": "c1ba53e388a0647957dcfa69122fccb835e4ffbd",
+          "cloud": "023c7d14744d6ee498823eaf6e4e03d33e9ecc33",
+          "artifact": "a570657aa2ccb91f7790b96abf40f855ac54f1d3ce1245e7a94e07cd98a054d8",
+          "openDirtyDigest": "786a4a28c577c8eb3aa97fbfb99c10d90dc806c2d089af28af5c5dd1ef88559c",
+          "cloudDirtyDigest": "b195af0e7e5293d8b8a44d271c1d319259f041ecd8839f81ad6ad00ff4819bc7",
+          "case": "specialty.concurrency.parallel-workspaces",
+          "cases": [
+            "specialty.concurrency.parallel-workspaces"
+          ]
+        },
+        "rustInputs": {
+          "run": "runs/261030-1019-parity-reconstruction-execute-4898",
+          "open": "c1ba53e388a0647957dcfa69122fccb835e4ffbd",
+          "cloud": "023c7d14744d6ee498823eaf6e4e03d33e9ecc33",
+          "artifact": "a570657aa2ccb91f7790b96abf40f855ac54f1d3ce1245e7a94e07cd98a054d8",
+          "openDirtyDigest": "786a4a28c577c8eb3aa97fbfb99c10d90dc806c2d089af28af5c5dd1ef88559c",
+          "cloudDirtyDigest": "b195af0e7e5293d8b8a44d271c1d319259f041ecd8839f81ad6ad00ff4819bc7",
+          "case": "specialty.parity-reconstruction.concurrent_user_journey_matches_profile",
+          "legacyCase": "rust.concurrency.concurrent_user_journey_matches_profile",
+          "nativeBinarySha256": "c582d3655f0437db19a52e1ae53e27dac5cd365d6344d95a8411acc74c8e66a5"
+        },
+        "assertionDelta": "Default old moderate profile is 10 workspaces x 2 sessions, four protocol observers at 20ms; both execute four phases and four model/tool rounds (six calls) per turn. TS also proves all first requests overlap and verifies actual tool file effects; separate qualified run 261030-1000-concurrency-profiles-30b3 covers 60/80 sessions and 8 observers. session.list is full (lean=false) for the common comparison. Native resource counts were None, and old browsers were protocol clients.",
+        "coverageDelta": "Default old moderate profile is 10 workspaces x 2 sessions, four protocol observers at 20ms; both execute four phases and four model/tool rounds (six calls) per turn. TS also proves all first requests overlap and verifies actual tool file effects; separate qualified run 261030-1000-concurrency-profiles-30b3 covers 60/80 sessions and 8 observers. session.list is full (lean=false) for the common comparison. Native resource counts were None, and old browsers were protocol clients.",
+        "fault": "Active subscription rotation plus list/tree/preview/trunk/blob reads during blocked model first requests; exact model/tool counts and per-session starts catch missing loops and crossed publication.",
+        "reviewedIn": "testing/deprecated/archive/concurrency-reconstruction-20261030/manifest.json",
+        "executionBoundary": "Frozen Rust uses the native daemon compiled from this source and the same current CLI/guest Agent as TS. TS uses the production WASM daemon. Daemon executable formats differ; this is same-source, shared-Agent-artifact comparison, not a claim that their binaries are bit-identical."
+      }
+    },
+    {
+      "oldId": "rust.concurrency.blocking_canaries_locate_the_global_stall",
+      "suite": "concurrency",
+      "testName": "blocking_canaries_locate_the_global_stall",
+      "tsId": "specialty.concurrency.slow-model-unrelated-reads",
+      "tsIds": [
+        "specialty.concurrency.slow-model-unrelated-reads",
+        "specialty.concurrency.slow-git-unrelated-reads",
+        "specialty.backpressure.preview-flood-exact-bytes",
+        "specialty.backpressure.paused-preview-flood-recovers"
+      ],
+      "status": "ts-owned",
+      "oracleClass": "public-behavior",
+      "assertionDelta": "Both frozen Rust and TS prove unrelated reads during slow model and deferred Git; TS retains the <500ms canaries. Both use 128 x 256KiB flowing and five-second inbound-paused previews and recovery. TS additionally checks exact bytes on every response; a stall is not required to pass the old observational pause probe.",
+      "legacyExecution": "retired",
+      "archive": {
+        "path": "testing/deprecated/archive/concurrency-reconstruction-20261030",
+        "record": "Frozen source, one-field protocol adaptation, one-off adapter, exact manifest/results and launch alias retained; no permanent Rust runner."
+      },
+      "retirement": {
+        "type": "ts-parity",
+        "tsId": "specialty.concurrency.slow-model-unrelated-reads",
+        "tsRunId": "261030-1019-parity-reconstruction-execute-4898",
+        "rustRunId": "261030-1019-parity-reconstruction-execute-4898",
+        "openSha": "c1ba53e388a0647957dcfa69122fccb835e4ffbd",
+        "cloudSha": "023c7d14744d6ee498823eaf6e4e03d33e9ecc33",
+        "artifactSha": "a570657aa2ccb91f7790b96abf40f855ac54f1d3ce1245e7a94e07cd98a054d8",
+        "tsInputs": {
+          "run": "runs/261030-1019-parity-reconstruction-execute-4898",
+          "open": "c1ba53e388a0647957dcfa69122fccb835e4ffbd",
+          "cloud": "023c7d14744d6ee498823eaf6e4e03d33e9ecc33",
+          "artifact": "a570657aa2ccb91f7790b96abf40f855ac54f1d3ce1245e7a94e07cd98a054d8",
+          "openDirtyDigest": "786a4a28c577c8eb3aa97fbfb99c10d90dc806c2d089af28af5c5dd1ef88559c",
+          "cloudDirtyDigest": "b195af0e7e5293d8b8a44d271c1d319259f041ecd8839f81ad6ad00ff4819bc7",
+          "case": "specialty.concurrency.slow-model-unrelated-reads",
+          "cases": [
+            "specialty.concurrency.slow-model-unrelated-reads",
+            "specialty.concurrency.slow-git-unrelated-reads",
+            "specialty.backpressure.preview-flood-exact-bytes",
+            "specialty.backpressure.paused-preview-flood-recovers"
+          ]
+        },
+        "rustInputs": {
+          "run": "runs/261030-1019-parity-reconstruction-execute-4898",
+          "open": "c1ba53e388a0647957dcfa69122fccb835e4ffbd",
+          "cloud": "023c7d14744d6ee498823eaf6e4e03d33e9ecc33",
+          "artifact": "a570657aa2ccb91f7790b96abf40f855ac54f1d3ce1245e7a94e07cd98a054d8",
+          "openDirtyDigest": "786a4a28c577c8eb3aa97fbfb99c10d90dc806c2d089af28af5c5dd1ef88559c",
+          "cloudDirtyDigest": "b195af0e7e5293d8b8a44d271c1d319259f041ecd8839f81ad6ad00ff4819bc7",
+          "case": "specialty.parity-reconstruction.blocking_canaries_locate_the_global_stall",
+          "legacyCase": "rust.concurrency.blocking_canaries_locate_the_global_stall",
+          "nativeBinarySha256": "c582d3655f0437db19a52e1ae53e27dac5cd365d6344d95a8411acc74c8e66a5"
+        },
+        "assertionDelta": "Both frozen Rust and TS prove unrelated reads during slow model and deferred Git; TS retains the <500ms canaries. Both use 128 x 256KiB flowing and five-second inbound-paused previews and recovery. TS additionally checks exact bytes on every response; a stall is not required to pass the old observational pause probe.",
+        "coverageDelta": "Both frozen Rust and TS prove unrelated reads during slow model and deferred Git; TS retains the <500ms canaries. Both use 128 x 256KiB flowing and five-second inbound-paused previews and recovery. TS additionally checks exact bytes on every response; a stall is not required to pass the old observational pause probe.",
+        "fault": "Real delayed model, slow Git PATH wrapper, and TCP inbound pause/resume at the public client boundary; no private daemon counters or replacements.",
+        "reviewedIn": "testing/deprecated/archive/concurrency-reconstruction-20261030/manifest.json",
+        "executionBoundary": "Frozen Rust uses the native daemon compiled from this source and the same current CLI/guest Agent as TS. TS uses the production WASM daemon. Daemon executable formats differ; this is same-source, shared-Agent-artifact comparison, not a claim that their binaries are bit-identical."
+      }
     }
   ],
   "catalogCorrections": [
@@ -3176,30 +3295,6 @@
       "sourceFunction": "write_workload_fixture"
     }
   ],
-  "openGaps": [
-    {
-      "oldId": "rust.concurrency.concurrent_user_journey_matches_profile",
-      "suite": "concurrency",
-      "tsId": "specialty.concurrency.parallel-workspaces",
-      "tsRunId": "261029-2042-change-6ccf",
-      "reason": "The retired Rust run 261028-2205 recorded inputDrift=true and never qualified; the runner and source are gone, so no accepted same-run Rust evidence exists. The TS business oracle is covered; only measurement-only deltas remain.",
-      "coverageDelta": "TS covers 10/20 workspaces, one own turn each, 4/8 extra observer clients, and workspace.list plus file.tree responsiveness under load; native resource counts, a real 4/8-browser fleet and poll timing are not reproduced.",
-      "tsIds": [
-        "specialty.concurrency.parallel-workspaces"
-      ]
-    },
-    {
-      "oldId": "rust.concurrency.blocking_canaries_locate_the_global_stall",
-      "suite": "concurrency",
-      "tsId": "specialty.concurrency.slow-model-unrelated-reads",
-      "tsRunId": "261029-2102-change-68aa",
-      "reason": "The retired Rust run 261028-2205 recorded inputDrift=true and never qualified; the runner and source are gone, so no accepted same-run Rust evidence exists. The TS business oracle is covered; only measurement-only deltas remain.",
-      "coverageDelta": "TS proves workspace.list stays under 500ms during a delayed mock turn and during a 900ms git.status wrapper; slow-git also proves file.tree under 500ms. It does not copy pause_inbound preview flood or native_resource_count.",
-      "tsIds": [
-        "specialty.concurrency.slow-model-unrelated-reads",
-        "specialty.concurrency.slow-git-unrelated-reads"
-      ]
-    }
-  ],
-  "openGapReview": "These rows are not retired and must not be counted as taken over. Replacing them needs a new same-artifact evidence run or an explicit Human decision to accept TS-only coverage."
+  "openGaps": [],
+  "openGapReview": "Closed by new matching-input comparison 261030-1019-parity-reconstruction-execute-4898; historical drifted run remains invalid. See archived exact inputs, results and frozen source."
 }

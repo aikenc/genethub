@@ -8,8 +8,8 @@ import { allocatePort, defineSpecialty, startHub, startRelay, startSharedBottlen
 for (const hosted of [false, true]) defineSpecialty({
   id: `specialty.fabric-pool.automatic-${hosted ? "hosted" : "paired"}`,
   title: `The normal ${hosted ? "Hosted" : "paired"} Client automatically separates control and body on both hops`,
-  oracle: "Two authenticated owners on the same machine, two node uplinks and two browser sockets, exact 8 MiB preview while control stays below 1500ms, old logical owners recover after all physical sockets are cut",
-  catches: ["only browser connections were split", "normal product client still shares the bulk path", "Hosted node endpoint replaces its other lane", "physical loss replaces a logical owner"],
+  oracle: "Two authenticated owners on the same machine, two node uplinks and two browser sockets, exact 8 MiB preview while control stays below 1500ms, fresh authenticated owners serve new requests after all physical sockets are cut",
+  catches: ["only browser connections were split", "normal product client still shares the bulk path", "Hosted node endpoint replaces its other lane", "new requests remain bound to a closed owner"],
   tags: ["fabric-pool", "fabric-automatic", "connectivity"], llm: { default: "none" }, requiredRepos: ["cloud"],
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
   surfaces: ["daemon", "relay", "workbench-client", "cloud-server", "tcp"], productInterfaces: ["@genehub/workbench/client", "hub-http"],
@@ -53,7 +53,7 @@ for (const hosted of [false, true]) defineSpecialty({
       t.assertions.assert(denied.status===404 || denied.status===403,"a second account obtained machine routes");
       revoke=async()=>{const r=await owner.fetch(`/app/machines/${machineId}/revoke`,{method:"POST"});await r.body?.cancel();t.assertions.assert(r.ok,"machine revocation failed");};
     } else {
-      const pair = await t.flows.main.pairDevice(o.client,o.daemon,[],"automatic"); pair.client.close(); credential = pair.credential;
+      const pair = await t.flows.main.pairDevice(o.client,o.daemon,"automatic"); pair.client.close(); credential = pair.credential;
       const attached = await o.client.call({type:"device.remoteAttach",payload:{relayUrl:link.urlFor(origin),joinToken:relay.joinToken,channelCount:2}});
       if (attached?.type !== "remoteAccess" || !attached.data.rendezvousUrl) throw new Error("paired attachment failed");
       await t.tools.waitUntil(async()=>{const d=await o.client.call({type:"device.list"});return d?.type==="devices" && d.data.remote.channels?.length===2 && d.data.remote.channels.every(l=>l.online);},15000);
@@ -88,8 +88,8 @@ for (const hosted of [false, true]) defineSpecialty({
       await t.tools.waitUntil(()=>client!.connectionState==="ready" && body.connectionState==="ready",20000);
       const after=await client!.call({type:"workspace.list"});
       const bodyAfter=await body.call({type:"workspace.list"});
-      t.note(JSON.stringify({phase:"recovered",primary:client!.logicalConnectionId===owners[0],body:body.logicalConnectionId===owners[1],bodyReady:bodyAfter?.type === "workspaces"}));
-      t.assertions.assert(after?.type==="workspaces" && client!.logicalConnectionId===owners[0] && body.logicalConnectionId===owners[1],"physical recovery changed an original logical owner");
+      t.note(JSON.stringify({phase:"recovered",primaryReplaced:client!.logicalConnectionId!==owners[0],bodyReplaced:body.logicalConnectionId!==owners[1],bodyReady:bodyAfter?.type === "workspaces"}));
+      t.assertions.assert(after?.type==="workspaces" && bodyAfter?.type==="workspaces" && client!.logicalConnectionId!==owners[0] && body.logicalConnectionId!==owners[1],"new authenticated owners did not serve both control and body after physical loss");
     });
     await t.stage("revocation", async () => {
       await revoke();

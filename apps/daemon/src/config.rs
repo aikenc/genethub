@@ -53,11 +53,6 @@ pub struct Config {
     /// neutral, backwards-compatible filesystem fact.
     #[serde(default)]
     pub agent_spaces: Vec<AgentSpaceEntry>,
-    /// The exclusive `pm` / `workerRole` shape this model replaced. Read once
-    /// so an existing installation keeps its project tree, then never written
-    /// again: two writable shapes would be two sources of truth.
-    #[serde(default, rename = "pipeSpaces", skip_serializing)]
-    pub(crate) legacy_pipe_spaces: Vec<LegacyPipeSpaceEntry>,
     /// Identifies one lifetime of the local workspace catalogue.
     ///
     /// This is deliberately unrelated to the machine identity and to any Hub
@@ -90,7 +85,6 @@ impl Default for Config {
             workspaces: Vec::new(),
             file_access: FileAccessConfig::default(),
             agent_spaces: Vec::new(),
-            legacy_pipe_spaces: Vec::new(),
             workspace_catalog_generation: String::new(),
             workspace_catalog_revision: 0,
             replay_window: 2048,
@@ -317,21 +311,44 @@ impl Config {
                             .count()
                             > 0
                     });
-                if remove_legacy_speech_provider {
-                    let rewritten = serde_json::to_string_pretty(&value)?;
-                    save_private(path, rewritten.as_bytes()).with_context(|| {
+                // Defer every write until all legacy inputs have parsed and
+                // the Space tree is valid. A bad pipeSpaces entry must not
+                // rewrite a mixed old config just to remove Speech fields.
+                let speech_rewrite = remove_legacy_speech_provider
+                    .then(|| serde_json::to_vec_pretty(&value))
+                    .transpose()?;
+                let legacy = value
+                    .get("pipeSpaces")
+                    .cloned()
+                    .map(serde_json::from_value::<Vec<LegacyPipeSpaceEntry>>)
+                    .transpose()?;
+                let mut config: Self = serde_json::from_value(value)
+                    .with_context(|| format!("parsing {}", path.display()))?;
+                config.normalize_workspace_paths();
+                let migrate_spaces = legacy.is_some();
+                if let Some(legacy) = legacy {
+                    config.adopt_legacy_pipe_spaces(legacy);
+                    for entry in &config.agent_spaces {
+                        crate::agent_space::check_tree(&config.agent_spaces, entry)?;
+                    }
+                    let backup = path.with_extension(format!(
+                        "pre-agent-spaces-{}.json",
+                        uuid::Uuid::new_v4().simple()
+                    ));
+                    save_private(&backup, raw.as_bytes())?;
+                }
+                for provider in config.agents.providers.values_mut() {
+                    provider.migrate();
+                }
+                if migrate_spaces {
+                    config.save(path)?;
+                } else if let Some(rewritten) = speech_rewrite {
+                    save_private(path, &rewritten).with_context(|| {
                         format!(
                             "removing obsolete speech credentials from {}",
                             path.display()
                         )
                     })?;
-                }
-                let mut config: Self = serde_json::from_value(value)
-                    .with_context(|| format!("parsing {}", path.display()))?;
-                config.normalize_workspace_paths();
-                config.adopt_legacy_pipe_spaces();
-                for provider in config.agents.providers.values_mut() {
-                    provider.migrate();
                 }
                 Ok(config)
             }
@@ -353,8 +370,8 @@ impl Config {
     /// the legacy field is therefore never written back. An entry already
     /// present in `agentSpaces` wins, which makes a partially upgraded config
     /// converge instead of resurrecting a stale relationship.
-    fn adopt_legacy_pipe_spaces(&mut self) {
-        for legacy in std::mem::take(&mut self.legacy_pipe_spaces) {
+    fn adopt_legacy_pipe_spaces(&mut self, legacy: Vec<LegacyPipeSpaceEntry>) {
+        for legacy in legacy {
             if self
                 .agent_spaces
                 .iter()

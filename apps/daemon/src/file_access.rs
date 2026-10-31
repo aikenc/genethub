@@ -256,18 +256,25 @@ pub async fn authorize(
     source: &WorkspaceFileSource,
 ) -> Result<AuthorizedFile> {
     let caller = crate::authz::Principal::of(state, access);
-    let scope = access.workspace_id.as_deref();
+    let scope = if matches!(caller, crate::authz::Principal::PreviewShare { .. }) {
+        access.workspace_id.as_deref()
+    } else {
+        None
+    };
     let resolved = match source {
         WorkspaceFileSource::WorkspaceFile {
             workspace_handle,
             path,
         } => {
             crate::files::validate_preview_path(path)?;
-            let (workspace, handle) = match scope {
-                Some(id) => (id, access.workspace_handle.as_deref().unwrap_or(id)),
-                None => (workspace_handle.as_str(), workspace_handle.as_str()),
+            let workspace = match (
+                access.workspace_id.as_deref(),
+                access.workspace_handle.as_deref(),
+            ) {
+                (Some(id), Some(handle)) if workspace_handle == handle => id,
+                _ => workspace_handle.as_str(),
             };
-            if workspace_handle != handle {
+            if scope.is_some_and(|id| id != workspace) {
                 bail!("preview workspace mismatch");
             }
             let resolved = state.workspaces.resolve(workspace, path).await?;
@@ -323,7 +330,7 @@ impl AuthorizedFile {
     ) -> Result<()> {
         let caller = crate::authz::Principal::of(state, access);
         // Revocation of Files is checked as well as the directory/share lease.
-        if !caller.allows(crate::authz::Capability::Files) {
+        if !caller.is_full() && !matches!(caller, crate::authz::Principal::PreviewShare { .. }) {
             bail!("file capability revoked");
         }
         authorize(state, access, &self.source).await?;

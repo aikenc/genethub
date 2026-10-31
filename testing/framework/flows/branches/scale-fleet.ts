@@ -56,7 +56,7 @@ export async function openScaleFleet(t: CaseContext, machines: number, members: 
         if (session?.type !== "session") throw new Error("member session was not created");
         node.sessions.push(session.data.id);
       }
-      const paired = await t.flows.main.pairDevice(opened.client, opened.daemon, [], `scale-manager-${machine}`);
+      const paired = await t.flows.main.pairDevice(opened.client, opened.daemon, `scale-manager-${machine}`);
       paired.client.close();
       const count = poolOptions.nodeChannels ?? 1;
       const attached = await opened.client.call({ type: "device.remoteAttach", payload: { relayUrl: link.urlFor(relay.origin), joinToken: relay.joinToken, channelCount: count } });

@@ -23,7 +23,7 @@
 /// WebProtocol version spoken by Web/CLI clients. It deliberately does not
 /// inherit the binary carrier version: either side may evolve without turning
 /// a protocol adapter into a data-plane upgrade.
-pub const WEB_PROTOCOL_VERSION: u32 = 3;
+pub const WEB_PROTOCOL_VERSION: u32 = 4;
 
 /// Generation of the binary carrier that frames the typed protocol above.
 ///
@@ -49,7 +49,7 @@ mod tests {
         // They are equal today, which is exactly why they are asserted apart: a
         // reader who assumes one implies the other bumps one and breaks the
         // other side.
-        assert_eq!(WEB_PROTOCOL_VERSION, 3);
+        assert_eq!(WEB_PROTOCOL_VERSION, 4);
         assert_eq!(DATA_PLANE_VERSION, 4);
     }
 

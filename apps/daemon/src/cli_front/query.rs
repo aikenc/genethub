@@ -98,18 +98,6 @@ const COMMAND_NAMES: [&str; 79] = [
     "speech.runtime.unregister",
 ];
 
-/// The capability vocabulary a machine grants a device, named here so `genet
-/// schema` can offer it as an enum rather than leaving an agent to discover the
-/// spelling by being refused. Derived from the same set `Capability::parse`
-/// accepts: a hand-written copy drifted, and published a shorter enum than the
-/// daemon would have honoured, which is the refusal this list exists to avoid.
-fn grants() -> Vec<&'static str> {
-    crate::authz::Capability::ALL
-        .iter()
-        .map(|capability| capability.as_str())
-        .collect()
-}
-
 /// Commands that change something on the target machine. Read by agents that
 /// need to know what is safe to retry, so it is a property of the command
 /// rather than a judgement made at each call site.
@@ -680,7 +668,7 @@ async fn execute(
                 .map_err(rpc_error)?
             {
                 Reply::CallerAuthority(authority) => {
-                    value["principal"] = serde_json::json!({"type":authority.principal_type,"sessionId":authority.session_id,"grants":authority.grants});
+                    value["principal"] = serde_json::json!({"type":authority.principal_type,"sessionId":authority.session_id,"providerOperations":authority.provider_operations});
                     value["authority"] =
                         serde_json::to_value(authority).expect("serializable authority");
                 }
@@ -798,10 +786,7 @@ async fn execute(
             sessions.retain(|session| {
                 labels.iter().all(|label| session.labels.contains(label))
                     && source_kind.as_deref().is_none_or(|kind| {
-                        crate::session::store::derived_source_kind_for(
-                            &session.labels,
-                            session.managed.is_some(),
-                        ) == kind
+                        crate::session::store::derived_source_kind_for(&session.labels) == kind
                     })
             });
             Ok((
@@ -1225,10 +1210,8 @@ fn capabilities_data() -> Value {
             "pairing": ["machine.pair", "device.invite"],
             "credentialStore": "machines.json",
         },
-        // What the target machine will let a command touch. `genet shell` runs
-        // an argv list, never a command line, so this binary never parses a
-        // shell and there is no interpreter of ours to sandbox — what holds is
-        // the operating system confinement on the machine that runs it.
+        // Commands run as the target daemon OS user. The separate machine
+        // report describes kernel capabilities, not applied confinement.
         "isolation": {
             "arbitraryCommands": true,
             "commandLineParsing": false,
@@ -1768,18 +1751,7 @@ fn command_schema(name: &str) -> Value {
             ),
         ),
         "device.list" => ("genet device list", true, object_input(json!({}), &[])),
-        "device.invite" => (
-            "genet device invite [--grant <capability>]…",
-            true,
-            object_input(
-                json!({"grants": {
-                    "type": ["array", "null"],
-                    "items": {"type": "string", "enum": grants()},
-                    "description": "absent means an unrestricted device",
-                }}),
-                &[],
-            ),
-        ),
+        "device.invite" => ("genet device invite", true, object_input(json!({}), &[])),
         "device.revoke" => (
             "genet device revoke <deviceId>",
             true,
@@ -1920,13 +1892,6 @@ fn command_output() -> Value {
                         ones after it are the end, and droppedBytes is what was in \
                         between. The kept end arrives after this record rather than \
                         in its place in the stream.",
-        "x-confinement": "shell.started.data.confinement: null, or the backend and \
-                          the roots the command can reach. Read every missing path \
-                          outside those roots as out of bounds, not as absent: with \
-                          the namespaces backend the rest of the filesystem is not \
-                          there at all, so the machine reports no such file rather \
-                          than permission denied. The command itself is told the \
-                          same thing in GENEHUB_CONFINEMENT and GENEHUB_CONFINED_ROOTS.",
     })
 }
 
@@ -2196,7 +2161,6 @@ pub fn reply_kind(reply: &Reply) -> &'static str {
         Reply::SessionDrafts(_) => "session drafts",
         Reply::PreviewAnnotations(_) => "preview annotations",
         Reply::SessionComponents(_) => "session components",
-        Reply::SessionFlow(_) => "session flow",
         Reply::SessionImports(_) => "session imports",
         Reply::Snapshot(_) => "session snapshot",
         Reply::SessionInspection(_) => "session inspection",
@@ -2210,14 +2174,7 @@ pub fn reply_kind(reply: &Reply) -> &'static str {
         Reply::Blobs(_) => "blobs",
         Reply::SessionArtifactUpload(_) => "session artifact upload",
         Reply::SessionArtifact(_) => "session artifact",
-        Reply::WorkflowCheck(_) => "workflow check",
-        Reply::WorkflowProject(_) => "workflow project",
-        Reply::WorkflowRun(_) => "workflow run",
-        Reply::WorkflowJournal(_) => "workflow journal",
-        Reply::WorkflowRuns(_) => "workflow runs",
         Reply::AgentSpaceChangePlan(_) => "agent space change plan",
-        Reply::WorkflowPackages(_) => "workflow packages",
-        Reply::WorkflowBuild(_) => "workflow build",
         Reply::Workspace(_) => "workspace",
         Reply::Workspaces(_) => "workspaces",
         Reply::Directory(_) => "directory",
@@ -2265,12 +2222,6 @@ pub fn rpc_error(error: RpcError) -> CliFailure {
             ErrorCode::Forbidden => CliFailure::business("forbidden", message, None),
             ErrorCode::Internal => CliFailure::business("internal", message, None),
             ErrorCode::WebProtocol => CliFailure::protocol(message),
-            // Not retryable and not fixable by asking for more: this machine
-            // cannot confine a process, and an agent told to wait would wait
-            // forever (`genet-remote-execution.md` §7.5).
-            ErrorCode::IsolationUnavailable => {
-                CliFailure::business("isolationUnavailable", message, None)
-            }
         },
     }
 }
@@ -2465,6 +2416,7 @@ mod tests {
         HelloResult {
             data_channel_url: None,
             daemon_version: "1.2.3".into(),
+            daemon_instance_id: "test-daemon-instance".into(),
             web_protocol: genehub_proto::DATA_PLANE_VERSION,
             machine_id: "m_local".into(),
             fingerprint: "AA-BB".into(),
@@ -2590,7 +2542,7 @@ mod tests {
             lineage: None,
             imported: None,
             last_activity_at_ms: None,
-            managed: None,
+            history_only: None,
         };
         assert_eq!(
             sessions(Reply::Sessions(vec![summary.clone()])).unwrap(),

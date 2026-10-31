@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-import { defineSpecialty, type CaseContext } from "../../framework/public.ts";
+import { connectProductClient, daemonEndpoint, defineSpecialty, startFaultLink, type CaseContext } from "../../framework/public.ts";
 
 type Opened = Awaited<ReturnType<CaseContext["flows"]["main"]["openWorkspace"]>>;
 
@@ -256,5 +256,47 @@ pressureCase(
       t.assertions.assert(opened.client.logicalConnectionId === owner, "preview flood replaced original owner");
       t.assertions.assert((await opened.client.call({ type: "workspace.list" }))?.type === "workspaces", "original peer unusable after preview flood");
     } finally { peer.close(); }
+  },
+);
+
+
+pressureCase(
+  "specialty.backpressure.paused-preview-flood-recovers",
+  "128 preview streams resume exact bytes after five seconds without inbound consumption",
+  "the old 128x256KiB flowing/paused input completes on the same authenticated peer after a real five-second TCP read pause; unrelated list/tree calls succeed throughout",
+  ["paused download wedges independent requests", "preview stream credit cannot resume", "queued previews lose bytes after resume"],
+  async(t,opened)=>{
+    const endpoint=daemonEndpoint(opened.daemon);
+    const link=await startFaultLink(endpoint.url);
+    const peer=await connectProductClient({...endpoint,url:link.urlFor(endpoint.url)});
+    const bytes=Buffer.alloc(256*1024,0x78);
+    writeFileSync(path.join(t.env.workspace,"paused-preview.md"),bytes);
+    try{
+      for(const mode of ["flowing","paused"]){
+        if(mode==="paused")link.blackhole("server");
+        let completed=0;
+        const outcome=Promise.all(Array.from({length:128},async()=>{
+          const preview=await peer.preview(opened.workspaceId,`${opened.rootHandle}/paused-preview.md`);
+          t.assertions.assert(Buffer.from(preview.bytes).equals(bytes),"flood lost or crossed preview bytes");completed++;
+        })).then(()=>null,error=>error as Error);
+        const latencies:number[]=[];
+        try{
+          if(mode==="paused")await t.tools.waitUntil(()=>link.heldBytes().server>0,5000);
+          const deadline=Date.now()+(mode==="paused"?5000:0);
+          do{
+            const start=Date.now();
+            const list=await opened.client.call({type:"workspace.list"});
+            const tree=await opened.client.call({type:"file.tree",payload:{workspaceId:opened.workspaceId,path:null,depth:1}});
+            latencies.push(Date.now()-start);
+            t.assertions.assert(list?.type==="workspaces"&&tree?.type==="fileTree","independent reads failed during flood");
+            if(mode==="paused")await new Promise(resolve=>setTimeout(resolve,100));
+          }while(Date.now()<deadline);
+        }finally{link.clearBlackhole();}
+        const error=await outcome;if(error)throw error;
+        t.assertions.assert(completed===128,"flood did not recover all 128 requests");
+        t.assertions.assert(Math.max(...latencies)<3000,"unrelated reads stalled during flood");
+        t.note(`${mode}: streams=128 bytesPerStream=${bytes.length} completed=${completed} unrelatedReadMaxMs=${Math.max(...latencies)} heldServerBytes=${link.heldBytes().server}`);
+      }
+    }finally{link.clearBlackhole();peer.close();await link.stop();}
   },
 );

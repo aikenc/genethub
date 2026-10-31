@@ -13,7 +13,11 @@ This package does not copy those checklists. `testctl governance check` only imp
 The frozen Rust integration crate is retired. Its cases are recorded in `testing/migration/rust-parity.json`
 as `retired`, `release-only`, or `suspended` with their evidence, and the source that remains for audit lives under
 `testing/deprecated/archive/`; `testctl` no longer executes a Rust legacy runner. New business cases belong in
-`journeys/`, `specialties/`, or `e2e/`.
+`journeys/`, `specialties/`, or `e2e/`. The last CLI consumers were compared and ported in
+`261030-1030-cli-parity-c417`; `genehub-testing`, its workspace membership and CI exclusion are removed.
+The two concurrency gaps closed in matching-input run `261030-1019-parity-reconstruction-execute-4898`.
+Their one-off reconstruction source and exact run records are in `deprecated/archive/`. Claude release-only
+canaries still record the current provider 403; their presence is not a passing canary result.
 
 For a bounded dev feedback, use `plan` then `run --gate dev-feedback --case <id> --reason <scope>`
 (repeat `--case`, or select with `--tags`). Use absolute `--open`, `--cloud` and `--space` paths:
@@ -35,6 +39,13 @@ All consumers of that environment dependency must declare it. The coordinator pr
 workers or hashing artifacts; a missing dependency blocks the run, including cases not started. It never installs dependencies.
 Runtime service availability and undeclared dependencies still require case-level checks; preflight is not a promise that every
 possible environment error is eliminated.
+
+Build selected JavaScript products in the paired candidate before a run: `npm --prefix <open>/apps/relay run build`,
+`npm --prefix <open>/packages/workbench run build`, `npm --prefix <cloud>/server run build`, and
+`npm --prefix <cloud>/console run build` when those surfaces are used. Cargo preflight refreshes native/guest outputs;
+it does not compile these JavaScript bundles. The manifest fingerprints the bytes it executes, so a stable hash alone
+is not proof that an existing `dist` matches source. Freeze source and all built artifacts throughout execution;
+if either needs correction, preserve the failed run, rebuild, and start a new run. Do not rebuild during an active gate.
 
 The run path and phase are printed on stderr immediately, with 15-second progress and immediate failure notices.
 `inspect --run <dir>` works before completion, returning `progress`, partial `results`, and null qualification. An old heartbeat

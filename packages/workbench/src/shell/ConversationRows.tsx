@@ -429,7 +429,7 @@ function SessionRow({
     session.messagePreview?.atMs ?? session.updatedAtMs,
   );
   const unsupported = session.unsupported;
-  const managedReadOnly = session.managed?.userInteraction === "readOnly";
+  const historyOnly = session.historyOnly === true;
   const displayTitle = title(session, Boolean(project?.agentSpace?.parentWorkspaceId));
   const projectPath = breadcrumb ?? (parentProject && project ? `${parentProject.name} / ${project.name}` : project?.name ?? "项目");
 
@@ -476,7 +476,7 @@ function SessionRow({
               </span>
               <span className={`conversation-facts entity-secondary flex min-w-0 items-center gap-1 text-xs font-normal leading-4 text-muted ${!selection && !pick ? "conversation-row-meta" : ""}`} title={`${messageDate.toLocaleString()} · ${projectPath}`}>
                 <AgentAvatar id={session.workspaceId} name={project?.name ?? "项目"} size="small" />
-                <span className="min-w-0 truncate"><time dateTime={messageDate.toISOString()}>{relativeTime(messageDate.getTime())}</time> · {projectPath}{session.draftCount ? ` · ${session.draftCount} 个草稿` : ""}{managedReadOnly ? " · 只读" : ""}{session.archived ? " · 已归档" : ""}{unsupported ? " · 需升级" : ""}</span>
+                <span className="min-w-0 truncate"><time dateTime={messageDate.toISOString()}>{relativeTime(messageDate.getTime())}</time> · {projectPath}{session.draftCount ? ` · ${session.draftCount} 个草稿` : ""}{historyOnly ? " · 只读" : ""}{session.archived ? " · 已归档" : ""}{unsupported ? " · 需升级" : ""}</span>
               </span>
               <span className={`conversation-marks entity-secondary flex min-h-3.5 min-w-0 items-center gap-1 text-[10px] font-normal leading-[14px] ${!selection && !pick ? "conversation-row-meta" : ""}`}>
                 {(facts.kind || stale) && <SessionStatusIcon session={session} sessions={summaries} stale={stale} />}
@@ -507,7 +507,7 @@ function SessionRow({
             setMenu("shut");
           } : undefined}
           confirming={menu === "confirming"}
-          readOnly={managedReadOnly}
+          readOnly={historyOnly}
           archived={session.archived}
           onArchive={() => {
             setMenu("shut");

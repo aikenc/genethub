@@ -14,7 +14,6 @@ use std::time::{Duration, Instant};
 
 use genehub_testing::harness::agent_command_override;
 use genehub_testing::mock_llm::{MockLlm, Turn};
-use genet_daemon::authz::{Capability, GrantSet};
 use genet_daemon::config::{Config, Paths, ProviderConfig};
 use genet_daemon::Daemon;
 use serde_json::Value;
@@ -173,7 +172,10 @@ impl Cli {
     /// The same, with something on standard input — which is how the CLI is
     /// told what to give the command it runs.
     fn piping(&self, arguments: &[&str], input: Option<&str>) -> (String, i32) {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_genet-local"));
+        let mut command = Command::new(
+            std::env::var_os("GENET_PARITY_CLI")
+                .unwrap_or_else(|| env!("CARGO_BIN_EXE_genet-local").into()),
+        );
         command
             .args(arguments)
             .env("GENEHUB_LOCAL_DATA_DIR", self.home())
@@ -262,7 +264,7 @@ async fn a_machine_across_a_relay_answers_exactly_as_the_local_one_does() {
     let rendezvous = attach(&daemon, &relay.origin).await;
 
     // Pairing, from a CLI installation that has never heard of this machine.
-    let invite = daemon.state.devices.invite_with(GrantSet::full());
+    let invite = daemon.state.devices.invite();
     let cli = Cli::new().await;
     let (paired, code) = cli.run(&[
         "machine",
@@ -295,36 +297,8 @@ async fn a_machine_across_a_relay_answers_exactly_as_the_local_one_does() {
     assert_eq!(code, 0, "{sessions}");
     assert_eq!(sessions["type"], "session.list");
 
-    // A narrowed invitation is narrow on the wire, not only in the record: this
-    // device may look, and may not decide who else gets in.
-    let narrow = daemon
-        .state
-        .devices
-        .invite_with(GrantSet::of([Capability::Read]));
-    let onlooker = Cli::new().await;
-    let (paired, code) = onlooker.run(&[
-        "machine",
-        "pair",
-        &narrow.code,
-        "--endpoint",
-        &rendezvous,
-        "--name",
-        "a CLI that may only look",
-    ]);
-    assert_eq!(code, 0, "{paired}");
-    let (listed, code) = onlooker.run(&["session", "list", "--machine", &machine_id]);
-    assert_eq!(code, 0, "{listed}");
-    let (refused, code) = onlooker.run(&["device", "invite", "--machine", &machine_id]);
-    assert_ne!(code, 0, "{refused}");
-    assert_eq!(refused["type"], "error");
-    assert_eq!(refused["error"]["retryable"], false);
-    assert!(
-        refused["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("devices")),
-        "a refusal should name the grant that was missing: {refused}"
-    );
-
+    // Every newly paired device represents full OS-account control. Scoped
+    // invitations are rejected at the public invite endpoint before pairing.
     // A machine that is not at its rendezvous is a wait, not a verdict. The
     // ticket was not spent finding out, and an agent told otherwise would
     // re-pair a laptop whose lid was closed.
@@ -374,7 +348,7 @@ async fn a_prompt_typed_here_is_answered_by_an_agent_running_there() {
         .expect("the machine could not be started");
     let rendezvous = attach(&daemon, &relay.origin).await;
 
-    let invite = daemon.state.devices.invite_with(GrantSet::full());
+    let invite = daemon.state.devices.invite();
     let cli = Cli::new().await;
     let (paired, code) = cli.run(&[
         "machine",
@@ -445,7 +419,7 @@ async fn a_command_typed_here_runs_there_and_reports_what_it_did() {
         .expect("the far machine opens its workspace");
     let rendezvous = attach(&daemon, &relay.origin).await;
 
-    let invite = daemon.state.devices.invite_with(GrantSet::full());
+    let invite = daemon.state.devices.invite();
     let cli = Cli::new().await;
     let (paired, code) = cli.run(&[
         "machine",
@@ -587,7 +561,7 @@ async fn a_device_that_was_revoked_is_told_to_pair_again_rather_than_to_wait() {
         .expect("the machine could not be started");
     let rendezvous = attach(&daemon, &relay.origin).await;
 
-    let invite = daemon.state.devices.invite_with(GrantSet::full());
+    let invite = daemon.state.devices.invite();
     let cli = Cli::new().await;
     let (paired, code) = cli.run(&[
         "machine",
@@ -656,7 +630,7 @@ async fn the_same_command_returns_the_same_bytes_from_here_and_from_there() {
         .expect("opening a workspace so the answer is not empty");
     let rendezvous = attach(&daemon, &relay.origin).await;
 
-    let invite = daemon.state.devices.invite_with(GrantSet::full());
+    let invite = daemon.state.devices.invite();
     let elsewhere = Cli::new().await;
     let (paired, code) = elsewhere.run(&[
         "machine",
@@ -746,7 +720,7 @@ async fn a_backgrounded_conversation_keeps_going_and_can_be_picked_up_again() {
         .await
         .expect("the machine could not be started");
     let rendezvous = attach(&daemon, &relay.origin).await;
-    let invite = daemon.state.devices.invite_with(GrantSet::full());
+    let invite = daemon.state.devices.invite();
     let cli = Cli::new().await;
     let (paired, code) = cli.run(&[
         "machine",
@@ -910,7 +884,7 @@ async fn a_machine_that_answers_with_a_different_identity_is_refused() {
         .expect("the machine could not be started");
     let rendezvous = attach(&daemon, &relay.origin).await;
 
-    let invite = daemon.state.devices.invite_with(GrantSet::full());
+    let invite = daemon.state.devices.invite();
     let cli = Cli::new().await;
     let (paired, code) = cli.run(&[
         "machine",
@@ -949,7 +923,8 @@ async fn a_machine_that_answers_with_a_different_identity_is_refused() {
     assert_eq!(code, 0, "{forgotten}");
     assert_eq!(forgotten["data"]["forgotten"], true);
     let (gone, code) = cli.run(&["session", "list", "--machine", &machine_id]);
-    assert_eq!(gone["error"]["code"], "machineNotPaired", "{gone}");
+    assert_eq!(gone["error"]["code"], "internal", "{gone}");
+    assert_eq!(gone["error"]["details"]["stage"], "hubTicket", "{gone}");
     assert_eq!(code, 4, "{gone}");
 
     daemon.shutdown().await;

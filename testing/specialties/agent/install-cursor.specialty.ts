@@ -45,6 +45,7 @@ function cursorCase(
   catches: string[],
   run: (t: CaseContext) => Promise<void>,
   durationMs: number,
+  stages: string[] = [],
 ): void {
   defineSpecialty(
     {
@@ -54,6 +55,7 @@ function cursorCase(
       catches,
       tags: ["agent", "script-agent", "agent-install", "cursor-install", "network"],
       llm: { default: "none" },
+      stages,
       expectedDurationMs: durationMs,
       timeoutMs: Math.max(durationMs * 4, 300_000),
       resources: { environments: 1, cpu: 2, memoryMb: 2048, io: 2, browser: 0, pool: "heavy" },
@@ -148,8 +150,8 @@ cursorCase(
     "the background update breaks the installed CLI",
   ],
   async (t) => {
-    await prepare(t);
-    let opened = await open(t);
+    await t.stage("prepare", () => prepare(t));
+    let opened = await t.stage("open", () => open(t));
     try {
       const pushes = t.flows.branches.recordAgentPushes(opened.client);
       try {
@@ -165,7 +167,7 @@ cursorCase(
 
         const asked = pushes.requests.length;
         await choose(t, opened.client, pushes, ask, "run");
-        const login = await nextRequest(t, pushes, LOGIN_TITLE, asked, 10 * 60_000);
+        const login = await t.stage("install-login", () => nextRequest(t, pushes, LOGIN_TITLE, asked, 10 * 60_000));
         const installed = cursorInstall(t.env);
         const versions = path.join(realpathSync(t.env.home), ".local", "share", "cursor-agent", "versions");
         t.assertions.assert(installed.target !== null && installed.target.startsWith(versions + path.sep) && installed.versions.length === 1,
@@ -187,7 +189,7 @@ cursorCase(
 
         const again = await t.flows.branches.agentControl(opened.client, { type: "agent.action", payload: { agentId: "cursor", actionId: "login" } });
         t.assertions.assert(again.ok, `login action: ${again.ok ? "" : again.error}`);
-        const second = await nextRequest(t, pushes, LOGIN_TITLE, pushes.requests.indexOf(login) + 1, 90_000);
+        const second = await t.stage("login-again", () => nextRequest(t, pushes, LOGIN_TITLE, pushes.requests.indexOf(login) + 1, 90_000));
         assertLoginRequest(t, second);
         await choose(t, opened.client, pushes, second, "cancel");
         const canceled = await t.flows.branches.waitForAgent(opened.client, "cursor",
@@ -199,14 +201,14 @@ cursorCase(
         const wrongKey = "crsr_genehub_wrong_key_0123456789abcdef0123456789abcdef";
         const keyRun = await t.flows.branches.agentControl(opened.client, { type: "agent.action", payload: { agentId: "cursor", actionId: "login-api-key" } });
         t.assertions.assert(keyRun.ok, `login-api-key action: ${keyRun.ok ? "" : keyRun.error}`);
-        const keyAsk = await nextRequest(t, pushes, API_KEY_TITLE, pushes.requests.indexOf(second) + 1, 30_000);
+        const keyAsk = await t.stage("key-card", () => nextRequest(t, pushes, API_KEY_TITLE, pushes.requests.indexOf(second) + 1, 30_000));
         t.assertions.assert(keyAsk.questions.find((item) => item.id === "key")?.input === "secret", "the API key question is not a password box");
         await t.flows.branches.answerAgentRequest(opened.client, {
           agentId: "cursor", requestId: keyAsk.id,
           outcome: { type: "answered", optionId: "save", answers: [{ questionId: "key", selectedOptionIds: [], freeformText: wrongKey }] },
         });
-        const rejected = await t.flows.branches.waitForAgent(opened.client, "cursor",
-          (info) => info.job?.action === "login-api-key" && info.job.done === true, { timeoutMs: 120_000, what: "API key check finished" });
+        const rejected = await t.stage("reject-key", () => t.flows.branches.waitForAgent(opened.client, "cursor",
+          (info) => info.job?.action === "login-api-key" && info.job.done === true, { timeoutMs: 120_000, what: "API key check finished" }));
         t.assertions.assert((rejected.job?.error ?? "").includes("不接受"), `a wrong key ended ${JSON.stringify(rejected.job)}`);
         const keyLogs = (await t.flows.branches.agentLogs(opened.client, "cursor")).join("\n");
         const listed = JSON.stringify(await t.flows.branches.listAgents(opened.client));
@@ -223,8 +225,8 @@ cursorCase(
       await close(opened);
       const restartedAt = Date.now();
       opened = await open(t);
-      const updated = await t.flows.branches.waitForAgent(opened.client, "cursor",
-        (info) => info.job?.action === "update" && info.job.done === true, { timeoutMs: 10 * 60_000, what: "background update finished" });
+      const updated = await t.stage("background-update", () => t.flows.branches.waitForAgent(opened.client, "cursor",
+        (info) => info.job?.action === "update" && info.job.done === true, { timeoutMs: 10 * 60_000, what: "background update finished" }));
       t.note(`background update: ${updated.job?.message ?? ""}`);
       t.assertions.assert(!updated.job?.error, `background update ended in error: ${updated.job?.error}`);
       const stamped = cursorScriptState(t.env).lastUpdateCheckMs;
@@ -238,6 +240,7 @@ cursorCase(
     }
   },
   40_000,
+  ["prepare", "open", "install-login", "login-again", "key-card", "reject-key", "background-update"],
 );
 
 function readlinkSafe(file: string): string {

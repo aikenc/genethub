@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -32,6 +32,10 @@ const MAX_LOOPBACK_HTTP_RESPONSE_BYTES: usize = 64 * 1024;
 /// Desktop CI now stages the iterate host (~36MB, <1s here). Keep slack for
 /// a cold machine, not because compile is supposed to take a minute.
 const LISTEN_TIMEOUT: Duration = Duration::from_secs(120);
+// Session drain already owns 30 seconds plus a 5-second verified force-kill
+// phase. A desktop quit must let that existing protocol finish before killing
+// the host; the old four-second grace cut normal Windows cleanup short.
+const STOP_TIMEOUT: Duration = Duration::from_secs(40);
 
 /// What the daemon prints once it is listening. The port is chosen by the OS,
 /// so reading it back is the only way to know where to connect.
@@ -474,7 +478,8 @@ impl Daemon {
             }
         }
 
-        for _ in 0..40 {
+        let deadline = Instant::now() + STOP_TIMEOUT;
+        while Instant::now() < deadline {
             let gone = match (child.as_mut(), adopted) {
                 (Some(child), _) => matches!(child.try_wait(), Ok(Some(_))),
                 (None, Some(pid)) => endpoint.as_ref().is_none_or(|e| !health(e, pid)),

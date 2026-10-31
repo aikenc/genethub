@@ -6,20 +6,11 @@ export const attentionFilters: readonly [AttentionFilter, string][] = [
 ];
 
 export function canHandleInteraction(session: SessionSummary): boolean {
-  return !session.unsupported && session.imported?.continuation !== "readOnly" && session.managed?.userInteraction !== "readOnly";
+  return !session.unsupported && session.imported?.continuation !== "readOnly" && !session.historyOnly;
 }
 
-export function humanController(session: SessionSummary, sessions: readonly SessionSummary[]): SessionSummary | undefined {
-  const seen = new Set<string>();
-  let owner: SessionSummary | undefined = session;
-  while (owner && !seen.has(owner.id)) {
-    seen.add(owner.id);
-    if (canHandleInteraction(owner)) return owner;
-    if (!owner.managed) return undefined;
-    const parentId: string = owner.managed.parentSessionId;
-    owner = sessions.find(item => item.id === parentId);
-  }
-  return undefined;
+export function humanController(session: SessionSummary, _sessions: readonly SessionSummary[]): SessionSummary | undefined {
+  return canHandleInteraction(session) ? session : undefined;
 }
 
 /** Only actual, accessible requests count as Human work. References to a
@@ -50,8 +41,7 @@ export function sessionAttention(session: SessionSummary, sessions: readonly Ses
   const inProgress = running || session.status === "waiting";
   const activity = running ? "Agent 处理中" : "";
   const waiting = !pending && session.status === "waiting"
-    ? session.managed?.userInteraction === "readOnly" ? "等待上级处理"
-      : session.interactionSummary ? "等待继续执行" : "等待交互 · 待核对"
+    ? session.interactionSummary ? "等待继续执行" : "等待交互 · 待核对"
     : "";
   const attention = pending ? `待你处理${pending > 1 ? ` ${pending}` : ""}` : "";
   const label = [attention, blocked ? "运行异常" : "", activity, waiting]

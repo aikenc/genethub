@@ -1,6 +1,6 @@
 // An expert is a Space tree plus one script. This journey builds `alice` from the shipped template with
-// the shipped SpaceBuilder, starts the shipped daemon, uses `expert.py init` to create a second expert `bob`
-// on the live daemon, and then plays the front desk's part: it runs `tools/expert.py` the way an Agent's
+// the shipped SpaceBuilder, starts the shipped daemon, uses `team.py init` to create a second expert `bob`
+// on the live daemon, and then plays the front desk's part: it runs `tools/team.py` the way an Agent's
 // shell would. The daemon's timer runs the same script's `hook`, which notices when background sessions
 // finish and delivers results. Sessions use the script Agent fixture, so no model is involved and the whole
 // path is deterministic.
@@ -43,7 +43,7 @@ defineJourney(
     oracle:
       "init creates bob with soul.md anchors, git branches and four registered Spaces; spawn creates a labelled work session whose result reaches the front once; two jobs spawned in one turn each reach the front exactly once and leave pending/ empty; a second work session on the same --dir is refused while research is allowed; send --to bob:work starts a cross-expert session and delivers its reply back; note writes once without starting sessions; mount enforces exclusive ownership and warns on dirty git state",
     catches: [
-      "expert.py init failing to register child Spaces or clobbering soul.md anchors",
+      "team.py init failing to register child Spaces or clobbering soul.md anchors",
       "a finished background session the front is never told about, or told twice",
       "two jobs from one turn collapsing into one delivery or being delivered twice",
       "two work sessions simultaneously writing the same business directory",
@@ -55,7 +55,7 @@ defineJourney(
     expectedDurationMs: 50_000,
     timeoutMs: 240_000,
     surfaces: ["daemon", "spacebuilder", "genet-cli", "script-agent", "timer-hook"],
-    productInterfaces: ["tools/expert.py", "genet hook list", "session.send --message-id"],
+    productInterfaces: ["tools/team.py", "genet hook list", "session.send --message-id"],
   },
   async (t) => {
     hideHostAgentClis(t.env);
@@ -112,7 +112,7 @@ defineJourney(
         EXPERT_SPACEBUILDER: path.join(t.openRoot, BUILDER),
       };
       const expert = (dir: string, ...args: string[]) => {
-        const done = spawnSync("python3", [path.join(dir, "tools", "expert.py"), ...args], {
+        const done = spawnSync("python3", [path.join(dir, "tools", "team.py"), ...args], {
           cwd: path.join(dir, "front"),
           env: { ...env, GENEHUB_SESSION_ID: front },
           encoding: "utf8",
@@ -120,7 +120,7 @@ defineJourney(
         return { code: done.status ?? -1, out: done.stdout, err: done.stderr };
       };
 
-      // 0. J1: `expert.py init` creates `bob` from the template, preserves soul.md anchors, initializes git, and opens its 4 Spaces.
+      // 0. J1: `team.py init` creates `bob` from the template, preserves soul.md anchors, initializes git, and opens its 4 Spaces.
       const inited = expert(alice, "init", "bob", "--desc", "QA与协作专家", "--soul", "负责跨专家验收与回合制回归验证");
       t.assertions.assert(inited.code === 0 && inited.out.includes("已创建并初始化团队 bob") && inited.out.includes("已打开空间"), `init bob: ${inited.out} ${inited.err}`);
       const bob = path.join(t.env.data, "spaces", "bob");

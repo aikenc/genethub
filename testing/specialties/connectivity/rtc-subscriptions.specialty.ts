@@ -16,7 +16,7 @@ defineSpecialty(
   {
     id: "specialty.connectivity.rtc-subscription-ownership",
     title: "Browser subscriptions remain live across RTC upgrades and fallback",
-    oracle: "Real browser receives sequenced session events and completion over the same connection that owns its subscription with stable logical identity across RTC activation, relay outage and real RTC failure",
+    oracle: "Real browser receives sequenced session events and completion over the same connection that owns its subscription with fresh connection identities and explicit business resubscription after RTC activation and real RTC failure; healthy RTC survives a relay outage",
     catches: ["empty new conversation after RTC connects", "history snapshot without subsequent events", "RTC fallback loses subscription", "unsubscribe targets a different peer"],
     tags: ["network-risk-v2", "multichannel","page-experience", "rtc-subscriptions", "connectivity"],
     runner: "playwright",
@@ -133,6 +133,8 @@ client.connect();
       t.assertions.assert(initial.snapshot.items.length === 0, "new session was not empty");
       await page.evaluate(() => (window as any).probe.client.setRtcEnabled(true));
       await page.waitForFunction(() => (window as any).probe.client.rtcState === "connected", null, { timeout: 30000 }).catch(diagnosticFailure);
+      const rtcId = await page.evaluate(() => (window as any).probe.client.logicalConnectionId);
+      t.assertions.assert(rtcId !== logicalId, "RTC upgrade reused the old physical endpoint");
       const remoteCandidates = await page.evaluate(() => (window as any).probe.rtcCandidates);
       t.assertions.assert(
         remoteCandidates.length >= 1 && remoteCandidates.every((counts: any) =>
@@ -168,7 +170,7 @@ client.connect();
         }).catch(diagnosticFailure);
         t.assertions.assert(
           held.reply === "workspaces" && held.state === "ready" &&
-          held.rtc === "connected" && held.logicalId === logicalId,
+          held.rtc === "connected" && held.logicalId === rtcId,
           `RTC did not stay usable for 20 seconds (sample ${sample + 1}): ${JSON.stringify(held)}`,
         );
       }
@@ -196,13 +198,17 @@ client.connect();
       t.assertions.assert(reopened.snapshot.items.length > 0, "history snapshot missing");
       await opened.client.call({ type: "session.rename", payload: { sessionId, title: "after-reopen" } });
       await page.waitForFunction(() => (window as any).probe.events.some((e: any) => e.event.type === "titleChanged" && e.event.title === "after-reopen"));
+      const beforeFallback = await page.evaluate(() => (window as any).probe.repairs.length);
       await page.evaluate(() => (window as any).probe.client.setRtcEnabled(false));
+      await page.waitForFunction(offset => (window as any).probe.client.connectionState === "ready" && (window as any).probe.repairs.length > offset, beforeFallback, { timeout: 20000 });
       await opened.client.call({ type: "session.rename", payload: { sessionId, title: "after-fallback" } });
       await page.waitForFunction(() => (window as any).probe.events.some((e: any) => e.event.type === "titleChanged" && e.event.title === "after-fallback"));
 
-      // A paused relay cannot stop events after the same logical peer moves to RTC.
+      // A paused relay cannot stop events owned by an independent RTC endpoint.
+      const beforeUpgrade = await page.evaluate(() => (window as any).probe.repairs.length);
       await page.evaluate(() => (window as any).probe.client.setRtcEnabled(true));
       await page.waitForFunction(() => (window as any).probe.client.rtcState === "connected", null, { timeout: 30000 }).catch(diagnosticFailure);
+      await page.waitForFunction(offset => (window as any).probe.repairs.length > offset, beforeUpgrade, { timeout: 10000 });
       relay.process.kill("SIGSTOP");
       try {
         await page.evaluate(() => (window as any).probe.client.call({ type: "workspace.list" }));
@@ -214,23 +220,22 @@ client.connect();
       }
       const beforeFault = await page.evaluate(() => {
         const p = (window as any).probe;
-        const before = { repairs: p.repairs.length, states: p.states.length };
+        const before = { repairs: p.repairs.length, states: p.states.length, id: p.client.logicalConnectionId };
         // Terminate the actual Chromium peers; every replacement still uses native WebRTC.
         for (const peer of (window as any).nativePeers) peer.close();
         return before;
       });
-      // A healthy authenticated standby should hide physical failure from the
-      // business session. Assert a real reply, not an intermediate UI state.
-      const afterFault = await page.evaluate(async (offset) => {
+      // The old RTC endpoint ends; business subscriptions rebuild on fresh admission.
+      await page.waitForFunction(before => {
+        const p = (window as any).probe;
+        return p.client.connectionState === "ready" && p.client.logicalConnectionId !== before.id && p.repairs.length > before.repairs;
+      }, beforeFault, { timeout: 30000 }).catch(diagnosticFailure);
+      const afterFault = await page.evaluate(async () => {
         const p = (window as any).probe;
         const reply = await p.client.call({ type: "workspace.list" });
-        return { reply: reply?.type, state: p.client.connectionState, states: p.states.slice(offset) };
-      }, beforeFault.states).catch(diagnosticFailure);
-      t.assertions.assert(afterFault.reply === "workspaces" && afterFault.state === "ready", "RTC failure interrupted ordinary RPC");
-      t.assertions.assert(!afterFault.states.includes("reconnecting"), "RTC failure discarded the healthy standby");
-      const resumed = await page.evaluate(() => ({ id: (window as any).probe.client.logicalConnectionId, repairs: (window as any).probe.repairs.length }));
-      t.assertions.assert(resumed.id === logicalId, "RTC failure replaced the logical connection");
-      t.assertions.assert(resumed.repairs === beforeFault.repairs, "carrier recovery rebuilt business subscriptions");
+        return { reply: reply?.type, state: p.client.connectionState };
+      }).catch(diagnosticFailure);
+      t.assertions.assert(afterFault.reply === "workspaces" && afterFault.state === "ready", "new connection did not recover ordinary RPC");
       await opened.client.call({ type: "session.rename", payload: { sessionId, title: "after-reconnect" } });
       await page.waitForFunction(() => (window as any).probe.events.some((e: any) => e.event.type === "titleChanged" && e.event.title === "after-reconnect"));
       await page.evaluate(async (id) => {
@@ -250,7 +255,7 @@ client.connect();
       t.assertions.assert(evidence.operations.some((e: any) => e.operation === "subscribe" && e.transport === "rtc" && e.outcome === "ok"), "subscription still used the temporary baseline selector");
       await page.evaluate(() => (window as any).probe.client.close());
       await page.close();
-      t.note("Actual Chromium: native RTC stayed usable for 20 seconds with periodic RPCs; one logical identity for RPC/subscription/events; empty session, Agent completion, reopen, configured fallback, live events during relay pause, native RTC failure without resubscription, and cancellation verified.");
+      t.note("Actual Chromium: native RTC stayed usable for 20 seconds with periodic RPCs; one logical identity for RPC/subscription/events; empty session, Agent completion, reopen, configured fallback, live events during relay pause, native RTC failure followed by business cursor repair on a fresh endpoint, and cancellation verified.");
       } catch (error) { await diagnosticFailure(error); }
     } finally {
       await server?.close();

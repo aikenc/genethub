@@ -21,7 +21,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 
-use crate::authz::GrantSet;
 use crate::channel_auth::{self, SessionKey};
 
 // One generator for every secret and nonce in the product, front door included:
@@ -39,7 +38,6 @@ const NONCE_MEMORY: usize = 1024;
 const MAX_INVITES: usize = 32;
 const MAX_DEVICES: usize = 128;
 const MAX_DEVICE_NAME_CHARS: usize = 64;
-const GRANTS_VERSION: u8 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -52,14 +50,6 @@ struct Device {
     secret: String,
     paired_at: DateTime<Utc>,
     last_seen_at: Option<DateTime<Utc>>,
-    /// What this device may ask for. Absent in files written before grants
-    /// existed, which `GrantSet::default` reads as everything.
-    #[serde(default)]
-    grants: GrantSet,
-    /// Distinguishes an old full grant set from a new set that deliberately
-    /// omits a capability added later.
-    #[serde(default)]
-    grants_version: u8,
 }
 
 /// Invites are not persisted. An invite means "right now I am waiting for a new
@@ -68,14 +58,12 @@ struct Invite {
     id: String,
     secret: String,
     expires_at: DateTime<Utc>,
-    /// Decided when the invitation is minted, not when it is redeemed. The
-    /// device being paired does not get to say how much it is worth.
-    grants: GrantSet,
 }
 
 #[derive(Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Persisted {
+    authority_version: u8,
     devices: Vec<Device>,
 }
 
@@ -102,8 +90,14 @@ impl Devices {
     pub fn load(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
         let (mut devices, writable) = match std::fs::read_to_string(&path) {
-            Ok(raw) => match serde_json::from_str::<Persisted>(&raw) {
-                Ok(file) => (file.devices, true),
+            Ok(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+                Ok(file) => match migrate_devices(&path, &raw, file) {
+                    Ok(devices) => (devices, true),
+                    Err(error) => {
+                        tracing::error!(%error, "device authority migration failed; preserving original and denying access");
+                        (Vec::new(), false)
+                    }
+                },
                 Err(error) => {
                     // Keep the bytes: starting from an empty list is fine,
                     // but the next pairing must not overwrite the only copy.
@@ -134,12 +128,6 @@ impl Devices {
             }
         };
         devices = devices.into_iter().take(MAX_DEVICES).collect();
-        for device in &mut devices {
-            if device.grants_version == 0 {
-                device.grants.add_speech_to_legacy_full();
-                device.grants_version = GRANTS_VERSION;
-            }
-        }
         let (revoked, _) = broadcast::channel(16);
         Devices {
             path,
@@ -169,30 +157,23 @@ impl Devices {
                 paired_at: device.paired_at.to_rfc3339(),
                 last_seen_at: device.last_seen_at.map(|at| at.to_rfc3339()),
                 connected: state.connected.contains_key(&device.id),
-                grants: Some(device.grants.names()),
             })
             .collect()
     }
 
-    /// What a device may ask for, or `None` if it is no longer authorized.
-    pub fn grants(&self, device_id: &str) -> Option<GrantSet> {
-        let state = self.state.lock().unwrap();
-        state
+    pub fn authorized(&self, device_id: &str) -> bool {
+        self.state
+            .lock()
+            .unwrap()
             .devices
             .iter()
-            .find(|device| device.id == device_id)
-            .map(|device| device.grants.clone())
+            .any(|device| device.id == device_id)
     }
 
     /// Mints a one-time code. `rendezvous_url` is filled in by the caller,
     /// which is the only part of the system that knows whether this machine is
     /// currently reachable from outside.
     pub fn invite(&self) -> DeviceInvite {
-        self.invite_with(GrantSet::full())
-    }
-
-    /// Mints an invitation worth only part of this machine.
-    pub fn invite_with(&self, grants: GrantSet) -> DeviceInvite {
         let id = format!("inv_{}", uuid::Uuid::new_v4().simple());
         let secret = random_token();
         let code = format!("{id}.{secret}");
@@ -203,18 +184,15 @@ impl Devices {
         if state.invites.len() >= MAX_INVITES {
             state.invites.remove(0);
         }
-        let names = grants.names();
         state.invites.push(Invite {
             id,
             secret,
             expires_at,
-            grants,
         });
         DeviceInvite {
             code,
             rendezvous_url: None,
             expires_at: expires_at.to_rfc3339(),
-            grants: Some(names),
         }
     }
 
@@ -270,15 +248,12 @@ impl Devices {
                 "this machine has reached its authorized-device limit"
             ));
         }
-        let invite = state.invites.remove(position);
         let device = Device {
             id: format!("d_{}", random_token()),
             name: device_name,
             secret: random_token(),
             paired_at: now,
             last_seen_at: None,
-            grants: invite.grants,
-            grants_version: GRANTS_VERSION,
         };
         let credential = DeviceCredential {
             device_id: device.id.clone(),
@@ -288,8 +263,11 @@ impl Devices {
             fingerprint: String::new(),
         };
         let id = device.id.clone();
-        state.devices.push(device);
-        self.persist(&state)?;
+        let mut next = state.devices.clone();
+        next.push(device);
+        self.persist_devices(&next)?;
+        state.invites.remove(position);
+        state.devices = next;
         Ok((credential, id))
     }
 
@@ -331,12 +309,17 @@ impl Devices {
     /// Forgets a device and tells any live connection of its to go away.
     pub fn revoke(&self, device_id: &str) -> Result<bool> {
         let mut state = self.state.lock().unwrap();
-        let before = state.devices.len();
-        state.devices.retain(|device| device.id != device_id);
-        if state.devices.len() == before {
+        let next: Vec<_> = state
+            .devices
+            .iter()
+            .filter(|device| device.id != device_id)
+            .cloned()
+            .collect();
+        if next.len() == state.devices.len() {
             return Ok(false);
         }
-        self.persist(&state)?;
+        self.persist_devices(&next)?;
+        state.devices = next;
         drop(state);
         let _ = self.revoked.send(device_id.to_string());
         Ok(true)
@@ -373,6 +356,10 @@ impl Devices {
     }
 
     fn persist(&self, state: &State) -> Result<()> {
+        self.persist_devices(&state.devices)
+    }
+
+    fn persist_devices(&self, devices: &[Device]) -> Result<()> {
         if !self.writable {
             anyhow::bail!("devices.json could not be read at startup; refusing to overwrite it");
         }
@@ -380,10 +367,110 @@ impl Devices {
             std::fs::create_dir_all(parent)?;
         }
         let body = serde_json::to_string_pretty(&Persisted {
-            devices: state.devices.clone(),
+            authority_version: 1,
+            devices: devices.to_vec(),
         })?;
         crate::config::save_private(&self.path, body.as_bytes())
     }
+}
+
+/// Only the old on-disk reader knows grant names. Restricted or unknown old
+/// credentials are removed, never upgraded into full machine authorization.
+fn migrate_devices(
+    path: &std::path::Path,
+    raw: &str,
+    mut file: serde_json::Value,
+) -> Result<Vec<Device>> {
+    let version = match file.get("authorityVersion") {
+        None => 0,
+        Some(v) => v
+            .as_u64()
+            .ok_or_else(|| anyhow!("invalid device authority version"))?,
+    };
+    anyhow::ensure!(version <= 1, "unsupported device authority format");
+    let rows = file
+        .get_mut("devices")
+        .and_then(|v| v.as_array_mut())
+        .ok_or_else(|| anyhow!("invalid devices list"))?;
+    let needs_migration = version == 0
+        || rows
+            .iter()
+            .any(|r| r.get("grants").is_some() || r.get("grantsVersion").is_some());
+    let mut devices = Vec::new();
+    for row in rows {
+        let grant_version = match row.get("grantsVersion") {
+            None => 0,
+            Some(v) => match v.as_u64() {
+                Some(v) => v,
+                None => continue,
+            },
+        };
+        let full = grant_version <= 1
+            && match row.get("grants") {
+                None => version == 1 || row.get("grantsVersion").is_none(),
+                Some(serde_json::Value::Array(values)) => {
+                    let names: Option<std::collections::BTreeSet<_>> =
+                        values.iter().map(|v| v.as_str()).collect();
+                    names.is_some_and(|names| {
+                        let current = [
+                            "handshake",
+                            "read",
+                            "session",
+                            "files",
+                            "git",
+                            "pty",
+                            "pty:unconfined",
+                            "devices",
+                            "settings",
+                            "speech",
+                            "services",
+                            "update",
+                        ]
+                        .into_iter()
+                        .collect();
+                        let old: std::collections::BTreeSet<_> = [
+                            "handshake",
+                            "read",
+                            "session",
+                            "files",
+                            "git",
+                            "pty",
+                            "devices",
+                            "settings",
+                            "update",
+                        ]
+                        .into_iter()
+                        .collect();
+                        let mut old_speech = old.clone();
+                        old_speech.insert("speech");
+                        names == current
+                            || (grant_version == 0 && (names == old || names == old_speech))
+                    })
+                }
+                _ => false,
+            };
+        if full {
+            devices.push(serde_json::from_value::<Device>(row.clone())?);
+        }
+    }
+    if needs_migration {
+        // Each attempt gets its own private original, including failed writes.
+        let backup = path.with_extension(format!(
+            "pre-full-access-{}.json",
+            uuid::Uuid::new_v4().simple()
+        ));
+        crate::config::save_private(&backup, raw.as_bytes())?;
+        let body = serde_json::to_vec_pretty(&Persisted {
+            authority_version: 1,
+            devices: devices.clone(),
+        })?;
+        crate::config::save_private(path, &body)?;
+        tracing::info!(
+            retained = devices.len(),
+            "device authority migrated; restricted legacy credentials require pairing again"
+        );
+    }
+    Ok(devices)
 }
 
 fn validate_device_name(name: &str) -> Result<String> {

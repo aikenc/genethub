@@ -46,8 +46,8 @@ defineSpecialty({ ...shape, id: "specialty.agent.provider-configuration.browser"
   try {
     const request = await prepare(t, s);
     const discovered = s.journal().filter(e => e.event === "provider-discovery");
-    const context = discovered.map(e => { try { return parseJson(String(e.result)) as { type?: string; data?: { principal?: {type?: string}; authority?: { grants?: string[] } } }; } catch { return null; } }).find(e => e?.type === "context");
-    t.assertions.assert(context?.data?.principal?.type === "sessionController" && context?.data?.authority?.grants?.includes("settings"), "Agent lost its session identity or ordinary owner capabilities");
+    const context = discovered.map(e => { try { return parseJson(String(e.result)) as { type?: string; data?: { principal?: {type?: string}; authority?: { providerOperations?: boolean } } }; } catch { return null; } }).find(e => e?.type === "context");
+    t.assertions.assert(context?.data?.principal?.type === "sessionController" && context?.data?.authority?.providerOperations === true, "Agent lost its session identity or ordinary owner capabilities");
     const cli = s.journal().find(e => e.event === "provider-cli");
     t.assertions.assert(!!cli, "configuration did not use the public CLI");
     const isRunning = (pid: number) => { try { const stat = readFileSync(`/proc/${pid}/stat`, "utf8"); return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0] !== "Z"; } catch { return false; } };
@@ -83,23 +83,22 @@ defineSpecialty({ ...shape, id: "specialty.agent.provider-configuration.browser"
 });
 
 defineSpecialty({ ...shape, id: "specialty.agent.provider-configuration.authorization",
-  title: "Provider operations reject unauthorized approval and stale plans, while retaining existing credentials",
-  oracle: "read+session device cannot submit; ordinary answers cannot approve a provider operation; concurrent Human settings update makes the plan stale without overwriting its key; rejection resumes the same task; changed action payload and credential command arguments are rejected",
-  catches: ["general Session permission elevates to Settings", "generic answer substitutes for configuration authorization", "stale plan overwrites new settings", "action identity changes"],
+  title: "Provider cards preserve explicit decisions and stale-plan fencing under full paired access",
+  oracle: "generic answers cannot approve a provider operation; a concurrent full paired device settings update makes the plan stale without overwriting its key; rejection resumes the same task; changed action payload and credential command arguments are rejected",
+  catches: ["generic answer substitutes for configuration authorization", "stale plan overwrites new settings", "action identity changes"],
 }, async t => {
   const s = await openProviderSession(t, "openai");
   let reader: Awaited<ReturnType<CaseContext["flows"]["main"]["pairDevice"]>> | undefined;
   try {
     const request = await prepare(t, s);
-    reader = await t.flows.main.pairDevice(s.client, s.daemon, ["read", "session"], "provider-reader");
-    await t.assertions.expectProtocolCode(() => operation(s, { type: "submit", actionId: s.actionId, approved: true, apiKey: "not-a-real-key" }, reader!.client), "forbidden");
+    reader = await t.flows.main.pairDevice(s.client, s.daemon, "provider-reader");
     await t.assertions.expectProtocolCode(() => s.client.call({ type: "session.respondPermission", payload: { sessionId: s.sessionId, requestId: request.id, outcome: { outcome: "selected", optionId: "approve" } } }), "forbidden");
     const pending = await operation(s, { type: "get", actionId: s.actionId });
     await t.assertions.expectProtocolCode(() => operation(s, { type: "prepare", actionId: s.actionId, draft: { ...pending.draft, label: "changed" } }), "badRequest");
     const bad = runGenet(s.daemon.genet, ["provider", "configure", "new", "--api-key", "masked"], s.daemon.env);
     t.assertions.assert(bad.code === 2, "credential argument accepted by CLI");
     const existingKey = "existing-" + randomBytes(16).toString("hex");
-    await s.client.call({ type: "settings.setProvider", payload: { providerId: "fixture-provider", apiKey: existingKey, baseUrl: s.mock.origin, label: "Manual change", dialect: "openai", models: ["mock-llm"] } });
+    await reader.client.call({ type: "settings.setProvider", payload: { providerId: "fixture-provider", apiKey: existingKey, baseUrl: s.mock.origin, label: "Manual change", dialect: "openai", models: ["mock-llm"] } });
     await t.assertions.expectProtocolCode(() => operation(s, { type: "submit", actionId: s.actionId, approved: true, apiKey: "replacement" }), "badRequest");
     t.assertions.assert((await operation(s, { type: "get", actionId: s.actionId })).state === "stale", "changed settings did not fence the plan");
     await operation(s, { type: "submit", actionId: s.actionId, approved: false });

@@ -9,17 +9,13 @@ export const MAX_DATA_PAYLOAD_BYTES =
   MAX_DATA_FRAME_BYTES -
   SECURE_RECORD_HEADER_BYTES -
   SECURE_RECORD_TAG_BYTES -
-  36;
-export const INITIAL_STREAM_WINDOW_BYTES = 3 * 1024 * 1024;
+  DATA_FRAME_HEADER_BYTES;
 export const MAX_FINITE_EXCHANGE_BODY_BYTES = 64 * 1024 * 1024;
-export const LEGACY_BULK_STREAM_WINDOW_BYTES = 8 * 1024 * 1024;
-export const MAX_BULK_STREAM_WINDOW_BYTES = MAX_FINITE_EXCHANGE_BODY_BYTES;
 
 export const DataKind = {
   Open: 1,
   Head: 2,
   Data: 3,
-  WindowUpdate: 4,
   Fin: 5,
   Reset: 6,
   Ping: 7,
@@ -100,3 +96,6 @@ function validateUint32(value: number, name: string): void {
     throw new RangeError(`${name} must be a uint32`);
   }
 }
+
+export type ConnectionPath = "fabric" | "rtc" | "loopback";
+export type ConnectionPolicy = "relay-allowed" | "direct-only";

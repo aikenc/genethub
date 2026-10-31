@@ -11,11 +11,7 @@ export const MAX_ROUTE_TICKET_BYTES = 4096;
  * OPEN budget from becoming a multi-gigabyte memory reservation.
  */
 export const MAX_OPERATION_METADATA_BYTES = 16 * 1024;
-/** Default receive window advertised independently by each stream endpoint. */
-export const FABRIC_INITIAL_STREAM_CREDIT = 256 * 1024;
-/** Hard protocol cap for an advertised per-stream receive window. */
-export const FABRIC_MAX_STREAM_CREDIT = 4 * 1024 * 1024;
-/** Query capability: Relay may make DATA obey each TCP leg, not remote WU. */
+/** The only supported flow mode; mismatched peers fail admission. */
 export const FABRIC_TRANSPORT_FLOW = "transport-v1";
 
 export const FabricKind = {
@@ -23,7 +19,6 @@ export const FabricKind = {
   Incoming: 2,
   Accept: 3,
   Data: 4,
-  WindowUpdate: 5,
   Fin: 6,
   Reset: 7,
   Ping: 8,

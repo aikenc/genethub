@@ -20,7 +20,7 @@ export async function openFabricPool(t: CaseContext, nodeChannels: number, brows
   }
   try {
     if (options.independentBrowserLeg) browserLink = await startSharedBottleneck(relay.origin, { bandwidthMbps: 1000, rttMs: 0 });
-    const paired = await t.flows.main.pairDevice(opened.client, opened.daemon, [], "all-hop-pool"); paired.client.close();
+    const paired = await t.flows.main.pairDevice(opened.client, opened.daemon, "all-hop-pool"); paired.client.close();
     const reply = await opened.client.call({ type: "device.remoteAttach", payload: { relayUrl: nativePath ? relay.origin : link.urlFor(relay.origin), joinToken: relay.joinToken, channelCount: nodeChannels } });
     if (reply?.type !== "remoteAccess") throw new Error("node pool attachment did not return metadata");
     let lanes = reply.data.channels ?? [];
@@ -35,7 +35,7 @@ export async function openFabricPool(t: CaseContext, nodeChannels: number, brows
       const beforeNode = new Map(link.connections().filter(flow => nodeFlowIds.includes(flow.id)).map(flow => [flow.id, [...flow.bytes]]));
       const client = new Client({ separateDataChannel: false, ...fresh(), rtcEnabled: false, requestTimeoutMs: 10000, redial: async () => fresh(),
         socketFactory: u => new WebSocket(u) as unknown as WebSocketLike,
-        onDiagnostic(event) { if (event.kind === "connection" || event.kind === "error") { diagnostics.push({ peer, state: event.detail.state, phase: event.detail.phase, reason: event.kind === "error" ? event.detail.errorName : event.detail.closeReason }); if (diagnostics.length > 40) diagnostics.shift(); } observe?.(event, peer); },
+        onDiagnostic(event) { if (event.kind === "connection" || event.kind === "error" || event.kind === "transport" && event.detail.phase === "carrier-lost") { diagnostics.push({ peer, state: event.detail.state, phase: event.detail.phase, reason: event.kind === "error" ? event.detail.errorName : event.detail.reason ?? event.detail.closeReason }); if (diagnostics.length > 40) diagnostics.shift(); } observe?.(event, peer); },
       });
       clients.push(client); client.connect(); await t.tools.waitUntil(() => client.connectionState === "ready", 15000);
       if (!nativePath) {

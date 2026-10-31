@@ -220,8 +220,6 @@ fn admin_descriptor(template: &[u8], name: &str) -> Vec<u8> {
 
 async fn build(script: &Path, admin: &Path, python: Option<PathBuf>) -> Result<(), String> {
     let program = python.unwrap_or_else(|| PathBuf::from("python3"));
-    let argv = crate::process::launch_argv(&program.to_string_lossy(), None)
-        .map_err(|e| format!("{e:#}"))?;
     let arguments = vec![
         script.to_string_lossy().into_owned(),
         "build".to_string(),
@@ -229,7 +227,7 @@ async fn build(script: &Path, admin: &Path, python: Option<PathBuf>) -> Result<(
         "--format".to_string(),
         "json".to_string(),
     ];
-    let mut command = crate::process::command(&argv, &arguments, admin);
+    let mut command = crate::process::command(&program, &arguments, admin);
     command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

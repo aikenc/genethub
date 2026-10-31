@@ -326,7 +326,10 @@ describe.skipIf(
       invite.data.code,
       "临时设备",
       socketFactory,
-    );
+    ).catch((error: Error) => {
+      const cause = error.cause;
+      throw new Error(`${error.message}; cause=${cause instanceof Error ? `${cause.name}: ${cause.message}` : typeof cause}`, { cause: error });
+    });
     const guest = new Client({
       url: rendezvous,
       credential: { deviceId: machine.deviceId, secret: machine.secret },

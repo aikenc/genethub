@@ -13,11 +13,7 @@ export const FABRIC_ZERO_STREAM_ID = "0".repeat(FABRIC_STREAM_ID_BYTES * 2);
 export const FABRIC_MAX_ROUTE_TICKET_BYTES = 4096;
 /** OPEN metadata retained during route admission has its own memory bound. */
 export const FABRIC_MAX_OPERATION_METADATA_BYTES = 16 * 1024;
-/** Default receive window advertised independently by each stream endpoint. */
-export const FABRIC_INITIAL_STREAM_CREDIT = 256 * 1024;
-/** Hard protocol cap for an advertised per-stream receive window. */
-export const FABRIC_MAX_STREAM_CREDIT = 4 * 1024 * 1024;
-/** Endpoint URL capability understood by Relay; old relays safely ignore it. */
+/** The only supported flow mode; mismatched peers fail admission. */
 export const FABRIC_TRANSPORT_FLOW = "transport-v1";
 
 export const FabricKind = {
@@ -25,7 +21,6 @@ export const FabricKind = {
   Incoming: 2,
   Accept: 3,
   Data: 4,
-  WindowUpdate: 5,
   Fin: 6,
   Reset: 7,
   Ping: 8,

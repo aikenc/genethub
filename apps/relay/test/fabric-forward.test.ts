@@ -9,7 +9,6 @@ import {
   encodeFabricOpenPayload,
   FabricKind,
   type FabricFrame,
-  FABRIC_INITIAL_STREAM_CREDIT,
   FabricReset,
 } from "../src/forward/fabric-frame.js";
 import { AuthorityHttpError } from "../src/shared/authority-error.js";
@@ -29,7 +28,6 @@ function id(value: number): string {
   return value.toString(16).padStart(32, "0");
 }
 
-const CREDIT = BigInt(FABRIC_INITIAL_STREAM_CREDIT);
 
 function wire(frame: FabricFrame): Buffer {
   return encodeFabricFrame(frame);
@@ -109,7 +107,7 @@ describe("Fabric v2 over real WebSockets", () => {
       wire({
         kind: FabricKind.Open,
         streamId: sourceStreamId,
-        value: CREDIT,
+        value: 0n,
         payload: encodeFabricOpenPayload(ticket, Buffer.from(`hello:${ticket}`)),
       }),
     );
@@ -122,7 +120,7 @@ describe("Fabric v2 over real WebSockets", () => {
       wire({
         kind: FabricKind.Accept,
         streamId: incoming.streamId,
-        value: CREDIT,
+        value: 0n,
         payload: Buffer.from(`accepted:${ticket}`),
       }),
     );

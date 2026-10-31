@@ -9,10 +9,7 @@ import {
   randomNonce,
   type ChannelSessionKey,
 } from "../devices/proof";
-import {
-  DATA_PLANE_VERSION,
-  INITIAL_STREAM_WINDOW_BYTES,
-} from "./frame";
+import { DATA_PLANE_VERSION } from "./frame";
 
 export type PeerCredential =
   | { kind: "loopback"; secret: string }
@@ -27,8 +24,6 @@ export interface PreparedPeerHandshake {
 
 export interface PeerHandshakeResult {
   key: ChannelSessionKey;
-  /** Receive lease advertised by this authenticated daemon for finite bulk flows. */
-  maxBulkStreamWindowBytes: number;
 }
 
 /** Builds the only plaintext application message on a peer carrier. */
@@ -45,13 +40,12 @@ export async function preparePeerHandshake(
     clientName: boundedClientName(options.clientName),
     auth,
     rtcSupported: options.rtcSupported ?? supportsRtc(),
-    // v4 uses the same bounded per-stream window for finite and live flows.
-    maxBulkStreamWindowBytes: INITIAL_STREAM_WINDOW_BYTES,
   };
   return {
     hello,
     async complete(welcome) {
       if (
+        Object.keys(welcome).some(key => !["version", "serverNonce", "proof"].includes(key)) ||
         welcome.version !== DATA_PLANE_VERSION ||
         typeof welcome.serverNonce !== "string" ||
         !/^[0-9a-f]{32,128}$/.test(welcome.serverNonce) ||
@@ -68,9 +62,6 @@ export async function preparePeerHandshake(
       if (!sameHex(welcome.proof, expected)) {
         throw new Error("the peer did not prove the expected E2EE secret");
       }
-      const maxBulkStreamWindowBytes = validBulkWindow(
-        welcome.maxBulkStreamWindowBytes,
-      );
       return {
         key: await deriveChannelSessionKey(
           credential.secret,
@@ -78,21 +69,9 @@ export async function preparePeerHandshake(
           nonce,
           welcome.serverNonce,
         ),
-        maxBulkStreamWindowBytes,
       };
     },
   };
-}
-
-function validBulkWindow(value: number): number {
-  if (
-    !Number.isSafeInteger(value) ||
-    value < INITIAL_STREAM_WINDOW_BYTES ||
-    value > INITIAL_STREAM_WINDOW_BYTES
-  ) {
-    throw new Error("the daemon advertised an invalid finite-bulk receive lease");
-  }
-  return value;
 }
 
 function contextOf(credential: PeerCredential): string {

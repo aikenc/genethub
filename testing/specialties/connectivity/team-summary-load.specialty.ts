@@ -19,7 +19,7 @@ defineSpecialty({
   const endpoints=await Promise.all(fleet.nodes.map(async n=>{const r=await n.opened.client.call({type:"device.list"});if(r?.type!=="devices"||!r.data.remote.channels?.[0])throw new Error("primary node missing");const u=new URL(r.data.remote.channels[0].url);u.host=new URL(fleet.relay.origin).host;return {url:fleet.link.urlFor(u.toString())};}));
   // Derive a fresh paired authority through the public invitation path for
   // the real product consumer, independently of the body's existing viewers.
-  const credentials=await Promise.all(fleet.nodes.map(async n=>{const p=await t.flows.main.pairDevice(n.opened.client,n.opened.daemon,[],"summary-viewer");p.client.close();return p.credential;}));
+  const credentials=await Promise.all(fleet.nodes.map(async n=>{const p=await t.flows.main.pairDevice(n.opened.client,n.opened.daemon,"summary-viewer");p.client.close();return p.credential;}));
   const directory=new MachineSummaryDirectory({targets:async()=>targets,openTarget:async id=>({url:endpoints[Number(id)]!.url,via:"relay",label:targets[Number(id)]!.label,credential:credentials[Number(id)]})},{
     socketFactory:u=>{sockets++;return new WebSocket(u) as unknown as WebSocketLike;},
     onDiagnostic(e){

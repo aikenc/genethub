@@ -14,7 +14,7 @@ defineJourney(
   },
   async (t) => {
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
-    const paired = await t.flows.main.pairDevice(opened.client, opened.daemon, []);
+    const paired = await t.flows.main.pairDevice(opened.client, opened.daemon);
     try {
       const before = await paired.client.call({ type: "workspace.list" });
       t.assertions.assert(before?.type === "workspaces", "device could not act before revoke");
