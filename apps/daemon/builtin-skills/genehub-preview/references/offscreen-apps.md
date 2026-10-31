@@ -41,5 +41,5 @@ Agent 改工程不需要桌面：`UnrealEditor-Cmd.exe 工程 -run=pythonscript 
 
 - 同机/同局域网：UE 与 Blender 经真实 Preview 可玩、可撤销、单观看者，进程无残留。
 - **Windows 会话锁定时**（RDP 会话，`LogonUI` 在场）：UE 出画、键盘、锁定鼠标、单观看者、撤销/恢复，Blender 出图、拖动、撤销/恢复，以及 `UnrealEditor-Cmd -run=pythonscript`，全部照常。
-- 跨网络：信令经 Hub 已通，UE 已拿到平台 STUN/TURN；但**媒体能否到达取决于网络**：平台 TURN 目前只有 UDP 3479。只放行 TCP 443、UDP 白名单的办公网和开发云里，两端都到不了 TURN，画面出不来。遇到“信令已通、一直连接中/连接失败”时先查这一点，不要当成引擎问题。
+- 跨网络：信令经 Hub 已通，UE 已拿到平台 STUN/TURN。公司网络（iOA 隧道）里点对点 WebRTC 不通，必须经 TURN；用 UDP TURN 实测 Mac mini 玩 PC 上的 UE：720p、约 56 fps、RTT 约 75 ms。遇到“信令已通、一直连接中/连接失败”时，先确认平台 TURN 的 UDP 端口可达（用 STUN Binding 探测），不要当成引擎问题。
 - 未验证：手柄、有声游戏、30 分钟稳定性、输入延迟、Safari/手机、Unity。
