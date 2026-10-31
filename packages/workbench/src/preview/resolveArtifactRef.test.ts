@@ -12,6 +12,20 @@ const context = {
 };
 
 describe("resolveArtifactRef", () => {
+  it("keeps team chat links relative to the project root when the Agent works in front", () => {
+    const team = {
+      ...context,
+      machineFiles: true,
+      cwd: "/srv/product/front",
+    };
+    expect(resolveArtifactRef("datas/releases/v1.0/index.html", team, "https://app.example"))
+      .toMatchObject({kind: "preview", path: "/srv/product/datas/releases/v1.0/index.html"});
+    expect(resolveWorkspacePath("r_docs/guide.md", team)).toBe("/srv/docs/guide.md");
+    expect(resolveWorkspacePath("../assets/logo.png", {
+      ...team, documentPath: "/srv/product/datas/reports/qa/index.html",
+    })).toBe("/srv/product/datas/reports/assets/logo.png");
+  });
+
   it("maps cwd-relative paths onto the first workspace root", () => {
     const resolved = resolveArtifactRef("reports/结果.md", context, "https://app.example");
     expect(resolved).toEqual({

@@ -1193,7 +1193,9 @@ export function HtmlDocument({
               key={srcDoc}
               ref={frameRef}
               title="HTML 文件预览"
-              sandbox={htmlMedia ? "allow-scripts allow-pointer-lock" : "allow-scripts"}
+              // Local submit handlers must run before they can preventDefault.
+              // The document CSP still blocks form-action navigation/requests.
+              sandbox={htmlMedia ? "allow-scripts allow-forms allow-pointer-lock" : "allow-scripts allow-forms"}
               referrerPolicy="no-referrer"
               allow={`camera 'none'; microphone 'none'; geolocation 'none'; clipboard-read 'none'; clipboard-write 'none'; usb 'none'; serial 'none'; display-capture 'none'; fullscreen 'none'; presentation 'none'${htmlMedia ? "; autoplay *" : ""}`}
               srcDoc={srcDoc}

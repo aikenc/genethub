@@ -24,6 +24,8 @@ GeneHub 会注入自己的预览加载器，普通静态页面不应把它作为
 | HTTPS API / CDN | 绝对 https:/wss: URL，可访问网络 |
 | WASM | fetch 相对路径的 .wasm，再用 WebAssembly.instantiate |
 
+本地 `<form>` 可用 JavaScript `submit` handler，先 `preventDefault()` 再更新页面；按钮和回车均应在实际预览中验证。表单向 URL 提交仍被 `form-action 'none'` 禁止。聊天中的相对文件链接以项目首 Root 为基准；HTML/Markdown 内部链接以当前文档目录为基准，不能把会话的 `agentCwd` 当作项目根。
+
 新版 `localStorage` 按源机器、部署 origin、调用者/分享 scope 和最初入口目录隔离；同一站点的二级页面共享存储，owner 与分享访客不共享。旧 daemon 的 v2 仍使用原 namespace；新版 daemon 对 v2 也提供主体隔离，旧值保留、不跨歧义主体自动搬迁。键最多 1 KB、单值最多 128 KB、总量最多 400 KB，超限抛出 `QuotaExceededError`。预览信息面板可以清空；文件重命名/移动会失去原有存储关联。
 
 ## 不支持的用法
