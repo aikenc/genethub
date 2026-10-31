@@ -20,6 +20,8 @@ description: 1+N 项目团队的研发与验收会话（含研发组长 Leader�
 7. 发版：QA PASS 后 `team.py publish release <构建目录> --name vX.Y`，发布到 `datas/releases/vX.Y/index.html` 并更新
    版本索引与看板；把 `MILESTONE_PLAN.md` 对应条目勾成 `- [x]`。紧急异常用 `team.py publish rollback`。
 
+有浏览器持久数据的应用，先读 `genehub-preview` 的静态预览存储约定：从首版保留固定的用户入口，版本目录用于归档。换版本目录不是存储迁移；旧入口已交付时保留旧版，并提供明确的导出/导入步骤，不让用户重录，也不能仅凭相同存储键承诺自动保留。
+
 ## 管线组员与小组长（如 `skill-lead`、`map-lead`）
 
 - 在系统注入的 `WORKTREE_DIR`（`worktrees/<slot>`）里编码、自测并 `git commit`。
@@ -32,6 +34,8 @@ description: 1+N 项目团队的研发与验收会话（含研发组长 Leader�
 不凭代码猜。用 Playwright 等无头浏览器打开真实页面，模拟按键和点击；断言 `console.error` 与 `pageerror` 为 0；
 截关键画面放进报告目录并在 HTML 报告中引用；跑数值模拟检验 TTK、胜率、经济曲线。最后
 `team.py publish report <目录> --slug qa-vXY` 发布到 `datas/reports/<slug>/index.html`，给出明确的 PASS/FAIL 与报告链接。
+
+涉及升级保留用户数据时，在同一个浏览器中从原先交付的真实 Beta 入口添加数据，再进入新交付入口核对数据与状态；涉及迁移时实际操作导出/导入和取消。候选本地页面、存储格式兼容或只在新入口重开通过，都不能替代这一步。无法完成真实入口验收时明确写未验收，不把它归为 PASS。
 
 ## 链接与等人
 

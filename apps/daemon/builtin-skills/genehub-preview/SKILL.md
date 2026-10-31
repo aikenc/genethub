@@ -22,7 +22,7 @@ description: 编写、分享和诊断 GeneHub Asset Preview 里的预览。静�
 ## 两种预览共同的规则
 
 - 分享**入口文件**，不分享目录：`[阶段预览](review/index.html)` 或 `review/index.html`。路径相对工作区、
-  使用正斜杠；新设备也可解析源机器绝对路径，但聊天交付优先给相对当前 Agent cwd 的普通入口链接。
+  使用正斜杠；新设备也可解析源机器绝对路径，但聊天交付优先给相对项目首 Root 的普通入口链接，不能按 Agent cwd 额外增减目录层级。
 - 不写 `file://`、`http://127.0.0.1`，不编造 `/assets/preview/…` 或部署域名；Workbench 在显示时
   解析入口。
 - 页面用相对路径引用资源；不嵌入 GeneHub 专用加载器，不为静态资源启动 HTTP 服务器。
