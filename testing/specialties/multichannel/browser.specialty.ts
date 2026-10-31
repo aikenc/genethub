@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { createSocket } from "node:dgram";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { Client } from "@genehub/workbench/client";
 import { defineSpecialty, openMultichannelBrowser, allocatePort, registerControlledAgent, readControlledAgentJournal } from "../../framework/public.ts";
 
 const meta = (name: string, title: string, oracle: string, duration = 30000) => ({
@@ -232,7 +233,13 @@ for (const rtc of [false, true]) {
       const id = await t.flows.main.createBuiltinSession(stack.opened.client, stack.opened.workspaceId);
       await stack.page.evaluate(async id => {
         const m = (window as any).mc;
-        await m.client.subscribe(id, { onEvent(e: unknown) { m.events.push(e); } });
+        // A carrier change can deliver the event through cursor recovery.
+        // Consume the same required callbacks as the workbench session store.
+        const handlers: Parameters<Client["subscribe"]>[1] = {
+          onEvent(e) { m.events.push(e); },
+          onResync(_snapshot, replayed) { m.repairs++; m.events.push(...replayed); },
+        };
+        await m.client.subscribe(id, handlers);
       }, id);
       if (rtc) await stack.rtc();
       await stack.opened.client.call({ type: "session.rename", payload: { sessionId: id, title: "authorized-event" } });
