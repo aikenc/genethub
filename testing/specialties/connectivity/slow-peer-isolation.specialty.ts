@@ -57,8 +57,8 @@ defineSpecialty({
     });
     b = await connectProductClient({ url: attached.data.rendezvousUrl, credential: second.credential });
     // Independent browser connections may share one paired device identity.
-    // Avoid creating and abandoning extra local logical sessions while seeding
-    // the cohort: those correctly retain resume slots after their sockets close.
+    // Seed additional authenticated peers directly; each owns only its live
+    // physical carrier, with no retained recovery slot after closure.
     for (let i = 1; i < peers; i++) {
       extra.push(await connectProductClient({ url: attached.data.rendezvousUrl, credential: second.credential }));
     }
@@ -71,7 +71,7 @@ defineSpecialty({
     const baseline = await b.preview(opened.workspaceId, path("isolated-small.png"));
     const baselineMs = performance.now() - baselineStarted;
     t.assertions.assert(digest(baseline.bytes) === smallHash && baselineMs < 1200, "healthy preview baseline failed");
-    // Allow the baseline's final ACK and idle interval to precede the fault.
+    // Separate the completed baseline from the downstream fault.
     await new Promise(resolve => setTimeout(resolve, 250));
     uplink.resetStats();
     stalledLeg.blackhole("server");

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { defineSpecialty } from "../../framework/public.ts";
 
 defineSpecialty({
-  id: "specialty.contracts.project-approval-recovery",
+  id: "specialty.contracts.native-plan-recovery",
   title: "Expired Human plan cards request a fresh plan without applying the expired one",
   oracle: "A Human plan timeout resumes only to request a fresh plan; the session timeline retains the correct expired-card state",
   catches: ["expired card retries forever", "expired plan is applied", "timeline hides the expired interaction"],

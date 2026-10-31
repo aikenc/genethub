@@ -62,7 +62,7 @@ relay 与控制面是两个进程、两个仓库，这不是部署细节而是�
 
 ### 1.1 现在的加密到什么程度，说清楚
 
-**转发业务帧现在对 Relay 加密。** 客户端与 daemon 先基于配对 PSK 或 hosted peer secret 做双向 HMAC proof；随后派生本次 peer link 的 AES-256-GCM key，用严格方向序号和绑定 version/context/direction/sequence 的 AAD 封装每个 protocol-v3 record。AES-GCM 已同时提供机密性与完整性；HMAC 用于握手与 key derivation，不再给每个 record 叠加第二个 MAC。Relay 能看元数据、丢包、延迟或重放密文，但没有 secret 就不能读取或伪造；重放与串 peer 注入会因序号、方向、context 或 AEAD tag 不匹配而 fail-close。
+**转发业务帧现在对 Relay 加密。** 客户端与 daemon 先基于配对 PSK 或 hosted peer secret 做双向 HMAC proof；随后派生本次 peer link 的 AES-256-GCM key，用严格方向序号和绑定 version/context/direction/sequence 的 AAD 封装每个 protocol-v4 record。AES-GCM 已同时提供机密性与完整性；HMAC 用于握手与 key derivation，不再给每个 record 叠加第二个 MAC。Relay 能看元数据、丢包、延迟或重放密文，但没有 secret 就不能读取或伪造；重放与串 peer 注入会因序号、方向、context 或 AEAD tag 不匹配而 fail-close。
 
 **这不是整个平台零知识，也没有前向保密。** Hosted peer secret 由 Control 生成：一份随短期 Fabric connection admission 交给浏览器，一份由目标 daemon 通过 HTTPS 兑换。Control/平台运营方技术上知道该 peer secret，并可主动仿冒客户端；托管 Web 前端也能接触浏览器侧凭证。当前对称 PSK 不提供独立公钥握手、密钥妥协后的前向保密或可验证客户端代码。
 

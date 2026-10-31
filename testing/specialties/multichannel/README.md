@@ -1,11 +1,11 @@
 # 多通道网络业务专项
 
 状态：已建立可执行专项；是否合格以精确输入对应的 testctl manifest 为准，失败用例不作为预期成功。
-本轮仅测试工程，不修改产品行为。规范沿用配对 Cloud 的 testing engineering principles/laws。
+2026-10-30按“断线结束旧endpoint、业务自行恢复”的v2合同迁移；对应产品实现与故障合同同步验收。规范沿用配对 Cloud 的 testing engineering principles/laws。
 
 ## 入口与使用
 
-专用 gate：`specialty:multichannel`。v2 共 26 个独立 case（v1 的 19 个加 7 个新用例）；既有 ID 和失败历史保持。
+专用 gate：`specialty:multichannel`。以plan返回的实际选集为准；既有 ID 和失败历史保持。
 从当前 Space 执行，先 plan、确认非空选集，再 run：
 
 ```bash
@@ -32,7 +32,7 @@ OPEN/CLOUD 必须采用 worktree broker 的绝对路径，SPACE 为当前 Space�
 
 - 8 条普通业务连接：对应“两设备各四个标签页”的最低容量探针；不是 8 个 RTC 标签页完整容量证明。
 - 撤权 5 秒内停止已有访问；至少不得超过原授权租期再加 5 秒容差。
-- 60 秒恢复窗口；该窗口不延长业务 deadline。
+- 物理断开有界终止旧流，无跨连接恢复窗口；业务deadline不因重连延长。
 - 本地慢消费者并存时小 RPC <2 秒，取消后生产者进程 <5 秒回收。
 - 10 轮预热后 60 轮客户端建立/关闭，RSS 增量≤64 MiB、FD 增量≤8。
 - 既有 neteff 原阈值保持不变。
@@ -44,13 +44,13 @@ OPEN/CLOUD 必须采用 worktree broker 的绝对路径，SPACE 为当前 Space�
 
 | 提案范围 | 可执行 case（省略 specialty.multichannel. 前缀） | 独立业务事实 |
 | --- | --- | --- |
-| N01/N02/N03 RTC 升级/回退/Relay 故障 | 既有 connectivity.rtc-subscription-ownership | 真实浏览器完成事件、订阅、取消、Relay 暂停和 native RTC 关闭；原 ID、无重订阅 |
-| N04 单路径与反复断链 | 既有 connectivity.logical-resume；repeated-loss-one-operation | 真实进程磁盘启动标记一次、完整 stdout、恢复后 RPC |
+| N01/N02/N03 RTC 升级/回退/Relay 故障 | 既有 connectivity.rtc-subscription-ownership | 真实浏览器完成事件、订阅、取消、Relay 暂停和 native RTC 关闭；新endpoint、保留业务游标重新订阅 |
+| N04 单路径与反复断链 | 既有 connectivity.logical-resume；repeated-loss-one-operation | 真实源磁盘标记一次、旧流明确失败、新连接公开RPC成功 |
 | N05 恢复期限和业务期限 | recovery-expiry-terminal；deadline-includes-outage | 原流终态、无业务重发、超时后无延迟副作用 |
-| N06 业务操作并存与取消 | file-write-under-loss；pty-retains-session；slow-stream-cancel-fairness | 256 KiB 真实传输后断链、1 MiB 文件逐字相等；PTY 环境变量保留；真实 PID 回收 |
-| N07 受限服务恢复 | direct-preview-resume | 真实 runner 注册，原 HTTP 响应 20 个片段完整，后端只收到一次请求 |
+| N06 业务操作并存与取消 | file-write-under-loss；pty-retains-session；slow-stream-cancel-fairness | 256KiB真实传输后断链、旧写入结果未知、业务显式新保存1MiB逐字相等；PTY 环境变量保留；真实 PID 回收 |
+| N07 受限服务恢复 | direct-preview-resume | 真实runner注册，旧响应失败且无重试；显式新GET返回20个片段，后端恰好2次请求 |
 | N08 撤权 | hosted-live-revocation；hosted-revoked-lease-expiry | 真实来源 session 撤销后，已有 RTC 的公开 RPC 被拒绝 |
-| N09 续期 | hosted-lease-renewal | 跨真实短租期、原订阅事件持续、未重建；必须观察到新 admission 发行，不能把错误持续放行当续期 |
+| N09 续期 | hosted-lease-renewal | 跨真实短租期、新endpoint修复原业务游标，事件完整且不重复；必须观察到新 admission 发行，不能把错误持续放行当续期 |
 | N10 并存与容量回收 | capacity-eight-clients；closed-client-releases-capacity | admitted/usable 数；12 次关闭后能再次接入 |
 | N11 公平性与吞吐 | slow-stream-cancel-fairness；既有两项 neteff | RPC 延迟、取消进程事实、同链路 TCP 对照与字节正确性 |
 | N12 资源 | connection-churn-resources | 同一真实 daemon 的 OS RSS/FD；逐轮公共 RPC |
@@ -73,8 +73,8 @@ worker 意外退出记录有界栈位置与退出码，不写原始 stdout/stder
 
 ## 尚未被本矩阵完整证明的范围
 
-- N01–N04 有真实交叉载体回归，但新增 both-paths-subscription 覆盖两条通道同时中断及原订阅恢复；超过保留期限的双通道组合、移动 OS 后台挂起/NAT 变化尚非全排列。
-- N07 原流恢复与禁止降级是不同契约；现有 core policy 断言保留，本 case 不声称完成网络内容泄漏审计。
+- N01–N04 有真实交叉载体回归，但新增 both-paths-subscription 覆盖两条通道同时中断及原订阅恢复；移动 OS 后台挂起/NAT 变化尚非全排列。
+- N07 显式重新读取与禁止降级是不同契约；现有 core policy 断言保留，本 case 不声称完成网络内容泄漏审计。
 - N12 没有用 60 轮测试冒充长时间 soak。24 小时、真实广域网和更多慢流组合仍需专项资源与正式阈值。
 - N13 App 原生壳/移动端尚未进入本次 Linux 载体范围。
 - 当前消费者跨一个租期的测试不是多天授权生命周期证明。
@@ -93,7 +93,7 @@ subscriptions-isolated-under-loss、both-paths-subscription、revoked-write-fabr
 分别证明下行丢失时单次执行、并发保存不串数据、离线取消无延迟副作用、多订阅隔离、双通道恢复、
 撤权后的 Fabric/RTC 写入权限。所有故障验证实际连接/字节变化；副作用由真实磁盘核对。
 
-已有 deadline 用例等待到危险副作用本应发生之后再断言；expiry 额外验证旧逻辑身份不复活；
+已有 deadline 用例等待到危险副作用本应发生之后再断言；expiry验证旧endpoint及进程及时结束；
 取消用例通过 Linux procfs 的启动时间识别原进程，并区分继续运行和 zombie 未回收；
 Hosted 撤权独立验证新准入被 401/403 拒绝；吞吐公平性探针确认真实数据已在传且尚未完成。
 完整相邻专项范围、命令及限制见 [网络风险 v2](../network-risk-v2.md)。

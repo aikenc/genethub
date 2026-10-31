@@ -297,7 +297,15 @@ impl AgentSession for ScriptSession {
         if !self.host.running() {
             return Ok(());
         }
-        if let Err(error) = self.control("session.close", json!({})).await {
+        if let Err(error) = self
+            .host
+            .call(
+                "session.close",
+                json!({ "sessionId": self.link.id }),
+                host::CLOSE,
+            )
+            .await
+        {
             // The session is forgotten either way; a script that cannot say
             // so is restarted by the missed deadline, which ends its CLIs.
             tracing::warn!(session = %self.link.id, %error, "script Agent did not confirm session close");

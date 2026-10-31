@@ -1,18 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import { channelServerProof } from "../devices/proof";
-import {
-  DATA_PLANE_VERSION,
-  INITIAL_STREAM_WINDOW_BYTES,
-  LEGACY_BULK_STREAM_WINDOW_BYTES,
-  MAX_BULK_STREAM_WINDOW_BYTES,
-} from "./frame";
+import { DATA_PLANE_VERSION } from "./frame";
 import { preparePeerHandshake } from "./handshake";
 
 const SECRET = "finite-bulk-handshake-secret";
 const SERVER_NONCE = "ffeeddccbbaa99887766554433221100";
 
-async function welcome(window = INITIAL_STREAM_WINDOW_BYTES) {
+async function welcome() {
   const prepared = await preparePeerHandshake({ kind: "loopback", secret: SECRET });
   const auth = prepared.hello.auth;
   if (auth.type !== "loopback") throw new Error("unexpected auth kind");
@@ -28,43 +23,31 @@ async function welcome(window = INITIAL_STREAM_WINDOW_BYTES) {
       version: DATA_PLANE_VERSION,
       serverNonce: SERVER_NONCE,
       proof,
-      maxBulkStreamWindowBytes: window,
     },
   };
 }
 
-describe("the peer handshake finite-bulk capability", () => {
-  it("rejects v3 before admitting a v4 stream", async () => {
+describe("the strict peer authentication handshake", () => {
+  it("rejects the old data-plane generation", async () => {
     const fixture = await welcome();
     await expect(fixture.prepared.complete({ ...fixture.value, version: 3 })).rejects.toThrow("invalid data-plane welcome");
   });
-  it("advertises the bounded v4 stream window", async () => {
+  it("sends only identity and RTC capability, without a receive allowance", async () => {
     const fixture = await welcome();
-    expect(fixture.prepared.hello.maxBulkStreamWindowBytes).toBe(
-      INITIAL_STREAM_WINDOW_BYTES,
-    );
+    expect(Object.keys(fixture.prepared.hello).sort()).toEqual(["auth", "clientName", "rtcSupported", "version"]);
   });
-
-  it("accepts only the bounded v4 stream window", async () => {
+  it("authenticates the expected peer and derives its record key", async () => {
     const fixture = await welcome();
     const result = await fixture.prepared.complete(fixture.value);
-    expect(result.maxBulkStreamWindowBytes).toBe(INITIAL_STREAM_WINDOW_BYTES);
+    expect(result.key.context).toBe("loopback");
   });
-
-  it("rejects the old 8 MiB bulk exception", async () => {
-    const fixture = await welcome(LEGACY_BULK_STREAM_WINDOW_BYTES);
-    await expect(fixture.prepared.complete(fixture.value)).rejects.toThrow("invalid finite-bulk receive lease");
+  it("rejects obsolete negotiated-window fields", async () => {
+    const fixture = await welcome();
+    const obsolete = { ...fixture.value, maxBulkStreamWindowBytes: 3 * 1024 * 1024 };
+    await expect(fixture.prepared.complete(obsolete)).rejects.toThrow("invalid data-plane welcome");
   });
-
-  it("rejects the old 64 MiB bulk exception", async () => {
-    const fixture = await welcome(MAX_BULK_STREAM_WINDOW_BYTES);
-    await expect(fixture.prepared.complete(fixture.value)).rejects.toThrow("invalid finite-bulk receive lease");
-  });
-
-  it("rejects an advertised lease beyond the protocol hard cap", async () => {
-    const fixture = await welcome(MAX_BULK_STREAM_WINDOW_BYTES + 1);
-    await expect(fixture.prepared.complete(fixture.value)).rejects.toThrow(
-      "invalid finite-bulk receive lease",
-    );
+  it("rejects a peer which cannot prove the shared secret", async () => {
+    const fixture = await welcome();
+    await expect(fixture.prepared.complete({ ...fixture.value, proof: "0".repeat(64) })).rejects.toThrow("expected E2EE secret");
   });
 });

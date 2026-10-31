@@ -15,16 +15,13 @@ import {
   encodeFabricFrame,
   FabricKind,
   type FabricFrame,
-  FABRIC_INITIAL_STREAM_CREDIT,
   FABRIC_MAX_OPERATION_METADATA_BYTES,
-  FABRIC_MAX_STREAM_CREDIT,
   FabricReset,
 } from "./frame";
 
 const bytes = (text = "") => new TextEncoder().encode(text);
 const text = (value: Uint8Array) => new TextDecoder().decode(value);
 const id = (value: number) => value.toString(16).padStart(32, "0");
-const CREDIT = BigInt(FABRIC_INITIAL_STREAM_CREDIT);
 
 class FakeFabricSocket implements FabricSocketLike {
   binaryType = "blob";
@@ -34,12 +31,17 @@ class FakeFabricSocket implements FabricSocketLike {
   onclose: ((event: FabricSocketCloseEvent) => void) | null = null;
   onerror: ((event: unknown) => void) | null = null;
   onmessage: ((event: { data: unknown }) => void) | null = null;
+  respondToPings = true;
   readonly sent: Uint8Array[] = [];
   readonly closes: Array<{ code?: number; reason?: string }> = [];
 
   send(data: Uint8Array): void {
     if (this.readyState !== 1) throw new Error("socket is not open");
     this.sent.push(data.slice());
+    const frame = decodeFabricFrame(data);
+    if (this.respondToPings && frame?.kind === FabricKind.Ping) {
+      queueMicrotask(() => this.receive({ ...frame, kind: FabricKind.Pong }));
+    }
   }
 
   close(code?: number, reason?: string): void {
@@ -119,13 +121,11 @@ function harness(
     onError?: (error: unknown) => void;
     connectTimeoutMs?: number;
     reconnect?: FabricReconnectOptions | false;
-    initialStreamCredit?: number;
     maxActiveStreams?: number;
     maxRememberedStreamIds?: number;
     maxQueuedInboundFrames?: number;
     maxQueuedInboundBytes?: number;
     maxBufferedBytes?: number;
-    transportFlow?: boolean;
   } = {},
 ) {
   const sockets: FakeFabricSocket[] = [];
@@ -145,8 +145,6 @@ function harness(
       return socket;
     },
     onError: options.onError,
-    initialStreamCredit: options.initialStreamCredit,
-    transportFlow: options.transportFlow,
     ...(options.maxActiveStreams === undefined
       ? {}
       : { maxActiveStreams: options.maxActiveStreams }),
@@ -207,13 +205,13 @@ describe("a browser Fabric endpoint", () => {
     socket.receive({
       kind: FabricKind.Accept,
       streamId: id(2),
-      value: CREDIT,
+      value: 0n,
       payload: bytes("second-ready"),
     });
     socket.receive({
       kind: FabricKind.Accept,
       streamId: id(1),
-      value: CREDIT,
+      value: 0n,
       payload: bytes("first-ready"),
     });
     expect(text(await first.accepted)).toBe("first-ready");
@@ -243,74 +241,30 @@ describe("a browser Fabric endpoint", () => {
     stack.endpoint.close();
   });
 
-  it("accounts byte credit and lets a healthy stream pass a slow consumer", async () => {
-    const stack = harness([id(70), id(71)], { initialStreamCredit: 4 });
+  it("lets a healthy stream pass a slow consumer without a consumption acknowledgement", async () => {
+    const stack = harness([id(70), id(71)]);
     const socket = await connect(stack.endpoint, stack.sockets);
-    const slow = stack.endpoint.open("route:slow");
-    const healthy = stack.endpoint.open("route:healthy");
-    expect(decoded(socket).map((frame) => frame.value)).toEqual([4n, 4n]);
-
-    socket.receive({ kind: FabricKind.Accept, streamId: slow.id, value: 4n, payload: bytes() });
-    socket.receive({ kind: FabricKind.Accept, streamId: healthy.id, value: 4n, payload: bytes() });
+    const slow = stack.endpoint.open("route:slow"), healthy = stack.endpoint.open("route:healthy");
+    socket.receive({ kind: FabricKind.Accept, streamId: slow.id, value: 0n, payload: bytes() });
+    socket.receive({ kind: FabricKind.Accept, streamId: healthy.id, value: 0n, payload: bytes() });
     await Promise.all([slow.accepted, healthy.accepted]);
-
-    slow.send(bytes("full"));
-    expect(slow.availableSendCredit).toBe(0n);
-    expect(() => slow.send(bytes("x"))).toThrow(FabricStateError);
-    socket.receive({
-      kind: FabricKind.WindowUpdate,
-      streamId: slow.id,
-      value: 4n,
-      payload: bytes(),
-    });
-    await vi.waitFor(() => expect(slow.availableSendCredit).toBe(4n));
-
-    let releaseSlow!: () => void;
-    const slowConsumption = new Promise<void>((resolve) => {
-      releaseSlow = resolve;
-    });
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
     const delivered: string[] = [];
-    slow.onData(async (payload) => {
-      delivered.push(text(payload));
-      await slowConsumption;
-    });
-    healthy.onData((payload) => delivered.push(text(payload)));
-
+    slow.onData(async payload => { delivered.push(text(payload)); await gate; });
+    healthy.onData(payload => delivered.push(text(payload)));
+    const sent = decoded(socket).length;
     socket.receive({ kind: FabricKind.Data, streamId: slow.id, value: 1n, payload: bytes("slow") });
     socket.receive({ kind: FabricKind.Data, streamId: healthy.id, value: 1n, payload: bytes("ok") });
     await vi.waitFor(() => expect(delivered).toEqual(["slow", "ok"]));
-    await vi.waitFor(() =>
-      expect(decoded(socket)).toContainEqual(
-        expect.objectContaining({
-          kind: FabricKind.WindowUpdate,
-          streamId: healthy.id,
-          value: 2n,
-        }),
-      ),
-    );
-    expect(
-      decoded(socket).some(
-        (frame) => frame.kind === FabricKind.WindowUpdate && frame.streamId === slow.id,
-      ),
-    ).toBe(false);
-
-    releaseSlow();
-    await vi.waitFor(() =>
-      expect(decoded(socket)).toContainEqual(
-        expect.objectContaining({
-          kind: FabricKind.WindowUpdate,
-          streamId: slow.id,
-          value: 4n,
-        }),
-      ),
-    );
-    expect(stack.endpoint.connectionState).toBe("open");
-    stack.endpoint.close();
+    expect(decoded(socket)).toHaveLength(sent);
+    slow.send(bytes("first")); slow.send(bytes("next"));
+    expect(decoded(socket).filter(frame => frame.kind === FabricKind.Data)).toHaveLength(2);
+    release(); stack.endpoint.close();
   });
 
   it("uses local socket drain and emits no WINDOW_UPDATE in transport-flow mode", async () => {
     const stack = harness([id(76)], {
-      transportFlow: true,
       maxBufferedBytes: 64,
     });
     const socket = await connect(stack.endpoint, stack.sockets);
@@ -340,58 +294,95 @@ describe("a browser Fabric endpoint", () => {
       payload: bytes("reply"),
     });
     await vi.waitFor(() => expect(received).toEqual(["reply"]));
-    expect(
-      decoded(socket)
-        .slice(beforeReceive)
-        .some((frame) => frame.kind === FabricKind.WindowUpdate),
-    ).toBe(false);
+    expect(decoded(socket).slice(beforeReceive)).toEqual([]);
     stack.endpoint.close();
   });
 
-  it("resets only an over-credit or maliciously updated stream", async () => {
-    const stack = harness([id(72), id(73)], { initialStreamCredit: 4 });
+  it("keeps physical socket probes moving while an opaque consumer waits", async () => {
+    vi.useFakeTimers();
+    const stack = harness([id(77)], { reconnect: false });
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    try {
+      const ready = stack.endpoint.connect();
+      await vi.advanceTimersByTimeAsync(0);
+      const socket = stack.sockets[0]!; socket.open(); await ready;
+      const stream = stack.endpoint.open("route:slow-consumer");
+      socket.receive({ kind: FabricKind.Accept, streamId: stream.id, value: 0n, payload: bytes() });
+      await vi.advanceTimersByTimeAsync(0); await stream.accepted;
+      stream.onData(() => gate);
+      socket.receive({ kind: FabricKind.Data, streamId: stream.id, value: 1n, payload: bytes("held") });
+      await vi.advanceTimersByTimeAsync(30000);
+      expect(stack.endpoint.connectionState).toBe("open");
+      expect(decoded(socket).filter(frame => frame.kind === FabricKind.Ping)).toHaveLength(6);
+    } finally { release(); stack.endpoint.close(); vi.useRealTimers(); }
+  });
+
+  it("ends every old stream when the physical socket stops returning probes", async () => {
+    vi.useFakeTimers();
+    const stack = harness([id(78)], { reconnect: false });
+    try {
+      const ready = stack.endpoint.connect();
+      await vi.advanceTimersByTimeAsync(0);
+      const socket = stack.sockets[0]!; socket.respondToPings = false; socket.open(); await ready;
+      const stream = stack.endpoint.open("route:one-attempt");
+      socket.receive({ kind: FabricKind.Accept, streamId: stream.id, value: 0n, payload: bytes() });
+      await vi.advanceTimersByTimeAsync(0); await stream.accepted;
+      await vi.advanceTimersByTimeAsync(119000);
+      expect(stack.endpoint.connectionState).toBe("open");
+      await vi.advanceTimersByTimeAsync(2000);
+      expect((await stream.done).type).toBe("connectionClosed");
+      expect(stack.endpoint.connectionState).toBe("closed");
+      expect(stack.sockets).toHaveLength(1);
+      expect(decoded(socket).filter(frame => frame.kind === FabricKind.Open)).toHaveLength(1);
+      expect(socket.closes.at(-1)?.reason).toBe("heartbeat-timeout");
+    } finally { stack.endpoint.close(); vi.useRealTimers(); }
+  });
+
+  it("delivers FIN only after all prior asynchronous DATA consumption", async () => {
+    const stack = harness([id(79)]);
     const socket = await connect(stack.endpoint, stack.sockets);
-    const flooded = stack.endpoint.open("route:flooded");
-    const healthy = stack.endpoint.open("route:healthy");
-    socket.receive({ kind: FabricKind.Accept, streamId: flooded.id, value: 4n, payload: bytes() });
-    socket.receive({ kind: FabricKind.Accept, streamId: healthy.id, value: 4n, payload: bytes() });
-    await Promise.all([flooded.accepted, healthy.accepted]);
-
-    socket.receive({
-      kind: FabricKind.Data,
-      streamId: flooded.id,
-      value: 1n,
-      payload: bytes("flood"),
-    });
-    expect(await flooded.done).toEqual({
-      type: "reset",
-      code: BigInt(FabricReset.ProtocolViolation),
-    });
-    expect(stack.endpoint.connectionState).toBe("open");
-
-    healthy.send(bytes("x"));
-    socket.receive({
-      kind: FabricKind.WindowUpdate,
-      streamId: healthy.id,
-      value: 2n,
-      payload: bytes(),
-    });
-    expect(await healthy.done).toEqual({
-      type: "reset",
-      code: BigInt(FabricReset.ProtocolViolation),
-    });
-    expect(stack.endpoint.connectionState).toBe("open");
+    const stream = stack.endpoint.open("route:ordered-finish");
+    socket.receive({ kind: FabricKind.Accept, streamId: stream.id, value: 0n, payload: bytes() });
+    await stream.accepted;
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const seen: string[] = [];
+    stream.onData(async payload => { seen.push(text(payload)); await gate; });
+    stream.onRemoteFinish(() => seen.push("FIN"));
+    socket.receive({ kind: FabricKind.Data, streamId: stream.id, value: 1n, payload: bytes("DATA") });
+    socket.receive({ kind: FabricKind.Fin, streamId: stream.id, value: 0n, payload: bytes() });
+    await vi.waitFor(() => expect(seen).toEqual(["DATA"]));
+    stream.finish();
+    expect(stack.endpoint.activeStreamCount).toBe(1);
+    release();
+    expect(await stream.done).toEqual({ type: "finished" });
+    expect(seen).toEqual(["DATA", "FIN"]);
     expect(stack.endpoint.activeStreamCount).toBe(0);
     stack.endpoint.close();
   });
 
-  it("fails excessive initial credit closed at stream scope", async () => {
-    expect(
-      () =>
-        harness([], {
-          initialStreamCredit: FABRIC_MAX_STREAM_CREDIT + 1,
-        }),
-    ).toThrow(FabricStateError);
+  it("releases an overloaded consumer queue without closing a healthy sibling", async () => {
+    const stack = harness([id(72), id(73)]);
+    const socket = await connect(stack.endpoint, stack.sockets);
+    const slow = stack.endpoint.open("route:slow"), healthy = stack.endpoint.open("route:healthy");
+    for (const stream of [slow, healthy]) socket.receive({ kind: FabricKind.Accept, streamId: stream.id, value: 0n, payload: bytes() });
+    await Promise.all([slow.accepted, healthy.accepted]);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    slow.onData(() => gate);
+    const delivered: string[] = [];
+    healthy.onData(payload => delivered.push(text(payload)));
+    for (let seq = 1; seq <= 66; seq++) socket.receive({ kind: FabricKind.Data, streamId: slow.id, value: BigInt(seq), payload: bytes("bounded") });
+    expect(await slow.done).toEqual({ type: "reset", code: BigInt(FabricReset.TooSlow) });
+    socket.receive({ kind: FabricKind.Data, streamId: healthy.id, value: 1n, payload: bytes("still healthy") });
+    await vi.waitFor(() => expect(delivered).toEqual(["still healthy"]));
+    expect(stack.endpoint.connectionState).toBe("open");
+    expect(stack.endpoint.activeStreamCount).toBe(1);
+    release(); stack.endpoint.close();
+  });
+
+  it("rejects legacy nonzero admission at stream scope", async () => {
 
     const stack = harness([id(74), id(75)]);
     const socket = await connect(stack.endpoint, stack.sockets);
@@ -400,13 +391,13 @@ describe("a browser Fabric endpoint", () => {
     socket.receive({
       kind: FabricKind.Accept,
       streamId: malicious.id,
-      value: BigInt(FABRIC_MAX_STREAM_CREDIT) + 1n,
+      value: 1n,
       payload: bytes(),
     });
     socket.receive({
       kind: FabricKind.Accept,
       streamId: healthy.id,
-      value: CREDIT,
+      value: 0n,
       payload: bytes(),
     });
     expect(await malicious.done).toEqual({
@@ -434,7 +425,7 @@ describe("a browser Fabric endpoint", () => {
     socket.receive({
       kind: FabricKind.Incoming,
       streamId: id(90),
-      value: CREDIT,
+      value: 0n,
       payload: bytes("opaque-service-hello"),
     });
 
@@ -442,7 +433,7 @@ describe("a browser Fabric endpoint", () => {
     expect(hello).toBe("opaque-service-hello");
     expect(incoming[0]?.direction).toBe("incoming");
     expect(frames.map((frame) => [frame.kind, frame.streamId, frame.value])).toEqual([
-      [FabricKind.Accept, id(90), CREDIT],
+      [FabricKind.Accept, id(90), 0n],
       [FabricKind.Data, id(90), 1n],
     ]);
     expect(text(frames[0]!.payload)).toBe("service-ready");
@@ -466,7 +457,7 @@ describe("a browser Fabric endpoint", () => {
     socket.receive({
       kind: FabricKind.Incoming,
       streamId: id(92),
-      value: CREDIT,
+      value: 0n,
       payload: new Uint8Array(FABRIC_MAX_OPERATION_METADATA_BYTES + 1),
     });
     let frames = await waitForFrames(socket, 1);
@@ -480,7 +471,7 @@ describe("a browser Fabric endpoint", () => {
     socket.receive({
       kind: FabricKind.Incoming,
       streamId: id(93),
-      value: CREDIT,
+      value: 0n,
       payload: bytes("within-bound"),
     });
     await vi.waitFor(() => expect(incoming).toHaveLength(1));
@@ -495,7 +486,7 @@ describe("a browser Fabric endpoint", () => {
     socket.receive({
       kind: FabricKind.Accept,
       streamId: outgoing.id,
-      value: CREDIT,
+      value: 0n,
       payload: new Uint8Array(FABRIC_MAX_OPERATION_METADATA_BYTES + 1),
     });
     expect(await outgoing.done).toEqual({
@@ -515,7 +506,7 @@ describe("a browser Fabric endpoint", () => {
     socket.receive({
       kind: FabricKind.Incoming,
       streamId: id(31),
-      value: CREDIT,
+      value: 0n,
       payload: bytes("this is never interpreted"),
     });
 
@@ -543,7 +534,7 @@ describe("a browser Fabric endpoint", () => {
     socket.receive({
       kind: FabricKind.Accept,
       streamId: healthy.id,
-      value: CREDIT,
+      value: 0n,
       payload: bytes("ready"),
     });
     await healthy.accepted;
@@ -554,7 +545,7 @@ describe("a browser Fabric endpoint", () => {
     socket.receive({
       kind: FabricKind.Incoming,
       streamId: id(91),
-      value: CREDIT,
+      value: 0n,
       payload: bytes("opaque"),
     });
 
@@ -616,7 +607,7 @@ describe("a browser Fabric endpoint", () => {
     socket.receive({
       kind: FabricKind.Accept,
       streamId: healthy.id,
-      value: CREDIT,
+      value: 0n,
       payload: bytes("ok"),
     });
     expect(text(await healthy.accepted)).toBe("ok");
@@ -631,7 +622,7 @@ describe("a browser Fabric endpoint", () => {
     const stack = harness([id(5)]);
     const socket = await connect(stack.endpoint, stack.sockets);
     const stream = stack.endpoint.open("route:half-close");
-    socket.receive({ kind: FabricKind.Accept, streamId: stream.id, value: CREDIT, payload: bytes() });
+    socket.receive({ kind: FabricKind.Accept, streamId: stream.id, value: 0n, payload: bytes() });
     await stream.accepted;
 
     stream.finish();
@@ -650,7 +641,7 @@ describe("a browser Fabric endpoint", () => {
     const otherStack = harness([id(6)]);
     const otherSocket = await connect(otherStack.endpoint, otherStack.sockets);
     const other = otherStack.endpoint.open("route:sequence");
-    otherSocket.receive({ kind: FabricKind.Accept, streamId: other.id, value: CREDIT, payload: bytes() });
+    otherSocket.receive({ kind: FabricKind.Accept, streamId: other.id, value: 0n, payload: bytes() });
     await other.accepted;
     otherSocket.receive({ kind: FabricKind.Data, streamId: other.id, value: 2n, payload: bytes("gap") });
     expect(await other.done).toEqual({
@@ -687,8 +678,8 @@ describe("a browser Fabric endpoint", () => {
 
     // The first one is refused because there is no service. A later reuse on
     // this same connection is still a duplicate, not a fresh operation.
-    socket.receive({ kind: FabricKind.Incoming, streamId: id(55), value: CREDIT, payload: bytes() });
-    socket.receive({ kind: FabricKind.Incoming, streamId: id(55), value: CREDIT, payload: bytes() });
+    socket.receive({ kind: FabricKind.Incoming, streamId: id(55), value: 0n, payload: bytes() });
+    socket.receive({ kind: FabricKind.Incoming, streamId: id(55), value: 0n, payload: bytes() });
     const frames = await waitForFrames(socket, 2);
     expect(frames.map((frame) => frame.value)).toEqual([
       BigInt(FabricReset.RouteDenied),
@@ -697,10 +688,10 @@ describe("a browser Fabric endpoint", () => {
 
     // An invalid INCOMING and an unknown non-opening frame also reserve their
     // ids, so neither can later be relabelled as a fresh operation.
+    socket.receive({ kind: FabricKind.Incoming, streamId: id(56), value: 1n, payload: bytes() });
     socket.receive({ kind: FabricKind.Incoming, streamId: id(56), value: 0n, payload: bytes() });
-    socket.receive({ kind: FabricKind.Incoming, streamId: id(56), value: CREDIT, payload: bytes() });
     socket.receive({ kind: FabricKind.Data, streamId: id(57), value: 1n, payload: bytes() });
-    socket.receive({ kind: FabricKind.Incoming, streamId: id(57), value: CREDIT, payload: bytes() });
+    socket.receive({ kind: FabricKind.Incoming, streamId: id(57), value: 0n, payload: bytes() });
     const allFrames = await waitForFrames(socket, 6);
     expect(allFrames.slice(2).map((frame) => frame.value)).toEqual([
       BigInt(FabricReset.ProtocolViolation),
@@ -723,7 +714,7 @@ describe("a browser Fabric endpoint", () => {
     socket.receive({
       kind: FabricKind.Incoming,
       streamId: id(90),
-      value: CREDIT,
+      value: 0n,
       payload: bytes(),
     });
     const frames = await waitForFrames(socket, 2);
@@ -737,7 +728,7 @@ describe("a browser Fabric endpoint", () => {
     socket.receive({
       kind: FabricKind.Accept,
       streamId: active.id,
-      value: CREDIT,
+      value: 0n,
       payload: bytes(),
     });
     await active.accepted;
@@ -759,7 +750,7 @@ describe("a browser Fabric endpoint", () => {
     socket.receive({
       kind: FabricKind.Accept,
       streamId: stream.id,
-      value: CREDIT,
+      value: 0n,
       payload: bytes(),
     });
     await stream.accepted;
@@ -920,7 +911,7 @@ describe("a browser Fabric endpoint", () => {
     timers.runNext();
     await vi.waitFor(() => expect(redial).toHaveBeenCalledTimes(1));
     stack.endpoint.close();
-    resolveRedial("wss://relay.test/fabric/v2?ticket=fresh");
+    resolveRedial("wss://relay.test/fabric/v2?ticket=fresh&flow=transport-v1");
 
     await expect(reconnecting).rejects.toBeInstanceOf(FabricStateError);
     expect(stack.sockets).toHaveLength(1);
@@ -953,7 +944,7 @@ describe("a browser Fabric endpoint", () => {
     firstSocket.receive({
       kind: FabricKind.Accept,
       streamId: accepted.id,
-      value: CREDIT,
+      value: 0n,
       payload: bytes(),
     });
     await accepted.accepted;
@@ -992,9 +983,9 @@ describe("a browser Fabric endpoint", () => {
 
     expect(redial).toHaveBeenCalledTimes(2);
     expect(stack.urls).toEqual([
-      "wss://relay.test/fabric/v2?ticket=first",
-      "wss://relay.test/fabric/v2?ticket=fresh-1",
-      "wss://relay.test/fabric/v2?ticket=fresh-2",
+      "wss://relay.test/fabric/v2?ticket=first&flow=transport-v1",
+      "wss://relay.test/fabric/v2?ticket=fresh-1&flow=transport-v1",
+      "wss://relay.test/fabric/v2?ticket=fresh-2&flow=transport-v1",
     ]);
     expect(failedRecoverySocket.sent).toHaveLength(0);
     expect(recoveredSocket.sent).toHaveLength(0);
@@ -1019,7 +1010,7 @@ describe("a browser Fabric endpoint", () => {
     "recovers transient Relay close %i with one fresh admission",
     async (closeCode) => {
     const timers = new ManualReconnectTimer();
-    const redial = vi.fn(async () => "wss://relay.test/fabric/v2?ticket=after-restart");
+    const redial = vi.fn(async () => "wss://relay.test/fabric/v2?ticket=after-restart&flow=transport-v1");
     const stack = harness([], {
       redial,
       reconnect: {
@@ -1040,7 +1031,7 @@ describe("a browser Fabric endpoint", () => {
     await recovery;
 
     expect(redial).toHaveBeenCalledTimes(1);
-    expect(stack.urls.at(-1)).toBe("wss://relay.test/fabric/v2?ticket=after-restart");
+    expect(stack.urls.at(-1)).toBe("wss://relay.test/fabric/v2?ticket=after-restart&flow=transport-v1");
     stack.endpoint.close();
     },
   );
@@ -1049,7 +1040,7 @@ describe("a browser Fabric endpoint", () => {
     "treats authority close %i as terminal and never redials",
     async (code) => {
       const timers = new ManualReconnectTimer();
-      const redial = vi.fn(async () => "wss://relay.test/fabric/v2?ticket=forbidden");
+      const redial = vi.fn(async () => "wss://relay.test/fabric/v2?ticket=forbidden&flow=transport-v1");
       const stack = harness([id(21)], {
         redial,
         reconnect: { timer: timers.timer },
@@ -1073,7 +1064,7 @@ describe("a browser Fabric endpoint", () => {
 
   it("cancels a pending recovery when the caller closes the endpoint", async () => {
     const timers = new ManualReconnectTimer();
-    const redial = vi.fn(async () => "wss://relay.test/fabric/v2?ticket=too-late");
+    const redial = vi.fn(async () => "wss://relay.test/fabric/v2?ticket=too-late&flow=transport-v1");
     const stack = harness([], {
       redial,
       reconnect: {
@@ -1104,7 +1095,7 @@ describe("a browser Fabric endpoint", () => {
     await refused;
 
     await expect(stack.endpoint.connect()).rejects.toThrow(/fresh Fabric endpoint URL/);
-    expect(stack.urls).toEqual(["wss://relay.test/fabric/v2?ticket=first"]);
+    expect(stack.urls).toEqual(["wss://relay.test/fabric/v2?ticket=first&flow=transport-v1"]);
   });
 
   it("closes the whole endpoint on malformed non-binary input", async () => {

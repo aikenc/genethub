@@ -4,14 +4,14 @@ import { promisify } from "node:util";
 import { join } from "node:path";
 import { defineSpecialty, BlockedError } from "../../framework/public.ts";
 
-// Native-intrinsic binary/u64/lease accounting plus the independent TS shape.
+// Native framing/nonce properties and the independent TypeScript endpoint.
 // This executes language-local properties and TS binding projection, not Rust
 // business journeys. The separate logical-resume specialty qualifies the real artifact.
 defineSpecialty({
   id: "specialty.connectivity.resume-core",
-  title: "Resume journals and physical channels preserve custody under loss and cancellation",
-  oracle: "Independent literal binary corpus, exact byte/lease accounting, at-most-once delivery and immutable path policy across 100 handoffs; channel nonce ordering and closure fencing",
-  catches: ["u64 rounded through JS number", "ACK treated as consumption", "duplicate OPEN delivery", "data exhausts progress reserve", "direct-only falls back to Fabric", "failed attach extends TTL", "cancelled write consumes nonce", "closed channel delivers late crypto"],
+  title: "Physical connections preserve frame order and end old streams under loss",
+  oracle: "Frame limits, cancellation-safe secure-record nonces, DATA/FIN order and endpoint termination without byte replay; new connections use new owners",
+  catches: ["incorrect wire limit", "lost carrier retains old streams", "direct-only uses Fabric", "cancelled write consumes nonce", "closed channel delivers late crypto"],
   tags: ["network-risk-v2", "core", "contract", "connectivity", "resume-core"],
   llm: { default: "none" },
   expectedDurationMs: 60000, timeoutMs: 300000,
@@ -21,10 +21,10 @@ defineSpecialty({
   const run = promisify(execFile);
   const generated = await mkdtemp(join(t.env.root, "resume-proto-"));
   const commands: Array<[string, string[], string]> = [
-    [process.execPath, [join(t.openRoot, "packages/workbench/node_modules/vitest/vitest.mjs"), "run", "--maxWorkers", "2", "src/dataplane/resume.test.ts", "src/dataplane/authenticated-channel.test.ts", "src/dataplane/endpoint.test.ts", "src/dataplane/handshake.test.ts"], join(t.openRoot, "packages/workbench")],
+    [process.execPath, [join(t.openRoot, "packages/workbench/node_modules/vitest/vitest.mjs"), "run", "--maxWorkers", "2", "src/dataplane/authenticated-channel.test.ts", "src/dataplane/endpoint.test.ts", "src/dataplane/handshake.test.ts"], join(t.openRoot, "packages/workbench")],
     [process.execPath, [join(t.openRoot, "packages/workbench/node_modules/typescript/bin/tsc"), "-p", "tsconfig.json", "--noEmit"], join(t.openRoot, "packages/workbench")],
     ["cargo", ["test", "-p", "genehub-proto", "--lib", "export_bindings"], t.openRoot],
-    ["cargo", ["test", "-p", "genehub-proto", "--lib", "resume::tests", "--", "--nocapture"], t.openRoot],
+    ["cargo", ["test", "-p", "genehub-proto", "--lib", "data::tests", "--", "--nocapture"], t.openRoot],
     ["cargo", ["test", "-p", "genet-daemon", "--lib", "dataplane::authenticated_channel::tests", "--", "--nocapture"], t.openRoot],
   ];
   for (const [executable, args, cwd] of commands) {
@@ -48,5 +48,5 @@ defineSpecialty({
       throw new Error(`${executable} property suite failed: ${excerpt}\n${(e.stderr ?? e.message).slice(-3000)}`);
     }
   }
-  t.note("Core properties and encrypted TS stream recovery; real daemon recovery is qualified separately by logical-resume. RTC handoff is qualified separately by the real Chromium specialty; this suite is not release qualification.");
+  t.note("Core properties and explicit encrypted stream termination; real socket-loss behavior is qualified separately by logical-resume. RTC handoff is qualified separately by the real Chromium specialty; this suite is not release qualification.");
 });

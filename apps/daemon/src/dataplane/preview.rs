@@ -23,9 +23,9 @@ const IMAGE_CACHE_BYTES: usize = 128 * 1024 * 1024;
 /// On-demand preview loading fetches many small sub-resources in parallel;
 /// two slots serialized whole sites behind each other.
 const PREVIEW_WORKERS: usize = 8;
-// Whole resume payloads avoid a tiny fifth record after each 64KiB source
+// Complete data frames avoid a tiny fifth record after each 64KiB source
 // read, reducing per-record crypto/actor handoffs without enlarging buffers.
-const PREVIEW_SEND_STEP_BYTES: usize = 4 * genehub_proto::resume::MAX_PAYLOAD;
+const PREVIEW_SEND_STEP_BYTES: usize = 4 * super::frame::MAX_PAYLOAD_BYTES;
 
 pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -> Result<()> {
     if !stream.read_body(0).await?.is_empty() {
@@ -123,7 +123,6 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
         read_us = stats.read_us,
         hash_us = stats.hash_us,
         write_us = stats.write_us,
-        write_credit_us = stats.write_timings.credit_us,
         write_budget_us = stats.write_timings.budget_us,
         write_enqueue_us = stats.write_timings.enqueue_us,
         write_completion_us = stats.write_timings.completion_us,
@@ -419,7 +418,6 @@ async fn send_file(
                 chunks = stats.chunks,
                 read_us = stats.read_us,
                 write_us = stats.write_us,
-                credit_us = stats.write_timings.credit_us,
                 budget_us = stats.write_timings.budget_us,
                 enqueue_us = stats.write_timings.enqueue_us,
                 completion_us = stats.write_timings.completion_us,

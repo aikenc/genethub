@@ -110,28 +110,26 @@ describe("the logical peer connection", () => {
   });
 
   it("owns queued request JSON independently of later caller mutation", async () => {
-    const { client, socket } = await connected();
-    const pending: Promise<unknown>[] = [];
-    const observe = (request: Parameters<Client["call"]>[0]) => {
-      const promise = client.call(request);
-      void promise.catch(() => {});
-      pending.push(promise);
-      return promise;
-    };
+    const proof = localProof();
+    const queue = socketQueue({ secret: proof.proof, identity: localIdentity });
+    const client = new Client({ url: "ws://127.0.0.1:42123/ws", localServerProof: proof,
+      socketFactory: queue.factory, rtcEnabled: false });
+    client.connect();
+    const socket = queue.latest();
+    const request = { type: "workspace.open" as const, payload: { root: "/original" } };
+    const pending = client.call(request);
+    void pending.catch(() => {});
+    request.payload.root = "/changed-after-admission";
+    expect(socket.sent.filter(r => r.type === "workspace.open")).toHaveLength(0);
     try {
-      for (let i = 0; i < 6; i++) observe({ type: "agent.list" });
-      await waitFor(() => socket.sent.filter(r => r.type === "agent.list").length === 6);
-      const request = { type: "workspace.open" as const, payload: { root: "/original" } };
-      observe(request);
-      request.payload.root = "/changed-after-admission";
-      expect(socket.sent.filter(r => r.type === "workspace.open")).toHaveLength(0);
-      const first = socket.sent.find(r => r.type === "agent.list")!;
-      socket.reply(first.id, { type: "agents", data: [] });
+      socket.open();
+      await waitFor(() => socket.sent.some(r => r.type === "hello"));
+      socket.acceptHandshake();
       await waitFor(() => socket.sent.some(r => r.type === "workspace.open"));
       expect(socket.sent.find(r => r.type === "workspace.open")!.payload).toEqual({ root: "/original" });
     } finally {
       client.close();
-      await Promise.allSettled(pending);
+      await Promise.allSettled([pending]);
     }
   });
 
@@ -396,7 +394,7 @@ describe("the logical peer connection", () => {
     client.close();
   });
 
-  it("starts a fresh logical peer instead of resuming one silent past the daemon's window", async () => {
+  it("starts a fresh connection after a suspended carrier closes", async () => {
     let clock = 1_000_000;
     const events: ClientDiagnosticEvent[] = [];
     const { client, queue } = await connected({
@@ -405,7 +403,6 @@ describe("the logical peer connection", () => {
     });
 
     clock += 10 * 60_000;
-    queue.latest().forgetSession();
     queue.latest().close(1006, "suspended for ten minutes");
     await waitFor(() => queue.sockets.length === 2);
     queue.latest().open();
@@ -414,11 +411,11 @@ describe("the logical peer connection", () => {
     await waitFor(() => client.connectionState === "ready");
 
     expect(queue.sockets.length).toBe(2);
-    expect(events.some((event) => event.detail.phase === "resume-skipped")).toBe(true);
+    expect(events.some((event) => event.detail.phase === "resume-skipped")).toBe(false);
     client.close();
   });
 
-  it("redials at once without escalating backoff when the daemon lost the session", async () => {
+  it("reconnects once with normal backoff when the daemon lost the old connection", async () => {
     const attempts: number[] = [];
     const events: ClientDiagnosticEvent[] = [];
     const { client, queue } = await connected({
@@ -429,21 +426,17 @@ describe("the logical peer connection", () => {
       onDiagnostic: (event) => events.push(event),
     });
 
-    queue.latest().forgetSession();
     queue.latest().close(1006, "lost");
     await waitFor(() => queue.sockets.length === 2);
     queue.latest().open();
     await waitFor(() => queue.latest().sent.some((message) => message.type === "hello"));
     queue.latest().acceptHandshake();
 
-    await waitFor(() => queue.sockets.length === 3);
-    queue.latest().open();
-    await waitFor(() => queue.latest().sent.some((message) => message.type === "hello"));
-    queue.latest().acceptHandshake();
     await waitFor(() => client.connectionState === "ready");
 
     expect(attempts).toEqual([0]);
-    expect(events.some((event) => event.detail.cause === "session-lost")).toBe(true);
+    expect(queue.sockets).toHaveLength(2);
+    expect(events.some((event) => event.detail.cause === "session-lost")).toBe(false);
     client.close();
   });
 
@@ -530,7 +523,7 @@ describe("RPC exchanges are independent logical streams", () => {
     });
     const request = client.call({ type: "agent.list" });
     await waitFor(() => socket.sent.some((message) => message.type === "agent.list"));
-    socket.endSession();
+    socket.close(1006, "injected response loss");
 
     await expect(request).rejects.toBeInstanceOf(ConnectionOutcomeUnknownError);
     expect(socket.sent.filter(message => message.type === "agent.list")).toHaveLength(1);
@@ -542,8 +535,8 @@ describe("RPC exchanges are independent logical streams", () => {
     );
     expect(finish?.detail.outcome).toBe("ConnectionOutcomeUnknownError");
     expect(finish?.detail).toMatchObject({
-      closeCode: null,
-      hasCloseReason: false,
+      closeCode: 1006,
+      hasCloseReason: true,
     });
     const error = diagnostics.find(
       (event) => event.kind === "error" && event.detail.operation === "agent.list",
@@ -551,8 +544,8 @@ describe("RPC exchanges are independent logical streams", () => {
     expect(error?.detail).toMatchObject({
       errorName: "ConnectionOutcomeUnknownError",
       operation: "agent.list",
-      closeCode: null,
-      hasCloseReason: false,
+      closeCode: 1006,
+      hasCloseReason: true,
     });
     expect(error?.detail.message).toBeUndefined();
     client.close();
@@ -780,35 +773,28 @@ describe("events, Preview and RTC use the same endpoint abstraction", () => {
     client.close();
   });
 
-  it("rechecks thumbnail support when Preview retries after a lost session", async () => {
+  it("reports a failed Preview read without automatically starting another read", async () => {
     const { client, socket } = await connected({}, ["asset.preview.image.v1"]);
-    const attempt = vi.spyOn(client as any, "previewAttempt")
-      .mockRejectedValueOnce(new Error("SessionLost"));
-    vi.spyOn(client as any, "waitForPreviewRecovery").mockImplementationOnce(async () => {
-      client.identity = { ...client.identity!, features: [] };
-    });
-    await expect(client.preview("workspace-1", "r_root/picture.png", "image-128"))
-      .rejects.toThrow("不支持图片缩略图");
-    expect(attempt).toHaveBeenCalledTimes(2);
-    expect(socket.sent.filter((message) => message.type === "asset.preview")).toHaveLength(0);
+    const pending = client.preview("workspace-1", "r_root/picture.png", "image-128");
+    await waitFor(() => socket.sent.some(message => message.type === "asset.preview"));
+    socket.close(1006, "injected loss after Preview was sent");
+    await expect(pending).rejects.toBeInstanceOf(Error);
+    expect(socket.sent.filter(message => message.type === "asset.preview")).toHaveLength(1);
     client.close();
   });
 
-  it("cancels a thumbnail while waiting for connection recovery", async () => {
+  it("cancels a thumbnail while waiting for its response", async () => {
     const { client, socket } = await connected({}, ["asset.preview.image.v1"]);
-    vi.spyOn(client as any, "previewAttempt").mockRejectedValueOnce(new Error("SessionLost"));
-    (client as any).state = "reconnecting";
-    const onStateChange = vi.spyOn(client, "onStateChange");
     const abort = new AbortController();
     const pending = client.preview("workspace-1", "r_root/picture.png", "image-128", abort.signal);
-    await waitFor(() => onStateChange.mock.calls.length > 0);
+    await waitFor(() => socket.sent.some(message => message.type === "asset.preview"));
     abort.abort();
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
-    expect(socket.sent.filter((message) => message.type === "asset.preview")).toHaveLength(0);
+    expect(socket.sent.filter(message => message.type === "asset.preview")).toHaveLength(1);
     client.close();
   });
 
-  it("shows RTC state and upgrades only remote peers when enabled", async () => {
+  it("rejects an RTC provider that tries to reuse the active endpoint", async () => {
     vi.stubGlobal("RTCPeerConnection", class {});
     const secret = "r".repeat(64);
     const queue = socketQueue({
@@ -820,14 +806,9 @@ describe("events, Preview and RTC use the same endpoint abstraction", () => {
         rtcSupported: true,
       },
     });
-    let releaseRestricted: (() => void) | undefined;
-    const rtcFactory = vi.fn<NonNullable<ClientOptions["rtcFactory"]>>(async (base, _id, _diagnostic, options) => {
-      if (options?.policy === "direct-only") {
-        await new Promise<void>((resolve) => { releaseRestricted = resolve; });
-      }
-      await options?.attachWhen;
-      return { endpoint: base, peer: {} as RTCPeerConnection, close() {} };
-    });
+    const rtcFactory = vi.fn<NonNullable<ClientOptions["rtcFactory"]>>(async base => ({
+      endpoint: base, peer: {} as RTCPeerConnection, close() {},
+    }));
     const client = new Client({
       url: "wss://relay.example/fabric/v2",
       channelCredential: { capabilityId: "cap-1", secret },
@@ -839,18 +820,10 @@ describe("events, Preview and RTC use the same endpoint abstraction", () => {
     queue.latest().open();
     await waitFor(() => queue.latest().sent.length === 1);
     queue.latest().acceptHandshake();
-    await waitFor(() => rtcFactory.mock.calls.length === 2);
-    // Both ICE handshakes have started before the restricted identity can be
-    // checked. The business carrier still cannot attach until that check ends.
-    expect(client.rtcState).toBe("connecting");
-    expect(rtcFactory).toHaveBeenCalledTimes(2);
-    expect(rtcFactory.mock.calls[0]?.[3]).toEqual({ policy: "direct-only" });
-    expect(rtcFactory.mock.calls[1]?.[3]).toEqual({
-      endpoint: rtcFactory.mock.calls[1]?.[0],
-      attachWhen: expect.any(Promise),
-    });
-    releaseRestricted?.();
-    await waitFor(() => client.rtcState === "connected");
+    await waitFor(() => client.rtcState === "failed");
+    expect(rtcFactory).toHaveBeenCalledTimes(1);
+    expect(rtcFactory.mock.calls[0]?.[3]).toEqual({ policy: "relay-allowed" });
+    expect(client.connectionState).toBe("ready");
     client.setRtcEnabled(false);
     expect(client.rtcState).toBe("disabled");
     client.close();
@@ -896,7 +869,7 @@ describe("events, Preview and RTC use the same endpoint abstraction", () => {
     queue.latest().open();
     await waitFor(() => queue.latest().sent.length === 1);
     queue.latest().acceptHandshake();
-    await waitFor(() => client.rtcState === "connected");
+    await waitFor(() => client.rtcState === "failed");
 
     expect(peerDiagnostic).toBeTypeOf("function");
     peerDiagnostic!({ diagnosticId: "rtc_1", iceConnectionState: "checking" });

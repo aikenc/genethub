@@ -10,7 +10,7 @@ import {
 
 // Public CLI consumers against an external release-protocol fixture. Nothing
 // inside daemon/Host is replaced: bytes are packed by the actual native Host.
-async function fixture(t: CaseContext, selfUpdate = false, holdApp = false) {
+async function fixture(t: CaseContext, selfUpdate = false, holdApp = false, holdGuest = false) {
   const hostArtifact = tryLocateHost(t.openRoot);
   const raw = tryLocateDaemonComponent(t.openRoot);
   if (!hostArtifact || !raw) throw new BlockedError("CLI updater requires built Host and guest artifacts");
@@ -39,6 +39,13 @@ async function fixture(t: CaseContext, selfUpdate = false, holdApp = false) {
   let origin = "";
   let downloads = 0;
   let appRequests = 0;
+  let guestReleased = !holdGuest;
+  const heldGuests = new Set<import("node:http").ServerResponse>();
+  const releaseGuest = () => {
+    guestReleased = true;
+    for (const response of heldGuests) response.end(bytes);
+    heldGuests.clear();
+  };
   const server = createServer((req, res) => {
     if (req.url === "/component") res.end(JSON.stringify({
       schema: "genehub.release-manifest.v2", channel: "local", releaseVersion: "0.1.1",
@@ -46,7 +53,11 @@ async function fixture(t: CaseContext, selfUpdate = false, holdApp = false) {
       artifact: { sources: [{ url: origin + "/guest" }], sha256, size: bytes.length },
       source: { kind: "test" }, activation: { enabled: true },
     }));
-    else if (req.url === "/guest") { downloads++; res.end(bytes); }
+    else if (req.url === "/guest") {
+      downloads++;
+      if (guestReleased) res.end(bytes);
+      else { heldGuests.add(res); res.once("close", () => heldGuests.delete(res)); }
+    }
     else if (req.url === "/app") res.end(JSON.stringify({
       channel: "local", version: "0.1.0", platforms: {
         "linux-x86_64": { kind: "cli", url: origin + "/bad-app", size: 3, sha256: "0".repeat(64) },
@@ -80,9 +91,11 @@ async function fixture(t: CaseContext, selfUpdate = false, holdApp = false) {
         return { code: r.code, envelope: parseJson(r.stdout) as any };
       },
       sha256,
+      releaseGuest,
       downloads: () => downloads,
       appRequests: () => appRequests,
       async close() {
+        releaseGuest();
         try { if (started) await exec(cli, ["daemon", "stop"]); }
         finally { await new Promise<void>(resolve => server.close(() => resolve())); }
       },
@@ -144,10 +157,38 @@ defineSpecialty(meta(
       if (receipt?.updateState === "succeeded" && receipt.continuation.state === "resumed" && session?.summary.status === "idle") break;
       await new Promise(resolve => setTimeout(resolve, 250));
     }
-    t.note(JSON.stringify({stage: "self-update-resume", updateState: receipt?.updateState, phase: receipt?.phase, error: receipt?.error, continuation: receipt?.continuation, sends, session: session?.summary}));
+    t.note(JSON.stringify({ updateState: receipt?.updateState, continuation: receipt?.continuation,
+      error: receipt?.error, sends: sends.length, status: session?.summary.status,
+      pending: session?.summary.inputSummary.pendingMessageIds.length }));
     t.assertions.assert(Boolean(run) && receipt?.updateState === "succeeded" && receipt.continuation.state === "resumed", "self-update did not finish and resume");
     t.assertions.assert(sends.length === 2 && sends[1].hasUpdateReceipt && sends[0].sessionId === sends[1].sessionId, "original Session was not resumed once with its receipt");
     t.assertions.assert(session?.summary.status === "idle" && session.summary.inputSummary.pendingMessageIds.length === 0 && session.items.filter((x: any) => x.type === "assistantMessage").length === 1 && f.downloads() === 1, "original goal did not finish exactly once");
+  } finally { await f.close(); }
+});
+
+
+for (const action of ["interrupt", "close"] as const) defineSpecialty(meta(
+  `specialty.release.cli-self-update-respects-${action}`, `A Human ${action} survives an Agent's own daemon update`,
+  "a real user interrupt while the component download is held prevents continuation after reload; the completed update is never repeated",
+  ["internal teardown is confused with user pause", "update continuation overrides an explicit pause", "completed update is reinstalled"],
+), async t => {
+  const f = await fixture(t, true, false, true);
+  try {
+    await f.call(["agent", "run", "--agent", "self-probe", "--model", "probe", "--cwd", t.env.workspace, "--open-workspace", "--no-wait", "--message-id", "paused-original", "upgrade, unless I pause this task"]);
+    await t.tools.waitUntil(() => f.downloads() === 1, 30000);
+    const journal = path.join(t.env.workspace, "self-update-sends.jsonl");
+    const first = JSON.parse(readFileSync(journal, "utf8").trim().split("\n")[0]!);
+    await f.call(["session", action, first.sessionId]);
+    f.releaseGuest();
+    let receipt: any;
+    await t.tools.waitUntil(async () => {
+      try { receipt = (await f.call(["update", "status", "--request-id", "self-live"])).data; } catch { return false; }
+      return receipt?.updateState === "succeeded" && receipt.continuation.state === "skipped";
+    }, 60000);
+    const sends = readFileSync(journal, "utf8").trim().split("\n");
+    const session = (await f.call(["session", "get", first.sessionId])).data.session;
+    t.assertions.assert(sends.length === 1 && session.summary.inputSummary.paused === true && f.downloads() === 1,
+      "completed update resumed a paused Session or repeated a side effect");
   } finally { await f.close(); }
 });
 

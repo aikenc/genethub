@@ -814,6 +814,19 @@ impl SessionManager {
     }
 }
 
+/// An explicit user stop/close blocks queued delivery until new user input.
+pub(super) async fn pause_delivery(live: &Live) -> Result<()> {
+    let mut meta = live.meta.lock().await;
+    if meta.inbox.paused {
+        return Ok(());
+    }
+    let mut next = meta.clone();
+    next.inbox.paused = true;
+    live.store.save_meta(&next)?;
+    *meta = next;
+    Ok(())
+}
+
 pub(super) async fn settle_inputs(
     live: &Live,
     execution: Option<&Execution>,
@@ -825,6 +838,11 @@ pub(super) async fn settle_inputs(
     let completed = matches!(event, SessionEvent::TurnCompleted { .. });
     let failed = matches!(event, SessionEvent::TurnFailed { .. });
     if !completed && !failed {
+        return Ok(());
+    }
+    // Retiring a daemon intentionally ends its Agent process. Its pending
+    // input stays recoverable; explicit Human stop already persisted pause.
+    if failed && live.closing.load(Ordering::SeqCst) {
         return Ok(());
     }
     let mut meta = live.meta.lock().await;

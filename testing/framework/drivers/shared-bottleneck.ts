@@ -25,10 +25,10 @@ export async function startSharedBottleneck(targetUrl: string, initial: NetworkL
   let stopped = false;
   const groups = [0, 1].map(direction => {
     const lanes: Lane[] = [];
-    let cursor = 0, availableAt = 0, timer: NodeJS.Timeout | undefined;
+    let cursor = 0, availableAt: number | null = null, timer: NodeJS.Timeout | undefined;
     function wake() {
       if (timer || stopped) return;
-      timer = setTimeout(pump, Math.max(0, availableAt - performance.now()));
+      timer = setTimeout(pump, availableAt === null ? 0 : Math.max(0, availableAt - performance.now()));
     }
     function pump() {
       timer = undefined;
@@ -37,7 +37,7 @@ export async function startSharedBottleneck(targetUrl: string, initial: NetworkL
       // per packet artificially capped small records at one packet per timer.
       for (let batch = 0; batch < 64; batch++) {
       const now = performance.now();
-      if (availableAt > now) { wake(); return; }
+      if (availableAt !== null && availableAt > now) { wake(); return; }
       let nextReady = Infinity;
       for (let n = 0; n < lanes.length; n++) {
         const index = (cursor + n) % lanes.length;
@@ -52,14 +52,16 @@ export async function startSharedBottleneck(targetUrl: string, initial: NetworkL
         connections.get(lane.id)!.bytes[direction]! += item.bytes.length;
         // One packet is serialized at a time; backlog on one lane cannot
         // reserve seconds of future service ahead of a different socket.
-        availableAt = Math.max(availableAt, now - 5) + item.bytes.length * 8 / (profile.bandwidthMbps * 1000);
+        // Keep serialization debt while backlogged, including late timer
+        // wakeups. Idle or blocked time must not create bandwidth credit.
+        availableAt = (availableAt ?? now) + item.bytes.length * 8 / (profile.bandwidthMbps * 1000);
         cursor = (index + 1) % lanes.length;
         if (lane.source.isPaused() && lane.queued < 512 * 1024) lane.source.resume();
         if (!lane.queue.length && lane.ended) lane.destination.end();
         break;
       }
-      if (!Number.isFinite(nextReady)) { availableAt = now; return; }
-      if (nextReady > now) { availableAt = now; timer = setTimeout(pump, Math.max(1, nextReady - now)); return; }
+      if (!Number.isFinite(nextReady)) { availableAt = null; return; }
+      if (nextReady > now) { availableAt = null; timer = setTimeout(pump, Math.max(1, nextReady - now)); return; }
       }
       wake();
     }
@@ -83,7 +85,7 @@ export async function startSharedBottleneck(targetUrl: string, initial: NetworkL
         destination.on("drain", () => { lane.writable = true; wake(); });
       },
       queuedBytes() { return lanes.reduce((sum, lane) => sum + lane.queued, 0); },
-      changed() { availableAt = Math.min(availableAt, performance.now() + 100); wake(); },
+      changed() { if (availableAt !== null) availableAt = Math.min(availableAt, performance.now() + 100); wake(); },
       stop() { if (timer) clearTimeout(timer); for (const lane of lanes) lane.queue.length = 0; },
     };
   });

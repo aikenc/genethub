@@ -35,7 +35,9 @@ use crate::os_process::Command;
 
 const INITIALIZE: Duration = Duration::from_secs(30);
 const SHORT: Duration = Duration::from_secs(10);
-const CLOSE: Duration = Duration::from_secs(15);
+// The session caller waits eight seconds; the host must own expiry and restart
+// before that caller can abandon its wait. Reuse this bound for every close.
+pub(super) const CLOSE: Duration = Duration::from_secs(5);
 /// Bounded well inside the time the host gives this daemon to exit.
 const SHUTDOWN: Duration = Duration::from_secs(3);
 /// How long a reload waits for a running turn before restarting anyway.

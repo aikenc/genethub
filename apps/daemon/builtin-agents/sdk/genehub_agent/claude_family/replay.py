@@ -834,7 +834,9 @@ def run_keycheck(case: dict, flavor: Flavor) -> Optional[str]:
 
     server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
     port = server.server_address[1]
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    # Offline fixtures need bounded prompt shutdown, not the HTTPServer's
+    # default half-second wait for every key-check recording.
+    thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.01), daemon=True)
     thread.start()
     if spec.get("closed"):
         server.shutdown()

@@ -844,19 +844,20 @@ defineSpecialty(
         const probe = runGenet(genet, ["daemon", "status"], env);
         try {
           after = parseJson(probe.stdout);
-          if (after.running === true) break;
+          if (after.running === true && typeof after.port === "number") break;
         } catch {
           after = {};
         }
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
-      t.assertions.assert(after.running === true, `not serving after reload: ${JSON.stringify(after)}`);
+      t.assertions.assert(after.running === true && typeof after.port === "number", `not serving after reload: ${JSON.stringify(after)}`);
       t.assertions.assert(
         String(after.pid) === pid,
         `reload changed the pid (${pid} -> ${after.pid}); the point of reload is the same process`,
       );
     } finally {
-      runGenet(genet, ["daemon", "stop"], env);
+      const stopped = runGenet(genet, ["daemon", "stop"], env);
+      t.assertions.assert(stopped.code === 0, `stop after reload failed: ${stopped.stderr || stopped.stdout}`);
     }
   },
 );

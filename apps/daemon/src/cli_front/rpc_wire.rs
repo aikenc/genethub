@@ -86,7 +86,7 @@ pub struct Rpc {
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     // This monitor owns the Fabric pump until the endpoint has sent CLOSE.
     // Dropping its handle detaches it; aborting it on normal RPC drop would
-    // tear down the carrier first and retain a resumable peer for 60 seconds.
+    // tear down the carrier before the local stream cancellation is observed.
     _transport_monitor: tokio::task::JoinHandle<()>,
     hello: HelloResult,
     /// Absent until someone asks to watch. A one-shot command opens no event
@@ -132,7 +132,6 @@ impl Rpc {
                 proof: crate::channel_auth::client_proof(&admission.server_proof, context, &nonce),
             },
             rtc_supported: false,
-            max_bulk_stream_window_bytes: genehub_proto::INITIAL_STREAM_WINDOW_BYTES,
         };
         timeout_send(
             &mut socket,
@@ -581,42 +580,9 @@ async fn link_up(
     context: &str,
     nonce: &str,
 ) -> Result<(ClientEndpoint, tokio::task::JoinHandle<()>), ConnectError> {
-    let redial: Option<crate::dataplane::client::Redial> =
-        if let PeerAuth::Device { device_id, .. } = &auth {
-            let endpoint = endpoint.to_owned();
-            let route = route_ticket.to_owned();
-            let secret = secret.to_owned();
-            let context = context.to_owned();
-            let device_id = device_id.clone();
-            Some(std::sync::Arc::new(move || {
-                let endpoint = endpoint.clone();
-                let route = route.clone();
-                let secret = secret.clone();
-                let context = context.clone();
-                let device_id = device_id.clone();
-                Box::pin(async move {
-                    let nonce = fresh_nonce();
-                    let auth = PeerAuth::Device {
-                        device_id,
-                        nonce: nonce.clone(),
-                        proof: crate::channel_auth::client_proof(&secret, &context, &nonce),
-                    };
-                    let (key, carrier, pump) =
-                        authenticated_fabric(&endpoint, &route, auth, &secret, &context, &nonce)
-                            .await
-                            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-                    Ok((key, carrier, Box::new(pump) as Box<dyn Send>))
-                })
-            }))
-        } else {
-            None
-        };
     let (key, carrier, pump) =
         authenticated_fabric(endpoint, route_ticket, auth, secret, context, nonce).await?;
-    let (data, endpoint_task) = match redial {
-        Some(redial) => ClientEndpoint::start_recovering(key, carrier, redial),
-        None => ClientEndpoint::start(key, carrier),
-    };
+    let (data, endpoint_task) = ClientEndpoint::start(key, carrier);
     let monitor = tokio::spawn(async move {
         let _ = endpoint_task.await;
         drop(pump);
@@ -644,7 +610,6 @@ async fn authenticated_fabric(
         client_name: format!("{}-cli", crate::channel::CLI_BINARY),
         auth,
         rtc_supported: false,
-        max_bulk_stream_window_bytes: genehub_proto::INITIAL_STREAM_WINDOW_BYTES,
     };
     let mut transport_url = crate::http::Url::parse(endpoint)
         .map_err(|error| ConnectError::Protocol(error.to_string()))?;
@@ -903,6 +868,7 @@ mod tests {
         let hello = HelloResult {
             data_channel_url: None,
             daemon_version: "test".into(),
+            daemon_instance_id: "test-daemon-instance".into(),
             web_protocol: genehub_proto::WEB_PROTOCOL_VERSION,
             machine_id: admission.machine_id.clone(),
             fingerprint: admission.fingerprint.clone(),

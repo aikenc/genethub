@@ -448,6 +448,7 @@ async fn dispatch(
                     None => None,
                 },
                 daemon_version: state.version.clone(),
+                daemon_instance_id: crate::cli_front::update_runtime().instance_id,
                 web_protocol: WEB_PROTOCOL_VERSION,
                 machine_id: state.machine.machine_id.clone(),
                 fingerprint: state.machine.fingerprint(),
