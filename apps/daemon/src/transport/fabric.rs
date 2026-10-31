@@ -75,6 +75,9 @@ impl Drop for PeerTasks {
     }
 }
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+// Explicit Hosted revocation is observed within this interval plus the 2s
+// check budget on a healthy control plane. Lease expiry remains independent.
+const AUTHORITY_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 /// Matches the browser half of this wire (`packages/workbench/src/fabric/frame.ts`).
 const MAX_ROUTE_TICKET_BYTES: usize = 4096;
 const BACKOFF: [u64; 6] = [1, 2, 5, 10, 30, 60];
@@ -675,8 +678,13 @@ async fn serve_peer_inner(
         let expires_at = admitted.expires_at;
         tokio::spawn(async move {
             let client = crate::hub::Client::new(&enrollment.hub_url);
+            // Keep the check cadence independent of the last HTTP response's
+            // latency. Skip missed ticks instead of bursting after a stall.
+            let mut checks = tokio::time::interval(AUTHORITY_CHECK_INTERVAL);
+            checks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            checks.tick().await; // interval's first tick is immediate
             loop {
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                checks.tick().await;
                 let Some(authority) = weak.upgrade() else {
                     break;
                 };
@@ -685,7 +693,7 @@ async fn serve_peer_inner(
                     break;
                 }
                 // Temporary control-plane loss cannot extend the admitted lease.
-                // An explicit revocation ends it immediately, including active RTC.
+                // A negative check revokes authority, including active RTC.
                 if matches!(
                     tokio::time::timeout(
                         Duration::from_secs(2),

@@ -609,13 +609,28 @@ const WRITER_LOCK: &str = "writer.lock";
 /// the kernel lock decides, and this file is merely the label on it.
 const WRITER_NAME: &str = "writer";
 
+/// Own both halves of a WASI lock: dropping File alone leaves the Host's
+/// path-addressed handle alive. Release on every owner removal and final drop.
+struct SessionLock {
+    file: File,
+    path: PathBuf,
+}
+
+impl Drop for SessionLock {
+    fn drop(&mut self) {
+        if let Err(error) = crate::fs_lock::unlock(&self.file, &self.path) {
+            tracing::warn!(%error, "could not release session home lock");
+        }
+    }
+}
+
 /// A registered workspace: where it is, and whether this daemon may write it.
 struct Home {
     /// Shared compatibility lock excluding older workspace-locking builds.
-    compatibility: Option<File>,
+    compatibility: Option<SessionLock>,
     /// One write lock per session. Different channels may write different
     /// conversations in the same workspace at the same time.
-    writers: BTreeMap<String, File>,
+    writers: BTreeMap<String, SessionLock>,
 }
 
 #[derive(Default)]
@@ -820,7 +835,7 @@ impl WorkspaceHomes {
             }
             Err(error) => return Err(error).with_context(|| format!("locking {}", path.display())),
         }
-        home.compatibility = Some(file);
+        home.compatibility = Some(SessionLock { file, path });
         Ok(())
     }
 
@@ -886,7 +901,8 @@ impl WorkspaceHomes {
             crate::host_pid::current()
         );
         let _ = fs::write(session_dir.join(WRITER_NAME), stamp);
-        home.writers.insert(session_id.to_string(), file);
+        home.writers
+            .insert(session_id.to_string(), SessionLock { file, path });
         Ok(())
     }
 

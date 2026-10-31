@@ -377,7 +377,7 @@ fn build_instance(
         .context("wasi linker")?;
     // TLS, DNS and the socket all live out here; the guest gets the protocol
     // only. This is the §6.5 split.
-    wasmtime_wasi_http::p2::add_only_http_to_linker_async(&mut linker)
+    crate::http_hooks::add_http_to_linker(&mut linker)
         .anyhow()
         .context("wasi:http linker")?;
     // Same split one layer down, for the wire `wasi:http` does not cover:

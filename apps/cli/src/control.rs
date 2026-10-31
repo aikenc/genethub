@@ -64,6 +64,19 @@ pub async fn daemon(args: &[String]) -> i32 {
             if !rest.is_empty() {
                 return crate::usage();
             }
+            if genet_frontdoor::launch_env::in_agent_session()
+                && std::env::var("GENEHUB_ALLOW_FOREGROUND_IN_SESSION").as_deref() != Ok("1")
+            {
+                fail(
+                    "foregroundDaemonInSession",
+                    &format!(
+                        "foreground daemon run would remain owned by this Agent session; use `{} daemon start`. \
+                         An intentional foreground supervisor may explicitly set GENEHUB_ALLOW_FOREGROUND_IN_SESSION=1",
+                        channel::CLI_BINARY,
+                    ),
+                    EXIT_FAILED,
+                );
+            }
             crate::wasm::become_daemon()
         }
         "status" => {
@@ -380,6 +393,15 @@ fn start() -> i32 {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         const DETACHED_PROCESS: u32 = 0x0000_0008;
         command.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // The launcher may belong to a tool-owned group that is killed on
+        // command completion. The daemon must outlive that group's cleanup.
+        unsafe {
+            command.pre_exec(genet_native::process_group::own_session);
+        }
     }
     let mut child = match command.spawn() {
         Ok(child) => child,

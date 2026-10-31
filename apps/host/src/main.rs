@@ -85,13 +85,7 @@ fn main() {
 /// reaches every terminal, remote command and script the daemon starts, which
 /// would then speak for a session they are not part of, possibly on another
 /// channel's daemon. The daemon sets them again for its own sessions' agents.
-const SESSION_SCOPED: &[&str] = &[
-    "GENEHUB_SESSION_ID",
-    "GENEHUB_CONTROLLER_TOKEN",
-    "GENEHUB_EVIDENCE_SCOPE",
-    "GENEHUB_SKILLS_DIR",
-    "GENET_WORKSPACE_ROOT",
-];
+use genet_frontdoor::launch_env::SESSION_SCOPED;
 
 /// What the platform itself knows about a launching shell: the endpoint a CLI
 /// binds and the trace context it hands out. Which *Agent* set them, and which

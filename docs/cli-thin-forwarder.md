@@ -149,3 +149,22 @@ stdin 只用于 `genet shell` 的管道输入，上限仍是 1 MiB。更大的�
 - 不在 CLI 中实现 Fabric/RTC、更新策略或签名；这些属于 daemon guest 与发布/host 边界
 - 不改桌面壳；桌面继续走 `/ws` 数据面
 - 不把 `/cli` 暴露到 loopback 以外
+
+## Daemon 启动与调用者生命周期
+
+`daemon start` 在 Unix 上为新 Host 建立独立 SID/PGID，并将标准输入置空、输出写入启动日志。
+发起命令所属工具进程组被回收后，daemon 继续运行。它不逃离调用者的 OS 身份、容器或 cgroup。
+CLI 启动边界与 Host daemon 入口共用 `genet_frontdoor::launch_env::SESSION_SCOPED`，Host 还清理
+Agent 声明的 launchingEnv；目标渠道的数据目录与 CLI 路径继续保留。
+
+`daemon run` 是前台托管入口。检测到 Agent 会话上下文时，默认返回 `foregroundDaemonInSession`，
+提示改用本渠道 `daemon start`。有意在该上下文中托管前台进程的 supervisor/调试器可以显式设置
+`GENEHUB_ALLOW_FOREGROUND_IN_SESSION=1`；仅继承 `INVOCATION_ID` 不构成豁免。
+这是防误用机制，同 UID 的渠道之间不构成安全隔离。
+
+Host 对 Wasmtime 48 的 WASI HTTP owned RequestOptions 增加回收包装，保留每个请求的超时和
+既有 Host-header hooks。HTTP 修复与启动脱离均属于 App 更新，单独更新 Guest 无法修复旧 Host/CLI。
+
+Hosted Fabric 连接每 10 秒复核持续连接资格，每次检查最多等待 2 秒。健康控制面下，显式撤销的观察
+预算为 10 秒加一次请求耗时；测试另留 3 秒调度余量。暂时无法复核不会延长既有租约，到期检查独立
+生效。该行为同时约束继续使用已升级 RTC 的连接。

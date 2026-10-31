@@ -314,6 +314,8 @@ cli(
       GENEHUB_EVIDENCE_SCOPE: "{\"launcher\":true}",
       GENEHUB_SKILLS_DIR: "/launcher/skills",
       GENET_WORKSPACE_ROOT: "/launcher/workspace",
+      GENEHUB_AGENT_PID: "123",
+      GENEHUB_HOST_PID: "124",
       GENEHUB_CLI: "/launcher/genet-other-channel",
     };
     await withWorkspace(
