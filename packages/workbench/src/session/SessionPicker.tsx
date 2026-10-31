@@ -48,7 +48,7 @@ export function SessionListItem({
         <span className="block truncate text-[10px] text-faint">
           {agent ? resolveAgentPresentation(agent).label : session.agentId} ·{" "}
           {formatClock(session.updatedAtMs)}
-          {session.managed ? ` · 受管 ${session.managed.role}` : ""}
+          {session.historyOnly ? " · 历史" : ""}
         </span>
       </span>
       {workspace ? <WorkspaceAffordance workspace={workspace} label={workspaceLabel} /> : null}

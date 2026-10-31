@@ -20,7 +20,6 @@ export function matchesConversation(
   // A missing parent catalogue entry does not turn an internal conversation into a primary one.
   // A session another session started carries SYSTEM_STARTED_LABEL and is internal too.
   const child = Boolean(
-    session.managed ||
     workspace?.agentSpace?.parentWorkspaceId ||
     session.labels?.includes(SYSTEM_STARTED_LABEL),
   );

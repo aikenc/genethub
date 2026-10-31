@@ -112,7 +112,7 @@ function ConversationListContent({ host, endpoint, open, hidden, onNavigate, onO
     // Bound writes and capture the original Client. Never retry an ambiguous write automatically.
     for (const session of targets) {
       if (!mounted.current || useWorkbench.getState().client !== client) break;
-      if (session.unsupported || session.managed?.userInteraction === "readOnly") {
+      if (session.unsupported || session.historyOnly) {
         failures.push(`${session.title || "新会话"}：只读或版本不兼容`); failedIds.add(session.id); continue;
       }
       try {

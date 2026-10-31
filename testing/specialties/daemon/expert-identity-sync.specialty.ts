@@ -1,5 +1,5 @@
 // An expert owns its soul.md and rewrites it while it reflects; Agents only see it through the AGENTS.md and
-// CLAUDE.md that SpaceBuilder compiles from it. `tools/expert.py sync-identity` (run by the timer hook) is what
+// CLAUDE.md that SpaceBuilder compiles from it. `tools/team.py sync-identity` (run by the timer hook) is what
 // keeps the two in step. These cases run the real script on a copy of the expert template laid out as the
 // daemon lays experts out (<data>/spaces/<name> next to <data>/builtin-skills), with no daemon and no model.
 
@@ -31,8 +31,8 @@ defineSpecialty(
     timeoutMs: 90_000,
     requiredArtifacts: [],
     resources: { environments: 1, cpu: 1 },
-    surfaces: ["tools/expert.py", "spacebuilder.py"],
-    productInterfaces: ["tools/expert.py", "spacebuilder.py"],
+    surfaces: ["tools/team.py", "spacebuilder.py"],
+    productInterfaces: ["tools/team.py", "spacebuilder.py"],
   },
   async (t) => {
     const data = join(t.env.root, "expert-identity-sync");
@@ -42,7 +42,7 @@ defineSpecialty(
     cpSync(join(t.openRoot, GENEHUB, "references", "team-template"), expert, { recursive: true });
 
     const sync = (extraEnv: Record<string, string> = {}) =>
-      spawnSync("python3", ["tools/expert.py", "sync-identity"], {
+      spawnSync("python3", ["tools/team.py", "sync-identity"], {
         cwd: expert,
         encoding: "utf8",
         env: { PATH: process.env.PATH ?? "", HOME: data, ...extraEnv },
@@ -50,9 +50,16 @@ defineSpecialty(
     const soul = (text: string) => writeFileSync(join(expert, "soul.md"), text);
     const read = (file: string) => readFileSync(join(expert, file), "utf8");
 
+    const timerFile = join(expert,"skills","team-front","hooks","timer.genet.json");
+    const legacyTimer = {schema:"genet.hook.v1",event:"timer",every:"7s",exec:["${GENEHUB_PYTHON}","tools/expert.py","hook"],cwd:".",timeout:17};
+    writeFileSync(timerFile,JSON.stringify(legacyTimer));
     soul("# 灵魂\n\n我叫小满。\n");
     const first = sync();
     t.assertions.assert(first.status === 0 && first.stdout.trim() === "rebuilt", `first sync: ${first.status} ${first.stdout} ${first.stderr}`);
+    const migratedTimer = JSON.parse(readFileSync(timerFile,"utf8"));
+    t.assertions.assert(migratedTimer.exec[1]==="tools/team.py"&&migratedTimer.every==="7s"&&migratedTimer.timeout===17,"legacy hook migration changed cadence or timeout");
+    t.assertions.assert(readFileSync(join(expert,".genethub","team","hook-name-backups","team-front.json"),"utf8").includes("tools/expert.py"),"original timer was not backed up");
+
     for (const file of ["front/AGENTS.md", "front/CLAUDE.md"]) t.assertions.assert(read(file).includes("我叫小满"), `${file} lacks the soul`);
 
     const stamp = readFileSync(join(expert, "front/AGENTS.md")).length;
@@ -82,16 +89,23 @@ defineSpecialty(
     t.assertions.assert(layered.status === 0 && layered.stdout.trim() === "rebuilt", `layered sync: ${layered.status} ${layered.stderr}`);
     t.assertions.assert(read("front/AGENTS.md").includes("用户在意简洁") && read("spaces/research/AGENTS.md").includes("用户在意简洁") && read("spaces/research/AGENTS.md").includes("先查本地仓库"), "memory.md or index.md did not reach the compiled AGENTS.md");
 
+    const customTimer={...legacyTimer,exec:["python3","tools/custom_timer.py","hook"]};
+    writeFileSync(join(expert,"tools/custom_timer.py"),"print('custom')\n");
+    writeFileSync(timerFile,JSON.stringify(customTimer));
+    const custom=sync();
+    t.assertions.assert(custom.status===0,"custom timer made identity upgrade fail");
+    t.assertions.assert(JSON.stringify(JSON.parse(readFileSync(timerFile,"utf8")))===JSON.stringify(customTimer),"upgrade rewrote a custom timer command");
+
     const stranded = join(t.env.root, "expert-identity-sync-stranded");
     mkdirSync(join(stranded, "spaces"), { recursive: true });
     cpSync(expert, join(stranded, "spaces", "expert"), { recursive: true });
-    const lonely = spawnSync("python3", ["tools/expert.py", "sync-identity"], {
+    const lonely = spawnSync("python3", ["tools/team.py", "sync-identity"], {
       cwd: join(stranded, "spaces", "expert"),
       encoding: "utf8",
       env: { PATH: process.env.PATH ?? "", HOME: stranded },
     });
     writeFileSync(join(stranded, "spaces", "expert", "soul.md"), "# 灵魂\n\n另一个。\n");
-    const missing = spawnSync("python3", ["tools/expert.py", "sync-identity"], {
+    const missing = spawnSync("python3", ["tools/team.py", "sync-identity"], {
       cwd: join(stranded, "spaces", "expert"),
       encoding: "utf8",
       env: { PATH: process.env.PATH ?? "", HOME: stranded },

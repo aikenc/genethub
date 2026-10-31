@@ -6,7 +6,7 @@
 //! reason `--machine` exists and `--device` is refused
 //! (`genet-remote-execution.md` §3).
 
-use genehub_proto::{HubStatus, InviteScope, Reply, Request};
+use genehub_proto::{HubStatus, Reply, Request};
 use serde_json::json;
 
 use super::machines::{self, PairedMachine};
@@ -359,32 +359,11 @@ async fn device_list(selection: &Selection) -> Result<serde_json::Value, CliFail
 }
 
 async fn invite(args: &[String], selection: &Selection) -> Result<serde_json::Value, CliFailure> {
-    let mut grants: Option<Vec<String>> = None;
-    let mut index = 0;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--grant" => {
-                let value = value_after(args, &mut index, "--grant")?;
-                grants
-                    .get_or_insert_with(Vec::new)
-                    .extend(value.split(',').map(|part| part.trim().to_string()));
-            }
-            other => {
-                return Err(CliFailure::invalid_args(format!(
-                    "device invite does not take {other}"
-                )))
-            }
-        }
-        index += 1;
+    if !args.is_empty() {
+        return Err(CliFailure::invalid_args("device invite grants full machine access; restricted invitations are no longer supported"));
     }
-
     let rpc = connect(selection).await?;
-    // No `--grant` means an unrestricted device, which is what pairing has
-    // always produced. Naming any grant means naming all of them: a flag that
-    // silently added to a default would make `--grant read` hand out more than
-    // it says.
-    let scope = grants.map(|grants| InviteScope { grants });
-    match rpc.call(Request::DeviceInvite(scope)).await {
+    match rpc.call(Request::DeviceInvite(None)).await {
         Ok(Reply::Invite(invite)) => Ok(json!({
             "code": invite.code,
             "expiresAt": invite.expires_at,

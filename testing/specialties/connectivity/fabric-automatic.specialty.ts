@@ -53,7 +53,7 @@ for (const hosted of [false, true]) defineSpecialty({
       t.assertions.assert(denied.status===404 || denied.status===403,"a second account obtained machine routes");
       revoke=async()=>{const r=await owner.fetch(`/app/machines/${machineId}/revoke`,{method:"POST"});await r.body?.cancel();t.assertions.assert(r.ok,"machine revocation failed");};
     } else {
-      const pair = await t.flows.main.pairDevice(o.client,o.daemon,[],"automatic"); pair.client.close(); credential = pair.credential;
+      const pair = await t.flows.main.pairDevice(o.client,o.daemon,"automatic"); pair.client.close(); credential = pair.credential;
       const attached = await o.client.call({type:"device.remoteAttach",payload:{relayUrl:link.urlFor(origin),joinToken:relay.joinToken,channelCount:2}});
       if (attached?.type !== "remoteAccess" || !attached.data.rendezvousUrl) throw new Error("paired attachment failed");
       await t.tools.waitUntil(async()=>{const d=await o.client.call({type:"device.list"});return d?.type==="devices" && d.data.remote.channels?.length===2 && d.data.remote.channels.every(l=>l.online);},15000);

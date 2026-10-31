@@ -3,6 +3,8 @@ import { spawn } from "node:child_process";
 import { createSocket } from "node:dgram";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { Client } from "@genehub/workbench/client";
+import type { SessionSnapshot } from "@genehub/proto";
 import { defineSpecialty, openMultichannelBrowser, allocatePort, registerControlledAgent, readControlledAgentJournal } from "../../framework/public.ts";
 
 const meta = (name: string, title: string, oracle: string, duration = 30000) => ({
@@ -232,11 +234,37 @@ for (const rtc of [false, true]) {
       const id = await t.flows.main.createBuiltinSession(stack.opened.client, stack.opened.workspaceId);
       await stack.page.evaluate(async id => {
         const m = (window as any).mc;
-        await m.client.subscribe(id, { onEvent(e: unknown) { m.events.push(e); } });
+        m.observedTitles = [];
+        // A carrier change can deliver the event through cursor recovery.
+        // At cursor zero, recovery returns a snapshot instead of old events.
+        // Adopt both public sources, as the workbench session store does.
+        const handlers: Parameters<Client["subscribe"]>[1] = {
+          onEvent(e) {
+            m.events.push(e);
+            if (e.event.type === "titleChanged") m.observedTitles.push(e.event.title);
+          },
+          onResync(snapshot, replayed) {
+            m.repairs++;
+            const title = (snapshot as SessionSnapshot).summary.title;
+            if (title !== null) m.observedTitles.push(title);
+            m.events.push(...replayed);
+            for (const e of replayed) if (e.event.type === "titleChanged") m.observedTitles.push(e.event.title);
+          },
+        };
+        const initial = await m.client.subscribe(id, handlers);
+        const title = (initial.snapshot as SessionSnapshot).summary.title;
+        if (title !== null) m.observedTitles.push(title);
       }, id);
       if (rtc) await stack.rtc();
       await stack.opened.client.call({ type: "session.rename", payload: { sessionId: id, title: "authorized-event" } });
-      await stack.page.waitForFunction(() => (window as any).mc.events.some((e: any) => e.event.title === "authorized-event"), null, { timeout: 5000 });
+      await stack.page.waitForFunction(() => (window as any).mc.observedTitles.includes("authorized-event"), null, { timeout: 5000 }).catch(async error => {
+        const state = await stack.page.evaluate(() => {
+          const m = (window as any).mc;
+          return { connection: m.client.connectionState, rtc: m.client.rtcState, repairs: m.repairs, titles: m.observedTitles, events: m.events.map((e: any) => e.event.type) };
+        });
+        throw new Error("authorized subscription title missing: " + JSON.stringify(state) + "; " + error);
+      });
+      t.note("authorizedSubscriptionObserved=true repairs=" + await stack.page.evaluate(() => (window as any).mc.repairs));
       await stack.page.evaluate(async request => {
         const m = (window as any).mc;
         m.running = m.client.openShellStream(request); await m.running.finish(); await m.running.responseHead;
@@ -248,11 +276,17 @@ for (const rtc of [false, true]) {
       const revokedAt = Date.now(); await stack.revoke!();
       const status = await stack.admissionStatus!();
       t.assertions.assert(status === 401 || status === 403, "revoked session retained admission");
-      await stack.page.waitForFunction(() => (window as any).mc.client.connectionState === "closed" && (window as any).mc.streamEnded, null, { timeout: 5500 });
+      await stack.page.waitForFunction(() => (window as any).mc.client.connectionState === "closed" && (window as any).mc.streamEnded, null, { timeout: 5500 }).catch(async error => {
+        const state = await stack.page.evaluate(() => {
+          const m = (window as any).mc;
+          return { connection: m.client.connectionState, rtc: m.client.rtcState, streamEnded: m.streamEnded, states: m.states };
+        });
+        throw new Error("revoked subscription or command remained open: " + JSON.stringify(state) + "; " + error);
+      });
       for (let n = 0; n < 3; n++) await stack.opened.client.call({ type: "session.rename", payload: { sessionId: id, title: "denied-event-" + n } });
       await new Promise(r => setTimeout(r, Math.max(1000, revokedAt + 9000 - Date.now())));
       t.assertions.assert(!existsSync(join(stack.opened.workspaceRoot, "revoked-effect")), "revoked running command still mutated disk");
-      t.assertions.assert(await stack.page.evaluate(() => !(window as any).mc.events.some((e: any) => e.event.title?.startsWith("denied-event-"))), "revoked subscription delivered new events");
+      t.assertions.assert(await stack.page.evaluate(() => !(window as any).mc.observedTitles.some((title: string) => title.startsWith("denied-event-"))), "revoked subscription delivered a new title through an event or snapshot");
       t.assertions.assert((await stack.opened.client.call({ type: "workspace.list" }))?.type === "workspaces", "revocation damaged the independent owner");
     } finally { await stack.stop(); }
   });

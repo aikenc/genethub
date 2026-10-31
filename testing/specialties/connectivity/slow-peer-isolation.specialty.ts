@@ -48,9 +48,9 @@ defineSpecialty({
       const result = await opened.client.call({ type: "device.list" });
       return result?.type === "devices" && result.data.remote.online;
     }, 20000);
-    const first = await t.flows.main.pairDevice(opened.client, opened.daemon, [], "stalled-client");
+    const first = await t.flows.main.pairDevice(opened.client, opened.daemon, "stalled-client");
     first.client.close();
-    const second = await t.flows.main.pairDevice(opened.client, opened.daemon, [], "healthy-client");
+    const second = await t.flows.main.pairDevice(opened.client, opened.daemon, "healthy-client");
     second.client.close();
     a = await connectProductClient({
       url: stalledLeg.urlFor(attached.data.rendezvousUrl), credential: first.credential,

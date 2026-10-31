@@ -1,12 +1,8 @@
 //! Starting a process for somebody who is not at this machine, and owning it
 //! for exactly as long as they are watching.
 //!
-//! Two places here start processes on a caller's behalf: a terminal
-//! (`pty.rs`) and a command (`exec.rs`). How the output is read differs, and
-//! that is genuinely all that differs — how the process is built out of a
-//! confinement policy, and what it means to stop it, are the same question
-//! twice. They used to be answered twice, which is how one of them came to be
-//! answered wrong.
+//! Commands and terminals share process ownership primitives. Each starts
+//! the requested program directly as the daemon OS user.
 //!
 //! **Killing a process does not kill what it started.** `SIGKILL` to a pid
 //! reaches that pid. Everything it forked keeps running, reparented to init,
@@ -28,27 +24,7 @@
 //! performing it: the policy belongs to the caller, the mechanism belongs
 //! here.
 
-use std::path::{Path, PathBuf};
-
-use anyhow::{Context, Result};
-
-use crate::isolation::Policy;
-
-/// The command line to actually launch, once a confinement policy has had its
-/// say.
-///
-/// Confinement is not a flag on the process, it is a different process: our
-/// own binary, re-run with a hidden argument, which restricts itself and only
-/// then becomes the program (`isolation.rs`). Both callers need that
-/// substitution and neither should be the one that remembers it.
-pub fn launch_argv(program: &str, confinement: Option<&Policy>) -> Result<Vec<PathBuf>> {
-    match confinement {
-        None => Ok(vec![PathBuf::from(program)]),
-        Some(policy) => policy
-            .wrap(Path::new(program))
-            .context("building the confinement wrapper"),
-    }
-}
+use std::path::Path;
 
 /// What a child must do to itself between fork and exec.
 ///
@@ -372,10 +348,13 @@ fn tree_exists(_pid: u32) -> bool {
 /// none of them can be added afterwards: a process cannot be put into its own
 /// session once it has children, and a death signal armed late is a death
 /// signal that was not armed during the window it was for.
-pub fn command(argv: &[PathBuf], arguments: &[String], cwd: &Path) -> crate::os_process::Command {
-    let (program, wrapper) = argv.split_first().expect("an argv always has a program");
-    let mut command = crate::os_process::Command::new(program);
-    command.args(wrapper).args(arguments).current_dir(cwd);
+pub fn command(
+    program: impl AsRef<Path>,
+    arguments: &[String],
+    cwd: &Path,
+) -> crate::os_process::Command {
+    let mut command = crate::os_process::Command::new(program.as_ref());
+    command.args(arguments).current_dir(cwd);
     own_group(&mut command);
     command
 }

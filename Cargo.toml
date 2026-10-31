@@ -13,10 +13,7 @@ members = [
     "packages/native",
     "packages/wasi-guest",
     "packages/proto",
-    "testing/deprecated/rust",
 ]
-# The retired integration crate keeps its harness sources so apps/cli tests still
-# link the same helpers. It is not a default member and has no gate suites.
 # genehub-host pulls Wasmtime; keep it off the default `cargo test` graph.
 default-members = [
     "apps/agent",

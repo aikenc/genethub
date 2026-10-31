@@ -35,7 +35,7 @@ GeneHub 是一套让你在自己的机器上跑 coding agent、并从任意设�
 
 **产品运行时只有 WASM guest。** 不存在可切换的原生 daemon/agent 模式。`genehub-host` 与薄 `genet` 只负责装载和生命周期。缺 host、缺 `genehub_guest.wasm`、或二者 `sha256(wit/genehub-host.wit)` 对不上时，在 instantiate 之前失败，不得改跑原生业务二进制，也不得把原生路径当兼容层保留。
 
-原生 `genet` 不再解析产品动词，也不再作为 E2EE 端点：它只做 confine、daemon 启停、`agent-serve` 和把 argv 经 loopback `POST /cli` 交给本机 daemon。业务语义与 `--machine` 拨号都在 daemon（guest）里。合同见 [cli-thin-forwarder.md](./cli-thin-forwarder.md)。
+原生 `genet` 不再解析产品动词，也不再作为 E2EE 端点：它只做 daemon 启停、`agent-serve` 和把 argv 经 loopback `POST /cli` 交给本机 daemon。业务语义与 `--machine` 拨号都在 daemon（guest）里。合同见 [cli-thin-forwarder.md](./cli-thin-forwarder.md)。
 
 ---
 
@@ -259,7 +259,7 @@ interface FabricAuthority {
 
 ### 6.5 加密的现状，说实话
 
-**当前实现：** 每个 routed peer carrier 先做 protocol-v3 PSK 双向 HMAC proof，再派生本次 peer-link AES-256-GCM key。每个 record 绑定 version、credential context、方向和严格 sequence；AES-GCM 同时提供加密与认证，HMAC 只用于 handshake/key derivation。Relay 能看到 IP、连接时序、长度、outer stream 和初始有界 `PeerHello`，但拿不到 secret，不能读取或伪造 Exchange 内容。
+**当前实现：** 每个 routed peer carrier 先做 protocol-v4 PSK 双向 HMAC proof，再派生本次 peer-link AES-256-GCM key。每个 record 绑定 version、credential context、方向和严格 sequence；AES-GCM 同时提供加密与认证，HMAC 只用于 handshake/key derivation。Relay 能看到 IP、连接时序、长度、outer stream 和初始有界 `PeerHello`，但拿不到 secret，不能读取或伪造 Exchange 内容。
 
 **这仍不等于“整个平台零知识”。** 托管 Control 生成 peer secret，分别返回给浏览器并供 daemon 兑换，因此平台运营方技术上知道该 secret；托管前端也处在浏览器凭证的信任路径里。当前协议是对称 PSK，没有公钥握手与前向保密。
 
@@ -267,7 +267,7 @@ interface FabricAuthority {
 
 ### 6.6 baseline 与 direct
 
-桌面壳内的 WebView 直连同一台机器的 `127.0.0.1`。跨设备先走 `/fabric/v2` baseline，再通过加密的 `rtc.negotiate` Exchange 协商 ordered reliable DataChannel。RTC connected 后普通新 logical streams 优先 direct；事件流及其订阅登记、补拉、取消始终属于同一个 baseline endpoint，心跳也检查该 endpoint。RTC 失败或关闭时 baseline 继续承载同一 v3 协议。已有流不迁移，业务写请求不自动重放；基线重连后的订阅恢复由协议客户端管理。
+桌面壳内的 WebView 直连同一台机器的 `127.0.0.1`。跨设备先走 `/fabric/v2` baseline，再通过加密的 `rtc.negotiate` Exchange 协商 ordered reliable DataChannel。当前 v4 的每个认证载体独立拥有 endpoint；换载体或续租会重新认证并创建 endpoint，不恢复旧的传输重放日志。已有 RPC、文件或预览流在载体断开时明确失败，不自动重放写操作。会话订阅用业务游标重新登记并补齐；已持久接受的会话输入由 message ID 和回执恢复，不依赖传输层续传。完整连接权限、撤销/过期和仅展示分享边界在新 endpoint 上重新校验。
 
 完整数据面见 [e2ee-data-plane.md](./e2ee-data-plane.md)，Relay 实现边界见 [relay.md](./relay.md)。
 

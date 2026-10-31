@@ -226,11 +226,6 @@ async fn dispatch(args: Vec<String>) -> i32 {
         Some("file") => Box::pin(file::file(&args[1..], &selection)).await,
         Some("client") => Box::pin(client::run(&args[1..], &selection)).await,
         Some("speech") => Box::pin(speech::speech(&args[1..], &selection)).await,
-        Some("workflow") => output::fail(output::CliFailure::business(
-            "workflowRetired",
-            "Workflow has been removed; use team Skills and ordinary Sessions",
-            None,
-        )),
         Some("space") => Box::pin(space::space(&args[1..], &selection)).await,
         Some("process") => Box::pin(process::process(&args[1..], &selection)).await,
         Some("hook") => Box::pin(hook::hook(&args[1..], &selection)).await,

@@ -28,8 +28,6 @@ const FORWARDED: &[&str] = &[
     "file",
     "speech",
     "client",
-    // Preserve the explicit workflowRetired reply for legacy callers.
-    "workflow",
     "process",
     "machine",
     "device",
@@ -37,22 +35,8 @@ const FORWARDED: &[&str] = &[
     "desktop",
 ];
 
-/// Deliberately not the async entry point, and deliberately doing one thing
-/// before the runtime exists.
-///
-/// The confinement wrapper has to run in a process that has never started a
-/// thread: creating a user namespace is refused outright for a multi-threaded
-/// caller, so the same code that works here fails with `EINVAL` if it is moved
-/// a few lines down into `#[tokio::main]`, where the worker pool is already up
-/// (`apps/daemon/src/isolation.rs`).
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-
-    if args.first().map(String::as_str) == Some(genet_native::confine::CONFINE_ARG) {
-        std::process::exit(genet_native::confine::confine_and_exec(&args[1..]));
-    }
-
-    run(args)
+    run(std::env::args().skip(1).collect())
 }
 
 // A front door waits on one forwarded command; it does not run the daemon.
@@ -190,7 +174,7 @@ fn print_usage() {
   genet session context <id>        build bounded, cited context without an LLM
   genet agent list                  agents installed on this machine
   genet agent show <id>             one agent: state, actions, job, requests
-  genet agent action <id> <action>  run an install/login/... action (settings grant)
+  genet agent action <id> <action>  run an install/login/... action
   genet agent reload <id>           restart a script agent from its directory
   genet agent reset <id>            delete user/<id> and use the built-in copy
   genet agent test <id> [--live]    run a script agent's own tests
@@ -254,8 +238,8 @@ fn print_usage() {
                                     one machine from the directory or direct store
   genet machine forget <machineId>  drop the local credential for a machine
   genet device list                 clients authorized on the target machine
-  genet device invite [--grant read,session,files,git,pty,devices,settings,update]
-                                    mint a pairing code; no --grant means no limits
+  genet device invite
+                                    mint a pairing code for full machine access
   genet device revoke <deviceId>    withdraw one client's authorization
   genet <any of the above> --machine <machineId>
                                     run it on a paired machine instead

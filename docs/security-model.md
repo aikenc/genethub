@@ -10,7 +10,7 @@
 
 这是 Human 明确的产品决策。**经账号/设备认证并获准驱动完整 Agent 的连接，等价于取得目标
 机器 daemon 所属 OS 用户的操作能力；可以访问该用户可访问的资源，不按设备、Agent 角色或项目再降权。**
-它是收敛实现的合同，不表示当前全部版本已完成迁移。
+本候选的完整连接已按此合同收敛；已发布旧版本不因此自动改变。
 
 例：用户在手机上让 Agent 修改另一个项目、提交 Git 或运行命令，Agent 已能通过工具完成。
 若同一连接的文件、终端或会话 RPC 却因缺少另一能力位或跨项目标签被拒绝，这只是入口不一致，
@@ -62,7 +62,7 @@ relay 与控制面是两个进程、两个仓库，这不是部署细节而是�
 
 ### 1.1 现在的加密到什么程度，说清楚
 
-**转发业务帧现在对 Relay 加密。** 客户端与 daemon 先基于配对 PSK 或 hosted peer secret 做双向 HMAC proof；随后派生本次 peer link 的 AES-256-GCM key，用严格方向序号和绑定 version/context/direction/sequence 的 AAD 封装每个 protocol-v3 record。AES-GCM 已同时提供机密性与完整性；HMAC 用于握手与 key derivation，不再给每个 record 叠加第二个 MAC。Relay 能看元数据、丢包、延迟或重放密文，但没有 secret 就不能读取或伪造；重放与串 peer 注入会因序号、方向、context 或 AEAD tag 不匹配而 fail-close。
+**转发业务帧现在对 Relay 加密。** 客户端与 daemon 先基于配对 PSK 或 hosted peer secret 做双向 HMAC proof；随后派生本次 peer link 的 AES-256-GCM key，用严格方向序号和绑定 version/context/direction/sequence 的 AAD 封装每个 protocol-v4 record。AES-GCM 已同时提供机密性与完整性；HMAC 用于握手与 key derivation，不再给每个 record 叠加第二个 MAC。Relay 能看元数据、丢包、延迟或重放密文，但没有 secret 就不能读取或伪造；重放与串 peer 注入会因序号、方向、context 或 AEAD tag 不匹配而 fail-close。
 
 **这不是整个平台零知识，也没有前向保密。** Hosted peer secret 由 Control 生成：一份随短期 Fabric connection admission 交给浏览器，一份由目标 daemon 通过 HTTPS 兑换。Control/平台运营方技术上知道该 peer secret，并可主动仿冒客户端；托管 Web 前端也能接触浏览器侧凭证。当前对称 PSK 不提供独立公钥握手、密钥妥协后的前向保密或可验证客户端代码。
 
@@ -140,7 +140,7 @@ daemon 本地维护一份已授权设备列表，形态就是 `authorized_keys`�
 客户端用 opaque route ticket 打开一条到 daemon 的 outer stream
         │
         ▼
-daemon 完成 PSK 双向证明并检查设备/workspace scope → 放行或断开
+daemon 完成 PSK 双向证明并检查完整连接或仅展示分享范围 → 放行或断开
 ```
 
 ### 4.1 配对：生成链接即批准，核销后换长期凭证
@@ -201,16 +201,27 @@ Relay 维护 Control 签发的 endpoint presence lease，并订阅 endpoint/rout
 | 任何常驻服务都要有重启策略 | 容器用 `unless-stopped`；非容器进程用 systemd |
 | 服务器上如果确实要跑 daemon：独立低权限用户 + 限定 workspace + 不放 provider 凭证 | 限制被攻破后的爆炸半径 |
 
-## 当前实现与收敛方向
+## 当前候选与升级
 
-普通 `LocalUser`、完整 Hub Channel 与 ordinary `SessionController` 已具有全能力路径，但实现仍有
-设备 grants、Workflow managed 特例、按请求类型的 Human 检查和跨项目会话拒绝。
-这些是待按第 0 节核对的历史/新增行为，不是额外权限层必不可少的证明。
+本候选移除普通设备 grants、SessionController ordinary 分级、旧 Workflow 授权和跨项目 ACL。
+身份、机器/账号准入、加密、抗重放、撤销和授权过期继续生效。完整 hosted 连接的 workspace
+字段用于默认项目定位；仅展示分享仍按所选文件/服务限制，不能列普通会话、运行终端或读取配置。
 
-- 保留真实 sessionId、来源和设备身份，不通过抹掉身份或仿冒 LocalUser 实现统一权限。
-- 迁移普通连接的重复 grants/项目/角色检查，移除没有当前消费者的 Workflow 授权残留；
-  分享身份、账号/机器准入、撤销和过期校验保持独立。
-- 用户确认与 Provider 密钥输入继续作为明确业务流程处理，不宣称能隔离同 UID 的恶意 Agent。
-- 既有拒绝测试须按产品合同重分类；不能只删除断言，需要同时证明完整连接的实际操作和外部边界。
+- 旧完整设备凭证保留身份；旧受限或无法确认完整授权的凭证失效，需要重新配对。迁移先保留
+  `devices.pre-full-access-*.json` 私有原件，保存失败不发布扩大后的授权，也不覆盖原件。
+- 旧 managed 会话是可读、可 fork 的历史。它不会恢复旧系统提示、待发输入、权限请求或执行过程。
+  fork 创建普通会话并沿用可读历史，新的输入与结果独立保存。
+- `pipeSpaces` 磁盘配置先验证树结构，再备份并原子导入 `agentSpaces`；已有新条目优先。
+  无效输入或写入失败保留原文件。当前协议只输出 `agentSpace`。
+- WebProtocol 4 明确拒绝旧协议客户端；device invite 的旧 scope 和 CLI --grant 参数报错，
+  不忽略旧限制后签发完整凭证。Cloud、daemon 与 web 必须协调升级。
+- team Space 树、角色、默认项目、hook、委派与幂等结果保留。新模板只分发 `tools/team.py`；
+  旧产品 timer hook 经团队的 sync-identity 升级并备份，自定义命令和旧团队副本不由启动扫描重写。
+- Provider 密钥输入与 Question/Plan/Permission 仍是产品交互。来源、action ID、CAS 和幂等保持；
+  它们不被描述为同 UID 任意 Agent 的安全沙箱。
 
-本轮仅更新文档及 Skill。运行时代码、负向测试与已发布版本尚未因此改变。
+回滚先停新版本，保留升级后的新增数据，再检查旧版本可读性并恢复对应私有原件。
+不能直接恢复受限设备旧备份而重新授权，也不能用旧会话快照覆盖 fork 后的新输入。
+本候选验证状态以对应 run 与候选 SHA 为准；本文不宣称完成发布。
+
+机器信息中的 `isolation` 仅报告内核能力探测结果（`enforced` 表示探测成功），不代表 Agent 已被隔离。完整连接的命令和终端直接以 daemon OS 用户运行；旧 `__confine` 包装入口与隐式设备隔离执行链已移除。

@@ -298,13 +298,6 @@ async fn cli(
         {
             crate::authz::Principal::SessionController {
                 session_id: session_id.to_string(),
-                ordinary: context
-                    .state
-                    .sessions
-                    .summary(session_id)
-                    .await
-                    .map(|summary| summary.managed.is_none())
-                    .unwrap_or(false),
             }
         }
         _ => {

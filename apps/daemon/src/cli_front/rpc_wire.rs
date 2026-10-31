@@ -10,8 +10,8 @@ use crate::config::Paths;
 use crate::dataplane::client::ClientEndpoint;
 use futures_util::{SinkExt, StreamExt};
 use genehub_proto::{
-    Confinement, HelloResult, HubTicket, PeerAuth, PeerHello, PeerWelcome, ProtocolError, Reply,
-    Request, SequencedEvent, ServerFrame, ShellFrame, ShellRunRequest,
+    HelloResult, HubTicket, PeerAuth, PeerHello, PeerWelcome, ProtocolError, Reply, Request,
+    SequencedEvent, ServerFrame, ShellFrame, ShellRunRequest,
 };
 use serde_json::Value;
 use tokio::sync::{mpsc, Mutex};
@@ -439,11 +439,6 @@ impl Rpc {
             )));
         }
         Ok(Running {
-            confinement: head
-                .metadata
-                .get("confinement")
-                .cloned()
-                .and_then(|value| serde_json::from_value(value).ok()),
             stream,
             buffered: Vec::new(),
         })
@@ -452,10 +447,6 @@ impl Rpc {
 
 /// A command that has started, and the frames it has yet to produce.
 pub struct Running {
-    /// What the machine is holding the command to, if anything. Known before
-    /// the first line of output, which is the only time it is useful: it is
-    /// the rule the output has to be read in light of.
-    pub confinement: Option<Confinement>,
     stream: crate::dataplane::client::ClientStream,
     buffered: Vec<u8>,
 }
@@ -851,7 +842,6 @@ fn error_code_name(code: genehub_proto::ErrorCode) -> &'static str {
         Forbidden => "forbidden",
         Internal => "internal",
         WebProtocol => "protocol_mismatch",
-        IsolationUnavailable => "isolation_unavailable",
     }
 }
 

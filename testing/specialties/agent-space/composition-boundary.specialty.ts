@@ -260,11 +260,7 @@ defineSpecialty(
         projectInfo?.agentSpace?.components?.length === 2,
         `the component set is not the wire truth: ${JSON.stringify(projectInfo?.agentSpace)}`,
       );
-      t.assertions.assert(
-        projectInfo?.pipeSpace?.workerRole === "workflow-executor" &&
-          projectInfo?.pipeSpace?.lifecycle === "persistent",
-        `the older exclusive-role shape stopped being readable: ${JSON.stringify(projectInfo?.pipeSpace)}`,
-      );
+      t.assertions.assert(!("pipeSpace" in (projectInfo ?? {})), "removed compatibility projection is still emitted");
 
       t.note(
         `project=${ids.project}#${registration(afterStale).revision} coder=${ids.coder} subteam=${ids.subteam} helper=${ids.helper}`,

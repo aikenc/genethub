@@ -1,7 +1,7 @@
 //! What the native front door has to know, and nothing else.
 //!
-//! `genet` is a thin forwarder: it starts and stops the daemon, confines a
-//! process, and hands argv to the running guest over loopback `POST /cli`
+//! `genet` is a thin forwarder: it starts and stops the daemon and hands argv
+//! to the running guest over loopback `POST /cli`
 //! (`docs/cli-thin-forwarder.md`). None of that requires knowing what a session
 //! is. Yet the CLI used to link the whole `genet-daemon` crate to get five
 //! things out of it — the build identity, where the data directory is, whether

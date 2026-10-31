@@ -12,7 +12,7 @@ use tokio::task::JoinSet;
 
 use super::authenticated_channel::{authenticated_channel, AuthenticatedWriter, Role};
 pub use super::authenticated_channel::{carrier_channels, Carrier};
-use crate::authz::{self, Capability, Principal, StreamMethod};
+use crate::authz::{Principal, StreamMethod};
 use crate::channel_auth::SessionKey;
 use crate::dataplane::frame::{Frame, Kind, HEADER_BYTES, MAX_PAYLOAD_BYTES};
 use crate::router::{self, SideEffect};
@@ -65,7 +65,8 @@ pub struct PeerAccess {
     pub(crate) authorization_expires_at: Option<std::time::Instant>,
     pub transport: TransportKind,
     pub device_id: Option<String>,
-    /// A resource-routed peer may operate only this daemon-local workspace.
+    /// Default placement for a resource-routed full peer; a PreviewShare uses
+    /// the same locator with its separately verified preview scope.
     pub workspace_id: Option<String>,
     /// The locator visible to the browser. Hosted routes use a Hub workspace
     /// handle while local routes use the daemon-local id.
@@ -525,7 +526,7 @@ pub(crate) async fn serve_streams(
     if access
         .device_id
         .as_ref()
-        .is_some_and(|id| state.devices.grants(id).is_none())
+        .is_some_and(|id| !state.devices.authorized(id))
     {
         anyhow::bail!("the peer device was revoked");
     }
@@ -549,61 +550,34 @@ pub(crate) async fn serve_streams(
         carrier_kind,
     });
 
-    // A terminal is shared across a user's own devices on purpose, but this
-    // fanout reaches every authenticated peer, and a device that was never
-    // granted `pty` must not be sent the terminal anyway. Gating only
-    // `pty.open` would leave the output arriving unasked, which is the half
-    // that matters: a shell shows keystrokes, paths, and whatever the user
-    // pastes into it.
-    //
-    // Decided once, at connection: grants are fixed when a device is paired,
-    // and revoking one drops its connections rather than editing them.
     let watcher = Principal::of(&state, &access);
-    let scoped_processes = access.workspace_id.is_some();
     state.diagnostics.record(
         "stream",
         "data.endpoint",
         "online",
         Some(carrier_kind.as_str()),
     );
-    let fanout_task = state.fanout.get().map(|fanout| {
-        let mut receiver = fanout.subscribe();
-        let events = services.event_sender.clone();
-        tokio::spawn(async move {
-            loop {
-                match receiver.recv().await {
-                    Ok(frame) => {
-                        if matches!(watcher, Principal::PreviewShare { .. }) {
-                            continue;
-                        }
-                        if frame_requires(&frame)
-                            .is_some_and(|capability| !watcher.allows(capability))
-                        {
-                            continue;
-                        }
-                        let mut frame = if scoped_processes
-                            && matches!(frame, ServerFrame::BackgroundProcesses { .. })
-                        {
-                            // A notification only; the client refetches its scoped snapshot.
-                            ServerFrame::BackgroundProcesses {
-                                processes: Vec::new(),
+    let fanout_task = state
+        .fanout
+        .get()
+        .filter(|_| watcher.is_full())
+        .map(|fanout| {
+            let mut receiver = fanout.subscribe();
+            let events = services.event_sender.clone();
+            tokio::spawn(async move {
+                loop {
+                    match receiver.recv().await {
+                        Ok(frame) => {
+                            if events.send(frame).await.is_err() {
+                                return;
                             }
-                        } else {
-                            frame
-                        };
-                        if let ServerFrame::AgentsChanged { agents } = &mut frame {
-                            filter_agent_logs(agents, &watcher);
                         }
-                        if events.send(frame).await.is_err() {
-                            return;
-                        }
+                        Err(broadcast::error::RecvError::Closed) => return,
+                        Err(broadcast::error::RecvError::Lagged(_)) => return,
                     }
-                    Err(broadcast::error::RecvError::Closed) => return,
-                    Err(broadcast::error::RecvError::Lagged(_)) => return,
                 }
-            }
-        })
-    });
+            })
+        });
 
     if let Some(device_id) = &access.device_id {
         state.devices.mark_connected(device_id);
@@ -618,6 +592,12 @@ pub(crate) async fn serve_streams(
 
     let receive_budget = Arc::new(Semaphore::new(RECEIVE_QUEUE_BYTES));
     let mut clock = tokio::time::interval(std::time::Duration::from_secs(5));
+    // Hosted revocation is already checked by the control-plane monitor.
+    // Do not add a whole physical heartbeat period before retiring RTC work.
+    // Keep physical probes on their original clock; only admitted Hosted or
+    // expiring access needs the shorter authorization check in this same task.
+    let mut authorization_clock = tokio::time::interval(std::time::Duration::from_secs(1));
+    authorization_clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_received = Instant::now();
     let outcome = async {
         loop {
@@ -648,8 +628,10 @@ pub(crate) async fn serve_streams(
                 failed = &mut writer_failed => {
                     break Err(failed.unwrap_or_else(|_| anyhow!("data-plane writer stopped")));
                 }
-                _ = clock.tick() => {
+                _ = authorization_clock.tick(), if access.hosted_authority.is_some() || access.authorization_expires_at.is_some() => {
                     super::logical_registry::validate_access(&access)?;
+                }
+                _ = clock.tick() => {
                     if (!matches!(carrier_kind, CarrierKind::Fabric) || access.bootstrap_invite.is_some()) && last_received.elapsed() >= std::time::Duration::from_secs(15) {
                         break Err(anyhow!("peer heartbeat timed out"));
                     }
@@ -1030,15 +1012,14 @@ async fn serve_stream(stream: &mut ServerStream, services: &PeerServices) -> Res
         )
         .await;
     }
-    let needed = method.required();
-    if !Principal::of(&services.state, &services.access).allows(needed) {
-        services.state.diagnostics.record(
-            "stream",
-            "authorization",
-            "error",
-            Some(needed.as_str()),
-        );
-        return refuse(stream, needed).await;
+    if !Principal::of(&services.state, &services.access).permits_stream(method) {
+        return send_error(
+            stream,
+            403,
+            ErrorCode::Forbidden,
+            "this connection does not permit this stream",
+        )
+        .await;
     }
     match method {
         StreamMethod::Events => handle_events(stream, services).await,
@@ -1055,63 +1036,20 @@ async fn serve_stream(stream: &mut ServerStream, services: &PeerServices) -> Res
     }
 }
 
-/// What a peer must have been granted to be told this.
-///
-/// Matched by name with no wildcard so that a new frame has to be classified
-/// here before it can be broadcast. Anything unsaid would be broadcast to
-/// every authenticated peer, which is the wrong default for a push: the peer
-/// never asked, so it never had a request for the usual check to refuse.
-fn frame_requires(frame: &ServerFrame) -> Option<Capability> {
-    match frame {
-        ServerFrame::PtyOutput { .. } | ServerFrame::PtyClosed { .. } => Some(Capability::Pty),
-        // Command lines of what an agent ran. The same material as the tool
-        // calls in a timeline, and gated the same way.
-        ServerFrame::BackgroundProcesses { .. } => Some(Capability::Session),
-        // What Agents exist and their state: the same as `agent.list`.
-        ServerFrame::AgentsChanged { .. } => Some(Capability::Read),
-        // A login link, a device code, a prompt for a key: only for a client
-        // that may change this machine's configuration.
-        ServerFrame::AgentRequestOpened { .. } | ServerFrame::AgentRequestClosed { .. } => {
-            Some(Capability::Settings)
-        }
-        ServerFrame::Event { .. }
-        | ServerFrame::Desync { .. }
-        | ServerFrame::Notice { .. }
-        | ServerFrame::UpdateDownloadChanged { .. } => None,
-    }
-}
-
-/// The one wording for "you are authenticated, and this is still not yours".
-///
-/// It names the missing capability rather than the request, so that a caller
-/// that was narrowed on purpose can tell that apart from a request it got
-/// wrong, and ask for the right invitation instead of retrying.
-async fn refuse(stream: &mut ServerStream, needed: Capability) -> Result<()> {
-    send_error(
-        stream,
-        403,
-        ErrorCode::Forbidden,
-        format!(
-            "this device was not granted `{}` on this machine",
-            needed.as_str()
-        ),
-    )
-    .await
-}
-
 async fn handle_protocol_identity(
     stream: &mut ServerStream,
     services: &PeerServices,
 ) -> Result<()> {
-    let needed = StreamMethod::ProtocolIdentity.required();
-    if !Principal::of(&services.state, &services.access).allows(needed) {
-        services.state.diagnostics.record(
-            "stream",
-            "authorization",
-            "error",
-            Some(needed.as_str()),
-        );
-        return refuse(stream, needed).await;
+    if !Principal::of(&services.state, &services.access)
+        .permits_stream(StreamMethod::ProtocolIdentity)
+    {
+        return send_error(
+            stream,
+            401,
+            ErrorCode::Unauthorized,
+            "connection authorization revoked",
+        )
+        .await;
     }
     let body = stream.read_body(0).await?;
     if !body.is_empty() {
@@ -1134,7 +1072,7 @@ async fn handle_protocol_identity(
 
 async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Result<()> {
     let body = stream.read_body(MAX_RPC_BODY_BYTES).await?;
-    let request: Request = match serde_json::from_slice(&body) {
+    let mut request: Request = match serde_json::from_slice(&body) {
         Ok(request) => request,
         Err(error) => {
             return send_error(
@@ -1154,95 +1092,6 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
         request_bytes = body.len(),
         "RPC request decoded"
     );
-    if let Some(scope) = &services.access.workspace_id {
-        if matches!(request, Request::ClientDebug(_)) {
-            return send_error(
-                stream,
-                403,
-                ErrorCode::Forbidden,
-                "client debugging requires a machine capability, not a workspace capability",
-            )
-            .await;
-        }
-        if matches!(
-            request,
-            Request::FileAccessList | Request::FileAccessConfigure { .. }
-        ) {
-            return send_error(
-                stream,
-                403,
-                ErrorCode::Forbidden,
-                "directory settings require a machine capability",
-            )
-            .await;
-        }
-        if matches!(request, Request::ProcessList) {
-            return send_error(
-                stream,
-                403,
-                ErrorCode::Forbidden,
-                "use workspace-scoped process listing",
-            )
-            .await;
-        }
-        if let Request::ProcessKill { session_id, .. } | Request::ProcessKillAll { session_id } =
-            &request
-        {
-            let allowed = services
-                .state
-                .sessions
-                .list(Some(scope), true)
-                .await?
-                .iter()
-                .any(|session| &session.id == session_id);
-            if !allowed {
-                return send_error(
-                    stream,
-                    403,
-                    ErrorCode::Forbidden,
-                    "session outside workspace capability",
-                )
-                .await;
-            }
-        }
-        if let Some(requested) = request_workspace(&request) {
-            if requested != scope {
-                return send_error(
-                    stream,
-                    403,
-                    ErrorCode::Forbidden,
-                    "the routed capability does not cover this workspace",
-                )
-                .await;
-            }
-        }
-        if let Request::AgentSpaceConfigure {
-            operation:
-                genehub_proto::AgentSpaceOperation::SetParent {
-                    parent_workspace_id: Some(parent),
-                },
-            ..
-        }
-        | Request::AgentSpaceChangePlan {
-            operation:
-                genehub_proto::AgentSpaceOperation::SetParent {
-                    parent_workspace_id: Some(parent),
-                },
-            ..
-        } = &request
-        {
-            if parent != scope {
-                return send_error(
-                    stream,
-                    403,
-                    ErrorCode::Forbidden,
-                    "the routed capability does not cover the parent workspace",
-                )
-                .await;
-            }
-        }
-    }
-
     if let (
         Some(invite_id),
         Request::DeviceClaim {
@@ -1286,14 +1135,23 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
         .await;
     }
 
-    // The admission's expiry is checked on every request, not only when the
-    // logical connection is attached: a hostile carrier can keep an expired
-    // stream open and would otherwise keep its capability.
-    if services
-        .access
-        .authorization_expires_at
-        .is_some_and(|at| at <= std::time::Instant::now())
-    {
+    // Each endpoint owns one admission. Check its live registry entry on
+    // every RPC; authorization renewal admits a fresh endpoint.
+    let admission_valid = match &services.access.logical_id {
+        Some(id) => services.state.logical_connections.access(id).is_ok(),
+        None => {
+            services
+                .access
+                .authorization_expires_at
+                .is_none_or(|at| at > Instant::now())
+                && services
+                    .access
+                    .hosted_authority
+                    .as_ref()
+                    .is_none_or(|a| a.load(std::sync::atomic::Ordering::Acquire))
+        }
+    };
+    if !admission_valid {
         services.state.diagnostics.record(
             "rpc",
             "authorization",
@@ -1304,7 +1162,7 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
             stream,
             401,
             ErrorCode::Unauthorized,
-            "hosted admission expired; reconnect".to_string(),
+            "hosted admission expired or revoked; reconnect".to_string(),
         )
         .await;
     }
@@ -1312,60 +1170,37 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
     // to enforce on a spawned process must be looking at the same caller the
     // gate just admitted, not at a second lookup that could disagree with it.
     let caller = Principal::of(&services.state, &services.access);
-    let needed = authz::required(&request);
-    if !caller.allows(needed) {
-        services
-            .state
-            .diagnostics
-            .record("rpc", "authorization", "error", Some(needed.as_str()));
-        return refuse(stream, needed).await;
+    if caller.is_full() {
+        if let Request::PreviewFeedback(feedback) = &mut request {
+            if services.access.workspace_handle.as_deref() == Some(feedback.workspace_id.as_str()) {
+                if let Some(local) = &services.access.workspace_id {
+                    feedback.workspace_id = local.clone();
+                }
+            }
+        }
     }
-
     let handled = router::handle_in_workspace(
         &services.state,
         services.access.transport,
         &caller,
-        services.access.workspace_id.as_deref(),
+        if matches!(caller, Principal::PreviewShare { .. }) {
+            services.access.workspace_id.as_deref()
+        } else {
+            None
+        },
         request,
     )
     .await;
     match handled.reply {
-        Ok(mut reply) => {
-            // Accept the effect under its owner's lock before acknowledging it.
-            // Checking capacity before an async reply left a race: concurrent
-            // subscriptions could all receive success and then lose admission.
+        Ok(reply) => {
+            // Admission must succeed before the caller receives its acknowledgement.
             if let Err(reason) = apply_side_effect(services, handled.effect) {
                 return send_error(stream, 409, ErrorCode::Conflict, reason).await;
-            }
-            if let Reply::Agents(agents) = &mut reply {
-                filter_agent_logs(agents, &caller);
             }
             send_reply(stream, reply).await?;
             Ok(())
         }
         Err(error) => send_protocol_error(stream, error).await,
-    }
-}
-
-/// List/push carry public readiness, but the text a script obtains from CLI
-/// output has the same Session grant as agent.logs. Apply one projection at
-/// both peer boundaries, rather than relying on scripts to classify stderr.
-fn filter_agent_logs(agents: &mut [genehub_proto::AgentInfo], caller: &Principal) {
-    if caller.allows(authz::Capability::Session) {
-        return;
-    }
-    for agent in agents {
-        agent.message = None;
-        if let genehub_proto::ProbeState::Unavailable { reason } = &mut agent.probe {
-            *reason = "当前不可用；需要会话权限查看详细原因".into();
-        }
-        if let Some(job) = &mut agent.job {
-            job.log_tail.clear();
-            job.message = None;
-            if job.error.is_some() {
-                job.error = Some("动作失败；需要会话权限查看详细原因".into());
-            }
-        }
     }
 }
 
@@ -1460,10 +1295,6 @@ async fn send_protocol_error(stream: &mut ServerStream, error: ProtocolError) ->
         ErrorCode::Unsupported => 422,
         ErrorCode::WebProtocol => 426,
         ErrorCode::Internal => 500,
-        // Not 403: the caller is allowed, the machine is unable. Retrying with
-        // a wider grant would not help, and neither would retrying at all
-        // until this machine gains a backend.
-        ErrorCode::IsolationUnavailable => 501,
     };
     stream
         .respond(&ExchangeResponseHead {
@@ -1583,52 +1414,6 @@ async fn handle_events(stream: &mut ServerStream, services: &PeerServices) -> Re
         stream.write_message(&frame).await?;
     }
     stream.finish().await
-}
-
-fn request_workspace(request: &Request) -> Option<&str> {
-    match request {
-        // Machine feedback has no workspace identity. Its handler intersects
-        // every source/record/manifest with the admission's physical scope.
-        Request::PreviewFeedback(request) => {
-            (!request.workspace_id.is_empty()).then_some(request.workspace_id.as_str())
-        }
-        Request::SessionFork {
-            target: Some(target),
-            ..
-        }
-        | Request::SessionForkImport { target, .. } => target.workspace_id.as_deref(),
-        Request::SessionForkRouted { workspace_id, .. }
-        | Request::SessionForkImportRouted { workspace_id, .. } => Some(workspace_id),
-        Request::ProcessWorkspaceList { workspace_id }
-        | Request::ProcessServiceStop { workspace_id, .. }
-        | Request::SessionCreate { workspace_id, .. }
-        | Request::SessionCreateRouted { workspace_id, .. }
-        | Request::SessionImportList { workspace_id, .. }
-        | Request::SessionImport { workspace_id, .. }
-        | Request::FileTree { workspace_id, .. }
-        | Request::FileWrite { workspace_id, .. }
-        | Request::FileMkdir { workspace_id, .. }
-        | Request::FileCopy { workspace_id, .. }
-        | Request::FileMove { workspace_id, .. }
-        | Request::FileDelete { workspace_id, .. }
-        | Request::GitStatus { workspace_id }
-        | Request::GitDiff { workspace_id, .. }
-        | Request::GitCommit { workspace_id, .. }
-        | Request::PtyOpen { workspace_id, .. }
-        | Request::SpeechContextPreview { workspace_id, .. }
-        | Request::SpeechFeedbackRecord { workspace_id, .. }
-        | Request::AgentSpaceChangePlan { workspace_id, .. }
-        | Request::AgentSpaceConfigure { workspace_id, .. }
-        | Request::WorkflowList { workspace_id }
-        | Request::WorkflowBuild { workspace_id, .. }
-        | Request::WorkflowHistory { workspace_id, .. }
-        | Request::WorkflowJournal { workspace_id, .. }
-        | Request::AgentSpaceChildren { workspace_id }
-        | Request::WorkspaceAddRoot { workspace_id, .. }
-        | Request::WorkspaceRename { workspace_id, .. }
-        | Request::WorkspaceRemove { workspace_id } => Some(workspace_id),
-        _ => None,
-    }
 }
 
 async fn run_writer(
@@ -1772,77 +1557,6 @@ mod tests {
         assert_eq!(
             diagnostic_operation(&serde_json::json!({ "operation": "settings/get?token=x" })),
             None
-        );
-    }
-
-    #[test]
-    fn routed_session_operations_are_scoped_to_the_destination_workspace() {
-        let transfer = genehub_proto::ForkTransfer {
-            source_session_id: "source".into(),
-            source_turn_id: "turn".into(),
-            source_agent_id: "codex".into(),
-            source_round_id: None,
-            title: None,
-            items: Vec::new(),
-            coverage: genehub_proto::HistoryCoverage {
-                source_item_count: Some(0),
-                retained_item_count: 0,
-                omitted_item_count: 0,
-                retrieval: genehub_proto::RetrievalCapability::Genehub,
-                reason: None,
-            },
-            blob_appendix: vec![],
-        };
-        let target = genehub_proto::ForkTarget {
-            agent_id: "codex".into(),
-            workspace_id: Some("target-workspace".into()),
-            model_id: None,
-            mode_id: None,
-            effort_id: None,
-            fast: None,
-            runtime_values: Default::default(),
-        };
-        assert_eq!(
-            request_workspace(&Request::SessionFork {
-                session_id: "source".into(),
-                turn_id: "turn".into(),
-                target: Some(target.clone()),
-            }),
-            Some("target-workspace")
-        );
-        assert_eq!(
-            request_workspace(&Request::SessionForkImport {
-                transfer: transfer.clone(),
-                target,
-            }),
-            Some("target-workspace")
-        );
-        assert_eq!(
-            request_workspace(&Request::SessionCreateRouted {
-                workspace_id: "created-workspace".into(),
-                tags: vec!["Flash".into()],
-                media_tags: Vec::new(),
-                title: None,
-                cwd: None,
-            }),
-            Some("created-workspace")
-        );
-        assert_eq!(
-            request_workspace(&Request::SessionForkRouted {
-                session_id: "source".into(),
-                turn_id: "turn".into(),
-                workspace_id: "routed-workspace".into(),
-                tags: vec!["Max".into()],
-            }),
-            Some("routed-workspace")
-        );
-        assert_eq!(
-            request_workspace(&Request::SessionForkImportRouted {
-                transfer,
-                workspace_id: "remote-workspace".into(),
-                tags: vec!["Flash".into()],
-            }),
-            Some("remote-workspace")
         );
     }
 }

@@ -31,7 +31,7 @@ for (const fastMbps of [100, 20]) defineSpecialty({
       return status?.type === "devices" && status.data.remote.online;
     }, 20000);
     for (const name of ["bulk", "interactive"]) {
-      const paired = await t.flows.main.pairDevice(opened.client, opened.daemon, [], name);
+      const paired = await t.flows.main.pairDevice(opened.client, opened.daemon, name);
       paired.client.close();
       clients.push(await connectProductClient({ url: remote.data.rendezvousUrl, credential: paired.credential,
         onDiagnostic(event) {

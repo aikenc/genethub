@@ -76,7 +76,6 @@ fn failed(error: anyhow::Error) -> Handled {
         ErrorCode::BadRequest
     } else if message.contains("artifact upload conflict")
         || message.contains("revision 冲突")
-        || message.contains("已由 Workflow Run")
         || message.contains("正在被另一个请求修改")
     {
         ErrorCode::Conflict
@@ -94,12 +93,7 @@ fn failed(error: anyhow::Error) -> Handled {
         ErrorCode::Forbidden
     } else if message.contains("already running") {
         ErrorCode::Conflict
-    } else if message.contains("no such")
-        || message.contains("does not exist")
-        || message.contains("Workflow 不存在")
-        || message.contains("Workflow Run 不存在")
-        || message.contains("项目尚未初始化 Workflow")
-    {
+    } else if message.contains("no such") || message.contains("does not exist") {
         ErrorCode::NotFound
     } else if message.contains("workspace file")
         || message.contains("workspace folder")
@@ -148,44 +142,10 @@ pub(crate) async fn handle_in_workspace(
     workspace_scope: Option<&str>,
     request: Request,
 ) -> Handled {
-    let needed = crate::authz::required(&request);
-    let session_exception = if !caller.allows(needed) {
-        match (&request, caller.session_controller_id()) {
-            // An Agent Session reaches the other machines of its owner's own
-            // account the way the owner's terminal does: the Hub issues a
-            // per-connection ticket and the target authenticates the channel.
-            // Fetching one changes nothing on this machine, so it is not the
-            // machine-wide Settings capability. Pairing, unpairing and the
-            // other Hub verbs still require it.
-            (Request::HubConnect { .. }, Some(_)) => true,
-            (
-                Request::AgentSpaceConfigure {
-                    workspace_id,
-                    operation,
-                    ..
-                },
-                Some(session_id),
-            ) => {
-                match agent_space_management_project(state, caller, workspace_id, operation).await {
-                    Ok(project) => session_belongs_to_project(state, &project, session_id).await,
-                    Err(_) => false,
-                }
-            }
-            (Request::WorkspaceOpen { root }, Some(session_id)) => {
-                authorize_pm_space_open(state, caller, session_id, root)
-                    .await
-                    .is_ok()
-                    || authorize_managed_space_open(state, root).is_ok()
-            }
-            _ => false,
-        }
-    } else {
-        false
-    };
-    if !caller.allows(needed) && !session_exception {
+    if !caller.permits(&request) {
         return Handled::err(
             ErrorCode::Forbidden,
-            format!("caller lacks the {} capability", needed.as_str()),
+            "this connection does not permit this operation",
         );
     }
     if let Err(message) = authorize_session_request(state, caller, &request).await {
@@ -206,105 +166,11 @@ pub(crate) async fn handle_in_workspace(
     handled
 }
 
-/// A bound PM may register its already-built direct project Spaces. This is
-/// project management, not the machine-wide Settings capability.
-async fn authorize_pm_space_open(
-    state: &Shared,
-    caller: &crate::authz::Principal,
-    session_id: &str,
-    root: &str,
-) -> anyhow::Result<()> {
-    let session = state.sessions.summary(session_id).await?;
-    let project_id = &session.workspace_id;
-    authorize_project_mutation(state, caller, project_id)
-        .await
-        .map_err(anyhow::Error::msg)?;
-    if !session_belongs_to_project(state, project_id, session_id).await {
-        anyhow::bail!(
-            "projectMembershipRequired: registering a prepared Space needs a Session that \
-             belongs to this project"
-        );
-    }
-    let project = state.workspaces.project_entry(project_id).await?;
-    let requested = crate::guest_paths::inbound_absolute(root)
-        .ok_or_else(|| anyhow::anyhow!("prepared Space path must be absolute"))?
-        .canonicalize()?;
-    let space_root = if requested.is_dir() {
-        requested.clone()
-    } else {
-        requested
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("Space file has no parent"))?
-            .to_path_buf()
-    };
-    let spaces = project.root.join("spaces").canonicalize()?;
-    if space_root.parent() != Some(spaces.as_path()) {
-        anyhow::bail!("prepared Space must be a direct child of this project's spaces directory");
-    }
-    Ok(())
-}
-
-/// Opening an already-built Space directory (or its `agent-space.genet.json`)
-/// inside `<data>/spaces/` only registers what `scan_spaces` would register on
-/// the next unthrottled `workspace.list`, so an Agent session (such as the
-/// built-in Admin or a team's `team.py`) may invoke `genet space open` without
-/// machine-wide `settings` authority.
-fn authorize_managed_space_open(state: &Shared, root: &str) -> anyhow::Result<()> {
-    let requested = crate::guest_paths::inbound_absolute(root)
-        .ok_or_else(|| anyhow::anyhow!("Space path must be absolute"))?
-        .canonicalize()?;
-    let space_root = if requested.is_dir() {
-        requested
-    } else {
-        requested
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("Space file has no parent"))?
-            .to_path_buf()
-    };
-    let spaces = state.paths.root.join("spaces").canonicalize()?;
-    if !space_root.starts_with(&spaces) || space_root == spaces {
-        anyhow::bail!("Space must be inside the daemon spaces directory");
-    }
-    if crate::space_descriptor::discover_root(&space_root)
-        .map_err(anyhow::Error::msg)?
-        .is_none()
-    {
-        anyhow::bail!("directory does not contain a valid agent-space.genet.json");
-    }
-    Ok(())
-}
-
-/// Keeps a Workflow-managed child read-only to everyone but the Workflow that
-/// delegated it, without inventing a second Session runtime.
-///
-/// That is a property of the target, not of who asks: an Agent Session acts
-/// with its owner's authority, exactly as it already does when it reaches a
-/// machine through `--machine`, so it may create, write and stop ordinary
-/// Sessions here too. Its writes are attributed, not narrowed.
 async fn authorize_session_request(
-    state: &Shared,
+    _state: &Shared,
     caller: &crate::authz::Principal,
     request: &Request,
 ) -> Result<(), String> {
-    // Ordinary Agents have their OS account's file authority. Only managed
-    // children retain the legacy workspace-bound receipt restriction.
-    if let (
-        crate::authz::Principal::SessionController {
-            session_id: controller,
-            ordinary: false,
-        },
-        Request::PreviewFeedback(feedback),
-    ) = (caller, request)
-    {
-        let session = state
-            .sessions
-            .summary(controller)
-            .await
-            .map_err(|e| e.to_string())?;
-        if session.workspace_id != feedback.workspace_id {
-            return Err("feedback belongs to another workspace".into());
-        }
-    }
     // OS-account capability parity does not turn an Agent into the Human
     // answering a credential card. Keep this semantic gate independent of
     // the coarse Settings grant.
@@ -328,113 +194,7 @@ async fn authorize_session_request(
             return Err("provider operation belongs to another Session".into());
         }
     }
-    let target = match request {
-        Request::ProviderOperation { session_id, .. } => Some(session_id.as_str()),
-        Request::SessionSend { session_id, .. }
-        | Request::SessionArtifactBegin { session_id, .. }
-        | Request::SessionArtifactChunk { session_id, .. }
-        | Request::SessionArtifactFinish { session_id, .. }
-        | Request::SessionArtifactAbort { session_id, .. }
-        | Request::SessionInterrupt { session_id }
-        | Request::SessionClose { session_id }
-        | Request::SessionArchive { session_id, .. }
-        | Request::SessionRename { session_id, .. }
-        | Request::SessionLabel { session_id, .. }
-        | Request::SessionDescribe { session_id, .. }
-        | Request::SessionDrafts { session_id }
-        | Request::SessionDraftsReplace { session_id, .. }
-        | Request::SessionPreviewAnnotationsGet { session_id }
-        | Request::SessionPreviewAnnotationUpsert { session_id, .. }
-        | Request::SessionPreviewAnnotationRemove { session_id, .. }
-        | Request::SessionDelete { session_id }
-        | Request::SessionSetModel { session_id, .. }
-        | Request::SessionSwitchAgent { session_id, .. }
-        | Request::SessionRoute { session_id, .. }
-        | Request::SessionSetMode { session_id, .. }
-        | Request::SessionSetEffort { session_id, .. }
-        | Request::SessionSetFast { session_id, .. }
-        | Request::SessionSetRuntimeAxis { session_id, .. }
-        | Request::SessionRespondPermission { session_id, .. }
-        | Request::SessionAsk { session_id, .. }
-        | Request::ProcessKill { session_id, .. }
-        | Request::ProcessKillAll { session_id } => Some(session_id.as_str()),
-        _ => None,
-    };
-    let Some(target) = target else {
-        return Ok(());
-    };
-    let summary = match state.sessions.summary(target).await {
-        Ok(summary) => summary,
-        // Process ownership is checked by the process registry itself. Let the
-        // caller reach that check when the Session record is already gone:
-        // killing one process then remains `notFound`, while `kill all`
-        // remains an idempotent desired-state cleanup.
-        Err(error) => {
-            if matches!(
-                request,
-                Request::ProcessKill { .. } | Request::ProcessKillAll { .. }
-            ) && error.is::<crate::session::manager::SessionMissing>()
-            {
-                return Ok(());
-            }
-            return Err(format!("{error:#}"));
-        }
-    };
-    let Some(managed) = summary.managed else {
-        return Ok(());
-    };
-    if let Some(controller) = caller.session_controller_id() {
-        if managed.parent_session_id == controller {
-            return Ok(());
-        }
-    }
-    if managed.user_interaction == genehub_proto::SessionUserInteraction::ReadOnly {
-        return Err(
-            "这是 Workflow 管理的只读子会话；只有委托它的 Workflow 可以改写，其他调用方可查看或 fork"
-                .into(),
-        );
-    }
     Ok(())
-}
-
-async fn authorize_project_mutation(
-    state: &Shared,
-    caller: &crate::authz::Principal,
-    workspace_id: &str,
-) -> Result<(), String> {
-    match caller {
-        crate::authz::Principal::LocalUser => Ok(()),
-        crate::authz::Principal::SessionController { session_id, .. } => {
-            if state.sessions.consulting(session_id).await {
-                return Err(
-                    "PM 正在咨询未决 Human 请求；不能以项目管理权替代该请求的正式决定".into(),
-                );
-            }
-            let summary = state
-                .sessions
-                .summary(session_id)
-                .await
-                .map_err(|error| format!("无法确认入口会话：{error:#}"))?;
-            if let Some(managed) = &summary.managed {
-                let project = state
-                    .workspaces
-                    .project_root(&summary.workspace_id)
-                    .await
-                    .map_err(|error| format!("无法确认受管 WM 的项目边界：{error:#}"))?;
-                if project == workspace_id
-                    && matches!(managed.role.as_str(), "wm" | "recovery-manager")
-                {
-                    return Ok(());
-                }
-                return Err("历史 Workflow 子会话不能修改项目配置".into());
-            }
-            if summary.workspace_id != workspace_id {
-                return Err("入口会话不属于请求的项目 Workspace".into());
-            }
-            Ok(())
-        }
-        _ => Err("只有认证用户或项目普通主会话可以修改项目配置".into()),
-    }
 }
 
 async fn mark_if_started_by_a_session(
@@ -453,120 +213,6 @@ async fn mark_if_started_by_a_session(
             summary
         }
     }
-}
-
-async fn session_belongs_to_project(state: &Shared, project_id: &str, session_id: &str) -> bool {
-    let Ok(summary) = state.sessions.summary(session_id).await else {
-        return false;
-    };
-    if summary.managed.is_some() {
-        return false;
-    }
-    state
-        .workspaces
-        .project_root(&summary.workspace_id)
-        .await
-        .is_ok_and(|owner| owner == project_id)
-}
-
-async fn authorize_agent_space_change(
-    state: &Shared,
-    caller: &crate::authz::Principal,
-    workspace_id: &str,
-) -> Result<(), String> {
-    match caller {
-        crate::authz::Principal::LocalUser => Ok(()),
-        crate::authz::Principal::SessionController { session_id, .. } => {
-            let summary = state
-                .sessions
-                .summary(session_id)
-                .await
-                .map_err(|error| format!("无法确认入口会话：{error:#}"))?;
-            if summary.managed.is_some() {
-                return Err("受管 Worker Session 不能改组 AgentSpace 树".into());
-            }
-            let project_id = state
-                .workspaces
-                .project_root(workspace_id)
-                .await
-                .map_err(|error| format!("无法确认项目边界：{error:#}"))?;
-            let session_project = state
-                .workspaces
-                .project_root(&summary.workspace_id)
-                .await
-                .map_err(|error| format!("无法确认会话项目边界：{error:#}"))?;
-            if summary.workspace_id == workspace_id || session_project == project_id {
-                Ok(())
-            } else {
-                Err("当前 Session 不属于目标 Space 或项目".into())
-            }
-        }
-        _ => Err("只有认证用户或项目内普通 Session 可以改组 AgentSpace".into()),
-    }
-}
-
-/// A newly built, uncomposed child has no ownership yet. Its physical location
-/// and the already authorized destination project allow PM to attach it without
-/// giving PM authority over unrelated roots or existing teams.
-async fn agent_space_management_project(
-    state: &Shared,
-    caller: &crate::authz::Principal,
-    workspace_id: &str,
-    operation: &genehub_proto::AgentSpaceOperation,
-) -> Result<String, String> {
-    let project = state
-        .workspaces
-        .project_root(workspace_id)
-        .await
-        .map_err(|error| format!("无法确认项目边界：{error:#}"))?;
-    if let genehub_proto::AgentSpaceOperation::SetParent {
-        parent_workspace_id: Some(parent),
-    } = operation
-    {
-        authorize_agent_space_change(state, caller, parent).await?;
-        if let Some(session) = caller.session_controller_id() {
-            let destination = state
-                .workspaces
-                .project_root(parent)
-                .await
-                .map_err(|error| format!("无法确认目标项目：{error:#}"))?;
-            let current = state
-                .workspaces
-                .agent_space(workspace_id)
-                .await
-                .map_err(|error| format!("无法读取 AgentSpace：{error:#}"))?;
-            if current.revision == 0
-                && current.parent_workspace_id.is_none()
-                && current.components.is_empty()
-                && session_belongs_to_project(state, &destination, session).await
-            {
-                let child = state
-                    .workspaces
-                    .get(workspace_id)
-                    .await
-                    .map_err(|error| format!("{error:#}"))?;
-                let owner = state
-                    .workspaces
-                    .get(&destination)
-                    .await
-                    .map_err(|error| format!("{error:#}"))?;
-                let child_root = child
-                    .root
-                    .canonicalize()
-                    .map_err(|error| format!("{error:#}"))?;
-                let spaces = owner
-                    .root
-                    .join("spaces")
-                    .canonicalize()
-                    .map_err(|error| format!("{error:#}"))?;
-                if child_root.parent() == Some(spaces.as_path()) {
-                    return Ok(destination);
-                }
-            }
-        }
-    }
-    authorize_agent_space_change(state, caller, workspace_id).await?;
-    Ok(project)
 }
 
 async fn agent_space_change_facts(
@@ -607,13 +253,6 @@ fn agent_space_plan_digest(
     Ok(format!("sha256:{:x}", hash.finalize()))
 }
 
-/// Refuses to move an AgentSpace while a Run still depends on it.
-///
-/// A Run pins its execution carrier when it starts, so a reparent in flight
-/// would leave that Run bound to a Space in another project's scope. The
-/// check lives here rather than in `workspace` because it is the one place
-/// that holds both the registry and the Workflow runtime root; the registry
-/// itself deliberately knows nothing about Runs.
 /// The responsibilities live in one Session.
 ///
 /// Read from the Space's current composition rather than from anything stored
@@ -948,27 +587,6 @@ async fn dispatch(
             }
         }).await,
 
-        // Legacy wire tags remain decodable; no Workflow runtime is shipped.
-        Request::WorkflowInspect { .. }
-        | Request::WorkflowList { .. }
-        | Request::WorkflowBuild { .. }
-        | Request::WorkflowActivate { .. }
-        | Request::WorkflowDispatch { .. }
-        | Request::WorkflowCheck { .. }
-        | Request::WorkflowGet { .. }
-        | Request::WorkflowJournal { .. }
-        | Request::WorkflowHistory { .. }
-        | Request::WorkflowComplete { .. }
-        | Request::WorkflowCancel { .. }
-        | Request::WorkflowRecover { .. }
-        | Request::WorkflowRecoveryStart { .. }
-        | Request::WorkflowHuman { .. }
-        | Request::WorkflowRecoveryReset { .. }
-        | Request::WorkflowBudget { .. }
-        | Request::SessionFlow { .. } => Handled::err(
-            ErrorCode::BadRequest, "workflowRetired: Workflow has been removed; use team Skills and ordinary Sessions",
-        ),
-
         Request::SessionCreate {
             workspace_id,
             agent_id,
@@ -1080,7 +698,7 @@ async fn dispatch(
                 routing_tags.iter().chain(media_tags.iter()).cloned(),
             );
             let (route, _) =
-                match crate::agent_routing::resolve_live_route(state, &required, false).await {
+                match crate::agent_routing::resolve_live_route(state, &required).await {
                     Ok(route) => route,
                     Err(error) => return failed(error),
                 };
@@ -1347,6 +965,9 @@ async fn dispatch(
             if text.trim().is_empty() && attachments.is_empty() {
                 return Handled::err(ErrorCode::BadRequest, "there is nothing to send");
             }
+            if matches!(state.sessions.summary(&session_id).await, Ok(summary) if summary.history_only == Some(true)) {
+                return Handled::err(ErrorCode::BadRequest, "this is retired execution history; fork to continue");
+            }
             // A stored file may only name this session's own upload. This also
             // fills `bytes` from the filesystem before the message is logged.
             if let Err(error) = state
@@ -1596,7 +1217,7 @@ async fn dispatch(
                 routing_tags.iter().chain(media_tags.iter()).cloned(),
             );
             let (route, providers) =
-                match crate::agent_routing::resolve_live_route(state, &required, false).await {
+                match crate::agent_routing::resolve_live_route(state, &required).await {
                     Ok(route) => route,
                     Err(error) => return failed(error),
                 };
@@ -1697,7 +1318,7 @@ async fn dispatch(
                 routing_tags.iter().chain(media_tags.iter()).cloned(),
             );
             let (route, providers) =
-                match crate::agent_routing::resolve_live_route(state, &required, false).await {
+                match crate::agent_routing::resolve_live_route(state, &required).await {
                     Ok(route) => route,
                     Err(error) => return failed(error),
                 };
@@ -2393,28 +2014,10 @@ async fn dispatch(
         }).await,
 
         Request::DeviceInvite(scope) => Box::pin(async move {
-            let grants = match scope {
-                None => crate::authz::GrantSet::full(),
-                Some(scope) => {
-                    let mut named = Vec::with_capacity(scope.grants.len());
-                    for raw in &scope.grants {
-                        match crate::authz::Capability::parse(raw) {
-                            Some(capability) => named.push(capability),
-                            // Refused rather than dropped: an invitation minted
-                            // from a misspelled grant would silently be worth
-                            // less than whoever sent it believes.
-                            None => {
-                                return Handled::err(
-                                    ErrorCode::BadRequest,
-                                    format!("unknown grant `{raw}`"),
-                                )
-                            }
-                        }
-                    }
-                    crate::authz::GrantSet::of(named)
-                }
-            };
-            let mut invite = state.devices.invite_with(grants);
+            if scope.is_some() {
+                return Handled::err(ErrorCode::BadRequest, "restricted invitations are no longer supported; pair for full machine access or use a preview share");
+            }
+            let mut invite = state.devices.invite();
             invite.rendezvous_url = remote_status(state).await.rendezvous_url;
             Handled::ok(Reply::Invite(invite))
         }).await,
@@ -2525,11 +2128,6 @@ async fn dispatch(
             expected_revision,
             operation,
         } => Box::pin(async move {
-            if let Err(message) =
-                agent_space_management_project(state, caller, &workspace_id, &operation).await
-            {
-                return Handled::err(ErrorCode::Forbidden, message);
-            }
             let (_current, _canonical_root, plan_digest) =
                 match agent_space_change_facts(state, &workspace_id, expected_revision, &operation).await {
                     Ok(facts) => facts,
@@ -2553,11 +2151,6 @@ async fn dispatch(
             plan_digest: _,
             action_id: _,
         } => Box::pin(async move {
-            if let Err(message) =
-                agent_space_management_project(state, caller, &workspace_id, &operation).await
-            {
-                return Handled::err(ErrorCode::Forbidden, message);
-            }
             if let Err(error) = guard_agent_space_mutation(state, &workspace_id, &operation).await {
                 return Handled::err(ErrorCode::Conflict, format!("{error:#}"));
             }
@@ -2799,17 +2392,12 @@ async fn dispatch(
                 Ok(workspace) => workspace,
                 Err(error) => return failed(error),
             };
-            let confinement = match crate::isolation::required_for(caller, &workspace) {
-                Ok(confinement) => confinement,
-                Err(refusal) => return Handled::err(ErrorCode::IsolationUnavailable, refusal),
-            };
             match state
                 .terminals
                 .open(
                     &workspace.root,
                     cols.unwrap_or(80),
                     rows.unwrap_or(24),
-                    confinement,
                 )
                 .await
             {
@@ -2862,9 +2450,6 @@ async fn dispatch(
             entry_path,
             run_id,
         } => Box::pin(async move {
-            if !caller.allows(crate::authz::Capability::Services) {
-                return Handled::err(ErrorCode::Forbidden, "需要 services 授权");
-            }
             match crate::dataplane::service_preview::stop_registered(
                 state,
                 &workspace_id,
@@ -2914,17 +2499,6 @@ fn diagnostic_operation(request: &Request) -> Option<&'static str> {
         Request::SessionCreate { .. } | Request::SessionCreateRouted { .. } => {
             Some("session.create")
         }
-        Request::WorkflowList { .. } => Some("workflow.list"),
-        Request::WorkflowBuild { .. } => Some("workflow.build"),
-        Request::WorkflowActivate { .. } => Some("workflow.activate"),
-        Request::WorkflowDispatch { .. } => Some("workflow.dispatch"),
-        Request::WorkflowComplete { .. } => Some("workflow.complete"),
-        Request::WorkflowCancel { .. } => Some("workflow.cancel"),
-        Request::WorkflowRecover { .. } => Some("workflow.recover"),
-        Request::WorkflowRecoveryStart { .. } => Some("workflow.recovery.start"),
-        Request::WorkflowHuman { .. } => Some("workflow.human"),
-        Request::WorkflowRecoveryReset { .. } => Some("workflow.recovery.reset"),
-        Request::WorkflowBudget { .. } => Some("workflow.budget"),
         Request::AgentSpaceChangePlan { .. } => Some("agentSpace.changePlan"),
         Request::AgentSpaceChildren { .. } => Some("agentSpace.children"),
         Request::SessionSend { .. } => Some("session.send"),
@@ -2995,7 +2569,6 @@ fn error_code_name(code: ErrorCode) -> &'static str {
         ErrorCode::Forbidden => "forbidden",
         ErrorCode::Internal => "internal",
         ErrorCode::WebProtocol => "webProtocol",
-        ErrorCode::IsolationUnavailable => "isolationUnavailable",
     }
 }
 
@@ -3025,49 +2598,6 @@ pub type SharedState = Arc<crate::state::AppState>;
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
-
-    #[tokio::test]
-    async fn session_membership_is_checked_by_project() {
-        let home = tempfile::tempdir().unwrap();
-        let project = home.path().join("project");
-        std::fs::create_dir_all(&project).unwrap();
-        let paths = crate::config::Paths::new(home.path().join("data"));
-        let (state, _pty) = crate::state::AppState::build(paths).await.unwrap();
-        let workspace = state.workspaces.open(&project, None).await.unwrap();
-        let holder = state
-            .sessions
-            .create(
-                &workspace.id,
-                project.clone(),
-                "genet",
-                None,
-                None,
-                None,
-                None,
-                Default::default(),
-                None,
-            )
-            .await
-            .unwrap();
-        let other = state
-            .sessions
-            .create(
-                &workspace.id,
-                project,
-                "genet",
-                None,
-                None,
-                None,
-                None,
-                Default::default(),
-                None,
-            )
-            .await
-            .unwrap();
-        assert!(session_belongs_to_project(&state, &workspace.id, &holder.id).await);
-        assert!(session_belongs_to_project(&state, &workspace.id, &other.id).await);
-        assert!(!session_belongs_to_project(&state, &workspace.id, "s_not_a_session").await);
-    }
 
     #[test]
     fn loopback_and_lan_addresses_are_distinguished() {

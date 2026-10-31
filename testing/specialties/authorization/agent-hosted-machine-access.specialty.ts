@@ -92,17 +92,17 @@ defineSpecialty({
         `the ordinary Agent could not inspect its account devices: exit=${devicesExit}`,
       );
       const context = JSON.parse(read(join(root, "context.out"))) as {
-        type?: string; data?: { authority?: { principalType?: string; sessionId?: string; grants?: string[] } };
+        type?: string; data?: { authority?: { principalType?: string; sessionId?: string; providerOperations?: boolean } };
       };
       t.assertions.assert(
         read(join(root, "context.exit")).trim() === "0" && context.type === "context"
           && context.data?.authority?.principalType === "sessionController"
-          && context.data.authority.sessionId === sessionId && context.data.authority.grants?.includes("devices"),
+          && context.data.authority.sessionId === sessionId && context.data.authority.providerOperations === true,
         "the Agent lost its owner device capability or its authenticated session identity",
       );
-      const restricted = await t.flows.main.pairDevice(opened.client, opened.daemon, ["read"], "read-only");
+      const restricted = await t.flows.main.pairDevice(opened.client, opened.daemon, "read-only");
       try {
-        await t.assertions.expectProtocolCode(() => restricted.client.call({ type: "device.list" }), "forbidden");
+        t.assertions.assert((await restricted.client.call({ type: "device.list" }))?.type === "devices", "paired device lost administration");
       } finally { restricted.client.close(); }
     });
   } finally {

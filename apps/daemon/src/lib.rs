@@ -167,6 +167,10 @@ impl Daemon {
         let _ = self.hook_timer.await;
         self.agent_pushes.abort();
         let _ = self.agent_pushes.await;
+        // Fence expected Agent exits before either concurrent shutdown branch
+        // can close a script host. Otherwise the pump records AgentCrashed,
+        // pauses durable inputs, and a successful self-update cannot resume.
+        self.state.sessions.prepare_shutdown().await;
         // Script Agents first and alongside: stopping one takes the process
         // away before anything waits on it, so closing its sessions fails
         // fast instead of spending a deadline on a script that stopped

@@ -3,7 +3,7 @@ name = "genet-native"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "What only a native process can answer: OS confinement and where a program is installed"
+description = "What only a native process can answer: OS diagnostics and where a program is installed"
 
 [lib]
 path = "src/lib.rs"
@@ -13,6 +13,3 @@ anyhow.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-
-[target.'cfg(target_os = "linux")'.dependencies]
-landlock = "0.4"

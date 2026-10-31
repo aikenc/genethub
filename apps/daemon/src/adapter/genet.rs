@@ -115,10 +115,6 @@ impl AgentAdapter for GenetAdapter {
         true
     }
 
-    fn supports_evidence_scope(&self) -> bool {
-        true
-    }
-
     fn needs_model_catalog(&self) -> bool {
         true
     }
@@ -276,9 +272,6 @@ impl AgentAdapter for GenetAdapter {
             .env("GENET_WORKSPACE_ROOT", workspace_root);
         super::apply_session_environment(&mut command, &config);
         command.env_remove("GENEHUB_EVIDENCE_SCOPE");
-        if let Some(scope) = &config.evidence_scope {
-            command.env("GENEHUB_EVIDENCE_SCOPE", serde_json::to_string(scope)?);
-        }
 
         if let Some(dir) = &config.skills_dir {
             command.env("GENEHUB_SKILLS_DIR", dir);
@@ -1524,7 +1517,6 @@ mod tests {
             binary: Some(agent),
         }
         .start(SessionConfig {
-            evidence_scope: None,
             session_id: "s_steer".into(),
             cwd: dir.path().to_path_buf(),
             model_id: None,
@@ -1588,7 +1580,6 @@ mod tests {
         };
         let session = adapter
             .start(SessionConfig {
-                evidence_scope: None,
                 session_id: "s_cfg".into(),
                 cwd: dir.path().to_path_buf(),
                 model_id: Some("anthropic/claude".into()),

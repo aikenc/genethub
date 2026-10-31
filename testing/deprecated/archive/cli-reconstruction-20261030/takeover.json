@@ -1,0 +1,43 @@
+{
+  "source": "apps/cli/tests/remote.rs",
+  "runId": "261030-1030-cli-parity-c417",
+  "nativeUnit": "specialty.parity-reconstruction.cli-remote",
+  "open": {
+    "path": "/data/workspace/genethub-work/genethub-spaces/worktrees/dev-3/genethub",
+    "sha": "c1ba53e388a0647957dcfa69122fccb835e4ffbd",
+    "branch": "dev-3",
+    "dirty": true,
+    "dirtyDigest": "1c88875e9cd2cba0f9cda5bf6217f9304706df8f7abfc7f2013e7229afc3ebc0"
+  },
+  "cloud": {
+    "path": "/data/workspace/genethub-work/genethub-spaces/worktrees/dev-3/genethub-cloud",
+    "sha": "023c7d14744d6ee498823eaf6e4e03d33e9ecc33",
+    "branch": "dev-3",
+    "dirty": true,
+    "dirtyDigest": "b195af0e7e5293d8b8a44d271c1d319259f041ecd8839f81ad6ad00ff4819bc7"
+  },
+  "artifact": {
+    "path": "/data/workspace/genethub-work/genethub-spaces/worktrees/dev-3/genethub/target/iterate/genet-local",
+    "hash": "a570657aa2ccb91f7790b96abf40f855ac54f1d3ce1245e7a94e07cd98a054d8",
+    "kind": "genet-local"
+  },
+  "qualification": {
+    "gate": "dev-feedback",
+    "scope": "feedback",
+    "policyVersion": "gates.v3",
+    "qualified": true,
+    "reasons": []
+  },
+  "inputDrift": false,
+  "nativeBinarySha256": "d5d6edc197e92a8bde7b2a11e0bf83f8d6ebcf15a7e4f2f9af2a606ccf28bd90",
+  "cases": {
+    "a_machine_across_a_relay_answers_exactly_as_the_local_one_does": "specialty.cli.remote-contract.identity-and-offline",
+    "a_prompt_typed_here_is_answered_by_an_agent_running_there": "specialty.cli.remote-contract.background-replay",
+    "a_command_typed_here_runs_there_and_reports_what_it_did": "specialty.cli.remote-contract.shell-io",
+    "a_device_that_was_revoked_is_told_to_pair_again_rather_than_to_wait": "specialty.cli.remote-contract.revoked",
+    "the_same_command_returns_the_same_bytes_from_here_and_from_there": "specialty.cli.remote-contract.exact-bytes",
+    "a_backgrounded_conversation_keeps_going_and_can_be_picked_up_again": "specialty.cli.remote-contract.background-replay",
+    "a_machine_that_answers_with_a_different_identity_is_refused": "specialty.cli.remote-contract.stale-identity"
+  },
+  "assertionDelta": "Same CLI/guest Agent, same product source; frozen side starts the native daemon and TS starts the WASM daemon. The old narrow-invite subpath is migrated under the full-Agent product contract and verified by journey.authorization.invite-read-only. Forget proceeds to account discovery and preserves its hubTicket failure; revocation remains credentialRevoked. Four forwarded agent_contract facts move to specialty.cli.usability.forwarded-contracts. Native front-door parsing/redaction and OS confinement checks remain Rust."
+}

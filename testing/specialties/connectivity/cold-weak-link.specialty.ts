@@ -31,7 +31,7 @@ for (const relayed of [false, true]) for (const bandwidthMbps of [0.5, 5]) defin
     if (relayed) {
       relay = await startRelay({ openRoot: t.openRoot });
       const nodeLink = await startShapedTcpProxy({ targetUrl: relay.origin, profile }); links.push(nodeLink);
-      const paired = await t.flows.main.pairDevice(o.client, o.daemon, [], "cold-weak"); paired.client.close();
+      const paired = await t.flows.main.pairDevice(o.client, o.daemon, "cold-weak"); paired.client.close();
       const attached = await o.client.call({ type: "device.remoteAttach", payload: { relayUrl: nodeLink.urlFor(relay.origin), joinToken: relay.joinToken, channelCount: 1 } });
       if (attached?.type !== "remoteAccess" || !attached.data.rendezvousUrl) throw new Error("cold relay attachment failed");
       await t.tools.waitUntil(async () => { const r = await o.client.call({ type: "device.list" }); return r?.type === "devices" && r.data.remote.online === true; }, 20000);

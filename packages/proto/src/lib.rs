@@ -12,9 +12,9 @@ pub use preview_feedback::*;
 pub mod data;
 pub mod domain;
 pub mod event;
+pub mod remote_desktop;
 pub mod rpc;
 pub mod speech;
-pub mod remote_desktop;
 pub use remote_desktop::*;
 pub mod timeline;
 
@@ -260,7 +260,7 @@ mod tests {
             web_protocol: WEB_PROTOCOL_VERSION,
         })
         .expect("serialize");
-        assert_eq!(encoded, json!({"webProtocol": 3}));
+        assert_eq!(encoded, json!({"webProtocol": WEB_PROTOCOL_VERSION}));
         round_trip(ProtocolIdentity {
             web_protocol: WEB_PROTOCOL_VERSION,
         });
@@ -281,15 +281,11 @@ mod tests {
         .unwrap();
         assert_eq!(
             narrowed,
-            Request::DeviceInvite(Some(InviteScope {
-                grants: vec!["read".into(), "session".into()]
-            }))
+            Request::DeviceInvite(Some(json!({"grants": ["read", "session"]})))
         );
 
         round_trip(Request::DeviceInvite(None));
-        round_trip(Request::DeviceInvite(Some(InviteScope {
-            grants: vec!["pty".into()],
-        })));
+        round_trip(Request::DeviceInvite(Some(json!({"grants": ["pty"]}))));
     }
 }
 

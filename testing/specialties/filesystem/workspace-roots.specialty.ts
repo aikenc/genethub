@@ -66,18 +66,11 @@ defineSpecialty(
       const observer = await t.flows.main.pairDevice(
         opened.client,
         opened.daemon,
-        ["read", "files"],
         "root-observer",
       );
       try {
-        await t.assertions.expectProtocolCode(
-          () =>
-            observer.client.call({
-              type: "workspace.addRoot",
-              payload: { workspaceId: id, root: second },
-            }),
-          "forbidden",
-        );
+        const addedByDevice = await observer.client.call({type:"workspace.addRoot",payload:{workspaceId:id,root:second}});
+        t.assertions.assert(addedByDevice?.type === "workspace", "complete paired device cannot add a root");
       } finally {
         observer.client.close();
       }

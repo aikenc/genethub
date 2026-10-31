@@ -179,8 +179,8 @@ impl SessionManager {
         }
         {
             let mut meta = live.meta.lock().await;
-            if meta.managed.is_some() {
-                bail!("durable consultation is available on ordinary sessions");
+            if meta.history_only {
+                bail!("this is retired execution history; fork to continue");
             }
             if meta
                 .imported
@@ -295,7 +295,7 @@ impl SessionManager {
 
     pub(crate) async fn recover_deliveries(&self) -> Result<()> {
         for meta in self.store.list_meta()? {
-            if !meta.openable() {
+            if !meta.openable() || meta.history_only {
                 continue;
             }
             let session_id = meta.id.clone();
@@ -619,7 +619,7 @@ impl SessionManager {
             }
         }
         let meta = live.meta.lock().await.clone();
-        if meta.inbox.paused {
+        if meta.inbox.paused || meta.history_only {
             return Ok(());
         }
         let execution = live.execution.lock().await.clone();

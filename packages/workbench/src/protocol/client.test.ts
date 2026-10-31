@@ -99,7 +99,7 @@ describe("the logical peer connection", () => {
     expect(client.identity).toMatchObject({
       machineId: "m_local",
       fingerprint: "FP-LOCAL",
-      webProtocol: 3,
+      webProtocol: 4,
     });
     const types = queue.latest().sent.map((message) => message.type);
     expect(types.indexOf("protocol.identity")).toBeGreaterThanOrEqual(0);
@@ -163,7 +163,7 @@ describe("the logical peer connection", () => {
     }
   });
 
-  it("assumes WebProtocol v3 when protocol.identity is missing", async () => {
+  it("refuses legacy v3 when protocol.identity is missing", async () => {
     const proof = localProof();
     const queue = socketQueue({
       secret: proof.proof,
@@ -180,10 +180,10 @@ describe("the logical peer connection", () => {
     queue.latest().open();
     await waitFor(() => queue.latest().sent.length === 1);
     queue.latest().acceptHandshake();
-    await waitFor(() => client.connectionState === "ready");
+    await waitFor(() => client.connectionState === "closed");
 
     expect(queue.latest().lastOf("protocol.identity")).toBeDefined();
-    expect(client.identity).toMatchObject({ webProtocol: 3 });
+    expect(client.failure).toBeDefined();
     client.close();
   });
 
@@ -191,7 +191,7 @@ describe("the logical peer connection", () => {
     const proof = localProof();
     const queue = socketQueue({
       secret: proof.proof,
-      identity: { ...localIdentity, webProtocol: 4 },
+      identity: { ...localIdentity, webProtocol: 5 },
     });
     const client = new Client({
       url: "ws://127.0.0.1:42123/ws",

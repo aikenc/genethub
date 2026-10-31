@@ -32,7 +32,7 @@ defineSpecialty({
     await t.tools.waitUntil(async () => { const r = await o.client.call({ type: "device.list" }); if (r?.type === "devices") lanes = r.data.remote.channels ?? []; return lanes.length === 4 && lanes.every(c => c.online); }, 15000);
     t.assertions.assert(new Set(lanes.map(c => c.url)).size === 4 && new URL(lanes[0]!.url).searchParams.get("route") === primary, "pool replaced the legacy slot or duplicated a node route");
     for (const channelCount of [0, 5]) await t.assertions.expectProtocolCode(() => attach(channelCount), "badRequest");
-    const paired = await t.flows.main.pairDevice(o.client, o.daemon, [], "pool-authority"); paired.client.close();
+    const paired = await t.flows.main.pairDevice(o.client, o.daemon, "pool-authority"); paired.client.close();
     const accepted = link.stats().accepted;
     for (const lane of lanes) {
       const url = new URL(lane.url); url.host = new URL(relay.origin).host;
@@ -43,14 +43,14 @@ defineSpecialty({
       t.assertions.assert(reply?.type === "workspaces" && reply.data.some(w => w.id === o.workspaceId), "pool lane did not reach the original daemon workspace");
     }
     t.assertions.assert(new Set(peers.map(p => p.logicalConnectionId)).size === 4 && new Set(peers.map(p => p.identity?.machineId)).size === 1, "channels did not retain distinct endpoints and same source identity");
-    const readOnly = await t.flows.main.pairDevice(o.client, o.daemon, ["read"], "pool-read-only");
-    try { await t.assertions.expectProtocolCode(() => readOnly.client.call({ type: "device.remoteAttach", payload: { relayUrl: relay.origin, joinToken: null, channelCount: 4 } }), "forbidden"); }
+    const readOnly = await t.flows.main.pairDevice(o.client, o.daemon, "pool-read-only");
+    try { t.assertions.assert((await readOnly.client.call({type:"device.list"}))?.type === "devices", "paired pool peer lost identity"); }
     finally { readOnly.client.close(); }
     await o.client.call({ type: "device.revoke", payload: { deviceId: paired.deviceId } });
     await t.tools.waitUntil(() => peers.every(p => p.connectionState !== "ready"), 5000);
     const status = await o.client.call({ type: "device.list" });
     t.assertions.assert(status?.type === "devices" && status.data.remote.channels?.length === 4, "invalid requests or revocation mutated node configuration");
-    t.note(JSON.stringify({ legacyPrimaryStable: true, channels: 4, independentOwners: 4, machineIdentities: 1, nodeTcpBeforeClients: accepted, nodeTcpAfterClients: link.stats().accepted, invalidSizesRejected: true, readOnlyDenied: true, revokedAllLanes: true }));
+    t.note(JSON.stringify({ legacyPrimaryStable: true, channels: 4, independentOwners: 4, machineIdentities: 1, nodeTcpBeforeClients: accepted, nodeTcpAfterClients: link.stats().accepted, invalidSizesRejected: true, pairedDeviceFull: true, revokedAllLanes: true }));
   } finally { peers.forEach(p => p.close()); await link.stop(); relay.stop(); o.client.close(); o.daemon.stop(); await o.mock.stop(); }
 });
 

@@ -30,7 +30,7 @@
 | [AssetPreviewPage.tsx](../packages/workbench/src/preview/AssetPreviewPage.tsx) | 服务发现、用户 enable、入口/连接切换、opaque iframe 与相对资源读取 | 增加可选 HTML 媒体模式，沿用当前页面生命周期 |
 | [ServiceMediaPanel.tsx](../packages/workbench/src/preview/ServiceMediaPanel.tsx) | 原生 RTC 播放、单次 offer、停止、可选 TURN 与诊断 | 旧服务保持；将可复用的逻辑整理到 H5 模板，不要求旧面板导入用户代码 |
 | [daemon 服务桥](../apps/daemon/src/dataplane/service_preview.rs) | 私有登记、runId/secret、v1 双向 HMAC、loopback HTTP/WS 代理、直接路径策略和最长一小时连接 | 继续使用；只验证新增公开字段和必要的取消清理，不导入桌面领域方法 |
-| [authz.rs](../apps/daemon/src/authz.rs)、[endpoint.rs](../apps/daemon/src/dataplane/endpoint.rs) | `services` 权限；PreviewShare 不可服务访问；设备撤销中断连接并 abort handler | 复用现有模型；把 WS 断开后的 App 实际回收列为验收 |
+| [authz.rs](../apps/daemon/src/authz.rs)、[endpoint.rs](../apps/daemon/src/dataplane/endpoint.rs) | 完整连接认证；PreviewShare 不可服务访问；撤销/过期中断连接并 abort handler | 复用现有模型；把 WS 断开后的 App 实际回收列为验收 |
 
 本次同步包括 `1717c38a`（移除 UplinkPace/SendPace 和 ACK-paced send windows）、`a3655530`（删除兼容回退，握手字段显式必需）、`c6ac5610`（本地控制优先、有界 bulk lookahead）。Bulk write 完成可只表示逻辑 journal 已接收；载体有界队列和 await socket write 承担背压。**这不表示所有 ACK 都消失了**：resume journal ACK/grant、Service Preview 的 `0x02` 与 iframe 的消费 ACK 仍存在，意义不同。
 
@@ -108,15 +108,15 @@ const socket = new WebSocket('/api/remote/session');
 
 ## 5. 权限采用现有模型，边界说清楚
 
-不改设备 Capability 枚举、ALL 或邀请迁移。三个层次分别是：
+沿用[产品安全模型](security-model.md)的完整连接合同：可驱动完整 Agent 的已认证连接具有目标 OS 账号的有效能力，不再按设备、Agent 角色或项目拆分 grants。本文的 `services` 仅指登记服务接口，不是独立授权档位。三个层次分别是：
 
-1. **GeneHub 服务访问**：沿用 `services`，files 不代替 services，PreviewShare 仍无权访问。设备撤销按现有本地机制切断数据连接。
+1. **GeneHub 服务访问**：沿用连接认证和账号/机器归属，完整连接统一可访问登记服务。未认证、配对 bootstrap、仅展示的 PreviewShare 不能访问服务业务；撤销和过期继续中断已有连接。
 2. **源端共享策略**：Capture 默认不采集/不允许注入；用户在 App 启用一个具体显示器共享，控制另有默认关闭的开关。策略由源端 UI 或已授权本机配置管理，不能通过普通远端 `/api/remote/` 调用放开。系统录屏和输入权限按 OS 分别取得，查询不触发弹窗。
 3. **当前会话**：App 再决定 WS 观看/控制是否可用，只有有效控制 WS 和独占租约允许注入。页面按钮只是发起申请，不能自行宣告 granted。
 
-**本版是已有可信服务客户端模型，不提供设备级“只看桌面/可控制桌面”的新增授权档位。** 源端开启共享后，拥有 services 且能访问该入口的客户端可申请观看；源端开启控制后，这些客户端可申请接管。原有 services 授权没有新增枚举，但用户开启 Capture 会让该登记服务提供桌面能力，界面必须明确说明这个范围，不能宣传成“旧 services 永远不涉及桌面”。
+**本版沿用完整连接模型。** 源端开启共享后，完整连接可以通过该登记入口申请观看；源端开启控制后，可以申请接管。源端开关、页面同意和 OS 隐私权限继续表达本次操作的业务意图，界面明确说明所共享的显示器及控制状态。
 
-因此，工作台里的观看/接管按钮、H5 的 enabled 或某个只读布局，不能隔离持有同一 services 权限的其他原生客户端。若业务要求把 devices A/B 分成只能看/可控制，必须增加真正的服务端鉴权约束；首期不作此承诺。未开启共享时任何既有 services 客户端都拿不到画面；控制关闭时任何会话都不能注入。
+工作台的观看/接管按钮和 H5 的 enabled 约束本页面交互，不构成对其他完整连接或同 OS 账号进程的隔离。当前 Capture 未开启共享时不输出画面，控制关闭时不接受会话输入；仅展示分享仍按现有范围拒绝登记服务访问。
 
 Capture 不采信请求体里的 principal、userId、scopes 或页面自报身份。首期按已认证本地桥连接和自己生成的 session/lease 区分访问，不需要传递账号身份。已有 v1 HMAC 仅证明 daemon 与登记 App 的运行关系；同 OS 账户恶意进程隔离不是该 shared secret 的能力。由此可以删除前版“认证主体上下文、broker/app 新帧域、daemon authority 存活证明”的整体设计。
 
@@ -165,7 +165,7 @@ sessionToken 由 App 生成，绑定观看 WS、运行和媒体协商，使用�
 
 `waiting-for-yield` 为保留状态，当前 App 在另一个控制者占用时返回 `busy`，不自动暂停其他 Agent。Workflow 自行协调 GUI Agent 静止；不把 agent 名称、暂停逻辑加进 daemon。未参与的 OS 自动化不能声称已被强制排他。App 的真实状态事件与 lease epoch 用于外壳显示，页面上报的 granted 不被信任；宿主可从已登记控制/观看 WS 的后端事件观察状态，不建立第二条新协议。桥关闭后没有收到释放确认，外壳显示“释放未确认”，不把本地 close 当成 OS 释放证明。
 
-WS 请求有 id；同连接内同 ID/同内容返回原结果，不同内容冲突。release/stop 幂等；创建/接管超时先查状态，不自动重放副作用；重连重新申请。错误区分 permission_required（services/源端策略分别说明）、not_shared、target_changed、desktop_unavailable（源OS会话锁定、非活跃或无法确认可用）、busy、encoder_unavailable、session_expired、lease_expired、release_unconfirmed。描述符的未知 client/protocol 由 Preview 明确拒绝；首轮没有额外版本协商框架。第一版只许一个观看和一个控制租约，不预建多观看者仲裁平台。
+WS 请求有 id；同连接内同 ID/同内容返回原结果，不同内容冲突。release/stop 幂等；创建/接管超时先查状态，不自动重放副作用；重连重新申请。错误区分 permission_required（OS 权限/源端策略分别说明）、not_shared、target_changed、desktop_unavailable（源OS会话锁定、非活跃或无法确认可用）、busy、encoder_unavailable、session_expired、lease_expired、release_unconfirmed。描述符的未知 client/protocol 由 Preview 明确拒绝；首轮没有额外版本协商框架。第一版只许一个观看和一个控制租约，不预建多观看者仲裁平台。
 
 消息通常 ≤16 KiB、SDP 本体 ≤128 KiB，仍服从现有 256 KiB 包上限；应用起始预算为每 WS 8 个在途请求、20 条普通请求/秒、256 KiB 待发送数据，ICE 个数与协商次数有界。超限明确失败/关闭，不无限排队；这些是待实测固定的起始预算。已有一小时连接上限继续生效，提前提示重新连接，不自动续控。
 
@@ -232,7 +232,7 @@ GeneHub 本体的 Web/guest 小改可沿已有兼容门做 Live；Capture 首次
 下列为完整平台验收清单，尚未执行 Windows/macOS 真实远控验收。首轮源码已落地，实际实现/验证边界见
 [提案 §12](remote-interactive-preview-proposal.md#12-首轮实现状态2026-10-29dev-4) 与 [Capture README](../apps/capture/README.md)：
 
-- 有 services/无 services、PreviewShare；Capture 共享关闭/只看/允许控制：分别验证真实 App 是否输出画面/接受输入。明确粗粒度模型，不声称设备级看控分权。
+- 已认证完整连接、未认证、配对 bootstrap、撤销/过期连接、PreviewShare；Capture 共享关闭/只看/允许控制：分别验证真实 App 是否输出画面/接受输入，保留认证与仅展示分享的真实边界。
 - 使用当前完整 Client/握手，经 Fabric 或 RTC 数据路径跑 HTTP/WS；只给 `direct-only` 时策略仍生效；媒体允许 TURN 与数据策略独立，以 selected pair 为证据。
 - 新 H5 用旧 fetch/WS API 和新增 describe/ice 完成真实媒体；停用 HTML 模式不重复建可信面板 PC；旧 `ServiceMediaPanel` 服务原样工作；旧 Web 对新 Capture 不意外输出桌面。
 - 控制 WS 关闭仍能观看，观看 WS 关闭同时释放输入；用户页不发 release、页面卡死、daemon 冻结、设备撤销而媒体仍直连、弱网恢复：挑战期限后资源与输入实际回收，迟到 renew 不复活。

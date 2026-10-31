@@ -14,7 +14,7 @@ GeneHub 是端侧多机器 Agent 的 hub：每台机器上的 daemon 持有自�
 经账号/设备认证且获准驱动完整 Agent 的连接，按目标 OS 用户能力操作全部可访问资源；
 Agent 已能通过工具执行的事，不应另按项目、设备或角色降权。仅展示分享不是完整连接，
 认证、撤销、过期、OS 权限与来源追踪仍保留。详见 [platform.md](references/platform.md) 第 4 节。
-这是 2026-10-29 产品契约；当前版本仍有旧 grants 和请求检查时，报告实际拒绝，不能换身份或读取 token 绕过。
+完整连接不再有设备 grants 或项目 ACL。旧版本若仍拒绝，保留真实错误，不能换身份或读取 token 绕过。
 该定位不扩大当前用户任务范围，也不代替发布、重启、配对等动作授权。
 
 ## 身份不能互换
@@ -38,7 +38,7 @@ Agent 已能通过工具执行的事，不应另按项目、设备或角色降�
 - 可路由到其他机器：`context`、`shell`、`workspace`、`session`、`agent`（含 `agent run`）、`device`、
   `client`、`process`。只能在本机：`machine`、`speech`、`file`、`daemon` 生命周期、`update`。
 - 配对、`device invite`、授权范围属于授权变更，只在用户明确要求时执行；完整 Agent 连接按上述全权契约理解；不要把包含 Session/任意工具执行的授权称作只读隔离，也不要把邀请链接或码贴进聊天以外的地方。当前 CLI 的旧范围参数按实际版本解释，不自行改变既有设备授权。
-- 会话控制本机与跨机同规则：完整连接的 Agent 可创建并控制普通会话，来源与真实 Session ID 保留。旧 Workflow 受管限制和新增跨项目拒绝属于待迁移实现，不是继续增加权限等级的依据；当前命令若拒绝，保留真实错误。Agent 消息按 Agent 来源处理，多会话协作用团队机制（Skill `genehub-team`）。
+- 会话控制本机与跨机同规则：完整连接的 Agent 可创建并控制普通会话，来源与真实 Session ID 保留。旧 Workflow 会话仅作历史查看，从 fork 创建普通会话继续；当前命令若拒绝，保留真实错误。Agent 消息按 Agent 来源处理，多会话协作用团队机制（Skill `genehub-team`）。
 - 用会话标签（`session label`、`agent run --label`、`session list --label`）标明会话的设备、角色或分工，
   不要把 `[标签]` 写进标题；见 [multi-machine.md](references/multi-machine.md)。
 - 数据留在所属机器：不要为了“方便”把工作区或密钥搬到别的机器；把任务派给持有资源的那台机器。

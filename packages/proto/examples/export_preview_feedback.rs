@@ -10,7 +10,6 @@ fn main() -> Result<(), ts_rs::ExportError> {
     AssetPreviewKind::export_all_to(directory)?;
     AssetPreviewMetadata::export_all_to(directory)?;
     AssetPreviewRequest::export_all_to(directory)?;
-    Confinement::export_all_to(directory)?;
     DeviceAuth::export_all_to(directory)?;
     ErrorCode::export_all_to(directory)?;
     ExchangeRequestHead::export_all_to(directory)?;
@@ -41,7 +40,6 @@ fn main() -> Result<(), ts_rs::ExportError> {
     SpeechSpanAlternative::export_all_to(directory)?;
     SpeechStart::export_all_to(directory)?;
     SpeechUncertainSpan::export_all_to(directory)?;
-    WorkflowRequestBudgetSnapshot::export_all_to(directory)?;
     WorkspaceFileSource::export_all_to(directory)?;
     WorkspaceFileSourceKind::export_all_to(directory)?;
     Ok(())

@@ -404,7 +404,7 @@ id: string, bytes: number,
  */
 at: string, };
 
-export type CallerAuthority = { principalType: string, sessionId?: string, grants: Array<string>, providerOperations: boolean, providerRequestCommand: string, };
+export type CallerAuthority = { principalType: string, sessionId?: string, providerOperations: boolean, providerRequestCommand: string, };
 
 /**
  * What an agent can do, declared up front.
@@ -506,24 +506,6 @@ spaceDir: string,
 sessionDir: string, };
 
 /**
- * What the operating system is holding a process to, told to whoever asked
- * for the process.
- *
- * Without this a confined caller has to infer the rule from the symptoms, and
- * the symptoms differ by backend: a namespace makes the rest of the filesystem
- * *absent* (`ENOENT`), Landlock leaves it there and *refuses* it (`EACCES`).
- * An agent reading "no such file" concludes the directory does not exist and
- * sets about creating it. Saying the rule up front is cheaper than every
- * caller guessing it wrong differently.
- */
-export type Confinement = { backend: IsolationBackend, 
-/**
- * Absolute paths the process can reach and write. Everything outside them
- * is absent or refused; which of the two depends on `backend`.
- */
-roots: Array<string>, };
-
-/**
  * Encrypted admission for one connection; no cross-carrier recovery identity.
  */
 export type ConnectionAdmission = { "op": "create", policy: string, } | { "op": "created", id: string, } | { "op": "error", code: string, };
@@ -560,12 +542,7 @@ export type DeviceInfo = { id: string, name: string, pairedAt: string, lastSeenA
 /**
  * True while this device has a live connection to the machine.
  */
-connected: boolean, 
-/**
- * What this device may ask for. Absent from machines that predate grants,
- * where every authorized device could do everything.
- */
-grants?: Array<string>, };
+connected: boolean, };
 
 /**
  * A one-time chance to become an authorized device.
@@ -583,12 +560,7 @@ export type DeviceInvite = { code: string,
  * a relay first for that reason; privileged LAN transport is deliberately
  * unsupported.
  */
-rendezvousUrl?: string, expiresAt: string, 
-/**
- * What redeeming this invitation will be worth. Shown before anyone
- * accepts it, because a grant nobody was told about is not a choice.
- */
-grants?: Array<string>, };
+rendezvousUrl?: string, expiresAt: string, };
 
 export type DirectoryEntry = { name: string, path: string, };
 
@@ -602,7 +574,7 @@ workspaceFiles: Array<DirectoryEntry>,
  */
 roots: boolean, };
 
-export type ErrorCode = "badRequest" | "unauthorized" | "notFound" | "conflict" | "unsupported" | "forbidden" | "internal" | "webProtocol" | "isolationUnavailable";
+export type ErrorCode = "badRequest" | "unauthorized" | "notFound" | "conflict" | "unsupported" | "forbidden" | "internal" | "webProtocol";
 
 /**
  * The first encrypted record on a client-opened logical stream.
@@ -610,13 +582,6 @@ export type ErrorCode = "badRequest" | "unauthorized" | "notFound" | "conflict" 
 export type ExchangeRequestHead = { version: number, method: string, metadata: JsonValue, bodyLength?: number, timeoutMs?: number, };
 
 export type ExchangeResponseHead = { status: number, metadata: JsonValue, bodyLength?: number, error?: ProtocolError, };
-
-/**
- * The current DCG state and independent flow timeline of one Executor
- * Session. A Session currently owns one Run; the envelope leaves that
- * identity explicit rather than relying on a directory name.
- */
-export type ExecutorFlowStatus = { schema: string, executorSessionId: string, run: WorkflowRunStatus, messages: Array<FlowMessageStatus>, };
 
 /**
  * A directory can have several registrations; removing one does not revoke others.
@@ -634,13 +599,6 @@ path: string, isDir: boolean, size?: number,
  * Absent means "not expanded yet" rather than "empty".
  */
 children?: Array<FileNode>, };
-
-/**
- * One structured, replayable control-plane message owned by an Executor
- * Session. Ordinary chat remains in the Session timeline and is not mixed
- * into this protocol record.
- */
-export type FlowMessageStatus = { messageId: string, kind: string, projectWorkspaceId: string, executorSessionId: string, runId: string, nodeId?: string, attempt?: number, senderSessionId: string, recipientSessionId: string, causationId?: string, expectedRevision?: number, payload: unknown, createdAtMs: number, };
 
 /**
  * What a bounded reconstructed fork carried into its target Agent.
@@ -720,8 +678,8 @@ rtcSupported: boolean,
  */
 features?: Array<string>, 
 /**
- * What this machine can actually enforce on a process it starts on a
- * caller's behalf. Absent from older daemons, which is why it is optional.
+ * Native kernel capability diagnostics, not applied Agent isolation.
+ * Absent from older daemons, which is why it is optional.
  */
 isolation?: IsolationInfo, };
 
@@ -871,29 +829,17 @@ export type InteractionQuestion = { id: string, prompt: string, allowMultiple: b
  */
 export type InviteAuth = { inviteId: string, nonce: string, proof: string, };
 
-/**
- * How much of a machine an invitation is worth.
- *
- * Its own type rather than a bare list of strings so that the request carrying
- * it can grow other limits — an expiry, a workspace — without changing shape
- * again.
- */
-export type InviteScope = { grants: Array<string>, };
-
 export type IsolationBackend = "landlock" | "namespaces" | "seatbelt" | "appContainer" | "none";
 
 /**
- * The operating system confinement this machine can put a spawned process in.
+ * Kernel isolation capability diagnostics for this machine.
  *
- * Reported rather than promised. A caller decides whether to run something it
- * does not fully trust by reading this, so it has to describe what is actually
- * in force on this kernel right now — not what the build supports and not what
- * a configuration file asked for.
+ * Diagnostic capability only: Agent commands run as the daemon OS user
+ * without an additional GeneHub sandbox.
  */
 export type IsolationInfo = { backend: IsolationBackend, 
 /**
- * Whether a confined process would really be confined. False means every
- * request that needs confinement is refused, never quietly downgraded.
+ * Whether the kernel capability probe succeeded; not applied Agent isolation.
  */
 enforced: boolean, 
 /**
@@ -936,16 +882,6 @@ export type LogTail = { name: string, path: string, text: string,
  * Every log in the directory, newest first, with its size in bytes.
  */
 files: Array<LogEntry>, };
-
-/**
- * Durable parent/role binding for a Workflow-managed ordinary Session.
- */
-export type ManagedSessionInfo = { parentSessionId: string, workflowRunId: string, workflowId: string, nodeId: string, 
-/**
- * Project-defined label such as `worker`, `reviewer` or a domain role.
- * The kernel never derives behavior from this value.
- */
-role: string, userInteraction: SessionUserInteraction, evidenceScope?: SessionEvidenceScope, };
 
 export type ModeInfo = { id: string, label: string, description?: string, };
 
@@ -1076,21 +1012,6 @@ toolCallId?: string, options: Array<PermissionOption>,
 questions?: Array<InteractionQuestion>, };
 
 export type PermissionRequestKind = "permission" | "question" | "planApproval" | "providerConfiguration";
-
-/**
- * Read-only compatibility projection of [`AgentSpaceInfo`] in the terms the
- * mutually exclusive `pm` / `workerRole` model used.
- *
- * Derived on every read and never stored: the component set is the only
- * truth. A Space with several responsibilities cannot be described here
- * without loss, which is exactly why this shape is no longer the model.
- */
-export type PipeSpaceInfo = { parentWorkspaceId?: string, 
-/**
- * `workflow-executor` for an enabled `executor`, otherwise the enabled
- * `worker` role. Absent when neither is mounted.
- */
-workerRole?: string, lifecycle: string, };
 
 /**
  * One confirmed note inside the session's single preview-annotation draft.
@@ -1251,7 +1172,7 @@ export type Reply = { "type": "previewFeedback", "data": PreviewFeedbackResponse
  * True when the requested `sinceSeq` fell outside the retained window
  * and the snapshot is a full reset rather than a continuation.
  */
-reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "agentRequests", "data": Array<AgentUserRequest> } | { "type": "agentTestResult", "data": { passed: boolean, output: string, } } | { "type": "agentLogs", "data": { lines: Array<string>, } } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "callerAuthority", "data": CallerAuthority } | { "type": "providers", "data": Array<ProviderInfo> } | { "type": "providerOperation", "data": ProviderOperationReceipt } | { "type": "speechCapabilities", "data": SpeechCapabilities } | { "type": "speechRuntimeStatus", "data": SpeechRuntimeStatus } | { "type": "speechContext", "data": SpeechContextPack } | { "type": "speechFeedbackReceipt", "data": SpeechFeedbackReceipt } | { "type": "log", "data": LogTail } | { "type": "diagnostics", "data": SupportDiagnostics } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "forkTransfer", "data": ForkTransfer } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionDrafts", "data": Array<SessionDraft> } | { "type": "previewAnnotations", "data": PreviewReviewDraft } | { "type": "sessionComponents", "data": Array<ComponentInstanceInfo> } | { "type": "sessionFlow", "data": ExecutorFlowStatus } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "sessionInspection", "data": SessionInspection } | { "type": "sessionNarrative", "data": SessionNarrativePage } | { "type": "sessionRounds", "data": SessionRoundPage } | { "type": "sessionContext", "data": SessionContext } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "roundTrunks", "data": Array<RoundTrunk> } | { "type": "blob", "data": BlobPayload } | { "type": "blobs", "data": Array<BlobPayload> } | { "type": "sessionArtifactUpload", "data": SessionArtifactUpload } | { "type": "sessionArtifact", "data": SessionArtifactBundle } | { "type": "workflowProject", "data": WorkflowProjectStatus } | { "type": "workflowPackages", "data": WorkflowPackageList } | { "type": "workflowBuild", "data": WorkflowBuildReport } | { "type": "workflowRun", "data": WorkflowRunStatus } | { "type": "workflowJournal", "data": Array<JsonValue> } | { "type": "workflowCheck", "data": WorkflowCheckReport } | { "type": "workflowRuns", "data": Array<WorkflowRunStatus> } | { "type": "agentSpaceChangePlan", "data": AgentSpaceChangePlan } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileAccess", "data": FileAccessInfo } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "processes", "data": Array<BackgroundProcess> } | { "type": "ack" };
+reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "agentRequests", "data": Array<AgentUserRequest> } | { "type": "agentTestResult", "data": { passed: boolean, output: string, } } | { "type": "agentLogs", "data": { lines: Array<string>, } } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "callerAuthority", "data": CallerAuthority } | { "type": "providers", "data": Array<ProviderInfo> } | { "type": "providerOperation", "data": ProviderOperationReceipt } | { "type": "speechCapabilities", "data": SpeechCapabilities } | { "type": "speechRuntimeStatus", "data": SpeechRuntimeStatus } | { "type": "speechContext", "data": SpeechContextPack } | { "type": "speechFeedbackReceipt", "data": SpeechFeedbackReceipt } | { "type": "log", "data": LogTail } | { "type": "diagnostics", "data": SupportDiagnostics } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "forkTransfer", "data": ForkTransfer } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionDrafts", "data": Array<SessionDraft> } | { "type": "previewAnnotations", "data": PreviewReviewDraft } | { "type": "sessionComponents", "data": Array<ComponentInstanceInfo> } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "sessionInspection", "data": SessionInspection } | { "type": "sessionNarrative", "data": SessionNarrativePage } | { "type": "sessionRounds", "data": SessionRoundPage } | { "type": "sessionContext", "data": SessionContext } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "roundTrunks", "data": Array<RoundTrunk> } | { "type": "blob", "data": BlobPayload } | { "type": "blobs", "data": Array<BlobPayload> } | { "type": "sessionArtifactUpload", "data": SessionArtifactUpload } | { "type": "sessionArtifact", "data": SessionArtifactBundle } | { "type": "agentSpaceChangePlan", "data": AgentSpaceChangePlan } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileAccess", "data": FileAccessInfo } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "processes", "data": Array<BackgroundProcess> } | { "type": "ack" };
 
 export type Request = { "type": "preview.feedback", "payload": PreviewFeedbackRequest } | { "type": "client.debug", "payload": ClientDebugRequest } | { "type": "connection.identity" } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, 
 /**
@@ -1271,57 +1192,7 @@ recentRounds?: number, } } | { "type": "unsubscribe", "payload": { sessionId: st
  * than clamping — a task silently run in the wrong directory is worse
  * than one that refused to start.
  */
-cwd: string | null, } } | { "type": "session.createRouted", "payload": { workspaceId: string, tags: Array<string>, mediaTags: Array<string>, title: string | null, cwd: string | null, } } | { "type": "workflow.inspect", "payload": { workspaceId: string, 
-/**
- * Required once a project holds more than one package.
- */
-packageId?: string, candidateDigest?: string, } } | { "type": "workflow.list", "payload": { workspaceId: string, } } | { "type": "workflow.build", "payload": { workspaceId: string, packageId: string, apply: boolean, 
-/**
- * Required for apply and copied verbatim from the preceding plan.
- */
-planDigest: string | null, 
-/**
- * Stable id chosen by the Agent for idempotent apply replay.
- */
-actionId: string | null, 
-/**
- * CAS value copied from the preceding plan.
- */
-expectedRevision: number | null, } } | { "type": "workflow.activate", "payload": { workspaceId: string, 
-/**
- * Required once a project holds more than one package.
- */
-packageId?: string, candidateDigest: string | null, expectedRevision: number, } } | { "type": "workflow.dispatch", "payload": { retryOf?: string, resumeCancelled?: boolean, candidateDigest?: string, workspaceId: string, 
-/**
- * Required once a project holds more than one package.
- */
-packageId?: string, 
-/**
- * Flow id inside the package. Optional when the package has one flow.
- */
-workflowId?: string, 
-/**
- * Project-relative task directory for this Run. Defaults to the
- * project root; a trial pins its own material directory here.
- */
-executionRoot?: string, taskId: string, prompt: string, } } | { "type": "workflow.check", "payload": { workspaceId: string, runId: string | null, 
-/**
- * Which package `--draft` validates. Required once a project holds
- * more than one.
- */
-packageId?: string, 
-/**
- * Validate current source without creating a Candidate, Run or Worker.
- */
-draft?: boolean, } } | { "type": "workflow.get", "payload": { workspaceId: string, runId: string, } } | { "type": "workflow.journal", "payload": { workspaceId: string, runId: string, since: bigint, limit: number, } } | { "type": "workflow.history", "payload": { workspaceId: string, limit: number | null, } } | { "type": "workflow.complete", "payload": { workspaceId: string, runId: string, nodeId: string, expectedRevision: number, evidence: { [key in string]?: string }, 
-/**
- * Bounded business data, checked against the node's declared output shape.
- */
-output?: unknown, 
-/**
- * Absent retains the existing successful-completion contract.
- */
-outcome?: WorkflowNodeOutcome, reason?: string, } } | { "type": "workflow.cancel", "payload": { workspaceId: string, runId: string, expectedRevision: number, } } | { "type": "workflow.recover", "payload": { workspaceId: string, runId: string, expectedRevision: number, } } | { "type": "workflow.recovery.start", "payload": { workspaceId: string, runId: string, reason: string, } } | { "type": "workflow.human", "payload": { workspaceId: string, runId: string, expectedRevision: number, kind: string, reason: string, } } | { "type": "workflow.recovery.reset", "payload": { workspaceId: string, packageId?: string, expectedRevision: number, } } | { "type": "workflow.budget", "payload": { workspaceId: string, runId: string, expectedRevision: number, maxRuns?: number, deadlineSeconds?: number, maxLlmRounds?: number, } } | { "type": "agentSpace.configure", "payload": { workspaceId: string, expectedRevision: number, operation: AgentSpaceOperation, 
+cwd: string | null, } } | { "type": "session.createRouted", "payload": { workspaceId: string, tags: Array<string>, mediaTags: Array<string>, title: string | null, cwd: string | null, } } | { "type": "agentSpace.configure", "payload": { workspaceId: string, expectedRevision: number, operation: AgentSpaceOperation, 
 /**
  * Required when the caller is a SessionController; omitted for a
  * direct authenticated Human UI action.
@@ -1331,7 +1202,7 @@ planDigest?: string, actionId?: string, } } | { "type": "agentSpace.changePlan",
  * Present for an explicit delete. Omitted after a confirmed send so a
  * note added during send is not rejected as a stale revision.
  */
-expectedRevision?: number, } } | { "type": "session.components", "payload": { sessionId: string, } } | { "type": "session.flow", "payload": { sessionId: string, } } | { "type": "session.inspect", "payload": { sessionId: string, throughRoundId: string | null, } } | { "type": "session.narrative", "payload": { sessionId: string, throughRoundId: string | null, 
+expectedRevision?: number, } } | { "type": "session.components", "payload": { sessionId: string, } } | { "type": "session.inspect", "payload": { sessionId: string, throughRoundId: string | null, } } | { "type": "session.narrative", "payload": { sessionId: string, throughRoundId: string | null, 
 /**
  * Exact item lookup. Mutually exclusive with `cursor` on the CLI.
  */
@@ -1410,7 +1281,7 @@ workspaceId?: string, } } | { "type": "speech.runtime.probe" } | { "type": "spee
  * Omitted means the daemon's own log, which is what an error is about
  * almost every time.
  */
-name: string | null, } } | { "type": "diagnostics.snapshot" } | { "type": "update.check" } | { "type": "update.appCheck" } | { "type": "update.download" } | { "type": "update.downloadState" } | { "type": "update.dismiss" } | { "type": "hub.status" } | { "type": "hub.pair", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.trial", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.claimLink" } | { "type": "hub.machines" } | { "type": "hub.connect", "payload": { machineId: string, } } | { "type": "hub.unpair" } | { "type": "device.list" } | { "type": "device.invite", "payload": InviteScope | null } | { "type": "device.claim", "payload": { code: string, deviceName: string, } } | { "type": "device.revoke", "payload": { deviceId: string, } } | { "type": "device.remoteAttach", "payload": { relayUrl: string, joinToken: string | null, 
+name: string | null, } } | { "type": "diagnostics.snapshot" } | { "type": "update.check" } | { "type": "update.appCheck" } | { "type": "update.download" } | { "type": "update.downloadState" } | { "type": "update.dismiss" } | { "type": "hub.status" } | { "type": "hub.pair", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.trial", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.claimLink" } | { "type": "hub.machines" } | { "type": "hub.connect", "payload": { machineId: string, } } | { "type": "hub.unpair" } | { "type": "device.list" } | { "type": "device.invite", "payload": JsonValue | null } | { "type": "device.claim", "payload": { code: string, deviceName: string, } } | { "type": "device.revoke", "payload": { deviceId: string, } } | { "type": "device.remoteAttach", "payload": { relayUrl: string, joinToken: string | null, 
 /**
  * Independent node uplinks, 1..4. Omission preserves one-channel access.
  */
@@ -1596,11 +1467,6 @@ export type SessionEvent = { "type": "turnStarted", turnId: string,
 startedAtMs: number, } | { "type": "item", turnId: string, item: TimelineItem, } | { "type": "itemDelta", turnId: string, itemId: string, delta: ItemDelta, } | { "type": "turnProgress", turnId: string, usage: Usage, } | { "type": "turnCompleted", turnId: string, usage: Usage, forkCheckpoint?: string, } | { "type": "turnFailed", turnId: string, error: TurnError, } | { "type": "turnCanceled", turnId: string, } | { "type": "permissionRequested", request: PermissionRequest, } | { "type": "permissionResolved", requestId: string, outcome: PermissionOutcome, } | { "type": "modelChanged", modelId: string, } | { "type": "agentChanged", agentId: string, modelId?: string, modeId?: string, effortId?: string, fast?: boolean, runtimeValues: { [key in string]?: string }, routingTags?: Array<string>, mediaTags?: Array<string>, } | { "type": "modeChanged", modeId: string, } | { "type": "effortChanged", effortId: string, } | { "type": "fastChanged", fast: boolean, } | { "type": "runtimeAxisChanged", axisId: string, valueId: string, } | { "type": "draftsChanged", count: number, } | { "type": "previewAnnotationsChanged", revision: number, count: number, } | { "type": "titleChanged", title: string, } | { "type": "sessionStatusChanged", status: SessionStatus, };
 
 /**
- * Immutable evidence access granted to a managed analysis session.
- */
-export type SessionEvidenceScope = { root: string, sessions: { [key in string]?: string | null }, };
-
-/**
  * One lightweight external conversation returned by the discovery pass.
  *
  * `candidate_id` is an expiring daemon-owned token. Provider handles, source
@@ -1751,11 +1617,9 @@ routingTags?: Array<string>,
  */
 mediaTags?: Array<string>, 
 /**
- * Present only when a project Workflow created this otherwise ordinary
- * Session. There is no parallel WorkSession runtime: timeline, storage,
- * recovery, fork and Workspace membership remain the normal ones.
+ * Historical execution context is retired; read it or fork a new Session.
  */
-managed?: ManagedSessionInfo, 
+historyOnly?: boolean, 
 /**
  * Absent until the session has been named — by the user, or by the daemon
  * from the first thing they said. Clients supply their own placeholder;
@@ -1799,11 +1663,6 @@ imported?: SessionImportOrigin,
  * Absent unless a turn is running.
  */
 lastActivityAtMs?: number, };
-
-/**
- * Whether human-facing clients may mutate a managed Session directly.
- */
-export type SessionUserInteraction = "normal" | "readOnly";
 
 /**
  * The machine-level settings a client may see and change.
@@ -2297,313 +2156,6 @@ avgOutputRateTps?: number,
  */
 outputRateEstimated: boolean, costUsd?: number, };
 
-export type WorkflowActivationStatus = { revision: number, digest: string, previousDigest?: string, activatedAtMs: number, };
-
-/**
- * Plan or result of `workflow build`.
- */
-export type WorkflowBuildReport = { schema: string, 
-/**
- * `planned` for a read-only plan, `applied` once the build wrote it.
- */
-status: string, packageId: string, sourceDigest: string, 
-/**
- * Product directories this build writes.
- */
-spaces: Array<string>, 
-/**
- * Component topology being authorized, one entry per Space.
- */
-components: Array<string>, planDigest: string, expectedRevision: number, 
-/**
- * Runs that must finish before a rebuild may replace shared carriers.
- */
-conflictRuns: Array<string>, 
-/**
- * Active Candidate digest after the build activated the package source.
- */
-activeDigest?: string, };
-
-export type WorkflowCatalogEntryStatus = { id: string, path: string, digest: string, };
-
-export type WorkflowCheckReport = { checkedAtMs: number, findings: Array<WorkflowFinding>, runs: Array<WorkflowRunStatus>, draft?: WorkflowDraftReport, };
-
-export type WorkflowDiagnostic = { phase: string, code: string, severity: string, 
-/**
- * Relative to Workflow source root; path is an RFC 6901 pointer in this file.
- */
-file: string, path: string, message: string, hint: string, expected: string | null, actual: string | null, 
-/**
- * Present only when the parser supplies a reliable 1-based location.
- */
-line: number | null, column: number | null, };
-
-export type WorkflowDraftEntry = { id: string, path: string, roles: Array<string>, };
-
-/**
- * Source validation is separate from carrier readiness and improvement/quality judgments.
- */
-export type WorkflowDraftReport = { schema: string, root: string, valid: boolean, truncated: boolean, diagnostics: Array<WorkflowDiagnostic>, candidateDigest: string | null, 
-/**
- * Package this draft compiled, absent when compilation never got that far.
- */
-packageId?: string, 
-/**
- * Project-relative executor product directory derived from the package.
- */
-executorPath?: string, workflows: Array<WorkflowDraftEntry>, };
-
-export type WorkflowFinding = { runId: string, nodeId: string | null, code: string, severity: string, detail: string, };
-
-export type WorkflowHumanExitStatus = { kind: string, requestId: string, pmSessionId: string, reason: string, createdAtMs: number, answer?: string, };
-
-/**
- * A node's settled outcome, as a bare string on the wire and on disk.
- *
- * The kernel's only stake in the name is the success bit — declared by the
- * workflow that owns it, with the four built-in names keeping their
- * historical semantics. Anything else the name means is project vocabulary
- * carried opaquely.
- */
-export type WorkflowNodeOutcome = string;
-
-export type WorkflowNodeRunStatus = { output?: unknown, 
-/**
- * First time this node instance existed, retained across attempts. The
- * daemon records transition times only; every rate, ranking and critical
- * path is computed by the reader.
- */
-pendingSinceMs?: number, assignedAtMs?: number, 
-/**
- * When this node's result was accepted, before execution retirement.
- */
-settledAtMs?: number, lastActivityAtMs?: number, 
-/**
- * Zero-based attempt of this node instance, not of the whole Run.
- */
-attempt?: number, llmRounds?: number, tokens?: number, 
-/**
- * LLM rounds already spent by this node's abandoned earlier attempts.
- */
-priorLlmRounds?: number, outcome?: WorkflowNodeOutcome, reason?: string, id: string, uses: string, status: string, sessionId?: string, evidence: { [key in string]?: string }, };
-
-/**
- * Result of `workflow list`.
- */
-export type WorkflowPackageList = { 
-/**
- * Absolute `.genethub/workflows/` path packages are discovered under.
- */
-root: string, packages: Array<WorkflowPackageStatus>, 
-/**
- * `spaces/<name>--<space>` directories with no package left to own them.
- */
-orphanSpaces: Array<string>, };
-
-/**
- * One product Space of a package and whether it is live.
- */
-export type WorkflowPackageSpaceStatus = { name: string, 
-/**
- * Project-relative product directory.
- */
-path: string, components: Array<string>, 
-/**
- * True when the directory exists and the Builder verifies it.
- */
-materialized: boolean, 
-/**
- * True when the AgentSpace is registered with an authorized topology.
- */
-registered: boolean, };
-
-/**
- * One discovered Workflow package and the mechanical facts about it.
- *
- * Everything here is computed by the daemon from the project side or from the
- * package's own Git checkout. Nothing is taken from the package's prose: an
- * untrusted clone must not be able to assert a platform fact.
- */
-export type WorkflowPackageStatus = { 
-/**
- * Path below `.genethub/workflows/`, which is the package's identity.
- */
-id: string, 
-/**
- * Frontmatter summary, or the first prose line. Untrusted display text.
- */
-description: string, 
-/**
- * The package's own experiment marker.
- */
-dev: boolean, 
-/**
- * Git remote of the package's checkout, when it has one.
- */
-sourceUrl?: string, 
-/**
- * Commit of the package's checkout; the package's version.
- */
-sourceCommit?: string, 
-/**
- * True when the package checkout has uncommitted changes, which includes
- * unresolved merge markers left by an upgrade.
- */
-sourceDirty: boolean, 
-/**
- * Content identity of the package source right now.
- */
-sourceDigest: string, 
-/**
- * Flow ids from `flows/*.yaml`.
- */
-flows: Array<string>, 
-/**
- * Compilation result of the current source; `null` when it compiles.
- */
-compileError?: string, 
-/**
- * Product Space directories this package owns once built.
- */
-spaces: Array<WorkflowPackageSpaceStatus>, 
-/**
- * True when every declared Space is registered with matching digests.
- */
-built: boolean, 
-/**
- * True when a built Space no longer matches its registered lock digest.
- */
-drifted: boolean, 
-/**
- * Flow ids also declared by another package in this project.
- */
-conflictingFlows: Array<string>, };
-
-/**
- * Project-owned Workflow package projected by the daemon after validation.
- */
-export type WorkflowProjectStatus = { 
-/**
- * The flow list below belongs to this exact version, not necessarily Active.
- */
-selectedDigest?: string, 
-/**
- * Path below `.genethub/workflows/` identifying the package.
- */
-packageId: string, 
-/**
- * The package's own "still an experiment" marker. It gates nothing; it
- * tells PM to weigh the health facts more carefully.
- */
-dev: boolean, root: string, workflows: Array<WorkflowCatalogEntryStatus>, 
-/**
- * Digest of the project source as it exists now, whether or not it has
- * been promoted for execution.
- */
-candidateDigest?: string, 
-/**
- * Compilation error for the current source while a previously activated
- * Candidate remains runnable. Absent when the source compiles.
- */
-candidateError?: string, 
-/**
- * Candidate used for new Runs. Absent only for a V1 directory project
- * that has not entered the activation lifecycle yet.
- */
-activeDigest?: string, 
-/**
- * This executor uses the built-in recovery flow for new recovery Runs.
- */
-recoveryBuiltinOverride: boolean, activationRevision: number, 
-/**
- * True when package source has changed since the active Candidate.
- */
-sourceChanged: boolean, 
-/**
- * Ordered immutable activation history. Reusing an already-active digest
- * is a no-op and therefore does not append an entry.
- */
-activationHistory: Array<WorkflowActivationStatus>, };
-
-export type WorkflowRecoveryHandleStatus = { runId: string, triggerSeq: number, reason: string, };
-
-/**
- * Read-only observation returned by the request.budget Workflow capability.
- * Remaining calls are based on observed usage, not reservations or a promise
- * that concurrent activities will fit. A completed query never changes.
- */
-export type WorkflowRequestBudgetSnapshot = { requestRunId: string, observedAtMs: number, budget: WorkflowRequestBudgetStatus, usedRuns: number, observedLlmRounds: number, executionMs: number, remainingRuns: number, remainingLlmRounds: number, remainingExecutionMs: number, };
-
-/**
- * Mutable limits shared by one Human request and all Workflow retry Runs.
- * Its revision is separate from the graph revision so a PM can adjust a
- * running request without racing a Worker node completion.
- */
-export type WorkflowRequestBudgetStatus = { revision: number, maxRuns: number, deadlineMs: number, maxLlmRounds: number, };
-
-/**
- * Durable status of one project Workflow run. Node meaning comes entirely
- * from the pinned project definition; the daemon reports only generic graph
- * and evidence facts here.
- */
-export type WorkflowRunStatus = { humanExit?: WorkflowHumanExitStatus, 
-/**
- * Immutable business Run references owned by a recovery Run.
- */
-handles: Array<WorkflowRecoveryHandleStatus>, 
-/**
- * Versioned read-only projection of the pinned structure and instances, or legacy DAG nodes and edges.
- */
-structure?: unknown, requestRunId?: string, reportPending?: boolean, supervision?: WorkflowSupervisionStatus, requestBudget: WorkflowRequestBudgetStatus, 
-/**
- * Why execution is blocked, stopping or cancelled.
- */
-reason?: string, 
-/**
- * Cleanup has not yet succeeded; a terminal success must not hide it.
- */
-cleanupError?: string, executionRoot?: string, experimental?: boolean, id: string, workspaceId: string, 
-/**
- * Existing reusable Workflow Executor WorkerSpace selected for this Run.
- * Absent only for directory projects created before the PipeSpace model.
- */
-executorWorkspaceId?: string, 
-/**
- * Persistent, non-LLM control instance that owns this Run's DCG state
- * and structured flow timeline.
- */
-executorSessionId?: string, parentSessionId: string, workflowId: string, 
-/**
- * Project-wide immutable DCG Candidate captured when this Run started.
- */
-dcgDigest: string, 
-/**
- * Activation revision captured with `dcgDigest`. Absent only for the
- * V1 compatibility path that executes unactivated source.
- */
-activationRevision?: number, bundleDigest: string, taskId: string, status: string, revision: number, 
-/**
- * Semantic Workflow Executor turns consumed by this Run. Deterministic
- * simple graphs remain zero.
- */
-executorTurns: number, activeNodes: Array<string>, nodes: Array<WorkflowNodeRunStatus>, createdAtMs: number, updatedAtMs: number, };
-
-/**
- * Raw non-LLM observation facts for one Run. Health is a reader's judgment:
- * the daemon publishes the clock it already keeps and its fixed silence
- * threshold, and deliberately computes no efficiency verdict from them.
- */
-export type WorkflowSupervisionStatus = { lastCheckedAtMs: number, 
-/**
- * Elapsed time excluded from execution charging because the whole Run was
- * waiting for a Human.
- */
-humanWaitMs: number, 
-/**
- * Elapsed time the Run spent recoverable, awaiting a PM continue decision.
- */
-recoveryWaitMs: number, waiting: boolean, nodeWallMs: number, };
-
 export type WorkspaceFileSource = { "kind": "workspaceFile", workspaceHandle: string, path: string, } | { "kind": "machineFile", absolutePath: string, };
 
 export type WorkspaceFileSourceKind = "workspaceFile";
@@ -2632,9 +2184,4 @@ root: string, isGitRepo: boolean, folders: Array<WorkspaceFolderInfo>, workspace
  * The registered component set and tree position. Absent for an ordinary
  * folder that has never been registered as an AgentSpace.
  */
-agentSpace?: AgentSpaceInfo, 
-/**
- * Derived from `agentSpace` for clients written against the older
- * exclusive-role shape. Never a second source of truth.
- */
-pipeSpace?: PipeSpaceInfo, };
+agentSpace?: AgentSpaceInfo, };

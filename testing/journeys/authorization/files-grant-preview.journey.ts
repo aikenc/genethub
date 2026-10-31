@@ -1,16 +1,14 @@
 import { writeFileSync } from "node:fs";
 import path from "node:path";
 
-import { AssetPreviewError_ } from "@genehub/workbench/client";
-
 import { defineJourney } from "../../framework/public.ts";
 
 defineJourney(
   {
     id: "journey.authorization.files-grant-preview",
-    title: "A device without a files grant cannot take the bytes by another door",
-    oracle: "asset.preview is 403 without files; 200 with read+files",
-    catches: ["files grant only gates RPC"],
+    title: "A complete paired device reads the exact preview bytes",
+    oracle: "paired preview returns the same bytes as the workspace file",
+    catches: ["full paired preview loses or changes file bytes"],
     tags: ["core", "authorization", "parity"],
     expectedDurationMs: 35_000,
     timeoutMs: 100_000,
@@ -21,20 +19,7 @@ defineJourney(
     writeFileSync(path.join(t.env.workspace, "secret.txt"), "the bytes");
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
     const asset = `${opened.rootHandle}/secret.txt`;
-    const narrow = await t.flows.main.pairDevice(opened.client, opened.daemon, ["read"], "narrow");
-    try {
-      try {
-        await narrow.client.preview(opened.workspaceId, asset);
-        t.assertions.assert(false, "read alone bought the file bytes");
-      } catch (error) {
-        t.assertions.assert(error instanceof AssetPreviewError_, `preview failed as ${String(error)}`);
-        if (!(error instanceof AssetPreviewError_)) throw error;
-        t.assertions.assert(error.status === 403, `read alone bought the file bytes: ${error.status}`);
-      }
-    } finally {
-      narrow.client.close();
-    }
-    const allowed = await t.flows.main.pairDevice(opened.client, opened.daemon, ["read", "files"], "allowed");
+    const allowed = await t.flows.main.pairDevice(opened.client, opened.daemon, "allowed");
     try {
       const ok = await allowed.client.preview(opened.workspaceId, asset);
       t.assertions.assert(

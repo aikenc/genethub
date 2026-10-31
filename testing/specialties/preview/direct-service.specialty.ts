@@ -60,12 +60,11 @@ requiredArtifacts:["genehub-host-local","genehub_guest.wasm"],
       const isolated=await opened.client.call({type:"process.workspaceList",payload:{workspaceId:other.data.id}});
       t.assertions.assert(isolated?.type==="processes"&&!isolated.data.some(p=>p.service?.runId===firstRun),"service leaked into another workspace");
     }
-    const narrow=await t.flows.main.pairDevice(opened.client,opened.daemon,["read","files","session"],"no-services");
+    const narrow=await t.flows.main.pairDevice(opened.client,opened.daemon,"no-services");
     try{
       const hidden=await narrow.client.call({type:"process.workspaceList",payload:{workspaceId:opened.workspaceId}});
-      t.assertions.assert(hidden?.type==="processes"&&!hidden.data.some(p=>p.service),"service metadata bypassed Services permission");
-      let denied=false;try{await narrow.client.call({type:"process.serviceStop",payload:{workspaceId:opened.workspaceId,entryPath,runId:firstRun}})}catch{denied=true}
-      t.assertions.assert(denied,"unprivileged application shutdown succeeded");
+      t.assertions.assert(hidden?.type==="processes"&&hidden.data.some(p=>p.service),"complete paired device lost service metadata");
+      await t.assertions.expectProtocolCode(() => narrow.client.call({type:"device.invite",payload:{grants:["read"]}}), "badRequest");
     }finally{narrow.client.close()}
     const bytes=new Uint8Array(90000);for(let i=0;i<bytes.length;i++)bytes[i]=i%251;
     const response=await active.fetch('/api/demo/echo',{method:'POST',body:bytes});

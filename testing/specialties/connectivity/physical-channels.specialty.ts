@@ -35,7 +35,7 @@ for (const route of ["direct", "fabric"] as const) for (const peers of [1, 2]) {
         await t.tools.waitUntil(async () => { const r = await opened.client.call({ type: "device.list" }); return r?.type === "devices" && r.data.remote.online; }, 15000);
       } else link = await startSharedBottleneck(daemonEndpoint(opened.daemon).url, { rttMs: 0, bandwidthMbps: 1000 });
       for (let n = 0; n < peers; n++) {
-        const paired = await t.flows.main.pairDevice(opened.client, opened.daemon, [], `network-lane-${n}`);
+        const paired = await t.flows.main.pairDevice(opened.client, opened.daemon, `network-lane-${n}`);
         paired.client.close();
         const fresh = () => ({ url: route === "fabric" ? fabricUrl! : link!.urlFor(daemonEndpoint(opened.daemon).url), credential: paired.credential });
         const client = new Client({ ...fresh(), rtcEnabled: false, requestTimeoutMs: 10000,

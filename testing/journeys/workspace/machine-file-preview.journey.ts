@@ -6,8 +6,8 @@ import { defineJourney, runGenetAsync, openWorkspacePeer } from "../../framework
 
 defineJourney({
   id: "journey.workspace.machine-file-preview",
-  title: "Machine file locators intersect live directory sources and caller grants",
-  oracle: "Real local WASI daemon returns exact absolute-path bytes, merges project/manual roots with CAS, revokes the last source, denies prefix/symlink escapes and persists machine feedback outside projects",
+  title: "Full connections use live machine directories across workspace routes",
+  oracle: "Real local WASI daemon returns exact absolute-path bytes, merges project/manual roots with CAS, revokes the last directory source, denies prefix/symlink escapes and operates on machine feedback across project locators",
   catches: ["absolute path bypasses directory policy", "removed project remains authorized", "one duplicate source revokes another", "CAS overwrites a newer policy", "symlink escapes the allowed root", "feedback still depends on workspace mapping"],
   tags: ["core", "workspace", "filesystem", "authorization", "machine-preview"],
   llm: {default: "none"}, expectedDurationMs: 45_000, timeoutMs: 150_000, requiredRepos: ["cloud"],
@@ -115,8 +115,8 @@ defineJourney({
     t.assertions.assert(append.code === 0 && append.stdout.includes(second.data.id), "formal add-root failed to preserve workspace identity");
     const cli = await runGenetAsync(opened.daemon.genet, ["file-access", "list"], opened.daemon.env);
     t.assertions.assert(cli.code === 0 && cli.stdout.includes("additionalDirectories"), "public directory CLI did not return the policy");
-    // A real Cloud workspace route must retain the same physical scope for
-    // machine locators, record IDs and the final share resource manifest.
+    // A real Cloud workspace route chooses placement for a complete connection.
+    // It must retain directory confinement without inventing a project ACL.
     await client.call({type: "workspace.open", payload: {root: extra}});
     const foreign = await read(external);
     const foreignDraft = await client.call({type: "preview.feedback", payload: {workspaceId: "", operation: {kind: "open", path: external, version: foreign.metadata.version, draftId: null}}});
@@ -131,7 +131,7 @@ defineJourney({
     };
     const refuse = async (action: () => Promise<unknown>) => {
       let rejected = false; try { await action(); } catch { rejected = true; }
-      t.assertions.assert(rejected, "workspace admission escaped its physical scope");
+      t.assertions.assert(rejected, "file resolver accepted an invalid path after directory revocation or a symlink escape");
     };
     t.assertions.assert(new TextDecoder().decode((await scoped.preview("", entry)).bytes) === "exact machine bytes", "scoped absolute preview failed");
     await call({kind: "source", path: entry});
@@ -154,20 +154,22 @@ defineJourney({
     const share = await call({kind: "share", path: entry, ttlSeconds: 3600, resources: []});
     if (share.kind !== "share") throw new Error("scoped share absent");
     await call({kind: "revoke", shareId: share.data.shareId});
-    await refuse(() => scoped.preview("", external));
-    await refuse(() => call({kind: "source", path: external}));
-    await refuse(() => call({kind: "draft", id: foreignId}));
-    await refuse(() => call({kind: "submit", id: foreignId, description: "forbidden", annotationIds: [], bundlePaths: []}));
-    await refuse(() => call({kind: "share", path: entry, ttlSeconds: 3600, resources: [external]}));
+    t.assertions.assert(new TextDecoder().decode((await scoped.preview("", external)).bytes) === "manual bytes", "workspace locator narrowed a full connection's registered file access");
+    t.assertions.assert((await call({kind: "source", path: external})).kind === "source", "full connection could not inspect another project's source");
+    const across = await call({kind: "draft", id: foreignId});
+    t.assertions.assert(across.kind === "draft" && across.data.id === foreignId, "full connection could not retrieve another project's draft");
+    t.assertions.assert((await call({kind: "submit", id: foreignId, description: "cross-project feedback", annotationIds: [], bundlePaths: []})).kind === "receipt", "full connection could not submit another project's feedback");
+    const crossShare = await call({kind: "share", path: entry, ttlSeconds: 3600, resources: [external]});
+    if (crossShare.kind !== "share") throw new Error("full connection could not select registered resources across projects");
+    await call({kind: "revoke", shareId: crossShare.data.shareId});
     const otherShare = await client.call({type: "preview.feedback", payload: {workspaceId: "", operation: {kind: "share", path: external, ttlSeconds: 3600, resources: []}}});
     if (otherShare?.type !== "previewFeedback" || otherShare.data.kind !== "share") throw new Error("foreign share absent");
     const otherShareId = otherShare.data.data.shareId;
-    await refuse(() => call({kind: "revoke", shareId: otherShareId}));
-    await client.call({type: "preview.feedback", payload: {workspaceId: "", operation: {kind: "revoke", shareId: otherShareId}}});
+    t.assertions.assert((await call({kind: "revoke", shareId: otherShareId})).kind === "ack", "full connection could not revoke another project’s share");
     await client.call({type: "workspace.remove", payload: {workspaceId: opened.workspaceId}});
     await client.call({type: "workspace.remove", payload: {workspaceId: second.data.id}});
     await denied(submitted.data.data.workspacePath);
     await refuse(() => scoped.preview("", scopeReceipt.data.workspacePath));
-    t.note("Real public Client/CLI with local WASI: v2/v3 file identity, manual roots, live source union, revocation, CAS, prefix/symlink confinement and machine feedback storage.");
+    t.note("Real public Client/CLI with local WASI: v2/v3 file identity, manual roots, live source union/revocation, CAS, prefix/symlink confinement, cross-project full connection feedback and bounded explicit share manifests. Anonymous share rejection and revocation are exercised independently by specialty.page-experience.preview-sharing.");
   } finally { await peer?.close(); opened.client.close(); opened.daemon.stop(); await opened.mock.stop(); }
 });

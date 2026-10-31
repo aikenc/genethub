@@ -79,7 +79,6 @@ pub struct CallerAuthority {
     pub principal_type: String,
     #[ts(optional)]
     pub session_id: Option<String>,
-    pub grants: Vec<String>,
     pub provider_operations: bool,
     pub provider_request_command: String,
 }

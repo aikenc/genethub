@@ -3,8 +3,8 @@ import { defineJourney } from "../../framework/public.ts";
 defineJourney(
   {
     id: "journey.authorization.invite-read-only",
-    title: "A device gets what its invitation named and nothing else",
-    oracle: "read grant lists workspaces; write/settings/process/invite are forbidden",
+    title: "Restricted invitations are rejected without issuing broader access",
+    oracle: "old scoped invitation is rejected; a normal paired device can configure and write with real effects",
     catches: ["invitation ignored", "self-widening invite"],
     tags: ["core", "authorization", "parity"],
     expectedDurationMs: 30_000,
@@ -14,28 +14,16 @@ defineJourney(
   },
   async (t) => {
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
-    const paired = await t.flows.main.pairDevice(opened.client, opened.daemon, ["read"]);
+    const paired = await t.flows.main.pairDevice(opened.client, opened.daemon);
     try {
-      const listed = await paired.client.call({ type: "workspace.list" });
-      t.assertions.assert(listed?.type === "workspaces", "read was not granted");
+      const before = await opened.client.call({ type: "device.list" });
       await t.assertions.expectProtocolCode(
-        () =>
-          paired.client.call({
-            type: "file.write",
-            payload: { workspaceId: opened.workspaceId, path: "owned.txt", content: "owned" },
-          }),
-        "forbidden",
-      );
-      await t.assertions.expectProtocolCode(() => paired.client.call({ type: "settings.get" }), "forbidden");
-      await t.assertions.expectProtocolCode(() => paired.client.call({ type: "process.list" }), "forbidden");
-      await t.assertions.expectProtocolCode(
-        () => paired.client.call({ type: "process.killAll", payload: { sessionId: "s_any" } }),
-        "forbidden",
-      );
-      await t.assertions.expectProtocolCode(
-        () => paired.client.call({ type: "device.invite", payload: null }),
-        "forbidden",
-      );
+        () => opened.client.call({ type: "device.invite", payload: { grants: ["read"] } }), "badRequest");
+      const after = await opened.client.call({ type: "device.list" });
+      t.assertions.assert(before?.type === "devices" && after?.type === "devices" && before.data.devices.length === after.data.devices.length, "rejected narrowed invite changed authorizations");
+      t.assertions.assert((await paired.client.call({ type: "settings.get" }))?.type === "settings", "complete paired device lost settings");
+      await paired.client.call({ type: "file.write", payload: { workspaceId: opened.workspaceId, path: opened.rootHandle + "/paired.txt", content: "paired" } });
+      t.assertions.fileEquals(opened.workspaceRoot, "paired.txt", "paired");
     } finally {
       paired.client.close();
       opened.client.close();
