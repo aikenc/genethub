@@ -197,6 +197,36 @@ App 不信客户端自报 principal/scopes。初期只需区分已认证本地�
 
 旧 hash 身份无法由新证书伪装继承；必要的一次迁移授权必须由用户在 macOS 作出。目标是迁移后连续正常更新保留权限，签名兼容通过不等于 TCC 实机验收已通过。本机开发签名已配置，两个不同可执行文件版本的 strict/deep 与双向 DR 校验已在 Mac 通过。带无管理窗口授权命令的 build 10 已兼容安装，已从固定安装 App 发起 screen/input 两项系统请求；后续用户关闭再开启权限，tccd 日志已确认当前安装 App/证书 DR 的 ScreenCapture Allowed；但新进程仍因另一份旧 cdhash verifier 校验失败而不获准。刷新 App 版本/注册、排除验证副本注册及相同签名换路径均未修复，不能把此状态误报为用户未授权。尚未重置或修改现有 TCC 授权，实际升级后保留 TCC 许可仍待验证，不声明已获得 Apple entitlement、完成公证或发布。按需启动继续复用现有 Agent；新引导、登录常驻和额外 entitlement 不作为此次修复前置条件。
 
+### 5.2.1 核心诉求：完全无人值守，不以用户解锁为前提（2026-10-31）
+
+**用户明确要求：正常的开发、编译、运行、录制和验证，全程不得要求用户到机器前解锁屏幕。**
+此前多轮把“请解锁一次”当作继续条件，是把平台的首次授权成本转嫁给了用户，不符合产品定位。
+
+本轮在 Mac mini 上实测到一个具体的、可复现的无人值守缺口：
+
+- 工作区迁到外置卷 `/Volumes/SDD` 后，启动 `UnrealEditor`（由 GeneHub 会话内的 shell 派生）在引擎初始化前停住；
+  `sample` 显示主线程阻塞在 dyld 的 `open()`。
+- 同时间的 TCC 日志给出直接原因：
+  `kTCCServiceSystemPolicyRemovableVolumes` 的授权请求，
+  `accessing=com.epicgames.UnrealEditor`、`responsible=com.apple.Terminal`，
+  并记录 `responsible process has com.apple.private.tcc.allow-prompting entitlement` ——
+  也就是 macOS **准备弹窗询问“是否允许访问可移动卷”**。屏幕锁定时无人能确认，`open()` 永久阻塞。
+- 对照实验：锁屏状态下 `Calculator`、`TextEdit` 通过 LaunchServices 可以正常启动，说明
+  **不是“锁屏禁止 GUI 应用”**，而是“访问可移动卷的首次 TCC 授权必须由人确认”。
+
+由此形成三条产品要求（本节之前只写了“首次配置是交付条件”，这里细化为可验收的约束）：
+
+1. **一次预置、长期免人工**：安装/首次配置阶段把执行采集、渲染、编码所需 App 的
+   “可移动卷 / 屏幕录制 / 辅助功能”等 TCC 授权一次性完成；之后正常使用、升级、故障恢复不得再要求用户到机器前。
+   TCC 无法由 Agent 自行写入，必须显式设计为一次性配置项，并在配置未完成时明确报告，而不是让任务静默卡住。
+2. **可解释的等待状态**：Agent 遇到“等待 TCC 确认”时必须能识别并报告具体服务名与请求方（例如
+   `kTCCServiceSystemPolicyRemovableVolumes` + `UnrealEditor`），不能用“进程没起来”当作运行结论。
+3. **数据布局与权限的取舍要写清楚**：工作区放在可移动卷会为每个 GUI 执行体引入一次授权；
+   若产品要求零人工，部署时应优先内置盘，或把可移动卷授权纳入一次性预置清单。
+
+验收补充：在**屏幕锁定、用户不在机器旁**的条件下，完成一次“启动 UE 工程 → 出画面 → 录制产物 → 退出”的端到端流程；
+过程中不允许出现需要人工确认的弹窗、不允许要求用户解锁。该条件不满足时，应判定为未交付，而不是“环境限制”。
+
 ### 5.3 在描述符和旧 API 上做增量
 
 保持 ServicePreviewDescriptor version1，在 media 可选增加 `client:"html"`、`protocol:"remote-desktop/1"`、`sessionPath` 和 `controlPath`；offerPath/stopPath/microphone 沿用。普通 HTML 继续使用现有 fetch/WS，宿主小 API 只加公开 describe 和当前已批准策略的 ice 查询，复用 ServicePreviewClient.ice，不暴露 Client 或任意机器/端口。
