@@ -4,7 +4,7 @@
 
 ## 怎么接
 
-不新建组件。用 `assets/node-adapter/run.mjs` 一次启动并登记整个应用，配置就是 `application.json`：
+不新建组件。用 `assets/python-adapter/run.py`（与 `app.py` 同一个目录、同一份 `requirements.txt`，用内置 Python 运行，不需要 Node）一次启动并登记整个应用：`python run.py --config application.json --daemon-root <dataDir>`。配置就是 `application.json`：
 
 - `backends[]`：按 argv 启动的进程，整棵进程树随运行器一起终止，任一进程退出则整个运行结束。
 - 有 `origin` 的后端参与路由和健康检查；**没有 `origin` 的后端只被启动和监控**（例如游戏进程本身）。
@@ -17,7 +17,7 @@
 
 用于要**玩**的游戏。画面和输入走引擎自己的 WebRTC，运行器只转发信令。
 
-1. 取 Epic 的 `PixelStreamingInfrastructure`（分支 `UE5.4`），按它的 `setup` 安装 `SignallingWebServer`（Node）。
+1. 取 Epic 的 `PixelStreamingInfrastructure`（分支 `UE5.4`），按它的 `setup` 安装 `SignallingWebServer`。**这是 Epic 的 Node 程序**，机器上需要 Node（Epic 的 setup 会自带一份）；运行器本身是 Python。
 2. 工程启用 `PixelStreaming` 插件（`.uproject` 的 `Plugins`）。
 3. 复制 `assets/unreal/` 到工作区，改 `application.json` 里三处路径：信令目录、`UnrealEditor.exe`、工程与地图。
 4. 页面入口 `index.html` 与 `pixelstreaming.esm.js` 放在工作区入口目录。

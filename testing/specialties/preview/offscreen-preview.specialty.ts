@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { cpSync } from "node:fs";
 import { createServer } from "node:net";
 import { writeFile } from "node:fs/promises";
@@ -6,6 +6,16 @@ import { join } from "node:path";
 import { ServicePreviewClient } from "@genehub/workbench/client";
 import { BlockedError, daemonEndpoint, defineSpecialty, openPreviewBrowser } from "../../framework/public.ts";
 
+const echoServer = `import os, sys
+from aiohttp import web, WSMsgType
+async def ws(request):
+    socket = web.WebSocketResponse(); await socket.prepare(request)
+    async for message in socket:
+        if message.type == WSMsgType.TEXT: await socket.send_str(message.data)
+    return socket
+app = web.Application(); app.router.add_get("/health", lambda r: web.Response(text="ok")); app.router.add_get("/ws", ws)
+web.run_app(app, host="127.0.0.1", port=int(os.environ["PORT"]), print=None)
+`;
 // The engine-streaming page mode (`pixel-streaming/1`) through the real Preview page:
 // the sandbox allows pointer lock, the page gets scoped describe()/ice(), the signalling
 // route admits one viewer, and revoking the service closes it. A plain echo backend
@@ -27,6 +37,7 @@ defineSpecialty(
     llm: { default: "none" },
     expectedDurationMs: 30000,
     timeoutMs: 120000,
+    requirements: [{ kind: "python", env: "GENEHUB_PREVIEW_MEDIA_PYTHON", minVersion: [3, 11], modules: ["aiohttp"] }],
     resources: { environments: 1, cpu: 2, memoryMb: 1024, io: 1, browser: 1, pool: "browser" },
     surfaces: ["browser", "daemon", "service-preview"],
     productInterfaces: ["@genehub/workbench/client"],
@@ -35,14 +46,10 @@ defineSpecialty(
   },
   async (t) => {
     if (!t.browser) throw new BlockedError("real browser required");
+    const python = process.env.GENEHUB_PREVIEW_MEDIA_PYTHON;
+    if (!python) throw new BlockedError("GENEHUB_PREVIEW_MEDIA_PYTHON must point to Python 3.11+ with aiohttp");
     const example = join(t.env.workspace, "service-example");
-    for (const folder of ["node-adapter", "demo"]) cpSync(
-      join(t.openRoot, "apps/daemon/builtin-skills/genehub-preview/assets", folder),
-      join(example, folder), { recursive: true, filter: source => !source.split(/[\\/]/).includes("node_modules") },
-    );
-    const installed = spawnSync("npm", ["--prefix", join(example, "node-adapter"), "ci", "--ignore-scripts", "--no-audit", "--no-fund", "--prefer-offline"],
-      { encoding: "utf8", timeout: 30_000 });
-    if (installed.status !== 0) throw new BlockedError(`the copied preview example dependencies could not be installed (exit ${installed.status})`);
+    cpSync(join(t.openRoot, "apps/daemon/builtin-skills/genehub-preview/assets/python-adapter"), join(example, "python-adapter"), { recursive: true });
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
     const reservation = createServer();
     await new Promise<void>((resolve) => reservation.listen(0, "127.0.0.1", resolve));
@@ -51,19 +58,21 @@ defineSpecialty(
     const port = address.port;
     await new Promise<void>((resolve) => reservation.close(() => resolve()));
     const entry = join(t.env.workspace, "index.html"), config = join(t.env.workspace, "application.json");
+    const echoScript = join(t.env.workspace, "echo_backend.py");
+    await writeFile(echoScript, echoServer);
     await writeFile(entry, "<!doctype html><title>Engine page</title><body>engine page</body>");
     await writeFile(config, JSON.stringify({
       entry: "index.html",
       media: { offerPath: "/api/demo/ws", microphone: "none", client: "html", protocol: "pixel-streaming/1", sessionPath: "/api/demo/ws" },
       backends: [{
-        command: [process.execPath, join(example, "demo/backend.mjs")],
+        command: [python, echoScript],
         origin: `http://127.0.0.1:${port}`,
-        env: { PREVIEW_DEMO_PORT: String(port) },
+        env: { PORT: String(port) },
         health: "/health",
         routes: [{ prefix: "/api/demo/", websocket: true, maxViewers: 1 }],
       }],
     }));
-    const runner = spawn(process.execPath, [join(example, "node-adapter/run.mjs"), "--config", config, "--daemon-root", t.env.data], { stdio: ["ignore", "pipe", "pipe"] });
+    const runner = spawn(python, [join(example, "python-adapter/run.py"), "--config", config, "--daemon-root", t.env.data], { stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
     for (const stream of [runner.stdout, runner.stderr]) stream.on("data", (b) => { output = (output + b).slice(-4096); });
     let service: ServicePreviewClient | null = null;

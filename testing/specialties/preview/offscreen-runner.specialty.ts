@@ -1,11 +1,21 @@
-import { spawn, spawnSync } from "node:child_process";
-import { cpSync, existsSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { cpSync, existsSync, readdirSync } from "node:fs";
 import { createServer } from "node:net";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ServicePreviewClient } from "@genehub/workbench/client";
 import { BlockedError, defineSpecialty } from "../../framework/public.ts";
 
+const echoServer = `import os, sys
+from aiohttp import web, WSMsgType
+async def ws(request):
+    socket = web.WebSocketResponse(); await socket.prepare(request)
+    async for message in socket:
+        if message.type == WSMsgType.TEXT: await socket.send_str(message.data)
+    return socket
+app = web.Application(); app.router.add_get("/health", lambda r: web.Response(text="ok")); app.router.add_get("/ws", ws)
+web.run_app(app, host="127.0.0.1", port=int(os.environ["PORT"]), print=None)
+`;
 // A process-only backend (no origin) is how an offscreen app such as a game is
 // started beside its signalling service. The viewer limit is what keeps a second
 // person from driving the same instance.
@@ -25,6 +35,7 @@ defineSpecialty(
     llm: { default: "none" },
     expectedDurationMs: 20000,
     timeoutMs: 120000,
+    requirements: [{ kind: "python", env: "GENEHUB_PREVIEW_MEDIA_PYTHON", minVersion: [3, 11], modules: ["aiohttp"] }],
     resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
     surfaces: ["daemon", "workbench", "service-preview"],
     productInterfaces: ["@genehub/workbench/client"],
@@ -32,14 +43,10 @@ defineSpecialty(
     requiredArtifacts: ["genehub-host-local", "genehub_guest.wasm"],
   },
   async (t) => {
+    const python = process.env.GENEHUB_PREVIEW_MEDIA_PYTHON;
+    if (!python) throw new BlockedError("GENEHUB_PREVIEW_MEDIA_PYTHON must point to Python 3.11+ with aiohttp");
     const example = join(t.env.workspace, "service-example");
-    for (const folder of ["node-adapter", "demo"]) cpSync(
-      join(t.openRoot, "apps/daemon/builtin-skills/genehub-preview/assets", folder),
-      join(example, folder), { recursive: true, filter: source => !source.split(/[\\/]/).includes("node_modules") },
-    );
-    const installed = spawnSync("npm", ["--prefix", join(example, "node-adapter"), "ci", "--ignore-scripts", "--no-audit", "--no-fund", "--prefer-offline"],
-      { encoding: "utf8", timeout: 30_000 });
-    if (installed.status !== 0) throw new BlockedError(`the copied preview example dependencies could not be installed (exit ${installed.status})`);
+    cpSync(join(t.openRoot, "apps/daemon/builtin-skills/genehub-preview/assets/python-adapter"), join(example, "python-adapter"), { recursive: true });
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
     const reservation = createServer();
     await new Promise<void>((resolve) => reservation.listen(0, "127.0.0.1", resolve));
@@ -50,23 +57,24 @@ defineSpecialty(
     const entry = join(t.env.workspace, "index.html"),
       config = join(t.env.workspace, "application.json"),
       marker = join(t.env.workspace, "app-process.pid"),
-      appScript = join(t.env.workspace, "app-process.mjs");
+      appScript = join(t.env.workspace, "app_process.py"), echoScript = join(t.env.workspace, "echo_backend.py");
     await writeFile(entry, "<!doctype html><title>Offscreen app</title>");
-    await writeFile(appScript, `import {writeFileSync} from "node:fs";writeFileSync(${JSON.stringify(marker)},String(process.pid));setInterval(()=>{},1000);`);
+    await writeFile(appScript, `import os, time\nopen(${JSON.stringify(marker)}, "w").write(str(os.getpid()))\ntime.sleep(3600)\n`);
+    await writeFile(echoScript, echoServer);
     await writeFile(config, JSON.stringify({
       entry: "index.html",
       backends: [
         {
-          command: [process.execPath, join(example, "demo/backend.mjs")],
+          command: [python, echoScript],
           origin: `http://127.0.0.1:${port}`,
-          env: { PREVIEW_DEMO_PORT: String(port) },
+          env: { PORT: String(port) },
           health: "/health",
           routes: [{ prefix: "/api/demo/", websocket: true, maxViewers: 1 }],
         },
-        { command: [process.execPath, appScript] },
+        { command: [python, appScript] },
       ],
     }));
-    const runner = spawn(process.execPath, [join(example, "node-adapter/run.mjs"), "--config", config, "--daemon-root", t.env.data], { stdio: ["ignore", "pipe", "pipe"] });
+    const runner = spawn(python, [join(example, "python-adapter/run.py"), "--config", config, "--daemon-root", t.env.data], { stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
     for (const stream of [runner.stdout, runner.stderr]) stream.on("data", (b) => { output = (output + b).slice(-4096); });
     let service: ServicePreviewClient | null = null;
@@ -112,6 +120,7 @@ defineSpecialty(
       await opened.client.call({ type: "process.serviceStop", payload: { workspaceId: opened.workspaceId, entryPath: `${opened.rootHandle}/index.html`, runId: active.descriptor.runId } });
       await t.tools.waitUntil(() => runner.exitCode !== null, 10000);
       await t.tools.waitUntil(() => { try { process.kill(appPid, 0); return false; } catch { return true; } }, 10000);
+      t.assertions.assert(readdirSync(join(t.env.data, "service-previews")).length === 0, "a normal stop left the registration behind");
     } finally {
       (service as ServicePreviewClient | null)?.close();
       runner.kill("SIGTERM");

@@ -1,8 +1,8 @@
 # 离屏应用的远程预览与游玩：沿用现有服务运行器的最小方案
 
-- 状态：第 1 期已实现并在 Windows RTX 4090 上用真实 Preview 验证（见第 10 节）；第 2–4 期待做
+- 状态：第 1 期已实现并在 Windows RTX 4090 上用真实 Preview 验证（见第 10 节；运行器为 Python 版）；第 2–4 期待做
 - 日期：2026-10-30
-- 适用范围：GeneHub Service Preview、`genehub-preview` Skill、扩展现有 `node-adapter` 服务运行器；首批适配 Unreal Engine 5.4.4（游玩）与 Blender（Agent 驱动的预览），之后可接入任何支持离屏渲染的软件
+- 适用范围：GeneHub Service Preview、`genehub-preview` Skill、在内置 Python 适配器旁新增 `run.py` 服务运行器；首批适配 Unreal Engine 5.4.4（游玩）与 Blender（Agent 驱动的预览），之后可接入任何支持离屏渲染的软件
 - 事实基线：`main` 的 `baae72ae`（含远程桌面 Capture）；UE 实验在 PC-4090-1（RTX 4090 D、驱动 591.74、Windows 11、Edge 142 无头）上完成
 - 关联：[远程桌面提案](remote-interactive-preview-proposal.md)（桌面抓取路径，本提案不改动它）
 
@@ -10,7 +10,7 @@
 
 **问题。** GeneHub 的用户是游戏和重度创作从业者，Agent 会不停改工程或场景。他们要随时看、玩 Agent 刚改完的结果，而不是看截图。能离屏渲染的软件很多（UE、Unity、Blender，以后还有更多），不应该每接一个就重写一遍启动、授权、清理。
 
-**先说结论：不需要新的平台组件、新的清单格式或新的权限模型。** 现有 `genehub-preview` 里的 [`node-adapter`](../apps/daemon/builtin-skills/genehub-preview/assets/node-adapter/run.mjs)（549 行）已经是一个通用的服务运行器：按 argv 启动一个或多个后端、检查端口、等健康就绪、整棵进程树终止、登记到 Service Preview、代理 HTTP 和 WebSocket。它的配置（`application.json`）就是清单。Pixel Streaming 的信令服务（HTTP + WebSocket）本身就是这样一个后端。
+**先说结论：不需要新的平台组件、新的清单格式或新的权限模型。** `genehub-preview` 里已有的 Node 示例运行器（`node-adapter/run.mjs`，549 行）证明了这类运行器该有的形态；但产品内置的是 Python 运行环境，不是 Node，所以落地为 Python 版 [`python-adapter/run.py`](../apps/daemon/builtin-skills/genehub-preview/assets/python-adapter/run.py)（沿用 `app.py` 的登记与认证协议，约 300 行）。它是一个通用的服务运行器：按 argv 启动一个或多个后端、检查端口、等健康就绪、整棵进程树终止、登记到 Service Preview、代理 HTTP 和 WebSocket。它的配置（`application.json`）就是清单。Pixel Streaming 的信令服务（HTTP + WebSocket）本身就是这样一个后端。
 
 软件之间真正的差别只有两处，都已经是现有扩展点：
 
@@ -90,7 +90,7 @@ Pixel Streaming 的基本概念：游戏进程是"串流端"，通过一个**信
 
 ### 5.1 沿用什么
 
-`node-adapter/run.mjs` 已有：argv 启动并整棵终止进程树（Windows 用 `taskkill`）、启动前探测端口占用、`health` 就绪轮询（可调超时，上限 300 秒）、`routes` 声明 HTTP/WS 前缀、对 WS 路由的代理（保持路径）、按 runId 登记与退出清理。Pixel Streaming 的信令服务可以直接作为一个 `backends` 项。
+Node 示例（`node-adapter/run.mjs`，未改动）已有、`run.py` 照搬的行为：argv 启动并整棵终止进程树（Windows 用 `taskkill`）、启动前探测端口占用、`health` 就绪轮询（可调超时，上限 300 秒）、`routes` 声明 HTTP/WS 前缀、对 WS 路由的代理（保持路径）、按 runId 登记与退出清理。Pixel Streaming 的信令服务可以直接作为一个 `backends` 项。
 
 ### 5.2 需要新增或调整的（三处代码/资产，加文档）
 
@@ -180,7 +180,7 @@ Capture 有控制租约、纪元号和独立的输入守护进程，是因为它
 | 1 | §5.2 的四处改动 + UE 示例（Epic 前端固定版本）+ Blender 示例（后端脚本 + 帧查看器）+ Skill 文档 + 共用验收脚本 | 本机/局域网内 Agent 启动 UE 或 Blender，浏览器观看并操作 | 跨网络、手柄、锁屏承诺 |
 | 2 | 平台 ICE/TURN 接入 UE 路径、强制 TURN 实测 | UE 跨网络可用 | 30 分钟稳定性承诺 |
 | 3 | 释放与清理全路径（运行器被杀、浏览器崩溃、断网）、手柄、有声游戏、两台机器各一次锁屏实测 | 可作为 Demo 流程常规使用；锁屏能力按实测写明 | — |
-| 4 | 第三个软件（Unity 或另一个 DCC）接入验证；判断是否需要把 `node-adapter` 升级为产品组件 | Agent 能自行接入新软件 | — |
+| 4 | 第三个软件（Unity 或另一个 DCC）接入验证；判断是否需要把 `run.py` 升级为产品组件 | Agent 能自行接入新软件 | — |
 
 每期先写验收再实现；没有测量依据时不承诺工期。
 
@@ -205,11 +205,11 @@ Agent 工作流验收看最终环境状态（实例在跑、行为变了、进�
 
 ## 8. 取舍、兼容与未决问题
 
-**取舍。** 不新建运行框架：现有 `node-adapter` 已覆盖进程、就绪、代理和登记，新建只会产生第二份生命周期代码。不引入"适配器种类"：UE 与 Blender 的差别只在后端进程和页面，不需要平台理解它们。不做租约：理由见 §5.3。代价是 UE 路径没有只看模式。不用 Capture 做游戏和后台可渲染的 DCC：它依赖解锁桌面并向真实桌面注入输入。
+**取舍。** 不新建运行框架：已有运行器形态已覆盖进程、就绪、代理和登记，新建框架只会产生第二份生命周期代码。不引入"适配器种类"：UE 与 Blender 的差别只在后端进程和页面，不需要平台理解它们。不做租约：理由见 §5.3。代价是 UE 路径没有只看模式。不用 Capture 做游戏和后台可渲染的 DCC：它依赖解锁桌面并向真实桌面注入输入。
 
-**兼容。** Service Preview v1、内置 H5 模式、Capture 与现有 `node-adapter` 配置不变；新增字段都是可选。
+**兼容。** Service Preview v1、内置 H5 模式、Capture、`app.py` 与 Node 示例的配置都不变；新增字段都是可选。
 
-**风险。** Pixel Streaming 与 Pixel Streaming 2 随 UE 版本变化；Epic 前端依赖的构建需要固定；GPU 上渲染与编码共载未测；UE 冷启动约 4 分钟需要预热；`node-adapter` 是示例级代码，升级为稳定组件前要补测试。
+**风险。** Pixel Streaming 与 Pixel Streaming 2 随 UE 版本变化；Epic 前端依赖的构建需要固定；GPU 上渲染与编码共载未测；UE 冷启动约 4 分钟需要预热；`run.py` 是示例级代码，升级为稳定组件前要补测试；UE 的 Epic 信令服务是 Node 程序，用 UE 示例的机器需要 Node（Epic 的 setup 自带），用 Python 重写信令服务是后续可选项。
 
 **未决问题**
 1. 接受"没有只看模式"吗？若需要，最简单的做法也是页面层的约定，不是平台强制。
@@ -230,7 +230,7 @@ Agent 工作流验收看最终环境状态（实例在跑、行为变了、进�
 
 | 改动 | 位置 |
 | --- | --- |
-| 运行器：后端可无 `origin`；WS 路由 `maxViewers`（1–16），超限得到 close 1013 `viewer_limit` | `apps/daemon/builtin-skills/genehub-preview/assets/node-adapter/run.mjs` |
+| 运行器（Python，内置环境）：多后端启停与进程树清理、后端可无 `origin`、WS 路由 `maxViewers`（1–16，超限得到 close 1013 `viewer_limit`） | `apps/daemon/builtin-skills/genehub-preview/assets/python-adapter/run.py` |
 | 新页面模式 `pixel-streaming/1`：只需一条信令 WS 路由；沙箱允许指针锁定与自动播放；页面得到 `describe()/ice()`；工具栏不出现 Capture 的接管开关 | `packages/proto/src/service_preview.rs`、`packages/workbench/src/preview/serviceClient.ts`、`AssetPreviewPage.tsx` |
 | UE 5.4 示例（固定版本的 Epic 前端库 157 KB + 页面 + 配置） | `assets/unreal/` |
 | Blender 后台渲染示例（本机 HTTP + JPEG 页面） | `assets/blender/` |
@@ -253,3 +253,5 @@ Agent 工作流验收看最终环境状态（实例在跑、行为变了、进�
 | 进程清理 | 运行器结束后 UE、信令、Blender 均不在，端口释放 |
 
 **未验证，不能外推**：锁屏下的 UE 与 Windows Blender、跨网络与强制中继（页面已把平台 ICE 换入，但本次平台 ICE 为空，只测了本机回环）、手柄、有声游戏（模板工程无声）、30 分钟稳定性、输入到画面延迟、Safari/手机、Mac 上的 UE、真实滚轮（无头驱动的滚轮事件到不了沙箱 iframe，只验证了页面的滚轮处理函数）、撤销之外的释放路径（运行器被杀、浏览器崩溃、断网）。UE 冷启动约 4 分钟（第一次，来自此前的 spike），运行器 `readyTimeoutMs` 上限 300 秒只覆盖信令服务，UE 就绪由页面等待（页面会提示"等待游戏启动"并持续重试约 5 分钟）。
+
+**Python 运行器复验（2026-10-31，同一台 4090）。** 产品内置的是 Python 环境而非 Node，运行器因此从 Node 示例迁为 `python-adapter/run.py`（Node 示例原样保留）。同一套真机脚本在 Python 运行器上重跑：UE 允许服务后约 21 秒首帧、指针锁定、按住 W 画面变化 6.9（空闲 0.43）、锁定鼠标帧差 9.2、第二个观看者被 `viewer_limit` 拒绝、撤销后 8 秒内无新帧、重新允许后恢复，UE 与 Blender 进程均无残留；Blender 首帧 1.5 秒、拖动与滚轮处理函数改变画面、撤销后不可达、重新允许后恢复。Linux 专项（`offscreen-runner-viewer-limit`、`engine-streaming-page-mode`）在 Python 运行器上通过，前者新增断言：正常停止会删除登记并结束全部后端进程。UE 示例的 Epic 信令服务仍是 Node 程序（Epic 的 setup 自带 Node），这是唯一仍依赖 Node 的部分。

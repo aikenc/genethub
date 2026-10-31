@@ -146,44 +146,36 @@ function localBase(raw) {
   return url;
 }
 for (const backend of spec.backends) {
-  // A backend without an origin (for example a game process that only talks to
-  // another backend) is started, watched and stopped, but serves no routes.
-  const base = backend.origin ? localBase(backend.origin) : null;
+  const base = localBase(backend.origin);
   if (
     !Array.isArray(backend.command) ||
     !backend.command.length ||
     !backend.command.every((x) => typeof x === "string")
   )
     throw new Error("backend command must be argv");
-  if (!Array.isArray(backend.routes ?? []) || (!base && backend.routes?.length))
-    throw new Error("backend routes require an origin");
-  for (const route of backend.routes ?? []) {
+  if (!Array.isArray(backend.routes))
+    throw new Error("backend routes required");
+  for (const route of backend.routes) {
     if (
       !/^\/api\/[a-z0-9/-]+\/$/.test(route.prefix) ||
       routes.some((x) => x.prefix === route.prefix)
     )
       throw new Error("unique /api/.../ prefixes ending in / required");
-    const maxViewers = route.maxViewers ?? 0;
-    if (!Number.isInteger(maxViewers) || maxViewers < 0 || maxViewers > 16)
-      throw new Error("maxViewers must be an integer from 1 to 16");
     routes.push({
       prefix: route.prefix,
       base: base.href,
       websocket: route.websocket === true,
-      maxViewers,
-      viewers: 0,
     });
   }
   // Refuse a previously occupied origin before launching. Application processes
   // are trusted to obey this manifest; this is not an OS sandbox for backend code.
-  if (base)
-    await new Promise((resolve_, reject) => {
-      const probe = createTcpServer();
-      probe.once("error", reject);
-      probe.listen(Number(base.port || 80), "127.0.0.1", () =>
-        probe.close((error) => (error ? reject(error) : resolve_())),
-      );
-    });
+  await new Promise((resolve_, reject) => {
+    const probe = createTcpServer();
+    probe.once("error", reject);
+    probe.listen(Number(base.port || 80), "127.0.0.1", () =>
+      probe.close((error) => (error ? reject(error) : resolve_())),
+    );
+  });
   // The application must stay in the foreground and bind only its configured loopback port.
   const child = spawn(backend.command[0], backend.command.slice(1), {
     cwd: resolve(dirname(configPath), backend.cwd ?? "."),
@@ -196,7 +188,7 @@ for (const backend of spec.backends) {
   child.once("exit", fail);
 }
 // Readiness is separate from process existence. Never follow an upstream redirect.
-for (const backend of spec.backends.filter((x) => x.origin)) {
+for (const backend of spec.backends) {
   const health = new URL(backend.health ?? "/", localBase(backend.origin));
   if (health.origin !== new URL(backend.origin).origin)
     throw new Error("health must remain on backend origin");
@@ -275,7 +267,6 @@ wss.on("connection", (socket, request) => {
   }
   peers.add(socket);
   let upstream = null,
-    counted = null,
     request_ = null,
     responded = false,
     bodyBytes = 0;
@@ -290,8 +281,6 @@ wss.on("connection", (socket, request) => {
     clearTimeout(deadline);
     clearTimeout(lifetime);
     peers.delete(socket);
-    if (counted) counted.viewers--;
-    counted = null;
     upstream?.terminate();
     request_?.destroy();
     ack?.reject(new Error("closed"));
@@ -370,17 +359,6 @@ wss.on("connection", (socket, request) => {
           const { route, url } = safePath(message?.path);
           if (message.kind === "ws") {
             if (!route.websocket) throw new Error("WS route not allowed");
-            // The limit is checked and taken in the same tick, so two viewers
-            // cannot both pass it. A refused viewer gets a close it can read.
-            if (route.maxViewers && route.viewers >= route.maxViewers) {
-              await deliver(
-                packet({ kind: "close", code: 1013, reason: "viewer_limit" }),
-              );
-              socket.close();
-              return;
-            }
-            route.viewers++;
-            counted = route;
             url.protocol = "ws:";
             upstream = new WebSocket(url, {
               maxPayload: MAX_PACKET - 1,
