@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { cpSync } from "node:fs";
 import { createServer } from "node:net";
 import { writeFile } from "node:fs/promises";
@@ -21,6 +21,7 @@ defineSpecialty(
     ],
     tags: ["network-risk-v2", "core", "service-preview"],
     llm: { default: "none" },
+    requirements: [{ kind: "python", env: "GENEHUB_PREVIEW_MEDIA_PYTHON", minVersion: [3, 11], modules: ["aiohttp"] }],
     expectedDurationMs: 20000,
     timeoutMs: 120000,
     resources: {
@@ -37,16 +38,14 @@ defineSpecialty(
     requiredArtifacts: ["genehub-host-local", "genehub_guest.wasm"],
   },
   async (t) => {
-    // Exercise the shipped example as documented: copy it into the user's
-    // project and install its pinned dependencies there, never in product source.
+    // Exercise the shipped example as documented: copy it into the user's project.
+    const python = process.env.GENEHUB_PREVIEW_MEDIA_PYTHON;
+    if (!python) throw new BlockedError("GENEHUB_PREVIEW_MEDIA_PYTHON must point to Python 3.11+ with aiohttp");
     const example = join(t.env.workspace, "service-example");
-    for (const folder of ["node-adapter", "demo"]) cpSync(
+    for (const folder of ["python-adapter", "demo"]) cpSync(
       join(t.openRoot, "apps/daemon/builtin-skills/genehub-preview/assets", folder),
-      join(example, folder), { recursive: true, filter: source => !source.split(/[\\/]/).includes("node_modules") },
+      join(example, folder), { recursive: true },
     );
-    const installed = spawnSync("npm", ["--prefix", join(example, "node-adapter"), "ci", "--ignore-scripts", "--no-audit", "--no-fund", "--prefer-offline"],
-      { encoding: "utf8", timeout: 30_000 });
-    if (installed.status !== 0) throw new BlockedError(`the copied preview example dependencies could not be installed (exit ${installed.status}); its package-lock.json and npm are required`);
     const opened = await t.flows.main.openWorkspace({
       openRoot: t.openRoot,
       lease: t.env,
@@ -68,10 +67,7 @@ defineSpecialty(
         entry: "index.html",
         backends: [
           {
-            command: [
-              process.execPath,
-              join(example, "demo/backend.mjs"),
-            ],
+            command: ["python", join(example, "demo/backend.py")],
             origin: `http://127.0.0.1:${port}`,
             env: { PREVIEW_DEMO_PORT: String(port) },
             health: "/health",
@@ -81,9 +77,9 @@ defineSpecialty(
       }),
     );
     const runner = spawn(
-      process.execPath,
+      python,
       [
-        join(example, "node-adapter/run.mjs"),
+        join(example, "python-adapter/run.py"),
         "--config",
         config,
         "--daemon-root",

@@ -47,7 +47,7 @@ frontmatter 必须包含与目录名完全相同的 `name` 和非空 `descriptio
 `genehub-client-debug`、`genehub-speech-runtime` 已不再是产品 Skill。`is_catalog_noise_title` 仍保留其中曾被模型当作会话标题的折叠形式，
 因为已持久化的会话可能用它们作标题。
 
-[Preview 的实时服务参考](../apps/daemon/builtin-skills/genehub-preview/references/live-service.md) 以中文随包携带创作过程接入、启动、媒体架构与契约、数字人、UE 参考文档，可在没有源码的安装环境中阅读。Skill 携带可复制的 Python 直接接入与可选 Node 多后端示例，不携带依赖、模型或 UE 环境；启动参考无需获取产品源码。GeneHub 本体不依赖示例的语言运行时。当前媒体面板没有 UE 输入协议，参考必须区分远程观看、交互云游玩和不同 PIE 模式，不能把适配引导宣传为已实现的 UE 功能。
+[Preview 的实时服务参考](../apps/daemon/builtin-skills/genehub-preview/references/live-service.md) 以中文随包携带创作过程接入、启动、媒体架构与契约、数字人、UE 参考文档，可在没有源码的安装环境中阅读。Skill 携带可复制的 Python 直接接入示例与 Python 多后端运行器（含离屏应用 UE/Blender 示例），不携带依赖、模型或 UE 环境；启动参考无需获取产品源码。GeneHub 本体不依赖示例的语言运行时；示例用平台 Python 建 venv 后安装 aiohttp。UE 示例走引擎自带串流（`pixel-streaming/1` 页面模式），旧媒体面板仍没有 UE 输入协议；参考必须区分远程观看、交互云游玩和不同 PIE 模式。
 
 ## 构建与分发
 

@@ -2,10 +2,10 @@
 
 ## 选择接入方式
 
-GeneHub 本体不要求 Node 或 Python。外部程序可按[语言无关接入协议](registration-contract.md)直接登记；下面两个目录只是随 Skill 携带的可选源码示例。先复制到用户工作区，**不要在内置 Skill 目录安装依赖或写运行产物**，也不需要下载 GeneHub 工程。
+GeneHub 本体不要求任何外部运行时。外部程序可按[语言无关接入协议](registration-contract.md)直接登记；下面的目录只是随 Skill 携带的可选 Python 源码示例（内置环境就是 Python）。先复制到用户工作区，**不要在内置 Skill 目录安装依赖或写运行产物**，也不需要下载 GeneHub 工程。
 
-- [Python 直接接入示例](../assets/python-adapter/app.py)：单程序实现登记、认证、HTTP/WS 和可选视频文件的 WebRTC 播放，无 Node 依赖。需要 Python 3.11+；基础依赖为 aiohttp。
-- [Node 多后端适配示例](../assets/node-adapter/run.mjs)：可选启动器，适合现有 Node 工作流，读取 application.json，前台管理多个后端。需要 Node 22+；其 ws 依赖仅属于该示例。
+- [Python 直接接入示例](../assets/python-adapter/app.py)：单程序实现登记、认证、HTTP/WS 和可选视频文件的 WebRTC 播放。需要 Python 3.11+；基础依赖为 aiohttp。
+- [Python 多后端运行器](../assets/python-adapter/run.py)：读取 application.json，前台管理多个后端（可无 HTTP 端口）、WebSocket 路由 `maxViewers`，用法见[离屏应用](offscreen-apps.md)。同样只需 aiohttp。
 - [入口 HTML](../assets/demo/index.html)：复制到工作区，演示 HTTP、流式进度与 WS。真实程序替换相应业务输出。
 
 用系统提供的 `GENEHUB_CLI` 取目标 Channel 的数据目录，不要猜路径或子命令：
@@ -32,18 +32,17 @@ Windows 使用相应的 `.venv/Scripts/python.exe`。上述路径是示意，按
 
 将示例 `http_response` 与媒体输出替换成实际内容软件的插件/API/画面。测试回声、测试图案不等于 DCC 或游戏适配已验收。
 
-## 可选 Node 路径
+## 多后端运行器
 
-将整个 `assets/node-adapter/` 与 `assets/demo/` 并排复制到工作区，保留相邻目录关系。两者现在是可独立复制的示例，不引用 GeneHub 源码树。
+将整个 `assets/python-adapter/` 与 `assets/demo/` 并排复制到工作区，保留相邻目录关系。
 
 ```sh
-npm --prefix node-adapter ci
-node node-adapter/run.mjs --config demo/application.json --daemon-root /实际目标数据目录
+python python-adapter/run.py --config demo/application.json --daemon-root /实际目标数据目录
 ```
 
-根据实际环境调整配置中的后端命令与端口。命令是 argv 数组，不是 shell 字符串；后端要前台运行，已有端口会拒启。该示例停止时清理自己启动的后端；不会接管用户原本打开的软件。
+根据实际环境调整配置中的后端命令与端口。命令是 argv 数组，不是 shell 字符串；以 `python` 开头的命令使用运行器自己的解释器；后端要前台运行，已有端口会拒启。运行器停止时清理自己启动的后端；不会接管用户原本打开的软件。
 
-`demo/media-application.json` 可用于 Python/aiortc 测试图案，配置解释器为安装了 `demo/requirements.txt` 的实际环境。此路径只是可选多后端组合，不能要求所有服务采用它。
+`demo/media-application.json` 可用于 Python/aiortc 测试图案，需要安装 `demo/requirements.txt`。此路径只是可选多后端组合，不能要求所有服务采用它。
 
 ## 找到入口并体验
 
@@ -53,7 +52,7 @@ node node-adapter/run.mjs --config demo/application.json --daemon-root /实际�
 4. 预览打开后，在可信工具栏点“允许本次预览访问登记服务”。HTTP/WS 请求由桥转发，音视频使用可信媒体面板；需要中继时由用户勾选允许媒体中继。
 5. 检查真实画面、进度或业务结果；记录实际直连/中继路径。只有健康接口或 SDP 成功不能宣称播放成功。
 
-文件访问权限不等于 Services 权限；能看预览也不自动拥有结束应用的权限。运行重启后使用“重新检查服务”，重新授权并连接新运行。
+仅展示的预览分享不能访问登记服务，也不能结束应用。运行重启后使用“重新检查服务”，重新授权并连接新运行。
 
 ## 退出与排障
 

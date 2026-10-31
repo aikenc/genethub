@@ -14,6 +14,7 @@ description: 编写、分享和诊断 GeneHub Asset Preview 里的预览。静�
 | 阶段文件、相册、静态页、H5 游戏、看板；资源都是文件，不需要后端 | [static.md](references/static.md) |
 | 需要本机后端、实时任务状态、麦克风、原生 WebRTC、引擎/数字人画面、操作回传 | [live-service.md](references/live-service.md) |
 | 通过独立 Capture 观看/操作桌面，定制内置 H5 | [remote-desktop.md](references/remote-desktop.md)；同时遵守 live-service 的登记约束 |
+| 游戏（UE 等）云游玩、Blender 等离屏渲染的实时预览，不依赖桌面 | [offscreen-apps.md](references/offscreen-apps.md) |
 
 拿不准时先做静态入口，保证有东西能点开；只有静态确实不够，才按 live-service.md 登记服务。静态入口始终保留，
 动态能力通过登记的服务和可信面板提供。

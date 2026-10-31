@@ -8,7 +8,7 @@ UE 是[创作过程接入](creative-workflows.md)的一类软件，不是 Servic
 | 远程操作游戏 | 观看之外，还要验证键鼠/触摸/手柄、焦点和断连处理 |
 | 编辑器/PIE 中预览或游玩 | 明确 UE 版本和运行模式，实测对应编辑器/视口，再验收观看/操作 |
 
-当前 `ServiceMediaPanel` 只协商音视频和可选麦克风，没有 Pixel Streaming DataChannel 输入、指针锁定/手柄控制或内置 UE 适配器。GeneHub 数据面 DataChannel 是另一种传输，不等于 UE 输入。收到视频不能标成云游玩。
+要**玩**未打包的 UE 5.4 游戏，按[离屏应用](offscreen-apps.md)：Pixel Streaming 加 `assets/unreal/`，页面自带 WebRTC 与输入，沙箱允许指针锁定。下面是更通用的背景与版本依据。旧的 `ServiceMediaPanel` 仍只协商音视频，没有 UE 输入；收到视频不能标成云游玩。GeneHub 数据面 DataChannel 是另一种传输，不等于 UE 输入。
 
 ## 版本依据
 

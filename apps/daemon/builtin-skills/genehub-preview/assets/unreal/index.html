@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>UE 串流</title>
+<style>html,body{margin:0;height:100%;background:#000;overflow:hidden}#stream{width:100vw;height:100vh}
+#bar{position:fixed;top:8px;left:8px;padding:4px 10px;border-radius:6px;background:#000a;color:#fff;font:13px system-ui}</style>
+<div id="stream"></div><div id="bar">连接中…</div>
+<script type="module">
+import { Config, PixelStreaming, Flags, NumericParameters, TextParameters } from './pixelstreaming.esm.js';
+const bar = document.getElementById('bar');
+const say = text => { bar.textContent = text; };
+// The platform decides the ICE servers (STUN, and relay when the viewer allows it). Both ends
+// use them: they replace what the signalling server's config names for this page, and the
+// first message on the signalling socket hands them to signalling.py, which passes them to
+// Unreal before the game creates its side of the connection. Without that, a game behind
+// another network's NAT only offers LAN addresses and the picture never arrives.
+let iceServers = null;
+try { ({ iceServers } = await window.genehubServicePreview.ice()); }
+catch { say('请先在预览信息中允许本次登记服务'); }
+// Viewers on another machine (including the same company network, whose tunnel blocks direct
+// paths) only get a picture through the platform relay, which the viewer grants in the toolbar.
+// The library reports "connected" before media flows, so the peer connection's own state decides.
+const relayGranted = !!iceServers?.some(server => server.username);
+const relayHint = '画面连不上：请在预览工具栏勾选“允许媒体中继”后重新启用本次登记服务';
+let hintTimer = 0;
+const peerState = pc => {
+  if (pc.connectionState === 'connected') { clearTimeout(hintTimer); say('已连接。点击画面开始，Esc 退出鼠标锁定，点击画面可开启声音'); }
+  else if (pc.connectionState === 'failed') { clearTimeout(hintTimer); say(relayGranted ? '连接失败，请重新启用本次登记服务' : relayHint); }
+};
+const Native = window.RTCPeerConnection;
+window.RTCPeerConnection = class extends Native {
+  constructor(cfg = {}) {
+    super(iceServers?.length ? { ...cfg, iceServers } : cfg);
+    this.addEventListener('connectionstatechange', () => peerState(this));
+    clearTimeout(hintTimer);
+    if (!relayGranted) hintTimer = setTimeout(() => say(relayHint), 12000);
+  }
+};
+if (iceServers?.length) {
+  const Socket = window.WebSocket;
+  window.WebSocket = class extends Socket {
+    constructor(...args) { super(...args); this.addEventListener('open', () => this.send(JSON.stringify({ type: 'iceServers', iceServers }))); }
+  };
+}
+// Locked mouse is what a third-person game expects; the page sandbox allows it. The signalling
+// address is one relative path through the preview bridge; the runner forwards it to the signalling
+// server. The library only connects when asked: the stock UI layer calls this itself.
+const config = new Config({ useUrlParams: false, initialSettings: {
+  [TextParameters.SignallingServerUrl]: 'wss://preview.invalid/api/ue/ws',
+  // While the game is still starting the library asks for streamers again every few seconds.
+  [NumericParameters.MaxReconnectAttempts]: 100,
+  [Flags.AutoPlayVideo]: true, [Flags.StartVideoMuted]: true,
+  [Flags.HoveringMouseMode]: false, [Flags.WaitForStreamer]: true, [Flags.SuppressBrowserKeys]: true,
+} });
+const stream = new PixelStreaming(config, { videoElementParent: document.getElementById('stream') });
+stream.addEventListener('streamerListMessage', e => { if (!e.data?.messageStreamerList?.ids?.length) say('等待游戏启动（首次可能需要几分钟）…'); });
+stream.addEventListener('webRtcConnecting', () => say('正在连接游戏…'));
+stream.addEventListener('webRtcFailed', () => { clearTimeout(hintTimer); say(relayGranted ? '连接失败，请重新启用本次登记服务' : relayHint); });
+stream.addEventListener('webRtcDisconnected', () => say('连接已断开；若是撤销或停止，请重新启用本次登记服务'));
+stream.addEventListener('playStreamRejected', () => say('点击画面开始播放'));
+stream.connect();
+document.getElementById('stream').addEventListener('click', () => {
+  const video = document.querySelector('video'); if (video) video.muted = false;
+});
+</script></html>
