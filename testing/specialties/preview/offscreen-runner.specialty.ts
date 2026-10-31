@@ -130,3 +130,76 @@ defineSpecialty(
     }
   },
 );
+
+// The UE 5.4 signalling server shipped for the runner (Python, no Node): a stand-in streamer
+// and player speak the real message flow.
+defineSpecialty(
+  {
+    id: "specialty.preview.pixel-streaming-signalling",
+    title: "The shipped Python signalling server pairs a streamer with a player and relays the WebRTC handshake",
+    oracle:
+      "the streamer gets config+identify and registers; a player lists and subscribes; the streamer sees playerConnected with the player id; offer/answer/iceCandidate cross in both directions with the player id added toward the streamer and removed toward the player; losing the streamer closes the player",
+    catches: [
+      "the signalling server stops speaking the UE 5.4 message flow",
+      "player ids leak to the browser or are missing toward Unreal",
+      "a lost streamer leaves players attached",
+    ],
+    tags: ["network-risk-v2", "service-preview"],
+    llm: { default: "none" },
+    requirements: [{ kind: "python", env: "GENEHUB_PREVIEW_MEDIA_PYTHON", minVersion: [3, 11], modules: ["aiohttp"] }],
+    expectedDurationMs: 10000,
+    timeoutMs: 60000,
+    resources: { environments: 1, cpu: 1, memoryMb: 256, io: 1, browser: 0, pool: "standard" },
+    surfaces: ["os-process", "service-preview"],
+  },
+  async (t) => {
+    const python = process.env.GENEHUB_PREVIEW_MEDIA_PYTHON;
+    if (!python) throw new BlockedError("GENEHUB_PREVIEW_MEDIA_PYTHON must point to Python 3.11+ with aiohttp");
+    const ports: number[] = [];
+    for (let i = 0; i < 2; i++) {
+      const reservation = createServer();
+      await new Promise<void>((resolve) => reservation.listen(0, "127.0.0.1", resolve));
+      ports.push((reservation.address() as { port: number }).port);
+      await new Promise<void>((resolve) => reservation.close(() => resolve()));
+    }
+    const server = spawn(python, [join(t.openRoot, "apps/daemon/builtin-skills/genehub-preview/assets/unreal/signalling.py"), "--http-port", String(ports[0]), "--streamer-port", String(ports[1])], { stdio: "ignore" });
+    const connect = async (url: string) => {
+      const inbox: Record<string, unknown>[] = [];
+      const socket = new WebSocket(url);
+      socket.onmessage = (event) => inbox.push(JSON.parse(String(event.data)));
+      const closed = new Promise<number>((resolve) => { socket.onclose = (event) => resolve(event.code); });
+      await t.tools.waitUntil(async () => socket.readyState === WebSocket.OPEN, 10000);
+      const next = async (type: string) => {
+        await t.tools.waitUntil(async () => inbox.some((m) => m.type === type), 5000);
+        return inbox.splice(inbox.findIndex((m) => m.type === type), 1)[0]!;
+      };
+      return { socket, next, closed };
+    };
+    try {
+      await t.tools.waitUntil(async () => (await fetch(`http://127.0.0.1:${ports[0]}/`).catch(() => null))?.ok === true, 10000);
+      const streamer = await connect(`ws://127.0.0.1:${ports[1]}`);
+      await streamer.next("config");
+      await streamer.next("identify");
+      streamer.socket.send(JSON.stringify({ type: "endpointId", id: "DefaultStreamer" }));
+      const player = await connect(`ws://127.0.0.1:${ports[0]}/ws`);
+      await player.next("config");
+      player.socket.send(JSON.stringify({ type: "listStreamers" }));
+      t.assertions.assert(JSON.stringify((await player.next("streamerList")).ids) === '["DefaultStreamer"]', "the registered streamer was not listed");
+      player.socket.send(JSON.stringify({ type: "subscribe", streamerId: "DefaultStreamer" }));
+      const connected = await streamer.next("playerConnected");
+      t.assertions.assert(typeof connected.playerId === "string" && connected.sendOffer === true, `unexpected playerConnected: ${JSON.stringify(connected)}`);
+      streamer.socket.send(JSON.stringify({ type: "offer", playerId: connected.playerId, sdp: "v=0" }));
+      const offer = await player.next("offer");
+      t.assertions.assert(offer.sdp === "v=0" && !("playerId" in offer), "the offer reached the player with a player id or without its body");
+      player.socket.send(JSON.stringify({ type: "answer", sdp: "v=1" }));
+      const answer = await streamer.next("answer");
+      t.assertions.assert(answer.sdp === "v=1" && answer.playerId === connected.playerId, "the answer did not reach Unreal tagged with the player id");
+      player.socket.send(JSON.stringify({ type: "iceCandidate", candidate: { candidate: "c" } }));
+      t.assertions.assert((await streamer.next("iceCandidate")).playerId === connected.playerId, "the ICE candidate was not tagged with the player id");
+      streamer.socket.close();
+      await Promise.race([player.closed, t.tools.waitUntil(async () => false, 5000).then(() => Promise.reject(new Error("the player stayed attached after the streamer was lost")))]);
+    } finally {
+      server.kill("SIGTERM");
+    }
+  },
+);

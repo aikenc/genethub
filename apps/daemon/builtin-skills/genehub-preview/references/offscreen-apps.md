@@ -17,7 +17,7 @@
 
 用于要**玩**的游戏。画面和输入走引擎自己的 WebRTC，运行器只转发信令。
 
-1. 取 Epic 的 `PixelStreamingInfrastructure`（分支 `UE5.4`），按它的 `setup` 安装 `SignallingWebServer`。**这是 Epic 的 Node 程序**，机器上需要 Node（Epic 的 setup 会自带一份）；运行器本身是 Python。
+1. 信令服务用随示例带的 `assets/unreal/signalling.py`（Python，UE 5.4 协议，只依赖 aiohttp），**不需要 Node，也不需要下载 Epic 的 `PixelStreamingInfrastructure`**。`application.json` 里的 `python` 命令表示运行器自己的解释器。
 2. 工程启用 `PixelStreaming` 插件（`.uproject` 的 `Plugins`）。
 3. 复制 `assets/unreal/` 到工作区，改 `application.json` 里三处路径：信令目录、`UnrealEditor.exe`、工程与地图。
 4. 页面入口 `index.html` 与 `pixelstreaming.esm.js` 放在工作区入口目录。

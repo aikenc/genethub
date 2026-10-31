@@ -11,3 +11,5 @@ SHA-256: `6f3e5cdfe0abe97428b17beb176bb049246c856313b9b8a5ac57ec6a9b990db6`.
 
 Use it with the matching engine only (UE 5.4). For other versions rebuild from that
 engine's branch.
+
+`signalling.py` is the signalling server (UE 5.4 message flow, Python + aiohttp), so running the example needs no Node. Node/npm were only used once to build `pixelstreaming.esm.js`; that file is a prebuilt browser module.

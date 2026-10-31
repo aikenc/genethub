@@ -110,7 +110,7 @@ Node 示例（`node-adapter/run.mjs`，未改动）已有、`run.py` 照搬的�
   "entry": "ue-client/index.html",
   "readyTimeoutMs": 300000,
   "backends": [
-    {"origin": "http://127.0.0.1:18081", "command": ["node", "cirrus", "--HttpPort=18081", "--StreamerPort=18888"],
+    {"origin": "http://127.0.0.1:18081", "command": ["python", "signalling.py", "--http-port", "18081", "--streamer-port", "18888"],
      "health": "/", "routes": [{"prefix": "/api/ue/", "websocket": true, "maxViewers": 1}]},
     {"command": ["{engine}/Engine/Binaries/Win64/UnrealEditor.exe", "{project}", "{map}", "-game", "-RenderOffScreen",
                  "-PixelStreamingURL=ws://127.0.0.1:18888", "-PixelStreamingEncoderCodec=H264", "-ResX=1280", "-ResY=720"]}
@@ -209,7 +209,7 @@ Agent 工作流验收看最终环境状态（实例在跑、行为变了、进�
 
 **兼容。** Service Preview v1、内置 H5 模式、Capture、`app.py` 与 Node 示例的配置都不变；新增字段都是可选。
 
-**风险。** Pixel Streaming 与 Pixel Streaming 2 随 UE 版本变化；Epic 前端依赖的构建需要固定；GPU 上渲染与编码共载未测；UE 冷启动约 4 分钟需要预热；`run.py` 是示例级代码，升级为稳定组件前要补测试；UE 的 Epic 信令服务是 Node 程序，用 UE 示例的机器需要 Node（Epic 的 setup 自带），用 Python 重写信令服务是后续可选项。
+**风险。** Pixel Streaming 与 Pixel Streaming 2 随 UE 版本变化；Epic 前端依赖的构建需要固定；GPU 上渲染与编码共载未测；UE 冷启动约 4 分钟需要预热；`run.py` 是示例级代码，升级为稳定组件前要补测试；UE 的信令服务已用 Python 重写（`assets/unreal/signalling.py`），示例运行不需要 Node。
 
 **未决问题**
 1. 接受"没有只看模式"吗？若需要，最简单的做法也是页面层的约定，不是平台强制。
@@ -254,4 +254,4 @@ Agent 工作流验收看最终环境状态（实例在跑、行为变了、进�
 
 **未验证，不能外推**：锁屏下的 UE 与 Windows Blender、跨网络与强制中继（页面已把平台 ICE 换入，但本次平台 ICE 为空，只测了本机回环）、手柄、有声游戏（模板工程无声）、30 分钟稳定性、输入到画面延迟、Safari/手机、Mac 上的 UE、真实滚轮（无头驱动的滚轮事件到不了沙箱 iframe，只验证了页面的滚轮处理函数）、撤销之外的释放路径（运行器被杀、浏览器崩溃、断网）。UE 冷启动约 4 分钟（第一次，来自此前的 spike），运行器 `readyTimeoutMs` 上限 300 秒只覆盖信令服务，UE 就绪由页面等待（页面会提示"等待游戏启动"并持续重试约 5 分钟）。
 
-**Python 运行器复验（2026-10-31，同一台 4090）。** 产品内置的是 Python 环境而非 Node，运行器因此从 Node 示例迁为 `python-adapter/run.py`（Node 示例原样保留）。同一套真机脚本在 Python 运行器上重跑：UE 允许服务后约 21 秒首帧、指针锁定、按住 W 画面变化 6.9（空闲 0.43）、锁定鼠标帧差 9.2、第二个观看者被 `viewer_limit` 拒绝、撤销后 8 秒内无新帧、重新允许后恢复，UE 与 Blender 进程均无残留；Blender 首帧 1.5 秒、拖动与滚轮处理函数改变画面、撤销后不可达、重新允许后恢复。Linux 专项（`offscreen-runner-viewer-limit`、`engine-streaming-page-mode`）在 Python 运行器上通过，前者新增断言：正常停止会删除登记并结束全部后端进程。UE 示例的 Epic 信令服务仍是 Node 程序（Epic 的 setup 自带 Node），这是唯一仍依赖 Node 的部分。
+**Python 运行器复验（2026-10-31，同一台 4090）。** 产品内置的是 Python 环境而非 Node，运行器因此从 Node 示例迁为 `python-adapter/run.py`（Node 示例原样保留）。同一套真机脚本在 Python 运行器上重跑：UE 允许服务后约 21 秒首帧、指针锁定、按住 W 画面变化 6.9（空闲 0.43）、锁定鼠标帧差 9.2、第二个观看者被 `viewer_limit` 拒绝、撤销后 8 秒内无新帧、重新允许后恢复，UE 与 Blender 进程均无残留；Blender 首帧 1.5 秒、拖动与滚轮处理函数改变画面、撤销后不可达、重新允许后恢复。Linux 专项（`offscreen-runner-viewer-limit`、`engine-streaming-page-mode`）在 Python 运行器上通过，前者新增断言：正常停止会删除登记并结束全部后端进程。随后把 Epic 的 Node 信令服务也换成 Python（`assets/unreal/signalling.py`，UE 5.4 消息流：config/identify/endpointId、listStreamers、subscribe、offer/answer/iceCandidate 转发、ping/pong、人数；不含 SFU 与 matchmaker），专项 `pixel-streaming-signalling` 用替身 streamer 与 player 走完整握手并在移除 playerId 转发时失败；4090 上再跑一遍真实 UE：首帧 18.3 秒、指针锁定、按住 W 画面变化 6.5、锁定鼠标帧差 9.2、第二个观看者被拒绝、撤销后画面停止、重新允许后恢复，Python 运行器与 Python 信令服务之外没有 Node 进程参与，UE 与监听端口均无残留。示例运行不再依赖 Node；仅 `pixelstreaming.esm.js` 当初用 npm 构建过一次，它是预构建的浏览器模块。

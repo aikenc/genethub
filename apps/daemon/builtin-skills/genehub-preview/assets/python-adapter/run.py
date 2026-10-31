@@ -6,7 +6,7 @@ The configuration is the same `application.json` shape the Node example uses:
 `entry`, optional `media`, and `backends[]` of {command, cwd, env, origin, health, routes}.
 A backend without `origin` is only started, watched and stopped (a game process that talks
 to another backend). A WebSocket route may set `maxViewers` (1-16): further viewers are
-closed with 1013 `viewer_limit`. Any backend exit retires the whole run; the process tree
+closed with 1013 `viewer_limit`. A command starting with `python` runs this interpreter. Any backend exit retires the whole run; the process tree
 of every backend is stopped with the runner.
 """
 import argparse
@@ -162,8 +162,11 @@ async def main():
                 except OSError as error:
                     raise ValueError(f"backend port {backend['origin']} is already in use") from error
         for backend in backends:
+            # `python` means this runner's own interpreter, so configs carry no machine path.
+            argv = [sys.executable if backend['command'][0] == 'python' else backend['command'][0],
+                    *backend['command'][1:]]
             proc = await asyncio.create_subprocess_exec(
-                *backend['command'], cwd=str((config_path.parent / backend.get('cwd', '.')).resolve()),
+                *argv, cwd=str((config_path.parent / backend.get('cwd', '.')).resolve()),
                 env={**os.environ, **backend.get('env', {})}, stdin=subprocess.DEVNULL,
                 start_new_session=os.name != 'nt',
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0)

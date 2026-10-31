@@ -5,6 +5,7 @@
 GeneHub 本体不要求 Node 或 Python。外部程序可按[语言无关接入协议](registration-contract.md)直接登记；下面两个目录只是随 Skill 携带的可选源码示例。先复制到用户工作区，**不要在内置 Skill 目录安装依赖或写运行产物**，也不需要下载 GeneHub 工程。
 
 - [Python 直接接入示例](../assets/python-adapter/app.py)：单程序实现登记、认证、HTTP/WS 和可选视频文件的 WebRTC 播放，无 Node 依赖。需要 Python 3.11+；基础依赖为 aiohttp。
+- [Python 多后端运行器](../assets/python-adapter/run.py)：读取 application.json，前台管理多个后端（可无 HTTP 端口）、WebSocket 路由 `maxViewers`，用法见[离屏应用](offscreen-apps.md)。同样只需 aiohttp，不需要 Node。
 - [Node 多后端适配示例](../assets/node-adapter/run.mjs)：可选启动器，适合现有 Node 工作流，读取 application.json，前台管理多个后端。需要 Node 22+；其 ws 依赖仅属于该示例。
 - [入口 HTML](../assets/demo/index.html)：复制到工作区，演示 HTTP、流式进度与 WS。真实程序替换相应业务输出。
 

@@ -3,23 +3,44 @@
   "entry": "index.html",
   "readyTimeoutMs": 300000,
   "media": {
-    "offerPath": "/api/ue/ws", "microphone": "none",
-    "client": "html", "protocol": "pixel-streaming/1", "sessionPath": "/api/ue/ws"
+    "offerPath": "/api/ue/ws",
+    "microphone": "none",
+    "client": "html",
+    "protocol": "pixel-streaming/1",
+    "sessionPath": "/api/ue/ws"
   },
   "backends": [
     {
       "origin": "http://127.0.0.1:18081",
-      "cwd": "C:/path/to/PixelStreamingInfrastructure/SignallingWebServer",
-      "command": ["node", "cirrus.js", "--HttpPort=18081", "--StreamerPort=18888"],
+      "cwd": ".",
+      "command": [
+        "python",
+        "signalling.py",
+        "--http-port",
+        "18081",
+        "--streamer-port",
+        "18888"
+      ],
       "health": "/",
-      "routes": [{ "prefix": "/api/ue/", "websocket": true, "maxViewers": 1 }]
+      "routes": [
+        {
+          "prefix": "/api/ue/",
+          "websocket": true,
+          "maxViewers": 1
+        }
+      ]
     },
     {
       "command": [
         "C:/path/to/UnrealEngine/Engine/Binaries/Win64/UnrealEditor.exe",
-        "C:/path/to/Game/Game.uproject", "/Game/Maps/Map",
-        "-game", "-RenderOffScreen", "-PixelStreamingURL=ws://127.0.0.1:18888",
-        "-PixelStreamingEncoderCodec=H264", "-ResX=1280", "-ResY=720"
+        "C:/path/to/Game/Game.uproject",
+        "/Game/Maps/Map",
+        "-game",
+        "-RenderOffScreen",
+        "-PixelStreamingURL=ws://127.0.0.1:18888",
+        "-PixelStreamingEncoderCodec=H264",
+        "-ResX=1280",
+        "-ResY=720"
       ]
     }
   ]
