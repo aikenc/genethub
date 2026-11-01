@@ -17,7 +17,7 @@
 //     enforces single-expert ownership and warns on a dirty worktree.
 
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import {
@@ -47,6 +47,7 @@ defineJourney(
       "a finished background session the front is never told about, or told twice",
       "two jobs from one turn collapsing into one delivery or being delivered twice",
       "two work sessions simultaneously writing the same business directory",
+      "an uncertain session query steals a live writer's reservation",
       "cross-expert send failing to start a session or failing to route the reply back",
       "two experts both owning one business directory",
     ],
@@ -224,6 +225,47 @@ defineJourney(
       // A second `work` session on the same directory is refused while `holderSid` is running, but `research` is allowed.
       const contestedWork = expert(alice, "spawn", "--kind", "work", "--dir", project, "--desc", "second writer", "Should be refused.");
       t.assertions.assert(contestedWork.code !== 0 && contestedWork.err.includes("已有写会话") && contestedWork.err.includes(holderSid), `contested writer lock: ${contestedWork.out} ${contestedWork.err}`);
+      // Corrupt only the external response after a real holder inspection.
+      // The daemon, original execution and reservation run unchanged; the
+      // independent client and files prove that uncertainty creates no writer.
+      const queryProxy = path.join(t.env.root, "uncertain-cli"), queryMarker = path.join(t.env.root, "query-observed.json");
+      const lockFile = path.join(project, ".git/genet-writer.json");
+      const originalLock = readFileSync(lockFile, "utf8");
+      const originalPending = JSON.parse(readFileSync(path.join(pending, holderSid + ".json"), "utf8"));
+      const holderReply = await opened.client.call({ type: "session.get", payload: { sessionId: holderSid } });
+      if (holderReply?.type !== "snapshot") throw new Error("original writer is not inspectable");
+      const holderWorkspace = (holderReply.data as unknown as { summary: { workspaceId: string } }).summary.workspaceId;
+      const originalSessions = (await sessionsOf(holderWorkspace)).map(s => s.id).sort();
+      writeFileSync(queryProxy, `#!/usr/bin/env python3
+import json,os,pathlib,subprocess,sys
+r=subprocess.run([${JSON.stringify(genet)},*sys.argv[1:]],capture_output=True,text=True)
+if sys.argv[1:4] == ['session','inspect',${JSON.stringify(holderSid)}]:
+ if r.returncode: sys.stdout.write(r.stdout);sys.stderr.write(r.stderr);sys.exit(r.returncode)
+ data=json.loads(r.stdout.strip().splitlines()[-1]);s=data['data']['inspection']['summary']
+ pathlib.Path(${JSON.stringify(queryMarker)}).write_text(json.dumps({'id':s['id'],'status':s['status'],'mode':os.environ['QUERY_FAULT']}))
+ mode=os.environ['QUERY_FAULT']
+ if mode == 'internal': print(json.dumps({'type':'error','error':{'code':'internal','message':'injected read failure'}}));sys.exit(4)
+ if mode == 'empty': sys.exit(0)
+ if mode == 'malformed': print('{broken');sys.exit(0)
+ if mode == 'missing-data': print(json.dumps({'type':'session.inspect'}));sys.exit(0)
+ if mode == 'missing-summary': data['data']={'inspection':{}}
+ if mode == 'wrong-id': s['id']='s_wrong_holder'
+ print(json.dumps(data));sys.exit(0)
+sys.stdout.write(r.stdout);sys.stderr.write(r.stderr);sys.exit(r.returncode)
+`);
+      chmodSync(queryProxy, 0o755);
+      for (const mode of ["internal", "empty", "malformed", "missing-data", "missing-summary", "wrong-id"]) {
+        const failedQuery = spawnSync("python3", [path.join(alice, "tools/team.py"), "spawn", "--kind", "work", "--dir", project, "--desc", "uncertain competitor", "Must preserve the original writer."], {
+          cwd: path.join(alice, "front"), env: { ...env, GENEHUB_SESSION_ID: front, GENEHUB_CLI: queryProxy, QUERY_FAULT: mode }, encoding: "utf8",
+        });
+        const observed = JSON.parse(readFileSync(queryMarker, "utf8"));
+        t.assertions.assert(observed.id === holderSid && observed.status === "running" && observed.mode === mode, `fault did not follow a real running-holder inspection: ${JSON.stringify(observed)}`);
+        t.assertions.assert(failedQuery.status !== 0, `${mode} query uncertainty created a competing writer: ${failedQuery.stdout} ${failedQuery.stderr}`);
+        t.assertions.assert(readFileSync(lockFile, "utf8") === originalLock, `${mode} query uncertainty changed the original reservation`);
+        const retained = JSON.parse(readFileSync(path.join(pending, holderSid + ".json"), "utf8"));
+        t.assertions.assert(retained.sessionId === originalPending.sessionId && retained.requester === originalPending.requester && retained.desc === originalPending.desc, `${mode} query uncertainty retired or replaced the original task`);
+        t.assertions.assert(JSON.stringify((await sessionsOf(holderWorkspace)).map(s => s.id).sort()) === JSON.stringify(originalSessions), `${mode} query uncertainty created a session`);
+      }
       writeFileSync(path.join(alice, ".genethub", "open.env"), "EXPERT_AGENT=ctl-normal\nEXPERT_BOARD_PORT=0\nEXPERT_WAKE_ROUNDS=100000\nEXPERT_NOTE_QUIET=100000\n");
       const allowedResearch = expert(alice, "spawn", "--kind", "research", "--dir", project, "--desc", "parallel reader", "Read-only inspection.");
       const researchSid = /(s_[0-9a-f]+)/.exec(allowedResearch.out)?.[1]!;
