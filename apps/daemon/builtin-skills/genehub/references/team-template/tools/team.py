@@ -3683,32 +3683,23 @@ def reconcile(root, name, mine):
                         update_pending(root, path, record)
             elif status == "running":
                 last_active = summary.get("lastActivityAtMs") or summary.get("updatedAtMs") or now_ms()
-                # A member holding up finished siblings gets less patience than one running on its own.
+                # Silence is an observation, not a deadline: a legitimate tool or
+                # provider call can stay quiet longer than this diagnostic window.
+                # Ask the requester to inspect it without cancelling work, releasing
+                # its workstation or fabricating a terminal batch result.
                 patience = min(stuck_after, batch_stuck_after) if bkey in batch_has_done else stuck_after
-                if (now_ms() - last_active) / 1000 > patience:
-                    genet("session", "interrupt", session_id, *machine_args(record.get("machine")))
-                    record["stopReason"] = "timeout"
-                    record["stopAfterSeconds"] = patience
+                if (now_ms() - last_active) / 1000 > patience and "quiet-check" not in said:
+                    text = (
+                        "会话 %s（%s）超过 %d 秒没有进展事件，仍在运行，未自动终止。"
+                        "请检查正在执行的工具、实际产物与任务预算；确认失败或超过明确期限后再决定中断，"
+                        "不要仅凭静默认定卡死或重复派单。"
+                    ) % (session_id, record["desc"], patience)
+                    if to:
+                        deliver_or_notice(root, to, "report", "%s:hook" % name, text, session_id, "quiet-check")
+                    if record.get("kind") not in ("reflect", "team-reflect"):
+                        add_note(root, {"kind": "anomaly", "session": session_id, "turn": latest_round(session_id, record.get("machine")), "ref": None, "from": "%s:hook" % name, "quote": "无", "context": text, "text": record["desc"]}, "anomaly", session_id, "quiet-check")
+                    said.append("quiet-check")
                     update_pending(root, path, record)
-                    clear_sessions_cache()
-                    stopped = session_summary(session_id, record.get("machine"))
-                    if stopped.get("status") == "running":
-                        continue
-                    if "stuck" not in said:
-                        if to:
-                            deliver_or_notice(root, to, "report", "%s:hook" % name, "会话 %s（%s）超过 %d 秒没有进展，已超时终止。" % (session_id, record["desc"], patience), session_id, "stuck")
-                        if record.get("kind") not in ("reflect", "team-reflect"):
-                            add_note(root, {"kind": "anomaly", "session": session_id, "turn": latest_round(session_id, record.get("machine")), "ref": None, "from": "%s:hook" % name, "quote": "无", "context": "会话 %s（%s）超过 %d 秒没有进展，已超时终止" % (session_id, record["desc"], patience), "text": record["desc"]}, "anomaly", session_id, "stuck")
-                        said.append("stuck")
-                        update_pending(root, path, record)
-                    if is_multi_batch and not record.get("done"):
-                        record["done"] = {
-                            "outcome": "stuck",
-                            "reply": "stuck:%s" % session_id,
-                            "ref": "ghref:session:%s" % session_id,
-                            "text": "⚠️ 会话超过 %d 秒没有进展（已熔断，不阻塞同批次其他子任务）。" % patience,
-                        }
-                        update_pending(root, path, record)
         except (ExpertError, OSError, subprocess.TimeoutExpired) as error:
             record["lastReconcileError"] = str(error)[:300]
             record["lastReconcileErrorAtMs"] = now_ms()
