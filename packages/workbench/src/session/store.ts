@@ -2336,6 +2336,20 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
 
   async setAgentPreferences(preferences) {
     const before = get().settings;
+    // Routing and the editor only expose currently usable catalog entries.
+    // Saving that view must not erase models hidden by a failed probe/login
+    // or a temporarily incomplete catalog. Visible entries can still be removed.
+    const hidden = before?.agentPreferences?.modelProfiles?.filter((profile) => {
+      if (preferences.modelProfiles?.some((next) =>
+        next.agentId === profile.agentId && (next.modelId ?? null) === (profile.modelId ?? null))) return false;
+      const agent = get().agents.find((entry) => entry.id === profile.agentId);
+      return !agent || !canStartAgent(agent) || (profile.modelId != null
+        ? !agent.catalog.models.some((model) => model.id === profile.modelId)
+        : agent.catalog.models.length > 0);
+    });
+    if (hidden?.length) {
+      preferences = { ...preferences, modelProfiles: [...(preferences.modelProfiles ?? []), ...hidden] };
+    }
     if (before) {
       set({ settings: { ...before, agentPreferences: preferences } });
     }
