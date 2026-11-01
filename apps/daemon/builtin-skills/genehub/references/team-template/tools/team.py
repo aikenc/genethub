@@ -2328,16 +2328,34 @@ def session_missing(session_id):
 
 
 def cmd_directory(args):
+    selected = [(name, expert) for name, expert in sorted(experts().items())
+                if not args.expert or args.expert == name]
+    by_workspace = {}
+    if selected:
+        # Directory is a read-only overview. One snapshot avoids rescanning the
+        # entire native session store (and workspace catalog) for every role.
+        snapshot = genet("session", "list", "--lean")
+        items = snapshot.get("sessions")
+        if "workspaceId" not in snapshot or snapshot["workspaceId"] is not None or not isinstance(items, list):
+            raise ExpertError("目录会话快照无法核对", "目录未知，没有按空会话处理", "核对原查询回执后重试目录")
+        seen = set()
+        for item in items:
+            if (not isinstance(item, dict) or not isinstance(item.get("id"), str)
+                    or not SESSION_ID.match(item["id"]) or item["id"] in seen
+                    or not isinstance(item.get("workspaceId"), str) or not item["workspaceId"]
+                    or not isinstance(item.get("status"), str)):
+                raise ExpertError("目录会话快照含无法核对的记录", "目录未知，没有发布部分目录", "核对原会话与查询回执")
+            seen.add(item["id"])
+            if not item.get("archived"):
+                by_workspace.setdefault(item["workspaceId"], []).append(item)
     lines = []
-    for name, expert in sorted(experts().items()):
-        if args.expert and args.expert != name:
-            continue
+    for name, expert in selected:
         info = descriptor(expert["root"]) or {}
         lines.append("== %s: %s" % (name, info.get("description", "")))
         for held in project_places(expert["root"]):
             lines.append("项目 %s" % held)
         for role, workspace_id in expert["spaces"].items():
-            for item in sorted(live_sessions(workspace_id), key=lambda value: -value.get("updatedAtMs", 0)):
+            for item in sorted(by_workspace.get(workspace_id, []), key=lambda value: -value.get("updatedAtMs", 0)):
                 labels = ",".join(item.get("labels") or [])
                 lines.append("%s/%s %s [%s] %s %s" % (name, role, item["id"], item.get("status"), labels, item.get("description") or item.get("title") or ""))
     print("\n".join(lines) if lines else "没有团队")

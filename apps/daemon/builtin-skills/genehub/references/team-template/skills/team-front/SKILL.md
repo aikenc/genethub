@@ -16,7 +16,7 @@ description: 1+N 项目团队的前台：唯一直接面向人类用户的窗口
 
 ## 接单
 
-1. 新目标或新阶段：先 `directory` 看 `leader` 有没有会话。
+1. 新目标或新阶段：先简短确认已接单，再 `directory --team "<本团队名称>"` 看 `leader` 有没有会话（名称取团队根描述的 `name`，不截断目录输出，避免漏掉原组长）。
    - 没有：`spawn --space leader --kind work --desc "评估里程碑规划与推进版本交付" "<用户原话与参考项目>"`。
    - 有：`send --to leader --kind human "<用户原话与诉求>"`（不打断组长，进收件箱并归档 `.pm/guidance/human/`）。
    - 回复用户：团队已接单，组长在评估版本内容可达性与排期，附 `[📊 实时团队看板](datas/board/index.html)`。
