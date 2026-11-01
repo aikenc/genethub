@@ -83,8 +83,11 @@ BOARD_HTML = r"""<!doctype html>
     border: 1px solid var(--border); background: var(--panel-alt); color: var(--text);
   }
   .pill.live { background: var(--ok-soft); border-color: rgba(34, 197, 94, 0.4); color: #4ade80; }
+  .pill.warn { border-color: #d99b37; color: #efc471; }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); display: inline-block; }
   .dot.pulse { animation: pulse 1.6s infinite; }
+  .pill:not(.live) .dot { background: var(--muted); animation: none; }
+  .pill.warn .dot { background: #d99b37; }
   @keyframes pulse {
     0% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7); }
     70% { box-shadow: 0 0 0 7px rgba(34, 197, 94, 0); }
@@ -181,7 +184,7 @@ BOARD_HTML = r"""<!doctype html>
       </div>
     </div>
     <div class="top-actions">
-      <span class="pill live" id="service-pill"><span class="dot pulse"></span><span id="service-text">看板服务实时同步中</span></span>
+      <span class="pill" id="service-pill"><span class="dot pulse"></span><span id="service-text">正在读取看板数据</span></span>
       <span class="pill mono" id="updated-at">--:--:--</span>
       <button class="btn" type="button" onclick="refreshBoard(true)">🔄 立即刷新</button>
       <a class="btn primary" id="latest-play-btn" href="../releases/index.html">🎮 试玩最新版本</a>
@@ -314,19 +317,21 @@ function switchTab(id) {
   });
 }
 
-function renderBoard(data) {
+function renderBoard(data, source) {
   if (!data) return;
   document.getElementById("team-title").textContent = (data.teamName || "项目团队") + " · 实时团队作战看板";
   document.getElementById("team-desc").textContent = data.description || "常驻团队看板服务 · 实时监控 1+N 成员、工位、里程碑与版本交付";
   document.getElementById("updated-at").textContent = "更新于 " + (data.updatedAt || "--:--:--");
 
-  const svc = data.service || {};
   const svcText = document.getElementById("service-text");
-  if (svc.running) {
-    svcText.textContent = "看板常驻服务在线 (PID " + svc.pid + ")";
-  } else {
-    svcText.textContent = "看板实时快照就绪 (3s 自动同步)";
-  }
+  const collectedAt = Number(data.updatedAtMs);
+  const age = Number.isFinite(collectedAt) && collectedAt > 0
+    ? Math.max(0, Math.floor((Date.now() - collectedAt) / 1000)) : null;
+  const stale = age === null || age > 15;
+  svcText.textContent = (stale ? "数据已过期 · 快照" : source === "live" ? "实时连接已更新" : "快照")
+    + (age === null ? " · 采集时间未知" : " · " + age + " 秒前采集");
+  document.getElementById("service-pill").classList.toggle("live", !stale && source === "live");
+  document.getElementById("service-pill").classList.toggle("warn", stale);
 
   const releases = data.releases || [];
   const reports = data.reports || [];
@@ -458,24 +463,40 @@ function renderBoard(data) {
     '</div>' + roleMems;
 }
 
+let refreshing = false;
+let rendered = false;
 async function refreshBoard() {
-  const urls = ["/api/board/live?t=" + Date.now(), "./live.json?t=" + Date.now()];
-  for (const url of urls) {
-    try {
-      const resp = await fetch(url, { cache: "no-store" });
-      if (resp.ok) {
-        const ctype = resp.headers.get("content-type") || "";
-        if (ctype.includes("json") || url.includes("live.json")) {
+  if (refreshing) return;
+  refreshing = true;
+  try {
+    // The service also refreshes this ordinary file. Reading it first keeps
+    // stopped/unregistered services usable through static Asset Preview.
+    const sources = [["./live.json", "snapshot"], ["/api/board/live", "live"]];
+    for (const [path, source] of sources) {
+      const abort = new AbortController();
+      const timer = setTimeout(() => abort.abort(), 10000);
+      try {
+        const resp = await fetch(path + "?t=" + Date.now(), { cache: "no-store", signal: abort.signal });
+        if (resp.ok) {
           const data = await resp.json();
-          if (data && data.teamName) {
-            renderBoard(data);
+          if (data && typeof data.teamName === "string" && data.teamName) {
+            renderBoard(data, source);
+            rendered = true;
             return;
           }
         }
+      } catch (_e) {
+        // Try the other public source, retaining the last rendered board.
+      } finally {
+        clearTimeout(timer);
       }
-    } catch (_e) {
-      // fallback to next URL
     }
+    document.getElementById("service-text").textContent = rendered
+      ? "刷新失败 · 显示上次快照，请核对采集时间" : "刷新失败 · 暂无可用快照，请稍后刷新";
+    document.getElementById("service-pill").classList.remove("live");
+    document.getElementById("service-pill").classList.add("warn");
+  } finally {
+    refreshing = false;
   }
 }
 
