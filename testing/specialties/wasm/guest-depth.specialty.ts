@@ -501,6 +501,35 @@ defineSpecialty(
 
 defineSpecialty(
   wasmMeta(
+    "specialty.wasm.agent.shell-cli-stdin-eof",
+    "An Agent can invoke shell CLI without supplying stdin and can deliberately pipe a payload",
+    "The real bash tool returns the remote command marker and preserves explicit piped bytes in model-visible tool results",
+    ["guest stdin handle drop leaves host pipe open", "CLI waits for EOF before sending its request", "explicit stdin is lost"],
+    { llm: "mock", ms: 45_000 },
+  ),
+  async (t) => withOpened(t, async (opened) => {
+    const target = `--workspace '${opened.workspaceId}' --timeout 5 --`;
+    opened.mock.script(
+      { tool: { name: "bash", arguments: { command: `"$GENEHUB_CLI" shell ${target} /usr/bin/printf eof-command-marker`, timeout: 15 } } },
+      { tool: { name: "bash", arguments: { command: `printf explicit-pipe-marker | "$GENEHUB_CLI" shell ${target} /bin/cat`, timeout: 15 } } },
+      { text: "Commands completed." },
+    );
+    const sid = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
+    const events = await t.flows.main.attachEventLog(opened.client, sid);
+    await t.flows.main.sendPrompt(opened.client, sid, "Execute both shell commands and finish.");
+    await t.tools.waitUntil(() => events.some(event => event.type === "turnCompleted" || event.type === "turnFailed"), 45_000);
+    t.assertions.assert(events.some(event => event.type === "turnCompleted"), "Agent command round failed");
+    const requests = JSON.stringify(opened.mock.requests);
+    // Marker strings also occur in the requested command; require shell.output
+    // envelopes so an echoed command is insufficient evidence of execution.
+    for (const marker of ["eof-command-marker", "explicit-pipe-marker"]) {
+      t.assertions.assert(requests.includes(`\\\"data\\\":\\\"${marker}\\\"`), `shell output missing: ${marker}`);
+    }
+  }, true),
+);
+
+defineSpecialty(
+  wasmMeta(
     "specialty.wasm.agent.launcher-provider-key-stays-out",
     "A provider key in the shell that started the daemon does not reach the built-in agent",
     "the agent's bash prints an empty OPENAI_API_KEY although the daemon was started with one",

@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import { defineSpecialty, openTeam, type CaseContext } from "../../framework/public.ts";
 type Team = Awaited<ReturnType<typeof openTeam>>;
 function reflectCase(id: string, oracle: string, run: (t: CaseContext, r: Team) => Promise<void>) {
@@ -8,6 +9,40 @@ function reflectCase(id: string, oracle: string, run: (t: CaseContext, r: Team) 
   }, async t => { const r = await openTeam(t); try { await run(t, r); } finally { await r.dispose(); } });
 }
 const pending = (r: Team) => existsSync(r.state("pending")) ? readdirSync(r.state("pending")).filter(f => f.endsWith(".json")).map(f => JSON.parse(readFileSync(r.state("pending", f), "utf8"))) : [];
+reflectCase("expert-reflection-keeps-watchdog-broken", "a completed real reflection cannot restart a no-progress watchdog cycle; a completed business task can", async (t, r) => {
+  // This case checks background lifecycle, not the optional standing board
+  // service. Use its supported user setting before any hook starts it.
+  const config = path.join(r.root, ".genethub/open.env");
+  writeFileSync(config, readFileSync(config, "utf8") + "\nTEAM_BOARD_PORT=0\n");
+  const leader = r.spaces.find(space => space.name === "leader" && space.agentSpace?.parentWorkspaceId === r.project.id)!;
+  const sid = await r.create("ctl-normal", leader.id);
+  await r.send(sid, "Review the outstanding milestone");
+  const idle = async (id: string) => t.tools.waitUntil(async () => (await r.snapshot(id)).summary.status === "idle", 20000);
+  await idle(sid);
+  mkdirSync(path.join(r.root, ".pm/trunk"), { recursive: true });
+  writeFileSync(path.join(r.root, ".pm/trunk/MILESTONE_PLAN.md"), "# Milestone\n- [ ] Deliver the playable game\n");
+  const policy = { TEAM_WATCHDOG_AFTER: "0", TEAM_WATCHDOG_MAX_WAKES: "1", TEAM_WAKE_ROUNDS: "9999", TEAM_WAKE_CHECK: "0", TEAM_WAKE_GAP: "0" };
+  const hook = () => r.ok(["hook"], policy);
+  const watchdog = () => JSON.parse(readFileSync(r.state("watchdog.json"), "utf8"));
+  hook(); await idle(sid);
+  hook();
+  const broken = watchdog();
+  t.assertions.assert(broken.circuitBroken === true, "watchdog did not circuit-break after one real wake");
+  hook();
+  const reflection = JSON.parse(readFileSync(r.state("reflect.json"), "utf8")).sessionId;
+  await idle(reflection);
+  const notes = readdirSync(r.state("notes")).filter(file => file.endsWith(".json")).map(file => JSON.parse(readFileSync(r.state("notes", file), "utf8")).id);
+  r.ok(["notes", "done", ...notes]);
+  hook();
+  t.assertions.assert(existsSync(r.state("done", `${reflection}.json`)), "real reflection was not reconciled to done");
+  t.assertions.assert(watchdog().progressFingerprint === broken.progressFingerprint && watchdog().brokenAtMs === broken.brokenAtMs,
+    "reflection-only bookkeeping reopened the circuit");
+  const out = r.ok(["spawn", "--kind", "research", "--desc", "business result", "--model", "fixture", "Deliver a research result"], { GENEHUB_SESSION_ID: sid });
+  const worker = /s_[0-9a-f]+/.exec(out)![0];
+  await idle(worker); await idle(r.front); hook(); await idle(sid); hook();
+  t.assertions.assert(existsSync(r.state("done", `${worker}.json`)), "business result was not reconciled");
+  t.assertions.assert(watchdog().progressFingerprint !== broken.progressFingerprint, "genuine business progress did not reset watchdog");
+});
 reflectCase("expert-reflect-wake", "real completed Human rounds trigger one reflection at its configured threshold and its persisted gap prevents repeated starts", async (t, r) => {
   for (const prompt of ["first round", "second round"]) {
     await r.send(r.front, prompt); await t.tools.waitUntil(async () => (await r.snapshot(r.front)).summary.status === "idle", 20000);
