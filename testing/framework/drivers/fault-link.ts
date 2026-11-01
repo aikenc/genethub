@@ -12,9 +12,11 @@ export async function startFaultLink(target: string) {
   let cutAt: number | null = null;
   let serverCutAt: number | null = null;
   let serverHoldAt: number | null = null;
+  let refuseNewAt: number | null = null;
+  let newConnectionRefusals = 0;
   const server = createServer((front) => {
     accepted++;
-    if (blocked) { front.destroy(); return; }
+    if (blocked) { newConnectionRefusals++; front.destroy(); return; }
     const back = createConnection(upstream);
     back.once("connect", () => { established++; });
     sockets.add(front); sockets.add(back);
@@ -29,6 +31,7 @@ export async function startFaultLink(target: string) {
     });
     back.on("data", bytes => {
       serverBytes += bytes.length;
+      if (refuseNewAt !== null && serverBytes >= refuseNewAt) { refuseNewAt = null; blocked = true; }
       if (serverCutAt !== null && serverBytes >= serverCutAt) { serverCutAt = null; cuts++; close(); return; }
       if (serverHoldAt !== null && serverBytes >= serverHoldAt) { serverHoldAt = null; dropServer = true; }
       if (dropServer) { heldServer += bytes.length; back.pause(); held.add({ socket: back, target: front, bytes, direction: "server" }); return; }
@@ -45,6 +48,9 @@ export async function startFaultLink(target: string) {
     urlFor(fresh: string) { const next = new URL(fresh); next.hostname = "127.0.0.1"; next.port = String(address.port); return next.toString(); },
     connections: () => established,
     attempts: () => accepted,
+    refusedConnections: () => newConnectionRefusals,
+    /** Refuse future connections after payload bytes pass; established streams stay intact. */
+    refuseNewConnectionsAfterServerBytes(bytes: number) { if (!Number.isSafeInteger(bytes) || bytes <= 0) throw new Error("positive fault byte threshold required"); refuseNewAt = serverBytes + bytes; },
     failure: () => lastError,
     cutAfterClientBytes(bytes: number) { if (!Number.isSafeInteger(bytes) || bytes <= 0) throw new Error("positive fault byte threshold required"); cutAt = clientBytes + bytes; },
     injectedCuts: () => cuts,
