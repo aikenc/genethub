@@ -83,6 +83,29 @@ sys.stdout.write(out);sys.stderr.write(r.stderr);sys.exit(r.returncode)
     }
     const memberQueries = readFileSync(calls, "utf8").trim().split("\n").map(s => JSON.parse(s) as string[]).filter(a => a[0] === "session" && a[1] === "list");
     t.assertions.assert(memberQueries.length === 1 && memberQueries[0]!.includes("--lean"), `member roster amplified session queries: ${JSON.stringify(memberQueries)}`);
+    // A canonical source and its deployed runtime legitimately share a Team name.
+    // Register both physical roots and prove each scoped invocation keeps its own
+    // native leader, independent of the name-keyed global directory ordering.
+    const source = join(t.env.root, "source", teams[0]!.name);
+    mkdirSync(join(source, "spaces", "leader"), { recursive: true });
+    mkdirSync(join(source, "tools"));
+    for (const file of ["agent-space.genet.json", "spaces/leader/agent-space.genet.json", "tools/team.py"]) {
+      writeFileSync(join(source, file), readFileSync(join(teams[0]!.root, file)));
+    }
+    const sourceOpened = await o.client.call({ type: "workspace.open", payload: { root: source } });
+    t.assertions.assert(sourceOpened?.type === "workspace", "same-name source did not open");
+    const sourceCatalog = await o.client.call({ type: "workspace.list" });
+    if (sourceCatalog?.type !== "workspaces") throw new Error("source catalog unavailable");
+    const sourceLeader = sourceCatalog.data.find(w => w.folders[0]?.root === join(source, "spaces", "leader"));
+    t.assertions.assert(sourceLeader, "same-name source leader workspace absent");
+    const sourceSession = await t.flows.main.createBuiltinSession(o.client, sourceLeader!.id);
+    for (const [root, own, other] of [[teams[0]!.root, teams[0]!.session, sourceSession], [source, sourceSession, teams[0]!.session]]) {
+      writeFileSync(calls, "");
+      const scoped = spawnSync(python, [join(root!, "tools", "team.py"), "directory", "--team", teams[0]!.name], { cwd: join(root!, "spaces", "leader"), env: { ...o.daemon.env, GENEHUB_CLI: recorder }, encoding: "utf8", timeout: 90_000, maxBuffer: 4 * 1024 * 1024 });
+      t.assertions.assert(scoped.status === 0 && scoped.stdout.includes(own!) && !scoped.stdout.includes(other!), `same-name physical Team lost or borrowed native leader: ${scoped.stdout} ${scoped.stderr}`);
+      const scopedQueries = readFileSync(calls, "utf8").trim().split("\n").map(s => JSON.parse(s) as string[]).filter(a => a[0] === "session" && a[1] === "list");
+      t.assertions.assert(scopedQueries.length === 1 && scopedQueries[0]!.includes("--lean"), "same-name scoped directory amplified queries");
+    }
     for (const fault of ["missing", "wrong-scope", "invalid-row"]) {
       writeFileSync(mode, fault);
       const bad = command();

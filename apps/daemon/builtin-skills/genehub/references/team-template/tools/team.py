@@ -2349,8 +2349,21 @@ def session_snapshot_by_workspace():
 
 
 def cmd_directory(args):
-    selected = [(name, expert) for name, expert in sorted(experts().items())
-                if not args.expert or args.expert == name]
+    # A source checkout and its deployed runtime may have the same Team name.
+    # A scoped query for this Team belongs to this physical root, rather than
+    # whichever same-name entry happened to win the global discovery map.
+    local = None
+    if args.expert:
+        try:
+            root = find_root()
+        except ExpertError:
+            root = None
+        if root and args.expert == ((descriptor(root) or {}).get("name") or os.path.basename(root)):
+            local = me(root)
+    selected = [local] if local else [
+        (name, expert) for name, expert in sorted(experts().items())
+        if not args.expert or args.expert == name
+    ]
     by_workspace = session_snapshot_by_workspace() if selected else {}
     lines = []
     for name, expert in selected:
