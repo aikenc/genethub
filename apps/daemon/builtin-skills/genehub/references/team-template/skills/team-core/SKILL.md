@@ -19,7 +19,7 @@ description: 1+N 项目团队内部协作的公共约定：前台、研发组长
 | `board start\|refresh` / `directory` / `models check` / `temp new\|ls\|rm\|clean` | 启动/刷新常驻团队看板服务 `datas/board/index.html` / 看会话目录 / 管临时区 |
 | `note --kind unhappy\|preference\|external\|observation --quote "原话"` / `reflect now "要求"` | 给 `team-reflect` 留言 / 立即启动团队反思；`snapshot` / `drift` 管理团队仓库与模板差异；`reset` 只在用户明确要求时用 |
 
-失败时命令会说明：出了什么、现在状态、下一步。细则见 `datas/README.md`、`temp/README.md`；模型选择见 `references/models.md`。
+失败时命令会说明：出了什么、现在状态、下一步。细则见 `datas/README.md`、`temp/README.md`；点名模型勿套档位，详见 `references/models.md`。
 
 跨机派单先读 [references/remote-targets.md](references/remote-targets.md)：固定目标、不按短名猜团队，执行端
 拿写锁并保存回执；未知创建结果不盲重派。`send` 不创建会话、不解除暂停，多个远端会话须用精确 ID。
