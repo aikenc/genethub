@@ -1,4 +1,4 @@
-import type { AgentInfo, AgentSelectionPreferences, SequencedEvent, SessionSummary, WorkspaceInfo } from "@genehub/proto";
+import type { AgentInfo, AgentSelectionPreferences, Request, SequencedEvent, SessionSummary, WorkspaceInfo } from "@genehub/proto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Client } from "../protocol/client";
@@ -1482,6 +1482,67 @@ describe("machine-global model selection", () => {
     const next = { ...preferences, selectedTags: ["Flash"] };
     expect(await useWorkbench.getState().setAgentPreferences(next)).toBe(false);
     expect(useWorkbench.getState().settings?.agentPreferences).toBe(before.agentPreferences);
+  });
+
+  it.each(["unavailable", "absent", "catalog-missing"] as const)(
+    "preserves saved models hidden by %s when saving a visible model edit",
+    async (hiddenBy) => {
+      // The Beta settings editor omitted three saved Claude rows when its
+      // probe was unavailable. Inspect the persistence request, not the draft.
+      const calls: Request[] = [];
+      const client = {
+        call: async (request: Request) => {
+          calls.push(request);
+          if (request.type !== "settings.setAgentPreferences") return undefined;
+          return { type: "settings", data: {
+            presets: [], providers: [], lanEnabled: false,
+            agentPreferences: request.payload.preferences,
+          } };
+        },
+      } as unknown as Client;
+      const hiddenAgent = hiddenBy === "unavailable"
+        ? { ...claude, probe: { state: "unavailable" } }
+        : { ...claude, catalog: { ...claude.catalog, models: [] } };
+      useWorkbench.setState({
+        client,
+        agents: hiddenBy === "absent" ? [codex] : [hiddenAgent as AgentInfo, codex],
+      });
+      const visible = { ...preferences.modelProfiles![2]!, cost: "low" as const };
+      const next = { ...preferences, modelProfiles: [visible] };
+
+      expect(await useWorkbench.getState().setAgentPreferences(next)).toBe(true);
+
+      const expected = { ...next, modelProfiles: [visible, ...preferences.modelProfiles!.slice(0, 2)] };
+      expect(calls).toEqual([{ type: "settings.setAgentPreferences", payload: { preferences: expected } }]);
+      expect(useWorkbench.getState().settings?.agentPreferences).toEqual(expected);
+    },
+  );
+
+  it("removes visible catalog models without resurrecting them as hidden settings", async () => {
+    const calls: Request[] = [];
+    useWorkbench.setState({ client: {
+      call: async (request: Request) => {
+        calls.push(request);
+        return request.type === "settings.setAgentPreferences"
+          ? { type: "settings", data: { presets: [], providers: [], lanEnabled: false, agentPreferences: request.payload.preferences } }
+          : undefined;
+      },
+    } as unknown as Client });
+    const next = { ...preferences, modelProfiles: [preferences.modelProfiles![2]!] };
+    expect(await useWorkbench.getState().setAgentPreferences(next)).toBe(true);
+    expect(calls).toEqual([{ type: "settings.setAgentPreferences", payload: { preferences: next } }]);
+    expect(useWorkbench.getState().settings?.agentPreferences?.modelProfiles).toEqual(next.modelProfiles);
+  });
+
+  it("restores hidden profiles and visible edits together when a save is refused", async () => {
+    const before = useWorkbench.getState().settings;
+    useWorkbench.setState({
+      agents: [codex],
+      client: { call: async () => { throw new Error("save refused"); } } as unknown as Client,
+    });
+    const next = { ...preferences, modelProfiles: [{ ...preferences.modelProfiles![2]!, cost: "low" as const }] };
+    expect(await useWorkbench.getState().setAgentPreferences(next)).toBe(false);
+    expect(useWorkbench.getState().settings).toBe(before);
   });
 
   it("changes filter tags without silently replacing the draft model", async () => {
