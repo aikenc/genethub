@@ -36,7 +36,7 @@ team.py send --machine <ID> --to qa "补充要求"
 工作岗位锁自己的 WORKTREE_DIR，未配置则锁岗位根；research 是只读任务不拿写锁。其他会话/机器派单遇到同一目录锁直接报忙。
 本机派单也不能抢走远端锁或未知创建结果的保留锁。协作锁只约束使用团队工具的写者，不限制任意 shell 或恶意会话。
 
-`send` 只补充本团队 pending 中仍持有效回执的会话，且由执行端在同一接单锁内投递；完成释放后的旧会话拒绝投递，新任务先 spawn。零个先 spawn，多个用精确 session ID。系统通知保留用户暂停；要恢复须由 Human 输入。
+`send` 只补充本团队 pending 中仍持有效回执的会话，且由执行端在同一接单锁内投递；完成释放后的旧会话拒绝投递，新任务先 spawn。零个先 spawn，多个用精确 session ID。系统通知保留用户暂停。用户明确要求继续时，前台/组长可按 [用户明确要求继续](../SKILL.md#用户明确要求继续) 用自己署名的普通消息恢复原会话；不能把通知伪装成 Human 输入或自动解除暂停。
 跨机 `--dir/--worktree` 不可用，`--workspace` 必须等于配置绑定，不是临时覆盖。
 使用精确会话 ID 时也校验 `--workspace`。显式空 workspace/machine/request-id 都拒绝；空 machine 不会退成本机执行，空 request-id 不会被当成一次新任务生成编号。
 
