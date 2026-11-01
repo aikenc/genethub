@@ -126,12 +126,15 @@ def genet(*args, ok_codes=(0,)):
         raise ExpertError("genet 调用未完成: %s" % type(error).__name__, "结果未确认，可能已部分完成", "先核对已有会话与回执，再决定是否重试") from error
     lines = [line for line in done.stdout.splitlines() if line.strip()]
     try:
-        envelope = json.loads(lines[-1]) if lines else {}  # the answer is the last line; earlier lines are progress
+        envelope = json.loads(lines[-1]) if lines else None  # the answer is the last line; earlier lines are progress
     except ValueError:
-        envelope = {}
+        envelope = None
     if done.returncode not in ok_codes:
-        message = (envelope.get("error") or {}).get("message") or done.stderr.strip()[-300:] or "exit %d" % done.returncode
-        raise ExpertError("genet %s 失败: %s" % (" ".join(args[:2]), message), "没有产生副作用或已部分完成，见错误", "核对目标会话与参数及已有回执后，使用同一身份重试", code=(envelope.get("error") or {}).get("code"))
+        error = (envelope.get("error") or {}) if isinstance(envelope, dict) else {}
+        message = error.get("message") or done.stderr.strip()[-300:] or "exit %d" % done.returncode
+        raise ExpertError("genet %s 失败: %s" % (" ".join(args[:2]), message), "没有产生副作用或已部分完成，见错误", "核对目标会话与参数及已有回执后，使用同一身份重试", code=error.get("code"))
+    if not isinstance(envelope, dict) or "data" not in envelope or envelope.get("error") or not isinstance(envelope["data"], (dict, type(None))):
+        raise ExpertError("genet 返回了无法核对的响应", "结果未知，不能按空目录或不存在处理", "保留原会话、派单与写锁，先查询原操作回执")
     if len(args) >= 2 and args[0] == "space" and args[1] == "open":
         _WORKSPACES_CACHE["items"] = None
     return envelope.get("data") or {}
@@ -629,7 +632,9 @@ def sessions_of(workspace_id, machine=None, max_age=None):
     key = (machine or "", workspace_id)
     cached = _WORKSPACE_SESSIONS_CACHE.get(key)
     if age <= 0 or cached is None or now - cached[0] > age:
-        items = genet("session", "list", "--workspace", workspace_id, *machine_args(machine)).get("sessions", [])
+        items = genet("session", "list", "--workspace", workspace_id, *machine_args(machine)).get("sessions")
+        if not isinstance(items, list):
+            raise ExpertError("会话列表响应缺少 sessions", "查询结果未知，没有更新目录缓存", "核对原会话与查询回执，不按空列表新建")
         _WORKSPACE_SESSIONS_CACHE[key] = (time.time(), items)
         return items
     return cached[1]
@@ -643,7 +648,12 @@ def session_summary(session_id, machine=None):
     # Coordination needs live status and inbox metadata, not the Agent's full
     # native conversation. Inspect exposes the same summary without expanding
     # tool bodies/history on every watchdog, lock and reconciliation check.
-    return genet("session", "inspect", session_id, *machine_args(machine)).get("inspection", {}).get("summary", {})
+    result = genet("session", "inspect", session_id, *machine_args(machine))
+    inspection = result.get("inspection")
+    summary = inspection.get("summary") if isinstance(inspection, dict) else None
+    if not isinstance(summary, dict) or summary.get("id") != session_id or not isinstance(summary.get("status"), str):
+        raise ExpertError("会话摘要响应无法核对原 ID 和状态", "查询结果未知，不能认定会话不存在或已结束", "保留原派单和写锁，查询同一会话回执")
+    return summary
 
 
 def same_expert_session(root, session_id, spaces=None):
@@ -2289,8 +2299,10 @@ def session_missing(session_id):
     try:
         session_summary(session_id)
         return False
-    except ExpertError:
-        return True
+    except ExpertError as error:
+        if error.code == "notFound":
+            return True
+        raise
 
 
 def cmd_directory(args):
