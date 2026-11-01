@@ -160,11 +160,17 @@ def descriptor(directory):
     return read_json(os.path.join(directory, "agent-space.genet.json"))
 
 
-def is_space(info):
+def is_deployed_output(root):
+    return os.path.lexists(os.path.join(root, ".spacebuilder", "output-lock.json"))
+
+
+def is_space(info, directory=None):
     """A directory is one of ours when its descriptor says so. `team` is the tag now;
     Spaces built before the rename still carry `expert`."""
     tags = (info or {}).get("tags") or []
-    return "team" in tags or "expert" in tags
+    return ("team" in tags or "expert" in tags
+            or (directory is not None and bool(info) and is_deployed_output(directory)
+                and os.path.isfile(os.path.join(directory, "tools", "team.py"))))
 
 
 def _walk_expert_root(path):
@@ -173,7 +179,7 @@ def _walk_expert_root(path):
     here = os.path.realpath(path)
     while True:
         found = descriptor(here)
-        if is_space(found):
+        if is_space(found, here):
             return here
         parent = os.path.dirname(here)
         if parent == here:
@@ -518,7 +524,7 @@ def experts():
             if not os.path.isdir(candidate):
                 continue
             info = descriptor(candidate)
-            if not is_space(info):
+            if not is_space(info, candidate):
                 continue
             real = os.path.realpath(candidate)
             expected_name = info.get("name") or os.path.basename(real)
@@ -540,7 +546,7 @@ def experts():
     found = {}
     for root, workspace_id in by_root.items():
         info = descriptor(root)
-        if is_space(info):
+        if is_space(info, root):
             spaces = {"root": workspace_id}
             for role in child_role_names(root):
                 child = by_root.get(os.path.realpath(os.path.join(root, "spaces", role)))
@@ -1824,7 +1830,7 @@ def find_existing_project_conflict(base, new_name, desc="", soul=""):
             continue
         cand_dir = os.path.join(base, item)
         info = descriptor(cand_dir)
-        if not is_space(info):
+        if not is_space(info, cand_dir):
             continue
         cand_name = info.get("name") or item
         cand_desc = info.get("description") or ""
@@ -1924,6 +1930,17 @@ def cmd_init(args):
     print("已创建并初始化团队 %s: %s%s" % (new_name, target, opened_info))
 
 
+def require_definition_source(root):
+    if not is_deployed_output(root):
+        return
+    provenance = read_json(os.path.join(root, "artifacts", "PROVENANCE.json"), {}) or {}
+    source = provenance.get("sourcePath") if isinstance(provenance, dict) else None
+    raise ExpertError("当前目录是已部署的团队制品，不能在此新增岗位定义",
+                      "没有创建岗位、工位或修改构建制品",
+                      "在定义源%s维护岗位并 build 后部署；执行机只接收和验证制品，已有岗位用 worktree bind 绑定本机工位" %
+                      (" " + str(source) if source else " Space"))
+
+
 def _unbind_space_worktree(root, space_name):
     role_dir = os.path.join(root, "spaces", space_name)
     if not os.path.isdir(role_dir):
@@ -1931,6 +1948,8 @@ def _unbind_space_worktree(root, space_name):
     env = open_env(role_dir)
     old_wt = env.pop("WORKTREE_DIR", None)
     write_open_env(role_dir, env)
+    if is_deployed_output(root):
+        return old_wt
     desc_path = os.path.join(role_dir, ROOT_DESCRIPTOR)
     data = read_json(desc_path, {}) or {}
     if old_wt:
@@ -1988,6 +2007,7 @@ def cmd_employee(args):
         return
     if subcmd != "add":
         raise ExpertError("未知 employee 子命令", "没有改动", "用 `team.py employee add|ls|retire`")
+    require_definition_source(root)
     role = (args.name or "").strip()
     if not role or "/" in role or "\\" in role or role.startswith("."):
         raise ExpertError("组员名 %r 不合法" % role, "没有创建子空间", "用简洁英文/数字/连字符名称（如 skill-lead、combat-lead）")
@@ -2038,6 +2058,8 @@ def bind_space_worktree(root, space_name, wt_abs):
     env["WORKTREE_DIR"] = wt_real
     env.setdefault("TEAM_EFFORT", "high")
     write_open_env(target_dir, env)
+    if is_deployed_output(root):
+        return
     desc_path = os.path.join(manifest_dir, ROOT_DESCRIPTOR)
     data = read_json(desc_path, {}) or {}
     folders = list(data.get("folders") or [])
@@ -2737,7 +2759,7 @@ def find_expert(root, name):
     for entry in sorted(os.listdir(siblings)) if os.path.isdir(siblings) else []:
         directory = os.path.join(siblings, entry)
         info = descriptor(directory)
-        if is_space(info) and name in (info.get("name"), entry):
+        if is_space(info, directory) and name in (info.get("name"), entry):
             matches.add(os.path.realpath(directory))
     if not matches:
         try:  # an expert kept outside spaces/ is only known to the daemon; without it, the name is simply not found
@@ -4030,6 +4052,8 @@ def sync_identity(root):
     Returns "none" (the team declares no identity), "unchanged", or "rebuilt". A failed build is remembered by the
     digest it failed on so the five-second tick does not rerun it more than once a minute.
     """
+    if is_deployed_output(root):
+        return "unchanged"
     migrate_hook_name(root)
     migrate_skill_names(root)
     heal_identity_aliases(root)
