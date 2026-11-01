@@ -5,13 +5,13 @@ import { defineSpecialty } from "../../framework/public.ts";
 
 defineSpecialty({
   id: "specialty.daemon.team-directory",
-  title: "A Team directory groups real sessions with one lean snapshot instead of querying every role",
-  oracle: "Two actual Team workspaces retain their native leader sessions and --team filtering; the shipped tool makes one lean session-list invocation regardless of role count. Invalid public CLI response shapes fail instead of reporting an empty directory.",
+  title: "Team directory and member roster group real sessions with one lean snapshot",
+  oracle: "Two actual Teams retain native sessions and --team filtering; directory and member roster each make one lean session-list invocation regardless of role count. Real leader/QA counts stay correct and invalid public response shapes stay unknown.",
   catches: ["per-role CLI amplification blocks the front", "sessions grouped under another Team", "filter drops an existing leader", "an uncertain list becomes no sessions"],
   tags: ["core", "expert", "performance"], llm: { default: "none" },
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
   requirements: [{ kind: "python", env: "GENEHUB_PYTHON", minVersion: [3, 7], modules: [] }],
-  productInterfaces: ["tools/team.py directory", "genet session list --lean", "session.create"],
+  productInterfaces: ["tools/team.py directory", "tools/team.py member ls", "genet session list --lean", "session.create"],
   surfaces: ["team-template", "daemon", "genet-cli"], expectedDurationMs: 20_000, timeoutMs: 180_000,
 }, async t => {
   const o = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
@@ -26,6 +26,8 @@ defineSpecialty({
       writeFileSync(join(root, "tools", "team.py"), readFileSync(join(t.openRoot, "apps/daemon/builtin-skills/genehub/references/team-template/tools/team.py")));
       writeFileSync(join(root, "agent-space.genet.json"), JSON.stringify({ schema: "agent-space.v1", name, tags: ["team"], children: ["spaces/leader"], folders: [{ path: "." }] }));
       writeFileSync(join(root, "spaces", "leader", "agent-space.genet.json"), JSON.stringify({ schema: "agent-space.v1", name: "leader", folders: [{ path: "." }] }));
+      mkdirSync(join(root, "spaces", "qa"));
+      writeFileSync(join(root, "spaces", "qa", "agent-space.genet.json"), JSON.stringify({ schema: "agent-space.v1", name: "qa", folders: [{ path: "." }] }));
       const opened = await o.client.call({ type: "workspace.open", payload: { root } });
       t.assertions.assert(opened?.type === "workspace", "Team workspace did not open");
       const listed = await o.client.call({ type: "workspace.list" });
@@ -33,6 +35,9 @@ defineSpecialty({
       const leader = listed.data.find(w => w.folders[0]?.root === join(root, "spaces", "leader"));
       t.assertions.assert(leader, "actual leader workspace missing");
       const session = await t.flows.main.createBuiltinSession(o.client, leader!.id);
+      const qa = listed.data.find(w => w.folders[0]?.root === join(root, "spaces", "qa"));
+      t.assertions.assert(qa, "actual QA workspace missing");
+      if (teams.length === 0) await t.flows.main.createBuiltinSession(o.client, qa!.id);
       teams.push({ root, name, session });
     }
     // A transparent process-boundary recorder forwards every call to the real CLI.
@@ -67,10 +72,23 @@ sys.stdout.write(out);sys.stderr.write(r.stderr);sys.exit(r.returncode)
     t.assertions.assert(queries.length === 1 && queries[0]!.includes("--lean"), `directory amplified session queries: ${JSON.stringify(queries)}`);
     const filtered = command("--team", teams[0]!.name);
     t.assertions.assert(filtered.status === 0 && filtered.stdout.includes(teams[0]!.session) && !filtered.stdout.includes(teams[1]!.session), "--team filtering changed native session membership");
+    const roster = () => {
+      writeFileSync(calls, "");
+      return spawnSync(python, [join(teams[0]!.root, "tools", "team.py"), "member", "ls"], { cwd: teams[0]!.root, env: { ...o.daemon.env, GENEHUB_CLI: recorder }, encoding: "utf8", timeout: 90_000, maxBuffer: 4 * 1024 * 1024 });
+    };
+    const members = roster();
+    t.assertions.assert(members.status === 0, `member roster failed: ${members.stderr}`);
+    for (const role of ["leader", "qa"]) {
+      t.assertions.assert(members.stdout.split("\n").some(line => line.startsWith(`- ${role} `) && line.endsWith("活跃会话: 1")), `native ${role} count lost: ${members.stdout}`);
+    }
+    const memberQueries = readFileSync(calls, "utf8").trim().split("\n").map(s => JSON.parse(s) as string[]).filter(a => a[0] === "session" && a[1] === "list");
+    t.assertions.assert(memberQueries.length === 1 && memberQueries[0]!.includes("--lean"), `member roster amplified session queries: ${JSON.stringify(memberQueries)}`);
     for (const fault of ["missing", "wrong-scope", "invalid-row"]) {
       writeFileSync(mode, fault);
       const bad = command();
       t.assertions.assert(bad.status !== 0 && bad.stderr.includes("目录会话快照") && !bad.stdout.includes("没有团队") && !bad.stdout.includes(teams[0]!.session), `${fault} response was interpreted as a known directory: ${bad.stderr}`);
+      const badRoster = roster();
+      t.assertions.assert(badRoster.status !== 0 && badRoster.stderr.includes("目录会话快照") && !badRoster.stdout.includes("活跃会话:"), `${fault} response published partial member counts: ${badRoster.stdout} ${badRoster.stderr}`);
     }
     t.note("Two real leader sessions grouped; one public lean snapshot; three public envelope faults remain unknown.");
   } finally { o.client.close(); o.daemon.stop(); await o.mock.stop(); }

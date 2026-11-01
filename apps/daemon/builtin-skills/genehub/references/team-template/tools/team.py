@@ -1989,13 +1989,14 @@ def cmd_employee(args):
         if not roles:
             print("（还没有子空间岗位）")
             return
+        by_workspace = session_snapshot_by_workspace() if any(spaces_map.get(role) for role in roles) else {}
         for r in roles:
             rdir = os.path.join(root, "spaces", r)
             info = descriptor(rdir) or {}
             wt = open_env(rdir).get("WORKTREE_DIR")
             active = bool(wt) or r in ("leader", "team-reflect", "reflect")
             wid = spaces_map.get(r, "")
-            live = live_sessions(wid) if wid else []
+            live = by_workspace.get(wid, []) if wid else []
             state_tag = "active(在岗)" if active else "standby(待岗)"
             print("- %s [%s]: %s | 工位: %s | 活跃会话: %d" % (r, state_tag, info.get("description") or "-", wt or "未绑定", len(live)))
         return
@@ -2327,27 +2328,30 @@ def session_missing(session_id):
         raise
 
 
+def session_snapshot_by_workspace():
+    """One validated public snapshot for read-only Team overviews."""
+    by_workspace = {}
+    snapshot = genet("session", "list", "--lean")
+    items = snapshot.get("sessions")
+    if "workspaceId" not in snapshot or snapshot["workspaceId"] is not None or not isinstance(items, list):
+        raise ExpertError("目录会话快照无法核对", "目录未知，没有按空会话处理", "核对原查询回执后重试目录")
+    seen = set()
+    for item in items:
+        if (not isinstance(item, dict) or not isinstance(item.get("id"), str)
+                or not SESSION_ID.match(item["id"]) or item["id"] in seen
+                or not isinstance(item.get("workspaceId"), str) or not item["workspaceId"]
+                or not isinstance(item.get("status"), str)):
+            raise ExpertError("目录会话快照含无法核对的记录", "目录未知，没有发布部分目录", "核对原会话与查询回执")
+        seen.add(item["id"])
+        if not item.get("archived"):
+            by_workspace.setdefault(item["workspaceId"], []).append(item)
+    return by_workspace
+
+
 def cmd_directory(args):
     selected = [(name, expert) for name, expert in sorted(experts().items())
                 if not args.expert or args.expert == name]
-    by_workspace = {}
-    if selected:
-        # Directory is a read-only overview. One snapshot avoids rescanning the
-        # entire native session store (and workspace catalog) for every role.
-        snapshot = genet("session", "list", "--lean")
-        items = snapshot.get("sessions")
-        if "workspaceId" not in snapshot or snapshot["workspaceId"] is not None or not isinstance(items, list):
-            raise ExpertError("目录会话快照无法核对", "目录未知，没有按空会话处理", "核对原查询回执后重试目录")
-        seen = set()
-        for item in items:
-            if (not isinstance(item, dict) or not isinstance(item.get("id"), str)
-                    or not SESSION_ID.match(item["id"]) or item["id"] in seen
-                    or not isinstance(item.get("workspaceId"), str) or not item["workspaceId"]
-                    or not isinstance(item.get("status"), str)):
-                raise ExpertError("目录会话快照含无法核对的记录", "目录未知，没有发布部分目录", "核对原会话与查询回执")
-            seen.add(item["id"])
-            if not item.get("archived"):
-                by_workspace.setdefault(item["workspaceId"], []).append(item)
+    by_workspace = session_snapshot_by_workspace() if selected else {}
     lines = []
     for name, expert in selected:
         info = descriptor(expert["root"]) or {}
