@@ -212,8 +212,8 @@ impl Command {
         self
     }
 
-    /// Every stream is a pipe here. `Stdio::null()` is accepted and treated
-    /// as a pipe nobody reads, which is indistinguishable to the child.
+    /// Streams are host pipes. Waiting drops the stdin handle, delivering EOF
+    /// even when a caller requested `Stdio::null()` and never writes input.
     pub fn stdin(&mut self, _cfg: impl Into<Stdio>) -> &mut Self {
         self
     }
@@ -387,6 +387,15 @@ impl Child {
 pub struct ChildStdin {
     handle: Handle,
     delay: Backoff,
+}
+
+impl Drop for ChildStdin {
+    fn drop(&mut self) {
+        // The other stream handles keep the host child alive. Releasing this
+        // handle alone must still close its pipe, as tokio's ChildStdin does.
+        // Otherwise a CLI reading stdin to EOF cannot even start its request.
+        let _ = with_child(self.handle.0, host::Child::close_stdin);
+    }
 }
 
 pub struct ChildStdout {
