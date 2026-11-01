@@ -1072,10 +1072,10 @@ export function App({
                         tags={selectedTags}
                         mediaTags={automaticMediaTags}
                         agentId={agentId}
-                        modelId={workbench.timeline.modelId ?? draft?.modelId ?? null}
+                        modelId={workbench.timeline.modelId ?? session?.modelId ?? draft?.modelId ?? null}
                         modeId={workbench.timeline.modeId ?? draft?.modeId ?? null}
                         effortId={
-                          workbench.timeline.effortId ?? draft?.effortId ?? null
+                          workbench.timeline.effortId ?? session?.effortId ?? draft?.effortId ?? null
                         }
                         fast={
                           workbench.timeline.fast ?? draft?.fast ?? false
