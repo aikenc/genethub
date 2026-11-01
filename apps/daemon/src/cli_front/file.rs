@@ -24,7 +24,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use super::output::{self, CliFailure};
-use super::rpc::RpcError;
+use super::rpc::{Rpc, RpcError};
 use super::target::Selection;
 use super::{query, EXIT_FAILED, EXIT_OK};
 use crate::transfer::wire::{FileIdentity, FileReadHead, FileReadRequest};
@@ -342,7 +342,7 @@ fn local(error: std::io::Error) -> Stop {
 struct Opened {
     head: FileReadHead,
     stream: crate::dataplane::client::ClientStream,
-    _connection: super::rpc::Rpc,
+    connection: Rpc,
 }
 
 async fn open(from: &str, request: &FileReadRequest) -> Result<Opened, Stop> {
@@ -352,6 +352,10 @@ async fn open(from: &str, request: &FileReadRequest) -> Result<Opened, Stop> {
     })
     .await
     .map_err(|error| Stop::Retry(error.message))?;
+    open_on(rpc, request).await
+}
+
+async fn open_on(rpc: Rpc, request: &FileReadRequest) -> Result<Opened, Stop> {
     let metadata = serde_json::to_value(request).map_err(|error| Stop::Fatal(error.to_string()))?;
     let (head, stream) = rpc
         .open_data_stream("file.read", metadata)
@@ -368,11 +372,11 @@ async fn open(from: &str, request: &FileReadRequest) -> Result<Opened, Stop> {
     Ok(Opened {
         head: parsed,
         stream,
-        _connection: rpc,
+        connection: rpc,
     })
 }
 
-async fn receive(registry: &Registry, live: &Live) -> Result<(), Stop> {
+async fn receive(registry: &Registry, live: &Live) -> Result<Rpc, Stop> {
     let (from, source, partial, expected) = {
         let record = live.record.lock().expect("transfer");
         (
@@ -407,7 +411,7 @@ async fn receive(registry: &Registry, live: &Live) -> Result<(), Stop> {
     let Opened {
         head,
         mut stream,
-        _connection,
+        connection,
     } = open(&from, &request).await?;
     if expected
         .as_ref()
@@ -456,11 +460,13 @@ async fn receive(registry: &Registry, live: &Live) -> Result<(), Stop> {
     }
     file.sync_all().map_err(local)?;
     update(registry, live, |record| record.received_bytes = received);
-    Ok(())
+    // Verification is another stream on this authenticated peer, rather than
+    // a new connection after successfully receiving the whole file.
+    Ok(connection)
 }
 
 /// Compares the file at `received` with the source's SHA-256.
-async fn verify(live: &Live, received: &Path) -> Result<String, Stop> {
+async fn verify(live: &Live, received: &Path, connection: Option<Rpc>) -> Result<String, Stop> {
     let (from, source, identity) = {
         let record = live.record.lock().expect("transfer");
         (
@@ -475,7 +481,16 @@ async fn verify(live: &Live, received: &Path) -> Result<String, Stop> {
         expect: identity,
         digest: true,
     };
-    let opened = open(&from, &request).await?;
+    let opened = match connection {
+        Some(rpc) => match open_on(rpc, &request).await {
+            Ok(opened) => opened,
+            // A peer can disappear after its last body byte. Preserve the
+            // previous reconnect path only for a retryable transport failure.
+            Err(Stop::Retry(_)) => open(&from, &request).await?,
+            Err(stop) => return Err(stop),
+        },
+        None => open(&from, &request).await?,
+    };
     let remote = opened
         .head
         .sha256
@@ -523,12 +538,17 @@ async fn run(registry: &'static Registry, live: Arc<Live>) {
             already_published(&record),
         )
     };
-    if !published {
-        if let Err(stop) = receive_with_retries(registry, &live).await {
-            settle(registry, &live, stop);
-            return;
+    let connection = if !published {
+        match receive_with_retries(registry, &live).await {
+            Ok(connection) => Some(connection),
+            Err(stop) => {
+                settle(registry, &live, stop);
+                return;
+            }
         }
-    }
+    } else {
+        None
+    };
     if live.cancel.load(Ordering::SeqCst) {
         settle(registry, &live, Stop::Canceled);
         return;
@@ -538,7 +558,7 @@ async fn run(registry: &'static Registry, live: Arc<Live>) {
         record.error = None;
     });
     let received = if published { &destination } else { &partial };
-    let digest = match verify(&live, received).await {
+    let digest = match verify(&live, received, connection).await {
         Ok(digest) => digest,
         Err(stop) => {
             let mismatch = matches!(stop, Stop::Fatal(ref message) if message.starts_with("integrityMismatch"));
@@ -567,11 +587,11 @@ async fn run(registry: &'static Registry, live: Arc<Live>) {
     });
 }
 
-async fn receive_with_retries(registry: &Registry, live: &Live) -> Result<(), Stop> {
+async fn receive_with_retries(registry: &Registry, live: &Live) -> Result<Rpc, Stop> {
     let mut failures = 0u32;
     loop {
         match receive(registry, live).await {
-            Ok(()) => return Ok(()),
+            Ok(connection) => return Ok(connection),
             Err(Stop::Retry(message)) => {
                 failures += 1;
                 if failures > MAX_RETRIES {
