@@ -104,6 +104,35 @@ const routesOf = (t: CaseContext, result: GenetCliResult): Route[] =>
   (succeeded(t, result, "agent.list").routes as Route[]).filter((route) => route.agentId === "genet");
 
 modelCase(
+  "busy-routed-durable-notice-keeps-its-receipt",
+  "A busy routed Session accepts a durable notice and acknowledges the same message twice without rerouting or duplication",
+  "Real CLI sends during a slow routed turn return accepted, remain queued without interrupting; identical retries acknowledge the same input, different content with the same id fails; after the turn both inputs finish exactly once",
+  ["admission tries to switch the running Agent", "a duplicate accepted input reports failure because execution is busy", "conflicting content reuses an accepted id", "a system notice interrupts or is delivered twice"],
+  async (t, {cli, workspaceId, snapshot, mock}) => {
+    mock.script({text:"first turn",delayMs:8000},{text:"notice handled"});
+    const created = succeeded(t, cli(["agent","run","--tag","Flash","--workspace",workspaceId,"--message-id","busy.initial","--no-wait","Work on the signup app"]), "session.result");
+    const id = String(created.sessionId);
+    await t.tools.waitUntil(async () => mock.calls.length === 1 && (await snapshot(id)).summary.status === "running", 30000);
+    const notice = ["session","send",id,"--system","Team result ready","--message-id","busy.notice","--no-wait"];
+    for (let i=0;i<2;i++) {
+      const receipt = succeeded(t, cli(notice), "session.result");
+      t.assertions.assert(receipt.status === "accepted" && receipt.messageId === "busy.notice", "durable accepted receipt was not returned");
+    }
+    t.assertions.assert((await snapshot(id)).summary.inputSummary?.pendingMessageIds.includes("busy.notice") === true, "notice not visible in the queue");
+    const conflict = cli(["session","send",id,"--system","DIFFERENT content","--message-id","busy.notice","--no-wait"]);
+    t.assertions.assert(conflict.code !== 0, "same id with different content was accepted");
+    t.assertions.assert(mock.calls.length === 1 && (await snapshot(id)).summary.status === "running", "notice interrupted the running turn");
+    await t.tools.waitUntil(async () => {
+      const s = (await snapshot(id)).summary;
+      return mock.calls.length === 2 && s.status === "idle" && s.inputSummary?.pendingMessageIds.length === 0;
+    }, 45000);
+    const items = (await snapshot(id)).items;
+    t.assertions.assert(items.filter(item=>item.type === "userMessage" && item.id === "busy.notice").length === 1, "accepted notice was duplicated");
+    t.assertions.assert(items.filter(item=>item.type === "assistantMessage").length === 2, "turns were not completed exactly once");
+  },
+);
+
+modelCase(
   "routes-are-listed-one-per-line-and-filtered-by-every-tier",
   "agent list --routes prints one line per routable model and filters by every tier and medium",
   "`genet agent list --routes` lists genet's flash (Flash, low) and pro (Pro, medium) routes each with agentId, modelId, tags, cost and default; --tag keeps only routes carrying every tier and implies route mode, --media keeps only routes that understand the medium; no match is an empty list, not an error; an unknown medium exits 2",
