@@ -153,6 +153,33 @@ defineSpecialty(
 
 defineSpecialty(
   wasmMeta(
+    "specialty.wasm.guest-identity.explicit-native-agent-command-is-honoured",
+    "An explicit native Agent command remains an intentional override",
+    "an explicitly selected invalid installed executable is invoked and fails without silently falling back to the component provider",
+    ["component default ignores an explicit runtime choice", "a failed override silently starts another Agent"],
+    { llm: "mock", ms: 15_000 },
+  ),
+  async (t) => {
+    const invoked = path.join(t.env.root, "explicit-native-invoked");
+    const executable = path.join(t.env.root, "explicit-native-agent");
+    const quoted = `'${invoked.replace(/'/g, "'\\''")}'`;
+    writeFileSync(executable, `#!/bin/sh\nprintf invoked > ${quoted}\nexit 91\n`, { mode: 0o755 });
+    await withOpened(t, async (opened) => {
+      opened.mock.script({ text: "unexpected component fallback" });
+      const session = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
+      const events = await t.flows.main.attachEventLog(opened.client, session);
+      let rejected = false;
+      try { await t.flows.main.sendPrompt(opened.client, session, "Use the explicitly configured runtime."); }
+      catch { rejected = true; }
+      await t.tools.waitUntil(() => existsSync(invoked), 10_000);
+      await t.tools.waitUntil(() => rejected || events.some(event => event.type === "turnFailed"), 15_000);
+      t.assertions.assert(opened.mock.requests.length === 0, "failed native override silently used the component model");
+    }, true, { GENET_AGENT_LOCAL_COMMAND: executable });
+  },
+);
+
+defineSpecialty(
+  wasmMeta(
     "specialty.wasm.guest-identity.agent-is-second-host-process",
     "A builtin session is a second host process running the same component's agent entry",
     "after session.create, a live pid other than the daemon runs genehub-host-local with --entry agent on the same genehub_guest.wasm",
@@ -166,6 +193,13 @@ defineSpecialty(
   ),
   async (t) => {
     const artifacts = requireWasmArtifacts(t.openRoot);
+    // Upgrades leave older native agents on users' PATH. That installation
+    // residue must not replace the Agent bundled in the active component.
+    const legacyBin = path.join(t.env.root, "obsolete-native-bin");
+    const legacyInvoked = path.join(t.env.root, "obsolete-native-invoked");
+    mkdirSync(legacyBin);
+    const quote = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
+    writeFileSync(path.join(legacyBin, "genet-agent-local"), `#!/bin/sh\nprintf invoked > ${quote(legacyInvoked)}\nexit 91\n`, { mode: 0o755 });
     await withOpened(
       t,
       async (opened) => {
@@ -208,8 +242,10 @@ defineSpecialty(
           !agents.some((row) => /(^|\s)genet-agent-local(\s|$)/.test(row.cmd) && !row.cmd.includes("genehub-host-local")),
           `native agent binary was spawned: ${JSON.stringify(agents)}`,
         );
+        t.assertions.assert(!existsSync(legacyInvoked), "obsolete installed Agent ran instead of the active component");
       },
       true,
+      { PATH: `${legacyBin}${path.delimiter}${process.env.PATH ?? ""}` },
     );
   },
 );

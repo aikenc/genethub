@@ -86,17 +86,23 @@ impl GenetAdapter {
     /// `beside` is where the daemon itself lives, taken as an argument so a test
     /// can point it at a directory it controls.
     fn discover_beside(beside: Option<PathBuf>) -> Self {
-        // Next to the daemon first: that is where the installer puts it, and it
-        // must win over any unrelated binary of the same name on PATH.
-        let sibling = beside
-            .map(|dir| dir.join(agent_file_name(cfg!(windows))))
-            .filter(|path| path.is_file());
         let binary = std::env::var(crate::channel::ENV_AGENT_COMMAND)
             .ok()
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
-            .or(sibling)
-            .or_else(|| find_executable(BINARY));
+            .or_else(|| {
+                // The component contains its own Agent. Old installers left
+                // native binaries beside the CLI or on PATH; discovering one
+                // must not silently pin an upgraded component to that runtime.
+                // An explicit command remains an intentional legacy override.
+                if cfg!(target_family = "wasm") {
+                    return None;
+                }
+                beside
+                    .map(|dir| dir.join(agent_file_name(cfg!(windows))))
+                    .filter(|path| path.is_file())
+                    .or_else(|| find_executable(BINARY))
+            });
         GenetAdapter { binary }
     }
 }
