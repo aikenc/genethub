@@ -3396,9 +3396,18 @@ def _team_unfinished_milestones(root):
 def _team_progress_fingerprint(root):
     done_dir = state_dir(root, "done")
     done_files = sorted(os.listdir(done_dir)) if os.path.isdir(done_dir) else []
+    business_done_count = 0
     latest_done_ms = 0
     for fname in done_files:
-        rec = read_json(os.path.join(done_dir, fname)) or {}
+        if not fname.endswith(".json"):
+            continue
+        rec = read_json(os.path.join(done_dir, fname))
+        if not isinstance(rec, dict) or not rec or rec.get("kind") in ("reflect", "team-reflect"):
+            continue
+        # A watchdog anomaly can finish a reflection without advancing the
+        # milestone. Counting that completion reopens the same circuit and
+        # creates another anomaly/reflection cycle.
+        business_done_count += 1
         latest_done_ms = max(latest_done_ms, rec.get("createdAtMs") or 0)
     releases = _valid_release_versions(os.path.join(datas_root(root), "releases"))
     wt_heads = []
@@ -3410,7 +3419,7 @@ def _team_progress_fingerprint(root):
                 sha = subprocess.run(["git", "-C", full, "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
                 if sha:
                     wt_heads.append("%s:%s" % (entry, sha))
-    raw = "%d|%d|%s|%s" % (len(done_files), latest_done_ms, ",".join(releases), ",".join(wt_heads))
+    raw = "%d|%d|%s|%s" % (business_done_count, latest_done_ms, ",".join(releases), ",".join(wt_heads))
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
 
