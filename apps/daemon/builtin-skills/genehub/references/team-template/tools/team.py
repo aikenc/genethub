@@ -640,7 +640,10 @@ def live_sessions(workspace_id, machine=None):
 
 
 def session_summary(session_id, machine=None):
-    return genet("session", "get", session_id, *machine_args(machine)).get("session", {}).get("summary", {})
+    # Coordination needs live status and inbox metadata, not the Agent's full
+    # native conversation. Inspect exposes the same summary without expanding
+    # tool bodies/history on every watchdog, lock and reconciliation check.
+    return genet("session", "inspect", session_id, *machine_args(machine)).get("inspection", {}).get("summary", {})
 
 
 def same_expert_session(root, session_id, spaces=None):
