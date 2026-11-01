@@ -346,7 +346,7 @@ function permissionResolutionMessage(
   }
   if (outcome.outcome === "timedOut") return "确认已超时；任务不会继续执行。";
   if (outcome.outcome === "canceled") return "已取消；任务不会继续执行。";
-  if (outcome.outcome === "answered") return "回答已提交，Agent 正在继续执行。";
+  if (outcome.outcome === "answered") return "回答已保存。";
 
   const option = request.options.find((candidate) => candidate.id === outcome.optionId);
   if (option?.kind === "reject") return "已拒绝；Agent 正在安全结束本次任务。";
