@@ -1110,7 +1110,10 @@ def flush_session_inbox_if_idle(root, session_id, force=False):
     if summary.get("status") != "idle" or (summary.get("inputSummary") or {}).get("paused"):
         return False
     if not force and _has_unfinished_children(root, session_id):
-        if not any(item.get("purpose") in ("human", "patrol", "task", "question") for item in peek_session_inbox(root, session_id)):
+        # Reconciliation queues a result only after its own batch is complete.
+        # Another older (possibly Human-paused) batch must not suppress it.
+        # The pause guard above and the original child's lock remain intact.
+        if not any(item.get("purpose") in ("human", "patrol", "task", "question", "result") for item in peek_session_inbox(root, session_id)):
             return False
     delivered = False
     with inbox_lock(root, session_id):
