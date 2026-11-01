@@ -9,7 +9,7 @@ defineSpecialty({
   title: "Fixed team targets dispatch once and hold the executor's writer lock until reconciliation",
   oracle: "Two real daemon directories communicate through a real relay: a lost successful receiver stdout recovers the same session, competing writer and changed identity are rejected, target model/media are validated before a writer lock, system notices preserve pause, an unreachable ledger entry cannot block another completion and executor lock release",
   catches: ["same role short name routes to another team", "two callers write one directory", "lost reply creates duplicate session", "caller model leaks remotely", "remote notice lifts Human pause", "one offline task aborts reconciliation"],
-  stages: ["initial-result", "resumed-result", "canceled-release"],
+  stages: ["initial-result", "resumed-result", "paused-reservation", "resumed-release"],
   tags: ["core", "expert", "team-remote"], llm: { default: "mock" },
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
   requirements: [{ kind: "python", env: "GENEHUB_PYTHON", minVersion: [3, 7], modules: [] }],
@@ -213,13 +213,14 @@ sys.exit(r.returncode)
       t.assertions.assert(finished.code === 0 && !existsSync(lock), "fresh task did not retire its own writer lock");
     }
     t.assertions.assert(freshSessions[0] !== freshSessions[1] && (await cliJson(["session", "list", "--workspace", qa.id], true)).sessions.length === 3, "same-worded new task reused an old session");
-    o.mock.script({ text: "A slow remote result.", delayMs: 30000 }, { text: "Canceled worker." });
+    o.mock.script({ text: "A slow remote result.", delayMs: 30000 }, { text: "Resumed worker." });
     const concurrent = await Promise.all(["racer-a", "racer-b"].map(id => script(dispatch.map(v => v === "one-task" ? id : v))));
     t.assertions.assert(concurrent.filter(r => r.code === 0).length === 1 && (await cliJson(["session", "list", "--workspace", qa.id], true)).sessions.length === 4, "concurrent callers admitted zero or multiple writers");
     const raceSession = JSON.parse(readFileSync(lock, "utf8")).session;
-    // The actual source timeout interrupts its own task; the executor may
-    // release that canceled writer without lifting the durable pause.
-    writeFileSync(path.join(sourceRoot, ".genethub/open.env"), "TEAM_AGENT=genet\nTEAM_BOARD_PORT=0\nTEAM_STUCK_AFTER=0\n");
+    // A person's stop pauses the task rather than abandoning its directory.
+    // Quiet workers are no longer canceled automatically. Keep the reservation
+    // until this same task is explicitly continued and actually completes.
+    await cliJson(["session", "interrupt", raceSession, "--machine", machine]);
     const peerErrors = (data: string) => {
       const file = path.join(data, "logs/daemon.log");
       if (!existsSync(file)) return [];
@@ -230,16 +231,28 @@ sys.exit(r.returncode)
         } catch { return "non-JSON diagnostic omitted"; }
       });
     };
-    let lastCancelState: unknown;
-    await t.stage("canceled-release", () => t.tools.waitUntil(async () => {
+    let lastReleaseState: unknown;
+    await t.stage("paused-reservation", async () => {
+      await t.tools.waitUntil(async () => {
+        const s = (await cliJson(["session", "list", "--workspace", qa.id], true)).sessions.find((s: any) => s.id === raceSession);
+        return s?.status === "idle" && s?.inputSummary?.paused;
+      }, 30000);
+      const pausedHook = await script(["hook"]);
+      t.assertions.assert(pausedHook.code === 0 && existsSync(lock), "paused writer lost its reservation");
+      t.assertions.assert(JSON.parse(readFileSync(lock, "utf8")).session === raceSession, "paused reservation changed owner");
+      const paused = (await cliJson(["session", "list", "--workspace", qa.id], true)).sessions.find((s: any) => s.id === raceSession);
+      t.assertions.assert(paused?.inputSummary?.paused && paused.inputSummary.pendingMessageIds.length > 0, "reconciliation resumed or discarded paused input");
+    });
+    await cliJson(["session", "send", raceSession, "Continue the same paused task and finish it.", "--message-id", "x.resume-reserved-writer", "--no-wait", "--machine", machine]);
+    await t.stage("resumed-release", () => t.tools.waitUntil(async () => {
       const tick = await script(["hook"]);
-      if (tick.code !== 0) throw new Error("timeout reconciliation failed: " + tick.stderr);
+      if (tick.code !== 0) throw new Error("explicit-stop reconciliation failed: " + tick.stderr);
       const summaries = (await cliJson(["session", "list", "--workspace", qa.id], true)).sessions;
-      lastCancelState = { targetErrors: peerErrors(t.env.data), sourceErrors: peerErrors(sourceData), relay: { exit: relay.process.exitCode, signal: relay.process.signalCode, logTail: relay.logTail().slice(-1500) }, summaries, pending: readdirSync(pendingDir).map(f => JSON.parse(readFileSync(path.join(pendingDir, f), "utf8"))) };
+      lastReleaseState = { targetErrors: peerErrors(t.env.data), sourceErrors: peerErrors(sourceData), relay: { exit: relay.process.exitCode, signal: relay.process.signalCode, logTail: relay.logTail().slice(-1500) }, summaries, pending: readdirSync(pendingDir).map(f => JSON.parse(readFileSync(path.join(pendingDir, f), "utf8"))) };
       return !existsSync(lock);
-    }, 30000).catch(() => { throw new Error("cancel release did not finish: " + JSON.stringify(lastCancelState)); }));
-    const canceled = (await cliJson(["session", "list", "--workspace", qa.id], true)).sessions.find((s: any) => s.id === raceSession);
-    t.assertions.assert(canceled?.inputSummary?.paused, "cancel release accidentally resumed the old task");
+    }, 30000).catch(() => { throw new Error("resumed writer release did not finish: " + JSON.stringify(lastReleaseState)); }));
+    const resumed = (await cliJson(["session", "list", "--workspace", qa.id], true)).sessions.find((s: any) => s.id === raceSession);
+    t.assertions.assert(resumed?.status === "idle" && !resumed?.inputSummary?.paused && resumed.inputSummary.pendingMessageIds.length === 0, "finished task left input paused or pending");
     t.note("real relay + two daemon state directories; one successful stdout lost and recovered; writer/identity/model/pause/reconcile/unknown-create contracts verified");
   } finally {
     if (sourceStarted) await sourceCli(["daemon", "stop"]);
