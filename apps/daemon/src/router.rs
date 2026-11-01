@@ -1015,19 +1015,10 @@ async fn dispatch(
                 }
             };
             if let Some(message_id) = message_id {
-                {
-                    let media_tags = crate::agent_routing::media_tags_for_mimes(
-                        attachments
-                            .iter()
-                            .map(|attachment| attachment.mime.as_str()),
-                    );
-                    if let Err(error) =
-                        crate::agent_routing::route_session(state, &session_id, None, media_tags)
-                            .await
-                    {
-                        return failed(error);
-                    }
-                }
+                // Ack the durable input, including identical retries, independently
+                // of the currently running Agent. The inbox routes its queued
+                // attachments when delivery can actually start; routing here
+                // rejects even a no-op selection while another turn is active.
                 return match state
                     .sessions
                     .accept_input(

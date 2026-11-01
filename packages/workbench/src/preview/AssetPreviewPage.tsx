@@ -389,7 +389,7 @@ export function AssetPreviewPage({
         />
       )}
       {fileFeedbackEnabled ? <PreviewFeedbackPanel feedback={feedback} bindOpen={annotatable ? bindFileFeedback : undefined} showToolbarButton={!annotatable} /> : null}
-      {fileFeedbackEnabled && !shareAccess && feedbackClient ? <PreviewShareButton client={feedbackClient} source={{...source, ...meta?.location, path: feedbackSource?.path ?? source.path, siteEntryPath: source.siteEntryPath ?? source.path}} resources={resources.current} trigger={false} bindOpen={bindShare} /> : null}
+      {fileFeedbackEnabled && !shareAccess && feedbackClient ? <PreviewShareButton client={feedbackClient} source={{...source, ...meta?.location, path: feedbackSource?.path ?? source.path, siteEntryPath: meta?.location?.siteEntryPath ?? source.siteEntryPath ?? source.path}} resources={resources.current} trigger={false} bindOpen={bindShare} /> : null}
       {fileFeedbackEnabled && shareAccess ? <PreviewShareCopyButton trigger={false} bindOpen={bindShare} /> : null}
       {chrome === "page" && pageInfoOpen ? (
         <EmbeddedInfoDialog
@@ -451,7 +451,7 @@ function PreviewDocument({
   onServiceChange?: (service: PreviewServiceInfo | null) => void;
   resourcePaths?: Set<string>;
 }) {
-  type Visit = {path: string; result: AssetPreviewResult; query: string; fragment: string};
+  type Visit = {path: string; result: AssetPreviewResult; query: string; fragment: string; siteEntryPath: string};
   const [history, setHistory] = useState<Visit[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [linkProblem, setLinkProblem] = useState<string | null>(null);
@@ -467,7 +467,7 @@ function PreviewDocument({
     setHistory([]); setHistoryIndex(-1); setLinkProblem(null); scrollPositions.current.clear();
     return () => { followAbort.current?.abort(); };
   }, [path, result]);
-  const shown = history[historyIndex] ?? {path, result, query: docQuery, fragment: docFragment};
+  const shown = history[historyIndex] ?? {path, result, query: docQuery, fragment: docFragment, siteEntryPath};
   const {metadata, bytes, transfer} = shown.result;
   useEffect(() => { onSourceChange?.({path: shown.path, version: metadata.version}); }, [shown.path, metadata.version, onSourceChange]);
   const openFile = useCallback(async (nextPath: string, query = "", fragment = "") => {
@@ -478,14 +478,19 @@ function PreviewDocument({
     try {
       const loaded = nextPath === shown.path ? shown.result : await client.preview(workspaceHandle, nextPath, "original", abort.signal);
       if (generation !== followGeneration.current) return;
-      const prior = historyIndex < 0 ? [{path, result, query: docQuery, fragment: docFragment}] : history.slice(0, historyIndex + 1);
-      setHistory([...prior, {path: nextPath, result: loaded, query, fragment}]);
+      const prior = historyIndex < 0 ? [{path, result, query: docQuery, fragment: docFragment, siteEntryPath}] : history.slice(0, historyIndex + 1);
+      // Child documents keep their site's root (storage and /assets alike).
+      // Leaving that directory opens another site, just as its chat link does.
+      // Store this per visit so back/forward and popout keep the same identity.
+      const siteDirectory = shown.siteEntryPath.slice(0, shown.siteEntryPath.lastIndexOf('/') + 1);
+      const nextSiteEntryPath = nextPath.startsWith(siteDirectory) ? shown.siteEntryPath : nextPath;
+      setHistory([...prior, {path: nextPath, result: loaded, query, fragment, siteEntryPath: nextSiteEntryPath}]);
       setHistoryIndex(prior.length);
       if (nextPath !== shown.path) { resourcePaths?.clear(); resourcePaths?.add(nextPath); }
     } catch (error) {
       if (generation === followGeneration.current && !abort.signal.aborted) setLinkProblem(error instanceof Error ? error.message : "无法打开这个链接");
     }
-  }, [client, workspaceHandle, shown, history, historyIndex, path, result, docQuery, docFragment, resourcePaths]);
+  }, [client, workspaceHandle, shown, history, historyIndex, path, result, docQuery, docFragment, siteEntryPath, resourcePaths]);
   const navigateHistory = (next: number) => {
     followGeneration.current += 1; followAbort.current?.abort(); setLinkProblem(null); setHistoryIndex(next);
     resourcePaths?.clear(); if (history[next]) resourcePaths?.add(history[next]!.path);
@@ -500,8 +505,8 @@ function PreviewDocument({
     if (id) Array.from(node.querySelectorAll("[id]")).find(target => target.id === id)?.scrollIntoView();
   }, [shown.path, shown.fragment, metadata.kind, visitKey]);
   const publishDocumentMeta = useCallback((meta: PreviewMeta | null) => {
-    onMetaChange?.(meta ? {...meta, location: {path: shown.path, docQuery: shown.query, docFragment: shown.fragment, siteEntryPath}} : null);
-  }, [onMetaChange, shown.path, shown.query, shown.fragment, siteEntryPath]);
+    onMetaChange?.(meta ? {...meta, location: {path: shown.path, docQuery: shown.query, docFragment: shown.fragment, siteEntryPath: shown.siteEntryPath}} : null);
+  }, [onMetaChange, shown.path, shown.query, shown.fragment, shown.siteEntryPath]);
   const rootHandle = path.split("/")[0] ?? "";
   const loadPreview = useCallback(
     async (assetPath: string, signal?: AbortSignal) => {
@@ -573,7 +578,7 @@ function PreviewDocument({
         metadata={shown.result.metadata}
         transfer={shown.result.transfer}
         entryPath={shown.path}
-        siteEntryPath={siteEntryPath}
+        siteEntryPath={shown.siteEntryPath}
         docQuery={shown.query}
         docFragment={shown.fragment}
         storageScope={{ deviceHandle, workspaceHandle, accessScope: storageAccessScope, principalScope: shown.result.metadata.storageScope }}
