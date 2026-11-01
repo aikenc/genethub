@@ -1588,6 +1588,7 @@ def refresh_live_status(root, force=False):
             pass
     try:
         name, mine = me(root)
+        by_workspace = session_snapshot_by_workspace()
     except ExpertError:
         return
     os.makedirs(trunk_dir, exist_ok=True)
@@ -1602,7 +1603,7 @@ def refresh_live_status(root, force=False):
     for role, wid in sorted((mine.get("spaces") or {}).items()):
         role_dir = root if role == "root" else os.path.join(root, "spaces", role)
         wt = open_env(role_dir).get("WORKTREE_DIR") or ("前台" if role == "root" else "未绑定工位（待岗）")
-        live = live_sessions(wid)
+        live = by_workspace.get(wid, [])
         if not live:
             lines.append("- **%s** (工位: `%s`): 暂无会话" % (role, wt))
         else:
@@ -3243,8 +3244,9 @@ def user_rounds_since(spaces, since, team_mode=False, limit=None):
     needs to know whether enough rounds piled up."""
     count, last = 0, 0
     target_wids = [wid for role, wid in spaces.items() if role not in ("reflect", "team-reflect")] if team_mode else [spaces["root"]]
+    by_workspace = session_snapshot_by_workspace() if target_wids else {}
     for wid in target_wids:
-        for item in sorted(live_sessions(wid), key=lambda value: -(value.get("updatedAtMs") or 0)):
+        for item in sorted(by_workspace.get(wid, []), key=lambda value: -(value.get("updatedAtMs") or 0)):
             if not team_mode and SYSTEM_LABEL in (item.get("labels") or []):
                 continue
             if item.get("updatedAtMs", 0) <= since:
