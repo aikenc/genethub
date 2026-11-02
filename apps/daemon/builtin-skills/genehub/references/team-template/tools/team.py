@@ -1265,11 +1265,98 @@ def resolve_send_target(root, target_spec, kind, text, sender, machine=None, wor
 
 # ---------------------------------------------------------------- commands
 
+def send_explicit_resume(root, args, sender, machine):
+    # The ID is global to this Team, including retries that name another target.
+    # Keep one owner through native delivery so late failures cannot overwrite an
+    # accepted receipt. The pending lock is held only for short metadata writes.
+    key = hashlib.sha256((args.message_id or "").encode("utf-8")).hexdigest()
+    with inbox_lock(root, "resume-" + key, purpose="恢复操作"):
+        return _send_explicit_resume(root, args, sender, machine)
+
+
+def _send_explicit_resume(root, args, sender, machine):
+    """Explicit continuation is one attributed input plus a durable result subscription.
+
+    The operation receipt is addressed directly by ID, never found by scanning history.
+    Unconfirmed delivery keeps the subscription dormant until the same operation is
+    acknowledged. A retry after completion must not reset the result baseline.
+    """
+    target = args.to
+    if args.kind != "human" or not SESSION_ID.match(target) or not SESSION_ID.match(sender or "") or target == sender or not args.message_id:
+        raise ExpertError("明确恢复需要 human 用途、原会话 ID 和稳定 --message-id", "没有恢复或新建会话", "用户明确要求继续后，由前台署名向原会话投递")
+    body = " ".join(args.text)
+    digest = hashlib.sha256(json.dumps([target, sender, machine, body], ensure_ascii=False).encode("utf-8")).hexdigest()
+    operation_path = state_dir(root, "resumes", hashlib.sha256(args.message_id.encode("utf-8")).hexdigest() + ".json")
+    pending_path = state_dir(root, "pending", target + ".json")
+    with inbox_lock(root, "pending-" + target, purpose="恢复回执"):
+        operation = read_json(operation_path)
+        if os.path.exists(operation_path) and (not isinstance(operation, dict) or operation.get("id") != args.message_id or not isinstance(operation.get("record"), dict) or operation.get("state") not in ("prepared", "unknown", "accepted")):
+            raise ExpertError("原恢复操作回执不可读或不完整", "没有覆盖回执或重新投递", "保留原文件与操作 ID，核对损坏回执后继续")
+        if operation and operation.get("digest") != digest:
+            raise ExpertError("同一恢复操作 ID 的内容不同", "没有投递或改写回执", "使用原 ID 和原文核对既有操作，不重放业务")
+        current = read_json(pending_path)
+        if os.path.exists(pending_path) and not isinstance(current, dict):
+            raise ExpertError("原派单记录不可读", "没有覆盖原任务或投递恢复", "先核对原派单文件")
+        if not operation:
+            if current and current.get("resumeAwaitingReceipt"):
+                raise ExpertError("原恢复操作尚未确认", "没有覆盖回执或发出另一恢复", "保留原操作 ID 和原文，先核对原接收状态")
+            if current and current.get("requester") not in (None, sender):
+                raise ExpertError("原任务仍由另一发起方接收结果", "没有恢复或接管派单", "由原发起方核对已有任务后继续")
+            if current and current.get("done"):
+                raise ExpertError("原派单已有待交付结果", "没有重开已有工作", "先采用原结果，再发送新的诉求")
+            if machine and (not current or current.get("machine") != machine or current.get("remoteReleased")):
+                raise ExpertError("远端原派单已释放或回执不匹配", "没有绕过远端工位或恢复会话", "核对原派单；已结束的远端新工作通过 spawn 取得新回执")
+            if not machine and current and current.get("machine"):
+                raise ExpertError("原派单属于远端机器", "没有按本机会话处理", "沿用原回执中的 --machine")
+            summary = session_summary(target, machine)
+            if not (summary.get("inputSummary") or {}).get("paused"):
+                raise ExpertError("目标当前没有暂停", "没有额外投递恢复消息", "未暂停的继续要求使用普通 team.py send，保留团队结果跟踪")
+            record = dict(current or {"sessionId": target, "requester": sender, "batch": target,
+                                     "kind": "research", "desc": "用户明确继续原会话", "lock": None, "route": "explicit-resume"})
+            record.update(baseline=(summary.get("latestReply") or {}).get("itemId"), notified=[], createdAtMs=now_ms(),
+                          resumeRequestId=args.message_id, resumeAwaitingReceipt=True)
+            record.pop("done", None)
+            operation = {"id": args.message_id, "digest": digest, "state": "prepared", "record": record,
+                         "previousPending": current, "previousDone": read_json(state_dir(root, "done", target + ".json")),
+                         "guidance": archive_guidance(root, "human", sender, target, body)}
+            write_json(operation_path, operation)
+        elif current and current.get("resumeRequestId") not in (None, args.message_id) and operation.get("state") != "accepted":
+            raise ExpertError("原恢复回执未确认且存在后续诉求", "没有重放旧诉求或覆盖新派单", "先核对两个原操作 ID 的接收状态")
+        if operation.get("state") == "accepted":
+            if current and current.get("resumeRequestId") == args.message_id and current.get("resumeAwaitingReceipt"):
+                current["resumeAwaitingReceipt"] = False
+                write_json(pending_path, current)
+            print("原恢复操作已受理，未重投或重置结果基线 → %s" % target)
+            return
+        # Persist the old result baseline before the native input can run.
+        write_json(pending_path, operation["record"])
+    payload = body + "\n\n[系统提示：直接在本会话输出最终回复，团队将转交发送方 %s；无需另行回传。]" % sender
+    try:
+        genet("session", "send", target, payload, "--message-id", args.message_id, "--no-wait", *machine_args(machine))
+    except ExpertError as error:
+        operation["state"] = "unknown"
+        operation["lastError"] = error.what
+        write_json(operation_path, operation)
+        raise
+    operation["state"] = "accepted"
+    write_json(operation_path, operation)
+    with inbox_lock(root, "pending-" + target, purpose="恢复回执"):
+        record = read_json(pending_path)
+        if record and record.get("resumeRequestId") == args.message_id:
+            record["resumeAwaitingReceipt"] = False
+            write_json(pending_path, record)
+    print("明确恢复已受理，保留原会话并跟踪本次最终结果 → %s" % target)
+
+
 def cmd_send(args):
     root = find_root()
     machine = dispatch_machine(args)
     name, mine = me(root)
     sender = os.environ.get("GENEHUB_SESSION_ID") or "%s:hook" % name
+    if getattr(args, "resume", False):
+        return send_explicit_resume(root, args, sender, machine)
+    if getattr(args, "message_id", None):
+        raise ExpertError("--message-id 仅用于明确恢复", "没有忽略指定操作 ID 后另行投递", "普通 send 使用团队自带的稳定投递身份")
     body_text = " ".join(args.text)
     target, created_now, target_root, target_role = resolve_send_target(
         root, args.to, args.kind, body_text, sender, machine, getattr(args, "workspace", None)
@@ -3635,12 +3722,14 @@ def reconcile(root, name, mine):
     batch_stuck_after = setting(root, "TEAM_BATCH_STUCK_AFTER", BATCH_STUCK_AFTER_S)
     for path, record in records:
         try:
+            if record.get("resumeAwaitingReceipt"):
+                continue
             session_id = record["sessionId"]
             bkey = record.get("batch") or session_id
             is_multi_batch = batch_counts.get(bkey, 1) > 1
             is_quiet_reflect = bool(record.get("quiet") or (record.get("kind") in ("reflect", "team-reflect") and not record.get("requester")))
             to = None if is_quiet_reflect else (record.get("requester") or front)
-            finish = lambda p=path, sid=session_id: (move(root, p), closed.add(sid))  # noqa: E731
+            finish = lambda p=path, sid=session_id, expected=record: (move(root, p, expected), closed.add(sid))  # noqa: E731
             has_children = any(other.get("requester") == session_id for _, other in records if other["sessionId"] != session_id)
             try:
                 summary = session_summary(session_id, record.get("machine"))
@@ -3837,7 +3926,7 @@ def reconcile(root, name, mine):
                     deliver_or_notice(root, w, "result", "%s（%s）" % (record["sessionId"], record["desc"]), "%s\n\nref: %s" % (done["text"], done["ref"]), record["sessionId"], done["reply"], "watcher", w, ref=done["ref"])
                 except Exception:
                     pass
-            move(root, path)
+            move(root, path, record)
         else:
             if to:
                 refs = ", ".join(item[1]["done"]["ref"] for item in group)
@@ -3852,8 +3941,8 @@ def reconcile(root, name, mine):
                     deliver_or_notice(root, w, "result", sender, "\n\n".join(parts), batch_key, "watcher", w, ref=refs)
                 except Exception:
                     pass
-            for path, _ in group:
-                move(root, path)
+            for path, rec in group:
+                move(root, path, rec)
     inbox_dir = state_dir(root, "inbox")
     if os.path.isdir(inbox_dir):
         session_ids = {entry.split(".jsonl", 1)[0] for entry in os.listdir(inbox_dir) if ".jsonl" in entry and (entry.endswith(".jsonl") or entry.endswith(".read"))}
@@ -3876,9 +3965,11 @@ def update_pending(root, path, record):
     A `done/<same name>` left over from an earlier cycle of the same long-lived session must not suppress this
     write: the record is about to be moved onto that very file and has to carry its own fresh `done` payload,
     otherwise the result text is lost and the board and any re-arm see "no result" forever."""
-    if not os.path.exists(path):
-        return
-    write_json(path, record)
+    with inbox_lock(root, "pending-" + record["sessionId"], purpose="派单回执"):
+        current = read_json(path)
+        if current is None or current.get("resumeRequestId") != record.get("resumeRequestId"):
+            return
+        write_json(path, record)
 
 
 def release_remote(root, path, record):
@@ -3899,15 +3990,21 @@ def release_remote(root, path, record):
     return True
 
 
-def move(root, path):
-    if not release_remote(root, path, read_json(path, {}) or {}):
+def move(root, path, expected=None):
+    record = expected if expected is not None else (read_json(path, {}) or {})
+    if not release_remote(root, path, record):
         return
     destination = state_dir(root, "done", os.path.basename(path))
     os.makedirs(os.path.dirname(destination), exist_ok=True)
-    try:
-        os.replace(path, destination)
-    except FileNotFoundError:
-        pass
+    session_id = record.get("sessionId") or os.path.basename(path)[:-5]
+    with inbox_lock(root, "pending-" + session_id, purpose="派单回执"):
+        current = read_json(path)
+        if current is None or current.get("resumeRequestId") != record.get("resumeRequestId"):
+            return
+        try:
+            os.replace(path, destination)
+        except FileNotFoundError:
+            pass
 
 
 def health(root, name, mine):
@@ -4172,6 +4269,8 @@ def main(argv):
     send.add_argument("--to", required=True)
     send.add_argument("--kind", default="note")
     send.add_argument("--inbox", action="store_true", help="write to file inbox when target is busy without interrupting")
+    send.add_argument("--resume", action="store_true", help="forward an explicit Human continuation without losing result tracking")
+    send.add_argument("--message-id", help="stable operation ID required with --resume; retry only with the same body")
     send.add_argument("--machine", help="exact id from `machine list`: deliver to a role workspace on that machine")
     send.add_argument("--workspace", help="with --machine: must equal the role’s fixed workspaceId in .genethub/remote-targets.json")
     send.add_argument("text", nargs="+")
