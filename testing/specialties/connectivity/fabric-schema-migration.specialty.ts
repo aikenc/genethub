@@ -9,7 +9,10 @@ defineSpecialty({
   oracle:"A real legacy node row keeps its handle after service restart upgrades its schema; public HTTP admits a second lane; the old single-lane index rejects both active lanes until explicit secondary revocation, while primary/foreign keys remain valid; public directory preserves literal and raw-key identities",
   catches:["additive migration loses old node", "old binary rollback cannot open new active rows", "native fingerprint is rehashed", "test bypasses public enrollment/admission"],
   tags:["fabric-pool","migration","contract"],llm:{default:"none"},requiredRepos:["cloud"],
-  requirements:[{kind:"python",env:"GENEHUB_PYTHON",minVersion:[3,7],modules:[]}],
+  requirements:[
+    {kind:"python",env:"GENEHUB_PYTHON",minVersion:[3,7],modules:["sqlite3"]},
+    {kind:"command",env:"GENEHUB_PYTHON",args:["-c","import sqlite3; c=sqlite3.connect(':memory:'); c.execute('CREATE TABLE capability (keep INTEGER, obsolete INTEGER)'); c.execute('ALTER TABLE capability DROP COLUMN obsolete'); assert [r[1] for r in c.execute('PRAGMA table_info(capability)')] == ['keep']; print('sqlite-drop-column-ready')"],contains:"sqlite-drop-column-ready"},
+  ],
   resources:{environments:1,cpu:2,memoryMb:1024,io:1,browser:0},expectedDurationMs:20000,timeoutMs:90000,
   surfaces:["cloud-server","hub-http","sqlite"],productInterfaces:["hub-http"],
 },async t=>{

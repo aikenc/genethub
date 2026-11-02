@@ -45,6 +45,7 @@ from genehub_agent import rpc as _rpc
 PROFILES = (
     "normal",
     "cli-question",
+    "cli-command",
     "provider-cli",
     "native-question",
     "native-plan",
@@ -309,6 +310,37 @@ class FixtureSession(Session):
         if DELAY_S > 0:
             await asyncio.sleep(DELAY_S)
         profile = PROFILE if fault_armed() else "normal"
+
+        if profile == "cli-command":
+            try:
+                request = json.loads(text)
+            except (ValueError, TypeError):
+                request = None
+                # The public serve protocol carries durable inbox inputs in an
+                # attributed envelope. Read its message text, never its metadata
+                # as a command. Direct JSON remains useful for standalone SDK runs.
+                _, marker, payload = text.partition("\nInputs:\n")
+                if marker:
+                    try:
+                        inputs, _ = json.JSONDecoder().raw_decode(payload)
+                        messages = [entry["text"] for entry in inputs if isinstance(entry, dict) and isinstance(entry.get("text"), str)]
+                        if len(messages) == 1:
+                            request = json.loads(messages[0])
+                    except (ValueError, TypeError):
+                        pass
+            if isinstance(request, dict) and isinstance(request.get("argv"), list) and request["argv"] and all(isinstance(arg, str) for arg in request["argv"]):
+                extra = self.ctx.config.session_environment()
+                child = await sdk_process.spawn(
+                    request["argv"], cwd=request.get("cwd"), env=sdk_process.child_environment(extra),
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+                stdout, stderr = await child.communicate()
+                journal("cli-command-returned", code=child.returncode, stdoutBytes=len(stdout), stderrBytes=len(stderr))
+                self.say(turn_id, item, json.dumps({"code": child.returncode, "out": stdout.decode("utf-8", "replace")[-32768:],
+                                                  "err": stderr.decode("utf-8", "replace")[-4096:]}), True)
+                self.complete(turn_id)
+                return
+            profile = "normal"
 
         if profile == "provider-cli":
             fire_fault("provider-cli")

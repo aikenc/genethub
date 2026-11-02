@@ -16,9 +16,9 @@ function generateBoard(root: string, openRoot: string, env: NodeJS.ProcessEnv) {
 
 const metadata = {
   tags: ["page-experience", "team-board"], runner: "playwright" as const, llm: { default: "none" as const },
-  resources: { environments: 1, cpu: 2, memoryMb: 1536, io: 1, browser: 1, pool: "browser" },
+  resources: { environments: 1, cpu: 2, memoryMb: 1536, io: 1, browser: 1, pool: "browser" as const },
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
-  requirements: [{ kind: "python" as const, env: "GENEHUB_PYTHON", minVersion: [3, 7], modules: [] }],
+  requirements: [{ kind: "python" as const, env: "GENEHUB_PYTHON", minVersion: [3, 7] as [number, number], modules: [] }],
   surfaces: ["team-template", "workbench-ui", "asset-preview", "daemon"],
   productInterfaces: ["pm_board_server.py --once", "@genehub/workbench", "asset.preview"],
   expectedDurationMs: 30_000, timeoutMs: 180_000,

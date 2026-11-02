@@ -139,6 +139,8 @@ export type ScriptAgentProfile =
   | "normal"
   /** Calls the real public CLI with its Session controller identity, then stops. */
   | "cli-question"
+  /** Executes a JSON argv/cwd request through a real Agent-bound child process. */
+  | "cli-command"
   | "provider-cli"
   | "native-question"
   /** Emits a planApproval request; continues when sent the approval prompt. */
