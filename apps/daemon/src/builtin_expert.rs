@@ -115,7 +115,7 @@ pub fn refresh(admin: &Path, name: &str) -> std::io::Result<bool> {
         }
     }
     for (relative, contents) in crate::skills::builtin_files_under(ADMIN_SKILL) {
-        put(&format!("skills/{relative}"), contents)?;
+        put(&format!("skills/genet_builtin/{relative}"), contents)?;
     }
     for relative in previous.difference(&shipped) {
         if is_preserved_runtime_or_build_path(relative, &owned) {

@@ -17,7 +17,7 @@
 
 定义源和权威任务账本留在项目指定的 dev 主机。远端使用已安装完整执行制品、固定 remote-targets 绑定及实际本机模型；配置了 WORKTREE_DIR 时按固定工位串行，未配置时可准备同岗位多个独立会话，实际写项目之前各自 bind-directory；不 clone 团队定义源、不另起前台/timer。
 
-远端 Owner 的 `.genethub/task-source.json` 显式绑定源端机器、接单 workspace、role 和 Python/team.py argv。远端 task 操作通过现有授权 shell 发回源端；输入保留原会话署名，源端按同一编号记账和派单，再将结果按机器/SID 回传。这个绑定是路由配置，不是新权限边界；未配置时不能假称已具备跨机协调。
+远端 Owner 的 `.genethub/task-source.json` 显式绑定源端机器、接单 workspace、role 和 Python/run.py argv。远端 task 操作通过现有授权 shell 发回源端；输入保留原会话署名，源端按同一编号记账和派单，再将结果按机器/SID 回传。这个绑定是路由配置，不是新权限边界；未配置时不能假称已具备跨机协调。
 
 内置模板发布不自动覆盖用户团队。合并定制后在源端构建，部署完整 tools/岗位/身份制品，目标 artifacts-only 验证并记录实际采用。升级前盘点在途回执；旧记录继续可读，未确认操作不换编号重派。
 

@@ -549,6 +549,7 @@ class Manifest:
     identity: list[str] = dataclasses.field(default_factory=list)
     space_builder: str = ""
     build_hooks: dict[str, list[dict[str, Any]]] = dataclasses.field(default_factory=dict)
+    team: dict[str, Any] | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -725,7 +726,7 @@ def load_manifest(root: Path) -> Manifest:
         fail("SB001", "agent-space.genet.json must contain a JSON object", sources=(path.as_posix(),))
     required = {"schema", "name", "agents", "skills", "tags", "skillProviders"}
     missing = sorted(required - raw.keys())
-    unknown = sorted(raw.keys() - required - {"description", "children", "agentCwd", "folders", "identity", "spaceBuilder", "buildHooks"})
+    unknown = sorted(raw.keys() - required - {"description", "children", "agentCwd", "folders", "identity", "spaceBuilder", "buildHooks", "team"})
     if missing:
         fail("SB001", "Missing manifest fields: " + ", ".join(missing), sources=(path.as_posix(),))
     if unknown:
@@ -864,8 +865,64 @@ def load_manifest(root: Path) -> Manifest:
     identity = validate_identity(raw.get("identity"), path)
     space_builder = validate_space_builder(raw.get("spaceBuilder"), path)
     hooks = validate_build_hooks(raw.get("buildHooks"), path)
-    return Manifest(path, name, description, agents, skills, tags, providers, scan_depth, agent_cwd, folders, identity, space_builder, hooks)
+    team = validate_team(raw.get("team"), path) if "team" in raw else None
+    return Manifest(path, name, description, agents, skills, tags, providers, scan_depth, agent_cwd, folders, identity, space_builder, hooks, team)
 
+
+
+def validate_team(value: Any, path: Path) -> dict[str, Any]:
+    """Validate the portable business configuration without importing project code."""
+    slots = {"class", "workflow_class", "resource_class", "reflection_class", "board_class", "commands_class"}
+    allowed = slots | {"settings", "apiVersion", "frameworkVersion"}
+    if not isinstance(value, dict) or set(value) - allowed:
+        fail("SB001", "team accepts known Class slots, settings and API/framework version", sources=(str(path),))
+    reference = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*:[A-Za-z_]\w*", re.ASCII)
+    for key in slots & value.keys():
+        if not isinstance(value[key], str) or not reference.fullmatch(value[key]):
+            fail("SB001", f"team.{key} must be module:Class", sources=(str(path),))
+    if "apiVersion" in value and (type(value["apiVersion"]) is not int or value["apiVersion"] != 1):
+        fail("SB001", "unsupported team.apiVersion", sources=(str(path),))
+    if "frameworkVersion" in value and value["frameworkVersion"] != "1":
+        fail("SB001", "requested team.frameworkVersion is unavailable", sources=(str(path),))
+    settings = value.get("settings", {})
+    if not isinstance(settings, dict) or any(not isinstance(v, dict) for v in settings.values()):
+        fail("SB001", "team.settings must contain per-policy objects", sources=(str(path),))
+    try:
+        encoded = json.dumps(value, allow_nan=False, ensure_ascii=False)
+    except (TypeError, ValueError):
+        fail("SB001", "team configuration must be finite JSON", sources=(str(path),))
+    if len(encoded.encode()) > 128 * 1024:
+        fail("SB001", "team configuration exceeds 128 KiB", sources=(str(path),))
+    return json.loads(encoded)
+
+
+def team_runtime_target(target: str) -> bool:
+    parts = Path(target).parts
+    return (len(parts) >= 2 and parts[0] == "tools" and
+            all(part not in (".", "..") and not part.startswith(".") for part in parts) and
+            Path(target).suffix in {".py", ".json", ".js", ".cjs", ".mjs"})
+
+
+def team_runtime_operations(root: Path) -> list[Operation]:
+    """Carry executable Team dependencies into an independent, source-free output."""
+    tools = root / "tools"
+    if tools.is_symlink():
+        fail("SB011", "Team tools directory must not be a symlink")
+    operations = []
+    if not tools.is_dir():
+        fail("SB001", "team configuration requires its tools runtime", sources=(str(tools),))
+    for source in sorted(tools.rglob("*")):
+        target = source.relative_to(root).as_posix()
+        if "__pycache__" in source.parts or not team_runtime_target(target):
+            continue
+        if source.is_symlink():
+            fail("SB011", "Team runtime dependency must not be a symlink", sources=(str(source),))
+        if source.is_file():
+            operations.append(Operation(target, source.read_bytes(), ["core:team-runtime"], "team-runtime-file", "copy",
+                                        executable=bool(source.stat().st_mode & 0o111)))
+    if not any(item.target == "tools/run.py" for item in operations):
+        fail("SB001", "Team output requires tools/run.py")
+    return operations
 
 def validate_build_hooks(value: Any, path: Path) -> dict[str, list[dict[str, Any]]]:
     if value is None:
@@ -3865,7 +3922,10 @@ def output_artifact_path(record: dict[str, Any], members: dict[str, dict[str, An
     target = record.get("target")
     if not isinstance(target, str) or not isinstance(record.get("logicalType"), str):
         fail("SB017", "Invalid output artifact target")
-    if target == "agent-space.genet.json" and record.get("logicalType") == "runtime-manifest":
+    if (record.get("logicalType") == "team-runtime-file" and normalize_target(target) == target
+            and team_runtime_target(target)):
+        pass
+    elif target == "agent-space.genet.json" and record.get("logicalType") == "runtime-manifest":
         pass
     else:
         if normalize_target(target) != target:
@@ -4011,12 +4071,18 @@ def write_output(root: Path, members: list[TreeMember], models: list[BuildModel]
     for member, model in zip(members, models):
         manifest = model.manifest
         descriptor: dict[str, Any] = {"schema": SPACE_SCHEMA, "name": manifest.name, "agents": manifest.agents,
-            "skills": [], "tags": [], "skillProviders": [], "children": {"scanDepth": manifest.child_scan_depth},
+            "skills": [], "tags": manifest.tags, "skillProviders": [], "children": {"scanDepth": manifest.child_scan_depth},
             "folders": [{"name": item.name, "path": item.path} for item in model.workspace.folders]}
+        if manifest.description is not None:
+            descriptor["description"] = manifest.description
         if manifest.agent_cwd:
             descriptor["agentCwd"] = manifest.agent_cwd
+        if manifest.team is not None:
+            descriptor["team"] = manifest.team
         own = model.operations + [Operation("agent-space.genet.json", json_bytes(descriptor),
                                            ["core:runtime-manifest"], "runtime-manifest", "render")]
+        if manifest.team is not None:
+            own += team_runtime_operations(model.root)
         member_records.append({"path": member.path, "name": manifest.name, "agentCwd": manifest.agent_cwd,
                                "manifestDigest": sha256_file(manifest.path)})
         for operation in own:

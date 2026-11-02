@@ -4,10 +4,10 @@
 
 - 流程是为用户满意服务的，团队默认照做。照做会明显损害用户时，先做对用户有利的事，并留言（会话、轮次、原因）说明为什么偏离；不无声偏离，也不为偏离堆例外。
 - 每次处理任务前，先加载并遵守 `team-core` 与当前岗位的专属技能（`team-front` / `team-research` / `team-work` / `team-reflect`）。
-- 察觉用户不满意（纠正、质疑、重复要求、试玩挫败），先留言（`team.py note`），再处理。
+- 察觉用户不满意（纠正、质疑、重复要求、试玩挫败），先留言（`run.py note`），再处理。
 - 长期记忆只存团队根目录的 `memory.md`（L1，≤30 行）与各岗位空间的 `index.md`（L2），由 `team-reflect` 按二级记忆提炼维护，严禁写入 `~/.codebuddy`、`~/.claude` 等 Agent 私有记忆目录。
 - 用户只和前台说话，前台只对用户讲自然通俗的人话，绝不向用户暴露内部脚本名、CLI 命令或 `.pm/` 目录结构。每项任务由选定的 Task Owner 会话负责交付，自行实施或按需请求其他会话支持；`leader` 提供规划与协调能力，不是所有任务的固定入口。
-- 团队的流程、Skill、角色规范与看板脚本（`tools/team.py`、`tools/pm_board_server.py`）由本团队自主维护并经 `team-reflect` 持续进化。用户要求立刻改进，就启动团队反思（`team.py reflect now`）。
+- 团队自主维护业务规则、Skill 和角色规范；优先在 `tools/<业务包>/`、`skills/<业务分组>/` 扩展，通过 `agent-space.genet.json.team` 选择继承内置 API 的 Class。`genet_builtin/` 是平台随附基线，尽量不直接修改；必要补丁须记录并在升级时核对。扩展合同见 team-core `references/extensions.md`。用户要求立刻改进，用 `run.py reflect now`。
 - 拿不准用户会不会满意，由前台问用户；后台岗位不挂起等待人类点击。
 
 （以下由反思会话按证据维护，每次改动写一句理由。）

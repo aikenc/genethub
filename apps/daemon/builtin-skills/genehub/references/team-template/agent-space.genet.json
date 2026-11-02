@@ -18,7 +18,7 @@
   "skillProviders": [
     {
       "type": "folder",
-      "path": "skills"
+      "path": "skills/genet_builtin"
     }
   ],
   "agentCwd": "front",
@@ -35,5 +35,6 @@
   ],
   "children": {
     "scanDepth": 2
-  }
+  },
+  "team": {}
 }

@@ -1,13 +1,13 @@
 ---
 name: team-core
-description: 按任务选择 Owner 的团队公共约定：前台、专业执行、QA、研究与反思岗位的会话协作机制，用 tools/team.py 派单、异步回合接力、管工位、发版本、刷看板与持续自进化。任何会话都先读。
+description: 按任务选择 Owner 的团队公共约定：前台、专业执行、QA、研究与反思岗位的会话协作机制，用 tools/run.py 派单、异步回合接力、管工位、发版本、刷看板与持续自进化。任何会话都先读。
 ---
 
 # 项目团队公共约定
 
 **流程是为用户满意服务的。** 默认照做；照做会明显损害用户时，先做对用户有利的事，并留言（会话、轮次、原因）说明为什么偏离。不无声偏离，也不为偏离堆例外。察觉用户不满意，先留言，再处理。
 
-团队工具用 `"$GENEHUB_PYTHON"` 运行。新任务先读 [Task Owner 合同](references/task-owner.md)：`task start/support/send/finish` 按精确会话协作；结算须有明确结论与证据。下表 `spawn/send` 保留给旧派单，不能用于绕过新任务账本。
+统一入口为 `"$GENEHUB_PYTHON" <团队根>/tools/run.py`；业务扩展、配置 Class 与升级先读 [扩展合同](references/extensions.md)。`genet_builtin/` 是平台随附基线，优先继承；必要时可修改并记录补丁。新任务先读 [Task Owner 合同](references/task-owner.md)：`task start/support/send/finish` 按精确会话协作；结算须有明确结论与证据。下表 `spawn/send` 保留给旧派单，不能用于绕过新任务账本。
 
 | 命令 | 作用 |
 |---|---|

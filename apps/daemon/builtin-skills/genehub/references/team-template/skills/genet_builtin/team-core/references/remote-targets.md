@@ -5,8 +5,8 @@
 ## 一次性配置
 
 启用新绑定前先停止旧版新派单，核对并收尾旧版未加锁的远端任务；不能把存量无锁会话当作已迁移。
-目标机升级到带 receive 的团队模板，保留团队根描述、`tools/team.py`、`spaces/<岗位>` 与配置文件。
-只注册需要的岗位 workspace；不需要注册根会话或启动前台、看板、hook。不能只部署一个 SpaceBuilder portable 制品：它不包含上述接单运行资源。
+目标机升级到带 receive 的团队模板，保留团队根描述、`tools/run.py`、`spaces/<岗位>` 与配置文件。
+只注册需要的岗位 workspace；不需要注册根会话或启动前台、看板、hook。根描述声明 team 的新版 SpaceBuilder 独立制品自动携带完整 tools 和配置；旧制品或单独子 Space 输出需补齐这些接单资源。无论哪种制品，都须在目标端 artifacts-only 校验后再启用绑定。
 
 目标团队 `.genethub/open.env` 配置该机实际可用的 `TEAM_AGENT`；岗位的同名文件可覆盖它并指定 `WORKTREE_DIR`。
 模型来自目标机 `TEAM_MODEL_WORK/RESEARCH` 或 Agent 默认；派单方隐式配置不传过去。`--tier/--model/--media` 均在目标机校验，缺配置或能力不明就拒绝。
@@ -18,7 +18,7 @@
   "qa": {
     "machineId": "<machine list 返回的精确 ID>",
     "workspaceId": "<目标机已注册的岗位 workspace ID>",
-    "command": ["<目标机 GENEHUB_PYTHON 的绝对路径>", "<目标团队 tools/team.py 的绝对路径>"]
+    "command": ["<目标机 GENEHUB_PYTHON 的绝对路径>", "<目标团队 tools/run.py 的绝对路径>"]
   }
 }
 ```
@@ -28,8 +28,8 @@
 ## 派单和投递
 
 ```text
-team.py spawn --space qa --kind work --machine <ID> --request-id qa-review-42 --desc "验收变更" "任务正文"
-team.py send --machine <ID> --to qa "补充要求"
+run.py spawn --space qa --kind work --machine <ID> --request-id qa-review-42 --desc "验收变更" "任务正文"
+run.py send --machine <ID> --to qa "补充要求"
 ```
 
 接单先验证 workspace 的真实根目录属于该脚本所在团队的指定岗位，再用现有 `genet-writer.json` 的文件排他创建拿写锁。

@@ -6,7 +6,7 @@ description: 团队的用户入口：理解目标，为每项任务选择合适�
 # 团队前台
 
 先简短回应用户，再异步推进；不要把内部目录、命令和派单编号变成用户负担。
-命令以 `"$GENEHUB_PYTHON" ../tools/team.py` 开头。完整合同见 team-core 的 `references/task-owner.md`。
+命令以 `"$GENEHUB_PYTHON" ../tools/run.py` 开头。完整合同见 team-core 的 `references/task-owner.md`。
 
 - 新目标先用 `directory` 查看岗位能力与实际会话。简单工作交给专业岗位，复杂工作选择有协调能力的岗位；旧团队可默认 leader。
 - 新任务用 `task start --space <岗位> --desc "<目标摘要>" --request-id <稳定编号> "<用户原话与验收>"`。同一 Space 可有多个独立任务会话；根据模型预算、执行机和真实工位决定并发。

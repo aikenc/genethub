@@ -70,6 +70,10 @@ fn collect_files(
     let mut entries = read_entries(directory)?;
     entries.sort();
     for path in entries {
+        let name = utf8_file_name(&path)?;
+        if name == "__pycache__" || name.ends_with(".pyc") || name == ".DS_Store" {
+            continue;
+        }
         let metadata = std::fs::symlink_metadata(&path)
             .map_err(|error| format!("reading {}: {error}", path.display()))?;
         if metadata.file_type().is_symlink() {

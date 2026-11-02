@@ -16,7 +16,7 @@
   "skillProviders": [
     {
       "type": "folder",
-      "path": "../../skills"
+      "path": "../../skills/genet_builtin"
     }
   ],
   "identity": [

@@ -23,17 +23,18 @@ description: 机器管理员：向用户介绍项目团队，当用户只说项�
       3. **大型团队（1+5+QA）**：在标准团队基础上进一步细分 UI/演出、剧情任务等独立管线。
     - 同时顺带用一句话确认是否使用本机现成仓库或新建仓库。
   - **第二步（用户确认大致规模后，先查重再全自动设计团队结构、绑定工位并启动常驻看板）**：
-    0. **查重防重复建团（铁律）**：先运行 `"$GENEHUB_PYTHON" tools/team.py directory` 检查 `<数据目录>/spaces/` 下是否已有同名或同项目的团队（如已有 `taixu-team` 则直接复用并补齐其成员、工位与常驻看板，**严禁为同一项目再新建第二个重复团队**如 `taixu`）。
+    0. **查重防重复建团（铁律）**：先运行 `"$GENEHUB_PYTHON" tools/run.py directory` 检查 `<数据目录>/spaces/` 下是否已有同名或同项目的团队（如已有 `taixu-team` 则直接复用并补齐其成员、工位与常驻看板，**严禁为同一项目再新建第二个重复团队**如 `taixu`）。
     1. 自动探测本机 `<数据目录>/repos/` 或 `datas/` 下的对应项目仓库（若用户说用现成仓库，自动定位其路径；若还没有则初始化基础仓库）。
     2. 一键初始化 `1+N` 团队与专业管线成员：
-       `"$GENEHUB_PYTHON" tools/team.py init <团队名> --desc "<项目一句话职责>" --soul "<项目核心玩法与质量准则>" --member <组员1:职责说明> --member <组员2:职责说明> ...`
+       `"$GENEHUB_PYTHON" tools/run.py init <团队名> --desc "<项目一句话职责>" --soul "<项目核心玩法与质量准则>" --member <组员1:职责说明> --member <组员2:职责说明> ...`
     3. 自动为组长与各在岗管线组员切出独立 git worktree 工位并绑定 `WORKTREE_DIR`：
-       `"$GENEHUB_PYTHON" <团队目录>/tools/team.py worktree create leader-main --repo <业务主仓路径> --branch team/<团队名>/leader-main --space leader`
-       `"$GENEHUB_PYTHON" <团队目录>/tools/team.py worktree create <组员槽名> --repo <业务主仓路径> --branch feat/<模块> --space <组员名>`
+       `"$GENEHUB_PYTHON" <团队目录>/tools/run.py worktree create leader-main --repo <业务主仓路径> --branch team/<团队名>/leader-main --space leader`
+       `"$GENEHUB_PYTHON" <团队目录>/tools/run.py worktree create <组员槽名> --repo <业务主仓路径> --branch feat/<模块> --space <组员名>`
     4. 自动启动常驻团队看板服务并生成快照：
-       `"$GENEHUB_PYTHON" <团队目录>/tools/team.py board start`
-       `"$GENEHUB_PYTHON" <团队目录>/tools/team.py snapshot -m "初始化项目团队与工位"`
+       `"$GENEHUB_PYTHON" <团队目录>/tools/run.py board start`
+       `"$GENEHUB_PYTHON" <团队目录>/tools/run.py snapshot -m "初始化项目团队与工位"`
     5. 向用户做简洁清晰的建队完成汇报（列出已配好的团队成员职责，不暴露底层命令细节），提示用户在左侧会话面板的**项目团队分组**中进入该团队前台直接提出首个版本的想法！
-- **clone 共享团队**：用户给了别人分享的团队仓库，先 `directory` 查重，再 clone 到 `<数据目录>/spaces/<团队名>/`，运行 `"$GENEHUB_PYTHON" <团队目录>/tools/team.py sync-identity` 编译身份；它从此是用户自己的团队。
-- **定制或重写团队**：用户想改岗位、流程、Skill，或干脆不用这套样板，按内置 Skill `genehub-team` 的 `references/customize.md` 做；团队文件归用户，不必经过团队自己的会话。
-- **团队不随模板自动覆盖**：平台模板更新后，团队的定时任务给它的反思会话留一条升级留言，由反思会话在 `temp/` 里三方合并、验证后再生效。只有用户明确要求整体回到模板时才 `team.py reset --team <名>`：先预演、用户确认再 `--apply`。内置管理员 `spaces/admin` 自己是产品文件，守护进程每次启动都与当前模板对齐，不维护独立记忆，也不跑 `reflect`。
+- **clone 共享团队**：用户给了别人分享的团队仓库，先 `directory` 查重，再 clone 到 `<数据目录>/spaces/<团队名>/`，运行 `"$GENEHUB_PYTHON" <团队目录>/tools/run.py sync-identity` 编译身份；它从此是用户自己的团队。
+- **Class 与 Skill 扩展**：先看 team-core `references/extensions.md`；`agent-space.genet.json.team` 选择公开策略类，业务代码放 `tools/<业务包>/`、Skill 放 `skills/<业务分组>/`。平台随附 `tools/genet_builtin/`、`skills/genet_builtin/` 尽量不直接改，必要补丁允许但须记录并在升级时核对。新建独立制品自动携带所需 tools 与配置，按 `describe` 和真实任务验证采用。
+- **定制或重写团队**：用户想改岗位、流程、Skill，或干脆不用这套样板，按 team-core 的 `references/extensions.md` 选择配置、业务 Skill 或公开 Class 扩展；团队文件归用户，不必经过团队自己的会话。
+- **团队不随模板自动覆盖**：平台模板更新后，团队的定时任务给它的反思会话留一条升级留言，由唯一源按 team-core 扩展/升级合同验证后再构建安装；已分离的项目优先更新平台包、保留项目 Class 与 Skill，旧式分叉再做三方核对，候选不得注册为运行团队。只有用户明确要求整体回到模板时才 `run.py reset --team <名>`：先预演、用户确认再 `--apply`。内置管理员 `spaces/admin` 自己是产品文件，守护进程每次启动都与当前模板对齐，不维护独立记忆，也不跑 `reflect`。

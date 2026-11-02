@@ -1,11 +1,11 @@
 ## 用户明确要求继续
 
-普通 `result/report/watchdog` 和未带 `--resume` 的 `team.py send` 仍保留暂停，内部通知不能自行恢复。
+普通 `result/report/watchdog` 和未带 `--resume` 的 `run.py send` 仍保留暂停，内部通知不能自行恢复。
 用户明确要求继续原任务后，前台或组长以**自己署名的普通会话消息**转达，不冒充 Human：
 先核对原会话、派单和已有成果，再走团队入口，同时建立本次结果回传记录：
 
 ```text
-"$GENEHUB_PYTHON" tools/team.py send --to <原sessionId> --kind human --resume --message-id <稳定恢复操作ID> "用户要求继续；先核对已有成果，只完成剩余目标"
+"$GENEHUB_PYTHON" tools/run.py send --to <原sessionId> --kind human --resume --message-id <稳定恢复操作ID> "用户要求继续；先核对已有成果，只完成剩余目标"
 ```
 
 沿用同一操作 ID 和正文；不同正文冲突拒绝。回包未知保留原回执，用原 ID 核对后恢复，不另号重派。
