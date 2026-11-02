@@ -80,7 +80,7 @@ adminCase(
       const frontRules = readFileSync(path.join(admin, "front", "AGENTS.md"), "utf8");
       t.assertions.assert(frontRules.includes("我做的一切只有一个目的：让用户满意"), "the administrator's rules do not carry the soul");
       for (const skill of ["team-core", "team-front", "team-research", "team-reflect", "team-work", "team-admin"]) {
-        const file = path.join(admin, "skills", skill, "SKILL.md");
+        const file = path.join(admin, "skills", "genet_builtin", skill, "SKILL.md");
         const lines = readFileSync(file, "utf8").trimEnd().split("\n").length;
         t.assertions.assert(lines <= 40, `${skill}/SKILL.md has ${lines} lines`);
       }
@@ -111,26 +111,28 @@ adminCase(
     let opened = await open();
     const script = path.join(admin, "tools", "team.py");
     const soul = path.join(admin, "soul.md");
-    const originalScript = readFileSync(script, "utf8");
-    const originalSoul = readFileSync(soul, "utf8");
-    writeFileSync(soul, "my own soul\n");
-    writeFileSync(script, "# damaged\n");
+    let originalScript = "", originalSoul = "", originalAdminSkill = "";
     const stale = path.join(admin, "front", "soul.mirror.md");
     const ownedPath = path.join(admin, ".genethub/bootstrap-owned.json");
     const generatedAdminSkill = path.join(admin, "front/.agents/skills/team-admin/SKILL.md");
-    const originalAdminSkill = readFileSync(generatedAdminSkill, "utf8");
-    rmSync(generatedAdminSkill);
     const legacySkill = path.join(admin, "skills", "expert-core", "SKILL.md");
+    const unknown = path.join(admin, "owner-notes.txt");
+    const post = path.join(admin, "posts", "keep.md");
+    try {
+    originalScript = readFileSync(script, "utf8");
+    originalSoul = readFileSync(soul, "utf8");
+    writeFileSync(soul, "my own soul\n");
+    writeFileSync(script, "# damaged\n");
+    originalAdminSkill = readFileSync(generatedAdminSkill, "utf8");
+    rmSync(generatedAdminSkill);
     mkdirSync(path.dirname(legacySkill), { recursive: true });
     writeFileSync(legacySkill, "---\nname: expert-core\ndescription: an older template\n---\n");
     writeFileSync(ownedPath, JSON.stringify([...JSON.parse(readFileSync(ownedPath, "utf8")), "front/soul.mirror.md", "skills/expert-core/SKILL.md"]));
-    const unknown = path.join(admin, "owner-notes.txt");
     writeFileSync(unknown, "untracked user content");
     writeFileSync(stale, "stale mirror\n");
     mkdirSync(path.join(admin, "posts"), { recursive: true });
-    const post = path.join(admin, "posts", "keep.md");
     writeFileSync(post, "keep me\n");
-    await stop(opened);
+    } finally { await stop(opened); }
 
     opened = await open();
     try {

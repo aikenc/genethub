@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { defineSpecialty } from "../../framework/public.ts";
 
@@ -25,6 +25,7 @@ defineSpecialty({
       mkdirSync(join(root, "tools"));
       writeFileSync(join(root, "tools", "team.py"), readFileSync(join(t.openRoot, "apps/daemon/builtin-skills/genehub/references/team-template/tools/team.py")));
       writeFileSync(join(root, "tools", "team_tasks.py"), readFileSync(join(t.openRoot, "apps/daemon/builtin-skills/genehub/references/team-template/tools/team_tasks.py")));
+      cpSync(join(t.openRoot, "apps/daemon/builtin-skills/genehub/references/team-template/tools/genet_builtin"), join(root, "tools/genet_builtin"), { recursive: true });
       writeFileSync(join(root, "agent-space.genet.json"), JSON.stringify({ schema: "agent-space.v1", name, tags: ["team"], children: ["spaces/leader"], folders: [{ path: "." }] }));
       writeFileSync(join(root, "spaces", "leader", "agent-space.genet.json"), JSON.stringify({ schema: "agent-space.v1", name: "leader", folders: [{ path: "." }] }));
       mkdirSync(join(root, "spaces", "qa"));
@@ -93,6 +94,7 @@ sys.stdout.write(out);sys.stderr.write(r.stderr);sys.exit(r.returncode)
     for (const file of ["agent-space.genet.json", "spaces/leader/agent-space.genet.json", "tools/team.py", "tools/team_tasks.py"]) {
       writeFileSync(join(source, file), readFileSync(join(teams[0]!.root, file)));
     }
+    cpSync(join(teams[0]!.root, "tools/genet_builtin"), join(source, "tools/genet_builtin"), { recursive: true });
     const sourceOpened = await o.client.call({ type: "workspace.open", payload: { root: source } });
     t.assertions.assert(sourceOpened?.type === "workspace", "same-name source did not open");
     const sourceCatalog = await o.client.call({ type: "workspace.list" });

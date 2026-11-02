@@ -50,14 +50,14 @@ defineSpecialty(
     const soul = (text: string) => writeFileSync(join(expert, "soul.md"), text);
     const read = (file: string) => readFileSync(join(expert, file), "utf8");
 
-    const timerFile = join(expert,"skills","team-front","hooks","timer.genet.json");
+    const timerFile = join(expert,"skills","genet_builtin","team-front","hooks","timer.genet.json");
     const legacyTimer = {schema:"genet.hook.v1",event:"timer",every:"7s",exec:["${GENEHUB_PYTHON}","tools/expert.py","hook"],cwd:".",timeout:17};
     writeFileSync(timerFile,JSON.stringify(legacyTimer));
     soul("# 灵魂\n\n我叫小满。\n");
     const first = sync();
     t.assertions.assert(first.status === 0 && first.stdout.trim() === "rebuilt", `first sync: ${first.status} ${first.stdout} ${first.stderr}`);
     const migratedTimer = JSON.parse(readFileSync(timerFile,"utf8"));
-    t.assertions.assert(migratedTimer.exec[1]==="tools/team.py"&&migratedTimer.every==="7s"&&migratedTimer.timeout===17,"legacy hook migration changed cadence or timeout");
+    t.assertions.assert(migratedTimer.exec[1]==="tools/run.py"&&migratedTimer.exec[2]==="tick"&&migratedTimer.every==="7s"&&migratedTimer.timeout===17,"legacy hook migration changed cadence or timeout");
     t.assertions.assert(readFileSync(join(expert,".genethub","team","hook-name-backups","team-front.json"),"utf8").includes("tools/expert.py"),"original timer was not backed up");
 
     for (const file of ["front/AGENTS.md", "front/CLAUDE.md"]) t.assertions.assert(read(file).includes("我叫小满"), `${file} lacks the soul`);

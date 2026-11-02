@@ -70,7 +70,7 @@ defineJourney(
     cpSync(path.join(t.openRoot, TEMPLATE), alice, { recursive: true });
     const descriptorPath = path.join(alice, "agent-space.genet.json");
     writeFileSync(descriptorPath, JSON.stringify({ ...JSON.parse(readFileSync(descriptorPath, "utf8")), name: "alice" }));
-    const hookPath = path.join(alice, "skills/team-front/hooks/timer.genet.json");
+    const hookPath = path.join(alice, "skills/genet_builtin/team-front/hooks/timer.genet.json");
     writeFileSync(hookPath, JSON.stringify({ ...JSON.parse(readFileSync(hookPath, "utf8")), every: "1s" }));
     mkdirSync(path.join(alice, ".genethub"), { recursive: true });
     writeFileSync(path.join(alice, ".genethub", "open.env"), "EXPERT_AGENT=ctl-normal\nEXPERT_BOARD_PORT=0\nEXPERT_WAKE_ROUNDS=100000\nEXPERT_NOTE_QUIET=100000\n");

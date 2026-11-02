@@ -72,14 +72,15 @@ defineSpecialty(
       descriptor.name = name;
       descriptor.description = `${name}的描述`;
       descriptor.skills = [...descriptor.skills, "expert-core", "my-extra-skill"];
+      descriptor.skillProviders.push({type:"folder", path:"skills/project"});
       writeFileSync(join(expert, "agent-space.genet.json"), JSON.stringify(descriptor, null, 2));
-      mkdirSync(join(expert, "skills", "my-extra-skill"), { recursive: true });
-      writeFileSync(join(expert, "skills", "my-extra-skill", "SKILL.md"), "---\nname: my-extra-skill\ndescription: x\n---\n");
+      mkdirSync(join(expert, "skills", "project", "my-extra-skill"), { recursive: true });
+      writeFileSync(join(expert, "skills", "project", "my-extra-skill", "SKILL.md"), "---\nname: my-extra-skill\ndescription: x\n---\n");
       writeFileSync(join(expert, "soul.md"), soul);
       writeFileSync(join(expert, "memory.md"), `${name}的记忆\n`);
-      writeFileSync(join(expert, "skills", "team-core", "SKILL.md"), OLD_SKILL);
-      mkdirSync(join(expert, "skills", "expert-core"), { recursive: true });
-      writeFileSync(join(expert, "skills", "expert-core", "SKILL.md"), LEGACY_SKILL);
+      writeFileSync(join(expert, "skills", "genet_builtin", "team-core", "SKILL.md"), OLD_SKILL);
+      mkdirSync(join(expert, "skills", "genet_builtin", "expert-core"), { recursive: true });
+      writeFileSync(join(expert, "skills", "genet_builtin", "expert-core", "SKILL.md"), LEGACY_SKILL);
       mkdirSync(join(expert, "posts"), { recursive: true });
       writeFileSync(join(expert, "posts", "p.md"), "https://example.com/a/b\n");
       mkdirSync(join(expert, "datas", "g", "p"), { recursive: true });
@@ -102,7 +103,7 @@ defineSpecialty(
     // Without --apply: a plan, and nothing else.
     const before = digest(alpha);
     const plan = reset(alpha);
-    t.assertions.assert(plan.code === 0 && plan.out.includes("预演") && plan.out.includes("soul.md") && plan.out.includes("skills/team-core/SKILL.md") && plan.out.includes("--apply"), `plan: ${plan.out} ${plan.err}`);
+    t.assertions.assert(plan.code === 0 && plan.out.includes("预演") && plan.out.includes("soul.md") && plan.out.includes("skills/genet_builtin/team-core/SKILL.md") && plan.out.includes("--apply"), `plan: ${plan.out} ${plan.err}`);
     t.assertions.assert(!plan.out.includes("覆盖 memory.md"), "memory.md was listed without --with-memory");
     t.assertions.assert(digest(alpha) === before, "the plan changed the expert");
 
@@ -110,18 +111,18 @@ defineSpecialty(
     const done = reset(alpha, "--apply");
     t.assertions.assert(done.code === 0 && done.out.includes("已重置自己"), `apply: ${done.out} ${done.err}`);
     t.assertions.assert(read(alpha, "soul.md") === templateText("soul.md"), "soul.md was not reset");
-    t.assertions.assert(read(alpha, "skills/team-core/SKILL.md") === templateText("skills/team-core/SKILL.md"), "a product file was not restored");
+    t.assertions.assert(read(alpha, "skills/genet_builtin/team-core/SKILL.md") === templateText("skills/genet_builtin/team-core/SKILL.md"), "a product file was not restored");
     t.assertions.assert(read(alpha, "memory.md") === "小满的记忆\n", "memory.md was reset without --with-memory");
     const descriptor = JSON.parse(read(alpha, "agent-space.genet.json"));
     t.assertions.assert(descriptor.name === "小满" && descriptor.description === "小满的描述" && descriptor.skills.includes("my-extra-skill") && descriptor.skills.includes("team-core") && !descriptor.skills.includes("expert-core"), `descriptor: ${JSON.stringify(descriptor)}`);
-    t.assertions.assert(existsSync(join(alpha, "skills", "my-extra-skill", "SKILL.md")), "an added skill was removed");
+    t.assertions.assert(existsSync(join(alpha, "skills", "project", "my-extra-skill", "SKILL.md")), "an added skill was removed");
     t.assertions.assert(read(alpha, "posts/p.md") === "https://example.com/a/b\n" && read(alpha, "datas/g/p/file.txt") === "keep\n" && read(alpha, "temp/261013/1405_x_abcd/f") === "keep\n", "posts, datas or temp changed");
     for (const file of ["front/AGENTS.md", "front/CLAUDE.md"]) {
       t.assertions.assert(!read(alpha, file).includes("只说方言"), `${file} still carries the old soul`);
     }
     const backups = join(alpha, ".genethub", "team", "reset");
     const stamps = readdirSync(backups);
-    t.assertions.assert(stamps.length === 1 && read(join(backups, stamps[0]!), "soul.md").includes("只说方言") && read(join(backups, stamps[0]!), "skills/team-core/SKILL.md") === OLD_SKILL, "the replaced files were not kept");
+    t.assertions.assert(stamps.length === 1 && read(join(backups, stamps[0]!), "soul.md").includes("只说方言") && read(join(backups, stamps[0]!), "skills/genet_builtin/team-core/SKILL.md") === OLD_SKILL, "the replaced files were not kept");
     t.assertions.assert(!existsSync(join(backups, stamps[0]!, "memory.md")), "memory.md was backed up though it was not touched");
     t.assertions.assert(existsSync(join(alpha, ".genethub", "team", "reset.log")), "the reset left no log");
     const again = reset(alpha);

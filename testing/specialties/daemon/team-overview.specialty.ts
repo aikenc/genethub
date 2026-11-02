@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { defineSpecialty, parseJson, runGenetAsync } from "../../framework/public.ts";
 
@@ -25,6 +25,8 @@ defineSpecialty({
     mkdirSync(join(root, "tools"), { recursive: true });
     writeFileSync(join(root, "tools/team.py"), readFileSync(join(t.openRoot, "apps/daemon/builtin-skills/genehub/references/team-template/tools/team.py")));
       writeFileSync(join(root, "tools", "team_tasks.py"), readFileSync(join(t.openRoot, "apps/daemon/builtin-skills/genehub/references/team-template/tools/team_tasks.py")));
+      cpSync(join(t.openRoot, "apps/daemon/builtin-skills/genehub/references/team-template/tools/genet_builtin"), join(root, "tools/genet_builtin"), { recursive: true });
+    rmSync(join(root, "tools/genet_builtin/board.py"));
     // A legitimate customized Team without identity or board-server modules:
     // isolate the Markdown overview and native hook's progress decision.
     const manifest = (name: string) => ({ schema: "agent-space.v1", name, tags: ["team"], agents: ["genet"], skills: [], skillProviders: [], folders: [{ path: "." }], children: { scanDepth: 2 } });

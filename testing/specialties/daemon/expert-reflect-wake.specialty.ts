@@ -17,7 +17,7 @@ reflectCase("expert-reflection-keeps-watchdog-broken", "a completed real reflect
   const leader = r.spaces.find(space => space.name === "leader" && space.agentSpace?.parentWorkspaceId === r.project.id)!;
   const sid = await r.create("ctl-normal", leader.id);
   await r.send(sid, "Review the outstanding milestone");
-  const idle = async (id: string) => t.tools.waitUntil(async () => (await r.snapshot(id)).summary.status === "idle", 20000);
+  const idle = async (id: string) => t.tools.waitUntil(async () => { const s = (await r.snapshot(id)).summary; return s.status === "idle" && !s.inputSummary?.pendingMessageIds.length; }, 20000);
   await idle(sid);
   mkdirSync(path.join(r.root, ".pm/trunk"), { recursive: true });
   writeFileSync(path.join(r.root, ".pm/trunk/MILESTONE_PLAN.md"), "# Milestone\n- [ ] Deliver the playable game\n");
@@ -41,7 +41,7 @@ reflectCase("expert-reflection-keeps-watchdog-broken", "a completed real reflect
   const worker = /s_[0-9a-f]+/.exec(out)![0];
   await idle(worker); await idle(r.front); hook(); await idle(sid); hook();
   t.assertions.assert(existsSync(r.state("done", `${worker}.json`)), "business result was not reconciled");
-  t.assertions.assert(watchdog().progressFingerprint !== broken.progressFingerprint, "genuine business progress did not reset watchdog");
+  t.assertions.assert(watchdog().progressFingerprint !== broken.progressFingerprint, "genuine business progress did not reset watchdog: " + JSON.stringify({watchdog:watchdog(), pending:pending(r), leader:(await r.snapshot(sid)).summary}));
 });
 reflectCase("expert-reflect-wake", "real completed Human rounds trigger one reflection at its configured threshold and its persisted gap prevents repeated starts", async (t, r) => {
   for (const prompt of ["first round", "second round"]) {

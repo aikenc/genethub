@@ -62,7 +62,7 @@ defineJourney(
     cpSync(path.join(t.openRoot, TEMPLATE), alice, { recursive: true });
     const descriptorPath = path.join(alice, "agent-space.genet.json");
     writeFileSync(descriptorPath, JSON.stringify({ ...JSON.parse(readFileSync(descriptorPath, "utf8")), name: "alice" }));
-    const hookPath = path.join(alice, "skills/team-front/hooks/timer.genet.json");
+    const hookPath = path.join(alice, "skills/genet_builtin/team-front/hooks/timer.genet.json");
     writeFileSync(hookPath, JSON.stringify({ ...JSON.parse(readFileSync(hookPath, "utf8")), every: "1s" }));
     mkdirSync(path.join(alice, ".genethub"), { recursive: true });
     writeFileSync(
@@ -186,7 +186,7 @@ defineJourney(
       const branches = spawnSync("git", ["-C", alice, "branch", "--format=%(refname:short)"], { encoding: "utf8" }).stdout.trim().split("\n").sort();
       t.assertions.assert(existsSync(path.join(alice, ".git")) && branches.includes("main"), `the expert root is not a repository on main: ${branches}`);
       const tracked = spawnSync("git", ["-C", alice, "ls-files"], { encoding: "utf8" }).stdout;
-      t.assertions.assert(tracked.includes("skills/team-reflect/SKILL.md") && !tracked.includes(".genethub/"), "the repository tracks the wrong files");
+      t.assertions.assert(tracked.includes("skills/genet_builtin/team-reflect/SKILL.md") && !tracked.includes(".genethub/"), "the repository tracks the wrong files");
     } finally {
       opened.client.close();
       opened.daemon.stop();

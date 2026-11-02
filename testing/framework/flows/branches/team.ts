@@ -7,7 +7,8 @@ import type { CaseContext } from "../../context.ts";
 import { registerControlledAgent, type ControlledAgentOptions } from "../../builders/script-agent.ts";
 
 /** Shipped template + Builder + CLI, against real isolated daemon Sessions. */
-export async function openTeam(t: CaseContext, name = "review-team", extraAgents: ControlledAgentOptions[] = []) {
+export async function openTeam(t: CaseContext, name = "review-team", extraAgents: ControlledAgentOptions[] = [],
+  options: { portable?: boolean; configureSource?: (root: string) => void } = {}) {
   for (const profile of ["normal", "native-question", "accept-then-silent", "exit-without-terminal"] as const) {
     registerControlledAgent(t.env, { profile, id: `ctl-${profile}`, chunks: 2 });
   }
@@ -16,12 +17,14 @@ export async function openTeam(t: CaseContext, name = "review-team", extraAgents
   const template = path.join(t.env.data, "builtin-skills/genehub/references/team-template");
   const builder = path.join(t.env.data, "builtin-skills/genehub/references/spacebuilder/spacebuilder.py");
   const root = path.join(t.env.data, "spaces", name);
-  cpSync(template, root, { recursive: true });
-  const descriptor = path.join(root, "agent-space.genet.json");
+  const source = options.portable ? path.join(t.env.root, "definitions", name) : root;
+  cpSync(template, source, { recursive: true });
+  const descriptor = path.join(source, "agent-space.genet.json");
   writeFileSync(descriptor, JSON.stringify({ ...JSON.parse(readFileSync(descriptor, "utf8")), name }));
   // Drive timer actions explicitly; this is an ordinary user-owned hook setting.
-  const hook = path.join(root, "skills/team-front/hooks/timer.genet.json");
+  const hook = path.join(source, "skills/genet_builtin/team-front/hooks/timer.genet.json");
   writeFileSync(hook, JSON.stringify({ ...JSON.parse(readFileSync(hook, "utf8")), enabled: false }));
+  options.configureSource?.(source);
   mkdirSync(path.join(root, ".genethub"), { recursive: true });
   const env: NodeJS.ProcessEnv = { ...opened.daemon.env, GENEHUB_CLI: opened.daemon.genet, TEAM_AGENT: "ctl-normal" };
   delete env.GENEHUB_CONTROLLER_TOKEN; delete env.GENEHUB_EXECUTION_LEASE; delete env.GENEHUB_SESSION_ID;
@@ -37,7 +40,7 @@ export async function openTeam(t: CaseContext, name = "review-team", extraAgents
     if (overrides.length) writeFileSync(configPath, original);
     return { code: result.status ?? -1, out: result.stdout ?? "", err: result.stderr ?? String(result.error ?? "") };
   };
-  const built = spawnSync("python3", [builder, "build", root, "--format", "json"], { env, encoding: "utf8" });
+  const built = spawnSync("python3", [builder, "build", source, ...(options.portable ? ["--output", root] : []), "--format", "json"], { env, encoding: "utf8" });
   t.assertions.assert(built.status === 0, `team build: ${built.stdout} ${built.stderr}`);
   await opened.client.call({ type: "workspace.open", payload: { root } });
   let spaces: WorkspaceInfo[] = [];
@@ -76,6 +79,6 @@ export async function openTeam(t: CaseContext, name = "review-team", extraAgents
     t.assertions.assert(done.code === 0, `team ${args[0]}: ${done.out.slice(-600)} ${done.err.slice(-600)}`);
     return done.out;
   };
-  return { ...opened, root, template, builder, env, command, ok, spaces, project, front, create, snapshot, send, state,
+  return { ...opened, root, source, template, builder, env, command, ok, spaces, project, front, create, snapshot, send, state,
     async dispose() { opened.client.close(); opened.daemon.stop(); await opened.mock.stop(); } };
 }
