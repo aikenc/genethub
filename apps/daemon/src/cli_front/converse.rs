@@ -50,6 +50,8 @@ enum Outcome {
 pub struct Run {
     pub system: bool,
     pub message_id: Option<String>,
+    pub creation_id: Option<String>,
+    pub prepare_only: bool,
     pub task_run_id: Option<String>,
     pub agent_id: Option<String>,
     pub prompt: String,
@@ -498,6 +500,8 @@ fn parse_session(args: &[String], selection: &Selection) -> Result<Command, CliF
 struct Options {
     system: bool,
     message_id: Option<String>,
+    creation_id: Option<String>,
+    prepare_only: bool,
     task_run_id: Option<String>,
     positional: Vec<String>,
     agent: Option<String>,
@@ -544,6 +548,8 @@ impl Options {
             match argument {
                 "--system" => options.system = true,
                 "--message-id" => options.message_id = Some(value()?),
+                "--creation-id" => options.creation_id = Some(value()?),
+                "--prepare-only" => options.prepare_only = true,
                 "--task-run" => options.task_run_id = Some(value()?),
                 "--agent" => options.agent = Some(value()?),
                 "--session" => options.session = Some(value()?),
@@ -594,6 +600,18 @@ impl Options {
         if prompt.is_empty() {
             return Err(CliFailure::invalid_args(
                 "nothing to say; pass the prompt as an argument or with --message",
+            ));
+        }
+        if self.prepare_only
+            && (!creates_session || self.creation_id.is_none() || self.wait == Some(true))
+        {
+            return Err(CliFailure::invalid_args(
+                "--prepare-only requires a new session, --creation-id and --no-wait",
+            ));
+        }
+        if self.creation_id.is_some() && !creates_session {
+            return Err(CliFailure::invalid_args(
+                "--creation-id applies only to a new session",
             ));
         }
         if self.message_id.is_some() && self.wait == Some(true) {
@@ -656,6 +674,8 @@ impl Options {
         Ok(Run {
             system: self.system,
             message_id: self.message_id,
+            creation_id: self.creation_id,
+            prepare_only: self.prepare_only,
             task_run_id: self.task_run_id,
             agent_id,
             prompt,
@@ -1203,7 +1223,7 @@ async fn pending_questions(
 
 async fn run_conversation(rpc: &Rpc, run: Run, here: bool) -> Result<i32, CliFailure> {
     // A script may send the first input to a new session too. Its input needs
-    // a stable identity before creation; that does not make creation itself idempotent.
+    // a stable identity before creation. Creation is independently opt-in with --creation-id.
     if run.system && run.session_id.is_none() && run.message_id.is_none() {
         return Err(CliFailure::invalid_args(
             "a --system notice sends to an existing session: use genet session send <id> ..., or give it a --message-id to open one with it",
@@ -1259,7 +1279,7 @@ async fn run_conversation(rpc: &Rpc, run: Run, here: bool) -> Result<i32, CliFai
             seq = seq.max(event.seq);
             emit_event(&event);
         }
-    } else {
+    } else if !run.prepare_only {
         emit(
             if run.session_id.is_some() {
                 "session.attached"
@@ -1296,6 +1316,13 @@ async fn run_conversation(rpc: &Rpc, run: Run, here: bool) -> Result<i32, CliFai
         return Err(CliFailure::invalid_args(
             "this daemon does not support durable Session input",
         ));
+    }
+    if run.prepare_only {
+        emit(
+            "session.created",
+            json!({"sessionId": session.id, "prepared": true, "status": session.status}),
+        );
+        return Ok(EXIT_OK);
     }
     rpc.call(Request::SessionSend {
         message_id: run.message_id.clone(),
@@ -1395,11 +1422,27 @@ async fn attach(
     Ok(snapshot.summary)
 }
 
+fn creation_operation(rpc: &Rpc, run: &Run) -> Result<Option<String>, CliFailure> {
+    if run.creation_id.is_some()
+        && !rpc
+            .hello()
+            .features
+            .as_ref()
+            .is_some_and(|features| features.iter().any(|f| f == "session.create-id.v1"))
+    {
+        return Err(CliFailure::invalid_args(
+            "this daemon does not support idempotent creation",
+        ));
+    }
+    Ok(run.creation_id.clone())
+}
+
 async fn create(rpc: &Rpc, run: &Run, here: bool) -> Result<SessionSummary, CliFailure> {
     if !run.tags.is_empty() {
         let (workspace_id, cwd) = resolve_workspace(rpc, run, here).await?;
         let Reply::Session(summary) = rpc
             .call(Request::SessionCreateRouted {
+                creation_id: creation_operation(rpc, run)?,
                 workspace_id,
                 tags: run.tags.clone(),
                 media_tags: run.media_tags.clone(),
@@ -1422,6 +1465,7 @@ async fn create(rpc: &Rpc, run: &Run, here: bool) -> Result<SessionSummary, CliF
     let (workspace_id, cwd) = resolve_workspace(rpc, run, here).await?;
     let Reply::Session(summary) = rpc
         .call(Request::SessionCreate {
+            creation_id: creation_operation(rpc, run)?,
             workspace_id,
             agent_id,
             model_id: run.model_id.clone(),

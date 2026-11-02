@@ -346,7 +346,9 @@ function renderBoard(data, source) {
   }
 
   const onDuty = members.filter(m => m.onDuty).length;
-  const runningCount = members.filter(m => m.activeSession && (m.activeSession.status === "running" || m.activeSession.status === "waiting")).length;
+  const allSessions = members.flatMap(m => m.sessions || (m.activeSession ? [m.activeSession] : []));
+  const runningCount = allSessions.filter(s => s.status === "running").length;
+  const coordinatingCount = allSessions.filter(s => s.status !== "running" && (s.status === "waiting" || s.coordination?.active || s.coordination?.pending || s.coordination?.ready || s.coordination?.unknown)).length;
   const totalSessions = members.reduce((acc, m) => acc + (m.sessionCount || 0), 0);
 
   document.getElementById("kpi-members").textContent = onDuty + " / " + members.length + " 在岗";
@@ -354,8 +356,8 @@ function renderBoard(data, source) {
     ? (members.length - onDuty) + " 个预置角色待岗（按需激活）"
     : "全员已配置独立职责";
 
-  document.getElementById("kpi-sessions").textContent = runningCount + " 运行中 / " + totalSessions + " 总计";
-  document.getElementById("kpi-sessions-sub").textContent = runningCount > 0 ? "后台管线正在并发工作" : "当前全员空闲待命";
+  document.getElementById("kpi-sessions").textContent = runningCount + " 执行中 / " + coordinatingCount + " 协作中 / " + totalSessions + " 总计";
+  document.getElementById("kpi-sessions-sub").textContent = runningCount > 0 ? "后台会话正在执行" : coordinatingCount > 0 ? "任务仍在接力或等待处理" : "当前未发现执行或协作义务";
 
   document.getElementById("kpi-releases").textContent = String(releases.length) + " 个版本";
   document.getElementById("kpi-releases-sub").textContent = releases.length > 0 ? "最新: " + releases[0].version : "等待首个版本发布";
@@ -370,8 +372,10 @@ function renderBoard(data, source) {
     const sess = m.activeSession;
     let statusBadge = '<span class="badge standby">待岗 (未绑工位)</span>';
     if (m.onDuty || sess) {
-      const st = sess ? sess.status : "idle";
-      if (st === "running" || st === "waiting") {
+      const c = sess?.coordination;
+      const st = sess?.paused ? "已暂停" : c?.stale || c?.unknown ? "协作状态待核对" : sess?.status === "running" ? "执行中"
+        : c?.pending ? "等待协作 " + c.pending + " 项" : c?.ready ? "结果待处理" : c?.active ? "任务待继续" : sess ? sess.status : "idle";
+      if (sess?.status === "running" || sess?.status === "waiting") {
         statusBadge = '<span class="badge running">● ' + esc(st) + '</span>';
       } else {
         statusBadge = '<span class="badge idle">● ' + esc(st) + '</span>';
@@ -390,10 +394,20 @@ function renderBoard(data, source) {
       '<span class="badge effort">effort: ' + esc(effortStr) + '</span>';
 
     // 会话 title 创建后改不了，description 可以随时改，所以以 description 为准显示"现在在做什么"。
-    const sessCell = sess
+    let sessCell = sess
       ? '<div><strong>' + esc((sess.description || sess.title || sess.id).slice(0, 100)) + '</strong> <span class="mono muted">(' + esc(sess.id) + ')</span></div>' +
         '<div class="muted" style="font-size:12px;margin-top:3px">' + esc((sess.preview || "").slice(0, 140)) + '</div>'
       : '<span class="muted">暂无会话</span>';
+    const sessions = m.sessions || (sess ? [sess] : []);
+    if (sessions.length > 1) {
+      sessCell += '<details style="margin-top:8px"><summary>查看本岗位全部 ' + sessions.length + ' 个会话</summary>' + sessions.map(s => {
+        const c = s.coordination;
+        const status = s.paused ? '已暂停' : s.status === 'running' ? '执行中' : s.status === 'waiting' ? '等待交互' : '';
+        const work = c?.stale || c?.unknown ? '协作状态待核对' : c?.pending ? '等待协作 ' + c.pending + ' 项' : c?.ready ? '结果待处理' : c?.active ? '任务待继续' : '';
+        return '<div class="item-row"><div><strong>' + esc(s.description || s.title || s.id) + '</strong><div class="muted">' + esc([status, work].filter(Boolean).join(' · ') || '当前无执行活动') + '</div><div class="mono muted">' + esc(s.modelId || '模型未上报') + ' · ' + esc(s.id) + '</div></div></div>';
+      }).join('') + '</details>';
+    }
+
 
     return '<tr>' +
       '<td><div style="font-weight:700;color:#f8fafc">' + esc(m.displayRole) + '</div><div class="muted" style="font-size:11.5px">' + esc(m.roleDesc || "") + '</div></td>' +
@@ -602,31 +616,11 @@ def query_daemon_spaces_and_sessions(team_root):
 
 
 def _query_daemon_spaces_and_sessions_uncached(team_root):
-    """Query sessions and workspaces using `genet` CLI if available, else fallback to daemon sqlite/files."""
-    daemon_root = detect_daemon_root(team_root)
-    slot_cli = os.path.realpath(os.path.join(daemon_root, "..", "..", "install", "bin", "genet-dev"))
+    """Use the caller's bound CLI and identity for both public summaries."""
     cli = os.environ.get("GENEHUB_CLI")
-    if os.path.isfile(slot_cli) and os.access(slot_cli, os.X_OK):
-        cli = slot_cli
-    elif not cli:
-        # Try sibling install/bin/genet-dev or genet-beta
-        for cand in (
-            slot_cli,
-            "/root/.local/bin/genet-dev",
-            "/root/.local/bin/genet-beta",
-            "/root/.local/bin/genet",
-        ):
-            if os.path.isfile(cand) and os.access(cand, os.X_OK):
-                cli = os.path.realpath(cand)
-                break
-    if not cli:
-        return {}, {}
+    if not cli or not os.path.isabs(cli) or not os.path.isfile(cli):
+        raise RuntimeError("GENEHUB_CLI 未绑定；无法核对会话，保留上次看板数据")
     env = dict(os.environ)
-    env.pop("GENEHUB_SESSION_ID", None)
-    env.pop("GENEHUB_EXECUTION_LEASE", None)
-    env.pop("GENEHUB_CONTROLLER_TOKEN", None)
-    if os.path.isdir(os.path.join(daemon_root, "spaces")):
-        env["GENEHUB_DEV_DATA_DIR"] = daemon_root
     try:
         # 该 CLI 不接受 --json（会被当成未知参数），且输出信封是 {"data": {...}}。
         ws_out = subprocess.run(
@@ -634,20 +628,25 @@ def _query_daemon_spaces_and_sessions_uncached(team_root):
             capture_output=True, text=True, env=env, timeout=30
         )
         sess_out = subprocess.run(
-            [cli, "session", "list"],
+            [cli, "session", "list", "--lean"],
             capture_output=True, text=True, env=env, timeout=30
         )
-        workspaces = ((json.loads(ws_out.stdout).get("data") or {}).get("workspaces") or []) \
-            if ws_out.returncode == 0 and ws_out.stdout.strip() else []
-        sessions = ((json.loads(sess_out.stdout).get("data") or {}).get("sessions") or []) \
-            if sess_out.returncode == 0 and sess_out.stdout.strip() else []
-    except Exception:
-        return {}, {}
+        if ws_out.returncode != 0 or sess_out.returncode != 0:
+            raise RuntimeError("绑定渠道会话读取失败，不能把失败显示为零会话")
+        workspaces = json.loads(ws_out.stdout)["data"]["workspaces"]
+        sessions = json.loads(sess_out.stdout)["data"]["sessions"]
+    except Exception as error:
+        raise RuntimeError("看板会话来源无法核对: " + str(error)) from error
     real_root = os.path.realpath(team_root)
     spaces_by_role = {}
     for w in workspaces:
         # workspace 只有 root 字段，没有 location.kind/path。
-        p = os.path.realpath(w.get("root") or "")
+        folders = w.get("folders") or []
+        first_root = folders[0].get("root") if folders and isinstance(folders[0], dict) else None
+        declared = w.get("root") or first_root
+        if not isinstance(declared, str) or not os.path.isabs(declared):
+            continue
+        p = os.path.realpath(declared)
         if p == real_root:
             spaces_by_role["root"] = w
         elif p.startswith(real_root + os.sep):
@@ -710,25 +709,28 @@ def build_board_live_data(team_root):
         env_dir = os.path.join(team_root, "front") if role == "root" and os.path.isdir(os.path.join(team_root, "front")) else role_dir
         role_desc_json = read_json(os.path.join(role_dir, "agent-space.genet.json"), {}) or {}
         env = parse_env_file(os.path.join(env_dir, ".genethub", "open.env"))
-        wt_dir = team_root if role == "root" else env.get("WORKTREE_DIR")
+        wt_dir = None if role == "root" else env.get("WORKTREE_DIR")
         effort = env.get("TEAM_EFFORT") or "high"
         ws_info = spaces_by_role.get(role) or {}
         wid = ws_info.get("id") or ""
-        sess_list = sorted(sessions_by_ws.get(wid, []), key=lambda s: -s.get("updatedAtMs", 0))
-        active_sess = None
-        if sess_list:
-            top = sess_list[0]
+        sess_list = sorted(sessions_by_ws.get(wid, []), key=lambda s: (
+            not (s.get("status") in ("running", "waiting") or (s.get("coordination") or {}).get("active")), -s.get("updatedAtMs", 0)))
+        session_rows = []
+        for top in sess_list:
             preview_obj = top.get("messagePreview") or {}
-            active_sess = {
+            session_rows.append({
                 "id": top.get("id"),
                 "title": top.get("title") or top.get("description") or "",
                 "description": top.get("description") or "",
                 "status": top.get("status") or "idle",
+                "coordination": top.get("coordination"),
+                "paused": (top.get("inputSummary") or {}).get("paused", False),
                 "modelId": top.get("modelId") or "",
                 "effortId": top.get("effortId") or effort,
                 "updatedAtMs": top.get("updatedAtMs") or 0,
                 "preview": preview_obj.get("text") or "",
-            }
+            })
+        active_sess = session_rows[0] if session_rows else None
         git_info = inspect_git_worktree(wt_dir) if wt_dir and role != "root" else None
         on_duty = bool(
             role in ("root", "leader", "qa", "research", "team-reflect")
@@ -738,6 +740,7 @@ def build_board_live_data(team_root):
         disp = ROLE_DISPLAY_ORDER.get(role, (5, "🔧 %s" % role))[1]
         members.append({
             "role": role,
+            "sessions": session_rows,
             "displayRole": disp,
             "roleDesc": role_desc_json.get("description") or "",
             "workspaceId": wid,
@@ -1156,7 +1159,7 @@ def main():
     if args.serve:
         asyncio.run(serve_board(args.team_root))
     else:
-        idx, _ = ensure_team_board(args.team_root, start_service=not args.once)
+        idx, _ = ensure_team_board(args.team_root, start_service=not args.once, force_sync=args.once)
         print(idx)
 
 

@@ -1,39 +1,22 @@
 ---
 name: team-work
-description: 1+N 项目团队的研发与验收会话（含研发组长 Leader、各管线组员、QA 验收）：研发组长自主评估里程碑规划与版本内容可达性，并发编排多工位组员、预检合入、无头浏览器实操截图验收、发布可玩版本并刷新常驻看板。在 leader、qa 与各管线岗位空间里开的会话用它。
+description: 承接团队 Task Owner、专业协作与验收任务；自己实施或按需请求其他会话支持，异步整合证据并完成目标。
 ---
 
-# 团队研发与验收
+# 团队任务执行
 
-开工先用两三句话复述任务、所在工位（`WORKTREE_DIR`）和完成标准；有疑问但不阻塞就按合理默认推进并写明假设。下文 `team.py` 即 `"$GENEHUB_PYTHON" <团队根>/tools/team.py`。
+开工确认目标、taskId、当前会话与验收标准。命令以 `"$GENEHUB_PYTHON" <团队根>/tools/team.py` 开头；详见 team-core `references/task-owner.md`。
 
-## 研发组长（`spaces/leader`）
-
-1. 先盘点代码基线，评估版本内容可达性与里程碑排期：路线图写 `<团队根>/.pm/trunk/MILESTONE_PLAN.md`；本版本的接口契约、各组员负责的文件边界与验收标准写 `<团队根>/.pm/trunk/milestone-vX.Y.md`。
-2. 编制：`team.py employee add <岗位> --desc "<职责>" --repo <主仓>`、`employee retire <岗位>`、`employee ls`；每个组员要有独立工位：`team.py worktree create <slot> --repo <主仓> --branch <分支> --space <组员>`。
-3. 并发派单：连续 `team.py spawn --space <组员> --kind work …` 启动多路组员或小组长，然后立即结束本轮；同批全部结束后系统合并成一条 `用途: result` 唤醒你。
-4. 多条 `human` 指令按时间序（`#1 → #K`）读，后一条否定前一条时以最新一条为准；请本机其他团队会诊用 `team.py send --to <团队名> --kind question`。
-5. 合入：收到组员提交后，在集成工位用 `git merge-tree` 预检无冲突再合入 `main`，并跑语法与构建检查。
-6. 验收：`team.py spawn --space qa --kind work` 派 QA（要数值对比时同时派 `research`），结束本轮等回执。
-7. 发版：QA PASS 后 `team.py publish release <构建目录> --name vX.Y`，发布到 `datas/releases/vX.Y/index.html` 并更新版本索引与看板；把 `MILESTONE_PLAN.md` 对应条目勾成 `- [x]`。紧急异常用 `team.py publish rollback`。
-
-有浏览器持久数据的应用，先读 `genehub-preview` 的静态预览存储约定：从首版保留固定的用户入口，版本目录用于归档。换版本目录不是存储迁移；旧入口已交付时保留旧版，并提供明确的导出/导入步骤，不让用户重录，也不能仅凭相同存储键承诺自动保留。
-
-## 管线组员与小组长（如 `skill-lead`、`map-lead`）
-
-- 在系统注入的 `WORKTREE_DIR`（`worktrees/<slot>`）里编码、自测并 `git commit`。
-- 模块大时当小组长：`team.py spawn --space <本空间> --kind work --worktree auto --desc "子模块" "任务"` 派 5~10 个子工位
-  （需要时加 `--space research --kind research`），立即结束本轮；收到汇总回执后把各 `worker/*` 分支合入本工位并自测提交。
-- 最终回复列出：分支名、commit SHA、改动文件与核心机制、自测结果。
-
-## QA（`spaces/qa`）
-
-不凭代码猜。用 Playwright 等无头浏览器打开真实页面，模拟按键和点击；断言 `console.error` 与 `pageerror` 为 0；
-截关键画面放进报告目录并在 HTML 报告中引用；跑数值模拟检验 TTK、胜率、经济曲线。最后 `team.py publish report <目录> --slug qa-vXY` 发布到 `datas/reports/<slug>/index.html`，给出明确的 PASS/FAIL 与报告链接。
-
-涉及升级保留用户数据时，在同一个浏览器中从原先交付的真实 Beta 入口添加数据，再进入新交付入口核对数据与状态；涉及迁移时实际操作导出/导入和取消。候选本地页面、存储格式兼容或只在新入口重开通过，都不能替代这一步。无法完成真实入口验收时明确写未验收，不把它归为 PASS。
-
-## 链接与等人
-
-- 预览、报告、截图链接写成相对团队根的 `[名称](datas/...)` 或 `[名称](temp/...)`：不加 `../`，不放进反引号。
-- 后台不挂起等人：要用户决定的事，把选项和推荐写进最终回复交回请求方，由前台去问；不调用 `AskQuestion`、`request_user_input`、`session ask`。
+- Space 提供身份与能力，会话承载任务。独立目标用独立会话，同 Space 可以并行，但不能抢写同一实际目录或超过团队预算。
+- 使用派单固定的机器、业务目录、分支与基线。原生启动 cwd 可能是岗位 Space；每次文件操作或 shell 明确目标目录，不通过修改公共 open.env 给在途任务换项目。
+- 未认领项目写目录时先准备独立工位并 `task bind-directory <taskId> --directory <绝对目录>`，然后在其中工作。只协调可不绑定项目，报告放本任务的独立输出位置。
+- 简单任务直接完成。需要协作时 `task support <taskId> --space <岗位> --desc "<支持目标>" --request-id <稳定支持编号> "<边界、输入、产物与验收>"`；编码协作者指定独立 `--directory`，远端用固定岗位绑定。
+- 可以一次派多项支持，然后立即结束本轮；不 sleep、不轮询、不靠常驻 Agent 空转等待。timer 按本任务关系收齐结果并唤醒。
+- idle 只表示当前没有执行，等待支持、用户暂停和未知创建结果都不等于可复用。追加要求回到原会话，支持结果按原任务与本次派单归属，不能按岗位简称挑最近会话。
+- 收到结果后核对真实提交、产物和验证，整合自己的任务工位。共享主分支或发布资源只在实际操作时串行，不与协作者共用可写 checkout。
+- 收尾前 `task finish <taskId> --outcome success "<提交/产物/验收证据>"`，再给公开最终结论。失败或阻塞使用 failed/blocked，不能把接收或中间回复当成交付。
+- 只有旧派单没有 taskId 时沿既有回执完成，不创建新任务重做；新规范通过明确升级后采用。
+- QA 读取固定提交或制品，实际操作、核对运行日志和结果；不凭源码猜测。报告写独立目录并交付实际链接。
+- 有持久数据的产品从原交付入口验证升级保留；版本目录更换不等于数据迁移。预览遵守 genehub-preview。
+- 临时材料使用 `temp new <slug> --task-id <taskId> --purpose "<用途>"` 得到本会话独立目录；任务归属、恢复记录和正式产物不放可清理 temp。
+- 用户暂停与明确恢复优先，普通回执不得解除暂停。要用户决策时经前台转达，不无限递归派单或换高成本模型绕过预算。

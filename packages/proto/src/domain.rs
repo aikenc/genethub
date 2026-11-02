@@ -987,6 +987,10 @@ pub struct PreviewReviewDraft {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct SessionSummary {
+    /// Read-only coordination projection, independent of native execution status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub coordination: Option<SessionCoordinationSummary>,
     /// Actual native Agent working directory captured by this Session. Older
     /// peers omit it; clients then retain the legacy project-root resolver.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1091,6 +1095,25 @@ pub struct SessionSummary {
     #[ts(optional, type = "number")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_activity_at_ms: Option<i64>,
+}
+
+/// A timer's bounded projection of durable work obligations. It never changes
+/// the native execution queue or grants permission to wake a paused Session.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionCoordinationSummary {
+    pub source: String,
+    #[serde(default)]
+    pub task_id: Option<String>,
+    pub active: bool,
+    pub pending: u32,
+    pub ready: u32,
+    pub unknown: u32,
+    #[ts(type = "number")]
+    pub updated_at_ms: i64,
+    #[serde(default)]
+    pub stale: bool,
 }
 
 /// A content cursor independent of status, rename and transport sequence numbers.

@@ -3,6 +3,7 @@ pub(crate) mod artifacts;
 pub(crate) mod chat_files;
 pub mod components;
 mod context_seed;
+pub(super) mod coordination;
 pub mod images;
 pub mod manager;
 pub mod overview;

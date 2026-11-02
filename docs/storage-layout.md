@@ -25,9 +25,14 @@ agent CLI 自己的线程库（`~/.codex/` 之类）不归我们管，只在会�
 <Space 根>/.genethub/
   .gitignore                  内容为 *，整个目录自我忽略
   sessions/<会话>/            一段对话，内部布局见 session-storage.md
+    creation.json             daemon 私有可选创建意图；先于 meta.json，删除后由墓碑阻止重建
     components/<组件>/        组件实例的会话级存储
     provider-operations/      本会话 provider 草案、无密钥决定与配置/验证回执
   components/<组件>/          组件实例的 Space 级存储
+  session-coordination.json   通用只读协作投影，timer 可重建，非任务事实来源
+  coordination-source.json    已绑定投影来源的标记；重启后投影失踪须显示待核对
+  task-source.json            团队远端回源路由配置，非权限边界
+  remote-targets.json         团队固定机器/workspace/接单 argv
   tombstones/<会话>.json      会话删除墓碑
   workflows/<包>/             Workflow 包源（仅项目根；Workflow 退役中，不再新建）
   preview-feedback/           文件与版本绑定的反馈草稿、证据、提交回执与限时分享范围
@@ -87,3 +92,9 @@ agent CLI 自己的线程库（`~/.codex/` 之类）不归我们管，只在会�
 项目 `.genethub/hooks/.locks/<hook-id>.lock` 由 hook runner 持有 OS 执行锁并保存上次启动和结束时间；`.locks/.status.lock` 保护共享状态合并，均跨 channel 共用。文件存在不代表锁被持有，进程退出由 OS 释放执行锁。
 
 团队现有状态目录下 `inbox/<session>.jsonl`、`*.read` 保存尚未取得平台回执的完整输入，逐条固定身份重试；`<session>.lock` 保护同机转交。读取或展示不等于回执。内置管理员 `.genethub/bootstrap-owned.json` 只记录产品分发拥有的相对路径，不扩大到未知用户文件。
+
+## 5. 团队任务记录与业务临时数据
+
+`.genethub/team/tasks/` 是源端任务/Owner/协作/控制回执，`task-dispatch/` 是先于创建的派单意图（creating/prepared/created），`task-inputs/` 绑定追加消息编号与原参数。准备 SID、持久化正反关系后才首次激活。pending/done/inbox 继续用于 timer 接力，投递已接受而未消费的 inbox 回执仍保留。远端执行端只保存接单/写锁回执，不另建定义源与调度者。
+
+业务临时材料在团队 `temp/`，按任务和真实会话隔离；适配器 `.genethub/sessions/SID/state` 只归适配器。清理核对活动/暂停/等待任务、派单和消息引用，摘要损坏/陈旧且不能核对的任务材料保留。永久产物进项目工作目录或 datas，不放内核私有目录。

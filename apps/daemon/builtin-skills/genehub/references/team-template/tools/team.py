@@ -97,6 +97,8 @@ ROLE_LABELS = {"research": "研究", "work": "工作", "reflect": "反思", "tea
 SESSION_ID = re.compile(r"^s_[0-9a-f]+$")
 
 
+import team_tasks
+
 class ExpertError(Exception):
     def __init__(self, what, state, nxt, code=None):
         super().__init__(what)
@@ -409,13 +411,60 @@ def cmd_receive(args):
             or workspace_root(entry) != os.path.realpath(os.path.join(root, "spaces", role))):
         raise ExpertError("workspace 不属于此接单命令的指定岗位", "没有创建或发送会话", "核对目标机 team.py 路径、岗位与 workspaceId")
     role_root = workspace_root(entry)
+    if request.get("operation") == "coordination":
+        snapshot = request.get("snapshot")
+        if not isinstance(snapshot, dict) or snapshot.get("version") != 1 or len(json.dumps(snapshot).encode()) > 524288:
+            raise ExpertError("无效协作摘要", "旧摘要保留", "核对源端版本与记录规模")
+        write_json(os.path.join(role_root, ".genethub", "coordination-source.json"), {"version": 1, "projection": "session-coordination.json"})
+        destination = os.path.join(role_root, ".genethub", "session-coordination.json")
+        old_projection = read_json(destination, {}) or {}
+        if old_projection.get("updatedAtMs", 0) <= snapshot.get("updatedAtMs", 0):
+            write_json(destination, snapshot)
+        print(json.dumps({"ok": True, "projected": True}))
+        return
+    if request.get("operation") == "task-operation":
+        operation = request.get("taskOperation") or {}
+        # The full-account shell is the existing authority. Sender IDs retain
+        # routing attribution; they are not an invented project permission.
+        import io
+        with contextlib.redirect_stdout(io.StringIO()) as captured:
+            team_tasks.command(sys.modules[__name__], type("TaskArgs", (), operation)(), root=root, sender=operation.get("sender"))
+        print(json.dumps({"ok": True, "result": captured.getvalue()}))
+        return
     receipt_path = state_dir(role_root, "dispatch", hashlib.sha256(key.encode()).hexdigest() + ".json")
     with inbox_lock(role_root, "receive"):
         old = read_dispatch_record(receipt_path)
         operation = request.get("operation")
-        if operation in ("release", "notice"):
+        if operation in ("release", "notice", "activate", "bind-directory"):
             if not old or old.get("sessionId") != request.get("sessionId"):
                 raise ExpertError("请求与派单回执不符", "锁保留，没有投递", "核对原派单 id 与 sessionId")
+        if operation == "bind-directory":
+            if old.get("released") or not old.get("request", {}).get("prepareOnly"):
+                raise ExpertError("该执行回执不能认领新任务工位", "没有修改任何写锁", "使用本任务原准备回执")
+            directory = resolve_expert_dir(root, request.get("directory"))
+            if not os.path.isdir(directory):
+                raise ExpertError("远端工位不存在", "没有在源端创建同名目录", "先在执行端准备工位")
+            if old.get("directory") and old["directory"] != directory:
+                raise ExpertError("执行端已绑定另一工位", "没有切换或遗留旧锁", "显式交接原资源")
+            with inbox_lock(writer_lock(directory), "writer", purpose="远端任务工位"):
+                lock, won = claim(directory, {"session": old["sessionId"], "requestId": key, "at": now_ms()}, "genet-writer.json")
+                holder = read_json(lock, {}) or {}
+                if not won and (holder.get("session") != old["sessionId"] or holder.get("requestId") != key):
+                    raise ExpertError("执行端工位被占用", "没有覆盖原写者", "选择独立工位或等待原任务释放")
+            old.update(lock=lock, directory=directory)
+            write_json(receipt_path, old)
+            print(json.dumps({"ok": True, "binding": {"directory": directory, "sessionId": old["sessionId"], "lock": lock}}))
+            return
+        if operation == "activate":
+            if old.get("released"):
+                raise ExpertError("派单已释放", "没有激活旧任务", "查询原结果；新任务用新操作编号")
+            original = old["request"]
+            genet("session", "send", old["sessionId"], original["text"], "--system", "--message-id",
+                  "activate." + hashlib.sha256(key.encode()).hexdigest(), "--no-wait")
+            old["activated"] = True
+            write_json(receipt_path, old)
+            print(json.dumps({"ok": True, "activated": True}))
+            return
         if operation == "notice":
             lock = old.get("lock")
             holder = read_json(lock, {}) if lock else None
@@ -468,27 +517,32 @@ def cmd_receive(args):
             if old.get("sessionId"):
                 print(json.dumps({"ok": True, "sessionId": old["sessionId"], "why": old["why"]}))
                 return
-            raise ExpertError("上次创建结果 unknown", "不会重复创建；锁与回执保留", "管理员核对实际会话后恢复原回执，禁止换编号盲重派")
+            if not old.get("recoverable") or not old.get("selection"):
+                raise ExpertError("上次创建结果 unknown", "不会重复创建；锁与回执保留", "管理员核对实际会话后恢复原回执，禁止换编号盲重派")
         # Validate selection BEFORE taking a lock or writing a creation intent.
         model_key = "TEAM_MODEL_RESEARCH" if role == "research" else "TEAM_MODEL_WORK"
-        selection = choose(role_root, model_key, request.get("tier"), request.get("model"), request.get("media"), executor=True)
-        lock = None
-        if role != "research":
-            directory = resolve_expert_dir(root, open_env(role_root).get("WORKTREE_DIR") or role_root)
+        selection = old["selection"] if old else choose(role_root, model_key, request.get("tier"), request.get("model"), request.get("media"), executor=True)
+        lock = old.get("lock") if old else None
+        directory = old.get("directory") if old else None
+        configured = open_env(role_root).get("WORKTREE_DIR")
+        if role != "research" and not old and (configured or not request.get("prepareOnly")):
+            directory = resolve_expert_dir(root, configured or role_root)
             with inbox_lock(writer_lock(directory), "writer", purpose="写者锁"):
                 lock, won = claim(directory, {"session": None, "requestId": key, "at": now_ms()}, "genet-writer.json")
                 if not won:
                     raise ExpertError("执行目录已有写锁 %s" % lock, "没有创建会话，也没有自动排队或切工位", "等待原任务回执完成并释放；未知状态先核对，不删除锁重派")
-        record = {"request": request, "status": "unknown", "lock": lock, "atMs": now_ms()}
+        features = (genet("context").get("daemon") or {}).get("features") or []
+        record = old or {"request": request, "status": "unknown", "lock": lock, "atMs": now_ms(),
+                         "selection": selection, "directory": directory, "recoverable": "session.create-id.v1" in features}
         # If this write or any following create/receipt write fails, retain the reservation.
         write_json(receipt_path, record)
         sid, why = start(role_root, workspace_id, role, request["desc"], request["text"], model_key,
-                         selection=selection)
+                         selection=selection, operation_id="receive." + hashlib.sha256(key.encode()).hexdigest(), prepare_only=bool(request.get("prepareOnly")))
         if not sid:
             raise ExpertError("没有收到创建回执", "unknown；锁保留", "先核对实际会话")
         if lock:
             write_json(lock, {"session": sid, "requestId": key, "at": now_ms()})
-        record.update(status="created", sessionId=sid, why=why)
+        record.update(status="created", sessionId=sid, why=why, activated=not request.get("prepareOnly"))
         write_json(receipt_path, record)
         print(json.dumps({"ok": True, "sessionId": sid, "why": why}))
 
@@ -844,7 +898,7 @@ def front_session(root, spaces):
     return max(candidates, key=lambda item: item.get("updatedAtMs", 0))["id"] if candidates else None
 
 
-def start(root, workspace_id, role, desc, text, model_key, tier=None, model=None, media=None, machine=None, selection=None):
+def start(root, workspace_id, role, desc, text, model_key, tier=None, model=None, media=None, machine=None, selection=None, operation_id=None, prepare_only=False):
     """Starts the session and returns (its id, why this Agent and model)."""
     picked, why = selection or choose(root, model_key, tier, model, media, machine)
     # The title defaults to the first line of the task, which starts with the user's own words: every session of one
@@ -854,8 +908,16 @@ def start(root, workspace_id, role, desc, text, model_key, tier=None, model=None
     old_candidates = list(live_sessions(workspace_id, machine)) if (auto_archive and role not in ("root", "front")) else []
     args = ["agent", "run", *picked, text, "--workspace", workspace_id, "--title", desc[:80], "--label", role_label,
             "--label", SYSTEM_LABEL, "--description", desc[:300],
-            "--system", "--message-id", message_id("start", workspace_id, role, desc, text), "--no-wait",
+            "--system", "--message-id", operation_id or message_id("start", workspace_id, role, desc, text), "--no-wait",
             *machine_args(machine)]
+    if operation_id:
+        features = (genet("context", *machine_args(machine)).get("daemon") or {}).get("features") or []
+        if "session.create-id.v1" in features:
+            args += ["--creation-id", "create." + hashlib.sha256(operation_id.encode("utf-8")).hexdigest()]
+        if prepare_only:
+            if "session.prepare.v1" not in features:
+                raise ExpertError("执行端不支持先准备会话再激活", "没有投递业务任务", "升级兼容guest后复用原操作编号")
+            args += ["--prepare-only"]
     new_sid = genet(*args).get("sessionId")
     clear_sessions_cache()
     if new_sid and old_candidates:
@@ -967,7 +1029,7 @@ def _inbox_message_id(session_id, item):
     return item.get("messageId") or message_id(session_id, json.dumps(item, ensure_ascii=False, sort_keys=True))
 
 
-def push_session_inbox(root, session_id, purpose, sender, text, ref=None, id_parts=()):
+def push_session_inbox(root, session_id, purpose, sender, text, ref=None, id_parts=(), machine=None):
     path = state_dir(root, "inbox", session_id + ".jsonl")
     stable_id = message_id(session_id, purpose, sender, text, ref or "", *id_parts)
     with inbox_lock(root, session_id):
@@ -981,7 +1043,7 @@ def push_session_inbox(root, session_id, purpose, sender, text, ref=None, id_par
         if len(body.encode("utf-8")) > 65536:
             raise ExpertError("消息超过平台 65536 字节上限", "没有接收或截断新消息", "拆成独立的完整消息，或交付含全部要求的文件链接")
         items = _read_inbox(path) if os.path.isfile(path) else []
-        items.append({"messageId": stable_id, "atMs": now_ms(), "purpose": purpose, "sender": sender, "ref": ref, "text": text})
+        items.append({"messageId": stable_id, "atMs": now_ms(), "purpose": purpose, "sender": sender, "ref": ref, "text": text, "machine": machine})
         _write_inbox(path, items)
 
 
@@ -1076,7 +1138,7 @@ def _advance_parent_baseline(root, parent_sid, parent_summary=None):
         return
     if parent_summary is None:
         try:
-            parent_summary = session_summary(parent_sid)
+            parent_summary = session_summary(parent_sid, p_rec.get("machine"))
         except ExpertError:
             parent_summary = {}
     latest_reply = ((parent_summary or {}).get("latestReply") or {}).get("itemId")
@@ -1103,45 +1165,77 @@ def _has_unfinished_children(root, session_id):
 
 
 def flush_session_inbox_if_idle(root, session_id, force=False):
-    """Transfer durable entries to the platform; only its receipt permits deletion."""
+    """Keep the same durable input identity through acceptance and consumption."""
     if not _inbox_paths(root, session_id):
         return False
-    summary = session_summary(session_id)
-    if summary.get("status") != "idle" or (summary.get("inputSummary") or {}).get("paused"):
-        return False
-    if not force and _has_unfinished_children(root, session_id):
-        # Reconciliation queues a result only after its own batch is complete.
-        # Another older (possibly Human-paused) batch must not suppress it.
-        # The pause guard above and the original child's lock remain intact.
-        if not any(item.get("purpose") in ("human", "patrol", "task", "question", "result") for item in peek_session_inbox(root, session_id)):
-            return False
+    queued = peek_session_inbox(root, session_id)
+    machine = next((item.get("machine") for item in queued if item.get("machine")), None)
+    summary = session_summary(session_id, machine)
+    inputs = summary.get("inputSummary") or {}
+    pending_ids = set(inputs.get("pendingMessageIds") or [])
+    can_send = summary.get("status") == "idle" and not inputs.get("paused")
     delivered = False
     with inbox_lock(root, session_id):
         for path in _inbox_paths(root, session_id):
-            claim = path if path.endswith(".read") else path + ".read"
-            if claim != path:
-                os.replace(path, claim)
-            items = _read_inbox(claim)
-            _advance_parent_baseline(root, session_id, summary)
-            while items:
-                item = items[0]
-                notice(session_id, item.get("purpose") or "notice", item.get("sender") or "-", item.get("text") or "",
-                       ref=item.get("ref"), delivery_id=_inbox_message_id(session_id, item))
-                # A crash before this replacement retries the same id AND body.
-                items = items[1:]
-                _write_inbox(claim, items)
+            items = _read_inbox(path)
+            kept = []
+            for item in items:
+                stable = _inbox_message_id(session_id, item)
+                if item.get("accepted"):
+                    if stable in pending_ids:
+                        kept.append(item)
+                    continue
+                if not can_send:
+                    kept.append(item)
+                    continue
+                if not force and _has_unfinished_children(root, session_id) and item.get("purpose") not in ("human", "patrol", "task", "question", "result"):
+                    kept.append(item)
+                    continue
+                _advance_parent_baseline(root, session_id, summary)
+                if item.get("machine"):
+                    record = read_dispatch_record(state_dir(root, "pending", session_id + ".json")) or {}
+                    dispatch = record.get("remoteDispatch")
+                    if not dispatch or record.get("machine") != item["machine"] or record.get("remoteReleased"):
+                        raise ExpertError("远端收件箱缺少原派单回执", "保留输入和等待义务", "核对原任务，不能改投最近会话")
+                    target = dispatch["target"]
+                    remote_receive(target, {"id": dispatch["id"], "workspaceId": target["workspaceId"],
+                                           "role": record["kind"], "operation": "notice", "sessionId": session_id,
+                                           "purpose": item.get("purpose") or "notice", "sender": item.get("sender") or "-",
+                                           "text": item.get("text") or "", "ref": item.get("ref"), "messageId": stable})
+                else:
+                    notice(session_id, item.get("purpose") or "notice", item.get("sender") or "-", item.get("text") or "",
+                           ref=item.get("ref"), delivery_id=stable)
+                item["accepted"] = True
+                after_inputs = (session_summary(session_id, machine).get("inputSummary") or {})
+                if stable in set(after_inputs.get("pendingMessageIds") or []):
+                    kept.append(item)
+                # Persist each receipt before touching another message. A crash
+                # before this write retries exactly the same ID and body.
+                _write_inbox(path, kept + items[items.index(item) + 1:])
                 delivered = True
-            os.remove(claim)
+            if kept:
+                _write_inbox(path, kept)
+            else:
+                try: os.remove(path)
+                except FileNotFoundError: pass
     return delivered
 
 
 def deliver_or_notice(root, session_id, purpose, sender, text, *id_parts, ref=None, unpause=False, use_inbox=False, machine=None):
+    if machine is None:
+        # Reports and watchers use the same exact persisted address as results.
+        # No role-name/latest-session fallback when the recipient is remote.
+        record = read_dispatch_record(state_dir(root, "pending", session_id + ".json")) or {}
+        machine = record.get("machine")
     if machine:
         record = read_dispatch_record(state_dir(root, "pending", session_id + ".json"))
         dispatch = (record or {}).get("remoteDispatch")
         if not dispatch or record.get("machine") != machine or record.get("remoteReleased"):
             raise ExpertError("该会话没有本团队尚未结束的远端派单回执", "没有投递或重新启动会话", "新任务用 spawn；补充要求使用仍在 pending 中的派单会话")
         target = dispatch["target"]
+        if record.get("taskId"):
+            push_session_inbox(root, session_id, purpose, sender, text, ref=ref, id_parts=id_parts, machine=machine)
+            return "queue" if flush_session_inbox_if_idle(root, session_id) else "inbox"
         stable_id = message_id(session_id, purpose, sender, text, ref or "", *id_parts)
         remote_receive(target, {"id": dispatch["id"], "workspaceId": target["workspaceId"],
                                "role": record["kind"], "operation": "notice", "sessionId": session_id,
@@ -1228,14 +1322,18 @@ def resolve_send_target(root, target_spec, kind, text, sender, machine=None, wor
     elif role_spec in spaces:
         role = role_spec
         existing = [item for item in live_sessions(spaces.get(role, "")) if item.get("status") in ("idle", "running", "waiting")] if spaces.get(role) else []
-        if existing:
-            return max(existing, key=lambda item: item.get("updatedAtMs", 0))["id"], False, target_root, role
+        if len(existing) == 1:
+            return existing[0]["id"], False, target_root, role
+        if len(existing) > 1:
+            raise ExpertError("岗位存在多个会话", "没有猜选最近会话", "持续协作请使用精确 SID 或 task send")
     elif role_spec is None:
         if "leader" in spaces and kind in ("human", "patrol", "task"):
             role = "leader"
             existing = [item for item in live_sessions(spaces["leader"]) if item.get("status") in ("idle", "running", "waiting")]
-            if existing:
-                return max(existing, key=lambda item: item.get("updatedAtMs", 0))["id"], False, target_root, "leader"
+            if len(existing) == 1:
+                return existing[0]["id"], False, target_root, "leader"
+            if len(existing) > 1:
+                raise ExpertError("默认组长存在多个会话", "没有猜选最近会话", "新任务用 task start；补充要求用 task send")
         else:
             role = ("leader" if "leader" in spaces else "work") if kind == "task" else "research"
             if kind not in ("task", "question", "request") and "root" in spaces:
@@ -1817,16 +1915,14 @@ def setup_team_structure(root, team_name, desc, members=None, final_root=None):
     root_env.setdefault("TEAM_WAKE_GAP", "1800")
     write_open_env(root, root_env)
     front_env = open_env(os.path.join(root, "front"))
-    front_env["WORKTREE_DIR"] = os.path.realpath(final_root or root)
+    front_env.pop("WORKTREE_DIR", None)
     front_env.setdefault("TEAM_EFFORT", "high")
     write_open_env(os.path.join(root, "front"), front_env)
     if not os.path.isdir(os.path.join(root, "spaces", "leader")):
         front_style = (
-            "# 风格与铁律（前台）\n\n"
-            "- 我是 `%s` 团队的**前台**，唯一直接面向人类用户的窗口。\n"
-            "- **用户零命令/零内部结构负担**：用户只会用简单自然语言表达“参考什么项目、下个版本想要什么内容”、“现在进展怎么样”、“刚玩了下哪里不够爽”。我严禁要求用户知道 `.pm/` 目录结构、里程碑文件名或 `team.py` 命令。\n"
-            "- **自动驱动组长（首次启动 vs 中途反馈）**：收到用户的版本诉求或试玩修改意见时，若组长 `leader` 尚无会话，立即用 `team.py spawn --space leader --kind work --desc \"评估里程碑规划与推进版本交付\" \"<用户原话与目标>\"` 启动组长；若组长已在岗，立即用 `team.py send --to leader --kind human \"<用户原话与要求>\"` 投递给组长（0 打断写入收件箱并归档 `.pm/guidance/human/`）。\n"
-            "- **常驻团队看板服务与秒回汇报**：用户查进度或要看板时，调用 `team.py board refresh`，基于实时数据直接给出清晰零黑话汇报，并固定附上**常驻实时看板 `[📊 实时团队看板](datas/board/index.html)`** 与 **`[🎮 最新可玩版本](datas/releases/index.html)`**（及当前版本试玩入口）。\n"
+            "# 团队前台\n\n"
+            "我是 %s 团队的用户入口，不绑定业务工位。新目标按能力选择岗位，通过 task start 创建 Owner 会话；补充要求沿 task send 发给原 Owner。"
+            "同 Space 可以有多个独立执行会话，持续通信使用明确机器与SID，不按最近活跃岗位猜测目标。遵守 team-front 与 team-core 的 task-owner 合同。\n"
         ) % team_name
         with open(os.path.join(root, "front", "style.md"), "w", encoding="utf-8") as handle:
             handle.write(front_style)
@@ -1836,9 +1932,7 @@ def setup_team_structure(root, team_name, desc, members=None, final_root=None):
             root,
             "leader",
             "研发组长（里程碑规划与版本可达性评估、多级并发派单、预检合入、QA 验收与版本发布）",
-            "# 研发组长（Leader）角色规范\n\n"
-            "- 我是团队的**后台研发组长（Leader）**。用户只提供参考项目与下个版本想要的核心内容，**里程碑规划与版本内容可达性评估由我全权负责**。\n"
-            "- **纯异步回合接力自驱闭环（严禁调用 sleep 或同步阻塞等待）**：① 收到用户诉求后，先盘点当前代码基线，评估版本内容可达性，自主编写/更新 `<团队根>/.pm/trunk/MILESTONE_PLAN.md`（用 `- [ ]` 列出待交付版本与模块，全部完成时标 `- [x]`）与 `milestone-vX.Y.md` 契约 → ② 连续调用 `team.py spawn --space <组员> --kind work` 并发派单到各组员（或小组长）独立 `worktrees/<slot>` 工位后**立即结束本轮**（系统收齐全部子任务结果后会自动唤醒我，若中途异常中断看门狗也会自动自愈唤醒） → ③ 收到组员批次汇总回执后，在集成工位用 `git merge-tree` 预检无冲突后合入 `main` → ④ 派 `qa` 执行无头浏览器实操截图与数值断言验收（若有数值对比诉求同时派 `research` 产出报告并 `publish report`）后结束本轮 → ⑤ 收到 QA PASS 回执后调用 `team.py publish release <构建目录> --name vX.Y` 发布可玩版本、勾选 `MILESTONE_PLAN.md` 并同步刷新常驻团队看板 `datas/board/index.html`。\n",
+            "# Team Leader / Task Owner\n\n我提供规划和协调能力。被选为 Owner 后对本任务交付负责，按 team-work 自己实施或使用 task support 找其他会话协作；派单后结束回合，由 timer 接力。不独占 Space，不强制每项任务建集成仓。\n",
             skills=["team-core", "team-work"],
         )
         scaffold_role_space(
@@ -2388,6 +2482,16 @@ def cmd_publish(args):
 
 def cmd_board(args):
     root = find_root()
+    if args.board_command == "refresh":
+        # A direct refresh is valid for an ordinary Team too; it must not
+        # silently depend on legacy .pm/TEAM_MODE or claim a stopped service.
+        script = os.path.join(root, "tools", "pm_board_server.py")
+        result = subprocess.run([sys.executable, script, "--once", "--team-root", root],
+                                cwd=root, env=dict(os.environ), capture_output=True, text=True, timeout=90)
+        if result.returncode != 0:
+            raise ExpertError("看板刷新失败: " + result.stderr[-600:], "上次快照保留，没有把未知会话写成零", "核对绑定CLI和原渠道连接后重试")
+        print("团队看板快照已更新: [团队看板](datas/board/index.html)")
+        return
     refresh_live_status(root, force=True)
     state = read_json(state_dir(root, "board-service.json"), {}) or {}
     pid = state.get("pid")
@@ -2585,7 +2689,7 @@ def caller_identity():
     return os.environ.get("GENEHUB_SESSION_ID") or "ppid%d" % os.getppid()
 
 
-def temp_new(root, slug, purpose, now=None, caller=None):
+def temp_new(root, slug, purpose, now=None, caller=None, task_id=None):
     """Create (or return, when the same caller asks again in the same minute) temp/YYMMDD/hhmm_slug_hash4."""
     if not isinstance(slug, str) or not SLUG.match(slug) or len(slug) > 30:
         raise ExpertError("slug %r 不合规" % (slug,), "没有创建任何目录", SLUG_RULE)
@@ -2594,12 +2698,12 @@ def temp_new(root, slug, purpose, now=None, caller=None):
     now = time.time() if now is None else now
     day, minute = local_stamp(now)
     who = caller or caller_identity()
-    digest = hashlib.sha1("\x1f".join((slug, day, minute, who)).encode("utf-8")).hexdigest()[:4]
+    digest = hashlib.sha256("\x1f".join((slug, day, minute, who)).encode("utf-8")).hexdigest()[:24]
     path = os.path.join(temp_root(root), day, "%s_%s_%s" % (minute, slug, digest))
     os.makedirs(path, exist_ok=True)
     meta = os.path.join(path, ".temp.json")
     if not os.path.exists(meta):
-        write_json(meta, {"slug": slug, "createdAtMs": int(now * 1000), "creator": who, "purpose": purpose.strip()})
+        write_json(meta, {"slug": slug, "createdAtMs": int(now * 1000), "creator": who, "purpose": purpose.strip(), "taskId": task_id})
     return path
 
 
@@ -2684,10 +2788,11 @@ def temp_clean(root, keep_days=None, dry_run=False, now=None):
     now = time.time() if now is None else now
     limit = max(TEMP_KEEP_DAYS if keep_days is None else keep_days, 0) * 86400
     removed = []
+    referenced_creators = team_tasks.active_temp_creators(sys.modules[__name__], root)
     for day, full in temp_entries(root):
         size, newest = tree_stats(full)
         age = now - newest
-        if age > limit and age > TEMP_ACTIVE_S:
+        if age > limit and age > TEMP_ACTIVE_S and not team_tasks.temp_is_referenced(sys.modules[__name__], root, full, referenced_creators):
             removed.append((full, size))
             if not dry_run:
                 if os.path.isdir(full) and not os.path.islink(full):
@@ -2761,7 +2866,7 @@ def cmd_datas(args):
 def cmd_temp(args):
     root = find_root()
     if args.temp_command == "new":
-        print(temp_new(root, args.slug, args.purpose or ""))
+        print(temp_new(root, args.slug, args.purpose or "", task_id=getattr(args, "task_id", None)))
     elif args.temp_command == "ls":
         rows = temp_list(root, args.date, args.slug, args.mine)
         base = temp_root(root)
@@ -3599,7 +3704,8 @@ def leader_watchdog(root, name, mine):
     leader_wid = spaces.get("leader")
     if not leader_wid:
         return
-    live = live_sessions(leader_wid)
+    task_owners = team_tasks.owner_sessions(sys.modules[__name__], root)
+    live = [item for item in live_sessions(leader_wid) if item.get("id") not in task_owners]
     if not live:
         return
     leader_sess = max(live, key=lambda s: s.get("updatedAtMs", 0))
@@ -3616,7 +3722,7 @@ def leader_watchdog(root, name, mine):
             if not rec:
                 continue
             sid = rec.get("sessionId")
-            if sid == leader_sid or rec.get("kind") in ("reflect", "team-reflect"):
+            if sid == leader_sid or rec.get("taskId") or rec.get("kind") in ("reflect", "team-reflect"):
                 continue
             notified = rec.get("notified") or []
             if "stopped" in notified or "stuck" in notified:
@@ -3725,12 +3831,26 @@ def reconcile(root, name, mine):
             if record.get("resumeAwaitingReceipt"):
                 continue
             session_id = record["sessionId"]
+            if record.get("superseded"):
+                if not record.get("machine"):
+                    move(root, path, record)
+                closed.add(session_id)
+                continue
             bkey = record.get("batch") or session_id
             is_multi_batch = batch_counts.get(bkey, 1) > 1
             is_quiet_reflect = bool(record.get("quiet") or (record.get("kind") in ("reflect", "team-reflect") and not record.get("requester")))
             to = None if is_quiet_reflect else (record.get("requester") or front)
             finish = lambda p=path, sid=session_id, expected=record: (move(root, p, expected), closed.add(sid))  # noqa: E731
-            has_children = any(other.get("requester") == session_id for _, other in records if other["sessionId"] != session_id)
+            has_children = any(other.get("requester") == session_id for _, other in records if other["sessionId"] != session_id) or team_tasks.has_intent(sys.modules[__name__], root, session_id)
+            if record.get("taskId"):
+                task_owner = team_tasks.read_task(sys.modules[__name__], root, record["taskId"])
+                is_owner = (task_owner.get("owner") or {}).get("sessionId") == session_id
+                participant = next((item for item in task_owner.get("collaborators", []) if item.get("sessionId") == session_id), {})
+                conclusion = task_owner.get("finished") if is_owner else participant.get("finished")
+                if conclusion:
+                    record["taskConclusion"] = conclusion
+                if (is_owner and not task_owner.get("finished")) or (not is_owner and not participant.get("finished")):
+                    has_children = True
             try:
                 summary = session_summary(session_id, record.get("machine"))
             except ExpertError as error:
@@ -3753,6 +3873,14 @@ def reconcile(root, name, mine):
             inputs = summary.get("inputSummary") or {}
             requests = (summary.get("interactionSummary") or {}).get("requests") or []
             reply = (summary.get("latestReply") or {}).get("itemId")
+            if record.get("taskId"):
+                observed = {"observedStatus": status, "observedPaused": bool(inputs.get("paused")), "observedRequests": bool(requests),
+                            "observedActivityAtMs": summary.get("lastActivityAtMs") or summary.get("updatedAtMs") or 0}
+                record.update(observed)
+                record["observedAtMs"] = now_ms()
+                record.pop("lastReconcileError", None)
+                record.pop("lastReconcileErrorAtMs", None)
+                update_pending(root, path, record)
             age = (now_ms() - record["createdAtMs"]) / 1000
             said = record.setdefault("notified", [])
             if requests:
@@ -3799,7 +3927,8 @@ def reconcile(root, name, mine):
                         parent_busy = False
                         if to and to != front:
                             try:
-                                tsum = session_summary(to)
+                                parent_record = read_dispatch_record(state_dir(root, "pending", to + ".json")) or {}
+                                tsum = session_summary(to, parent_record.get("machine"))
                                 if tsum.get("status") not in ("idle", "failed"):
                                     parent_busy = True
                                 else:
@@ -3822,7 +3951,12 @@ def reconcile(root, name, mine):
                 else:
                     if not record.get("done") or record["done"].get("reply") != reply:
                         text = last_reply_text(session_id, reply, record.get("machine")) or (summary.get("messagePreview") or {}).get("text", "")
-                        record["done"] = {"outcome": "ok", "reply": reply, "ref": "ghref:item:%s:%s" % (session_id, reply), "text": text}
+                        conclusion = record.get("taskConclusion")
+                        outcome = "ok"
+                        if conclusion:
+                            outcome = "ok" if conclusion["outcome"] == "success" else conclusion["outcome"]
+                            text = "任务结论：%s\n证据：%s\n\n原生会话末次回复：\n%s" % (conclusion["outcome"], conclusion["evidence"], text)
+                        record["done"] = {"outcome": outcome, "reply": reply, "ref": "ghref:item:%s:%s" % (session_id, reply), "text": text}
                         update_pending(root, path, record)
             elif status == "idle" and not record.get("done") and not has_children:
                 idle_anchor = max(record["createdAtMs"], record.get("wokenAtMs") or 0, summary.get("lastActivityAtMs") or 0)
@@ -3884,16 +4018,24 @@ def reconcile(root, name, mine):
         if not all(released):
             continue
         to = group[0][1].get("requester") or front
+        parent_record = read_dispatch_record(state_dir(root, "pending", str(to) + ".json")) or {}
+        parent_machine = parent_record.get("machine")
         should_unpause = False
         if to:
             try:
-                to_summary = session_summary(to)
-            except ExpertError:
+                to_summary = session_summary(to, parent_machine)
+            except ExpertError as error:
+                if any(rec.get("taskId") for _, rec in group):
+                    for path, rec in group:
+                        rec["lastReconcileError"] = error.what
+                        update_pending(root, path, rec)
+                    continue
                 to_summary = None
                 if front and to != front:
                     try:
                         to_summary = session_summary(front)
                         to = front
+                        parent_machine = None
                     except ExpertError:
                         to = None
                 else:
@@ -3920,7 +4062,7 @@ def reconcile(root, name, mine):
             done = record["done"]
             wt_extra = (" [工位: %s, 分支: %s]" % (record["worktree"], record.get("branch") or "-")) if record.get("worktree") else ""
             if to:
-                deliver_or_notice(root, to, "result", "%s（%s）%s" % (record["sessionId"], record["desc"], wt_extra), "%s\n\nref: %s" % (done["text"], done["ref"]), record["sessionId"], done["reply"], ref=done["ref"], unpause=should_unpause)
+                deliver_or_notice(root, to, "result", "%s（%s）%s" % (record["sessionId"], record["desc"], wt_extra), "%s\n\nref: %s" % (done["text"], done["ref"]), record["sessionId"], done["reply"], ref=done["ref"], unpause=should_unpause, machine=parent_machine)
             for w in watchers:
                 try:
                     deliver_or_notice(root, w, "result", "%s（%s）" % (record["sessionId"], record["desc"]), "%s\n\nref: %s" % (done["text"], done["ref"]), record["sessionId"], done["reply"], "watcher", w, ref=done["ref"])
@@ -3935,7 +4077,7 @@ def reconcile(root, name, mine):
                     wt_line = ("\nworktree: %s (branch: %s)" % (rec["worktree"], rec.get("branch") or "-")) if rec.get("worktree") else ""
                     parts.append("### %s（%s）\nref: %s%s\n\n%s" % (rec["sessionId"], rec["desc"], rec["done"]["ref"], wt_line, rec["done"]["text"]))
                 sender = "批次完成（%d 项）：%s" % (len(group), "、".join(item[1]["sessionId"] for item in group))
-                deliver_or_notice(root, to, "result", sender, "\n\n".join(parts), batch_key, *(item[1]["done"]["reply"] for item in group), ref=refs, unpause=should_unpause)
+                deliver_or_notice(root, to, "result", sender, "\n\n".join(parts), batch_key, *(item[1]["done"]["reply"] for item in group), ref=refs, unpause=should_unpause, machine=parent_machine)
             for w in watchers:
                 try:
                     deliver_or_notice(root, w, "result", sender, "\n\n".join(parts), batch_key, "watcher", w, ref=refs)
@@ -3979,8 +4121,8 @@ def release_remote(root, path, record):
         try:
             remote_receive(target, {"id": dispatch["id"], "workspaceId": target["workspaceId"],
                                    "role": record["kind"], "operation": "release", "sessionId": record["sessionId"],
-                                   "canceled": record.get("stopReason") == "timeout",
-                                   "expectedReply": (record.get("done") or {}).get("reply") if (record.get("done") or {}).get("outcome") == "ok" else None})
+                                   "canceled": record.get("stopReason") == "timeout" or bool(record.get("taskCanceled")),
+                                   "expectedReply": (record.get("done") or {}).get("reply") if record.get("taskConclusion") or (record.get("done") or {}).get("outcome") == "ok" else None})
         except ExpertError as error:
             record["lastReconcileError"] = error.what
             update_pending(root, path, record)
@@ -3992,6 +4134,8 @@ def release_remote(root, path, record):
 
 def move(root, path, expected=None):
     record = expected if expected is not None else (read_json(path, {}) or {})
+    if record.get("taskId") and not team_tasks.release_local(sys.modules[__name__], root, record):
+        return
     if not release_remote(root, path, record):
         return
     destination = state_dir(root, "done", os.path.basename(path))
@@ -4242,6 +4386,7 @@ def cmd_hook(_args):
             report(root, name, mine, error.text())
     try:
         reconcile(root, name, mine)
+        team_tasks.publish(sys.modules[__name__], root)
         health(root, name, mine)
         if not builtin_admin:
             wake(root, name, mine)
@@ -4265,6 +4410,7 @@ def report(root, name, mine, text):
 def main(argv):
     parser = argparse.ArgumentParser(prog="team.py")
     sub = parser.add_subparsers(dest="command", required=True)
+    team_tasks.parser(sub)
     send = sub.add_parser("send")
     send.add_argument("--to", required=True)
     send.add_argument("--kind", default="note")
@@ -4359,6 +4505,7 @@ def main(argv):
     new = temp_sub.add_parser("new")
     new.add_argument("slug")
     new.add_argument("--purpose", required=True)
+    new.add_argument("--task-id", help="retain task-scoped temporary material across remote waits and projection gaps")
     listing = temp_sub.add_parser("ls")
     listing.add_argument("--date", help="YYMMDD")
     listing.add_argument("--slug", help="a fragment of the slug")
@@ -4398,8 +4545,14 @@ def main(argv):
     sub.add_parser("hook")
     receive = sub.add_parser("receive", help="target-side executor; invoked by a fixed remote binding")
     receive.add_argument("request", help="dispatch/release JSON envelope")
-    args = parser.parse_args(argv)
-    handlers = {"receive": cmd_receive, "send": cmd_send, "spawn": cmd_spawn, "init": cmd_init,
+    if len(argv) > 1 and argv[0] == "task" and argv[1] in ("pause", "resume", "cancel", "handover"):
+        args, remaining = parser.parse_known_args(argv)
+        if any(word.startswith("-") for word in remaining):
+            parser.error("unrecognized arguments: " + " ".join(remaining))
+        args.words.extend(remaining)
+    else:
+        args = parser.parse_args(argv)
+    handlers = {"task": lambda a: team_tasks.command(sys.modules[__name__], a), "receive": cmd_receive, "send": cmd_send, "spawn": cmd_spawn, "init": cmd_init,
                 "employee": cmd_employee, "member": cmd_employee, "worktree": cmd_worktree, "publish": cmd_publish, "board": cmd_board, "models": cmd_models,
                 "directory": cmd_directory, "mount": cmd_mount, "unmount": cmd_unmount, "path": cmd_path, "datas": cmd_datas, "temp": cmd_temp, "reset": cmd_reset, "sync-identity": cmd_sync_identity, "hook": cmd_hook,
                 "note": cmd_note, "notes": cmd_notes, "tell-user": cmd_tell_user, "reflect": cmd_reflect, "snapshot": cmd_snapshot, "drift": cmd_drift}

@@ -6,7 +6,7 @@
 - 每次处理任务前，先加载并遵守 `team-core` 与当前岗位的专属技能（`team-front` / `team-research` / `team-work` / `team-reflect`）。
 - 察觉用户不满意（纠正、质疑、重复要求、试玩挫败），先留言（`team.py note`），再处理。
 - 长期记忆只存团队根目录的 `memory.md`（L1，≤30 行）与各岗位空间的 `index.md`（L2），由 `team-reflect` 按二级记忆提炼维护，严禁写入 `~/.codebuddy`、`~/.claude` 等 Agent 私有记忆目录。
-- 用户只和前台说话，前台只对用户讲自然通俗的人话，绝不向用户暴露内部脚本名、CLI 命令或 `.pm/` 目录结构。里程碑规划、并发开发、QA 实操验收与版本发布由研发组长（`leader`）统筹各管线完成。
+- 用户只和前台说话，前台只对用户讲自然通俗的人话，绝不向用户暴露内部脚本名、CLI 命令或 `.pm/` 目录结构。每项任务由选定的 Task Owner 会话负责交付，自行实施或按需请求其他会话支持；`leader` 提供规划与协调能力，不是所有任务的固定入口。
 - 团队的流程、Skill、角色规范与看板脚本（`tools/team.py`、`tools/pm_board_server.py`）由本团队自主维护并经 `team-reflect` 持续进化。用户要求立刻改进，就启动团队反思（`team.py reflect now`）。
 - 拿不准用户会不会满意，由前台问用户；后台岗位不挂起等待人类点击。
 

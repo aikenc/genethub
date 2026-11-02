@@ -1,7 +1,7 @@
 {
   "schema": "agent-space.v1",
   "name": "team",
-  "description": "一支 1+N 项目团队：前台直接与用户沟通，研发组长统筹里程碑与并发派单，专项管线组员在独立工位开发，QA 实操验收，研究专家推演数值，团队反思持续进化。",
+  "description": "任务协作团队：前台选择合适岗位的 Task Owner 会话，Owner 自己实施或请求其他会话支持，独立工位并发推进，timer 可靠接力与验收。",
   "tags": [
     "team"
   ],

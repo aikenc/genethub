@@ -1,0 +1,30 @@
+# Task Owner：会话协作与 timer 接力
+
+所有 task 子命令属于团队工具，不是新的内核 Workflow。原生执行 status 不被协作等待覆盖，timer 从派单、收件箱和任务引用推导 `.genethub/session-coordination.json`，工作台读取摘要显示等待与待处理。源事实损坏应报告待核对，不按空闲处理。
+
+## 命令
+
+- `task start --space ROLE --desc TEXT --request-id ID [--directory ABS] [--machine MACHINE] [--tier T|--model MODEL] GOAL`：前台建立稳定任务及 Owner 会话。重复 ID 和原参数读取原结果；不同内容拒绝。
+- `task support TASK --space ROLE --desc TEXT --request-id ID ... GOAL`：Owner/子负责人发出支持请求，结果回到精确请求会话。默认等待本组必需支持全部结算；失败结算不等于成功。
+- `task status TASK`：核对当前 Owner、版本、协作与控制回执。
+- `task send TASK --request-id ID TEXT`：把追加要求投给该任务的精确 Owner。
+- `task bind-directory TASK --directory ABS`：当前 Owner 或协作者为自己的执行会话认领写工位，不独占整个 Space；远端路径由原接单回执指向的执行端认领，源端不创建同名目录。
+- `task finish TASK --outcome success|failed|blocked EVIDENCE`：提交本会话负责工作的明确结论；尚有未结算支持时不得宣称 success。
+- `task pause|resume|cancel TASK --request-id ID --expected-revision N [用户原话]`：前台转达明确用户要求，保留原操作与协作树。暂停/取消发送成功不等于全部执行已停止，查询实际回执。
+- `task handover TASK --session SID --request-id ID --expected-revision N`：原执行停止、资源核对后接手同一个任务；不重发已完成副作用。本版仅支持同机独立会话接手；跨机请求在中断旧Owner前拒绝，迁移需先显式交接产物和执行端资源。
+
+## 跨机与部署
+
+定义源和权威任务账本留在项目指定的 dev 主机。远端使用已安装完整执行制品、固定 remote-targets 绑定及实际本机模型；配置了 WORKTREE_DIR 时按固定工位串行，未配置时可准备同岗位多个独立会话，实际写项目之前各自 bind-directory；不 clone 团队定义源、不另起前台/timer。
+
+远端 Owner 的 `.genethub/task-source.json` 显式绑定源端机器、接单 workspace、role 和 Python/team.py argv。远端 task 操作通过现有授权 shell 发回源端；输入保留原会话署名，源端按同一编号记账和派单，再将结果按机器/SID 回传。这个绑定是路由配置，不是新权限边界；未配置时不能假称已具备跨机协调。
+
+内置模板发布不自动覆盖用户团队。合并定制后在源端构建，部署完整 tools/岗位/身份制品，目标 artifacts-only 验证并记录实际采用。升级前盘点在途回执；旧记录继续可读，未确认操作不换编号重派。
+
+## 材料和恢复
+
+适配器私有 `.genethub/sessions/SID/state` 不作为业务临时区。`temp new NAME --task-id TASK` 以当前会话身份分配独立目录；活动任务、等待/暂停、在途派单和未消费收件箱仍引用的材料不按 mtime 清理。正式产物存 datas 或项目工位。执行环境未收尾不释放目录、端口和设备。
+
+创建使用可协商的 `--creation-id` 和 `--prepare-only`：先准备 SID，源端保存归属和反向依赖，再投递第一条业务。丢回执只重试原准备身份，原生消息稳定编号去重；旧端不支持时保留意图且不开始业务。
+
+派单共享预算默认64个团队活动会话、单任务累计32个会话、任务年龄7200秒；对应 TEAM_MAX_ACTIVE_SESSIONS、TEAM_TASK_MAX_SESSIONS、TEAM_TASK_MAX_AGE_SECONDS。达到限额保存成果并报阻塞，不换编号绕过。

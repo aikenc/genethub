@@ -452,6 +452,7 @@ pub struct SessionManager {
     sessions: RwLock<HashMap<String, Arc<Live>>>,
     /// Serializes disk rehydration without holding the map's write lock.
     live_load: Mutex<()>,
+    creation_gate: Mutex<()>,
     /// What each session's agent has left running. Owned here because that is
     /// where the ownership is: a stray process belongs to the conversation
     /// whose agent started it, and there is no such thing as one without a
@@ -488,6 +489,7 @@ impl SessionManager {
             diagnostics,
             sessions: RwLock::new(HashMap::new()),
             live_load: Mutex::new(()),
+            creation_gate: Mutex::new(()),
             processes: crate::processes::Processes::new(),
             replay_window: replay_window.max(1),
             import_candidates: Mutex::new(HashMap::new()),
@@ -526,9 +528,106 @@ impl SessionManager {
         runtime_values: std::collections::BTreeMap<String, String>,
         title: Option<String>,
     ) -> Result<SessionSummary> {
+        self.create_durable(
+            workspace_id,
+            cwd,
+            agent_id,
+            model_id,
+            effort_id,
+            fast,
+            mode_id,
+            runtime_values,
+            title,
+            None,
+            None,
+            serde_json::Value::Null,
+        )
+        .await
+    }
+
+    /// Creates an ordinary Session from a tag-router result and records only
+    /// the intent tags, never a sticky resolved route.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn create_routed(
+        &self,
+        workspace_id: &str,
+        cwd: PathBuf,
+        agent_id: &str,
+        model_id: Option<String>,
+        effort_id: Option<String>,
+        fast: Option<bool>,
+        mode_id: Option<String>,
+        runtime_values: std::collections::BTreeMap<String, String>,
+        title: Option<String>,
+        routing_tags: Vec<String>,
+        media_tags: Vec<String>,
+    ) -> Result<SessionSummary> {
+        self.create_durable(
+            workspace_id,
+            cwd,
+            agent_id,
+            model_id,
+            effort_id,
+            fast,
+            mode_id,
+            runtime_values,
+            title,
+            None,
+            Some((routing_tags, media_tags)),
+            serde_json::Value::Null,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn create_durable(
+        &self,
+        workspace_id: &str,
+        cwd: PathBuf,
+        agent_id: &str,
+        model_id: Option<String>,
+        effort_id: Option<String>,
+        fast: Option<bool>,
+        mode_id: Option<String>,
+        runtime_values: std::collections::BTreeMap<String, String>,
+        title: Option<String>,
+        creation_id: Option<String>,
+        routing: Option<(Vec<String>, Vec<String>)>,
+        parameters: serde_json::Value,
+    ) -> Result<SessionSummary> {
         // Fail before creating anything if the agent is not real.
         self.registry.require(agent_id)?;
 
+        let _creation = if creation_id.is_some() {
+            Some(self.creation_gate.lock().await)
+        } else {
+            None
+        };
+        let id = if let Some(operation) = creation_id.as_deref() {
+            let (id, existing) =
+                self.store
+                    .reserve_creation(workspace_id, operation, &parameters)?;
+            if let Some(meta) = existing {
+                // A retry never resets labels, runtime, history or archived state.
+                if let Some(live) = self.sessions.read().await.get(&id).cloned() {
+                    let current = live.meta.lock().await;
+                    return Ok(current.summary(*live.status.lock().await));
+                }
+                return Ok(meta.summary(if meta.execution_retired {
+                    SessionStatus::Closed
+                } else {
+                    SessionStatus::Idle
+                }));
+            }
+            id
+        } else {
+            format!("s_{}", uuid::Uuid::new_v4().simple())
+        };
+        let (tag_routing, routing_tags, media_tags) = match routing {
+            Some((tags, media)) => (true, tags, media),
+            None => (false, Vec::new(), Vec::new()),
+        };
         let now = now_ms();
         let meta = SessionMeta {
             inbox: Default::default(),
@@ -542,13 +641,13 @@ impl SessionManager {
             effort_id,
             fast,
             runtime_values,
-            id: format!("s_{}", uuid::Uuid::new_v4().simple()),
+            id,
             workspace_id: workspace_id.to_string(),
             format: SESSION_FORMAT,
             agent_id: agent_id.to_string(),
-            tag_routing: false,
-            routing_tags: Vec::new(),
-            media_tags: Vec::new(),
+            tag_routing,
+            routing_tags,
+            media_tags,
             title,
             title_locked: false,
             labels: Vec::new(),
@@ -598,47 +697,6 @@ impl SessionManager {
             Arc::new(Live::new(meta, self.store.clone())),
         );
         Ok(summary)
-    }
-
-    /// Creates an ordinary Session from a tag-router result and records only
-    /// the intent tags, never a sticky resolved route.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn create_routed(
-        &self,
-        workspace_id: &str,
-        cwd: PathBuf,
-        agent_id: &str,
-        model_id: Option<String>,
-        effort_id: Option<String>,
-        fast: Option<bool>,
-        mode_id: Option<String>,
-        runtime_values: std::collections::BTreeMap<String, String>,
-        title: Option<String>,
-        routing_tags: Vec<String>,
-        media_tags: Vec<String>,
-    ) -> Result<SessionSummary> {
-        let created = self
-            .create(
-                workspace_id,
-                cwd,
-                agent_id,
-                model_id,
-                effort_id.clone(),
-                fast,
-                mode_id,
-                runtime_values,
-                title,
-            )
-            .await?;
-        let live = self.live(&created.id).await?;
-        let mut meta = live.meta.lock().await;
-        let mut next = meta.clone();
-        next.tag_routing = true;
-        next.routing_tags = routing_tags;
-        next.media_tags = media_tags;
-        self.store.save_meta(&next)?;
-        *meta = next.clone();
-        Ok(next.summary(SessionStatus::Idle))
     }
 
     /// Authenticates a local Agent CLI as exactly one durable Session. The
@@ -1556,6 +1614,7 @@ impl SessionManager {
             .lock()
             .await
             .summary_with_activity(status, live.activity_of(status));
+        summary.coordination = self.store.coordination(&summary.workspace_id, &summary.id);
         summary.interaction_summary = Some(super::store::interaction_summary(
             live.pending_permissions.lock().await.iter(),
         ));
@@ -1711,6 +1770,7 @@ impl SessionManager {
                 None => (SessionStatus::Idle, None),
             };
             let mut summary = meta.summary_with_activity(status, activity);
+            summary.coordination = self.store.coordination(&meta.workspace_id, &meta.id);
             if let Some(live) = self.sessions.read().await.get(&meta.id) {
                 summary.interaction_summary = Some(super::store::interaction_summary(
                     live.pending_permissions.lock().await.iter(),
@@ -1911,10 +1971,12 @@ impl SessionManager {
         let view = self.read_view(session_id, through_round_id).await?;
         let live = self.live(session_id).await?;
         let status = *live.status.lock().await;
+        let mut summary = view
+            .meta
+            .summary_with_activity(status, live.activity_of(status));
+        summary.coordination = self.store.coordination(&summary.workspace_id, &summary.id);
         Ok(SessionInspection {
-            summary: view
-                .meta
-                .summary_with_activity(status, live.activity_of(status)),
+            summary,
             source: view.source,
             narrative_item_count: u64::try_from(view.items.len()).unwrap_or(u64::MAX),
             round_count: u64::try_from(view.rounds.len()).unwrap_or(u64::MAX),
@@ -5170,6 +5232,7 @@ impl Live {
             .lock()
             .await
             .summary_with_activity(status, self.activity_of(status));
+        summary.coordination = self.store.coordination(&summary.workspace_id, &summary.id);
         summary.interaction_summary = Some(super::store::interaction_summary(&pending_permissions));
         Ok(SessionSnapshot {
             summary,

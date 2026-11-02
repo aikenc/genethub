@@ -1162,6 +1162,7 @@ fn context_data(hello: &HelloResult, machine: Option<&str>) -> Value {
         "workingDirectory": {"selector": "--cwd", "value": null, "inferred": false},
         "daemon": {
             "version": hello.daemon_version,
+            "features": hello.features,
             "webProtocol": hello.web_protocol,
             "machineId": hello.machine_id,
             "machineName": hello.machine_name,
@@ -1569,7 +1570,7 @@ fn command_schema(name: &str) -> Value {
         "agent.run" => (
             "genet agent run (--agent <id> | --tag <tier>... [--media image|video]) \"<prompt>\" [--cwd <dir> | --workspace <id>] \
              [--session <id>] [--model <id>] [--mode <id>] [--effort <id>] [--title <t>] \
-             [--label <label>]... [--description <text>] [--system] [--message-id <id>] [--wait|--no-wait] [--since-seq <n>] \
+             [--label <label>]... [--description <text>] [--system] [--creation-id <id>] [--prepare-only] [--message-id <id>] [--wait|--no-wait] [--since-seq <n>] \
              [--auto-approve] [--timeout <s>] [--open-workspace]",
             true,
             object_input(
@@ -1583,6 +1584,8 @@ fn command_schema(name: &str) -> Value {
                     "prompt": {"type": "string", "minLength": 1},
                     "system": {"type": "boolean", "description": "--system; script-created input, never a Human decision"},
                     "messageId": {"type": "string", "minLength": 1, "maxLength": 128, "description": "--message-id; durable acceptance with stable input identity"},
+                    "creationId": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,128}$", "description": "--creation-id; opt-in durable creation identity; same intent returns original SID; conflicts/deletion refuse; requires session.create-id.v1"},
+                    "prepareOnly": {"type": "boolean", "description": "--prepare-only; requires creationId and session.prepare.v1; return SID without sending the prompt; persist relationships before explicit session send"},
                     "sessionId": {"type": ["string", "null"], "minLength": 1},
                     "workspaceId": {"type": ["string", "null"], "minLength": 1},
                     "modelId": {"type": ["string", "null"], "minLength": 1},
@@ -2515,6 +2518,7 @@ mod tests {
         assert!(mismatch.message.contains("returned sessions"));
 
         let summary = SessionSummary {
+            coordination: None,
             cwd: None,
             interaction_summary: None,
             input_summary: None,

@@ -1,13 +1,13 @@
 ---
 name: team-core
-description: 1+N 项目团队内部协作的公共约定：前台、研发组长、管线组员、QA、研究与反思岗位的协同机制，用 tools/team.py 派单、异步回合接力、管工位、发版本、刷看板与持续自进化。任何会话都先读。
+description: 按任务选择 Owner 的团队公共约定：前台、专业执行、QA、研究与反思岗位的会话协作机制，用 tools/team.py 派单、异步回合接力、管工位、发版本、刷看板与持续自进化。任何会话都先读。
 ---
 
 # 项目团队公共约定
 
 **流程是为用户满意服务的。** 默认照做；照做会明显损害用户时，先做对用户有利的事，并留言（会话、轮次、原因）说明为什么偏离。不无声偏离，也不为偏离堆例外。察觉用户不满意，先留言，再处理。
 
-团队根目录里有 `tools/team.py` 与 `tools/pm_board_server.py`（用 `"$GENEHUB_PYTHON"` 运行，团队可自主维护演进）。
+团队工具用 `"$GENEHUB_PYTHON"` 运行。新任务先读 [Task Owner 合同](references/task-owner.md)：`task start/support/send/finish` 按精确会话协作；结算须有明确结论与证据。下表 `spawn/send` 保留给旧派单，不能用于绕过新任务账本。
 
 | 命令 | 作用 |
 |---|---|
@@ -31,7 +31,7 @@ description: 1+N 项目团队内部协作的公共约定：前台、研发组长
 
 ## 纯异步多级回合接力与二级记忆
 
-- **纯异步回合接力**：发起 `spawn`（支持 `Leader -> 小组长 Lead -> 多名并发 Worker + Research`）或 `send` 后**立即结束本轮**；系统按「有界终态 + 父就绪才交棒销账 + 组长看门狗」三法则收齐同批结果后自动合并唤醒上级进入下一轮。
+- **纯异步回合接力**：有 taskId 时用 `task support` 派出必需协作并结束本轮，timer 收齐结果后唤醒精确请求会话；收尾用 `task finish`。旧派单继续原 `spawn/send` 回执。普通结果不解除用户暂停，未知结果不换编号重派。
 - **二级记忆**：对话是事实源（L3）；全局铁律存根 `memory.md`（L1，≤30 行）；各岗位专属经验与 `ghref` 检索指针存 `spaces/<岗位>/index.md`（L2）。查历史会话直接 `rg "<词>" <团队根>/.genethub/sessions/ <团队根>/spaces/*/.genethub/sessions/`。
 
 ## 系统消息

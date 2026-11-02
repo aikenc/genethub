@@ -1183,7 +1183,11 @@ expandLastRound: boolean,
 /**
  * Optional UI history window. Does not alter Agent context or replay semantics.
  */
-recentRounds?: number, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "agent.action", "payload": { agentId: string, actionId: string, } } | { "type": "agent.reload", "payload": { agentId: string, } } | { "type": "agent.reset", "payload": { agentId: string, } } | { "type": "agent.test", "payload": { agentId: string, live: boolean, } } | { "type": "agent.logs", "payload": { agentId: string, lines?: number, } } | { "type": "agent.requests" } | { "type": "agent.requestAnswer", "payload": { agentId: string, requestId: string, outcome: AgentRequestOutcome, } } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, effortId?: string, fast?: boolean, modeId: string | null, runtimeValues?: { [key in string]?: string }, title: string | null, 
+recentRounds?: number, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "agent.action", "payload": { agentId: string, actionId: string, } } | { "type": "agent.reload", "payload": { agentId: string, } } | { "type": "agent.reset", "payload": { agentId: string, } } | { "type": "agent.test", "payload": { agentId: string, live: boolean, } } | { "type": "agent.logs", "payload": { agentId: string, lines?: number, } } | { "type": "agent.requests" } | { "type": "agent.requestAnswer", "payload": { agentId: string, requestId: string, outcome: AgentRequestOutcome, } } | { "type": "session.create", "payload": { 
+/**
+ * Stable creation operation, scoped to the durable workspace.
+ */
+creationId?: string, workspaceId: string, agentId: string, modelId: string | null, effortId?: string, fast?: boolean, modeId: string | null, runtimeValues?: { [key in string]?: string }, title: string | null, 
 /**
  * Where the agent starts, inside the workspace. Absent means the
  * workspace root, which is what every client sent before this field
@@ -1192,7 +1196,11 @@ recentRounds?: number, } } | { "type": "unsubscribe", "payload": { sessionId: st
  * than clamping — a task silently run in the wrong directory is worse
  * than one that refused to start.
  */
-cwd: string | null, } } | { "type": "session.createRouted", "payload": { workspaceId: string, tags: Array<string>, mediaTags: Array<string>, title: string | null, cwd: string | null, } } | { "type": "agentSpace.configure", "payload": { workspaceId: string, expectedRevision: number, operation: AgentSpaceOperation, 
+cwd: string | null, } } | { "type": "session.createRouted", "payload": { 
+/**
+ * Stable creation operation, scoped to the durable workspace.
+ */
+creationId?: string, workspaceId: string, tags: Array<string>, mediaTags: Array<string>, title: string | null, cwd: string | null, } } | { "type": "agentSpace.configure", "payload": { workspaceId: string, expectedRevision: number, operation: AgentSpaceOperation, 
 /**
  * Required when the caller is a SessionController; omitted for a
  * direct authenticated Human UI action.
@@ -1448,6 +1456,12 @@ workspacePath: string, maxChunkBytes: number, };
 export type SessionContext = { source: SessionReadSource, coverage: HistoryCoverage, text: string, references: Array<SessionSourceRef>, retrievalCommands: Array<string>, estimatedTokens: number, tokenBudget: number, digest: string, };
 
 /**
+ * A timer's bounded projection of durable work obligations. It never changes
+ * the native execution queue or grants permission to wake a paused Session.
+ */
+export type SessionCoordinationSummary = { source: string, taskId: string | null, active: boolean, pending: number, ready: number, unknown: number, updatedAtMs: number, stale: boolean, };
+
+/**
  * One explicitly saved, still-unsent message in a session.
  */
 export type SessionDraft = { id: string, text: string, attachments: Array<Attachment>, 
@@ -1583,6 +1597,10 @@ export type SessionSourceRef = { id: string, sessionId: string, itemId?: string,
 export type SessionStatus = "idle" | "running" | "waiting" | "readOnly" | "failed" | "closed";
 
 export type SessionSummary = { 
+/**
+ * Read-only coordination projection, independent of native execution status.
+ */
+coordination?: SessionCoordinationSummary, 
 /**
  * Actual native Agent working directory captured by this Session. Older
  * peers omit it; clients then retain the legacy project-root resolver.

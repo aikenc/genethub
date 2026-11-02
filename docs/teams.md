@@ -21,7 +21,7 @@
 | 层 | 是什么 | 归属与变化方式 |
 |---|---|---|
 | **L0 平台原语** | Space 树、身份编译、定时 hook、系统通知、会话控制、档位路由、跨机执行等（§3） | daemon 契约，随产品版本演进；团队只调用，不改 |
-| **L1 样板** | `team-template`：一套 1+N 团队的描述文件、岗位身份、Skill 与 `tools/team.py`、`tools/pm_board_server.py`；加上每台机器的内置管理员（§4） | 随产品发布；是可复制、可改写的范例，不是平台规则 |
+| **L1 样板** | `team-template`：一套按任务选择 Owner 的团队的描述文件、岗位身份、Skill 与 `tools/team.py`、`tools/pm_board_server.py`；加上每台机器的内置管理员（§4） | 随产品发布；是可复制、可改写的范例，不是平台规则 |
 | **L2 用户团队** | 从样板建出来、或用户自己写的 `<data>/spaces/<团队>/`：一棵 Space 树加一个 git 仓库（§5） | 用户资产；产品升级不覆盖，只通知 |
 
 判断一件事属于哪层：**换掉样板之后它还成立吗？** 成立的是原语，要写进 daemon 契约并有平台测试；
@@ -47,6 +47,14 @@
 团队状态（收件箱、待办、留言、写者锁）是团队脚本自己的文件，放在 Space 根下的 `.genethub/team/` 与业务目录里，
 daemon 不解释它们（[storage-layout.md](./storage-layout.md)）。
 
+### 3.1 会话创建与协作摘要
+
+`session.create` / `session.createRouted` 可选 `creationId`（1–128 位 ASCII 字母、数字、点、下划线、短横线）。相同项目及编号、相同原始参数重试返回原 SID；不同参数拒绝；删除墓碑阻止复活。未提供时保持普通创建语义。`agent run --creation-id ID --prepare-only` 仅准备会话、不投递 prompt；调用方先保存 Owner/派单关系，再以稳定 message-id 发送业务。两项能力通过 hello/context 的 `session.create-id.v1`、`session.prepare.v1` 协商，旧端不得假装已执行准备。
+
+内核只读 `.genethub/session-coordination.json` 的通用、带版本摘要：`sessions[SID]` 含 `source/taskId/active/pending/ready/unknown` 和时间。原始 `status=idle` 仍表示 Agent 本轮未执行，不能拿它替代业务任务结论。界面可同时显示“空闲执行器、等待两个协作”。摘要不决定消息消费或抢占资源，不是第二套调度器。
+
+摘要是可重建投影，源端 timer 从持久意图、pending/done、inbox 和任务引用重建。读取有大小、数量和两秒缓存边界，不同步访问远端。损坏/失踪保留上次信息并标为待核对；`coordination-source.json` 使重启后失踪也不假装空闲。超过两分钟未更新为 stale；未升级的客户端可忽略可选摘要。
+
 ## 4. 样板
 
 位置：`apps/daemon/builtin-skills/genehub/references/team-template/`，随内置 Skill 物化到 `<data>/builtin-skills/`。
@@ -69,6 +77,16 @@ daemon 不解释它们（[storage-layout.md](./storage-layout.md)）。
   Skill 与脚本。
 - **模板升级不覆盖**：团队初始化时把模板记入 `platform` 分支；模板更新后定时任务给反思会话留言，由它在 `temp/`
   里三方合并、验证后生效。`reset` 只在用户明确要求时整体恢复。
+
+### 4.1 Task Owner 与资源
+
+Space 是身份、Skill 和配置来源，可同时承载不同任务的独立会话。前台不绑定业务目录，也不锁 Space。`task start` 从适合的岗位准备 Owner 会话；简单任务由 Owner 自行完成，复杂任务由 Owner/子负责人 `task support` 请求支持，按精确机器和 SID 回流。Team Leader 只是具备集成/领导能力的默认岗位，旧 `spawn/send` 路径仍可读写。
+
+Owner、协作者都以 `task finish` 记录明确结论，普通中间回复不销账。默认组内全部必需支持结算，失败不等于成功；多层支持仍使用相同记录和 timer。用户暂停保留输入、引用和工位，普通结果不解除暂停。显式 task 控制用请求编号和 revision 防止重放/旧归属操作，取消核对原生执行和子进程停止后才释放。当前自动 handover 支持同机独立会话；跨机迁移先拒绝、保留原工作，需显式完成产物/资源交接。
+
+写锁跟随实际工作目录，不跟随 Space。Owner 和协作者默认没有写目录，修改项目前为本会话 `task bind-directory`，远端认领在执行端完成；并发写任务选择独立 worktree。临时材料使用 `temp new NAME --task-id TASK`，任务/会话引用与暂停、等待、未消费回执保护材料，不能仅按 mtime 删除。
+
+共享上限默认团队64个活动会话、单任务累计32个会话、派单任务年龄7200秒，可在 open.env 调整 `TEAM_MAX_ACTIVE_SESSIONS`、`TEAM_TASK_MAX_SESSIONS`、`TEAM_TASK_MAX_AGE_SECONDS`。Owner 空闲且没有待办时复用 timer 有界提醒；真实进展才重置计数，普通空转回复不重置。达到阈值报前台并保留工作，不无限唤醒。详见样板 [task-owner.md](../apps/daemon/builtin-skills/genehub/references/team-template/skills/team-core/references/task-owner.md)。
 
 **内置管理员**是样板的另一种用法：`<data>/spaces/admin/` 用同一份根文件加 `team-admin` Skill，只有一个 Space，
 负责替用户建团队、接入共享团队、指导定制。它是产品文件，daemon 每次启动与模板对齐（[daemon.md](./daemon.md)「内置管理员」）。

@@ -440,6 +440,7 @@ impl SessionMeta {
         last_activity_at_ms: Option<i64>,
     ) -> SessionSummary {
         SessionSummary {
+            coordination: None,
             cwd: Some(crate::file_access::display(&self.cwd)),
             interaction_summary: self
                 .openable()
@@ -951,16 +952,84 @@ fn prune_home(homes: &mut Homes, root: &Path) {
 #[derive(Clone)]
 pub struct Store {
     homes: WorkspaceHomes,
+    coordination: super::coordination::Cache,
 }
 
 impl Store {
     pub fn new(homes: WorkspaceHomes) -> Self {
-        Store { homes }
+        Store {
+            homes,
+            coordination: Default::default(),
+        }
+    }
+
+    pub(super) fn coordination(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+    ) -> Option<genehub_proto::SessionCoordinationSummary> {
+        self.coordination
+            .read(&self.homes.home_dir(workspace_id).ok()?, session_id)
     }
 
     pub fn session_dir(&self, workspace_id: &str, session_id: &str) -> Result<PathBuf> {
         self.ensure_not_deleted(workspace_id, session_id)?;
         self.raw_session_dir(workspace_id, session_id)
+    }
+
+    /// Reserve an operation's deterministic SID before it can receive input.
+    /// The existing per-session writer lock excludes other daemon writers;
+    /// the caller serializes local creation. Intent survives every later crash.
+    pub(super) fn reserve_creation(
+        &self,
+        workspace_id: &str,
+        operation: &str,
+        parameters: &Value,
+    ) -> Result<(String, Option<SessionMeta>)> {
+        if operation.is_empty()
+            || operation.len() > 128
+            || !operation
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        {
+            anyhow::bail!("creationId must contain 1-128 ASCII letters, digits, '.', '_' or '-'");
+        }
+        let key = self.homes.project_key(workspace_id)?;
+        let digest = Sha256::digest(serde_json::to_vec(&("session.create.v1", key, operation))?);
+        // Keep the established 128-bit Session ID spelling (including Windows
+        // path lengths); the immutable parameters also fence a hash collision.
+        let hash = format!("{:x}", digest);
+        let sid = format!("s_{}", &hash[..32]);
+        let dir = self.session_dir(workspace_id, &sid)?;
+        let intent = dir.join("creation.json");
+        let expected = serde_json::json!({"operation": operation, "parameters": parameters});
+        if intent.exists() {
+            let found: Value = serde_json::from_slice(&fs::read(&intent)?)?;
+            if found != expected {
+                anyhow::bail!("creationId already belongs to different parameters");
+            }
+            if dir.join("meta.json").exists() {
+                let meta = self.load_meta(workspace_id, &sid)?;
+                if !meta.openable() {
+                    anyhow::bail!("creation was written by a newer session format");
+                }
+                return Ok((sid, Some(meta)));
+            }
+        }
+        self.prepare_write(workspace_id, &sid, &dir)?;
+        // Recheck after obtaining the physical writer lock.
+        if intent.exists() {
+            let found: Value = serde_json::from_slice(&fs::read(&intent)?)?;
+            if found != expected {
+                anyhow::bail!("creationId already belongs to different parameters");
+            }
+        } else {
+            crate::config::save_private(&intent, &serde_json::to_vec(&expected)?)?;
+        }
+        if dir.join("meta.json").exists() {
+            return Ok((sid.clone(), Some(self.load_meta(workspace_id, &sid)?)));
+        }
+        Ok((sid, None))
     }
 
     /// Where the workspace itself lives, for mapping absolute tool paths back

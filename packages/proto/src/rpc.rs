@@ -106,6 +106,10 @@ pub enum Request {
     // -- sessions ----------------------------------------------------------
     #[serde(rename = "session.create", rename_all = "camelCase")]
     SessionCreate {
+        /// Stable creation operation, scoped to the durable workspace.
+        #[serde(default)]
+        #[ts(optional)]
+        creation_id: Option<String>,
         workspace_id: String,
         agent_id: String,
         #[serde(default)]
@@ -136,6 +140,10 @@ pub enum Request {
     /// configuration. No concrete route is cached by the client.
     #[serde(rename = "session.createRouted", rename_all = "camelCase")]
     SessionCreateRouted {
+        /// Stable creation operation, scoped to the durable workspace.
+        #[serde(default)]
+        #[ts(optional)]
+        creation_id: Option<String>,
         workspace_id: String,
         #[serde(default)]
         tags: Vec<String>,

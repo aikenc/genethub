@@ -461,6 +461,8 @@ async fn dispatch(
                     "service.preview.v1".to_string(),
                     "process.services.v1".to_string(),
                     "session.input.v1".to_string(),
+                    "session.create-id.v1".to_string(),
+                    "session.prepare.v1".to_string(),
                     "session.file-upload.v1".to_string(),
                     "provider.configuration.v1".to_string(),
                     "session.previewAnnotations.v1".to_string(),
@@ -588,6 +590,7 @@ async fn dispatch(
         }).await,
 
         Request::SessionCreate {
+            creation_id,
             workspace_id,
             agent_id,
             model_id,
@@ -602,6 +605,7 @@ async fn dispatch(
                 Ok(workspace) => workspace,
                 Err(error) => return failed(error),
             };
+            let parameters = serde_json::json!({"kind":"concrete","cwd":cwd,"agentId":agent_id,"modelId":model_id,"effortId":effort_id,"fast":fast,"modeId":mode_id,"runtime":runtime_values,"title":title});
             let start_in = match cwd {
                 // Any of the workspace's folders, not only the first: a
                 // multi-folder workspace is one project, and a task started in
@@ -637,7 +641,7 @@ async fn dispatch(
             };
             match state
                 .sessions
-                .create(
+                .create_durable(
                     &workspace_id,
                     start_in,
                     &agent_id,
@@ -647,6 +651,9 @@ async fn dispatch(
                     mode_id,
                     runtime_values.unwrap_or_default(),
                     title,
+                    creation_id,
+                    None,
+                    parameters,
                 )
                 .await
             {
@@ -658,6 +665,7 @@ async fn dispatch(
         }).await,
 
         Request::SessionCreateRouted {
+            creation_id,
             workspace_id,
             tags,
             media_tags,
@@ -668,6 +676,7 @@ async fn dispatch(
                 Ok(workspace) => workspace,
                 Err(error) => return failed(error),
             };
+            let parameters = serde_json::json!({"kind":"routed","cwd":cwd,"tags":tags,"mediaTags":media_tags,"title":title});
             let start_in = match cwd {
                 Some(cwd) => {
                     let candidate = std::path::Path::new(&cwd);
@@ -704,7 +713,7 @@ async fn dispatch(
                 };
             match state
                 .sessions
-                .create_routed(
+                .create_durable(
                     &workspace_id,
                     start_in,
                     &route.agent_id,
@@ -714,8 +723,9 @@ async fn dispatch(
                     route.mode_id,
                     route.runtime_values,
                     title,
-                    routing_tags,
-                    media_tags,
+                    creation_id,
+                    Some((routing_tags, media_tags)),
+                    parameters,
                 )
                 .await
             {
