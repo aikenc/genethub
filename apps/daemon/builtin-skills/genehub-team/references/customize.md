@@ -15,7 +15,7 @@
 | 成员与层级 | `run.py employee add` / `retire`；或手写 `spaces/<名>/` 并改 `agent-space.genet.json` 的 `children.scanDepth` | 前者自动建子空间；后者要 build |
 | 生成物 | `AGENTS.md`、`.agents/skills/*`、`.genethub/hooks/*` | 不要手改；`spacebuilder verify` 会报 `SB017` |
 
-业务扩展首先读 [公开 Class 接口](../../genehub/references/team-template/skills/genet_builtin/team-core/references/extensions.md)。优先配置与子类，不复制内置调度器；`tools/genet_builtin/` 和 `skills/genet_builtin/` 提示内置维护范围，但不禁止有意修改。
+业务扩展首先按目录定位内置 `genehub` Skill，读取它的 `references/team-template/skills/genet_builtin/team-core/references/extensions.md`。优先配置与子类，不复制内置调度器；`tools/genet_builtin/` 和 `skills/genet_builtin/` 提示内置维护范围，但不禁止有意修改。
 
 ## 改完怎么落地
 
