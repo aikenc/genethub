@@ -74,5 +74,5 @@ daemon 只有一种事件 `timer`：按间隔运行 Space 的 `.genethub/hooks/<
 
 ## 不在平台里的东西
 
-收件箱、待办、写者锁、批次回执、看门狗、记忆分层、模板升级——这些都是 `team-template/tools/team.py` 的实现，
+收件箱、待办、写者锁、批次回执、看门狗、记忆分层、模板升级——这些都是 `team-template/tools/genet_builtin/` 的实现，经 `tools/run.py` 调用，
 不是平台规则。自己写团队时按需要实现，或者干脆不要。

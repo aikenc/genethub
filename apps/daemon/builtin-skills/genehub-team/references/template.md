@@ -1,14 +1,14 @@
 # 内置样板：1+N 项目团队怎么运转
 
 这里描述的是 `../../genehub/references/team-template/` 这一份样板的实现，**不是平台规则**：团队可以改掉其中任何一条。
-已建团队以它自己目录里的 `skills/team-core` 和岗位 Skill 为准——团队改过的地方，本文不再适用。
+已建团队以它自己目录里的 `skills/genet_builtin/team-core` 和岗位 Skill 为准——团队改过的地方，本文不再适用。
 
 ## 拓扑
 
 | 岗位 | 位置 | 职责 |
 |---|---|---|
-| 前台 | 团队根，`agentCwd: front` | 唯一直接面对用户的窗口：接诉求、追进度、给看板与试玩入口 |
-| 研发组长 | `spaces/leader` | 盘点基线、写里程碑与契约、并发派单、合并主干、发版 |
+| 前台 | 团队根，`agentCwd: front` | 面对用户：接诉求、选择 Task Owner、追进度、给看板与试玩入口 |
+| 集成岗位 | `spaces/leader` | 可担任需要协调能力的 Task Owner，维护集成基线与交付；普通任务可直接选择其他成员负责 |
 | 管线组员 | `spaces/<岗位>` | 各管一条业务线，在独立工位开发；`employee add` 扩出 |
 | QA | `spaces/qa` | 无头浏览器实操截图与数值断言验收 |
 | 研究 | `spaces/research` | 只读的推演、调研、评审，产出报告 |
@@ -17,10 +17,11 @@
 Skill：`team-core`（所有会话先读）、`team-front`（带 5 秒定时 hook）、`team-work`、`team-research`、`team-reflect`。
 身份四层：`soul.md` 宪章、`memory.md`（≤30 行）、岗位 `style.md`、岗位 `index.md`；会话记录是事实源。
 
-## 命令（`"$GENEHUB_PYTHON" <团队根>/tools/team.py …`）
+## 命令（`"$GENEHUB_PYTHON" <团队根>/tools/run.py …`）
 
 | 命令 | 用途 |
 |---|---|
+| `task start --space <岗位> --desc "一句话" --request-id <稳定编号> "目标"` | 创建绑定 Owner 会话的任务；追加、支持、控制和收尾按团队 team-core Skill 的任务指引执行 |
 | `spawn --space <岗位> --kind work\|research [--worktree auto] [--machine <ID>] --desc "一句话" [--tier Ultra\|Max\|Pro\|Flash\|Mini] [--media image\|video] "任务"` | 在子空间起后台会话；`--worktree auto` 自动切独立并发工位；`--machine` 派到固定绑定的远端岗位 workspace；`--team <名>` 派到本机另一支团队 |
 | `send --to <岗位\|会话\|团队名[:岗位]> [--machine <ID>] [--kind human\|patrol\|task\|question\|note] "话"` | 投递消息；对方忙时写文件收件箱，0 抢占不打断；`--machine` 投给远端岗位或远端会话 |
 | `employee add\|ls\|retire` | 动态扩编或待岗岗位，自动建子空间与工位 |
@@ -42,10 +43,10 @@ Skill：`team-core`（所有会话先读）、`team-front`（带 5 秒定时 hoo
 - 同一批子任务全部结束后合并为一条 `result` 回执；中途异常由看门狗拉起，不必人工催促。
 - 一个目录同一时间只有一个写会话；并发组员在各自 worktree 提交，由组长 `git merge-tree` 预检后合入。
 - 档位是平台路由标签，不是模型 id；团队只写标签，不钉 `modelId`。
-- **跨机器**：先按团队自己的 `skills/team-core/references/remote-targets.md` 配置固定 machine/workspace/接单命令，
+- **跨机器**：先按团队自己的 `skills/genet_builtin/team-core/references/remote-targets.md` 配置固定 machine/workspace/接单命令，
   再 `spawn --machine <ID>`。执行端校验模型并持有写锁、创建回执；派单方保留待办和结果回传。
   丢失回复用同一 `--request-id` 查回执，unknown 不重派。`send` 只投递已有会话且不解除暂停。
-  单独 portable 岗位制品不含接单脚本与父团队配置；当前必须补齐目标机团队运行资源，不能当成已完成部署。
+  配置了 team 的完整 portable 团队制品包含运行工具与团队配置；旧制品或单独子岗位仍须补齐。自定义资源策略在目标团队的新 task 入口执行，旧 receive 不承接它。
 - 自动身份刷新（定时任务与 `sync-identity`）使用 `--require-no-post-commands`：有 Space pre/post 或 Provider post
   时返回 `SB018` 并保留旧生成身份。发布 hook 应在源 Space 显式构建中执行，不能借一次身份刷新触发部署。
 
@@ -60,8 +61,8 @@ Skill：`team-core`（所有会话先读）、`team-front`（带 5 秒定时 hoo
 
 - 初始化时模板记进团队仓库的 `platform` 分支；`drift` 看团队与模板的差异。
 - 模板更新后，定时任务给 `team-reflect` 留 `upgrade` 留言，由它按
-  `../../genehub/references/team-template/skills/team-reflect/references/upgrade.md` 在 `temp/` 里三方合并、验证后生效。
+  `../../genehub/references/team-template/skills/genet_builtin/team-reflect/references/upgrade.md` 在唯一定义源合入、构建完整制品、校验后安装；验证副本不登记为运行团队。
 - 改名前的团队（Skill 叫 `expert-*`）合并后，`sync-identity` 会把描述文件里的旧名改指 `team-*`。
 - `reset` 覆盖平台文件与 `soul.md`，只在用户明确要求时用，先看预演。
 
-设计取舍的完整理由在 `../../genehub/references/team-template/skills/team-reflect/references/rationale.md`。
+设计取舍的完整理由在 `../../genehub/references/team-template/skills/genet_builtin/team-reflect/references/rationale.md`。
