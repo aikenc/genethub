@@ -32,6 +32,7 @@ defineSpecialty({
     writeFileSync(file, "original"); await new Promise(r => setTimeout(r, 100));
     const result = watcher.stop();
     t.assertions.assert(result.complete && result.changed, "restored mutation did not invalidate input evidence");
+    t.assertions.assert(result.changedPaths.includes(file), "input observation omitted the concrete changed path needed to diagnose restored writes");
   } finally { watcher.stop(); }
 });
 

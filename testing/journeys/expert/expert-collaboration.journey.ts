@@ -36,6 +36,8 @@ type Info = { id: string; name: string; agentSpace?: { parentWorkspaceId?: strin
 type Item = { type?: string; text?: string; system?: boolean; origin?: { sessionId?: string } };
 const isSystem = (item: Item): boolean => item.origin?.sessionId === "system";
 
+const dispatchedSid = (text: string) => [...text.matchAll(/^(?:已开始|已确认派单) \S+ 会话 (s_[0-9a-f]+)/gm)].at(-1)?.[1];
+
 defineJourney(
   {
     id: "journey.expert.collaboration",
@@ -172,9 +174,9 @@ defineJourney(
           (item) => isSystem(item) && (item.text ?? "").includes("用途: result") && (item.text ?? "").includes(sid) && (item.text ?? "").includes("chunk-0 chunk-1"),
         );
       const spawnedA = expert(alice, "spawn", "--kind", "work", "--desc", "first async job", "Run job A.");
-      const sidA = /(s_[0-9a-f]+)/.exec(spawnedA.out)?.[1];
+      const sidA = dispatchedSid(spawnedA.out);
       const spawnedB = expert(alice, "spawn", "--kind", "research", "--desc", "second async job", "Run job B.");
-      const sidB = /(s_[0-9a-f]+)/.exec(spawnedB.out)?.[1];
+      const sidB = dispatchedSid(spawnedB.out);
       t.assertions.assert(sidA && sidB && sidA !== sidB, `two jobs: ${spawnedA.out} ${spawnedA.err} | ${spawnedB.out} ${spawnedB.err}`);
       const bothArrived = await t.tools
         .waitUntil(async () => (await resultsFor(sidA!)).length >= 1 && (await resultsFor(sidB!)).length >= 1, 60_000)
@@ -194,7 +196,7 @@ defineJourney(
 
       // 3. Cross-expert collaboration (J8): `send --to bob:work` starts a session in bob and routes the reply back to alice's front.
       const crossSent = expert(alice, "send", "--to", "bob:work", "--kind", "task", "请对裂谷防线执行QA验收");
-      const bobSid = /(s_[0-9a-f]+)/.exec(crossSent.out)?.[1];
+      const bobSid = [...crossSent.out.matchAll(/^已为 bob:work 启动会话并投递 → (s_[0-9a-f]+)/gm)].at(-1)?.[1];
       t.assertions.assert(crossSent.code === 0 && bobSid !== undefined && crossSent.out.includes("已为 bob:work 启动会话并投递"), `send to bob:work: ${crossSent.out} ${crossSent.err}`);
       const crossResults = async () => (await itemsOf(front)).filter((item) => isSystem(item) && (item.text ?? "").includes(bobSid!) && (item.text ?? "").includes("chunk-0 chunk-1"));
       const crossArrived = await t.tools
@@ -216,12 +218,12 @@ defineJourney(
       spawnSync("git", ["init", "-q", project]);
       writeFileSync(path.join(alice, ".genethub", "open.env"), "EXPERT_AGENT=ctl-silent\nEXPERT_BOARD_PORT=0\nEXPERT_WAKE_ROUNDS=100000\nEXPERT_NOTE_QUIET=100000\n");
       const holderSpawn = expert(alice, "spawn", "--kind", "work", "--dir", project, "--desc", "long writer", "Hold the writer lock.");
-      const holderSid = /(s_[0-9a-f]+)/.exec(holderSpawn.out)?.[1]!;
+      const holderSid = dispatchedSid(holderSpawn.out)!;
       t.assertions.assert(holderSpawn.code === 0 && holderSid, `holderSpawn: ${holderSpawn.out} ${holderSpawn.err}`);
       await t.tools.waitUntil(async () => {
         const reply = await opened.client.call({ type: "session.get", payload: { sessionId: holderSid } });
         return reply?.type === "snapshot" && (reply.data as unknown as { summary: { status: string } }).summary.status === "running";
-      }, 20_000);
+      }, 20_000).catch(async () => { throw new Error("silent writer did not run: " + JSON.stringify(await opened.client.call({type:"session.get",payload:{sessionId:holderSid}}))); });
       // A second `work` session on the same directory is refused while `holderSid` is running, but `research` is allowed.
       const contestedWork = expert(alice, "spawn", "--kind", "work", "--dir", project, "--desc", "second writer", "Should be refused.");
       t.assertions.assert(contestedWork.code !== 0 && contestedWork.err.includes("已有写会话") && contestedWork.err.includes(holderSid), `contested writer lock: ${contestedWork.out} ${contestedWork.err}`);
@@ -268,7 +270,7 @@ sys.stdout.write(r.stdout);sys.stderr.write(r.stderr);sys.exit(r.returncode)
       }
       writeFileSync(path.join(alice, ".genethub", "open.env"), "EXPERT_AGENT=ctl-normal\nEXPERT_BOARD_PORT=0\nEXPERT_WAKE_ROUNDS=100000\nEXPERT_NOTE_QUIET=100000\n");
       const allowedResearch = expert(alice, "spawn", "--kind", "research", "--dir", project, "--desc", "parallel reader", "Read-only inspection.");
-      const researchSid = /(s_[0-9a-f]+)/.exec(allowedResearch.out)?.[1]!;
+      const researchSid = dispatchedSid(allowedResearch.out)!;
       t.assertions.assert(allowedResearch.code === 0 && researchSid, `research alongside writer lock failed: ${allowedResearch.err}`);
       // The silent writer holds the lock until it is interrupted; it never replies, so the batch it shares
       // with the research session is only settled once it is stopped.

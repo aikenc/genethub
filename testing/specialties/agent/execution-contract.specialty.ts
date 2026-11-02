@@ -248,11 +248,13 @@ contractCase(
       await t.flows.main.sendPrompt(session.client, session.sessionId, `Before restart ${i}.`);
       await t.tools.waitUntil(() => completed(session) === i + 1, 15_000);
     }
+    const beforeResync = session.resyncs();
     session.daemon.stop();
     await t.tools.waitUntil(() => session.client.connectionState !== "ready", 5_000);
     const started = runGenet(session.daemon.genet, ["daemon", "start"], session.daemon.env);
     t.assertions.assert(started.code === 0, `restart failed: ${started.stderr}`);
     await t.tools.waitUntil(() => session.client.connectionState === "ready", 30_000).catch(() => { throw new Error("original business Client did not recover after daemon restart: state=" + session.client.connectionState); });
+    await t.tools.waitUntil(() => session.resyncs() > beforeResync, 30000);
     await t.flows.main.sendPrompt(session.client, session.sessionId, "After restart, on the same Client.");
     await t.tools.waitUntil(() => completed(session) === 3, 15_000)
       .catch(() => { throw new Error(`same Client lost completion after restart: completions=${completed(session)}, resyncs=${session.resyncs()}`); });

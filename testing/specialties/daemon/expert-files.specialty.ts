@@ -90,9 +90,9 @@ defineSpecialty(
   {
     ...base,
     id: "specialty.daemon.expert-temp-naming",
-    title: "A scratch directory is named temp/YYMMDD/hhmm_slug_hash4, the same caller gets the same one back, and a bad slug creates nothing",
+    title: "A scratch directory is named temp/YYMMDD/hhmm_slug_hash24, the same caller gets the same one back, and a bad slug creates nothing",
     oracle:
-      "temp new gives temp/261013/1405_fix-login_xxxx with four hex characters and a .temp.json holding the purpose and the creator; the same caller in the same minute gets the same directory, another caller or another minute gets another; an empty, uppercase, Chinese, over-long, slash-containing or dash-ended slug, and a missing purpose, are refused with the rule in the message and no directory is created",
+      "temp new gives temp/261013/1405_fix-login_<96-bit creator hash> with 24 hex characters and a .temp.json holding the purpose and the creator; the same caller in the same minute gets the same directory, another caller or another minute gets another; an empty, uppercase, Chinese, over-long, slash-containing or dash-ended slug, and a missing purpose, are refused with the rule in the message and no directory is created",
     catches: [
       "two sessions sharing one scratch directory",
       "a retry creating a second directory for the same job",
@@ -112,7 +112,7 @@ defineSpecialty(
       { do: "new", slug: "ok-slug", purpose: "   ", now: NOW, caller: "s_one" },
     ]);
     t.assertions.assert(
-      /\/temp\/261013\/1405_fix-login_[0-9a-f]{4}$/.test(first!.path ?? ""),
+      /\/temp\/261013\/1405_fix-login_[0-9a-f]{24}$/.test(first!.path ?? ""),
       `name ${first?.path}`,
     );
     const meta = JSON.parse(readFileSync(join(first!.path!, ".temp.json"), "utf8"));

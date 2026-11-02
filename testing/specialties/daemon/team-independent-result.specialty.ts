@@ -74,7 +74,11 @@ defineSpecialty({
     const args = ["send", "--to", parent, "--kind", "result", marker];
     const delivered = await command(args); t.assertions.assert(delivered.code === 0, delivered.stderr);
     const inbox = join(root, ".genethub/team/inbox", parent + ".jsonl");
-    t.assertions.assert(!existsSync(inbox) || !readFileSync(inbox, "utf8").includes(marker), "Completed independent result is still blocked in the Team inbox by an older paused child");
+    // An accepted input is deliberately retained until the native queue
+    // consumes it, preserving collaboration obligations across a crash. It
+    // must already be accepted, rather than blocked behind the paused sibling.
+    const waitingEntries = existsSync(inbox) ? readFileSync(inbox, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line)) : [];
+    t.assertions.assert(waitingEntries.filter(entry => String(entry.text).includes(marker)).every(entry => entry.accepted === true), "Completed independent result is still unaccepted behind an older paused child");
     await t.tools.waitUntil(async () => { const s = await summary(parent); return s.status === "idle" && !!s.latestReply; }, 15_000);
     const first = (await cli(["session", "get", parent])).session;
     const matches = (s: any) => s.items.filter((item: any) => item.type === "userMessage" && String(item.text).includes(marker));

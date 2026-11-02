@@ -35,7 +35,7 @@ defineSpecialty({
   let browser: Awaited<ReturnType<typeof openBrowser>> | undefined;
   let consumer: Awaited<ReturnType<typeof openPreviewBrowser>> | undefined;
   try {
-    const board = generateBoard(t.env.workspace, t.openRoot, opened.daemon.env);
+    const board = generateBoard(t.env.workspace, t.openRoot, { ...opened.daemon.env, GENEHUB_CLI: opened.daemon.genet });
     board.snapshot.updatedAtMs = Date.now() - 3 * 60 * 60_000;
     board.snapshot.updatedAt = "three hours ago";
     board.snapshot.service = { running: false };
@@ -79,7 +79,7 @@ defineSpecialty({
   let browser: Awaited<ReturnType<typeof openBrowser>> | undefined;
   let hold = true, active = 0, maximum = 0, requests = 0, cancelled = 0;
   const pending: ServerResponse[] = [];
-  const board = generateBoard(t.env.workspace, t.openRoot, opened.daemon.env);
+  const board = generateBoard(t.env.workspace, t.openRoot, { ...opened.daemon.env, GENEHUB_CLI: opened.daemon.genet });
   const sendFile = (response: ServerResponse) => {
     if (response.destroyed) return;
     response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });

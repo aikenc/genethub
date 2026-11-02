@@ -2,7 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { defineSpecialty, parseJson, runGenetAsync, startRelay } from "../../framework/public.ts";
+import { defineSpecialty, connectProductClient, registerControlledAgent, parseJson, runGenetAsync, startRelay } from "../../framework/public.ts";
 
 defineSpecialty({
   id: "specialty.daemon.team-remote-dispatch",
@@ -19,6 +19,7 @@ defineSpecialty({
   resources: { environments: 1, cpu: 2, memoryMb: 1024, io: 2, browser: 0, pool: "standard" },
 }, async t => {
   const python = process.env.GENEHUB_PYTHON!;
+  registerControlledAgent(t.env, { id: "ctl-cli-command", profile: "cli-command" });
   const o = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
   const relay = await startRelay({ openRoot: t.openRoot });
   const sourceData = path.join(t.env.root, "caller-data"); mkdirSync(sourceData);
@@ -49,9 +50,11 @@ defineSpecialty({
     return root;
   };
   let sourceStarted = false;
+  let sourceClient: Awaited<ReturnType<typeof connectProductClient>> | undefined;
   try {
     await t.flows.main.configureMockProvider(o.client, o.mock);
     await o.client.call({ type: "settings.setProvider", payload: { providerId: "deepseek", apiKey: "sk-test", baseUrl: o.mock.origin, label: null, dialect: null, models: ["deepseek-v4-flash", "deepseek-v4-pro", "text-only"], modelInputs: { "deepseek-v4-flash": ["image", "video"], "deepseek-v4-pro": ["image", "video"], "text-only": [] } } });
+    cpSync(path.join(t.env.data, "agents"), path.join(sourceData, "agents"), { recursive: true });
     if ((await sourceCli(["daemon", "start"])).code !== 0) throw new Error("caller daemon failed to start");
     sourceStarted = true;
     const targetRoot = await team("remote-team", true), sourceRoot = await team("source-team", false);
@@ -213,6 +216,7 @@ sys.exit(r.returncode)
       t.assertions.assert(finished.code === 0 && !existsSync(lock), "fresh task did not retire its own writer lock");
     }
     t.assertions.assert(freshSessions[0] !== freshSessions[1] && (await cliJson(["session", "list", "--workspace", qa.id], true)).sessions.length === 3, "same-worded new task reused an old session");
+    const beforeSlowRequest = o.mock.requests.length;
     o.mock.script({ text: "A slow remote result.", delayMs: 30000 }, { text: "Resumed worker." });
     const concurrent = await Promise.all(["racer-a", "racer-b"].map(id => script(dispatch.map(v => v === "one-task" ? id : v))));
     t.assertions.assert(concurrent.filter(r => r.code === 0).length === 1 && (await cliJson(["session", "list", "--workspace", qa.id], true)).sessions.length === 4, "concurrent callers admitted zero or multiple writers");
@@ -220,6 +224,7 @@ sys.exit(r.returncode)
     // A person's stop pauses the task rather than abandoning its directory.
     // Quiet workers are no longer canceled automatically. Keep the reservation
     // until this same task is explicitly continued and actually completes.
+    await t.tools.waitUntil(() => o.mock.requests.length > beforeSlowRequest, 15000);
     await cliJson(["session", "interrupt", raceSession, "--machine", machine]);
     const peerErrors = (data: string) => {
       const file = path.join(data, "logs/daemon.log");
@@ -253,8 +258,90 @@ sys.exit(r.returncode)
     }, 30000).catch(() => { throw new Error("resumed writer release did not finish: " + JSON.stringify(lastReleaseState)); }));
     const resumed = (await cliJson(["session", "list", "--workspace", qa.id], true)).sessions.find((s: any) => s.id === raceSession);
     t.assertions.assert(resumed?.status === "idle" && !resumed?.inputSummary?.paused && resumed.inputSummary.pendingMessageIds.length === 0, "finished task left input paused or pending");
+    // Upgrade the same real source/executor to TaskOwner routing. The source
+    // keeps the only task ledger; execution-only remote Owner can ask for help.
+    writeFileSync(path.join(sourceRoot, ".genethub/open.env"), "TEAM_AGENT=ctl-cli-command\nTEAM_BOARD_PORT=0\nTEAM_WAKE_ROUNDS=9999\n");
+    writeFileSync(path.join(targetRoot, ".genethub/open.env"), "TEAM_AGENT=ctl-cli-command\nTEAM_BOARD_PORT=0\nTEAM_WAKE_ROUNDS=9999\n");
+    const sourceWorkspaces = (await cliJson(["workspace", "list"])).workspaces;
+    const sourceProject = sourceWorkspaces.find((w: any) => w.folders?.[0]?.root === sourceRoot);
+    const sourceQa = sourceWorkspaces.find((w: any) => w.folders?.[0]?.root === path.join(sourceRoot, "spaces/qa"));
+    if (!sourceProject || !sourceQa) throw new Error("source task workspaces missing");
+    const sourceEndpoint = parseJson((await sourceCli(["daemon", "endpoint"])).stdout) as any;
+    sourceClient = await connectProductClient({ url: sourceEndpoint.wsUrl, localServerProof: { proof: sourceEndpoint.serverProof, ...sourceEndpoint.admission } });
+    const sourceAccess = await sourceClient.call({ type: "device.remoteAttach", payload: { relayUrl: relay.origin, joinToken: relay.joinToken } });
+    if (sourceAccess?.type !== "remoteAccess" || !sourceAccess.data.rendezvousUrl) throw new Error("source reverse relay unavailable");
+    await t.tools.waitUntil(async () => { const d = await sourceClient!.call({ type: "device.list" }); return d?.type === "devices" && d.data.remote.online; }, 20000);
+    const sourceInvite = await sourceClient.call({ type: "device.invite", payload: null });
+    if (sourceInvite?.type !== "invite") throw new Error("source reverse invitation unavailable");
+    const reverse = await cliJson(["machine", "pair", sourceInvite.data.code, "--endpoint", sourceAccess.data.rendezvousUrl, "--name", "source-definition"], true);
+    writeFileSync(path.join(targetRoot, ".genethub/task-source.json"), JSON.stringify({ machineId: reverse.machine.machineId, workspaceId: sourceQa.id, role: "qa", command: [python, path.join(sourceRoot, "tools/team.py")] }));
+    const caller = await cliJson(["agent", "run", "--agent", "ctl-cli-command", "--workspace", sourceProject.id, "--creation-id", "remote.owner.front", "--prepare-only", "--no-wait", "prepare front before dispatch"]);
+    const callerSid = caller.sessionId;
+    const inspectSession = async (sid: string, remote = false) => (await cliJson(["session", "get", sid], remote)).session;
+    const idleSession = (sid: string, remote = false) => t.tools.waitUntil(async () => {
+      const snap = await inspectSession(sid, remote);
+      return snap.summary.status === "idle" && !snap.summary.inputSummary?.pendingMessageIds.length;
+    }, 30000);
+    const callTask = async (sid: string, root: string, args: string[], remote = false) => {
+      await cliJson(["session", "send", sid, JSON.stringify({ argv: [python, path.join(root, "tools/team.py"), ...args], cwd: root }), "--no-wait"], remote);
+      await idleSession(sid, remote);
+      const item = (await inspectSession(sid, remote)).items.filter((i: any) => i.type === "assistantMessage").at(-1);
+      if (!item) throw new Error("real task caller returned no reply");
+      return JSON.parse(item.text) as { code: number; out: string; err: string };
+    };
+    const beginOwner = ["task", "start", "--space", "qa", "--machine", machine, "--request-id", "remote.owner.task", "--desc", "remote coordinating Owner", "Delegate one read-only source support and explicitly finish"];
+    // Drop the successful prepare stdout once. No first business input may
+    // precede the source's durable Owner and reverse dependency records.
+    const { unlinkSync } = await import("node:fs"); unlinkSync(dropped);
+    t.note("TaskOwner remote: preparing with dropped stdout");
+    const lostOwner = await callTask(callerSid, sourceRoot, beginOwner);
+    t.assertions.assert(lostOwner.code !== 0, "lost prepare was falsely acknowledged as complete");
+    const ownerReply = await callTask(callerSid, sourceRoot, beginOwner);
+    t.assertions.assert(ownerReply.code === 0, "same-operation remote prepare could not recover: " + ownerReply.err);
+    const remoteTask = JSON.parse(ownerReply.out.trim().split("\n").at(-1)!);
+    const remoteOwner = remoteTask.owner.sessionId;
+    await idleSession(remoteOwner, true);
+    const sourceTaskFile = path.join(sourceRoot, ".genethub/team/tasks", remoteTask.taskId + ".json");
+    t.assertions.assert(JSON.parse(readFileSync(sourceTaskFile, "utf8")).owner.sessionId === remoteOwner, "remote input started without durable source ownership");
+    const remoteDirectory = path.join(targetRoot, "remote-owner-workstation"); mkdirSync(remoteDirectory);
+    const bound = await callTask(remoteOwner, targetRoot, ["task", "bind-directory", remoteTask.taskId, "--directory", remoteDirectory], true);
+    t.assertions.assert(bound.code === 0, "remote Owner could not claim an executor-side directory: " + bound.err);
+    const boundReply = JSON.parse(JSON.parse(bound.out.trim()).result.trim());
+    const secondOwnerReply = await callTask(callerSid, sourceRoot, beginOwner.map(v => v === "remote.owner.task" ? "remote.owner.independent" : v));
+    t.assertions.assert(secondOwnerReply.code === 0, "the remote Space was still treated as an exclusive workstation: " + secondOwnerReply.err);
+    const secondTask = JSON.parse(secondOwnerReply.out.trim().split("\n").at(-1)!);
+    const secondOwner = secondTask.owner.sessionId;
+    await idleSession(secondOwner, true);
+    const contested = await callTask(secondOwner, targetRoot, ["task", "bind-directory", secondTask.taskId, "--directory", remoteDirectory], true);
+    t.assertions.assert(contested.code !== 0 && JSON.parse(readFileSync(boundReply.lock, "utf8")).session === remoteOwner, "independent remote session stole the first Owner's actual directory");
+    const secondDone = await callTask(secondOwner, targetRoot, ["task", "finish", secondTask.taskId, "--outcome", "success", "Read-only independent remote task completed"], true);
+    t.assertions.assert(secondDone.code === 0, "second remote Owner did not settle");
+    await t.tools.waitUntil(async () => { const tick = await script(["hook"]); if (tick.code !== 0) throw new Error(tick.stderr); return JSON.parse(readFileSync(path.join(sourceRoot, ".genethub/team/tasks", secondTask.taskId + ".json"), "utf8")).state === "delivered"; }, 30000);
+    t.assertions.assert(existsSync(boundReply.lock), "unrelated remote task released another Owner's resource");
+    t.note("TaskOwner remote: source ownership saved; asking source support");
+    const supportReply = await callTask(remoteOwner, targetRoot, ["task", "support", remoteTask.taskId, "--space", "research", "--desc", "source support", "--request-id", "remote.owner.support", "Produce one source-side evidence report"], true);
+    t.assertions.assert(supportReply.code === 0, "remote Owner could not request source support: " + supportReply.err);
+    const forwarded = JSON.parse(supportReply.out.trim());
+    const support = JSON.parse(forwarded.result.trim()).collaborator;
+    await idleSession(support);
+    t.note("TaskOwner remote: source support created; recording evidence");
+    const finishReply = await callTask(support, sourceRoot, ["task", "finish", remoteTask.taskId, "--outcome", "success", "REMOTE_OWNER_SOURCE_SUPPORT_EVIDENCE"]);
+    t.assertions.assert(finishReply.code === 0, "source support could not settle: " + finishReply.err);
+    await t.tools.waitUntil(async () => {
+      const tick = await script(["hook"]);
+      if (tick.code !== 0) throw new Error(tick.stderr);
+      const snap = await inspectSession(remoteOwner, true);
+      return snap.items.some((i: any) => i.type === "userMessage" && i.text.includes("REMOTE_OWNER_SOURCE_SUPPORT_EVIDENCE"));
+    }, 30000);
+    await idleSession(remoteOwner, true);
+    t.note("TaskOwner remote: evidence returned to remote Owner; finishing");
+    const ownerFinish = await callTask(remoteOwner, targetRoot, ["task", "finish", remoteTask.taskId, "--outcome", "success", "REMOTE_OWNER_COMPLETE_WITH_SOURCE_SUPPORT"], true);
+    t.assertions.assert(ownerFinish.code === 0, "remote Owner could not finish through source ledger: " + ownerFinish.err);
+    await t.tools.waitUntil(async () => { const tick = await script(["hook"]); if (tick.code !== 0) throw new Error(tick.stderr); return JSON.parse(readFileSync(sourceTaskFile, "utf8")).state === "delivered"; }, 30000);
+    t.assertions.assert(!existsSync(boundReply.lock) && !existsSync(lock) && !existsSync(path.join(targetRoot, ".genethub/team/tasks", remoteTask.taskId + ".json")), "remote Owner left a writer or created a second authoritative task ledger");
     t.note("real relay + two daemon state directories; one successful stdout lost and recovered; writer/identity/model/pause/reconcile/unknown-create contracts verified");
   } finally {
+    sourceClient?.close();
     if (sourceStarted) await sourceCli(["daemon", "stop"]);
     relay.stop(); o.client.close(); o.daemon.stop(); await o.mock.stop();
   }

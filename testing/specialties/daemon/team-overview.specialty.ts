@@ -24,6 +24,7 @@ defineSpecialty({
   try {
     mkdirSync(join(root, "tools"), { recursive: true });
     writeFileSync(join(root, "tools/team.py"), readFileSync(join(t.openRoot, "apps/daemon/builtin-skills/genehub/references/team-template/tools/team.py")));
+      writeFileSync(join(root, "tools", "team_tasks.py"), readFileSync(join(t.openRoot, "apps/daemon/builtin-skills/genehub/references/team-template/tools/team_tasks.py")));
     // A legitimate customized Team without identity or board-server modules:
     // isolate the Markdown overview and native hook's progress decision.
     const manifest = (name: string) => ({ schema: "agent-space.v1", name, tags: ["team"], agents: ["genet"], skills: [], skillProviders: [], folders: [{ path: "." }], children: { scanDepth: 2 } });

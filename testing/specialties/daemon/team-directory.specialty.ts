@@ -24,6 +24,7 @@ defineSpecialty({
       mkdirSync(join(root, "spaces", "leader"), { recursive: true });
       mkdirSync(join(root, "tools"));
       writeFileSync(join(root, "tools", "team.py"), readFileSync(join(t.openRoot, "apps/daemon/builtin-skills/genehub/references/team-template/tools/team.py")));
+      writeFileSync(join(root, "tools", "team_tasks.py"), readFileSync(join(t.openRoot, "apps/daemon/builtin-skills/genehub/references/team-template/tools/team_tasks.py")));
       writeFileSync(join(root, "agent-space.genet.json"), JSON.stringify({ schema: "agent-space.v1", name, tags: ["team"], children: ["spaces/leader"], folders: [{ path: "." }] }));
       writeFileSync(join(root, "spaces", "leader", "agent-space.genet.json"), JSON.stringify({ schema: "agent-space.v1", name: "leader", folders: [{ path: "." }] }));
       mkdirSync(join(root, "spaces", "qa"));
@@ -89,7 +90,7 @@ sys.stdout.write(out);sys.stderr.write(r.stderr);sys.exit(r.returncode)
     const source = join(t.env.root, "source", teams[0]!.name);
     mkdirSync(join(source, "spaces", "leader"), { recursive: true });
     mkdirSync(join(source, "tools"));
-    for (const file of ["agent-space.genet.json", "spaces/leader/agent-space.genet.json", "tools/team.py"]) {
+    for (const file of ["agent-space.genet.json", "spaces/leader/agent-space.genet.json", "tools/team.py", "tools/team_tasks.py"]) {
       writeFileSync(join(source, file), readFileSync(join(teams[0]!.root, file)));
     }
     const sourceOpened = await o.client.call({ type: "workspace.open", payload: { root: source } });

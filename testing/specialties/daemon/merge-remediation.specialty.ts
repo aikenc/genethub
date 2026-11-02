@@ -13,7 +13,7 @@ function check(name: string, oracle: string, run: (t: CaseContext, r: Team) => P
   }, async t => { const r = await openTeam(t); try { await run(t, r); } finally { await r.dispose(); } });
 }
 const idle = (t: CaseContext, r: Team, id: string) => t.tools.waitUntil(async () => (await r.snapshot(id)).summary.status === "idle", 30000);
-const sid = (output: string) => { const id = /s_[0-9a-f]+/.exec(output)?.[0]; if (!id) throw new Error(`no Session in ${output}`); return id; };
+const sid = (output: string) => { const id = [...output.matchAll(/^(?:已开始|已确认派单) \S+ 会话 (s_[0-9a-f]+)/gm)].at(-1)?.[1]; if (!id) throw new Error(`no Session in ${output}`); return id; };
 
 
 check("source-and-authority", "ordinary Human text beginning 用途 stays conversational, display role labels do not classify it, and a bad controller identity never falls back to Owner", async (t, r) => {
@@ -83,7 +83,7 @@ check("failed-and-stuck-terminals", "a failed paused turn closes as failed; sile
   r.ok(["hook"]);
   t.assertions.assert(!existsSync(r.state("pending", `${failed}.json`)) && existsSync(r.state("done", `${failed}.json`)), "real failed+paused child stayed pending");
   const stuck = sid(r.ok(["spawn", "--kind", "work", "--desc", "silent child", "--model", "fixture", "stay silent"], { TEAM_AGENT: "ctl-accept-then-silent", GENEHUB_SESSION_ID: r.front }));
-  await t.tools.waitUntil(async () => (await r.snapshot(stuck)).summary.status === "running", 20000);
+  await t.tools.waitUntil(async () => (await r.snapshot(stuck)).summary.status === "running", 20000).catch(async () => { throw new Error("silent child failed to run: " + JSON.stringify(await r.snapshot(stuck))); });
   await new Promise(resolve => setTimeout(resolve, 1300));
   const hook = () => r.ok(["hook"], { TEAM_STUCK_AFTER: "1", TEAM_BATCH_STUCK_AFTER: "1" });
   hook(); hook();
