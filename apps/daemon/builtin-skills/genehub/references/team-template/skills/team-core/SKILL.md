@@ -24,20 +24,7 @@ description: 1+N 项目团队内部协作的公共约定：前台、研发组长
 跨机派单先读 [references/remote-targets.md](references/remote-targets.md)：固定目标、不按短名猜团队，执行端
 拿写锁并保存回执；未知创建结果不盲重派。`send` 不创建会话、不解除暂停，多个远端会话须用精确 ID。
 
-## 用户明确要求继续
-
-普通 `result/report/watchdog` 和 `team.py send` 仍保留暂停，不能自行改成普通消息来自动唤醒。
-用户在前台明确要求继续原任务后，前台或组长可以用**自己署名的普通会话消息**转达这项要求；
-不需要用户挨个工位重复确认，也不冒充 Human 批准。先核对原会话、派单及已有成果，再向原 ID 发送：
-
-```text
-"$GENEHUB_CLI" session send <原sessionId> "用户要求继续原任务；先核对已完成效果，再续接剩余工作" --message-id <稳定恢复操作ID> --no-wait
-```
-
-远端目标追加原回执中的 `--machine <ID>`，核对仍是原派单对应会话；这个入口不加 `--system`。
-同一恢复操作沿用同一 message ID 和正文，回包未知先查原条目，不能另号重派。
-接收、实际运行、`inputSummary.paused=false`、原结果被消费与采用分别核对；仅开始运行不算恢复完成。
-保留原队列、写锁与部分成果，不手改元数据或从头回放整个波次。被明确拒绝时保留错误，不换身份绕过。
+暂停会话的显式恢复、署名、去重与验收，先读 [references/resume-paused.md](references/resume-paused.md)。
 
 自动身份刷新（定时任务与 `sync-identity`）只重编身份，不执行 Space pre/post 或 Provider post；有此类配置时
 返回 `SB018`，保留上一版生成身份。发布 hook 由源 Space 的显式构建执行，不能靠反复刷新身份来运行。
