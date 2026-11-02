@@ -294,7 +294,7 @@ impl SessionManager {
     }
 
     pub(crate) async fn recover_deliveries(&self) -> Result<()> {
-        for meta in self.store.list_meta()? {
+        for meta in self.store.list_meta().await? {
             if !meta.openable() || meta.history_only {
                 continue;
             }

@@ -1334,9 +1334,10 @@ impl Store {
     /// are the user's conversations sitting in the user's own folder, so the
     /// answer to "where did my chats go" has to be visible rather than an empty
     /// list, even though this build cannot show what is inside them.
-    pub fn list_meta(&self) -> Result<Vec<SessionMeta>> {
+    pub async fn list_meta(&self) -> Result<Vec<SessionMeta>> {
         let mut out = Vec::new();
         for (workspaces, sessions) in self.homes.all_sessions_dirs() {
+            crate::blocking::breathe().await;
             if let Some((workspace_id, _)) = workspaces.first() {
                 self.reap_tombstoned_sessions(workspace_id, &sessions);
             }
@@ -1349,6 +1350,9 @@ impl Store {
                 continue;
             };
             for entry in entries.flatten() {
+                // A bulk read must not hold the guest's only fiber while
+                // unrelated foreground requests and peer handshakes wait.
+                crate::blocking::breathe().await;
                 let session_id = entry.file_name().to_string_lossy().into_owned();
                 if sessions.parent().is_some_and(|home| {
                     home.join(TOMBSTONES_DIR)
@@ -1364,18 +1368,7 @@ impl Store {
                 let Ok(header) = serde_json::from_str::<MetaHeader>(&raw) else {
                     continue;
                 };
-                let project_key = header.project_key.clone();
-                let owner = if project_key.is_empty() {
-                    workspaces.first().map(|(id, _)| id.clone())
-                } else {
-                    workspaces
-                        .iter()
-                        .find(|(_, home)| {
-                            home.project_key == project_key
-                                || home.aliases.iter().any(|alias| alias == &project_key)
-                        })
-                        .map(|(id, _)| id.clone())
-                };
+                let owner = Self::metadata_owner(&workspaces, &header.project_key);
                 let Some(workspace_id) = owner else {
                     continue;
                 };
@@ -1391,6 +1384,76 @@ impl Store {
         }
         out.sort_by_key(|meta: &SessionMeta| std::cmp::Reverse(meta.updated_at_ms));
         Ok(out)
+    }
+
+    /// Locate the requested conversation by its directory, without reading
+    /// every other conversation. Project keys and tombstones still decide
+    /// whether a registered view can expose that directory.
+    pub async fn find_meta(&self, session_id: &str) -> Result<Option<SessionMeta>> {
+        if session_id.is_empty()
+            || session_id.contains(['/', '\\'])
+            || !matches!(
+                Path::new(session_id).components().next(),
+                Some(std::path::Component::Normal(_))
+            )
+        {
+            return Ok(None);
+        }
+        let mut found: Option<SessionMeta> = None;
+        for (workspaces, sessions) in self.homes.all_sessions_dirs() {
+            crate::blocking::breathe().await;
+            let Some(home) = sessions.parent() else {
+                continue;
+            };
+            if home
+                .join(TOMBSTONES_DIR)
+                .join(format!("{session_id}.json"))
+                .exists()
+            {
+                continue;
+            }
+            let Ok(raw) = fs::read_to_string(sessions.join(session_id).join("meta.json")) else {
+                continue;
+            };
+            let Ok(header) = serde_json::from_str::<MetaHeader>(&raw) else {
+                continue;
+            };
+            let Some(workspace_id) = Self::metadata_owner(&workspaces, &header.project_key) else {
+                continue;
+            };
+            let _ = self.establish_home(home);
+            match self.load_meta_from(&workspace_id, session_id, &raw, header) {
+                Ok(meta) if meta.id == session_id => {
+                    // A copied project may retain the same conversation ID.
+                    // Match the newest-first catalog's existing tie-breaking.
+                    if found
+                        .as_ref()
+                        .is_none_or(|known| meta.updated_at_ms > known.updated_at_ms)
+                    {
+                        found = Some(meta);
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(session = %session_id, %error, "skipping a session whose meta could not be read")
+                }
+            }
+        }
+        Ok(found)
+    }
+
+    fn metadata_owner(workspaces: &[(String, WorkspaceHome)], project_key: &str) -> Option<String> {
+        if project_key.is_empty() {
+            workspaces.first().map(|(id, _)| id.clone())
+        } else {
+            workspaces
+                .iter()
+                .find(|(_, home)| {
+                    home.project_key == project_key
+                        || home.aliases.iter().any(|alias| alias == project_key)
+                })
+                .map(|(id, _)| id.clone())
+        }
     }
 
     fn reap_tombstoned_sessions(&self, workspace_id: &str, sessions: &Path) {
@@ -2455,8 +2518,8 @@ mod project_home_tests {
         }
     }
 
-    #[test]
-    fn project_views_share_one_physical_lock_but_not_session_ownership() {
+    #[tokio::test]
+    async fn project_views_share_one_physical_lock_but_not_session_ownership() {
         let root = tempfile::tempdir().unwrap();
         let homes = WorkspaceHomes::default();
         homes.attach_project("w_folder", "folder", root.path());
@@ -2470,14 +2533,14 @@ mod project_home_tests {
             .save_meta(&meta("s_workspace", "w_workspace", root.path()))
             .unwrap();
 
-        let listed = store.list_meta().unwrap();
+        let listed = store.list_meta().await.unwrap();
         assert_eq!(listed.len(), 2, "the shared directory is scanned once");
         assert!(listed.iter().any(|meta| meta.workspace_id == "w_folder"));
         assert!(listed.iter().any(|meta| meta.workspace_id == "w_workspace"));
         assert!(store.load_meta("w_workspace", "s_folder").is_err());
 
         homes.detach("w_folder");
-        let listed = store.list_meta().unwrap();
+        let listed = store.list_meta().await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].workspace_id, "w_workspace");
         assert!(root
@@ -2486,11 +2549,11 @@ mod project_home_tests {
             .is_file());
 
         homes.attach_project("w_folder", "folder", root.path());
-        assert_eq!(store.list_meta().unwrap().len(), 2);
+        assert_eq!(store.list_meta().await.unwrap().len(), 2);
     }
 
-    #[test]
-    fn a_legacy_workspace_file_key_is_claimed_by_the_directory() {
+    #[tokio::test]
+    async fn a_legacy_workspace_file_key_is_claimed_by_the_directory() {
         let root = tempfile::tempdir().unwrap();
         let homes = WorkspaceHomes::default();
         homes.attach_project("w_old", "workspace:filehash", root.path());
@@ -2506,7 +2569,7 @@ mod project_home_tests {
             &["workspace:filehash".into()],
             root.path(),
         );
-        let listed = store.list_meta().unwrap();
+        let listed = store.list_meta().await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, "s_old");
         assert_eq!(listed[0].workspace_id, "w_dir");

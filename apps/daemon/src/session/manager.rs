@@ -1198,7 +1198,8 @@ impl SessionManager {
         let expires_at_ms = now.saturating_add(IMPORT_CANDIDATE_TTL_MS);
         let duplicate_keys: HashSet<String> = self
             .store
-            .list_meta()?
+            .list_meta()
+            .await?
             .into_iter()
             .filter(|meta| meta.workspace_id == workspace_id)
             .filter_map(|meta| meta.imported.map(|imported| imported.source_key))
@@ -1299,7 +1300,7 @@ impl SessionManager {
         {
             anyhow::bail!("that import candidate expired; refresh the list");
         }
-        if self.store.list_meta()?.into_iter().any(|meta| {
+        if self.store.list_meta().await?.into_iter().any(|meta| {
             meta.workspace_id == workspace_id
                 && meta
                     .imported
@@ -1425,7 +1426,7 @@ impl SessionManager {
             return Ok(live);
         }
         // One rehydration at a time, but not under the map's write lock: the
-        // scan and chat read are slow, and other Session readers must not
+        // metadata lookup and chat read can be slow, and other Session readers must not
         // queue behind them.
         let _loading = self.live_load.lock().await;
         if let Some(live) = self.sessions.read().await.get(session_id).cloned() {
@@ -1435,9 +1436,8 @@ impl SessionManager {
         // to past conversations.
         let mut meta = self
             .store
-            .list_meta()?
-            .into_iter()
-            .find(|meta| meta.id == session_id)
+            .find_meta(session_id)
+            .await?
             .ok_or_else(|| SessionMissing(session_id.to_string()))?;
         // Reading a layout this build predates would not give a partial view,
         // it would give a wrong one, and any reply written back would corrupt
@@ -1665,7 +1665,8 @@ impl SessionManager {
         lean: bool,
     ) -> Result<Vec<SessionSummary>> {
         let mut out = Vec::new();
-        for mut meta in self.store.list_meta()? {
+        for mut meta in self.store.list_meta().await? {
+            crate::blocking::breathe().await;
             if let Some(workspace) = workspace_id {
                 if meta.workspace_id != workspace {
                     continue;
@@ -2117,7 +2118,7 @@ impl SessionManager {
                     }
                 })
                 .collect();
-            let metas = match self.store.list_meta() {
+            let metas = match self.store.list_meta().await {
                 Ok(metas) => metas,
                 Err(_) => return views,
             };
@@ -4575,7 +4576,8 @@ impl SessionManager {
             Some(live) => Some(live.meta.lock().await.workspace_id.clone()),
             None => self
                 .store
-                .list_meta()?
+                .list_meta()
+                .await?
                 .into_iter()
                 .find(|meta| meta.id == session_id)
                 .map(|meta| meta.workspace_id),
@@ -10012,7 +10014,7 @@ mod tests {
 
         sessions.delete("s1").await.unwrap();
 
-        assert!(sessions.store.list_meta().unwrap().is_empty());
+        assert!(sessions.store.list_meta().await.unwrap().is_empty());
         assert!(sessions.store.load_chat("w1", "s1").is_err());
         assert!(
             !scratch.exists(),
