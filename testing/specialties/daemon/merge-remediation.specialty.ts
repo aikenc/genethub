@@ -76,7 +76,7 @@ check("waiting-and-paused-children", "team reconciliation preserves a genuine qu
   t.assertions.assert(after.summary.status === "waiting" && after.summary.interactionSummary?.count === before.summary.interactionSummary?.count, "team script answered a Human question");
 });
 
-check("failed-and-stuck-terminals", "a real failed turn carrying paused closes as failed; a silent worker is actually interrupted before it can be reported as terminal", async (t, r) => {
+check("failed-and-stuck-terminals", "a failed paused turn closes as failed; silence keeps a live worker reserved and emits one diagnostic, while explicit Human stop preserves its paused input and pending work", async (t, r) => {
   const failed = sid(r.ok(["spawn", "--kind", "work", "--desc", "failing child", "--model", "fixture", "fail now"], { TEAM_AGENT: "ctl-exit-without-terminal", GENEHUB_SESSION_ID: r.front }));
   await t.tools.waitUntil(async () => (await r.snapshot(failed)).summary.status === "failed", 25000);
   t.assertions.assert((await r.snapshot(failed)).summary.inputSummary?.paused, "fixture did not reach real paused failure");
@@ -85,10 +85,24 @@ check("failed-and-stuck-terminals", "a real failed turn carrying paused closes a
   const stuck = sid(r.ok(["spawn", "--kind", "work", "--desc", "silent child", "--model", "fixture", "stay silent"], { TEAM_AGENT: "ctl-accept-then-silent", GENEHUB_SESSION_ID: r.front }));
   await t.tools.waitUntil(async () => (await r.snapshot(stuck)).summary.status === "running", 20000);
   await new Promise(resolve => setTimeout(resolve, 1300));
-  r.ok(["hook"], { TEAM_STUCK_AFTER: "1", TEAM_BATCH_STUCK_AFTER: "1" });
-  await t.tools.waitUntil(async () => (await r.snapshot(stuck)).summary.status !== "running", 10000);
-  r.ok(["hook"]);
-  t.assertions.assert(!existsSync(r.state("pending", `${stuck}.json`)), "confirmed timeout has no terminal bookkeeping");
+  const hook = () => r.ok(["hook"], { TEAM_STUCK_AFTER: "1", TEAM_BATCH_STUCK_AFTER: "1" });
+  hook(); hook();
+  const record = () => JSON.parse(readFileSync(r.state("pending", `${stuck}.json`), "utf8"));
+  const quiet = (await r.snapshot(stuck)).summary;
+  t.assertions.assert(quiet.status === "running" && !quiet.inputSummary?.paused, "diagnostic silence cancelled the live worker");
+  t.assertions.assert(!record().done && !record().stopReason && !existsSync(r.state("done", `${stuck}.json`)), "silence fabricated a terminal result or retired its reservation");
+  t.assertions.assert(record().notified.filter((event: string) => event === "quiet-check").length === 1, "quiet diagnostic missing or repeated");
+  const lock = record().lock;
+  t.assertions.assert(typeof lock === "string" && existsSync(lock), "live worker has no physical writer reservation");
+  const queuedBeforeStop = (await r.snapshot(stuck)).items.filter(item => item.type === "userMessage").map(item => item.id);
+  await r.client.call({ type: "session.interrupt", payload: { sessionId: stuck } });
+  await t.tools.waitUntil(async () => Boolean((await r.snapshot(stuck)).summary.inputSummary?.paused), 10000);
+  hook();
+  const paused = await r.snapshot(stuck);
+  t.assertions.assert(paused.summary.inputSummary?.paused && existsSync(r.state("pending", `${stuck}.json`)), "explicit Human stop lost its paused pending work");
+  t.assertions.assert(!record().done && record().lock === lock && existsSync(lock) && !existsSync(r.state("done", `${stuck}.json`)), "Human pause released the reservation or fabricated completion");
+  const inputIds = new Set(paused.items.filter(item => item.type === "userMessage").map(item => item.id));
+  t.assertions.assert(queuedBeforeStop.length > 0 && queuedBeforeStop.every(id => inputIds.has(id)), "explicit Human pause lost the original input");
 });
 
 check("existing-branch-protection", "recreating a removed worktree never resets an existing branch to another base", async (t, r) => {
