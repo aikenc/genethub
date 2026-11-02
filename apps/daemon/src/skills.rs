@@ -628,9 +628,10 @@ mod tests {
         }
         let dir = skill.file_path.parent().unwrap();
         for file in [
+            "../genehub/references/team-template/tools/run.py",
             "../genehub/references/team-template/tools/team.py",
             "../genehub/references/team-template/tools/pm_board_server.py",
-            "../genehub/references/team-template/skills/team-reflect/references/upgrade.md",
+            "../genehub/references/team-template/skills/genet_builtin/team-reflect/references/upgrade.md",
             "../genehub/references/team-admin-skill/team-admin/SKILL.md",
         ] {
             assert!(
@@ -646,7 +647,7 @@ mod tests {
             (
                 "template.md",
                 &[
-                    "tools/team.py",
+                    "tools/run.py",
                     "spawn --space",
                     "send --to",
                     "立即结束本轮",
