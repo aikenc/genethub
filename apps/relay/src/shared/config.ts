@@ -155,8 +155,8 @@ export const config = {
     maxFabricStreams: boundedEnv("RELAY_MAX_FABRIC_STREAMS", 100_000, 1, 2_000_000),
     /**
      * Bounds reconnect replay fences without ever evicting a live security
-     * fence. Once full, new endpoint identities fail closed until an expiring
-     * identity can be pruned or the stateless relay is restarted.
+     * fence. Disconnected identities are pruned after all older admissions
+     * finish; live sockets and delayed authorization replies stay fenced.
      */
     maxFabricGenerationFences: boundedEnv(
       "RELAY_MAX_FABRIC_GENERATION_FENCES",

@@ -80,20 +80,22 @@ export async function startRelay(
 
   const app = new Hono();
   const healthBody = () => {
-    const ready = fabricForwarder.authorityAvailable();
+    const admission = fabricForwarder.admissionCapacity();
+    const ready = fabricForwarder.authorityAvailable() && admission.available;
     return {
       status: ready ? "ok" : "degraded",
       productVersion: process.env.GENEHUB_PRODUCT_VERSION ?? null,
       ready,
       fabric: {
         ...fabricForwarder.stats(),
-        authorityReady: ready,
+        authorityReady: fabricForwarder.authorityAvailable(),
+        admission,
       },
     };
   };
   app.get("/api/health", (c) => c.json(healthBody()));
   app.get("/api/ready", (c) =>
-    fabricForwarder.authorityAvailable()
+    healthBody().ready
       ? c.json(healthBody(), 200)
       : c.json(healthBody(), 503),
   );

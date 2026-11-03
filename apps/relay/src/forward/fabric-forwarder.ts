@@ -178,6 +178,10 @@ export class FabricForwarder {
     return this.core.stats();
   }
 
+  admissionCapacity(): ReturnType<FabricCore["admissionCapacity"]> {
+    return this.core.admissionCapacity();
+  }
+
   authorityAvailable(): boolean {
     return this.authorityReady && !this.closing;
   }
@@ -277,6 +281,20 @@ export class FabricForwarder {
     socket: Duplex,
     head: Buffer,
   ): Promise<void> {
+    const admission = this.core.beginAdmission();
+    try {
+      await this.admit(request, socket, head, admission);
+    } finally {
+      this.core.finishAdmission(admission);
+    }
+  }
+
+  private async admit(
+    request: IncomingMessage,
+    socket: Duplex,
+    head: Buffer,
+    admission: number,
+  ): Promise<void> {
     if (this.closing || !this.authorityReady) {
       return reject(socket, 503, "Service Unavailable");
     }
@@ -346,7 +364,7 @@ export class FabricForwarder {
         connectionGeneration: grant.connectionGeneration,
         presenceLeaseSeconds: grant.presenceLeaseSeconds,
         connectionEpoch: randomBytes(16).toString("hex"),
-      }, revocationCheckpoint);
+      }, revocationCheckpoint, admission);
     });
   }
 
@@ -354,6 +372,7 @@ export class FabricForwarder {
     socket: WebSocket,
     rawContext: FabricEndpointContext,
     revocationCheckpoint: number,
+    admission: number,
   ): void {
     const context = Object.freeze({ ...rawContext });
     this.socketDiagnostics.set(socket, {
@@ -435,7 +454,7 @@ export class FabricForwarder {
       });
       this.closeSocket(socket);
     });
-    const previous = this.core.register(connection, revocationCheckpoint);
+    const previous = this.core.register(connection, revocationCheckpoint, admission);
     if (connection.closed) return;
     this.peers.add(peer);
     previous?.close(4000);

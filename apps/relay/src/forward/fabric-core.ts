@@ -128,15 +128,19 @@ export class FabricCore {
    *
    * This deliberately outlives the socket. Otherwise an older authorization
    * response that was delayed in flight could become current after the newer
-   * socket disconnected. Expiring client identities are pruned after their
-   * authority expiry; non-expiring node identities are stable and remain
-   * fenced for this process lifetime. Reusing either with a reset generation
-   * is invalid.
+   * socket disconnected. Tracked admissions retain the fence until no older
+   * authorization can return. Callers without admission tracking retain the
+   * conservative authority-expiry fence.
    */
   private readonly connectionGenerations = new Map<
     string,
-    { generation: number; expiresAt: number | null }
+    { generation: number; expiresAt: number | null; admissionSequence: number | null }
   >();
+  // A completed admission may only be overtaken by authorizations already in
+  // flight. Track that finite window instead of retaining disconnected client
+  // identities for their entire account-session lifetime.
+  private admissionSequence = 0;
+  private readonly admissions = new Set<number>();
   private readonly routes = new Map<string, FabricPeerBinding>();
   private readonly revokedEndpoints = new Map<string, RevocationFence>();
   private readonly revokedRoutes = new Map<string, RevocationFence>();
@@ -195,9 +199,30 @@ export class FabricCore {
     return this.revocationSequence;
   }
 
+  beginAdmission(): number {
+    const admission = ++this.admissionSequence;
+    this.admissions.add(admission);
+    return admission;
+  }
+
+  finishAdmission(admission: number): void {
+    this.admissions.delete(admission);
+    this.pruneConnectionGenerations();
+  }
+
+  admissionCapacity(): { generationFences: number; limit: number; available: boolean } {
+    this.pruneConnectionGenerations();
+    return {
+      generationFences: this.connectionGenerations.size,
+      limit: this.maxConnectionGenerations,
+      available: this.connectionGenerations.size < this.maxConnectionGenerations,
+    };
+  }
+
   register(
     connection: FabricEndpointConnection,
     revocationCheckpoint = this.revocationSequence,
+    admission?: number,
   ): FabricEndpointConnection | null {
     this.pruneRevocations();
     this.pruneConnectionGenerations();
@@ -210,6 +235,11 @@ export class FabricCore {
     ) {
       connection.closed = true;
       connection.close(4403);
+      return null;
+    }
+    if (admission !== undefined && !this.admissions.has(admission)) {
+      connection.closed = true;
+      connection.close(4409);
       return null;
     }
     const handle = connection.context.endpointHandle;
@@ -231,6 +261,7 @@ export class FabricCore {
     this.connectionGenerations.set(handle, {
       generation,
       expiresAt: parseExpiry(connection.context.expiresAt),
+      admissionSequence: admission === undefined ? null : this.admissionSequence,
     });
     const previous = this.endpoints.get(handle) ?? null;
     if (previous && previous !== connection) {
@@ -822,11 +853,16 @@ export class FabricCore {
 
   private pruneConnectionGenerations(): void {
     const now = this.now();
+    const oldestAdmission = Math.min(Infinity, ...this.admissions);
     for (const [handle, fence] of this.connectionGenerations) {
+      // Keep the fence while an earlier authorization can still return, even
+      // after the winning socket disconnects. Future admissions consult the
+      // authority after this generation was issued and cannot return an older
+      // generation. Untracked callers retain the conservative expiry fence.
       if (
-        fence.expiresAt !== null &&
-        fence.expiresAt <= now &&
-        !this.endpoints.has(handle)
+        !this.endpoints.has(handle) &&
+        ((fence.expiresAt !== null && fence.expiresAt <= now) ||
+          (fence.admissionSequence !== null && fence.admissionSequence < oldestAdmission))
       ) {
         this.connectionGenerations.delete(handle);
       }
