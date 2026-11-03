@@ -1704,6 +1704,24 @@ impl SessionManager {
             .abort_artifact(&workspace_id, session_id, upload_id)
     }
 
+    /// Loaded Agents remain authoritative even if a damaged or shared project
+    /// home prevented their metadata from appearing in the persisted catalog.
+    pub async fn has_active_sessions(&self, workspace_ids: &[String]) -> bool {
+        let sessions = self.sessions.read().await;
+        for live in sessions.values() {
+            let workspace = live.meta.lock().await.workspace_id.clone();
+            if workspace_ids.contains(&workspace)
+                && matches!(
+                    *live.status.lock().await,
+                    SessionStatus::Running | SessionStatus::Waiting
+                )
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     pub async fn list(
         &self,
         workspace_id: Option<&str>,

@@ -2180,22 +2180,26 @@ async fn dispatch(
         }).await,
 
         Request::WorkspaceRemove { workspace_id } => Box::pin(async move {
-            let sessions = match state.sessions.list(Some(&workspace_id), true).await {
+            let planned = match state.workspaces.removal_plan(&workspace_id).await {
+                Ok(planned) => planned,
+                Err(error) => return Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
+            };
+            let sessions = match state.sessions.list_with_projection(None, true, true).await {
                 Ok(sessions) => sessions,
                 Err(error) => return failed(error),
             };
-            if sessions.iter().any(|session| {
-                matches!(
+            if state.sessions.has_active_sessions(&planned).await || sessions.iter().any(|session| {
+                planned.contains(&session.workspace_id) && matches!(
                     session.status,
                     genehub_proto::SessionStatus::Running | genehub_proto::SessionStatus::Waiting
                 )
             }) {
                 return Handled::err(
                     ErrorCode::Conflict,
-                    "stop the workspace's running or waiting sessions before removing it",
+                    "项目或成员仍有运行中、等待交互的会话，请先处理后再移除。",
                 );
             }
-            match state.workspaces.remove(&workspace_id).await {
+            match state.workspaces.remove_planned(&workspace_id, &planned).await {
                 Ok(workspaces) => Handled::ok(Reply::Workspaces(workspaces)),
                 Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
             }
