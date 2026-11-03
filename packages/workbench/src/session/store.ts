@@ -1093,36 +1093,15 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
 
   async removeWorkspace(workspaceId) {
     const client = require_(get().client);
-    // Plan from current public facts; never infer membership from names or paths.
-    const catalog = await client.call({ type: "workspace.list" });
-    if (catalog?.type !== "workspaces") throw new Error("无法读取项目列表，未执行移除。");
-    const planned = new Set<string>();
-    const order: string[] = [];
-    const visit = (id: string) => {
-      if (planned.has(id)) return;
-      planned.add(id);
-      for (const w of catalog.data) if (w.agentSpace?.parentWorkspaceId === id) visit(w.id);
-      order.push(id);
-    };
-    visit(workspaceId);
-    const summary = await client.call({ type: "session.list", payload: { workspaceId: null, includeArchived: true, lean: true } });
-    if (summary?.type !== "sessions") throw new Error("无法确认会话状态，未执行移除。");
-    if (summary.data.some(s => planned.has(s.workspaceId) && ["running", "waiting"].includes(s.status))) {
-      throw new Error("项目或其成员仍有运行中、等待交互的会话，请先处理后再移除。");
-    }
-    let remaining = catalog.data;
-    let failure: unknown;
-    // Existing per-workspace RPC keeps its authoritative activity and child guards.
-    // Stop on a race/failure and reconcile completed removals, without claiming atomicity.
-    for (const id of order) {
-      if (get().client !== client) { failure = new Error("设备已切换，停止后续移除"); break; }
-      try {
-        const reply = await client.call({ type: "workspace.remove", payload: { workspaceId: id } });
-        if (reply?.type !== "workspaces") throw new Error("未收到移除结果");
-        remaining = reply.data;
-      } catch (e) { failure = e; break; }
-    }
-    if (get().client !== client) throw failure ?? new Error("设备已切换");
+    // The daemon owns subtree membership and activity checks. One request
+    // commits the full registration change, avoiding per-member round trips
+    // and partial removals while background clients query the same team.
+    const catalog = { data: get().workspaces };
+    const summary = { data: get().sessions };
+    const reply = await client.call({ type: "workspace.remove", payload: { workspaceId } });
+    if (reply?.type !== "workspaces") throw new Error("未收到移除结果");
+    if (get().client !== client) throw new Error("设备已切换");
+    const remaining = reply.data;
     const before = get();
     const removedIds = new Set(catalog.data.filter(w => !remaining.some(r => r.id === w.id)).map(w => w.id));
     const removedSessionIds = new Set(summary.data.filter(s => removedIds.has(s.workspaceId)).map(s => s.id));
@@ -1135,7 +1114,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       (before.activeSessionId ? removedSessionIds.has(before.activeSessionId) : false) ||
       Boolean(before.draft && removedIds.has(before.draft.workspaceId));
     const nextWorkspaceId = removedWasActive
-      ? (remaining[0]?.id ?? null)
+      ? (before.workspaces.find(w => !removedIds.has(w.id))?.id ?? null)
       : before.activeWorkspaceId;
     set((state) => {
       const tabs = state.tabs.filter((tab) => !removedTabs.some((removed) => removed.id === tab.id));
@@ -1143,7 +1122,9 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         ? state.activeTabId
         : (tabs.at(-1)?.id ?? null);
       return {
-        workspaces: remaining,
+        // Concurrent removals can finish out of order. Apply only the known
+        // removals; an older full-catalog reply must not resurrect another team.
+        workspaces: state.workspaces.filter(w => !removedIds.has(w.id)),
         activeWorkspaceId: nextWorkspaceId,
         activeSessionId: removedWasActive ? null : state.activeSessionId,
         draft: state.draft && removedIds.has(state.draft.workspaceId) ? null : state.draft,
@@ -1163,7 +1144,6 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     if (removedWasActive && nextWorkspaceId) {
       get().newSession(nextWorkspaceId, null, { addressScope: "workspace" });
     }
-    if (failure) throw new Error(`移除未全部完成，列表已更新：${failure instanceof Error ? failure.message : String(failure)}`);
   },
 
   async configureAgentSpace(workspaceId, expectedRevision, operation) {

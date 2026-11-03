@@ -37,3 +37,9 @@ description: 按任务选择 Owner 的团队公共约定：前台、专业执行
 ## 系统消息
 
 以「用途:」开头的消息是脚本写的（`result`、`report`、`watchdog`、`tell-user`、`reflect`、`human`、`patrol`、`task`/`question`/`note`），不是人类的直接批准；带 `ref: ghref:item:<会话>:<消息>` 的可用 `"$GENEHUB_CLI" session narrative <会话> --item <消息>` 取全文。命令行一律用 `"$GENEHUB_CLI"`，不要猜 `genet`：本机可能装着别的渠道。
+
+## 项目登记与移除
+
+`experts`、`me`、看板和 timer 中的目录查询只读，不能把缺失的项目或成员自动 `space open`。用户从列表移除团队后，保留的目录和会话不等于恢复登记的授权；恢复由明确的打开、安装或建队操作执行。项目移除由平台一次处理整个成员树，任何成员运行中或等待交互时拒绝整组移除，不通过逐个移除成员绕过检查。
+
+已有团队升级时，在定义源合入本条及内置 `tools/genet_builtin/team.py` 的查询修复，保留业务 Class、数据与回执，构建完整制品后安装。旧版 `tools/team.py` 若仍含查询时自动打开的实现，也要在迁移时移除该副作用；只更新平台不会自动改写已有团队副本。

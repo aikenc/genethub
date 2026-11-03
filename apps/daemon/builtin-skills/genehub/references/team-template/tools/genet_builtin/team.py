@@ -575,37 +575,9 @@ def experts():
     """Every expert on this machine: its name, root directory, and the id of each of its Spaces."""
     entries = workspaces()
     by_root = {workspace_root(entry): entry["id"] for entry in entries}
-    by_root_name = {workspace_root(entry): entry.get("name") for entry in entries}
-    spaces_dirs = {os.path.dirname(root) for root in by_root if os.path.basename(os.path.dirname(root)) == "spaces"}
-    reopened = False
-    for spaces_dir in list(spaces_dirs):
-        try:
-            candidates = [os.path.join(spaces_dir, item) for item in os.listdir(spaces_dir)]
-        except OSError:
-            continue
-        for candidate in candidates:
-            if not os.path.isdir(candidate):
-                continue
-            info = descriptor(candidate)
-            if not is_space(info, candidate):
-                continue
-            real = os.path.realpath(candidate)
-            expected_name = info.get("name") or os.path.basename(real)
-            roles = child_role_names(real) or ["research", "work", "reflect"]
-            missing_role = any(
-                os.path.isdir(os.path.join(real, "spaces", role))
-                and os.path.realpath(os.path.join(real, "spaces", role)) not in by_root
-                for role in roles
-            )
-            if real not in by_root or missing_role or by_root_name.get(real) != expected_name:
-                try:
-                    genet("space", "open", real)
-                    reopened = True
-                except ExpertError:
-                    pass
-    if reopened:
-        entries = workspaces()
-        by_root = {workspace_root(entry): entry["id"] for entry in entries}
+    # Directory lookup is read-only. The daemon discovers active Spaces and
+    # preserves removal tombstones; opening missing roots here resurrects teams
+    # the user just removed. Explicit setup/open commands own registration.
     found = {}
     for root, workspace_id in by_root.items():
         info = descriptor(root)
@@ -632,21 +604,6 @@ def me(root):
         child = by_root.get(os.path.realpath(os.path.join(real, "spaces", role)))
         if child:
             spaces[role] = child
-    expected_count = 1 + len(roles)
-    if len(spaces) < expected_count:
-        try:
-            genet("space", "open", real)
-            entries = workspaces()
-            by_root = {workspace_root(entry): entry["id"] for entry in entries}
-            spaces = {}
-            if real in by_root:
-                spaces["root"] = by_root[real]
-            for role in roles:
-                child = by_root.get(os.path.realpath(os.path.join(real, "spaces", role)))
-                if child:
-                    spaces[role] = child
-        except ExpertError:
-            pass
     return name, {"root": real, "spaces": spaces}
 
 

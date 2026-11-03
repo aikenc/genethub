@@ -1023,47 +1023,52 @@ impl Workspaces {
         Ok(self.describe_with_space(&updated, &config))
     }
 
-    /// Removes a project from the active registry without touching its files or
-    /// conversations. The durable entry is a tombstone with enough identity to
-    /// reactivate the same id when the source is opened again.
+    /// Snapshot the active registration subtree before checking session activity.
+    pub async fn removal_plan(&self, id: &str) -> Result<Vec<String>> {
+        let entries = self.entries.read().await;
+        let config = self.config.read().await;
+        removal_ids(&entries, &config, id)
+    }
+
+    /// Removes registration only, preserving files and conversations.
     pub async fn remove(&self, id: &str) -> Result<Vec<WorkspaceInfo>> {
+        let planned = self.removal_plan(id).await?;
+        self.remove_planned(id, &planned).await
+    }
+
+    /// Commit an activity-checked subtree in one durable config write. A changed
+    /// tree must be checked again; never silently remove a newly added member.
+    pub async fn remove_planned(&self, id: &str, checked: &[String]) -> Result<Vec<WorkspaceInfo>> {
         let mut entries = self.entries.write().await;
-        let entry = entries
-            .get(id)
-            .cloned()
-            .ok_or_else(|| anyhow!("no such workspace: {id}"))?;
-        if entry.removed {
-            let config = self.config.read().await;
+        let mut config = self.config.write().await;
+        let planned = removal_ids(&entries, &config, id)?;
+        if planned
+            .iter()
+            .all(|id| entries.get(id).is_some_and(|entry| entry.removed))
+        {
             return Ok(active_descriptions(entries.values(), &config));
         }
-        let config_snapshot = self.config.read().await;
-        let has_active_children = config_snapshot.agent_spaces.iter().any(|space| {
-            space.parent_workspace_id.as_deref() == Some(id)
-                && entries
-                    .get(&space.workspace_id)
-                    .is_some_and(|child| !child.removed)
-        });
-        drop(config_snapshot);
-        if has_active_children {
-            anyhow::bail!("remove or re-parent this AgentSpace's children first");
+        if planned != checked {
+            anyhow::bail!("project membership changed; refresh and retry removal");
         }
-
-        let mut updated = entry;
-        updated.removed = true;
-        let mut config = self.config.write().await;
         let mut next = config.clone();
-        let saved = next
-            .workspaces
-            .iter_mut()
-            .find(|entry| entry.id == id)
-            .ok_or_else(|| anyhow!("workspace {id} is missing from config"))?;
-        saved.removed = true;
+        for id in &planned {
+            let saved = next
+                .workspaces
+                .iter_mut()
+                .find(|entry| entry.id == *id)
+                .ok_or_else(|| anyhow!("workspace {id} is missing from config"))?;
+            saved.removed = true;
+        }
         next.workspace_catalog_revision = next.workspace_catalog_revision.saturating_add(1);
         next.save(&self.config_path)?;
         *config = next;
-        entries.insert(id.to_string(), updated);
-        self.homes.detach(id);
-
+        for id in &planned {
+            if let Some(entry) = entries.get_mut(id) {
+                entry.removed = true;
+            }
+            self.homes.detach(id);
+        }
         Ok(active_descriptions(entries.values(), &config))
     }
 
@@ -1156,6 +1161,40 @@ impl Workspaces {
         }
         *config = next;
     }
+}
+
+fn removal_ids(
+    entries: &HashMap<String, WorkspaceEntry>,
+    config: &Config,
+    id: &str,
+) -> Result<Vec<String>> {
+    let root = entries
+        .get(id)
+        .ok_or_else(|| anyhow!("no such workspace: {id}"))?;
+    let mut ids = HashSet::from([id.to_owned()]);
+    if !root.removed {
+        loop {
+            let previous = ids.len();
+            for space in &config.agent_spaces {
+                if space
+                    .parent_workspace_id
+                    .as_ref()
+                    .is_some_and(|parent| ids.contains(parent))
+                    && entries
+                        .get(&space.workspace_id)
+                        .is_some_and(|child| !child.removed)
+                {
+                    ids.insert(space.workspace_id.clone());
+                }
+            }
+            if ids.len() == previous {
+                break;
+            }
+        }
+    }
+    let mut planned: Vec<_> = ids.into_iter().collect();
+    planned.sort();
+    Ok(planned)
 }
 
 fn active_descriptions<'a>(
