@@ -64,7 +64,6 @@ with av.open(sys.argv[1],'w') as out:
       const closeInfo = page.getByRole("button", { name: "关闭信息", exact: true });
       if (await closeInfo.isVisible()) await closeInfo.click();
     };
-    await openServiceAction('允许本次预览访问登记服务');
     await page.getByRole('button',{name:'连接音视频',exact:true}).click();
     await page.waitForFunction(()=>Array.from(document.querySelectorAll('video')).some(v=>v.videoWidth>0&&v.currentTime>0),{},{timeout:30000}).catch(async error => {
       const media = await page.evaluate(() => ({ secure: window.isSecureContext,
@@ -73,9 +72,9 @@ with av.open(sys.argv[1],'w') as out:
           tracks: v.srcObject instanceof MediaStream ? v.srcObject.getTracks().map(t => ({ kind: t.kind, ready: t.readyState, enabled: t.enabled, muted: t.muted })) : [] })) }));
       throw new Error(`${error instanceof Error ? error.message : String(error)}; media evidence=${JSON.stringify({ media, browser: consumer?.errors.slice(-6).map(e => e.slice(0,300)), body: (await page.locator('body').innerText()).slice(-1400), appOutput })}`);
     });
-    await openServiceAction('暂停服务访问');
+    await openServiceAction('暂停预览连接');
     // Re-enable and query application's real session inventory via its public route.
-    await openServiceAction('允许本次预览访问登记服务');
+    await openServiceAction('继续预览连接');
     const frame=page.frameLocator('iframe').first();
     await frame.getByRole('button',{name:'请求后端',exact:true}).click();
     await t.tools.waitUntil(async()=>{

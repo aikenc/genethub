@@ -50,11 +50,11 @@ export function PreviewServiceSection({ service }: { service: PreviewServiceInfo
       <div className="mt-2 flex flex-col items-start gap-2">
         {service.canToggle ? (
           <button type="button" className="rounded border border-line px-2 py-1 text-left hover:bg-raised" onClick={service.onToggle}>
-            {service.enabled ? "暂停服务访问" : "允许本次预览访问登记服务"}
+            {service.enabled ? "暂停预览连接" : "继续预览连接"}
           </button>
         ) : null}
         <button type="button" className="rounded border border-line px-2 py-1 text-left hover:bg-raised" onClick={service.onRecheck}>
-          重新检查服务
+          重新连接
         </button>
       </div>
     </section>
