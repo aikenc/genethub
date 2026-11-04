@@ -2,7 +2,12 @@
   "schema": "genet.hook.v1",
   "event": "timer",
   "every": "5s",
-  "exec": ["${GENEHUB_PYTHON}", "tools/run.py", "tick"],
+  "exec": [
+    "${GENEHUB_PYTHON}",
+    "tools/run.py",
+    "tick"
+  ],
   "cwd": ".",
-  "timeout": 60
+  "timeout": 60,
+  "schedule": "fixed-delay"
 }

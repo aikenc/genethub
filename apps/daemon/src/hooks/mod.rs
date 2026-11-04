@@ -79,8 +79,7 @@ pub struct HookList {
 
 /// How many hook commands run at the same time, across every project.
 pub const MAX_CONCURRENT: usize = 8;
-/// A run that overran its interval does not start again at once: this much
-/// quiet follows it, so a slow hook cannot spin.
+/// Minimum quiet time for the opt-in start-based interval schedule.
 const MIN_GAP: Duration = Duration::from_secs(1);
 /// How long to wait for a finished command's pipes to drain: a grandchild that
 /// inherited them must not hold the record open.
@@ -116,18 +115,21 @@ struct Run {
     last_error: Option<String>,
 }
 
-/// Whether a hook should start now. The first run is immediate; after that a
-/// hook is due `every` after it last started, but never sooner than [`MIN_GAP`]
-/// after it last finished.
-fn due(now: Instant, run: &Run, every: Duration) -> bool {
+/// The first run is immediate. Subsequent runs default to a full interval
+/// after completion; start-based timing is an explicit, short-command opt-in.
+fn due(now: Instant, run: &Run, spec: &file::Spec) -> bool {
     if run.running {
         return false;
     }
-    let Some(started) = run.last_started else {
-        return true;
-    };
-    let finished = run.last_finished.unwrap_or(started);
-    now >= (started + every).max(finished + MIN_GAP)
+    match spec.schedule {
+        file::Schedule::FixedDelay => run
+            .last_finished
+            .is_none_or(|finished| now >= finished + spec.every),
+        file::Schedule::Interval => run.last_started.is_none_or(|started| {
+            let finished = run.last_finished.unwrap_or(started);
+            now >= (started + spec.every).max(finished + MIN_GAP)
+        }),
+    }
 }
 
 type Key = (String, String);
@@ -204,7 +206,7 @@ impl Hooks {
             {
                 let mut runs = self.runs.lock().expect("never poisoned");
                 let run = runs.entry(key.clone()).or_default();
-                if !due(now, run, spec.every) {
+                if !due(now, run, &spec) {
                     continue;
                 }
                 run.running = true;
@@ -305,6 +307,7 @@ impl Hooks {
             }
             return;
         }
+        let mut recovered_completion = false;
         let ownership = lock_file(&path).and_then(|guard| {
             let Some(mut guard) = guard else {
                 return Ok(None);
@@ -329,9 +332,28 @@ impl Hooks {
                 }
             };
             let now = now_ms();
-            if now.saturating_sub(previous) < spec.every.as_millis() as i64
-                || now.saturating_sub(finished) < MIN_GAP.as_millis() as i64
-            {
+            if spec.schedule == file::Schedule::FixedDelay && previous > 0 && finished == 0 {
+                // The old owner disappeared without recording completion (or
+                // wrote the legacy start-only format). The lock proves it no
+                // longer owns execution. Observe that fact once, then honor a
+                // complete cooldown instead of immediately replaying its work.
+                guard.file.seek(SeekFrom::Start(8))?;
+                guard.file.write_all(&now.to_le_bytes())?;
+                guard.file.set_len(16)?;
+                guard.file.sync_all()?;
+                recovered_completion = true;
+                return Ok(None);
+            }
+            let cooling = match spec.schedule {
+                file::Schedule::FixedDelay => {
+                    previous > 0 && now.saturating_sub(finished) < spec.every.as_millis() as i64
+                }
+                file::Schedule::Interval => {
+                    now.saturating_sub(previous) < spec.every.as_millis() as i64
+                        || now.saturating_sub(finished) < MIN_GAP.as_millis() as i64
+                }
+            };
+            if cooling {
                 return Ok(None);
             }
             guard.file.seek(SeekFrom::Start(0))?;
@@ -349,13 +371,32 @@ impl Hooks {
                     .expect("never poisoned")
                     .remove(&path);
                 let mut runs = self.runs.lock().expect("never poisoned");
+                let record_outcome = recovered_completion || outcome.is_err();
                 if let Some(run) = runs.get_mut(&key) {
                     run.running = false;
+                    run.queued = false;
+                    if recovered_completion {
+                        if let Some(shared) = read_status_file(&directory).get(&id) {
+                            run.runs = run.runs.max(shared.runs);
+                            run.last_started_at_ms = shared.last_started_at_ms;
+                            run.consecutive_failures = shared.consecutive_failures;
+                        }
+                        run.last_finished = Some(Instant::now());
+                        run.last_exit_code = None;
+                        run.last_timed_out = false;
+                        run.consecutive_failures = run.consecutive_failures.saturating_add(1);
+                        run.last_error = Some(
+                            "previous owner stopped without completion; waiting for the next run"
+                                .to_string(),
+                        );
+                    }
                     if let Err(error) = outcome {
                         run.last_error = Some(format!("hook execution ownership failed: {error}"));
                         run.consecutive_failures = run.consecutive_failures.saturating_add(1);
-                        write_status_file(&key.0, &project_root, &runs);
                     }
+                }
+                if record_outcome {
+                    write_status_file(&key.0, &project_root, &runs);
                 }
                 return;
             }
@@ -493,9 +534,19 @@ impl Hooks {
             status = child.wait() => status.ok(),
             () = tokio::time::sleep(spec.timeout) => {
                 timed_out = true;
-                child.end().await
+                if spec.schedule == file::Schedule::Interval {
+                    None // Drop below enforces the short mode's hard deadline.
+                } else {
+                    child.end().await
+                }
             }
         };
+        if timed_out && spec.schedule == file::Schedule::Interval {
+            // Graceful termination permits two more seconds of business work,
+            // which would exceed e.g. a 150ms interval-mode allowance. Group's
+            // existing Drop kills the entire process tree without that grace.
+            drop(child);
+        }
         let tail = match stderr {
             Some(task) => tokio::time::timeout(SETTLE, task)
                 .await
@@ -510,10 +561,12 @@ impl Hooks {
         let exit_code = status.as_ref().and_then(|status| status.code());
         let signal = status.as_ref().and_then(crate::os_process::signal_of);
         let failure = if timed_out {
-            Some(format!(
-                "timed out after {}s and was ended",
-                spec.timeout.as_secs()
-            ))
+            let limit = if spec.timeout.subsec_nanos() == 0 {
+                format!("{}s", spec.timeout.as_secs())
+            } else {
+                format!("{}ms", spec.timeout.as_millis())
+            };
+            Some(format!("timed out after {limit} and was ended"))
         } else if let Some(signal) = signal {
             Some(format!(
                 "was ended by {}",

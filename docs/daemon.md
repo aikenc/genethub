@@ -189,13 +189,13 @@ DataEndpoint method 只有四个：
 **目录就是注册表。** hook 是 `<项目>/.genethub/hooks/<id>.genet.json`，一个文件一个 hook：
 
 ```json
-{"schema":"genet.hook.v1","event":"timer","every":"5s","exec":["python3","tools/team.py","hook"],
+{"schema":"genet.hook.v1","event":"timer","every":"5s","schedule":"fixed-delay","exec":["python3","tools/team.py","hook"],
  "cwd":".","timeout":20,"enabled":true,"owner":"…","payload":{}}
 ```
 
-daemon 解析 `schema`（缺省可）、`event`（只能是 `timer`）、`every`（`5s`/`1m`/`2h`，1 秒到 24 小时）、`exec`（argv，不经 shell）、`cwd`、`timeout`（1–300 秒，缺省 30）、`enabled`；`owner` 与 `payload` 原样保留、原样转交。没有"注册"这一步，也没有 CLI 去写或删——写文件、删文件就是全部；daemon 每个 tick（1 秒）重新读目录，所以新增、修改、停用、删除下一个 tick 就生效，不用重启。读不了的文件（坏 JSON、缺字段、符号链接、过大、大小写不同的重名）**被列出并写明原因，不会被忽略**，也不会运行。
+daemon 解析 `schema`（缺省可）、`event`（只能是 `timer`）、`every`（`5s`/`1m`/`2h`，1 秒到 24 小时）、`schedule`（缺省`fixed-delay`，可选`interval`）、`exec`（argv，不经 shell）、`cwd`、`timeout`（1–300 秒，缺省 30）、`enabled`；`owner` 与 `payload` 原样保留、原样转交。没有"注册"这一步，也没有 CLI 去写或删——写文件、删文件就是全部；daemon 每个 tick（1 秒）重新读目录，所以新增、修改、停用、删除下一个 tick 就生效，不用重启。读不了的文件（坏 JSON、缺字段、符号链接、过大、大小写不同的重名）**被列出并写明原因，不会被忽略**，也不会运行。
 
-**命令的运行**：作为独立进程组启动，超时则整组结束；同一 hook 同一时刻最多一个，跑得比间隔久时下一次至少隔 1 秒；每个 daemon 最多 8 个同时跑，满额时留到下次 tick 重读，不建立等待任务队列；实际启动前重新核对文件与项目登记。相同项目路径和 hook ID 使用 `.genethub/hooks/.locks/` 中的 OS 文件锁与上次启动时间，跨渠道和 daemon 重启共享间隔、不并发执行；命令仍必须幂等。已经启动的进程按原 timeout 收尾，删除或停用不追杀在途命令。stdin 是一行 JSON：`event`、`hook`、`firedAtMs`、`space.dir`、`payload`、`openEnvProblems`。环境变量：`GENEHUB_HOOK_ID`、`GENEHUB_HOOK_EVENT`、`GENEHUB_SPACE_DIR`、`GENEHUB_CLI`、`GENEHUB_PYTHON`，加项目 `open.env` 里的变量；GeneHub 自己的名字不能被 `open.env` 改写（以 `GENEHUB_` 开头的行被拒并写进 `openEnvProblems`）。`exec` 与 `cwd` 里的 `${GENEHUB_SPACE_DIR}`、`${GENEHUB_PYTHON}`、`${GENEHUB_CLI}` 会被展开，别的 `${X}` 原样保留。
+**命令的运行**：作为独立进程组启动，超时则整组结束；同一 hook 同一时刻最多一个；默认`fixed-delay`在命令及收尾完成后等待完整`every`，成功、失败和超时都遵守该等待。例如执行10秒、every为5秒，下次最早在第15秒开始，实际还受1秒扫描和容量影响。冷却期间释放执行名额，不积压或补跑错过的次数。显式`schedule: "interval"`沿用从开始计间隔及完成后至少1秒的规则，执行期限强制取`min(timeout, every×15%)`；支持亚秒期限（every=1秒时最多150毫秒），到期立即结束整个进程组，不增加正常模式的优雅退出时间。`interval`仅用于可安全强制结束的短命令，Team巡检使用默认固定等待；每个 daemon 最多 8 个同时跑，满额时留到下次 tick 重读，不建立等待任务队列；实际启动前重新核对文件与项目登记。相同项目路径和 hook ID 使用 `.genethub/hooks/.locks/` 中的 OS 文件锁与上次启动时间，跨渠道和 daemon 重启共享启动/完成时间与冷却、不并发执行。旧8字节启动记录或崩溃留下的未完成记录在确认文件锁已释放后，从首次确认停止时补记完成边界，再等完整冷却；没有补造业务成功。参与执行同一hook的daemon都需升级后才能遵守新计时语义；命令仍必须幂等。已经启动的进程按原 timeout 收尾，删除或停用不追杀在途命令。stdin 是一行 JSON：`event`、`hook`、`firedAtMs`、`space.dir`、`payload`、`openEnvProblems`。环境变量：`GENEHUB_HOOK_ID`、`GENEHUB_HOOK_EVENT`、`GENEHUB_SPACE_DIR`、`GENEHUB_CLI`、`GENEHUB_PYTHON`，加项目 `open.env` 里的变量；GeneHub 自己的名字不能被 `open.env` 改写（以 `GENEHUB_` 开头的行被拒并写进 `openEnvProblems`）。`exec` 与 `cwd` 里的 `${GENEHUB_SPACE_DIR}`、`${GENEHUB_PYTHON}`、`${GENEHUB_CLI}` 会被展开，别的 `${X}` 原样保留。
 
 **失败只记录，不自愈，也不停用。** 失败（非零退出、超时、被信号结束、起不来）记入内存与 `<项目>/.genethub/hooks/.status.json` 的运行记录：连续失败数、最后一次退出码、stderr 末尾 2 KiB。hook 永远不会因为失败被停用——"被停用"是第二份需要有人发现并撤销的状态。`timer` 不由会话事件触发，所以 hook 发出的消息不可能再触发 hook，不会有循环。`genet hook list [--workspace <id>]` 读取 `.genethub/hooks/*.genet.json` 并合并 `.status.json` 运行记录，是脚本发现"某个 hook 坏了"的办法。
 

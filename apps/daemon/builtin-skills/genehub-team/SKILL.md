@@ -35,3 +35,7 @@ description: GeneHub 的团队机制：多个 Agent 会话组成一支会接力�
 - 用户不满意先 `run.py note --kind unhappy`，流程问题用 `run.py reflect now`；平台缺陷写进团队的
   `docs/platform-issues.md`，不要绕过平台。
 - Workflow（PM / Executor）是退役中的旧机制，不要用它建团队或派单。
+
+## Timer执行约定
+
+回调默认`schedule: "fixed-delay"`：本次命令及收尾结束后再等`every`，运行中不重入、不积压补跑，冷却不占执行名额。Team巡检使用此模式；耗时超过触发间隔本身不算故障，仍按声明timeout处理。显式`interval`仅供短命令，其实际执行期限为`min(timeout, every×15%)`，亚秒值不向上取整，到期整组强制结束。改模板hook源并重新build，不手改生成的`.genethub/hooks/`；新daemon默认也适用于未写schedule的已有hook，跨渠道共同执行需核对各daemon版本。

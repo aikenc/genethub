@@ -19,6 +19,7 @@ import path from "node:path";
 
 import {
   createLease,
+  daemonEndpoint,
   releaseLease,
   defineSpecialty,
   localGenetCli,
@@ -323,7 +324,7 @@ hookCase("public-spec-validation", "hook validation is proved at the actual CLI 
     const base = { event: "timer", every: "1s", exec: [process.execPath,"-e","process.exit(0)"], enabled: false };
     const invalid: Array<Record<string,unknown>> = [
       {schema:"other"}, {event:"round.settled"}, {every:"0s"}, {every:"25h"}, {every:5},
-      {exec:[]}, {exec:"sh -c echo wrong"}, {timeout:301}, {timeout:0}, {cwd:""}, {enabled:"yes"},
+      {exec:[]}, {exec:"sh -c echo wrong"}, {timeout:301}, {timeout:0}, {cwd:""}, {enabled:"yes"}, {schedule:"unknown"}, {schedule:5},
     ];
     invalid.forEach((change,index)=>writeHook(root,`bad-${index}`,{...base,...change}));
     writeHook(root,"minimum",base); writeHook(root,"maximum",{...base,every:"24h"});
@@ -338,3 +339,110 @@ hookCase("public-spec-validation", "hook validation is proved at the actual CLI 
     const badVerb=cli(["hook","run","--workspace",opened.workspaceId]);
     t.assertions.assert(badVerb.code===2 && badVerb.envelope?.error?.code==="invalidArgs","unsupported hook verb accepted");
   },15000);
+
+
+hookCase(
+  "completion-based-default",
+  "default and explicit fixed-delay hooks wait a full interval after success or failure",
+  "real callbacks run longer than their 2s interval, never overlap, and the next start follows the recorded completion by at least 2s; failed callbacks honor the same cooldown and a healthy neighbor keeps running",
+  ["long callbacks restart after only the former 1s gap", "a failed hook skips its cooldown", "one hook overlaps itself or blocks an independent hook"],
+  async (t, opened, cli, root) => {
+    for (const [id, code, explicit] of [["default-delay", 0, false], ["explicit-delay", 3, true]] as const) {
+      const script = `const fs=require('fs');const log=${JSON.stringify(id + ".log")};fs.appendFileSync(log,'start|'+Date.now()+'\\n');setTimeout(()=>{fs.appendFileSync(log,'end|'+Date.now()+'\\n');process.exit(${code})},2500)`;
+      writeHook(root, id, { event: "timer", every: "2s", timeout: 10,
+        ...(explicit ? { schedule: "fixed-delay" } : {}), exec: [process.execPath, "-e", script] });
+    }
+    writeHook(root, "neighbor", { event: "timer", every: "1s", exec: sh("echo ok >> neighbor.log") });
+    await t.tools.waitUntil(() => ["default-delay", "explicit-delay"].every(id => lines(root, id + ".log").filter(x => x.startsWith("start|")).length >= 3), 35_000);
+    for (const id of ["default-delay", "explicit-delay"]) {
+      const events = lines(root, id + ".log").map(line => { const [phase, at] = line.split("|"); return { phase, at: Number(at) }; });
+      const starts = events.filter(x => x.phase === "start");
+      const ends = events.filter(x => x.phase === "end");
+      t.assertions.assert(starts.length >= 3 && ends.length >= 2, `missing callback timestamps: ${JSON.stringify(events)}`);
+      for (let i = 1; i < starts.length; i++) {
+        t.assertions.assert(starts[i]!.at - ends[i - 1]!.at >= 1_950,
+          `callback restarted before its full completion delay: ${JSON.stringify(events)}`);
+      }
+      writeHook(root, id, { event: "timer", every: "2s", enabled: false, exec: [process.execPath, "-e", "process.exit(0)"] });
+    }
+    const failed = listed(t, cli(["hook", "list", "--workspace", opened.workspaceId])).find(row => row.id === "explicit-delay");
+    t.assertions.assert(failed?.lastExitCode === 3 && failed.consecutiveFailures >= 2, `failure cadence lost: ${JSON.stringify(failed)}`);
+    t.assertions.assert(lines(root, "neighbor.log").length >= 3, "long callbacks blocked their healthy neighbor");
+  }, 35_000,
+);
+
+hookCase(
+  "interval-hard-deadline",
+  "opt-in interval commands are forcibly stopped at 15 percent including fractional seconds",
+  "a SIGTERM-ignoring callback on a 2s interval is killed at its 300ms allowance without reaching its 1s side effect; a smaller configured timeout remains effective and a healthy default callback progresses",
+  ["the legacy mode runs longer than 15 percent", "subsecond caps round up", "graceful teardown grants extra business execution", "a configured shorter deadline is ignored"],
+  async (t, opened, cli, root) => {
+    const script = "const fs=require('fs');process.on('SIGTERM',()=>{});setTimeout(()=>fs.writeFileSync('interval-overran','bad'),1000);setInterval(()=>{},1000)";
+    writeHook(root, "capped", { event: "timer", schedule: "interval", every: "2s", timeout: 20, exec: [process.execPath, "-e", script] });
+    writeHook(root, "shorter", { event: "timer", schedule: "interval", every: "20s", timeout: 1, exec: sh("sleep 10") });
+    writeHook(root, "healthy-delay", { event: "timer", every: "1s", exec: sh("echo ok >> interval-neighbor.log") });
+    await t.tools.waitUntil(() => {
+      const rows = listed(t, cli(["hook", "list", "--workspace", opened.workspaceId]));
+      return rows.find(row => row.id === "capped")?.lastTimedOut === true
+        && rows.find(row => row.id === "shorter")?.lastTimedOut === true
+        && lines(root, "interval-neighbor.log").length >= 2;
+    }, 25_000);
+    const rows = listed(t, cli(["hook", "list", "--workspace", opened.workspaceId]));
+    t.assertions.assert(/timed out after 300ms/.test(rows.find(row => row.id === "capped")?.lastError ?? ""), "subsecond runtime limit not reported accurately");
+    t.assertions.assert(/timed out after 1s/.test(rows.find(row => row.id === "shorter")?.lastError ?? ""), "configured timeout was not the tighter bound");
+    t.assertions.assert(!existsSync(path.join(root, "interval-overran")), "interval callback executed past its hard deadline");
+  }, 25_000,
+);
+
+hookCase(
+  "completion-delay-survives-restart",
+  "a restarted daemon honors the prior callback completion cooldown",
+  "after a real callback completes, stopping and starting its daemon preserves the completion-based interval through the shared hook lock timestamps",
+  ["daemon restart discards the completion time and immediately reruns a hook"],
+  async (t, opened, cli, root) => {
+    const script = "const fs=require('fs');fs.appendFileSync('restart-delay.log','start|'+Date.now()+'\\n');setTimeout(()=>fs.appendFileSync('restart-delay.log','end|'+Date.now()+'\\n'),1500)";
+    writeHook(root, "restart-delay", { event: "timer", every: "6s", timeout: 10, exec: [process.execPath, "-e", script] });
+    await t.tools.waitUntil(() => lines(root, "restart-delay.log").some(x => x.startsWith("end|")), 15_000);
+    const endedAt = Number(lines(root, "restart-delay.log").find(x => x.startsWith("end|"))!.split("|")[1]);
+    opened.client.close();
+    t.assertions.assert(cli(["daemon", "stop"]).code === 0, "could not stop the isolated test daemon");
+    t.assertions.assert(cli(["daemon", "start"]).code === 0, "could not restart the isolated test daemon");
+    await t.tools.waitUntil(() => lines(root, "restart-delay.log").filter(x => x.startsWith("start|")).length >= 2, 20_000);
+    const nextStart = Number(lines(root, "restart-delay.log").filter(x => x.startsWith("start|"))[1]!.split("|")[1]);
+    t.assertions.assert(nextStart - endedAt >= 5_950, `restart bypassed cooldown: ${nextStart - endedAt}ms`);
+    rmSync(path.join(hooksDir(root), "restart-delay.genet.json"));
+  }, 30_000,
+);
+
+
+hookCase(
+  "completion-delay-after-crash",
+  "an abruptly killed owner leaves a conservative completion cooldown before its hook can run again",
+  "a real host is killed during a callback; the next daemon observes the unlocked incomplete execution once, records that observation as its completion boundary, and waits a full interval before running the same hook",
+  ["a missing completion timestamp causes an immediate retry after a crash", "an incomplete callback is mistaken for a successful one"],
+  async (t, opened, cli, root) => {
+    const script = "const fs=require('fs');fs.appendFileSync('crash-starts',Date.now()+'\\n');const timer=setInterval(()=>{if(fs.existsSync('release-crash-hook'))clearInterval(timer)},100)";
+    writeHook(root, "crash-delay", { event: "timer", every: "4s", timeout: 30, exec: [process.execPath, "-e", script] });
+    await t.tools.waitUntil(() => lines(root, "crash-starts").length === 1, 15_000);
+    const pid = daemonEndpoint(opened.daemon).localServerProof.pid;
+    opened.client.close();
+    process.kill(pid, "SIGKILL");
+    const lock = path.join(hooksDir(root), ".locks", "crash-delay.lock");
+    t.assertions.assert(readFileSync(lock).readBigInt64LE(8) === 0n, "crash did not leave an incomplete execution boundary");
+    writeFileSync(path.join(root, "release-crash-hook"), "release");
+    t.assertions.assert(cli(["daemon", "start"]).code === 0, "could not restart the isolated crashed daemon");
+    let recoveredAt = 0;
+    await t.tools.waitUntil(() => {
+      recoveredAt = Number(readFileSync(lock).readBigInt64LE(8));
+      return recoveredAt > 0;
+    }, 15_000);
+    t.assertions.assert(lines(root, "crash-starts").length === 1, "crashed work restarted before its recovery cooldown");
+    const recovering = listed(t, cli(["hook", "list", "--workspace", opened.workspaceId])).find(row => row.id === "crash-delay");
+    t.assertions.assert(recovering?.running === false && /without completion/.test(recovering.lastError ?? ""),
+      `crashed attempt still looks running or successful during cooldown: ${JSON.stringify(recovering)}`);
+    await t.tools.waitUntil(() => lines(root, "crash-starts").length >= 2, 15_000);
+    const nextStart = Number(lines(root, "crash-starts")[1]);
+    t.assertions.assert(nextStart - recoveredAt >= 3_950, `crash recovery skipped delay: ${nextStart - recoveredAt}ms`);
+    rmSync(path.join(hooksDir(root), "crash-delay.genet.json"));
+  }, 30_000,
+);
