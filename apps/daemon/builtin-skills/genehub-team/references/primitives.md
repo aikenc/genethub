@@ -45,6 +45,7 @@ daemon 只有一种事件 `timer`：按间隔运行 Space 的 `.genethub/hooks/<
 - 命令不经 shell，stdin 是一行 JSON；环境里有 `GENEHUB_SPACE_DIR`、`GENEHUB_CLI`、`GENEHUB_PYTHON` 和
   `.genethub/open.env` 的变量。同一 hook 不并发，失败只记录不停用，命令必须幂等。
 - 用 `"$GENEHUB_CLI" hook list --workspace <id>` 看 hook 是否有效、最近是否失败。
+- 默认`schedule: "fixed-delay"`：命令和收尾结束后再等`every`，例如跑10秒、等5秒，下次最早第15秒；不重入、不积压补跑，冷却不占名额。Team巡检采用此模式。短命令可显式用`interval`，运行时限最多为`min(timeout, every×15%)`，亚秒上限不取整，到期强制结束整组；失败也不会自动停用。
 
 ## 4. 会话：派单、回执、接手
 

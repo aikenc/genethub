@@ -70,3 +70,5 @@ GeneHub 中使用内置 `$GENEHUB_PYTHON` 启动，Python hook 通过 `{python}`
 ## 与 daemon 的关系
 
 Rust 版构建器已移除（2026-10-28），`genet space builder …` 与 `agentSpace.builder` RPC 都不再存在。所有 Space 由本脚本构建；daemon 只读取 `agent-space.genet.json` 并维护注册/组合。
+
+生成hook保留源文件的`schedule`字段；未写时daemon按`fixed-delay`处理，即上次完成并收尾后再等`every`。需要开始计时的短命令才显式使用`interval`，其有效执行期限是`min(timeout, every×15%)`，可低于1秒；到期强制结束整组。Team模板显式声明`fixed-delay`，修改源hook后重新build并验证实际制品，不编辑生成hook。

@@ -27,11 +27,19 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_TIMEOUT: Duration = Duration::from_secs(300);
 const MAX_FILE_BYTES: u64 = 64 * 1024;
 
+/// Completion-based cooldown is safe for coordinating commands of any duration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Schedule {
+    FixedDelay,
+    Interval,
+}
+
 /// What a valid hook file asks for. `owner` and `payload` are the file's own
 /// business: kept, shown, handed to the command, never interpreted.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Spec {
     pub every: Duration,
+    pub schedule: Schedule,
     pub exec: Vec<String>,
     pub cwd: Option<String>,
     pub timeout: Duration,
@@ -165,6 +173,12 @@ pub fn parse(text: &str) -> Result<Spec, String> {
         }
         None => return Err("\"every\" is required, for example \"5s\"".into()),
     };
+    let schedule = match object.get("schedule") {
+        None => Schedule::FixedDelay,
+        Some(Value::String(value)) if value == "fixed-delay" => Schedule::FixedDelay,
+        Some(Value::String(value)) if value == "interval" => Schedule::Interval,
+        Some(_) => return Err("\"schedule\" must be \"fixed-delay\" or \"interval\"".into()),
+    };
     let exec = match object.get("exec") {
         Some(Value::Array(items)) if !items.is_empty() => items
             .iter()
@@ -198,6 +212,12 @@ pub fn parse(text: &str) -> Result<Spec, String> {
         },
         Some(_) => return Err("\"timeout\" must be a number of seconds".into()),
     };
+    // The opt-in start-based mode is only for short commands. Keep fractional
+    // seconds: a 1s interval permits 150ms, not a rounded-up whole second.
+    let timeout = match schedule {
+        Schedule::FixedDelay => timeout,
+        Schedule::Interval => timeout.min(every * 15 / 100),
+    };
     let enabled = match object.get("enabled") {
         None => true,
         Some(Value::Bool(flag)) => *flag,
@@ -214,6 +234,7 @@ pub fn parse(text: &str) -> Result<Spec, String> {
         .map(str::to_string);
     Ok(Spec {
         every,
+        schedule,
         exec,
         cwd,
         timeout,
