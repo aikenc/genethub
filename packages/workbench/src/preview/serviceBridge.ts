@@ -4,6 +4,7 @@ import { htmlServiceMedia, servicePathname, type ServicePreviewClient } from "./
 export type ServiceBridgePolicy = {
   allowTurn: boolean;
   allowControl: boolean;
+  onUnavailable?: () => void;
   onControlState?: (state: "granted" | "released" | "waiting-for-yield" | "release-pending" | "release-unconfirmed") => void;
 };
 
@@ -58,7 +59,7 @@ export function useServiceBridge(
         void result.then(value => {
           if (!closed && serviceRef.current === service) port.postMessage({ kind: "result", value });
         }).catch(() => {
-          if (!closed) port.postMessage({ kind: "error", message: "媒体配置不可用，请检查服务或中继设置" });
+          if (!closed) { port.postMessage({ kind: "error", message: "媒体配置不可用，正在重新连接服务" }); policyRef.current?.onUnavailable?.(); }
         }).finally(close);
         return;
       }
@@ -108,6 +109,7 @@ export function useServiceBridge(
       active.add(close);
       if (control) controls.current.add(close);
       const error = () => {
+        if (!closed && data.kind === "ws" && !control) policyRef.current?.onUnavailable?.();
         if (!closed)
           port.postMessage({
             kind: "error",
@@ -198,6 +200,7 @@ export function useServiceBridge(
               // trusted chrome. Messages posted by the page never enter here.
               try {
                 const outer = JSON.parse(new TextDecoder().decode(packet.subarray(1)));
+                if (outer.kind === "close" && outer.code === 1006 && !control) policyRef.current?.onUnavailable?.();
                 const event = outer.kind === "text" ? JSON.parse(outer.text) : null;
                 const state = event?.params?.state;
                 if (event?.event === "control.state" && ["granted", "released", "waiting-for-yield", "release-unconfirmed"].includes(state) && (state !== "granted" || policyRef.current?.allowControl))

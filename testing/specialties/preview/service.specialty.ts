@@ -146,6 +146,8 @@ defineSpecialty(
       phase = "http";
       const body = new Uint8Array(90000);
       for (let i = 0; i < body.length; i++) body[i] = i % 251;
+      const automaticIce = await (service as unknown as ServicePreviewClient).ice(true);
+      t.assertions.assert(Array.isArray(automaticIce), "automatic ICE failed without Channel TURN");
       const response = await active.fetch("/api/demo/echo", {
         method: "POST",
         headers: { "content-type": "application/octet-stream" },

@@ -709,18 +709,29 @@ function serviceMark(client: ServicePreviewClient): ServiceMark {
   };
 }
 
-function ServiceHtmlDocument(props: React.ComponentProps<typeof HtmlDocument> & {client:Client;workspaceHandle:string;onServiceChange?:(service:PreviewServiceInfo|null)=>void}) {
+export function ServiceHtmlDocument(props: React.ComponentProps<typeof HtmlDocument> & {client:Client;workspaceHandle:string;onServiceChange?:(service:PreviewServiceInfo|null)=>void}) {
   const [candidate,setCandidate]=useState<ServicePreviewClient|null>(null);
   const [mark,setMark]=useState<ServiceMark|null>(null);
   const [generation,setGeneration]=useState(0);
-  const [enabled,setEnabled]=useState(false);
-  const enabledBinding = useRef<{client: Client; key: string} | null>(null);
+  const [stopped,setStopped]=useState(false);
+  const candidateBinding = useRef<{client: Client; key: string} | null>(null);
   const bindingKey = JSON.stringify([props.workspaceHandle,props.entryPath,props.metadata.version,generation]);
-  const accessEnabled = enabled && enabledBinding.current?.client === props.client && enabledBinding.current?.key === bindingKey;
-  const [allowTurn,setAllowTurn]=useState(false);
+  const currentCandidate = candidateBinding.current?.client === props.client && candidateBinding.current?.key === bindingKey ? candidate : null;
+  const accessEnabled = !!currentCandidate && !stopped;
+  const [allowTurn,setAllowTurn]=useState(true);
+  const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const retries = useRef(0);
+  const hadRegistration = useRef(false);
+  const stoppedRef = useRef(stopped); stoppedRef.current = stopped;
+  const reconnect = useCallback(() => {
+    if (retryTimer.current || stoppedRef.current || retries.current >= 5) return;
+    retries.current++;
+    retryTimer.current = setTimeout(() => { retryTimer.current = null; setGeneration(n => n + 1); }, 2000);
+  }, []);
+  useEffect(() => () => { if (retryTimer.current) clearTimeout(retryTimer.current); retryTimer.current = null; }, [props.client, props.entryPath, stopped]);
   const [allowControl,setAllowControl]=useState(false);
   const [controlState,setControlState]=useState("released");
-  const htmlMedia = candidate ? htmlServiceMedia(candidate.descriptor) : null;
+  const htmlMedia = currentCandidate ? htmlServiceMedia(currentCandidate.descriptor) : null;
   const releaseControl = useCallback(() => { setAllowControl(false); setControlState(state => state === "granted" || state === "waiting-for-yield" ? "release-pending" : state); }, []);
   const onControlState = useCallback((state: "granted" | "released" | "waiting-for-yield" | "release-pending" | "release-unconfirmed") => {
     setControlState(previous => state === "release-pending" && (previous === "released" || previous === "release-unconfirmed") ? previous : state);
@@ -749,36 +760,33 @@ function ServiceHtmlDocument(props: React.ComponentProps<typeof HtmlDocument> & 
     };
   }, [allowControl, releaseControl]);
   const supported = !!props.client.identity?.features?.includes("service.preview.v1");
-  const onToggle = useCallback(() => {
-    if (accessEnabled) setEnabled(false);
-    else { enabledBinding.current={client:props.client,key:bindingKey}; setEnabled(true); }
-  }, [accessEnabled,props.client,bindingKey]);
-  const onRecheck = useCallback(() => setGeneration(n => n + 1), []);
+  const onToggle = useCallback(() => setStopped(value => !value), []);
+  const onRecheck = useCallback(() => { retries.current = 0; setStopped(false); setGeneration(n => n + 1); }, []);
   const { onServiceChange } = props;
   useEffect(() => {
     onServiceChange?.(mark ? previewServiceInfo(mark, accessEnabled, onToggle, onRecheck) : null);
   }, [accessEnabled, mark, onRecheck, onServiceChange, onToggle]);
   useEffect(() => () => onServiceChange?.(null), [onServiceChange]);
   useEffect(() => props.client.onStateChange(state => {
-    setEnabled(false);
-    if (state === "ready") setGeneration(n => n + 1);
+    if (state === "ready") { retries.current = 0; setGeneration(n => n + 1); }
     else if (supported) {
       setCandidate(null);
       setMark({ state: "unreachable", detail: "源电脑连接已断开，请重连后重新检查服务。" });
     }
   }), [props.client, supported]);
-  useEffect(()=>{let cancelled=false;let loaded:ServicePreviewClient|null=null;setCandidate(null);setEnabled(false);setMark(null);
+  useEffect(()=>{let cancelled=false;let loaded:ServicePreviewClient|null=null;setCandidate(null);setMark(null);
     if(!supported)return;
-    void ServicePreviewClient.discover(props.client,isAbsoluteFilePath(props.entryPath) ? "" : props.workspaceHandle,props.entryPath).then(value=>{loaded=value;if(cancelled || props.client.connectionState!=="ready")value?.close();else { setCandidate(value); setMark(value ? serviceMark(value) : { state: "absent" }); }}).catch(error=>{if(!cancelled)setMark(classifyServiceFailure(error));});
+    void ServicePreviewClient.discover(props.client,isAbsoluteFilePath(props.entryPath) ? "" : props.workspaceHandle,props.entryPath).then(value=>{loaded=value;if(cancelled || props.client.connectionState!=="ready")value?.close();else { candidateBinding.current={client:props.client,key:bindingKey}; setCandidate(value); setMark(value ? serviceMark(value) : { state: "absent" }); if (value) hadRegistration.current = true; else if (hadRegistration.current) reconnect(); }}).catch(error=>{if(!cancelled) { const failure=classifyServiceFailure(error); setMark(failure); if (failure.state !== "unauthorized") reconnect(); }});
     return()=>{cancelled=true;loaded?.close();};
-  },[props.client,props.workspaceHandle,props.entryPath,props.metadata.version,generation,supported]);
+  },[props.client,props.workspaceHandle,props.entryPath,props.metadata.version,generation,supported,reconnect,bindingKey]);
   return <>{htmlMedia ? <PreviewToolbarPortal>
     <span className="truncate" title={candidate?.descriptor.name}>{htmlMedia.protocol === "pixel-streaming/1" ? "引擎串流" : `桌面共享 · ${controlState === "granted" ? "正在控制" : controlState === "waiting-for-yield" ? "等待交还" : controlState === "release-pending" ? "等待源端释放" : controlState === "release-unconfirmed" ? "释放未确认，请检查源端" : "仅观看"}`}</span>
-    <label className="ml-2 flex items-center gap-1"><input type="checkbox" checked={allowTurn} onChange={event => { setAllowTurn(event.target.checked); setEnabled(false); setGeneration(n => n + 1); }}/>允许媒体中继</label>
+    <label className="ml-2 flex items-center gap-1"><input type="checkbox" checked={!allowTurn} onChange={event => { setAllowTurn(!event.target.checked); retries.current = 0; setGeneration(n => n + 1); }}/>仅直连</label>
     {htmlMedia.protocol === "pixel-streaming/1" ? null : <button type="button" disabled={!accessEnabled} className="ml-2 rounded border border-line px-2 py-1 disabled:opacity-40" onClick={() => allowControl ? releaseControl() : setAllowControl(true)}>{allowControl ? "交还控制" : "允许本页接管"}</button>}
-    <button type="button" disabled={!accessEnabled} className="rounded border border-line px-2 py-1 disabled:opacity-40" onClick={() => setEnabled(false)}>停止观看</button>
-  </PreviewToolbarPortal> : accessEnabled&&candidate?<ServiceMediaPanel service={candidate}/>:null}
-  <HtmlDocument {...props} service={accessEnabled?candidate:null} servicePolicy={{allowTurn,allowControl:allowControl&&accessEnabled,onControlState}}/></>;
+    <button type="button" disabled={!accessEnabled} className="rounded border border-line px-2 py-1 disabled:opacity-40" onClick={() => setStopped(true)}>停止观看</button>
+    <button type="button" className="rounded border border-line px-2 py-1" onClick={onRecheck}>重新连接</button>
+  </PreviewToolbarPortal> : accessEnabled&&currentCandidate?<ServiceMediaPanel service={currentCandidate}/>:null}
+  <HtmlDocument {...props} service={accessEnabled?currentCandidate:null} servicePolicy={{allowTurn,allowControl:allowControl&&accessEnabled,onControlState,onUnavailable:reconnect}}/></>;
 }
 
 /** Exported for tests. */

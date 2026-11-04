@@ -226,11 +226,8 @@ defineSpecialty(
         entryPath: `${opened.rootHandle}/index.html`,
       });
       try {
-        await uiPage.getByRole("button", { name: "预览信息", exact: true }).click({ timeout: 30000 });
-        await uiPage
-          .getByRole("button", { name: "允许本次预览访问登记服务" })
-          .click({ timeout: 30000 });
-        await uiPage.getByRole("button", { name: "关闭信息", exact: true }).click();
+        // Registered services connect automatically on authenticated connections.
+
         const frame = uiPage.frameLocator("iframe").first();
         await frame
           .getByRole("button", { name: "请求后端", exact: true })

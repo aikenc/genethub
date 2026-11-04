@@ -220,19 +220,17 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
         }
         let mut socket = tokio::time::timeout(Duration::from_secs(5), connect(&run)).await??;
         socket.close(None).await?;
-        let value = if req.allow_turn {
-            let link = services
-                .state
-                .link
-                .get()
-                .context("TURN requires a configured Channel")?;
-            tokio::time::timeout(Duration::from_secs(5), link.rtc_config(Some(&run.run_id)))
-                .await??
+        // A Channel may provide STUN without TURN. Automatic media routing
+        // must still work in that configuration and in self-hosted mode.
+        let mut value = super::rtc::ice_config(&services.state).await;
+        if req.allow_turn && value["turnAvailable"].as_bool() == Some(true) {
+            let link = services.state.link.get().context("Channel unavailable")?;
+            value =
+                tokio::time::timeout(Duration::from_secs(5), link.rtc_config(Some(&run.run_id)))
+                    .await??;
         } else if !run.ice_servers.is_empty() {
-            json!({"version":1,"iceServers":run.ice_servers})
-        } else {
-            super::rtc::ice_config(&services.state).await
-        };
+            value = json!({"version":1,"iceServers":run.ice_servers});
+        }
         let body = serde_json::to_vec(&value)?;
         stream
             .respond(&ExchangeResponseHead {

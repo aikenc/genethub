@@ -23,8 +23,8 @@ const {iceServers} = await window.genehubServicePreview.ice();
 // 现有 fetch / WebSocket 桥：只访问 descriptor.routes 登记的 /api/ 路径。
 ```
 
-API 不暴露 daemon Client、私有登记 secret 或任意设备能力。ice 由外侧“允许媒体中继”决定；页面不能
-替用户启用中继。源端真实 PeerConnection 也使用此配置。HTML mode 的普通 RTP 媒体直接到 H5，
+API 不暴露 daemon Client、私有登记 secret 或任意设备能力。ice 默认按渠道策略提供中继，用户可在外侧选择“仅直连”；页面不能
+覆盖外侧网络策略。源端真实 PeerConnection 也使用此配置。HTML mode 的普通 RTP 媒体直接到 H5，
 麦克风/摄像头采集不开放。外侧停止/交还控制、控制状态与控制 WS 开关属于 Preview，不由可编辑 H5 绘制。
 
 需要替换 Capture 实现时，保留 `service.preview` v1 私有登记与桥；公开 media 指定：

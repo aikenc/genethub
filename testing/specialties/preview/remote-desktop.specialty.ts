@@ -68,9 +68,8 @@ defineSpecialty({
     const denied=responses.find(r=>r.id==="denied") as {error?:{code:string}};
     t.assertions.assert(denied.error?.code==="not_shared","source allowed a session without opt-in"); view.close();
     consumer=await openPreviewBrowser({openRoot:t.openRoot,lease:t.env,page,endpoint:daemonEndpoint(opened.daemon),refreshEndpoint:()=>daemonEndpoint(opened.daemon),workspaceId:opened.workspaceId,entryPath:`${opened.rootHandle}/remote/index.html`});
-    await page.getByRole("button",{name:"预览信息",exact:true}).click({timeout:30000});
-    await page.getByRole("button",{name:"允许本次预览访问登记服务",exact:true}).click({timeout:30000});
-    await page.getByRole("button",{name:"关闭信息",exact:true}).click();
+        // Registered services connect automatically on authenticated connections.
+
     const frame=page.frameLocator("iframe").first();
     // Execute the shipped modules, not just the bridge injected by Preview.
     await frame.getByRole("button",{name:"连接画面",exact:true}).click();

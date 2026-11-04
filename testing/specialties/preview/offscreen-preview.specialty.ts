@@ -87,11 +87,10 @@ defineSpecialty(
       t.assertions.assert((service as unknown as ServicePreviewClient).descriptor.media?.protocol === "pixel-streaming/1", "descriptor lost the page mode");
       consumer = await openPreviewBrowser({ openRoot: t.openRoot, lease: t.env, page, endpoint: daemonEndpoint(opened.daemon), refreshEndpoint: () => daemonEndpoint(opened.daemon), workspaceId: opened.workspaceId, entryPath: `${opened.rootHandle}/index.html` });
       const enable = async () => {
-        await page.getByRole("button", { name: "预览信息", exact: true }).click({ timeout: 30000 });
-        await page.getByRole("button", { name: "允许本次预览访问登记服务", exact: true }).click({ timeout: 30000 });
-        await page.getByRole("button", { name: "关闭信息", exact: true }).click();
+        await page.getByRole("button", { name: "重新连接", exact: true }).click({ timeout: 30000 });
       };
-      await enable();
+      await page.getByRole("button", { name: "停止观看", exact: true }).waitFor({ timeout: 30000 });
+      t.assertions.assert(!(await page.getByRole("button", { name: "允许本次预览访问登记服务", exact: true }).count()), "engine preview still requires a second grant");
       const frame = page.frameLocator("iframe").first();
       const sandbox = await page.locator("iframe").first().getAttribute("sandbox");
       t.assertions.assert(!!sandbox?.includes("allow-pointer-lock"), `engine page iframe lacks pointer lock: ${sandbox}`);
@@ -128,6 +127,9 @@ defineSpecialty(
       await open("second");
       const second = await probe("second");
       t.assertions.assert(second?.opened === false && second.closed?.code === 1013 && second.closed.reason === "viewer_limit", `second viewer was not refused: ${JSON.stringify(second)}`);
+      // A rejected extra viewer is an application decision, not a stale run.
+      // Wait beyond automatic recovery's delay: the existing viewer must survive.
+      await new Promise(resolve => setTimeout(resolve, 2200));
       await frame.locator("body").evaluate((body) => (body.ownerDocument.defaultView as unknown as { probe: Record<string, Probe> }).probe.first!.ws.send("still mine"));
       await t.tools.waitUntil(async () => (await probe("first"))?.echoed === "still mine", 5000);
       // Revoke from the trusted toolbar, then allow again. The route admits one viewer, so a new

@@ -11,7 +11,7 @@ export function ServiceMediaPanel({
   const [status, setStatus] = useState("尚未连接");
   const [connected, setConnected] = useState(false);
   const [mic, setMic] = useState(false);
-  const [allowTurn, setAllowTurn] = useState(false);
+  const [allowTurn, setAllowTurn] = useState(true);
   const [path, setPath] = useState("");
   const video = useRef<HTMLVideoElement>(null);
   const pc = useRef<RTCPeerConnection | null>(null);
@@ -220,7 +220,7 @@ export function ServiceMediaPanel({
                   a?.candidateType === "relay" || b?.candidateType === "relay";
                 if (relayed && !allowTurn) {
                   stop();
-                  setStatus("已阻止未授权的中继路径");
+                  setStatus("已阻止仅直连模式的中继路径");
                   return;
                 }
                 setPath(
@@ -282,14 +282,14 @@ export function ServiceMediaPanel({
         <label>
           <input
             type="checkbox"
-            checked={allowTurn}
+            checked={!allowTurn}
             disabled={connected || mic}
             onChange={(e) => {
               stop();
-              setAllowTurn(e.target.checked);
+              setAllowTurn(!e.target.checked);
             }}
           />
-          允许媒体中继
+          仅直连
         </label>
         {mic ? <span className="text-red-500">麦克风正在使用</span> : null}
       </div>
