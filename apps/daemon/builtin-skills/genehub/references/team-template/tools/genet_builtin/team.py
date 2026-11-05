@@ -1364,8 +1364,6 @@ def _send_explicit_resume(root, args, sender, machine):
         if not operation:
             if current and current.get("resumeAwaitingReceipt"):
                 raise ExpertError("原恢复操作尚未确认", "没有覆盖回执或发出另一恢复", "保留原操作 ID 和原文，先核对原接收状态")
-            if current and current.get("requester") not in (None, sender):
-                raise ExpertError("原任务仍由另一发起方接收结果", "没有恢复或接管派单", "由原发起方核对已有任务后继续")
             if current and current.get("done"):
                 raise ExpertError("原派单已有待交付结果", "没有重开已有工作", "先采用原结果，再发送新的诉求")
             if machine and (not current or current.get("machine") != machine or current.get("remoteReleased")):
@@ -1375,8 +1373,14 @@ def _send_explicit_resume(root, args, sender, machine):
             summary = session_summary(target, machine)
             if not (summary.get("inputSummary") or {}).get("paused"):
                 raise ExpertError("目标当前没有暂停", "没有额外投递恢复消息", "未暂停的继续要求使用普通 team.py send，保留团队结果跟踪")
-            record = dict(current or {"sessionId": target, "requester": sender, "batch": target,
+            previous = read_dispatch_record(state_dir(root, "done", target + ".json")) if not current else None
+            record = dict(current or previous or {"sessionId": target, "requester": sender, "batch": target,
                                      "kind": "research", "desc": "用户明确继续原会话", "lock": None, "route": "explicit-resume"})
+            if previous:
+                # Continuing a conversation retains its result owner, not a
+                # workstation already returned to another task.
+                record["lock"] = None
+                record.pop("taskConclusion", None)
             record.update(baseline=(summary.get("latestReply") or {}).get("itemId"), notified=[], createdAtMs=now_ms(),
                           resumeRequestId=args.message_id, resumeAwaitingReceipt=True)
             record.pop("done", None)
@@ -1394,7 +1398,7 @@ def _send_explicit_resume(root, args, sender, machine):
             return
         # Persist the old result baseline before the native input can run.
         write_json(pending_path, operation["record"])
-    payload = body + "\n\n[系统提示：直接在本会话输出最终回复，团队将转交发送方 %s；无需另行回传。]" % sender
+    payload = body + "\n\n[系统提示：直接在本会话输出最终回复，团队将转交原结果接收方 %s；本次续接由 %s 发起，无需另行回传。]" % (operation["record"].get("requester") or sender, sender)
     try:
         genet("session", "send", target, payload, "--message-id", args.message_id, "--no-wait", *machine_args(machine))
     except ExpertError as error:
@@ -3803,8 +3807,6 @@ def leader_watchdog(root, name, mine):
                 "watchdog-circuit-break",
                 fp,
             )
-            if front:
-                deliver_or_notice(root, front, "report", "%s:watchdog" % name, msg, leader_sid, "watchdog-circuit-break", fp)
         return
     wakes += 1
     wd["consecutiveWakes"] = wakes
@@ -4015,8 +4017,6 @@ def reconcile(root, name, mine):
                         "请检查正在执行的工具、实际产物与任务预算；确认失败或超过明确期限后再决定中断，"
                         "不要仅凭静默认定卡死或重复派单。"
                     ) % (session_id, record["desc"], patience)
-                    if to:
-                        deliver_or_notice(root, to, "report", "%s:hook" % name, text, session_id, "quiet-check")
                     if record.get("kind") not in ("reflect", "team-reflect"):
                         add_note(root, {"kind": "anomaly", "session": session_id, "turn": latest_round(session_id, record.get("machine")), "ref": None, "from": "%s:hook" % name, "quote": "无", "context": text, "text": record["desc"]}, "anomaly", session_id, "quiet-check")
                     said.append("quiet-check")
@@ -4025,6 +4025,7 @@ def reconcile(root, name, mine):
             record["lastReconcileError"] = str(error)[:300]
             record["lastReconcileErrorAtMs"] = now_ms()
             update_pending(root, path, record)
+            record_system_issue(root, "team-reconcile", str(error), record.get("sessionId"))
             continue
     batches = {}
     for path, record in records:
@@ -4155,8 +4156,16 @@ def release_remote(root, path, record):
 
 def move(root, path, expected=None):
     record = expected if expected is not None else (read_json(path, {}) or {})
-    if record.get("taskId") and not team_tasks.release_local(sys.modules[__name__], root, record):
-        return
+    if record.get("taskId"):
+        try:
+            if not team_tasks.release_local(sys.modules[__name__], root, record):
+                return
+        except (ExpertError, TeamConfigurationError, OSError, subprocess.TimeoutExpired) as error:
+            record["lastReconcileError"] = str(error)[:300]
+            record["lastReconcileErrorAtMs"] = now_ms()
+            update_pending(root, path, record)
+            record_system_issue(root, "resource-release", str(error), record.get("operationId") or record.get("sessionId"))
+            return
     if not release_remote(root, path, record):
         return
     destination = state_dir(root, "done", os.path.basename(path))
@@ -4173,9 +4182,6 @@ def move(root, path, expected=None):
 
 
 def health(root, name, mine):
-    front = front_session(root, mine["spaces"])
-    if not front:
-        return
     marker = state_dir(root, "health-check.json")
     # `hook list` 单次约 2s，而钩子每 5s 一轮：钩子坏没坏不需要每轮问一次，60s 一次足够。
     if now_ms() - (read_json(marker, {}) or {}).get("atMs", 0) < HEALTH_CHECK_S * 1000:
@@ -4184,14 +4190,10 @@ def health(root, name, mine):
     hooks = genet("hook", "list", "--workspace", mine["spaces"]["root"]).get("hooks", [])
     problems = ["%s: %s" % (item["id"], item.get("problem") or item.get("lastError") or "连续失败 %d 次" % item.get("consecutiveFailures", 0))
                 for item in hooks if not item.get("valid", True) or item.get("consecutiveFailures", 0) >= 3]
-    report_path = state_dir(root, "reported.json")
-    last = read_json(report_path, {})
-    digest = hashlib.sha1("\n".join(problems).encode()).hexdigest()
-    if problems and (last.get("digest") != digest or now_ms() - last.get("atMs", 0) > REPORT_AGAIN_S * 1000):
-        notice(front, "report", "%s:hook" % name, "机制出了问题:\n%s\n修好后无需注册，下一次运行自动恢复。待办记录都还在 .genethub/team/pending/。" % "\n".join(problems), digest, str(now_ms() // (REPORT_AGAIN_S * 1000)))
-        write_json(report_path, {"digest": digest, "atMs": now_ms()})
-    elif not problems and last.get("digest"):
-        write_json(report_path, {})
+    if problems:
+        report(root, name, mine, "机制出了问题:\n%s" % "\n".join(problems))
+        return False
+    return True
 
 
 IDENTITY_RETRY_S = 60
@@ -4409,22 +4411,29 @@ def cmd_hook(_args):
     global SESSIONS_TTL
     SESSIONS_TTL = HOOK_SESSIONS_TTL  # 一轮钩子共用一份 session 快照；非钩子命令仍用 2s
     root = find_root()
+    SYSTEM_ISSUES_SEEN.discard(root)
     name, mine = me(root)
     builtin_admin = is_builtin_admin(root)
     write_json(state_dir(root, "alive"), {"atMs": now_ms()})
     routines = (sync_identity, clean_temp_hourly) if builtin_admin else (sync_identity, clean_temp_hourly, platform_watch)
+    routines_ok = True
     for routine in routines:
         try:
             routine(root)
         except ExpertError as error:
+            routines_ok = False
             report(root, name, mine, error.text())
     try:
         reconcile(root, name, mine)
         team_tasks.reconcile_resources(sys.modules[__name__], root)
         team_tasks.publish(sys.modules[__name__], root)
-        health(root, name, mine)
+        healthy = health(root, name, mine)
         if not builtin_admin:
             wake(root, name, mine)
+        if routines_ok and healthy is True and root not in SYSTEM_ISSUES_SEEN:
+            # Recovery opens a new occurrence; a healthy skipped health probe
+            # does not erase an unresolved failure from the previous probe.
+            write_json(state_dir(root, "reported.json"), {"lastSuccessAtMs": now_ms()})
     except ExpertError as error:
         report(root, name, mine, error.text())
         raise
@@ -4433,11 +4442,36 @@ def cmd_hook(_args):
         raise
 
 
+SYSTEM_ISSUES_SEEN = set()
+
+
+def record_system_issue(root, category, text, target="hook"):
+    """One internal note per unresolved occurrence; no Agent delivery or reads."""
+    SYSTEM_ISSUES_SEEN.add(root)
+    with inbox_lock(root, "system-notes", purpose="机制问题记录"):
+        state = read_json(state_dir(root, "reported.json"), {}) or {}
+        occurrence = state.get("lastSuccessAtMs", 0)
+        note_id, fresh = add_note(root, {"kind": "anomaly", "from": "system:" + category,
+                    "session": target if SESSION_ID.fullmatch(str(target)) else None,
+                    "quote": "", "context": str(text)[:3000], "text": "机制问题：" + category},
+                    "mechanism", category, target, occurrence)
+        path = os.path.join(notes_dir(root), note_id + ".json")
+        if not fresh and os.path.isfile(path):
+            note = read_json(path)
+            if note:
+                note["lastObservedAtMs"] = now_ms()
+                details = note.get("observations") or [note.get("context", "")]
+                detail = str(text)[:1000]
+                if detail not in details:
+                    details = (details + [detail])[-8:]
+                note["observations"] = details
+                write_json(path, note)
+        return note_id
+
+
 def report(root, name, mine, text):
     try:
-        front = front_session(root, mine["spaces"])
-        if front:
-            notice(front, "report", "%s:hook" % name, text, hashlib.sha1(text.encode()).hexdigest(), str(now_ms() // (REPORT_AGAIN_S * 1000)))
+        record_system_issue(root, "team-hook", text)
     except Exception:  # noqa: BLE001 - the original failure is re-raised by the caller
         pass
 

@@ -330,12 +330,15 @@ pub(crate) async fn process_snapshot(
         state.workspaces.get(id).await?;
     }
     let mut rows = state.processes.list().await;
-    let sessions = state.sessions.list(None, true).await?;
+    let mut owners = std::collections::HashMap::new();
     for row in &mut rows {
-        row.workspace_id = sessions
-            .iter()
-            .find(|s| s.id == row.session_id)
-            .map(|s| s.workspace_id.clone());
+        if !owners.contains_key(&row.session_id) {
+            owners.insert(
+                row.session_id.clone(),
+                state.sessions.workspace_of(&row.session_id).await?,
+            );
+        }
+        row.workspace_id = owners.get(&row.session_id).cloned().flatten();
     }
     rows.retain(|r| workspace.is_none_or(|w| r.workspace_id.as_deref() == Some(w)));
     if !caller.is_full() {

@@ -259,6 +259,10 @@ interface WorkbenchState {
   sessions: SessionSummary[];
   sessionsLoaded: boolean;
   sessionsError: boolean;
+  sessionsCheckedAtMs: number;
+  sessionsFailedAtMs: number;
+  /** Local observations only; never use message timestamps as freshness. */
+  sessionObservations: Record<string, number>;
   includeArchived: boolean;
   activeSessionId: string | null;
   /** Set while an unstarted conversation is on screen. See `Draft`. */
@@ -837,6 +841,9 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   sessions: [],
   sessionsLoaded: false,
   sessionsError: false,
+  sessionsCheckedAtMs: 0,
+  sessionsFailedAtMs: 0,
+  sessionObservations: {},
   includeArchived: false,
   activeSessionId: null,
   draft: null,
@@ -885,6 +892,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     // before a machine switch ends up with no live stream at all.
     set({ client, notice: null, subscribedSessionIds: [], subscriptionOwner: null,
       sessions: [], sessionsLoaded: false, sessionsError: false,
+      sessionsCheckedAtMs: 0, sessionsFailedAtMs: 0, sessionObservations: {},
       agentRequests: [], hiddenAgentRequests: [], repairingAgentIds: [], agentConfig: null });
     let wasReady = false;
     let logicalOwner = client.logicalConnectionId;
@@ -3519,13 +3527,14 @@ async function loadSessions(client: Client, set: Setter): Promise<SessionSummary
         const resolved = timeout?.client === client;
         if (resolved && sessionListTimeoutNotice === timeout) sessionListTimeoutNotice = null;
         return {
-          sessions, sessionsLoaded: true, sessionsError: false,
+          sessions, sessionsLoaded: true, sessionsError: false, sessionsCheckedAtMs: Date.now(),
+          sessionObservations: Object.fromEntries(sessions.map(session => [session.id, state.sessionObservations[session.id] ?? 0])),
           ...(resolved && state.notice === timeout.message ? { notice: null } : {}),
         };
       });
       return useWorkbench.getState().sessions;
     } catch (error) {
-      if (useWorkbench.getState().client === client && epoch === sessionSummaryEpoch) set({ sessionsError: true });
+      if (useWorkbench.getState().client === client && epoch === sessionSummaryEpoch) set({ sessionsError: true, sessionsFailedAtMs: Date.now() });
       throw error;
     }
   })();
@@ -3589,6 +3598,7 @@ function adoptSnapshotStatus(sessionId: string, snapshot: SessionSnapshot, set: 
   const status = snapshot?.summary?.status;
   if (!status) return;
   set((state) => ({
+    sessionObservations: { ...state.sessionObservations, [sessionId]: Date.now() },
     sessions: state.sessions.map((session) =>
       session.id === sessionId ? { ...session, ...snapshot.summary } : session,
     ),
@@ -3642,6 +3652,7 @@ function applySessionStatus(
               : null;
   if (!status && event.type !== "permissionResolved") return;
   set((state) => ({
+    sessionObservations: { ...state.sessionObservations, [sessionId]: Date.now() },
     sessions: state.sessions.map((session) => {
       if (session.id !== sessionId) return session;
       const interactionSummary = event.type === "permissionRequested"

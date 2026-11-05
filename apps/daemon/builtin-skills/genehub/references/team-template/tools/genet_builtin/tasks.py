@@ -6,6 +6,7 @@ All operations persist their intent before starting or messaging another session
 import hashlib
 import json
 import os
+import subprocess
 from types import SimpleNamespace
 from .runtime import get_runtime, json_value, check_decision
 from .api import TeamConfigurationError
@@ -589,6 +590,11 @@ def records(t, root, area):
 def release_local(t, root, record):
     if record.get('machine') or not record.get('lock'):
         return True
+    operation = record.get('operationId')
+    intent_path = t.state_dir(root, 'task-dispatch', operation + '.json') if operation else None
+    intent = t.read_dispatch_record(intent_path) if intent_path else None
+    if intent and intent.get('resourceReleased') and intent.get('sessionId') == record['sessionId']:
+        return True  # this lease ended; do not inspect or touch its successor
     summary = t.session_summary(record['sessionId'])
     inputs = summary.get('inputSummary') or {}
     if summary.get('status') not in ('idle', 'failed') or (not record.get('taskCanceled') and (inputs.get('paused') or inputs.get('pendingMessageIds'))):
@@ -646,7 +652,12 @@ def reconcile_resources(t, root):
             pending = receipt(t, root, intent['sessionId'])
             if not pending or not pending.get('done'):
                 continue
-            release_local(t, root, dict(pending, operationId=operation, lock=intent.get('lock')))
+            try:
+                release_local(t, root, dict(pending, operationId=operation, lock=intent.get('lock')))
+            except (t.ExpertError, TeamConfigurationError, OSError, subprocess.TimeoutExpired) as error:
+                intent['resourceRelease'] = dict(status='unknown', reason=str(error)[:300], checkedAtMs=t.now_ms())
+                t.write_json(path, intent)
+                t.record_system_issue(root, 'resource-release', str(error), operation)
 
 
 def active_temp_creators(t, root):
@@ -718,8 +729,8 @@ def watchdog(t, root, task, pending):
     maximum = int(t.setting(root, 'TEAM_WATCHDOG_MAX_WAKES', t.WATCHDOG_MAX_WAKES))
     if state.get('wakes', 0) >= maximum:
         if not state.get('reported'):
-            t.deliver_or_notice(root, task['front'], 'report', 'task-watchdog',
-                                '任务 %s 连续自动接力后仍无可核对进展，已停止自动唤醒，保留会话、材料和资源。' % task['taskId'], task['taskId'], 'bounded-stop')
+            t.record_system_issue(root, 'task-watchdog',
+                                  '任务 %s 连续自动接力后仍无可核对进展，已停止自动唤醒，保留会话、材料和资源。' % task['taskId'], task['taskId'] + ':' + progress)
             state['reported'] = True
     else:
         state['wakes'] = state.get('wakes', 0) + 1

@@ -421,7 +421,9 @@ function SessionRow({
   const [labeling, setLabeling] = useState(false);
   const [processesOpen, setProcessesOpen] = useState(false);
   const summaries = useWorkbench(state => state.sessions);
-  const stale = useWorkbench(state => state.sessionsError || state.connection !== "ready");
+  const observedAtMs = useWorkbench(state => Math.max(state.sessionsCheckedAtMs, state.sessionObservations[session.id] ?? 0));
+  const disconnected = useWorkbench(state => state.connection !== "ready");
+  const stale = useWorkbench(state => state.connection !== "ready" || (state.sessionsError && Math.max(state.sessionsCheckedAtMs, state.sessionObservations[session.id] ?? 0) <= state.sessionsFailedAtMs));
   const facts = sessionAttention(session, summaries);
   // Written by a newer build into this project's folder. Listed, so the
   // conversation does not appear to have vanished, but not openable here.
@@ -479,7 +481,7 @@ function SessionRow({
                 <span className="min-w-0 truncate"><time dateTime={messageDate.toISOString()}>{relativeTime(messageDate.getTime())}</time> · {projectPath}{session.draftCount ? ` · ${session.draftCount} 个草稿` : ""}{historyOnly ? " · 只读" : ""}{session.archived ? " · 已归档" : ""}{unsupported ? " · 需升级" : ""}</span>
               </span>
               <span className={`conversation-marks entity-secondary flex min-h-3.5 min-w-0 items-center gap-1 text-[10px] font-normal leading-[14px] ${!selection && !pick ? "conversation-row-meta" : ""}`}>
-                {(facts.kind || stale) && <SessionStatusIcon session={session} sessions={summaries} stale={stale} />}
+                {(facts.kind || stale) && <SessionStatusIcon session={session} sessions={summaries} stale={stale} disconnected={disconnected} observedAtMs={observedAtMs} showLabel={stale} />}
                 {session.labels?.map((label) => <span key={label} className="session-label shrink-0 rounded bg-accent/10 px-1 text-accent">{label}</span>)}
               </span>
             </span>

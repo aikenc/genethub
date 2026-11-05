@@ -96,7 +96,7 @@ export function NewSessionPanel({ endpoint, surface = "sessions", onSurface, onB
           <FilterBar<AttentionFilter> label="当前项目会话状态" options={attentionFilters} value={filter}
             onChange={id => { if (surface !== "sessions") setSurface("sessions"); setFilter(id); setShowAll(id !== "all"); setHistoryQuery(""); }} />
           {filter === "pending" && <p className="mb-2 text-xs text-muted">完整待办列表，包含仍有待办的归档会话；打开会话处理具体问题。</p>}
-          {activity.error && activity.sessions && <p role="status" className="mb-2 text-xs text-muted">会话状态待同步，当前显示最近已知记录。</p>}
+          {activity.error && activity.sessions && <p role="status" className="mb-2 text-xs text-muted">会话列表刷新失败，当前显示最近记录。</p>}
           {showAll && <div className="mb-3 flex gap-2"><input aria-label="搜索当前项目会话" placeholder="搜索会话" value={historyQuery} onChange={e => setHistoryQuery(e.target.value)} className="min-h-11 min-w-0 flex-1 rounded-lg bg-raised px-3 text-sm"/>{filter !== "pending" && filter !== "running" && <button type="button" aria-pressed={archived} className="min-h-11 rounded-lg border border-line px-3 text-sm" onClick={() => setArchived(v => !v)}>{archived ? "返回未归档" : "已归档"}</button>}</div>}
           {!activity.sessions ? <p role="status" className="py-6 text-sm text-muted">{activity.error ? "会话暂时无法读取，请检查连接后重试。" : "正在读取会话…"}</p> : <>
             <RecentSessions sessions={(showAll || filter !== "all" ? rows : rows.slice(0,10)).map(s => ({...s, unread: hasUnreadReply(machine, s)}))} workspaces={wb.workspaces} activeSessionId={null} onPickSession={id => void wb.selectSession(id)} onRename={(id,title) => void wb.renameSession(id,title)} onDelete={id => void wb.deleteSession(id)} />

@@ -1621,6 +1621,15 @@ impl SessionManager {
         Ok(summary)
     }
 
+    /// Process ownership needs metadata, never a conversation rehydration.
+    pub(crate) async fn workspace_of(&self, session_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .store
+            .find_meta(session_id)
+            .await?
+            .map(|meta| meta.workspace_id))
+    }
+
     /// Returns the durable Human tags plus media requirements observed anywhere
     /// in the visible history. Scanning also upgrades sessions written before
     /// `mediaTags` existed without a migration pass over every workspace.
@@ -1741,8 +1750,12 @@ impl SessionManager {
         include_archived: bool,
         lean: bool,
     ) -> Result<Vec<SessionSummary>> {
+        let started = std::time::Instant::now();
+        let metadata = self.store.list_meta_for(workspace_id).await?;
+        let metadata_ms = started.elapsed().as_millis() as u64;
+        let mut title_repair_ms = 0u64;
         let mut out = Vec::new();
-        for mut meta in self.store.list_meta().await? {
+        for mut meta in metadata {
             crate::blocking::breathe().await;
             if let Some(workspace) = workspace_id {
                 if meta.workspace_id != workspace {
@@ -1752,6 +1765,7 @@ impl SessionManager {
             if meta.archived && !include_archived {
                 continue;
             }
+            let repair_started = std::time::Instant::now();
             match self.store.repair_catalog_noise_title(&mut meta) {
                 Ok(true) => {
                     if let Some(live) = self.sessions.read().await.get(&meta.id) {
@@ -1769,6 +1783,7 @@ impl SessionManager {
                     "could not repair a catalog-heading session title"
                 ),
             }
+            title_repair_ms += repair_started.elapsed().as_millis() as u64;
             // A suspended approval survives daemon restarts without a live
             // Agent process or client connection.
             let (status, activity) = match self.sessions.read().await.get(&meta.id) {
@@ -1803,6 +1818,18 @@ impl SessionManager {
                 }
             }
             out.push(summary);
+        }
+        if started.elapsed().as_millis() >= 1000 {
+            tracing::warn!(
+                event = "session_list_slow",
+                scoped = workspace_id.is_some(),
+                lean,
+                sessions = out.len(),
+                metadata_ms,
+                title_repair_ms,
+                total_ms = started.elapsed().as_millis() as u64,
+                "session list exceeded one second"
+            );
         }
         Ok(out)
     }

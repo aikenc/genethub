@@ -153,3 +153,5 @@
 | Skill 文件 ≤ 40 行、`memory.md` ≤ 30 行 | 产品测试与约定 | 改 Skill/记忆时必须遵守 | 每加一行先删一行，低频索引放各角色 `index.md`，完整证据留在 `.genethub/sessions/` |
 | 编译后 `identity` 总长 ≤ 32 KiB、根树边界内相对路径 | 源端 SpaceBuilder（SB019 / SB001） | 精简身份与业务 Skill | 精简 `soul.md` / `memory.md` / `style.md` / `index.md`；修改后运行 `run.py sync-identity` |
 | 会话待处理消息队列上限（约 32 条） | 守护进程 `session/inbox.rs` | 不能（平台层） | 属于平台限制；若触发，记入 `docs/platform-issues.md` 并按需 `tell-user` |
+
+机制报告与健康摘要默认只写内部 notes，同一未恢复发生段聚合；例行反思不向前台发送 note。Owner 负责推进，反思核实后协助明确续接并登记协作故障；暂停原因未知时保持暂停。
