@@ -26,7 +26,7 @@ struct Request {
     #[serde(default)]
     allow_turn: bool,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 struct Run {
     version: u32,
@@ -415,10 +415,17 @@ async fn read_process_snapshot(
             continue;
         };
         if run.pid > 0 {
-            registrations.push(run);
+            if let Ok(absolute) = std::fs::canonicalize(crate::guest_paths::guest_path(
+                std::path::Path::new(&run.entry),
+            )) {
+                registrations.push(absolute);
+            }
         }
     }
-    let mut candidates = Vec::new();
+    if registrations.is_empty() {
+        return Ok(finish(rows));
+    }
+    let mut candidates: Vec<(Run, Vec<(String, String)>)> = Vec::new();
     for info in state.workspaces.list().await {
         if workspace.is_some_and(|w| w != info.id) {
             continue;
@@ -427,16 +434,17 @@ async fn read_process_snapshot(
         // leave room for conversation reads and peer handshakes.
         crate::blocking::breathe().await;
         let entry = state.workspaces.get(&info.id).await?;
-        for run in &registrations {
-            let Ok(absolute) = std::fs::canonicalize(crate::guest_paths::guest_path(
-                std::path::Path::new(&run.entry),
-            )) else {
-                continue;
-            };
-            for folder in &entry.folders {
-                let Ok(root) = std::fs::canonicalize(&folder.root) else {
-                    continue;
-                };
+        let folders: Vec<_> = entry
+            .folders
+            .iter()
+            .filter_map(|folder| {
+                std::fs::canonicalize(&folder.root)
+                    .ok()
+                    .map(|root| (folder, root))
+            })
+            .collect();
+        for absolute in &registrations {
+            for (folder, root) in &folders {
                 let Ok(relative) = absolute.strip_prefix(root) else {
                     continue;
                 };
@@ -446,14 +454,23 @@ async fn read_process_snapshot(
                     relative.to_string_lossy().replace('\\', "/")
                 );
                 if let Ok(Some(verified)) = load_entry(state, &info.id, &path).await {
-                    candidates.push((info.id.clone(), path, verified));
+                    // Each project still validates its own path and current
+                    // registration. Aliases of the identical Run need only
+                    // one authenticated health probe, not one per project.
+                    if let Some((_, aliases)) =
+                        candidates.iter_mut().find(|(run, _)| *run == verified)
+                    {
+                        aliases.push((info.id.clone(), path));
+                    } else {
+                        candidates.push((verified, vec![(info.id.clone(), path)]));
+                    }
                 }
                 break;
             }
         }
     }
-    let mut probes = futures_util::stream::iter(candidates.into_iter().map(
-        |(workspace_id, entry_path, run)| async move {
+    let mut probes =
+        futures_util::stream::iter(candidates.into_iter().map(|(run, aliases)| async move {
             let reachable = tokio::time::timeout(Duration::from_secs(1), async {
                 let mut socket = connect(&run).await?;
                 socket.close(None).await?;
@@ -461,13 +478,16 @@ async fn read_process_snapshot(
             })
             .await
             .is_ok_and(|r| r.is_ok());
-            (workspace_id, entry_path, run, reachable)
-        },
-    ))
-    .buffer_unordered(8);
+            (run, aliases, reachable)
+        }))
+        .buffer_unordered(8);
     let mut completed = Vec::new();
-    while let Some(result) = probes.next().await {
-        completed.push(result);
+    while let Some((run, aliases, reachable)) = probes.next().await {
+        completed.extend(
+            aliases.into_iter().map(|(workspace_id, entry_path)| {
+                (workspace_id, entry_path, run.clone(), reachable)
+            }),
+        );
     }
     let roots: Vec<u32> = completed.iter().filter(|r| r.3).map(|r| r.2.pid).collect();
     let trees = crate::processes::registered_trees(&roots).await;
