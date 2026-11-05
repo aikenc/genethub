@@ -762,12 +762,27 @@ impl WorkspaceHomes {
     /// Every physical session directory once, plus the active projects allowed
     /// to see sessions stored there.
     fn all_sessions_dirs(&self) -> Vec<(Vec<(String, WorkspaceHome)>, PathBuf)> {
+        self.session_dirs_for(None)
+    }
+
+    fn session_dirs_for(
+        &self,
+        workspace: Option<&str>,
+    ) -> Vec<(Vec<(String, WorkspaceHome)>, PathBuf)> {
         let Ok(homes) = self.homes.read() else {
             return Vec::new();
         };
         homes
             .roots
             .keys()
+            .filter(|root| {
+                workspace.is_none_or(|id| {
+                    homes
+                        .workspaces
+                        .get(id)
+                        .is_some_and(|home| &home.root == *root)
+                })
+            })
             .map(|root| {
                 let projects = homes
                     .workspaces
@@ -1404,8 +1419,17 @@ impl Store {
     /// answer to "where did my chats go" has to be visible rather than an empty
     /// list, even though this build cannot show what is inside them.
     pub async fn list_meta(&self) -> Result<Vec<SessionMeta>> {
+        self.list_meta_for(None).await
+    }
+
+    pub async fn list_meta_for(&self, workspace: Option<&str>) -> Result<Vec<SessionMeta>> {
+        let started = std::time::Instant::now();
+        let mut directories = 0usize;
+        let mut entries_read = 0usize;
+        let mut metadata_bytes = 0usize;
         let mut out = Vec::new();
-        for (workspaces, sessions) in self.homes.all_sessions_dirs() {
+        for (workspaces, sessions) in self.homes.session_dirs_for(workspace) {
+            directories += 1;
             crate::blocking::breathe().await;
             if let Some((workspace_id, _)) = workspaces.first() {
                 self.reap_tombstoned_sessions(workspace_id, &sessions);
@@ -1419,6 +1443,7 @@ impl Store {
                 continue;
             };
             for entry in entries.flatten() {
+                entries_read += 1;
                 // A bulk read must not hold the guest's only fiber while
                 // unrelated foreground requests and peer handshakes wait.
                 crate::blocking::breathe().await;
@@ -1434,6 +1459,7 @@ impl Store {
                 let Ok(raw) = fs::read_to_string(&path) else {
                     continue;
                 };
+                metadata_bytes += raw.len();
                 let Ok(header) = serde_json::from_str::<MetaHeader>(&raw) else {
                     continue;
                 };
@@ -1441,6 +1467,9 @@ impl Store {
                 let Some(workspace_id) = owner else {
                     continue;
                 };
+                if workspace.is_some_and(|id| id != workspace_id) {
+                    continue;
+                }
                 match self.load_meta_from(&workspace_id, &session_id, &raw, header) {
                     Ok(meta) => out.push(meta),
                     Err(error) => tracing::warn!(
@@ -1452,6 +1481,18 @@ impl Store {
             }
         }
         out.sort_by_key(|meta: &SessionMeta| std::cmp::Reverse(meta.updated_at_ms));
+        if started.elapsed().as_millis() >= 1000 {
+            tracing::warn!(
+                event = "session_catalog_slow",
+                scoped = workspace.is_some(),
+                directories,
+                entries_read,
+                metadata_bytes,
+                sessions = out.len(),
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "session metadata enumeration exceeded one second"
+            );
+        }
         Ok(out)
     }
 

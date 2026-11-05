@@ -159,7 +159,7 @@ function ConversationListContent({ host, endpoint, open, hidden, onNavigate, onO
         </div>
       </>}
     </ListHeader>
-    {activity.error && <p role="status" className="px-3 py-2 text-xs text-muted">会话状态待同步，当前显示最近已知记录。</p>}
+    {activity.error && <p role="status" className="px-3 py-2 text-xs text-muted">会话列表刷新失败，当前显示最近记录；不代表所有会话已停止。</p>}
     {state === "pending" && <p className="px-3 py-1 text-xs text-muted">包含可处理的内部及归档会话；每项可进入具体问题。</p>}
     {notice && <div role="status" className="flex max-h-[10%] shrink-0 gap-2 overflow-y-auto border-b border-line px-3 py-2 text-xs leading-5"><p className="min-w-0 flex-1 break-words">{notice}</p><button aria-label="关闭操作结果" className="h-8 w-8 shrink-0" onClick={() => setNotice("")}>×</button></div>}
     <ListScroll label="会话滚动区域">
