@@ -159,7 +159,7 @@ function ConversationListContent({ host, endpoint, open, hidden, onNavigate, onO
         </div>
       </>}
     </ListHeader>
-    {activity.error && <p role="status" className="px-3 py-2 text-xs text-muted">会话列表刷新失败，当前显示最近记录；不代表所有会话已停止。</p>}
+    {activity.error && activity.sessions && <p role="status" className="px-3 py-2 text-xs text-muted">会话列表刷新失败，当前显示最近记录；不代表所有会话已停止。</p>}
     {state === "pending" && <p className="px-3 py-1 text-xs text-muted">包含可处理的内部及归档会话；每项可进入具体问题。</p>}
     {notice && <div role="status" className="flex max-h-[10%] shrink-0 gap-2 overflow-y-auto border-b border-line px-3 py-2 text-xs leading-5"><p className="min-w-0 flex-1 break-words">{notice}</p><button aria-label="关闭操作结果" className="h-8 w-8 shrink-0" onClick={() => setNotice("")}>×</button></div>}
     <ListScroll label="会话滚动区域">
@@ -168,7 +168,9 @@ function ConversationListContent({ host, endpoint, open, hidden, onNavigate, onO
         selection={managing ? { ids: selection, toggle, disabled: busy } : undefined}
         onPickSession={(id) => { void wb.selectSession(id); onNavigate(); }}
         onRename={(id, title) => void wb.renameSession(id, title)} onDelete={(id) => void wb.deleteSession(id)} />
-      {!rows.length && <div className="px-4 py-8 text-center text-sm text-muted"><p>{query || agentId || state !== "all" || wb.includeArchived ? "没有匹配的会话" : "从一个项目开始会话"}</p></div>}
+      {!rows.length && <div className="px-4 py-8 text-center text-sm text-muted"><p>{!activity.sessions
+        ? wb.connection !== "ready" ? "正在连接设备…" : activity.error ? "会话列表暂时无法加载，请稍后重试。" : "正在加载会话…"
+        : query || agentId || state !== "all" || wb.includeArchived ? "没有匹配的会话" : "从一个项目开始会话"}</p></div>}
     </ListScroll>
     {managing && <footer aria-label="批量管理会话" className="max-h-[42%] shrink-0 space-y-2 overflow-y-auto border-t border-line bg-surface p-3">
       <p className="text-xs text-muted">已选 {selection.size} 条{busy ? " · 正在处理，请稍候…" : " · 切换筛选会清空选择"}</p>
