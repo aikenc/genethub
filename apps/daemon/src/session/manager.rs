@@ -447,6 +447,7 @@ async fn open_annotation_source(
 
 pub struct SessionManager {
     store: Store,
+    list_reads: crate::blocking::InFlightReads<(Option<String>, bool, bool), Vec<SessionSummary>>,
     registry: Arc<Registry>,
     diagnostics: Arc<Diagnostics>,
     sessions: RwLock<HashMap<String, Arc<Live>>>,
@@ -485,6 +486,7 @@ impl SessionManager {
     ) -> Self {
         SessionManager {
             store,
+            list_reads: Default::default(),
             registry,
             diagnostics,
             sessions: RwLock::new(HashMap::new()),
@@ -1745,6 +1747,20 @@ impl SessionManager {
     /// last-reply cursor stay because expert directories and fleet
     /// verification read them. Session detail reads remain complete.
     pub async fn list_with_projection(
+        &self,
+        workspace_id: Option<&str>,
+        include_archived: bool,
+        lean: bool,
+    ) -> Result<Vec<SessionSummary>> {
+        crate::blocking::coalesce(
+            &self.list_reads,
+            (workspace_id.map(str::to_owned), include_archived, lean),
+            || self.read_list(workspace_id, include_archived, lean),
+        )
+        .await
+    }
+
+    async fn read_list(
         &self,
         workspace_id: Option<&str>,
         include_archived: bool,
@@ -6555,6 +6571,9 @@ async fn pump_events(
     let mut stopping = live.pump_stop.subscribe();
     let mut checkpoint = tokio::time::interval(Duration::from_secs(1));
     checkpoint.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Idle pumps must not fsync identical metadata every second. Retain only
+    // the last successfully saved fingerprint; failed saves remain retryable.
+    let mut checkpoint_saved: Option<[u8; 32]> = None;
     'events: loop {
         let received = tokio::select! {
             biased;
@@ -6580,7 +6599,18 @@ async fn pump_events(
                 if let Some(pid) = pid {
                     meta.agent_pid = Some(pid);
                 }
-                if let Err(error) = store.save_meta(&meta) { tracing::error!(%error, "persisting execution checkpoint"); }
+                match serde_json::to_vec(&*meta) {
+                    Ok(bytes) => {
+                        let fingerprint: [u8; 32] = Sha256::digest(&bytes).into();
+                        if checkpoint_saved != Some(fingerprint) {
+                            match store.save_meta(&meta) {
+                                Ok(()) => checkpoint_saved = Some(fingerprint),
+                                Err(error) => tracing::error!(%error, "persisting execution checkpoint"),
+                            }
+                        }
+                    }
+                    Err(error) => tracing::error!(%error, "encoding execution checkpoint"),
+                }
                 if let Some(pid) = changed_pid {
                     let session_id = meta.id.clone();
                     drop(meta);
