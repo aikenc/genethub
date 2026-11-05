@@ -968,6 +968,7 @@ fn prune_home(homes: &mut Homes, root: &Path) {
 pub struct Store {
     homes: WorkspaceHomes,
     coordination: super::coordination::Cache,
+    catalog_reads: Arc<crate::blocking::InFlightReads<Option<String>, Vec<SessionMeta>>>,
 }
 
 impl Store {
@@ -975,6 +976,7 @@ impl Store {
         Store {
             homes,
             coordination: Default::default(),
+            catalog_reads: Default::default(),
         }
     }
 
@@ -1423,6 +1425,13 @@ impl Store {
     }
 
     pub async fn list_meta_for(&self, workspace: Option<&str>) -> Result<Vec<SessionMeta>> {
+        crate::blocking::coalesce(&self.catalog_reads, workspace.map(str::to_owned), || {
+            self.read_meta_for(workspace)
+        })
+        .await
+    }
+
+    async fn read_meta_for(&self, workspace: Option<&str>) -> Result<Vec<SessionMeta>> {
         let started = std::time::Instant::now();
         let mut directories = 0usize;
         let mut entries_read = 0usize;
