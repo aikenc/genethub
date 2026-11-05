@@ -1433,13 +1433,19 @@ impl Store {
 
     async fn read_meta_for(&self, workspace: Option<&str>) -> Result<Vec<SessionMeta>> {
         let started = std::time::Instant::now();
+        let mut yield_wait = std::time::Duration::ZERO;
+        let mut max_yield = std::time::Duration::ZERO;
         let mut directories = 0usize;
         let mut entries_read = 0usize;
         let mut metadata_bytes = 0usize;
         let mut out = Vec::new();
         for (workspaces, sessions) in self.homes.session_dirs_for(workspace) {
             directories += 1;
+            let yielding = std::time::Instant::now();
             crate::blocking::breathe().await;
+            let waited = yielding.elapsed();
+            yield_wait += waited;
+            max_yield = max_yield.max(waited);
             if let Some((workspace_id, _)) = workspaces.first() {
                 self.reap_tombstoned_sessions(workspace_id, &sessions);
             }
@@ -1455,7 +1461,11 @@ impl Store {
                 entries_read += 1;
                 // A bulk read must not hold the guest's only fiber while
                 // unrelated foreground requests and peer handshakes wait.
+                let yielding = std::time::Instant::now();
                 crate::blocking::breathe().await;
+                let waited = yielding.elapsed();
+                yield_wait += waited;
+                max_yield = max_yield.max(waited);
                 let session_id = entry.file_name().to_string_lossy().into_owned();
                 if sessions.parent().is_some_and(|home| {
                     home.join(TOMBSTONES_DIR)
@@ -1498,6 +1508,9 @@ impl Store {
                 entries_read,
                 metadata_bytes,
                 sessions = out.len(),
+                yield_wait_ms = yield_wait.as_millis() as u64,
+                max_yield_ms = max_yield.as_millis() as u64,
+                inline_ms = started.elapsed().saturating_sub(yield_wait).as_millis() as u64,
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 "session metadata enumeration exceeded one second"
             );

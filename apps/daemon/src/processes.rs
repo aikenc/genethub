@@ -80,6 +80,11 @@ const CLOCK_SLACK: u64 = 5;
 #[derive(Default)]
 pub struct Processes {
     agents: RwLock<HashMap<String, Agent>>,
+    inventory_reads: crate::blocking::InFlightReads<(), Vec<BackgroundProcess>>,
+    /// Concurrent observers share one inventory, without retaining it after
+    /// they leave. Full preview discovery is distinct from a restricted view.
+    pub(crate) snapshot_reads:
+        crate::blocking::InFlightReads<(Option<String>, bool), Vec<BackgroundProcess>>,
     /// Set once the transport exists, which is after this does.
     announce: std::sync::OnceLock<tokio::sync::broadcast::Sender<genehub_proto::ServerFrame>>,
 }
@@ -218,6 +223,23 @@ impl Processes {
 
     /// Everything still running that some session's agent started.
     pub async fn list(&self) -> Vec<BackgroundProcess> {
+        // Announcements and differently scoped observers still ask the same
+        // OS question. Share only their in-flight observation; cleanup and
+        // signal decisions below keep their own fresh census.
+        match crate::blocking::coalesce(&self.inventory_reads, (), || async {
+            anyhow::Ok(self.read_list().await)
+        })
+        .await
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(%error, "could not share a process inventory read");
+                self.read_list().await
+            }
+        }
+    }
+
+    async fn read_list(&self) -> Vec<BackgroundProcess> {
         let agents = self.agents.read().await.clone();
         if agents.is_empty() {
             return Vec::new();
@@ -688,6 +710,9 @@ async fn terminate_snapshot(owned: &[Row]) -> bool {
 pub(crate) async fn registered_trees(
     roots: &[u32],
 ) -> HashMap<u32, Vec<genehub_proto::BackgroundProcess>> {
+    if roots.is_empty() {
+        return HashMap::new();
+    }
     let Some(current) = census().await else {
         return HashMap::new();
     };

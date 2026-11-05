@@ -329,7 +329,23 @@ pub(crate) async fn process_snapshot(
     if let Some(id) = workspace {
         state.workspaces.get(id).await?;
     }
+    crate::blocking::coalesce(
+        &state.processes.snapshot_reads,
+        (workspace.map(str::to_owned), caller.is_full()),
+        || read_process_snapshot(state, caller.is_full(), workspace),
+    )
+    .await
+}
+
+async fn read_process_snapshot(
+    state: &crate::state::Shared,
+    full: bool,
+    workspace: Option<&str>,
+) -> Result<Vec<genehub_proto::BackgroundProcess>> {
+    let started = std::time::Instant::now();
     let mut rows = state.processes.list().await;
+    let census_ms = started.elapsed().as_millis() as u64;
+    let ownership_started = std::time::Instant::now();
     let mut owners = std::collections::HashMap::new();
     for row in &mut rows {
         if !owners.contains_key(&row.session_id) {
@@ -341,12 +357,31 @@ pub(crate) async fn process_snapshot(
         row.workspace_id = owners.get(&row.session_id).cloned().flatten();
     }
     rows.retain(|r| workspace.is_none_or(|w| r.workspace_id.as_deref() == Some(w)));
-    if !caller.is_full() {
-        return Ok(rows);
+    let ownership_ms = ownership_started.elapsed().as_millis() as u64;
+    let finish = |rows: Vec<genehub_proto::BackgroundProcess>| {
+        let total_ms = started.elapsed().as_millis() as u64;
+        if total_ms >= 1000 {
+            tracing::warn!(
+                event = "process_snapshot_slow",
+                scoped = workspace.is_some(),
+                full,
+                census_ms,
+                ownership_ms,
+                preview_ms = total_ms.saturating_sub(census_ms + ownership_ms),
+                total_ms,
+                unique_owners = owners.len(),
+                processes = rows.len(),
+                "process inventory exceeded one second"
+            );
+        }
+        rows
+    };
+    if !full {
+        return Ok(finish(rows));
     }
     let directory = state.paths.root.join("service-previews");
     if !directory.exists() {
-        return Ok(rows);
+        return Ok(finish(rows));
     }
     crate::config::reject_link_or_reparse(
         &directory,
@@ -388,6 +423,9 @@ pub(crate) async fn process_snapshot(
         if workspace.is_some_and(|w| w != info.id) {
             continue;
         }
+        // Registry size is user-controlled; a global process observer must
+        // leave room for conversation reads and peer handshakes.
+        crate::blocking::breathe().await;
         let entry = state.workspaces.get(&info.id).await?;
         for run in &registrations {
             let Ok(absolute) = std::fs::canonicalize(crate::guest_paths::guest_path(
@@ -470,7 +508,7 @@ pub(crate) async fn process_snapshot(
             });
         }
     }
-    Ok(rows)
+    Ok(finish(rows))
 }
 
 pub(crate) async fn stop_registered(

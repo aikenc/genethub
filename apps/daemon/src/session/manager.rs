@@ -1625,6 +1625,14 @@ impl SessionManager {
 
     /// Process ownership needs metadata, never a conversation rehydration.
     pub(crate) async fn workspace_of(&self, session_id: &str) -> Result<Option<String>> {
+        // A watched Agent was started from this Live. Its actual execution
+        // binding is authoritative, including when another project copied
+        // the same durable ID. Do not scan every home for every live process.
+        let live = self.sessions.read().await.get(session_id).cloned();
+        if let Some(live) = live {
+            let workspace = live.meta.lock().await.workspace_id.clone();
+            return Ok(Some(workspace));
+        }
         Ok(self
             .store
             .find_meta(session_id)
