@@ -983,12 +983,15 @@ struct PageCatalogSnapshot {
     metadata: Vec<SessionMeta>,
 }
 
+type PageReadKey = (Option<String>, u64, u64);
+type PageReads = crate::blocking::InFlightReads<PageReadKey, Vec<SessionMeta>>;
+
 #[derive(Clone)]
 pub struct Store {
     homes: WorkspaceHomes,
     coordination: super::coordination::Cache,
     catalog_reads: Arc<crate::blocking::InFlightReads<Option<String>, Vec<SessionMeta>>>,
-    page_reads: Arc<crate::blocking::InFlightReads<(Option<String>, u64, u64), Vec<SessionMeta>>>,
+    page_reads: Arc<PageReads>,
     page_catalog: Arc<std::sync::Mutex<PageCatalog>>,
 }
 
