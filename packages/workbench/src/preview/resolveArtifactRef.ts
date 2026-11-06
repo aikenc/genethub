@@ -22,7 +22,7 @@ export type ArtifactResolveContext = {
 };
 
 export type ResolvedArtifactRef =
-  | { kind: "preview"; path: string; href: string; docQuery?: string; docFragment?: string }
+  | { kind: "preview"; path: string; href: string; docQuery?: string; docFragment?: string; deviceHandle?: string; workspaceHandle?: string }
   | { kind: "external"; href: string }
   | { kind: "blocked" };
 
@@ -103,7 +103,11 @@ function rebindPreviewUrl(
   // A machine locator already identifies its machine. Never rebind it onto
   // the currently selected device and accidentally read a different file.
   if (isAbsoluteFilePath(parsed.path)) {
-    if (!context || parsed.deviceHandle !== context.deviceHandle) return {kind: "external", href: value};
+    if (!context) return {kind: "external", href: value};
+    if (parsed.deviceHandle !== context.deviceHandle) return {kind: "preview", path: parsed.path,
+      deviceHandle: parsed.deviceHandle, workspaceHandle: "",
+      href: documentLocatorUrl(assetPreviewUrl(parsed.deviceHandle, "", parsed.path, origin), parsed.docQuery ?? "", parsed.docFragment ?? ""),
+      ...(parsed.docQuery ? {docQuery: parsed.docQuery} : {}), ...(parsed.docFragment ? {docFragment: parsed.docFragment} : {})};
     return {kind: "preview", path: parsed.path, href: documentLocatorUrl(assetPreviewUrl(parsed.deviceHandle, "", parsed.path, origin), parsed.docQuery ?? "", parsed.docFragment ?? ""),
       ...(parsed.docQuery ? {docQuery: parsed.docQuery} : {}), ...(parsed.docFragment ? {docFragment: parsed.docFragment} : {})};
   }

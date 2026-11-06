@@ -12,7 +12,9 @@ import type {
 import { ChangesPanel } from "../changes/ChangesPanel";
 import { claimMachine, deviceName } from "../devices/claim";
 import { emitClientDiagnostic } from "../diagnostics";
-import { TargetSwitcher } from "../shell/TargetSwitcher";
+import { MachineConnections, dialOf, type MachineLease } from "../protocol/machine-connections";
+import { MachineConnectionsContext } from "../protocol/machine-connection-context";
+import { readRecentSessions } from "../protocol/session-pages";
 import { DevicesPanel } from "../devices/DevicesPanel";
 import { FilesPanel } from "../files/FilesPanel";
 import { BackgroundBadge } from "../processes/BackgroundBadge";
@@ -43,14 +45,14 @@ import type {
 } from "../session/TimelineView";
 import type { ForkMachineOption } from "../session/ForkDialog";
 import type { MachineCatalog } from "../session/MachineCatalogPicker";
-import { useWorkbench } from "../session/store";
+import { useWorkbench, workbenchForClient } from "../session/store";
 import {
   mediaTagsForTimeline,
   normalizeTags,
   normalizeAgentPreferences,
   resolveTagRoute,
 } from "../session/capability-preferences";
-import { MachineSummaryOverview } from "./MachineSummaryOverview";
+import { MachineDirectoryLists } from "./MachineDirectoryLists";
 import { ConversationList as Sidebar } from "./ConversationList";
 import { ToolsMenu } from "../shell/ToolsMenu";
 import { WorkbenchNavigation } from "../shell/WorkbenchNavigation";
@@ -198,11 +200,60 @@ export function App({
   // desktop asking for the room back, which starts false because the left
   // column is how the workbench is read.
   const [sidebarHidden, setSidebarHidden] = useState(false);
-  const [summaryOverview,setSummaryOverview]=useState(false);
+  const pickedMachine = useRef<Target | null>(null);
+  const connections = useMemo(() => new MachineConnections({
+    targets: options => host.targets?.(options) ?? Promise.resolve([]),
+    openTarget: async id => {
+      if (host.openTarget && id !== "default") return host.openTarget(id, { remember: false });
+      const found = await host.endpoint();
+      if (!found) throw new Error("没有可连接的机器。");
+      return found;
+    },
+  }, { connect, rtcEnabled: readRtcEnabled }), [host, connect]);
+  const closeConnections = useRef(new Map<MachineConnections, ReturnType<typeof setTimeout>>());
+  useEffect(() => {
+    const pending = closeConnections.current;
+    const timer = pending.get(connections);
+    if (timer) clearTimeout(timer);
+    pending.delete(connections);
+    return () => { pending.set(connections, setTimeout(() => { connections.close(); pending.delete(connections); }, 0)); };
+  }, [connections]);
+  useEffect(() => {
+    const media = window.matchMedia?.("(min-width: 768px)");
+    const update = () => connections.setLimit(media?.matches === false ? 3 : 4);
+    update(); media?.addEventListener?.("change", update);
+    return () => media?.removeEventListener?.("change", update);
+  }, [connections]);
+  const [pendingProject, setPendingProject] = useState<{ machineId: string; workspaceId?: string; addProject?: boolean } | null>(null);
   const [pendingJumpSession, setPendingJumpSession] = useState<string | null>(null);
   const [pendingJumpFrom,setPendingJumpFrom]=useState<Client|null>(null);
+  const pickTarget = useCallback((picked: Target, next: Endpoint) => {
+    setPendingJumpSession(null);setPendingJumpFrom(null);
+    pickedMachine.current = picked;
+    // The local machine goes back to following the shell, which is the only
+    // thing that knows where its daemon moved to.
+    setTarget(picked.kind === "local" ? null : picked.id);
+    // Keeping the object when the address did not move, so that picking the
+    // machine you are already on does not tear the connection down and build
+    // an identical one.
+    setEndpoint((current) =>
+      current !== "loading" && current?.url === next.url ? current : next,
+    );
+  }, []);
+
+  useEffect(() => host.onTargetRequested?.(pickTarget), [host, pickTarget]);
   useEffect(() => { if (section === "spaces") setSpacesVisited(true); }, [section]);
   const workbench = useWorkbench();
+  useEffect(() => connections.onInvalidated(machine => {
+    const state = useWorkbench.getState();
+    const client = state.client;
+    const matches = machine.deviceHandle ? machine.deviceHandle === client?.identity?.machineId
+      : machine.fingerprint ? machine.fingerprint === client?.identity?.fingerprint
+      : machine.id === "default" || machine.id === pickedMachine.current?.id;
+    if (!client || !matches) return;
+    state.detach(client);
+    useWorkbench.setState({ notice: "此机器的访问授权已失效，请重新连接。", connection: "closed" });
+  }), [connections]);
   useEffect(() => {
     const client = workbench.client;
     if (!client) return;
@@ -347,11 +398,40 @@ export function App({
 
   useEffect(() => {
     if (host.kind !== "browser") return;
+    let routeController: AbortController | null = null;
     const apply = () => {
-      if (window.history.state?.genehubPage) return;
+      routeController?.abort();
+      const saved = window.history.state?.genehubPage as { machineId?: string; sessionId?: string; workspaceId?: string } | undefined;
       const loc = readWorkbenchLocation();
       if (!loc) return;
       const state = useWorkbench.getState();
+      const desiredDevice = saved?.machineId ?? loc.deviceHandle;
+      if (state.client?.identity && !locatorsMatch(state.client.identity.machineId, desiredDevice) && host.targets && host.openTarget) {
+        const controller = new AbortController(); routeController = controller;
+        void connections.targets().then(async targets => {
+          const machine = targets.find(target => locatorsMatch(target.deviceHandle ?? target.id, desiredDevice));
+          if (!machine) throw new Error("此地址的机器不在已授权目录中。");
+          const lease = await connections.acquire(machine, { signal: controller.signal });
+          try {
+            if (controller.signal.aborted) return;
+            const cached = workbenchForClient(lease.client);
+            pickTarget(machine, lease.endpoint);
+            const wantedSession = saved?.sessionId ?? loc.sessionId;
+            const wantedWorkspace = saved?.workspaceId ?? loc.workspaceId;
+            if (wantedSession && wantedSession !== NEW_SESSION_ID) {
+              const id = expandLocator(wantedSession, cached?.sessions.map(session => session.id) ?? []) ?? (wantedSession.startsWith("s_") ? wantedSession : null);
+              if (id) { setPendingJumpFrom(state.client); setPendingJumpSession(id); }
+            } else if (wantedWorkspace) {
+              const id = expandLocator(wantedWorkspace, cached?.workspaces.map(workspace => workspace.id) ?? []) ?? (wantedWorkspace.startsWith("w_") ? wantedWorkspace : null);
+              if (id) setPendingProject({ machineId: machine.deviceHandle ?? lease.client.identity!.machineId, workspaceId: id });
+            }
+          } finally { lease.release(); }
+        }).catch((error: unknown) => {
+          if (!controller.signal.aborted) useWorkbench.setState({ notice: error instanceof Error ? error.message : String(error) });
+        });
+        return;
+      }
+      if (saved) return;
       const workspaceId = loc.workspaceId
         ? expandLocator(
             loc.workspaceId,
@@ -413,8 +493,8 @@ export function App({
       }
     };
     window.addEventListener("popstate", apply);
-    return () => window.removeEventListener("popstate", apply);
-  }, [host]);
+    return () => { routeController?.abort(); window.removeEventListener("popstate", apply); };
+  }, [host, connections, pickTarget]);
 
   // The frame the compositor paints while a window is being resized is the
   // shell's, not the page's, so it has to be told which palette is in force —
@@ -437,7 +517,7 @@ export function App({
     syncLimit();
     media.addEventListener?.("change", syncLimit);
     return () => media.removeEventListener?.("change", syncLimit);
-  }, []);
+  }, [workbench.client]);
 
   useEffect(() => {
     if (!pairing) return;
@@ -536,49 +616,60 @@ export function App({
   useEffect(() => {
     if (claiming !== "idle") return;
     if (endpoint === "loading" || endpoint === null) return;
-    const client = connect(endpoint, async () =>
-      // Asking the target again rather than replaying the address: whoever
-      // supplies a remote machine may be minting a one-time forwarding ticket,
-      // and a client that reuses the first one gives up for good on the first
-      // dropped socket.
-      target !== null && host.openTarget
-        ? dialOf(await host.openTarget(target))
+    let cancelled = false;
+    let lease: MachineLease | undefined;
+    const machine = pickedMachine.current ?? { id: target ?? "default", label: endpoint.label,
+      deviceHandle: endpoint.localServerProof?.machineId, fingerprint: endpoint.fingerprint,
+      kind: target === null && host.kind === "desktop" ? "local" as const : "remote" as const };
+    void connections.acquire(machine, { endpoint, foreground: true, redial: async () =>
+      target !== null && host.openTarget ? dialOf(await host.openTarget(target, { remember: false }))
         : dialOf((await host.endpoint()) ?? endpoint),
-    );
-    client.connect();
-    void useWorkbench.getState().attach(client);
-    return () => client.close();
-  }, [endpoint, connect, host, target]);
+    }).then(async opened => {
+      if (cancelled) { opened.release(); return; }
+      lease = opened;
+      await useWorkbench.getState().attach(opened.client);
+    }).catch((error: unknown) => {
+      if (!cancelled) useWorkbench.setState({ connection: "closed", notice: error instanceof Error ? error.message : String(error) });
+    });
+    return () => {
+      cancelled = true;
+      if (lease) useWorkbench.getState().detach(lease.client);
+      lease?.release();
+    };
+  }, [endpoint, connections, host, target, claiming]);
 
   useEffect(() => {
     if (
       !pendingJumpSession ||
       (pendingJumpFrom !== null && workbench.client === pendingJumpFrom) ||
       workbench.connection !== "ready" ||
-      !workbench.sessions.some((entry) => entry.id === pendingJumpSession)
+      !workbench.sessionsLoaded
     ) return;
     const sessionId = pendingJumpSession;
     setPendingJumpSession(null);
     setPendingJumpFrom(null);
-    void useWorkbench.getState().selectSession(sessionId).catch((error: unknown) => {
+    // The dial/hydration crossed event turns. Record the root navigation now,
+    // with the destination's session, rather than an earlier source snapshot.
+    rootNextPage();
+    const selecting = useWorkbench.getState().selectSession(sessionId);
+    setSection("sessions"); setSessionsOpen(false);
+    void selecting.catch((error: unknown) => {
       useWorkbench.setState({
         notice: error instanceof Error ? error.message : String(error),
       });
     });
-  }, [pendingJumpSession, pendingJumpFrom, workbench.client, workbench.connection, workbench.sessions]);
+  }, [pendingJumpSession, pendingJumpFrom, workbench.client, workbench.connection, workbench.sessions, workbench.sessionsLoaded]);
 
-  const pickTarget = useCallback((picked: Target, next: Endpoint) => {
-    setPendingJumpSession(null);setPendingJumpFrom(null);
-    // The local machine goes back to following the shell, which is the only
-    // thing that knows where its daemon moved to.
-    setTarget(picked.kind === "local" ? null : picked.id);
-    // Keeping the object when the address did not move, so that picking the
-    // machine you are already on does not tear the connection down and build
-    // an identical one.
-    setEndpoint((current) =>
-      current !== "loading" && current?.url === next.url ? current : next,
-    );
-  }, []);
+  useEffect(() => {
+    if (!pendingProject || workbench.client?.identity?.machineId !== pendingProject.machineId ||
+        (!pendingProject.addProject && !workbench.sessionsLoaded)) return;
+    const intent = pendingProject;
+    setPendingProject(null);
+    rootNextPage();
+    if (intent.addProject) expertCreator.current?.open();
+    else if (intent.workspaceId) useWorkbench.getState().newSession(intent.workspaceId, null, { addressScope: "workspace" });
+    setSection("spaces"); setSessionsOpen(false);
+  }, [pendingProject, workbench.client, workbench.sessionsLoaded]);
 
   const sourceMachineId = workbench.client?.identity?.machineId ?? "current";
   const sourceMachine = useMemo<ForkMachineOption>(
@@ -594,24 +685,13 @@ export function App({
   );
   const machineBroker = useMemo<MachineBroker | undefined>(() => {
     if (!host.targets || !host.openTarget) return undefined;
-    const listTargets = host.targets;
-    const openTarget = host.openTarget;
-    const onMachine = <T,>(
-      machine: ForkMachineOption,
-      exchange: (client: Client) => Promise<T>,
-    ): Promise<T> =>
-      openTarget(machine.routeId, { remember: false }).then((opened) =>
-        withForkClient(
-          connect,
-          opened,
-          async () => dialOf(await openTarget(machine.routeId, { remember: false })),
-          exchange,
-        ),
-      );
+    const onMachine = <T,>(machine: ForkMachineOption, exchange: (client: Client) => Promise<T>): Promise<T> =>
+      connections.use({ id: machine.routeId, deviceHandle: machine.id === "current" ? undefined : machine.id,
+        label: machine.label, kind: machine.kind }, exchange);
     return {
       sourceMachine,
       async listMachines() {
-        const listed = await listTargets();
+        const listed = await connections.targets();
         const machines = listed.map((machine): ForkMachineOption => ({
           id: machine.deviceHandle ?? machine.id,
           routeId: machine.id,
@@ -659,16 +739,7 @@ export function App({
       },
       async loadSessions(machine) {
         if (machine.id === sourceMachine.id) return useWorkbench.getState().sessions;
-        return onMachine(machine, async (client) => {
-          const reply = await client.call({
-            type: "session.list",
-            payload: { workspaceId: null, includeArchived: false, lean: true },
-          });
-          if (reply?.type !== "sessions") {
-            throw new Error("目标机器没有返回可用的会话列表。");
-          }
-          return reply.data;
-        });
+        return onMachine(machine, client => readRecentSessions(client));
       },
       async deliverForward(machine, target, capsule) {
         return onMachine(machine, async (client) => {
@@ -722,27 +793,17 @@ export function App({
       jumpTo(machine, sessionId) {
         // The one navigation cross-machine flows still perform — deliberately
         // chosen from the completion banner, never a side effect of confirming.
-        void openTarget(machine.routeId).then((next) => {
-          pickTarget(
-            {
-              id: machine.routeId,
-              deviceHandle: machine.id,
-              label: machine.label,
-              kind: machine.kind,
-              online: true,
-            },
-            next,
-          );
-          setPendingJumpFrom(machine.id===sourceMachine.id?null:useWorkbench.getState().client);setPendingJumpSession(sessionId);
-        });
+        void connections.acquire({ id: machine.routeId, deviceHandle: machine.id, label: machine.label, kind: machine.kind }).then(lease => {
+          const previous = useWorkbench.getState().client;
+          pickTarget({ id: machine.routeId, deviceHandle: machine.id, label: machine.label, kind: machine.kind, online: true }, lease.endpoint);
+          setPendingJumpFrom(previous?.identity?.machineId === machine.id ? null : previous);
+          setPendingJumpSession(sessionId);
+          lease.release();
+        }).catch((error: unknown) => useWorkbench.setState({ notice: error instanceof Error ? error.message : String(error) }));
       },
     };
-  }, [connect, host.openTarget, host.targets, pickTarget, sourceMachine]);
+  }, [connections, host.openTarget, host.targets, pickTarget, sourceMachine]);
 
-  const summarySource=useMemo(()=>machineBroker && host.openTarget ? {
-    targets:async()=> await host.targets!({requireComplete:true}),
-    openTarget:host.openTarget,
-  } : null,[machineBroker,host.openTarget]);
 
   const forkController = useMemo<ForkController | undefined>(() => {
     if (!machineBroker) return undefined;
@@ -839,7 +900,7 @@ export function App({
     setSessionsOpen(false); setSection("spaces"); setOverviewSurface(surface, true);
   };
   return (
-    <AgentDetailsEnvironment.Provider value={{ host, endpoint, onCreateExpert: () => expertCreator.current?.open(), onOverview: (id, surface, child) => { if (sessionsOpen && section === "spaces") rootNextPage(); else if (useWorkbench.getState().draft && !useWorkbench.getState().activeSessionId && !child) replaceNextPage(); openOverview(id, surface); }, workspaceTools: (id) => <div className="mt-3 flex flex-wrap gap-2">{extraTabs.filter(tab => !tab.scope || tab.scope === "workspace").map(tab => <button type="button" key={tab.id} className="min-h-11 rounded-lg border border-line px-3 text-sm" onClick={() => { useWorkbench.setState({activeWorkspaceId: id}); workbench.openTab(`extra:${tab.id}`, tab.label); }}>{tab.label}</button>)}</div> }}>
+    <MachineConnectionsContext.Provider value={connections}><AgentDetailsEnvironment.Provider value={{ host, endpoint, onCreateExpert: () => expertCreator.current?.open(), onOverview: (id, surface, child) => { if (sessionsOpen && section === "spaces") rootNextPage(); else if (useWorkbench.getState().draft && !useWorkbench.getState().activeSessionId && !child) replaceNextPage(); openOverview(id, surface); }, workspaceTools: (id) => <div className="mt-3 flex flex-wrap gap-2">{extraTabs.filter(tab => !tab.scope || tab.scope === "workspace").map(tab => <button type="button" key={tab.id} className="min-h-11 rounded-lg border border-line px-3 text-sm" onClick={() => { useWorkbench.setState({activeWorkspaceId: id}); workbench.openTab(`extra:${tab.id}`, tab.label); }}>{tab.label}</button>)}</div> }}>
     <div className="genehub-ui flex h-full min-h-0 max-w-full flex-col overflow-hidden bg-bg">
       <OpenProject ref={expertCreator} host={host} endpoint={endpoint} variant="none" driveUrl onOpened={() => { const id = useWorkbench.getState().draft?.workspaceId; if (id) openOverview(id); }} />
       <TitleBar
@@ -861,24 +922,46 @@ export function App({
           if (next === "spaces") setSpacesVisited(true);
           setSection(next);
         }} />
-        <Sidebar
-          host={host}
-          onOpenOverview={summarySource ? ()=>setSummaryOverview(true) : undefined}
-          open={sessionsOpen && section === "sessions"}
-          sessionOnly
-          hidden={sidebarHidden || section !== "sessions" || !showChat}
-          endpoint={endpoint}
-          onPickTarget={pickTarget}
-          onNavigate={() => { rootNextPage(); setSessionsOpen(false); setSection(useWorkbench.getState().activeSessionId ? "sessions" : "spaces"); }}
-        />
-
-        {spacesVisited && workbench.client?.identity?.machineId ? <ListPane label="项目列表面板" open={sessionsOpen} hidden={section !== "spaces"}>
-          <WorkspaceBrowser host={host} endpoint={endpoint} key={workbench.client.identity.machineId} deviceName={endpoint.label}
-            selectedId={starting ? draft?.workspaceId : undefined} onNewSession={id => { rootNextPage(); openOverview(id); }} />
-        </ListPane> : null}
-        {section === "spaces" && !workbench.client?.identity?.machineId && <p role="status" className="p-6 text-sm text-muted">正在连接，准备项目列表…</p>}
+        {host.targets && host.openTarget ? <MachineDirectoryLists connections={connections}
+          host={host} endpoint={endpoint} section={section === "spaces" ? "projects" : "sessions"}
+          open={sessionsOpen} hidden={sidebarHidden || !["sessions", "spaces"].includes(section) || section === "sessions" && !showChat}
+          onOpen={async (machine, sessionId, workspaceId) => {
+            if (machine.deviceHandle === useWorkbench.getState().client?.identity?.machineId) {
+              if (sessionId) {
+                rootNextPage();
+                const selecting = useWorkbench.getState().selectSession(sessionId);
+                setSection("sessions"); setSessionsOpen(false);
+                await selecting;
+              }
+              else if (workspaceId) openOverview(workspaceId);
+            } else {
+              const lease = await connections.acquire(machine);
+              const previous = useWorkbench.getState().client;
+              pickTarget(machine, lease.endpoint);
+              if (sessionId) { setPendingJumpFrom(previous); setPendingJumpSession(sessionId); }
+              else if (workspaceId) setPendingProject({ machineId: machine.deviceHandle ?? machine.id, workspaceId });
+              lease.release();
+            }
+            rootNextPage(); setSessionsOpen(false); setSection(sessionId ? "sessions" : "spaces");
+          }} onNewSession={() => { workbench.newSession(null, null); rootNextPage(); setSessionsOpen(false); setSection("spaces"); }}
+          onAddProject={machine => {
+            if (!machine || machine.deviceHandle === useWorkbench.getState().client?.identity?.machineId) { expertCreator.current?.open(); return; }
+            void connections.acquire(machine).then(lease => {
+              pickTarget(machine, lease.endpoint);
+              setPendingProject({ machineId: machine.deviceHandle ?? lease.client.identity!.machineId, addProject: true });
+              lease.release();
+            }).catch((error: unknown) => useWorkbench.setState({ notice: error instanceof Error ? error.message : String(error) }));
+          }} /> : <>
+          <Sidebar host={host} open={sessionsOpen && section === "sessions"} sessionOnly
+            hidden={sidebarHidden || section !== "sessions" || !showChat} endpoint={endpoint}
+            onNavigate={() => { rootNextPage(); setSessionsOpen(false); setSection(useWorkbench.getState().activeSessionId ? "sessions" : "spaces"); }} />
+          {spacesVisited && workbench.client?.identity?.machineId ? <ListPane label="项目列表面板" open={sessionsOpen} hidden={section !== "spaces"}>
+            <WorkspaceBrowser host={host} endpoint={endpoint} key={workbench.client.identity.machineId} deviceName={endpoint.label}
+              selectedId={starting ? draft?.workspaceId : undefined} onNewSession={id => { rootNextPage(); openOverview(id); }} />
+          </ListPane> : null}
+        </>}
         {section === "discover" ? <section style={{ paddingTop: "calc(1.5rem + var(--safe-area-top))" }} className="min-h-0 min-w-0 flex-1 overflow-y-auto p-6" aria-label="发现"><div className="mx-auto max-w-2xl py-8"><p className="text-xs text-muted">{endpoint.label}</p><h1 className="mt-3 text-2xl font-medium">发现</h1><p className="mt-6 text-base leading-relaxed text-muted">来自各个项目的新想法，将在这里与你见面。</p><p className="mt-3 text-sm leading-relaxed text-faint">自动发现尚未启用。你现在可以进入任一项目，让它基于已有内容提出建议。</p><button type="button" className="mt-6 min-h-11 rounded-xl bg-accent px-4 text-sm text-white" onClick={() => { setSpacesVisited(true); setSessionsOpen(true); setSection("spaces"); }}>浏览项目</button></div></section> : null}
-        {section === "tools" ? <section className="flex min-h-0 min-w-0 flex-1 flex-col" aria-label="全局设置"><header style={{ paddingTop: "calc(1rem + var(--safe-area-top))" }} className="border-b border-line px-6 py-4"><p className="text-xs text-muted">{endpoint.label}</p><h1 className="mt-1 text-xl font-medium">设置</h1><p className="mt-2 text-xs text-muted">文件、变更和终端位于所属项目。</p></header><ToolsMenu leading={<TargetSwitcher host={host} current={endpoint} onPick={pickTarget} onNavigate={() => { setSessionsOpen(true); setSection("sessions"); }} variant="row" />} scope="global" density="phone" extraTabs={extraTabs} onNavigate={() => setSection("sessions")}><div>{sidebarMenu}</div><div className="md:hidden">{mobileTools}</div><div className="hidden md:block">{desktopTools}</div></ToolsMenu></section> : null}
+        {section === "tools" ? <section className="flex min-h-0 min-w-0 flex-1 flex-col" aria-label="全局设置"><header style={{ paddingTop: "calc(1rem + var(--safe-area-top))" }} className="border-b border-line px-6 py-4"><p className="text-xs text-muted">{endpoint.label}</p><h1 className="mt-1 text-xl font-medium">设置</h1><p className="mt-2 text-xs text-muted">文件、变更和终端位于所属项目。</p></header><ToolsMenu scope="global" density="phone" extraTabs={extraTabs} onNavigate={() => setSection("sessions")}><div>{sidebarMenu}</div><div className="md:hidden">{mobileTools}</div><div className="hidden md:block">{desktopTools}</div></ToolsMenu></section> : null}
 
         {((section === "spaces" && (!starting || !showChat)) || (section === "sessions" && starting && showChat)) && <section aria-label="未选择内容" className="hidden min-w-0 flex-1 items-center justify-center bg-bg p-6 text-sm text-muted md:flex">{section === "spaces" ? "选择一个项目，查看会话与配置" : "选择会话，继续话题"}</section>}
         <main className={(section === "sessions" && (!starting || !showChat)) || (section === "spaces" && starting && showChat) ? `${sessionsOpen ? "hidden md:flex" : "flex"} min-h-0 min-w-0 flex-1 flex-col` : "hidden"}>
@@ -1217,15 +1300,6 @@ export function App({
       {/* Outside every tab, because a finished download is not about whichever
           panel happens to be open. */}
       <UpdateToast host={host} />
-      {summaryOverview && summarySource && machineBroker && <MachineSummaryOverview source={summarySource} onClose={()=>setSummaryOverview(false)} onOpenSession={async (target,sessionId,signal)=>{
-        if(target.deviceHandle===workbench.client?.identity?.machineId){await useWorkbench.getState().selectSession(sessionId);return;}
-        if(!host.openTarget)throw new Error("machine navigation unavailable");
-        const previous=useWorkbench.getState().client;
-        const next=await host.openTarget(target.id);
-        if(signal.aborted)throw new DOMException("Cancelled","AbortError");
-        pickTarget(target,next);
-        setPendingJumpFrom(previous);setPendingJumpSession(sessionId);setSummaryOverview(false);
-      }}/>}
       {/* An Agent-level request is for whoever is at this window, whatever tab. */}
       <AgentConfigDialog />
       <AgentRequestDialog />
@@ -1237,7 +1311,7 @@ export function App({
         />
       ) : null}
     </div>
-    </AgentDetailsEnvironment.Provider>
+    </AgentDetailsEnvironment.Provider></MachineConnectionsContext.Provider>
   );
 }
 
@@ -1253,61 +1327,6 @@ function importCoverageLabel(coverage: HistoryCoverage): string {
     unavailable: "省略部分不可找回",
   }[coverage.retrieval];
   return `保留 ${coverage.retainedItemCount}/${source} 条，省略 ${coverage.omittedItemCount} 条 · ${recovery}`;
-}
-
-async function withForkClient<T>(
-  connect: (
-    endpoint: Endpoint,
-    redial: () => Promise<string | ProtocolDial>,
-  ) => Client,
-  endpoint: Endpoint,
-  redial: () => Promise<string | ProtocolDial>,
-  exchange: (client: Client) => Promise<T>,
-): Promise<T> {
-  const client = connect(endpoint, redial);
-  let stop = () => {};
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  const ready = client.connectionState === "ready"
-    ? Promise.resolve()
-    : new Promise<void>((resolve, reject) => {
-        timer = setTimeout(() => {
-          stop();
-          reject(new Error("目标机器连接超时。"));
-        }, 8_000);
-        stop = client.onStateChange((state) => {
-          if (state !== "ready" && state !== "closed") return;
-          if (timer !== null) clearTimeout(timer);
-          stop();
-          if (state === "ready") resolve();
-          else reject(new Error(client.failure?.message ?? "目标机器连接已关闭。"));
-        });
-      });
-  client.connect();
-  try {
-    await ready;
-    return await exchange(client);
-  } finally {
-    if (timer !== null) clearTimeout(timer);
-    stop();
-    client.close();
-  }
-}
-
-function dialOf(endpoint: Endpoint): ProtocolDial {
-  return {
-    fabricAuthorizationExpiresAt: endpoint.fabricAuthorizationExpiresAt,
-    bulk: endpoint.bulk,
-    url: endpoint.url,
-    ...(endpoint.channelCredential
-      ? { channelCredential: endpoint.channelCredential }
-      : {}),
-    ...(endpoint.fabricRouteTicket
-      ? { fabricRouteTicket: endpoint.fabricRouteTicket }
-      : {}),
-    ...(endpoint.localServerProof
-      ? { localServerProof: endpoint.localServerProof }
-      : {}),
-  };
 }
 
 /**
@@ -1330,6 +1349,7 @@ function FirstRun({
     newSession,
     connection,
     client,
+    notice,
   } = useWorkbench();
   const workspace =
     workspaces.find((entry) => entry.id === activeWorkspaceId) ?? workspaces[0];
@@ -1345,7 +1365,7 @@ function FirstRun({
     // port": the credential was revoked, or the two sides are different
     // versions. Showing the generic advice then sends people to fix the one
     // thing that is already working.
-    const refused = connection === "closed" ? client?.failure : null;
+    const refused = connection === "closed" ? client?.failure ?? (notice ? { code: /身份验证|重新配对/.test(notice) ? "unauthorized" : "", message: notice } : null) : null;
     return (
       <Splash>
         <p className="text-sm">

@@ -470,22 +470,23 @@ function MarkdownLink({ href, children }: { href?: string; children?: ReactNode 
     artifact?.deviceHandle &&
     (artifact.workspaceHandle || artifact.machineFiles)
   ) {
+    const foreign = resolved.deviceHandle !== undefined && resolved.deviceHandle !== artifact.deviceHandle;
     const open = (event: { preventDefault: () => void }) => {
       event.preventDefault();
-      if (artifact.onNavigate) { artifact.onNavigate(resolved.path, resolved.docQuery, resolved.docFragment); return; }
+      if (artifact.onNavigate && !foreign) { artifact.onNavigate(resolved.path, resolved.docQuery, resolved.docFragment); return; }
       openPreviewFloat({
-        deviceHandle: artifact.deviceHandle,
-        workspaceHandle: artifact.workspaceHandle,
+        deviceHandle: resolved.deviceHandle ?? artifact.deviceHandle,
+        workspaceHandle: resolved.workspaceHandle ?? artifact.workspaceHandle,
         path: resolved.path,
         docQuery: resolved.docQuery,
         docFragment: resolved.docFragment,
-        sessionId: artifact.sessionId ?? null,
+        sessionId: foreign ? null : artifact.sessionId ?? null,
       });
     };
     // Agents share workspace pictures as ordinary file links; a
     // link that points at an image renders the picture inline and
     // keeps the caption as the preview opener.
-    if (isImageLinkPath(resolved.path)) {
+    if (isImageLinkPath(resolved.path) && !foreign) {
       return (
         <MarkdownImageRef
           path={resolved.path}
@@ -729,11 +730,12 @@ function MarkdownImage({
   const openPreviewFloat = useWorkbench((state) => state.openPreviewFloat);
   const inlineData = src && isSafeInlineImageDataUrl(src) ? src.trim() : null;
   const resolved = resolveArtifactRef(inlineData ? null : src, artifact);
+  const foreign = resolved.kind === "preview" && resolved.deviceHandle !== undefined && resolved.deviceHandle !== artifact?.deviceHandle;
   const previewPath = resolved.kind === "preview" ? resolved.path : null;
   const [observe, near] = useNearViewport();
   const { url, failed } = usePreviewImageUrl(
     previewPath,
-    artifact?.loadPreview,
+    foreign ? undefined : artifact?.loadPreview,
     artifact?.inlineImages,
     near,
     artifact,
@@ -742,6 +744,11 @@ function MarkdownImage({
   if (inlineData) {
     return <img src={inlineData} alt={alt ?? ""} className="gh-markdown-image" />;
   }
+
+  if (foreign && resolved.kind === "preview") return <button type="button" className="gh-markdown-image-ref" onClick={() => openPreviewFloat({
+    deviceHandle: resolved.deviceHandle!, workspaceHandle: resolved.workspaceHandle ?? "", path: resolved.path,
+    docQuery: resolved.docQuery, docFragment: resolved.docFragment, sessionId: null,
+  })}>{alt || "打开图片"}</button>;
 
   if (resolved.kind === "external" || resolved.kind === "blocked" || failed) {
     return (

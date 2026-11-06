@@ -15,7 +15,6 @@ import { App } from "../App";
 import { rememberMachine } from "../devices/machines";
 import { browserHost, desktopHost, type Endpoint, type Host } from "../host";
 import { socketQueue, TEST_PEER_SECRET } from "../protocol/fake-socket";
-import type { ProtocolDial } from "../protocol/client";
 import { useWorkbench } from "../session/store";
 
 /**
@@ -51,14 +50,11 @@ const paired = (machineId: string, name: string, endpoint = REMOTE) =>
  * A stand-in for `App`'s `connect`, typed so that what it was called with —
  * the endpoint, and the redial that asks for a fresh ticket — is inspectable.
  */
-const connectSpy = () =>
-  vi.fn((_endpoint: Endpoint, _redial: () => Promise<string | ProtocolDial>) =>
-    stubClient(),
-  );
-
 /** Enough of a client for the store to attach to without throwing in an effect. */
 function stubClient() {
   return {
+    setDataChannelEnabled() {},
+    setRtcEnabled() {},
     connect() {},
     close() {},
     onStateChange: () => () => {},
@@ -408,56 +404,9 @@ describe("switching from the sidebar", () => {
     ...overrides,
   });
 
-  const openMachineSwitcher = async () => {
-    await userEvent.click(await screen.findByRole("button", { name: "设置" }));
-    await userEvent.click(await screen.findByRole("button", { name: /切换机器/ }));
-  };
-
-  it("scrolls a long machine list instead of clipping it", async () => {
-    render(
-      <App
-        host={host({
-          targets: async () =>
-            Array.from({ length: 24 }, (_, index) => ({
-              id: `m_${index}`,
-              label: `机器 ${index}`,
-              kind: "remote" as const,
-              online: true,
-            })),
-        })}
-        connect={() => stubClient()}
-      />,
-    );
-
-    await openMachineSwitcher();
-    const list = await screen.findByRole("listbox", { name: "我能控制的机器" });
-    expect(list.className).toContain("overflow-y-auto");
-    expect(list.className).toContain("overflow-x-hidden");
-    expect(list.className).toContain("max-h-");
-    expect(screen.getByRole("option", { name: /机器 23/ })).toBeInTheDocument();
-  });
-
-  it("names the machine everything below it belongs to", async () => {
-    render(<App host={host()} connect={() => stubClient()} />);
-
-    await openMachineSwitcher();
-    expect(screen.getByRole("option", { name: /这台电脑/ })).toBeInTheDocument();
-  });
-
-  it("points the workbench at another machine, credential and all", async () => {
-    const connect = connectSpy();
-    render(<App host={host()} connect={connect} />);
-
-    await waitFor(() => expect(connect).toHaveBeenCalled());
-    await openMachineSwitcher();
-    await userEvent.click(
-      await screen.findByRole("option", { name: /工作机/ }),
-    );
-
-    await waitFor(() =>
-      expect(connect.mock.calls.at(-1)?.[0]).toMatchObject({ url: REMOTE }),
-    );
-  });
+  // Machine-switcher cases are replaced by real source-filter/navigation
+  // parity: specialty.page-experience.team-summary.{390,1280} and
+  // specialty.connectivity.shared-machine-connections.
 
   it("exports a completed turn, validates the remote catalog, and opens the imported fork", async () => {
     const sourceSession: SessionSummary = {
@@ -545,7 +494,9 @@ describe("switching from the sidebar", () => {
       return {
         connectionState: "ready",
         identity: { machineId: remote ? "m_far" : "m_here" },
-        connect() {},
+        setDataChannelEnabled() {},
+    setRtcEnabled() {},
+    connect() {},
         close() {},
         onStateChange: () => () => {},
         onNotice: () => () => {},
@@ -674,7 +625,7 @@ describe("switching from the sidebar", () => {
     const jump = await screen.findByRole("button", { name: "前往查看" });
     await userEvent.click(jump);
     await waitFor(() => expect(useWorkbench.getState().activeSessionId).toBe("forked-session"));
-    expect(openTarget).toHaveBeenCalledWith("m_far");
+    expect(openTarget).not.toHaveBeenCalledWith("m_far");
   });
 
   it("sends an exact target so a non-native Agent can Fork back through a fresh route", async () => {
@@ -748,7 +699,9 @@ describe("switching from the sidebar", () => {
     const client = {
       connectionState: "ready",
       identity: { machineId: "m_here" },
-      connect() {},
+      setDataChannelEnabled() {},
+    setRtcEnabled() {},
+    connect() {},
       close() {},
       onStateChange: () => () => {},
       onNotice: () => () => {},
@@ -836,55 +789,6 @@ describe("switching from the sidebar", () => {
       },
     }));
     await waitFor(() => expect(useWorkbench.getState().activeSessionId).toBe("cursor-fork"));
-  });
-
-  it("does not drag someone home because the local daemon restarted", async () => {
-    let announce = () => {};
-    const connect = connectSpy();
-    render(
-      <App
-        host={host({
-          onEndpointChange: (listener) => {
-            announce = listener;
-            return () => {};
-          },
-        })}
-        connect={connect}
-      />,
-    );
-
-    await waitFor(() => expect(connect).toHaveBeenCalled());
-    await openMachineSwitcher();
-    await userEvent.click(
-      await screen.findByRole("option", { name: /工作机/ }),
-    );
-    await waitFor(() =>
-      expect(connect.mock.calls.at(-1)?.[0]).toMatchObject({ url: REMOTE }),
-    );
-
-    announce();
-
-    // A sidecar coming back on a new port is news about one machine, not an
-    // instruction to leave the one being worked on.
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(connect.mock.calls.at(-1)?.[0]).toMatchObject({ url: REMOTE });
-  });
-
-  it("asks the target again on every redial, because a ticket is spent once", async () => {
-    const openTarget = vi.fn(async () => remoteEndpoint);
-    const connect = connectSpy();
-    render(<App host={host({ openTarget })} connect={connect} />);
-
-    await waitFor(() => expect(connect).toHaveBeenCalled());
-    await openMachineSwitcher();
-    await userEvent.click(
-      await screen.findByRole("option", { name: /工作机/ }),
-    );
-    await waitFor(() => expect(openTarget).toHaveBeenCalledTimes(1));
-
-    const redial = connect.mock.calls.at(-1)![1];
-    expect(await redial()).toEqual({ url: REMOTE });
-    expect(openTarget).toHaveBeenCalledTimes(2);
   });
 
   it("stays out of the way where the shell has only one machine to offer", async () => {

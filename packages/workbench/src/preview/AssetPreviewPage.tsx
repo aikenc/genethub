@@ -7,12 +7,14 @@ import { ServicePreviewClient, classifyServiceFailure, htmlServiceMedia } from "
 import { previewServiceInfo, PreviewServiceSection, type PreviewServiceInfo, type ServiceMark } from "./ServiceStatusMenu";
 import { ServiceMediaPanel } from "./ServiceMediaPanel";
 import { serviceBridgeScript, useServiceBridge, type ServiceBridgePolicy } from "./serviceBridge";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 
 import type { AssetPreviewMetadata, SessionArtifactBundle } from "@genehub/proto";
 import modernScreenshotSource from "modern-screenshot/dist/index.js?raw";
 
 import { emitClientDiagnostic, registerDiagnosticClient } from "../diagnostics";
+import { MachineConnectionsContext } from "../protocol/machine-connection-context";
+import type { MachineLease } from "../protocol/machine-connections";
 import { detectHost, type Endpoint, type Host } from "../host";
 import {
   Client,
@@ -159,9 +161,11 @@ export function AssetPreviewPage({
     setPageInfoOpen(false);
   }, [source.path, source.workspaceHandle, source.deviceHandle, publishMeta]);
 
+  const connections = useContext(MachineConnectionsContext);
   useEffect(() => {
     let cancelled = false;
     const abort = new AbortController();
+    let borrowed: MachineLease | null = null;
     let owned: Client | null = null;
     let unregisterDiagnosticClient: (() => void) | null = null;
     setState({ kind: "loading" });
@@ -184,6 +188,13 @@ export function AssetPreviewPage({
             throw new Error("当前连接的设备与预览目标不一致");
           }
           active = sharedClient;
+        } else if (connections && !shareAccess) {
+          const targets = await connections.targets();
+          const target = targets.find(target => target.deviceHandle === source.deviceHandle || target.id === source.deviceHandle);
+          if (!target) throw new Error("资源所在机器未授权或已移除");
+          borrowed = await connections.acquire(target, { signal: abort.signal, foreground: true });
+          if (cancelled) { borrowed.release(); return; }
+          active = borrowed.client;
         } else {
           const endpoint =
             (await endpointForDevice(host, source.deviceHandle)) ??
@@ -221,7 +232,7 @@ export function AssetPreviewPage({
           if (!cancelled && info?.kind === "source") setSourceInfo(info.data);
         }
         if (cancelled) {
-          owned?.close();
+          owned?.close(); borrowed?.release();
           return;
         }
         emitPreviewDiagnostic("log", {
@@ -246,7 +257,7 @@ export function AssetPreviewPage({
       } catch (error) {
         unregisterDiagnosticClient?.();
         unregisterDiagnosticClient = null;
-        owned?.close();
+        owned?.close(); borrowed?.release();
         if (!cancelled) {
           const message = error instanceof Error ? error.message : "无法预览这个文件";
           emitPreviewDiagnostic("error", {
@@ -267,9 +278,9 @@ export function AssetPreviewPage({
       legacyAbort.current?.abort();
       legacyAbort.current = null;
       unregisterDiagnosticClient?.();
-      owned?.close();
+      owned?.close(); borrowed?.release();
     };
-  }, [host, sharedClient, source.deviceHandle, source.path, source.workspaceHandle]);
+  }, [host, sharedClient, source.deviceHandle, source.path, source.workspaceHandle, connections, shareAccess]);
 
   const submitStandaloneArtifact = useCallback<RuntimeArtifactSubmit>(
     async (artifact, onProgress) => {

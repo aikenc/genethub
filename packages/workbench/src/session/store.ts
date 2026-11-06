@@ -380,6 +380,7 @@ interface WorkbenchState {
   download: UpdateDownload;
 
   attach(client: Client): Promise<void>;
+  detach(client: Client): void;
   /** Stop consuming conversation bodies while retaining local tabs and text. */
   pauseSessionBody(): void;
   /** Restore the focused body after its page becomes visible again. */
@@ -718,7 +719,6 @@ function shouldExpandLastRound(summary: SessionSummary | undefined): boolean {
 
 /** The reconnect sentence this store put on screen, while it is still true. */
 let reconnectNotice: string | null = null;
-let selectedSessionLoad: { client: Client; sessionId: string } | null = null;
 
 /**
  * The connection-loss sentence put on screen by a request that died with the
@@ -837,7 +837,10 @@ function scheduleRoundRefresh(get: () => WorkbenchState): void {
   }, 250);
 }
 
-export const useWorkbench = create<WorkbenchState>((set, get) => ({
+function createMachineStore() {
+let attachedListeners: (() => void)[] = [];
+let selectedSessionLoad: { client: Client; sessionId: string } | null = null;
+return create<WorkbenchState>((set, get) => ({
   client: null,
   connection: "connecting",
   agents: [],
@@ -891,9 +894,16 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   appUpdating: false,
   download: { state: "idle" },
 
-  async attach(client) {
+  detach(client) {
+    if (get().client !== client) return;
     get().pauseSessionBody();
-    sessionSummaryEpoch++;
+    for (const stop of attachedListeners) stop();
+    attachedListeners = [];
+    set({ client: null, connection: "connecting" });
+  },
+  async attach(client) {
+    if (get().client) get().detach(get().client!);
+    invalidateSessionSummaries(client);
     selectedSessionLoad = null;
     reconnectNotice = null;
     connectionLossNotice = null;
@@ -901,20 +911,25 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     // Subscriptions belong to the client that made them. This one has never
     // subscribed to anything, and saying otherwise is how a session opened
     // before a machine switch ends up with no live stream at all.
-    set({ client, notice: null, subscribedSessionIds: [], subscriptionOwner: null,
+    set({ client, connection: client.connectionState, notice: null,
+      agents: [], workspaces: [], activeWorkspaceId: null, activeSessionId: null, draft: null,
+      tabs: [], activeTabId: null, timeline: emptyTimeline(), sessionTimelines: {},
+      rightPanel: null, previewFloat: null, forwardDraft: null, tree: null, git: null, diff: null,
+      settings: null, hub: null, devices: [], remote: null, backgroundProcesses: [],
+      sessionDrafts: [], previewReview: null, completionNotice: null, subscribedSessionIds: [], subscriptionOwner: null,
       sessions: [], sessionsLoaded: false, sessionsError: false,
       sessionsComplete: false, sessionGlobalView: false, sessionExpandedSpaces: [], sessionPages: {},
       sessionsCheckedAtMs: 0, sessionsFailedAtMs: 0, sessionObservations: {},
       agentRequests: [], hiddenAgentRequests: [], repairingAgentIds: [], agentConfig: null });
     let wasReady = false;
     let logicalOwner = client.logicalConnectionId;
-    client.onStateChange((connection) => {
+    attachedListeners.push(client.onStateChange((connection) => {
       if (get().client !== client) return;
       // A physical resume retains in-flight RPCs. Invalidating their shared
       // load here creates a second full catalog request beside the first.
       if (connection === "ready" && client.logicalConnectionId) {
         if (logicalOwner && logicalOwner !== client.logicalConnectionId) {
-          sessionSummaryEpoch++;
+          invalidateSessionSummaries(client);
           void get().refreshWorkspaces();
         }
         logicalOwner = client.logicalConnectionId;
@@ -923,7 +938,12 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       // A connection that was refused knows why — wrong credential, revoked
       // device, protocol mismatch — and none of those are fixed by waiting. Say
       // it, instead of leaving a spinner and a guess about ports.
-      if (connection === "closed" && client.failure) set({ notice: client.failure.message });
+      if (connection === "closed" && client.failure) {
+        const denied = ["unauthorized", "unauthenticated", "forbidden"].includes(client.failure.code);
+        set({ notice: client.failure.message, ...(denied ? { sessions: [], workspaces: [], activeSessionId: null,
+          activeWorkspaceId: null, draft: null, tabs: [], activeTabId: null, timeline: emptyTimeline(),
+          sessionTimelines: {}, tree: null, git: null, diff: null, previewFloat: null } : {}) });
+      }
       // A reconnect on its own is routine and worth no words. One the far side
       // explained is not: that sentence is the only account anyone will ever
       // get of why the work in flight was lost.
@@ -958,13 +978,13 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
           set((state) => (state.notice === stale ? { notice: null } : {}));
         }
       }
-    });
-    client.onNotice((_level, message) => set({ notice: message }));
-    client.onUpdateDownload((download) => set({ download }));
-    client.onBackgroundProcesses(() => {
-      void get().refreshBackgroundProcesses();
-    });
-    client.onAgents((agents) => {
+    }));
+    attachedListeners.push(client.onNotice((_level, message) => { if (get().client === client) set({ notice: message }); }));
+    attachedListeners.push(client.onUpdateDownload((download) => { if (get().client === client) set({ download }); }));
+    attachedListeners.push(client.onBackgroundProcesses(() => {
+      if (get().client === client) void get().refreshBackgroundProcesses();
+    }));
+    attachedListeners.push(client.onAgents((agents) => {
       if (get().client !== client) return;
       agentsEpoch++;
       set({ agents });
@@ -977,13 +997,13 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       if (pending.size !== shown.size || [...pending].some((key) => !shown.has(key))) {
         void get().refreshAgentRequests();
       }
-    });
-    client.onAgentRequest((request) => {
+    }));
+    attachedListeners.push(client.onAgentRequest((request) => {
       if (get().client !== client) return;
       agentRequestsEpoch++;
       set((state) => ({ agentRequests: withAgentRequest(state.agentRequests, request) }));
-    });
-    client.onAgentRequestClosed((agentId, requestId) => {
+    }));
+    attachedListeners.push(client.onAgentRequestClosed((agentId, requestId) => {
       if (get().client !== client) return;
       agentRequestsEpoch++;
       const key = agentRequestKey(agentId, requestId);
@@ -991,7 +1011,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         agentRequests: withoutAgentRequest(state.agentRequests, agentId, requestId),
         hiddenAgentRequests: state.hiddenAgentRequests.filter((entry) => entry !== key),
       }));
-    });
+    }));
     // Requests opened before this window connected.
     void get().refreshAgentRequests();
     try {
@@ -1011,7 +1031,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         // install it has to come back with the window rather than wait for
         // someone to go looking in settings for a file they already have.
         const download = await client.call({ type: "update.downloadState" });
-        if (download?.type === "updateDownload") set({ download: download.data });
+        if (get().client === client && download?.type === "updateDownload") set({ download: download.data });
       })().catch((error: unknown) => unattended(client, get, set)(error));
     } catch (error) {
       // A connection can disappear halfway through being asked things: the tab
@@ -1031,7 +1051,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     sessionGlobalUsers.set(client, users);
     complete = users.size > 0;
     if (get().sessionGlobalView === complete) return;
-    sessionSummaryEpoch++;
+    invalidateSessionSummaries(client);
     set({ sessionGlobalView: complete, sessionsComplete: false });
     void get().refreshSessions();
   },
@@ -3031,6 +3051,58 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     }
   },
 }));
+}
+
+// Actions retain their source store across await. Switching the visible source
+// never redirects a delayed settings/file/session reply into another machine.
+type MachineStore = ReturnType<typeof createMachineStore>;
+const storesByClient = new WeakMap<Client, MachineStore>();
+let activeStore = createMachineStore();
+export const useWorkbench = create<WorkbenchState>(() => activeStore.getState());
+const publishWorkbench = useWorkbench.setState;
+let stopVisibleStore = () => {};
+function showStore(store: MachineStore): void {
+  stopVisibleStore();
+  activeStore = store;
+  const publish = (state: WorkbenchState) => publishWorkbench({ ...state, attach: attachMachine, detach: detachMachine }, true);
+  publish(store.getState());
+  stopVisibleStore = store.subscribe(publish);
+}
+async function attachMachine(client: Client): Promise<void> {
+  let store = storesByClient.get(client);
+  if (!store) { store = createMachineStore(); storesByClient.set(client, store); }
+  if (activeStore !== store) activeStore.getState().pauseSessionBody();
+  showStore(store);
+  if (store.getState().client !== client) await store.getInitialState().attach(client);
+  else {
+    await Promise.all([store.getState().refreshWorkspaces(), store.getState().refreshSessions()]);
+  }
+}
+function detachMachine(client: Client): void {
+  const store = storesByClient.get(client);
+  store?.getState().pauseSessionBody();
+  if (activeStore.getState().client === client) showStore(createMachineStore());
+}
+export function workbenchForClient(client: Client): WorkbenchState | undefined {
+  return storesByClient.get(client)?.getState();
+}
+function sourceState(client: Client): WorkbenchState {
+  return (storesByClient.get(client) ?? activeStore).getState();
+}
+function sourceNotice(get: () => WorkbenchState, message: string): void {
+  const client = get().client;
+  const store = client ? storesByClient.get(client) : activeStore;
+  store?.setState({ notice: message });
+}
+// Public store writes from UI components follow only the visible source. The
+// original hook subscription continues observing the mirrored source snapshot.
+useWorkbench.setState = ((next: unknown, replace?: boolean) => {
+  (activeStore.setState as (next: unknown, replace?: boolean) => void)(next, replace);
+}) as typeof useWorkbench.setState;
+const initialWorkbench = useWorkbench.getInitialState();
+useWorkbench.getInitialState = () => ({ ...initialWorkbench, attach: attachMachine, detach: detachMachine });
+showStore(activeStore);
+
 
 type Setter = (
   partial:
@@ -3059,7 +3131,7 @@ async function refreshCatalog(
     (error: unknown) => ({ error } as const),
   );
   const workspaces = await loadWorkspaces(client, set);
-  if (useWorkbench.getState().client !== client) return;
+  if (sourceState(client).client !== client) return;
   const first = workspaces[0];
   if (first) {
     const sessions = await loadSessions(client, set);
@@ -3078,7 +3150,7 @@ async function refreshCatalog(
   const settingsResult = await settings;
   if ("error" in settingsResult) throw settingsResult.error;
   const listedAgents = listedAgentsResult.reply;
-  if (useWorkbench.getState().client !== client) return;
+  if (sourceState(client).client !== client) return;
   if (listedAgents?.type === "agents") set({ agents: listedAgents.data });
   if (settingsResult.reply?.type === "settings") set({ settings: settingsResult.reply.data });
   // A project with no saved conversation needs an Agent before it can land on
@@ -3088,13 +3160,13 @@ async function refreshCatalog(
 
 const workspaceSummaryLoads = new WeakMap<Client, { epoch: number; promise: Promise<WorkspaceInfo[]> }>();
 async function loadWorkspaces(client: Client, set: Setter): Promise<WorkspaceInfo[]> {
-  const epoch = sessionSummaryEpoch;
+  const epoch = sessionEpoch(client);
   const existing = workspaceSummaryLoads.get(client);
   if (existing?.epoch === epoch) return existing.promise;
-  const before = new Map(useWorkbench.getState().workspaces.map(workspace => [workspace.id, workspace]));
+  const before = new Map(sourceState(client).workspaces.map(workspace => [workspace.id, workspace]));
   const promise = (async () => {
     const reply = await client.call({ type: "workspace.list" });
-    if (useWorkbench.getState().client !== client || epoch !== sessionSummaryEpoch) return [];
+    if (sourceState(client).client !== client || epoch !== sessionEpoch(client)) return [];
     if (reply?.type !== "workspaces") throw new Error("项目列表暂不可用，请重新连接后再试。");
     set(state => {
       const current = new Map(state.workspaces.map(workspace => [workspace.id, workspace]));
@@ -3108,7 +3180,7 @@ async function loadWorkspaces(client: Client, set: Setter): Promise<WorkspaceInf
       workspaces.push(...state.workspaces.filter(workspace => !before.has(workspace.id) && !ids.has(workspace.id)));
       return { workspaces };
     });
-    return useWorkbench.getState().workspaces;
+    return sourceState(client).workspaces;
   })();
   workspaceSummaryLoads.set(client, { epoch, promise });
   try { return await promise; }
@@ -3136,7 +3208,7 @@ async function land(get: () => WorkbenchState): Promise<void> {
       get().workspaces.map((entry) => entry.id),
     );
     if (!workspaceId) {
-      useWorkbench.setState({ notice: "这个地址对不上。" });
+      sourceNotice(get, "这个地址对不上。");
     } else if (get().activeWorkspaceId !== workspaceId) {
       await get().selectWorkspace(workspaceId);
       finishLanding(get, intent);
@@ -3188,7 +3260,7 @@ async function applyLanding(
       await get().selectSession(sessionId);
       return true;
     }
-    useWorkbench.setState({ notice: "这个会话已经不在了。" });
+    sourceNotice(get, "这个会话已经不在了。");
     return false;
   }
   if (intent.localDraftId && intent.localDraftWorkspaceId && get().client?.identity) {
@@ -3205,7 +3277,7 @@ async function applyLanding(
       )
     : currentWorkspace(get()) ?? get().activeWorkspaceId;
   if (intent.workspaceId && !workspaceId) {
-    useWorkbench.setState({ notice: "这个地址对不上。" });
+    sourceNotice(get, "这个地址对不上。");
     return false;
   }
   if (!workspaceId) return false;
@@ -3231,7 +3303,7 @@ function openLandingPreview(get: () => WorkbenchState, intent: LandingIntent | n
       ?.folders.map((folder) => folder.rootHandle) ?? [];
   const path = expandPreviewPath(intent.previewPath, roots);
   if (!path) {
-    useWorkbench.setState({ notice: "这个地址对不上。" });
+    sourceNotice(get, "这个地址对不上。");
     return;
   }
   get().openPreviewFloat({
@@ -3533,18 +3605,22 @@ function rememberMachineRuntime(
  * per workspace would mean one round trip per row, and a tree that fills in
  * raggedly as the answers arrive.
  */
-let sessionSummaryEpoch = 0;
+const sessionSummaryEpochs = new WeakMap<Client, number>();
+const sessionEpoch = (client: Client) => sessionSummaryEpochs.get(client) ?? 0;
+function invalidateSessionSummaries(client: Client): void {
+  sessionSummaryEpochs.set(client, sessionEpoch(client) + 1);
+}
 const sessionSummaryLoads = new WeakMap<Client, { epoch: number; promise: Promise<SessionSummary[]> }>();
 async function loadSessions(client: Client, set: Setter): Promise<SessionSummary[]> {
-  if (client.identity?.features?.includes("session.page.v1")) return readSessionPages(client, set, useWorkbench.getState().sessionGlobalView);
-  const epoch = sessionSummaryEpoch;
+  if (client.identity?.features?.includes("session.page.v1")) return readSessionPages(client, set, sourceState(client).sessionGlobalView);
+  const epoch = sessionEpoch(client);
   const existing = sessionSummaryLoads.get(client);
   if (existing?.epoch === epoch) return existing.promise;
-  const before = new Map(useWorkbench.getState().sessions.map(session => [session.id, session]));
+  const before = new Map(sourceState(client).sessions.map(session => [session.id, session]));
   const promise = (async () => {
     try {
       const reply = await client.call({ type: "session.list", payload: { workspaceId: null, includeArchived: true, lean: true } });
-      if (useWorkbench.getState().client !== client || epoch !== sessionSummaryEpoch) return [];
+      if (sourceState(client).client !== client || epoch !== sessionEpoch(client)) return [];
       if (reply?.type !== "sessions") throw new Error("会话摘要暂不可用");
       initializeReplyReads(client.identity?.machineId ?? "", reply.data);
       const timeout = sessionListTimeoutNotice;
@@ -3570,9 +3646,9 @@ async function loadSessions(client: Client, set: Setter): Promise<SessionSummary
           ...(resolved && state.notice === timeout.message ? { notice: null } : {}),
         };
       });
-      return useWorkbench.getState().sessions;
+      return sourceState(client).sessions;
     } catch (error) {
-      if (useWorkbench.getState().client === client && epoch === sessionSummaryEpoch) set({ sessionsError: true, sessionsFailedAtMs: Date.now() });
+      if (sourceState(client).client === client && epoch === sessionEpoch(client)) set({ sessionsError: true, sessionsFailedAtMs: Date.now() });
       throw error;
     }
   })();
@@ -3587,13 +3663,13 @@ const sessionGlobalUsers = new WeakMap<Client, Set<string>>();
 const sessionPageQueues = new WeakMap<Client, Promise<unknown>>();
 const sessionPageRefreshes = new WeakMap<Client, { epoch: number; promise: Promise<SessionSummary[]> }>();
 function readSessionPages(client: Client, set: Setter, complete: boolean, moreSpace?: string, firstPage = false): Promise<SessionSummary[]> {
-  const epoch = sessionSummaryEpoch;
+  const epoch = sessionEpoch(client);
   const active = sessionPageRefreshes.get(client);
   if (!moreSpace && active?.epoch === epoch) return active.promise;
   const run = async () => {
-    const valid = () => useWorkbench.getState().client === client && sessionSummaryEpoch === epoch;
+    const valid = () => sourceState(client).client === client && sessionEpoch(client) === epoch;
     if (!valid()) return [];
-    const before = new Map(useWorkbench.getState().sessions.map(row => [row.id, row]));
+    const before = new Map(sourceState(client).sessions.map(row => [row.id, row]));
     const seen = new Set<string>();
     const adopt = (rows: SessionSummary[]) => {
       if (!valid()) return;
@@ -3636,14 +3712,14 @@ function readSessionPages(client: Client, set: Setter, complete: boolean, moreSp
         if (valid()) set(state => ({ sessions: state.sessions.filter(row => seen.has(row.id) || !before.has(row.id)), sessionsComplete: true,
           sessionsLoaded: true, sessionsError: false, sessionsCheckedAtMs: Date.now() }));
       } else {
-        const state = useWorkbench.getState();
+        const state = sourceState(client);
         const scopes = moreSpace ? [moreSpace] : [...new Set([
           ...buildAgentSpaceTree(state.workspaces).roots.map(node => node.workspace.id), ...state.sessionExpandedSpaces,
         ])].filter(id => state.workspaces.some(workspace => workspace.id === id));
         for (let i = 0; i < scopes.length && valid(); i += 10) {
           const ids = scopes.slice(i, i + 10);
-          const requests = ids.map(id => ({ workspaceId: id, limit: 10, cursor: moreSpace && !firstPage ? useWorkbench.getState().sessionPages[id]?.cursor ?? null : null }));
-          if (moreSpace && !firstPage && useWorkbench.getState().sessionPages[moreSpace]?.loaded && !requests[0]?.cursor) break;
+          const requests = ids.map(id => ({ workspaceId: id, limit: 10, cursor: moreSpace && !firstPage ? sourceState(client).sessionPages[id]?.cursor ?? null : null }));
+          if (moreSpace && !firstPage && sourceState(client).sessionPages[moreSpace]?.loaded && !requests[0]?.cursor) break;
           set(state => ({ sessionPages: { ...state.sessionPages, ...Object.fromEntries(ids.map(id => [id, { ...(state.sessionPages[id] ?? { loaded: false, cursor: null, more: false, limit: 10, ids: [] }), loading: true }])) } }));
           const pages = await fetch(requests, false);
           for (const page of pages) {
@@ -3662,12 +3738,12 @@ function readSessionPages(client: Client, set: Setter, complete: boolean, moreSp
         }
         if (valid()) set({ sessionsLoaded: true, sessionsError: false });
       }
-      return useWorkbench.getState().sessions;
+      return sourceState(client).sessions;
     } catch (error) {
       if (valid()) set({ sessionsError: true, sessionsComplete: false, sessionsFailedAtMs: Date.now() });
       throw error;
     } finally {
-      if (useWorkbench.getState().client === client) set(state => ({ sessionPages: Object.fromEntries(Object.entries(state.sessionPages).map(([id, page]) => [id, { ...page, loading: false }])) }));
+      if (sourceState(client).client === client) set(state => ({ sessionPages: Object.fromEntries(Object.entries(state.sessionPages).map(([id, page]) => [id, { ...page, loading: false }])) }));
     }
   };
   const promise = (sessionPageQueues.get(client) ?? Promise.resolve()).catch(() => undefined).then(run);

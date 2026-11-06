@@ -275,6 +275,7 @@ interface PendingCall {
   reject(error: unknown): void;
   queueTimer: ReturnType<typeof setTimeout> | null;
   started: boolean;
+  deadline?: number;
 }
 
 function sessionOf(topic: string): string {
@@ -287,6 +288,7 @@ function sessionOf(topic: string): string {
  */
 export class Client {
   private bulkDial: ProtocolDial | undefined;
+  private dataChannelEnabled: boolean;
   private bulkClient: Client | null = null;
   private bulkReady: Promise<Client | null> | null = null;
   private bulkRetryAt = 0;
@@ -351,6 +353,7 @@ export class Client {
   identity: HelloResult | null = null;
 
   constructor(private readonly options: ClientOptions) {
+    this.dataChannelEnabled = options.separateDataChannel !== false;
     this.bulkDial = options.separateDataChannel === false ? undefined : options.bulk;
     this.activeChannelCredential = options.channelCredential;
     this.authorizationExpiresAt = options.fabricAuthorizationExpiresAt;
@@ -387,6 +390,21 @@ export class Client {
   onRtcStateChange(listener: (state: RtcState) => void): () => void {
     this.rtcListeners.add(listener);
     return () => this.rtcListeners.delete(listener);
+  }
+
+  /** Background directory leases keep only the control carrier warm. */
+  setDataChannelEnabled(enabled: boolean): void {
+    enabled = enabled && this.options.separateDataChannel !== false;
+    if (this.dataChannelEnabled === enabled) return;
+    this.dataChannelEnabled = enabled;
+    if (!enabled) {
+      this.bulkClient?.close();
+      this.bulkClient = null;
+      this.bulkSubscriptions.clear();
+    } else {
+      this.bulkRetryAt = 0;
+      if (this.state === "ready") void this.prepareDataChannel();
+    }
   }
 
   setRtcEnabled(enabled: boolean): void {
@@ -497,12 +515,13 @@ export class Client {
     this.setState("closed");
   }
 
-  async call(request: Request): Promise<Reply | undefined> {
+  async call(request: Request, options: { timeoutMs?: number } = {}): Promise<Reply | undefined> {
+    if (options.timeoutMs !== undefined && (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0)) throw new Error("request deadline must be positive");
     // Decide before opening an operation. A failed operation is never retried
     // on another owner: it may already have executed on the daemon.
-    if (this.bulkDial && /^(file\.(read|write)|session\.(get|export|import))$/.test(request.type)) {
+    if (this.dataChannelEnabled && this.bulkDial && /^(file\.(read|write)|session\.(get|export|import))$/.test(request.type)) {
       const body = await this.prepareDataChannel();
-      if (body !== this) return body.call(request);
+      if (body !== this) return body.call(request, options);
     }
     const operation = request.type;
     const id = diagnosticId("op");
@@ -556,6 +575,7 @@ export class Client {
         reject,
         queueTimer: null,
         started: false,
+        deadline: options.timeoutMs === undefined ? undefined : queuedAt + options.timeoutMs,
       };
       this.pendingBytes += bytes;
       const endpoint = this.state === "ready" ? this.requestEndpoint() : null;
@@ -577,7 +597,7 @@ export class Client {
             requestBytes: bytes,
           });
           reject(new ClientRequestTimeoutError("the request waited too long for admission"));
-        }, this.options.maxQueueAgeMs ?? 30_000);
+        }, Math.min(options.timeoutMs ?? Infinity, this.options.maxQueueAgeMs ?? 30_000));
         this.queue.push(pending);
       }
     });
@@ -882,7 +902,7 @@ export class Client {
 
   /** Warm the advertised data lane. Admission is best effort and globally bounded. */
   async prepareDataChannel(): Promise<Client> {
-    if (this.stopped || this.state !== "ready" || !this.identity || !this.bulkDial || this.options.separateDataChannel === false) return this;
+    if (!this.dataChannelEnabled || this.stopped || this.state !== "ready" || !this.identity || !this.bulkDial || this.options.separateDataChannel === false) return this;
     if (this.bulkClient?.connectionState === "ready") return this.bulkClient;
     if (this.bulkReady) return (await this.bulkReady) ?? this;
     // Reuse a live data companion. It owns its own reconnect and reports lost
@@ -917,7 +937,7 @@ export class Client {
         if (!ready) {
           child.close();
           if (this.bulkClient === child) this.bulkClient = null;
-          if (!this.stopped) {
+          if (!this.stopped && this.dataChannelEnabled) {
             this.bulkRetryAt = this.now() + 60_000;
             this.diagnostic("transport", { phase: "data-fallback", cause: "admission-unavailable" });
           }
@@ -1219,7 +1239,7 @@ export class Client {
       queueMs: Math.round(started - pending.queuedAt),
       requestBytes: pending.bytes,
     });
-    void this.rpc(endpoint, pending.request, undefined, pending.id)
+    void this.rpc(endpoint, pending.request, pending.deadline === undefined ? undefined : Math.max(1, pending.deadline - started), pending.id)
       .then((reply) => {
         this.diagnostic("operation", {
           ...diagnosticContext(pending.request),

@@ -3,6 +3,7 @@ import { useWorkbench } from "../session/store";
 import type { WorkbenchSection } from "../shell/WorkbenchNavigation";
 
 interface Page {
+  machineId?: string | null;
   section: WorkbenchSection;
   list: boolean;
   sessionId?: string | null;
@@ -26,7 +27,7 @@ export function usePageNavigation() {
     if (restoring.current) return;
     const previous = current.current;
     const wb = useWorkbench.getState();
-    const next = {...previous, ...patch, sessionId: wb.activeSessionId, workspaceId: wb.activeWorkspaceId,
+    const next = {...previous, ...patch, machineId: wb.client?.identity?.machineId ?? previous.machineId, sessionId: wb.activeSessionId, workspaceId: wb.activeWorkspaceId,
       tabId: wb.activeTabId, draftLocalId: wb.draft?.localId};
     if (JSON.stringify(previous) === JSON.stringify(next)) return;
     current.current = next;
@@ -59,6 +60,10 @@ export function usePageNavigation() {
       current.current = saved;
       setPage(saved);
       const wb = useWorkbench.getState();
+      if (saved.machineId && saved.machineId !== wb.client?.identity?.machineId) {
+        requestAnimationFrame(() => { restoring.current = false; });
+        return; // App resolves cross-machine history through the shared owner.
+      }
       let restored: Promise<unknown> = Promise.resolve();
       if (saved.draftLocalId && saved.workspaceId && wb.workspaces.some(w => w.id === saved.workspaceId)) {
         wb.newSession(saved.workspaceId, null, {localId: saved.draftLocalId, addressScope: "workspace"});

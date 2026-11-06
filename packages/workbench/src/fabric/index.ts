@@ -36,10 +36,3 @@ export type {
   FabricRandomFill,
   FabricReset as FabricResetValue,
 } from "./frame";
-export { HubFabricApiError, HubWorkspaceFabric } from "./hub-workspaces";
-export type {
-  HubWorkspace,
-  HubWorkspaceFabricOptions,
-  HubWorkspaceOperation,
-  HubWorkspaceRoute,
-} from "./hub-workspaces";

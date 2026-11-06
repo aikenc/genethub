@@ -40,3 +40,6 @@ export { MachineSummaryDirectory } from "./protocol/summary-directory";
 export type { SummarySource, SummaryState, MachineSummary, SummaryDirectory } from "./protocol/summary-directory";
 
 export type { Endpoint, Target } from "./protocol/target";
+
+export { MachineConnections, machineRefs } from "./protocol/machine-connections";
+export type { MachineRef, MachineLease, MachineSource, MachineConnectionOptions } from "./protocol/machine-connections";
