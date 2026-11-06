@@ -1779,8 +1779,9 @@ impl SessionManager {
         let metadata_ms = started.elapsed().as_millis() as u64;
         let mut title_repair_ms = 0u64;
         let mut out = Vec::new();
+        let mut budget = crate::blocking::WorkBudget::new();
         for mut meta in metadata {
-            crate::blocking::breathe().await;
+            budget.checkpoint().await;
             if let Some(workspace) = workspace_id {
                 if meta.workspace_id != workspace {
                     continue;

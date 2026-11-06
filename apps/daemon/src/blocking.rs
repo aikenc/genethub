@@ -57,6 +57,32 @@ pub async fn breathe() {
     tokio::task::yield_now().await;
 }
 
+/// A soft cooperative budget for loops whose size comes from user data.
+/// Reset after resumption: scheduler wait does not consume the next work slice.
+/// A single filesystem operation still has to return before we can yield.
+pub(crate) struct WorkBudget {
+    since: std::time::Instant,
+}
+
+impl WorkBudget {
+    pub(crate) fn new() -> Self {
+        Self {
+            since: std::time::Instant::now(),
+        }
+    }
+
+    pub(crate) async fn checkpoint(&mut self) -> std::time::Duration {
+        if self.since.elapsed() < std::time::Duration::from_millis(4) {
+            return std::time::Duration::ZERO;
+        }
+        let yielding = std::time::Instant::now();
+        breathe().await;
+        let waited = yielding.elapsed();
+        self.since = std::time::Instant::now();
+        waited
+    }
+}
+
 /// Short, bounded work: a stat, a small write, a directory listing.
 pub async fn run<F, T>(work: F) -> Result<T>
 where

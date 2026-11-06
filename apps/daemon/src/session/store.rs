@@ -1438,12 +1438,11 @@ impl Store {
         let mut directories = 0usize;
         let mut entries_read = 0usize;
         let mut metadata_bytes = 0usize;
+        let mut budget = crate::blocking::WorkBudget::new();
         let mut out = Vec::new();
         for (workspaces, sessions) in self.homes.session_dirs_for(workspace) {
             directories += 1;
-            let yielding = std::time::Instant::now();
-            crate::blocking::breathe().await;
-            let waited = yielding.elapsed();
+            let waited = budget.checkpoint().await;
             yield_wait += waited;
             max_yield = max_yield.max(waited);
             if let Some((workspace_id, _)) = workspaces.first() {
@@ -1461,9 +1460,7 @@ impl Store {
                 entries_read += 1;
                 // A bulk read must not hold the guest's only fiber while
                 // unrelated foreground requests and peer handshakes wait.
-                let yielding = std::time::Instant::now();
-                crate::blocking::breathe().await;
-                let waited = yielding.elapsed();
+                let waited = budget.checkpoint().await;
                 yield_wait += waited;
                 max_yield = max_yield.max(waited);
                 let session_id = entry.file_name().to_string_lossy().into_owned();
@@ -1532,8 +1529,9 @@ impl Store {
             return Ok(None);
         }
         let mut found: Option<SessionMeta> = None;
+        let mut budget = crate::blocking::WorkBudget::new();
         for (workspaces, sessions) in self.homes.all_sessions_dirs() {
-            crate::blocking::breathe().await;
+            budget.checkpoint().await;
             let Some(home) = sessions.parent() else {
                 continue;
             };

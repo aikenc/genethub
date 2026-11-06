@@ -2083,12 +2083,8 @@ async fn dispatch(
             }
         }).await,
         Request::WorkspaceList => Box::pin(async move {
-            // Spaces written into <data>/spaces/ become projects the next time
-            // anyone looks; throttled, and a no-op when there is nothing there.
-            state
-                .workspaces
-                .scan_spaces(&state.paths.root.join("spaces"), false)
-                .await;
+            // Discovery is maintained independently. A sidebar/Team query must
+            // never pay for recursively resolving every Space on disk.
             Handled::ok(Reply::Workspaces(state.workspaces.list().await))
         }).await,
 
