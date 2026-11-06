@@ -38,8 +38,8 @@ export function markContentRead(machine: string, session: string, cursor: Sessio
  window.dispatchEvent(new Event("genehub-conversation-local"));
 }
 
-/** One migration for the complete machine list, never one baseline per visit.
- * New sessions/replies after migration remain unread until actually seen. */
+/** One first-visit watermark per machine, shared by later history pages.
+ * Replies after that visit remain unread until actually seen. */
 export function initializeReplyReads(machine: string, sessions: readonly SessionSummary[]): void {
   if (!machine || localValue(`reply-baseline:${machine}`)) return;
   if (sessions.length && !sessions.some(session => session.interactionSummary)) return;
@@ -48,13 +48,16 @@ export function initializeReplyReads(machine: string, sessions: readonly Session
       saveLocalValue(`reply-read:${machine}:${session.id}`, session.latestReply);
     }
   }
-  saveLocalValue(`reply-baseline:${machine}`, true);
+  saveLocalValue(`reply-baseline:${machine}`, Date.now());
 }
 
 export function hasUnreadReply(machine: string, session: SessionSummary): boolean {
   const reply = session.latestReply;
-  if (!machine || !reply || !localValue(`reply-baseline:${machine}`)) return false;
+  const baseline = localValue<boolean | number>(`reply-baseline:${machine}`);
+  if (!machine || !reply || !baseline) return false;
   const read = localValue<SessionReplyCursor>(`reply-read:${machine}:${session.id}`);
+  // Later history pages predate the first visit; they are not new replies.
+  if (!read && typeof baseline === "number" && reply.atMs <= baseline) return false;
   return read?.itemId !== reply.itemId && (read?.atMs ?? 0) <= reply.atMs;
 }
 

@@ -19,7 +19,11 @@ import { useWorkbench } from "../session/store";
 function stubClient(answers: Partial<Record<Request["type"], (payload: never) => Reply>>) {
   const calls: Request[] = [];
   let onState: ((state: string) => void) | undefined;
+  let connectionState = "connecting";
   const client = {
+    get connectionState() { return connectionState; },
+    setDataChannelEnabled() {},
+    setRtcEnabled() {},
     call: async (request: Request) => {
       calls.push(request);
       const answer = answers[request.type];
@@ -29,7 +33,7 @@ function stubClient(answers: Partial<Record<Request["type"], (payload: never) =>
     connect: () => {
       // Real sockets fire "ready" after the handshake; do the same so attach
       // has time to register its listener before the state change arrives.
-      queueMicrotask(() => onState?.("ready"));
+      queueMicrotask(() => { connectionState = "ready"; onState?.("ready"); });
     },
     close: () => {},
     subscribe: async () => ({

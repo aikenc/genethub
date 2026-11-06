@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { rememberMachine } from "../devices/machines";
 import { browserHost, desktopHost, detectHost } from "./index";
 
 describe("finding the machine to connect to", () => {
@@ -25,6 +26,18 @@ describe("finding the machine to connect to", () => {
 
   it("returns nothing when there is no endpoint, so the app can say so", async () => {
     expect(await browserHost({ hash: "" }).endpoint()).toBeNull();
+  });
+
+  it("reloads the path's paired machine after shared navigation leaves an older fragment", async () => {
+    const previous = window.location.pathname + window.location.search + window.location.hash;
+    const stored = Object.entries(localStorage);
+    try {
+      localStorage.clear();
+      for (const id of ["m_aaaaaaaa11111111", "m_bbbbbbbb22222222"]) rememberMachine({ machineId: id, name: id, fingerprint: id, endpoint: `ws://127.0.0.1/${id}`, deviceId: `d_${id}`, secret: "property-fixture", pairedAt: "2026-11-07" });
+      window.history.replaceState(null, "", "/m-bbbbbbbb");
+      const endpoint = await browserHost({ hash: "#endpoint=" + encodeURIComponent("ws://127.0.0.1/m_aaaaaaaa11111111") }).endpoint();
+      expect(endpoint?.url).toBe("ws://127.0.0.1/m_bbbbbbbb22222222");
+    } finally { localStorage.clear(); for (const [key, value] of stored) localStorage.setItem(key, value); window.history.replaceState(null, "", previous); }
   });
 
   it("builds the loopback url from what the desktop shell read off the daemon", async () => {

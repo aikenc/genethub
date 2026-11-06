@@ -1,5 +1,6 @@
 import {
   useCallback,
+  useContext,
   useEffect,
   useMemo,
   useRef,
@@ -9,6 +10,8 @@ import {
 
 import { PreviewShareButton } from "./PreviewShareButton";
 import type { Host } from "../host";
+import { MachineConnectionsContext } from "../protocol/machine-connection-context";
+import type { MachineLease } from "../protocol/machine-connections";
 import type { Client } from "../protocol/client";
 import { useWorkbench, type PreviewFloatTarget } from "../session/store";
 import { isIosStandalonePwa } from "../shell/platform";
@@ -54,7 +57,29 @@ export function PreviewFloat({
   host: Host;
   onClose(): void;
 }) {
-  const client = useWorkbench((state) => state.client);
+  const primaryClient = useWorkbench((state) => state.client);
+  const connections = useContext(MachineConnectionsContext);
+  const [borrowedClient, setBorrowedClient] = useState<Client | null>(null);
+  const [connectionError, setConnectionError] = useState("");
+  const sameSource = primaryClient?.identity?.machineId === source.deviceHandle;
+  const client = sameSource ? primaryClient : borrowedClient;
+  useEffect(() => {
+    setBorrowedClient(null); setConnectionError("");
+    if (sameSource || !connections) return;
+    const controller = new AbortController();
+    let lease: MachineLease | undefined;
+    void connections.targets().then(targets => {
+      const target = targets.find(target => target.deviceHandle === source.deviceHandle || target.id === source.deviceHandle);
+      if (!target) throw new Error("资源所在机器未授权或已移除");
+      return connections.acquire(target, { signal: controller.signal, foreground: true });
+    }).then(opened => {
+      if (controller.signal.aborted) { opened.release(); return; }
+      lease = opened; setBorrowedClient(opened.client);
+    }).catch((error: unknown) => {
+      if (!controller.signal.aborted) setConnectionError(error instanceof Error ? error.message : String(error));
+    });
+    return () => { controller.abort(); lease?.release(); };
+  }, [connections, sameSource, source.deviceHandle]);
   const appendComposerDraftLine = useWorkbench((state) => state.appendComposerDraftLine);
   const [mode, setMode] = useState<Mode>("expanded");
   const [sizeLevel, setSizeLevel] = useState(0);
@@ -274,20 +299,20 @@ export function PreviewFloat({
 
   const submitRuntimeArtifact = useCallback<RuntimeArtifactSubmit>(
     async (artifact, onProgress) => {
-      const state = useWorkbench.getState();
-      if (!state.client || !source.sessionId) {
+      if (!client || !sameSource || !source.sessionId) {
         throw new Error("尚未连接到可保存运行产物的会话");
       }
       const sessionId = source.sessionId;
       const bundle = await uploadSessionArtifact(
-        state.client,
+        client,
         sessionId,
         artifact,
         ({ uploadedBytes, totalBytes }) => onProgress(uploadedBytes, totalBytes),
       );
 
-      const afterSave = useWorkbench.getState();
-      afterSave.appendComposerDraftLine(
+      // This action closes over its source store, even if the visible machine
+      // changes while the upload is finishing.
+      appendComposerDraftLine(
         sessionId,
         runtimeArtifactDraftLine(bundle.workspacePath),
       );
@@ -296,7 +321,7 @@ export function PreviewFloat({
         addedToDraft: true,
       };
     },
-    [source.sessionId],
+    [client, sameSource, appendComposerDraftLine, source.sessionId],
   );
 
   const copyPortableLink = useCallback(async () => {
@@ -334,7 +359,7 @@ export function PreviewFloat({
     />
   ) : (
     <p role="status" className="m-auto p-6 text-center text-sm text-muted">
-      尚未连接到设备，无法预览
+      {connectionError || "正在连接资源所在机器…"}
     </p>
   );
 

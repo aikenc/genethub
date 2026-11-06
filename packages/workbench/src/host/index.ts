@@ -77,6 +77,8 @@ export interface Host {
    * simply returns the same address.
    */
   openTarget?(id: string, options?: { remember?: boolean }): Promise<Endpoint>;
+  /** Explicit navigation from the embedding shell; peeks/redials never emit it. */
+  onTargetRequested?(listener: (target: Target, endpoint: Endpoint) => void): () => void;
   notify(notification: Notification): void;
   openExternal(url: string): void;
   /**
@@ -225,15 +227,15 @@ export function browserHost(
     async endpoint() {
       const fragment = new URLSearchParams(location.hash.replace(/^#/, ""));
       const url = fragment.get("endpoint");
-      if (url) return reach(findMachine(url), url);
       const { pathname, search } = readAppHref();
       const workbench = parseWorkbenchPath(pathname, search);
-      if (!workbench) return null;
-      const machine = listMachines().find((entry) =>
-        locatorsMatch(entry.machineId, workbench.deviceHandle),
-      );
-      if (!machine) return null;
-      return reach(machine, machine.endpoint);
+      const machine = workbench ? listMachines().find(entry => locatorsMatch(entry.machineId, workbench.deviceHandle)) : null;
+      // Shared clients change the path without re-spending a ticket merely to
+      // update the fragment. A reload must follow that path's paired identity.
+      if (machine) return reach(machine, machine.endpoint);
+      const paired = url ? findMachine(url) : null;
+      if (paired && workbench && !locatorsMatch(paired.machineId, workbench.deviceHandle)) return null;
+      return url ? reach(paired, url) : null;
     },
     async targets() {
       // Every paired machine is remote here. The browser is not running on any

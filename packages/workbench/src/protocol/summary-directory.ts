@@ -1,11 +1,15 @@
 import type { SessionSummary, WorkspaceInfo } from "@genehub/proto";
 import type { Endpoint, Target } from "./target";
-import { Client, type ClientOptions, type ProtocolDial } from "./client";
+import { type ClientOptions } from "./client";
+import { MachineConnections, accessDenied } from "./machine-connections";
+import { readSessionPage } from "./session-pages";
 
 export interface SummarySource { targets():Promise<Target[]>; openTarget(id:string,options?:{remember?:boolean}):Promise<Endpoint>; }
 export type SummaryState = "deferred" | "waiting" | "loading" | "ready" | "offline" | "denied" | "timeout" | "unavailable" | "notChecked" | "partial" | "rateLimited";
 export interface MachineSummary {
   target: Target;
+  version?: string;
+  nextCursor?: string | null;
   state: SummaryState;
   stateSource: "directory" | "daemon" | "request";
   observedAt: string;
@@ -27,15 +31,29 @@ const SOURCE_TIMEOUT_MS = 10000;
 
 /** A bounded, read-only compatibility directory; business data stays on its source. */
 export class MachineSummaryDirectory {
-  private clients = new Map<string, Client>();
+  private connections: MachineConnections;
+  private ownsConnections: boolean;
+  private stopInvalidation: () => void;
   private previous = new Map<string, MachineSummary>();
   private controller: AbortController | null = null;
   private generation = 0;
   private disposed = false;
   private directoryDenied = false;
   private rows: MachineSummary[] = [];
+  private includeArchived = false;
+  setIncludeArchived(value: boolean): void { this.includeArchived = value; }
   private observer: ((value: SummaryDirectory) => void) | null = null;
-  constructor(private source: SummarySource, private options: Pick<ClientOptions, "socketFactory" | "onDiagnostic"> = {}) {}
+  constructor(source: SummarySource, private options: Pick<ClientOptions, "socketFactory" | "onDiagnostic"> & { connections?: MachineConnections } = {}) {
+    this.ownsConnections = !options.connections;
+    this.connections = options.connections ?? new MachineConnections(source, options);
+    this.stopInvalidation = this.connections.onInvalidated(target => {
+      this.previous.delete(target.id);
+      for (const row of this.rows) if (row.target.id === target.id || target.deviceHandle && row.target.deviceHandle === target.deviceHandle) {
+        this.previous.delete(row.target.id); this.deny(row);
+      }
+      this.emit();
+    });
+  }
 
   async refresh(onUpdate: (value: SummaryDirectory) => void, signal?: AbortSignal, sourceIds?: ReadonlySet<string>): Promise<SummaryDirectory> {
     if (this.disposed) throw new Error("summary directory is closed");
@@ -50,7 +68,7 @@ export class MachineSummaryDirectory {
       let listTimer: ReturnType<typeof setTimeout> | undefined;
       let stopList = () => {};
       const listed = await Promise.race([
-        this.source.targets(),
+        this.connections.targets(),
         new Promise<never>((_, reject) => {
           const cancel = () => reject(new DOMException("Cancelled", "AbortError"));
           stopList = () => controller.signal.removeEventListener("abort", cancel);
@@ -71,17 +89,17 @@ export class MachineSummaryDirectory {
       // An omitted selection preserves the public bulk-directory API. The UI
       // supplies its expanded sources, including an empty set on first open.
       const activeKeys = new Set(targets.filter(target => !sourceIds || sourceIds.has(target.id)).slice(0, MAX_SOURCES).map(target => target.id));
-      for (const [id, client] of this.clients) if (!activeKeys.has(id)) { client.close(); this.clients.delete(id); }
       for (const id of this.previous.keys()) if (!keys.has(id)) this.previous.delete(id);
       const rows = targets.map((target): MachineSummary => ({
         target, stateSource: "directory", observedAt: new Date().toISOString(), state: sourceIds && !sourceIds.has(target.id) ? "deferred" : !activeKeys.has(target.id) ? "notChecked" : target.online === false ? "offline" : "waiting",
         updatedAt: this.previous.get(target.id)?.updatedAt ?? null,
+        version: this.previous.get(target.id)?.version, nextCursor: this.previous.get(target.id)?.nextCursor,
         sessionTotal: this.previous.get(target.id)?.sessionTotal ?? 0, workspaceTotal: this.previous.get(target.id)?.workspaceTotal ?? 0,
         sessions: this.previous.get(target.id)?.sessions ?? [], workspaces: this.previous.get(target.id)?.workspaces ?? [],
       }));
       this.rows = rows;
       const emit = () => { if (!controller.signal.aborted && this.generation === generation) this.emit(); };
-      const pendingRows = rows.filter(row => activeKeys.has(row.target.id));
+      const pendingRows = rows.filter(row => activeKeys.has(row.target.id)).sort((a,b) => Number(this.connections.hasReady(b.target)) - Number(this.connections.hasReady(a.target)));
       let index = 0;
       emit();
       await Promise.all(Array.from({ length: CONCURRENCY }, async () => {
@@ -89,17 +107,18 @@ export class MachineSummaryDirectory {
           const current = index++;
           if (current >= pendingRows.length) return;
           const row = pendingRows[current]!;
-          if (row.state === "offline") { this.clients.get(row.target.id)?.close(); this.clients.delete(row.target.id); continue; }
+          if (row.state === "offline") continue;
           row.state = "loading"; emit();
           try {
             const value = await this.read(row.target, controller.signal);
             if (controller.signal.aborted || this.generation !== generation) return;
             if (!this.canPublish(row)) { emit(); continue; }
-            Object.assign(row, value, { state: value.sessionTotal > MAX_ITEMS_PER_SOURCE || value.workspaceTotal > MAX_ITEMS_PER_SOURCE ? "partial" : "ready", stateSource: "daemon", observedAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+            Object.assign(row, value, { state: value.nextCursor || value.workspaceTotal > MAX_ITEMS_PER_SOURCE ? "partial" : "ready", stateSource: "daemon", observedAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
             this.previous.delete(row.target.id); this.previous.set(row.target.id, { ...row });
             while (this.previous.size > MAX_SOURCES) this.previous.delete(this.previous.keys().next().value!);
           } catch (error) {
             if (controller.signal.aborted || this.generation !== generation) return;
+            if (!this.canPublish(row)) { emit(); continue; }
             row.state = classify(error); row.stateSource = "request"; row.observedAt = new Date().toISOString();
             // An authority rejection invalidates cached content immediately.
             if (row.state === "denied") { row.sessions = []; row.workspaces = []; row.sessionTotal = 0; row.workspaceTotal = 0; row.updatedAt = null; this.previous.delete(row.target.id); }
@@ -114,8 +133,7 @@ export class MachineSummaryDirectory {
         this.directoryDenied = true;
         for (const row of this.rows) this.deny(row);
         this.previous.clear();
-        const clients = [...this.clients.values()]; this.clients.clear();
-        for (const client of clients) client.close();
+        this.connections.invalidateAll();
         this.diagnostic("summary.directory", "denied"); this.emit();
         return this.snapshot();
       }
@@ -125,8 +143,9 @@ export class MachineSummaryDirectory {
 
   close(): void {
     this.disposed = true; this.observer = null; this.rows = []; this.generation++; this.controller?.abort(); this.controller = null;
-    for (const client of this.clients.values()) client.close();
-    this.clients.clear(); this.previous.clear();
+    this.stopInvalidation();
+    if (this.ownsConnections) this.connections.close();
+    this.previous.clear();
   }
 
   private canPublish(row: MachineSummary): boolean { return !this.disposed && !this.directoryDenied && row.state !== "denied"; }
@@ -142,80 +161,65 @@ export class MachineSummaryDirectory {
     try { this.options.onDiagnostic?.({ at: new Date().toISOString(), kind: "operation", detail: { operation, phase: "failure", outcome, sourceId: sourceId ?? null } }); } catch { /* observation cannot own a source connection */ }
   }
   private deny(row: MachineSummary): void {
-    Object.assign(row, {state:"denied",stateSource:"request",observedAt:new Date().toISOString(),sessions:[],workspaces:[],sessionTotal:0,workspaceTotal:0,updatedAt:null});
+    Object.assign(row, {state:"denied",stateSource:"request",observedAt:new Date().toISOString(),sessions:[],workspaces:[],sessionTotal:0,workspaceTotal:0,updatedAt:null,nextCursor:null,version:undefined});
   }
-  private observeClient(id: string, client: Client): void {
-    client.onStateChange(state => {
-      if (state !== "closed" || this.disposed || this.clients.get(id) !== client || !["unauthorized","unauthenticated","forbidden"].includes(client.failure?.code ?? "")) return;
-      this.clients.delete(id); this.previous.delete(id);
-      for (const row of this.rows) if (row.target.id === id) this.deny(row);
-      this.diagnostic("summary.authority", "denied", id); this.emit();
-    });
-  }
-
-  private async read(target: Target, signal: AbortSignal): Promise<Pick<MachineSummary, "sessions" | "workspaces" | "sessionTotal" | "workspaceTotal">> {
-    const parentSignal = signal, reading = new AbortController();
-    const cancelReading = () => reading.abort();
-    parentSignal.addEventListener("abort", cancelReading, { once: true });
-    if (parentSignal.aborted) cancelReading();
-    signal = reading.signal;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let client = this.clients.get(target.id);
-    const check = () => { if (signal.aborted || this.disposed) throw signal.reason ?? new DOMException("Cancelled", "AbortError"); };
-    let rejectAbort!: (error: Error) => void;
-    const aborted = new Promise<never>((_, reject) => { rejectAbort = reject; });
-    const abort = () => rejectAbort(signal.reason ?? new DOMException("Cancelled", "AbortError"));
-    signal.addEventListener("abort", abort, { once: true });
-    const operation = (async () => {
-      check();
-      if (!client || client.connectionState === "closed") {
-        const endpoint = await this.source.openTarget(target.id, { remember: false }); check();
-        const dial = (e: Endpoint): ProtocolDial => ({ url:e.url, channelCredential:e.channelCredential, fabricRouteTicket:e.fabricRouteTicket, fabricAuthorizationExpiresAt:e.fabricAuthorizationExpiresAt, localServerProof:e.localServerProof });
-        client = new Client({ ...this.options,
-          onDiagnostic: event => { try { this.options.onDiagnostic?.({ ...event, detail: { ...event.detail, summarySourceId: target.deviceHandle ?? target.id } }); } catch { /* observation cannot own a source */ } },
-          ...dial(endpoint), credential:endpoint.credential, separateDataChannel:false, rtcEnabled:false,
-          requestTimeoutMs:SOURCE_TIMEOUT_MS, redial:async()=>dial(await this.source.openTarget(target.id,{remember:false})),
-        });
-        this.clients.set(target.id,client); this.observeClient(target.id,client); client.connect();
-        await new Promise<void>((resolve,reject)=>{
-          let stop=()=>{};
-          const finish=(error?:Error)=>{stop();signal.removeEventListener("abort",cancel);error?reject(error):resolve();};
-          const cancel=()=>finish(signal.reason ?? new DOMException("Cancelled","AbortError"));
-          stop=client!.onStateChange(state=>{if(state==="ready")finish();else if(state==="closed")finish(Object.assign(new Error("source connection closed"),{code:client!.failure?.code}));});
-          signal.addEventListener("abort",cancel,{once:true});
-          if(signal.aborted)cancel();else if(client!.connectionState==="ready")finish();
-        });
-        if (endpoint.fingerprint && client.identity?.fingerprint !== endpoint.fingerprint) throw Object.assign(new Error("machine identity mismatch"),{code:"unauthorized"});
-      }
-      check();
-      if (target.deviceHandle && client.identity?.machineId !== target.deviceHandle || target.fingerprint && client.identity?.fingerprint !== target.fingerprint) {
-        throw Object.assign(new Error("summary source identity mismatch"),{code:"unauthorized"});
-      }
-      const [sessions, workspaces] = await Promise.all([
-        client.call({type:"session.list",payload:{workspaceId:null,includeArchived:false,lean:true}}), client.call({type:"workspace.list"}),
-      ]);
-      check();
-      if(sessions?.type!=="sessions" || workspaces?.type!=="workspaces") throw new Error("invalid source summary");
-      return {sessions:sessions.data.slice(0,MAX_ITEMS_PER_SOURCE),workspaces:workspaces.data.slice(0,MAX_ITEMS_PER_SOURCE),sessionTotal:sessions.data.length,workspaceTotal:workspaces.data.length};
-    })();
-    timer=setTimeout(()=>reading.abort(Object.assign(new Error("summary source timed out"),{code:"timeout"})),SOURCE_TIMEOUT_MS);
-    try { return await Promise.race([operation,aborted]); }
-    catch(error){
-      const failure=client?.failure;
-      this.diagnostic("summary.read",failure && ["unauthorized","unauthenticated","forbidden"].includes(failure.code) ? "denied" : classify(error),target.deviceHandle ?? target.id);
-      client?.close();if(this.clients.get(target.id)===client)this.clients.delete(target.id);
-      if(failure && ["unauthorized","unauthenticated","forbidden"].includes(failure.code)) throw Object.assign(new Error("summary access denied"),{code:failure.code});
-      throw error;
+  async workspacePage(target: Target, workspaceId: string, cursor: string | null = null) {
+    const page = await this.connections.use(target, client => readSessionPage(client, workspaceId, cursor, 10, this.includeArchived));
+    const row = this.rows.find(row => row.target.id === target.id);
+    if (row && this.canPublish(row)) {
+      row.sessions = [...new Map([...row.sessions, ...page.sessions].map(s => [s.id, s])).values()];
+      this.previous.set(target.id, { ...row }); this.emit();
     }
-    finally { if(timer)clearTimeout(timer);signal.removeEventListener("abort",abort);parentSignal.removeEventListener("abort",cancelReading); }
+    return page;
+  }
+  /** Continue a source's history without redialing or re-reading earlier pages. */
+  async loadMore(target: Target, signal?: AbortSignal): Promise<void> {
+    const row = this.rows.find(row => row.target.id === target.id);
+    if (!row?.nextCursor || !this.canPublish(row)) return;
+    const cursor = row.nextCursor;
+    const page = await this.connections.use(target, client => readSessionPage(client, null, cursor, 100, this.includeArchived), signal);
+    if (this.disposed || signal?.aborted || !this.canPublish(row) || row.nextCursor !== cursor) return;
+    row.sessions = [...new Map([...row.sessions, ...page.sessions].map(s => [s.id, s])).values()];
+    row.sessionTotal = row.sessions.length;
+    row.nextCursor = page.nextCursor;
+    row.state = page.nextCursor ? "partial" : "ready";
+    this.previous.set(target.id, { ...row });
+    this.emit();
+  }
+  private async read(target: Target, signal: AbortSignal): Promise<Pick<MachineSummary, "sessions" | "workspaces" | "sessionTotal" | "workspaceTotal" | "nextCursor" | "version">> {
+    const reading = new AbortController();
+    const cancel = () => reading.abort(signal.reason);
+    signal.addEventListener("abort", cancel, { once: true });
+    if (signal.aborted) cancel();
+    const timer = setTimeout(() => reading.abort(Object.assign(new Error("summary source timed out"), { code: "timeout" })), SOURCE_TIMEOUT_MS);
+    const operation = this.connections.use(target, async client => {
+      target.deviceHandle ??= client.identity?.machineId;
+      target.fingerprint ??= client.identity?.fingerprint;
+      const [page, workspaces] = await Promise.all([
+        readSessionPage(client, null, null, 100, this.includeArchived), client.call({ type: "workspace.list" }, { timeoutMs: 10_000 }),
+      ]);
+      if (workspaces?.type !== "workspaces") throw new Error("invalid source summary");
+      return { sessions: page.sessions, workspaces: workspaces.data, sessionTotal: page.sessions.length,
+        workspaceTotal: workspaces.data.length, nextCursor: page.nextCursor, version: client.identity?.daemonVersion };
+    }, reading.signal);
+    // Cancellation discards this reader, never a client that other views use.
+    const stopped = new Promise<never>((_, reject) => {
+      const abort = () => reject(reading.signal.reason ?? new DOMException("Cancelled", "AbortError"));
+      reading.signal.addEventListener("abort", abort, { once: true });
+      operation.finally(() => reading.signal.removeEventListener("abort", abort)).catch(() => {});
+      if (reading.signal.aborted) abort();
+    });
+    try { return await Promise.race([operation, stopped]); }
+    catch (error) { this.diagnostic("summary.read", classify(error), target.deviceHandle ?? target.id); throw error; }
+    finally { clearTimeout(timer); signal.removeEventListener("abort", cancel); }
   }
 }
 function classify(error: unknown): SummaryState {
-  const value=error as {status?:number;code?:string;detail?:{code?:string}};
-  const code=value?.code ?? value?.detail?.code;
-  if([401,403,404].includes(value?.status ?? 0) || ["forbidden","unauthenticated","unauthorized"].includes(code ?? ""))return "denied";
-  if(value?.status===429)return "rateLimited";
-  if(value?.status===409 || code==="machineOffline")return "offline";
-  if([408,504].includes(value?.status ?? 0) || code==="timeout" || (error instanceof Error && error.name==="ClientRequestTimeoutError"))return "timeout";
+  const value = error as { status?: number; code?: string; detail?: { code?: string } };
+  const code = value?.code ?? value?.detail?.code;
+  if (accessDenied(error)) return "denied";
+  if (value?.status === 429) return "rateLimited";
+  if (value?.status === 409 || code === "machineOffline") return "offline";
+  if ([408,504].includes(value?.status ?? 0) || code === "timeout" || (error instanceof Error && error.name === "ClientRequestTimeoutError")) return "timeout";
   return "unavailable";
 }
