@@ -235,3 +235,28 @@ N = 会话总 item 数，R = round 数，T = 某个 round 的 trunk 数，B = �
 - **版本单向：** `format` 高于本机的会话仍出现在列表里并说明原因，但打不开；本机只读它不会改动 `meta.json`。
 - **写入互斥：** 同一 session 的第二个 daemon 写入被拒绝并指出占用者，读取不受影响；不同 session 可跨 channel 并行写；占用者退出后无需重启即可恢复写入；从稳定 turn Fork 的新 session 不受源 session 锁影响。
 - **删除原子且可回收：** `session.delete` 持有该 session 的 writer lock 写入 durable tombstone；从此所有 channel 都隐藏并拒绝写入该 id。随后释放锁并删除整个会话目录，包括 blobs 与 scratch；Windows 若因开放 handle 暂时不能删除，启动/列表扫描会继续回收，墓碑保证残留目录永不复活。
+
+
+## Bounded summary pages
+
+`session.page` is additive; `session.list` remains the complete CLI/Team catalog.
+A batch accepts up to ten distinct Space scopes and at most 100 requested rows.
+A null scope means the full registered range and must be requested alone. Cursors
+bind scope, archive choice, sort version and the last `(updatedAtMs, id, owner)`;
+they are read boundaries, not frozen snapshots or mutation authority. Scope errors
+are explicit per-item errors rather than successful empty lists.
+
+The daemon reuses a rebuildable in-memory metadata catalog across pages (five-second
+external-writer reconciliation on read, up to 32 retained scopes and a 10,000-row
+aggregate retention budget; a single larger catalog is still read as one scope).
+Committed metadata writes update warm catalogs; a bounded five-second set of recent
+writes is overlaid after cold reads so active Agents cannot starve catalog reuse.
+Deletion and workspace-registry revisions invalidate old snapshots. These structures
+contain metadata only: bodies stay on disk and execution/coordination facts are
+projected from their existing sources for the selected page. Legacy reads remain
+fresh full reads. No session format, database or Team ledger migration is needed.
+
+The workbench defaults to ten recent rows per root Space, loads a child on explicit
+expansion and offers older pages in that Space. Search, attention and unread views
+share one full-range paginated loader before using the existing predicates; partial
+results must not be described as a complete empty range or global idle state.

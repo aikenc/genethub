@@ -199,6 +199,13 @@ pub enum Request {
         include_archived: bool,
         lean: bool,
     },
+    /// Bounded summary pages; existing session.list remains complete.
+    #[serde(rename = "session.page", rename_all = "camelCase")]
+    SessionPage {
+        requests: Vec<SessionPageRequest>,
+        #[serde(default)]
+        include_archived: bool,
+    },
     #[serde(rename = "session.get", rename_all = "camelCase")]
     SessionGet {
         session_id: String,
@@ -984,6 +991,7 @@ pub enum Reply {
     Session(SessionSummary),
     ForkTransfer(ForkTransfer),
     Sessions(Vec<SessionSummary>),
+    SessionPages(Vec<SessionPageResult>),
     SessionDrafts(Vec<crate::SessionDraft>),
     PreviewAnnotations(crate::PreviewReviewDraft),
     SessionComponents(Vec<ComponentInstanceInfo>),
@@ -1022,6 +1030,25 @@ pub enum Reply {
     Processes(Vec<BackgroundProcess>),
     /// Nothing to return, but the call succeeded.
     Ack,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionPageRequest {
+    pub workspace_id: Option<String>,
+    pub limit: u32,
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionPageResult {
+    pub workspace_id: Option<String>,
+    pub sessions: Vec<SessionSummary>,
+    pub next_cursor: Option<String>,
+    pub error: Option<String>,
 }
 
 /// One change to an AgentSpace's registration.

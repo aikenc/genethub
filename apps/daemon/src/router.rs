@@ -462,6 +462,7 @@ async fn dispatch(
                     "process.services.v1".to_string(),
                     "session.input.v1".to_string(),
                     "session.create-id.v1".to_string(),
+                    "session.page.v1".to_string(),
                     "session.prepare.v1".to_string(),
                     "session.file-upload.v1".to_string(),
                     "provider.configuration.v1".to_string(),
@@ -751,6 +752,24 @@ async fn dispatch(
                 }
                 Err(error) => failed(error),
             }
+        }).await,
+
+        Request::SessionPage { requests, include_archived } => Box::pin(async move {
+            let mut scopes = std::collections::HashSet::new();
+            if requests.is_empty() || requests.len() > 10
+                || requests.iter().any(|r| r.limit == 0 || r.limit > 100 || !scopes.insert(r.workspace_id.clone()))
+                || requests.iter().map(|r| r.limit as u64).sum::<u64>() > 100
+                || (requests.len() > 1 && requests.iter().any(|r| r.workspace_id.is_none())) {
+                return Handled::err(ErrorCode::BadRequest, "page requests must be unique, bounded to 100 rows, and global scope must be alone");
+            }
+            let mut pages = Vec::new();
+            for request in requests {
+                match state.sessions.page(&request, include_archived).await {
+                    Ok(page) => pages.push(page),
+                    Err(error) => pages.push(genehub_proto::SessionPageResult { workspace_id: request.workspace_id, sessions: Vec::new(), next_cursor: None, error: Some(format!("{error:#}")) }),
+                }
+            }
+            Handled::ok(Reply::SessionPages(pages))
         }).await,
 
         Request::SessionGet {

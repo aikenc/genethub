@@ -1,3 +1,4 @@
+import { useCompleteSessionList } from "./useCompleteSessionList";
 import { FilterBar } from "../ui/FilterBar";
 import { usePageViewState } from "../app/usePageNavigation";
 import { DetailBackButton } from "../ui/ListLayout";
@@ -64,6 +65,10 @@ export function NewSessionPanel({ endpoint, surface = "sessions", onSurface, onB
   }, [surface, workspace?.id]);
   const owned = (activity.sessions ?? []).filter(s => s.workspaceId === workspace?.id);
   const candidates = filter === "pending" ? pendingSessions(owned, activity.sessions ?? []) : owned;
+  useCompleteSessionList(sessionSurface && (showAll || archived || Boolean(historyQuery.trim()) || filter !== "all"));
+  useEffect(() => {
+    if (sessionSurface && workspace?.agentSpace?.parentWorkspaceId && wb.client?.identity?.features?.includes("session.page.v1")) wb.expandSessionSpace(workspace.id, true);
+  }, [sessionSurface, workspace?.id, wb.client]);
   const rows = candidates.filter((s) =>
     ((filter === "pending" || filter === "running") && hasCurrentWork(s, activity.sessions) || s.archived === archived) &&
     matchesAttention(s, filter, hasUnreadReply(machine, s), activity.sessions) &&
@@ -98,9 +103,10 @@ export function NewSessionPanel({ endpoint, surface = "sessions", onSurface, onB
           {filter === "pending" && <p className="mb-2 text-xs text-muted">完整待办列表，包含仍有待办的归档会话；打开会话处理具体问题。</p>}
           {activity.error && activity.sessions && <p role="status" className="mb-2 text-xs text-muted">会话列表刷新失败，当前显示最近记录。</p>}
           {showAll && <div className="mb-3 flex gap-2"><input aria-label="搜索当前项目会话" placeholder="搜索会话" value={historyQuery} onChange={e => setHistoryQuery(e.target.value)} className="min-h-11 min-w-0 flex-1 rounded-lg bg-raised px-3 text-sm"/>{filter !== "pending" && filter !== "running" && <button type="button" aria-pressed={archived} className="min-h-11 rounded-lg border border-line px-3 text-sm" onClick={() => setArchived(v => !v)}>{archived ? "返回未归档" : "已归档"}</button>}</div>}
+          {wb.client?.identity?.features?.includes("session.page.v1") && (showAll || archived || historyQuery || filter !== "all") && !wb.sessionsComplete && <p role="status" className="py-2 text-xs text-muted">{wb.sessionsError ? "完整会话范围读取失败，请重试。" : "正在读取完整会话范围…"}</p>}
           {!activity.sessions ? <p role="status" className="py-6 text-sm text-muted">{activity.error ? "会话暂时无法读取，请检查连接后重试。" : "正在读取会话…"}</p> : <>
             <RecentSessions sessions={(showAll || filter !== "all" ? rows : rows.slice(0,10)).map(s => ({...s, unread: hasUnreadReply(machine, s)}))} workspaces={wb.workspaces} activeSessionId={null} onPickSession={id => void wb.selectSession(id)} onRename={(id,title) => void wb.renameSession(id,title)} onDelete={id => void wb.deleteSession(id)} />
-            {!rows.length && <p className="py-6 text-center text-sm text-muted">{archived || historyQuery || filter !== "all" ? "没有匹配的会话" : "还没有会话，从下面开始吧"}</p>}
+            {!rows.length && !(wb.client?.identity?.features?.includes("session.page.v1") && (showAll || archived || historyQuery || filter !== "all") && !wb.sessionsComplete) && <p className="py-6 text-center text-sm text-muted">{archived || historyQuery || filter !== "all" ? "没有匹配的会话" : "还没有会话，从下面开始吧"}</p>}
           </>}
         </>}
         {surface === "components" && <AgentAdvancedSettings key={workspace.id} workspace={workspace} section="components" inline />}

@@ -119,6 +119,9 @@ export function useAgentActivities() {
 
 export function useAgentActivity(workspaceId: string) {
   const snapshot = useAgentActivities();
-  const activity = snapshot.agents?.get(workspaceId) ?? (snapshot.agents ? noSessions : undefined);
-  return { ...activity, error: snapshot.error };
+  const complete = useWorkbench(state => state.sessionsComplete || !state.client?.identity?.features?.includes("session.page.v1"));
+  const page = useWorkbench(state => state.sessionPages[workspaceId]);
+  const partial = !complete && !(page?.loaded && !page.cursor && !page.error);
+  const activity = snapshot.agents?.get(workspaceId) ?? (!partial && snapshot.agents ? noSessions : undefined);
+  return { ...activity, partial, error: snapshot.error || Boolean(page?.error) };
 }
