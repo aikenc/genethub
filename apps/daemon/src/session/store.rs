@@ -667,6 +667,7 @@ struct WorkspaceHome {
 #[derive(Clone, Default)]
 pub struct WorkspaceHomes {
     homes: Arc<RwLock<Homes>>,
+    revision: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl WorkspaceHomes {
@@ -704,6 +705,8 @@ impl WorkspaceHomes {
             prune_home(&mut homes, &previous.root);
         }
         homes.roots.entry(root.to_path_buf()).or_default();
+        self.revision
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
     }
 
     /// Stops exposing one workspace's history without deleting any of it.
@@ -712,6 +715,8 @@ impl WorkspaceHomes {
         if let Ok(mut homes) = self.homes.write() {
             if let Some(home) = homes.workspaces.remove(workspace_id) {
                 prune_home(&mut homes, &home.root);
+                self.revision
+                    .fetch_add(1, std::sync::atomic::Ordering::Release);
             }
         }
     }
@@ -964,11 +969,27 @@ fn prune_home(homes: &mut Homes, root: &Path) {
     }
 }
 
+// Rebuildable metadata only. Never a source of execution, coordination or
+// mutation authority. Expiry reconciles external writers on the next read.
+#[derive(Default)]
+struct PageCatalog {
+    generation: u64,
+    recent_writes: HashMap<(String, String), (u64, std::time::Instant, SessionMeta)>,
+    scopes: HashMap<Option<String>, PageCatalogSnapshot>,
+}
+struct PageCatalogSnapshot {
+    homes_revision: u64,
+    read_at: std::time::Instant,
+    metadata: Vec<SessionMeta>,
+}
+
 #[derive(Clone)]
 pub struct Store {
     homes: WorkspaceHomes,
     coordination: super::coordination::Cache,
     catalog_reads: Arc<crate::blocking::InFlightReads<Option<String>, Vec<SessionMeta>>>,
+    page_reads: Arc<crate::blocking::InFlightReads<(Option<String>, u64, u64), Vec<SessionMeta>>>,
+    page_catalog: Arc<std::sync::Mutex<PageCatalog>>,
 }
 
 impl Store {
@@ -977,6 +998,8 @@ impl Store {
             homes,
             coordination: Default::default(),
             catalog_reads: Default::default(),
+            page_reads: Default::default(),
+            page_catalog: Default::default(),
         }
     }
 
@@ -1305,7 +1328,53 @@ impl Store {
         let mut value = serde_json::to_value(stamped)?;
         value["projectKey"] =
             serde_json::Value::String(self.homes.project_key(&meta.workspace_id)?);
-        crate::config::save_private(&path, serde_json::to_string_pretty(&value)?.as_bytes())
+        let raw = serde_json::to_string_pretty(&value)?;
+        crate::config::save_private(&path, raw.as_bytes())?;
+        // Reuse the same normalization/owner selection as an actual catalog
+        // read, including aliased project views and history-only records.
+        let normalized = (|| -> Result<SessionMeta> {
+            let dirs = self.homes.session_dirs_for(Some(&meta.workspace_id));
+            let projects = &dirs.first().context("session home disappeared")?.0;
+            let header: MetaHeader = serde_json::from_str(&raw)?;
+            let owner = Self::metadata_owner(projects, &header.project_key)
+                .context("session owner disappeared")?;
+            self.load_meta_from(&owner, &meta.id, &raw, header)
+        })();
+        if let Ok(mut cache) = self.page_catalog.lock() {
+            if let Ok(meta) = normalized {
+                cache
+                    .recent_writes
+                    .retain(|_, (_, at, _)| at.elapsed() < std::time::Duration::from_secs(5));
+                if cache.recent_writes.len() >= 10_000 {
+                    cache.generation = cache.generation.wrapping_add(1);
+                    cache.scopes.clear();
+                    cache.recent_writes.clear();
+                }
+                cache.recent_writes.insert(
+                    (meta.workspace_id.clone(), meta.id.clone()),
+                    (
+                        self.homes
+                            .revision
+                            .load(std::sync::atomic::Ordering::Acquire),
+                        std::time::Instant::now(),
+                        meta.clone(),
+                    ),
+                );
+                for (scope, snapshot) in &mut cache.scopes {
+                    snapshot
+                        .metadata
+                        .retain(|row| row.id != meta.id || row.workspace_id != meta.workspace_id);
+                    if scope.as_ref().is_none_or(|id| id == &meta.workspace_id) {
+                        snapshot.metadata.push(meta.clone());
+                    }
+                }
+            } else {
+                cache.generation = cache.generation.wrapping_add(1);
+                cache.scopes.clear();
+                cache.recent_writes.clear();
+            }
+        }
+        Ok(())
     }
 
     pub fn load_meta(&self, workspace_id: &str, session_id: &str) -> Result<SessionMeta> {
@@ -1426,24 +1495,124 @@ impl Store {
 
     pub async fn list_meta_for(&self, workspace: Option<&str>) -> Result<Vec<SessionMeta>> {
         crate::blocking::coalesce(&self.catalog_reads, workspace.map(str::to_owned), || {
-            self.read_meta_for(workspace)
+            self.read_meta_for(workspace, false)
         })
         .await
     }
 
-    async fn read_meta_for(&self, workspace: Option<&str>) -> Result<Vec<SessionMeta>> {
+    fn invalidate_page_catalog(&self) {
+        if let Ok(mut cache) = self.page_catalog.lock() {
+            cache.generation = cache.generation.wrapping_add(1);
+            cache.scopes.clear();
+            cache.recent_writes.clear();
+        }
+    }
+
+    pub(super) async fn page_metadata(&self, workspace: Option<&str>) -> Result<Vec<SessionMeta>> {
+        if let Some(id) = workspace {
+            self.homes.root(id)?;
+        }
+        let revision = self
+            .homes
+            .revision
+            .load(std::sync::atomic::Ordering::Acquire);
+        let scope = workspace.map(str::to_owned);
+        let generation = {
+            let cache = self
+                .page_catalog
+                .lock()
+                .map_err(|_| anyhow!("page catalog poisoned"))?;
+            let reusable = |snapshot: &&PageCatalogSnapshot| {
+                snapshot.homes_revision == revision
+                    && snapshot.read_at.elapsed() < std::time::Duration::from_secs(5)
+            };
+            if let Some(snapshot) = cache.scopes.get(&scope).filter(reusable) {
+                return Ok(snapshot.metadata.clone());
+            }
+            if workspace.is_some() {
+                if let Some(snapshot) = cache.scopes.get(&None).filter(reusable) {
+                    return Ok(snapshot
+                        .metadata
+                        .iter()
+                        .filter(|row| Some(row.workspace_id.as_str()) == workspace)
+                        .cloned()
+                        .collect());
+                }
+            }
+            cache.generation
+        };
+        let mut metadata = crate::blocking::coalesce(
+            &self.page_reads,
+            (scope.clone(), revision, generation),
+            || self.read_meta_for(workspace, true),
+        )
+        .await?;
+        let mut cache = self
+            .page_catalog
+            .lock()
+            .map_err(|_| anyhow!("page catalog poisoned"))?;
+        // Overlay bounded recent durable writes so an active Agent cannot
+        // continually prevent a cold catalog from becoming reusable. Delete and
+        // registry fences still prevent publication across structural changes.
+        if cache.generation == generation
+            && self
+                .homes
+                .revision
+                .load(std::sync::atomic::Ordering::Acquire)
+                == revision
+        {
+            cache
+                .recent_writes
+                .retain(|_, (_, at, _)| at.elapsed() < std::time::Duration::from_secs(5));
+            for (written_revision, _, written) in cache.recent_writes.values() {
+                if *written_revision == revision
+                    && workspace.is_none_or(|id| id == written.workspace_id)
+                {
+                    metadata.retain(|row| {
+                        row.id != written.id || row.workspace_id != written.workspace_id
+                    });
+                    metadata.push(written.clone());
+                }
+            }
+            if cache.scopes.len() >= 32
+                || cache
+                    .scopes
+                    .values()
+                    .map(|s| s.metadata.len())
+                    .sum::<usize>()
+                    + metadata.len()
+                    > 10_000
+            {
+                cache.scopes.clear();
+            }
+            cache.scopes.insert(
+                scope,
+                PageCatalogSnapshot {
+                    homes_revision: revision,
+                    read_at: std::time::Instant::now(),
+                    metadata: metadata.clone(),
+                },
+            );
+        }
+        Ok(metadata)
+    }
+
+    async fn read_meta_for(
+        &self,
+        workspace: Option<&str>,
+        strict: bool,
+    ) -> Result<Vec<SessionMeta>> {
         let started = std::time::Instant::now();
         let mut yield_wait = std::time::Duration::ZERO;
         let mut max_yield = std::time::Duration::ZERO;
         let mut directories = 0usize;
         let mut entries_read = 0usize;
         let mut metadata_bytes = 0usize;
+        let mut budget = crate::blocking::WorkBudget::new();
         let mut out = Vec::new();
         for (workspaces, sessions) in self.homes.session_dirs_for(workspace) {
             directories += 1;
-            let yielding = std::time::Instant::now();
-            crate::blocking::breathe().await;
-            let waited = yielding.elapsed();
+            let waited = budget.checkpoint().await;
             yield_wait += waited;
             max_yield = max_yield.max(waited);
             if let Some((workspace_id, _)) = workspaces.first() {
@@ -1454,16 +1623,17 @@ impl Store {
                     let _ = self.establish_home(home);
                 }
             }
-            let Ok(entries) = fs::read_dir(&sessions) else {
-                continue;
+            let entries = match fs::read_dir(&sessions) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) if strict => return Err(error).context("reading session directory"),
+                Err(_) => continue,
             };
             for entry in entries.flatten() {
                 entries_read += 1;
                 // A bulk read must not hold the guest's only fiber while
                 // unrelated foreground requests and peer handshakes wait.
-                let yielding = std::time::Instant::now();
-                crate::blocking::breathe().await;
-                let waited = yielding.elapsed();
+                let waited = budget.checkpoint().await;
                 yield_wait += waited;
                 max_yield = max_yield.max(waited);
                 let session_id = entry.file_name().to_string_lossy().into_owned();
@@ -1475,12 +1645,19 @@ impl Store {
                     continue;
                 }
                 let path = entry.path().join("meta.json");
-                let Ok(raw) = fs::read_to_string(&path) else {
-                    continue;
+                let raw = match fs::read_to_string(&path) {
+                    Ok(raw) => raw,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) if strict => return Err(error).context("reading session metadata"),
+                    Err(_) => continue,
                 };
                 metadata_bytes += raw.len();
-                let Ok(header) = serde_json::from_str::<MetaHeader>(&raw) else {
-                    continue;
+                let header = match serde_json::from_str::<MetaHeader>(&raw) {
+                    Ok(header) => header,
+                    Err(error) if strict => {
+                        return Err(error).context("parsing session metadata header")
+                    }
+                    Err(_) => continue,
                 };
                 let owner = Self::metadata_owner(&workspaces, &header.project_key);
                 let Some(workspace_id) = owner else {
@@ -1491,11 +1668,10 @@ impl Store {
                 }
                 match self.load_meta_from(&workspace_id, &session_id, &raw, header) {
                     Ok(meta) => out.push(meta),
-                    Err(error) => tracing::warn!(
-                        session = %session_id,
-                        %error,
-                        "skipping a session whose meta could not be read"
-                    ),
+                    Err(error) if strict => return Err(error).context("parsing session metadata"),
+                    Err(error) => {
+                        tracing::warn!(session = %session_id, %error, "skipping a session whose meta could not be read")
+                    }
                 }
             }
         }
@@ -1532,8 +1708,9 @@ impl Store {
             return Ok(None);
         }
         let mut found: Option<SessionMeta> = None;
+        let mut budget = crate::blocking::WorkBudget::new();
         for (workspaces, sessions) in self.homes.all_sessions_dirs() {
-            crate::blocking::breathe().await;
+            budget.checkpoint().await;
             let Some(home) = sessions.parent() else {
                 continue;
             };
@@ -2238,6 +2415,7 @@ impl Store {
     /// Missing files are not an error: this is also the cleanup path for a
     /// session that never got as far as being written.
     pub fn delete(&self, workspace_id: &str, session_id: &str) -> Result<()> {
+        self.invalidate_page_catalog();
         let dir = self.raw_session_dir(workspace_id, session_id)?;
         let tombstone = self.tombstone_path(workspace_id, session_id)?;
         if tombstone.exists() {
@@ -2264,6 +2442,7 @@ impl Store {
             "deletedAtMs": now_ms(),
         });
         crate::config::save_private(&tombstone, serde_json::to_vec_pretty(&marker)?.as_slice())?;
+        self.invalidate_page_catalog();
         tracing::info!(
             event = "session_tombstoned",
             workspace = %workspace_id,

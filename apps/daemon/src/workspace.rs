@@ -48,8 +48,8 @@ pub struct Workspaces {
     homes: WorkspaceHomes,
     /// When the last scan for Spaces on disk finished; only a throttle, not state.
     scanned_at: std::sync::Mutex<Option<tokio::time::Instant>>,
-    /// A second `workspace.list` while one scan is still walking the tree
-    /// would repeat the same work, so it returns the previous answer instead.
+    /// Discovery has one owner even when explicitly requested during startup.
+    /// Foreground workspace.list reads the registry and never waits for a scan.
     scanning: std::sync::atomic::AtomicBool,
 }
 
@@ -317,14 +317,16 @@ impl Workspaces {
                 return ScanReport::default();
             }
         }
-        let discovery = crate::space_descriptor::discover(spaces_root);
+        let started = std::time::Instant::now();
+        let discovery = crate::space_descriptor::discover(spaces_root).await;
         for problem in &discovery.problems {
             tracing::warn!(%problem, "a Space descriptor cannot be used");
         }
         let mut report = ScanReport::default();
         let mut links: Vec<(String, Option<String>)> = Vec::new();
+        let mut budget = crate::blocking::WorkBudget::new();
         for root in &discovery.roots {
-            Box::pin(self.scan_tree(root, None, &mut links, &mut report)).await;
+            Box::pin(self.scan_tree(root, None, &mut links, &mut report, &mut budget)).await;
         }
         if !links.is_empty() {
             match self.register_scanned_parents(&links).await {
@@ -336,6 +338,15 @@ impl Workspaces {
             tracing::warn!(%error, "retiring missing scanned child Spaces failed");
         }
         *self.scanned_at.lock().expect("never poisoned") = Some(tokio::time::Instant::now());
+        if started.elapsed().as_secs() >= 1 {
+            tracing::warn!(
+                event = "workspace_discovery_slow",
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                opened = report.opened,
+                linked = report.linked,
+                "Space discovery exceeded one second"
+            );
+        }
         report
     }
 
@@ -350,14 +361,32 @@ impl Workspaces {
         let Ok(canonical_root) = crate::guest_paths::guest_path(spaces_root).canonicalize() else {
             return Ok(0);
         };
+        let candidates: Vec<_> = self
+            .entries
+            .read()
+            .await
+            .values()
+            .filter(|entry| !entry.removed && entry.root.starts_with(&canonical_root))
+            .map(|entry| (entry.id.clone(), entry.root.clone()))
+            .collect();
+        let mut missing = Vec::new();
+        let mut budget = crate::blocking::WorkBudget::new();
+        for (id, root) in candidates {
+            budget.checkpoint().await;
+            if !root.exists() {
+                missing.push((id, root));
+            }
+        }
         let mut entries = self.entries.write().await;
         let mut config = self.config.write().await;
-        let stale: Vec<String> = entries
-            .values()
-            .filter(|entry| {
-                !entry.removed && entry.root.starts_with(&canonical_root) && !entry.root.exists()
+        let stale: Vec<String> = missing
+            .into_iter()
+            .filter_map(|(id, root)| {
+                entries
+                    .get(&id)
+                    .is_some_and(|entry| !entry.removed && entry.root == root && !root.exists())
+                    .then_some(id)
             })
-            .map(|entry| entry.id.clone())
             .collect();
         if stale.is_empty() {
             return Ok(0);
@@ -386,7 +415,9 @@ impl Workspaces {
         parent: Option<&str>,
         links: &mut Vec<(String, Option<String>)>,
         report: &mut ScanReport,
+        budget: &mut crate::blocking::WorkBudget,
     ) {
+        budget.checkpoint().await;
         let id = match self.scanned_workspace(found, report).await {
             Scanned::Id(id) => id,
             Scanned::Removed | Scanned::Failed => return,
@@ -397,7 +428,7 @@ impl Workspaces {
             links.push((id.clone(), parent.map(str::to_string)));
         }
         for child in &found.children {
-            Box::pin(self.scan_tree(child, Some(&id), links, report)).await;
+            Box::pin(self.scan_tree(child, Some(&id), links, report, budget)).await;
         }
     }
 
@@ -409,9 +440,14 @@ impl Workspaces {
         let Ok(source) = crate::guest_paths::guest_path(&found.dir).canonicalize() else {
             return Scanned::Failed;
         };
+        let candidate = directory_workspace_from_descriptor(
+            source,
+            found.descriptor.name.clone(),
+            Some(&found.descriptor),
+        )
+        .await;
         {
             let entries = self.entries.read().await;
-            let candidate = directory_workspace(source.clone(), found.descriptor.name.clone());
             if let Some(existing) = existing_project(&entries, &candidate) {
                 // The descriptor's folders and name are read again on every scan, so editing them takes effect without
                 // reopening by hand. A project registered another way (a plain folder, a `.code-workspace`)
@@ -436,7 +472,10 @@ impl Workspaces {
                 }
             }
         }
-        match self.open(&source, found.descriptor.name.clone()).await {
+        match self
+            .register_candidate(candidate, found.descriptor.name.clone(), false)
+            .await
+        {
             Ok(info) => {
                 report.opened += 1;
                 Scanned::Id(info.id)
@@ -805,7 +844,7 @@ impl Workspaces {
     pub async fn open_with_children(&self, root: &Path) -> Result<WorkspaceInfo> {
         let info = self.open(root, None).await?;
         let dir = Path::new(&info.root);
-        if let Ok(Some(found)) = crate::space_descriptor::discover_root(dir) {
+        if let Ok(Some(found)) = crate::space_descriptor::discover_root(dir).await {
             if !found.children.is_empty() {
                 let mut links = vec![(info.id.clone(), None)];
                 self.open_child_tree(&found.children, &info.id, &mut links)
@@ -827,7 +866,9 @@ impl Workspaces {
         parent_id: &str,
         links: &mut Vec<(String, Option<String>)>,
     ) {
+        let mut budget = crate::blocking::WorkBudget::new();
         for child in children {
+            budget.checkpoint().await;
             if let Ok(opened) = self.open(&child.dir, child.descriptor.name.clone()).await {
                 links.push((opened.id.clone(), Some(parent_id.to_string())));
                 if !child.children.is_empty() {
@@ -862,13 +903,13 @@ impl Workspaces {
                 .and_then(|descriptor| descriptor.name)
         });
         let candidate = if source.is_dir() {
-            directory_workspace(source, name)
+            directory_workspace(source, name).await
         } else if source.is_file() && is_space_descriptor_file(&source) {
             let dir = source
                 .parent()
                 .ok_or_else(|| anyhow!("descriptor file has no parent directory"))?
                 .to_path_buf();
-            directory_workspace(dir, name)
+            directory_workspace(dir, name).await
         } else if source.is_file() && is_workspace_file(&source) && name.is_none() {
             code_workspace(&source)?
         } else {
@@ -878,6 +919,18 @@ impl Workspaces {
             ));
         };
 
+        self.register_candidate(candidate, explicit_or_descriptor_name, true)
+            .await
+    }
+
+    /// Discovery may refresh an entry, but only an explicit open can restore a
+    /// removed project. Recheck under the commit lock after all filesystem work.
+    async fn register_candidate(
+        &self,
+        candidate: WorkspaceEntry,
+        explicit_or_descriptor_name: Option<String>,
+        restore_removed: bool,
+    ) -> Result<WorkspaceInfo> {
         // Keep the write lock from the source identity check through commit.
         // A `.code-workspace` file belongs to the directory that contains it,
         // not to whichever folder happens to be listed first and not to the
@@ -891,6 +944,10 @@ impl Workspaces {
             folder.root_handle = next.ensure_workspace_root(&folder.root);
         }
         if let Some(existing) = existing_project(&entries, &candidate).cloned() {
+            anyhow::ensure!(
+                restore_removed || !existing.removed,
+                "workspace was removed during discovery"
+            );
             let mut updated = candidate;
             updated.id = existing.id.clone();
             // The label belongs to the durable project identity, not whichever
@@ -1324,21 +1381,42 @@ fn describe(entry: &WorkspaceEntry) -> WorkspaceInfo {
 /// descriptor replaces a `.code-workspace` file, which keeps working for projects that have no such descriptor),
 /// otherwise the directory itself. An entry this machine cannot use (a URI, a missing directory, one already
 /// listed) is dropped rather than refusing the Space; with none left the directory alone is the project.
-fn directory_workspace(dir: PathBuf, name: Option<String>) -> WorkspaceEntry {
-    let name = name.or_else(|| {
-        crate::space_descriptor::read(&dir)
-            .ok()
-            .flatten()
-            .and_then(|descriptor| descriptor.name)
-    });
-    descriptor_workspace(&dir, name.clone()).unwrap_or_else(|| folder_workspace(dir.clone(), name))
+async fn directory_workspace(dir: PathBuf, name: Option<String>) -> WorkspaceEntry {
+    let descriptor = crate::space_descriptor::read(&dir).ok().flatten();
+    if descriptor.is_none() {
+        if let Some(folders) = crate::space_descriptor::declared_folders(&dir) {
+            if let Some(entry) = descriptor_workspace(&dir, name.clone(), &folders).await {
+                return entry;
+            }
+        }
+    }
+    directory_workspace_from_descriptor(dir, name, descriptor.as_ref()).await
 }
 
-fn descriptor_workspace(dir: &Path, name: Option<String>) -> Option<WorkspaceEntry> {
-    let declared = crate::space_descriptor::declared_folders(dir)?;
+async fn directory_workspace_from_descriptor(
+    dir: PathBuf,
+    name: Option<String>,
+    descriptor: Option<&crate::space_descriptor::Descriptor>,
+) -> WorkspaceEntry {
+    let name = name.or_else(|| descriptor.and_then(|descriptor| descriptor.name.clone()));
+    if let Some(descriptor) = descriptor {
+        if let Some(entry) = descriptor_workspace(&dir, name.clone(), &descriptor.folders).await {
+            return entry;
+        }
+    }
+    folder_workspace(dir, name)
+}
+
+async fn descriptor_workspace(
+    dir: &Path,
+    name: Option<String>,
+    declared: &[serde_json::Value],
+) -> Option<WorkspaceEntry> {
     let mut seen = HashSet::new();
-    let mut usable = Vec::new();
+    let mut folders = Vec::new();
+    let mut budget = crate::blocking::WorkBudget::new();
     for folder in declared {
+        budget.checkpoint().await;
         let Some(raw) = folder.get("path").and_then(serde_json::Value::as_str) else {
             continue;
         };
@@ -1351,30 +1429,44 @@ fn descriptor_workspace(dir: &Path, name: Option<String>) -> Option<WorkspaceEnt
         {
             continue;
         }
-        let requested = dir.join(requested);
-        match requested.canonicalize() {
-            Ok(root) if root.is_dir() && seen.insert(root.clone()) => usable.push(folder),
-            _ => {}
+        let Ok(root) = dir.join(requested).canonicalize() else {
+            continue;
+        };
+        if !root.is_dir() || !seen.insert(root.clone()) {
+            continue;
         }
-        if usable.len() == MAX_WORKSPACE_FOLDERS {
+        let parsed: CodeWorkspaceFolder = serde_json::from_value(folder.clone()).ok()?;
+        if parsed.uri.is_some() {
+            return None;
+        }
+        folders.push(WorkspaceFolderEntry {
+            name: workspace_folder_name(parsed.name.as_deref(), &root).ok()?,
+            root,
+            root_handle: String::new(),
+        });
+        if folders.len() == MAX_WORKSPACE_FOLDERS {
             break;
         }
     }
-    if usable.is_empty() {
+    if folders.is_empty() || (folders.len() == 1 && folders[0].root == dir) {
         return None;
     }
-    let path = dir.join(crate::space_descriptor::FILE);
-    let body = serde_json::json!({ "folders": usable }).to_string();
-    let mut entry = parse_code_workspace(&path, &body).ok()?;
-    if entry.folders.len() == 1 && entry.folders[0].root == dir {
-        return None; // only the Space itself: an ordinary project, not a multi-root one
-    }
-    entry.name = name.unwrap_or_else(|| {
-        dir.file_name()
-            .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_else(|| dir.display().to_string())
-    });
-    Some(entry)
+    // Roots have already been canonicalized and checked. Do not serialize them
+    // into a workspace document and resolve the same paths for a second time.
+    let root = folders[0].root.clone();
+    Some(WorkspaceEntry {
+        id: format!("w_{}", uuid::Uuid::new_v4().simple()),
+        name: name.unwrap_or_else(|| {
+            dir.file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| dir.display().to_string())
+        }),
+        root: root.clone(),
+        folders,
+        workspace_file: Some(dir.join(crate::space_descriptor::FILE)),
+        removed: false,
+        is_git_repo: root.join(".git").exists(),
+    })
 }
 
 fn folder_workspace(root: PathBuf, name: Option<String>) -> WorkspaceEntry {

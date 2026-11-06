@@ -1777,10 +1777,31 @@ impl SessionManager {
         let started = std::time::Instant::now();
         let metadata = self.store.list_meta_for(workspace_id).await?;
         let metadata_ms = started.elapsed().as_millis() as u64;
+        self.project_list(
+            metadata,
+            workspace_id,
+            include_archived,
+            lean,
+            started,
+            metadata_ms,
+        )
+        .await
+    }
+
+    async fn project_list(
+        &self,
+        metadata: Vec<SessionMeta>,
+        workspace_id: Option<&str>,
+        include_archived: bool,
+        lean: bool,
+        started: std::time::Instant,
+        metadata_ms: u64,
+    ) -> Result<Vec<SessionSummary>> {
         let mut title_repair_ms = 0u64;
         let mut out = Vec::new();
+        let mut budget = crate::blocking::WorkBudget::new();
         for mut meta in metadata {
-            crate::blocking::breathe().await;
+            budget.checkpoint().await;
             if let Some(workspace) = workspace_id {
                 if meta.workspace_id != workspace {
                     continue;
@@ -1856,6 +1877,98 @@ impl SessionManager {
             );
         }
         Ok(out)
+    }
+
+    pub async fn page(
+        &self,
+        request: &genehub_proto::SessionPageRequest,
+        include_archived: bool,
+    ) -> Result<genehub_proto::SessionPageResult> {
+        use base64::Engine;
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct Cursor {
+            version: u8,
+            workspace: Option<String>,
+            archived: bool,
+            at: i64,
+            id: String,
+            owner: String,
+        }
+        let started = std::time::Instant::now();
+        let cursor: Option<Cursor> = request
+            .cursor
+            .as_ref()
+            .map(|raw| -> Result<Cursor> {
+                anyhow::ensure!(raw.len() <= 2048, "invalid page cursor");
+                let cursor: Cursor = serde_json::from_slice(
+                    &base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(raw)?,
+                )?;
+                anyhow::ensure!(
+                    cursor.version == 1
+                        && cursor.workspace == request.workspace_id
+                        && cursor.archived == include_archived,
+                    "page cursor does not match query"
+                );
+                Ok(cursor)
+            })
+            .transpose()?;
+        let mut metadata = self
+            .store
+            .page_metadata(request.workspace_id.as_deref())
+            .await?;
+        metadata.retain(|meta| {
+            (include_archived || !meta.archived)
+                && cursor.as_ref().is_none_or(|cursor| {
+                    (
+                        meta.updated_at_ms,
+                        meta.id.as_str(),
+                        meta.workspace_id.as_str(),
+                    ) < (cursor.at, cursor.id.as_str(), cursor.owner.as_str())
+                })
+        });
+        metadata.sort_by(|a, b| {
+            (b.updated_at_ms, &b.id, &b.workspace_id).cmp(&(
+                a.updated_at_ms,
+                &a.id,
+                &a.workspace_id,
+            ))
+        });
+        let more = metadata.len() > request.limit as usize;
+        metadata.truncate(request.limit as usize);
+        let next_cursor = if more {
+            metadata.last().map(|last| {
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+                    serde_json::to_vec(&Cursor {
+                        version: 1,
+                        workspace: request.workspace_id.clone(),
+                        archived: include_archived,
+                        at: last.updated_at_ms,
+                        id: last.id.clone(),
+                        owner: last.workspace_id.clone(),
+                    })
+                    .expect("serializable cursor"),
+                )
+            })
+        } else {
+            None
+        };
+        let metadata_ms = started.elapsed().as_millis() as u64;
+        let sessions = self
+            .project_list(
+                metadata,
+                request.workspace_id.as_deref(),
+                include_archived,
+                true,
+                started,
+                metadata_ms,
+            )
+            .await?;
+        Ok(genehub_proto::SessionPageResult {
+            workspace_id: request.workspace_id.clone(),
+            sessions,
+            next_cursor,
+            error: None,
+        })
     }
 
     pub async fn snapshot(&self, session_id: &str) -> Result<SessionSnapshot> {

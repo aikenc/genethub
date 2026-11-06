@@ -76,6 +76,7 @@ pub struct Daemon {
     session_deliveries: tokio::task::JoinHandle<()>,
     hook_timer: tokio::task::JoinHandle<()>,
     agent_pushes: tokio::task::JoinHandle<()>,
+    space_discovery: tokio::task::JoinHandle<()>,
 }
 
 impl Daemon {
@@ -86,7 +87,8 @@ impl Daemon {
             .record("daemon", "lifecycle", "started", None);
         // The machine's administrator is a Space on disk like any other; put it there first.
         builtin_expert::ensure_admin(&state).await;
-        // Spaces already on disk are projects from the first moment.
+        // Preserve startup registration: existing on-disk Spaces are available
+        // when the endpoint opens. Subsequent discovery never blocks list RPCs.
         state
             .workspaces
             .scan_spaces(&state.paths.root.join("spaces"), true)
@@ -129,10 +131,24 @@ impl Daemon {
         });
         let hook_timer = tokio::spawn(hooks::run_timer(state.clone()));
         let agent_pushes = tokio::spawn(push_agent_changes(state.clone()));
+        let space_discovery = tokio::spawn({
+            let state = state.clone();
+            async move {
+                loop {
+                    state
+                        .workspaces
+                        .scan_spaces(&state.paths.root.join("spaces"), false)
+                        .await;
+                    // Fixed delay: no catch-up queue if discovery itself is slow.
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+            }
+        });
         Ok(Daemon {
             session_deliveries,
             hook_timer,
             agent_pushes,
+            space_discovery,
             state,
             port: listener.port,
             listener: listener.handle,
@@ -163,6 +179,8 @@ impl Daemon {
         self.state.sessions.prepare_shutdown().await;
         self.session_deliveries.abort();
         let _ = self.session_deliveries.await;
+        self.space_discovery.abort();
+        let _ = self.space_discovery.await;
         self.hook_timer.abort();
         let _ = self.hook_timer.await;
         self.agent_pushes.abort();

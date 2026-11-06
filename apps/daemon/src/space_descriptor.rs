@@ -1,7 +1,7 @@
 //! `agent-space.genet.json`: the one file that describes a project.
 //!
-//! GeneHub reads four things from it — `name`, `description`, `tags` and
-//! `agentCwd` — and nothing else: every other key (`agents`, `skills`,
+//! GeneHub reads project metadata, `folders`, `agentCwd` and `spaceBuilder`.
+//! Every other key (`agents`, `skills`,
 //! `skillProviders`, `children`, …) belongs to the Space builder and is
 //! ignored here, so the file can grow without the daemon having to learn what
 //! the keys mean. The descriptor is strict JSON, matching SpaceBuilder. A legacy
@@ -31,6 +31,8 @@ pub struct Descriptor {
     /// Optional path to the Space's own SpaceBuilder script, relative to the
     /// Space root. Always a safe relative path with no `..`.
     pub space_builder: Option<String>,
+    /// Raw declarations are resolved once per discovery pass, outside registry locks.
+    pub folders: Vec<serde_json::Value>,
 }
 
 /// The descriptor in `dir`: `Ok(None)` when there is none, `Err` with what to
@@ -97,13 +99,16 @@ pub fn parse(text: &str) -> Result<Descriptor, String> {
         tags,
         agent_cwd,
         space_builder,
+        folders: object
+            .get("folders")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default(),
     })
 }
 
-/// The `folders` the descriptor declares, exactly as written (`{"path": …, "name": …}` objects), or `None` when
-/// there is no usable descriptor or it declares none. This is the descriptor's replacement for a `.code-workspace`
-/// file: the daemon opens the Space with these directories as its roots, in this order. Entries are not judged
-/// here; the caller drops the ones this machine cannot use.
+/// Raw folders remain usable on explicit open even when unrelated descriptor
+/// metadata is invalid. Normal discovery reuses the already parsed Descriptor.
 pub fn declared_folders(dir: &Path) -> Option<Vec<serde_json::Value>> {
     let path = dir.join(FILE);
     let meta = std::fs::symlink_metadata(&path).ok()?;
@@ -188,12 +193,13 @@ pub struct Discovery {
 /// Reads `dir` as a Space root and discovers any child Spaces nested under
 /// `dir/spaces/*` (up to `MAX_NESTING`). Returns `Ok(None)` when `dir` has no
 /// `agent-space.genet.json`.
-pub fn discover_root(dir: &Path) -> Result<Option<Found>, String> {
+pub async fn discover_root(dir: &Path) -> Result<Option<Found>, String> {
     let Some(descriptor) = read(dir)? else {
         return Ok(None);
     };
     let mut problems = Vec::new();
-    let children = children_of(dir, 1, &mut problems);
+    let mut budget = crate::blocking::WorkBudget::new();
+    let children = children_of(dir, 1, &mut problems, &mut budget).await;
     for problem in &problems {
         tracing::warn!(%problem, "a child Space descriptor cannot be used");
     }
@@ -210,12 +216,14 @@ pub fn discover_root(dir: &Path) -> Result<Option<Found>, String> {
 /// the directories one level inside it that have descriptors are Spaces. That
 /// is all the depth there is, so a scan never walks `node_modules` or a
 /// worktree, and hidden directories and symbolic links are never entered.
-pub fn discover(spaces_root: &Path) -> Discovery {
+pub async fn discover(spaces_root: &Path) -> Discovery {
     let mut found = Discovery::default();
-    for dir in subdirectories(spaces_root) {
+    let mut budget = crate::blocking::WorkBudget::new();
+    for dir in subdirectories(spaces_root, &mut budget).await {
+        budget.checkpoint().await;
         match read(&dir) {
             Ok(Some(descriptor)) => {
-                let children = children_of(&dir, 1, &mut found.problems);
+                let children = children_of(&dir, 1, &mut found.problems, &mut budget).await;
                 found.roots.push(Found {
                     dir,
                     descriptor,
@@ -223,10 +231,12 @@ pub fn discover(spaces_root: &Path) -> Discovery {
                 });
             }
             Ok(None) => {
-                for inner in subdirectories(&dir) {
+                for inner in subdirectories(&dir, &mut budget).await {
+                    budget.checkpoint().await;
                     match read(&inner) {
                         Ok(Some(descriptor)) => {
-                            let children = children_of(&inner, 1, &mut found.problems);
+                            let children =
+                                children_of(&inner, 1, &mut found.problems, &mut budget).await;
                             found.roots.push(Found {
                                 dir: inner,
                                 descriptor,
@@ -246,15 +256,21 @@ pub fn discover(spaces_root: &Path) -> Discovery {
     found
 }
 
-fn children_of(dir: &Path, level: usize, problems: &mut Vec<String>) -> Vec<Found> {
+async fn children_of(
+    dir: &Path,
+    level: usize,
+    problems: &mut Vec<String>,
+    budget: &mut crate::blocking::WorkBudget,
+) -> Vec<Found> {
     if level > MAX_NESTING {
         return Vec::new();
     }
     let mut children = Vec::new();
-    for child in subdirectories(&dir.join("spaces")) {
+    for child in subdirectories(&dir.join("spaces"), budget).await {
+        budget.checkpoint().await;
         match read(&child) {
             Ok(Some(descriptor)) => {
-                let nested = children_of(&child, level + 1, problems);
+                let nested = Box::pin(children_of(&child, level + 1, problems, budget)).await;
                 children.push(Found {
                     dir: child,
                     descriptor,
@@ -270,22 +286,22 @@ fn children_of(dir: &Path, level: usize, problems: &mut Vec<String>) -> Vec<Foun
 
 /// Real, visible directories directly inside `dir`, by name. A missing
 /// directory has none.
-fn subdirectories(dir: &Path) -> Vec<PathBuf> {
+async fn subdirectories(dir: &Path, budget: &mut crate::blocking::WorkBudget) -> Vec<PathBuf> {
     let Ok(reader) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
-    let mut dirs: Vec<PathBuf> = reader
-        .flatten()
-        .filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.') || name == "node_modules" {
-                return None;
-            }
-            // `file_type` does not follow links, so a link to a directory is
-            // not one here.
-            entry.file_type().ok()?.is_dir().then(|| entry.path())
-        })
-        .collect();
+    let mut dirs = Vec::new();
+    for entry in reader.flatten() {
+        budget.checkpoint().await;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') || name == "node_modules" {
+            continue;
+        }
+        // file_type does not follow symbolic links.
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            dirs.push(entry.path());
+        }
+    }
     dirs.sort();
     dirs
 }

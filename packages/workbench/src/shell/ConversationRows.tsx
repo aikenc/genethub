@@ -149,7 +149,7 @@ export function WorkspaceRow({
           >
             <EntityAvatar id={workspace.id} name={workspace.name} badge={!activity.error && activity.running && !activity.pending ? <Loader2 aria-label="有执行活动" className="h-3 w-3 animate-spin text-ok" /> : undefined}/>
             <EntityText title={workspace.name} hint="当前会话及仍有活动的归档会话；待办可进入具体处理位置">
-              <span className="truncate">{activity.error ? "会话状态待同步" : activity.count === undefined ? "正在读取会话…" : activity.label || `${relativeTime(activity.recent ?? 0)} · ${activity.count} 个会话`}</span>
+              <span className="truncate">{activity.error ? "会话状态待同步" : activity.partial ? activity.count === undefined ? "展开后读取会话" : `已加载 ${activity.count} 条会话` : activity.count === undefined ? "正在读取会话…" : activity.label || `${relativeTime(activity.recent ?? 0)} · ${activity.count} 个会话`}</span>
             </EntityText>
           </button>
           {!!activity.pending && <button type="button" aria-label={`查看 ${workspace.name} 的 ${activity.pending} 项待办`} title="打开完整待办列表"
@@ -295,7 +295,7 @@ export function WorkspaceRow({
  */
 export function RecentSessions({
   density = "auto", sessions, workspaces, activeSessionId, pick = false,
-  groupedProjectIds = new Set<string>(), listLabel = "最近会话", ...actions
+  groupedProjectIds = new Set<string>(), listLabel = "最近会话", paged = false, ...actions
 }: {
   density?: "auto" | "comfortable" | "compact";
   sessions: ListedSession[];
@@ -305,6 +305,7 @@ export function RecentSessions({
   /** Explicit local display choice; neither names nor Space roles select groups. */
   groupedProjectIds?: ReadonlySet<string>;
   listLabel?: string;
+  paged?: boolean;
 } & RowActions) {
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
   const [expandedChildren, setExpandedChildren] = useState<Record<string, boolean>>({});
@@ -335,6 +336,15 @@ export function RecentSessions({
       active={session.id === activeSessionId} project={project} parentProject={parentProject}
       breadcrumb={tree.breadcrumbById[session.workspaceId]} {...actions} />;
   };
+  if (paged) return <PagedSessionGroups workspaces={workspaces} sessions={sortedSessions} renderRow={renderRow} groupedProjectIds={groupedProjectIds} collapsed={collapsedGroups} expandedRoots={expandedChildren} onExpandRoot={(id, expanded) => setExpandedChildren(old => ({ ...old, [id]: expanded }))} onToggle={id => {
+    const closing = !collapsedGroups[id];
+    setCollapsedGroups(old => ({ ...old, [id]: !old[id] }));
+    if (closing) {
+      setExpandedChildren(old => ({ ...old, [id]: false }));
+      const wb = useWorkbench.getState();
+      for (const child of wb.sessionExpandedSpaces) if (tree.projectRootById[child] === id) wb.expandSessionSpace(child, false);
+    }
+  }} />;
   const counts = (rows: ListedSession[]) => {
     const running = rows.filter(s => s.status === "running").length;
     const waiting = rows.filter(s => s.status === "waiting").length;
@@ -392,6 +402,48 @@ export function RecentSessions({
             </div>}
           </>}
         </>}
+      </li>;
+    })}
+  </ul>;
+}
+
+/** Root summaries load by default; each actual child Space owns its expansion. */
+function PagedSessionGroups({ workspaces, sessions, renderRow, groupedProjectIds, collapsed, expandedRoots, onExpandRoot, onToggle }: {
+  workspaces: WorkspaceInfo[]; sessions: ListedSession[]; renderRow(row: ListedSession): ReactNode;
+  groupedProjectIds: ReadonlySet<string>; collapsed: Record<string, boolean>; onToggle(id: string): void;
+  expandedRoots: Record<string, boolean>; onExpandRoot(id: string, expanded: boolean): void;
+}) {
+  const wb = useWorkbench();
+  const tree = buildAgentSpaceTree(workspaces);
+  const scope = (workspace: WorkspaceInfo) => {
+    const page = wb.sessionPages[workspace.id];
+    const rows = sessions.filter(row => row.workspaceId === workspace.id && (!page?.loaded || page.ids.includes(row.id))).sort((a,b) => b.updatedAtMs - a.updatedAtMs || b.id.localeCompare(a.id)).slice(0, page?.limit ?? 10);
+    return <>
+      <ul className="space-y-1">{rows.map(renderRow)}</ul>
+      {page?.error ? <p role="status" className="px-3 py-2 text-xs text-muted">此 Space 读取失败。<button className="ml-2 text-accent" onClick={() => wb.expandSessionSpace(workspace.id, true)}>重试</button></p>
+        : !page?.loaded ? <p role="status" className="px-3 py-2 text-xs text-muted">正在加载会话…</p>
+        : !rows.length ? <p className="px-3 py-2 text-xs text-muted">暂无会话</p> : null}
+      {page?.cursor && <button type="button" className="min-h-11 px-3 text-xs text-accent" aria-label={`加载 ${workspace.name} 的更早会话`} disabled={page.loading} onClick={() => void wb.loadMoreSessions(workspace.id)}>{page.loading ? "正在加载…" : "更早会话"}</button>}
+    </>;
+  };
+  return <ul aria-label="最近会话" className="entity-list conversation-list w-full min-w-0 space-y-2">
+    {tree.roots.map(({ workspace }) => {
+      const children = workspaces.filter(child => child.id !== workspace.id && tree.projectRootById[child.id] === workspace.id);
+      const grouped = groupedProjectIds.has(workspace.id);
+      return <li key={workspace.id} aria-label={`项目分组 ${workspace.name}`} className={grouped ? "project-session-group rounded-xl border border-line bg-surface/60 p-1.5" : "space-y-1"}>
+        {grouped && <button type="button" aria-label={`${collapsed[workspace.id] ? "展开" : "折叠"}项目分组 ${workspace.name}`} aria-expanded={!collapsed[workspace.id]} onClick={() => onToggle(workspace.id)} className="flex min-h-11 w-full items-center gap-2 px-2 text-sm font-semibold"><span aria-hidden>{collapsed[workspace.id] ? "▸" : "▾"}</span><AgentAvatar id={workspace.id} name={workspace.name} size="small" /><span>{workspace.name}</span><span className="ml-auto text-[10px] font-normal text-muted">已加载 {wb.sessionPages[workspace.id]?.ids.length ?? 0} 条</span></button>}
+        {(!grouped || !collapsed[workspace.id]) && <>{scope(workspace)}
+        {children.length > 0 && <details className="mt-1 border-t border-line px-1" open={Boolean(expandedRoots[workspace.id])} onToggle={event => {
+          if (event.target !== event.currentTarget) return;
+          const expanded = event.currentTarget.open;
+          if (expanded !== Boolean(expandedRoots[workspace.id])) onExpandRoot(workspace.id, expanded);
+          if (!expanded) for (const child of children) if (useWorkbench.getState().sessionExpandedSpaces.includes(child.id)) wb.expandSessionSpace(child.id, false);
+        }}><summary className="min-h-11 cursor-pointer py-3 text-xs text-muted">子 Space ({children.length})</summary>
+          {children.map(child => <details key={child.id} className="ml-2 border-t border-line" open={wb.sessionExpandedSpaces.includes(child.id)} onToggle={event => {
+            const expanded = event.currentTarget.open;
+            if (expanded !== useWorkbench.getState().sessionExpandedSpaces.includes(child.id)) wb.expandSessionSpace(child.id, expanded);
+          }}><summary className="min-h-11 cursor-pointer py-3 text-xs text-muted">{tree.breadcrumbById[child.id]}</summary>{wb.sessionExpandedSpaces.includes(child.id) && scope(child)}</details>)}
+        </details>}</>}
       </li>;
     })}
   </ul>;

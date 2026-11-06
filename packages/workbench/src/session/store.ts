@@ -1,3 +1,4 @@
+import { buildAgentSpaceTree } from "../workspace/agent-space-tree";
 import type { ProviderOperationReceipt } from "@genehub/proto";
 import { savedInputReceipts, saveInputReceipt, rememberDraftIdentity, draftIdentities, forgetDraftIdentity, saveLocalValue, localValue, initializeReplyReads, hasUnreadReply } from "./localConversation";
 import type {
@@ -258,6 +259,11 @@ interface WorkbenchState {
   activeWorkspaceId: string | null;
   sessions: SessionSummary[];
   sessionsLoaded: boolean;
+  sessionsComplete: boolean;
+  sessionGlobalView: boolean;
+  sessionExpandedSpaces: string[];
+  sessionPages: Record<string, { cursor: string | null; loaded: boolean; more: boolean; limit: number; ids: string[]; loading?: boolean; error?: string }>;
+
   sessionsError: boolean;
   sessionsCheckedAtMs: number;
   sessionsFailedAtMs: number;
@@ -382,6 +388,10 @@ interface WorkbenchState {
   refreshWorkspaces(): Promise<void>;
   /** Refreshes daemon-owned session status for the sidebar. */
   refreshSessions(): Promise<void>;
+  setSessionGlobalView(complete: boolean, owner?: string): void;
+  expandSessionSpace(workspaceId: string, expanded: boolean): void;
+  loadMoreSessions(workspaceId: string): Promise<void>;
+
   openWorkspace(root: string): Promise<void>;
   selectWorkspace(workspaceId: string): Promise<void>;
   /** Changes a workspace's display name without moving its folders. */
@@ -840,6 +850,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   activeWorkspaceId: null,
   sessions: [],
   sessionsLoaded: false,
+  sessionsComplete: false, sessionGlobalView: false, sessionExpandedSpaces: [], sessionPages: {},
   sessionsError: false,
   sessionsCheckedAtMs: 0,
   sessionsFailedAtMs: 0,
@@ -892,6 +903,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     // before a machine switch ends up with no live stream at all.
     set({ client, notice: null, subscribedSessionIds: [], subscriptionOwner: null,
       sessions: [], sessionsLoaded: false, sessionsError: false,
+      sessionsComplete: false, sessionGlobalView: false, sessionExpandedSpaces: [], sessionPages: {},
       sessionsCheckedAtMs: 0, sessionsFailedAtMs: 0, sessionObservations: {},
       agentRequests: [], hiddenAgentRequests: [], repairingAgentIds: [], agentConfig: null });
     let wasReady = false;
@@ -1009,6 +1021,31 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       if (get().client !== client) return;
       reportError(set, error);
     }
+  },
+
+  setSessionGlobalView(complete, owner = "conversation-list") {
+    const client = get().client;
+    if (!client) return;
+    const users = sessionGlobalUsers.get(client) ?? new Set<string>();
+    complete ? users.add(owner) : users.delete(owner);
+    sessionGlobalUsers.set(client, users);
+    complete = users.size > 0;
+    if (get().sessionGlobalView === complete) return;
+    sessionSummaryEpoch++;
+    set({ sessionGlobalView: complete, sessionsComplete: false });
+    void get().refreshSessions();
+  },
+  expandSessionSpace(workspaceId, expanded) {
+    set(state => ({ sessionExpandedSpaces: expanded
+      ? [...new Set([...state.sessionExpandedSpaces, workspaceId])]
+      : state.sessionExpandedSpaces.filter(id => id !== workspaceId) }));
+    const client = get().client;
+    if (expanded && client) void readSessionPages(client, set, false, workspaceId, true).catch(unattended(client, get, set));
+  },
+  async loadMoreSessions(workspaceId) {
+    const client = get().client;
+    if (!client) return;
+    await readSessionPages(client, set, false, workspaceId).catch(unattended(client, get, set));
   },
 
   async refreshSessions() {
@@ -3499,6 +3536,7 @@ function rememberMachineRuntime(
 let sessionSummaryEpoch = 0;
 const sessionSummaryLoads = new WeakMap<Client, { epoch: number; promise: Promise<SessionSummary[]> }>();
 async function loadSessions(client: Client, set: Setter): Promise<SessionSummary[]> {
+  if (client.identity?.features?.includes("session.page.v1")) return readSessionPages(client, set, useWorkbench.getState().sessionGlobalView);
   const epoch = sessionSummaryEpoch;
   const existing = sessionSummaryLoads.get(client);
   if (existing?.epoch === epoch) return existing.promise;
@@ -3527,7 +3565,7 @@ async function loadSessions(client: Client, set: Setter): Promise<SessionSummary
         const resolved = timeout?.client === client;
         if (resolved && sessionListTimeoutNotice === timeout) sessionListTimeoutNotice = null;
         return {
-          sessions, sessionsLoaded: true, sessionsError: false, sessionsCheckedAtMs: Date.now(),
+          sessions, sessionsLoaded: true, sessionsComplete: true, sessionsError: false, sessionsCheckedAtMs: Date.now(),
           sessionObservations: Object.fromEntries(sessions.map(session => [session.id, state.sessionObservations[session.id] ?? 0])),
           ...(resolved && state.notice === timeout.message ? { notice: null } : {}),
         };
@@ -3541,6 +3579,104 @@ async function loadSessions(client: Client, set: Setter): Promise<SessionSummary
   sessionSummaryLoads.set(client, { epoch, promise });
   try { return await promise; }
   finally { if (sessionSummaryLoads.get(client)?.promise === promise) sessionSummaryLoads.delete(client); }
+}
+
+// Every page reader shares this queue, including user expansion and history.
+// Results share the original ID store; absence from a page never means deletion.
+const sessionGlobalUsers = new WeakMap<Client, Set<string>>();
+const sessionPageQueues = new WeakMap<Client, Promise<unknown>>();
+const sessionPageRefreshes = new WeakMap<Client, { epoch: number; promise: Promise<SessionSummary[]> }>();
+function readSessionPages(client: Client, set: Setter, complete: boolean, moreSpace?: string, firstPage = false): Promise<SessionSummary[]> {
+  const epoch = sessionSummaryEpoch;
+  const active = sessionPageRefreshes.get(client);
+  if (!moreSpace && active?.epoch === epoch) return active.promise;
+  const run = async () => {
+    const valid = () => useWorkbench.getState().client === client && sessionSummaryEpoch === epoch;
+    if (!valid()) return [];
+    const before = new Map(useWorkbench.getState().sessions.map(row => [row.id, row]));
+    const seen = new Set<string>();
+    const adopt = (rows: SessionSummary[]) => {
+      if (!valid()) return;
+      initializeReplyReads(client.identity?.machineId ?? "", rows);
+      rows.forEach(row => seen.add(row.id));
+      const timeout = sessionListTimeoutNotice;
+      const resolved = timeout?.client === client;
+      if (resolved) sessionListTimeoutNotice = null;
+      set(state => {
+        const current = new Map(state.sessions.map(row => [row.id, row]));
+        for (const row of rows) {
+          const previous = before.get(row.id), live = current.get(row.id);
+          if (previous && !live) continue; // locally deleted during this read
+          const old = new Map(Object.entries(previous ?? {}));
+          const changed = live && live !== previous ? Object.fromEntries(Object.entries(live).filter(([key, value]) => old.get(key) !== value)) : {};
+          current.set(row.id, { ...row, ...changed });
+        }
+        return { sessions: [...current.values()], sessionsLoaded: true, sessionsError: false,
+          ...(resolved && state.notice === timeout.message ? { notice: null } : {}),
+          sessionObservations: { ...state.sessionObservations, ...Object.fromEntries(rows.map(row => [row.id, Date.now()])) } };
+      });
+    };
+    const fetch = async (requests: Array<{ workspaceId: string | null; limit: number; cursor: string | null }>, archived: boolean) => {
+      const reply = await client.call({ type: "session.page", payload: { requests, includeArchived: archived } });
+      if (!valid()) return [];
+      if (reply?.type !== "sessionPages") throw new Error("会话分页暂不可用");
+      return reply.data;
+    };
+    try {
+      if (complete) {
+        let cursor: string | null = null;
+        do {
+          if (!valid()) return [];
+          const pages = await fetch([{ workspaceId: null, limit: 100, cursor }], true);
+          if (!valid()) return [];
+          const page = pages[0];
+          if (!page || page.error) throw new Error(page?.error ?? "会话摘要暂不可用");
+          adopt(page.sessions); cursor = page.nextCursor;
+        } while (cursor);
+        if (valid()) set(state => ({ sessions: state.sessions.filter(row => seen.has(row.id) || !before.has(row.id)), sessionsComplete: true,
+          sessionsLoaded: true, sessionsError: false, sessionsCheckedAtMs: Date.now() }));
+      } else {
+        const state = useWorkbench.getState();
+        const scopes = moreSpace ? [moreSpace] : [...new Set([
+          ...buildAgentSpaceTree(state.workspaces).roots.map(node => node.workspace.id), ...state.sessionExpandedSpaces,
+        ])].filter(id => state.workspaces.some(workspace => workspace.id === id));
+        for (let i = 0; i < scopes.length && valid(); i += 10) {
+          const ids = scopes.slice(i, i + 10);
+          const requests = ids.map(id => ({ workspaceId: id, limit: 10, cursor: moreSpace && !firstPage ? useWorkbench.getState().sessionPages[id]?.cursor ?? null : null }));
+          if (moreSpace && !firstPage && useWorkbench.getState().sessionPages[moreSpace]?.loaded && !requests[0]?.cursor) break;
+          set(state => ({ sessionPages: { ...state.sessionPages, ...Object.fromEntries(ids.map(id => [id, { ...(state.sessionPages[id] ?? { loaded: false, cursor: null, more: false, limit: 10, ids: [] }), loading: true }])) } }));
+          const pages = await fetch(requests, false);
+          for (const page of pages) {
+            if (!valid() || !page.workspaceId) continue;
+            const id = page.workspaceId;
+            if (!page.error) adopt(page.sessions);
+            set(state => ({ sessionPages: { ...state.sessionPages, [id]: page.error
+              ? { ...(state.sessionPages[id] ?? { loaded: false, cursor: null, more: false, limit: 10, ids: [] }), loading: false, error: page.error }
+              : { loaded: true, ids: [...new Set(moreSpace && !firstPage
+                  ? [...(state.sessionPages[id]?.ids ?? []), ...page.sessions.map(row => row.id)]
+                  : [...page.sessions.map(row => row.id), ...(state.sessionPages[id]?.more ? (state.sessionPages[id]?.ids ?? []).slice(10) : [])])],
+                  limit: moreSpace && !firstPage ? (state.sessionPages[id]?.limit ?? 10) + page.sessions.length : state.sessionPages[id]?.limit ?? 10,
+                  more: Boolean((moreSpace && !firstPage) || state.sessionPages[id]?.more),
+                  cursor: (!moreSpace || firstPage) && state.sessionPages[id]?.more ? state.sessionPages[id]!.cursor : page.nextCursor } } }));
+          }
+        }
+        if (valid()) set({ sessionsLoaded: true, sessionsError: false });
+      }
+      return useWorkbench.getState().sessions;
+    } catch (error) {
+      if (valid()) set({ sessionsError: true, sessionsComplete: false, sessionsFailedAtMs: Date.now() });
+      throw error;
+    } finally {
+      if (useWorkbench.getState().client === client) set(state => ({ sessionPages: Object.fromEntries(Object.entries(state.sessionPages).map(([id, page]) => [id, { ...page, loading: false }])) }));
+    }
+  };
+  const promise = (sessionPageQueues.get(client) ?? Promise.resolve()).catch(() => undefined).then(run);
+  sessionPageQueues.set(client, promise);
+  if (!moreSpace) {
+    sessionPageRefreshes.set(client, { epoch, promise });
+    void promise.finally(() => { if (sessionPageRefreshes.get(client)?.promise === promise) sessionPageRefreshes.delete(client); }).catch(() => undefined);
+  }
+  return promise;
 }
 
 /** The most recently touched of a set, or null. */
