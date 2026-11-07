@@ -51,6 +51,7 @@ import {
 } from "../location/locator";
 import type { AddressScope } from "../location/workbench";
 import type { Client, ConnectionState } from "../protocol/client";
+import { readActivitySessions } from "../protocol/session-pages";
 import { PREVIEW_ANNOTATIONS_FEATURE } from "../preview/reviewDraft";
 import { resolveWorkspacePath } from "../preview/resolveArtifactRef";
 import { isAbsoluteFilePath } from "../preview/url";
@@ -259,6 +260,8 @@ interface WorkbenchState {
   workspaces: WorkspaceInfo[];
   activeWorkspaceId: string | null;
   sessions: SessionSummary[];
+  activitySessions: SessionSummary[];
+  activityComplete: boolean;
   sessionsLoaded: boolean;
   sessionsComplete: boolean;
   sessionGlobalView: boolean;
@@ -854,7 +857,7 @@ return create<WorkbenchState>((set, get) => ({
   activeWorkspaceId: null,
   sessions: [],
   sessionsLoaded: false,
-  sessionsComplete: false, sessionGlobalView: false, sessionExpandedSpaces: [], sessionPages: {},
+  activitySessions: [], activityComplete: false, sessionsComplete: false, sessionGlobalView: false, sessionExpandedSpaces: [], sessionPages: {},
   sessionsError: false,
   sessionsCheckedAtMs: 0,
   sessionsFailedAtMs: 0,
@@ -919,7 +922,7 @@ return create<WorkbenchState>((set, get) => ({
       settings: null, hub: null, devices: [], remote: null, backgroundProcesses: [],
       sessionDrafts: [], previewReview: null, completionNotice: null, subscribedSessionIds: [], subscriptionOwner: null,
       sessions: [], sessionsLoaded: false, sessionsError: false,
-      sessionsComplete: false, sessionGlobalView: false, sessionExpandedSpaces: [], sessionPages: {},
+      activitySessions: [], activityComplete: false, sessionsComplete: false, sessionGlobalView: false, sessionExpandedSpaces: [], sessionPages: {},
       sessionsCheckedAtMs: 0, sessionsFailedAtMs: 0, sessionObservations: {},
       agentRequests: [], hiddenAgentRequests: [], repairingAgentIds: [], agentConfig: null });
     let wasReady = false;
@@ -3092,6 +3095,10 @@ function detachMachine(client: Client): void {
 export function workbenchForClient(client: Client): WorkbenchState | undefined {
   return storesByClient.get(client)?.getState();
 }
+export function adoptMachineActivity(client: Client, activitySessions: SessionSummary[], activityComplete: boolean): void {
+  const store = storesByClient.get(client);
+  if (store?.getState().client === client) store.setState({activitySessions,activityComplete});
+}
 function sourceState(client: Client): WorkbenchState {
   return (storesByClient.get(client) ?? activeStore).getState();
 }
@@ -3640,6 +3647,10 @@ function invalidateSessionSummaries(client: Client): void {
 }
 const sessionSummaryLoads = new WeakMap<Client, { epoch: number; promise: Promise<SessionSummary[]> }>();
 async function loadSessions(client: Client, set: Setter): Promise<SessionSummary[]> {
+  if (client.identity?.features?.includes("session.active-page.v1")) {
+    try { const activitySessions = await readActivitySessions(client); if (sourceState(client).client === client) set({activitySessions,activityComplete:true}); }
+    catch { if (sourceState(client).client === client) set({activityComplete:false}); }
+  }
   if (client.identity?.features?.includes("session.page.v1")) return readSessionPages(client, set, sourceState(client).sessionGlobalView);
   const epoch = sessionEpoch(client);
   const existing = sessionSummaryLoads.get(client);

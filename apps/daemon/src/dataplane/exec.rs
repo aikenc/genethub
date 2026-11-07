@@ -118,6 +118,14 @@ pub(crate) async fn start(
         ));
     }
     let mut command = crate::process::command(program, arguments, &cwd);
+    // Remote scripts use this daemon's bindings, never the caller's machine
+    // paths. Keep explicit shell env overrides following normal argv/env rules.
+    if let Some(cli) = crate::skills::front_door_cli_from_env() {
+        command.env("GENEHUB_CLI", cli);
+    }
+    if let Some(python) = state.registry.python() {
+        command.env("GENEHUB_PYTHON", python);
+    }
     command
         .envs(&request.env)
         .stdout(std::process::Stdio::piped())

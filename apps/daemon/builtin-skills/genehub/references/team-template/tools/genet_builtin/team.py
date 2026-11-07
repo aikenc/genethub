@@ -346,10 +346,44 @@ def remote_targets(root):
     return targets
 
 
+def canonical_machine(machine):
+    entry = genet("machine", "show", machine)
+    return entry.get("deviceHandle") or entry["machineId"]
+
+
+def projection_source(root, machine=None):
+    machine = machine or (genet("context").get("daemon") or {}).get("machineId")
+    if not machine:
+        raise ExpertError("定义源机器身份未知", "没有发布摘要", "恢复原机器身份后重试")
+    return "team." + hashlib.sha256((machine + "\x1f" + os.path.realpath(root)).encode()).hexdigest()[:24]
+
+
+def source_route(root):
+    entry = next((w for w in workspaces() if workspace_root(w) == os.path.realpath(root)), None)
+    machine = (genet("context").get("daemon") or {}).get("machineId")
+    if not entry or not machine:
+        raise ExpertError("定义源未登记或机器身份未知", "没有派单", "打开源 Team 后重试原任务")
+    return dict(machineId=machine, workspaceId=entry["id"], role="root",
+                command=[sys.executable, os.path.join(root, "tools", "run.py")])
+
+
+def received_route(root, sid):
+    pointer = read_dispatch_record(state_dir(root, "received", sid + ".json"))
+    if not pointer:
+        return None
+    path = os.path.realpath(os.path.join(root, pointer["receipt"]))
+    if os.path.commonpath([os.path.realpath(root),path]) != os.path.realpath(root):
+        raise ExpertError("返回回执索引越界", "没有转发", "核对原接单回执")
+    record = read_dispatch_record(path)
+    if not record or record.get("sessionId") != sid:
+        raise ExpertError("接单回执不完整", "没有改变原任务来源", "核对原派单回执，不能改配置重派")
+    return record.get("request", {}).get("returnTo")
+
+
 def remote_target(root, machine, role, explicit=None):
     """A role is bound to one exact target; never infer team identity from a short name."""
     target = remote_targets(root).get(role)
-    if (not isinstance(target, dict) or target.get("machineId") != machine
+    if (not isinstance(target, dict) or canonical_machine(target.get("machineId", "")) != canonical_machine(machine)
             or not isinstance(target.get("workspaceId"), str) or not target["workspaceId"]
             or not isinstance(target.get("command"), list) or len(target["command"]) < 2
             or not all(isinstance(part, str) and part for part in target["command"])
@@ -360,7 +394,7 @@ def remote_target(root, machine, role, explicit=None):
         raise ExpertError("--workspace 与岗位固定绑定不同", "没有创建或发送消息", "核对项目 members；修改绑定后再派单")
     if not any(item.get("id") == target["workspaceId"] for item in remote_workspaces(machine)):
         raise ExpertError("目标机器没有绑定的 workspace %s" % target["workspaceId"], "没有创建或发送消息", "先在目标机注册岗位 Space，再更新固定绑定")
-    return target
+    return dict(target, machineId=canonical_machine(target["machineId"]))
 
 
 def remote_receive(target, request):
@@ -403,7 +437,7 @@ def dispatch_remote(root, target, role, desc, text, tier=None, model=None, media
     request_id = request_id if request_id is not None else "dispatch." + os.urandom(16).hex()
     print("派单编号: %s" % request_id, flush=True)
     request = {"id": request_id, "workspaceId": target["workspaceId"], "role": role, "desc": desc,
-               "text": text, "tier": tier, "model": model, "media": media, "origin": origin}
+               "text": text, "tier": tier, "model": model, "media": media, "origin": origin, "returnTo": source_route(root)}
     # Store intent before any remote mutation. The executor persists its own receipt before creating.
     intent = state_dir(root, "dispatch", hashlib.sha256(request_id.encode()).hexdigest() + ".json")
     with inbox_lock(root, "dispatch-" + hashlib.sha256(request_id.encode()).hexdigest()):
@@ -421,6 +455,16 @@ def dispatch_remote(root, target, role, desc, text, tier=None, model=None, media
 
 
 def cmd_receive(args):
+    root = _walk_expert_root(os.path.dirname(os.path.abspath(__file__)))
+    if not root: raise ExpertError("接单运行时未安装", "没有派单", "先在定义源 build")
+    # Same installation gate as the post hook; never swap scripts between
+    # checking an empty receiver and persisting a new creation receipt.
+    key = 'install-' + hashlib.sha256(os.path.realpath(root).encode()).hexdigest()
+    with inbox_lock(os.path.dirname(root), key, purpose='接单/安装互斥'):
+        return _cmd_receive(args)
+
+
+def _cmd_receive(args):
     """Executor entry: target-local config, atomic writer marker and durable create receipt.
 
     Requires an installed team script, but never discovers/registers fronts or starts a timer.
@@ -436,7 +480,11 @@ def cmd_receive(args):
     workspace_id = request.get("workspaceId")
     entry = next((item for item in workspaces() if item.get("id") == workspace_id), None)
     role = request.get("role")
-    if (not entry or not isinstance(role, str) or role in ("root", "front", "default")
+    source_operation = request.get("operation") == "task-operation" and role == "root"
+    if source_operation:
+        if not entry or workspace_root(entry) != os.path.realpath(root):
+            raise ExpertError("返回入口不属于定义源", "没有更改账本", "使用原派单回执中的来源")
+    elif (not entry or not isinstance(role, str) or role in ("root", "front", "default")
             or role not in child_role_names(root)
             or workspace_root(entry) != os.path.realpath(os.path.join(root, "spaces", role))):
         raise ExpertError("workspace 不属于此接单命令的指定岗位", "没有创建或发送会话", "核对目标机 team.py 路径、岗位与 workspaceId")
@@ -445,11 +493,28 @@ def cmd_receive(args):
         snapshot = request.get("snapshot")
         if not isinstance(snapshot, dict) or snapshot.get("version") != 1 or len(json.dumps(snapshot).encode()) > 524288:
             raise ExpertError("无效协作摘要", "旧摘要保留", "核对源端版本与记录规模")
-        write_json(os.path.join(role_root, ".genethub", "coordination-source.json"), {"version": 1, "projection": "session-coordination.json"})
         destination = os.path.join(role_root, ".genethub", "session-coordination.json")
-        old_projection = read_json(destination, {}) or {}
-        if old_projection.get("updatedAtMs", 0) <= snapshot.get("updatedAtMs", 0):
-            write_json(destination, snapshot)
+        with inbox_lock(role_root, "projection", purpose="协作投影"):
+            old_projection = read_dispatch_record(destination) or {}
+            owner = read_dispatch_record(os.path.join(root, ".genethub", "task-source.json")) or {}
+            expected = owner.get("source") or old_projection.get("source")
+            revision, source = snapshot.get("revision"), snapshot.get("source")
+            if type(revision) is not int or revision < 1 or not isinstance(source, str) or not source or (expected and expected != source):
+                raise ExpertError("协作摘要来源或版本不符", "旧摘要保留", "核对源 Team 和原安装绑定")
+            rows = snapshot.get("sessions")
+            if not isinstance(rows, dict) or len(rows) > 4096 or any(
+                not SESSION_ID.fullmatch(sid) or not isinstance(value, dict) or value.get("source") != source
+                or type(value.get("active")) is not bool
+                or any(type(value.get(k, 0)) is not int or not 0 <= value.get(k, 0) <= 4294967295 for k in ("pending", "ready", "unknown"))
+                for sid, value in rows.items()
+            ):
+                raise ExpertError("协作摘要内容无效", "旧摘要保留", "核对源端的通用会话摘要格式")
+            before = old_projection.get("revision", 0)
+            if revision > before:
+                write_json(os.path.join(role_root, ".genethub", "coordination-source.json"), {"version": 1, "source": source})
+                write_json(destination, dict(snapshot, receivedAtMs=now_ms()))
+            elif revision == before and any(old_projection.get(k) != v for k, v in snapshot.items() if k != "receivedAtMs"):
+                raise ExpertError("同一摘要版本内容不同", "旧摘要保留", "源端递增 revision 后重发")
         print(json.dumps({"ok": True, "projected": True}))
         return
     if request.get("operation") == "task-operation":
@@ -461,6 +526,10 @@ def cmd_receive(args):
             team_tasks.command(sys.modules[__name__], type("TaskArgs", (), operation)(), root=root, sender=operation.get("sender"))
         print(json.dumps({"ok": True, "result": captured.getvalue()}))
         return
+    owner = read_dispatch_record(os.path.join(root, ".genethub", "task-source.json")) or {}
+    returning = request.get("returnTo") or {}
+    if not request.get("operation") and owner.get("source") and any(owner.get(key) != returning.get(key) for key in ("machineId", "workspaceId")):
+        raise ExpertError("运行目录已归属另一个源 Team", "没有创建会话", "为另一个 Team 安装独立运行目录")
     from .api import ResourcePolicy, WorkflowPolicy
     runtime = get_runtime(root)
     if type(runtime.resource) is not ResourcePolicy or type(runtime.workflow) is not WorkflowPolicy:
@@ -550,6 +619,11 @@ def cmd_receive(args):
             if old.get("request") != request:
                 raise ExpertError("派单编号已用于不同内容", "没有重派", "检查原回执；新任务使用新的编号")
             if old.get("sessionId"):
+                write_json(state_dir(root, "received", old["sessionId"] + ".json"), {"receipt": os.path.relpath(receipt_path, root)})
+                if not request.get("prepareOnly") and not old.get("activated"):
+                    genet("session", "send", old["sessionId"], request["text"], "--system", "--message-id", "activate." + hashlib.sha256(key.encode()).hexdigest(), "--no-wait")
+                    old['activated'] = True
+                    write_json(receipt_path,old)
                 print(json.dumps({"ok": True, "sessionId": old["sessionId"], "why": old["why"]}))
                 return
             if not old.get("recoverable") or not old.get("selection"):
@@ -572,13 +646,18 @@ def cmd_receive(args):
         # If this write or any following create/receipt write fails, retain the reservation.
         write_json(receipt_path, record)
         sid, why = start(role_root, workspace_id, role, request["desc"], request["text"], model_key,
-                         selection=selection, operation_id="receive." + hashlib.sha256(key.encode()).hexdigest(), prepare_only=bool(request.get("prepareOnly")))
+                         selection=selection, operation_id="receive." + hashlib.sha256(key.encode()).hexdigest(), prepare_only=True)
         if not sid:
             raise ExpertError("没有收到创建回执", "unknown；锁保留", "先核对实际会话")
         if lock:
             write_json(lock, {"session": sid, "requestId": key, "at": now_ms()})
-        record.update(status="created", sessionId=sid, why=why, activated=not request.get("prepareOnly"))
+        record.update(status="created", sessionId=sid, why=why, activated=False)
         write_json(receipt_path, record)
+        write_json(state_dir(root, "received", sid + ".json"), {"receipt": os.path.relpath(receipt_path, root)})
+        if not request.get("prepareOnly"):
+            genet("session", "send", sid, request["text"], "--system", "--message-id", "activate." + hashlib.sha256(key.encode()).hexdigest(), "--no-wait")
+            record["activated"] = True
+            write_json(receipt_path,record)
         print(json.dumps({"ok": True, "sessionId": sid, "why": why}))
 
 
@@ -2105,7 +2184,7 @@ def cmd_init(args):
 def require_definition_source(root):
     if not is_deployed_output(root):
         return
-    provenance = read_json(os.path.join(root, "artifacts", "PROVENANCE.json"), {}) or {}
+    provenance = read_json(os.path.join(root, ".genethub", "definition-source.json"), {}) or read_json(os.path.join(root, "artifacts", "PROVENANCE.json"), {}) or {}
     source = provenance.get("sourcePath") if isinstance(provenance, dict) else None
     raise ExpertError("当前目录是已部署的团队制品，不能在此新增岗位定义",
                       "没有创建岗位、工位或修改构建制品",
@@ -3247,6 +3326,9 @@ def deployed_platform_watch(root):
         return
     binding = read_json(os.path.join(root, ".genethub", "definition-source.json"), {}) or {}
     source = binding.get("sourcePath")
+    if binding.get("machineId") and binding["machineId"] != (genet("context").get("daemon") or {}).get("machineId"):
+        write_json(marker, {"atMs":now_ms(), "status":"managedAtSource", "machineId":binding["machineId"], "workspaceId":binding.get("workspaceId")})
+        return
     state = {"atMs": now_ms(), "sourcePath": source, "status": "unknown"}
     if not source or not os.path.isfile(os.path.join(source, ROOT_DESCRIPTOR)):
         state["reason"] = "definition source is unavailable; runtime was not initialized as a repository"

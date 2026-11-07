@@ -43,3 +43,5 @@ export type { Endpoint, Target } from "./protocol/target";
 
 export { MachineConnections, machineRefs } from "./protocol/machine-connections";
 export type { MachineRef, MachineLease, MachineSource, MachineConnectionOptions } from "./protocol/machine-connections";
+
+export { readActivitySessions } from "./protocol/session-pages";

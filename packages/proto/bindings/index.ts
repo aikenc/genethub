@@ -1549,7 +1549,11 @@ export type SessionMessagePreview = { itemId: string, text: string, atMs: number
  */
 export type SessionNarrativePage = { source: SessionReadSource, items: Array<TimelineItem>, nextCursor?: string, };
 
-export type SessionPageRequest = { workspaceId: string | null, limit: number, cursor: string | null, };
+export type SessionPageRequest = { 
+/**
+ * Filter current work before applying the page limit, independently of history.
+ */
+activeOnly?: boolean, workspaceId: string | null, limit: number, cursor: string | null, };
 
 export type SessionPageResult = { workspaceId: string | null, sessions: Array<SessionSummary>, nextCursor: string | null, error: string | null, };
 

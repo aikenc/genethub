@@ -1036,6 +1036,10 @@ pub enum Reply {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct SessionPageRequest {
+    /// Filter current work before applying the page limit, independently of history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub active_only: Option<bool>,
     pub workspace_id: Option<String>,
     pub limit: u32,
     pub cursor: Option<String>,

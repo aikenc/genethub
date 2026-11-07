@@ -21,9 +21,13 @@ description: GeneHub 的团队机制：多个 Agent 会话组成一支会接力�
 
 样板文件在 `../genehub/references/team-template/`，统一入口是 `tools/run.py`，内置实现位于 `tools/genet_builtin/`；业务扩展见模板 team-core 的 `references/extensions.md`。
 
+## 日常只需理解这些
+
+前台按岗位给目标与验收标准，用已有 `task start`；执行会话需要支持用 `task support`，提交结论用 `task finish`。脚本自动解析岗位所在机器、保存归属并把结果回到原请求方。接收不是完成，未知结果沿原编号恢复。只有维护 Agent 需要配置远程目标并运行原 build，详见管理员 Skill；普通任务不换算机器 ID、不搬文件、不填写回传配置。
+
 ## 不能违反的三条
 
-- **派单后立即结束本轮**：样板里 `spawn --space`、`send --to` 都是纯异步，结果由定时对账收齐后唤醒你；
+- **派单后立即结束本轮**：样板里 `task start/support/send` 都是纯异步，结果由定时对账收齐后唤醒你；
   不 sleep、不轮询。自己写的团队也不要让会话守着等。
 - **对用户零黑话**：只说进展与结论，不提脚本、内部目录或工位；后台岗位不挂起等人，要人决定的事经前台问。
 - **改源文件，不改生成物**：`AGENTS.md`、`.agents/skills/`、`.genethub/hooks/` 由 SpaceBuilder 生成；改身份或

@@ -52,6 +52,9 @@ def dispatch(t, root, task, operation, role, desc, goal, requester, machine=None
     runtime.verify_task(task)
     op_id = 'taskop.' + identity(operation)
     path = t.state_dir(root, 'task-dispatch', op_id + '.json')
+    saved = t.read_dispatch_record(path)
+    bound = t.remote_targets(root).get(role)
+    machine = saved['request'].get('machine') if saved else (t.canonical_machine(machine) if machine else (t.canonical_machine(bound['machineId']) if bound else None))
     request = dict(taskId=task['taskId'], role=role, desc=desc, goal=goal, requester=requester,
                    machine=machine, directory=directory, tier=tier, model=model)
     if parameters: request['parameters'] = json_value(parameters)
@@ -71,7 +74,7 @@ def dispatch(t, root, task, operation, role, desc, goal, requester, machine=None
         if old and old.get('state') == 'creating' and old.get('createAttempted') and not old.get('recoverable'):
             raise t.ExpertError('旧平台创建结果未知', '保留意图与资源，没有重派', '核对原生会话，或升级支持幂等创建的平台后恢复')
         name, mine = t.me(root)
-        if role not in mine.get('spaces', {}) or role in ('root', 'front', 'default'):
+        if (not machine and role not in mine.get('spaces', {})) or role in ('root', 'front', 'default'):
             raise t.ExpertError('目标不是已登记执行岗位', '没有派单', '先核对 directory；前台不作为写工位')
         if machine and directory:
             raise t.ExpertError('远端工位必须使用执行端固定绑定', '没有派单', '核对远端岗位的 WORKTREE_DIR')
@@ -143,9 +146,12 @@ def prepare_intent(t, root, record):
     _, mine = t.me(root)
     remote = None
     if machine:
-        target = t.remote_target(root, machine, role)
+        target = record.get('target') or t.remote_target(root, machine, role)
+        record['target'] = target
+        record.setdefault('returnTo', t.source_route(root))
+        t.write_json(t.state_dir(root, 'task-dispatch', op_id + '.json'), record)
         remote_request = dict(id=op_id, workspaceId=target['workspaceId'], role=role, desc=desc, text=prompt,
-                              tier=tier, model=model, media=None, prepareOnly=True)
+                              tier=tier, model=model, media=None, prepareOnly=True, returnTo=record['returnTo'])
         result = t.remote_receive(target, remote_request)
         sid, why = result['sessionId'], result['why']
         remote = dict(id=op_id, target=target)
@@ -202,7 +208,7 @@ def activate(t, root, record, path):
 
 
 def forward(t, root, args):
-    binding = t.read_dispatch_record(os.path.join(root, '.genethub', 'task-source.json'))
+    binding = t.received_route(root, own_session(t)) or t.read_dispatch_record(os.path.join(root, '.genethub', 'task-source.json'))
     if not binding:
         return False
     envelope = vars(args).copy()
@@ -241,14 +247,14 @@ def command(t, args, root=None, sender=None):
                 raise t.ExpertError('任务编号已用于不同内容或发起方', '没有重派或抢走归属', '查询原任务；独立新目标使用新编号')
             if task: runtime.verify_task(task)
             if not task:
-                resources.gate(runtime, resources.request(task_id, args.space, requested['goal'], sid, args.machine, args.directory, parameters), 'taskop.' + identity(task_id + ':owner'))
+                resources.gate(runtime, resources.request(task_id, args.space, requested['goal'], sid, args.machine or (t.remote_targets(root).get(args.space) or {}).get('machineId'), args.directory, parameters), 'taskop.' + identity(task_id + ':owner'))
                 task = dict(framework=runtime.identity(), version=1, taskId=task_id, request=requested, front=sid, owner=None,
                             state='active', revision=1, createdAtMs=t.now_ms(), collaborators=[])
                 t.write_json(path, task)
             result = dispatch(t, root, task, task_id + ':owner', args.space, args.desc, requested['goal'], sid,
                               args.machine, args.directory, args.tier, args.model, parameters)
             if not task.get('owner'):
-                task['owner'] = dict(sessionId=result['sessionId'], machine=args.machine, space=args.space)
+                task['owner'] = dict(sessionId=result['sessionId'], machine=result['request'].get('machine'), space=args.space)
                 if args.directory:
                     task['executionBinding'] = dict(directory=t.resolve_expert_dir(root, args.directory), sessionId=result['sessionId'], lock=result.get('lock'))
                 t.write_json(path, task)
@@ -277,7 +283,7 @@ def command(t, args, root=None, sender=None):
         with t.inbox_lock(root, task['taskId'], purpose='协作关系'):
             task = read_task(t, root, task['taskId'])
             if not any(x['operationId'] == result['operationId'] for x in task['collaborators']):
-                task['collaborators'].append(dict(operationId=result['operationId'], sessionId=result['sessionId'], machine=args.machine, requester=sid))
+                task['collaborators'].append(dict(operationId=result['operationId'], sessionId=result['sessionId'], machine=result['request'].get('machine'), requester=sid))
                 t.write_json(path, task)
         publish(t, root)
         print(json.dumps(dict(taskId=task['taskId'], collaborator=result['sessionId']), ensure_ascii=False))
@@ -746,10 +752,15 @@ def watchdog(t, root, task, pending):
 
 
 def publish(t, root):
+    with t.inbox_lock(root, 'projection', purpose='协作投影发布'):
+        return _publish(t, root)
+
+
+def _publish(t, root):
     """A single indexed snapshot of durable obligations; no remote history scans."""
     now = t.now_ms()
     projected = {}
-    source = 'team.' + identity(os.path.realpath(root))[:24]
+    source = t.projection_source(root)
     def row(sid):
         if not sid or not t.SESSION_ID.fullmatch(sid):
             return None
@@ -814,18 +825,28 @@ def publish(t, root):
     roots = [root] + [os.path.join(root, 'spaces', name) for name in mine.get('spaces', {}) if name != 'root']
     references = sorted({sid for task in tasks if task.get('state') not in ('delivered', 'canceled')
                          for sid in [(task.get('owner') or {}).get('sessionId')] + [x['sessionId'] for x in task.get('collaborators', [])] + [x['sessionId'] for x in task.get('previousOwners', [])] if sid})
-    snapshot = dict(version=1, updatedAtMs=now, sessions=projected, references=references)
+    markers_path = t.state_dir(root, 'projection-targets.json')
+    markers = t.read_dispatch_record(markers_path) or {}
+    previous = t.read_json(os.path.join(root, '.genethub', 'session-coordination.json'), {}) or {}
+    revision = max(markers.get('_revision', 0), previous.get('revision', 0)) + 1
+    markers['_revision'] = revision
+    # Counter survives deletion/corruption of the replaceable projection.
+    t.write_json(markers_path, markers)
+    snapshot = dict(version=1, source=source, revision=revision, receivedAtMs=now, updatedAtMs=now, sessions=projected, references=references)
+    t.write_json(os.path.join(root, '.genethub', 'session-coordination.json'), snapshot)
     for target in roots:
-        if os.path.isdir(target):
+        if os.path.isdir(target) and os.path.realpath(target) != os.path.realpath(root):
             t.write_json(os.path.join(target, '.genethub', 'coordination-source.json'), dict(version=1, source=source, projection='session-coordination.json'))
-            t.write_json(os.path.join(target, '.genethub', 'session-coordination.json'), snapshot)
+            with t.inbox_lock(target, 'projection', purpose='本地协作投影'):
+                old = t.read_dispatch_record(os.path.join(target, '.genethub', 'session-coordination.json')) or {}
+                if old.get('revision', 0) < revision:
+                    t.write_json(os.path.join(target, '.genethub', 'session-coordination.json'), snapshot)
     # Changed projections or a one-minute heartbeat only, and only to bindings
     # with an actual task/pending execution. Empty views clear previous hints.
     remote_roles = {(x.get('machine'), x.get('kind')) for x in records(t, root, 'pending') if x.get('machine')}
     for task in tasks:
         owner = task.get('owner') or {}
         if owner.get('machine'): remote_roles.add((owner['machine'], owner.get('space')))
-    markers = t.read_json(t.state_dir(root, 'projection-targets.json'), {}) or {}
     bindings = t.remote_targets(root)
     content = identity(json.dumps(dict(sessions={sid: {k: v for k, v in row.items() if k != 'updatedAtMs'} for sid, row in projected.items()}, references=references), sort_keys=True))
     for role, target in bindings.items():
@@ -833,10 +854,10 @@ def publish(t, root):
         before = markers.get(key, {})
         if (target.get('machineId'), role) not in remote_roles and not before:
             continue
-        if before.get('content') == content and now - before.get('atMs', 0) < 60_000:
+        if before.get('content') == content and 0 <= now - before.get('atMs', 0) < 60_000:
             continue
         try:
-            t.remote_receive(target, dict(id=source, operation='coordination', workspaceId=target['workspaceId'], role=role, snapshot=snapshot))
+            t.remote_receive(target, dict(id=source, operation='coordination', workspaceId=target['workspaceId'], role=role, snapshot={k:v for k,v in snapshot.items() if k != 'receivedAtMs'}))
             markers[key] = dict(content=content, atMs=now)
         except t.ExpertError as error:
             markers[key] = dict(before, error=error.what)
