@@ -5,7 +5,7 @@ for (const scenario of ["pending-entry", "reply-read"] as const) {
   defineSpecialty({
     id: `specialty.page-experience.session-attention.${scenario}`,
     title: `Expert and session attention stays actionable across ${scenario}`,
-    oracle: "The real Workbench opens every counted Human request, including archived sessions beyond recent history; only new assistant replies become unread, and viewing them clears both browser tabs",
+    oracle: "The real Workbench project active filter opens Human requests, including archived sessions beyond recent history; only new assistant replies become unread, and viewing them clears both browser tabs",
     catches: ["expert hand opens an empty recent list", "viewing a question clears unresolved work", "old history or own input creates unread", "read state does not reach another tab", "session status bubbles into navigation"],
     tags: ["page-experience", "session-attention", "session-control-fixes"], runner: "playwright", llm: { default: "mock" },
     expectedDurationMs: 45_000, timeoutMs: 180_000,
@@ -51,15 +51,14 @@ for (const scenario of ["pending-entry", "reply-read"] as const) {
       const nav = page.getByRole("navigation", { name: "工作台导航" });
       await nav.getByRole("button", { name: "项目", exact: true }).click();
       if (scenario === "pending-entry") {
-        await page.getByRole("button", { name: "查看 提示验收项目 的 1 项待办", exact: true }).waitFor();
         t.assertions.assert(await nav.locator(".bg-danger, [aria-label='有未读新回复']").count() === 0, "pending session bubbled into navigation");
-        await page.getByRole("button", { name: "查看 提示验收项目 的 1 项待办", exact: true }).click();
+        await page.getByRole("complementary",{name:"项目列表面板",exact:true}).getByRole("button",{name:/提示验收项目/}).click();
         const panel = page.getByRole("region", { name: "项目页面" });
-        await panel.getByRole("button", { name: "待你处理", exact: true }).waitFor();
+        await panel.getByRole("button", { name: "进行中", exact: true }).click();
         await panel.getByRole("button", { name: "项目菜单", exact: true }).click();
         await page.getByRole("menuitem", { name: "资料与头像", exact: true }).click();
         await panel.getByRole("button", { name: "返回", exact: true }).click();
-        await panel.getByRole("button", { name: "待你处理", exact: true }).waitFor();
+        await panel.getByRole("button", { name: "进行中", exact: true }).click();
         const row = panel.locator(".conversation-row").filter({ hasText: "需要关注的会话" });
         await row.getByText(/已归档/).waitFor();
         await row.getByRole("button").first().click();
@@ -76,8 +75,9 @@ for (const scenario of ["pending-entry", "reply-read"] as const) {
         await t.tools.waitUntil(async () => (await snapshot()).summary.interactionSummary?.count === 0, 30_000);
         await page.setViewportSize({ width: 1280, height: 800 });
         await nav.getByRole("button", { name: "项目", exact: true }).click();
-        await page.getByRole("button", { name: "提示验收项目", exact: true }).waitFor();
-        await t.tools.waitUntil(async () => await page.getByRole("button", { name: /查看 提示验收项目 的 .* 项待办/ }).count() === 0, 15_000);
+        await page.getByRole("complementary",{name:"项目列表面板",exact:true}).getByRole("button",{name:/提示验收项目/}).click();
+        await panel.getByRole("button",{name:"进行中",exact:true}).click();
+        await t.tools.waitUntil(async()=>await panel.locator(".conversation-row").filter({hasText:"需要关注的会话"}).count()===0,15_000);
       } else {
         await nav.getByRole("button", { name: "会话", exact: true }).click();
         const list = page.getByRole("complementary", { name: "会话列表", exact: true });
@@ -101,8 +101,11 @@ for (const scenario of ["pending-entry", "reply-read"] as const) {
         await page.bringToFront();
         await send("再给出一条新回复。");
         await row.getByLabel("有未读新回复").waitFor();
-        await row.hover();
-        await row.getByRole("button", { name: "需要关注的会话 的更多操作", exact: true }).click();
+        await row.getByRole("button").first().click();
+        await page.getByText("ATTENTION_REPLY_2：已处理本次要求。", { exact: true }).waitFor();
+        // Conversation actions now live in the opened conversation header.
+        // Viewing the reply also marks it read; the header action stays available.
+        await page.getByRole("button", { name: "会话菜单", exact: true }).click();
         await page.getByRole("menuitem", { name: "标为已读", exact: true }).click();
         await t.tools.waitUntil(async () => await row.getByLabel("有未读新回复").count() === 0, 15_000);
         const cursor = (await snapshot()).summary.latestReply;

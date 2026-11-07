@@ -61,6 +61,24 @@ for (const width of [390, 1280]) defineSpecialty({
     t.assertions.assert(await machines.evaluate(e=>e===document.activeElement),"Escape did not return focus to the machine filter");
     await list.getByRole("button", { name: /甲机器项目/ }).waitFor();
     await list.getByRole("button", { name: /乙机器项目/ }).waitFor();
+    if(width>=700){
+      await page.evaluate(()=>{
+        const failures:string[]=[];
+        const observer=new MutationObserver(()=>{
+          const rows=document.querySelectorAll('[aria-label="会话列表"] .conversation-row button');
+          for(const button of rows) if((button as HTMLButtonElement).disabled||Number(getComputedStyle(button).opacity)<0.99) failures.push("navigation greyed/disabled another row");
+        });
+        observer.observe(document.body,{subtree:true,childList:true,attributes:true});
+        Object.assign(window,{navigationCheck:{failures,observer}});
+        const rows=[...document.querySelectorAll<HTMLButtonElement>('[aria-label="会话列表"] .conversation-row button')];
+        rows.find(b=>b.textContent?.includes("乙机器专属会话"))!.click();
+        rows.find(b=>b.textContent?.includes("甲机器专属会话"))!.click();
+      });
+      await page.waitForTimeout(200);
+      await page.getByRole("heading",{name:"甲机器专属会话",exact:true}).waitFor();
+      const navigationFailures=await page.evaluate(()=>{const v=(window as unknown as {navigationCheck:{failures:string[];observer:MutationObserver}}).navigationCheck;v.observer.disconnect();return v.failures;});
+      t.assertions.assert(navigationFailures.length===0,"conversation navigation greyed/disabled the list");
+    }
     await machines.press("ArrowDown"); await page.keyboard.press("End"); await page.keyboard.press("Enter");
     t.assertions.assert(await machines.innerText()===entries[1]!.label,"keyboard selection did not select the long machine name");
     const selectedGeometry=await machines.evaluate(e=>({width:e.clientWidth,scroll:e.scrollWidth}));
