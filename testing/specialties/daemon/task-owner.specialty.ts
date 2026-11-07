@@ -129,8 +129,9 @@ defineSpecialty({
       await browser.page.getByRole("button", { name: "当前项目", exact: true }).waitFor();
       await browser.page.getByRole("navigation", { name: "工作台导航" }).getByRole("button", { name: "会话", exact: true }).click();
       const row = browser.page.getByRole("complementary", { name: "会话列表", exact: true }).locator(".conversation-row").filter({ hasText: "first independent goal" });
-      await browser.page.getByRole("button", { name: "子 Space 会话 owner-session-team", exact: true }).click();
-      await row.getByLabel(/等待协作 2 项/).waitFor();
+      await browser.page.getByRole("button", { name: /团队内部/ }).click();
+      t.assertions.assert(await row.count()===1,"Owner was duplicated in the conversation list");
+      await row.getByRole("img",{name:"等待协作 2 项",exact:true}).first().waitFor();
       t.assertions.assert((await r.snapshot(owner)).summary.status === "idle", "UI waiting changed native runnable state");
     } finally { await browser.close(); }
     const board = await cli(front, ["board", "refresh"]);
@@ -141,7 +142,7 @@ defineSpecialty({
       const frame = boardBrowser.page.frameLocator('iframe[title="HTML 文件预览"]');
       const leaderRow = frame.locator("#members-tbody tr").filter({ hasText: "研发组长" });
       const details = leaderRow.locator("details");
-      await details.getByText(/查看本岗位全部/).click();
+      await details.getByText(/查看本岗位活动/).click();
       await details.getByText("first independent goal", { exact: true }).waitFor();
       await details.getByText("second independent goal", { exact: true }).waitFor();
       await details.getByText("等待协作 2 项", { exact: true }).waitFor();

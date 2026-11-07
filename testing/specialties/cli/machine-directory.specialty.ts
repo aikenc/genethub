@@ -2,7 +2,7 @@ import path from "node:path";
 import { defineSpecialty, parseJson, runGenetAsync, startHub, type CaseContext } from "../../framework/public.ts";
 
 type Opened = Awaited<ReturnType<CaseContext["flows"]["main"]["openWorkspace"]>>;
-type Row = { machineId: string; local: boolean; sources: string[]; online: boolean | null };
+type Row = { machineId: string; deviceHandle?: string; local: boolean; sources: string[]; online: boolean | null };
 type Answer = { data: { machines: Row[]; complete: boolean; [key: string]: any }; error?: { code: string; details: any } };
 const command = (opened: Opened, args: string[]) => runGenetAsync(opened.daemon.genet, args, opened.daemon.env);
 async function json(opened: Opened, args: string[]): Promise<Answer> {
@@ -51,6 +51,14 @@ for (const hubEnabled of [false, true]) {
       t.assertions.assert(row.sources.includes("local") && (!hub || row.sources.includes("hub")), "discovery lost a machine source");
       const shown = (await json(opened, ["machine", "show", row.machineId])).data;
       t.assertions.assert(JSON.stringify(shown) === JSON.stringify(row), "show did not use the listing directory");
+      if(hub){
+        const handle=opened.client.identity!.machineId;
+        t.assertions.assert(row.deviceHandle===handle,"Hub directory lost canonical daemon identity");
+        for(const selector of [handle,`m-${handle.slice(2,10)}`]){
+          const resolved=(await json(opened,["machine","show",selector])).data;
+          t.assertions.assert(resolved.machineId===row.machineId&&resolved.deviceHandle===handle,"canonical/legacy identity did not resolve to its existing route");
+        }
+      }
       const absent = await command(opened, ["machine", "show", "m_no_such_machine"]);
       t.assertions.assert(absent.code !== 0 && (parseJson(absent.stdout).error as any)?.code === "targetNotFound", "unknown ID was reported as an unpaired machine");
       for (const args of [["machine", "list", "--paired", "--reachable"], ["machine", "show", row.machineId, "extra"], ["machine", "list", "--unknown"]]) {
