@@ -27,12 +27,26 @@ defineSpecialty({
     await t.tools.waitUntil(async () => { const s = (await r.snapshot(r.front)).summary; return s.status === "idle" && !!s.latestReply; }, 15000);
     const before = (await r.snapshot(r.front)).items.length;
     const descriptor = join(r.root, "agent-space.genet.json"), original = readFileSync(descriptor, "utf8");
+    const notes = () => existsSync(r.state("notes")) ? readdirSync(r.state("notes")).filter(x => x.endsWith(".json")).map(x => JSON.parse(readFileSync(r.state("notes", x), "utf8"))) : [];
+    // A normal explicit-build configuration must not manufacture anomaly work.
+    // Keep the actual Builder refusal: no publishing or identity edits on tick.
+    const soul = join(r.root, "soul.md"), savedSoul = readFileSync(soul, "utf8");
+    const identity = join(r.root, "front/AGENTS.md"), savedIdentity = readFileSync(identity, "utf8");
+    const published = join(r.root, "unexpected-publication");
+    const guarded = JSON.parse(original);
+    guarded.buildHooks = { post: [{ args: ["{python}", "-c", "from pathlib import Path; import sys; Path(sys.argv[1]).write_text('published')", published] }] };
+    writeFileSync(descriptor, JSON.stringify(guarded)); writeFileSync(soul, savedSoul + "\nExplicit build required.\n");
+    for (let i = 0; i < 2; i++) r.ok(["tick"], { TEAM_BOARD_PORT: "0", TEAM_PLATFORM_CHECK: "999999" });
+    t.assertions.assert(!existsSync(published) && readFileSync(identity, "utf8") === savedIdentity, "guarded timer ran a deployment or changed identity");
+    t.assertions.assert(!notes().some(x => x.from === "system:team-hook"), "expected explicit-build mode created anomaly work");
+    t.assertions.assert((await r.snapshot(r.front)).items.length === before, "guarded timer woke the front");
+    writeFileSync(descriptor, original); writeFileSync(soul, savedSoul);
+    r.ok(["tick"], { TEAM_BOARD_PORT: "0", TEAM_PLATFORM_CHECK: "999999" });
     const desc = JSON.parse(original); desc.identity = ["missing-identity.md"]; writeFileSync(descriptor, JSON.stringify(desc));
     for (let i = 0; i < 3; i++) {
       desc.identity = [`missing-identity-${i}.md`]; writeFileSync(descriptor, JSON.stringify(desc));
       r.ok(["tick"], { TEAM_BOARD_PORT: "0", TEAM_PLATFORM_CHECK: "999999" });
     }
-    const notes = () => readdirSync(r.state("notes")).filter(x => x.endsWith(".json")).map(x => JSON.parse(readFileSync(r.state("notes", x), "utf8")));
     t.assertions.assert(notes().filter(x => x.from === "system:team-hook").length === 1, "one unresolved identity fault multiplied notes");
     t.assertions.assert((await r.snapshot(r.front)).items.length === before, "internal mechanism error woke the real front");
     const first = notes().find(x => x.from === "system:team-hook")!.id;
