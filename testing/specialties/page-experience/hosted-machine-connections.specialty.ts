@@ -60,7 +60,6 @@ defineSpecialty({
     await list.getByRole("combobox", { name: "机器筛选" }).getByRole("option", { name: /全部机器 · 2\/2 在线/ }).waitFor({ state: "attached" });
     const beforeJump = connects;
     phase="jump";
-    await list.getByRole("button", { name: /Hosted B project/ }).click();
     await list.getByRole("button", { name: /Hosted B session/ }).click();
     await page.getByRole("heading", { name: "Hosted B session", exact: true }).waitFor();
     t.assertions.assert(connects === beforeJump, `Console rebuilt or reminted on a pooled jump: ${beforeJump} -> ${connects}`);

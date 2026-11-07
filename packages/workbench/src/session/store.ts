@@ -474,7 +474,7 @@ interface WorkbenchState {
     },
   ): void;
   selectSession(sessionId: string): Promise<void>;
-  archiveSession(sessionId: string, archived: boolean): Promise<void>;
+  archiveSession(sessionId: string, archived: boolean): Promise<boolean>;
   loadHistory(): Promise<void>;
   loadNarrativeItem(itemId: string): Promise<void>;
   loadRound(roundId: string): Promise<void>;
@@ -486,7 +486,7 @@ interface WorkbenchState {
   /** Removes, then adds, labels in one daemon step; the stored set comes back. */
   labelSession(sessionId: string, change: { add?: string[]; remove?: string[] }): Promise<boolean>;
   /** Erases a session. There is no undo; the caller does the asking. */
-  deleteSession(sessionId: string): Promise<void>;
+  deleteSession(sessionId: string): Promise<boolean>;
   openTab(kind: TabKind, title?: string): void;
   /** Adds URL strip tokens without changing which tab is focused. */
   restoreStrip(tokens: string[]): void;
@@ -2544,13 +2544,17 @@ return create<WorkbenchState>((set, get) => ({
   async archiveSession(sessionId, archived) {
     const client = require_(get().client);
     const reply = await asked(set, () => client.call({type: "session.archive", payload: {sessionId, archived}}));
-    if (reply) await loadSessions(client, set);
+    if (!reply || reply.type !== "session" || reply.data.id !== sessionId || reply.data.archived !== archived) return false;
+    set(state => ({sessions: upsertBy(state.sessions,reply.data,s => s.id), sessionObservations: {...state.sessionObservations,[sessionId]:Date.now()}}));
+    await loadSessions(client, set);
+    return true;
   },
 
   async deleteSession(sessionId) {
-    await asked(set, () =>
+    const reply = await asked(set, () =>
       require_(get().client).call({ type: "session.delete", payload: { sessionId } }),
     );
+    if (!reply || reply.type !== "ack") return false;
     const wasOpen = get().activeSessionId === sessionId;
     const tabId = `chat:${sessionId}`;
     set((state) => ({
@@ -2565,6 +2569,7 @@ return create<WorkbenchState>((set, get) => ({
     // Deleting what you were reading leaves a blank pane otherwise. `land`
     // picks the next conversation, or opens an empty one.
     if (wasOpen) await land(get);
+    return true;
   },
 
   /**

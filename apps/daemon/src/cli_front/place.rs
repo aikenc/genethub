@@ -144,6 +144,7 @@ mod tests {
 
     fn workspace(id: &str, roots: &[&Path]) -> WorkspaceInfo {
         WorkspaceInfo {
+            builtin: None,
             id: id.into(),
             name: id.into(),
             root: roots[0].to_string_lossy().into_owned(),

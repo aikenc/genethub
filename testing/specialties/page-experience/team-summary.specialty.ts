@@ -24,6 +24,7 @@ for (const width of [390, 1280]) defineSpecialty({
     const note = join(otherLease.workspace, "remote-artifact.md");
     await writeFile(note, "# Remote artifact on machine B\n\nSource-owned bytes.\n");
     await t.flows.main.configureMockProvider(a.client, a.mock);
+    await t.flows.main.configureMockProvider(b.client, b.mock);
     a.mock.script({ respond: () => ({ text: `[远端产物](/assets/preview/v3/${b!.client.identity!.machineId}?path=${encodeURIComponent(note)})` }) });
     await t.flows.main.sendPrompt(a.client, first, "提供这次交付的产物。");
     await t.tools.waitUntil(async () => {
@@ -54,7 +55,6 @@ for (const width of [390, 1280]) defineSpecialty({
     await machines.selectOption(entries[1]!.id);
     t.assertions.assert(await list.getByRole("button", { name: /甲机器项目/ }).count() === 0, "machine filter left another source visible");
     t.assertions.assert(await page.getByRole("heading", { name: "甲机器专属会话", exact: true, includeHidden: true }).count() === 1, "filter changed the active conversation");
-    await list.getByRole("button", { name: /乙机器项目/ }).click();
     await list.getByRole("button", { name: /乙机器专属会话/ }).click();
     await page.getByRole("heading", { name: "乙机器专属会话", exact: true }).waitFor();
     const legacy = `/d/${entries[1]!.id}/w/${b.workspaceId}/s/${second}`;
@@ -62,14 +62,21 @@ for (const width of [390, 1280]) defineSpecialty({
     await page.waitForURL(url => url.pathname === legacy || url.pathname === compact);
     if (width < 768) await page.getByRole("button", { name: "会话列表", exact: true }).click();
     await machines.selectOption("");
-    await list.getByRole("button", { name: /甲机器项目/ }).click();
     await list.getByRole("button", { name: /甲机器专属会话/ }).click();
     await page.getByRole("heading", { name: "甲机器专属会话", exact: true }).waitFor();
     const geometry = await page.evaluate(() => ({ viewport: innerWidth, scroll: document.documentElement.scrollWidth }));
     t.assertions.assert(geometry.scroll <= geometry.viewport, "unified list overflowed horizontally");
     if (width < 768) await page.getByRole("button", { name: "会话列表", exact: true }).click();
     await list.getByRole("button", { name: "新建会话", exact: true }).click();
-    await page.getByRole("region", { name: "项目页面", exact: true }).waitFor();
+    const draft = page.getByRole("region", { name: "项目页面", exact: true });
+    await draft.waitFor();
+    const draftInput = page.getByPlaceholder("描述任务…", {exact:true});
+    await draftInput.fill("跨机器选择项目，保留尚未发送的目标");
+    await page.locator('input[type="file"]').first().setInputFiles({name:"draft-retained.txt",mimeType:"text/plain",buffer:Buffer.from("Unsent browser-owned file")});
+    await page.getByText("draft-retained.txt",{exact:true}).waitFor();
+    await draft.getByRole("button", {name:/乙机器项目.*机器乙/}).click();
+    await t.tools.waitUntil(async()=>await draftInput.inputValue()==="跨机器选择项目，保留尚未发送的目标",5_000);
+    await page.getByText("draft-retained.txt",{exact:true}).waitFor();
     const afterDraft = await a.client.call({ type: "session.page", payload: { requests: [{workspaceId: a.workspaceId, limit: 100, cursor: null}], includeArchived: true } });
     t.assertions.assert(afterDraft?.type === "sessionPages" && afterDraft.data[0]?.sessions.length === 1, "opening a draft created a persisted session");
     if (width < 768) await page.getByRole("button", { name: "返回", exact: true }).first().click();

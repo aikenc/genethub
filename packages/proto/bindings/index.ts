@@ -2197,7 +2197,12 @@ root: string,
  */
 rootHandle: string, };
 
-export type WorkspaceInfo = { id: string, name: string, 
+export type WorkspaceInfo = { 
+/**
+ * Product-owned bootstrap project, identified by its registered storage
+ * location rather than a display name. Absent on older daemons.
+ */
+builtin?: boolean, id: string, name: string, 
 /**
  * The first folder and Agent working directory.
  */

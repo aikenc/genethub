@@ -9,7 +9,7 @@ import path from "node:path";
 import { defineSpecialty, localGenetCli, type CaseContext } from "../../framework/public.ts";
 
 type Opened = Awaited<ReturnType<CaseContext["flows"]["main"]["openWorkspace"]>>;
-type Info = { id: string; name: string; root?: string; agentSpace?: { parentWorkspaceId?: string } };
+type Info = { builtin?: boolean; id: string; name: string; root?: string; agentSpace?: { parentWorkspaceId?: string } };
 
 const MACHINE = "办公室-Mac";
 const NAME = `${MACHINE}管理员`;
@@ -71,6 +71,8 @@ adminCase(
       const spaces = await list(opened);
       const root = spaces.find((space) => space.name === NAME);
       t.assertions.assert(root, `no ${NAME} in ${JSON.stringify(spaces.map((s) => s.name))}`);
+      t.assertions.assert(root!.builtin === true, "product-owned administrator lacks its factual builtin projection");
+      t.assertions.assert(spaces.filter(space => space.builtin).length === 1, "ordinary projects were marked builtin");
       const children = spaces.filter((space) => space.agentSpace?.parentWorkspaceId === root!.id);
       t.assertions.assert(children.length === 0, `the administrator has child Spaces: ${JSON.stringify(children.map((s) => s.name))}`);
       t.assertions.assert(existsSync(path.join(admin, "front", "AGENTS.md")), "front/AGENTS.md was not built");

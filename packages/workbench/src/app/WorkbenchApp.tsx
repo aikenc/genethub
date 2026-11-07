@@ -52,12 +52,14 @@ import {
   normalizeAgentPreferences,
   resolveTagRoute,
 } from "../session/capability-preferences";
+import type { MachineSummary } from "../protocol/summary-directory";
+import { SessionCoordination } from "../session/SessionCoordination";
 import { MachineDirectoryLists } from "./MachineDirectoryLists";
 import { ConversationList as Sidebar } from "./ConversationList";
 import { ToolsMenu } from "../shell/ToolsMenu";
 import { WorkbenchNavigation } from "../shell/WorkbenchNavigation";
 import { AgentDetailsEnvironment } from "../workspace/AgentDetails";
-import { draftIdentities, readLocalDraft } from "../session/localConversation";
+import { draftIdentities, readLocalDraft, saveLocalDraft, hasLocalDraftContent } from "../session/localConversation";
 import { SessionHeading } from "../session/SessionHeading";
 import { WorkspaceBrowser } from "../workspace/WorkspaceBrowser";
 import type { ExtraTab } from "../shell/tabs";
@@ -224,7 +226,9 @@ export function App({
     update(); media?.addEventListener?.("change", update);
     return () => media?.removeEventListener?.("change", update);
   }, [connections]);
-  const [pendingProject, setPendingProject] = useState<{ machineId: string; workspaceId?: string; addProject?: boolean } | null>(null);
+  const [draftSources, setDraftSources] = useState<MachineSummary[]>([]);
+  const [draftChooser, setDraftChooser] = useState(false);
+  const [pendingProject, setPendingProject] = useState<{ machineId: string; workspaceId?: string | null; addProject?: boolean; newDraft?: boolean; localId?: string } | null>(null);
   const [pendingJumpSession, setPendingJumpSession] = useState<string | null>(null);
   const [pendingJumpFrom,setPendingJumpFrom]=useState<Client|null>(null);
   const pickTarget = useCallback((picked: Target, next: Endpoint) => {
@@ -667,7 +671,7 @@ export function App({
     setPendingProject(null);
     rootNextPage();
     if (intent.addProject) expertCreator.current?.open();
-    else if (intent.workspaceId) useWorkbench.getState().newSession(intent.workspaceId, null, { addressScope: "workspace" });
+    else if (intent.newDraft || intent.workspaceId) useWorkbench.getState().newSession(intent.workspaceId ?? null, null, { addressScope: intent.newDraft ? "machine" : "workspace", localId:intent.localId });
     setSection("spaces"); setSessionsOpen(false);
   }, [pendingProject, workbench.client, workbench.sessionsLoaded]);
 
@@ -892,12 +896,35 @@ export function App({
     workbench.workspaces[0];
 
   const openOverview = (id: string, surface = "sessions", localId?: string) => {
+    setDraftChooser(false);
     const state = useWorkbench.getState();
     const machine = state.client?.identity?.machineId ?? "";
-    const existing = draftIdentities(machine).find(d => d.workspaceId === id && Boolean(readLocalDraft(`${machine}:${d.localId}`).text || readLocalDraft(`${machine}:${d.localId}`).attachments.length || readLocalDraft(`${machine}:${d.localId}`).missingAttachments));
+    const existing = draftIdentities(machine).find(d => d.workspaceId === id && hasLocalDraftContent(`${machine}:${d.localId}`));
     const draftId = localId ?? (state.draft?.workspaceId === id ? state.draft.localId : existing?.localId);
     if (state.draft?.workspaceId !== id || state.activeSessionId || state.tabs.find(tab => tab.id === state.activeTabId)?.kind !== "chat" || (localId && localId !== state.draft?.localId)) state.newSession(id, null, { localId: draftId, addressScope: "workspace" });
     setSessionsOpen(false); setSection("spaces"); setOverviewSurface(surface, true);
+  };
+  const beginDraft = (machine?: Target, workspaceId?: string, keepDraft = false) => {
+    const before = useWorkbench.getState();
+    const oldId = keepDraft ? before.draft?.localId : undefined;
+    const localId = oldId ?? crypto.randomUUID();
+    const carry = oldId ? readLocalDraft(`${before.client?.identity?.machineId}:${oldId}`) : undefined;
+    setDraftChooser(true); setOverviewSurface("sessions");
+    if (!machine || machine.deviceHandle === useWorkbench.getState().client?.identity?.machineId) {
+      workbench.newSession(workspaceId ?? null, null, {localId}); rootNextPage(); setSessionsOpen(false); setSection("spaces"); return;
+    }
+    void connections.acquire(machine).then(lease => {
+      const destination = machine.deviceHandle ?? lease.client.identity!.machineId;
+      if (carry) {
+        const portable = carry.attachments.filter(a => Boolean(a.dataBase64)).map(a => ({...a,path:undefined}));
+        const missing = carry.attachments.length - portable.length;
+        saveLocalDraft(`${destination}:${localId}`, {...carry, attachments:portable, missingAttachments:carry.missingAttachments+missing,
+          ...(missing ? {recoveryNotice:"原设备附件保留在原草稿，请在此设备重新添加。"} : {})});
+      }
+      pickTarget(machine, lease.endpoint);
+      setPendingProject({ machineId: destination, workspaceId: workspaceId ?? null, newDraft: true, localId });
+      lease.release();
+    }).catch((error: unknown) => useWorkbench.setState({ notice: error instanceof Error ? error.message : String(error) }));
   };
   return (
     <MachineConnectionsContext.Provider value={connections}><AgentDetailsEnvironment.Provider value={{ host, endpoint, onCreateExpert: () => expertCreator.current?.open(), onOverview: (id, surface, child) => { if (sessionsOpen && section === "spaces") rootNextPage(); else if (useWorkbench.getState().draft && !useWorkbench.getState().activeSessionId && !child) replaceNextPage(); openOverview(id, surface); }, workspaceTools: (id) => <div className="mt-3 flex flex-wrap gap-2">{extraTabs.filter(tab => !tab.scope || tab.scope === "workspace").map(tab => <button type="button" key={tab.id} className="min-h-11 rounded-lg border border-line px-3 text-sm" onClick={() => { useWorkbench.setState({activeWorkspaceId: id}); workbench.openTab(`extra:${tab.id}`, tab.label); }}>{tab.label}</button>)}</div> }}>
@@ -926,6 +953,7 @@ export function App({
           host={host} endpoint={endpoint} section={section === "spaces" ? "projects" : "sessions"}
           open={sessionsOpen} hidden={sidebarHidden || !["sessions", "spaces"].includes(section) || section === "sessions" && !showChat}
           onOpen={async (machine, sessionId, workspaceId) => {
+            if (workspaceId) setDraftChooser(false);
             if (machine.deviceHandle === useWorkbench.getState().client?.identity?.machineId) {
               if (sessionId) {
                 rootNextPage();
@@ -943,7 +971,7 @@ export function App({
               lease.release();
             }
             rootNextPage(); setSessionsOpen(false); setSection(sessionId ? "sessions" : "spaces");
-          }} onNewSession={() => { workbench.newSession(null, null); rootNextPage(); setSessionsOpen(false); setSection("spaces"); }}
+          }} onNewSession={beginDraft} onSources={setDraftSources}
           onAddProject={machine => {
             if (!machine || machine.deviceHandle === useWorkbench.getState().client?.identity?.machineId) { expertCreator.current?.open(); return; }
             void connections.acquire(machine).then(lease => {
@@ -974,7 +1002,7 @@ export function App({
             style={{ paddingTop: "env(safe-area-inset-top)" }}
           >
             <DetailBackButton label={nested ? "返回" : showChat ? "会话列表" : "返回"} listVisible={!nested && showChat && !sidebarHidden} onClick={backPage}/>
-            {showChat && session ? <SessionHeading key={session.id} session={session} workspace={workbench.workspaces.find(entry => entry.id === session.workspaceId)} onOpenExpert={openOverview} onReportSession={onReportSession} /> : <div className="min-w-0 flex-1 px-2 py-2"><h1 className="truncate text-lg font-semibold">{activeTab?.title}</h1><p className="truncate text-xs text-muted">{endpoint.label}</p></div>}
+            {showChat && session ? <SessionHeading key={`${sourceMachineId}:${session.id}`} session={session} workspace={workbench.workspaces.find(entry => entry.id === session.workspaceId)} onOpenExpert={openOverview} onReportSession={onReportSession} machineName={endpoint.label} /> : <div className="min-w-0 flex-1 px-2 py-2"><h1 className="truncate text-lg font-semibold">{activeTab?.title}</h1><p className="truncate text-xs text-muted">{endpoint.label}</p></div>}
             {/* Only when it is not what it should be. A green tick on every
                 screen is one more thing to read past, and this bar has room
                 for exactly three things — but a phone that has quietly lost
@@ -992,6 +1020,7 @@ export function App({
             )}
             <BackgroundBadge />
           </header>}
+          {showChat && !starting && session && <SessionCoordination key={`${sourceMachineId}:${session.id}`} session={session} />}
 
           {workbench.completionNotice ? (
             <p
@@ -1057,7 +1086,7 @@ export function App({
                           still needs — which workspace, which Agent — are least
                           hidden. */}
                       {starting ? (
-                        <NewSessionPanel host={host} endpoint={endpoint} surface={overviewSurface} onSurface={setOverviewSurface} onBack={backPage} nested={nested} />
+                        <NewSessionPanel draftPicker={draftChooser} sources={draftSources} onPickDraftProject={(machine,id) => beginDraft(machine,id,true)} host={host} endpoint={endpoint} surface={overviewSurface} onSurface={setOverviewSurface} onBack={backPage} nested={nested} />
                       ) : (
                         // Anchors the transcript's own furniture — the fade at
                         // its cut edge, the way back to the newest message — to

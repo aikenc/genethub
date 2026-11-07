@@ -32,9 +32,14 @@ body subscriptions are detached without stopping the Agent or
 closing the original machine client. Returning restores that source's tabs and drafts. Each source is keyed by identity plus its
 local workspace/session ID. Equal names are never merged.
 
-Directory reads use `session.page`, initially at most 100 summaries per source,
-and `workspace.list`, with two concurrent source reads. Older history is loaded
-explicitly by cursor; expanding a project reads its own first ten sessions.
+Directory reads use `session.page` and `workspace.list`, with two concurrent
+source reads. The initial global page contains at most 100 summaries. Up to 32
+roots with child Spaces also get five root-session previews each, in batches of
+at most ten workspace scopes; child activity cannot displace the front previews.
+Ordinary conversations are flat and sorted across sources. Projects with children
+show their root conversations by default, with internal conversations collapsed.
+Opening internals reads ten records per Space with at most two concurrent reads,
+and a Space filter narrows that single time-sorted list. Older history uses cursors.
 Search and status filters describe the loaded scope. Unsupported old daemons
 show an upgrade error instead of falling back to unbounded `session.list`.
 Directory snapshots refresh every 30 seconds while visible, on foreground resume,
@@ -63,3 +68,20 @@ daemon proposal. Exact activity totals independent of pagination, session-change
 pushes, a server search API, persistent cross-device icon preferences and explicit
 cross-machine Space membership are separate work. List filters expose their
 loaded scope; the Forward target picker reads at most 500 recent summaries.
+
+
+The header owns single-session actions; message Fork/Forward stay on messages.
+Bulk actions operate on the current visible source-qualified selection and require
+confirmed replies. Archives update the source store before refreshing, and newer
+directory facts cannot be overwritten by an older active-session cache. A missing
+delete acknowledgement leaves local navigation intact. Bulk deletion is not enabled
+without a daemon atomic-idle contract.
+
+New conversations are local drafts with source-labeled project cards. Retargeting
+keeps unsent text and browser-owned File objects in memory. Inline attachments
+carry their bytes without source paths; nonportable source paths remain in the
+original draft and are reported as missing in the new target. Binary content is
+never serialized to localStorage; reloads retain only text and attachment counts.
+Pinned projects are a browser preference keyed by machine and workspace. Product
+bootstrap projects default to pinned via the daemon's optional `builtin` fact,
+identified from its actual administrator storage location, never a display name.

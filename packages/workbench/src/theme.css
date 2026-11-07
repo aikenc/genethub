@@ -668,7 +668,7 @@ input:focus-visible {
   --gh-type-navigation: calc(12px + var(--gh-font-nudge));
 }
 .gh-filter-bar { display: flex; min-width: 0; align-items: center; gap: var(--gh-space-1); }
-.gh-filter-options { display: flex; flex: 1; min-width: 0; overflow-x: auto; overscroll-behavior-x: contain; gap: var(--gh-space-1); padding-block: 4px; scrollbar-width: thin; }
+.gh-filter-options { display: flex; flex: 1; min-width: 0; flex-wrap: wrap; gap: var(--gh-space-1); padding-block: 4px; }
 .gh-filter-option { flex: 0 0 auto; white-space: nowrap; min-height: var(--gh-touch-target); padding-inline: var(--gh-space-3); border-radius: var(--gh-radius-control); color: rgb(var(--muted)); font-size: var(--gh-type-label); }
 .gh-filter-option[aria-pressed="true"], .gh-filter-option[aria-current="page"] { color: rgb(var(--accent)); background: rgb(var(--accent) / 0.1); font-weight: 600; }
 .gh-filter-option:hover, .gh-filter-option:active { background: rgb(var(--raised)); }

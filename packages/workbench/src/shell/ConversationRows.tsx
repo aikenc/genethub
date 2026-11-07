@@ -18,6 +18,7 @@ import { SessionStatusIcon } from "./SessionStatusIcon";
 import { buildAgentSpaceTree } from "../workspace/agent-space-tree";
 
 interface RowActions {
+  rowActions?: boolean;
   selection?: { ids: ReadonlySet<string>; toggle(id: string): void; disabled?: boolean };
   onPickSession(sessionId: string): void;
   onRename(sessionId: string, title: string): void;
@@ -460,6 +461,7 @@ function SessionRow({
   onRename,
   onDelete,
   selection,
+  rowActions = true,
 }: {
   session: ListedSession;
   active: boolean;
@@ -534,12 +536,12 @@ function SessionRow({
               </span>
               <span className={`conversation-marks entity-secondary flex min-h-3.5 min-w-0 items-center gap-1 text-[10px] font-normal leading-[14px] ${!selection && !pick ? "conversation-row-meta" : ""}`}>
                 {(facts.kind || stale) && <SessionStatusIcon session={session} sessions={summaries} stale={stale} disconnected={disconnected} observedAtMs={observedAtMs} showLabel={stale} />}
-                {session.labels?.map((label) => <span key={label} className="session-label shrink-0 rounded bg-accent/10 px-1 text-accent">{label}</span>)}
+                {session.labels?.filter(label => label !== "系统发起").map((label) => <span key={label} className="session-label shrink-0 rounded bg-accent/10 px-1 text-accent">{label}</span>)}
               </span>
             </span>
           </button>
 
-          {!selection && !pick && <button
+          {!selection && !pick && rowActions && <button
             type="button"
             aria-label={`${displayTitle} 的更多操作`}
             aria-expanded={menu !== "shut"}
@@ -789,7 +791,7 @@ const MAX_LABEL_CHARS = 10;
  * A rename is one `remove` + `add` request, so another device never sees the
  * label briefly missing.
  */
-function LabelEditor({
+export function LabelEditor({
   labels,
   onChange,
   onDone,
