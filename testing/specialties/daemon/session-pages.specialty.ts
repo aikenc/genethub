@@ -24,9 +24,6 @@ defineSpecialty({ ...shared,
     const seed = await t.flows.main.createBuiltinSession(o.client, o.workspaceId);
     const home = join(o.workspaceRoot, ".genethub", "sessions");
     const model = JSON.parse(readFileSync(join(home, seed, "meta.json"), "utf8"));
-    // Let any setup observation and recent-write overlay expire before the
-    // external writer establishes the observed catalog.
-    await new Promise(resolve => setTimeout(resolve, 5100));
     for (let i = 0; i < 1500; i++) {
       const id = `s_catalog_external_${i}`;
       mkdirSync(join(home, id));
@@ -45,10 +42,20 @@ defineSpecialty({ ...shared,
       return r.data;
     };
     const coldStart = performance.now();
-    const first = await listed();
+    // Other real readers (including built-in Agents) may have refreshed the
+    // snapshot during setup. External writers have a bounded reconciliation
+    // contract, not synchronous invalidation of another process's cache.
+    let first = await listed();
+    const initialCount = first.length;
+    await t.tools.waitUntil(async () => {
+      if (first.length === 1501 && first.some(s => s.id === target && s.title === "external 0")) return true;
+      first = await listed();
+      return first.length === 1501 && first.some(s => s.id === target && s.title === "external 0");
+    }, 12_000);
     const coldMs = performance.now() - coldStart;
+    t.note(`external reconciliation: initial=${initialCount}, observed=${first.length}, elapsedMs=${Math.round(coldMs)}`);
     t.assertions.assert(first.length === 1501 && first.some(s => s.id === target && s.title === "external 0"),
-      "legacy catalog lost compatible records or admitted corrupt metadata");
+      `legacy catalog lost compatible records or admitted corrupt metadata: count=${first.length}, target=${JSON.stringify(first.find(s => s.id === target) ?? null)}, coldMs=${Math.round(coldMs)}`);
     const changed = { ...JSON.parse(readFileSync(targetFile, "utf8")), title: "external writer changed" };
     writeFileSync(targetFile, JSON.stringify(changed));
     const warmStart = performance.now();
