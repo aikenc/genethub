@@ -597,19 +597,34 @@ impl Workspaces {
         let mut budget = crate::blocking::WorkBudget::new();
         for info in &mut out {
             budget.checkpoint().await;
-            let dir = info.workspace_file.as_deref()
-                .filter(|file| Path::new(file).file_name().is_some_and(|name| name == crate::space_descriptor::FILE))
+            let dir = info
+                .workspace_file
+                .as_deref()
+                .filter(|file| {
+                    Path::new(file)
+                        .file_name()
+                        .is_some_and(|name| name == crate::space_descriptor::FILE)
+                })
                 .and_then(|file| Path::new(file).parent())
                 .unwrap_or_else(|| Path::new(&info.root));
             match crate::space_descriptor::read(dir) {
                 Ok(Some(descriptor)) if !descriptor.members.is_empty() => {
-                    let space = info.agent_space.get_or_insert_with(|| crate::agent_space::describe(&existing_or_unregistered(&Config::default(), &info.id)));
+                    let space = info.agent_space.get_or_insert_with(|| {
+                        crate::agent_space::describe(&existing_or_unregistered(
+                            &Config::default(),
+                            &info.id,
+                        ))
+                    });
                     space.members = Some(descriptor.members);
                 }
                 Err(reason) => {
                     if let Some(space) = info.agent_space.as_mut() {
-                        let health = space.health.get_or_insert(AgentSpaceHealth { status: "unhealthy".into(), reasons: Vec::new() });
-                        health.status = "unhealthy".into(); health.reasons.push(reason);
+                        let health = space.health.get_or_insert(AgentSpaceHealth {
+                            status: "unhealthy".into(),
+                            reasons: Vec::new(),
+                        });
+                        health.status = "unhealthy".into();
+                        health.reasons.push(reason);
                     }
                 }
                 _ => {}

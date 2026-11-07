@@ -93,12 +93,23 @@ pub fn parse(text: &str) -> Result<Descriptor, String> {
             let mut names = std::collections::HashSet::new();
             let mut members = Vec::new();
             for item in items {
-                let member: genehub_proto::SpaceMemberReference = serde_json::from_value(item.clone())
-                    .map_err(|_| "members requires machineId and workspaceId strings".to_string())?;
-                if [&member.machine_id, &member.workspace_id].iter().any(|id| id.trim().is_empty() || id.len() > 200 || id.trim() != id.as_str())
-                    || member.name.as_ref().is_some_and(|name| name.trim().is_empty() || name.len() > 200)
+                let member: genehub_proto::SpaceMemberReference =
+                    serde_json::from_value(item.clone()).map_err(|_| {
+                        "members requires machineId and workspaceId strings".to_string()
+                    })?;
+                if [&member.machine_id, &member.workspace_id]
+                    .iter()
+                    .any(|id| id.trim().is_empty() || id.len() > 200 || id.trim() != id.as_str())
+                    || member
+                        .name
+                        .as_ref()
+                        .is_some_and(|name| name.trim().is_empty() || name.len() > 200)
                     || !seen.insert((member.machine_id.clone(), member.workspace_id.clone()))
-                    || member.name.as_ref().is_some_and(|name| !names.insert(name.clone())) {
+                    || member
+                        .name
+                        .as_ref()
+                        .is_some_and(|name| !names.insert(name.clone()))
+                {
                     return Err("members contains invalid or duplicate Space references".into());
                 }
                 members.push(member);
