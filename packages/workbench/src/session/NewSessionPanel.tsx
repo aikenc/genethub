@@ -65,7 +65,7 @@ export function NewSessionPanel({ endpoint, surface = "sessions", onSurface, onB
     guidanceKey ? guidanceKey.split("\n") : undefined), [workspace?.id, guidanceKey]);
   const sessionSurface = !draftPicker && (surface === "sessions" || surface === "attention" || surface === "activity");
   useEffect(() => {
-    const filter = surface === "attention" ? "pending" : surface === "activity" ? "running" : null;
+    const filter = surface === "attention" || surface === "activity" ? "running" : null;
     if (filter && view.filter !== filter) setView(old => ({...old, showAll: true, archived: false, historyQuery: "", filter}));
   }, [surface, workspace?.id]);
   const owned = (activity.sessions ?? []).filter(s => s.workspaceId === workspace?.id);

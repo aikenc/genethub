@@ -1,4 +1,5 @@
-import { ListPane, DetailBackButton } from "../ui/ListLayout";
+import { DetailBackButton } from "../ui/ListLayout";
+import { WORKBENCH_SPLIT_WIDTH } from "../ui/breakpoints";
 import "../ui/entity-lists.css";
 import { usePageNavigation } from "./usePageNavigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -55,13 +56,11 @@ import {
 import type { MachineSummary } from "../protocol/summary-directory";
 import { SessionCoordination } from "../session/SessionCoordination";
 import { MachineDirectoryLists } from "./MachineDirectoryLists";
-import { ConversationList as Sidebar } from "./ConversationList";
 import { ToolsMenu } from "../shell/ToolsMenu";
 import { WorkbenchNavigation } from "../shell/WorkbenchNavigation";
 import { AgentDetailsEnvironment } from "../workspace/AgentDetails";
 import { draftIdentities, readLocalDraft, saveLocalDraft, hasLocalDraftContent } from "../session/localConversation";
 import { SessionHeading } from "../session/SessionHeading";
-import { WorkspaceBrowser } from "../workspace/WorkspaceBrowser";
 import type { ExtraTab } from "../shell/tabs";
 import { TitleBar } from "../shell/TitleBar";
 import { useTheme } from "../theme/store";
@@ -193,7 +192,6 @@ export function App({
   >(() => (host.pendingPairing?.() ? "working" : "idle"));
   const {sessionsOpen, setSessionsOpen, section, setSection, back: backPage, replaceNextPage,
     rootNextPage, nested, overviewSurface, setOverviewSurface} = usePageNavigation();
-  const [spacesVisited, setSpacesVisited] = useState(false);
   const expertCreator = useRef<OpenWorkspaceHandle>(null);
   const [composerHeight, setComposerHeight] = useState(128);
   const [composerMinimized, setComposerMinimized] = useState(false);
@@ -204,7 +202,13 @@ export function App({
   const [sidebarHidden, setSidebarHidden] = useState(false);
   const pickedMachine = useRef<Target | null>(null);
   const connections = useMemo(() => new MachineConnections({
-    targets: options => host.targets?.(options) ?? Promise.resolve([]),
+    targets: async options => {
+      if (host.targets) return host.targets(options);
+      const found = await host.endpoint();
+      if (!found) return [];
+      return [{ id:"default", kind:"local", label:found.label, online:true,
+        deviceHandle:found.localServerProof?.machineId ?? useWorkbench.getState().client?.identity?.machineId }];
+    },
     openTarget: async id => {
       if (host.openTarget && id !== "default") return host.openTarget(id, { remember: false });
       const found = await host.endpoint();
@@ -221,7 +225,7 @@ export function App({
     return () => { pending.set(connections, setTimeout(() => { connections.close(); pending.delete(connections); }, 0)); };
   }, [connections]);
   useEffect(() => {
-    const media = window.matchMedia?.("(min-width: 768px)");
+    const media = window.matchMedia?.(`(min-width: ${WORKBENCH_SPLIT_WIDTH}px)`);
     const update = () => connections.setLimit(media?.matches === false ? 3 : 4);
     update(); media?.addEventListener?.("change", update);
     return () => media?.removeEventListener?.("change", update);
@@ -246,7 +250,6 @@ export function App({
   }, []);
 
   useEffect(() => host.onTargetRequested?.(pickTarget), [host, pickTarget]);
-  useEffect(() => { if (section === "spaces") setSpacesVisited(true); }, [section]);
   const workbench = useWorkbench();
   useEffect(() => connections.onInvalidated(machine => {
     const state = useWorkbench.getState();
@@ -516,7 +519,7 @@ export function App({
   // crosses the phone/desktop breakpoint.
   useEffect(() => {
     if (typeof window.matchMedia !== "function") return;
-    const media = window.matchMedia("(min-width: 768px)");
+    const media = window.matchMedia(`(min-width: ${WORKBENCH_SPLIT_WIDTH}px)`);
     const syncLimit = () => useWorkbench.getState().setTabLimit(media.matches ? 16 : 6);
     syncLimit();
     media.addEventListener?.("change", syncLimit);
@@ -946,31 +949,33 @@ export function App({
             if (chat) workbench.activateTab(chat.id);
             else workbench.newSession(null, null);
           }
-          if (next === "spaces") setSpacesVisited(true);
           setSection(next);
         }} />
-        {host.targets && host.openTarget ? <MachineDirectoryLists connections={connections}
-          host={host} endpoint={endpoint} section={section === "spaces" ? "projects" : "sessions"}
+        <MachineDirectoryLists connections={connections}
+          endpoint={endpoint} section={section === "spaces" ? "projects" : "sessions"}
           open={sessionsOpen} hidden={sidebarHidden || !["sessions", "spaces"].includes(section) || section === "sessions" && !showChat}
-          onOpen={async (machine, sessionId, workspaceId) => {
-            if (workspaceId) setDraftChooser(false);
-            if (machine.deviceHandle === useWorkbench.getState().client?.identity?.machineId) {
-              if (sessionId) {
-                rootNextPage();
-                const selecting = useWorkbench.getState().selectSession(sessionId);
-                setSection("sessions"); setSessionsOpen(false);
-                await selecting;
-              }
-              else if (workspaceId) openOverview(workspaceId);
-            } else {
-              const lease = await connections.acquire(machine);
+          onOpen={async (machine, sessionId, workspaceId, signal) => {
+            signal?.throwIfAborted();
+            const lease = await connections.acquire(machine, {signal});
+            try {
+              signal?.throwIfAborted();
+              if (workspaceId) setDraftChooser(false);
               const previous = useWorkbench.getState().client;
+              // Align even a cached source with the latest intent: an older
+              // remote attachment may still be pending when the user returns.
               pickTarget(machine, lease.endpoint);
-              if (sessionId) { setPendingJumpFrom(previous); setPendingJumpSession(sessionId); }
-              else if (workspaceId) setPendingProject({ machineId: machine.deviceHandle ?? machine.id, workspaceId });
-              lease.release();
-            }
-            rootNextPage(); setSessionsOpen(false); setSection(sessionId ? "sessions" : "spaces");
+              if (previous === lease.client) {
+                if (sessionId) {
+                  rootNextPage();
+                  const selecting = useWorkbench.getState().selectSession(sessionId);
+                  setSection("sessions"); setSessionsOpen(false);
+                  await selecting;
+                  return; // A late body reply cannot replace a newly opened page.
+                } else if (workspaceId) openOverview(workspaceId);
+              } else if (sessionId) { setPendingJumpFrom(previous); setPendingJumpSession(sessionId); }
+              else if (workspaceId) setPendingProject({ machineId: lease.client.identity!.machineId, workspaceId });
+              if (!signal?.aborted) { rootNextPage(); setSessionsOpen(false); setSection(sessionId ? "sessions" : "spaces"); }
+            } finally { lease.release(); }
           }} onNewSession={beginDraft} onSources={setDraftSources}
           onAddProject={machine => {
             if (!machine || machine.deviceHandle === useWorkbench.getState().client?.identity?.machineId) { expertCreator.current?.open(); return; }
@@ -979,16 +984,8 @@ export function App({
               setPendingProject({ machineId: machine.deviceHandle ?? lease.client.identity!.machineId, addProject: true });
               lease.release();
             }).catch((error: unknown) => useWorkbench.setState({ notice: error instanceof Error ? error.message : String(error) }));
-          }} /> : <>
-          <Sidebar host={host} open={sessionsOpen && section === "sessions"} sessionOnly
-            hidden={sidebarHidden || section !== "sessions" || !showChat} endpoint={endpoint}
-            onNavigate={() => { rootNextPage(); setSessionsOpen(false); setSection(useWorkbench.getState().activeSessionId ? "sessions" : "spaces"); }} />
-          {spacesVisited && workbench.client?.identity?.machineId ? <ListPane label="项目列表面板" open={sessionsOpen} hidden={section !== "spaces"}>
-            <WorkspaceBrowser host={host} endpoint={endpoint} key={workbench.client.identity.machineId} deviceName={endpoint.label}
-              selectedId={starting ? draft?.workspaceId : undefined} onNewSession={id => { rootNextPage(); openOverview(id); }} />
-          </ListPane> : null}
-        </>}
-        {section === "discover" ? <section style={{ paddingTop: "calc(1.5rem + var(--safe-area-top))" }} className="min-h-0 min-w-0 flex-1 overflow-y-auto p-6" aria-label="发现"><div className="mx-auto max-w-2xl py-8"><p className="text-xs text-muted">{endpoint.label}</p><h1 className="mt-3 text-2xl font-medium">发现</h1><p className="mt-6 text-base leading-relaxed text-muted">来自各个项目的新想法，将在这里与你见面。</p><p className="mt-3 text-sm leading-relaxed text-faint">自动发现尚未启用。你现在可以进入任一项目，让它基于已有内容提出建议。</p><button type="button" className="mt-6 min-h-11 rounded-xl bg-accent px-4 text-sm text-white" onClick={() => { setSpacesVisited(true); setSessionsOpen(true); setSection("spaces"); }}>浏览项目</button></div></section> : null}
+          }} />
+        {section === "discover" ? <section style={{ paddingTop: "calc(1.5rem + var(--safe-area-top))" }} className="min-h-0 min-w-0 flex-1 overflow-y-auto p-6" aria-label="发现"><div className="mx-auto max-w-2xl py-8"><p className="text-xs text-muted">{endpoint.label}</p><h1 className="mt-3 text-2xl font-medium">发现</h1><p className="mt-6 text-base leading-relaxed text-muted">来自各个项目的新想法，将在这里与你见面。</p><p className="mt-3 text-sm leading-relaxed text-faint">自动发现尚未启用。你现在可以进入任一项目，让它基于已有内容提出建议。</p><button type="button" className="mt-6 min-h-11 rounded-xl bg-accent px-4 text-sm text-white" onClick={() => { setSessionsOpen(true); setSection("spaces"); }}>浏览项目</button></div></section> : null}
         {section === "tools" ? <section className="flex min-h-0 min-w-0 flex-1 flex-col" aria-label="全局设置"><header style={{ paddingTop: "calc(1rem + var(--safe-area-top))" }} className="border-b border-line px-6 py-4"><p className="text-xs text-muted">{endpoint.label}</p><h1 className="mt-1 text-xl font-medium">设置</h1><p className="mt-2 text-xs text-muted">文件、变更和终端位于所属项目。</p></header><ToolsMenu scope="global" density="phone" extraTabs={extraTabs} onNavigate={() => setSection("sessions")}><div>{sidebarMenu}</div><div className="md:hidden">{mobileTools}</div><div className="hidden md:block">{desktopTools}</div></ToolsMenu></section> : null}
 
         {((section === "spaces" && (!starting || !showChat)) || (section === "sessions" && starting && showChat)) && <section aria-label="未选择内容" className="hidden min-w-0 flex-1 items-center justify-center bg-bg p-6 text-sm text-muted md:flex">{section === "spaces" ? "选择一个项目，查看会话与配置" : "选择会话，继续话题"}</section>}
@@ -1095,7 +1092,7 @@ export function App({
                           <TimelineView
                             key={`${deviceHandle ?? endpoint.label}:${session?.id ?? "empty"}`}
                             readingKey={`${deviceHandle ?? endpoint.label}:${session?.id ?? "empty"}`}
-                            visible={section === "sessions" && (!sessionsOpen || window.innerWidth >= 768)}
+                            visible={section === "sessions" && (!sessionsOpen || window.innerWidth >= WORKBENCH_SPLIT_WIDTH)}
                             state={workbench.timeline}
                             {...(forkController ? { forkController } : {})}
                             {...(forwardController ? { forwardController } : {})}

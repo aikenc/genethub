@@ -46,6 +46,7 @@ import {
   decodeTabToken,
   expandLocator,
   expandPreviewPath,
+  locatorsMatch,
   NEW_SESSION_ID,
 } from "../location/locator";
 import type { AddressScope } from "../location/workbench";
@@ -3203,9 +3204,10 @@ async function loadWorkspaces(client: Client, set: Setter): Promise<WorkspaceInf
  */
 async function land(get: () => WorkbenchState): Promise<void> {
   const intent = takeLandingIntent();
-  if (intent && (await applyLanding(get, intent))) {
-    finishLanding(get, intent);
-    return;
+  if (intent) {
+    const applied = await applyLanding(get, intent);
+    if (applied === "superseded") return;
+    if (applied) { finishLanding(get, intent); return; }
   }
   if (intent?.workspaceId) {
     const workspaceId = expandLocator(
@@ -3255,12 +3257,33 @@ async function land(get: () => WorkbenchState): Promise<void> {
 async function applyLanding(
   get: () => WorkbenchState,
   intent: LandingIntent,
-): Promise<boolean> {
+): Promise<boolean | "superseded"> {
   if (intent.sessionId && intent.sessionId !== NEW_SESSION_ID) {
-    const sessionId = expandLocator(
-      intent.sessionId,
-      get().sessions.map((session) => session.id),
-    );
+    let sessionId = expandLocator(intent.sessionId, get().sessions.map(session => session.id));
+    const client = get().client;
+    const workspaceId = intent.workspaceId ? expandLocator(intent.workspaceId, get().workspaces.map(w => w.id)) : null;
+    const before = get();
+    // Compact bookmarks may name a child/history session outside loaded pages.
+    // Resolve only that addressed Space, through bounded metadata pages. Never
+    // turn initial navigation into a machine-wide full-history read.
+    if (!sessionId && client && workspaceId && client.identity?.features?.includes("session.page.v1")) {
+      let cursor: string | null = null;
+      const matches = new Set<string>(), visited = new Set<string>();
+      do {
+        const reply = await client.call({ type: "session.page", payload: {
+          requests: [{workspaceId, limit: 100, cursor}], includeArchived: true,
+        } });
+        if (get().client !== client || get().activeSessionId !== before.activeSessionId || get().activeTabId !== before.activeTabId) return "superseded";
+        if (reply?.type !== "sessionPages" || !reply.data[0] || reply.data[0].error) break;
+        const page = reply.data[0];
+        for (const row of page.sessions) if (locatorsMatch(intent.sessionId,row.id)) matches.add(row.id);
+        if (matches.size > 1) break; // Never guess an ambiguous compact address.
+        cursor = page.nextCursor;
+        if (cursor && visited.has(cursor)) break;
+        if (cursor) visited.add(cursor);
+      } while (cursor);
+      if (!cursor && matches.size === 1) sessionId = [...matches][0]!;
+    }
     if (sessionId) {
       await get().selectSession(sessionId);
       return true;
@@ -3813,12 +3836,17 @@ function withSnapshotStatus(previous: TimelineState, snapshot: SessionSnapshot):
 
 function adoptSnapshotStatus(sessionId: string, snapshot: SessionSnapshot, set: Setter): void {
   const status = snapshot?.summary?.status;
-  if (!status) return;
+  if (!status || snapshot.summary.id !== sessionId) return;
   set((state) => ({
     sessionObservations: { ...state.sessionObservations, [sessionId]: Date.now() },
-    sessions: state.sessions.map((session) =>
-      session.id === sessionId ? { ...session, ...snapshot.summary } : session,
-    ),
+    // A directory/deep link can select a session outside the loaded pages.
+    // The authoritative snapshot must introduce its summary as well as update it.
+    sessions: state.sessions.some(session => session.id === sessionId)
+      ? state.sessions.map(session => session.id === sessionId ? { ...session, ...snapshot.summary } : session)
+      : [...state.sessions, snapshot.summary],
+    tabs: state.tabs.map(tab => tab.kind === "chat" && tab.sessionId === sessionId
+      ? { ...tab, title: snapshot.summary.title || "新会话" } : tab),
+    ...(state.activeSessionId === sessionId ? { activeWorkspaceId: snapshot.summary.workspaceId } : {}),
   }));
 }
 

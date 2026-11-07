@@ -26,7 +26,8 @@ optimization; it is not a second machine owner. CLI remote dispatch remains owne
 by the daemon and is unchanged.
 
 The conversation and project lists share one machine filter, defaulting to all
-machines. Filtering does not attach a new active client. Opening a conversation
+machines. Single-endpoint hosts use the same directory through a default local
+target; they no longer render a different sidebar. Filtering does not attach a new active client. Opening a conversation
 borrows its machine's client and selects that client's source-owned store. Delayed replies always update their source store; inactive
 body subscriptions are detached without stopping the Agent or
 closing the original machine client. Returning restores that source's tabs and drafts. Each source is keyed by identity plus its
@@ -99,3 +100,19 @@ never serialized to localStorage; reloads retain only text and attachment counts
 Pinned projects are a browser preference keyed by machine and workspace. Product
 bootstrap projects default to pinned via the daemon's optional `builtin` fact,
 identified from its actual administrator storage location, never a display name.
+
+The visible list has two toolbar rows: machine/search/new above and filters/bulk/
+more below. In-progress includes actual Human requests and failures, while icons
+keep those states distinct. Bounded directory reads include archived summaries;
+current/archived views filter that shared snapshot locally, so archived work
+remains reachable and changing views cannot race a new transport range.
+
+Navigation has its own cancellable intent and never disables every row. A newer
+selection cancels an older connection lease without closing another consumer.
+Page transitions happen before awaiting the body; a late body cannot reopen a
+page the user has already left. The 700px split breakpoint includes iPad Mini;
+compact split navigation is 56px and its list 256–280px, with 44px touch targets.
+
+A compact bookmark outside loaded pages resolves within its addressed Space via
+bounded metadata pages, including archived history. It does not load other
+Spaces or accept an ambiguous locator; a later navigation cancels its result.
