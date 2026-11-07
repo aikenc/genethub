@@ -1,14 +1,15 @@
 // What the expert's timer hook does when a background session does not simply finish. Each branch of
 // `tools/team.py hook` is driven by a real session that misbehaves in one named way (the script Agent
-// fixture), through the shipped daemon, template and SpaceBuilder; the front must be told exactly once,
-// in words that say what happened and what to do, and what cannot be delivered must say so to the caller.
+// fixture), through the shipped daemon, template and SpaceBuilder. Business
+// outcomes reach the front once; quiet work and mechanism diagnostics stay in
+// internal notes, as required by team-front/team-reflect, without ending work.
 //
 //   waiting  a session stops at a question for the person      -> one report naming the request
 //   paused   the person interrupts a running session           -> one report that it was paused
 //   failed   the Agent process dies mid-turn                   -> one report that it failed
-//   stuck    a running session makes no progress               -> one report after the threshold
+//   stuck    a running session makes no progress               -> one internal diagnostic, still running
 //   gone     the session is deleted behind the hook's back     -> one report; the record is closed
-//   broken   a hook file is damaged                            -> one report naming the file
+//   broken   a hook file is damaged                            -> one internal diagnostic naming the file
 //   full     the platform and local inbox reach their limits   -> bounded storage and actionable refusal
 
 import { spawnSync } from "node:child_process";
@@ -34,15 +35,15 @@ const isSystem = (item: Item): boolean => item.origin?.sessionId === "system";
 defineJourney(
   {
     id: "journey.expert.fault-injection",
-    title: "the expert's timer reports each way a background session can go wrong, once, and says what to do",
+    title: "the expert's timer routes business outcomes once and keeps mechanism diagnosis internal",
     oracle:
-      "waiting/interrupted/failed/stuck/deleted sessions and damaged hooks produce one system notice; a full platform queue refuses further input while the local inbox retains up to32 complete messages without claiming a platform receipt, then refuses overflow with actionable state and no change to accepted entries",
+      "waiting/interrupted/failed/deleted sessions produce one system notice; quiet work stays running with one internal diagnostic and damaged hooks create internal notes without waking the front; a full platform queue refuses further input while the local inbox retains up to32 complete messages without claiming a platform receipt, then refuses overflow with actionable state and no change to accepted entries",
     catches: [
       "a session waiting on the person that nobody is told about",
       "a paused or failed background session that goes unnoticed",
-      "a stuck session that is never flagged, or flagged on every timer run",
+      "quiet work is unobserved, repeatedly reported, or automatically terminated",
       "a deleted session that leaves its pending record behind forever",
-      "a damaged hook file that stops all reconciliation silently",
+      "a damaged hook file loses its internal diagnosis or wakes the front",
       "a send to a full queue that fails without saying why",
     ],
     tags: ["core", "expert", "daemon", "fault-injection"],
@@ -190,11 +191,15 @@ defineJourney(
 
       // stuck: running, silent, past the threshold (4 s in this lease).
       const stuck = await spawnWith("ctl-accept-then-silent", "makes no progress");
-      await exactlyOnce(stuck, /没有进展/, "stuck");
+      await t.tools.waitUntil(() => anomalyNotes().some(n => n.kind === "anomaly" && n.session === stuck), 40_000);
+      await settle(4_000);
       t.assertions.assert(
-        anomalyNotes().some((n) => n.kind === "anomaly" && n.session === stuck),
-        `stuck session ${stuck} did not leave a kind=anomaly note: ${JSON.stringify(anomalyNotes())}`,
+        anomalyNotes().filter(n => n.kind === "anomaly" && n.session === stuck).length === 1,
+        `quiet session ${stuck} did not retain one internal diagnostic`,
       );
+      t.assertions.assert((await notices(stuck, /没有进展/)).length === 0, "quiet diagnosis woke the front");
+      const stillRunning = await opened.client.call({ type: "session.get", payload: { sessionId: stuck } });
+      t.assertions.assert(stillRunning?.type === "snapshot" && stillRunning.data.summary.status === "running" && pendingIds().includes(stuck), "silence ended work or retired its pending receipt");
 
       // gone: deleted behind the hook's back, after it has already reported the pause.
       const gone = await spawnWith("ctl-accept-then-silent", "will be deleted");
@@ -213,7 +218,11 @@ defineJourney(
 
       // broken: a hook file the daemon cannot use.
       writeFileSync(path.join(alice, ".genethub/hooks/damaged.genet.json"), "{ not json");
-      await exactlyOnce("damaged", /机制出了问题/, "broken hook file");
+      const damagedNotes = () => anomalyNotes().filter(n => n.kind === "anomaly" && JSON.stringify(n).includes("damaged"));
+      await t.tools.waitUntil(() => damagedNotes().length >= 1, 40_000);
+      await settle(4_000);
+      t.assertions.assert(damagedNotes().length === 1, "one damaged hook multiplied internal incidents");
+      t.assertions.assert((await notices("damaged", /机制出了问题/)).length === 0, "mechanism diagnosis woke the front");
 
       // Capacity is separate at the two real acceptance boundaries.
       const target = await spawnWith("ctl-accept-then-silent", "queue target");
