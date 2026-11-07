@@ -57,7 +57,10 @@ defineSpecialty({
     await page.goto(`${hub.origin}/d/${a.client.identity!.machineId}/w/${a.workspaceId}/s/${first}`);
     await page.getByRole("heading", { name: "Hosted A session", exact: true }).waitFor();
     const list = page.getByRole("complementary", { name: "会话列表", exact: true });
-    await list.getByRole("combobox", { name: "机器筛选" }).getByRole("option", { name: /全部机器 · 2\/2 在线/ }).waitFor({ state: "attached" });
+    await list.getByRole("button", { name: /Hosted B session/ }).waitFor();
+    await list.getByRole("button", { name: "机器筛选", exact: true }).click();
+    await list.getByRole("menuitemradio", { name: /全部机器.*2\/2 在线/ }).waitFor();
+    await page.keyboard.press("Escape");
     const beforeJump = connects;
     phase="jump";
     await list.getByRole("button", { name: /Hosted B session/ }).click();

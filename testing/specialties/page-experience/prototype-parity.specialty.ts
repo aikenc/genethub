@@ -56,10 +56,14 @@ for (const width of [390,1280]) defineSpecialty({
     const nav=page.getByRole("navigation",{name:"工作台导航",exact:true});
     await page.getByRole("heading",{name:"普通会话直接可见",exact:true}).waitFor();
     await showList();
-    await list.getByRole("combobox",{name:"机器筛选",exact:true}).getByRole("option",{name:/全部机器 · 1\/1 在线/}).waitFor({state:"attached"});
+    await list.getByRole("button",{name:"机器筛选",exact:true}).click();
+    await list.getByRole("menuitemradio",{name:/全部机器.*1\/1 在线/}).waitFor();
+    await page.keyboard.press("Escape");
     phase="root previews";
     const group=list.getByRole("region",{name:"项目 原型团队",exact:true});
     await group.getByRole("button",{name:/前台会话8/}).waitFor();
+    t.assertions.assert(await group.getByRole("img",{name:"项目状态尚未完整读取",exact:true}).count()===0,"historical pagination displayed an unknown project warning");
+    await group.getByRole("img",{name:"至少 1 待你处理",exact:true}).first().waitFor();
     t.assertions.assert(await group.locator(".conversation-row").count()===5,"front preview is not exactly five rows");
     await list.getByRole("button",{name:/普通会话直接可见/}).waitFor();
     t.assertions.assert(await list.locator(".project-session-group").count()===1,"ordinary conversations were forced into project groups");
@@ -124,6 +128,9 @@ for (const width of [390,1280]) defineSpecialty({
     if(width<768) await showList();
     await nav.getByRole("button",{name:"项目",exact:true}).click();
     const projects=page.getByRole("complementary",{name:"项目列表面板",exact:true});
+    await projects.getByRole("button",{name:"机器筛选",exact:true}).click();
+    await projects.getByRole("menuitemradio",{name:/原型验收机器.*3 项目/}).waitFor();
+    await page.keyboard.press("Escape");
     const pinned=projects.getByRole("button",{name:/置顶 ·/});
     await pinned.waitFor(); await pinned.click();
     t.assertions.assert(await projects.getByRole("region",{name:"项目 普通项目",exact:true}).count()===0,"collapsed pinned project remained visible");

@@ -44,8 +44,8 @@ export function SessionActivityIcons({ sessions, partial = false, stale = false 
   const icons = [Hand, TriangleAlert, Loader2, Circle];
   const names = ["待你处理", "运行异常", "Agent 处理中", "进行中"];
   const tones = ["text-accent", "text-danger", "text-ok", "text-muted"];
-  return <span className="inline-flex min-w-0 items-center gap-2" title={stale ? "上次同步状态" : partial ? "已加载会话的活动；完整项目状态尚未读取" : "当前会话活动"}>
-    {counts.map((n, i) => { const Icon = icons[i]!; return n ? <span key={i} role="img" aria-label={`${partial ? "已加载记录：" : ""}${n} ${names[i]}`} className={`inline-flex items-center gap-0.5 text-[11px] ${tones[i]}`}><Icon aria-hidden className={`h-4 w-4 ${i === 2 && !stale ? "animate-spin" : ""}`} />{n}</span> : null; })}
-    {(stale || partial) && <CircleDashed role="img" aria-label={stale ? "状态待同步" : "项目状态尚未完整读取"} className="h-4 w-4 text-faint" />}
+  return <span className="inline-flex min-w-0 items-center gap-2" title={stale ? "上次同步状态" : partial ? "≥ 表示已读取会话中的活动下限" : "当前会话活动"}>
+    {counts.map((n, i) => { const Icon = icons[i]!; return n ? <span key={i} role="img" aria-label={`${partial ? "至少 " : ""}${n} ${names[i]}`} className={`inline-flex items-center gap-0.5 text-[11px] ${tones[i]}`}><Icon aria-hidden className={`h-4 w-4 ${i === 2 && !stale ? "animate-spin" : ""}`} />{partial ? "≥" : ""}{n}</span> : null; })}
+    {stale && <CircleDashed role="img" aria-label="状态待同步" className="h-4 w-4 text-faint" />}
   </span>;
 }

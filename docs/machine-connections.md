@@ -44,9 +44,23 @@ Search and status filters describe the loaded scope. Unsupported old daemons
 show an upgrade error instead of falling back to unbounded `session.list`.
 Directory snapshots refresh every 30 seconds while visible, on foreground resume,
 and on explicit refresh. Active-source updates reuse the current store.
+Refresh progress is separate from the last confirmed source state: a healthy
+source stays usable during a normal refresh. A failed read remains uncertain
+until a subsequent successful read; starting a retry cannot revive old healthy
+status. Genuine offline/timeout/denial outcomes still change the source state.
 Offline snapshots are dated and unknown; an authorization rejection clears them.
 This is not the separately proposed session-change push protocol or an exact
 activity-count API.
+
+The machine filter uses a compact trigger with an ellipsized machine name. Its
+bounded menu lists source status, daemon version and loaded counts on separate
+lines; all machines is the default. Keyboard selection, Escape, outside clicks
+and focus changes close the menu without changing the execution target.
+Historical pagination is not an unknown runtime state: incomplete activity
+counts use a visible `≥` lower bound, while the dashed unknown icon is reserved
+for unavailable source/collaboration state. An exhausted per-Space cursor alone
+does not establish complete retained coverage after a machine-wide refresh.
+Absence of an activity icon does not assert that an incompletely read project is idle.
 
 The old machine switcher, overview dialog, Fork temporary-client helper, and
 unused `HubWorkspaceFabric` browser facade are removed. Hub workspace directory

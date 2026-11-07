@@ -14,11 +14,9 @@ import { buildAgentSpaceTree } from "../workspace/agent-space-tree";
 import { ListHeader, ListPane, ListScroll } from "../ui/ListLayout";
 import { relativeTime } from "../ui/relativeTime";
 import { WorkspaceDetailsDialog } from "../workspace/WorkspaceDetailsDialog";
+import { MachineFilter, machineReady as fresh, machineStateLabel as stateLabel } from "./MachineFilter";
 
-const stateLabel = { deferred: "待同步", waiting: "待同步", loading: "同步中", ready: "在线", partial: "在线",
-  offline: "离线", denied: "授权已撤销", timeout: "读取超时", unavailable: "暂不可用", notChecked: "未同步", rateLimited: "稍后重试" };
 const keyOf = (machine: Target, id: string) => JSON.stringify([machine.deviceHandle ?? machine.id, id]);
-const fresh = (source: MachineSummary) => source.state === "ready" || source.state === "partial";
 const latest = (s: SessionSummary) => s.messagePreview?.atMs ?? s.updatedAtMs;
 const byTime = (a: SessionSummary, b: SessionSummary) => latest(b) - latest(a) || a.id.localeCompare(b.id);
 
@@ -202,7 +200,7 @@ export function MachineDirectoryLists({ connections, host, endpoint, section, op
         <AgentAvatar id={g.workspace.id} name={g.workspace.name} />
         <span className="min-w-0 flex-1"><span className="flex min-w-0 items-center gap-2"><span className="min-w-0 flex-1 truncate text-sm font-medium">{g.workspace.name}</span><span className="shrink-0 text-[10px] text-faint">{g.workspace.builtin ? "内置" : g.time ? relativeTime(g.time) : ""}</span></span>
           <span className="mt-1 flex min-w-0 items-center gap-2"><SessionActivityIcons sessions={g.row.sessions.filter(s => s.workspaceId === g.workspace.id || g.children.some(w => w.id === s.workspaceId))} partial={g.row.state === "partial" || Boolean(g.row.nextCursor)} stale={!fresh(g.row)} />
-            <span className={`ml-auto min-w-0 truncate text-[11px] ${fresh(g.row) ? "text-faint" : "text-danger"}`}>{g.row.target.label}{!fresh(g.row) ? ` · ${stateLabel[g.row.state]}` : ""}</span>
+            <span className={`ml-auto min-w-0 truncate text-[11px] ${["offline","denied","timeout","unavailable","rateLimited"].includes(g.row.state) ? "text-danger" : "text-faint"}`}>{g.row.target.label}{!fresh(g.row) ? ` · ${stateLabel[g.row.state]}` : ""}</span>
           </span>
         </span>
         {section === "sessions" && <ChevronDown size={16} className={`shrink-0 text-muted ${g.show ? "" : "-rotate-90"}`} />}
@@ -230,15 +228,15 @@ export function MachineDirectoryLists({ connections, host, endpoint, section, op
       </>}
     </>}
   </section>;
-  const changeArchived = () => { const next = !includeArchived; setIncludeArchived(next); setCursors({}); source.current?.setIncludeArchived(next); setOptions(false); void refresh(); };
+  const changeArchived = () => {
+    if (lock.current || refreshLock.current) return;
+    const next = !includeArchived; setIncludeArchived(next); setCursors({}); source.current?.setIncludeArchived(next); setOptions(false); void refresh();
+  };
   return <ListPane label={section === "projects" ? "项目列表面板" : "会话列表"} open={open} hidden={hidden}>
     <ListHeader>
       <div className="flex min-h-11 min-w-0 items-center gap-1">
         {searching ? <><input autoFocus aria-label={`搜索${section === "projects" ? "项目" : "会话"}`} placeholder="搜索会话、项目或 Space" value={query} onChange={e => setQuery(e.target.value)} className="min-h-11 min-w-0 flex-1 rounded-lg bg-raised px-2 text-sm" /><button aria-label="关闭搜索" className="min-h-11 shrink-0 px-2 text-xs" onClick={() => { setSearching(false); setQuery(""); }}>取消</button></> : <>
-          <select aria-label="机器筛选" value={machineId} onChange={e => setMachineId(e.target.value)} className="min-h-11 min-w-0 flex-1 rounded-lg bg-transparent text-sm font-semibold">
-            <option value="">全部机器 · {sources.filter(fresh).length}/{sources.length} 在线</option>
-            {sources.map(row => <option key={row.target.id} value={row.target.id}>{row.target.label} · {stateLabel[row.state]}{row.version ? ` · ${row.version}` : ""}</option>)}
-          </select>
+          <MachineFilter sources={sources} value={machineId} onChange={setMachineId} section={section} />
           <button aria-label="搜索列表" className="flex h-11 w-8 shrink-0 items-center justify-center text-muted" onClick={() => setSearching(true)}><Search size={18} /></button>
           <button disabled={busy} aria-pressed={managing} className="min-h-11 shrink-0 px-2 text-xs text-muted" onClick={() => { setManaging(!managing); setSelection(new Set()); }}>{managing ? "完成" : "批量"}</button>
           <button aria-label={section === "projects" ? "添加项目" : "新建会话"} disabled={busy} className="flex min-h-11 shrink-0 items-center justify-center gap-1 rounded-lg bg-accent px-2 text-xs text-white" onClick={() => {
@@ -254,9 +252,9 @@ export function MachineDirectoryLists({ connections, host, endpoint, section, op
       </div>}
       {options && <><button aria-label="关闭列表选项" className="fixed inset-0 z-40 cursor-default" onClick={() => setOptions(false)} /><div role="menu" aria-label="列表选项" className="absolute right-3 top-full z-50 min-w-40 rounded-xl border border-line bg-surface p-1 shadow-xl">
         <button role="menuitem" disabled={busy || refreshing} className="min-h-11 w-full px-3 text-left text-sm" onClick={() => { setOptions(false); void refresh(); }}>{refreshing ? "刷新中…" : "刷新列表"}</button>
-        {section === "sessions" && <button role="menuitem" disabled={busy} className="min-h-11 w-full px-3 text-left text-sm" onClick={changeArchived}>{includeArchived ? "返回当前会话" : "查看已归档"}</button>}
+        {section === "sessions" && <button role="menuitem" disabled={busy || refreshing} className="min-h-11 w-full px-3 text-left text-sm" onClick={changeArchived}>{includeArchived ? "返回当前会话" : "查看已归档"}</button>}
       </div></>}
-      {includeArchived && section === "sessions" && <button className="min-h-9 w-full text-left text-xs text-accent" onClick={changeArchived}>已归档会话 · 返回当前</button>}
+      {includeArchived && section === "sessions" && <button disabled={busy || refreshing} className="min-h-9 w-full text-left text-xs text-accent" onClick={changeArchived}>已归档会话 · 返回当前</button>}
       {error && <p role="status" className="max-h-24 overflow-y-auto break-words text-xs text-muted">{error}</p>}
       {narrowed && <p className="text-xs text-muted">已检索 {sources.filter(fresh).length}/{sources.length} 台机器的已加载记录；可加载更早会话扩大范围。</p>}
     </ListHeader>
@@ -281,7 +279,7 @@ export function MachineDirectoryLists({ connections, host, endpoint, section, op
       <button disabled={!chosen.size || busy} onClick={() => setConfirming(true)} className="min-h-11 rounded-lg border border-line px-3 text-sm disabled:opacity-40">{section === "projects" ? "移除" : includeArchived ? "恢复" : "归档"}</button>
     </footer>}
     {confirming && <WorkspaceDetailsDialog title={section === "projects" ? "移除所选项目" : includeArchived ? "恢复所选会话" : "归档所选会话"} onClose={() => setConfirming(false)}><p className="text-sm">{section === "projects" ? "只移除项目登记，保留磁盘文件；运行中的项目由设备拒绝。" : "会话历史保留，归档不会停止任务。"}</p><button className="mt-3 min-h-11 w-full rounded-lg bg-accent text-sm text-white" onClick={() => void batch()}>确认处理 {chosen.size} 项</button></WorkspaceDetailsDialog>}
-    {legend && <WorkspaceDetailsDialog title="状态图标说明" onClose={() => setLegend(false)}><div className="space-y-3 text-sm"><p>手形：待你处理；警告：运行异常；转圈：Agent 处理中；圆圈：等待或协作进行中。</p><p>暂停：已暂停；协作：等待其他会话；收件箱：结果待处理；虚线圆：状态尚未完整确认；圆点：未读。</p><p className="text-xs text-muted">主状态按上述顺序优先显示。项目计数只覆盖已加载记录，虚线圆表示还不能确认完整项目状态；不把未知当作空闲。</p></div></WorkspaceDetailsDialog>}
+    {legend && <WorkspaceDetailsDialog title="状态图标说明" onClose={() => setLegend(false)}><div className="space-y-3 text-sm"><p>手形：待你处理；警告：运行异常；转圈：Agent 处理中；圆圈：等待或协作进行中。</p><p>暂停：已暂停；协作：等待其他会话；收件箱：结果待处理；虚线圆：连接或协作状态待核对；圆点：未读。</p><p className="text-xs text-muted">主状态按上述顺序优先显示。≥ 表示已读取会话中的活动下限，继续加载历史可能发现更多；没有图标不代表项目空闲。离线时保留上次确认结果。</p></div></WorkspaceDetailsDialog>}
     <span className="sr-only">当前正文来自 {endpoint.label}</span>
   </ListPane>;
 }

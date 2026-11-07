@@ -18,8 +18,12 @@ defineSpecialty({
     directory=new MachineSummaryDirectory({targets:async()=>targets,openTarget:async()=>({...daemonEndpoint(o.daemon),via:"loopback",label:"Budget source"})},{socketFactory:u=>{sockets++;return new WebSocket(u) as unknown as WebSocketLike;}});
     const first=await directory.refresh(()=>{}),row=first.sources[0]!;
     t.assertions.assert(!first.complete&&row.state==="partial"&&row.sessions.length===100&&row.sessionTotal===100&&Boolean(row.nextCursor)&&row.sessions.every(s=>ids.has(s.id)),"real native session truncation did not remain explicit");
+    let invalidRefresh=false;
+    const refreshing=await directory.refresh(v=>{if(v.complete||v.sources[0]?.state!=="partial"||v.sources[0].sessions.length!==100) invalidRefresh=true;});
+    t.assertions.assert(!invalidRefresh,"refresh relabeled bounded history as unknown or complete");
+    t.assertions.assert(!refreshing.sources[0]?.refreshing,"completed partial refresh still reports in-flight progress");
     targets=[{...targets[0]!,online:false}];const offline=await directory.refresh(()=>{});
-    t.assertions.assert(!offline.complete&&offline.sources[0]!.state==="offline"&&offline.sources[0]!.sessions.length===100&&offline.sources[0]!.updatedAt===row.updatedAt&&sockets===1,"offline refresh lost its stale label or opened another owner");
+    t.assertions.assert(!offline.complete&&offline.sources[0]!.state==="offline"&&offline.sources[0]!.sessions.length===100&&offline.sources[0]!.updatedAt===refreshing.sources[0]!.updatedAt&&sockets===1,"offline refresh lost its latest confirmed timestamp/stale label or opened another owner");
     targets=[{...targets[0]!,online:false},{...targets[0]!,id:"online-alias",online:true}];const dedup=await directory.refresh(()=>{});
     t.assertions.assert(dedup.sources.length===1&&dedup.sources[0]!.target.id==="online-alias"&&dedup.sources[0]!.state==="partial"&&sockets===1,"online device alias was not deduplicated");
     targets=[{id:"wrong-source",deviceHandle:"m_wrong_source",label:"Wrong source",kind:"remote",online:true}];

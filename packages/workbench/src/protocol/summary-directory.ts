@@ -12,6 +12,8 @@ export interface MachineSummary {
   nextCursor?: string | null;
   projectPages?: Record<string, { nextCursor: string | null; error?: string | null }>;
   state: SummaryState;
+  /** Refresh progress is independent of the last confirmed source state. */
+  refreshing?: boolean;
   stateSource: "directory" | "daemon" | "request";
   observedAt: string;
   updatedAt: string | null;
@@ -42,7 +44,13 @@ export class MachineSummaryDirectory {
   private directoryDenied = false;
   private rows: MachineSummary[] = [];
   private includeArchived = false;
-  setIncludeArchived(value: boolean): void { if (value !== this.includeArchived) this.previous.clear(); this.includeArchived = value; }
+  setIncludeArchived(value: boolean): void {
+    if (value !== this.includeArchived) {
+      this.controller?.abort(); this.generation++;
+      this.previous.clear(); this.rows = [];
+    }
+    this.includeArchived = value;
+  }
   private observer: ((value: SummaryDirectory) => void) | null = null;
   constructor(source: SummarySource, private options: Pick<ClientOptions, "socketFactory" | "onDiagnostic"> & { connections?: MachineConnections } = {}) {
     this.ownsConnections = !options.connections;
@@ -91,14 +99,22 @@ export class MachineSummaryDirectory {
       // supplies its expanded sources, including an empty set on first open.
       const activeKeys = new Set(targets.filter(target => !sourceIds || sourceIds.has(target.id)).slice(0, MAX_SOURCES).map(target => target.id));
       for (const id of this.previous.keys()) if (!keys.has(id)) this.previous.delete(id);
-      const rows = targets.map((target): MachineSummary => ({
+      const rows = targets.map((target): MachineSummary => {
+        // Retain the most recent outcome, including a failed read. A retry must
+        // not resurrect an older healthy state before the source answers.
+        const previous = this.rows.find(row => row.target.id === target.id) ?? this.previous.get(target.id);
+        const checking = activeKeys.has(target.id) && target.online !== false;
+        const confirmed = checking && (previous?.state === "ready" || previous?.state === "partial");
+        return ({
         target, stateSource: "directory", observedAt: new Date().toISOString(), state: sourceIds && !sourceIds.has(target.id) ? "deferred" : !activeKeys.has(target.id) ? "notChecked" : target.online === false ? "offline" : "waiting",
-        updatedAt: this.previous.get(target.id)?.updatedAt ?? null,
-        projectPages: this.previous.get(target.id)?.projectPages,
-        version: this.previous.get(target.id)?.version, nextCursor: this.previous.get(target.id)?.nextCursor,
-        sessionTotal: this.previous.get(target.id)?.sessionTotal ?? 0, workspaceTotal: this.previous.get(target.id)?.workspaceTotal ?? 0,
-        sessions: this.previous.get(target.id)?.sessions ?? [], workspaces: this.previous.get(target.id)?.workspaces ?? [],
-      }));
+        ...(confirmed ? {state: previous.state, stateSource: previous.stateSource, observedAt: previous.observedAt} : {}),
+        refreshing: checking,
+        updatedAt: previous?.updatedAt ?? null,
+        projectPages: previous?.projectPages,
+        version: previous?.version, nextCursor: previous?.nextCursor,
+        sessionTotal: previous?.sessionTotal ?? 0, workspaceTotal: previous?.workspaceTotal ?? 0,
+        sessions: previous?.sessions ?? [], workspaces: previous?.workspaces ?? [],
+      }); });
       this.rows = rows;
       const emit = () => { if (!controller.signal.aborted && this.generation === generation) this.emit(); };
       const pendingRows = rows.filter(row => activeKeys.has(row.target.id)).sort((a,b) => Number(this.connections.hasReady(b.target)) - Number(this.connections.hasReady(a.target)));
@@ -110,20 +126,21 @@ export class MachineSummaryDirectory {
           if (current >= pendingRows.length) return;
           const row = pendingRows[current]!;
           if (row.state === "offline") continue;
-          row.state = "loading"; emit();
+          if (row.state === "waiting") row.state = "loading";
+          emit();
           try {
             const value = await this.read(row.target, controller.signal);
             if (controller.signal.aborted || this.generation !== generation) return;
             if (!this.canPublish(row)) { emit(); continue; }
-            Object.assign(row, value, { state: value.nextCursor || value.workspaceTotal > MAX_ITEMS_PER_SOURCE ? "partial" : "ready", stateSource: "daemon", observedAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+            Object.assign(row, value, { refreshing: false, state: value.nextCursor || value.workspaceTotal > MAX_ITEMS_PER_SOURCE ? "partial" : "ready", stateSource: "daemon", observedAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
             this.previous.delete(row.target.id); this.previous.set(row.target.id, { ...row });
             while (this.previous.size > MAX_SOURCES) this.previous.delete(this.previous.keys().next().value!);
           } catch (error) {
             if (controller.signal.aborted || this.generation !== generation) return;
             if (!this.canPublish(row)) { emit(); continue; }
-            row.state = classify(error); row.stateSource = "request"; row.observedAt = new Date().toISOString();
+            row.refreshing = false; row.state = classify(error); row.stateSource = "request"; row.observedAt = new Date().toISOString();
             // An authority rejection invalidates cached content immediately.
-            if (row.state === "denied") { row.sessions = []; row.workspaces = []; row.sessionTotal = 0; row.workspaceTotal = 0; row.updatedAt = null; this.previous.delete(row.target.id); }
+            if (row.state === "denied") { this.deny(row); this.previous.delete(row.target.id); }
           }
           emit();
         }
@@ -152,7 +169,7 @@ export class MachineSummaryDirectory {
 
   private canPublish(row: MachineSummary): boolean { return !this.disposed && !this.directoryDenied && row.state !== "denied"; }
   private snapshot(): SummaryDirectory {
-    return { sources: this.rows.map(row => ({ ...row })), complete: !this.directoryDenied && this.rows.every(row => row.state === "ready"), checked: this.rows.filter(row => !["deferred","waiting","loading","notChecked"].includes(row.state)).length };
+    return { sources: this.rows.map(row => ({ ...row })), complete: !this.directoryDenied && this.rows.every(row => row.state === "ready" && !row.refreshing), checked: this.rows.filter(row => !row.refreshing && !["deferred","waiting","loading","notChecked"].includes(row.state)).length };
   }
   private emit(): void {
     if (this.disposed) return;
@@ -163,7 +180,7 @@ export class MachineSummaryDirectory {
     try { this.options.onDiagnostic?.({ at: new Date().toISOString(), kind: "operation", detail: { operation, phase: "failure", outcome, sourceId: sourceId ?? null } }); } catch { /* observation cannot own a source connection */ }
   }
   private deny(row: MachineSummary): void {
-    Object.assign(row, {state:"denied",stateSource:"request",observedAt:new Date().toISOString(),sessions:[],workspaces:[],sessionTotal:0,workspaceTotal:0,updatedAt:null,nextCursor:null,version:undefined});
+    Object.assign(row, {state:"denied",refreshing:false,stateSource:"request",observedAt:new Date().toISOString(),sessions:[],workspaces:[],projectPages:undefined,sessionTotal:0,workspaceTotal:0,updatedAt:null,nextCursor:null,version:undefined});
   }
   async workspacePage(target: Target, workspaceId: string, cursor: string | null = null) {
     const page = await this.connections.use(target, client => readSessionPage(client, workspaceId, cursor, 10, this.includeArchived));
