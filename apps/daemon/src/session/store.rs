@@ -20,7 +20,7 @@
 //! session proportional to what was actually said rather than to the number of
 //! tokens streamed (`docs/daemon.md` §4).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -969,30 +969,116 @@ fn prune_home(homes: &mut Homes, root: &Path) {
     }
 }
 
-// Rebuildable metadata only. Never a source of execution, coordination or
-// mutation authority. Expiry reconciles external writers on the next read.
+// One rebuildable metadata table. Scope/order indexes contain references only;
+// execution recovery still uses a fresh durable read, independently of this view.
 #[derive(Default)]
 struct PageCatalog {
     generation: u64,
-    recent_writes: HashMap<(String, String), (u64, std::time::Instant, SessionMeta)>,
-    // Tolerant legacy lists must not populate a strict page read: a skipped
-    // corrupt record must still be reported by that page's own scan.
-    scopes: HashMap<(Option<String>, bool), PageCatalogSnapshot>,
-}
-struct PageCatalogSnapshot {
+    write_revision: u64,
     homes_revision: u64,
-    read_at: std::time::Instant,
-    metadata: Vec<SessionMeta>,
+    checked_at: Option<std::time::Instant>,
+    initialized: bool,
+    files: HashMap<PathBuf, CatalogFile>,
+    order: BTreeMap<(i64, String, String), PathBuf>,
+    by_id: HashMap<String, Vec<PathBuf>>,
+    pending: HashSet<PathBuf>,
+    errors: HashMap<PathBuf, (Vec<String>, String)>,
 }
-
-type PageReadKey = (Option<String>, bool, u64, u64);
-type PageReads = crate::blocking::InFlightReads<PageReadKey, Vec<SessionMeta>>;
+#[derive(Clone, PartialEq, Eq)]
+struct MetadataStamp {
+    modified: std::time::SystemTime,
+    bytes: u64,
+}
+impl MetadataStamp {
+    fn read(path: &Path) -> Option<Self> {
+        let meta = fs::metadata(path).ok()?;
+        Some(Self {
+            modified: meta.modified().ok()?,
+            bytes: meta.len(),
+        })
+    }
+}
+#[derive(Clone)]
+struct CatalogFile {
+    stamp: Option<MetadataStamp>,
+    meta: Option<Arc<SessionMeta>>,
+    error: Option<String>,
+    changed: u64,
+}
+#[derive(Default, Clone)]
+struct CatalogScan {
+    files: HashMap<PathBuf, CatalogFile>,
+    errors: HashMap<PathBuf, (Vec<String>, String)>,
+}
+impl PageCatalog {
+    fn put(&mut self, path: PathBuf, file: CatalogFile) {
+        if let Some(old) = self.files.get(&path).and_then(|f| f.meta.as_ref()) {
+            self.order
+                .remove(&(old.updated_at_ms, old.id.clone(), old.workspace_id.clone()));
+            if let Some(paths) = self.by_id.get_mut(&old.id) {
+                paths.retain(|p| p != &path);
+            }
+        }
+        self.pending.remove(&path);
+        if let Some(meta) = &file.meta {
+            self.order.insert(
+                (
+                    meta.updated_at_ms,
+                    meta.id.clone(),
+                    meta.workspace_id.clone(),
+                ),
+                path.clone(),
+            );
+            self.by_id
+                .entry(meta.id.clone())
+                .or_default()
+                .push(path.clone());
+            if Self::has_obligation(meta) {
+                self.pending.insert(path.clone());
+            }
+        }
+        self.errors.remove(&path);
+        self.files.insert(path, file);
+    }
+    fn has_obligation(meta: &SessionMeta) -> bool {
+        meta.pending_permission.is_some()
+            || meta
+                .human_continuation
+                .as_ref()
+                .is_some_and(|c| !c.completed)
+    }
+    fn check_scope(&self, workspace: Option<&str>, strict: bool) -> Result<()> {
+        if strict {
+            if let Some((_, reason)) = self
+                .errors
+                .values()
+                .find(|(scopes, _)| workspace.is_none_or(|id| scopes.iter().any(|s| s == id)))
+            {
+                anyhow::bail!("{reason}");
+            }
+        }
+        Ok(())
+    }
+    fn metadata(&self, workspace: Option<&str>, strict: bool) -> Result<Vec<SessionMeta>> {
+        self.check_scope(workspace, strict)?;
+        Ok(self
+            .order
+            .values()
+            .rev()
+            .filter_map(|path| self.files.get(path)?.meta.as_deref())
+            .filter(|meta| workspace.is_none_or(|id| id == meta.workspace_id))
+            .cloned()
+            .collect())
+    }
+}
+type PageReadKey = (u64, u64);
+type PageReads = crate::blocking::InFlightReads<PageReadKey, ()>;
 
 #[derive(Clone)]
 pub struct Store {
     homes: WorkspaceHomes,
     coordination: super::coordination::Cache,
-    catalog_reads: Arc<crate::blocking::InFlightReads<Option<String>, Vec<SessionMeta>>>,
+    catalog_reads: Arc<crate::blocking::InFlightReads<Option<String>, Arc<CatalogScan>>>,
     page_reads: Arc<PageReads>,
     page_catalog: Arc<std::sync::Mutex<PageCatalog>>,
 }
@@ -1347,36 +1433,20 @@ impl Store {
         })();
         if let Ok(mut cache) = self.page_catalog.lock() {
             if let Ok(meta) = normalized {
-                cache
-                    .recent_writes
-                    .retain(|_, (_, at, _)| at.elapsed() < std::time::Duration::from_secs(5));
-                if cache.recent_writes.len() >= 10_000 {
-                    cache.generation = cache.generation.wrapping_add(1);
-                    cache.scopes.clear();
-                    cache.recent_writes.clear();
-                }
-                cache.recent_writes.insert(
-                    (meta.workspace_id.clone(), meta.id.clone()),
-                    (
-                        self.homes
-                            .revision
-                            .load(std::sync::atomic::Ordering::Acquire),
-                        std::time::Instant::now(),
-                        meta.clone(),
-                    ),
+                cache.write_revision = cache.write_revision.wrapping_add(1);
+                let changed = cache.write_revision;
+                cache.put(
+                    path.clone(),
+                    CatalogFile {
+                        stamp: MetadataStamp::read(&path),
+                        meta: Some(Arc::new(meta)),
+                        error: None,
+                        changed,
+                    },
                 );
-                for ((scope, _strict), snapshot) in &mut cache.scopes {
-                    snapshot
-                        .metadata
-                        .retain(|row| row.id != meta.id || row.workspace_id != meta.workspace_id);
-                    if scope.as_ref().is_none_or(|id| id == &meta.workspace_id) {
-                        snapshot.metadata.push(meta.clone());
-                    }
-                }
             } else {
                 cache.generation = cache.generation.wrapping_add(1);
-                cache.scopes.clear();
-                cache.recent_writes.clear();
+                cache.checked_at = None;
             }
         }
         Ok(())
@@ -1501,10 +1571,16 @@ impl Store {
     pub async fn list_meta_for(&self, workspace: Option<&str>) -> Result<Vec<SessionMeta>> {
         // Execution recovery, import de-duplication and deletion checks require
         // a fresh durable observation, independently of presentation caches.
-        crate::blocking::coalesce(&self.catalog_reads, workspace.map(str::to_owned), || {
-            self.read_meta_for(workspace, false)
-        })
-        .await
+        let scan = self.fresh_metadata_scan(workspace).await?;
+        let mut rows: Vec<_> = scan
+            .files
+            .values()
+            .filter_map(|f| f.meta.as_deref())
+            .filter(|m| workspace.is_none_or(|id| id == m.workspace_id))
+            .cloned()
+            .collect();
+        rows.sort_by_key(|m| std::cmp::Reverse(m.updated_at_ms));
+        Ok(rows)
     }
 
     pub(super) async fn list_metadata(&self, workspace: Option<&str>) -> Result<Vec<SessionMeta>> {
@@ -1514,13 +1590,30 @@ impl Store {
     fn invalidate_page_catalog(&self) {
         if let Ok(mut cache) = self.page_catalog.lock() {
             cache.generation = cache.generation.wrapping_add(1);
-            cache.scopes.clear();
-            cache.recent_writes.clear();
+            cache.checked_at = None;
         }
     }
 
-    pub(super) async fn page_metadata(&self, workspace: Option<&str>) -> Result<Vec<SessionMeta>> {
-        self.catalog_metadata(workspace, true).await
+    fn forget_catalog_session(&self, workspace: &str, session: &str) {
+        let Ok(dir) = self.raw_session_dir(workspace, session) else {
+            return;
+        };
+        let path = dir.join("meta.json");
+        if let Ok(mut cache) = self.page_catalog.lock() {
+            cache.write_revision = cache.write_revision.wrapping_add(1);
+            let changed = cache.write_revision;
+            // A cold read that started before deletion must not put the row
+            // back. The next reconciliation drops this empty cache entry.
+            cache.put(
+                path,
+                CatalogFile {
+                    stamp: None,
+                    meta: None,
+                    error: None,
+                    changed,
+                },
+            );
+        }
     }
 
     async fn catalog_metadata(
@@ -1531,127 +1624,288 @@ impl Store {
         if let Some(id) = workspace {
             self.homes.root(id)?;
         }
-        let revision = self
-            .homes
-            .revision
-            .load(std::sync::atomic::Ordering::Acquire);
-        let scope = workspace.map(str::to_owned);
-        let generation = {
-            let cache = self
-                .page_catalog
-                .lock()
-                .map_err(|_| anyhow!("page catalog poisoned"))?;
-            let reusable = |snapshot: &&PageCatalogSnapshot| {
-                snapshot.homes_revision == revision
-                    && snapshot.read_at.elapsed() < std::time::Duration::from_secs(5)
-            };
-            if let Some(snapshot) = cache.scopes.get(&(scope.clone(), strict)).filter(reusable) {
-                return Ok(snapshot.metadata.clone());
-            }
-            if workspace.is_some() {
-                if let Some(snapshot) = cache.scopes.get(&(None, strict)).filter(reusable) {
-                    return Ok(snapshot
-                        .metadata
-                        .iter()
-                        .filter(|row| Some(row.workspace_id.as_str()) == workspace)
-                        .cloned()
-                        .collect());
-                }
-            }
-            cache.generation
-        };
-        let mut metadata = crate::blocking::coalesce(
-            &self.page_reads,
-            (scope.clone(), strict, revision, generation),
-            || self.read_meta_for(workspace, strict),
-        )
-        .await?;
-        let mut cache = self
+        self.ensure_catalog().await?;
+        self.page_catalog
+            .lock()
+            .map_err(|_| anyhow!("page catalog poisoned"))?
+            .metadata(workspace, strict)
+    }
+
+    pub(super) async fn metadata_window(
+        &self,
+        workspace: Option<&str>,
+        include_archived: bool,
+        before: Option<(i64, String, String)>,
+        limit: usize,
+    ) -> Result<Vec<SessionMeta>> {
+        if let Some(id) = workspace {
+            self.homes.root(id)?;
+        }
+        self.ensure_catalog().await?;
+        let cache = self
             .page_catalog
             .lock()
             .map_err(|_| anyhow!("page catalog poisoned"))?;
-        // Overlay bounded recent durable writes so an active Agent cannot
-        // continually prevent a cold catalog from becoming reusable. Delete and
-        // registry fences still prevent publication across structural changes.
-        if cache.generation == generation
-            && self
-                .homes
-                .revision
-                .load(std::sync::atomic::Ordering::Acquire)
-                == revision
-        {
-            cache
-                .recent_writes
-                .retain(|_, (_, at, _)| at.elapsed() < std::time::Duration::from_secs(5));
-            for (written_revision, _, written) in cache.recent_writes.values() {
-                if *written_revision == revision
-                    && workspace.is_none_or(|id| id == written.workspace_id)
-                {
-                    metadata.retain(|row| {
-                        row.id != written.id || row.workspace_id != written.workspace_id
-                    });
-                    metadata.push(written.clone());
-                }
-            }
-            if cache.scopes.len() >= 32
-                || cache
-                    .scopes
-                    .values()
-                    .map(|s| s.metadata.len())
-                    .sum::<usize>()
-                    + metadata.len()
-                    > 10_000
-            {
-                cache.scopes.clear();
-            }
-            cache.scopes.insert(
-                (scope, strict),
-                PageCatalogSnapshot {
-                    homes_revision: revision,
-                    read_at: std::time::Instant::now(),
-                    metadata: metadata.clone(),
-                },
-            );
-        }
-        Ok(metadata)
+        cache.check_scope(workspace, true)?;
+        let end = before
+            .map(std::ops::Bound::Excluded)
+            .unwrap_or(std::ops::Bound::Unbounded);
+        Ok(cache
+            .order
+            .range((std::ops::Bound::Unbounded, end))
+            .rev()
+            .filter_map(|(_, path)| cache.files.get(path)?.meta.as_deref())
+            .filter(|m| {
+                workspace.is_none_or(|id| id == m.workspace_id) && (include_archived || !m.archived)
+            })
+            .take(limit)
+            .cloned()
+            .collect())
     }
 
-    async fn read_meta_for(
+    pub(super) async fn activity_metadata(
         &self,
         workspace: Option<&str>,
-        strict: bool,
+        live_ids: &[String],
     ) -> Result<Vec<SessionMeta>> {
+        if let Some(id) = workspace {
+            self.homes.root(id)?;
+        }
+        self.ensure_catalog().await?;
+        // The existing projection cache observes each home once. No history
+        // row is projected just to discover which sessions have obligations.
+        let coordination: Vec<_> = self
+            .homes
+            .session_dirs_for(workspace)
+            .into_iter()
+            .map(|(owners, sessions)| {
+                let home = sessions.parent().expect("sessions have a home");
+                (
+                    owners.into_iter().map(|(id, _)| id).collect::<Vec<_>>(),
+                    self.coordination.candidates(home),
+                )
+            })
+            .collect();
+        let cache = self
+            .page_catalog
+            .lock()
+            .map_err(|_| anyhow!("page catalog poisoned"))?;
+        cache.check_scope(workspace, true)?;
+        let mut paths = cache.pending.clone();
+        for id in live_ids {
+            if let Some(found) = cache.by_id.get(id) {
+                paths.extend(found.iter().cloned());
+            }
+        }
+        for (owners, ids) in coordination {
+            match ids {
+                Some(ids) => {
+                    for id in ids {
+                        if let Some(found) = cache.by_id.get(&id) {
+                            paths.extend(
+                                found
+                                    .iter()
+                                    .filter(|p| {
+                                        cache
+                                            .files
+                                            .get(*p)
+                                            .and_then(|f| f.meta.as_ref())
+                                            .is_some_and(|m| owners.contains(&m.workspace_id))
+                                    })
+                                    .cloned(),
+                            );
+                        }
+                    }
+                }
+                // An unavailable declared coordinator makes its scope unknown,
+                // including sessions absent from its previous projection.
+                None => paths.extend(
+                    cache
+                        .order
+                        .values()
+                        .filter(|p| {
+                            cache
+                                .files
+                                .get(*p)
+                                .and_then(|f| f.meta.as_ref())
+                                .is_some_and(|m| owners.contains(&m.workspace_id))
+                        })
+                        .cloned(),
+                ),
+            }
+        }
+        let mut rows: Vec<_> = paths
+            .iter()
+            .filter_map(|p| cache.files.get(p)?.meta.as_deref())
+            .filter(|m| workspace.is_none_or(|id| id == m.workspace_id))
+            .cloned()
+            .collect();
+        rows.sort_by(|a, b| {
+            (b.updated_at_ms, &b.id, &b.workspace_id).cmp(&(
+                a.updated_at_ms,
+                &a.id,
+                &a.workspace_id,
+            ))
+        });
+        Ok(rows)
+    }
+
+    async fn ensure_catalog(&self) -> Result<()> {
+        loop {
+            let revision = self
+                .homes
+                .revision
+                .load(std::sync::atomic::Ordering::Acquire);
+            let generation = {
+                let cache = self
+                    .page_catalog
+                    .lock()
+                    .map_err(|_| anyhow!("page catalog poisoned"))?;
+                if cache.homes_revision == revision
+                    && cache
+                        .checked_at
+                        .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(5))
+                {
+                    return Ok(());
+                }
+                cache.generation
+            };
+            // Every scope shares the same enumeration. Strictness is applied
+            // to that scope's errors afterwards, not by building another table.
+            crate::blocking::coalesce(&self.page_reads, (revision, generation), || async {
+                let (known, write_revision) = {
+                    let cache = self
+                        .page_catalog
+                        .lock()
+                        .map_err(|_| anyhow!("page catalog poisoned"))?;
+                    (
+                        if cache.homes_revision == revision && cache.initialized {
+                            cache.files.clone()
+                        } else {
+                            HashMap::new()
+                        },
+                        cache.write_revision,
+                    )
+                };
+                // Recovery always asks for a fresh durable observation. A cold
+                // presentation read may share that in-flight scan, never its
+                // old cached result, so boot does not walk every file twice.
+                let mut scan = if known.is_empty() {
+                    (*self.fresh_metadata_scan(None).await?).clone()
+                } else {
+                    self.scan_metadata(None, Some(&known)).await?
+                };
+                let mut cache = self
+                    .page_catalog
+                    .lock()
+                    .map_err(|_| anyhow!("page catalog poisoned"))?;
+                if cache.generation != generation
+                    || self
+                        .homes
+                        .revision
+                        .load(std::sync::atomic::Ordering::Acquire)
+                        != revision
+                {
+                    return Ok(());
+                }
+                // Keep durable local changes made during this scan, for its
+                // entire lifetime rather than a five-second overlay window.
+                for (path, file) in &cache.files {
+                    if file.changed > write_revision {
+                        scan.files.insert(path.clone(), file.clone());
+                        scan.errors.remove(path);
+                    }
+                }
+                cache.order.clear();
+                cache.by_id.clear();
+                cache.pending.clear();
+                for (path, file) in &scan.files {
+                    if let Some(m) = &file.meta {
+                        cache.order.insert(
+                            (m.updated_at_ms, m.id.clone(), m.workspace_id.clone()),
+                            path.clone(),
+                        );
+                        cache
+                            .by_id
+                            .entry(m.id.clone())
+                            .or_default()
+                            .push(path.clone());
+                        if PageCatalog::has_obligation(m) {
+                            cache.pending.insert(path.clone());
+                        }
+                    }
+                }
+                cache.initialized = true;
+                cache.files = scan.files;
+                cache.errors = scan.errors;
+                cache.homes_revision = revision;
+                cache.checked_at = Some(std::time::Instant::now());
+                Ok(())
+            })
+            .await?;
+            // A registry/deletion fence changed during enumeration. Re-read
+            // the current generation rather than returning the abandoned scan.
+        }
+    }
+
+    async fn fresh_metadata_scan(&self, workspace: Option<&str>) -> Result<Arc<CatalogScan>> {
+        crate::blocking::coalesce(
+            &self.catalog_reads,
+            workspace.map(str::to_owned),
+            || async { self.scan_metadata(workspace, None).await.map(Arc::new) },
+        )
+        .await
+    }
+
+    async fn scan_metadata(
+        &self,
+        workspace: Option<&str>,
+        known: Option<&HashMap<PathBuf, CatalogFile>>,
+    ) -> Result<CatalogScan> {
         let started = std::time::Instant::now();
         let mut yield_wait = std::time::Duration::ZERO;
         let mut max_yield = std::time::Duration::ZERO;
         let mut directories = 0usize;
         let mut entries_read = 0usize;
         let mut metadata_bytes = 0usize;
+        let mut metadata_read = 0usize;
         let mut budget = crate::blocking::WorkBudget::new();
-        let mut out = Vec::new();
+        let mut out = CatalogScan::default();
         for (workspaces, sessions) in self.homes.session_dirs_for(workspace) {
             directories += 1;
+            let scopes: Vec<_> = workspaces.iter().map(|(id, _)| id.clone()).collect();
             let waited = budget.checkpoint().await;
             yield_wait += waited;
             max_yield = max_yield.max(waited);
-            if let Some((workspace_id, _)) = workspaces.first() {
-                self.reap_tombstoned_sessions(workspace_id, &sessions);
+            if let Some((id, _)) = workspaces.first() {
+                self.reap_tombstoned_sessions(id, &sessions);
             }
-            if let Some(home) = sessions.parent() {
-                if home.exists() {
-                    let _ = self.establish_home(home);
-                }
+            if let Some(home) = sessions.parent().filter(|home| home.exists()) {
+                let _ = self.establish_home(home);
             }
             let entries = match fs::read_dir(&sessions) {
                 Ok(entries) => entries,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) if strict => return Err(error).context("reading session directory"),
-                Err(_) => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    out.errors.insert(
+                        sessions,
+                        (scopes, format!("reading session directory: {e}")),
+                    );
+                    continue;
+                }
             };
-            for entry in entries.flatten() {
+            for entry in entries {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(e) => {
+                        out.errors.insert(
+                            sessions.clone(),
+                            (scopes.clone(), format!("reading session entry: {e}")),
+                        );
+                        continue;
+                    }
+                };
                 entries_read += 1;
-                // A bulk read must not hold the guest's only fiber while
-                // unrelated foreground requests and peer handshakes wait.
                 let waited = budget.checkpoint().await;
                 yield_wait += waited;
                 max_yield = max_yield.max(waited);
@@ -1664,45 +1918,91 @@ impl Store {
                     continue;
                 }
                 let path = entry.path().join("meta.json");
-                let raw = match fs::read_to_string(&path) {
-                    Ok(raw) => raw,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                    Err(error) if strict => return Err(error).context("reading session metadata"),
-                    Err(_) => continue,
-                };
-                metadata_bytes += raw.len();
-                let header = match serde_json::from_str::<MetaHeader>(&raw) {
-                    Ok(header) => header,
-                    Err(error) if strict => {
-                        return Err(error).context("parsing session metadata header")
+                let stamp = MetadataStamp::read(&path);
+                let file = if let Some(file) = known
+                    .and_then(|known| known.get(&path))
+                    .filter(|file| stamp.is_some() && file.error.is_none() && file.stamp == stamp)
+                {
+                    file.clone()
+                } else {
+                    let raw = match fs::read_to_string(&path) {
+                        Ok(raw) => raw,
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(e) => {
+                            out.errors.insert(
+                                path.clone(),
+                                (scopes.clone(), format!("reading session metadata: {e}")),
+                            );
+                            out.files.insert(
+                                path,
+                                CatalogFile {
+                                    stamp,
+                                    meta: None,
+                                    error: Some(format!("reading session metadata: {e}")),
+                                    changed: 0,
+                                },
+                            );
+                            continue;
+                        }
+                    };
+                    metadata_bytes += raw.len();
+                    metadata_read += 1;
+                    let parsed = (|| -> Result<Option<SessionMeta>> {
+                        let header: MetaHeader = serde_json::from_str(&raw)
+                            .context("parsing session metadata header")?;
+                        let Some(owner) = Self::metadata_owner(&workspaces, &header.project_key)
+                        else {
+                            return Ok(None);
+                        };
+                        self.load_meta_from(&owner, &session_id, &raw, header)
+                            .context("parsing session metadata")
+                            .map(Some)
+                    })();
+                    match parsed {
+                        Ok(meta) => CatalogFile {
+                            stamp,
+                            meta: meta.map(Arc::new),
+                            error: None,
+                            changed: 0,
+                        },
+                        Err(error) => CatalogFile {
+                            stamp,
+                            meta: None,
+                            error: Some(format!("{error:#}")),
+                            changed: 0,
+                        },
                     }
-                    Err(_) => continue,
                 };
-                let owner = Self::metadata_owner(&workspaces, &header.project_key);
-                let Some(workspace_id) = owner else {
-                    continue;
-                };
-                if workspace.is_some_and(|id| id != workspace_id) {
-                    continue;
+                if let Some(error) = &file.error {
+                    out.errors
+                        .insert(path.clone(), (scopes.clone(), error.clone()));
                 }
-                match self.load_meta_from(&workspace_id, &session_id, &raw, header) {
-                    Ok(meta) => out.push(meta),
-                    Err(error) if strict => return Err(error).context("parsing session metadata"),
-                    Err(error) => {
-                        tracing::warn!(session = %session_id, %error, "skipping a session whose meta could not be read")
-                    }
-                }
+                out.files.insert(path, file);
             }
         }
-        out.sort_by_key(|meta: &SessionMeta| std::cmp::Reverse(meta.updated_at_ms));
+        let count = out.files.values().filter(|f| f.meta.is_some()).count();
+        tracing::debug!(
+            event = "session_catalog_reconciled",
+            scoped = workspace.is_some(),
+            incremental = known.is_some(),
+            directories,
+            entries_read,
+            metadata_read,
+            metadata_bytes,
+            sessions = count,
+            errors = out.errors.len(),
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "reconciled session metadata signatures"
+        );
         if started.elapsed().as_millis() >= 1000 {
             tracing::warn!(
                 event = "session_catalog_slow",
                 scoped = workspace.is_some(),
                 directories,
                 entries_read,
+                metadata_read,
                 metadata_bytes,
-                sessions = out.len(),
+                sessions = count,
                 yield_wait_ms = yield_wait.as_millis() as u64,
                 max_yield_ms = max_yield.as_millis() as u64,
                 inline_ms = started.elapsed().saturating_sub(yield_wait).as_millis() as u64,
@@ -2438,10 +2738,12 @@ impl Store {
         let dir = self.raw_session_dir(workspace_id, session_id)?;
         let tombstone = self.tombstone_path(workspace_id, session_id)?;
         if tombstone.exists() {
+            self.forget_catalog_session(workspace_id, session_id);
             self.reap_tombstoned_session(workspace_id, session_id, &dir);
             return Ok(());
         }
         if !dir.exists() {
+            self.forget_catalog_session(workspace_id, session_id);
             return Ok(());
         }
         let home = self.homes.home_dir(workspace_id)?;
@@ -2462,6 +2764,7 @@ impl Store {
         });
         crate::config::save_private(&tombstone, serde_json::to_vec_pretty(&marker)?.as_slice())?;
         self.invalidate_page_catalog();
+        self.forget_catalog_session(workspace_id, session_id);
         tracing::info!(
             event = "session_tombstoned",
             workspace = %workspace_id,

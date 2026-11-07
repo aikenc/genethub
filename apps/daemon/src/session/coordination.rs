@@ -28,10 +28,28 @@ struct Entry {
     checked: Instant,
     snapshot: Option<Snapshot>,
     unavailable: bool,
+    stamp: Option<(std::time::SystemTime, u64)>,
 }
 #[derive(Default, Clone)]
 pub(super) struct Cache(Arc<Mutex<HashMap<PathBuf, Entry>>>);
 impl Cache {
+    /// None means the declared projection is unavailable: all rows in that
+    /// home require the existing unknown projection, never a complete idle set.
+    pub(super) fn candidates(&self, home: &Path) -> Option<Vec<String>> {
+        self.read(home, "");
+        let cache = self.0.lock().ok()?;
+        let entry = cache.get(&home.join("session-coordination.json"))?;
+        if entry.unavailable {
+            return None;
+        }
+        Some(
+            entry
+                .snapshot
+                .as_ref()
+                .map(|s| s.sessions.keys().cloned().collect())
+                .unwrap_or_default(),
+        )
+    }
     pub(super) fn read(&self, home: &Path, session: &str) -> Option<SessionCoordinationSummary> {
         let path = home.join("session-coordination.json");
         let mut cache = self.0.lock().ok()?;
@@ -40,38 +58,50 @@ impl Cache {
             checked: now - Duration::from_secs(3),
             snapshot: None,
             unavailable: false,
+            stamp: None,
         });
         if now.duration_since(entry.checked) >= Duration::from_secs(2) {
             entry.checked = now;
-            let read = || -> anyhow::Result<Option<Snapshot>> {
-                let meta = match std::fs::symlink_metadata(&path) {
-                    Ok(meta) => meta,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                    Err(error) => return Err(error.into()),
+            let read =
+                || -> anyhow::Result<Option<(Snapshot, Option<(std::time::SystemTime, u64)>)>> {
+                    let meta = match std::fs::symlink_metadata(&path) {
+                        Ok(meta) => meta,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            return Ok(None)
+                        }
+                        Err(error) => return Err(error.into()),
+                    };
+                    anyhow::ensure!(
+                        meta.is_file() && !meta.file_type().is_symlink() && meta.len() <= 524288,
+                        "invalid coordination projection"
+                    );
+                    let stamp = meta.modified().ok().map(|at| (at, meta.len()));
+                    if !entry.unavailable && stamp.is_some() && entry.stamp == stamp {
+                        if let Some(snapshot) = &entry.snapshot {
+                            return Ok(Some((snapshot.clone(), stamp)));
+                        }
+                    }
+                    let mut bytes = Vec::new();
+                    std::fs::File::open(&path)?
+                        .take(524289)
+                        .read_to_end(&mut bytes)?;
+                    anyhow::ensure!(bytes.len() <= 524288, "oversized coordination projection");
+                    let value: Snapshot = serde_json::from_slice(&bytes)?;
+                    anyhow::ensure!(
+                        value.version == 1
+                            && value.sessions.len() <= 4096
+                            && value.updated_at_ms > 0,
+                        "unsupported coordination projection"
+                    );
+                    anyhow::ensure!(
+                        value.sessions.values().all(|s| s.source.len() <= 200
+                            && s.task_id.as_ref().is_none_or(|id| id.len() <= 200)),
+                        "oversized coordination identity"
+                    );
+                    Ok(Some((value, stamp)))
                 };
-                anyhow::ensure!(
-                    meta.is_file() && !meta.file_type().is_symlink() && meta.len() <= 524288,
-                    "invalid coordination projection"
-                );
-                let mut bytes = Vec::new();
-                std::fs::File::open(&path)?
-                    .take(524289)
-                    .read_to_end(&mut bytes)?;
-                anyhow::ensure!(bytes.len() <= 524288, "oversized coordination projection");
-                let value: Snapshot = serde_json::from_slice(&bytes)?;
-                anyhow::ensure!(
-                    value.version == 1 && value.sessions.len() <= 4096 && value.updated_at_ms > 0,
-                    "unsupported coordination projection"
-                );
-                anyhow::ensure!(
-                    value.sessions.values().all(|s| s.source.len() <= 200
-                        && s.task_id.as_ref().is_none_or(|id| id.len() <= 200)),
-                    "oversized coordination identity"
-                );
-                Ok(Some(value))
-            };
             match read() {
-                Ok(Some(snapshot)) => {
+                Ok(Some((snapshot, stamp))) => {
                     let ordered = entry.snapshot.as_ref().is_none_or(|old| {
                         match (old.revision, snapshot.revision) {
                             (Some(before), Some(after)) => {
@@ -83,6 +113,7 @@ impl Cache {
                     });
                     if ordered {
                         entry.snapshot = Some(snapshot);
+                        entry.stamp = stamp;
                     }
                     entry.unavailable = !ordered;
                 }

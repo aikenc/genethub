@@ -1923,10 +1923,40 @@ impl SessionManager {
                 Ok(cursor)
             })
             .transpose()?;
-        let mut metadata = self
-            .store
-            .page_metadata(request.workspace_id.as_deref())
-            .await?;
+        let mut metadata = if request.active_only.unwrap_or(false) {
+            // Native status has one owner, Live. Only examine loaded sessions,
+            // never all historical metadata to find running conversations.
+            let live = self
+                .sessions
+                .read()
+                .await
+                .values()
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut live_ids = Vec::new();
+            for session in live {
+                if matches!(
+                    *session.status.lock().await,
+                    SessionStatus::Running | SessionStatus::Waiting | SessionStatus::Failed
+                ) {
+                    live_ids.push(session.meta.lock().await.id.clone());
+                }
+            }
+            self.store
+                .activity_metadata(request.workspace_id.as_deref(), &live_ids)
+                .await?
+        } else {
+            self.store
+                .metadata_window(
+                    request.workspace_id.as_deref(),
+                    include_archived,
+                    cursor
+                        .as_ref()
+                        .map(|c| (c.at, c.id.clone(), c.owner.clone())),
+                    request.limit as usize + 1,
+                )
+                .await?
+        };
         metadata.retain(|meta| {
             (include_archived || !meta.archived)
                 && (request.active_only.unwrap_or(false)
@@ -5509,7 +5539,6 @@ impl Live {
         // progress", which nobody outside the agent can judge.
         self.last_activity_ms.store(now_ms(), Ordering::SeqCst);
         let session_id = self.meta.lock().await.id.clone();
-
         // Numbering, retaining and fanning out are one step, not three.
         //
         // Several tasks publish to the same session at once — the event pump, a
