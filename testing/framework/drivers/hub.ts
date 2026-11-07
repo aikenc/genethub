@@ -89,7 +89,7 @@ interface ControlServerLike {
   close(): Promise<void>;
 }
 
-export async function startHub(input: { databasePath: string; relayOrigin?: string; relayToken?: string; routeGrantTtlSeconds?: number; consoleDir?: string }): Promise<HubHandle> {
+export async function startHub(input: { databasePath: string; relayOrigin?: string; daemonRelayOrigin?: string; relayToken?: string; routeGrantTtlSeconds?: number; consoleDir?: string }): Promise<HubHandle> {
   const cloudRoot = process.env.TESTCTL_CLOUD_ROOT?.trim();
   if (!cloudRoot) {
     throw new BlockedError(
@@ -110,6 +110,7 @@ export async function startHub(input: { databasePath: string; relayOrigin?: stri
   // deterministic; this driver exists for cases whose oracle never crosses
   // the relay.
   process.env.HUB_RELAY_ORIGIN = input.relayOrigin ?? "http://127.0.0.1:1";
+  if (input.daemonRelayOrigin !== undefined) process.env.HUB_DAEMON_RELAY_ORIGIN = input.daemonRelayOrigin;
   // Each testctl case has a separate process. Set real product configuration before import.
   if (input.routeGrantTtlSeconds !== undefined) process.env.HUB_FABRIC_ROUTE_GRANT_TTL = String(input.routeGrantTtlSeconds);
 
