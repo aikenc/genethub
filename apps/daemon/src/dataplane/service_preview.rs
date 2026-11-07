@@ -426,13 +426,14 @@ async fn read_process_snapshot(
         return Ok(finish(rows));
     }
     let mut candidates: Vec<(Run, Vec<(String, String)>)> = Vec::new();
+    let mut budget = crate::blocking::WorkBudget::new();
     for info in state.workspaces.list().await {
         if workspace.is_some_and(|w| w != info.id) {
             continue;
         }
         // Registry size is user-controlled; a global process observer must
         // leave room for conversation reads and peer handshakes.
-        crate::blocking::breathe().await;
+        budget.checkpoint().await;
         let entry = state.workspaces.get(&info.id).await?;
         let folders: Vec<_> = entry
             .folders
@@ -444,6 +445,7 @@ async fn read_process_snapshot(
             })
             .collect();
         for absolute in &registrations {
+            budget.checkpoint().await;
             for (folder, root) in &folders {
                 let Ok(relative) = absolute.strip_prefix(root) else {
                     continue;

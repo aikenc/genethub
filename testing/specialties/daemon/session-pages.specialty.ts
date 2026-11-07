@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { SessionPageRequest } from "@genehub/proto";
 import { defineSpecialty, daemonEndpoint, openWorkbenchPage } from "../../framework/public.ts";
@@ -9,6 +9,68 @@ const shared = {
   surfaces: ["daemon", "filesystem", "workbench-client"],
   productInterfaces: ["session.page", "session.list", "session.rename", "session.archive", "session.delete", "workspace.remove"],
 };
+
+defineSpecialty({ ...shared,
+  id: "specialty.daemon.legacy-catalog-reconciliation",
+  title: "Legacy readers reuse a bounded catalog without weakening strict pages or hiding writes",
+  oracle: "With 1500 real external records a warm legacy read keeps its observed snapshot until reconciliation, strict pages still report corrupt metadata, external changes reconcile within 12 seconds and committed rename/delete appear immediately",
+  catches: ["each sequential observer rescans all history", "tolerant legacy cache hides a strict page error", "cache never reconciles external writers", "committed mutation leaves cached stale history"],
+  tags: ["core", "session-pages", "session-read", "catalog-pressure"],
+  expectedDurationMs: 25_000, timeoutMs: 120_000,
+  resources: { environments: 1, cpu: 1, memoryMb: 768, io: 2, browser: 0, pool: "standard" },
+}, async t => {
+  const o = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
+  try {
+    const seed = await t.flows.main.createBuiltinSession(o.client, o.workspaceId);
+    const home = join(o.workspaceRoot, ".genethub", "sessions");
+    const model = JSON.parse(readFileSync(join(home, seed, "meta.json"), "utf8"));
+    // Let any setup observation and recent-write overlay expire before the
+    // external writer establishes the observed catalog.
+    await new Promise(resolve => setTimeout(resolve, 5100));
+    for (let i = 0; i < 1500; i++) {
+      const id = `s_catalog_external_${i}`;
+      mkdirSync(join(home, id));
+      writeFileSync(join(home, id, "meta.json"), JSON.stringify({ ...model, id,
+        title: `external ${i}`, titleLocked: true, updatedAtMs: Date.now() }));
+    }
+    const target = "s_catalog_external_0";
+    const targetFile = join(home, target, "meta.json");
+    const corrupt = join(home, "s_catalog_corrupt"); mkdirSync(corrupt);
+    const corruptFile = join(corrupt, "meta.json"); writeFileSync(corruptFile, "{");
+    const listed = async () => {
+      const r = await o.client.call({ type: "session.list", payload: {
+        workspaceId: null, includeArchived: true, lean: true,
+      } });
+      if (r?.type !== "sessions") throw Error("legacy catalog reply missing");
+      return r.data;
+    };
+    const coldStart = performance.now();
+    const first = await listed();
+    const coldMs = performance.now() - coldStart;
+    t.assertions.assert(first.length === 1501 && first.some(s => s.id === target && s.title === "external 0"),
+      "legacy catalog lost compatible records or admitted corrupt metadata");
+    const changed = { ...JSON.parse(readFileSync(targetFile, "utf8")), title: "external writer changed" };
+    writeFileSync(targetFile, JSON.stringify(changed));
+    const warmStart = performance.now();
+    const warm = await listed();
+    t.assertions.assert(warm.some(s => s.id === target && s.title === "external 0"),
+      "the next observer rescanned external metadata instead of reusing its bounded snapshot");
+    const page = await o.client.call({ type: "session.page", payload: {
+      requests: [{ workspaceId: null, limit: 10, cursor: null }], includeArchived: true,
+    } });
+    t.assertions.assert(page?.type === "sessionPages" && Boolean(page.data[0]?.error),
+      "a tolerant legacy snapshot suppressed the strict page corruption error");
+    unlinkSync(corruptFile);
+    const warmMs = performance.now() - warmStart;
+    await t.tools.waitUntil(async () => (await listed()).some(s => s.id === target && s.title === changed.title), 12_000);
+    await o.client.call({ type: "session.rename", payload: { sessionId: target, title: "committed rename" } });
+    t.assertions.assert((await listed()).some(s => s.id === target && s.title === "committed rename"),
+      "warm legacy catalog hid a committed rename");
+    await o.client.call({ type: "session.delete", payload: { sessionId: target } });
+    t.assertions.assert(!(await listed()).some(s => s.id === target), "warm legacy catalog resurrected a deleted session");
+    t.note(`1500 external records: cold=${Math.round(coldMs)}ms warm-and-strict-error=${Math.round(warmMs)}ms; external reconciliation and immediate mutations verified`);
+  } finally { o.client.close(); o.daemon.stop(); await o.mock.stop(); }
+});
 
 defineSpecialty({ ...shared,
   id: "specialty.daemon.session-pages-contract",

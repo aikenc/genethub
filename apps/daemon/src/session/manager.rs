@@ -1775,7 +1775,7 @@ impl SessionManager {
         lean: bool,
     ) -> Result<Vec<SessionSummary>> {
         let started = std::time::Instant::now();
-        let metadata = self.store.list_meta_for(workspace_id).await?;
+        let metadata = self.store.list_metadata(workspace_id).await?;
         let metadata_ms = started.elapsed().as_millis() as u64;
         self.project_list(
             metadata,

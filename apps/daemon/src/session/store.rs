@@ -975,7 +975,9 @@ fn prune_home(homes: &mut Homes, root: &Path) {
 struct PageCatalog {
     generation: u64,
     recent_writes: HashMap<(String, String), (u64, std::time::Instant, SessionMeta)>,
-    scopes: HashMap<Option<String>, PageCatalogSnapshot>,
+    // Tolerant legacy lists must not populate a strict page read: a skipped
+    // corrupt record must still be reported by that page's own scan.
+    scopes: HashMap<(Option<String>, bool), PageCatalogSnapshot>,
 }
 struct PageCatalogSnapshot {
     homes_revision: u64,
@@ -983,7 +985,7 @@ struct PageCatalogSnapshot {
     metadata: Vec<SessionMeta>,
 }
 
-type PageReadKey = (Option<String>, u64, u64);
+type PageReadKey = (Option<String>, bool, u64, u64);
 type PageReads = crate::blocking::InFlightReads<PageReadKey, Vec<SessionMeta>>;
 
 #[derive(Clone)]
@@ -1363,7 +1365,7 @@ impl Store {
                         meta.clone(),
                     ),
                 );
-                for (scope, snapshot) in &mut cache.scopes {
+                for ((scope, _strict), snapshot) in &mut cache.scopes {
                     snapshot
                         .metadata
                         .retain(|row| row.id != meta.id || row.workspace_id != meta.workspace_id);
@@ -1497,10 +1499,16 @@ impl Store {
     }
 
     pub async fn list_meta_for(&self, workspace: Option<&str>) -> Result<Vec<SessionMeta>> {
+        // Execution recovery, import de-duplication and deletion checks require
+        // a fresh durable observation, independently of presentation caches.
         crate::blocking::coalesce(&self.catalog_reads, workspace.map(str::to_owned), || {
             self.read_meta_for(workspace, false)
         })
         .await
+    }
+
+    pub(super) async fn list_metadata(&self, workspace: Option<&str>) -> Result<Vec<SessionMeta>> {
+        self.catalog_metadata(workspace, false).await
     }
 
     fn invalidate_page_catalog(&self) {
@@ -1512,6 +1520,14 @@ impl Store {
     }
 
     pub(super) async fn page_metadata(&self, workspace: Option<&str>) -> Result<Vec<SessionMeta>> {
+        self.catalog_metadata(workspace, true).await
+    }
+
+    async fn catalog_metadata(
+        &self,
+        workspace: Option<&str>,
+        strict: bool,
+    ) -> Result<Vec<SessionMeta>> {
         if let Some(id) = workspace {
             self.homes.root(id)?;
         }
@@ -1529,11 +1545,11 @@ impl Store {
                 snapshot.homes_revision == revision
                     && snapshot.read_at.elapsed() < std::time::Duration::from_secs(5)
             };
-            if let Some(snapshot) = cache.scopes.get(&scope).filter(reusable) {
+            if let Some(snapshot) = cache.scopes.get(&(scope.clone(), strict)).filter(reusable) {
                 return Ok(snapshot.metadata.clone());
             }
             if workspace.is_some() {
-                if let Some(snapshot) = cache.scopes.get(&None).filter(reusable) {
+                if let Some(snapshot) = cache.scopes.get(&(None, strict)).filter(reusable) {
                     return Ok(snapshot
                         .metadata
                         .iter()
@@ -1546,8 +1562,8 @@ impl Store {
         };
         let mut metadata = crate::blocking::coalesce(
             &self.page_reads,
-            (scope.clone(), revision, generation),
-            || self.read_meta_for(workspace, true),
+            (scope.clone(), strict, revision, generation),
+            || self.read_meta_for(workspace, strict),
         )
         .await?;
         let mut cache = self
@@ -1589,7 +1605,7 @@ impl Store {
                 cache.scopes.clear();
             }
             cache.scopes.insert(
-                scope,
+                (scope, strict),
                 PageCatalogSnapshot {
                     homes_revision: revision,
                     read_at: std::time::Instant::now(),
