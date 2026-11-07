@@ -14,6 +14,7 @@ defineSpecialty({
   catches: [
     "Hub ticket request refused for an Agent Session and reported as machineNotPaired",
     "Hub-listed online machine that no Agent can reach",
+    "machine tickets use an unreachable browser origin instead of the configured daemon relay",
     "ordinary Agent loses owner capabilities or impersonates a localUser",
   ],
   tags: ["authorization-depth", "cloud-server", "genet-cli"],
@@ -29,9 +30,11 @@ defineSpecialty({
 }, async t => {
   const token = randomBytes(32).toString("hex");
   const port = await allocatePort();
+  const browserPort = await allocatePort();
   const hub = await startHub({
     databasePath: join(t.env.root, "hub.sqlite"),
-    relayOrigin: `http://127.0.0.1:${port}`,
+    relayOrigin: `http://127.0.0.1:${browserPort}`,
+    daemonRelayOrigin: `http://127.0.0.1:${port}`,
     relayToken: token,
   });
   const relay = await startRelay({ openRoot: t.openRoot, port, control: { origin: hub.origin, token } });
@@ -53,6 +56,12 @@ defineSpecialty({
       }, 30_000);
       return id;
     });
+
+    const browserTicket = await owner.json<{ url: string }>(`/app/machines/${machineId}/connect`, {
+      method: "POST", body: JSON.stringify({}),
+    });
+    t.assertions.assert(new URL(browserTicket.url).port === String(browserPort),
+      "the daemon relay override leaked into browser tickets");
 
     // No machine is paired directly with this installation, so the only way
     // for the CLI to reach `machineId` is the Hub's per-connection ticket.
