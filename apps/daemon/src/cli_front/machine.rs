@@ -118,12 +118,12 @@ async fn reachable() -> Result<serde_json::Value, CliFailure> {
         .call(Request::HubStatus)
         .await
         .map_err(|error| directory_error(super::query::rpc_error(error), "hubStatus", &known))?;
-    let (hub_self, hub_machines) =
+    let hub_machines =
         match hub_status {
-            Reply::HubStatus(HubStatus::Unpaired) => (None, Vec::new()),
-            Reply::HubStatus(HubStatus::Paired { machine_id, .. }) => {
+            Reply::HubStatus(HubStatus::Unpaired) => Vec::new(),
+            Reply::HubStatus(HubStatus::Paired { .. }) => {
                 let known = merge_directory(
-                    &machine_id,
+                    &rpc.hello().machine_id,
                     &rpc.hello().machine_name,
                     direct.clone(),
                     vec![],
@@ -131,7 +131,7 @@ async fn reachable() -> Result<serde_json::Value, CliFailure> {
                 match rpc.call(Request::HubMachines).await.map_err(|error| {
                     directory_error(super::query::rpc_error(error), "hub", &known)
                 })? {
-                    Reply::HubMachines(items) => (Some(machine_id), items),
+                    Reply::HubMachines(items) => items,
                     other => return Err(directory_error(unexpected(other), "hub", &known)),
                 }
             }
@@ -148,12 +148,12 @@ async fn reachable() -> Result<serde_json::Value, CliFailure> {
             }
             other => return Err(directory_error(unexpected(other), "hubStatus", &known)),
         };
-    let local_id = hub_self.as_deref().unwrap_or(&rpc.hello().machine_id);
+    let local_id = &rpc.hello().machine_id;
     let hub = hub_machines
         .iter()
         .map(|m| {
             json!({
-                "machineId": m.id, "name": m.name, "online": m.online, "source": "hub"
+                "machineId": m.id, "deviceHandle": m.device_handle, "name": m.name, "online": m.online, "source": "hub"
             })
         })
         .collect();
@@ -188,7 +188,12 @@ fn merge_directory(
     );
     // Hub display names are current; direct credential names may predate a rename.
     for entry in direct.into_iter().chain(hub) {
-        let id = entry["machineId"].as_str().expect("machine id").to_string();
+        let id = entry
+            .get("deviceHandle")
+            .and_then(|v| v.as_str())
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(|| entry["machineId"].as_str().expect("machine id"))
+            .to_string();
         let previous = entries.entry(id).or_insert_with(|| json!({}));
         let mut sources = previous
             .get("sources")
@@ -234,13 +239,33 @@ async fn show(args: &[String]) -> Result<serde_json::Value, CliFailure> {
         return Ok(machines::find(id)?.public());
     }
     let directory = reachable().await?;
-    directory["machines"]
-        .as_array()
-        .expect("machine directory")
+    let rows = directory["machines"].as_array().expect("machine directory");
+    let exact = rows
         .iter()
-        .find(|row| row["machineId"] == id.as_str())
-        .cloned()
-        .ok_or_else(|| CliFailure::target_not_found("machine", id))
+        .find(|row| row["machineId"] == id.as_str() || row["deviceHandle"] == id.as_str());
+    if let Some(row) = exact {
+        return Ok(row.clone());
+    }
+    let matches: Vec<_> = rows
+        .iter()
+        .filter(|row| {
+            crate::hub::machine_handle_matches(
+                row.get("deviceHandle")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| row["machineId"].as_str().unwrap_or("")),
+                id,
+            )
+        })
+        .collect();
+    match matches.as_slice() {
+        [one] => Ok((*one).clone()),
+        [] => Err(CliFailure::target_not_found("machine", id)),
+        _ => Err(CliFailure::business(
+            "ambiguousMachine",
+            "machine locator matches multiple directory entries",
+            None,
+        )),
+    }
 }
 
 fn forget(args: &[String]) -> Result<serde_json::Value, CliFailure> {

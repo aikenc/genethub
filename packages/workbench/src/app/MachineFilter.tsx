@@ -1,11 +1,11 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { Check, ChevronDown } from "lucide-react";
-import type { MachineSummary } from "../protocol/summary-directory";
+import { machineReady, type MachineSummary } from "../protocol/summary-directory";
+export { machineReady } from "../protocol/summary-directory";
 import { buildAgentSpaceTree } from "../workspace/agent-space-tree";
 
 export const machineStateLabel = { deferred: "待同步", waiting: "待同步", loading: "同步中", ready: "在线", partial: "在线",
   offline: "离线", denied: "授权已撤销", timeout: "读取超时", unavailable: "暂不可用", notChecked: "未同步", rateLimited: "稍后重试" };
-export const machineReady = (row: MachineSummary) => row.state === "ready" || row.state === "partial";
 
 /** Filtering never acquires a connection or changes the current conversation. */
 export function MachineFilter({ sources, value, onChange, section }: {

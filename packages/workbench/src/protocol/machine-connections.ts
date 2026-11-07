@@ -60,6 +60,7 @@ export class MachineConnections {
   private entries = new Set<Entry>();
   private invalidated = new Set<(target: Target) => void>();
   private disposed = false;
+  private available = new Set<() => void>();
   private limit: number;
   constructor(private source: MachineSource, private options: MachineConnectionOptions = {}) {
     this.limit = options.limit ?? 4;
@@ -97,10 +98,20 @@ export class MachineConnections {
   } = {}): Promise<MachineLease> {
     if (this.disposed) throw new Error("machine connections are closed");
     options.signal?.throwIfAborted();
-    let entry = [...this.entries].find(entry => this.matches(entry, target));
-    if (!entry) {
+    const deadlineAt = Date.now() + (this.options.timeoutMs ?? 10_000);
+    let entry: Entry | undefined;
+    for (;;) {
+      if (this.disposed) throw new Error("machine connections are closed");
+      options.signal?.throwIfAborted();
+      entry = [...this.entries].find(entry => this.matches(entry, target));
+      if (entry) break;
       this.trim(this.limit - 1);
-      if (this.entries.size >= this.limit) throw new Error("连接正忙，请稍后重试。");
+      const background = [...this.entries].filter(e => e.users > 0 && e.foreground === 0).length;
+      if (this.entries.size < this.limit && (options.foreground || background < Math.max(1, this.limit - 1))) break;
+      if (this.available.size >= 64) throw new Error("连接等待已满，请稍后重试。");
+      await this.waitAvailable(deadlineAt, options.signal);
+    }
+    if (!entry) {
       entry = { target, users: 0, foreground: 0, touched: Date.now(), removed: false, ready: Promise.resolve() };
       this.entries.add(entry);
       entry.ready = this.open(entry, options.endpoint, options.redial);
@@ -117,6 +128,7 @@ export class MachineConnections {
       if (options.foreground) current.foreground--;
       current.touched = Date.now();
       this.rtc(current);
+      this.wake();
       if (!current.users && !current.removed) {
         if (!current.client || current.client.connectionState !== "ready") { this.remove(current); return; }
         current.timer = setTimeout(() => this.remove(current), this.options.idleMs ?? 60_000);
@@ -135,8 +147,8 @@ export class MachineConnections {
       throw error;
     }
   }
-  async use<T>(target: Target, action: (client: Client) => Promise<T>, signal?: AbortSignal): Promise<T> {
-    const lease = await this.acquire(target, { signal });
+  async use<T>(target: Target, action: (client: Client) => Promise<T>, signal?: AbortSignal, background = false): Promise<T> {
+    const lease = await this.acquire(target, { signal, foreground: !background });
     try { return await action(lease.client); }
     catch (error) {
       if (accessDenied(error)) for (const entry of [...this.entries]) if (this.matches(entry, target)) this.remove(entry, true);
@@ -150,6 +162,16 @@ export class MachineConnections {
     this.disposed = true;
     for (const entry of [...this.entries]) this.remove(entry);
     this.invalidated.clear();
+    this.wake();
+  }
+  private wake(): void { for (const resolve of this.available) resolve(); }
+  private async waitAvailable(deadlineAt: number, signal?: AbortSignal): Promise<void> {
+    const remaining = deadlineAt - Date.now();
+    if (remaining <= 0) throw Object.assign(new Error("连接等待超时，请重试。"), {code: "timeout"});
+    let wake!: () => void;
+    const waiting = new Promise<void>(resolve => { wake = resolve; this.available.add(wake); });
+    try { await abortable(deadline(waiting, remaining), signal); }
+    finally { this.available.delete(wake); }
   }
   private matches(entry: Entry, target: Target): boolean {
     if (entry.removed) return false;
@@ -222,6 +244,7 @@ export class MachineConnections {
     if (entry.removed) return;
     entry.removed = true;
     this.entries.delete(entry);
+    this.wake();
     if (entry.timer) clearTimeout(entry.timer);
     entry.stop?.();
     entry.client?.close();

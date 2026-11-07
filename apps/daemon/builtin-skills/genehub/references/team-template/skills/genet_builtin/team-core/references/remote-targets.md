@@ -11,18 +11,15 @@
 目标团队 `.genethub/open.env` 配置该机实际可用的 `TEAM_AGENT`；岗位的同名文件可覆盖它并指定 `WORKTREE_DIR`。
 模型来自目标机 `TEAM_MODEL_WORK/RESEARCH` 或 Agent 默认；派单方隐式配置不传过去。`--tier/--model/--media` 均在目标机校验，缺配置或能力不明就拒绝。
 
-在派单方 `agent-space.genet.json` 的 `members` 写真实绑定；工作台、派单和远端状态投影共用此声明。例如：
+在唯一定义源的根描述配置现有构建 post，然后照常 build 完整 Team 输出：
 
 ```json
-{
-  "members": [{
-    "name": "qa",
-    "machineId": "<machine list 返回的精确 ID>",
-    "workspaceId": "<目标机已注册的岗位 workspace ID>",
-    "command": ["<目标机 GENEHUB_PYTHON 的绝对路径>", "<目标团队 tools/run.py 的绝对路径>"]
-  }]
-}
+{"buildHooks":{"post":[{"cwd":".","args":["{python}","tools/install_remote.py","{outputRoot}","qa","<machine list 的精确机器 ID>","<目标机独立运行目录绝对路径>"]}]}}
 ```
+
+源端身份／Skill 修改后用原 `build <源 Team>` 更新本机生成规则（此步不分发）；再用 `spacebuilder.py build <源 Team> --output <独立输出目录>` 会完成传输、纯产物校验、登记岗位及写回 `members`。没有 post 的 build 不产生远端动作，身份自动刷新也不安装。远端不执行 build，不带作者 Provider／Skill 源；完整输出的生成 Skill 和 tools 全量保留。脚本只注册指定岗位，不启动远端前台或 Timer。目标机 Agent／工位等配置缺失会具体报错，一次补齐后重试原 build。
+
+每个远端运行目录对应一个源 Team；同机另一个 Team 使用另一个目录。`members` 是安装后生成的真实引用；不用 Agent 手填 workspace ID、Python 路径或返回 JSON。已有目录归属冲突、在途／未知任务会阻止替换。保留旧制品、配置和历史，先收尾后升级，不自动覆盖定制文件。
 
 旧团队未声明 `members` 时兼容 `.genethub/remote-targets.json`；有声明就只读这一份，无效或缺失岗位不会回退。迁移时保留机器、workspace、接单命令与未完成派单回执。
 
@@ -31,9 +28,11 @@
 ## 派单和投递
 
 ```text
-run.py spawn --space qa --kind work --machine <ID> --request-id qa-review-42 --desc "验收变更" "任务正文"
-run.py send --machine <ID> --to qa "补充要求"
+run.py task start --space qa --request-id review-42 --desc "验收变更" "目标与验收标准"
+run.py task send <返回的任务> --request-id add-42 "补充要求"
 ```
+
+无需每次指定机器；源机无需登记同名执行 workspace，但岗位定义仍留在源机。原创建意图固定目标，修改 members 不移动在途任务。`spawn/send --machine` 只兼容旧派单。
 
 接单先验证 workspace 的真实根目录属于该脚本所在团队的指定岗位，再用现有 `genet-writer.json` 的文件排他创建拿写锁。
 工作岗位锁自己的 WORKTREE_DIR，未配置则锁岗位根；research 是只读任务不拿写锁。其他会话/机器派单遇到同一目录锁直接报忙。

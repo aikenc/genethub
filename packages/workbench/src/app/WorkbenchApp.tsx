@@ -956,7 +956,7 @@ export function App({
           open={sessionsOpen} hidden={sidebarHidden || !["sessions", "spaces"].includes(section) || section === "sessions" && !showChat}
           onOpen={async (machine, sessionId, workspaceId, signal) => {
             signal?.throwIfAborted();
-            const lease = await connections.acquire(machine, {signal});
+            const lease = await connections.acquire(machine, {signal, foreground: true});
             try {
               signal?.throwIfAborted();
               if (workspaceId) setDraftChooser(false);
@@ -1083,7 +1083,12 @@ export function App({
                           still needs — which workspace, which Agent — are least
                           hidden. */}
                       {starting ? (
-                        <NewSessionPanel draftPicker={draftChooser} sources={draftSources} onPickDraftProject={(machine,id) => beginDraft(machine,id,true)} host={host} endpoint={endpoint} surface={overviewSurface} onSurface={setOverviewSurface} onBack={backPage} nested={nested} />
+                        <NewSessionPanel onOpenProject={(machine,id) => {
+                          void connections.acquire(machine,{foreground:true}).then(lease => {
+                            try { setDraftChooser(false); pickTarget(machine,lease.endpoint); setPendingProject({machineId:lease.client.identity!.machineId,workspaceId:id}); rootNextPage(); setSection("spaces"); setSessionsOpen(false); }
+                            finally { lease.release(); }
+                          }).catch(error => useWorkbench.setState({notice:error instanceof Error ? error.message : String(error)}));
+                        }} draftPicker={draftChooser} sources={draftSources} onPickDraftProject={(machine,id) => beginDraft(machine,id,true)} host={host} endpoint={endpoint} surface={overviewSurface} onSurface={setOverviewSurface} onBack={backPage} nested={nested} />
                       ) : (
                         // Anchors the transcript's own furniture — the fade at
                         // its cut edge, the way back to the newest message — to

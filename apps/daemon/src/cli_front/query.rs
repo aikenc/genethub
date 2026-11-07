@@ -7,8 +7,8 @@
 use base64::Engine;
 use genehub_proto::{
     BlobRef, ErrorCode, HelloResult, ProtocolError, Reply, Request, RoundLayer, RoundTrunk,
-    SessionContext, SessionInspection, SessionNarrativePage, SessionRoundPage, SessionSnapshot,
-    SessionSummary, WorkspaceInfo,
+    SessionContext, SessionInspection, SessionNarrativePage, SessionPageRequest, SessionRoundPage,
+    SessionSnapshot, SessionSummary, WorkspaceInfo,
 };
 use serde_json::{json, Value};
 
@@ -176,6 +176,7 @@ enum Query {
         source_kind: Option<String>,
         include_archived: bool,
         lean: bool,
+        active: bool,
     },
     SessionGet {
         session_id: String,
@@ -386,6 +387,7 @@ fn parse_session(args: &[String]) -> Result<Query, CliFailure> {
             let mut source_kind = None;
             let mut include_archived = false;
             let mut lean = false;
+            let mut active = false;
             let mut index = 1;
             while index < args.len() {
                 match args[index].as_str() {
@@ -437,6 +439,9 @@ fn parse_session(args: &[String]) -> Result<Query, CliFailure> {
                     "--include-archived" => {
                         include_archived = true;
                     }
+                    "--active" => {
+                        active = true;
+                    }
                     "--lean" => {
                         lean = true;
                     }
@@ -454,6 +459,7 @@ fn parse_session(args: &[String]) -> Result<Query, CliFailure> {
                 source_kind,
                 include_archived,
                 lean,
+                active,
             })
         }
         "get" => match &args[1..] {
@@ -765,6 +771,7 @@ async fn execute(
             source_kind,
             include_archived,
             lean,
+            active,
         } => {
             let rpc = connect_selected(selection).await?;
             if let Some(id) = workspace_id.as_deref() {
@@ -774,15 +781,82 @@ async fn execute(
                     return Err(CliFailure::target_not_found("workspace", id));
                 }
             }
-            let mut sessions = sessions(
-                rpc.call(Request::SessionList {
-                    workspace_id: workspace_id.clone(),
-                    include_archived,
-                    lean,
-                })
-                .await
-                .map_err(rpc_error)?,
-            )?;
+            if active
+                && !rpc
+                    .hello()
+                    .features
+                    .iter()
+                    .flatten()
+                    .any(|f| f == "session.active-page.v1")
+            {
+                return Err(CliFailure::business(
+                    "upgradeRequired",
+                    "target needs session.active-page.v1 for complete activity",
+                    None,
+                ));
+            }
+            let mut sessions = Vec::new();
+            if (lean || active)
+                && rpc
+                    .hello()
+                    .features
+                    .iter()
+                    .flatten()
+                    .any(|f| f == "session.page.v1")
+            {
+                let mut cursor = None;
+                let mut seen = std::collections::HashSet::new();
+                loop {
+                    let reply = rpc
+                        .call(Request::SessionPage {
+                            requests: vec![SessionPageRequest {
+                                workspace_id: workspace_id.clone(),
+                                limit: 100,
+                                cursor: cursor.clone(),
+                                active_only: active.then_some(true),
+                            }],
+                            include_archived,
+                        })
+                        .await
+                        .map_err(rpc_error)?;
+                    let Reply::SessionPages(mut pages) = reply else {
+                        return Err(unexpected_reply("session pages", &reply));
+                    };
+                    if pages.len() != 1 {
+                        return Err(CliFailure::business(
+                            "invalidReply",
+                            "expected one session page",
+                            None,
+                        ));
+                    }
+                    let page = pages.remove(0);
+                    if let Some(error) = page.error {
+                        return Err(CliFailure::business("sessionPageFailed", error, None));
+                    }
+                    sessions.extend(page.sessions);
+                    cursor = page.next_cursor;
+                    let Some(next) = cursor.as_ref() else {
+                        break;
+                    };
+                    if !seen.insert(next.clone()) {
+                        return Err(CliFailure::business(
+                            "invalidReply",
+                            "session cursor did not advance",
+                            None,
+                        ));
+                    }
+                }
+            } else {
+                sessions = self::sessions(
+                    rpc.call(Request::SessionList {
+                        workspace_id: workspace_id.clone(),
+                        include_archived,
+                        lean,
+                    })
+                    .await
+                    .map_err(rpc_error)?,
+                )?;
+            }
             sessions.retain(|session| {
                 labels.iter().all(|label| session.labels.contains(label))
                     && source_kind.as_deref().is_none_or(|kind| {
@@ -1357,7 +1431,7 @@ fn command_schema(name: &str) -> Value {
             ),
         ),
         "session.list" => (
-            "genet session list [--workspace <id>] [--label <label>]... [--source-kind <kind>] [--include-archived] [--lean]",
+            "genet session list [--workspace <id>] [--label <label>]... [--source-kind <kind>] [--include-archived] [--lean] [--active]",
             true,
             object_input(
                 json!({
@@ -1367,6 +1441,8 @@ fn command_schema(name: &str) -> Value {
                     "sourceKind": {"enum": ["human", "system", null],
                         "description": "--source-kind; keeps sessions matching the given sourceKind (human or system)"},
                     "includeArchived": {"type": "boolean", "description": "--include-archived; include archived sessions"},
+                    "lean": {"type": "boolean", "description": "--lean; bounded summary fields"},
+                    "active": {"type": "boolean", "description": "--active; complete current work via session.active-page.v1; combine --include-archived for archived obligations"},
                 }),
                 &[],
             ),
@@ -2325,6 +2401,7 @@ mod tests {
                 source_kind: None,
                 include_archived: false,
                 lean: false,
+                active: false,
             }
         );
         assert_eq!(
@@ -2348,6 +2425,7 @@ mod tests {
                 source_kind: Some("system".into()),
                 include_archived: true,
                 lean: false,
+                active: false,
             }
         );
         let duplicate = parse(&words(&[

@@ -360,7 +360,7 @@ function renderBoard(data, source) {
     ? (members.length - onDuty) + " 个预置角色待岗（按需激活）"
     : "全员已配置独立职责";
 
-  document.getElementById("kpi-sessions").textContent = runningCount + " 执行中 / " + coordinatingCount + " 协作中 / " + totalSessions + " 总计";
+  document.getElementById("kpi-sessions").textContent = runningCount + " 执行中 / " + coordinatingCount + " 协作中 / " + totalSessions + " 当前活动";
   document.getElementById("kpi-sessions-sub").textContent = runningCount > 0 ? "后台会话正在执行" : coordinatingCount > 0 ? "任务仍在接力或等待处理" : "当前未发现执行或协作义务";
 
   document.getElementById("kpi-releases").textContent = String(releases.length) + " 个版本";
@@ -404,7 +404,7 @@ function renderBoard(data, source) {
       : '<span class="muted">暂无会话</span>';
     const sessions = m.sessions || (sess ? [sess] : []);
     if (sessions.length > 1) {
-      sessCell += '<details style="margin-top:8px"><summary>查看本岗位全部 ' + sessions.length + ' 个会话</summary>' + sessions.map(s => {
+      sessCell += '<details style="margin-top:8px"><summary>查看本岗位活动 ' + sessions.length + ' 个会话</summary>' + sessions.map(s => {
         const c = s.coordination;
         const status = s.paused ? '已暂停' : s.status === 'running' ? '执行中' : s.status === 'waiting' ? '等待交互' : '';
         const work = c?.stale || c?.unknown ? '协作状态待核对' : c?.pending ? '等待协作 ' + c.pending + ' 项' : c?.ready ? '结果待处理' : c?.active ? '任务待继续' : '';
@@ -632,7 +632,7 @@ def _query_daemon_spaces_and_sessions_uncached(team_root):
             capture_output=True, text=True, env=env, timeout=30
         )
         sess_out = subprocess.run(
-            [cli, "session", "list", "--lean"],
+            [cli, "session", "list", "--lean", "--active", "--include-archived"],
             capture_output=True, text=True, env=env, timeout=30
         )
         if ws_out.returncode != 0 or sess_out.returncode != 0:

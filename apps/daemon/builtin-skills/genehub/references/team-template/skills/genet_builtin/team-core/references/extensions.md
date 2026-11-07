@@ -83,3 +83,5 @@ class ProjectResources(ResourcePolicy):
 源端 `spacebuilder.py build <定义源> --output <独立制品>` 自动携带 team 配置、tools 下非隐藏 Python/JSON/JS依赖、编译后的身份与 Skill/hook。不携带外部 pip 包、绝对本机依赖或业务数据；依赖应随 tools 包提供或由安装器显式满足。目标端无需源仓：`spacebuilder.py verify <制品> --artifacts-only`，再用制品 `tools/run.py describe` 和实际任务验收。执行副本不反向修改定义源。
 
 兼容平台升级只替换 genet_builtin 包/Skill和薄入口，保留业务源码、配置、身份及数据。首次升级提取旧版内部修改成本可高；后续依赖稳定公开方法而不是拷贝内部代码。破坏公开签名、语义、持久绑定或准备/释放含义时必须升 API/binding 版本并给迁移说明；不能保证任意 monkey patch 都自动兼容。采用新的 Class/settings 前必须结算或显式迁移在途任务。部署时验证完整制品及后台进程采用；回退保留能读新账本的收尾路径。
+
+远端运行副本由定义源原 build 的 post 安装完整产物，参见 [远端岗位](remote-targets.md)。目标机只改本机配置与业务数据，身份／Skill／策略类回定义源维护；在途任务保留原制品收尾。新任务使用 task，脚本自动使用 members 和原返回回执。

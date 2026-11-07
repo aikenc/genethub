@@ -24,6 +24,24 @@ const MAX_JSON_RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_CHANNEL_ADMISSION_BYTES: usize = 4 * 1024;
 const MAX_CONTROL_REDIRECTS: usize = 3;
 
+/// Existing handle/legacy-locator matching, shared by directory lookup and
+/// ticket routing. Callers must reject multiple matches before selecting one.
+pub(crate) fn machine_handle_matches(handle: &str, selector: &str) -> bool {
+    if selector.starts_with("mch_") {
+        return false;
+    }
+    let clean = |value: &str| {
+        value
+            .trim()
+            .trim_start_matches("m-")
+            .trim_start_matches("m_")
+            .replace('-', "")
+    };
+    let wanted = clean(selector);
+    let handle = clean(handle);
+    !wanted.is_empty() && (handle == wanted || (wanted.len() >= 8 && handle.starts_with(&wanted)))
+}
+
 /// What the user has to type in, and where.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -540,25 +558,10 @@ impl Client {
         if machine_id.starts_with("mch_") {
             return Ok(machine_id.to_string());
         }
-        let wanted = machine_id
-            .trim()
-            .trim_start_matches("m-")
-            .trim_start_matches("m_")
-            .replace('-', "");
-        if wanted.is_empty() {
-            return Ok(machine_id.to_string());
-        }
         let directory = self.machines(enrollment).await?;
         let matches: Vec<_> = directory
             .iter()
-            .filter(|entry| {
-                let handle = entry
-                    .device_handle
-                    .trim_start_matches("m-")
-                    .trim_start_matches("m_")
-                    .replace('-', "");
-                handle == wanted || (wanted.len() >= 8 && handle.starts_with(&wanted))
-            })
+            .filter(|entry| machine_handle_matches(&entry.device_handle, machine_id))
             .collect();
         match matches.as_slice() {
             [one] => Ok(one.id.clone()),

@@ -29,7 +29,8 @@ export const NEW_SESSION_WORKSPACE_PREVIEW_LIMIT = 4;
 export const NEW_SESSION_PROJECT_PREVIEW_LIMIT = NEW_SESSION_WORKSPACE_PREVIEW_LIMIT;
 
 /** The single expert home. The existing Composer remains owned by WorkbenchApp. */
-export function NewSessionPanel({ endpoint, surface = "sessions", onSurface, onBack, nested = false, draftPicker = false, sources = [], onPickDraftProject }: {
+export function NewSessionPanel({ endpoint, surface = "sessions", onSurface, onBack, nested = false, draftPicker = false, sources = [], onPickDraftProject, onOpenProject }: {
+  onOpenProject?(machine: Target,workspaceId: string): void;
   draftPicker?: boolean; sources?: MachineSummary[]; onPickDraftProject?(machine: Target, workspaceId: string): void;
   host?: Host; endpoint?: Endpoint | null; surface?: string; onSurface?(value: string, nested?: boolean): void; onBack?(): void; nested?: boolean;
 } = {}) {
@@ -70,7 +71,7 @@ export function NewSessionPanel({ endpoint, surface = "sessions", onSurface, onB
   }, [surface, workspace?.id]);
   const owned = (activity.sessions ?? []).filter(s => s.workspaceId === workspace?.id);
   const candidates = filter === "pending" ? pendingSessions(owned, activity.sessions ?? []) : owned;
-  useCompleteSessionList(sessionSurface && (showAll || archived || Boolean(historyQuery.trim()) || filter !== "all"));
+  useCompleteSessionList(sessionSurface && (showAll || archived || Boolean(historyQuery.trim())));
   useEffect(() => {
     if (sessionSurface && workspace?.agentSpace?.parentWorkspaceId && wb.client?.identity?.features?.includes("session.page.v1")) wb.expandSessionSpace(workspace.id, true);
   }, [sessionSurface, workspace?.id, wb.client]);
@@ -127,7 +128,7 @@ export function NewSessionPanel({ endpoint, surface = "sessions", onSurface, onB
         </>}
         {surface === "components" && <AgentAdvancedSettings key={workspace.id} workspace={workspace} section="components" inline />}
         {surface === "directories" && <><ExpertDirectories workspace={workspace} /><div className="mt-4 flex flex-wrap gap-2">{[["files","文件"],["changes","变更"],["terminal","终端"]].map(([id,label]) => <button type="button" key={id} className="min-h-11 rounded-lg border border-line px-4 text-sm" onClick={() => setSurface(id!, true)}>{label}</button>)}</div>{environment?.workspaceTools?.(workspace.id)}</>}
-        {surface === "children" && <ExpertSquad key={workspace.id} workspace={workspace} onOpen={id => navigate(id, true)} />}
+        {surface === "children" && <ExpertSquad key={workspace.id} workspace={workspace} sources={sources} onOpenRemote={onOpenProject} onOpen={id => navigate(id, true)} />}
         {surface === "details" && <AgentDetails workspace={workspace} deviceName={endpoint?.label ?? "当前设备"} compact />}
       </div>
       {surface === "files" && <FilesPanel workspaceId={workspace.id} />}

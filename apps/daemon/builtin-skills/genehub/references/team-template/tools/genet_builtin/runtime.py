@@ -32,6 +32,45 @@ def json_value(value):
     return json.loads(encoded)
 
 
+def verify_output_artifact(root, exact=False):
+    """Runtime package verification; exact mode rejects unowned author inputs."""
+    root = Path(root).resolve()
+    receipt = root / '.spacebuilder/output-lock.json'
+    if receipt.is_symlink(): raise TeamConfigurationError('output receipt is a symlink')
+    try:
+        value = json.loads(receipt.read_text(encoding='utf-8'))
+        if value.get('schema') != 'spacebuilder-output.v1' or not isinstance(value.get('artifacts'), list):
+            raise ValueError('invalid output receipt')
+        files = {'.spacebuilder/output-lock.json'}
+        members = {item['path'] for item in value['members']}
+        if '.' not in members: raise ValueError('root member missing')
+        for item in value['artifacts']:
+            if item['member'] not in members: raise ValueError('unknown output member')
+            relative = Path(item['member']) / item['target']
+            if relative.is_absolute() or '..' in relative.parts: raise ValueError('escaping output path')
+            path = root / relative
+            if any(part.is_symlink() for part in [path, *list(path.parents)[:len(relative.parts)-1]]):
+                raise ValueError('symlink in output path')
+            name = relative.as_posix()
+            if name in files: raise ValueError('duplicate output path')
+            if not path.is_file() or 'sha256:' + hashlib.sha256(path.read_bytes()).hexdigest() != item['digest'] or bool(path.stat().st_mode & 0o100) != item['executable']:
+                raise ValueError('missing/changed artifact: '+name)
+            if item['logicalType'] == 'runtime-manifest':
+                descriptor = json.loads(path.read_text(encoding='utf-8'))
+                if any(descriptor.get(key) for key in ('identity','skillProviders','buildHooks')):
+                    raise ValueError('author inputs in execution descriptor')
+            files.add(name)
+        if not {'agent-space.genet.json','tools/run.py'} <= files:
+            raise ValueError('complete Team runtime missing')
+        if exact:
+            for path in root.rglob('*'):
+                if path.is_symlink() or path.is_file() and path.relative_to(root).as_posix() not in files | {'.spacebuilder/build.lock'}:
+                    raise ValueError('unowned input in artifact: '+str(path.relative_to(root)))
+        return files
+    except (OSError, KeyError, TypeError, ValueError) as error:
+        raise TeamConfigurationError('Team artifact integrity failed: '+str(error)) from error
+
+
 def class_ref(cls):
     # Public defaults retain their stable API module identity.
     return cls.__module__ + ":" + cls.__qualname__
@@ -125,26 +164,7 @@ class TeamRuntime:
         receipt = Path(self.root) / ".spacebuilder/output-lock.json"
         if not receipt.exists():
             return
-        try:
-            value = json.loads(receipt.read_text(encoding="utf-8"))
-            if value.get("schema") != "spacebuilder-output.v1" or not isinstance(value.get("artifacts"), list):
-                raise ValueError("invalid output receipt")
-            owned = set()
-            for item in value["artifacts"]:
-                if item.get("member") != "." or item.get("logicalType") not in ("runtime-manifest", "team-runtime-file"):
-                    continue
-                relative = item["target"]
-                parts = Path(relative).parts
-                if Path(relative).is_absolute() or ".." in parts:
-                    raise ValueError("escaping output receipt")
-                path = Path(self.root) / relative
-                if path.is_symlink() or not path.is_file() or "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest() != item["digest"]:
-                    raise ValueError("partial or modified artifact: " + relative)
-                owned.add(relative)
-            if "agent-space.genet.json" not in owned or "tools/run.py" not in owned:
-                raise ValueError("artifact lacks Team runtime receipt")
-        except (OSError, KeyError, TypeError, ValueError) as error:
-            raise TeamConfigurationError("Team artifact integrity failed; rebuild/verify complete artifact: " + str(error)) from error
+        verify_output_artifact(self.root)
 
     def for_operation(self, operation_id):
         return TaskContext(self.root, self.context.session_id, operation_id)

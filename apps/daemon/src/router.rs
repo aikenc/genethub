@@ -463,6 +463,7 @@ async fn dispatch(
                     "session.input.v1".to_string(),
                     "session.create-id.v1".to_string(),
                     "session.page.v1".to_string(),
+                    "session.active-page.v1".to_string(),
                     "session.prepare.v1".to_string(),
                     "session.file-upload.v1".to_string(),
                     "provider.configuration.v1".to_string(),

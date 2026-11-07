@@ -22,6 +22,8 @@
 "$GENEHUB_CLI" machine show <machineId> --paired # 只查看直连记录
 ```
 
+`machine show` 同时接受目录提供的稳定 `deviceHandle`（若有）与原路由 ID；新绑定保存稳定身份，旧合法 ID 继续由平台解析。Agent 不做前缀转换。
+
 `machine list` 的每项包含 `machineId`、`name`、`online`、`local`、`source`（主要展示来源）和 `sources`
 （如 `["paired", "hub"]`）。按精确 ID 合并，同名机器保留。成功返回 `complete: true`；
 Hub 查询失败会返回非零退出码和 `complete: false` 的已知条目，不能把它当作完整目录。
@@ -53,7 +55,7 @@ Hub 查询失败会返回非零退出码和 `complete: false` 的已知条目，
 
 `--` 后面的参数原样交给目标进程，包括 `--version`、`-V` 和 `--help`。例如
 `shell --workspace <id> -- python3 --version` 查询的是目标 Python 的版本。
-列表仍返回完整 JSON，按需使用管道和结构化筛选（如 `session list | jq -c '.data.sessions[] | select(.status == "running")'`）。
+`session list --active --include-archived` 返回完整活动集合，独立于历史分页；普通 `session list` 保持完整历史输出。
 命令分组帮助用 `session --help` 或 `agent run --help`；`schema <command>` 提供机器可读合同。
 
 ## 跨机传文件

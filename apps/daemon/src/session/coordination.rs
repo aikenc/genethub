@@ -16,6 +16,12 @@ use std::{
 struct Snapshot {
     version: u32,
     updated_at_ms: i64,
+    #[serde(default)]
+    received_at_ms: Option<i64>,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    revision: Option<u64>,
     sessions: HashMap<String, SessionCoordinationSummary>,
 }
 struct Entry {
@@ -66,8 +72,19 @@ impl Cache {
             };
             match read() {
                 Ok(Some(snapshot)) => {
-                    entry.snapshot = Some(snapshot);
-                    entry.unavailable = false;
+                    let ordered = entry.snapshot.as_ref().is_none_or(|old| {
+                        match (old.revision, snapshot.revision) {
+                            (Some(before), Some(after)) => {
+                                old.source == snapshot.source && after >= before
+                            }
+                            (Some(_), None) => false,
+                            _ => true,
+                        }
+                    });
+                    if ordered {
+                        entry.snapshot = Some(snapshot);
+                    }
+                    entry.unavailable = !ordered;
                 }
                 Ok(None)
                     if entry.snapshot.is_none()
@@ -90,7 +107,13 @@ impl Cache {
                 .map(|s| s.updated_at_ms)
                 .unwrap_or(0);
             value.stale = entry.unavailable
-                || super::store::now_ms().saturating_sub(value.updated_at_ms) > 120_000;
+                || super::store::now_ms().saturating_sub(
+                    entry
+                        .snapshot
+                        .as_ref()
+                        .and_then(|s| s.received_at_ms)
+                        .unwrap_or(value.updated_at_ms),
+                ) > 120_000;
         } else if entry.unavailable {
             summary = Some(SessionCoordinationSummary {
                 source: "unavailable".into(),

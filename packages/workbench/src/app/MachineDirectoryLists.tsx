@@ -4,7 +4,7 @@ import type { SessionSummary, WorkspaceInfo } from "@genehub/proto";
 import type { Endpoint, Target } from "../host";
 import { MachineConnections } from "../protocol/machine-connections";
 import { MachineSummaryDirectory, type MachineSummary, type SummaryDirectory } from "../protocol/summary-directory";
-import { useWorkbench, workbenchForClient } from "../session/store";
+import { useWorkbench, workbenchForClient, adoptMachineActivity } from "../session/store";
 import { hasUnreadReply, initializeReplyReads, useConversationLocalChanges } from "../session/localConversation";
 import { hasCurrentWork, matchesAttention, type AttentionFilter } from "../session/attention";
 import { SessionActivityIcons, SessionStatusIcon } from "../shell/SessionStatusIcon";
@@ -14,14 +14,10 @@ import { buildAgentSpaceTree } from "../workspace/agent-space-tree";
 import { ListHeader, ListPane, ListScroll } from "../ui/ListLayout";
 import { relativeTime } from "../ui/relativeTime";
 import { WorkspaceDetailsDialog } from "../workspace/WorkspaceDetailsDialog";
+import { spaceKey as keyOf, memberSource, workspaceMembers, type DirectorySpace } from "../workspace/members";
 import { SpaceFilter } from "./SpaceFilter";
 import { MachineFilter, machineReady as fresh, machineStateLabel as stateLabel } from "./MachineFilter";
 
-const keyOf = (machine: Target, id: string) => JSON.stringify([machine.deviceHandle ?? machine.id, id]);
-interface DirectorySpace {
-  key: string; workspaceId: string; name: string; machine: string;
-  row?: MachineSummary; workspace?: WorkspaceInfo;
-}
 const latest = (s: SessionSummary) => s.messagePreview?.atMs ?? s.updatedAtMs;
 const byTime = (a: SessionSummary, b: SessionSummary) => latest(b) - latest(a) || a.id.localeCompare(b.id);
 
@@ -86,12 +82,18 @@ export function MachineDirectoryLists({ connections, endpoint, section, open, hi
   }, [refresh]);
   useEffect(() => { setSelection(new Set()); setConfirming(false); }, [machineId, query, filter, projectFilter, section, includeArchived]);
   const sources = useMemo(() => directory.sources.map(row => {
+    const activity = row.activeSessions ?? [];
+    row = {...row, sessions: [...new Map([...row.sessions, ...activity].map(s => [s.id,s])).values()]};
     if (row.target.deviceHandle !== client?.identity?.machineId || client?.connectionState !== "ready" || row.state === "denied") return row;
     return { ...row, state: (["waiting", "loading", "deferred", "notChecked"].includes(row.state) && sessionsChecked ? "partial" : row.state) as MachineSummary["state"], version: client.identity?.daemonVersion ?? row.version, workspaces: liveWorkspaces.length ? liveWorkspaces : row.workspaces,
       sessions: [...new Map([...row.sessions, ...liveSessions.filter(s => (observations[s.id] ?? 0) > (row.updatedAt ? Date.parse(row.updatedAt) : 0))].map(s => [s.id, s])).values()],
       updatedAt: sessionsChecked ? new Date(sessionsChecked).toISOString() : row.updatedAt };
   }), [directory, client, liveSessions, liveWorkspaces, sessionsChecked, observations]);
   useEffect(() => { onSources?.(sources); }, [sources,onSources]);
+  useEffect(() => {
+    const row = directory.sources.find(row => row.target.deviceHandle === client?.identity?.machineId);
+    if (client && row) adoptMachineActivity(client,row.activeSessions ?? [],Boolean(row.activityComplete));
+  }, [directory,client]);
   useEffect(() => { for (const row of directory.sources) if (fresh(row)) initializeReplyReads(row.target.deviceHandle ?? row.target.id, row.sessions); }, [directory]);
   const selectedSources = sources.filter(row => !machineId || row.target.id === machineId);
   const run = async (action: () => Promise<unknown>) => {
@@ -147,7 +149,7 @@ export function MachineDirectoryLists({ connections, endpoint, section, open, hi
     return (Boolean(s.archived) === includeArchived || !includeArchived && hasCurrentWork(s,row.sessions)) && `${s.title} ${s.description ?? ""} ${workspace?.name ?? ""}`.toLocaleLowerCase().includes(q)
       && matchesAttention(s, filter, hasUnreadReply(row.target.deviceHandle ?? row.target.id, s), row.sessions);
   };
-  const rowFor = (id: string) => sources.find(row => row.target.deviceHandle === id || row.target.id === id);
+  const rowFor = (id: string) => memberSource(sources,id);
   const references = new Set(sources.flatMap(row => row.workspaces.flatMap(workspace => (workspace.agentSpace?.members ?? []).flatMap(member => {
     const owner = rowFor(member.machineId);
     return owner ? [keyOf(owner.target,member.workspaceId)] : [];
@@ -156,14 +158,7 @@ export function MachineDirectoryLists({ connections, endpoint, section, open, hi
     const tree = buildAgentSpaceTree(row.workspaces);
     return [...tree.roots,...tree.anomalies].filter(({workspace}) => (!references.has(keyOf(row.target,workspace.id)) || Boolean(workspace.agentSpace?.members?.length))).map(({workspace}) => {
       const key = keyOf(row.target,workspace.id);
-      const local: DirectorySpace[] = row.workspaces.filter(w => w.id !== workspace.id && tree.projectRootById[w.id] === workspace.id)
-        .map(w => ({key:keyOf(row.target,w.id),workspaceId:w.id,name:w.name,machine:row.target.label,row,workspace:w}));
-      const remote: DirectorySpace[] = (workspace.agentSpace?.members ?? []).map(member => {
-        const owner = rowFor(member.machineId), child = owner?.workspaces.find(w => w.id === member.workspaceId);
-        return {key:owner ? keyOf(owner.target,member.workspaceId) : JSON.stringify([member.machineId,member.workspaceId]),
-          workspaceId:member.workspaceId,name:child?.name ?? member.name ?? "Space",machine:owner?.target.label ?? "未连接的机器",row:owner,workspace:child};
-      });
-      const children = [...new Map([...local,...remote].filter(child => child.key !== key).map(child => [child.key,child])).values()];
+      const children = workspaceMembers(sources,row,workspace);
       const visibleChildren = children.filter(child => !machineId || child.row?.target.id === machineId);
       const direct = (!machineId || row.target.id === machineId) ? row.sessions.filter(s => s.workspaceId === workspace.id && matches(row,s)).sort(byTime) : [];
       const inside = visibleChildren.flatMap(child => child.row?.sessions.filter(s => s.workspaceId === child.workspaceId && matches(child.row!,s))
@@ -173,7 +168,7 @@ export function MachineDirectoryLists({ connections, endpoint, section, open, hi
       const childRows = inside.filter(item => !internalFilter || keyOf(item.row.target,item.session.workspaceId) === internalFilter).slice(0,innerLimits[key] ?? 10);
       const allSessions = [...row.sessions.filter(s => s.workspaceId === workspace.id),...children.flatMap(child => child.row?.sessions.filter(s => s.workspaceId === child.workspaceId) ?? [])];
       return {row,workspace,key,children:visibleChildren,allChildren:children,direct,inside,show,internalOpen,childRows,allSessions,
-        partial:children.some(child => !child.workspace || child.row?.state === "partial" || child.row?.nextCursor) || row.state === "partial" || Boolean(row.nextCursor),
+        partial:children.some(child => !child.workspace || !child.row?.activityComplete) || !row.activityComplete,
         stale:!fresh(row) || children.some(child => !child.row || !fresh(child.row)),
         machineCount:new Set([row.target.id,...children.map(child => child.row?.target.id ?? child.key)]).size,
         pinned:projectPinned(row.target.deviceHandle ?? row.target.id,workspace.id,workspace.builtin === true),

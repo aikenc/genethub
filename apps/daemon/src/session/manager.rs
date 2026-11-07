@@ -1829,31 +1829,7 @@ impl SessionManager {
                 ),
             }
             title_repair_ms += repair_started.elapsed().as_millis() as u64;
-            // A suspended approval survives daemon restarts without a live
-            // Agent process or client connection.
-            let (status, activity) = match self.sessions.read().await.get(&meta.id) {
-                Some(live) => {
-                    let status = *live.status.lock().await;
-                    (status, live.activity_of(status))
-                }
-                None if meta.execution_retired => (SessionStatus::Closed, None),
-                None if meta.pending_permission.is_some()
-                    || meta
-                        .human_continuation
-                        .as_ref()
-                        .is_some_and(|c| !c.completed) =>
-                {
-                    (SessionStatus::Waiting, None)
-                }
-                None => (SessionStatus::Idle, None),
-            };
-            let mut summary = meta.summary_with_activity(status, activity);
-            summary.coordination = self.store.coordination(&meta.workspace_id, &meta.id);
-            if let Some(live) = self.sessions.read().await.get(&meta.id) {
-                summary.interaction_summary = Some(super::store::interaction_summary(
-                    live.pending_permissions.lock().await.iter(),
-                ));
-            }
+            let mut summary = self.project_meta(&meta).await;
             if lean {
                 summary.lineage = None;
                 if let Some(preview) = &mut summary.message_preview {
@@ -1879,6 +1855,36 @@ impl SessionManager {
         Ok(out)
     }
 
+    /// Project existing execution and collaboration facts without reading message bodies.
+    async fn project_meta(&self, meta: &SessionMeta) -> SessionSummary {
+        // A suspended approval survives daemon restarts without a live
+        // Agent process or client connection.
+        let (status, activity) = match self.sessions.read().await.get(&meta.id) {
+            Some(live) => {
+                let status = *live.status.lock().await;
+                (status, live.activity_of(status))
+            }
+            None if meta.execution_retired => (SessionStatus::Closed, None),
+            None if meta.pending_permission.is_some()
+                || meta
+                    .human_continuation
+                    .as_ref()
+                    .is_some_and(|c| !c.completed) =>
+            {
+                (SessionStatus::Waiting, None)
+            }
+            None => (SessionStatus::Idle, None),
+        };
+        let mut summary = meta.summary_with_activity(status, activity);
+        summary.coordination = self.store.coordination(&meta.workspace_id, &meta.id);
+        if let Some(live) = self.sessions.read().await.get(&meta.id) {
+            summary.interaction_summary = Some(super::store::interaction_summary(
+                live.pending_permissions.lock().await.iter(),
+            ));
+        }
+        summary
+    }
+
     pub async fn page(
         &self,
         request: &genehub_proto::SessionPageRequest,
@@ -1890,6 +1896,10 @@ impl SessionManager {
             version: u8,
             workspace: Option<String>,
             archived: bool,
+            #[serde(default)]
+            active_only: bool,
+            #[serde(default)]
+            activity_revision: Option<String>,
             at: i64,
             id: String,
             owner: String,
@@ -1906,7 +1916,8 @@ impl SessionManager {
                 anyhow::ensure!(
                     cursor.version == 1
                         && cursor.workspace == request.workspace_id
-                        && cursor.archived == include_archived,
+                        && cursor.archived == include_archived
+                        && cursor.active_only == request.active_only.unwrap_or(false),
                     "page cursor does not match query"
                 );
                 Ok(cursor)
@@ -1918,13 +1929,14 @@ impl SessionManager {
             .await?;
         metadata.retain(|meta| {
             (include_archived || !meta.archived)
-                && cursor.as_ref().is_none_or(|cursor| {
-                    (
-                        meta.updated_at_ms,
-                        meta.id.as_str(),
-                        meta.workspace_id.as_str(),
-                    ) < (cursor.at, cursor.id.as_str(), cursor.owner.as_str())
-                })
+                && (request.active_only.unwrap_or(false)
+                    || cursor.as_ref().is_none_or(|cursor| {
+                        (
+                            meta.updated_at_ms,
+                            meta.id.as_str(),
+                            meta.workspace_id.as_str(),
+                        ) < (cursor.at, cursor.id.as_str(), cursor.owner.as_str())
+                    }))
         });
         metadata.sort_by(|a, b| {
             (b.updated_at_ms, &b.id, &b.workspace_id).cmp(&(
@@ -1933,8 +1945,64 @@ impl SessionManager {
                 &a.workspace_id,
             ))
         });
+        // Reuse PageCatalog. Activity is evaluated before truncation, so an old
+        // pending interaction or collaboration cannot disappear behind history.
+        let mut active_summaries = Vec::new();
+        let mut activity_revision = None;
+        if request.active_only.unwrap_or(false) {
+            let mut selected = Vec::new();
+            let mut budget = crate::blocking::WorkBudget::new();
+            for meta in metadata {
+                budget.checkpoint().await;
+                let summary = self.project_meta(&meta).await;
+                let active = matches!(
+                    summary.status,
+                    SessionStatus::Running | SessionStatus::Waiting | SessionStatus::Failed
+                ) || summary
+                    .interaction_summary
+                    .as_ref()
+                    .is_some_and(|s| s.count > 0)
+                    || summary.coordination.as_ref().is_some_and(|s| {
+                        s.active || s.pending > 0 || s.ready > 0 || s.unknown > 0 || s.stale
+                    });
+                if active {
+                    selected.push(meta);
+                    active_summaries.push(summary);
+                }
+            }
+            let digest = format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_vec(
+                    &selected
+                        .iter()
+                        .map(|m| (&m.id, &m.workspace_id, m.updated_at_ms))
+                        .collect::<Vec<_>>()
+                )?)
+            );
+            anyhow::ensure!(
+                cursor
+                    .as_ref()
+                    .is_none_or(|c| c.activity_revision.as_deref() == Some(digest.as_str())),
+                "activity changed; restart activity pages"
+            );
+            activity_revision = Some(digest);
+            let pairs = selected
+                .into_iter()
+                .zip(active_summaries)
+                .filter(|(meta, _)| {
+                    cursor.as_ref().is_none_or(|c| {
+                        (
+                            meta.updated_at_ms,
+                            meta.id.as_str(),
+                            meta.workspace_id.as_str(),
+                        ) < (c.at, c.id.as_str(), c.owner.as_str())
+                    })
+                });
+            (metadata, active_summaries) = pairs.unzip();
+        }
         let more = metadata.len() > request.limit as usize;
         metadata.truncate(request.limit as usize);
+        active_summaries.truncate(request.limit as usize);
         let next_cursor = if more {
             metadata.last().map(|last| {
                 base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
@@ -1942,6 +2010,8 @@ impl SessionManager {
                         version: 1,
                         workspace: request.workspace_id.clone(),
                         archived: include_archived,
+                        active_only: request.active_only.unwrap_or(false),
+                        activity_revision: activity_revision.clone(),
                         at: last.updated_at_ms,
                         id: last.id.clone(),
                         owner: last.workspace_id.clone(),
@@ -1953,8 +2023,10 @@ impl SessionManager {
             None
         };
         let metadata_ms = started.elapsed().as_millis() as u64;
-        let sessions = self
-            .project_list(
+        let sessions = if request.active_only.unwrap_or(false) {
+            active_summaries
+        } else {
+            self.project_list(
                 metadata,
                 request.workspace_id.as_deref(),
                 include_archived,
@@ -1962,7 +2034,8 @@ impl SessionManager {
                 started,
                 metadata_ms,
             )
-            .await?;
+            .await?
+        };
         Ok(genehub_proto::SessionPageResult {
             workspace_id: request.workspace_id.clone(),
             sessions,

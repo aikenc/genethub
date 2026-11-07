@@ -150,6 +150,7 @@ export function WorkspaceRow({
           >
             <EntityAvatar id={workspace.id} name={workspace.name} badge={!activity.error && activity.running && !activity.pending ? <Loader2 aria-label="有执行活动" className="h-3 w-3 animate-spin text-ok" /> : undefined}/>
             <EntityText title={workspace.name} hint="当前会话及仍有活动的归档会话；待办可进入具体处理位置">
+              {deviceName && <span className="block truncate text-[11px] text-muted">{deviceName}</span>}
               <span className="truncate">{activity.error ? "会话状态待同步" : activity.partial ? activity.count === undefined ? "展开后读取会话" : `已加载 ${activity.count} 条会话` : activity.count === undefined ? "正在读取会话…" : activity.label || `${relativeTime(activity.recent ?? 0)} · ${activity.count} 个会话`}</span>
             </EntityText>
           </button>
