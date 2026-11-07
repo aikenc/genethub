@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { randomBytes } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { allocatePort, createLease, releaseLease, defineSpecialty, openBrowser, startHub, startRelay } from "../../framework/public.ts";
 
@@ -46,6 +47,23 @@ defineSpecialty({
       await opened.client.call({ type: "session.rename", payload: { sessionId: id, title: `${title} session` } });
       await opened.client.call({ type: "workspace.rename", payload: { workspaceId: opened.workspaceId, name: `${title} project` } });
     }
+    // A project explicitly composes an identically named local/remote Space.
+    // The actual owning daemon remains the independent oracle for navigation.
+    const childRoot=join(a.workspaceRoot,"spaces","shared"); mkdirSync(childRoot,{recursive:true});
+    writeFileSync(join(childRoot,"agent-space.genet.json"),JSON.stringify({name:"共享验证",folders:[{path:"."}]}));
+    const child=await a.client.call({type:"workspace.open",payload:{root:childRoot}});
+    if(child?.type!=="workspace")throw new Error("local Space missing");
+    await a.client.call({type:"agentSpace.configure",payload:{workspaceId:a.workspaceId,expectedRevision:0,operation:{kind:"setLifecycle",lifecycle:"persistent"}}});
+    await a.client.call({type:"agentSpace.configure",payload:{workspaceId:child.data.id,expectedRevision:0,operation:{kind:"setParent",parentWorkspaceId:a.workspaceId}}});
+    const local=await t.flows.main.createBuiltinSession(a.client,child.data.id);
+    await a.client.call({type:"session.rename",payload:{sessionId:local,title:"Local same-name Space"}});
+    await b.client.call({type:"workspace.rename",payload:{workspaceId:b.workspaceId,name:"共享验证"}});
+    writeFileSync(join(a.workspaceRoot,"agent-space.genet.json"),JSON.stringify({name:"Hosted A project",folders:[{path:"."}],members:[
+      {machineId:b.client.identity!.machineId,workspaceId:b.workspaceId,name:"共享验证"},
+      {machineId:"m_unavailable",workspaceId:"w_unknown",name:"离线岗位"},
+    ]}));
+    const catalog=await a.client.call({type:"workspace.list"});
+    t.assertions.assert(catalog?.type==="workspaces"&&catalog.data.find(w=>w.id===a!.workspaceId)?.agentSpace?.members?.[0]?.workspaceId===b.workspaceId,"descriptor references were not projected through workspace.list");
     browser = await openBrowser({ viewport: { width: 1280, height: 900 } }, { trace: false });
     const cookies = (account.cookie() ?? "").split(";").map(part => {
       const at = part.indexOf("="); return { name: part.slice(0,at).trim(), value: part.slice(at+1), url: hub.origin, httpOnly: true, sameSite: "Lax" as const };
@@ -57,10 +75,31 @@ defineSpecialty({
     await page.goto(`${hub.origin}/d/${a.client.identity!.machineId}/w/${a.workspaceId}/s/${first}`);
     await page.getByRole("heading", { name: "Hosted A session", exact: true }).waitFor();
     const list = page.getByRole("complementary", { name: "会话列表", exact: true });
-    await list.getByRole("button", { name: /Hosted B session/ }).waitFor();
+    const group=list.getByRole("region",{name:"项目 Hosted A project",exact:true});
+    await group.getByRole("button",{name:/Hosted A session/}).waitFor();
+    t.assertions.assert(await group.getByRole("button",{name:/Hosted B session/}).count()===0,"remote internal session expanded by default");
+    await group.getByRole("button",{name:/团队内部.*3 个 Space/}).click();
+    const spaceFilter=group.getByRole("button",{name:"Hosted A project Space 筛选",exact:true});
+    await spaceFilter.click();
+    const chooser=page.getByRole("listbox",{name:"Hosted A project Space 筛选",exact:true});
+    await chooser.getByRole("option",{name:/共享验证.*Hosted A/}).waitFor();
+    await chooser.getByRole("option",{name:/共享验证.*Hosted B/}).waitFor();
+    await chooser.getByRole("option",{name:/离线岗位.*状态未知/}).waitFor();
+    await page.getByRole("combobox",{name:"搜索Space或机器",exact:true}).fill("Hosted B");
+    t.assertions.assert(await chooser.getByRole("option").count()===2,"machine search did not disambiguate same-name Spaces");
+    await chooser.getByRole("option",{name:/共享验证.*Hosted B/}).click();
+    await group.getByRole("button",{name:/Hosted B session/}).waitFor();
+    t.assertions.assert(await group.getByRole("button",{name:/Local same-name Space/}).count()===0,"selected remote Space leaked a local sibling");
+    t.assertions.assert(await group.getByRole("button",{name:/Hosted A session/}).isEnabled(),"Space loading disabled the front conversation");
     await list.getByRole("button", { name: "机器筛选", exact: true }).click();
     await list.getByRole("menuitemradio", { name: /全部机器.*2\/2 在线/ }).waitFor();
     await page.keyboard.press("Escape");
+    await list.getByRole("button",{name:"机器筛选",exact:true}).click();
+    await list.getByRole("menuitemradio",{name:/Hosted B.*在线/}).click();
+    await group.getByRole("button",{name:/Hosted B session/}).waitFor();
+    t.assertions.assert(await group.getByRole("button",{name:/Hosted A session/}).count()===0,"machine filter retained a front on the other machine");
+    await list.getByRole("button",{name:"机器筛选",exact:true}).click();
+    await list.getByRole("menuitemradio",{name:/全部机器/}).click();
     const beforeJump = connects;
     phase="jump";
     await list.getByRole("button", { name: /Hosted B session/ }).click();

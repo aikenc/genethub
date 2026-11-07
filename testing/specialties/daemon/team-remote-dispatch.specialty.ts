@@ -27,7 +27,7 @@ defineSpecialty({
   const sourceCli = (args: string[]) => runGenetAsync(o.daemon.genet, args, sourceEnv);
   const cliJson = async (args: string[], remote = false): Promise<any> => {
     const r = await (remote ? runGenetAsync(o.daemon.genet, args, o.daemon.env) : sourceCli(args));
-    if (r.code !== 0) throw new Error(`CLI ${args.slice(0, 2).join(" ")} failed (${r.code})`);
+    if (r.code !== 0) throw new Error(`CLI ${remote ? "executor" : "source"} ${args.slice(0, 2).join(" ")} failed (${r.code}): ${r.stderr.slice(-500)} ${r.stdout.slice(-500)}`);
     return (parseJson(r.stdout) as any).data;
   };
   const team = async (name: string, target: boolean) => {
@@ -101,7 +101,13 @@ sys.stderr.write(r.stderr)
 sys.exit(r.returncode)
 `);
     const binding = { machineId: machine, workspaceId: qa.id, command: [python, wrapper, path.join(targetRoot, "tools/team.py")] };
-    writeFileSync(path.join(sourceRoot, ".genethub/remote-targets.json"), JSON.stringify({ qa: binding }));
+    const bind = (target: typeof binding) => {
+      const file=path.join(sourceRoot,"agent-space.genet.json"), descriptor=JSON.parse(readFileSync(file,"utf8"));
+      descriptor.members=[{name:"qa",...target}]; writeFileSync(file,JSON.stringify(descriptor));
+    };
+    // A stale legacy binding must not override the canonical project reference.
+    writeFileSync(path.join(sourceRoot,".genethub/remote-targets.json"),JSON.stringify({qa:{...binding,workspaceId:otherQa.id}}));
+    bind(binding);
     const script = (args: string[]) => new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
       const child = spawn(python, ["tools/team.py", ...args], { cwd: sourceRoot, env: sourceEnv, stdio: ["ignore", "pipe", "pipe"] });
       let stdout = "", stderr = ""; child.stdout.on("data", b => stdout += b); child.stderr.on("data", b => stderr += b);
@@ -128,10 +134,10 @@ sys.exit(r.returncode)
     t.assertions.assert(changed.code !== 0 && changed.stderr.includes("不同内容"), "dispatch identity accepted changed content");
     const wrong = await script([...dispatch.slice(0, -1), "--workspace", "w_wrong", "Complete the check."]);
     t.assertions.assert(wrong.code !== 0 && wrong.stderr.includes("固定绑定"), "explicit workspace bypassed fixed binding");
-    writeFileSync(path.join(sourceRoot, ".genethub/remote-targets.json"), JSON.stringify({ qa: { ...binding, workspaceId: otherQa.id } }));
+    bind({...binding,workspaceId:otherQa.id});
     const wrongTeam = await script(dispatch.map(v => v === "one-task" ? "other-team-task" : v));
     t.assertions.assert(wrongTeam.code !== 0 && wrongTeam.stderr.includes("不属于"), "receiver accepted another team's same-named role");
-    writeFileSync(path.join(sourceRoot, ".genethub/remote-targets.json"), JSON.stringify({ qa: binding }));
+    bind(binding);
     const badModel = await script([...dispatch.slice(0, -1).map(v => v === "one-task" ? "bad-model" : v), "--model", "missing-model", "Complete the check."]);
     t.assertions.assert(badModel.code !== 0 && badModel.stderr.includes("没有模型"), "missing target model reached creation");
     const badMedia = await script([...dispatch.slice(0, -1).map(v => v === "one-task" ? "bad-media" : v), "--model", "deepseek/text-only", "--media", "image", "Complete the check."]);
@@ -207,9 +213,14 @@ sys.exit(r.returncode)
     for (let n = 0; n < 2; n++) {
       const fresh = await script(freshArgs);
       t.assertions.assert(fresh.code === 0 && fresh.stdout.includes("派单编号:"), "new spawn did not expose its recovery identity: " + fresh.stderr);
-      const taskFile = readdirSync(pendingDir).find(f => f.endsWith(".json") && f !== "000-offline.json");
+      const dispatchId = fresh.stdout.match(/^派单编号: ([^\s]+)$/m)?.[1];
+      t.assertions.assert(!!dispatchId,"new spawn omitted its exact operation identity");
+      const taskFile = readdirSync(pendingDir).find(f => f.endsWith(".json") && JSON.parse(readFileSync(path.join(pendingDir,f),"utf8")).remoteDispatch?.id === dispatchId);
       t.assertions.assert(!!taskFile, "new spawn returned an archived receipt instead of a new task");
-      const task = JSON.parse(readFileSync(path.join(pendingDir, taskFile!), "utf8")); freshSessions.push(task.sessionId);
+      const task = JSON.parse(readFileSync(path.join(pendingDir, taskFile!), "utf8"));
+      const receipt = JSON.parse(readFileSync(path.join(intentDir,createHash("sha256").update(dispatchId!).digest("hex")+".json"),"utf8"));
+      t.assertions.assert(task.sessionId===receipt.receipt.sessionId && task.remoteDispatch.target.workspaceId===qa.id && task.remoteDispatch.target.machineId===machine,"fresh task evidence belongs to another operation or source");
+      freshSessions.push(task.sessionId);
       await t.tools.waitUntil(async () => { const s = (await cliJson(["session", "get", task.sessionId], true)).session.summary; return s.status === "idle" && !!s.latestReply; }, 30000)
         .catch(async () => { throw new Error("fresh task did not finish: " + JSON.stringify((await cliJson(["session", "get", task.sessionId], true)).session.summary)); });
       const finished = await script(["hook"]);
