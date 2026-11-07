@@ -24,7 +24,7 @@ export function MachineFilter({ sources, value, onChange, section }: {
   };
   const entries = [{id: "", label: "全部机器", detail: `${online}/${sources.length} 在线`, row: undefined as MachineSummary | undefined},
     ...sources.map(row => ({id: row.target.id, label: row.target.label,
-      detail: `${machineStateLabel[row.state]}${row.version ? ` · ${row.version}` : ""}`, row}))];
+      detail: `${row.cached ? "上次状态" : machineStateLabel[row.state]}${row.version ? ` · ${row.version}` : ""}`, row}))];
   const close = (restoreFocus = false) => { setOpen(false); if (restoreFocus) trigger.current?.focus(); };
   useEffect(() => {
     if (!open) return;

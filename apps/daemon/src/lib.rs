@@ -134,13 +134,28 @@ impl Daemon {
         let space_discovery = tokio::spawn({
             let state = state.clone();
             async move {
+                let wake = state.sessions.catalog_wake();
+                let mut next_discovery = tokio::time::Instant::now();
                 loop {
-                    state
-                        .workspaces
-                        .scan_spaces(&state.paths.root.join("spaces"), false)
-                        .await;
-                    // Fixed delay: no catch-up queue if discovery itself is slow.
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    if tokio::time::Instant::now() >= next_discovery {
+                        state
+                            .workspaces
+                            .scan_spaces(&state.paths.root.join("spaces"), false)
+                            .await;
+                        next_discovery =
+                            tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+                    }
+                    if let Err(error) = state.sessions.refresh_catalog(&state.workspaces).await {
+                        tracing::warn!(%error, "refreshing directory projection failed");
+                    }
+                    tokio::select! {
+                        _ = tokio::time::sleep_until(next_discovery) => {},
+                        _ = wake.notified() => {
+                            // Coalesce state boundaries, never token-by-token
+                            // fanout or a queue on the Agent's publish path.
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        }
+                    }
                 }
             }
         });

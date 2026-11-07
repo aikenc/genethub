@@ -447,6 +447,24 @@ export type Catalog = { models: Array<ModelInfo>, modes: Array<ModeInfo>, comman
  */
 runtimeAxes?: Array<RuntimeAxisInfo>, defaultModel?: string, defaultMode?: string, defaultEffort?: string, };
 
+/**
+ * Snapshot parts share one revision and finish explicitly. Deltas have an
+ * exact previous revision. There is no directory replay or cross-machine clock.
+ */
+export type CatalogBatch = { revision: number, previousRevision: number, snapshot: boolean, first: boolean, complete: boolean, resetRequired: boolean, sessions: Array<CatalogSessionRow>, removedSessions: Array<CatalogSessionRef>, active: Array<CatalogSessionRef>, inactive: Array<CatalogSessionRef>, workspaces: Array<CatalogWorkspaceRow>, removedWorkspaces: Array<string>, scopeErrors: Array<CatalogScopeError> | null, };
+
+export type CatalogKnownSession = { workspaceId: string, id: string, etag: string, active: boolean, };
+
+export type CatalogKnownWorkspace = { id: string, etag: string, };
+
+export type CatalogScopeError = { workspaceId: string | null, message: string, };
+
+export type CatalogSessionRef = { workspaceId: string, id: string, };
+
+export type CatalogSessionRow = { summary: SessionSummary, etag: string, active: boolean, };
+
+export type CatalogWorkspaceRow = { workspace: WorkspaceInfo, etag: string, };
+
 export type ClientDebugAction = { "kind": "inspect" } | { "kind": "eval", script: string, } | { "kind": "screenshot" } | { "kind": "act", selector: string, value: string | null, } | { "kind": "events" } | { "kind": "reload" };
 
 export type ClientDebugCommand = { commandId: string, action: ClientDebugAction, };
@@ -1188,7 +1206,7 @@ expandLastRound: boolean,
 /**
  * Optional UI history window. Does not alter Agent context or replay semantics.
  */
-recentRounds?: number, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "agent.action", "payload": { agentId: string, actionId: string, } } | { "type": "agent.reload", "payload": { agentId: string, } } | { "type": "agent.reset", "payload": { agentId: string, } } | { "type": "agent.test", "payload": { agentId: string, live: boolean, } } | { "type": "agent.logs", "payload": { agentId: string, lines?: number, } } | { "type": "agent.requests" } | { "type": "agent.requestAnswer", "payload": { agentId: string, requestId: string, outcome: AgentRequestOutcome, } } | { "type": "session.create", "payload": { 
+recentRounds?: number, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "catalog.sync", "payload": { subscriptionId: string, enabled: boolean, knownSessions: Array<CatalogKnownSession>, knownWorkspaces: Array<CatalogKnownWorkspace>, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "agent.action", "payload": { agentId: string, actionId: string, } } | { "type": "agent.reload", "payload": { agentId: string, } } | { "type": "agent.reset", "payload": { agentId: string, } } | { "type": "agent.test", "payload": { agentId: string, live: boolean, } } | { "type": "agent.logs", "payload": { agentId: string, lines?: number, } } | { "type": "agent.requests" } | { "type": "agent.requestAnswer", "payload": { agentId: string, requestId: string, outcome: AgentRequestOutcome, } } | { "type": "session.create", "payload": { 
 /**
  * Stable creation operation, scoped to the durable workspace.
  */
@@ -1415,7 +1433,7 @@ export type SequencedEvent = { seq: number, sessionId: string, event: SessionEve
 /**
  * Anything the daemon sends to a client.
  */
-export type ServerFrame = { "type": "event", topic: string, payload: SequencedEvent, } | { "type": "pty", ptyId: string, data: string, } | { "type": "ptyClosed", ptyId: string, exitCode?: number, } | { "type": "notice", level: NoticeLevel, message: string, } | { "type": "updateDownload", download: UpdateDownload, } | { "type": "agents", agents: Array<AgentInfo>, } | { "type": "agentRequest", request: AgentUserRequest, } | { "type": "agentRequestClosed", agentId: string, requestId: string, } | { "type": "processes", processes: Array<BackgroundProcess>, } | { "type": "desync", sessionId: string, missed: number, };
+export type ServerFrame = { "type": "catalog", subscriptionId: string, batch: CatalogBatch, } | { "type": "event", topic: string, payload: SequencedEvent, } | { "type": "pty", ptyId: string, data: string, } | { "type": "ptyClosed", ptyId: string, exitCode?: number, } | { "type": "notice", level: NoticeLevel, message: string, } | { "type": "updateDownload", download: UpdateDownload, } | { "type": "agents", agents: Array<AgentInfo>, } | { "type": "agentRequest", request: AgentUserRequest, } | { "type": "agentRequestClosed", agentId: string, requestId: string, } | { "type": "processes", processes: Array<BackgroundProcess>, } | { "type": "desync", sessionId: string, missed: number, };
 
 /**
  * One complete runtime destination for changing the Agent behind an existing
@@ -1549,13 +1567,13 @@ export type SessionMessagePreview = { itemId: string, text: string, atMs: number
  */
 export type SessionNarrativePage = { source: SessionReadSource, items: Array<TimelineItem>, nextCursor?: string, };
 
-export type SessionPageRequest = { 
+export type SessionPageRequest = { ifNoneMatch?: string, 
 /**
  * Filter current work before applying the page limit, independently of history.
  */
 activeOnly?: boolean, workspaceId: string | null, limit: number, cursor: string | null, };
 
-export type SessionPageResult = { workspaceId: string | null, sessions: Array<SessionSummary>, nextCursor: string | null, error: string | null, };
+export type SessionPageResult = { etag?: string, notModified?: boolean, catalogEtags?: { [key in string]?: string }, catalogRevision?: number, workspaceId: string | null, sessions: Array<SessionSummary>, nextCursor: string | null, error: string | null, };
 
 /**
  * Stable identity and waterline shared by every read-only session page.

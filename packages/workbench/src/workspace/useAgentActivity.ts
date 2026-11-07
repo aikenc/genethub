@@ -39,7 +39,7 @@ function summarize(sessions: SessionSummary[]) {
 
 export async function refreshAgentActivities(client: Client) {
   const wb = useWorkbench.getState();
-  if (wb.client === client && wb.connection === "ready") await wb.refreshSessions();
+  if (wb.client === client && wb.connection === "ready" && !client.identity?.features?.includes("catalog.sync.v1")) await wb.refreshSessions();
 }
 
 export function useAgentActivities() {

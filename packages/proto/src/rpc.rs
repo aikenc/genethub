@@ -57,6 +57,17 @@ pub enum Request {
     },
     #[serde(rename = "unsubscribe", rename_all = "camelCase")]
     Unsubscribe { session_id: String },
+    /// One directory consumer on this authenticated control peer. Cached rows
+    /// are conditional read hints, never execution or authorization state.
+    #[serde(rename = "catalog.sync", rename_all = "camelCase")]
+    CatalogSync {
+        subscription_id: String,
+        enabled: bool,
+        #[serde(default)]
+        known_sessions: Vec<CatalogKnownSession>,
+        #[serde(default)]
+        known_workspaces: Vec<CatalogKnownWorkspace>,
+    },
 
     // -- agents ------------------------------------------------------------
     #[serde(rename = "agent.list")]
@@ -1036,6 +1047,9 @@ pub enum Reply {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct SessionPageRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub if_none_match: Option<String>,
     /// Filter current work before applying the page limit, independently of history.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -1049,10 +1063,91 @@ pub struct SessionPageRequest {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct SessionPageResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub etag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub not_modified: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub catalog_etags: Option<std::collections::BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub catalog_revision: Option<u64>,
     pub workspace_id: Option<String>,
     pub sessions: Vec<SessionSummary>,
     pub next_cursor: Option<String>,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct CatalogSessionRef {
+    pub workspace_id: String,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct CatalogKnownSession {
+    pub workspace_id: String,
+    pub id: String,
+    pub etag: String,
+    pub active: bool,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct CatalogKnownWorkspace {
+    pub id: String,
+    pub etag: String,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct CatalogSessionRow {
+    pub summary: SessionSummary,
+    pub etag: String,
+    pub active: bool,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct CatalogWorkspaceRow {
+    pub workspace: WorkspaceInfo,
+    pub etag: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct CatalogScopeError {
+    pub workspace_id: Option<String>,
+    pub message: String,
+}
+/// Snapshot parts share one revision and finish explicitly. Deltas have an
+/// exact previous revision. There is no directory replay or cross-machine clock.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct CatalogBatch {
+    #[ts(type = "number")]
+    pub revision: u64,
+    #[ts(type = "number")]
+    pub previous_revision: u64,
+    pub snapshot: bool,
+    pub first: bool,
+    pub complete: bool,
+    pub reset_required: bool,
+    pub sessions: Vec<CatalogSessionRow>,
+    pub removed_sessions: Vec<CatalogSessionRef>,
+    pub active: Vec<CatalogSessionRef>,
+    pub inactive: Vec<CatalogSessionRef>,
+    pub workspaces: Vec<CatalogWorkspaceRow>,
+    pub removed_workspaces: Vec<String>,
+    pub scope_errors: Option<Vec<CatalogScopeError>>,
 }
 
 /// One change to an AgentSpace's registration.
@@ -1229,6 +1324,11 @@ pub struct ProtocolError {
 // 构造/匹配点,线格式不变但收益不抵 churn,放行 clippy。
 #[allow(clippy::large_enum_variant)]
 pub enum ServerFrame {
+    #[serde(rename = "catalog", rename_all = "camelCase")]
+    Catalog {
+        subscription_id: String,
+        batch: CatalogBatch,
+    },
     /// A session event push. `topic` is `session:<id>`.
     #[serde(rename = "event", rename_all = "camelCase")]
     Event {

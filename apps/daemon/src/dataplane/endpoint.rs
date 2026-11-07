@@ -451,14 +451,32 @@ impl ServerStream {
 #[derive(Default)]
 struct SubscriptionTasks {
     stopped: bool,
+    catalog: Option<tokio::task::JoinHandle<()>>,
     tasks: HashMap<String, tokio::task::JoinHandle<()>>,
+}
+
+struct QueuedEvent {
+    frame: ServerFrame,
+    // Shares the existing Writer budget; no second directory byte queue.
+    budget: Option<OwnedSemaphorePermit>,
+    delivered: Option<oneshot::Sender<()>>,
+}
+impl From<ServerFrame> for QueuedEvent {
+    fn from(frame: ServerFrame) -> Self {
+        Self {
+            frame,
+            budget: None,
+            delivered: None,
+        }
+    }
 }
 
 pub(crate) struct PeerServices {
     pub(crate) state: Shared,
     pub(crate) access: PeerAccess,
-    event_sender: mpsc::Sender<ServerFrame>,
-    event_receiver: tokio::sync::Mutex<Option<mpsc::Receiver<ServerFrame>>>,
+    event_sender: mpsc::Sender<QueuedEvent>,
+    event_receiver: tokio::sync::Mutex<Option<mpsc::Receiver<QueuedEvent>>>,
+    event_budget: Arc<Semaphore>,
     subscriptions: Mutex<SubscriptionTasks>,
     pub(crate) carrier_kind: CarrierKind,
 }
@@ -486,6 +504,9 @@ impl Drop for PeerRuntime {
         // abort() does not preempt a handler currently being polled elsewhere.
         // Fence its final registration under this same lock before draining.
         subscriptions.stopped = true;
+        if let Some(task) = subscriptions.catalog.take() {
+            task.abort();
+        }
         for (_, task) in subscriptions.tasks.drain() {
             task.abort();
         }
@@ -545,6 +566,7 @@ pub(crate) async fn serve_streams(
         state: state.clone(),
         access: access.clone(),
         event_sender,
+        event_budget: writer.budget.clone(),
         event_receiver: tokio::sync::Mutex::new(Some(event_receiver)),
         subscriptions: Mutex::new(SubscriptionTasks::default()),
         carrier_kind,
@@ -568,7 +590,7 @@ pub(crate) async fn serve_streams(
                 loop {
                     match receiver.recv().await {
                         Ok(frame) => {
-                            if events.send(frame).await.is_err() {
+                            if events.send(frame.into()).await.is_err() {
                                 return;
                             }
                         }
@@ -1344,6 +1366,67 @@ fn apply_side_effect(services: &PeerServices, effect: SideEffect) -> Result<(), 
     }
     match effect {
         SideEffect::None => {}
+        SideEffect::Catalog {
+            subscription_id,
+            initial,
+            receiver,
+        } => {
+            if let Some(old) = subscriptions.catalog.take() {
+                old.abort();
+            }
+            if let Some(mut receiver) = receiver {
+                let events = services.event_sender.clone();
+                let budget = services.event_budget.clone();
+                subscriptions.catalog = Some(tokio::spawn(async move {
+                    let send = async |batch: genehub_proto::CatalogBatch| {
+                        let frame = ServerFrame::Catalog {
+                            subscription_id: subscription_id.clone(),
+                            batch,
+                        };
+                        let bytes = serde_json::to_vec(&frame).map_err(|_| ())?.len();
+                        let permit = budget
+                            .clone()
+                            .acquire_many_owned(bytes as u32)
+                            .await
+                            .map_err(|_| ())?;
+                        let (delivered, written) = oneshot::channel();
+                        events
+                            .send(QueuedEvent {
+                                frame,
+                                budget: Some(permit),
+                                delivered: Some(delivered),
+                            })
+                            .await
+                            .map_err(|_| ())?;
+                        // Only one catalog message may occupy the peer queue.
+                        // Otherwise the producer can reserve Writer's whole
+                        // budget before the event consumer can write a frame.
+                        written.await.map_err(|_| ())
+                    };
+                    for batch in initial {
+                        if send(batch).await.is_err() {
+                            return;
+                        }
+                    }
+                    loop {
+                        let batch = match receiver.recv().await {
+                            Ok(batch) => (*batch).clone(),
+                            Err(broadcast::error::RecvError::Lagged(_)) => {
+                                genehub_proto::CatalogBatch {
+                                    reset_required: true,
+                                    ..Default::default()
+                                }
+                            }
+                            Err(broadcast::error::RecvError::Closed) => return,
+                        };
+                        let reset = batch.reset_required;
+                        if send(batch).await.is_err() || reset {
+                            return;
+                        }
+                    }
+                }));
+            }
+        }
         SideEffect::Unsubscribe { session_id } => {
             if let Some(task) = subscriptions.tasks.remove(&session_id) {
                 task.abort();
@@ -1377,7 +1460,7 @@ fn apply_side_effect(services: &PeerServices, effect: SideEffect) -> Result<(), 
                         },
                         Err(broadcast::error::RecvError::Closed) => return,
                     };
-                    if events.send(frame).await.is_err() {
+                    if events.send(frame.into()).await.is_err() {
                         return;
                     }
                 }
@@ -1410,8 +1493,22 @@ async fn handle_events(stream: &mut ServerStream, services: &PeerServices) -> Re
             error: None,
         })
         .await?;
-    while let Some(frame) = receiver.recv().await {
+    while let Some(QueuedEvent {
+        frame,
+        budget,
+        delivered,
+    }) = receiver.recv().await
+    {
+        if delivered.as_ref().is_some_and(|reply| reply.is_closed()) {
+            continue;
+        }
+        // Transfer ownership to Writer's own bounded frames instead of charging
+        // the same bytes twice and deadlocking a full event queue.
+        drop(budget);
         stream.write_message(&frame).await?;
+        if let Some(delivered) = delivered {
+            let _ = delivered.send(());
+        }
     }
     stream.finish().await
 }
@@ -1509,6 +1606,7 @@ mod tests {
     async fn a_new_subscription_is_refused_only_at_the_limit() {
         let mut subscriptions = SubscriptionTasks {
             stopped: false,
+            catalog: None,
             tasks: HashMap::new(),
         };
         assert!(!subscription_capacity_refused(&subscriptions, "s1", 2));

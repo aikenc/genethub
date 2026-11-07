@@ -45,3 +45,5 @@ export { MachineConnections, machineRefs } from "./protocol/machine-connections"
 export type { MachineRef, MachineLease, MachineSource, MachineConnectionOptions } from "./protocol/machine-connections";
 
 export { readActivitySessions } from "./protocol/session-pages";
+
+export { clearDirectoryCaches } from "./protocol/summary-directory-cache";

@@ -810,6 +810,7 @@ async fn execute(
                     let reply = rpc
                         .call(Request::SessionPage {
                             requests: vec![SessionPageRequest {
+                                if_none_match: None,
                                 workspace_id: workspace_id.clone(),
                                 limit: 100,
                                 cursor: cursor.clone(),

@@ -5,6 +5,9 @@ import type {
   AssetPreviewMetadata,
   AssetPreviewRepresentation,
   BackgroundProcess,
+  CatalogBatch,
+  CatalogKnownSession,
+  CatalogKnownWorkspace,
   HelloResult,
   PeerWelcome,
   ProtocolError,
@@ -251,16 +254,34 @@ export class ClientQueueFullError extends Error {
   }
 }
 
-interface Subscription {
-  seq: number;
-  onEvent(event: SequencedEvent): void;
-  onResync(snapshot: unknown, replayed: SequencedEvent[], reset: boolean): void;
+interface Recovery {
   resync: Promise<void> | null;
   needsResync: boolean;
-  resetRequired: boolean;
   initializing: boolean;
   retry: ReturnType<typeof setTimeout> | null;
   retryDelay: number;
+}
+export interface CatalogHandlers {
+  known(): {sessions: CatalogKnownSession[]; workspaces: CatalogKnownWorkspace[]};
+  onBatch(batch: CatalogBatch): void;
+  onUnavailable(error?: unknown): void;
+}
+interface CatalogSubscription extends Recovery {
+  handlers: CatalogHandlers;
+  requestId: string;
+  revision: number;
+  first: boolean;
+  finish?: () => void;
+  reject?: (error: unknown) => void;
+  progress?: () => void;
+  resolveReady: () => void;
+  rejectReady: (error: unknown) => void;
+}
+interface Subscription extends Recovery {
+  seq: number;
+  onEvent(event: SequencedEvent): void;
+  onResync(snapshot: unknown, replayed: SequencedEvent[], reset: boolean): void;
+  resetRequired: boolean;
   expandLastRound: boolean;
   recentRounds?: number;
 }
@@ -306,6 +327,7 @@ export class Client {
   private readonly active = new Set<PendingCall>();
   private pendingBytes = 0;
   private readonly subscriptions = new Map<string, Subscription>();
+  private catalog: CatalogSubscription | null = null;
   private readonly stateListeners = new Set<(state: ConnectionState) => void>();
   private readonly rtcListeners = new Set<(state: RtcState) => void>();
   private readonly ptyListeners = new Set<(ptyId: string, data: string | null) => void>();
@@ -497,6 +519,13 @@ export class Client {
     this.redialAbort = null;
     this.redialing = false;
     this.clearTimers();
+    if (this.catalog) {
+      if (this.catalog.retry) clearTimeout(this.catalog.retry);
+      this.catalog.reject?.(new Error("directory connection closed"));
+      this.catalog.rejectReady(new Error("directory connection closed"));
+      this.callListener(() => this.catalog?.handlers.onUnavailable());
+      this.catalog = null;
+    }
     for (const subscription of this.subscriptions.values()) {
       if (subscription.retry !== null) clearTimeout(subscription.retry);
       subscription.retry = null;
@@ -839,6 +868,101 @@ export class Client {
         timeoutMs: request.timeoutMs ?? null,
       },
     });
+  }
+
+  /** One directory topic on the primary control peer. Row ownership stays in
+   * MachineSummaryDirectory; the Client owns only subscription recovery. */
+  followCatalog(handlers: CatalogHandlers): {ready: Promise<void>; stop(): void} {
+    if (!this.identity?.features?.includes("catalog.sync.v1")) throw new Error("请更新此机器以增量同步目录。");
+    if (this.catalog) throw new Error("this client already has a directory consumer");
+    let resolveReady!: () => void, rejectReady!: (error: unknown) => void;
+    const ready = new Promise<void>((resolve,reject) => {resolveReady=resolve; rejectReady=reject;});
+    const subscription: CatalogSubscription = {handlers, requestId:"", revision:0, first:false,
+      resync:null, needsResync:true, initializing:false, retry:null, retryDelay:250, resolveReady,rejectReady};
+    this.catalog = subscription;
+    void this.repairCatalog();
+    return {ready, stop: () => {
+      if (this.catalog !== subscription) return;
+      this.catalog = null;
+      if (subscription.retry) clearTimeout(subscription.retry);
+      subscription.reject?.(new DOMException("Cancelled", "AbortError"));
+      subscription.rejectReady(new DOMException("Cancelled", "AbortError"));
+      if (!this.stopped && this.state === "ready") void this.call({type:"catalog.sync",payload:{subscriptionId:subscription.requestId || diagnosticId("catalog"),enabled:false,knownSessions:[],knownWorkspaces:[]}}).catch(() => {});
+    }};
+  }
+
+  async refreshCatalog(): Promise<void> {
+    if (this.catalog?.resync) await this.catalog.resync;
+    else await this.repairCatalog();
+  }
+
+  private async repairCatalog(): Promise<void> {
+    const subscription = this.catalog;
+    if (!subscription || this.stopped) return;
+    subscription.needsResync = true;
+    if (subscription.resync || this.state !== "ready") return;
+    if (subscription.retry) clearTimeout(subscription.retry);
+    subscription.retry = null;
+    const repair = (async () => {
+      subscription.needsResync = false; subscription.initializing = true; subscription.first = false;
+      subscription.requestId = diagnosticId("catalog");
+      this.callListener(() => subscription.handlers.onUnavailable());
+      const epoch = this.connectionEpoch;
+      const complete = new Promise<void>((resolve,reject) => { subscription.finish=resolve; subscription.reject=reject; });
+      // Install the rejection handler before issuing the RPC: events can arrive
+      // before its acknowledgement, and closing the peer cancels this handoff.
+      void complete.catch(() => {});
+      const timer = setTimeout(() => subscription.reject?.(new ClientRequestTimeoutError("directory snapshot exceeded total budget")), 180_000);
+      let stalled: ReturnType<typeof setTimeout>;
+      subscription.progress=() => {
+        clearTimeout(stalled);
+        stalled=setTimeout(() => subscription.reject?.(new ClientRequestTimeoutError("directory snapshot stopped making progress")),45_000);
+      };
+      subscription.progress();
+      try {
+        const known = subscription.handlers.known();
+        const reply = await this.call({type:"catalog.sync",payload:{subscriptionId:subscription.requestId, enabled:true, knownSessions:known.sessions, knownWorkspaces:known.workspaces}}, {timeoutMs:45_000});
+        if (this.catalog !== subscription || epoch !== this.connectionEpoch || reply?.type !== "ack") throw new Error("directory owner changed during sync");
+        await complete;
+        subscription.retryDelay = 250;
+      } catch (error) {
+        if (this.catalog !== subscription || this.stopped) return;
+        subscription.initializing = false;
+        subscription.needsResync = !(error instanceof ClientRequestTooLargeError) && !String(error).includes("directory capacity") && !this.failure;
+        subscription.rejectReady(error);
+        this.callListener(() => subscription.handlers.onUnavailable(error));
+      } finally { clearTimeout(timer); clearTimeout(stalled!); subscription.progress=undefined; subscription.finish=undefined; subscription.reject=undefined; }
+    })();
+    subscription.resync = repair;
+    try { await repair; }
+    finally {
+      if (subscription.resync === repair) subscription.resync = null;
+      if (subscription.needsResync) this.retryRecovery(subscription, () => this.catalog === subscription, () => {void this.repairCatalog();});
+    }
+  }
+
+  private receiveCatalog(batch: CatalogBatch, requestId: string): void {
+    const subscription = this.catalog;
+    if (!subscription || requestId !== subscription.requestId) return;
+    if (this.options.onDiagnostic) this.diagnostic("operation", {operation:"catalog.receive",phase:"finish",outcome:"ok",
+      snapshot:batch.snapshot,complete:batch.complete,resetRequired:batch.resetRequired,revision:batch.revision,previousRevision:batch.previousRevision,
+      summaryRows:batch.sessions.length,workspaceRows:batch.workspaces.length,removedRows:batch.removedSessions.length,
+      responseBytes:encoder.encode(JSON.stringify(batch)).byteLength});
+    if (batch.resetRequired) {void this.repairCatalog(); return;}
+    if (batch.snapshot) {
+      if (!subscription.initializing) return;
+      subscription.progress?.();
+      if (batch.first) {subscription.revision=batch.revision; subscription.first=true;}
+      if (!subscription.first || batch.revision !== subscription.revision) { subscription.reject?.(new Error("directory snapshot boundary changed")); return; }
+      this.callListener(() => subscription.handlers.onBatch(batch));
+      if (batch.complete) { subscription.initializing=false; subscription.finish?.(); subscription.resolveReady(); }
+    } else {
+      if (subscription.initializing) return; // The following snapshot covers this earlier queued delta.
+      if (batch.revision <= subscription.revision) return;
+      if (batch.previousRevision !== subscription.revision) {void this.repairCatalog(); return;}
+      subscription.revision = batch.revision;
+      this.callListener(() => subscription.handlers.onBatch(batch));
+    }
   }
 
   async subscribe(
@@ -1250,6 +1374,10 @@ export class Client {
           requestId: pending.id,
           phase: "finish",
           outcome: "ok",
+          ...(reply?.type === "sessionPages" ? {
+            summaryRows:reply.data.reduce((count,page) => count+page.sessions.length,0),
+            unchangedPages:reply.data.filter(page => page.notModified).length,
+          } : {}),
           transport,
           durationMs: Math.round(this.now() - started),
           requestBytes: pending.bytes,
@@ -1427,6 +1555,7 @@ export class Client {
 
   private receiveEvent(frame: ServerFrame): void {
     switch (frame.type) {
+      case "catalog": this.receiveCatalog(frame.batch, frame.subscriptionId); return;
       case "event": {
         const sessionId = sessionOf(frame.topic);
         const subscription = this.subscriptions.get(sessionId);
@@ -1472,6 +1601,7 @@ export class Client {
   }
 
   private async resubscribe(): Promise<void> {
+    void this.repairCatalog();
     for (const sessionId of [...this.subscriptions.keys()]) await this.fillGap(sessionId);
   }
 
@@ -1531,16 +1661,25 @@ export class Client {
   }
 
   private retrySubscription(sessionId: string, subscription: Subscription, delay = subscription.retryDelay): void {
-    if (this.stopped || this.subscriptions.get(sessionId) !== subscription || subscription.retry !== null) return;
+    this.retryRecovery(subscription, () => this.subscriptions.get(sessionId) === subscription,
+      () => {void this.fillGap(sessionId);}, delay);
+  }
+
+  private retryRecovery(subscription: Recovery, current: () => boolean, repair: () => void, delay = subscription.retryDelay): void {
+    if (this.stopped || !current() || subscription.retry !== null) return;
     subscription.retry = setTimeout(() => {
       subscription.retry = null;
-      if (this.subscriptions.get(sessionId) === subscription) void this.fillGap(sessionId);
+      if (current()) repair();
     }, delay);
     subscription.retryDelay = Math.min(5_000, subscription.retryDelay * 2);
   }
 
   private canStartCall(pending: PendingCall): boolean {
     const request = pending.request;
+    if (request.type === "catalog.sync") {
+      if ([...this.active].some(other => other.request.type === "catalog.sync")) return false;
+      for (const queued of this.queue) {if (queued === pending) break; if (queued.request.type === "catalog.sync") return false;}
+    }
     if (request.type === "subscribe" || request.type === "unsubscribe") {
       const sessionId = request.payload.sessionId;
       const sameSession = (other: PendingCall) => {
@@ -2036,6 +2175,10 @@ export class Client {
   private setState(state: ConnectionState): void {
     if (this.state === state) return;
     this.state = state;
+    if (state !== "ready" && this.catalog) {
+      this.catalog.reject?.(new Error("directory connection interrupted"));
+      this.callListener(() => this.catalog?.handlers.onUnavailable());
+    }
     if (this.authorizationTimer !== null) clearTimeout(this.authorizationTimer);
     this.authorizationTimer = null;
     if (state === "ready") this.scheduleAuthorizationRenewal();
