@@ -196,6 +196,7 @@ export class MachineConnections {
       client.setDataChannelEnabled(false);
       client.setRtcEnabled(false);
       entry.stop = client.onStateChange(state => {
+        if (state === "reconnecting") this.rtc(entry);
         if (state === "ready") {
           try { this.verify(entry, entry.target); }
           catch (error) { entry.failure = error as Error; this.remove(entry, true); }
@@ -233,7 +234,10 @@ export class MachineConnections {
   private rtc(entry: Entry): void {
     if (!entry.removed) {
       entry.client?.setDataChannelEnabled(entry.foreground > 0);
-      entry.client?.setRtcEnabled(entry.foreground > 0 && (typeof this.options.rtcEnabled === "function" ? this.options.rtcEnabled() : this.options.rtcEnabled !== false));
+      // Promotion retires the relay carrier. A background lease must retain
+      // that healthy RTC connection rather than close its only live path.
+      // After a real loss activePath is null, so background redials use relay.
+      entry.client?.setRtcEnabled((entry.foreground > 0 || entry.client.activePath === "rtc") && (typeof this.options.rtcEnabled === "function" ? this.options.rtcEnabled() : this.options.rtcEnabled !== false));
     }
   }
   private trim(budget = this.limit): void {

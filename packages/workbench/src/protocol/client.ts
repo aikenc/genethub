@@ -370,6 +370,9 @@ export class Client {
   /** Stable diagnostic identity across carrier changes; never a recovery credential. */
   get logicalConnectionId(): string | null { return this.endpoint?.logicalId ?? null; }
 
+  /** The adopted carrier, including while its activation is finishing. */
+  get activePath() { return this.endpoint?.activePath ?? null; }
+
   get lastCloseReason(): CloseReason | undefined {
     return this.lastClose;
   }
