@@ -111,11 +111,12 @@ for (const width of [390, 1280]) defineSpecialty({
     await list.getByRole("button",{name:"全部",exact:true}).click();
     await internal.click();
     await row("验证会话一").waitFor(); await row("验证会话二").waitFor();
-    const spaces=group.getByRole("combobox",{name:"观察项目 Space 筛选",exact:true});
-    await spaces.selectOption(qa.id);
+    const spaces=group.getByRole("button",{name:"观察项目 Space 筛选",exact:true});
+    await spaces.click();
+    await page.getByRole("listbox",{name:"观察项目 Space 筛选",exact:true}).getByRole("option",{name:/verification/}).click();
     await row("验证会话二").waitFor();
     t.assertions.assert(await row("深层工作会话").count()===0,"Space filter mixed sibling/deeper conversations");
-    await spaces.selectOption("");
+    await group.getByRole("button",{name:"清除Space筛选",exact:true}).click();
     await row("深层工作会话").getByRole("button").first().click();
     await page.getByRole("heading",{name:"深层工作会话",exact:true}).waitFor();
     await page.getByRole("button",{name:"当前项目",exact:true}).getByText("观察项目 / verification / delivery").waitFor();
