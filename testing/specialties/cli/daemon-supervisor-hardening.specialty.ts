@@ -116,7 +116,9 @@ defineSpecialty(meta("repeated-kill-recovery", "Repeated Host kills retain a pro
     }
     t.assertions.assert(hostPriority > guardianPriority, "Host and guardian share the same OOM victim priority");
     process.kill(Number(current.pid), "SIGKILL");
-    t.assertions.assert((await cli(["daemon", "stop"])).code === 0, "stop during repeated-failure cooldown failed");
+    const stopped = await cli(["daemon", "stop"]);
+    t.note(`cooldownStopCode=${stopped.code} ${stopped.stderr.slice(-500)}`);
+    t.assertions.assert(stopped.code === 0, "stop during repeated-failure cooldown failed");
     await new Promise(resolve => setTimeout(resolve, 2200));
     t.assertions.assert((await status()).running === false && !alive(guardian), "stop was undone by repeated-failure recovery");
   } finally {
@@ -125,8 +127,22 @@ defineSpecialty(meta("repeated-kill-recovery", "Repeated Host kills retain a pro
 });
 
 defineSpecialty(meta("restart-headroom", "Recovery waits for memory headroom and remains cancellable",
-  "With an operator restart reserve above all physical memory, the first Host can run but after SIGKILL its guardian logs a memory wait and spawns no replacement; explicit stop exits the waiting guardian", 30_000), async t => {
-  const env = genetEnv(t.openRoot, { ...t.env.env, GENEHUB_DAEMON_RESTART_HEADROOM_MB: "1048576" });
+  "With an operator restart reserve above the visible container memory limit (or physical capacity if unconstrained), the first Host can run but after SIGKILL its guardian logs a memory wait and spawns no replacement; explicit stop exits the waiting guardian", 30_000), async t => {
+  const memory = readFileSync("/proc/meminfo", "utf8");
+  const physicalKb = Number(/^MemTotal:\s+(\d+)/m.exec(memory)?.[1]);
+  const physicalAvailableKb = Number(/^MemAvailable:\s+(\d+)/m.exec(memory)?.[1]);
+  let capacity = physicalKb * 1024;
+  // Independent kernel evidence on this test machine, not an imitation of
+  // the product's mount/ancestor resolver. A container cap below physical
+  // availability catches a gate that incorrectly reads only host RAM.
+  for (const file of ["/sys/fs/cgroup/memory/memory.limit_in_bytes", "/sys/fs/cgroup/memory.max"]) {
+    if (existsSync(file)) {
+      const limit = Number(readFileSync(file, "utf8").trim());
+      if (Number.isFinite(limit) && limit > 0) capacity = Math.min(capacity, limit);
+    }
+  }
+  const reserveMb = Math.ceil(capacity / (1024 * 1024)) + 1;
+  const env = genetEnv(t.openRoot, { ...t.env.env, GENEHUB_DAEMON_RESTART_HEADROOM_MB: String(reserveMb) });
   const genet = locateGenet(t.openRoot);
   const cli = (args: string[]) => runGenetAsync(genet, args, env);
   let guardian = 0;
@@ -142,6 +158,6 @@ defineSpecialty(meta("restart-headroom", "Recovery waits for memory headroom and
     const children = readFileSync(`/proc/${guardian}/task/${guardian}/children`, "utf8").trim();
     t.assertions.assert(alive(guardian) && children === "", "memory wait still launched a replacement Host");
     t.assertions.assert((await cli(["daemon", "stop"])).code === 0 && !alive(guardian), "memory wait ignored explicit stop");
-    t.note("memoryWait=true replacementCount=0 stopCancelledWait=true");
+    t.note(`memoryWait=true replacementCount=0 stopCancelledWait=true reserveMb=${reserveMb} physicalMb=${Math.floor(physicalKb / 1024)} physicalAvailableMb=${Math.floor(physicalAvailableKb / 1024)}`);
   } finally { await cli(["daemon", "stop"]); }
 });

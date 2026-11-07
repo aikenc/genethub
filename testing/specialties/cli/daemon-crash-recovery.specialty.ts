@@ -42,6 +42,10 @@ defineSpecialty({
       "p=os.fork()",
       "if p:", " os.waitpid(p,0); sys.exit(0)",
       "os.setsid()", "p=os.fork()", "if p: os._exit(0)",
+      "os.setsid()",
+      // A session leader with a similarly named OPEN file is still work,
+      // not a delegated lifecycle owner: the kernel lease must be held.
+      `unlocked=open(${JSON.stringify(path.join(t.env.workspace, "daemon.lock"))},'a')`,
       "fd=os.open(os.devnull,os.O_RDWR)",
       "for n in (0,1,2): os.dup2(fd,n)",
       "signal.signal(signal.SIGTERM,signal.SIG_IGN)",

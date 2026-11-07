@@ -14,6 +14,8 @@ use fs2::FileExt;
 
 use super::*;
 
+mod pressure;
+
 const LOCK: &str = "daemon-supervisor.lock";
 const STOP: &str = "daemon-supervisor.stop";
 const POLL: Duration = Duration::from_millis(50);
@@ -109,7 +111,11 @@ fn start_owned(paths: &Paths) -> anyhow::Result<serde_json::Value> {
             }
         }
         if Instant::now() >= deadline {
-            mark_stop(paths).map_err(anyhow::Error::msg)?;
+            // Observing another owner's slow/unresponsive Host is read-only.
+            // Only this start attempt's own detached launch may be cancelled.
+            if launched.is_some() {
+                mark_stop(paths).map_err(anyhow::Error::msg)?;
+            }
             anyhow::bail!(
                 "the supervised daemon did not publish an endpoint within {}s; inspect cli-start.log",
                 START_TIMEOUT.as_secs()
@@ -142,7 +148,21 @@ pub(super) fn stop_owned(paths: &Paths) -> Result<(bool, bool), String> {
     } else if lifecycle::instance_locked(paths).map_err(|e| e.to_string())? {
         // stop_verified sets the stop flag only AFTER identity is established.
         // A foreign or silent listener must not cancel the real owner's recovery.
-        (true, stop_verified(paths)?)
+        match stop_verified(paths) {
+            Ok(forced) => (true, forced),
+            Err(error) => {
+                // A killed Host can release its kernel lock while an identity
+                // probe is failing against the dying endpoint. No Host PID is
+                // authorized by that failure: cancel the existing guardian's
+                // recovery only after observing that the instance is gone.
+                if supervised && !lifecycle::instance_locked(paths).map_err(|e| e.to_string())? {
+                    mark_stop(paths)?;
+                    (true, false)
+                } else {
+                    return Err(error);
+                }
+            }
+        }
     } else if supervised {
         // The Host can be between crash and recovery, with no endpoint at all.
         mark_stop(paths)?;
@@ -182,6 +202,10 @@ fn supervise() -> anyhow::Result<()> {
     if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } == -1 {
         return Err(io::Error::last_os_error().into());
     }
+    let minimum_reserve = pressure::restart_reserve()?;
+    if let Err(error) = pressure::protect_guardian() {
+        eprintln!("daemon supervisor: cannot lower inherited OOM priority: {error}");
+    }
     match std::fs::remove_file(paths.root.join(STOP)) {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -201,14 +225,23 @@ fn supervise() -> anyhow::Result<()> {
         command.stdin(Stdio::null());
         let began = Instant::now();
         let mut child = command.spawn()?;
+        if let Err(error) = pressure::prefer_host(child.id()) {
+            eprintln!("daemon supervisor: cannot prefer Host as OOM victim: {error}");
+        }
         eprintln!("daemon supervisor: started Host pid={}", child.id());
         let mut stop_at = None;
         let mut reaped = 0;
+        let mut peak_rss = 0;
+        let mut sample_at = Instant::now();
         let status = loop {
             if let Some(status) = child.try_wait()? {
                 break status;
             }
             reaped += reap_completed_adoptees(child.id())?;
+            if Instant::now() >= sample_at {
+                peak_rss = peak_rss.max(pressure::host_rss(child.id()).unwrap_or(0));
+                sample_at = Instant::now() + Duration::from_secs(1);
+            }
             if stopping(&paths) {
                 if stop_at.is_none() {
                     // We own this unreaped Child, so its PID cannot be reused.
@@ -222,30 +255,58 @@ fn supervise() -> anyhow::Result<()> {
             }
             std::thread::sleep(POLL);
         };
+        let uptime = began.elapsed();
         reaped += clean_descendants()?;
         eprintln!("daemon supervisor: Host exited {status}; descendants reaped={reaped}");
         if stopping(&paths) || status.success() {
             return Ok(());
         }
-        if began.elapsed() >= Duration::from_secs(30) {
+        if uptime >= Duration::from_secs(30) {
             failures = 0;
         }
-        failures += 1;
-        if failures >= 5 {
-            anyhow::bail!(
-                "five consecutive short Host failures; automatic recovery stopped; inspect cli-start.log"
-            );
+        failures = failures.saturating_add(1);
+        let delay = Duration::from_secs((1u64 << (failures - 1).min(5)).min(30));
+        eprintln!(
+            "daemon supervisor: recovering after {}s; consecutive failures={failures}",
+            delay.as_secs()
+        );
+        if wait_stopping(&paths, delay) {
+            return Ok(());
         }
-        let delay = Duration::from_secs(1 << (failures - 1));
-        let retry_at = Instant::now() + delay;
-        eprintln!("daemon supervisor: recovering after {}s", delay.as_secs());
-        while Instant::now() < retry_at {
-            if stopping(&paths) {
+        let mut reported_wait = false;
+        let reserve = minimum_reserve.max(peak_rss);
+        loop {
+            match pressure::available_memory() {
+                Ok(bytes) if bytes < reserve => {
+                    if !reported_wait {
+                        eprintln!("daemon supervisor: waiting for memory headroom; available={bytes} reserve={reserve}");
+                        reported_wait = true;
+                    }
+                }
+                Ok(_) => break,
+                Err(error) => {
+                    // A missing observation must not permanently strand a
+                    // recoverable daemon. Retry rate stays bounded above.
+                    eprintln!("daemon supervisor: memory headroom unavailable: {error}");
+                    break;
+                }
+            }
+            if wait_stopping(&paths, Duration::from_secs(1)) {
                 return Ok(());
             }
-            std::thread::sleep(POLL);
         }
     }
+}
+
+fn wait_stopping(paths: &Paths, delay: Duration) -> bool {
+    let until = Instant::now() + delay;
+    while Instant::now() < until {
+        if stopping(paths) {
+            return true;
+        }
+        std::thread::sleep(POLL);
+    }
+    stopping(paths)
 }
 
 /// Reap adopted orphans during normal operation, without consuming the Host's
@@ -292,7 +353,7 @@ fn reap_completed_adoptees(host: u32) -> io::Result<usize> {
 /// An Agent may intentionally launch another independent manual daemon. Its
 /// supervisor's kernel-held lifecycle lease is the ownership handoff, even
 /// when this subreaper later adopts it. Merely naming a process is not proof.
-fn delegated_supervisor(pid: i32) -> anyhow::Result<bool> {
+fn delegated_lifecycle(pid: i32) -> anyhow::Result<bool> {
     let proc = std::path::PathBuf::from(format!("/proc/{pid}"));
     let descriptors = match std::fs::read_dir(proc.join("fd")) {
         Ok(entries) => entries,
@@ -301,10 +362,12 @@ fn delegated_supervisor(pid: i32) -> anyhow::Result<bool> {
     };
     for descriptor in descriptors {
         let descriptor = descriptor?;
-        if std::fs::read_link(descriptor.path())
-            .ok()
-            .is_none_or(|target| target.file_name() != Some(std::ffi::OsStr::new(LOCK)))
-        {
+        let Ok(target) = std::fs::read_link(descriptor.path()) else {
+            continue;
+        };
+        let supervisor = target.file_name() == Some(std::ffi::OsStr::new(LOCK));
+        let legacy = target.file_name() == Some(std::ffi::OsStr::new("daemon.lock"));
+        if !supervisor && !legacy {
             continue;
         }
         let info = match std::fs::read_to_string(proc.join("fdinfo").join(descriptor.file_name())) {
@@ -320,7 +383,13 @@ fn delegated_supervisor(pid: i32) -> anyhow::Result<bool> {
                 && fields[5].parse::<i32>() == Ok(pid)
                 && fields[7..] == ["0", "EOF"]
         }) {
-            return Ok(true);
+            // Legacy manual start has no supervisor lease. Its own locked
+            // daemon instance and OS session still establish independent
+            // lifecycle ownership, including while its endpoint initializes
+            // or stalls. This never grants authority to signal a file PID.
+            if supervisor || unsafe { libc::getsid(pid) } == pid {
+                return Ok(true);
+            }
         }
     }
     Ok(false)
@@ -358,7 +427,7 @@ fn clean_descendants() -> anyhow::Result<usize> {
             .collect::<Result<_, _>>()?;
         let mut owned = Vec::new();
         for pid in children {
-            if !delegated_supervisor(pid)? {
+            if !delegated_lifecycle(pid)? {
                 owned.push(pid);
             }
         }

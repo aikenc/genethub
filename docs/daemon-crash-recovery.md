@@ -8,11 +8,21 @@ Linux 的 `daemon start` 启动一个独立的薄 CLI 监督进程，后者运�
 
 监督进程在启动 Host 前设置 Linux child-subreaper。Host 退出后，即使工具通过 setsid、双重 fork 脱离原进程组，也会成为监督进程可回收的后代。清理只向监督进程自己的直接子进程发送 TERM，随后升级 KILL，并重复回收新接管的后代；清理未确认结束时拒绝启动另一个 Host。不扫描或终止同 UID、同名字的其他工作负载。
 
-Host 异常退出后，先完成清理，再按 1/2/4/8 秒退避重启；连续五次短运行失败后停止自动重试并在 `cli-start.log` 留下原因。持续运行至少 30 秒会重置该失败计数。正常退出结束监督；显式 `daemon stop` 也取消尚未开始的恢复。单实例启动锁保护并发 start/stop，监督锁保护同数据目录的唯一监督者。
+Host 异常退出后，先完成清理，再按 1/2/4/8/16/30 秒退避重启，随后保持最长 30 秒退避，不在第五次失败后永久放弃。实际 Host 持续运行至少 30 秒会重置该失败计数，清理耗时不计入存活时间。正常退出结束监督；显式 `daemon stop` 也取消退避或内存等待中的恢复。单实例启动锁保护并发 start/stop，监督锁保护同数据目录的唯一监督者。`specialty.cli.supervisor.repeated-kill-recovery` 覆盖六次连续强杀和恢复间隙的停止。
 
-从 Agent 里显式 `daemon start` 创建的另一套 daemon 是独立生命周期。清理时只读取自身直接子进程的 fd/fdinfo：持有 `daemon-supervisor.lock` 全文件独占内核锁的监督者代表已经交接所有权，保留其工作树。仅同名进程或未持有锁的文件不构成交接。`specialty.cli.daemon-start-outlives-tool-group` 验收父 Host 强杀并恢复、父 daemon 正常停止后，独立 daemon 的原 PID 与连接仍可用。
+`start` 等待既有 owner 超时只报告失败；只有本次实际创建的监督进程才可由本次超时写停止意图。`specialty.cli.supervisor.observer-timeout` 将原 Host 暂停超过真实启动期限，再确认恢复原 PID 与公共连接，避免观察性的 start 变成 stop。
+
+从 Agent 里显式 `daemon start` 创建的另一套 daemon 是独立生命周期。清理时只读取自身直接子进程的 fd/fdinfo：持有 `daemon-supervisor.lock` 全文件独占内核锁的监督者代表已经交接所有权，保留其工作树。旧式无监督 Host 若实际持有 `daemon.lock` 的全文件独占内核锁，且自身是 OS 会话首进程，同样保留；不依赖旧版新增锁格式或当时监听器是否响应。仅同名进程或未持有锁的文件不构成交接，也不授予对文件中 PID 发送信号的权限。`specialty.cli.daemon-start-outlives-tool-group` 和 `specialty.cli.supervisor.legacy-independent-owner` 分别验收有监督与旧式无监督拓扑，在父 Host 强杀并恢复、父 daemon 正常停止后仍保持独立 PID 和连接。后者使用真实前台 Host 重现旧拓扑，不冒充完整历史 App 二进制混装验收。
 
 Host 正常运行时也会非阻塞回收已退出的接管后代，避免孤儿变成长期僵尸；保留实际 Host 的退出状态给其 Child 所有者处理。`specialty.cli.daemon-crash-recovery` 还要求短命双重 fork 工具的 `/proc` 项在原 Host 存活时消失。
+
+## 内存压力下的恢复
+
+监督者只在 OS 账户已允许的范围内，将自身继承的正 `oom_score_adj` 降至可写的最低非负值；已有负值保留，不请求 OOM 免疫或新增权限。创建的 Host 调整至 1000，使内核倾向回收 Host，监督者继续负责旧后代清理和恢复。调整失败会记录日志，不能据此保证监督者不会成为 OOM 目标。每台机器、每套 daemon 独立生效，不修改其他运行进程的优先级。
+
+异常退出完成清理后，重启需要同时满足退避结束和可观测内存余量。余量取物理 `MemAvailable` 与可见 cgroup v1/v2 各级剩余额度的较小值；cgroup 已计费的 inactive file cache 按可回收部分处理。需要的余量至少为上一 Host 观测到的 RSS 峰值，以及 `GENEHUB_DAEMON_RESTART_HEADROOM_MB` 配置值（二者取大，默认配置值 256 MiB）。这是一项重启等待策略，不是内核内存预留或硬限额；第一次显式启动仍使用已有启动期限。无法读取内存观测时记录降级原因，继续遵守退避上限，不因观测永久缺失而放弃恢复。
+
+`specialty.cli.supervisor.restart-headroom` 通过真实 CLI 配置高于可见容器限额的重启余量（无可见限额则使用物理容量），验证 Host 退出后只等待、不会创建替代 Host，且显式 stop 可取消等待；普通强杀用例验证余量足够时恢复。测试不在共享机器制造内存耗尽，SIGKILL 不等于实际内核 OOM 验收。整体容器 OOM（例如启用 `memory.oom.group`）仍需 OS 服务/容器 owner 承担外部恢复；参考 [Linux 内核 cgroup 文档](https://docs.kernel.org/admin-guide/cgroup-v2.html#memory)。
 
 ## 数据位置
 
