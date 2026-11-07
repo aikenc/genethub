@@ -108,6 +108,12 @@ sys.exit(r.returncode)
     // A stale legacy binding must not override the canonical project reference.
     writeFileSync(path.join(sourceRoot,".genethub/remote-targets.json"),JSON.stringify({qa:{...binding,workspaceId:otherQa.id}}));
     bind(binding);
+    // Editing membership must remain compatible with the actual team build,
+    // before any remote business command is attempted.
+    const rebuilt = spawnSync(python,[path.join(t.openRoot,"apps/daemon/builtin-skills/genehub/references/spacebuilder/spacebuilder.py"),"build",sourceRoot],{env:sourceEnv,encoding:"utf8"});
+    t.assertions.assert(rebuilt.status===0,"cross-machine metadata broke team rebuild: "+rebuilt.stdout+rebuilt.stderr);
+    const members=(await cliJson(["workspace","list"])).workspaces.find((w:any)=>w.folders?.[0]?.root===sourceRoot)?.agentSpace?.members;
+    t.assertions.assert(members?.length===1&&members[0].workspaceId===qa.id&&members[0].machineId===machine&&!Object.hasOwn(members[0],"command"),"build lost the exact remote reference or exposed executor commands");
     const script = (args: string[]) => new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
       const child = spawn(python, ["tools/team.py", ...args], { cwd: sourceRoot, env: sourceEnv, stdio: ["ignore", "pipe", "pipe"] });
       let stdout = "", stderr = ""; child.stdout.on("data", b => stdout += b); child.stderr.on("data", b => stderr += b);
@@ -312,6 +318,10 @@ sys.exit(r.returncode)
     const remoteTask = JSON.parse(ownerReply.out.trim().split("\n").at(-1)!);
     const remoteOwner = remoteTask.owner.sessionId;
     await idleSession(remoteOwner, true);
+    await t.tools.waitUntil(async()=>{
+      const s=(await inspectSession(remoteOwner,true)).summary;
+      return s.coordination?.taskId===remoteTask.taskId && s.coordination?.active;
+    },30000);
     const sourceTaskFile = path.join(sourceRoot, ".genethub/team/tasks", remoteTask.taskId + ".json");
     t.assertions.assert(JSON.parse(readFileSync(sourceTaskFile, "utf8")).owner.sessionId === remoteOwner, "remote input started without durable source ownership");
     const remoteDirectory = path.join(targetRoot, "remote-owner-workstation"); mkdirSync(remoteDirectory);
