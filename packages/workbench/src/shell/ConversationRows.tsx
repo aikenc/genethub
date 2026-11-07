@@ -526,7 +526,7 @@ function SessionRow({
           >
             {/* Always three lines: title, time and project, then a short status icon with labels. */}
             <span className="entity-copy block min-w-0">
-              <span className="entity-title flex min-w-0 items-center gap-1.5 text-sm font-medium leading-5 text-fg">
+              <span className="gh-conversation-title entity-title flex min-w-0 items-center gap-1.5 font-medium leading-5 text-fg">
                 {session.unread && <span role="img" aria-label="有未读新回复" title="有未读新回复" className="block h-2 w-2 shrink-0 rounded-full bg-accent" />}
                 <span className="truncate" title={displayTitle}>{displayTitle}</span>
               </span>

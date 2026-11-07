@@ -2,7 +2,7 @@ import type { SessionSummary } from "@genehub/proto";
 
 export type AttentionFilter = "all" | "pending" | "running" | "blocked" | "unread";
 export const attentionFilters: readonly [AttentionFilter, string][] = [
-  ["all", "全部"], ["pending", "待你处理"], ["running", "进行中"], ["blocked", "异常／受阻"], ["unread", "未读"],
+  ["all", "全部"], ["running", "进行中"], ["unread", "未读"],
 ];
 
 export function canHandleInteraction(session: SessionSummary): boolean {
@@ -62,7 +62,7 @@ export function sessionAttention(session: SessionSummary, sessions: readonly Ses
 export function matchesAttention(session: SessionSummary, filter: AttentionFilter, unread: boolean, sessions: readonly SessionSummary[] = []) {
   const facts = sessionAttention(session, sessions);
   return filter === "all" || (filter === "pending" ? facts.pending > 0
-    : filter === "running" ? facts.inProgress : filter === "blocked" ? facts.blocked : unread);
+    : filter === "running" ? facts.inProgress || facts.pending > 0 || facts.blocked : filter === "blocked" ? facts.blocked : unread);
 }
 
 export function hasCurrentWork(session: SessionSummary, sessions: readonly SessionSummary[] = []) {

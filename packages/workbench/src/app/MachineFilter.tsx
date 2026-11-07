@@ -41,7 +41,7 @@ export function MachineFilter({ sources, value, onChange, section }: {
   };
   return <div ref={root} className="min-w-0 flex-1">
     <button ref={trigger} type="button" aria-label="机器筛选" title={label} aria-haspopup="menu" aria-expanded={open} aria-controls={open ? id : undefined}
-      className="flex min-h-11 w-full min-w-0 items-center gap-1 rounded-lg text-left text-sm font-semibold hover:bg-raised focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+      className="gh-machine-filter flex min-h-11 w-full min-w-0 items-center gap-1 rounded-lg text-left font-semibold hover:bg-raised focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
       onClick={() => open ? close() : show()}
       onKeyDown={event => { if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); show(event.key === "ArrowUp"); } }}>
       <span className="min-w-0 truncate">{label}</span><ChevronDown aria-hidden size={16} className="shrink-0 text-muted" />

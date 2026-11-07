@@ -52,9 +52,10 @@ export class MachineSummaryDirectory {
     this.includeArchived = value;
   }
   private observer: ((value: SummaryDirectory) => void) | null = null;
-  constructor(source: SummarySource, private options: Pick<ClientOptions, "socketFactory" | "onDiagnostic"> & { connections?: MachineConnections } = {}) {
-    this.ownsConnections = !options.connections;
-    this.connections = options.connections ?? new MachineConnections(source, options);
+  constructor(source: SummarySource | MachineConnections, private options: Pick<ClientOptions, "socketFactory" | "onDiagnostic"> & { connections?: MachineConnections } = {}) {
+    const shared = source instanceof MachineConnections ? source : options.connections;
+    this.ownsConnections = !shared;
+    this.connections = shared ?? new MachineConnections(source as SummarySource, options);
     this.stopInvalidation = this.connections.onInvalidated(target => {
       this.previous.delete(target.id);
       for (const row of this.rows) if (row.target.id === target.id || target.deviceHandle && row.target.deviceHandle === target.deviceHandle) {

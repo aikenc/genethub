@@ -3,6 +3,8 @@ export default {
   content: ["./index.html", "./src/**/*.{ts,tsx}"],
   theme: {
     extend: {
+      // Keep aligned with WORKBENCH_SPLIT_WIDTH and the shared theme's media rules.
+      screens: { md: "700px" },
       colors: {
         bg: "rgb(var(--bg) / <alpha-value>)",
         surface: "rgb(var(--surface) / <alpha-value>)",

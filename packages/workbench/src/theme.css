@@ -216,7 +216,7 @@ body {
  * what "mobile" means. Inline links remain inline, so paragraphs do not acquire
  * artificial 44px gaps; their surrounding line-height supplies separation.
  */
-@media (max-width: 767px) {
+@media (max-width: 699px) {
   body {
     font-size: calc(16px + var(--gh-font-nudge));
     line-height: 1.625;
@@ -624,7 +624,7 @@ input:focus-visible {
 .gh-mermaid [role="alert"] { color: rgb(var(--danger)); text-align: left; }
 .gh-mermaid [role="alert"] pre { margin-top: 0.6rem; overflow: auto; color: #333; font-size: 12px; }
 
-@media (max-width: 767px) {
+@media (max-width: 699px) {
   .gh-markdown-document { font-size: 16px; }
   .gh-markdown h1 { font-size: 1.55em; }
   .gh-markdown h2 { font-size: 1.3em; }
@@ -651,7 +651,7 @@ input:focus-visible {
 .workbench-navigation {
   padding-bottom: max(0.25rem, var(--safe-area-bottom));
 }
-@media (min-width: 768px) {
+@media (min-width: 700px) {
   .workbench-navigation { padding-top: max(1rem, var(--safe-area-top)); padding-bottom: 1rem; }
 }
 
@@ -674,7 +674,15 @@ input:focus-visible {
 .gh-filter-option:hover, .gh-filter-option:active { background: rgb(var(--raised)); }
 .gh-filter-actions { display: flex; flex: 0 0 auto; border-left: 1px solid rgb(var(--line)); }
 .gh-filter-actions > button { min-width: var(--gh-touch-target); min-height: var(--gh-touch-target); }
-.workbench-navigation button > span { font-size: var(--gh-type-navigation); }
+.workbench-navigation button > span { font-size: calc(11px + var(--gh-font-nudge)); }
+.gh-conversation-title, .gh-machine-filter { font-size: calc(13px + var(--gh-font-nudge)); line-height: 20px; }
+@media (max-width: 699px) {
+  .gh-conversation-title, .gh-machine-filter { font-size: calc(15px + var(--gh-font-nudge)); }
+}
+/* Compact split layouts reserve more room for the task and its generated UI. */
+@media (min-width: 700px) and (max-width: 1023px) {
+  .genehub-ui .list-pane { width: clamp(256px, 32vw, 280px); }
+}
 @media (pointer: coarse) {
   .genehub-ui button { min-height: var(--gh-touch-target); min-width: var(--gh-touch-target); }
 }
@@ -688,7 +696,7 @@ input:focus-visible {
 /* Portalled dialogs use the same zoom-adjusted viewport as the shell. */
 .gh-dialog-frame { max-height: calc(88dvh / var(--gh-ui-scale)); }
 .gh-dialog-content { max-height: inherit; }
-@media (max-width: 767px) {
+@media (max-width: 699px) {
   .gh-dialog-full { height: calc(100dvh / var(--gh-ui-scale)); max-height: 100%; }
   .gh-dialog-full .gh-dialog-content { height: 100%; }
   .gh-dialog-full header { padding-top: max(12px, var(--safe-area-top)); }

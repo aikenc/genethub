@@ -10,6 +10,7 @@ import type {
 } from "@genehub/proto";
 import { BookmarkPlus, Check, Loader2, Mic, Paperclip, Play, Square, X } from "lucide-react";
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { WORKBENCH_SPLIT_WIDTH } from "../ui/breakpoints";
 
 import {
   composeSegmentText,
@@ -1428,7 +1429,7 @@ export const COMPOSER_TEXTAREA_PHONE_MIN_HEIGHT = 66;
 export const COMPOSER_TEXTAREA_PHONE_MAX_HEIGHT = 192;
 export const COMPOSER_TEXTAREA_DESKTOP_MIN_HEIGHT = 44;
 export const COMPOSER_TEXTAREA_DESKTOP_MAX_HEIGHT = 176;
-export const COMPOSER_DESKTOP_BREAKPOINT = 768;
+export const COMPOSER_DESKTOP_BREAKPOINT = WORKBENCH_SPLIT_WIDTH;
 
 export function appendDraftLine(current: string, line: string): string {
   if (!current) return line;
