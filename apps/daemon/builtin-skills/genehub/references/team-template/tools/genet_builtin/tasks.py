@@ -826,7 +826,7 @@ def publish(t, root):
         owner = task.get('owner') or {}
         if owner.get('machine'): remote_roles.add((owner['machine'], owner.get('space')))
     markers = t.read_json(t.state_dir(root, 'projection-targets.json'), {}) or {}
-    bindings = t.read_json(os.path.join(root, '.genethub', 'remote-targets.json'), {}) or {}
+    bindings = t.remote_targets(root)
     content = identity(json.dumps(dict(sessions={sid: {k: v for k, v in row.items() if k != 'updatedAtMs'} for sid, row in projected.items()}, references=references), sort_keys=True))
     for role, target in bindings.items():
         key = identity(json.dumps(target, sort_keys=True))

@@ -320,20 +320,35 @@ def read_dispatch_record(path):
         raise ExpertError("派单配置/回执无法读取: %s" % path, "没有重建或覆盖原回执", "管理员检查文件；先核对实际会话，不要删账重派") from error
 
 
-def remote_target(root, machine, role, explicit=None):
-    """A role is bound to one exact target; never infer team identity from a short name."""
+def remote_targets(root):
+    """One declaration reader for dispatch and cross-machine status projection."""
     descriptor = read_dispatch_record(os.path.join(root, "agent-space.genet.json")) or {}
     members = descriptor.get("members")
-    if members is not None:
-        if not isinstance(members, list) or len(members) > 128:
-            raise ExpertError("members 声明无效", "没有派单", "修正项目的 agent-space.genet.json members")
-        matches = [item for item in members if isinstance(item, dict) and item.get("name") == role]
-        if len(matches) != 1:
-            raise ExpertError("远端岗位 %s 缺少唯一 members 绑定" % role, "没有派单", "核对项目描述文件中的 name、machineId、workspaceId 和 command")
-        target = matches[0]
-    else:
-        # Existing customized teams remain readable until their descriptor is migrated.
-        target = (read_dispatch_record(os.path.join(root, ".genethub", "remote-targets.json")) or {}).get(role)
+    if members is None:
+        targets = read_dispatch_record(os.path.join(root, ".genethub", "remote-targets.json")) or {}
+        if not isinstance(targets, dict):
+            raise ExpertError("旧远端绑定无效", "没有派单", "核对远端绑定对象")
+        return targets
+    if not isinstance(members, list) or len(members) > 128:
+        raise ExpertError("members 声明无效", "没有派单", "修正项目的 agent-space.genet.json members")
+    targets = {}
+    for item in members:
+        if not isinstance(item, dict):
+            raise ExpertError("members 声明无效", "没有派单", "每项须为 Space 引用对象")
+        name = item.get("name")
+        if name is None:
+            continue
+        if not isinstance(name, str) or not name.strip() or name in targets:
+            raise ExpertError("远端岗位名称缺少唯一绑定", "没有派单", "核对 members 中的 name")
+        # Display aliases are not execution intent; preserve legacy receipt
+        # identity when an unchanged binding moves into the descriptor.
+        targets[name] = {key: value for key, value in item.items() if key != "name"}
+    return targets
+
+
+def remote_target(root, machine, role, explicit=None):
+    """A role is bound to one exact target; never infer team identity from a short name."""
+    target = remote_targets(root).get(role)
     if (not isinstance(target, dict) or target.get("machineId") != machine
             or not isinstance(target.get("workspaceId"), str) or not target["workspaceId"]
             or not isinstance(target.get("command"), list) or len(target["command"]) < 2
@@ -4499,7 +4514,7 @@ def main(argv):
     send.add_argument("--resume", action="store_true", help="forward an explicit Human continuation without losing result tracking")
     send.add_argument("--message-id", help="stable operation ID required with --resume; retry only with the same body")
     send.add_argument("--machine", help="exact id from `machine list`: deliver to a role workspace on that machine")
-    send.add_argument("--workspace", help="with --machine: must equal the role’s fixed workspaceId in .genethub/remote-targets.json")
+    send.add_argument("--workspace", help="with --machine: must equal the role’s fixed workspaceId in agent-space.genet.json members")
     send.add_argument("text", nargs="+")
     spawn = sub.add_parser("spawn")
     spawn.add_argument("--team", "--expert", dest="expert", help="spawn inside another team's research/work space (--expert is the old name)")
@@ -4509,7 +4524,7 @@ def main(argv):
     spawn.add_argument("--dir")
     spawn.add_argument("--worktree", help="auto or slot name: cut an isolated git worktree under worktrees/ for parallel workers")
     spawn.add_argument("--machine", help="exact id from `machine list`: run this task in the role's workspace there")
-    spawn.add_argument("--workspace", help="with --machine: must equal the role’s fixed workspaceId in .genethub/remote-targets.json")
+    spawn.add_argument("--workspace", help="with --machine: must equal the role’s fixed workspaceId in agent-space.genet.json members")
     spawn.add_argument("--request-id", help="remote retry identity; omitted means a new printed id; repeat the same id and payload to recover a receipt")
     spawn.add_argument("--tier", help="Ultra, Max, Pro, Flash or Mini; the platform picks the cheapest live model with it")
     spawn.add_argument("--model", help="an exact model id on the team's Agent")

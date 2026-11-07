@@ -726,7 +726,7 @@ def load_manifest(root: Path) -> Manifest:
         fail("SB001", "agent-space.genet.json must contain a JSON object", sources=(path.as_posix(),))
     required = {"schema", "name", "agents", "skills", "tags", "skillProviders"}
     missing = sorted(required - raw.keys())
-    unknown = sorted(raw.keys() - required - {"description", "children", "agentCwd", "folders", "identity", "spaceBuilder", "buildHooks", "team"})
+    unknown = sorted(raw.keys() - required - {"description", "children", "agentCwd", "folders", "identity", "spaceBuilder", "buildHooks", "team", "members"})
     if missing:
         fail("SB001", "Missing manifest fields: " + ", ".join(missing), sources=(path.as_posix(),))
     if unknown:
@@ -837,6 +837,18 @@ def load_manifest(root: Path) -> Manifest:
             fail("SB001", f"Duplicate skill provider at index {index}", sources=(path.as_posix(),))
         seen_provider_specs.add(spec)
         providers.append(provider)
+    # Kernel-owned composition metadata. The builder does not resolve remote
+    # machines, execute member commands, or turn references into local children.
+    members = raw.get("members")
+    if members is not None:
+        if not isinstance(members, list) or len(members) > 128:
+            fail("SB001", "manifest.members must be an array of at most 128 Space references", sources=(path.as_posix(),))
+        for member in members:
+            if not isinstance(member, dict) or any(
+                not isinstance(member.get(key), str) or not member[key].strip() or len(member[key].encode("utf-8")) > 200
+                for key in ("machineId", "workspaceId")
+            ):
+                fail("SB001", "manifest.members requires non-empty machineId and workspaceId strings", sources=(path.as_posix(),))
     description = raw.get("description")
     if description is not None and not isinstance(description, str):
         fail("SB001", "manifest.description must be a string", sources=(path.as_posix(),))
