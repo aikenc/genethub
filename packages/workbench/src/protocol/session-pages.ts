@@ -2,11 +2,11 @@ import type { SessionSummary } from "@genehub/proto";
 import type { Client } from "./client";
 
 /** Bounded summary reads. Older daemons must upgrade; never fall back to a full scan. */
-export async function readSessionPage(client: Client, workspaceId: string | null = null, cursor: string | null = null, limit = 100, includeArchived = false, activeOnly = false) {
+export async function readSessionPage(client: Client, workspaceId: string | null = null, cursor: string | null = null, limit = 100, includeArchived = false, activeOnly = false, ifNoneMatch?: string) {
   if (!client.identity?.features?.includes("session.page.v1")) throw new Error("请更新此机器以读取分页会话。");
   if (activeOnly && !client.identity?.features?.includes("session.active-page.v1")) throw new Error("请更新此机器以完整读取活动会话。");
   const reply = await client.call({ type: "session.page", payload: {
-    requests: [{ workspaceId, cursor, limit, ...(activeOnly ? {activeOnly: true} : {}) }], includeArchived,
+    requests: [{ workspaceId, cursor, limit, ...(activeOnly ? {activeOnly: true} : {}), ...(ifNoneMatch ? {ifNoneMatch} : {}) }], includeArchived,
   } }, { timeoutMs: 30_000 });
   if (reply?.type !== "sessionPages" || reply.data.length !== 1 || reply.data[0]?.workspaceId !== workspaceId) throw new Error("目标机器没有返回会话页。");
   const page = reply.data[0];

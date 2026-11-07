@@ -983,6 +983,17 @@ struct PageCatalog {
     by_id: HashMap<String, Vec<PathBuf>>,
     pending: HashSet<PathBuf>,
     errors: HashMap<PathBuf, (Vec<String>, String)>,
+    projection: CatalogProjection,
+}
+
+#[derive(Default)]
+pub(super) struct CatalogProjection {
+    pub revision: u64,
+    pub dirty: HashSet<genehub_proto::CatalogSessionRef>,
+    pub removed: HashSet<genehub_proto::CatalogSessionRef>,
+    pub rows: HashMap<genehub_proto::CatalogSessionRef, (String, bool)>,
+    pub workspaces: HashMap<String, String>,
+    pub errors: String,
 }
 #[derive(Clone, PartialEq, Eq)]
 struct MetadataStamp {
@@ -1013,6 +1024,18 @@ struct CatalogScan {
 impl PageCatalog {
     fn put(&mut self, path: PathBuf, file: CatalogFile) {
         if let Some(old) = self.files.get(&path).and_then(|f| f.meta.as_ref()) {
+            if file
+                .meta
+                .as_ref()
+                .is_none_or(|next| next.id != old.id || next.workspace_id != old.workspace_id)
+            {
+                self.projection
+                    .removed
+                    .insert(genehub_proto::CatalogSessionRef {
+                        workspace_id: old.workspace_id.clone(),
+                        id: old.id.clone(),
+                    });
+            }
             self.order
                 .remove(&(old.updated_at_ms, old.id.clone(), old.workspace_id.clone()));
             if let Some(paths) = self.by_id.get_mut(&old.id) {
@@ -1021,6 +1044,12 @@ impl PageCatalog {
         }
         self.pending.remove(&path);
         if let Some(meta) = &file.meta {
+            self.projection
+                .dirty
+                .insert(genehub_proto::CatalogSessionRef {
+                    workspace_id: meta.workspace_id.clone(),
+                    id: meta.id.clone(),
+                });
             self.order.insert(
                 (
                     meta.updated_at_ms,
@@ -1081,6 +1110,7 @@ pub struct Store {
     catalog_reads: Arc<crate::blocking::InFlightReads<Option<String>, Arc<CatalogScan>>>,
     page_reads: Arc<PageReads>,
     page_catalog: Arc<std::sync::Mutex<PageCatalog>>,
+    catalog_wake: Arc<tokio::sync::Notify>,
 }
 
 impl Store {
@@ -1091,6 +1121,7 @@ impl Store {
             catalog_reads: Default::default(),
             page_reads: Default::default(),
             page_catalog: Default::default(),
+            catalog_wake: Default::default(),
         }
     }
 
@@ -1449,6 +1480,7 @@ impl Store {
                 cache.checked_at = None;
             }
         }
+        self.catalog_wake.notify_one();
         Ok(())
     }
 
@@ -1614,6 +1646,7 @@ impl Store {
                 },
             );
         }
+        self.catalog_wake.notify_one();
     }
 
     async fn catalog_metadata(
@@ -1667,6 +1700,7 @@ impl Store {
         &self,
         workspace: Option<&str>,
         live_ids: &[String],
+        strict: bool,
     ) -> Result<Vec<SessionMeta>> {
         if let Some(id) = workspace {
             self.homes.root(id)?;
@@ -1690,7 +1724,7 @@ impl Store {
             .page_catalog
             .lock()
             .map_err(|_| anyhow!("page catalog poisoned"))?;
-        cache.check_scope(workspace, true)?;
+        cache.check_scope(workspace, strict)?;
         let mut paths = cache.pending.clone();
         for id in live_ids {
             if let Some(found) = cache.by_id.get(id) {
@@ -1748,6 +1782,99 @@ impl Store {
             ))
         });
         Ok(rows)
+    }
+
+    pub(super) fn catalog_scope_errors(&self) -> Vec<genehub_proto::CatalogScopeError> {
+        let cache = self.page_catalog.lock().unwrap_or_else(|e| e.into_inner());
+        let mut errors = Vec::new();
+        for (scopes, message) in cache.errors.values() {
+            if scopes.is_empty() {
+                errors.push(genehub_proto::CatalogScopeError {
+                    workspace_id: None,
+                    message: message.chars().take(1000).collect(),
+                });
+            }
+            for workspace in scopes {
+                errors.push(genehub_proto::CatalogScopeError {
+                    workspace_id: Some(workspace.clone()),
+                    message: message.chars().take(1000).collect(),
+                });
+            }
+        }
+        errors.sort_by(|a, b| (&a.workspace_id, &a.message).cmp(&(&b.workspace_id, &b.message)));
+        errors.dedup();
+        errors
+    }
+
+    pub(super) fn catalog_wake(&self) -> Arc<tokio::sync::Notify> {
+        self.catalog_wake.clone()
+    }
+
+    pub(super) fn mark_catalog_dirty(&self, workspace: &str, session: &str) {
+        if let Ok(mut cache) = self.page_catalog.lock() {
+            cache
+                .projection
+                .dirty
+                .insert(genehub_proto::CatalogSessionRef {
+                    workspace_id: workspace.into(),
+                    id: session.into(),
+                });
+        }
+        self.catalog_wake.notify_one();
+    }
+
+    pub(super) fn catalog_edit<R>(&self, edit: impl FnOnce(&mut CatalogProjection) -> R) -> R {
+        let mut cache = self.page_catalog.lock().unwrap_or_else(|e| e.into_inner());
+        edit(&mut cache.projection)
+    }
+
+    pub(super) fn catalog_metadata_keys(
+        &self,
+        keys: &HashSet<genehub_proto::CatalogSessionRef>,
+    ) -> Vec<Arc<SessionMeta>> {
+        let cache = self.page_catalog.lock().unwrap_or_else(|e| e.into_inner());
+        keys.iter()
+            .filter_map(|key| {
+                cache
+                    .by_id
+                    .get(&key.id)?
+                    .iter()
+                    .filter_map(|path| cache.files.get(path)?.meta.as_ref())
+                    .find(|meta| meta.workspace_id == key.workspace_id)
+                    .cloned()
+            })
+            .collect()
+    }
+
+    /// A late projection cannot publish over a durable write or deletion.
+    pub(super) fn catalog_accept(
+        &self,
+        meta: &Arc<SessionMeta>,
+        row: &genehub_proto::CatalogSessionRow,
+    ) -> bool {
+        let mut cache = self.page_catalog.lock().unwrap_or_else(|e| e.into_inner());
+        let current = cache.by_id.get(&meta.id).is_some_and(|paths| {
+            paths.iter().any(|p| {
+                cache
+                    .files
+                    .get(p)
+                    .and_then(|f| f.meta.as_ref())
+                    .is_some_and(|m| Arc::ptr_eq(meta, m))
+            })
+        });
+        if !current {
+            return false;
+        }
+        let key = genehub_proto::CatalogSessionRef {
+            workspace_id: meta.workspace_id.clone(),
+            id: meta.id.clone(),
+        };
+        let value = (row.etag.clone(), row.active);
+        if cache.projection.rows.get(&key) == Some(&value) {
+            return false;
+        }
+        cache.projection.rows.insert(key, value);
+        true
     }
 
     async fn ensure_catalog(&self) -> Result<()> {
@@ -1816,6 +1943,59 @@ impl Store {
                         scan.errors.remove(path);
                     }
                 }
+                for (path, previous) in &cache.files {
+                    if scan.errors.values().any(|(scopes, _)| {
+                        previous
+                            .meta
+                            .as_ref()
+                            .is_some_and(|m| scopes.contains(&m.workspace_id))
+                    }) && !scan.files.contains_key(path)
+                    {
+                        scan.files.insert(path.clone(), previous.clone());
+                    }
+                }
+                for (path, next) in &mut scan.files {
+                    if next.error.is_some() && next.meta.is_none() {
+                        if let Some(previous) = cache.files.get(path) {
+                            next.meta = previous.meta.clone();
+                        }
+                    }
+                }
+                let mut changed = Vec::new();
+                let mut removed = Vec::new();
+                for (path, before) in &cache.files {
+                    if let Some(old) = &before.meta {
+                        if scan
+                            .files
+                            .get(path)
+                            .and_then(|f| f.meta.as_ref())
+                            .is_none_or(|m| m.id != old.id || m.workspace_id != old.workspace_id)
+                        {
+                            removed.push(genehub_proto::CatalogSessionRef {
+                                workspace_id: old.workspace_id.clone(),
+                                id: old.id.clone(),
+                            });
+                        }
+                    }
+                }
+                for (path, file) in &scan.files {
+                    if let Some(meta) = &file.meta {
+                        let same = cache.files.get(path).is_some_and(|old| {
+                            old.stamp == file.stamp
+                                && old.meta.as_ref().is_some_and(|m| {
+                                    m.id == meta.id && m.workspace_id == meta.workspace_id
+                                })
+                        });
+                        if !same {
+                            changed.push(genehub_proto::CatalogSessionRef {
+                                workspace_id: meta.workspace_id.clone(),
+                                id: meta.id.clone(),
+                            });
+                        }
+                    }
+                }
+                cache.projection.dirty.extend(changed);
+                cache.projection.removed.extend(removed);
                 cache.order.clear();
                 cache.by_id.clear();
                 cache.pending.clear();

@@ -52,6 +52,7 @@ import {
 import type { AddressScope } from "../location/workbench";
 import type { Client, ConnectionState } from "../protocol/client";
 import { readActivitySessions } from "../protocol/session-pages";
+import { observeCatalogSource, readCatalogSource } from "../protocol/summary-directory";
 import { PREVIEW_ANNOTATIONS_FEATURE } from "../preview/reviewDraft";
 import { resolveWorkspacePath } from "../preview/resolveArtifactRef";
 import { isAbsoluteFilePath } from "../preview/url";
@@ -925,6 +926,21 @@ return create<WorkbenchState>((set, get) => ({
       activitySessions: [], activityComplete: false, sessionsComplete: false, sessionGlobalView: false, sessionExpandedSpaces: [], sessionPages: {},
       sessionsCheckedAtMs: 0, sessionsFailedAtMs: 0, sessionObservations: {},
       agentRequests: [], hiddenAgentRequests: [], repairingAgentIds: [], agentConfig: null });
+    attachedListeners.push(observeCatalogSource(client, row => {
+      if (get().client !== client || row.catalogRevision === undefined && row.state !== "denied") return;
+      if (row.state === "denied") {
+        set({sessions:[],workspaces:[],activitySessions:[],activityComplete:false,sessionsLoaded:false,
+          activeSessionId:null,activeWorkspaceId:null,timeline:emptyTimeline(),sessionTimelines:{},tabs:[],activeTabId:null,previewFloat:null,
+          draft:null,sessionDrafts:[],forwardDraft:null,tree:null,git:null,diff:null,settings:null,agents:[],agentRequests:[]});
+        return;
+      }
+      set(state => {
+        const detail = state.sessions.find(s => s.id === state.activeSessionId);
+        const sessions = detail && !row.sessions.some(s => s.id === detail.id) ? [...row.sessions,detail] : row.sessions;
+        return {sessions,workspaces:row.workspaces,activitySessions:row.activeSessions ?? [],activityComplete:Boolean(row.activityComplete),
+          sessionsLoaded:!row.refreshing,sessionsComplete:!row.nextCursor,sessionsError:false,sessionsCheckedAtMs:Date.now()};
+      });
+    }));
     let wasReady = false;
     let logicalOwner = client.logicalConnectionId;
     attachedListeners.push(client.onStateChange((connection) => {
@@ -934,7 +950,7 @@ return create<WorkbenchState>((set, get) => ({
       if (connection === "ready" && client.logicalConnectionId) {
         if (logicalOwner && logicalOwner !== client.logicalConnectionId) {
           invalidateSessionSummaries(client);
-          void get().refreshWorkspaces();
+          if (!client.identity?.features?.includes("catalog.sync.v1")) void get().refreshWorkspaces();
         }
         logicalOwner = client.logicalConnectionId;
       }
@@ -1420,8 +1436,10 @@ return create<WorkbenchState>((set, get) => ({
         if (endsATurn(event.event.type) && get().agents.some((agent) => !canStartAgent(agent))) {
           void get().refreshAgents();
         }
-        if (endsATurn(event.event.type)) void get().refreshWorkspaces();
-        if (endsATurn(event.event.type) || event.event.type === "permissionRequested" || event.event.type === "permissionResolved") void get().refreshSessions();
+        if (!client.identity?.features?.includes("catalog.sync.v1")) {
+          if (endsATurn(event.event.type)) void get().refreshWorkspaces();
+          if (endsATurn(event.event.type) || event.event.type === "permissionRequested" || event.event.type === "permissionResolved") void get().refreshSessions();
+        }
         set((state) => {
           const timeline = applySequenced(
             state.sessionTimelines[sessionId] ?? emptyTimeline(),
@@ -3083,7 +3101,7 @@ async function attachMachine(client: Client): Promise<void> {
   if (activeStore !== store) activeStore.getState().pauseSessionBody();
   showStore(store);
   if (store.getState().client !== client) await store.getInitialState().attach(client);
-  else {
+  else if (!client.identity?.features?.includes("catalog.sync.v1")) {
     await Promise.all([store.getState().refreshWorkspaces(), store.getState().refreshSessions()]);
   }
 }
@@ -3173,6 +3191,9 @@ async function refreshCatalog(
 
 const workspaceSummaryLoads = new WeakMap<Client, { epoch: number; promise: Promise<WorkspaceInfo[]> }>();
 async function loadWorkspaces(client: Client, set: Setter): Promise<WorkspaceInfo[]> {
+  if (client.identity?.features?.includes("catalog.sync.v1")) {
+    const row=await readCatalogSource(client); return row.workspaces;
+  }
   const epoch = sessionEpoch(client);
   const existing = workspaceSummaryLoads.get(client);
   if (existing?.epoch === epoch) return existing.promise;
@@ -3647,6 +3668,9 @@ function invalidateSessionSummaries(client: Client): void {
 }
 const sessionSummaryLoads = new WeakMap<Client, { epoch: number; promise: Promise<SessionSummary[]> }>();
 async function loadSessions(client: Client, set: Setter): Promise<SessionSummary[]> {
+  if (client.identity?.features?.includes("catalog.sync.v1")) {
+    const row=await readCatalogSource(client); return row.sessions;
+  }
   if (client.identity?.features?.includes("session.active-page.v1")) {
     try { const activitySessions = await readActivitySessions(client); if (sourceState(client).client === client) set({activitySessions,activityComplete:true}); }
     catch { if (sourceState(client).client === client) set({activityComplete:false}); }

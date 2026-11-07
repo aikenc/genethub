@@ -53,7 +53,7 @@ import {
   normalizeAgentPreferences,
   resolveTagRoute,
 } from "../session/capability-preferences";
-import type { MachineSummary } from "../protocol/summary-directory";
+import { MachineSummaryDirectory, type MachineSummary } from "../protocol/summary-directory";
 import { SessionCoordination } from "../session/SessionCoordination";
 import { MachineDirectoryLists } from "./MachineDirectoryLists";
 import { ToolsMenu } from "../shell/ToolsMenu";
@@ -216,13 +216,14 @@ export function App({
       return found;
     },
   }, { connect, rtcEnabled: readRtcEnabled }), [host, connect]);
+  const directory = useMemo(() => new MachineSummaryDirectory(connections, {cacheScope:host.cacheScope}), [connections,host]);
   const closeConnections = useRef(new Map<MachineConnections, ReturnType<typeof setTimeout>>());
   useEffect(() => {
     const pending = closeConnections.current;
     const timer = pending.get(connections);
     if (timer) clearTimeout(timer);
     pending.delete(connections);
-    return () => { pending.set(connections, setTimeout(() => { connections.close(); pending.delete(connections); }, 0)); };
+    return () => { pending.set(connections, setTimeout(() => { directory.close(); connections.close(); pending.delete(connections); }, 0)); };
   }, [connections]);
   useEffect(() => {
     const media = window.matchMedia?.(`(min-width: ${WORKBENCH_SPLIT_WIDTH}px)`);
@@ -951,7 +952,7 @@ export function App({
           }
           setSection(next);
         }} />
-        <MachineDirectoryLists connections={connections}
+        <MachineDirectoryLists connections={connections} directory={directory}
           endpoint={endpoint} section={section === "spaces" ? "projects" : "sessions"}
           open={sessionsOpen} hidden={sidebarHidden || !["sessions", "spaces"].includes(section) || section === "sessions" && !showChat}
           onOpen={async (machine, sessionId, workspaceId, signal) => {

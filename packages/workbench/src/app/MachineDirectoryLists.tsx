@@ -22,8 +22,8 @@ const latest = (s: SessionSummary) => s.messagePreview?.atMs ?? s.updatedAtMs;
 const byTime = (a: SessionSummary, b: SessionSummary) => latest(b) - latest(a) || a.id.localeCompare(b.id);
 
 /** A shared directory is a navigation surface, never a change to the active execution target. */
-export function MachineDirectoryLists({ connections, endpoint, section, open, hidden, onOpen, onNewSession, onAddProject, onSources }: {
-  connections: MachineConnections; endpoint: Endpoint; section: "sessions" | "projects";
+export function MachineDirectoryLists({ connections, directory:sharedDirectory, endpoint, section, open, hidden, onOpen, onNewSession, onAddProject, onSources }: {
+  connections: MachineConnections; directory:MachineSummaryDirectory; endpoint: Endpoint; section: "sessions" | "projects";
   open: boolean; hidden: boolean;
   onOpen(machine: Target, sessionId?: string, workspaceId?: string, signal?: AbortSignal): Promise<void>;
   onSources?(sources: MachineSummary[]): void;
@@ -54,22 +54,23 @@ export function MachineDirectoryLists({ connections, endpoint, section, open, hi
   const mounted = useRef(false), initialized = useRef(false), lock = useRef(false), refreshLock = useRef(false);
   const navigation = useRef(0);
   const navigationController = useRef<AbortController>();
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (force = false) => {
     if (!source.current || lock.current || refreshLock.current) return;
     refreshLock.current = true; setRefreshing(true); setError("");
-    try { await source.current.refresh(value => { if (mounted.current) setDirectory(value); }); }
+    try { await source.current.refresh(undefined,undefined,undefined,force); }
     catch (e) { if (mounted.current && !(e instanceof DOMException && e.name === "AbortError")) setError("目录刷新未完成，请重试；已读取的内容保留。"); }
     finally { refreshLock.current = false; if (mounted.current) setRefreshing(false); }
   }, []);
   useEffect(() => {
     mounted.current = true; initialized.current = false;
-    const current = new MachineSummaryDirectory(connections);
+    const current = sharedDirectory;
     // Current and archived views share a bounded snapshot. Archived work that
     // still needs attention stays reachable without another transport query.
     current.setIncludeArchived(true);
     source.current = current;
-    return () => { mounted.current = false; navigation.current++; navigationController.current?.abort(); current.close(); source.current = undefined; };
-  }, [connections]);
+    const stop = current.subscribe(value => {if (mounted.current) setDirectory(value);});
+    return () => { mounted.current = false; navigation.current++; navigationController.current?.abort(); stop(); source.current = undefined; };
+  }, [sharedDirectory]);
   useEffect(() => {
     if ((!client?.identity && connection !== "closed") || initialized.current) return;
     initialized.current = true; void refresh();
@@ -84,6 +85,7 @@ export function MachineDirectoryLists({ connections, endpoint, section, open, hi
   const sources = useMemo(() => directory.sources.map(row => {
     const activity = row.activeSessions ?? [];
     row = {...row, sessions: [...new Map([...row.sessions, ...activity].map(s => [s.id,s])).values()]};
+    if (row.catalogRevision !== undefined) return row;
     if (row.target.deviceHandle !== client?.identity?.machineId || client?.connectionState !== "ready" || row.state === "denied") return row;
     return { ...row, state: (["waiting", "loading", "deferred", "notChecked"].includes(row.state) && sessionsChecked ? "partial" : row.state) as MachineSummary["state"], version: client.identity?.daemonVersion ?? row.version, workspaces: liveWorkspaces.length ? liveWorkspaces : row.workspaces,
       sessions: [...new Map([...row.sessions, ...liveSessions.filter(s => (observations[s.id] ?? 0) > (row.updatedAt ? Date.parse(row.updatedAt) : 0))].map(s => [s.id, s])).values()],
@@ -92,7 +94,7 @@ export function MachineDirectoryLists({ connections, endpoint, section, open, hi
   useEffect(() => { onSources?.(sources); }, [sources,onSources]);
   useEffect(() => {
     const row = directory.sources.find(row => row.target.deviceHandle === client?.identity?.machineId);
-    if (client && row) adoptMachineActivity(client,row.activeSessions ?? [],Boolean(row.activityComplete));
+    if (client && row && row.catalogRevision === undefined) adoptMachineActivity(client,row.activeSessions ?? [],Boolean(row.activityComplete));
   }, [directory,client]);
   useEffect(() => { for (const row of directory.sources) if (fresh(row)) initializeReplyReads(row.target.deviceHandle ?? row.target.id, row.sessions); }, [directory]);
   const selectedSources = sources.filter(row => !machineId || row.target.id === machineId);
@@ -169,7 +171,7 @@ export function MachineDirectoryLists({ connections, endpoint, section, open, hi
       const allSessions = [...row.sessions.filter(s => s.workspaceId === workspace.id),...children.flatMap(child => child.row?.sessions.filter(s => s.workspaceId === child.workspaceId) ?? [])];
       return {row,workspace,key,children:visibleChildren,allChildren:children,direct,inside,show,internalOpen,childRows,allSessions,
         partial:children.some(child => !child.workspace || !child.row?.activityComplete) || !row.activityComplete,
-        stale:!fresh(row) || children.some(child => !child.row || !fresh(child.row)),
+        stale:Boolean(row.cached) || !fresh(row) || children.some(child => !child.row || child.row.cached || !fresh(child.row)),
         machineCount:new Set([row.target.id,...children.map(child => child.row?.target.id ?? child.key)]).size,
         pinned:projectPinned(row.target.deviceHandle ?? row.target.id,workspace.id,workspace.builtin === true),
         time:Math.max(0,...direct.map(latest),...inside.map(item => latest(item.session))) };
@@ -213,7 +215,7 @@ export function MachineDirectoryLists({ connections, endpoint, section, open, hi
     }
     if (mounted.current) {
       setSelection(new Set());
-      await source.current!.refresh(value => { if (mounted.current) setDirectory(value); });
+      await source.current!.refresh(undefined,undefined,undefined,true);
       if (useWorkbench.getState().client) { await useWorkbench.getState().refreshWorkspaces(); await useWorkbench.getState().refreshSessions(); }
       if (mounted.current) setError(`${succeeded} 项已${section === "projects" ? "移除" : includeArchived ? "恢复" : "归档"}${failures.length ? `；${failures.join("；")}` : ""}`);
     }
@@ -231,7 +233,7 @@ export function MachineDirectoryLists({ connections, endpoint, section, open, hi
           <span className={`gh-conversation-title min-w-0 flex-1 truncate ${unread ? "font-semibold" : ""}`}>{session.title || "新会话"}</span>
           <time className="shrink-0 text-[10px] text-faint" dateTime={new Date(latest(session)).toISOString()}>{relativeTime(latest(session))}</time>
         </span><span className="mt-1 flex min-w-0 items-center gap-2 text-xs text-muted"><span className="min-w-0 flex-1 truncate">{workspace && (workspace.agentSpace?.members?.length || row.workspaces.some(w => w.agentSpace?.parentWorkspaceId === workspace.id)) ? "前台" : workspace?.name ?? "Space"}{session.archived ? " · 已归档" : ""}{session.historyOnly ? " · 只读" : ""}</span>
-          <SessionStatusIcon session={session} sessions={row.sessions} stale={!fresh(row)} disconnected={!fresh(row)} observedAtMs={row.updatedAt ? Date.parse(row.updatedAt) : 0} />
+          <SessionStatusIcon session={session} sessions={row.sessions} stale={Boolean(row.cached) || !fresh(row)} disconnected={!fresh(row)} observedAtMs={row.updatedAt ? Date.parse(row.updatedAt) : 0} />
         </span></span>
       </button>
     </li>;
@@ -271,7 +273,7 @@ export function MachineDirectoryLists({ connections, endpoint, section, open, hi
           <SpaceFilter label={`${g.workspace.name} Space 筛选`} value={spaceFilters[g.key] ?? ""} options={g.children.map(child => ({
             id:child.key,avatarId:child.workspaceId,name:child.name,machine:child.machine,status:!child.workspace ? "状态未知" : stateLabel[child.row!.state],
             count:child.row?.sessions.filter(s => s.workspaceId === child.workspaceId).length ?? 0,
-            activity:<SessionActivityIcons sessions={child.row?.sessions.filter(s => s.workspaceId === child.workspaceId) ?? []} partial={Boolean(child.row?.nextCursor)} stale={!child.row || !fresh(child.row)} />,
+            activity:<SessionActivityIcons sessions={child.row?.sessions.filter(s => s.workspaceId === child.workspaceId) ?? []} partial={Boolean(child.row?.nextCursor)} stale={!child.row || Boolean(child.row.cached) || !fresh(child.row)} />,
           }))} onChange={value => {
             setSelection(new Set()); setSpaceFilters(old => ({...old,[g.key]:value})); setInnerLimits(old => ({...old,[g.key]:10}));
             if (value) { const child = g.children.find(child => child.key === value); if(child?.row && child.workspace) void workspacePage(child.row,child.workspace); }
@@ -320,7 +322,7 @@ export function MachineDirectoryLists({ connections, endpoint, section, open, hi
         </div>
       </div>
       {options && <><button aria-label="关闭列表选项" className="fixed inset-0 z-40 cursor-default" onClick={() => setOptions(false)} /><div role="menu" aria-label="列表选项" className="absolute right-3 top-full z-50 min-w-40 rounded-xl border border-line bg-surface p-1 shadow-xl">
-        <button role="menuitem" disabled={busy || refreshing} className="min-h-11 w-full px-3 text-left text-sm" onClick={() => { setOptions(false); void refresh(); }}>{refreshing ? "刷新中…" : "刷新列表"}</button>
+        <button role="menuitem" disabled={busy || refreshing} className="min-h-11 w-full px-3 text-left text-sm" onClick={() => { setOptions(false); void refresh(true); }}>{refreshing ? "刷新中…" : "刷新列表"}</button>
         {section === "sessions" && <button role="menuitem" disabled={busy || refreshing} className="min-h-11 w-full px-3 text-left text-sm" onClick={changeArchived}>{includeArchived ? "返回当前会话" : "查看已归档"}</button>}
       </div></>}
       {includeArchived && section === "sessions" && <button disabled={busy || refreshing} className="min-h-9 w-full text-left text-xs text-accent" onClick={changeArchived}>已归档会话 · 返回当前</button>}
@@ -339,7 +341,7 @@ export function MachineDirectoryLists({ connections, endpoint, section, open, hi
       </>}
       {selectedSources.map(row => <div key={row.target.id}>
         {row.nextCursor && section === "sessions" && <button disabled={busy || !fresh(row)} className="min-h-11 w-full px-2 text-xs text-accent" onClick={() => void run(() => source.current!.loadMore(row.target))}>加载 {row.target.label} 的更早会话</button>}
-        {!fresh(row) && <p role="status" className="px-3 py-2 text-xs text-muted">{row.target.label} · {stateLabel[row.state]}{row.updatedAt ? ` · 上次同步 ${relativeTime(Date.parse(row.updatedAt))}` : " · 状态未知"}</p>}
+        {(row.cached || !fresh(row)) && <p role="status" className="px-3 py-2 text-xs text-muted">{row.target.label} · {row.cached ? "上次状态" : stateLabel[row.state]}{row.updatedAt ? ` · 上次同步 ${relativeTime(Date.parse(row.updatedAt))}` : " · 状态未知"}</p>}
       </div>)}
     </ListScroll>
     {managing && <footer aria-label="批量操作" className="flex shrink-0 flex-wrap items-center gap-2 border-t border-line p-3">

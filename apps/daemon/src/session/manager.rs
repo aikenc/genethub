@@ -46,6 +46,8 @@ use crate::diagnostics::Diagnostics;
 
 #[path = "activity.rs"]
 mod activity;
+#[path = "catalog.rs"]
+mod catalog;
 #[path = "inbox.rs"]
 mod inbox;
 #[path = "managed_update.rs"]
@@ -447,6 +449,8 @@ async fn open_annotation_source(
 
 pub struct SessionManager {
     store: Store,
+    catalog_gate: Mutex<()>,
+    catalog_updates: broadcast::Sender<Arc<genehub_proto::CatalogBatch>>,
     list_reads: crate::blocking::InFlightReads<(Option<String>, bool, bool), Vec<SessionSummary>>,
     registry: Arc<Registry>,
     diagnostics: Arc<Diagnostics>,
@@ -486,6 +490,8 @@ impl SessionManager {
     ) -> Self {
         SessionManager {
             store,
+            catalog_gate: Mutex::new(()),
+            catalog_updates: broadcast::channel(32).0,
             list_reads: Default::default(),
             registry,
             diagnostics,
@@ -1904,6 +1910,7 @@ impl SessionManager {
             id: String,
             owner: String,
         }
+        let catalog_revision = self.store.catalog_edit(|p| p.revision);
         let started = std::time::Instant::now();
         let cursor: Option<Cursor> = request
             .cursor
@@ -1924,26 +1931,7 @@ impl SessionManager {
             })
             .transpose()?;
         let mut metadata = if request.active_only.unwrap_or(false) {
-            // Native status has one owner, Live. Only examine loaded sessions,
-            // never all historical metadata to find running conversations.
-            let live = self
-                .sessions
-                .read()
-                .await
-                .values()
-                .cloned()
-                .collect::<Vec<_>>();
-            let mut live_ids = Vec::new();
-            for session in live {
-                if matches!(
-                    *session.status.lock().await,
-                    SessionStatus::Running | SessionStatus::Waiting | SessionStatus::Failed
-                ) {
-                    live_ids.push(session.meta.lock().await.id.clone());
-                }
-            }
-            self.store
-                .activity_metadata(request.workspace_id.as_deref(), &live_ids)
+            self.activity_metadata(request.workspace_id.as_deref(), true)
                 .await?
         } else {
             self.store
@@ -1985,16 +1973,7 @@ impl SessionManager {
             for meta in metadata {
                 budget.checkpoint().await;
                 let summary = self.project_meta(&meta).await;
-                let active = matches!(
-                    summary.status,
-                    SessionStatus::Running | SessionStatus::Waiting | SessionStatus::Failed
-                ) || summary
-                    .interaction_summary
-                    .as_ref()
-                    .is_some_and(|s| s.count > 0)
-                    || summary.coordination.as_ref().is_some_and(|s| {
-                        s.active || s.pending > 0 || s.ready > 0 || s.unknown > 0 || s.stale
-                    });
+                let active = catalog::is_active(&summary);
                 if active {
                     selected.push(meta);
                     active_summaries.push(summary);
@@ -2053,7 +2032,7 @@ impl SessionManager {
             None
         };
         let metadata_ms = started.elapsed().as_millis() as u64;
-        let sessions = if request.active_only.unwrap_or(false) {
+        let mut sessions = if request.active_only.unwrap_or(false) {
             active_summaries
         } else {
             self.project_list(
@@ -2066,7 +2045,31 @@ impl SessionManager {
             )
             .await?
         };
+        let catalog_etags = sessions
+            .iter()
+            .map(|s| Ok((s.id.clone(), catalog::summary_etag(s)?)))
+            .collect::<Result<std::collections::BTreeMap<_, _>>>()?;
+        let etag = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&(
+                &request.workspace_id,
+                include_archived,
+                &next_cursor,
+                sessions
+                    .iter()
+                    .map(|s| (&s.id, &catalog_etags[&s.id]))
+                    .collect::<Vec<_>>()
+            ))?)
+        );
+        let not_modified = request.if_none_match.as_ref() == Some(&etag);
+        if not_modified {
+            sessions.clear();
+        }
         Ok(genehub_proto::SessionPageResult {
+            etag: Some(etag),
+            not_modified: Some(not_modified),
+            catalog_etags: (!not_modified).then_some(catalog_etags),
+            catalog_revision: Some(catalog_revision),
             workspace_id: request.workspace_id.clone(),
             sessions,
             next_cursor,
@@ -5538,7 +5541,22 @@ impl Live {
         // answers is "is anything still coming out of it", not "has it made
         // progress", which nobody outside the agent can judge.
         self.last_activity_ms.store(now_ms(), Ordering::SeqCst);
-        let session_id = self.meta.lock().await.id.clone();
+        let (session_id, workspace_id) = {
+            let meta = self.meta.lock().await;
+            (meta.id.clone(), meta.workspace_id.clone())
+        };
+        if matches!(
+            &event,
+            SessionEvent::SessionStatusChanged { .. }
+                | SessionEvent::TurnStarted { .. }
+                | SessionEvent::TurnCompleted { .. }
+                | SessionEvent::TurnFailed { .. }
+                | SessionEvent::TurnCanceled { .. }
+                | SessionEvent::PermissionRequested { .. }
+                | SessionEvent::PermissionResolved { .. }
+        ) {
+            self.store.mark_catalog_dirty(&workspace_id, &session_id);
+        }
         // Numbering, retaining and fanning out are one step, not three.
         //
         // Several tasks publish to the same session at once — the event pump, a

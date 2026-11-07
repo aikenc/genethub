@@ -58,6 +58,8 @@ export interface WindowControls {
 
 export interface Host {
   readonly kind: "browser" | "desktop";
+  /** Opaque identity namespace for optional local read caches. */
+  cacheScope?(): Promise<string | null>;
   /** Where to connect on startup, or null when the user has to choose. */
   endpoint(): Promise<Endpoint | null>;
   /**
@@ -224,6 +226,7 @@ export function browserHost(
 ): Host {
   return {
     kind: "browser",
+    async cacheScope() {return "browser-paired";},
     async endpoint() {
       const fragment = new URLSearchParams(location.hash.replace(/^#/, ""));
       const url = fragment.get("endpoint");

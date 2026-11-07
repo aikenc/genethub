@@ -25,6 +25,11 @@ pub enum SideEffect {
     Unsubscribe {
         session_id: String,
     },
+    Catalog {
+        subscription_id: String,
+        initial: Vec<genehub_proto::CatalogBatch>,
+        receiver: Option<broadcast::Receiver<Arc<genehub_proto::CatalogBatch>>>,
+    },
 }
 
 pub struct Handled {
@@ -464,6 +469,7 @@ async fn dispatch(
                     "session.create-id.v1".to_string(),
                     "session.page.v1".to_string(),
                     "session.active-page.v1".to_string(),
+                    "catalog.sync.v1".to_string(),
                     "session.prepare.v1".to_string(),
                     "session.file-upload.v1".to_string(),
                     "provider.configuration.v1".to_string(),
@@ -478,7 +484,18 @@ async fn dispatch(
                 ].into_iter().chain(crate::file_access::machine_files_supported().then(|| "asset.preview.machine-file.v1".to_string())).collect()),
                 isolation: Some(crate::isolation::report()),
             }))
-        }).await,        Request::Subscribe {
+        }).await,        Request::CatalogSync { subscription_id, enabled, known_sessions, known_workspaces } => {
+            if subscription_id.is_empty() || subscription_id.len() > 200 { return Handled::err(ErrorCode::BadRequest, "invalid directory subscription id"); }
+            if !enabled {
+                Handled {reply: Ok(Reply::Ack), effect: SideEffect::Catalog {subscription_id, initial: Vec::new(), receiver: None}}
+            } else {
+                match state.sessions.catalog_sync(&state.workspaces, known_sessions, known_workspaces).await {
+                    Ok((_, initial, receiver)) => Handled {reply: Ok(Reply::Ack), effect: SideEffect::Catalog {subscription_id, initial, receiver: Some(receiver)}},
+                    Err(error) => failed(error),
+                }
+            }
+        },
+        Request::Subscribe {
             session_id,
             since_seq,
             expand_last_round,
@@ -767,7 +784,7 @@ async fn dispatch(
             for request in requests {
                 match state.sessions.page(&request, include_archived).await {
                     Ok(page) => pages.push(page),
-                    Err(error) => pages.push(genehub_proto::SessionPageResult { workspace_id: request.workspace_id, sessions: Vec::new(), next_cursor: None, error: Some(format!("{error:#}")) }),
+                    Err(error) => pages.push(genehub_proto::SessionPageResult { etag: None, not_modified: None, catalog_etags: None, catalog_revision: None, workspace_id: request.workspace_id, sessions: Vec::new(), next_cursor: None, error: Some(format!("{error:#}")) }),
                 }
             }
             Handled::ok(Reply::SessionPages(pages))

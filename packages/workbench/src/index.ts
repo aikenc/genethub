@@ -17,6 +17,7 @@ export { captureLayoutGeometry } from "./shell/layoutDiagnostics";
 export { detectHost, browserHost, desktopHost, LOCAL_TARGET } from "./host";
 export type { Endpoint, Host, Notification, Target } from "./host";
 export { Client } from "./protocol/client";
+export { clearDirectoryCaches } from "./protocol/summary-directory-cache";
 export { AssetPreviewPage } from "./preview/AssetPreviewPage";
 export { PreviewFloat } from "./preview/PreviewFloat";
 export { PreviewPopoutPage } from "./preview/PreviewPopoutPage";
