@@ -109,10 +109,10 @@ Owner、协作者都以 `task finish` 记录明确结论，普通中间回复不
 | 会话在 A，工具在 B | 成员留在 A 的岗位会话里，用 `genet shell --machine B` 在 B 的 workspace 内执行；结果回到 A 的会话，走本机接力 |
 | 会话本身在 B | `team.py spawn --machine <B 的机器 ID> ...` 或 `send --machine <B> --to <岗位>`：在 B 的岗位 workspace 创建/投递，Agent 进程、身份与产物都在 B |
 
-`--machine` 接受 `genet machine list` 返回的精确 ID。派单方在 `.genethub/remote-targets.json` 为每个远端岗位
+`--machine` 接受 `genet machine list` 返回的精确 ID。派单方在 `agent-space.genet.json` 的 `members` 为每个远端岗位
 固定 `machineId`、`workspaceId` 与 `command`（目标机 Python、已安装 `tools/team.py` 的绝对路径 argv）。
 不再按岗位短名/目录名猜归属，`--workspace` 只能核对同一个绑定。完整配置与恢复见
-[远端岗位接单](../apps/daemon/builtin-skills/genehub/references/team-template/skills/team-core/references/remote-targets.md)。
+[远端岗位接单](../apps/daemon/builtin-skills/genehub/references/team-template/skills/genet_builtin/team-core/references/remote-targets.md)。
 
 **派单账本在发起方，写锁与创建回执在执行端**。`spawn` 经已授权的 `shell --machine` 调用执行端 `receive`，
 先验证目标 workspace 确属该团队岗位，使用目标团队/岗位配置校验 Agent、模型及媒体能力，然后原子申请本机写锁。

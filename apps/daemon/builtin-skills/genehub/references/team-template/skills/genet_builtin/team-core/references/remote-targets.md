@@ -11,17 +11,20 @@
 目标团队 `.genethub/open.env` 配置该机实际可用的 `TEAM_AGENT`；岗位的同名文件可覆盖它并指定 `WORKTREE_DIR`。
 模型来自目标机 `TEAM_MODEL_WORK/RESEARCH` 或 Agent 默认；派单方隐式配置不传过去。`--tier/--model/--media` 均在目标机校验，缺配置或能力不明就拒绝。
 
-在派单方 `.genethub/remote-targets.json` 写真实绑定，例如：
+在派单方 `agent-space.genet.json` 的 `members` 写真实绑定；工作台、派单和远端状态投影共用此声明。例如：
 
 ```json
 {
-  "qa": {
+  "members": [{
+    "name": "qa",
     "machineId": "<machine list 返回的精确 ID>",
     "workspaceId": "<目标机已注册的岗位 workspace ID>",
     "command": ["<目标机 GENEHUB_PYTHON 的绝对路径>", "<目标团队 tools/run.py 的绝对路径>"]
-  }
+  }]
 }
 ```
+
+旧团队未声明 `members` 时兼容 `.genethub/remote-targets.json`；有声明就只读这一份，无效或缺失岗位不会回退。迁移时保留机器、workspace、接单命令与未完成派单回执。
 
 路径属于目标机，含空格可直接放 argv 元素中，不拼 shell 字符串。接单进程使用目标 daemon 绑定的 `GENEHUB_CLI`；缺少绑定时直接失败，不猜另一个安装或渠道。绑定每个岗位只指向一个工位，不做机器发现调度。
 
