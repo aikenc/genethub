@@ -15,7 +15,7 @@ defineSpecialty({
   requirements: [{ kind: "python", env: "GENEHUB_PYTHON", minVersion: [3, 7], modules: [] }],
   productInterfaces: ["tools/team.py", "genet-cli", "@genehub/workbench/client"],
   surfaces: ["team-template", "daemon", "relay", "filesystem"],
-  expectedDurationMs: 30000, timeoutMs: 180000,
+  expectedDurationMs: 30000, timeoutMs: 360000,
   resources: { environments: 1, cpu: 2, memoryMb: 1024, io: 2, browser: 0, pool: "standard" },
 }, async t => {
   const python = process.env.GENEHUB_PYTHON!;
@@ -306,7 +306,10 @@ sys.exit(r.returncode)
       if (!item) throw new Error("real task caller returned no reply");
       return JSON.parse(item.text) as { code: number; out: string; err: string };
     };
-    const beginOwner = ["task", "start", "--space", "qa", "--machine", machine, "--request-id", "remote.owner.task", "--desc", "remote coordinating Owner", "Delegate one read-only source support and explicitly finish"];
+    // Keep author role definitions but remove the fake source execution Space.
+    await cliJson(["workspace","remove",sourceQa.id]);
+    t.assertions.assert(!(await cliJson(["workspace","list"])).workspaces.some((w:any)=>w.id===sourceQa.id),"local QA execution workspace was silently restored");
+    const beginOwner = ["task", "start", "--space", "qa", "--request-id", "remote.owner.task", "--desc", "remote coordinating Owner", "Delegate one read-only source support and explicitly finish"];
     // Drop the successful prepare stdout once. No first business input may
     // precede the source's durable Owner and reverse dependency records.
     const { unlinkSync } = await import("node:fs"); unlinkSync(dropped);
@@ -340,6 +343,8 @@ sys.exit(r.returncode)
     await t.tools.waitUntil(async () => { const tick = await script(["hook"]); if (tick.code !== 0) throw new Error(tick.stderr); return JSON.parse(readFileSync(path.join(sourceRoot, ".genethub/team/tasks", secondTask.taskId + ".json"), "utf8")).state === "delivered"; }, 30000);
     t.assertions.assert(existsSync(boundReply.lock), "unrelated remote task released another Owner's resource");
     t.note("TaskOwner remote: source ownership saved; asking source support");
+    // Changing the install default cannot redirect already accepted work.
+    writeFileSync(path.join(targetRoot,".genethub/task-source.json"),JSON.stringify({machineId:"m_missing",workspaceId:"w_missing",role:"qa",command:[python,"/missing/run.py"]}));
     const supportReply = await callTask(remoteOwner, targetRoot, ["task", "support", remoteTask.taskId, "--space", "research", "--desc", "source support", "--request-id", "remote.owner.support", "Produce one source-side evidence report"], true);
     t.assertions.assert(supportReply.code === 0, "remote Owner could not request source support: " + supportReply.err);
     const forwarded = JSON.parse(supportReply.out.trim());
@@ -359,7 +364,51 @@ sys.exit(r.returncode)
     const ownerFinish = await callTask(remoteOwner, targetRoot, ["task", "finish", remoteTask.taskId, "--outcome", "success", "REMOTE_OWNER_COMPLETE_WITH_SOURCE_SUPPORT"], true);
     t.assertions.assert(ownerFinish.code === 0, "remote Owner could not finish through source ledger: " + ownerFinish.err);
     await t.tools.waitUntil(async () => { const tick = await script(["hook"]); if (tick.code !== 0) throw new Error(tick.stderr); return JSON.parse(readFileSync(sourceTaskFile, "utf8")).state === "delivered"; }, 30000);
+    t.assertions.assert(!(await cliJson(["workspace","list"])).workspaces.some((w:any)=>w.id===sourceQa.id),"task return restored a fake local QA workspace");
     t.assertions.assert(!existsSync(boundReply.lock) && !existsSync(lock) && !existsSync(path.join(targetRoot, ".genethub/team/tasks", remoteTask.taskId + ".json")), "remote Owner left a writer or created a second authoritative task ledger");
+    // Ordered single-source delivery uses receiving time, never wall-clock
+    // comparison with the source. Replay and accidental foreign use retain it.
+    const projectionPath=path.join(targetRoot,"spaces/qa/.genethub/session-coordination.json");
+    const previousProjection=JSON.parse(readFileSync(projectionPath,"utf8"));
+    const incoming={...previousProjection,revision:previousProjection.revision+10,updatedAtMs:Date.now()+86400000};
+    delete incoming.receivedAtMs;
+    const receiveProjection=(snapshot:any)=>spawnSync(python,[path.join(targetRoot,"tools/team.py"),"receive",JSON.stringify({id:incoming.source,operation:"coordination",workspaceId:qa.id,role:"qa",snapshot})],{env:o.daemon.env,encoding:"utf8"});
+    t.assertions.assert(receiveProjection(incoming).status===0,"fresh source revision rejected");
+    const acceptedProjection=JSON.parse(readFileSync(projectionPath,"utf8"));
+    t.assertions.assert(Math.abs(acceptedProjection.receivedAtMs-Date.now())<5000,"target adopted the future source clock as freshness");
+    t.assertions.assert(receiveProjection({...incoming,revision:incoming.revision-1,updatedAtMs:incoming.updatedAtMs+86400000}).status===0&&JSON.parse(readFileSync(projectionPath,"utf8")).revision===incoming.revision,"older revision overwrote a newer projection");
+    t.assertions.assert(receiveProjection({...incoming,source:"another-team",revision:incoming.revision+1}).status!==0,"foreign source replaced a single-source runtime");
+    t.assertions.assert(receiveProjection({...incoming,sessions:{}}).status!==0,"same revision accepted different content");
+    // Exercise the existing build post all the way through real file download,
+    // verification, target registration and generated canonical membership.
+    const runtimeRoot=path.join(t.env.root,"artifact-only-runtime"), portable=path.join(t.env.root,"portable-output");
+    mkdirSync(path.join(runtimeRoot,".genethub"),{recursive:true});
+    writeFileSync(path.join(runtimeRoot,".genethub/open.env"),"TEAM_AGENT=ctl-cli-command\nTEAM_BOARD_PORT=0\n");
+    const sourceDescriptor=path.join(sourceRoot,"agent-space.genet.json"), raw=JSON.parse(readFileSync(sourceDescriptor,"utf8"));
+    raw.buildHooks={post:[{cwd:".",args:["{python}","tools/install_remote.py","{outputRoot}","qa",machine,runtimeRoot]}]};
+    writeFileSync(sourceDescriptor,JSON.stringify(raw));
+    const buildArtifact=()=>spawnSync(python,[path.join(t.openRoot,"apps/daemon/builtin-skills/genehub/references/spacebuilder/spacebuilder.py"),"build",sourceRoot,"--output",portable],{env:sourceEnv,encoding:"utf8",timeout:180000});
+    const localBuild=spawnSync(python,[path.join(t.openRoot,"apps/daemon/builtin-skills/genehub/references/spacebuilder/spacebuilder.py"),"build",sourceRoot],{env:sourceEnv,encoding:"utf8",timeout:30000});
+    t.assertions.assert(localBuild.status===0&&!existsSync(path.join(runtimeRoot,".genethub/install-receipt.json")),"ordinary build installed remotely or broke local identity compilation: "+localBuild.stdout+localBuild.stderr);
+    let installed=buildArtifact();t.assertions.assert(installed.status===0,"build post did not install: "+installed.stdout+installed.stderr);
+    const installedBinding=JSON.parse(readFileSync(sourceDescriptor,"utf8")).members.find((m:any)=>m.name==="qa");
+    t.assertions.assert(installedBinding.machineId===o.client.identity!.machineId&&!existsSync(path.join(runtimeRoot,"skills"))&&!existsSync(path.join(runtimeRoot,"soul.md"))&&existsSync(path.join(runtimeRoot,".spacebuilder/output-lock.json")),"remote runtime carries author inputs or a route instead of identity");
+    const adopted=(await cliJson(["workspace","list"],true)).workspaces.filter((w:any)=>w.folders?.[0]?.root.startsWith(runtimeRoot+path.sep));
+    t.assertions.assert(adopted.length===1&&adopted[0].id===installedBinding.workspaceId,"installer registered extra remote roles/front");
+    t.assertions.assert(!(await cliJson(["workspace","list"])).workspaces.some((w:any)=>w.folders?.[0]?.root===path.join(sourceRoot,"spaces/qa")),"ordinary build restored a source QA execution workspace");
+    const installedTaskReply=await callTask(callerSid,sourceRoot,["task","start","--space","qa","--request-id","artifact.owner","--desc","artifact owner","Complete one task without author sources"]);
+    t.assertions.assert(installedTaskReply.code===0,"artifact Owner did not start: "+installedTaskReply.err);
+    const installedTask=JSON.parse(installedTaskReply.out.trim().split("\n").at(-1)!);await idleSession(installedTask.owner.sessionId,true);
+    const heldDigest=JSON.parse(readFileSync(path.join(runtimeRoot,".genethub/install-receipt.json"),"utf8")).archiveSha256;
+    writeFileSync(path.join(sourceRoot,"tools/version-marker.py"),"VALUE = 'new artifact'\n");
+    installed=buildArtifact();t.assertions.assert(installed.status!==0&&JSON.parse(readFileSync(path.join(runtimeRoot,".genethub/install-receipt.json"),"utf8")).archiveSha256===heldDigest,"in-flight update replaced the executing artifact");
+    const finishInstalled=await callTask(installedTask.owner.sessionId,runtimeRoot,["task","finish",installedTask.taskId,"--outcome","success","ARTIFACT_ONLY_OWNER_COMPLETE"],true);
+    t.assertions.assert(finishInstalled.code===0,"artifact Owner could not return: "+finishInstalled.err);
+    await t.tools.waitUntil(async()=>{const tick=await script(["hook"]);if(tick.code!==0)throw Error(tick.stderr);return JSON.parse(readFileSync(path.join(sourceRoot,".genethub/team/tasks",installedTask.taskId+".json"),"utf8")).state==="delivered";},30000);
+    installed=buildArtifact();t.assertions.assert(installed.status===0,"settled artifact update failed: "+installed.stdout+installed.stderr);
+    const afterUpgrade=JSON.parse(readFileSync(path.join(runtimeRoot,".genethub/install-receipt.json"),"utf8"));
+    installed=buildArtifact();t.assertions.assert(installed.status===0&&JSON.parse(readFileSync(path.join(runtimeRoot,".genethub/install-receipt.json"),"utf8")).archiveSha256===afterUpgrade.archiveSha256,"unchanged build did not recover the same install receipt");
+    t.assertions.assert((await inspectSession(installedTask.owner.sessionId,true)).summary.workspaceId===installedBinding.workspaceId,"artifact upgrade lost the native history binding");
     t.note("real relay + two daemon state directories; one successful stdout lost and recovered; writer/identity/model/pause/reconcile/unknown-create contracts verified");
   } finally {
     sourceClient?.close();

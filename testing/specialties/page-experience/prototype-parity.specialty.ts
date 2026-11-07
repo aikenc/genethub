@@ -87,7 +87,7 @@ for (const width of [390,744,768,820,1280]) defineSpecialty({
       }
     }
     t.assertions.assert(await group.getByRole("img",{name:"项目状态尚未完整读取",exact:true}).count()===0,"historical pagination displayed an unknown project warning");
-    await group.getByRole("img",{name:"至少 1 待你处理",exact:true}).first().waitFor();
+    await group.getByRole("img",{name:"1 待你处理",exact:true}).first().waitFor();
     t.assertions.assert(await group.locator(".conversation-row").count()===5,"front preview is not exactly five rows");
     await list.getByRole("button",{name:"进行中",exact:true}).click();
     await group.getByRole("button",{name:/验证待确认/}).waitFor();

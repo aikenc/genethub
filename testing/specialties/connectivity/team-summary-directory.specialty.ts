@@ -7,7 +7,7 @@ import { openFabricPool } from "../../framework/flows/branches/fabric-pool.ts";
 
 defineSpecialty({
   id:"specialty.team-summary.public-consumer",title:"The real workbench summary consumer reuses a control-only owner and distinguishes uncertain paired-link failure",
-  oracle:"Two refreshes each read one bounded session.page and one workspace.list from a real native daemon, keep one browser socket, subscribe to no bodies, and revoked paired access cannot refresh cached data or be presented as a successful read",
+  oracle:"Two refreshes each read bounded history/activity pages and one workspace.list from a real native daemon, keep one browser socket, subscribe to no bodies, and revoked paired access cannot refresh cached data or be presented as a successful read",
   catches:["one connection or query per member", "summary view subscribes to all bodies", "uncertain disconnect is presented as fresh authorized data", "public interface is only a type projection"],
   tags:["team-summary","contract"],llm:{default:"none"},resources:{environments:1,cpu:2,memoryMb:2048,io:1,browser:0},expectedDurationMs:20000,timeoutMs:60000,
   surfaces:["daemon","relay","workbench-client","tcp"],productInterfaces:["@genehub/workbench/client MachineSummaryDirectory"],requiredArtifacts:["genet","genehub-host-local","genehub_guest.wasm"],
@@ -30,12 +30,12 @@ defineSpecialty({
         t.assertions.assert(transitions.every(v=>v.sources[0]?.state==="ready"&&v.sources[0].sessions.some(s=>s.id===id)),"normal refresh temporarily replaced confirmed online data with an uncertain state");
       }
     }
-    t.assertions.assert(sockets===1&&body===0&&operations.filter(x=>x==="session.page").length===2&&!operations.includes("session.list")&&operations.filter(x=>x==="workspace.list").length===2&&!operations.some(x=>x==="subscribe"||x==="session.get"),"summary path multiplied owners or fetched bodies");
+    t.assertions.assert(sockets===1&&body===0&&operations.filter(x=>x==="session.page").length===4&&!operations.includes("session.list")&&operations.filter(x=>x==="workspace.list").length===2&&!operations.some(x=>x==="subscribe"||x==="session.get"),"summary path multiplied owners or fetched bodies");
     await o.client.call({type:"device.revoke",payload:{deviceId:pool.credential.deviceId}});
     await t.tools.waitUntil(()=>closed===1,5000);
     latest=await directory.refresh(()=>{});
     const state=latest.sources[0]?.state;
-    t.note(JSON.stringify({refreshes:2,sessionPages:2,workspaceLists:2,initialSockets:1,bodySubscriptions:0,afterRevocation:state,complete:latest.complete}));
+    t.note(JSON.stringify({refreshes:2,sessionPages:4,workspaceLists:2,initialSockets:1,bodySubscriptions:0,afterRevocation:state,complete:latest.complete}));
     t.assertions.assert(!latest.complete&&["timeout","unavailable","denied"].includes(state??""),"unconfirmed paired failure was treated as fresh successful data or confirmed offline");
     if(state==="denied")t.assertions.assert(latest.sources[0]!.sessions.length===0&&latest.sources[0]!.updatedAt===null,"confirmed denial retained cached content");
     const retryStates:string[]=[];

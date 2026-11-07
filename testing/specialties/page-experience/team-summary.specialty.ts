@@ -43,7 +43,13 @@ for (const width of [390, 1280]) defineSpecialty({
     page.on("websocket", () => { extraSockets++; });
     await page.getByRole("button", { name: /乙机器专属会话/, includeHidden: true }).waitFor({ state: "attached" });
     const socketsBeforePreview = extraSockets;
-    await page.getByRole("link", { name: "远端产物", exact: true }).click();
+    const artifactLink=page.getByRole("link", { name: "远端产物", exact: true });
+    try { await t.tools.waitUntil(async()=>await artifactLink.count()===1,5_000); }
+    catch {
+      t.note(JSON.stringify({artifactLinks:await artifactLink.evaluateAll(links=>links.map(link=>({html:link.outerHTML,parent:link.parentElement?.outerHTML.slice(0,1800),visible:!!(link as HTMLElement).offsetParent,opacity:getComputedStyle(link).opacity})))}));
+      throw new Error("remote artifact rendered more than once after reconciliation");
+    }
+    await artifactLink.click();
     await page.getByRole("heading", { name: "Remote artifact on machine B", exact: true }).waitFor();
     t.assertions.assert(extraSockets === socketsBeforePreview, "cross-machine preview opened a duplicate machine connection");
     await page.getByRole("button", { name: "关闭预览", exact: true }).click();

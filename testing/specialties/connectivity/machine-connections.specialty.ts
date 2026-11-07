@@ -66,3 +66,35 @@ defineSpecialty({
     releaseLease(otherLease);
   }
 });
+
+defineSpecialty({
+  id: "specialty.connectivity.foreground-reservation",
+  title: "Background readers leave a slot for a new foreground machine",
+  oracle: "Three real background leases fill the background budget; a fourth foreground target opens immediately, queued readers share it after cancellation, and no lease cancellation closes a live foreground source",
+  catches:["summary readers occupy all machine slots","foreground throws busy instead of using reserve","cancelled wait poisons active source"],
+  tags:["machine-connections","connectivity"],llm:{default:"none"},
+  productInterfaces:["@genehub/workbench/client MachineConnections"],surfaces:["daemon","workbench-client","tcp"],
+  expectedDurationMs:15000,timeoutMs:90000,resources:{environments:1,cpu:4,memoryMb:4096,io:1,browser:0},
+},async t=>{
+  const leases=[t.env,...Array.from({length:3},()=>createLease("reserve-machine-"))];
+  const nodes:Awaited<ReturnType<typeof t.flows.main.openWorkspace>>[]=[];
+  let pool:MachineConnections|undefined;
+  const borrowed:{release():void}[]=[];
+  try{
+    for(const lease of leases) nodes.push(await t.flows.main.openWorkspace({openRoot:t.openRoot,lease}));
+    const targets:Target[]=nodes.map((node,i)=>({id:String(i),deviceHandle:node.client.identity!.machineId,label:"reserve "+i,kind:"remote",online:true}));
+    let sockets=0;
+    pool=new MachineConnections({targets:async()=>targets,openTarget:async id=>({...daemonEndpoint(nodes[Number(id)]!.daemon),via:"loopback",label:id})},{limit:4,socketFactory:url=>{sockets++;return new WebSocket(url) as unknown as WebSocketLike;}});
+    for(const target of targets.slice(0,3))borrowed.push(await pool.acquire(target));
+    const controller=new AbortController();let waitingSettled=false;
+    const waiting=pool.acquire(targets[3]!,{signal:controller.signal}).then(lease=>{waitingSettled=true;borrowed.push(lease);return "opened";},()=>{waitingSettled=true;return "cancelled";});
+    await new Promise(resolve=>setTimeout(resolve,100));
+    t.assertions.assert(!waitingSettled&&sockets===3,"background occupied the foreground reserve");
+    const began=performance.now();const front=await pool.acquire(targets[3]!,{foreground:true});borrowed.push(front);
+    t.assertions.assert(performance.now()-began<4000&&sockets===4,"new foreground target was blocked by slow background holders");
+    controller.abort();t.assertions.assert(await waiting==="cancelled","queued cancellation was not observed");
+    const reply=await front.client.call({type:"workspace.list"});
+    t.assertions.assert(reply?.type==="workspaces"&&front.client.connectionState==="ready","cancelled reader closed the foreground connection");
+    t.note(JSON.stringify({sockets,backgroundHeld:3,foregroundMs:Math.round(performance.now()-began)}));
+  }finally{borrowed.forEach(lease=>lease.release());pool?.close();for(const node of nodes){node.client.close();node.daemon.stop();await node.mock.stop();}leases.slice(1).forEach(releaseLease);}
+});
