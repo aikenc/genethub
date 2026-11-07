@@ -19,8 +19,8 @@ description: 按任务选择 Owner 的团队公共约定：前台、专业执行
 失败时命令会说明：出了什么、现在状态、下一步。细则见 `datas/README.md`、`temp/README.md`；点名模型勿套档位，详见 `references/models.md`。
 日常按岗位使用 task 即可，机器与返回来源由原回执固定。维护远端绑定或恢复旧派单时再读 [references/remote-targets.md](references/remote-targets.md)；`spawn/send` 仅用于已存在的旧派单。
 暂停会话的显式恢复、署名、去重与验收，先读 [references/resume-paused.md](references/resume-paused.md)。
-自动身份刷新（定时任务与 `sync-identity`）只重编身份，不执行 Space pre/post 或 Provider post；有此类配置时
-返回 `SB018`，保留上一版生成身份。发布 hook 由源 Space 的显式构建执行，不能靠反复刷新身份来运行。
+自动身份刷新不执行 Space pre/post 或 Provider post；有此类配置时，定时任务保留上一版生成身份，不因此唤起异常反思，手工 `sync-identity` 返回 `SB018`。
+修改源后显式 build 更新身份；发布 hook 由源 Space 的显式构建执行，不能靠反复刷新身份来运行。
 ## 纯异步多级回合接力与二级记忆
 - **纯异步回合接力**：有 taskId 时用 `task support` 派出必需协作并结束本轮，timer 收齐结果后唤醒精确请求会话；收尾用 `task finish`。旧派单继续原 `spawn/send` 回执。普通结果不解除用户暂停，未知结果不换编号重派。
 - **二级记忆**：对话是事实源（L3）；全局铁律存根 `memory.md`（L1，≤30 行）；各岗位专属经验与 `ghref` 检索指针存 `spaces/<岗位>/index.md`（L2）。查历史会话直接 `rg "<词>" <团队根>/.genethub/sessions/ <团队根>/spaces/*/.genethub/sessions/`。
