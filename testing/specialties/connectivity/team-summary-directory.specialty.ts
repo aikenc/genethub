@@ -22,8 +22,13 @@ defineSpecialty({
     const id=await t.flows.main.createBuiltinSession(o.client,o.workspaceId);
     let latest:SummaryDirectory|undefined;
     for(let i=0;i<2;i++){
-      latest=await directory.refresh(value=>{latest=value;});
+      const transitions: SummaryDirectory[]=[];
+      latest=await directory.refresh(value=>{latest=value;transitions.push(value);});
       t.assertions.assert(latest.complete&&latest.sources[0]?.sessions.some(s=>s.id===id)&&latest.sources[0].workspaces.some(w=>w.id===o.workspaceId),"summary did not read exact source sessions/projects");
+      if(i===1){
+        t.assertions.assert(transitions.some(v=>v.sources[0]?.refreshing&&!v.complete),"refresh progress was not observable separately from confirmed source state");
+        t.assertions.assert(transitions.every(v=>v.sources[0]?.state==="ready"&&v.sources[0].sessions.some(s=>s.id===id)),"normal refresh temporarily replaced confirmed online data with an uncertain state");
+      }
     }
     t.assertions.assert(sockets===1&&body===0&&operations.filter(x=>x==="session.page").length===2&&!operations.includes("session.list")&&operations.filter(x=>x==="workspace.list").length===2&&!operations.some(x=>x==="subscribe"||x==="session.get"),"summary path multiplied owners or fetched bodies");
     await o.client.call({type:"device.revoke",payload:{deviceId:pool.credential.deviceId}});
@@ -33,6 +38,9 @@ defineSpecialty({
     t.note(JSON.stringify({refreshes:2,sessionPages:2,workspaceLists:2,initialSockets:1,bodySubscriptions:0,afterRevocation:state,complete:latest.complete}));
     t.assertions.assert(!latest.complete&&["timeout","unavailable","denied"].includes(state??""),"unconfirmed paired failure was treated as fresh successful data or confirmed offline");
     if(state==="denied")t.assertions.assert(latest.sources[0]!.sessions.length===0&&latest.sources[0]!.updatedAt===null,"confirmed denial retained cached content");
+    const retryStates:string[]=[];
+    const retried=await directory.refresh(value=>{if(value.sources[0])retryStates.push(value.sources[0].state);});
+    t.assertions.assert(!retried.complete&&retryStates.every(value=>!["ready","partial"].includes(value)),"starting a failed-source retry resurrected an old healthy state");
   }finally{directory.close();await pool.dispose();}
 });
 

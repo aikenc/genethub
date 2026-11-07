@@ -8,7 +8,7 @@ for (const width of [390, 1280]) defineSpecialty({
   oracle: "The actual Workbench defaults to all machines, filters without dialing or replacing the active view, opens a remote conversation, returns through the shared directory, and retains responsive layout without a machine switcher or overview dialog",
   catches: ["filter changes the execution target", "remote selection opens the wrong source", "directory disappears on navigation", "mobile filter causes horizontal overflow"],
   tags: ["team-summary", "machine-connections", "page-experience"], runner: "playwright", llm: { default: "mock" },
-  resources: { environments: 1, cpu: 3, memoryMb: 3072, io: 1, browser: 1, pool: "browser" }, expectedDurationMs: 40_000, timeoutMs: 180_000,
+  resources: { environments: 1, cpu: 3, memoryMb: 3072, io: 1, browser: 1, pool: "browser" }, expectedDurationMs: 80_000, timeoutMs: 180_000,
   surfaces: ["workbench-ui", "daemon"], productInterfaces: ["@genehub/workbench", "session.page", "workspace.list", "session.get"],
 }, async t => {
   const otherLease = createLease("summary-ui-");
@@ -31,15 +31,17 @@ for (const width of [390, 1280]) defineSpecialty({
       const reply = await a.client.call({ type: "session.get", payload: { sessionId: first } });
       return reply?.type === "snapshot" && reply.data.summary.status === "idle" && reply.data.items.some(item => item.type === "assistantMessage");
     }, 15_000);
-    const entries = [a,b].map((o,i) => ({ id: o.client.identity!.machineId, deviceHandle: o.client.identity!.machineId, label: `机器${i === 0 ? "甲" : "乙"}`, kind: "remote" as const, online: true }));
+    const entries = [a,b].map((o,i) => ({ id: o.client.identity!.machineId, deviceHandle: o.client.identity!.machineId,
+      label: i===0 ? "机器甲" : "机器乙 · 4090-工作站-远程开发与创作环境-很长的机器名称用于检查省略与换行", kind: "remote" as const, online: true }));
+    let directoryReads=0;
     browser = await openWorkbenchPage(t.openRoot, () => daemonEndpoint(a.daemon), a.workspaceId, first,
       { viewport: { width, height: 844 }, hasTouch: width < 768, isMobile: width < 768 }, { trace: false },
-      { targets: () => entries, endpoint: id => daemonEndpoint(id === entries[0]!.id ? a.daemon : b!.daemon) });
+      { targets: () => {directoryReads++; return entries;}, endpoint: id => daemonEndpoint(id === entries[0]!.id ? a.daemon : b!.daemon) });
     const page = browser.page;
     await page.getByRole("heading", { name: "甲机器专属会话", exact: true }).waitFor();
     let extraSockets = 0;
     page.on("websocket", () => { extraSockets++; });
-    await page.getByRole("combobox", { name: "机器筛选", exact: true, includeHidden: true }).getByRole("option", { name: /全部机器 · 2\/2 在线/, includeHidden: true }).waitFor({ state: "attached" });
+    await page.getByRole("button", { name: /乙机器专属会话/, includeHidden: true }).waitFor({ state: "attached" });
     const socketsBeforePreview = extraSockets;
     await page.getByRole("link", { name: "远端产物", exact: true }).click();
     await page.getByRole("heading", { name: "Remote artifact on machine B", exact: true }).waitFor();
@@ -47,12 +49,22 @@ for (const width of [390, 1280]) defineSpecialty({
     await page.getByRole("button", { name: "关闭预览", exact: true }).click();
     if (width < 768) await page.getByRole("button", { name: "会话列表", exact: true }).click();
     const list = page.getByRole("complementary", { name: "会话列表", exact: true });
-    const machines = list.getByRole("combobox", { name: "机器筛选", exact: true });
-    await machines.getByRole("option", { name: /全部机器 · 2\/2 在线/ }).waitFor({ state: "attached" });
-    t.assertions.assert(await machines.inputValue() === "", "default view was not all machines");
+    const machines = list.getByRole("button", { name: "机器筛选", exact: true });
+    t.assertions.assert(await machines.innerText() === "全部机器", "default compact label was not all machines");
+    await machines.click();
+    const machineMenu=list.getByRole("menu",{name:"机器筛选",exact:true});
+    await machineMenu.getByRole("menuitemradio",{name:/全部机器.*2\/2 在线/,checked:true}).waitFor();
+    t.assertions.assert((await machineMenu.getByRole("menuitemradio").allTextContents()).filter(text=>text.includes("在线 ·")).length===2,"machine rows omitted current state/version");
+    const popupBox=await machineMenu.boundingBox(), listBox=await list.boundingBox();
+    t.assertions.assert(Boolean(popupBox&&listBox&&popupBox.x>=listBox.x&&popupBox.x+popupBox.width<=listBox.x+listBox.width),"machine menu escaped the list width");
+    await page.keyboard.press("Escape");
+    t.assertions.assert(await machines.evaluate(e=>e===document.activeElement),"Escape did not return focus to the machine filter");
     await list.getByRole("button", { name: /甲机器项目/ }).waitFor();
     await list.getByRole("button", { name: /乙机器项目/ }).waitFor();
-    await machines.selectOption(entries[1]!.id);
+    await machines.press("ArrowDown"); await page.keyboard.press("End"); await page.keyboard.press("Enter");
+    t.assertions.assert(await machines.innerText()===entries[1]!.label,"keyboard selection did not select the long machine name");
+    const selectedGeometry=await machines.evaluate(e=>({width:e.clientWidth,scroll:e.scrollWidth}));
+    t.assertions.assert(selectedGeometry.scroll<=selectedGeometry.width,"selected long name overflowed the compact filter");
     t.assertions.assert(await list.getByRole("button", { name: /甲机器项目/ }).count() === 0, "machine filter left another source visible");
     t.assertions.assert(await page.getByRole("heading", { name: "甲机器专属会话", exact: true, includeHidden: true }).count() === 1, "filter changed the active conversation");
     await list.getByRole("button", { name: /乙机器专属会话/ }).click();
@@ -61,7 +73,7 @@ for (const width of [390, 1280]) defineSpecialty({
     const compact = `/m-${entries[1]!.id.slice(2,10)}/w-${b.workspaceId.slice(2,10)}/s-${second.slice(2,10)}`;
     await page.waitForURL(url => url.pathname === legacy || url.pathname === compact);
     if (width < 768) await page.getByRole("button", { name: "会话列表", exact: true }).click();
-    await machines.selectOption("");
+    await machines.click(); await machineMenu.getByRole("menuitemradio",{name:/^全部机器/}).click();
     await list.getByRole("button", { name: /甲机器专属会话/ }).click();
     await page.getByRole("heading", { name: "甲机器专属会话", exact: true }).waitFor();
     const geometry = await page.evaluate(() => ({ viewport: innerWidth, scroll: document.documentElement.scrollWidth }));
@@ -82,9 +94,42 @@ for (const width of [390, 1280]) defineSpecialty({
     if (width < 768) await page.getByRole("button", { name: "返回", exact: true }).first().click();
     await page.getByRole("button", { name: "设置", exact: true }).click();
     t.assertions.assert(await page.getByRole("button", { name: /切换机器/ }).count() === 0, "retired machine switcher is still exposed");
+    await page.getByRole("navigation",{name:"工作台导航",exact:true}).getByRole("button",{name:"项目",exact:true}).click();
+    const projects=page.getByRole("complementary",{name:"项目列表面板",exact:true});
+    await projects.getByRole("region",{name:"项目 乙机器项目",exact:true}).waitFor();
+    await page.evaluate(()=>{
+      const failures:string[]=[];
+      const observer=new MutationObserver(()=>{
+        for(const region of document.querySelectorAll('[aria-label="项目列表面板"] section')){
+          if(region.querySelector(".text-danger")) failures.push("red flash");
+          if(region.querySelector("button:disabled")) failures.push("temporarily disabled project");
+          if(/同步中|待同步|项目状态尚未完整读取/.test(region.textContent??"")) failures.push("refresh replaced confirmed state");
+        }
+      });
+      observer.observe(document.body,{subtree:true,childList:true,attributes:true,characterData:true});
+      Object.assign(window,{feedbackRefresh:{failures,observer}});
+    });
+    const manualRefresh=async()=>{
+      const before=directoryReads;
+      await projects.getByRole("button",{name:"列表选项",exact:true}).click();
+      await projects.getByRole("menuitem",{name:"刷新列表",exact:true}).click();
+      await t.tools.waitUntil(()=>directoryReads>before,5_000);
+      await projects.getByRole("button",{name:"列表选项",exact:true}).click();
+      await t.tools.waitUntil(async()=>await projects.getByRole("menuitem",{name:"刷新列表",exact:true}).isEnabled(),15_000);
+      await projects.getByRole("button",{name:"关闭列表选项",exact:true}).click();
+    };
+    await manualRefresh(); await manualRefresh();
+    const beforeTimer=directoryReads;
+    await t.tools.waitUntil(()=>directoryReads>beforeTimer,35_000);
+    // Wait until the real periodic refresh completes, not just its directory lookup.
+    await projects.getByRole("button",{name:"列表选项",exact:true}).click();
+    await t.tools.waitUntil(async()=>await projects.getByRole("menuitem",{name:"刷新列表",exact:true}).isEnabled(),15_000);
+    await projects.getByRole("button",{name:"关闭列表选项",exact:true}).click();
+    const refreshFailures=await page.evaluate(()=>{const check=(window as unknown as {feedbackRefresh:{failures:string[];observer:MutationObserver}}).feedbackRefresh;check.observer.disconnect();return check.failures;});
+    t.assertions.assert(refreshFailures.length===0,`normal manual/timer refresh changed project status: ${refreshFailures.slice(0,5).join(", ")}`);
     const snapshot = await b.client.call({ type: "session.get", payload: { sessionId: second } });
     t.assertions.assert(snapshot?.type === "snapshot" && snapshot.data.summary.title === "乙机器专属会话", "remote source was mutated by navigation");
-    t.note(JSON.stringify({ width, sources: 2, filterPreservedActive: true, sourceSafeNavigation: true, geometry }));
+    t.note(JSON.stringify({ width, sources: 2, filterPreservedActive: true, sourceSafeNavigation: true, geometry, selectedGeometry, directoryReads, manualAndTimerRefreshNoFlash:true }));
   } catch (error) {
     if (browser) t.note(`UI failure: ${await browser.page.locator("body").innerText().then(text=>text.slice(-5000)).catch(()=>"unavailable")}`);
     throw error;
