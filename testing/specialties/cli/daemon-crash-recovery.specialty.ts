@@ -14,13 +14,14 @@ defineSpecialty({
   id: "specialty.cli.daemon-crash-recovery",
   title: "Manual daemon survives Host SIGKILL without leaving detached work or replaying history",
   oracle: "Without another start request, the real CLI restores a new healthy Host with the same machine and saved conversation; a double-forked TERM-resistant process started through public shell disappears, a foreign sentinel survives, concurrent starts return the same Host, and explicit stop stays stopped",
-  catches: ["manual daemon never recovers after kernel kill", "detached tool survives Host death", "recovery kills unrelated work", "recovery loses identity or history", "stop is undone by recovery", "concurrent starts duplicate the Host"],
+  catches: ["manual daemon never recovers after kernel kill", "detached tool survives Host death", "completed orphan remains a zombie while Host lives", "recovery kills unrelated work", "recovery loses identity or history", "stop is undone by recovery", "concurrent starts duplicate the Host"],
   tags: ["core", "daemon-control", "daemon-crash-recovery"], llm: { default: "none" },
   expectedDurationMs: 35_000, timeoutMs: 180_000,
   resources: { environments: 1, cpu: 2, memoryMb: 1536, io: 1, browser: 0 },
   surfaces: ["cli", "genehub-host", "daemon", "os-process", "filesystem"],
   productInterfaces: ["genet-cli", "@genehub/workbench/client"],
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
+  requirements: [{ kind: "python", env: "GENEHUB_PYTHON", minVersion: [3, 7], modules: [] }],
 }, async t => {
   const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
   const cli = (args: string[]) => runGenetAsync(opened.daemon.genet, args, opened.daemon.env);
@@ -36,7 +37,7 @@ defineSpecialty({
   try {
     // OS fault fixture, launched through the actual product shell. Like an
     // offscreen browser it leaves the original group twice and ignores TERM.
-    const source = [
+    const source = (file: string, body: string) => [
       "import os,signal,time,sys",
       "p=os.fork()",
       "if p:", " os.waitpid(p,0); sys.exit(0)",
@@ -44,11 +45,23 @@ defineSpecialty({
       "fd=os.open(os.devnull,os.O_RDWR)",
       "for n in (0,1,2): os.dup2(fd,n)",
       "signal.signal(signal.SIGTERM,signal.SIG_IGN)",
-      `open(${JSON.stringify(pidFile)},'w').write(str(os.getpid()))`,
-      "while True: time.sleep(1)",
+      `open(${JSON.stringify(file)},'w').write(str(os.getpid()))`,
+      body,
     ].join("\n");
+    const completedFile = path.join(t.env.workspace, "completed-orphan.pid");
+    const completed = await t.flows.main.runShell(opened.client, {
+      workspaceId: opened.workspaceId,
+      argv: [process.env.GENEHUB_PYTHON!, "-c", source(completedFile, "time.sleep(0.5)")], timeoutMs: 10_000,
+    });
+    t.assertions.assert(t.flows.main.shellExit(completed.frames)?.code === 0, "completed orphan fixture failed to start");
+    await t.tools.waitUntil(() => existsSync(completedFile), 5000);
+    const completedPid = Number(readFileSync(completedFile, "utf8"));
+    t.assertions.assert(completedPid > 1, "completed orphan PID absent");
+    const completedReaped = await t.tools.waitUntil(() => !existsSync(`/proc/${completedPid}`), 3000).then(() => true, () => false);
+    t.note(`completedOrphanReaped=${completedReaped}`);
+    t.assertions.assert(completedReaped && (await status()).pid === oldPid, "completed orphan was not reaped while original Host remained alive");
     const shell = await t.flows.main.runShell(opened.client, {
-      workspaceId: opened.workspaceId, argv: ["python3", "-c", source], timeoutMs: 10_000,
+      workspaceId: opened.workspaceId, argv: [process.env.GENEHUB_PYTHON!, "-c", source(pidFile, "while True: time.sleep(1)")], timeoutMs: 10_000,
     });
     t.assertions.assert(t.flows.main.shellExit(shell.frames)?.code === 0, "detached OS fixture failed to start");
     await t.tools.waitUntil(() => existsSync(pidFile), 5000);
@@ -60,7 +73,7 @@ defineSpecialty({
     let replacement = first;
     const recovered = await t.tools.waitUntil(async () => {
       replacement = await status();
-      return replacement.running === true && Number(replacement.pid) !== oldPid;
+      return replacement.running === true && Number(replacement.pid) !== oldPid && typeof replacement.port === "number";
     }, 20_000).then(() => true, () => false);
     t.note(`detachedCleaned=${cleaned} automaticRecovery=${recovered}`);
     t.assertions.assert(cleaned && recovered, `Host SIGKILL: detachedCleaned=${cleaned} automaticRecovery=${recovered}`);
