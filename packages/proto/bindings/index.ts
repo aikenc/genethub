@@ -233,6 +233,11 @@ export type AgentSpaceInfo = {
  */
 parentWorkspaceId?: string, 
 /**
+ * Explicit Space references for a project spanning machines. These are
+ * display/composition metadata, never permission or scheduling rules.
+ */
+members?: Array<SpaceMemberReference>, 
+/**
  * CAS token covering the parent, the component set and the lifecycle.
  * A Space that was never registered reports `0`.
  */
@@ -1776,6 +1781,11 @@ env: { [key in string]?: string },
  * cannot wait — an agent, which has no way to press Ctrl-C — says so.
  */
 timeoutMs?: bigint, };
+
+/**
+ * A reference is always qualified by the machine that owns the workspace.
+ */
+export type SpaceMemberReference = { machineId: string, workspaceId: string, name?: string, };
 
 export type SpeechAudioFormat = { encoding: SpeechEncoding, sampleRateHz: number, channels: number, };
 

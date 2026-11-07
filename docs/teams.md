@@ -155,3 +155,16 @@ SpaceBuilder 0.1.5 可 `build <岗位源目录> --output <制品目录>`，移�
 - 样板：`testing/journeys/expert/`（协作、故障注入、反思、真实模型）与 `testing/specialties/daemon/expert-*`、
   `testing/specialties/agent-space/spacebuilder-*`。用例 ID 仍沿用 expert 旧名。
 - 内置 Skill：`apps/daemon/src/skills.rs` 断言 `genehub-team` 的路由与参考文件，`builtin-skills` case 比对物化树。
+
+### 跨机器 Space 的固定引用
+
+项目的 `agent-space.genet.json` 可用 `members` 声明外部 Space：
+
+```json
+{"members":[{"name":"qa","machineId":"<目录中精确机器ID>","workspaceId":"<远端已登记Space ID>","command":["<远端Python绝对路径>","<远端team.py绝对路径>"]}]}
+```
+
+工作台通过现有 `workspace.list` 读取机器、Space 和可选名称，只用于组合展示。
+会话与状态仍从所属机器读取；无法访问的引用显示状态未知，不按名字合并，也不授予权限。
+`team.py` 用同一声明的 `command` 接单；平台不解释或执行该字段。声明存在时必须匹配唯一岗位，
+无效声明不会回退到旧绑定。旧团队未声明 `members` 时仍兼容 `.genethub/remote-targets.json`。

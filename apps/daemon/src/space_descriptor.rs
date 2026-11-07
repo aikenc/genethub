@@ -24,6 +24,7 @@ pub struct Descriptor {
     pub name: Option<String>,
     pub description: Option<String>,
     pub tags: Vec<String>,
+    pub members: Vec<genehub_proto::SpaceMemberReference>,
     /// Where a session starts when nothing says otherwise, relative to the
     /// Space. Always a safe relative path: absolute paths and `..` are refused
     /// when the file is read.
@@ -85,6 +86,27 @@ pub fn parse(text: &str) -> Result<Descriptor, String> {
             .collect::<Result<Vec<_>, _>>()?,
         Some(_) => return Err("\"tags\" must be a list of strings".into()),
     };
+    let members = match object.get("members") {
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(serde_json::Value::Array(items)) if items.len() <= 128 => {
+            let mut seen = std::collections::HashSet::new();
+            let mut names = std::collections::HashSet::new();
+            let mut members = Vec::new();
+            for item in items {
+                let member: genehub_proto::SpaceMemberReference = serde_json::from_value(item.clone())
+                    .map_err(|_| "members requires machineId and workspaceId strings".to_string())?;
+                if [&member.machine_id, &member.workspace_id].iter().any(|id| id.trim().is_empty() || id.len() > 200 || id.trim() != id.as_str())
+                    || member.name.as_ref().is_some_and(|name| name.trim().is_empty() || name.len() > 200)
+                    || !seen.insert((member.machine_id.clone(), member.workspace_id.clone()))
+                    || member.name.as_ref().is_some_and(|name| !names.insert(name.clone())) {
+                    return Err("members contains invalid or duplicate Space references".into());
+                }
+                members.push(member);
+            }
+            members
+        }
+        Some(_) => return Err("members must be an array of at most 128 Space references".into()),
+    };
     let agent_cwd = text_of("agentCwd")?;
     if let Some(cwd) = &agent_cwd {
         safe_relative_key("agentCwd", cwd)?;
@@ -97,6 +119,7 @@ pub fn parse(text: &str) -> Result<Descriptor, String> {
         name: text_of("name")?,
         description: text_of("description")?,
         tags,
+        members,
         agent_cwd,
         space_builder,
         folders: object
