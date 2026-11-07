@@ -85,8 +85,8 @@ defineSpecialty({
     await chooser.getByRole("option",{name:/共享验证.*Hosted A/}).waitFor();
     await chooser.getByRole("option",{name:/共享验证.*Hosted B/}).waitFor();
     await chooser.getByRole("option",{name:/离线岗位.*状态未知/}).waitFor();
-    await page.getByRole("combobox",{name:"搜索Space或机器",exact:true}).fill("Hosted B");
-    t.assertions.assert(await chooser.getByRole("option").count()===2,"machine search did not disambiguate same-name Spaces");
+    t.assertions.assert(await page.getByRole("combobox",{name:"搜索Space或机器",exact:true}).count()===0,"Space chooser unexpectedly opened search");
+    t.assertions.assert(await chooser.getByRole("option").count()===4,"source-labelled options are not directly available");
     await chooser.getByRole("option",{name:/共享验证.*Hosted B/}).click();
     await group.getByRole("button",{name:/Hosted B session/}).waitFor();
     t.assertions.assert(await group.getByRole("button",{name:/Local same-name Space/}).count()===0,"selected remote Space leaked a local sibling");

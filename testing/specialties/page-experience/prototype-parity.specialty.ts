@@ -7,7 +7,7 @@ for (const width of [390,744,768,820,1280]) defineSpecialty({
   id: `specialty.page-experience.prototype-parity.${width}`,
   title: `Accepted prototype navigation, compact rows and actions at ${width}px`,
   oracle: "The actual browser lists ordinary conversations flat, exposes five root conversations even behind 110 newer internal conversations, opens a single Space-filtered internal list, preserves header menus and real bulk archive/recovery, pins projects and creates source-labeled drafts without writing sessions",
-  catches: ["every project is collapsed", "child history displaces root previews", "missing full session actions", "status and avatars are too small", "bulk selection cannot select visible rows", "draft navigation secretly creates a session"],
+  catches: ["every project is collapsed", "child history displaces root previews", "missing full session actions", "status and avatars are too small", "bulk selection cannot select visible rows", "draft navigation secretly creates a session", "opening a small Space chooser summons a search keyboard"],
   tags: ["page-experience","prototype-parity","machine-connections"], runner: "playwright", llm: {default: "mock"},
   expectedDurationMs: 60_000, timeoutMs: 240_000,
   resources: {environments: 1,cpu: 3,memoryMb: 3072,io: 1,browser: 1,pool: "browser"},
@@ -110,16 +110,20 @@ for (const width of [390,744,768,820,1280]) defineSpecialty({
     await chooser.getByRole("option",{name:/验证Space.*原型验收机器/}).waitFor();
     const chooserBox=await chooser.boundingBox();
     t.assertions.assert(Boolean(chooserBox&&chooserBox.x>=0&&chooserBox.x+chooserBox.width<=width&&chooserBox.y>=0&&chooserBox.y+chooserBox.height<=1133),"Space menu escaped the viewport");
-    const searchSpace=page.getByRole("combobox",{name:"搜索Space或机器",exact:true});
-    await searchSpace.fill("没有这样的Space");
-    await page.getByRole("status").filter({hasText:"没有匹配的 Space"}).waitFor();
-    await searchSpace.fill("验证Space");
-    await searchSpace.press("ArrowDown"); await searchSpace.press("Enter");
+    t.assertions.assert(await page.getByRole("combobox",{name:"搜索Space或机器",exact:true}).count()===0,"small Space chooser opened a search field");
+    t.assertions.assert(await chooser.evaluate(e=>e===document.activeElement),"Space chooser did not focus the non-editable list");
+    t.assertions.assert(await page.locator("input:focus,textarea:focus,[contenteditable=true]:focus").count()===0,"opening Space chooser focused an editable control");
+    t.assertions.assert(await chooser.getByRole("option").count()===spaces.length+1,"Space options require a search before they appear");
+    const optionTexts=await chooser.getByRole("option").allTextContents();
+    const verificationIndex=optionTexts.findIndex(text=>text.includes("验证Space"));
+    t.assertions.assert(verificationIndex>0,"verification Space is not directly listed");
+    for(let n=0;n<verificationIndex;n++) await chooser.press("ArrowDown");
+    await chooser.press("Enter");
     await group.getByRole("button",{name:/验证待确认/}).waitFor();
     t.assertions.assert(await chooser.count()===0,"selection did not close the Space menu");
     await spaceFilter.click();
     await chooser.getByRole("option",{selected:true}).filter({hasText:"验证Space"}).waitFor();
-    await page.getByRole("combobox",{name:"搜索Space或机器",exact:true}).press("Escape");
+    await chooser.press("Escape");
     t.assertions.assert(await spaceFilter.evaluate(e=>e===document.activeElement),"Escape did not restore focus");
     await spaceFilter.click();
     await page.getByRole("button",{name:"关闭Space筛选",exact:true}).focus();
