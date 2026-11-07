@@ -2,7 +2,7 @@ import type { Attachment, SessionReplyCursor, SessionSummary } from "@genehub/pr
 import { useEffect, useReducer } from "react";
 
 /** Local UI state only. Neither navigation nor persistence sends a message. */
-export interface LocalDraft { text: string; attachments: Attachment[]; missingAttachments: number; recoveryNotice?: string }
+export interface LocalDraft { text: string; attachments: Attachment[]; missingAttachments: number; recoveryNotice?: string; files?: File[]; videoFiles?: File[] }
 const memory = new Map<string, LocalDraft>();
 const prefix = "genehub.conversation.v1:";
 export function readLocalDraft(key: string): LocalDraft {
@@ -22,8 +22,9 @@ export function saveLocalDraft(key: string, draft: LocalDraft): void {
   window.dispatchEvent(new Event("genehub-conversation-local"));
   // Never persist binary/base64 attachments. Their loss is explicitly presented.
   try {
-    if (!draft.text && !draft.attachments.length && !draft.missingAttachments) localStorage.removeItem(prefix + key);
-    else localStorage.setItem(prefix + key, JSON.stringify({ text: draft.text, attachmentCount: draft.attachments.length + draft.missingAttachments }));
+    const count = draft.attachments.length + draft.missingAttachments + (draft.files?.length ?? 0) + (draft.videoFiles?.length ?? 0);
+    if (!draft.text && !count) localStorage.removeItem(prefix + key);
+    else localStorage.setItem(prefix + key, JSON.stringify({ text: draft.text, attachmentCount: count }));
   } catch { /* In-memory editing remains usable when storage is unavailable. */ }
 }
 
@@ -77,8 +78,12 @@ export function useConversationLocalChanges(): void {
 
 export interface DraftIdentity { localId: string; workspaceId: string; tags?: string[]; agentId: string | null; title: string; modelId?: string | null; modeId?: string | null; effortId?: string | null; fast?: boolean | null; runtimeValues?: Record<string,string> }
 export function draftIdentities(machine: string): DraftIdentity[] { const value = localValue<DraftIdentity[]>(`drafts:${machine}`); return Array.isArray(value) ? value.filter(item => item && typeof item.localId === "string" && typeof item.workspaceId === "string") : []; }
+export function hasLocalDraftContent(key: string): boolean {
+  const draft = readLocalDraft(key);
+  return Boolean(draft.text || draft.attachments.length || draft.missingAttachments || draft.files?.length || draft.videoFiles?.length);
+}
 export function rememberDraftIdentity(machine: string, draft: DraftIdentity): void {
- saveLocalValue(`drafts:${machine}`, [...draftIdentities(machine).filter(item => item.localId !== draft.localId && Boolean(readLocalDraft(`${machine}:${item.localId}`).text || readLocalDraft(`${machine}:${item.localId}`).attachments.length || readLocalDraft(`${machine}:${item.localId}`).missingAttachments)), draft]);
+ saveLocalValue(`drafts:${machine}`, [...draftIdentities(machine).filter(item => item.localId !== draft.localId && hasLocalDraftContent(`${machine}:${item.localId}`)), draft]);
 }
 export function forgetDraftIdentity(machine: string, id: string): void { saveLocalValue(`drafts:${machine}`, draftIdentities(machine).filter(item => item.localId !== id)); }
 

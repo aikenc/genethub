@@ -717,6 +717,13 @@ impl Workspaces {
 
     fn describe_with_space(&self, entry: &WorkspaceEntry, config: &Config) -> WorkspaceInfo {
         let mut info = describe(entry);
+        let builtin_root = self
+            .config_path
+            .parent()
+            .map(|root| root.join("spaces").join("admin"));
+        info.builtin = builtin_root
+            .filter(|root| *root == entry.root)
+            .map(|_| true);
         apply_space_projection(&mut info, config);
         apply_space_health(&mut info, entry, config);
         info
@@ -1103,7 +1110,11 @@ impl Workspaces {
             .iter()
             .all(|id| entries.get(id).is_some_and(|entry| entry.removed))
         {
-            return Ok(active_descriptions(entries.values(), &config));
+            return Ok(active_descriptions(
+                entries.values(),
+                &config,
+                &self.config_path,
+            ));
         }
         if planned != checked {
             anyhow::bail!("project membership changed; refresh and retry removal");
@@ -1126,7 +1137,11 @@ impl Workspaces {
             }
             self.homes.detach(id);
         }
-        Ok(active_descriptions(entries.values(), &config))
+        Ok(active_descriptions(
+            entries.values(),
+            &config,
+            &self.config_path,
+        ))
     }
 
     /// Changes only the label shown to the user; the directory itself stays put.
@@ -1144,7 +1159,8 @@ impl Workspaces {
             return Err(anyhow!("no such workspace: {id}"));
         }
         if entry.name == name {
-            return Ok(describe(entry));
+            let config = self.config.read().await;
+            return Ok(self.describe_with_space(entry, &config));
         }
         let mut updated = entry.clone();
         updated.name = name;
@@ -1257,11 +1273,18 @@ fn removal_ids(
 fn active_descriptions<'a>(
     entries: impl Iterator<Item = &'a WorkspaceEntry>,
     config: &Config,
+    config_path: &Path,
 ) -> Vec<WorkspaceInfo> {
     let mut out: Vec<_> = entries
         .filter(|entry| !entry.removed)
         .map(|entry| {
             let mut info = describe(entry);
+            let builtin_root = config_path
+                .parent()
+                .map(|root| root.join("spaces").join("admin"));
+            info.builtin = builtin_root
+                .filter(|root| *root == entry.root)
+                .map(|_| true);
             apply_space_projection(&mut info, config);
             apply_space_health(&mut info, entry, config);
             info
@@ -1356,6 +1379,7 @@ fn existing_or_unregistered(config: &Config, workspace_id: &str) -> AgentSpaceEn
 
 fn describe(entry: &WorkspaceEntry) -> WorkspaceInfo {
     WorkspaceInfo {
+        builtin: None,
         id: entry.id.clone(),
         name: entry.name.clone(),
         root: entry.root.display().to_string(),

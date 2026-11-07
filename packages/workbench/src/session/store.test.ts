@@ -2075,7 +2075,7 @@ describe("renaming and deleting a conversation", () => {
   });
 
   it("takes the row, its tab and the open conversation with it", async () => {
-    const { client, asked } = answering(() => undefined);
+    const { client, asked } = answering(type => type === "session.delete" ? {type: "ack"} : undefined);
     useWorkbench.setState({
       client,
       activeSessionId: "s1",
@@ -2090,6 +2090,15 @@ describe("renaming and deleting a conversation", () => {
     expect(useWorkbench.getState().tabs).toEqual([]);
     expect(useWorkbench.getState().activeSessionId).toBeNull();
   });
+  it("keeps the row and active tab when deletion was not acknowledged", async () => {
+    const {client} = answering(() => undefined);
+    useWorkbench.setState({client, activeSessionId:"s1",tabs:[{id:"chat:s1",kind:"chat",title:"新会话",sessionId:"s1"}],activeTabId:"chat:s1"});
+    expect(await useWorkbench.getState().deleteSession("s1")).toBe(false);
+    expect(useWorkbench.getState().sessions.map(s => s.id)).toEqual(["s1"]);
+    expect(useWorkbench.getState().activeSessionId).toBe("s1");
+    expect(useWorkbench.getState().tabs.map(tab => tab.id)).toEqual(["chat:s1"]);
+  });
+
 });
 
 /**

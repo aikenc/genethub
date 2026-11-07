@@ -47,7 +47,7 @@ import {
   resolveTagRoute,
   tagMediaInputSupport,
 } from "./capability-preferences";
-import { readLocalDraft, saveLocalDraft } from "./localConversation";
+import { readLocalDraft, saveLocalDraft, type LocalDraft } from "./localConversation";
 import { ComposerControls } from "./ComposerControls";
 import { useSessionArtifact } from "./useSessionArtifact";
 import { useWorkbench } from "./store";
@@ -246,7 +246,7 @@ export function Composer({
   minimized?: boolean;
   onExpand?(): void;
 }) {
-  const [saved] = useState(() => persistenceKey ? readLocalDraft(persistenceKey) : { text: "", attachments: [], missingAttachments: 0 });
+  const [saved] = useState<LocalDraft>(() => persistenceKey ? readLocalDraft(persistenceKey) : { text: "", attachments: [], missingAttachments: 0 });
   const [draft, setDraft] = useState(saved.text);
   const [missingAttachments, setMissingAttachments] = useState(saved.missingAttachments);
   // Only while a turn is running, and only every few seconds: the number this
@@ -262,8 +262,8 @@ export function Composer({
   }, [watchingQuiet]);
   const quiet = watchingQuiet ? quietFor(lastActivityAtMs, nowMs) : null;
   const [attachments, setAttachments] = useState<Attachment[]>(saved.attachments);
-  const [videoFiles, setVideoFiles] = useState<File[]>([]);
-  const [files, setFiles] = useState<File[]>([]);
+  const [videoFiles, setVideoFiles] = useState<File[]>(saved.videoFiles ?? []);
+  const [files, setFiles] = useState<File[]>(saved.files ?? []);
   const [mediaViewer, setMediaViewer] = useState<{ name: string; mime: string; url: string } | null>(null);
   const [draftSaveState, setDraftSaveState] = useState<"idle" | "saving" | "saved">("idle");
   const draftSavePending = useRef(false);
@@ -323,8 +323,9 @@ export function Composer({
       ? (imageAllowed ? `${imageAccept},${videoAccept}` : videoAccept)
       : imageAccept;
   useEffect(() => {
-    if (persistenceKey) saveLocalDraft(persistenceKey, { text: draft, attachments, missingAttachments });
-  }, [persistenceKey, draft, attachments, missingAttachments]);
+    if (persistenceKey) saveLocalDraft(persistenceKey, { text: draft, attachments, missingAttachments,
+      ...(files.length ? {files} : {}), ...(videoFiles.length ? {videoFiles} : {}) });
+  }, [persistenceKey, draft, attachments, missingAttachments, files, videoFiles]);
   useEffect(() => () => {
     if (draftSavedTimer.current !== null) clearTimeout(draftSavedTimer.current);
   }, []);

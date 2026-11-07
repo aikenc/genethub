@@ -10,6 +10,7 @@ export interface MachineSummary {
   target: Target;
   version?: string;
   nextCursor?: string | null;
+  projectPages?: Record<string, { nextCursor: string | null; error?: string | null }>;
   state: SummaryState;
   stateSource: "directory" | "daemon" | "request";
   observedAt: string;
@@ -41,7 +42,7 @@ export class MachineSummaryDirectory {
   private directoryDenied = false;
   private rows: MachineSummary[] = [];
   private includeArchived = false;
-  setIncludeArchived(value: boolean): void { this.includeArchived = value; }
+  setIncludeArchived(value: boolean): void { if (value !== this.includeArchived) this.previous.clear(); this.includeArchived = value; }
   private observer: ((value: SummaryDirectory) => void) | null = null;
   constructor(source: SummarySource, private options: Pick<ClientOptions, "socketFactory" | "onDiagnostic"> & { connections?: MachineConnections } = {}) {
     this.ownsConnections = !options.connections;
@@ -93,6 +94,7 @@ export class MachineSummaryDirectory {
       const rows = targets.map((target): MachineSummary => ({
         target, stateSource: "directory", observedAt: new Date().toISOString(), state: sourceIds && !sourceIds.has(target.id) ? "deferred" : !activeKeys.has(target.id) ? "notChecked" : target.online === false ? "offline" : "waiting",
         updatedAt: this.previous.get(target.id)?.updatedAt ?? null,
+        projectPages: this.previous.get(target.id)?.projectPages,
         version: this.previous.get(target.id)?.version, nextCursor: this.previous.get(target.id)?.nextCursor,
         sessionTotal: this.previous.get(target.id)?.sessionTotal ?? 0, workspaceTotal: this.previous.get(target.id)?.workspaceTotal ?? 0,
         sessions: this.previous.get(target.id)?.sessions ?? [], workspaces: this.previous.get(target.id)?.workspaces ?? [],
@@ -168,6 +170,7 @@ export class MachineSummaryDirectory {
     const row = this.rows.find(row => row.target.id === target.id);
     if (row && this.canPublish(row)) {
       row.sessions = [...new Map([...row.sessions, ...page.sessions].map(s => [s.id, s])).values()];
+      row.projectPages = { ...row.projectPages, [workspaceId]: {nextCursor: page.nextCursor, error: page.error} };
       this.previous.set(target.id, { ...row }); this.emit();
     }
     return page;
@@ -186,7 +189,7 @@ export class MachineSummaryDirectory {
     this.previous.set(target.id, { ...row });
     this.emit();
   }
-  private async read(target: Target, signal: AbortSignal): Promise<Pick<MachineSummary, "sessions" | "workspaces" | "sessionTotal" | "workspaceTotal" | "nextCursor" | "version">> {
+  private async read(target: Target, signal: AbortSignal): Promise<Pick<MachineSummary, "sessions" | "workspaces" | "sessionTotal" | "workspaceTotal" | "nextCursor" | "version" | "projectPages">> {
     const reading = new AbortController();
     const cancel = () => reading.abort(signal.reason);
     signal.addEventListener("abort", cancel, { once: true });
@@ -199,8 +202,27 @@ export class MachineSummaryDirectory {
         readSessionPage(client, null, null, 100, this.includeArchived), client.call({ type: "workspace.list" }, { timeoutMs: 10_000 }),
       ]);
       if (workspaces?.type !== "workspaces") throw new Error("invalid source summary");
-      return { sessions: page.sessions, workspaces: workspaces.data, sessionTotal: page.sessions.length,
-        workspaceTotal: workspaces.data.length, nextCursor: page.nextCursor, version: client.identity?.daemonVersion };
+      // The newest machine-wide page may contain only busy child Spaces.
+      // Fetch root conversation previews separately so opening a project always
+      // shows its user-facing conversations, without reading its whole history.
+      const roots = workspaces.data.filter(w => !w.agentSpace?.parentWorkspaceId &&
+        workspaces.data.some(child => child.agentSpace?.parentWorkspaceId === w.id)).slice(0, 32);
+      const projectPages: NonNullable<MachineSummary["projectPages"]> = {};
+      const previews: SessionSummary[] = [];
+      for (let at = 0; at < roots.length; at += 10) {
+        const reply = await client.call({ type: "session.page", payload: {
+          requests: roots.slice(at, at + 10).map(w => ({workspaceId: w.id, limit: 5, cursor: null})),
+          includeArchived: this.includeArchived,
+        } }, {timeoutMs: 10_000});
+        if (reply?.type !== "sessionPages") throw new Error("invalid project conversation preview");
+        for (const result of reply.data) if (result.workspaceId) {
+          projectPages[result.workspaceId] = {nextCursor: result.nextCursor, error: result.error};
+          if (!result.error) previews.push(...result.sessions);
+        }
+      }
+      return { sessions: [...new Map([...page.sessions, ...previews].map(s => [s.id,s])).values()], workspaces: workspaces.data,
+        sessionTotal: page.sessions.length, workspaceTotal: workspaces.data.length, nextCursor: page.nextCursor,
+        version: client.identity?.daemonVersion, projectPages };
     }, reading.signal);
     // Cancellation discards this reader, never a client that other views use.
     const stopped = new Promise<never>((_, reject) => {

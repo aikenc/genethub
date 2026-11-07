@@ -500,6 +500,11 @@ pub struct AgentSpaceHealth {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct WorkspaceInfo {
+    /// Product-owned bootstrap project, identified by its registered storage
+    /// location rather than a display name. Absent on older daemons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub builtin: Option<bool>,
     pub id: String,
     pub name: String,
     /// The first folder and Agent working directory.
