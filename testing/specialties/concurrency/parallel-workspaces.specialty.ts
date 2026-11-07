@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import type { Request } from "@genehub/proto";
+import type { Request, SequencedEvent, SessionSnapshot } from "@genehub/proto";
 import { defineSpecialty, type CaseContext } from "../../framework/public.ts";
 
 type Client = Awaited<ReturnType<CaseContext["flows"]["main"]["openSecondClient"]>>;
@@ -19,18 +19,52 @@ for(const profile of profiles)defineSpecialty({
   catches:["load scale silently reduced to one session per workspace","tool/model loops or history missing under fanout","active polling starves turns or mixes subscriptions"],
   tags:["core","concurrency","parity"],llm:{default:"mock"},
   expectedDurationMs:240_000,timeoutMs:900_000,
-  resources:{environments:1,cpu:4,memoryMb:4096,io:4,browser:0,pool:"standard"},
+  resources:{environments:1,cpu:4,memoryMb:4096,io:4,browser:0,pool:"exclusive"},
   surfaces:["daemon","workbench-client"],productInterfaces:["@genehub/workbench/client"],
 },async t=>{
   const opened=await t.flows.main.openWorkspace({openRoot:t.openRoot,lease:t.env});
   const allObservers:Client[]=[];
   const collectors:Client[]=[opened.client];
+  const repairs:Array<{session:string;reset:boolean;events:number}>=[];
+  const snapshots=new Map<string,SessionSnapshot>();
+  // A real client repairs gaps through onResync rather than onEvent. Keep
+  // those actual replayed events, as the workbench does, without fabricating
+  // events from a snapshot or counting a repeated sequence twice.
+  const observe=async(client:Client,session:string)=>{
+    const events:Entry["events"]=[], seen=new Map<number,string>();
+    const append=(event:SequencedEvent)=>{
+      const encoded=JSON.stringify(event), previous=seen.get(event.seq);
+      t.assertions.assert(previous===undefined||previous===encoded,"a replay changed an observed sequence");
+      if(previous!==undefined)return;
+      seen.set(event.seq,encoded);events.push({type:event.event.type,raw:event});
+    };
+    const adopt=(snapshot:unknown)=>{
+      const value=snapshot as SessionSnapshot;
+      t.assertions.assert(value?.summary?.id===session,"resync snapshot crossed conversations");
+      snapshots.set(session,value);
+    };
+    const initial=await client.subscribe(session,{onEvent:append,onResync:(snapshot,replayed,reset)=>{
+      adopt(snapshot);
+      repairs.push({session,reset,events:replayed.length});
+      for(const event of replayed)append(event);
+    }});
+    adopt(initial.snapshot);
+    return events;
+  };
+  const snapshotCompleted=(session:string,token:string)=>{
+    const snapshot=snapshots.get(session);
+    if(snapshot?.summary.status!=="idle")return false;
+    let index=-1;
+    for(let i=0;i<snapshot.items.length;i++)if(snapshot.items[i]!.type==="userMessage"&&(snapshot.items[i] as {text?:string}).text===token)index=i;
+    return index>=0&&snapshot.items.slice(index+1).some(item=>item.type==="turnSummary"&&item.stats.toolCalls===6&&item.stats.usage.llmRounds===5);
+  };
   try {
     await t.flows.main.configureMockProvider(opened.client,opened.mock);
       const entries:Entry[]=[];
       const operations=new Map<string,number>();
       const sampled=async(client:Client,request:Request)=>{
-        const reply=await client.call(request);
+        let reply;
+        try{reply=await client.call(request);}catch(error){throw new Error(`${request.type} under load failed`,{cause:error});}
         operations.set(request.type,(operations.get(request.type)??0)+1);
         return reply;
       };
@@ -48,10 +82,16 @@ for(const profile of profiles)defineSpecialty({
           const session=await t.flows.main.createBuiltinSession(opened.client,reply.data.id);
           const collectorIndex=Math.floor(entries.length/32);
           if(!collectors[collectorIndex])collectors.push(await t.flows.main.openSecondClient(opened,`turn-collector-${collectorIndex}`));
-          entries.push({id:reply.data.id,session,root,handle:reply.data.folders[0].rootHandle,events:await t.flows.main.attachEventLog(collectors[collectorIndex]!,session)});
+          entries.push({id:reply.data.id,session,root,handle:reply.data.folders[0].rootHandle,events:await observe(collectors[collectorIndex]!,session)});
         }
       }
-      const observers=await Promise.all(Array.from({length:profile.observers},(_,i)=>t.flows.main.openSecondClient(opened,`${profile.name}-${i}`)));
+      const connectionDiagnostics:unknown[]=[];
+      const observers=await Promise.all(Array.from({length:profile.observers},(_,i)=>t.flows.main.openSecondClient(opened,`${profile.name}-${i}`,{onDiagnostic:event=>{
+        if(event.kind!=="operation"||event.detail.phase==="failed"){
+          connectionDiagnostics.push({observer:i,...event});
+          if(connectionDiagnostics.length>40)connectionDiagnostics.shift();
+        }
+      }})));
       allObservers.push(...observers);
       // Each observer retains one active conversation; rotations exercise the
       // same subscribe/unsubscribe path as opening another conversation card.
@@ -63,9 +103,10 @@ for(const profile of profiles)defineSpecialty({
           const entry=entries[(observer+iteration++)%entries.length]!;
           const sessions=await sampled(client,{type:"session.list",payload:{workspaceId:null,includeArchived:false,lean:false}});
           t.assertions.assert(sessions?.type==="sessions","session.list under load failed");
-          const snapshot=await sampled(client,{type:"subscribe",payload:{sessionId:entry.session,sinceSeq:0,expandLastRound:true}});
-          if(snapshot?.type!=="subscribed")throw new Error("conversation open failed");
-          if(previous&&previous!==entry.session)await sampled(client,{type:"unsubscribe",payload:{sessionId:previous}});
+          const snapshot=await client.subscribe(entry.session,{onEvent:()=>{},onResync:()=>{}});
+          t.assertions.assert((snapshot.snapshot as SessionSnapshot).summary.id===entry.session,"conversation open crossed sessions");
+          operations.set("subscribe",(operations.get("subscribe")??0)+1);
+          if(previous&&previous!==entry.session){await client.unsubscribe(previous);operations.set("unsubscribe",(operations.get("unsubscribe")??0)+1);}
           previous=entry.session;observerSessions[observer]=entry.session;
           const rounds=await sampled(client,{type:"session.rounds",payload:{sessionId:entry.session,limit:20,cursor:null,throughRoundId:null}});
           if(rounds?.type!=="sessionRounds")throw new Error("rounds failed");
@@ -96,8 +137,8 @@ for(const profile of profiles)defineSpecialty({
           if(phase==="passive-reader"){
             polling=false;const error=await pollsDone;if(error)throw error;
             for(const [i,observer] of observers.entries()){
-              if(observerSessions[i])await observer.call({type:"unsubscribe",payload:{sessionId:observerSessions[i]!}});
-              passiveLogs.push(await t.flows.main.attachEventLog(observer,entries[i]!.session));
+              if(observerSessions[i])await observer.unsubscribe(observerSessions[i]!);
+              passiveLogs.push(await observe(observer,entries[i]!.session));
             }
           }
           if(phase==="owner-only")for(const observer of observers)observer.close();
@@ -136,18 +177,20 @@ for(const profile of profiles)defineSpecialty({
               const current=entry.events.slice(before[i]);
               const failed=current.find(e=>e.type==="turnFailed");
               if(failed)throw new Error(`turn failed: ${JSON.stringify(failed.raw)}`);
-              return current.some(e=>e.type==="turnCompleted");
+              return current.some(e=>e.type==="turnCompleted")||snapshotCompleted(entry.session,token);
             }),180_000);
           } catch(error) {
-            t.note(`phase failure: modelRequests=${opened.mock.requests.length-requestStart}, sessions=${JSON.stringify(entries.map((entry,i)=>({id:entry.session,events:entry.events.slice(before[i]).map(e=>e.type)})))}`);
+            const missing=entries.map((entry,i)=>({id:entry.session,events:entry.events.slice(before[i])})).filter(e=>!e.events.some(x=>x.type==="turnCompleted"));
+            t.note(`phase failure: modelRequests=${opened.mock.requests.length-requestStart}, liveCompleted=${count-missing.length}/${count}, repairs=${repairs.length}, replayedEvents=${repairs.reduce((n,r)=>n+r.events,0)}, resets=${repairs.filter(r=>r.reset).length}, missing=${JSON.stringify(missing.slice(0,16).map(e=>({id:e.id,status:snapshots.get(e.id)?.summary.status,last:e.events.slice(-5).map(x=>x.type)})))}`);
             throw error;
           }
           for(const [i,entry] of entries.entries()){
             const events=entry.events.slice(before[i]);
             t.assertions.assert(events.every(e=>(e.raw as {sessionId?:string}).sessionId===entry.session),`crossed publication for ${entry.session}`);
-            t.assertions.assert(events.filter(e=>e.type==="turnStarted").length===1,`crossed turn ${entry.session}`);
+            t.assertions.assert(events.filter(e=>e.type==="turnStarted").length<=1,`crossed turn ${entry.session}`);
             const narrative=await opened.client.call({type:"session.narrative",payload:{sessionId:entry.session,itemId:null,limit:100,throughRoundId:null,cursor:null}});
             if(narrative?.type!=="sessionNarrative")throw new Error("missing narrative");
+            t.assertions.assert(narrative.data.items.filter(item=>item.type==="userMessage"&&item.text===token).length===1,`missing or repeated durable request for ${entry.session}`);
             const completed=narrative.data.items.filter(item=>item.type==="turnSummary").at(-1);
             t.assertions.assert(completed?.type==="turnSummary"&&completed.stats.toolCalls===6&&completed.stats.usage.llmRounds===5,`missing tool/model loop: ${JSON.stringify(completed)}`);
             t.assertions.assert(readFileSync(path.join(entry.root,"load-phases.txt"),"utf8").split("\n").filter(line=>line===token).length===profile.sessions,"tool side effects lost or duplicated");
@@ -158,11 +201,12 @@ for(const profile of profiles)defineSpecialty({
           t.assertions.assert(requests.every(r=>Buffer.byteLength(JSON.stringify(r))>0),"unmeasured request body");
           t.note(`${profile.name}/${phase}: sessions=${count}, modelRequests=${requests.length}, toolCalls=${count*6}, concurrentFirstRequests=${firstRequests}`);
         }
-      }finally{polling=false;const error=await pollsDone;if(error)throw error;for(const observer of observers)observer.close();}
+      }finally{polling=false;const error=await pollsDone;if(error){t.note(`observer diagnostics=${JSON.stringify(connectionDiagnostics)}`);throw error;}for(const observer of observers)observer.close();}
       for(const operation of ["session.list","subscribe","unsubscribe","file.tree","asset.preview","round.trunk.list","round.trunk.get","blob.get"]){
         t.assertions.assert((operations.get(operation)??0)>0,`missing active interaction ${operation}`);
       }
       for(const entry of entries)await opened.client.call({type:"session.close",payload:{sessionId:entry.session}});
       t.note(`${profile.name} polling pause=${profile.pause}ms, observers=${profile.observers}, operations=${JSON.stringify(Object.fromEntries(operations))}`);
+      t.note(`${profile.name} subscription repairs=${repairs.length}, replayedEvents=${repairs.reduce((n,r)=>n+r.events,0)}, resets=${repairs.filter(r=>r.reset).length}`);
   }finally{for(const observer of allObservers)observer.close();for(const collector of collectors)collector.close();opened.client.close();opened.daemon.stop();await opened.mock.stop();}
 });

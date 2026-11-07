@@ -123,7 +123,7 @@ for (const width of [390, 1280]) defineSpecialty({
     await opened.client.call({type:"workspace.rename",payload:{workspaceId:project.id,name:"改名项目"}});
     await opened.client.call({type:"workspace.rename",payload:{workspaceId:qa.id,name:"验证空间"}});
     // A copied compact bookmark has no in-memory summary or history-state ID.
-    await page.evaluate(() => history.replaceState(null,"",location.href));
+    await page.evaluate(() => window.history.replaceState(null,"",location.href));
     await page.reload();
     await page.getByRole("heading",{name:"深层工作会话",exact:true}).waitFor();
     await page.getByRole("button",{name:"当前项目",exact:true}).getByText("改名项目 / 验证空间 / delivery").waitFor();
