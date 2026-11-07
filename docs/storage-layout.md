@@ -19,6 +19,10 @@ agent CLI 自己的线程库（`~/.codex/` 之类）不归我们管，只在会�
 
 ## 2. `.genethub/` 全貌
 
+Linux 手动 daemon 的原生 CLI 在 `<data>` 保存 `daemon-start.lock`、`daemon-supervisor.lock`、
+`daemon-supervisor.stop` 三个可丢弃的生命周期文件；不保存业务状态。职责和验收见
+[崩溃恢复](daemon-crash-recovery.md)。
+
 项目根和每个 AgentSpace 根（`spaces/<name>/`）各有一个 `.genethub/`，互不嵌套。
 
 ```text

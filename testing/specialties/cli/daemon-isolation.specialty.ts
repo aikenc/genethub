@@ -15,7 +15,7 @@ const meta = (name: string, title: string, oracle: string) => ({
 });
 
 defineSpecialty(meta("daemon-start-outlives-tool-group", "An Agent shell can start an independent daemon",
-  "The public Host shell finishes and its original process group disappears; the new daemon has SID=PGID=PID, cleans launcher context, and remains healthy after the parent daemon stops"), async t => {
+  "The public Host shell finishes and its original process group disappears; the new daemon has SID=PGID=PID, cleans launcher context, and remains healthy after the parent Host crashes, recovers, and stops"), async t => {
   const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
   const childLease = createLease("daemon-independent-");
   const cli = locateGenet(t.openRoot), env = genetEnv(t.openRoot, childLease.env);
@@ -45,10 +45,20 @@ defineSpecialty(meta("daemon-start-outlives-tool-group", "An Agent shell can sta
     t.assertions.assert(registered.code === 0, "could not register independent daemon workspace");
     const shell = await call(["shell", "--cwd", childLease.workspace, "--", "/bin/sh", "-c", 'test -z "$GENEHUB_SESSION_ID$GENEHUB_CONTROLLER_TOKEN$GENEHUB_AGENT_PID$GENEHUB_HOST_PID$GENET_WORKSPACE_ROOT"']);
     t.assertions.assert(shell.code === 0 && /"exitCode":0/.test(shell.stdout), "launcher context reached a daemon-owned command: " + JSON.stringify(shell));
-    opened.client.close(); opened.daemon.stop(); parentStopped = true;
+    const parentStatus = async () => parseJson((await runGenetAsync(cli, ["daemon", "status"], opened.daemon.env)).stdout);
+    const parentPid = Number((await parentStatus()).pid);
+    opened.client.close();
+    process.kill(parentPid, "SIGKILL");
+    await t.tools.waitUntil(async () => {
+      const replacement = await parentStatus();
+      return replacement.running === true && replacement.pid !== parentPid && typeof replacement.port === "number";
+    }, 20_000);
+    const afterCrash = parseJson((await call(["daemon", "status"])).stdout);
+    t.assertions.assert(afterCrash.running === true && afterCrash.pid === pid, "parent crash cleanup took down independent daemon");
+    opened.daemon.stop(); parentStopped = true;
     const independent = parseJson((await call(["daemon", "status"])).stdout);
     t.assertions.assert(independent.running === true && independent.pid === pid, "parent daemon exit took down independent daemon");
-    t.note("launcherGroupGone=true independentSid=true survivesParentExit=true");
+    t.note("launcherGroupGone=true independentSid=true survivesParentCrash=true survivesParentExit=true");
   } finally {
     await call(["daemon", "stop"]);
     releaseLease(childLease);

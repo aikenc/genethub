@@ -17,6 +17,9 @@ use genet_frontdoor::Paths;
 
 use crate::{fail, ok, EXIT_FAILED, EXIT_UNREACHABLE};
 
+#[cfg(target_os = "linux")]
+mod supervisor;
+
 /// How long `start` waits for the fresh daemon to publish its endpoint.
 const START_TIMEOUT: Duration = Duration::from_secs(45);
 /// How long `stop` lets a SIGTERM'd daemon end its sessions before insisting.
@@ -60,6 +63,9 @@ pub async fn daemon(args: &[String]) -> i32 {
     };
     let rest = &args[1..];
     match verb {
+        // Private lifecycle entry used by manual start, not a guest verb.
+        #[cfg(target_os = "linux")]
+        "supervise" if rest.is_empty() => supervisor::run(),
         "run" => {
             if !rest.is_empty() {
                 return crate::usage();
@@ -344,6 +350,14 @@ fn start() -> i32 {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    return supervisor::start(&paths);
+    #[cfg(not(target_os = "linux"))]
+    start_unmanaged(paths)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn start_unmanaged(paths: Paths) -> i32 {
     let settling = Instant::now() + START_TIMEOUT;
     while lifecycle::instance_locked(&paths).unwrap_or(false) {
         let mut value = facts(&paths);
@@ -482,6 +496,14 @@ fn start_log(paths: &Paths) -> std::io::Result<(std::fs::File, std::fs::File)> {
 /// (`{"stopped": false, "running": false}`), not an error.
 fn stop() -> i32 {
     let paths = paths();
+    #[cfg(target_os = "linux")]
+    return supervisor::stop(&paths);
+    #[cfg(not(target_os = "linux"))]
+    stop_unmanaged(paths)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn stop_unmanaged(paths: Paths) -> i32 {
     if !lifecycle::instance_locked(&paths).unwrap_or(false) {
         return ok(serde_json::json!({"stopped": false, "running": false}));
     }
@@ -497,6 +519,19 @@ fn stop() -> i32 {
 
 fn restart() -> i32 {
     let paths = paths();
+    #[cfg(target_os = "linux")]
+    {
+        if let Err(error) = supervisor::stop_owned(&paths) {
+            fail("internal", &error, EXIT_FAILED);
+        }
+        start()
+    }
+    #[cfg(not(target_os = "linux"))]
+    restart_unmanaged(paths)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn restart_unmanaged(paths: Paths) -> i32 {
     if lifecycle::instance_locked(&paths).unwrap_or(false) {
         if let Err(error) = stop_verified(&paths) {
             fail("internal", &error, EXIT_FAILED);
@@ -534,9 +569,15 @@ fn stop_verified(paths: &Paths) -> Result<bool, String> {
                 "refusing to stop pid {lock}: its listener did not provide an identity proof within the bounded probes; retry when it responds"
             ));
         }
-        Identity::NoListener => return stop_locked_process(paths, lock),
+        Identity::NoListener => {
+            #[cfg(target_os = "linux")]
+            supervisor::mark_stop(paths)?;
+            return stop_locked_process(paths, lock);
+        }
     }
 
+    #[cfg(target_os = "linux")]
+    supervisor::mark_stop(paths)?;
     ask_to_stop(&endpoint);
     if wait_unhealthy(&endpoint, STOP_TIMEOUT) {
         return wait_stopped(paths, lock);

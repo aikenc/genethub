@@ -1,5 +1,8 @@
 # CLI 薄转发器
 
+Linux 手动 `daemon start` 的异常退出清理和重启由原生生命周期监督者承担，见
+[崩溃恢复合同与验收](daemon-crash-recovery.md)。它不解析任何业务动词。
+
 > 合同：`genet` 原生二进制不再解析业务动词，也不再作为 E2EE 端点。
 > 它只做本机生命周期与把 argv 交给本机 daemon。业务语义在 daemon（guest）里。
 > 产品没有原生业务模式：daemon/agent 只装载 `genehub_guest.wasm`，缺件或不匹配即失败，禁止回退。
