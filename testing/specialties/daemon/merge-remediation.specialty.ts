@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, renameSync, watch, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, watch, writeFileSync } from "node:fs";
 import path from "node:path";
 import { defineSpecialty, localGenetCli, openTeam, type CaseContext } from "../../framework/public.ts";
 
@@ -146,7 +146,7 @@ defineSpecialty({
 });
 
 
-check("inbox-collision-retains-original", "a platform conflict retains the complete original local claim and reports the error instead of deleting or changing its id", async (t, r) => {
+check("inbox-collision-retains-original", "a platform conflict retains the complete original local claim and one internal diagnostic without waking the front or changing the accepted message", async (t, r) => {
   const target = await r.create(); await r.send(target, "work"); await idle(t,r,target);
   await r.client.call({type:"session.interrupt",payload:{sessionId:target}});
   r.ok(["send","--to",target,"--kind","report","ORIGINAL_USER_CORRECTION"]);
@@ -156,8 +156,17 @@ check("inbox-collision-retains-original", "a platform conflict retains the compl
     attachments:[],artifactPreviewBaseUrl:null,continuesRound:null,origin:{machineId:"script",sessionId:"system"}}});
   await r.send(target,"resume"); await idle(t,r,target); r.ok(["hook"]);
   t.assertions.assert(existsSync(claim) && readFileSync(claim,"utf8") === original,"conflicting receipt erased or rewrote original input");
-  await t.tools.waitUntil(async()=>{
-    for(const id of [r.front,target]) if((await r.snapshot(id)).items.some(item=>item.type === "userMessage" && item.text.includes("收件箱投递失败") && item.text.includes("collides"))) return true;
-    return false;
-  },10000);
+  const diagnostics = () => existsSync(r.state("notes")) ? readdirSync(r.state("notes"))
+    .filter(name => name.endsWith(".json")).map(name => JSON.parse(readFileSync(r.state("notes", name), "utf8")))
+    .filter(note => note.kind === "anomaly" && JSON.stringify(note).includes("收件箱投递失败") && JSON.stringify(note).includes("collides")) : [];
+  await t.tools.waitUntil(() => diagnostics().length === 1, 10000);
+  r.ok(["hook"]);
+  t.assertions.assert(diagnostics().length === 1, "one conflict multiplied internal diagnostics");
+  t.assertions.assert(existsSync(claim) && readFileSync(claim,"utf8") === original, "reconciliation changed the original conflicting input");
+  for (const id of [r.front, target]) {
+    const snapshot = await r.snapshot(id);
+    t.assertions.assert(!snapshot.items.some(item => item.type === "userMessage" && item.text.includes("收件箱投递失败")), "internal inbox diagnosis woke a conversation");
+  }
+  const accepted = (await r.snapshot(target)).items.filter(item => item.type === "userMessage" && item.id === entry.messageId);
+  t.assertions.assert(accepted.length === 1 && accepted[0]?.type === "userMessage" && accepted[0].text === "different accepted content", "conflict changed or duplicated the accepted message");
 });

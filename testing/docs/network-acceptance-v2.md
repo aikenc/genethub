@@ -8,9 +8,11 @@ No case is removed and no gate or frozen-legacy selection changes.
 
 ## Business and degraded capacity
 
-The 50/80-active mixed-load cases and normal both-hop separated profiles retain
-their existing stimuli, exact-output assertions, 1500ms catalog p95 and preview
-budgets. `team-b2-n1` instead measures 200 simultaneous complete subscriptions
+On 2026-11-07, Human u_ef9dc0c479874bc9b4ab3458bd03deb9 changed only the
+50/80/200-active mixed-load catalog p95 budget to 2000ms to allow CPU variance.
+Their stimuli, exact-output, source identity, zero-read-error and preview checks
+remain unchanged. Normal both-hop separated profiles retain their existing
+1500ms catalog p95 and preview budgets. `team-b2-n1` instead measures 200 simultaneous complete subscriptions
 with only one Native carrier: it must still recover every exact reply, execute
 each source once, and provide error-free management calls below 10 seconds.
 Its original 1500ms p95 observation is retained as `original1500msMet`, alongside

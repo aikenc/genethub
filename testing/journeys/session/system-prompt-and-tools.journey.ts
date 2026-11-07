@@ -10,6 +10,8 @@ async function regularFiles(root: string, relative = ""): Promise<string[]> {
   });
   entries.sort((left, right) => left.name.localeCompare(right.name));
   for (const entry of entries) {
+    // Match the product embedding boundary: caches are not shipped resources.
+    if (entry.name === "__pycache__" || entry.name.endsWith(".pyc") || entry.name === ".DS_Store") continue;
     const child = relative ? `${relative}/${entry.name}` : entry.name;
     if (entry.isDirectory()) files.push(...(await regularFiles(root, child)));
     else if (entry.isFile()) files.push(child);
@@ -44,7 +46,8 @@ defineJourney(
       const sourceFiles = await regularFiles(sourceSkills);
       for (const relative of sourceFiles) {
         const source = await readFile(path.join(sourceSkills, ...relative.split("/")));
-        const installed = await readFile(path.join(installedSkills, ...relative.split("/")));
+        const installed = await readFile(path.join(installedSkills, ...relative.split("/")))
+          .catch((error: unknown) => { throw new Error(`missing built-in Skill resource: ${relative}`, { cause: error }); });
         t.assertions.assert(
           source.equals(installed),
           `built-in Skill resource was not embedded and materialized exactly: ${relative}`,

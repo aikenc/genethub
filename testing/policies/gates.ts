@@ -14,6 +14,13 @@ export function selectForGate(
   if (tags.length > 0 && !tags.some((tag) => item.tags.includes(tag))) {
     return { include: false, reason: "tag filter" };
   }
+  // Human u_ef9dc0c479874bc9b4ab3458bd03deb9 (2026-11-07): temporarily
+  // waive this replay batch; CodeBuddy stays required. Keep the case registered
+  // so every plan reports the omission. Restore after the original 25s deadline
+  // is independently met; this waiver does not certify Claude replay behavior.
+  if (item.id === "specialty.agent.cli.builtin-agent-tests.claude") {
+    return { include: false, reason: "Human-approved temporary Claude replay waiver (2026-11-07, u_ef9dc0c479874bc9b4ab3458bd03deb9); CodeBuddy replay remains required" };
+  }
   // L13 terminal states never run, even when selected explicitly. They remain
   // registered so plans can report why they are excluded.
   if (item.tags.includes("legacy-suspended")) {
