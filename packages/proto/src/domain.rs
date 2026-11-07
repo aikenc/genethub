@@ -465,6 +465,11 @@ pub struct AgentSpaceInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub parent_workspace_id: Option<String>,
+    /// Explicit Space references for a project spanning machines. These are
+    /// display/composition metadata, never permission or scheduling rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub members: Option<Vec<SpaceMemberReference>>,
     /// CAS token covering the parent, the component set and the lifecycle.
     /// A Space that was never registered reports `0`.
     #[ts(type = "number")]
@@ -484,6 +489,18 @@ pub struct AgentSpaceInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub health: Option<AgentSpaceHealth>,
+}
+
+/// A reference is always qualified by the machine that owns the workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SpaceMemberReference {
+    pub machine_id: String,
+    pub workspace_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

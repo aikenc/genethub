@@ -322,16 +322,27 @@ def read_dispatch_record(path):
 
 def remote_target(root, machine, role, explicit=None):
     """A role is bound to one exact target; never infer team identity from a short name."""
-    target = (read_dispatch_record(os.path.join(root, ".genethub", "remote-targets.json")) or {}).get(role)
+    descriptor = read_dispatch_record(os.path.join(root, "agent-space.genet.json")) or {}
+    members = descriptor.get("members")
+    if members is not None:
+        if not isinstance(members, list) or len(members) > 128:
+            raise ExpertError("members 声明无效", "没有派单", "修正项目的 agent-space.genet.json members")
+        matches = [item for item in members if isinstance(item, dict) and item.get("name") == role]
+        if len(matches) != 1:
+            raise ExpertError("远端岗位 %s 缺少唯一 members 绑定" % role, "没有派单", "核对项目描述文件中的 name、machineId、workspaceId 和 command")
+        target = matches[0]
+    else:
+        # Existing customized teams remain readable until their descriptor is migrated.
+        target = (read_dispatch_record(os.path.join(root, ".genethub", "remote-targets.json")) or {}).get(role)
     if (not isinstance(target, dict) or target.get("machineId") != machine
             or not isinstance(target.get("workspaceId"), str) or not target["workspaceId"]
             or not isinstance(target.get("command"), list) or len(target["command"]) < 2
             or not all(isinstance(part, str) and part for part in target["command"])
             or not all(os.path.isabs(part) or ntpath.isabs(part) for part in target["command"][:2])):
         raise ExpertError("远端岗位 %s 未绑定到机器 %s" % (role, machine), "没有创建或发送消息",
-                          "在 .genethub/remote-targets.json 为该岗位配置 machineId、workspaceId 和目标机接单命令 command（Python 与 team.py 的绝对路径）")
+                          "在 agent-space.genet.json 的 members 为该岗位配置 machineId、workspaceId 和目标机接单命令 command（Python 与 team.py 的绝对路径）")
     if explicit is not None and explicit != target["workspaceId"]:
-        raise ExpertError("--workspace 与岗位固定绑定不同", "没有创建或发送消息", "核对 remote-targets.json；修改绑定后再派单")
+        raise ExpertError("--workspace 与岗位固定绑定不同", "没有创建或发送消息", "核对项目 members；修改绑定后再派单")
     if not any(item.get("id") == target["workspaceId"] for item in remote_workspaces(machine)):
         raise ExpertError("目标机器没有绑定的 workspace %s" % target["workspaceId"], "没有创建或发送消息", "先在目标机注册岗位 Space，再更新固定绑定")
     return target

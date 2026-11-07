@@ -337,6 +337,7 @@ pub fn schedulable_children<'a>(
 pub fn describe(entry: &AgentSpaceEntry) -> AgentSpaceInfo {
     AgentSpaceInfo {
         parent_workspace_id: entry.parent_workspace_id.clone(),
+        members: None,
         revision: entry.revision,
         lifecycle: entry.lifecycle.clone(),
         components: entry

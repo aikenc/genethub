@@ -14,9 +14,14 @@ import { buildAgentSpaceTree } from "../workspace/agent-space-tree";
 import { ListHeader, ListPane, ListScroll } from "../ui/ListLayout";
 import { relativeTime } from "../ui/relativeTime";
 import { WorkspaceDetailsDialog } from "../workspace/WorkspaceDetailsDialog";
+import { SpaceFilter } from "./SpaceFilter";
 import { MachineFilter, machineReady as fresh, machineStateLabel as stateLabel } from "./MachineFilter";
 
 const keyOf = (machine: Target, id: string) => JSON.stringify([machine.deviceHandle ?? machine.id, id]);
+interface DirectorySpace {
+  key: string; workspaceId: string; name: string; machine: string;
+  row?: MachineSummary; workspace?: WorkspaceInfo;
+}
 const latest = (s: SessionSummary) => s.messagePreview?.atMs ?? s.updatedAtMs;
 const byTime = (a: SessionSummary, b: SessionSummary) => latest(b) - latest(a) || a.id.localeCompare(b.id);
 
@@ -43,6 +48,8 @@ export function MachineDirectoryLists({ connections, endpoint, section, open, hi
   const [spaceFilters, setSpaceFilters] = useState<Record<string, string>>({});
   const [rootLimits, setRootLimits] = useState<Record<string, number>>({}), [innerLimits, setInnerLimits] = useState<Record<string, number>>({});
   const [cursors, setCursors] = useState<Record<string, string | null>>({});
+  const [reads, setReads] = useState<Record<string, {loading: boolean; error?: string}>>({});
+  const readTasks = useRef(new Map<string, Promise<void>>());
   const [refreshing, setRefreshing] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState("");
   const [managing, setManaging] = useState(false), [selection, setSelection] = useState(new Set<string>());
   const [confirming, setConfirming] = useState(false), [options, setOptions] = useState(false);
@@ -103,16 +110,35 @@ export function MachineDirectoryLists({ connections, endpoint, section, open, hi
     try { await onOpen(row.target, sessionId, workspaceId, controller.signal); }
     catch (e) { if (mounted.current && !controller.signal.aborted && generation === navigation.current) setError(e instanceof Error ? e.message : String(e)); }
   };
-  const workspacePage = async (row: MachineSummary, workspace: WorkspaceInfo, more = false) => {
-    const key = keyOf(row.target, workspace.id);
-    const page = await source.current!.workspacePage(row.target, workspace.id, more ? cursors[key] ?? null : null);
-    if (mounted.current) setCursors(old => ({ ...old, [key]: page.nextCursor }));
+  const workspacePage = (row: MachineSummary, workspace: WorkspaceInfo, more = false): Promise<void> => {
+    const key = keyOf(row.target, workspace.id), directory = source.current;
+    const existing = readTasks.current.get(key);
+    if (existing) return existing;
+    if (!directory || !fresh(row)) return Promise.resolve();
+    setReads(old => ({...old,[key]:{loading:true}}));
+    const task = (async () => {
+      try {
+        const cursor = more ? cursors[key] ?? row.projectPages?.[workspace.id]?.nextCursor ?? null : null;
+        const page = await directory.workspacePage(row.target,workspace.id,cursor);
+        if (page.error) throw new Error(page.error);
+        if (mounted.current && source.current === directory) {
+          setCursors(old => ({...old,[key]:page.nextCursor}));
+          setReads(old => ({...old,[key]:{loading:false}}));
+        }
+      } catch {
+        if (mounted.current && source.current === directory) setReads(old => ({...old,[key]:{loading:false,error:"会话读取失败，已读取的内容保留。"}}));
+      } finally { readTasks.current.delete(key); }
+    })();
+    readTasks.current.set(key,task); return task;
   };
-  const loadInternals = async (row: MachineSummary, children: WorkspaceInfo[], more = false) => {
+  const loadInternals = async (children: DirectorySpace[], more = false) => {
     let index = 0;
-    const todo = children.filter(w => !more || cursors[keyOf(row.target, w.id)]);
-    await Promise.all(Array.from({ length: Math.min(2, todo.length) }, async () => {
-      while (index < todo.length && mounted.current) await workspacePage(row, todo[index++]!, more);
+    const todo = children.filter(space => space.row && space.workspace && fresh(space.row)
+      && (!more || cursors[space.key] || space.row.projectPages?.[space.workspaceId]?.nextCursor));
+    await Promise.all(Array.from({length: Math.min(2,todo.length)},async () => {
+      while (index < todo.length && mounted.current) {
+        const space = todo[index++]!; await workspacePage(space.row!,space.workspace!,more);
+      }
     }));
   };
   const q = query.trim().toLocaleLowerCase(), narrowed = Boolean(q || filter !== "all");
@@ -121,28 +147,46 @@ export function MachineDirectoryLists({ connections, endpoint, section, open, hi
     return (Boolean(s.archived) === includeArchived || !includeArchived && hasCurrentWork(s,row.sessions)) && `${s.title} ${s.description ?? ""} ${workspace?.name ?? ""}`.toLocaleLowerCase().includes(q)
       && matchesAttention(s, filter, hasUnreadReply(row.target.deviceHandle ?? row.target.id, s), row.sessions);
   };
-  const groups = selectedSources.flatMap(row => {
+  const rowFor = (id: string) => sources.find(row => row.target.deviceHandle === id || row.target.id === id);
+  const references = new Set(sources.flatMap(row => row.workspaces.flatMap(workspace => (workspace.agentSpace?.members ?? []).flatMap(member => {
+    const owner = rowFor(member.machineId);
+    return owner ? [keyOf(owner.target,member.workspaceId)] : [];
+  }))));
+  const groups = sources.flatMap(row => {
     const tree = buildAgentSpaceTree(row.workspaces);
-    return [...tree.roots, ...tree.anomalies].map(({ workspace }) => {
-      const key = keyOf(row.target, workspace.id);
-      const children = row.workspaces.filter(w => w.id !== workspace.id && tree.projectRootById[w.id] === workspace.id);
-      const direct = row.sessions.filter(s => s.workspaceId === workspace.id && matches(row, s)).sort(byTime);
-      const inside = row.sessions.filter(s => children.some(w => w.id === s.workspaceId) && matches(row, s)).sort(byTime);
+    return [...tree.roots,...tree.anomalies].filter(({workspace}) => (!references.has(keyOf(row.target,workspace.id)) || Boolean(workspace.agentSpace?.members?.length))).map(({workspace}) => {
+      const key = keyOf(row.target,workspace.id);
+      const local: DirectorySpace[] = row.workspaces.filter(w => w.id !== workspace.id && tree.projectRootById[w.id] === workspace.id)
+        .map(w => ({key:keyOf(row.target,w.id),workspaceId:w.id,name:w.name,machine:row.target.label,row,workspace:w}));
+      const remote: DirectorySpace[] = (workspace.agentSpace?.members ?? []).map(member => {
+        const owner = rowFor(member.machineId), child = owner?.workspaces.find(w => w.id === member.workspaceId);
+        return {key:owner ? keyOf(owner.target,member.workspaceId) : JSON.stringify([member.machineId,member.workspaceId]),
+          workspaceId:member.workspaceId,name:child?.name ?? member.name ?? "Space",machine:owner?.target.label ?? "未连接的机器",row:owner,workspace:child};
+      });
+      const children = [...new Map([...local,...remote].filter(child => child.key !== key).map(child => [child.key,child])).values()];
+      const visibleChildren = children.filter(child => !machineId || child.row?.target.id === machineId);
+      const direct = (!machineId || row.target.id === machineId) ? row.sessions.filter(s => s.workspaceId === workspace.id && matches(row,s)).sort(byTime) : [];
+      const inside = visibleChildren.flatMap(child => child.row?.sessions.filter(s => s.workspaceId === child.workspaceId && matches(child.row!,s))
+        .map(session => ({row:child.row!,session})) ?? []).sort((a,b) => byTime(a.session,b.session));
       const show = !collapsed.has(key) || narrowed, internalOpen = internals.has(key) || narrowed;
       const internalFilter = narrowed ? "" : spaceFilters[key];
-      const childRows = inside.filter(s => !internalFilter || s.workspaceId === internalFilter).slice(0, innerLimits[key] ?? 10);
-      return { row, workspace, key, children, direct, inside, show, internalOpen, childRows,
-        pinned: projectPinned(row.target.deviceHandle ?? row.target.id, workspace.id, workspace.builtin === true),
-        time: Math.max(0, ...direct.map(latest), ...inside.map(latest)) };
+      const childRows = inside.filter(item => !internalFilter || keyOf(item.row.target,item.session.workspaceId) === internalFilter).slice(0,innerLimits[key] ?? 10);
+      const allSessions = [...row.sessions.filter(s => s.workspaceId === workspace.id),...children.flatMap(child => child.row?.sessions.filter(s => s.workspaceId === child.workspaceId) ?? [])];
+      return {row,workspace,key,children:visibleChildren,allChildren:children,direct,inside,show,internalOpen,childRows,allSessions,
+        partial:children.some(child => !child.workspace || child.row?.state === "partial" || child.row?.nextCursor) || row.state === "partial" || Boolean(row.nextCursor),
+        stale:!fresh(row) || children.some(child => !child.row || !fresh(child.row)),
+        machineCount:new Set([row.target.id,...children.map(child => child.row?.target.id ?? child.key)]).size,
+        pinned:projectPinned(row.target.deviceHandle ?? row.target.id,workspace.id,workspace.builtin === true),
+        time:Math.max(0,...direct.map(latest),...inside.map(item => latest(item.session))) };
     });
-  }).filter(g => section === "projects" ? `${g.workspace.name} ${g.workspace.root}`.toLocaleLowerCase().includes(q)
-      && (projectFilter === "all" || (projectFilter === "builtin" ? g.workspace.builtin : g.children.length > 0))
-    : !narrowed || g.direct.length + g.inside.length > 0)
+  }).filter(g => (!machineId || g.row.target.id === machineId || g.children.length > 0) && (section === "projects"
+    ? `${g.workspace.name} ${g.workspace.root}`.toLocaleLowerCase().includes(q) && (projectFilter === "all" || (projectFilter === "builtin" ? g.workspace.builtin : g.allChildren.length > 0))
+    : !narrowed || g.direct.length + g.inside.length > 0))
     .sort((a,b) => b.time - a.time || a.workspace.name.localeCompare(b.workspace.name));
-  const flatRows = groups.filter(g => !g.children.length).flatMap(g => g.direct.map(session => ({ row: g.row, session }))).sort((a,b) => byTime(a.session,b.session));
-  const visibleSessions = [...flatRows, ...groups.filter(g => g.children.length && g.show).flatMap(g => [
-    ...g.direct.slice(0, rootLimits[g.key] ?? 5), ...(g.internalOpen ? g.childRows : []),
-  ].map(session => ({ row: g.row, session })))];
+  const flatRows = groups.filter(g => !g.allChildren.length).flatMap(g => g.direct.map(session => ({row:g.row,session}))).sort((a,b) => byTime(a.session,b.session));
+  const visibleSessions = [...flatRows,...groups.filter(g => g.allChildren.length && g.show).flatMap(g => [
+    ...g.direct.slice(0,rootLimits[g.key] ?? 5).map(session => ({row:g.row,session})),...(g.internalOpen ? g.childRows : []),
+  ])];
   const selectable = section === "projects" ? groups.filter(g => !g.workspace.builtin && (!g.pinned || !pinnedClosed)).map(g => g.key)
     : visibleSessions.filter(({row,session}) => fresh(row) && !session.historyOnly && !session.unsupported).map(({row,session}) => keyOf(row.target, session.id));
   const chosen = new Set([...selection].filter(key => selectable.includes(key)));
@@ -151,7 +195,7 @@ export function MachineDirectoryLists({ connections, endpoint, section, open, hi
     setConfirming(false);
     let succeeded = 0;
     const failures: string[] = [];
-    for (const row of selectedSources) {
+    for (const row of sources) {
       for (const item of section === "projects" ? row.workspaces : row.sessions) {
         if (!chosen.has(keyOf(row.target, item.id))) continue;
         if (!mounted.current) return;
@@ -191,7 +235,7 @@ export function MachineDirectoryLists({ connections, endpoint, section, open, hi
           {unread && <span role="img" aria-label="有未读新回复" className="h-2 w-2 shrink-0 rounded-full bg-accent" />}
           <span className={`gh-conversation-title min-w-0 flex-1 truncate ${unread ? "font-semibold" : ""}`}>{session.title || "新会话"}</span>
           <time className="shrink-0 text-[10px] text-faint" dateTime={new Date(latest(session)).toISOString()}>{relativeTime(latest(session))}</time>
-        </span><span className="mt-1 flex min-w-0 items-center gap-2 text-xs text-muted"><span className="min-w-0 flex-1 truncate">{workspace && row.workspaces.some(w => w.agentSpace?.parentWorkspaceId === workspace.id) ? "前台" : workspace?.name ?? "Space"}{session.archived ? " · 已归档" : ""}{session.historyOnly ? " · 只读" : ""}</span>
+        </span><span className="mt-1 flex min-w-0 items-center gap-2 text-xs text-muted"><span className="min-w-0 flex-1 truncate">{workspace && (workspace.agentSpace?.members?.length || row.workspaces.some(w => w.agentSpace?.parentWorkspaceId === workspace.id)) ? "前台" : workspace?.name ?? "Space"}{session.archived ? " · 已归档" : ""}{session.historyOnly ? " · 只读" : ""}</span>
           <SessionStatusIcon session={session} sessions={row.sessions} stale={!fresh(row)} disconnected={!fresh(row)} observedAtMs={row.updatedAt ? Date.parse(row.updatedAt) : 0} />
         </span></span>
       </button>
@@ -211,31 +255,45 @@ export function MachineDirectoryLists({ connections, endpoint, section, open, hi
       }}>
         <AgentAvatar id={g.workspace.id} name={g.workspace.name} />
         <span className="min-w-0 flex-1"><span className="flex min-w-0 items-center gap-2"><span className="min-w-0 flex-1 truncate text-sm font-medium">{g.workspace.name}</span><span className="shrink-0 text-[10px] text-faint">{g.workspace.builtin ? "内置" : g.time ? relativeTime(g.time) : ""}</span></span>
-          <span className="mt-1 flex min-w-0 items-center gap-2"><SessionActivityIcons sessions={g.row.sessions.filter(s => s.workspaceId === g.workspace.id || g.children.some(w => w.id === s.workspaceId))} partial={g.row.state === "partial" || Boolean(g.row.nextCursor)} stale={!fresh(g.row)} />
-            <span className={`ml-auto min-w-0 truncate text-[11px] ${["offline","denied","timeout","unavailable","rateLimited"].includes(g.row.state) ? "text-danger" : "text-faint"}`}>{g.row.target.label}{!fresh(g.row) ? ` · ${stateLabel[g.row.state]}` : ""}</span>
+          <span className="mt-1 flex min-w-0 items-center gap-2"><SessionActivityIcons sessions={g.allSessions} partial={g.partial} stale={g.stale} />
+            <span className={`ml-auto min-w-0 truncate text-[11px] ${["offline","denied","timeout","unavailable","rateLimited"].includes(g.row.state) ? "text-danger" : "text-faint"}`}>{g.machineCount > 1 ? `${g.machineCount} 台机器` : g.row.target.label}{!fresh(g.row) ? ` · ${stateLabel[g.row.state]}` : ""}</span>
           </span>
         </span>
         {section === "sessions" && <ChevronDown size={16} className={`shrink-0 text-muted ${g.show ? "" : "-rotate-90"}`} />}
       </button>
     </div>
     {section === "sessions" && g.show && <>
-      {g.row.projectPages?.[g.workspace.id]?.error && <p role="status" className="p-2 text-xs text-muted">前台会话读取失败。<button className="ml-2 text-accent" onClick={() => void run(() => workspacePage(g.row,g.workspace))}>重试</button></p>}
+      {(reads[g.key]?.error || g.row.projectPages?.[g.workspace.id]?.error) && <p role="status" className="p-2 text-xs text-muted">前台会话读取失败。<button className="ml-2 text-accent" onClick={() => void workspacePage(g.row,g.workspace)}>重试</button></p>}
       <ul>{g.direct.slice(0, rootLimits[g.key] ?? 5).map(s => rowButton(g.row, s))}</ul>
-      {(g.direct.length > (rootLimits[g.key] ?? 5) || cursors[g.key] || g.row.projectPages?.[g.workspace.id]?.nextCursor) && <button disabled={busy} className="min-h-10 w-full text-xs text-accent" onClick={() => void run(() => moreRoot(g))}>更早前台会话</button>}
-      {!g.direct.length && fresh(g.row) && !g.row.projectPages?.[g.workspace.id]?.error && <button disabled={busy} className="min-h-11 w-full text-xs text-accent" onClick={() => onNewSession(g.row.target, g.workspace.id)}>在此项目开始会话</button>}
-      {g.children.length > 0 && <>
+      {(g.direct.length > (rootLimits[g.key] ?? 5) || cursors[g.key] || g.row.projectPages?.[g.workspace.id]?.nextCursor) && <button disabled={busy} className="min-h-10 w-full text-xs text-accent" onClick={() => void moreRoot(g)}>更早前台会话</button>}
+      {!g.direct.length && fresh(g.row) && !reads[g.key]?.error && !g.row.projectPages?.[g.workspace.id]?.error && <button disabled={busy} className="min-h-11 w-full text-xs text-accent" onClick={() => onNewSession(g.row.target, g.workspace.id)}>在此项目开始会话</button>}
+      {g.allChildren.length > 0 && <>
         <button aria-expanded={g.internalOpen} className="mt-1 flex min-h-11 w-full items-center gap-2 border-t border-line px-2 text-left text-xs text-muted" onClick={() => {
           const next = new Set(internals); next.has(g.key) ? next.delete(g.key) : next.add(g.key); setInternals(next); setSelection(new Set());
-          if (next.has(g.key) && fresh(g.row)) void run(() => loadInternals(g.row, g.children));
-        }}><ChevronDown size={16} className={`shrink-0 ${g.internalOpen ? "" : "-rotate-90"}`} /><span className="min-w-0 flex-1 truncate">团队内部 · {g.children.length} 个 Space</span><SessionActivityIcons sessions={g.inside} partial={g.row.state === "partial" || Boolean(g.row.nextCursor)} stale={!fresh(g.row)} /></button>
+          if (next.has(g.key)) void loadInternals(g.children);
+        }}><ChevronDown size={16} className={`shrink-0 ${g.internalOpen ? "" : "-rotate-90"}`} /><span className="min-w-0 flex-1 truncate">团队内部 · {g.children.length} 个 Space</span><SessionActivityIcons sessions={g.inside.map(item => item.session)} partial={g.partial} stale={g.stale} /></button>
         {g.internalOpen && <>
-          <select aria-label={`${g.workspace.name} Space 筛选`} value={spaceFilters[g.key] ?? ""} onChange={e => { const value = e.target.value; setSelection(new Set()); setSpaceFilters(old => ({...old, [g.key]: value})); if (value) void run(() => workspacePage(g.row, g.children.find(w => w.id === value)!)); }} className="my-1 min-h-10 w-full min-w-0 rounded-lg border border-line bg-surface px-2 text-xs"><option value="">全部 Space · {g.children.length}</option>{g.children.map(w => <option key={w.id} value={w.id}>{w.name} · {g.row.target.label}{!fresh(g.row) ? ` · ${stateLabel[g.row.state]}` : ""}</option>)}</select>
-          <ul>{g.childRows.map(s => rowButton(g.row,s))}</ul>
-          {!g.childRows.length && <p className="p-3 text-xs text-muted">{busy ? "正在读取内部会话…" : "没有匹配的会话"}</p>}
-          {(g.inside.length > (innerLimits[g.key] ?? 10) || g.children.some(w => cursors[keyOf(g.row.target,w.id)])) && <button disabled={busy} className="min-h-11 w-full text-xs text-accent" onClick={() => void run(async () => {
-            await loadInternals(g.row, spaceFilters[g.key] ? g.children.filter(w => w.id === spaceFilters[g.key]) : g.children, true);
-            setInnerLimits(old => ({...old, [g.key]:(old[g.key] ?? 10)+10}));
-          })}>更早内部会话</button>}
+          <SpaceFilter label={`${g.workspace.name} Space 筛选`} value={spaceFilters[g.key] ?? ""} options={g.children.map(child => ({
+            id:child.key,avatarId:child.workspaceId,name:child.name,machine:child.machine,status:!child.workspace ? "状态未知" : stateLabel[child.row!.state],
+            count:child.row?.sessions.filter(s => s.workspaceId === child.workspaceId).length ?? 0,
+            activity:<SessionActivityIcons sessions={child.row?.sessions.filter(s => s.workspaceId === child.workspaceId) ?? []} partial={Boolean(child.row?.nextCursor)} stale={!child.row || !fresh(child.row)} />,
+          }))} onChange={value => {
+            setSelection(new Set()); setSpaceFilters(old => ({...old,[g.key]:value})); setInnerLimits(old => ({...old,[g.key]:10}));
+            if (value) { const child = g.children.find(child => child.key === value); if(child?.row && child.workspace) void workspacePage(child.row,child.workspace); }
+            else void loadInternals(g.children);
+          }} />
+          {g.children.filter(child => !spaceFilters[g.key] || spaceFilters[g.key] === child.key).map(child => <div key={child.key}>
+            {reads[child.key]?.loading && <p role="status" className="px-2 py-1 text-xs text-muted">正在读取 {child.name}…</p>}
+            {reads[child.key]?.error && <p role="status" className="px-2 py-1 text-xs text-muted">{child.name} · {reads[child.key]!.error}<button className="ml-2 min-h-11 text-accent" onClick={() => {if(child.row && child.workspace) void workspacePage(child.row,child.workspace);}}>重试</button></p>}
+            {(!child.workspace || !child.row || !fresh(child.row)) && <p role="status" className="px-2 py-1 text-xs text-muted">{child.name} · {child.machine} · {child.row ? stateLabel[child.row.state] : "状态未知"}</p>}
+          </div>)}
+          <ul>{g.childRows.map(({row,session}) => rowButton(row,session))}</ul>
+          {!g.childRows.length && !g.children.some(child => reads[child.key]?.loading) && <p className="p-3 text-xs text-muted">没有匹配的会话</p>}
+          {(g.inside.length > (innerLimits[g.key] ?? 10) || g.children.some(child => cursors[child.key] || child.row?.projectPages?.[child.workspaceId]?.nextCursor)) && <button className="min-h-11 w-full text-xs text-accent" onClick={() => {
+            void loadInternals(spaceFilters[g.key] ? g.children.filter(child => child.key === spaceFilters[g.key]) : g.children,true).then(() => {
+              if(mounted.current) setInnerLimits(old => ({...old,[g.key]:(old[g.key] ?? 10)+10}));
+            });
+          }}>更早内部会话</button>}
         </>}
       </>}
     </>}
@@ -280,9 +338,9 @@ export function MachineDirectoryLists({ connections, endpoint, section, open, hi
         {groups.some(g => g.pinned) && <><button aria-expanded={!pinnedClosed} className="flex min-h-10 w-full items-center gap-1 px-2 text-xs text-muted" onClick={() => { setPinnedClosed(!pinnedClosed); setSelection(new Set()); }}><ChevronDown size={14} className={pinnedClosed ? "-rotate-90" : ""} />置顶 · {groups.filter(g => g.pinned).length}</button>{!pinnedClosed && groups.filter(g => g.pinned).map(projectRow)}</>}
         {groups.some(g => !g.pinned) && <p className="px-2 py-2 text-xs text-faint">项目</p>}{groups.filter(g => !g.pinned).map(projectRow)}
       </> : <>
-        {groups.filter(g => g.children.length).map(projectRow)}
+        {groups.filter(g => g.allChildren.length).map(projectRow)}
         <ul aria-label="最近会话">{flatRows.map(({row,session}) => rowButton(row,session))}</ul>
-        {!flatRows.length && !groups.some(g => g.children.length) && sources.some(fresh) && <p className="p-5 text-center text-sm text-muted">{narrowed || includeArchived ? "没有匹配的会话" : "从一个项目开始会话"}</p>}
+        {!flatRows.length && !groups.some(g => g.allChildren.length) && sources.some(fresh) && <p className="p-5 text-center text-sm text-muted">{narrowed || includeArchived ? "没有匹配的会话" : "从一个项目开始会话"}</p>}
       </>}
       {selectedSources.map(row => <div key={row.target.id}>
         {row.nextCursor && section === "sessions" && <button disabled={busy || !fresh(row)} className="min-h-11 w-full px-2 text-xs text-accent" onClick={() => void run(() => source.current!.loadMore(row.target))}>加载 {row.target.label} 的更早会话</button>}
