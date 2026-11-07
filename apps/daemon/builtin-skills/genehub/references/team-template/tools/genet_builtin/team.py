@@ -4529,6 +4529,11 @@ def cmd_hook(_args):
         try:
             routine(root)
         except ExpertError as error:
+            if routine is sync_identity and "SB018" in error.what:
+                # A configured publishing hook requires an explicit build.
+                # Preserve the identity and the refusal marker; this expected
+                # mode must not create anomaly work on every timer retry.
+                continue
             routines_ok = False
             report(root, name, mine, error.text())
     try:
