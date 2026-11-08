@@ -1,6 +1,7 @@
 //! Opt-in wall-time attribution for the single-threaded guest. This observes
 //! work; it neither schedules it nor adds a second state/cache authority.
-//! Enable `genet_daemon::diagnostics::work=debug` in the ordinary log filter.
+//! Slow-read reports work with the default Info log filter. Set the existing
+//! `genet_daemon::diagnostics::work=off` target to disable their observation.
 //! Only compile-time spawn locations and fixed operation names are retained.
 
 use std::cell::RefCell;
@@ -34,7 +35,7 @@ thread_local! {
 }
 
 pub fn enabled() -> bool {
-    tracing::enabled!(target: "genet_daemon::diagnostics::work", tracing::Level::DEBUG)
+    tracing::enabled!(target: "genet_daemon::diagnostics::work", tracing::Level::WARN)
 }
 
 /// Called only by the guest's daemon runtime, never by an Agent runtime.
