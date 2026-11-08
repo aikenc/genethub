@@ -53,8 +53,11 @@ def dispatch(t, root, task, operation, role, desc, goal, requester, machine=None
     op_id = 'taskop.' + identity(operation)
     path = t.state_dir(root, 'task-dispatch', op_id + '.json')
     saved = t.read_dispatch_record(path)
-    bound = t.remote_targets(root).get(role)
-    machine = saved['request'].get('machine') if saved else (t.canonical_machine(machine) if machine else (t.canonical_machine(bound['machineId']) if bound else None))
+    if saved:
+        machine = saved['request'].get('machine')
+    else:
+        route = t.role_route(root, role, machine)
+        machine = route[1]['machineId'] if route else None
     request = dict(taskId=task['taskId'], role=role, desc=desc, goal=goal, requester=requester,
                    machine=machine, directory=directory, tier=tier, model=model)
     if parameters: request['parameters'] = json_value(parameters)
@@ -247,7 +250,7 @@ def command(t, args, root=None, sender=None):
                 raise t.ExpertError('任务编号已用于不同内容或发起方', '没有重派或抢走归属', '查询原任务；独立新目标使用新编号')
             if task: runtime.verify_task(task)
             if not task:
-                resources.gate(runtime, resources.request(task_id, args.space, requested['goal'], sid, args.machine or (t.remote_targets(root).get(args.space) or {}).get('machineId'), args.directory, parameters), 'taskop.' + identity(task_id + ':owner'))
+                resources.gate(runtime, resources.request(task_id, args.space, requested['goal'], sid, args.machine or t.role_machine(root, args.space) or (t.remote_targets(root).get(args.space) or {}).get('machineId'), args.directory, parameters), 'taskop.' + identity(task_id + ':owner'))
                 task = dict(framework=runtime.identity(), version=1, taskId=task_id, request=requested, front=sid, owner=None,
                             state='active', revision=1, createdAtMs=t.now_ms(), collaborators=[])
                 t.write_json(path, task)

@@ -8,7 +8,7 @@ defineSpecialty({
   id: "specialty.daemon.team-remote-dispatch",
   title: "Fixed team targets dispatch once and hold the executor's writer lock until reconciliation",
   oracle: "Two real daemon directories communicate through a real relay: a lost successful receiver stdout recovers the same session, competing writer and changed identity are rejected, target model/media are validated before a writer lock, system notices preserve pause, an unreachable ledger entry cannot block another completion and executor lock release",
-  catches: ["same role short name routes to another team", "two callers write one directory", "lost reply creates duplicate session", "caller model leaks remotely", "remote notice lifts Human pause", "one offline task aborts reconciliation"],
+  catches: ["same role short name routes to another team", "two callers write one directory", "lost reply creates duplicate session", "caller model leaks remotely", "remote notice lifts Human pause", "one offline task aborts reconciliation", "a declared remote role is rerouted by --machine or silently runs locally", "an executor accepts a role not installed for it", "remote install needs hand-written paths or scripts"],
   stages: ["initial-result", "resumed-result", "paused-reservation", "resumed-release"],
   tags: ["core", "expert", "team-remote"], llm: { default: "mock" },
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
@@ -19,7 +19,7 @@ defineSpecialty({
   resources: { environments: 1, cpu: 2, memoryMb: 1024, io: 2, browser: 0, pool: "standard" },
 }, async t => {
   const python = process.env.GENEHUB_PYTHON!;
-  registerControlledAgent(t.env, { id: "ctl-cli-command", profile: "cli-command" });
+  const commandAgent = registerControlledAgent(t.env, { id: "ctl-cli-command", profile: "cli-command" });
   const o = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
   const relay = await startRelay({ openRoot: t.openRoot });
   const sourceData = path.join(t.env.root, "caller-data"); mkdirSync(sourceData);
@@ -116,8 +116,8 @@ sys.exit(r.returncode)
     await t.tools.waitUntil(async () => (await cliJson(["workspace","list"])).workspaces.find((w:any)=>w.folders?.[0]?.root===sourceRoot)?.agentSpace?.members?.some((m:any)=>m.workspaceId===qa.id&&m.machineId===machine), 10000);
     const members=(await cliJson(["workspace","list"])).workspaces.find((w:any)=>w.folders?.[0]?.root===sourceRoot)?.agentSpace?.members;
     t.assertions.assert(members?.length===1&&members[0].workspaceId===qa.id&&members[0].machineId===machine&&!Object.hasOwn(members[0],"command"),"build lost the exact remote reference or exposed executor commands");
-    const script = (args: string[]) => new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
-      const child = spawn(python, ["tools/team.py", ...args], { cwd: sourceRoot, env: sourceEnv, stdio: ["ignore", "pipe", "pipe"] });
+    const script = (args: string[], extra: Record<string, string> = {}) => new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+      const child = spawn(python, ["tools/team.py", ...args], { cwd: sourceRoot, env: { ...sourceEnv, ...extra }, stdio: ["ignore", "pipe", "pipe"] });
       let stdout = "", stderr = ""; child.stdout.on("data", b => stdout += b); child.stderr.on("data", b => stderr += b);
       child.on("error", reject); child.on("close", code => resolve({ code, stdout, stderr }));
     });
@@ -306,7 +306,12 @@ sys.exit(r.returncode)
       await idleSession(sid, remote);
       const item = (await inspectSession(sid, remote)).items.filter((i: any) => i.type === "assistantMessage").at(-1);
       if (!item) throw new Error("real task caller returned no reply");
-      return JSON.parse(item.text) as { code: number; out: string; err: string };
+      try { return JSON.parse(item.text) as { code: number; out: string; err: string }; }
+      catch {
+        const snap = await inspectSession(sid, remote);
+        const recent = snap.items.slice(-5).map((i: any) => `${i.type}: ${String(i.text ?? "").slice(0, 160)}`).join(" | ");
+        throw new Error(`task caller ${sid} (${remote ? "executor" : "source"}, agent ${snap.summary.agentId}) replied without a command result; recent items: ${recent}; agent journal: ${readFileSync(commandAgent.journalPath, "utf8").split("\n").filter(l => l.includes("unparsed")).slice(-2).join(" ").slice(-1500)}`);
+      }
     };
     // Keep author role definitions but remove the fake source execution Space.
     await cliJson(["workspace","remove",sourceQa.id]);
@@ -411,6 +416,72 @@ sys.exit(r.returncode)
     const afterUpgrade=JSON.parse(readFileSync(path.join(runtimeRoot,".genethub/install-receipt.json"),"utf8"));
     installed=buildArtifact();t.assertions.assert(installed.status===0&&JSON.parse(readFileSync(path.join(runtimeRoot,".genethub/install-receipt.json"),"utf8")).archiveSha256===afterUpgrade.archiveSha256,"unchanged build did not recover the same install receipt");
     t.assertions.assert((await inspectSession(installedTask.owner.sessionId,true)).summary.workspaceId===installedBinding.workspaceId,"artifact upgrade lost the native history binding");
+    // Migrate the same team to the role-level TEAM_MACHINE contract: one declaration per role,
+    // installed by `employee sync` into a platform-chosen directory, never re-routed by a flag.
+    const builder={TEAM_SPACEBUILDER:path.join(t.openRoot,"apps/daemon/builtin-skills/genehub/references/spacebuilder/spacebuilder.py")};
+    const declare=(role:string,value:string|null)=>{
+      const file=path.join(sourceRoot,"spaces",role,".genethub/open.env");
+      const lines=existsSync(file)?readFileSync(file,"utf8").split("\n").filter(l=>l&&!l.startsWith("TEAM_MACHINE=")):[];
+      if(value!==null)lines.push("TEAM_MACHINE="+value);
+      mkdirSync(path.dirname(file),{recursive:true});writeFileSync(file,lines.join("\n")+"\n");
+    };
+    const intentsBeforeDeclared=readdirSync(intentDir).sort(), pendingBeforeDeclared=readdirSync(pendingDir).sort();
+    const sourceSettings=path.join(sourceRoot,".genethub/open.env"), sourceSettingsText=readFileSync(sourceSettings,"utf8");
+    writeFileSync(sourceSettings,sourceSettingsText+"TEAM_MACHINE="+machine+"\n");
+    const teamWide=await script(["spawn","--kind","research","--space","qa","--desc","team-wide machine","Must not dispatch."]);
+    t.assertions.assert(teamWide.code!==0&&teamWide.stderr.includes("只能写在岗位"),"team-level TEAM_MACHINE was accepted: "+teamWide.stderr);
+    writeFileSync(sourceSettings,sourceSettingsText);
+    declare("qa",machine);
+    const legacyHook=await script(["employee","sync"],builder);
+    t.assertions.assert(legacyHook.code!==0&&legacyHook.stderr.includes("install_remote"),"sync ran beside the legacy install build hook: "+legacyHook.stderr);
+    const withoutHook=JSON.parse(readFileSync(sourceDescriptor,"utf8"));delete withoutHook.buildHooks;writeFileSync(sourceDescriptor,JSON.stringify(withoutHook));
+    declare("research",machine);
+    const notInstalled=await script(["spawn","--kind","research","--space","research","--desc","undeployed role","Must not run locally."]);
+    t.assertions.assert(notInstalled.code!==0&&notInstalled.stderr.includes("还没有安装"),"declared but uninstalled role did not stop dispatch: "+notInstalled.stderr);
+    declare("research",null);
+    const sourceMachine=(await cliJson(["context"])).daemon.machineId;
+    const rerouted=await script(["spawn","--kind","research","--space","qa","--machine",sourceMachine,"--desc","reroute","Must not move the role."]);
+    t.assertions.assert(rerouted.code!==0&&rerouted.stderr.includes("不能用 --machine"),"--machine moved a declared role: "+rerouted.stderr);
+    t.assertions.assert(JSON.stringify(intentsBeforeDeclared)===JSON.stringify(readdirSync(intentDir).sort())&&JSON.stringify(pendingBeforeDeclared)===JSON.stringify(readdirSync(pendingDir).sort()),"a rejected declared-role dispatch left intents or pending work");
+    let synced=await script(["employee","sync"],builder);
+    const agentSettings=synced.stderr.match(/TEAM_AGENT=<agent id> to (\/\S+?open\.env)/)?.[1];
+    if(synced.code!==0&&agentSettings){mkdirSync(path.dirname(agentSettings),{recursive:true});writeFileSync(agentSettings,"TEAM_AGENT=ctl-cli-command\n");synced=await script(["employee","sync"],builder);}
+    t.assertions.assert(synced.code===0,"employee sync did not install the declared role: "+synced.stdout+synced.stderr);
+    const syncReport=JSON.parse(synced.stdout.trim().split("\n").at(-1)!);
+    const declaredBinding=JSON.parse(readFileSync(sourceDescriptor,"utf8")).members.find((m:any)=>m.name==="qa");
+    const declaredRuntime=path.dirname(path.dirname(declaredBinding.command[1]));
+    t.assertions.assert(syncReport.installed.length===1&&syncReport.installed[0].roles.join()==="qa"&&declaredBinding.machineId===machine&&declaredBinding.workspaceId===syncReport.installed[0].workspaces.qa,"sync did not write exactly the declared binding");
+    t.assertions.assert(declaredRuntime.startsWith(path.join(t.env.home,".genehub-teams","team."))&&declaredRuntime!==runtimeRoot,"runtime directory was not chosen by the platform: "+declaredRuntime);
+    writeFileSync(path.join(declaredRuntime,".genethub/open.env"),"TEAM_AGENT=ctl-cli-command\nTEAM_BOARD_PORT=0\nTEAM_WAKE_ROUNDS=9999\n");
+    const declaredReceipt=JSON.parse(readFileSync(path.join(declaredRuntime,".genethub/install-receipt.json"),"utf8"));
+    const installedRoleSettings=path.join(declaredRuntime,"spaces/qa/.genethub/open.env");
+    t.assertions.assert(declaredReceipt.members.map((m:any)=>m.name).join()==="qa"&&(!existsSync(installedRoleSettings)||!readFileSync(installedRoleSettings,"utf8").includes("TEAM_MACHINE")),"installed copy carries the source's machine declaration or extra roles");
+    const listedRoles=await script(["employee","ls"]);
+    t.assertions.assert(listedRoles.code===0&&/- qa \[.*机器: .*已安装/.test(listedRoles.stdout),"employee ls hides the role's machine: "+listedRoles.stdout);
+    // The executor accepts only roles installed for it, even if someone registers another role by hand.
+    const intruder=(await cliJson(["space","open",path.join(declaredRuntime,"spaces/research")],true));
+    const intruderId=(intruder.workspace??intruder).id;
+    const foreign=spawnSync(python,[path.join(declaredRuntime,"tools/team.py"),"receive",JSON.stringify({id:"uninstalled-role",workspaceId:intruderId,role:"research"})],{env:{...o.daemon.env,GENEHUB_CLI:o.daemon.genet},encoding:"utf8"});
+    const foreignError=(()=>{try{return JSON.parse(foreign.stdout.trim().split("\n").at(-1)!).error?.what??"";}catch{return "";}})();
+    t.assertions.assert(foreign.status!==0&&foreignError.includes("没有安装到这台机器"),"executor accepted a role that was not installed for it: "+foreign.stdout+foreign.stderr);
+    await cliJson(["workspace","remove",intruderId],true);
+    const declaredStart=await callTask(callerSid,sourceRoot,["task","start","--space","qa","--request-id","declared.owner","--desc","declared owner","Complete one task on the declared machine"]);
+    t.assertions.assert(declaredStart.code===0,"declared role did not auto-route without --machine: "+declaredStart.err);
+    const declaredTask=JSON.parse(declaredStart.out.trim().split("\n").at(-1)!);
+    await t.tools.waitUntil(async()=>{
+      const snap=await inspectSession(declaredTask.owner.sessionId,true);
+      return snap.summary.coordination?.taskId===declaredTask.taskId&&snap.summary.status==="idle"&&!snap.summary.inputSummary?.pendingMessageIds.length&&snap.items.some((i:any)=>i.type==="assistantMessage");
+    },30000);
+    t.assertions.assert((await inspectSession(declaredTask.owner.sessionId,true)).summary.workspaceId===declaredBinding.workspaceId,"declared role ran outside its installed workspace");
+    const declaredFinish=await callTask(declaredTask.owner.sessionId,declaredRuntime,["task","finish",declaredTask.taskId,"--outcome","success","DECLARED_MACHINE_OWNER_COMPLETE"],true);
+    t.assertions.assert(declaredFinish.code===0,"declared Owner could not return: "+declaredFinish.err);
+    await t.tools.waitUntil(async()=>{const tick=await script(["hook"]);if(tick.code!==0)throw Error(tick.stderr);return JSON.parse(readFileSync(path.join(sourceRoot,".genethub/team/tasks",declaredTask.taskId+".json"),"utf8")).state==="delivered";},30000);
+    // Removing the declaration brings the role home; the old registration is reported, not silently orphaned.
+    declare("qa",null);
+    const home=await script(["employee","sync"],builder);
+    t.assertions.assert(home.code===0,"sync could not bring the role back: "+home.stderr);
+    const homeReport=JSON.parse(home.stdout.trim().split("\n").at(-1)!);
+    t.assertions.assert(!(JSON.parse(readFileSync(sourceDescriptor,"utf8")).members??[]).some((m:any)=>m.name==="qa")&&homeReport.local.includes("qa")&&homeReport.retained.some((r:any)=>r.role==="qa"&&r.workspaceId===declaredBinding.workspaceId),"undeclared role kept a remote binding or lost the retained registration report: "+home.stdout);
     t.note("real relay + two daemon state directories; one successful stdout lost and recovered; writer/identity/model/pause/reconcile/unknown-create contracts verified");
   } finally {
     sourceClient?.close();

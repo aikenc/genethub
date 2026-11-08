@@ -397,6 +397,58 @@ def remote_target(root, machine, role, explicit=None):
     return dict(target, machineId=canonical_machine(target["machineId"]))
 
 
+def machine_entry(selector):
+    """(canonical id, is this machine) for one exact `machine list` selector."""
+    entry = genet("machine", "show", selector)
+    own = entry.get("deviceHandle") or entry["machineId"]
+    here = (genet("context").get("daemon") or {}).get("machineId")
+    return own, entry.get("local") is True or here in (entry.get("machineId"), entry.get("deviceHandle"))
+
+
+def role_machine(root, role):
+    """The machine a role belongs to: `TEAM_MACHINE` in that role's own open.env, nothing else."""
+    if open_env(root).get("TEAM_MACHINE") is not None:
+        raise ExpertError("TEAM_MACHINE 只能写在岗位自己的 spaces/<岗位>/.genethub/open.env", "没有派单",
+                          "从团队根 .genethub/open.env 删除 TEAM_MACHINE，改到需要放到其他机器的岗位里")
+    if not role or role in ("root", "front", "default") or role not in child_role_names(root):
+        return None
+    value = open_env(os.path.join(root, "spaces", role)).get("TEAM_MACHINE")
+    if value == "":
+        raise ExpertError("岗位 %s 的 TEAM_MACHINE 为空" % role, "没有派单", "填写 machine list 返回的精确 ID；在本机运行就删除这一行")
+    return value
+
+
+def role_route(root, role, requested=None, workspace=None):
+    """(machine, binding) when a role executes elsewhere, None when it executes here.
+
+    A declared role has exactly one machine: dispatch follows it and `--machine` cannot move it.
+    Roles without a declaration keep a legacy members/remote-targets binding only when one is named."""
+    declared = role_machine(root, role)
+    if declared is None:
+        if requested is None:
+            legacy = remote_targets(root).get(role)
+            if not isinstance(legacy, dict) or not legacy.get("machineId"):
+                return None
+            requested = legacy["machineId"]
+        print("提示：岗位 %s 使用旧的远端绑定；在 spaces/%s/.genethub/open.env 写 TEAM_MACHINE 后运行 employee sync 迁移" % (role, role), file=sys.stderr)
+        binding = remote_target(root, requested, role, workspace)
+        return binding["machineId"], binding
+    own, here = machine_entry(declared)
+    if requested is not None and canonical_machine(requested) != own:
+        raise ExpertError("岗位 %s 属于机器 %s，不能用 --machine %s 改派" % (role, declared, requested), "没有创建或发送消息",
+                          "去掉 --machine；要换机器就改岗位的 TEAM_MACHINE 后运行 employee sync")
+    if here:
+        if workspace is not None:
+            raise ExpertError("岗位 %s 在本机执行，不接受 --workspace" % role, "没有创建或发送消息", "去掉 --workspace")
+        return None
+    target = remote_targets(root).get(role)
+    if not isinstance(target, dict) or not target.get("machineId") or canonical_machine(target["machineId"]) != own:
+        raise ExpertError("岗位 %s 声明在机器 %s，但还没有安装到那台机器" % (role, declared), "没有创建或发送消息",
+                          "在定义源运行 `run.py employee sync`，安装完成后重试原命令")
+    binding = remote_target(root, declared, role, workspace)
+    return binding["machineId"], binding
+
+
 def remote_receive(target, request):
     """Run the installed executor through the real shell stream, without a command shell."""
     cli, env = _resolve_genet_env()
@@ -488,6 +540,12 @@ def _cmd_receive(args):
             or role not in child_role_names(root)
             or workspace_root(entry) != os.path.realpath(os.path.join(root, "spaces", role))):
         raise ExpertError("workspace 不属于此接单命令的指定岗位", "没有创建或发送会话", "核对目标机 team.py 路径、岗位与 workspaceId")
+    installed = read_dispatch_record(os.path.join(root, ".genethub", "install-receipt.json"))
+    if installed and not source_operation:
+        bound = {item.get("name") for item in (installed.get("members") or [installed.get("member") or {}])}
+        if role not in bound:
+            raise ExpertError("岗位 %s 没有安装到这台机器" % role, "没有创建或发送会话",
+                              "在定义源把该岗位的 TEAM_MACHINE 指向本机后运行 `run.py employee sync`")
     role_root = workspace_root(entry)
     if request.get("operation") == "coordination":
         snapshot = request.get("snapshot")
@@ -743,11 +801,12 @@ def machine_args(machine):
     return ["--machine", machine] if machine else []
 
 
-def dispatch_machine(args):
+def dispatch_machine(args, routed=False):
+    """`routed` callers resolve the role's own machine first and check remote-only options themselves."""
     machine = getattr(args, "machine", None)
     if machine == "":
         raise ExpertError("--machine 不能为空", "没有执行操作", "从 machine list 取得精确 ID；本机派单移除 --machine")
-    if machine is None and any(getattr(args, key, None) is not None for key in ("workspace", "request_id")):
+    if machine is None and not routed and any(getattr(args, key, None) is not None for key in ("workspace", "request_id")):
         raise ExpertError("--workspace/--request-id 仅用于 --machine 派单", "没有执行操作", "本机派单用 --space 选择岗位；移除无效的远端选项")
     request_id = getattr(args, "request_id", None)
     if request_id is not None and (not isinstance(request_id, str) or not request_id or len(request_id) > 200):
@@ -1372,7 +1431,10 @@ def resolve_send_target(root, target_spec, kind, text, sender, machine=None, wor
                 "没有排入任何消息",
                 "用 `--machine <id> --to <岗位名>`（如 qa、leader）或 `--to s_xxx`；远端不注册团队根和前台",
             )
-        target = remote_target(root, machine, role, workspace)
+        route = role_route(root, role, machine, workspace)
+        if not route:
+            raise ExpertError("岗位 %s 在本机执行" % role, "没有排入任何消息", "去掉 --machine，按本机岗位发送")
+        machine, target = route
         existing = []
         for item in live_sessions(target["workspaceId"], machine):
             record = read_dispatch_record(state_dir(root, "pending", item["id"] + ".json")) or {}
@@ -1553,6 +1615,10 @@ def cmd_send(args):
         return send_explicit_resume(root, args, sender, machine)
     if getattr(args, "message_id", None):
         raise ExpertError("--message-id 仅用于明确恢复", "没有忽略指定操作 ID 后另行投递", "普通 send 使用团队自带的稳定投递身份")
+    own_role = "leader" if args.to == "work" else args.to
+    if not SESSION_ID.match(args.to) and own_role in child_role_names(root) and role_machine(root, own_role) is not None:
+        route = role_route(root, own_role, machine, getattr(args, "workspace", None))
+        machine = route[0] if route else None
     body_text = " ".join(args.text)
     target, created_now, target_root, target_role = resolve_send_target(
         root, args.to, args.kind, body_text, sender, machine, getattr(args, "workspace", None)
@@ -1719,18 +1785,25 @@ def _cut_worker_sub_worktree(target_root, role, base_repo_hint, desc, explicit_s
 
 def cmd_spawn(args):
     root = find_root()
-    machine = dispatch_machine(args)
+    machine = dispatch_machine(args, routed=True)
     if machine and getattr(args, "expert", None):
         raise ExpertError("--machine 只能派给本团队在其它机器上的岗位", "没有创建会话", "先在本机定位到该团队再派单，或去掉 --team")
     target_root = find_expert(root, getattr(args, "expert", None)) if getattr(args, "expert", None) else root
     name, mine = me(target_root)
     role = getattr(args, "space", None) or args.kind
+    if role == "work" and not getattr(args, "space", None) and "work" not in child_role_names(target_root):
+        role = "leader"
+    declared = machine or role_machine(target_root, role) is not None
+    route = role_route(target_root, role, machine, getattr(args, "workspace", None)) if declared else None
+    machine = route[0] if route else None
+    if not machine and any(getattr(args, key, None) is not None for key in ("workspace", "request_id")):
+        raise ExpertError("--workspace/--request-id 仅用于其他机器上的岗位", "没有执行操作", "本机岗位直接用 --space 派单；移除远端选项")
+    if machine and getattr(args, "expert", None):
+        raise ExpertError("其他团队的远端岗位不能从这里派单", "没有创建会话", "在该团队的定义源里派单")
     if machine and (getattr(args, "worktree", None) or args.dir):
-        raise ExpertError("--machine 不支持 --worktree/--dir", "没有创建会话", "远端岗位用它自己的 WORKTREE_DIR；需要隔离目录时在那个岗位的会话里再 spawn")
+        raise ExpertError("其他机器上的岗位不支持 --worktree/--dir", "没有创建会话", "远端岗位用它自己的 WORKTREE_DIR；需要隔离目录时在那个岗位的会话里再 spawn")
     if machine:
-        if role == "work" and not getattr(args, "space", None):
-            role = "leader"
-        remote_binding = remote_target(root, machine, role, getattr(args, "workspace", None))
+        remote_binding = route[1]
         workspace_id = remote_binding["workspaceId"]
     else:
         workspace_id = mine["spaces"].get(role)
@@ -2264,6 +2337,7 @@ def cmd_employee(args):
             print("（还没有子空间岗位）")
             return
         by_workspace = session_snapshot_by_workspace() if any(spaces_map.get(role) for role in roles) else {}
+        bindings = remote_targets(root)
         for r in roles:
             rdir = os.path.join(root, "spaces", r)
             info = descriptor(rdir) or {}
@@ -2272,7 +2346,29 @@ def cmd_employee(args):
             wid = spaces_map.get(r, "")
             live = by_workspace.get(wid, []) if wid else []
             state_tag = "active(在岗)" if active else "standby(待岗)"
-            print("- %s [%s]: %s | 工位: %s | 活跃会话: %d" % (r, state_tag, info.get("description") or "-", wt or "未绑定", len(live)))
+            declared = role_machine(root, r)
+            installed = (bindings.get(r) or {}).get("machineId")
+            if declared:
+                try:
+                    own, here = machine_entry(declared)
+                except ExpertError:
+                    where = "%s（目标机器不在 machine list 中）" % declared
+                else:
+                    where = "本机" if here else "%s（%s）" % (declared, "已安装" if installed == own else "未安装，运行 employee sync")
+            else:
+                where = "本机" if not installed else "%s（旧绑定，写 TEAM_MACHINE 后 employee sync 迁移）" % installed
+            print("- %s [%s]: %s | 机器: %s | 工位: %s | 活跃会话: %d" % (r, state_tag, info.get("description") or "-", where, wt or "未绑定", len(live)))
+        return
+    if subcmd == "sync":
+        require_definition_source(root)
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("install_remote", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "install_remote.py"))
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        try:
+            installer.sync(root)
+        except RuntimeError as error:
+            raise ExpertError("岗位安装没有完成: %s" % str(error)[-600:], "已安装的旧版本与原绑定保留", "按提示补齐目标机配置后重新运行 employee sync") from error
         return
     if subcmd in ("retire", "standby"):
         role = (args.name or "").strip()
@@ -2281,7 +2377,7 @@ def cmd_employee(args):
         print("已将岗位 spaces/%s 解除工位绑定转入待岗（原工位: %s）" % (role, old_wt or "无"))
         return
     if subcmd != "add":
-        raise ExpertError("未知 employee 子命令", "没有改动", "用 `team.py employee add|ls|retire`")
+        raise ExpertError("未知 employee 子命令", "没有改动", "用 `team.py employee add|ls|sync|retire`")
     require_definition_source(root)
     role = (args.name or "").strip()
     if not role or "/" in role or "\\" in role or role.startswith("."):
@@ -4675,6 +4771,7 @@ def main(argv):
         emp_add.add_argument("--branch", help="optional branch name when cutting worktree from --repo")
         emp_add.add_argument("--no-worktree", action="store_true", help="do not auto-cut a worktree slot")
         emp_sub.add_parser("ls")
+        emp_sub.add_parser("sync", help="install every role whose open.env declares TEAM_MACHINE on that machine")
         for ret_name in ("retire", "standby"):
             emp_ret = emp_sub.add_parser(ret_name)
             emp_ret.add_argument("name")

@@ -328,6 +328,8 @@ class FixtureSession(Session):
                             request = json.loads(messages[0])
                     except (ValueError, TypeError):
                         pass
+            if not isinstance(request, dict):
+                journal("cli-command-unparsed", head=text[:800])
             if isinstance(request, dict) and isinstance(request.get("argv"), list) and request["argv"] and all(isinstance(arg, str) for arg in request["argv"]):
                 extra = self.ctx.config.session_environment()
                 child = await sdk_process.spawn(

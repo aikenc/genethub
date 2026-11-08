@@ -9,7 +9,7 @@ description: 机器管理员：向用户介绍项目团队，当用户只说项�
 
 先落实用户已经指定的机器、源仓位置和成本约束，再采用下文的本机默认流程。用户要求“团队源仓只在服务器、远端只收岗位制品”时，当前管理员所在机器不自动成为源机：按 `genehub` 的 `references/multi-machine.md` 核实源机与 workspace，在源机查重、初始化/clone、维护与构建团队定义。不能先在当前机器建完整团队，再把源仓位置写成“以后迁移”。源机没有某个模型时，核实其它已授权低成本 Agent，或通过源机的 remote shell 完成构建；不能因此悄悄更换源机。
 
-远端岗位沿用原 build：唯一定义源先普通 build 更新本机规则，再 build --output 经 post 分发；配置与迁移按 team-core 的 references/remote-targets.md，使用随附安装工具，不另写 deploy／pack。先核对目标机 Agent／模型和业务工位，不复制源机绝对路径或暗中升档。脚本负责传输校验、真实 workspace 登记、members 和回传配置；远端只留运行产物、tools、本机配置与任务数据，不 clone 作者源、不 build。不同 Team 分开运行目录，冲突或在途任务先收尾，不删锁重派；旧源码副本保留历史，验证新产物真实接单回传后停用旧登记。
+远端岗位只由岗位自己 `.genethub/open.env` 的 `TEAM_MACHINE` 决定，在唯一定义源运行 `run.py employee sync` 安装；配置与迁移按 team-core 的 references/remote-targets.md，不手写 members、目标路径或 deploy／pack／install 脚本。先核对目标机 Agent／模型和业务工位，不复制源机绝对路径或暗中升档。脚本负责传输校验、真实 workspace 登记、members 和回传配置；远端只留运行产物、tools、本机配置与任务数据，不 clone 作者源、不 build。不同 Team 分开运行目录，冲突或在途任务先收尾，不删锁重派；旧源码副本保留历史，验证新产物真实接单回传后停用旧登记。
 
 用户限制模型成本时，同时核对前台、组长、worker、QA、反思与其它自动会话的实际路由和覆盖配置；档位标签不等于成本档。后台触发没有当前请求方可继承的上下文，不能只验证当前管理员或前台模型。缺少符合成本约束的路由时保留待办并解释，不自动升档。
 

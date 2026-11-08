@@ -84,4 +84,4 @@ class ProjectResources(ResourcePolicy):
 
 兼容平台升级只替换 genet_builtin 包/Skill和薄入口，保留业务源码、配置、身份及数据。首次升级提取旧版内部修改成本可高；后续依赖稳定公开方法而不是拷贝内部代码。破坏公开签名、语义、持久绑定或准备/释放含义时必须升 API/binding 版本并给迁移说明；不能保证任意 monkey patch 都自动兼容。采用新的 Class/settings 前必须结算或显式迁移在途任务。部署时验证完整制品及后台进程采用；回退保留能读新账本的收尾路径。
 
-远端运行副本由定义源原 build 的 post 安装完整产物，参见 [远端岗位](remote-targets.md)。目标机只改本机配置与业务数据，身份／Skill／策略类回定义源维护；在途任务保留原制品收尾。新任务使用 task，脚本自动使用 members 和原返回回执。
+远端运行副本由定义源 `run.py employee sync` 按岗位的 `TEAM_MACHINE` 安装完整产物，参见 [远端岗位](remote-targets.md)。目标机只改本机配置与业务数据，身份／Skill／策略类回定义源维护；在途任务保留原制品收尾。新任务使用 task，脚本自动使用 members 和原返回回执。

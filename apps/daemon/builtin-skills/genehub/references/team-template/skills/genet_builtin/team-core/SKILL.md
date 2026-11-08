@@ -17,7 +17,7 @@ description: 按任务选择 Owner 的团队公共约定：前台、专业执行
 | `board start\|refresh` / `directory` / `models check` / `temp new\|ls\|rm\|clean` | 启动/刷新常驻团队看板服务 `datas/board/index.html` / 看当前任务目录 / 管临时区 |
 | `note --kind unhappy\|preference\|external\|observation --quote "原话"` / `reflect now "要求"` | 给 `team-reflect` 留言 / 立即启动团队反思；`snapshot` / `drift` 管理团队仓库与模板差异；`reset` 只在用户明确要求时用 |
 失败时命令会说明：出了什么、现在状态、下一步。细则见 `datas/README.md`、`temp/README.md`；点名模型勿套档位，详见 `references/models.md`。
-日常按岗位使用 task 即可，机器与返回来源由原回执固定。维护远端绑定或恢复旧派单时再读 [references/remote-targets.md](references/remote-targets.md)；`spawn/send` 仅用于已存在的旧派单。
+日常按岗位使用 task 即可，机器与返回来源由原回执固定。岗位要放到另一台机器时，只在该岗位 `.genethub/open.env` 写 `TEAM_MACHINE=<机器 ID>` 再运行 `run.py employee sync`，不写安装脚本；细节或恢复旧派单时读 [references/remote-targets.md](references/remote-targets.md)；`spawn/send` 仅用于已存在的旧派单。
 暂停会话的显式恢复、署名、去重与验收，先读 [references/resume-paused.md](references/resume-paused.md)。
 自动身份刷新不执行 Space pre/post 或 Provider post；有此类配置时，定时任务保留上一版生成身份，不因此唤起异常反思，手工 `sync-identity` 返回 `SB018`。
 修改源后显式 build 更新身份；发布 hook 由源 Space 的显式构建执行，不能靠反复刷新身份来运行。
