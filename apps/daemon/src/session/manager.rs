@@ -10496,11 +10496,14 @@ mod tests {
         assert!(restarted.list(None, false).await.unwrap().is_empty());
         assert!(residual.exists(), "cleanup raced the legacy writer");
         drop(legacy);
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        // Cleanup retries on the shared catalog's five-second reconciliation,
+        // not every presentation read. Allow two cycles while requiring the
+        // logically deleted row to stay hidden throughout the deferred reap.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
         while residual.exists() && tokio::time::Instant::now() < deadline {
-            restarted.list(None, false).await.unwrap();
+            assert!(restarted.list(None, false).await.unwrap().is_empty());
             if residual.exists() {
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
         }
         assert!(
