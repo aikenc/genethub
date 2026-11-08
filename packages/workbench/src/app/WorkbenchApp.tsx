@@ -650,9 +650,10 @@ export function App({
     if (
       !pendingJumpSession ||
       (pendingJumpFrom !== null && workbench.client === pendingJumpFrom) ||
-      workbench.connection !== "ready" ||
-      !workbench.sessionsLoaded
+      workbench.connection !== "ready"
     ) return;
+    // The full session ID is already known. selectSession reads its metadata
+    // and body directly; unrelated directory hydration must not block it.
     const sessionId = pendingJumpSession;
     setPendingJumpSession(null);
     setPendingJumpFrom(null);

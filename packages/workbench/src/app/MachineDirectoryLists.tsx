@@ -221,11 +221,15 @@ export function MachineDirectoryLists({ connections, directory:sharedDirectory, 
     }
   });
   const rowButton = (row: MachineSummary, session: SessionSummary) => {
+    // A cached directory is a locator, not authorization: onOpen obtains a
+    // fresh authenticated connection before it can read the selected body.
+    const canOpen = fresh(row) || Boolean(row.cached) && row.target.online !== false
+      && row.state !== "denied" && row.state !== "offline";
     const workspace = row.workspaces.find(w => w.id === session.workspaceId), key = keyOf(row.target, session.id);
     const unread = hasUnreadReply(row.target.deviceHandle ?? row.target.id, session);
     return <li key={key} className="conversation-row flex min-w-0 items-center gap-1">
       {managing && <input aria-label={`选择会话 ${session.title}`} type="checkbox" className="m-2 h-5 w-5 shrink-0" disabled={!fresh(row) || Boolean(session.historyOnly || session.unsupported)} checked={chosen.has(key)} onChange={() => toggle(key)} />}
-      <button type="button" disabled={busy || !fresh(row) || Boolean(session.unsupported)} aria-current={row.target.deviceHandle === client?.identity?.machineId && activeId === session.id ? "page" : undefined}
+      <button type="button" disabled={busy || !(managing ? fresh(row) : canOpen) || Boolean(session.unsupported)} aria-current={row.target.deviceHandle === client?.identity?.machineId && activeId === session.id ? "page" : undefined}
         className="flex min-h-14 min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-2 text-left hover:bg-raised aria-[current=page]:bg-raised disabled:opacity-60" onClick={() => managing ? toggle(key) : void navigate(row, session.id)}>
         <AgentAvatar id={session.workspaceId} name={workspace?.name ?? "Space"} size="medium" />
         <span className="min-w-0 flex-1"><span className="flex min-w-0 items-center gap-1.5">
