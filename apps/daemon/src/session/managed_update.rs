@@ -51,7 +51,13 @@ impl SessionManager {
         let Ok(path) = records::session_file(&state.paths.root, session_id) else {
             return false;
         };
-        let Ok(mut c) = records::read::<Continuation>(&path) else {
+        let continuation = {
+            let _work = crate::diagnostics::work::FileScope::new(
+                crate::diagnostics::work::FileWork::UpdateContinuation,
+            );
+            records::read::<Continuation>(&path)
+        };
+        let Ok(mut c) = continuation else {
             return false;
         };
         if c.state != "waiting" {

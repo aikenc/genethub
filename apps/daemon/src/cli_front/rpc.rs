@@ -189,11 +189,29 @@ impl Rpc {
             Inner::Local(local) => {
                 let state = local.state.clone();
                 let principal = super::caller_principal();
+                let observe = crate::diagnostics::work::enabled();
+                let started = observe.then(std::time::Instant::now);
+                let operation = match &request {
+                    Request::WorkspaceList => "workspace.list",
+                    Request::SessionList { .. } => "session.list",
+                    Request::SessionPage { .. } => "session.page",
+                    _ => "other",
+                };
                 let handled = tokio::spawn(async move {
                     router::handle(&state, TransportKind::Loopback, &principal, request).await
                 })
                 .await
                 .map_err(|error| RpcError::Transport(format!("rpc task failed: {error}")))?;
+                if let Some(elapsed) = started.map(|started| started.elapsed()) {
+                    if elapsed.as_secs() >= 1 {
+                        tracing::warn!(
+                            event = "cli_rpc_slow",
+                            operation,
+                            elapsed_ms = elapsed.as_millis() as u64,
+                            "local CLI request exceeded one second"
+                        );
+                    }
+                }
                 if let SideEffect::Subscribe {
                     session_id,
                     receiver,

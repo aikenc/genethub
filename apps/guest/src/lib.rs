@@ -22,7 +22,7 @@ impl Guest for GenehubGuest {
     /// component file it was loaded from changes on disk (a dev rebuild, an
     /// installer's replace).
     fn run() -> Result<String, String> {
-        runtime()?
+        runtime(true)?
             .block_on(genet_daemon::run::run())
             .map(|exit| match exit {
                 genet_daemon::run::Exit::Shutdown => "shutdown".to_string(),
@@ -33,7 +33,7 @@ impl Guest for GenehubGuest {
 
     /// One agent process: JSONL over stdio, exit code as the return value.
     fn agent_run() -> Result<u32, String> {
-        Ok(runtime()?.block_on(genet_agent::run()) as u32)
+        Ok(runtime(false)?.block_on(genet_agent::run()) as u32)
     }
 }
 
@@ -41,9 +41,17 @@ genet_wasi::wit::export!(GenehubGuest);
 
 /// Both entries are `current_thread`: the instance runs on one fiber, and the
 /// guest code was written against exactly that.
-fn runtime() -> Result<tokio::runtime::Runtime, String> {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
+fn runtime(observe_daemon: bool) -> Result<tokio::runtime::Runtime, String> {
+    let mut builder = tokio::runtime::Builder::new_current_thread();
+    builder.enable_all();
+    if observe_daemon {
+        builder
+            .on_before_task_poll(|meta| {
+                genet_daemon::diagnostics::work::before_poll(meta.spawned_at())
+            })
+            .on_after_task_poll(|_| genet_daemon::diagnostics::work::after_poll());
+    }
+    builder
         .build()
         .map_err(|error| format!("guest runtime: {error}"))
 }

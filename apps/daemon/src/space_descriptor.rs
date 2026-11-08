@@ -39,6 +39,9 @@ pub struct Descriptor {
 /// The descriptor in `dir`: `Ok(None)` when there is none, `Err` with what to
 /// fix when there is one that cannot be used.
 pub fn read(dir: &Path) -> Result<Option<Descriptor>, String> {
+    let _work = crate::diagnostics::work::FileScope::new(
+        crate::diagnostics::work::FileWork::SpaceDescriptor,
+    );
     let path = dir.join(FILE);
     let meta = match std::fs::symlink_metadata(&path) {
         Ok(meta) => meta,
