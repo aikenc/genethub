@@ -5,9 +5,9 @@ import { defineSpecialty, parseJson, runGenetAsync } from "../../framework/publi
 
 defineSpecialty({
   id: "specialty.daemon.team-overview",
-  title: "A 35-role Team refreshes status and counts progress without per-role queries",
-  oracle: "Public board refresh retains real native membership; public hook counts a business round but excludes reflection. Each overview uses one validated lean snapshot regardless of 35 roles; malformed responses preserve the prior status rather than publish emptiness.",
-  catches: ["board refresh queries every role", "progress scans query empty roles", "reflection counts as business progress", "malformed overview erases last good status"],
+  title: "A 35-role Team separates current work from bounded scoped progress history",
+  oracle: "One active snapshot retains all 35 native roles without expanding the two completed Agent conversations; progress uses explicitly bounded Team Space pages, counts one business round and excludes reflection; malformed responses preserve the prior status.",
+  catches: ["board refresh queries every role", "progress uses unbounded machine-wide history", "reflection counts as business progress", "malformed overview erases last good status"],
   tags: ["core", "expert", "performance"], llm: { default: "mock" },
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
   requirements: [{ kind: "python", env: "GENEHUB_PYTHON", minVersion: [3, 7], modules: [] }],
@@ -78,18 +78,26 @@ sys.stdout.write(out);sys.stderr.write(r.stderr);sys.exit(r.returncode)
     const board = command("board", "refresh");
     t.assertions.assert(board.status === 0, board.stderr);
     const status = join(root, ".pm/trunk/status-live.md"), before = readFileSync(status, "utf8");
-    t.assertions.assert(before.includes(business) && before.includes(reflection) && before.includes("work31"), "Native membership was lost from the 35-role overview");
+    const roles = ["root", "leader", "reflect", ...Array.from({ length: 32 }, (_, n) => `work${n}`)];
+    t.assertions.assert(roles.every(role => before.includes(`**${role}**`)), "Native membership was lost from the 35-role overview");
+    t.assertions.assert(!before.includes(business) && !before.includes(reflection), "Current-work overview expanded completed history");
     let queries = listQueries();
-    t.assertions.assert(queries.length === 1 && queries[0]!.includes("--lean"), `Board query amplification: ${JSON.stringify(queries)}`);
+    t.assertions.assert(queries.length === 1 && queries[0]!.includes("--lean") && queries[0]!.includes("--active"), `Board query amplification: ${JSON.stringify(queries)}`);
+    const modelRequestsBeforeHook = o.mock.requests.length;
     const hook = command("hook"); t.assertions.assert(hook.status === 0, hook.stderr);
     const progress = JSON.parse(readFileSync(join(root, ".genethub/team/reflect.json"), "utf8"));
     t.assertions.assert(progress.seen.rounds === 1, `Reflection counted as business progress: ${JSON.stringify(progress.seen)}`);
     queries = listQueries();
-    t.assertions.assert(queries.filter(a => a.includes("--lean")).length === 1 && queries.length <= 3, `Hook progress query amplification: ${JSON.stringify(queries)}`);
-    t.assertions.assert(o.mock.requests.length === 2, "Hook unexpectedly started automatic model work");
+    const scopes = new Set(spaces.filter((w: any) => w.root === root || w.root.startsWith(join(root, "spaces") + "/")).map((w: any) => w.id));
+    const history = queries.filter(a => !a.includes("--active"));
+    t.assertions.assert(queries.filter(a => a.includes("--active")).length <= 1 && queries.length <= scopes.size + 1
+      && history.every(a => scopes.has(a[a.indexOf("--workspace") + 1]) && a.includes("--limit")
+        && Number(a[a.indexOf("--limit") + 1]) > 0 && Number(a[a.indexOf("--limit") + 1]) <= 500),
+      `Hook used unbounded or unrelated history: ${JSON.stringify(queries)}`);
+    t.assertions.assert(o.mock.requests.length === modelRequestsBeforeHook, "Hook unexpectedly started automatic model work");
     writeFileSync(mode, "missing-sessions");
     command("board", "refresh");
     t.assertions.assert(readFileSync(status, "utf8") === before, "Malformed snapshot replaced last good status with partial or empty data");
-    t.note("Real35-role board and native hook use one lean snapshot, preserve membership/progress and last-good status; original pause/reconcile safety remains independently covered.");
+    t.note(JSON.stringify({ roles: scopes.size, activeBoardQueries: 1, hookQueries: queries.length, boundedHistoryPages: history.length, businessRounds: progress.seen.rounds, additionalModelWork: 0, malformedPreservedLastGood: true }));
   } finally { o.client.close(); o.daemon.stop(); await o.mock.stop(); }
 });
