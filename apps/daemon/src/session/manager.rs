@@ -1747,6 +1747,13 @@ impl SessionManager {
         false
     }
 
+    pub async fn has_blocking_workspace_sessions(&self, workspace_ids: &[String]) -> Result<bool> {
+        if self.has_active_sessions(workspace_ids).await {
+            return Ok(true);
+        }
+        self.store.has_pending_interactions(workspace_ids).await
+    }
+
     pub async fn list(
         &self,
         workspace_id: Option<&str>,

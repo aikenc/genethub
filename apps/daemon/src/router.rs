@@ -2217,16 +2217,11 @@ async fn dispatch(
                 Ok(planned) => planned,
                 Err(error) => return Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
             };
-            let sessions = match state.sessions.list_with_projection(None, true, true).await {
-                Ok(sessions) => sessions,
+            let blocked = match state.sessions.has_blocking_workspace_sessions(&planned).await {
+                Ok(blocked) => blocked,
                 Err(error) => return failed(error),
             };
-            if state.sessions.has_active_sessions(&planned).await || sessions.iter().any(|session| {
-                planned.contains(&session.workspace_id) && matches!(
-                    session.status,
-                    genehub_proto::SessionStatus::Running | genehub_proto::SessionStatus::Waiting
-                )
-            }) {
+            if blocked {
                 return Handled::err(
                     ErrorCode::Conflict,
                     "项目或成员仍有运行中、等待交互的会话，请先处理后再移除。",

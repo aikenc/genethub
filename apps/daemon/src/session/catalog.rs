@@ -343,7 +343,17 @@ impl SessionManager {
         }
         batch.removed_sessions = known
             .keys()
-            .filter(|k| !present.contains(*k))
+            .filter(|k| {
+                !present.contains(*k)
+                    && !batch.scope_errors.as_ref().is_some_and(|errors| {
+                        errors.iter().any(|error| {
+                            error
+                                .workspace_id
+                                .as_ref()
+                                .is_none_or(|id| id == &k.workspace_id)
+                        })
+                    })
+            })
             .cloned()
             .collect();
         let known_spaces: HashMap<_, _> = known_workspaces

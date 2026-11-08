@@ -1784,6 +1784,24 @@ impl Store {
         Ok(rows)
     }
 
+    /// Removal needs only durable pending decisions in the checked subtree,
+    /// never complete summaries, title repair or unrelated project projection.
+    pub(super) async fn has_pending_interactions(&self, workspaces: &[String]) -> Result<bool> {
+        self.ensure_catalog().await?;
+        let cache = self
+            .page_catalog
+            .lock()
+            .map_err(|_| anyhow!("page catalog poisoned"))?;
+        for workspace in workspaces {
+            cache.check_scope(Some(workspace), true)?;
+        }
+        Ok(cache
+            .pending
+            .iter()
+            .filter_map(|path| cache.files.get(path)?.meta.as_ref())
+            .any(|meta| !meta.execution_retired && workspaces.contains(&meta.workspace_id)))
+    }
+
     pub(super) fn catalog_scope_errors(&self) -> Vec<genehub_proto::CatalogScopeError> {
         let cache = self.page_catalog.lock().unwrap_or_else(|e| e.into_inner());
         let mut errors = Vec::new();
