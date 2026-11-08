@@ -440,10 +440,28 @@ impl Workspaces {
         let Ok(source) = crate::guest_paths::guest_path(&found.dir).canonicalize() else {
             return Scanned::Failed;
         };
+        let known = self
+            .entries
+            .read()
+            .await
+            .values()
+            .filter(|entry| project_directory(entry) == source)
+            .min_by_key(|entry| {
+                (
+                    entry.removed,
+                    entry.workspace_file.is_none(),
+                    entry.id.as_str(),
+                )
+            })
+            .cloned();
+        if known.as_ref().is_some_and(|entry| entry.removed) {
+            return Scanned::Removed;
+        }
         let candidate = directory_workspace_from_descriptor(
             source,
             found.descriptor.name.clone(),
             Some(&found.descriptor),
+            known.as_ref(),
         )
         .await;
         {
@@ -1449,22 +1467,25 @@ async fn directory_workspace(dir: PathBuf, name: Option<String>) -> WorkspaceEnt
     let descriptor = crate::space_descriptor::read(&dir).ok().flatten();
     if descriptor.is_none() {
         if let Some(folders) = crate::space_descriptor::declared_folders(&dir) {
-            if let Some(entry) = descriptor_workspace(&dir, name.clone(), &folders).await {
+            if let Some(entry) = descriptor_workspace(&dir, name.clone(), &folders, None).await {
                 return entry;
             }
         }
     }
-    directory_workspace_from_descriptor(dir, name, descriptor.as_ref()).await
+    directory_workspace_from_descriptor(dir, name, descriptor.as_ref(), None).await
 }
 
 async fn directory_workspace_from_descriptor(
     dir: PathBuf,
     name: Option<String>,
     descriptor: Option<&crate::space_descriptor::Descriptor>,
+    known: Option<&WorkspaceEntry>,
 ) -> WorkspaceEntry {
     let name = name.or_else(|| descriptor.and_then(|descriptor| descriptor.name.clone()));
     if let Some(descriptor) = descriptor {
-        if let Some(entry) = descriptor_workspace(&dir, name.clone(), &descriptor.folders).await {
+        if let Some(entry) =
+            descriptor_workspace(&dir, name.clone(), &descriptor.folders, known).await
+        {
             return entry;
         }
     }
@@ -1475,6 +1496,7 @@ async fn descriptor_workspace(
     dir: &Path,
     name: Option<String>,
     declared: &[serde_json::Value],
+    known: Option<&WorkspaceEntry>,
 ) -> Option<WorkspaceEntry> {
     let mut seen = HashSet::new();
     let mut folders = Vec::new();
@@ -1493,10 +1515,47 @@ async fn descriptor_workspace(
         {
             continue;
         }
-        let Ok(root) = dir.join(requested).canonicalize() else {
-            continue;
+        // Discovery refreshes declarations, not the availability of registered
+        // roots. Reopening a known external root here can wait indefinitely for
+        // an OS permission dialog, even before the daemon starts listening.
+        // Compare only the lexical spelling to roots resolved at registration;
+        // new/aliased paths and explicit workspace.open still resolve on disk.
+        let mut lexical = PathBuf::new();
+        for component in dir.join(&requested).components() {
+            match component {
+                std::path::Component::ParentDir => {
+                    lexical.pop();
+                }
+                std::path::Component::CurDir => {}
+                other => lexical.push(other.as_os_str()),
+            }
+        }
+        // `link/../other` cannot be collapsed lexically: link may redirect
+        // the parent traversal. Only leading `..` from canonical dir is safe.
+        let mut descended = false;
+        let reusable = requested.components().all(|component| match component {
+            std::path::Component::ParentDir => !descended,
+            std::path::Component::Normal(_) => {
+                descended = true;
+                true
+            }
+            _ => true,
+        });
+        let registered = known
+            .filter(|_| reusable)
+            .and_then(|entry| entry.folders.iter().find(|folder| folder.root == lexical));
+        let root = if let Some(folder) = registered {
+            folder.root.clone()
+        } else {
+            let Ok(root) = dir.join(requested).canonicalize() else {
+                continue;
+            };
+            if !root.is_dir() {
+                continue;
+            }
+            root
         };
-        if !root.is_dir() || !seen.insert(root.clone()) {
+        if !seen.insert(root.clone()) {
             continue;
         }
         let parsed: CodeWorkspaceFolder = serde_json::from_value(folder.clone()).ok()?;
@@ -1529,7 +1588,9 @@ async fn descriptor_workspace(
         folders,
         workspace_file: Some(dir.join(crate::space_descriptor::FILE)),
         removed: false,
-        is_git_repo: root.join(".git").exists(),
+        is_git_repo: known
+            .filter(|entry| entry.root == root)
+            .map_or_else(|| root.join(".git").exists(), |entry| entry.is_git_repo),
     })
 }
 
