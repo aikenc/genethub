@@ -469,6 +469,7 @@ async fn dispatch(
                     "session.create-id.v1".to_string(),
                     "session.page.v1".to_string(),
                     "session.active-page.v1".to_string(),
+                    "session.summary.v1".to_string(),
                     "catalog.sync.v1".to_string(),
                     "session.prepare.v1".to_string(),
                     "session.file-upload.v1".to_string(),
@@ -792,9 +793,19 @@ async fn dispatch(
 
         Request::SessionGet {
             session_id,
+            summary_only,
             recent_rounds,
             before_item_id,
         } => Box::pin(async move {
+            if summary_only == Some(true) {
+                if recent_rounds.is_some() || before_item_id.is_some() {
+                    return failed(anyhow::anyhow!("summaryOnly cannot include a history window"));
+                }
+                return match state.sessions.metadata_summary(&session_id).await {
+                    Ok(summary) => Handled::ok(Reply::Session(summary)),
+                    Err(error) => failed(error),
+                };
+            }
             match match recent_rounds {
                 Some(limit) => {
                     state

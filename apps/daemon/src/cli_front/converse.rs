@@ -1060,6 +1060,7 @@ async fn set_model(
 async fn session_summary(rpc: &Rpc, session_id: &str) -> Result<SessionSummary, CliFailure> {
     match rpc
         .call(Request::SessionGet {
+            summary_only: None,
             recent_rounds: Some(0),
             before_item_id: None,
             session_id: session_id.to_string(),
@@ -1203,6 +1204,7 @@ async fn pending_questions(
 ) -> Result<Vec<genehub_proto::InteractionQuestion>, CliFailure> {
     let snapshot = match rpc
         .call(Request::SessionGet {
+            summary_only: None,
             recent_rounds: Some(0),
             before_item_id: None,
             session_id: session_id.to_string(),
@@ -1399,6 +1401,7 @@ async fn attach(
 ) -> Result<SessionSummary, CliFailure> {
     let Reply::Snapshot(snapshot) = rpc
         .call(Request::SessionGet {
+            summary_only: None,
             recent_rounds: None,
             before_item_id: None,
             session_id: session_id.to_string(),

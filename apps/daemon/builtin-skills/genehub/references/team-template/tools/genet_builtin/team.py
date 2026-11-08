@@ -777,11 +777,10 @@ def live_sessions(workspace_id, machine=None):
 
 def session_summary(session_id, machine=None):
     # Coordination needs live status and inbox metadata, not the Agent's full
-    # native conversation. Inspect exposes the same summary without expanding
-    # tool bodies/history on every watchdog, lock and reconciliation check.
-    result = genet("session", "inspect", session_id, *machine_args(machine))
-    inspection = result.get("inspection")
-    summary = inspection.get("summary") if isinstance(inspection, dict) else None
+    # native conversation. The explicit summary mode skips the history view,
+    # including narrative cloning and digesting, in watchdog/lock checks.
+    result = genet("session", "get", session_id, "--summary", *machine_args(machine))
+    summary = result.get("summary")
     if not isinstance(summary, dict) or summary.get("id") != session_id or not isinstance(summary.get("status"), str):
         raise ExpertError("会话摘要响应无法核对原 ID 和状态", "查询结果未知，不能认定会话不存在或已结束", "保留原派单和写锁，查询同一会话回执")
     return summary

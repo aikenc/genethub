@@ -1616,6 +1616,20 @@ impl SessionManager {
         Ok(Vec::new())
     }
 
+    /// Read the existing metadata/state projection without opening chat history.
+    pub async fn metadata_summary(&self, session_id: &str) -> Result<SessionSummary> {
+        let live = self.sessions.read().await.get(session_id).cloned();
+        let meta = match live {
+            Some(live) => live.meta.lock().await.clone(),
+            None => self
+                .store
+                .find_meta(session_id)
+                .await?
+                .ok_or_else(|| SessionMissing(session_id.to_string()))?,
+        };
+        Ok(self.project_meta(&meta).await)
+    }
+
     pub async fn summary(&self, session_id: &str) -> Result<SessionSummary> {
         let live = self.live(session_id).await?;
         let status = *live.status.lock().await;

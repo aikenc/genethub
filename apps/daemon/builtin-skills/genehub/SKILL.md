@@ -48,7 +48,8 @@ Agent 已能通过工具执行的事，不应另按项目、设备或角色降�
 
 会话列表默认按 Space 分页：根 Space 最近 10 条，子 Space 展开后读取，更多历史需继续翻页。
 历史未展开不代表空闲；进行中和计数独立读取全部活动页，未确认完整时保留下限／未知，不显示精确零。
-查当前任务用 `session list --active --include-archived`；查历史必须指定 `--workspace <id>`。
+查当前任务用 `session list --active --include-archived`；找历史先用 `session list --limit 50`，需要更多才把返回的 `nextCursor` 原样传给 `--cursor`，同时保留原机器和查询条件。`complete: false` 不代表没有更多结果。
+完整项目历史用 `--workspace <id> --lean`；按 ID 查状态用 `session get <id> --summary`（返回 `data.summary`，不构造历史视图）；读正文按需使用 genehub-introspect。
 无范围的完整历史命令已禁用，`--lean` 和标签不能替代范围。读取失败表示未知，不能按零会话重新派单。
 团队对账不能仅凭页面当前显示的记录数判断。
 
