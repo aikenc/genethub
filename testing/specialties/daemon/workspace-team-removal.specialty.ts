@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { defineSpecialty, daemonEndpoint, openWorkbenchPage } from "../../framework/public.ts";
+import { defineSpecialty, daemonEndpoint, openWorkbenchPage, createLease, releaseLease, startFaultLink } from "../../framework/public.ts";
 
 for (const busy of [false, true]) defineSpecialty({
   id: `specialty.daemon.workspace-team-remove-${busy ? "busy-atomic" : "directory-readonly"}`,
@@ -76,12 +76,19 @@ defineSpecialty({
   catches: ["project stays in removing state", "UI sends removal to the wrong workspace", "descendant remains registered"],
   tags: ["page-experience", "workspace-team-removal"], runner: "playwright", llm: { default: "mock" },
   expectedDurationMs: 15000, timeoutMs: 120000,
-  resources: { environments: 1, cpu: 2, memoryMb: 2048, io: 1, browser: 1, pool: "browser" },
+  resources: { environments: 2, cpu: 3, memoryMb: 3072, io: 1, browser: 1, pool: "browser" },
   surfaces: ["workbench-ui", "daemon"], productInterfaces: ["workspace.remove", "project-list confirmation"],
 }, async t => {
   const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
+  const peerLease = createLease("remove-slow-peer-");
+  let peer: typeof opened | undefined;
+  let fault: Awaited<ReturnType<typeof startFaultLink>> | undefined;
   let browser: Awaited<ReturnType<typeof openWorkbenchPage>> | undefined;
+  let peerAdvertised = false, rosterReads = 0;
   try {
+    peer = await t.flows.main.openWorkspace({openRoot:t.openRoot,lease:peerLease});
+    const peerEndpoint = daemonEndpoint(peer.daemon);
+    fault = await startFaultLink(peerEndpoint.url); fault.blackhole("both");
     await t.flows.main.configureMockProvider(opened.client, opened.mock);
     await opened.client.call({type:"workspace.rename",payload:{workspaceId:opened.workspaceId,name:"cleanup-target"}});
     await opened.client.call({type:"agentSpace.configure",payload:{workspaceId:opened.workspaceId,expectedRevision:0,operation:{kind:"setLifecycle",lifecycle:"persistent"}}});
@@ -91,7 +98,13 @@ defineSpecialty({
     if (child?.type !== "workspace") throw new Error("child open failed");
     await opened.client.call({type:"agentSpace.configure",payload:{workspaceId:child.data.id,expectedRevision:0,operation:{kind:"setParent",parentWorkspaceId:opened.workspaceId}}});
     const sid = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
-    browser = await openWorkbenchPage(t.openRoot,()=>daemonEndpoint(opened.daemon),opened.workspaceId,sid,{viewport:{width:1280,height:900}});
+    browser = await openWorkbenchPage(t.openRoot,()=>daemonEndpoint(opened.daemon),opened.workspaceId,sid,{viewport:{width:1280,height:900}},{trace:false},{
+      targets:()=>{rosterReads++;return [
+        {id:"remove-source",deviceHandle:opened.client.identity!.machineId,fingerprint:opened.client.identity!.fingerprint,label:"Removal source",kind:"local",online:true},
+        {id:"slow-peer",deviceHandle:peer!.client.identity!.machineId,fingerprint:peer!.client.identity!.fingerprint,label:"Slow peer",kind:"remote",online:peerAdvertised},
+      ];},
+      endpoint:id=>id==="slow-peer"?{...peerEndpoint,url:fault!.url}:daemonEndpoint(opened.daemon),
+    });
     const page = browser.page;
     await page.getByRole("button", {name:"当前项目", exact:true}).waitFor();
     await page.getByRole("navigation",{name:"工作台导航"}).getByRole("button",{name:"项目",exact:true}).click();
@@ -101,10 +114,15 @@ defineSpecialty({
     await projects.getByRole("button",{name:"批量",exact:true}).click();
     await project.getByRole("checkbox",{name:"选择项目 cleanup-target",exact:true}).check();
     await projects.getByRole("button",{name:"移除",exact:true}).click();
+    peerAdvertised=true; const before=rosterReads, began=performance.now();
     await page.getByRole("dialog",{name:"移除所选项目",exact:true}).getByRole("button",{name:"确认处理 1 项",exact:true}).click();
-    await project.waitFor({state:"detached",timeout:30000});
+    await project.waitFor({state:"detached",timeout:5000});
+    await projects.getByText("1 项已移除",{exact:true}).waitFor({timeout:5000});
+    t.assertions.assert(await projects.getByRole("button",{name:"完成",exact:true}).isEnabled(),"removed card disappeared while the entire list stayed busy");
+    t.assertions.assert(rosterReads===before&&fault!.attempts()===0,"successful local removal re-read all machines or waited for the stalled peer");
+    t.note(JSON.stringify({ackToUsableMs:Math.round(performance.now()-began),extraRosterReads:rosterReads-before,slowPeerAttempts:fault!.attempts()}));
     const listed = await opened.client.call({type:"workspace.list"});
     t.assertions.assert(listed?.type === "workspaces" && !listed.data.some(w=>[opened.workspaceId,child.data.id].includes(w.id)),"browser removal left part of the team registered");
     t.assertions.assert(readFileSync(path.join(childRoot,"keep.txt"),"utf8")==="preserved","browser removal changed user files");
-  } finally { await browser?.close(); opened.client.close(); opened.daemon.stop(); await opened.mock.stop(); }
+  } finally { await browser?.close(); await fault?.stop(); if(peer){peer.client.close();peer.daemon.stop();await peer.mock.stop();}releaseLease(peerLease);opened.client.close(); opened.daemon.stop(); await opened.mock.stop(); }
 });
