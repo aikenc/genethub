@@ -43,3 +43,9 @@ description: GeneHub 的团队机制：多个 Agent 会话组成一支会接力�
 ## Timer执行约定
 
 回调默认`schedule: "fixed-delay"`：本次命令及收尾结束后再等`every`，运行中不重入、不积压补跑，冷却不占执行名额。Team巡检使用此模式；耗时超过触发间隔本身不算故障，仍按声明timeout处理。显式`interval`仅供短命令，其实际执行期限为`min(timeout, every×15%)`，亚秒值不向上取整，到期整组强制结束。改模板hook源并重新build，不手改生成的`.genethub/hooks/`；新daemon默认也适用于未写schedule的已有hook，跨渠道共同执行需核对各daemon版本。
+
+## 脚本查询与升级迁移
+
+已知任务沿账本中的会话 ID 用 `session get <id> --summary`；当前工作用 `session list --workspace <id> --active --include-archived`。需要历史时用 `--workspace <id> --limit 50`，保持机器和条件按 `nextCursor` 续页至 `complete: true`。
+
+`unboundedQueryDisabled` 是读取方式需要修改：即使已指定项目，历史也必须分页。先修团队自己的工具源，再运行同一待办；保留原 task/session ID、派单、回传配置和写锁，不原样重试，不按空目录重建任务，不用提高频率或超时绕过错误。一般读取失败仍表示未知。Timer 无待办时不查前台历史；有原请求方引用时直接使用，避免每轮重新发现全目录。

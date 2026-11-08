@@ -359,7 +359,9 @@ impl SessionManager {
             .iter()
             .map(|(id, live)| (id.clone(), live.clone()))
             .collect();
+        let mut budget = crate::blocking::WorkBudget::new();
         for (session_id, live) in lives {
+            budget.checkpoint().await;
             if self.update_blocks_delivery(state, &live, &session_id).await {
                 continue;
             }

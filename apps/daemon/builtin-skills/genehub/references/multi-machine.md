@@ -55,7 +55,7 @@ Hub 查询失败会返回非零退出码和 `complete: false` 的已知条目，
 
 `--` 后面的参数原样交给目标进程，包括 `--version`、`-V` 和 `--help`。例如
 `shell --workspace <id> -- python3 --version` 查询的是目标 Python 的版本。
-`session list --active --include-archived` 返回完整活动集合，独立于历史分页。找历史用 `session list --limit 50 [--cursor <nextCursor>]`，每次一页摘要；游标绑定机器，查询范围和归档条件也须保持一致，`complete: false` 表示尚有未读取历史。分页暂不支持标签／来源筛选，不能靠读空一页认定全局无匹配。完整项目历史指定 `--workspace <id> --lean`；无范围完整历史已禁用，`--lean`、`--label` 和 `--source-kind` 不能替代范围。查询失败表示未知，不能据此重新派单。
+`session list --active --include-archived` 返回完整活动集合，独立于历史分页。找历史用 `session list --limit 50 [--cursor <nextCursor>]`，每次一页摘要；游标绑定机器，查询范围和归档条件也须保持一致，`complete: false` 表示尚有未读取历史。分页暂不支持标签／来源筛选，不能靠读空一页认定全局无匹配。项目历史同样使用 `--workspace <id> --limit 50` 分页读完；所有缺少 `--limit` 的历史查询已禁用，`--workspace`、`--lean`、`--label` 和 `--source-kind` 不能替代分页。遇到 `unboundedQueryDisabled` 应修改原脚本的读取方式，保留原任务、会话 ID 和回执，不原样重试。查询失败表示未知，不能据此重新派单。
 命令分组帮助用 `session --help` 或 `agent run --help`；`schema <command>` 提供机器可读合同。
 
 ## 跨机传文件
@@ -69,7 +69,7 @@ Hub 查询失败会返回非零退出码和 `complete: false` 的已知条目，
 ```bash
 "$GENEHUB_CLI" agent list --machine <machineId>
 "$GENEHUB_CLI" agent run --machine <machineId> --agent <agentId> --cwd /abs/path "<任务>" --no-wait
-"$GENEHUB_CLI" session list --machine <machineId> --workspace <workspaceId>
+"$GENEHUB_CLI" session list --machine <machineId> --workspace <workspaceId> --limit 50
 "$GENEHUB_CLI" session send <sessionId> "<补充指令>" --machine <machineId> --no-wait
 "$GENEHUB_CLI" agent run --machine <machineId> --agent <agentId> --session <sessionId> --since-seq <n> "<续接>"
 ```

@@ -199,6 +199,9 @@ struct Live {
     interaction_lock: Mutex<()>,
     /// Execution guard only. The decision and delivery obligation live in meta.
     continuation_dispatched: std::sync::atomic::AtomicBool,
+    /// Derived from the existing durable update continuation, not from having
+    /// opened history. Ordinary cached sessions never poll missing records.
+    update_waiting: AtomicBool,
     /// Item ids settled during the current turn, flushed to disk when it ends.
     turn_items: Mutex<Vec<String>>,
     /// When the turn in progress last had its narrative written out, which
@@ -5522,6 +5525,7 @@ impl Live {
             pending_permissions: Mutex::new(pending.into_iter().collect()),
             interaction_lock: Mutex::new(()),
             continuation_dispatched: std::sync::atomic::AtomicBool::new(false),
+            update_waiting: AtomicBool::new(false),
             turn_items: Mutex::new(Vec::new()),
             open_turn_written_ms: AtomicI64::new(0),
             open_trunk_written_ms: AtomicI64::new(0),

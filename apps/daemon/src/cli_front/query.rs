@@ -856,21 +856,14 @@ async fn execute(
             limit,
             cursor,
         } => {
-            if workspace_id.is_none() && !active && limit.is_none() {
+            if !active && limit.is_none() {
                 return Err(CliFailure::business(
                     "unboundedQueryDisabled",
-                    "无范围的完整会话历史查询已禁用。找历史用 session list --limit 50，按 nextCursor 续页；查看当前任务用 --active --include-archived；完整项目历史请指定 --workspace <id>。--lean 或标签不能替代范围。",
+                    "无界历史查询已禁用，指定项目也必须分页。查已知会话用 session get <id> --summary；查当前任务用 session list --workspace <id> --active --include-archived；查历史用 session list --workspace <id> --limit 50，并将 nextCursor 原样传给 --cursor 续页。--lean 不能替代 --limit。请修改原脚本的读取方式，保留原任务、会话 ID 和回执；不要原样重试，不要按空结果重新派单。",
                     None,
                 ));
             }
             let rpc = connect_selected(selection).await?;
-            if let Some(id) = workspace_id.as_deref() {
-                let listed =
-                    workspaces(rpc.call(Request::WorkspaceList).await.map_err(rpc_error)?)?;
-                if !listed.iter().any(|workspace| workspace.id == id) {
-                    return Err(CliFailure::target_not_found("workspace", id));
-                }
-            }
             if active
                 && !rpc
                     .hello()
@@ -1610,12 +1603,12 @@ fn command_schema(name: &str) -> Value {
             ),
         ),
         "session.list" => (
-            "genet session list (--limit <1..100> [--cursor <nextCursor>] | --workspace <id> | --active) [--include-archived] [--lean]",
+            "genet session list (--limit <1..100> [--cursor <nextCursor>] | --active) [--workspace <id>] [--include-archived] [--lean]",
             true,
             object_input(
                 json!({
                     "workspaceId": {"type": ["string", "null"], "minLength": 1,
-                        "description": "--workspace; scope history to a project; unscoped history requires an explicit --limit"},
+                        "description": "--workspace; scope to a project; history always requires --limit, including scoped/lean queries"},
                     "limit": {"type": ["integer", "null"], "minimum": 1, "maximum": 100,
                         "description": "--limit; read exactly one bounded summary page; does not auto-follow nextCursor; excludes label/source filters"},
                     "cursor": {"type": ["string", "null"], "description": "--cursor; opaque nextCursor from the same machine and query, requires --limit"},

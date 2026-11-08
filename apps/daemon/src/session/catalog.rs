@@ -140,6 +140,10 @@ impl SessionManager {
         &self,
         workspaces: &crate::workspace::Workspaces,
     ) -> Result<()> {
+        // Reconcile even with no browser observer: CLI readers must also see
+        // external writers. Do not hold the projection handoff gate while a
+        // global file walk is in flight, so cached reads remain independent.
+        self.store.reconcile_catalog().await?;
         if self.catalog_updates.receiver_count() == 0 {
             // No observer needs a change history. Cached browsers validate
             // against current content on their next connection.

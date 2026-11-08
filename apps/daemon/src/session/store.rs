@@ -1787,19 +1787,23 @@ impl Store {
     /// Removal needs only durable pending decisions in the checked subtree,
     /// never complete summaries, title repair or unrelated project projection.
     pub(super) async fn has_pending_interactions(&self, workspaces: &[String]) -> Result<bool> {
-        self.ensure_catalog().await?;
-        let cache = self
-            .page_catalog
-            .lock()
-            .map_err(|_| anyhow!("page catalog poisoned"))?;
         for workspace in workspaces {
-            cache.check_scope(Some(workspace), true)?;
+            // This is an execution/removal decision, not a presentation read.
+            // Observe just the affected homes, including external decisions.
+            let scan = self.fresh_metadata_scan(Some(workspace)).await?;
+            if let Some((_, reason)) = scan.errors.values().next() {
+                anyhow::bail!("{reason}");
+            }
+            if scan
+                .files
+                .values()
+                .filter_map(|file| file.meta.as_ref())
+                .any(|meta| !meta.execution_retired && PageCatalog::has_obligation(meta))
+            {
+                return Ok(true);
+            }
         }
-        Ok(cache
-            .pending
-            .iter()
-            .filter_map(|path| cache.files.get(path)?.meta.as_ref())
-            .any(|meta| !meta.execution_retired && workspaces.contains(&meta.workspace_id)))
+        Ok(false)
     }
 
     pub(super) fn catalog_scope_errors(&self) -> Vec<genehub_proto::CatalogScopeError> {
@@ -1896,6 +1900,29 @@ impl Store {
     }
 
     async fn ensure_catalog(&self) -> Result<()> {
+        let revision = self
+            .homes
+            .revision
+            .load(std::sync::atomic::Ordering::Acquire);
+        {
+            let cache = self
+                .page_catalog
+                .lock()
+                .map_err(|_| anyhow!("page catalog poisoned"))?;
+            // A presentation read uses the current projection. Expiry belongs
+            // to background reconciliation, never to an already-cached page.
+            // New/changed home registrations still need their initial scan.
+            if cache.initialized && cache.homes_revision == revision {
+                return Ok(());
+            }
+        }
+        self.reconcile_catalog().await
+    }
+
+    /// The existing discovery task owns periodic external-file reconciliation.
+    /// Cold readers share this same in-flight scan; durable recovery continues
+    /// to use fresh_metadata_scan independently of presentation snapshots.
+    pub(super) async fn reconcile_catalog(&self) -> Result<()> {
         loop {
             let revision = self
                 .homes
