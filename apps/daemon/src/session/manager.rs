@@ -199,6 +199,9 @@ struct Live {
     interaction_lock: Mutex<()>,
     /// Execution guard only. The decision and delivery obligation live in meta.
     continuation_dispatched: std::sync::atomic::AtomicBool,
+    /// Derived from the existing durable update continuation, not from having
+    /// opened history. Ordinary cached sessions never poll missing records.
+    update_waiting: AtomicBool,
     /// Item ids settled during the current turn, flushed to disk when it ends.
     turn_items: Mutex<Vec<String>>,
     /// When the turn in progress last had its narrative written out, which
@@ -5522,6 +5525,7 @@ impl Live {
             pending_permissions: Mutex::new(pending.into_iter().collect()),
             interaction_lock: Mutex::new(()),
             continuation_dispatched: std::sync::atomic::AtomicBool::new(false),
+            update_waiting: AtomicBool::new(false),
             turn_items: Mutex::new(Vec::new()),
             open_turn_written_ms: AtomicI64::new(0),
             open_trunk_written_ms: AtomicI64::new(0),
@@ -10529,11 +10533,12 @@ mod tests {
         assert!(restarted.list(None, false).await.unwrap().is_empty());
         assert!(residual.exists(), "cleanup raced the legacy writer");
         drop(legacy);
-        // Cleanup retries on the shared catalog's five-second reconciliation,
-        // not every presentation read. Allow two cycles while requiring the
-        // logically deleted row to stay hidden throughout the deferred reap.
+        // This bare manager has no Daemon discovery task. Drive its real
+        // maintenance entry here; cached presentation reads deliberately do
+        // not trigger cleanup. Keep the row hidden throughout the deferred reap.
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
         while residual.exists() && tokio::time::Instant::now() < deadline {
+            restarted.store.reconcile_catalog().await.unwrap();
             assert!(restarted.list(None, false).await.unwrap().is_empty());
             if residual.exists() {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;

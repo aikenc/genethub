@@ -48,7 +48,7 @@ check("discovery-contracts", "Help and schemas describe real public command beha
   "help creates no sessions, native status schemas describe native facts, transfer schemas accept list responses, invalid filters fail as arguments",
   ["help opens a session", "schema excludes actual response shape", "invalid option reports no target", "capabilities disagree with command schema"],
   async t => workspace(t, async opened => {
-    const before = (await json(opened, ["session", "list", "--workspace", opened.workspaceId])).data.sessions.length;
+    const before = (await json(opened, ["session", "list", "--workspace", opened.workspaceId, "--limit", "100"])).data.sessions.length;
     for (const args of [["session", "--help"], ["agent", "run", "--help"], ["file", "transfer", "--help"]]) {
       t.assertions.assert((await json(opened, args)).type === "help", "command help failed");
     }
@@ -77,10 +77,10 @@ check("discovery-contracts", "Help and schemas describe real public command beha
       const refused = await command(opened, args);
       t.assertions.assert(refused.code === 2 && records(refused.stdout).at(-1)?.error?.code === "invalidArgs", "invalid input became an empty result or missing target");
     }
-    t.assertions.assert((await json(opened, ["session", "list", "--workspace", opened.workspaceId])).data.sessions.length === before, "discovery created a session");
+    t.assertions.assert((await json(opened, ["session", "list", "--workspace", opened.workspaceId, "--limit", "100"])).data.sessions.length === before, "discovery created a session");
   }));
 
-check("bounded-session-queries", "Whole-machine history commands fail explicitly while scoped history and current work remain usable",
+check("bounded-session-queries", "Unbounded history fails explicitly in every scope while pages and current work remain usable",
   "Bare, lean and label/source-filtered global history commands fail with actionable errors and no empty success; a project still returns its idle history and complete activity preserves an archived obligation",
   ["lean hides another full history walk", "labels bypass the query scope", "refused read becomes empty work", "restriction breaks project history or archived obligations"],
   async t => workspace(t, async opened => {
@@ -96,17 +96,21 @@ check("bounded-session-queries", "Whole-machine history commands fail explicitly
       const r = await opened.client.call({type: "session.page", payload: {requests: [{workspaceId: null, cursor: null, limit: 100, activeOnly: true}], includeArchived: true}});
       return r?.type === "sessionPages" && r.data[0]?.sessions.some(s => s.id === active) === true;
     }, 10000);
-    for (const flags of [[], ["--lean"], ["--label", "old-script"], ["--source-kind", "human"], ["--lean", "--include-archived"]]) {
+    for (const flags of [[], ["--lean"], ["--label", "old-script"], ["--source-kind", "human"], ["--lean", "--include-archived"], ["--workspace", opened.workspaceId], ["--workspace", opened.workspaceId, "--lean"], ["--workspace", opened.workspaceId, "--include-archived"], ["--workspace", opened.workspaceId, "--source-kind", "human"]]) {
       const result = await command(opened, ["session", "list", ...flags]);
       const last = records(result.stdout).at(-1);
       t.assertions.assert(result.code !== 0 && last?.error?.code === "unboundedQueryDisabled" && !records(result.stdout).some(r => r.type === "session.list"), "unbounded read bypassed scope or became a successful empty result");
-      t.assertions.assert(result.stdout.includes("--workspace") && result.stdout.includes("--active"), "refusal provides no supported replacement");
+      t.assertions.assert(result.stdout.includes("--limit") && result.stdout.includes("--summary") && result.stdout.includes("--active"), "refusal provides no supported replacement");
     }
-    const history = (await json(opened, ["session", "list", "--workspace", opened.workspaceId, "--lean", "--include-archived"])).data.sessions;
+    const history = (await json(opened, ["session", "list", "--workspace", opened.workspaceId, "--limit", "100", "--lean", "--include-archived"])).data.sessions;
     t.assertions.assert(history.length === 2 && history.some((s: {id: string}) => s.id === idle), "scope restriction hid project history");
+    await opened.client.call({type: "session.label", payload: {sessionId: active, add: ["反思", "组长"], remove: []}});
+    const human = (await json(opened, ["session", "list", "--workspace", opened.workspaceId, "--active", "--include-archived", "--source-kind", "human"])).data.sessions;
+    const system = (await json(opened, ["session", "list", "--workspace", opened.workspaceId, "--active", "--include-archived", "--source-kind", "system"])).data.sessions;
+    t.assertions.assert(human.some((s: {id: string}) => s.id === active) && !system.some((s: {id: string}) => s.id === active), "display role labels changed Human source classification");
     const current = (await json(opened, ["session", "list", "--active", "--include-archived"])).data.sessions;
     t.assertions.assert(current.length === 1 && current[0].id === active && current[0].archived, "complete current work lost an archived obligation or included idle history");
-    t.note("Five global history spellings rejected; scoped idle history and complete archived current work remain usable.");
+    t.note("Nine global/scoped history spellings rejected; bounded idle history and archived current work remain usable.");
   }));
 
 check("paged-history-summary", "An Agent can browse one history page and check a task without decoding its chat",

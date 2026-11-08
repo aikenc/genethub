@@ -21,9 +21,11 @@ check("source-and-authority", "ordinary Human text beginning 用途 stays conver
   const item = (await r.snapshot(r.front)).items.find(item => item.type === "userMessage" && item.text === "用途: 普通人的一句话");
   t.assertions.assert(item?.type === "userMessage" && item.origin?.sessionId !== "system", "body prefix changed Human attribution");
   await r.client.call({ type: "session.label", payload: { sessionId: r.front, add: ["反思", "组长"], remove: [] } });
-  const listing = localGenetCli(t.openRoot, t.env)(["session", "list", "--workspace", r.project.id, "--source-kind", "human"]);
+  const listing = localGenetCli(t.openRoot, t.env)(["session", "list", "--workspace", r.project.id, "--limit", "100"]);
   const rows = listing.envelope?.data?.sessions as Array<{id:string}> | undefined;
   t.assertions.assert(rows?.some(row=>row.id === r.front), `display labels still classify business roles: ${listing.stderr}`);
+  const labeled = (await r.snapshot(r.front)).items.find(row => row.id === item?.id);
+  t.assertions.assert(labeled?.type === "userMessage" && labeled.origin?.sessionId === (item?.type === "userMessage" ? item.origin?.sessionId : undefined), "display labels changed the durable Human origin");
   const denied = r.command(["send", "--to", r.front, "--kind", "report", "MUST_NOT_DELIVER_AFTER_401"], {
     GENEHUB_SESSION_ID: r.front, GENEHUB_CONTROLLER_TOKEN: "invalid-controller-identity", GENEHUB_EXECUTION_LEASE: "invalid-lease",
   });

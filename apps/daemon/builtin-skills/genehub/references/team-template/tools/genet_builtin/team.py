@@ -755,6 +755,32 @@ def dispatch_machine(args):
     return machine
 
 
+def session_history(workspace_id, machine=None):
+    """Explicitly page one Space's history; never fall back to an unbounded read."""
+    items, seen_ids, seen_cursors = [], set(), set()
+    cursor = None
+    while True:
+        flags = ["--workspace", workspace_id, "--limit", "100", *machine_args(machine)]
+        if cursor:
+            flags += ["--cursor", cursor]
+        page = genet("session", "list", *flags)
+        rows = page.get("sessions")
+        if page.get("workspaceId") != workspace_id or not isinstance(rows, list):
+            raise ExpertError("会话分页响应无法核对范围", "结果未知，没有按空列表处理", "核对原查询回执，保留任务和写锁")
+        for row in rows:
+            if (not isinstance(row, dict) or not isinstance(row.get("id"), str)
+                    or row.get("workspaceId") != workspace_id or row["id"] in seen_ids):
+                raise ExpertError("会话分页记录无法核对", "没有发布部分历史", "核对原查询回执，保留原任务")
+            seen_ids.add(row["id"])
+            items.append(row)
+        cursor = page.get("nextCursor")
+        if cursor is None and page.get("complete") is True:
+            return items
+        if not isinstance(cursor, str) or not cursor or cursor in seen_cursors:
+            raise ExpertError("会话分页没有推进", "历史尚未完整，没有按完整列表处理", "核对 nextCursor 和原查询范围")
+        seen_cursors.add(cursor)
+
+
 def sessions_of(workspace_id, machine=None, max_age=None):
     if not workspace_id:
         return []
@@ -763,9 +789,7 @@ def sessions_of(workspace_id, machine=None, max_age=None):
     key = (machine or "", workspace_id)
     cached = _WORKSPACE_SESSIONS_CACHE.get(key)
     if age <= 0 or cached is None or now - cached[0] > age:
-        items = genet("session", "list", "--workspace", workspace_id, "--lean", *machine_args(machine)).get("sessions")
-        if not isinstance(items, list):
-            raise ExpertError("会话列表响应缺少 sessions", "查询结果未知，没有更新目录缓存", "核对原会话与查询回执，不按空列表新建")
+        items = session_history(workspace_id, machine)
         _WORKSPACE_SESSIONS_CACHE[key] = (time.time(), items)
         return items
     return cached[1]
@@ -2601,7 +2625,8 @@ def session_snapshot_by_workspace(workspace_ids=None, *, active=True):
     seen = set()
     for scope in scopes:
         flags = ["--active", "--include-archived"] if active else ["--workspace", scope]
-        snapshot = genet("session", "list", "--lean", *flags)
+        snapshot = (genet("session", "list", "--lean", *flags) if active
+                    else {"workspaceId": scope, "sessions": session_history(scope)})
         items = snapshot.get("sessions")
         if "workspaceId" not in snapshot or snapshot["workspaceId"] != scope or not isinstance(items, list):
             raise ExpertError("目录会话快照无法核对", "目录未知，没有按空会话处理", "核对原查询回执后重试目录")
@@ -3943,7 +3968,7 @@ def leader_watchdog(root, name, mine):
 
 
 def reconcile(root, name, mine):
-    front = front_session(root, mine["spaces"])
+    front, front_checked = None, False
     pending_dir = state_dir(root, "pending")
     entries = sorted(os.listdir(pending_dir)) if os.path.isdir(pending_dir) else []
     records = []
@@ -3977,6 +4002,12 @@ def reconcile(root, name, mine):
             bkey = record.get("batch") or session_id
             is_multi_batch = batch_counts.get(bkey, 1) > 1
             is_quiet_reflect = bool(record.get("quiet") or (record.get("kind") in ("reflect", "team-reflect") and not record.get("requester")))
+            # Task references are authoritative. Only old records without a
+            # requester need the compatibility lookup; an empty pending set
+            # must not enumerate front-session history on every timer tick.
+            if not is_quiet_reflect and not record.get("requester") and not front_checked:
+                front = front_session(root, mine["spaces"])
+                front_checked = True
             to = None if is_quiet_reflect else (record.get("requester") or front)
             finish = lambda p=path, sid=session_id, expected=record: (move(root, p, expected), closed.add(sid))  # noqa: E731
             has_children = any(other.get("requester") == session_id for _, other in records if other["sessionId"] != session_id) or team_tasks.has_intent(sys.modules[__name__], root, session_id)

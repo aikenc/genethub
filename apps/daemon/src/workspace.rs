@@ -51,6 +51,14 @@ pub struct Workspaces {
     /// Discovery has one owner even when explicitly requested during startup.
     /// Foreground workspace.list reads the registry and never waits for a scan.
     scanning: std::sync::atomic::AtomicBool,
+    /// Derived descriptor fields for the registered projects. The existing
+    /// discovery owner refreshes them; listing never opens project files.
+    descriptors: std::sync::Mutex<HashMap<PathBuf, DescriptorView>>,
+}
+
+struct DescriptorView {
+    stamp: Option<(std::time::SystemTime, u64)>,
+    members: Result<Vec<genehub_proto::SpaceMemberReference>, String>,
 }
 
 /// A scan looks at two directory levels, so asking more than this often only
@@ -292,6 +300,7 @@ impl Workspaces {
             homes,
             scanned_at: std::sync::Mutex::new(None),
             scanning: std::sync::atomic::AtomicBool::new(false),
+            descriptors: Default::default(),
         }
     }
 
@@ -337,6 +346,17 @@ impl Workspaces {
         if let Err(error) = self.retire_missing_scanned_children(spaces_root).await {
             tracing::warn!(%error, "retiring missing scanned child Spaces failed");
         }
+        let projects = self.list().await;
+        let mut directories = HashSet::new();
+        for project in &projects {
+            budget.checkpoint().await;
+            directories.insert(Self::descriptor_dir(project));
+            self.refresh_descriptor(project);
+        }
+        self.descriptors
+            .lock()
+            .expect("never poisoned")
+            .retain(|dir, _| directories.contains(dir));
         *self.scanned_at.lock().expect("never poisoned") = Some(tokio::time::Instant::now());
         if started.elapsed().as_secs() >= 1 {
             tracing::warn!(
@@ -608,32 +628,64 @@ impl Workspaces {
             .filter(|entry| !entry.removed)
             .map(|entry| self.describe_with_space(entry, &config))
             .collect();
-        // Descriptor I/O must never retain the registry/config guards. Only
-        // bounded project metadata is read here; session history is untouched.
         drop(config);
         drop(entries);
-        let mut budget = crate::blocking::WorkBudget::new();
+        let descriptors = self.descriptors.lock().expect("never poisoned");
         for info in &mut out {
-            budget.checkpoint().await;
-            let dir = info
-                .workspace_file
-                .as_deref()
-                .filter(|file| {
-                    Path::new(file)
-                        .file_name()
-                        .is_some_and(|name| name == crate::space_descriptor::FILE)
-                })
-                .and_then(|file| Path::new(file).parent())
-                .unwrap_or_else(|| Path::new(&info.root));
-            match crate::space_descriptor::read(dir) {
-                Ok(Some(descriptor)) if !descriptor.members.is_empty() => {
+            Self::apply_descriptor(info, &descriptors);
+        }
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
+    }
+
+    fn descriptor_dir(info: &WorkspaceInfo) -> PathBuf {
+        info.workspace_file
+            .as_deref()
+            .filter(|file| {
+                Path::new(file)
+                    .file_name()
+                    .is_some_and(|name| name == crate::space_descriptor::FILE)
+            })
+            .and_then(|file| Path::new(file).parent())
+            .unwrap_or_else(|| Path::new(&info.root))
+            .to_path_buf()
+    }
+
+    fn refresh_descriptor(&self, info: &WorkspaceInfo) {
+        let dir = Self::descriptor_dir(info);
+        let stamp = std::fs::symlink_metadata(dir.join(crate::space_descriptor::FILE))
+            .ok()
+            .filter(|meta| meta.is_file() && !meta.file_type().is_symlink())
+            .and_then(|meta| Some((meta.modified().ok()?, meta.len())));
+        if stamp.is_some()
+            && self
+                .descriptors
+                .lock()
+                .expect("never poisoned")
+                .get(&dir)
+                .is_some_and(|view| view.stamp == stamp)
+        {
+            return;
+        }
+        let members = crate::space_descriptor::read(&dir)
+            .map(|descriptor| descriptor.map(|d| d.members).unwrap_or_default());
+        self.descriptors
+            .lock()
+            .expect("never poisoned")
+            .insert(dir, DescriptorView { stamp, members });
+    }
+
+    fn apply_descriptor(info: &mut WorkspaceInfo, descriptors: &HashMap<PathBuf, DescriptorView>) {
+        if let Some(view) = descriptors.get(&Self::descriptor_dir(info)) {
+            match &view.members {
+                Ok(members) if !members.is_empty() => {
                     let space = info.agent_space.get_or_insert_with(|| {
                         crate::agent_space::describe(&existing_or_unregistered(
                             &Config::default(),
                             &info.id,
                         ))
                     });
-                    space.members = Some(descriptor.members);
+                    space.members = Some(members.clone());
                 }
                 Err(reason) => {
                     if let Some(space) = info.agent_space.as_mut() {
@@ -642,14 +694,12 @@ impl Workspaces {
                             reasons: Vec::new(),
                         });
                         health.status = "unhealthy".into();
-                        health.reasons.push(reason);
+                        health.reasons.push(reason.clone());
                     }
                 }
                 _ => {}
             }
         }
-        out.sort_by(|a, b| a.name.cmp(&b.name));
-        out
     }
 
     /// A stable, path-free snapshot suitable for account-wide discovery.
@@ -984,8 +1034,12 @@ impl Workspaces {
             ));
         };
 
-        self.register_candidate(candidate, explicit_or_descriptor_name, true)
-            .await
+        let mut info = self
+            .register_candidate(candidate, explicit_or_descriptor_name, true)
+            .await?;
+        self.refresh_descriptor(&info);
+        Self::apply_descriptor(&mut info, &self.descriptors.lock().expect("never poisoned"));
+        Ok(info)
     }
 
     /// Discovery may refresh an entry, but only an explicit open can restore a

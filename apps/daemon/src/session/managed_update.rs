@@ -22,6 +22,8 @@ impl SessionManager {
         let path = records::session_file(&state.paths.root, id)?;
         if let Ok(prior) = records::read::<Continuation>(&path) {
             if prior.request_id == request.request_id {
+                live.update_waiting
+                    .store(prior.state == "waiting", Ordering::SeqCst);
                 return Ok(());
             }
             anyhow::ensure!(
@@ -37,7 +39,55 @@ impl SessionManager {
                 state: "waiting".into(),
                 error: None,
             },
-        )
+        )?;
+        live.update_waiting.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Restore only actual update handoffs once at startup. A handoff can
+    /// finish while its original session has no queued input, so looking just
+    /// at inbox entries would lose its completion notification.
+    pub(crate) async fn recover_updates(&self, state: &Shared) -> Result<()> {
+        let directory = records::root(&state.paths.root).join("sessions");
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut budget = crate::blocking::WorkBudget::new();
+        for entry in entries {
+            budget.checkpoint().await;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    tracing::warn!(%error, "reading update continuation entry failed");
+                    continue;
+                }
+            };
+            if entry.path().extension().is_none_or(|ext| ext != "json") {
+                continue;
+            }
+            let recovered: Result<()> = async {
+                let continuation: Continuation = records::read(&entry.path())?;
+                anyhow::ensure!(
+                    records::session_file(&state.paths.root, &continuation.session_id)?
+                        == entry.path(),
+                    "update continuation identity does not match its file"
+                );
+                if continuation.state == "waiting" {
+                    self.live(&continuation.session_id)
+                        .await?
+                        .update_waiting
+                        .store(true, Ordering::SeqCst);
+                }
+                Ok(())
+            }
+            .await;
+            if let Err(error) = recovered {
+                tracing::warn!(%error, "recovering update continuation failed; inspect its recorded request");
+            }
+        }
+        Ok(())
     }
     /// Returns true only while this Session is awaiting its update result.
     pub(super) async fn update_blocks_delivery(
@@ -46,9 +96,11 @@ impl SessionManager {
         live: &Arc<Live>,
         session_id: &str,
     ) -> bool {
-        // No new Session lock or metadata clone on normal delivery. Only an
-        // actual waiting handoff joins the lifecycle of this Session.
+        if !live.update_waiting.load(Ordering::SeqCst) {
+            return false;
+        }
         let Ok(path) = records::session_file(&state.paths.root, session_id) else {
+            live.update_waiting.store(false, Ordering::SeqCst);
             return false;
         };
         let continuation = {
@@ -58,9 +110,12 @@ impl SessionManager {
             records::read::<Continuation>(&path)
         };
         let Ok(mut c) = continuation else {
+            // A transient read failure is not a terminal update. Retain the
+            // known handoff so the next dispatch retries its durable record.
             return false;
         };
         if c.state != "waiting" {
+            live.update_waiting.store(false, Ordering::SeqCst);
             return false;
         }
         let meta = live.meta.lock().await.clone();
@@ -99,11 +154,15 @@ impl SessionManager {
             c.state="ready".into();records::write_continuation(&state.paths.root,&c)?;Ok(false)
         }.await;
         match result {
-            Ok(blocked) => blocked,
+            Ok(blocked) => {
+                live.update_waiting.store(blocked, Ordering::SeqCst);
+                blocked
+            }
             Err(error) => {
                 c.state = "resumeFailed".into();
                 c.error = Some(format!("{error:#}"));
                 let _ = records::write_continuation(&state.paths.root, &c);
+                live.update_waiting.store(false, Ordering::SeqCst);
                 false
             }
         }
