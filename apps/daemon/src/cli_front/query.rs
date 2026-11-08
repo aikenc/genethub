@@ -1341,42 +1341,18 @@ pub async fn connect_selected(selection: &Selection) -> Result<Rpc, CliFailure> 
             .await
             .map_err(|error| remote_connect_error(machine_id, error));
     }
-    hosted(machine_id).await
+    super::hosted::shared(machine_id).await
 }
 
-/// The hosted-Hub path: a per-connection ticket, fetched through the local
-/// daemon's enrolment.
-///
-/// The CLI holds no Hub enrolment of its own, so this only works where a local
-/// daemon is running and paired. That is a real limit and it is reported as
-/// one — a machine that is unreachable because nothing here is enrolled must
-/// not read as a machine that does not exist.
-async fn hosted(machine_id: &str) -> Result<Rpc, CliFailure> {
-    let local = Rpc::connect().await.map_err(connect_error)?;
-    let ticket = match local
-        .call(Request::HubConnect {
-            machine_id: machine_id.to_string(),
-        })
-        .await
-    {
-        Ok(Reply::HubTicket(ticket)) => ticket,
-        Ok(other) => return Err(CliFailure::protocol(format!("unexpected reply: {other:?}"))),
-        Err(error) => {
-            let mut failure = rpc_error(error);
-            failure.message = format!(
-                "Hub ticket request for {machine_id} failed: {}",
-                failure.message
-            );
-            failure.details = Some(
-                json!({"machineId": machine_id, "stage": "hubTicket", "upstream": failure.details}),
-            );
-            return Err(failure);
+/// The same choice for a command that follows the target's events. Those
+/// belong to one connection, so a hosted target gets one of its own.
+pub async fn connect_selected_dedicated(selection: &Selection) -> Result<Rpc, CliFailure> {
+    match selection.machine.as_deref() {
+        Some(machine_id) if super::machines::lookup(machine_id)?.is_none() => {
+            super::hosted::dedicated(machine_id).await
         }
-    };
-    drop(local);
-    Rpc::connect_hosted(&ticket)
-        .await
-        .map_err(|error| remote_connect_error(machine_id, error))
+        _ => connect_selected(selection).await,
+    }
 }
 
 fn context_data(hello: &HelloResult, machine: Option<&str>) -> Value {

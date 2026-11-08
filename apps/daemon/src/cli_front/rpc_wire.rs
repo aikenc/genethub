@@ -87,7 +87,7 @@ pub struct Rpc {
     // This monitor owns the Fabric pump until the endpoint has sent CLOSE.
     // Dropping its handle detaches it; aborting it on normal RPC drop would
     // tear down the carrier before the local stream cancellation is observed.
-    _transport_monitor: tokio::task::JoinHandle<()>,
+    transport_monitor: tokio::task::JoinHandle<()>,
     hello: HelloResult,
     /// Absent until someone asks to watch. A one-shot command opens no event
     /// stream, and the daemon allows one per peer.
@@ -222,7 +222,7 @@ impl Rpc {
         Ok(Self {
             endpoint: data,
             tasks: Mutex::new(vec![writer, reader]),
-            _transport_monitor: endpoint_monitor,
+            transport_monitor: endpoint_monitor,
             hello,
             events: Mutex::new(None),
         })
@@ -304,7 +304,7 @@ impl Rpc {
         Ok(Self {
             endpoint: data,
             tasks: Mutex::new(Vec::new()),
-            _transport_monitor: monitor,
+            transport_monitor: monitor,
             hello,
             events: Mutex::new(None),
         })
@@ -312,6 +312,12 @@ impl Rpc {
 
     pub fn hello(&self) -> &HelloResult {
         &self.hello
+    }
+
+    /// Whether the carrier under this connection is still up. The monitor
+    /// ends with the endpoint, so a finished one means every later call fails.
+    pub fn is_open(&self) -> bool {
+        !self.transport_monitor.is_finished()
     }
 
     pub async fn call(&self, request: Request) -> Result<Reply, RpcError> {

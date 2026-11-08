@@ -715,7 +715,11 @@ fn number(raw: &str, flag: &str) -> Result<u64, CliFailure> {
 }
 
 async fn execute(command: Command, selection: &Selection) -> i32 {
-    let rpc = match query::connect_selected(selection).await {
+    let connected = match &command {
+        Command::Run(run) if run.wait => query::connect_selected_dedicated(selection).await,
+        _ => query::connect_selected(selection).await,
+    };
+    let rpc = match connected {
         Ok(rpc) => rpc,
         Err(error) => return output::fail(error),
     };
