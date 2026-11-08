@@ -220,6 +220,10 @@ pub enum Request {
     #[serde(rename = "session.get", rename_all = "camelCase")]
     SessionGet {
         session_id: String,
+        /// Metadata and current state only; replies with Session, not Snapshot.
+        #[serde(default)]
+        #[ts(optional)]
+        summary_only: Option<bool>,
         #[serde(default)]
         #[ts(optional)]
         recent_rounds: Option<u32>,

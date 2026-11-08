@@ -452,6 +452,7 @@ pub struct SessionManager {
     catalog_gate: Mutex<()>,
     catalog_updates: broadcast::Sender<Arc<genehub_proto::CatalogBatch>>,
     list_reads: crate::blocking::InFlightReads<(Option<String>, bool, bool), Vec<SessionSummary>>,
+    page_reads: crate::blocking::InFlightReads<String, genehub_proto::SessionPageResult>,
     registry: Arc<Registry>,
     diagnostics: Arc<Diagnostics>,
     sessions: RwLock<HashMap<String, Arc<Live>>>,
@@ -493,6 +494,7 @@ impl SessionManager {
             catalog_gate: Mutex::new(()),
             catalog_updates: broadcast::channel(32).0,
             list_reads: Default::default(),
+            page_reads: Default::default(),
             registry,
             diagnostics,
             sessions: RwLock::new(HashMap::new()),
@@ -1614,6 +1616,20 @@ impl SessionManager {
         Ok(Vec::new())
     }
 
+    /// Read the existing metadata/state projection without opening chat history.
+    pub async fn metadata_summary(&self, session_id: &str) -> Result<SessionSummary> {
+        let live = self.sessions.read().await.get(session_id).cloned();
+        let meta = match live {
+            Some(live) => live.meta.lock().await.clone(),
+            None => self
+                .store
+                .find_meta(session_id)
+                .await?
+                .ok_or_else(|| SessionMissing(session_id.to_string()))?,
+        };
+        Ok(self.project_meta(&meta).await)
+    }
+
     pub async fn summary(&self, session_id: &str) -> Result<SessionSummary> {
         let live = self.live(session_id).await?;
         let status = *live.status.lock().await;
@@ -1899,6 +1915,23 @@ impl SessionManager {
     }
 
     pub async fn page(
+        &self,
+        request: &genehub_proto::SessionPageRequest,
+        include_archived: bool,
+    ) -> Result<genehub_proto::SessionPageResult> {
+        // CLI --lean also uses pages. Overlapping readers of the same page
+        // share projection work just like the legacy list, without retaining
+        // a snapshot after its last reader leaves. Include the full query so
+        // cursors, activity, archives and conditional replies stay isolated.
+        crate::blocking::coalesce(
+            &self.page_reads,
+            serde_json::to_string(&(request, include_archived))?,
+            || self.read_page(request, include_archived),
+        )
+        .await
+    }
+
+    async fn read_page(
         &self,
         request: &genehub_proto::SessionPageRequest,
         include_archived: bool,

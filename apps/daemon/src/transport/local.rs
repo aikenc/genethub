@@ -986,7 +986,7 @@ mod tests {
             let response = crate::http::Client::new()
                 .post(&url)
                 .json(&serde_json::json!({
-                    "argv": ["--machine", "m_not_paired", "session", "list"],
+                    "argv": ["--machine", "m_not_paired", "session", "list", "--limit", "1"],
                     "cwd": dir.path().to_string_lossy(),
                 }))
                 .send()

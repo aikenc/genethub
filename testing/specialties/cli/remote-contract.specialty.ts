@@ -39,15 +39,15 @@ check("identity-and-offline","A paired relay target answers as itself; offline i
   const context=await json(["context","--machine",machine]);
   if(context.type!=="context")throw new Error("remote context failed");
   if(context.data.source!=="remoteDaemon"||context.data.target.machineId!==machine||context.data.target.credential!=="pairedDeviceSecret")throw new Error("target identity or credential attribution changed");
-  if((await json(["session","list","--machine",machine])).type!=="session.list")throw new Error("remote sessions failed");
+  if((await json(["session","list","--active","--machine",machine])).type!=="session.list")throw new Error("remote sessions failed");
   await opened.client.call({type:"device.remoteDetach"});
   let result:Reply|undefined;await new Promise(resolve=>setTimeout(resolve,300));
-  for(let i=0;i<30;i++){const r=await cli(["session","list","--machine",machine]);result=parseJson(r.stdout) as unknown as Reply;if(result.error?.code==="machineOffline"){if(r.code!==3||!result.error.retryable)throw new Error("offline exit/retry semantics changed");return;}await new Promise(resolve=>setTimeout(resolve,200));}
+  for(let i=0;i<30;i++){const r=await cli(["session","list","--active","--machine",machine]);result=parseJson(r.stdout) as unknown as Reply;if(result.error?.code==="machineOffline"){if(r.code!==3||!result.error.retryable)throw new Error("offline exit/retry semantics changed");return;}await new Promise(resolve=>setTimeout(resolve,200));}
   throw new Error(`offline target returned ${result?.error?.code}`);
 });
 check("exact-bytes","Local and paired CLI return identical workspace/session/Agent bytes",async({opened,machine,cli})=>{
   let prior="";for(let i=0;i<50;i++){const r=await runGenetAsync(opened.daemon.genet,["agent","list"],opened.daemon.env);if(r.stdout===prior)break;prior=r.stdout;await new Promise(resolve=>setTimeout(resolve,200));}
-  for(const args of [["workspace","list"],["session","list"],["agent","list"]]){
+  for(const args of [["workspace","list"],["session","list","--active"],["agent","list"]]){
     const local=await runGenetAsync(opened.daemon.genet,args,opened.daemon.env);const remote=await cli([...args,"--machine",machine]);
     if(local.code!==remote.code||local.stdout!==remote.stdout)throw new Error(`different local/remote bytes for ${args.join(" ")}`);
   }
@@ -66,15 +66,15 @@ check("shell-io","Remote shell preserves file bytes, stdin, stderr, child exit a
 });
 check("revoked","Revoked remote CLI asks to pair again without retrying",async({opened,machine,device,cli})=>{
   await opened.client.call({type:"device.revoke",payload:{deviceId:device}});
-  const result=await cli(["session","list","--machine",machine]);const reply=parseJson(result.stdout) as unknown as Reply;
+  const result=await cli(["session","list","--active","--machine",machine]);const reply=parseJson(result.stdout) as unknown as Reply;
   if(result.code!==4||reply.error?.code!=="credentialRevoked"||reply.error.retryable)throw new Error(`revoked device result: exit=${result.code} error=${JSON.stringify(reply.error)}`);
 });
 check("stale-identity","A changed paired identity is refused; forget removes local credential",async({caller,machine,cli})=>{
   const file=path.join(caller.daemon.env.GENEHUB_LOCAL_DATA_DIR!,"machines.json");const store=JSON.parse(readFileSync(file,"utf8"));store.machines[0].fingerprint="AA-BB-CC-DD";writeFileSync(file,JSON.stringify(store));
-  const result=await cli(["session","list","--machine",machine]);const reply=parseJson(result.stdout) as unknown as Reply;
+  const result=await cli(["session","list","--active","--machine",machine]);const reply=parseJson(result.stdout) as unknown as Reply;
   if(result.code!==3||reply.error?.code!=="protocolIncompatible"||reply.error.retryable)throw new Error(`stale identity not refused: ${reply.error?.code}`);
   const forgotten=parseJson((await cli(["machine","forget",machine])).stdout) as unknown as Reply;if(forgotten.data.forgotten!==true)throw new Error("forget failed");
-  const gone=await cli(["session","list","--machine",machine]);const goneError=(parseJson(gone.stdout) as unknown as Reply).error;
+  const gone=await cli(["session","list","--active","--machine",machine]);const goneError=(parseJson(gone.stdout) as unknown as Reply).error;
   if(gone.code!==4||goneError?.code!=="internal"||goneError.details?.stage!=="hubTicket")throw new Error("forgotten credential reused instead of attempting account discovery");
 });
 check("background-replay","Remote Agent works after CLI exits and replays only missed events",async({opened,machine,cli,settled})=>{

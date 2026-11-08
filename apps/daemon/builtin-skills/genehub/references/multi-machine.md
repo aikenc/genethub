@@ -55,7 +55,7 @@ Hub 查询失败会返回非零退出码和 `complete: false` 的已知条目，
 
 `--` 后面的参数原样交给目标进程，包括 `--version`、`-V` 和 `--help`。例如
 `shell --workspace <id> -- python3 --version` 查询的是目标 Python 的版本。
-`session list --active --include-archived` 返回完整活动集合，独立于历史分页；普通 `session list` 保持完整历史输出。
+`session list --active --include-archived` 返回完整活动集合，独立于历史分页。找历史用 `session list --limit 50 [--cursor <nextCursor>]`，每次一页摘要；游标绑定机器，查询范围和归档条件也须保持一致，`complete: false` 表示尚有未读取历史。分页暂不支持标签／来源筛选，不能靠读空一页认定全局无匹配。完整项目历史指定 `--workspace <id> --lean`；无范围完整历史已禁用，`--lean`、`--label` 和 `--source-kind` 不能替代范围。查询失败表示未知，不能据此重新派单。
 命令分组帮助用 `session --help` 或 `agent run --help`；`schema <command>` 提供机器可读合同。
 
 ## 跨机传文件
@@ -79,7 +79,7 @@ Hub 查询失败会返回非零退出码和 `complete: false` 的已知条目，
   断开而停止。
 - 无人值守时，权限请求默认被拒，除非显式 `--auto-approve`；Agent 提问总会停下等待回答
   （`session respond`）。不要为了让任务继续而默认加 `--auto-approve`，先确认任务范围。
-- 用 `--no-wait` 派发后，用 `session get` / `session list` 轮询状态，不要把派发成功当成完成。
+- 用 `--no-wait` 派发后，用 `session get <id> --summary` 查原任务状态；目录用现有活动查询。轻量模式要求目标声明 `session.summary.v1`，不支持就明确要求升级，不回退读取完整历史；不要把派发成功当成完成。
 - 把任务派给持有该资源（代码、许可、GPU、外设）的机器，不要把工作区搬到别处。
 - 其他可路由的只读命令：`workspace list/show`、`session get/inspect/narrative/rounds/context`。
 
@@ -92,7 +92,7 @@ Hub 查询失败会返回非零退出码和 `complete: false` 的已知条目，
 "$GENEHUB_CLI" agent run --machine <machineId> --agent <agentId> --cwd /abs/path --label 4090 --label 组员 "<任务>" --no-wait
 "$GENEHUB_CLI" session label <sessionId> --add 评审 [--machine <machineId>]
 "$GENEHUB_CLI" session label <sessionId> --remove 组员 --add 组长     # 改名：一次请求内先删后加
-"$GENEHUB_CLI" session list --machine <machineId> --label 4090 --label 组员  # 同时带这些标签的会话
+"$GENEHUB_CLI" session list --machine <machineId> --active --include-archived --label 4090 --label 组员  # 同时带这些标签的当前任务
 ```
 
 - 当前标签在 `session get` / `session list` 返回的 `labels` 里；工作台会话列表每条固定三行：标题、时间与项目名、较小的状态图标和标签。状态不写文字。也可在“⋯ → 标签”里增删改。

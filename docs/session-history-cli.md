@@ -18,6 +18,22 @@ All results use the `genet.cli/v1` envelope. `genet schema session.context` and 
 
 ## Reading strategy
 
+Find sessions with `genet session list --limit 50`. Each invocation returns one
+summary page and `data.nextCursor` / `data.complete`; pass the opaque cursor back
+with `--cursor` and keep the machine, workspace, archive and activity choices.
+Page mode supports `--workspace`, `--active` and `--include-archived`; label/source
+filters remain available on scoped complete queries. A page limit is not a total
+count, and list paging never reads chat bodies. Complete project history remains
+available with `--workspace <id> --lean`; complete current work uses
+`--active --include-archived` without a page limit.
+
+For task state only, use `genet session get <id> --summary`: `data.summary` comes
+from metadata/current state without opening chat or building its history digest.
+The existing `session.get` RPC accepts additive `summaryOnly: true` and returns
+the existing `session` reply; the target must advertise `session.summary.v1`.
+The CLI refuses unsupported targets instead of silently expanding history.
+Ordinary `session get <id>` keeps its existing snapshot response and behavior.
+
 Start with `inspect`, then use `context` or a small narrative/round page. Follow `nextCursor` backward. Open a trunk only when process detail matters; resolve a blob only from an opaque `blobRefs[].ref` returned by `session trunk`. The CLI does not accept paths or caller-constructed blob offsets.
 
 `--through-round` freezes a historical boundary. Each result identifies its source session, boundary, digest and untrusted status. Context projections carry `ghref:item:<session-id>:<item-id>` references; resolve one with:
