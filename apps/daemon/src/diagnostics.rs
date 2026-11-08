@@ -12,6 +12,8 @@ use std::time::Instant;
 
 use genehub_proto::{HubStatus, RemoteAccess, SupportDiagnosticEvent, SupportDiagnostics};
 
+pub mod work;
+
 const MAX_EVENTS: usize = 256;
 
 struct Record {

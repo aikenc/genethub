@@ -2061,6 +2061,7 @@ impl Store {
         known: Option<&HashMap<PathBuf, CatalogFile>>,
     ) -> Result<CatalogScan> {
         let started = std::time::Instant::now();
+        let workload = crate::diagnostics::work::Window::start();
         let mut yield_wait = std::time::Duration::ZERO;
         let mut max_yield = std::time::Duration::ZERO;
         let mut directories = 0usize;
@@ -2081,7 +2082,13 @@ impl Store {
             if let Some(home) = sessions.parent().filter(|home| home.exists()) {
                 let _ = self.establish_home(home);
             }
-            let entries = match fs::read_dir(&sessions) {
+            let directory = {
+                let _work = crate::diagnostics::work::FileScope::new(
+                    crate::diagnostics::work::FileWork::CatalogDirectory,
+                );
+                fs::read_dir(&sessions)
+            };
+            let entries = match directory {
                 Ok(entries) => entries,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(e) => {
@@ -2107,6 +2114,9 @@ impl Store {
                 let waited = budget.checkpoint().await;
                 yield_wait += waited;
                 max_yield = max_yield.max(waited);
+                let _work = crate::diagnostics::work::FileScope::new(
+                    crate::diagnostics::work::FileWork::CatalogEntry,
+                );
                 let session_id = entry.file_name().to_string_lossy().into_owned();
                 if sessions.parent().is_some_and(|home| {
                     home.join(TOMBSTONES_DIR)
@@ -2207,6 +2217,7 @@ impl Store {
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 "session metadata enumeration exceeded one second"
             );
+            workload.report(started.elapsed(), yield_wait);
         }
         Ok(out)
     }
