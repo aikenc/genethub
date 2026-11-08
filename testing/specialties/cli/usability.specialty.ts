@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { defineSpecialty, parseJson, runGenetAsync, type CaseContext } from "../../framework/public.ts";
 
@@ -109,6 +109,48 @@ check("bounded-session-queries", "Whole-machine history commands fail explicitly
     t.note("Five global history spellings rejected; scoped idle history and complete archived current work remain usable.");
   }));
 
+check("paged-history-summary", "An Agent can browse one history page and check a task without decoding its chat",
+  "25 real sessions are reachable through explicit bounded CLI pages; incomplete pages carry a machine-bound nextCursor; cold metadata remains readable when chat cannot be decoded; archived and deleted state is respected",
+  ["CLI secretly drains all pages", "cursor jumps to another source or scope", "a status check opens chat history", "a summary error becomes idle or missing success"],
+  async t => workspace(t, async opened => {
+    const ids: string[] = [];
+    for (let i = 0; i < 25; i++) ids.push(await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId));
+    const first = (await json(opened, ["session", "list", "--limit", "7"])).data;
+    t.assertions.assert(first.sessions.length === 7 && first.complete === false && typeof first.nextCursor === "string", "one page expanded history or claimed completeness");
+    const found = first.sessions.map((s: {id: string}) => s.id);
+    let cursor: string | null = first.nextCursor;
+    while (cursor) {
+      const page = (await json(opened, ["session", "list", "--limit", "7", "--cursor", cursor])).data;
+      t.assertions.assert(page.sessions.length <= 7 && page.complete === (page.nextCursor === null), "continuation violates bounded/completeness contract");
+      found.push(...page.sessions.map((s: {id: string}) => s.id)); cursor = page.nextCursor;
+    }
+    t.assertions.assert(found.length === 25 && new Set(found).size === 25 && ids.every(id => found.includes(id)), "paged history lost or duplicated a session");
+    const foreign = JSON.parse(Buffer.from(first.nextCursor, "base64url").toString()); foreign.machine_id = "different-machine";
+    const wrong = Buffer.from(JSON.stringify(foreign)).toString("base64url");
+    for (const flags of [["--limit", "0"], ["--limit", "101"], ["--cursor", first.nextCursor], ["--limit", "7", "--cursor", wrong], ["--limit", "7", "--label", "tag"]]) {
+      t.assertions.assert((await command(opened, ["session", "list", ...flags])).code !== 0, "invalid/foreign page silently returned data");
+    }
+    const scope = await command(opened, ["session", "list", "--workspace", opened.workspaceId, "--limit", "7", "--cursor", first.nextCursor]);
+    t.assertions.assert(scope.code !== 0, "global cursor silently switched query scope");
+    await opened.client.call({type: "session.archive", payload: {sessionId: ids[0]!, archived: true}});
+    const archived = (await json(opened, ["session", "get", ids[0]!, "--summary"])).data;
+    t.assertions.assert(archived.summary.archived === true && !Object.hasOwn(archived, "session"), "summary expanded a snapshot or hid archive state");
+    const home = path.join(opened.workspaceRoot, ".genethub", "sessions");
+    const model = JSON.parse(readFileSync(path.join(home, ids[0]!, "meta.json"), "utf8"));
+    const cold = "s_cli_metadata_only"; mkdirSync(path.join(home, cold));
+    writeFileSync(path.join(home, cold, "meta.json"), JSON.stringify({...model, id: cold, title: "Cold status only", archived: false}));
+    // A real filesystem fault proves this read path must not deserialize chat.
+    mkdirSync(path.join(home, cold, "chat.jsonl"));
+    t.assertions.assert((await command(opened, ["session", "get", cold])).code !== 0, "fixture failed to make history unreadable");
+    const summary = (await json(opened, ["session", "get", cold, "--summary"])).data.summary;
+    t.assertions.assert(summary.id === cold && summary.title === "Cold status only", "status-only read required history");
+    const absent = records((await command(opened, ["session", "get", "s_missing_summary", "--summary"])).stdout).at(-1);
+    t.assertions.assert(absent?.error?.code === "targetNotFound", "missing status lost typed error");
+    await opened.client.call({type: "session.delete", payload: {sessionId: ids[1]!}});
+    t.assertions.assert((await command(opened, ["session", "get", ids[1]!, "--summary"])).code !== 0, "deleted task reappeared as a summary");
+    t.note("Four CLI pages returned all 25 IDs; scope/source guards, archive and deletion checked; cold unreadable chat did not block metadata status.");
+  }));
+
 check("route-filters", "Agent filters select routes without a redundant mode switch",
   "implicit and explicit route filters agree and a tag-only CLI run actually selects the requested remote-independent model",
   ["filters require hidden routes flag", "schema requires Agent for tag selection", "tag request silently runs a different model"],
@@ -167,7 +209,7 @@ check("forwarded-contracts", "Forwarded schema, capabilities and selector failur
       const reply=await command(opened,args);const error=records(reply.stdout).at(-1)?.error;
       t.assertions.assert(reply.code===2&&error?.code==="commandNotRoutable","local-only selector was ignored");
     }
-    const missing=await command(opened,["session","list","--machine=m_other"]);
+    const missing=await command(opened,["session","list","--active","--machine=m_other"]);
     const failure=parseJson(missing.stdout) as {error?:{code:string;retryable:boolean;details?:{stage:string;machineId:string}}};
     t.assertions.assert(missing.code===4&&failure.error?.code==="internal"&&!failure.error.retryable&&failure.error.details?.stage==="hubTicket"&&failure.error.details.machineId==="m_other","missing account route silently used local data or hid upstream failure");
     const cwd=await command(opened,["workspace","list","--cwd","/srv/app"]);
