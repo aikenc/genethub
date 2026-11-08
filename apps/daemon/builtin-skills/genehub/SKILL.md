@@ -39,7 +39,7 @@ Agent 已能通过工具执行的事，不应另按项目、设备或角色降�
   `client`、`process`。只能在本机：`machine`、`speech`、`file`、`daemon` 生命周期、`update`。
 - 配对、`device invite`、授权范围属于授权变更，只在用户明确要求时执行；完整 Agent 连接按上述全权契约理解；不要把包含 Session/任意工具执行的授权称作只读隔离，也不要把邀请链接或码贴进聊天以外的地方。当前 CLI 的旧范围参数按实际版本解释，不自行改变既有设备授权。
 - 会话控制本机与跨机同规则：完整连接的 Agent 可创建并控制普通会话，来源与真实 Session ID 保留。旧 Workflow 会话仅作历史查看，从 fork 创建普通会话继续；当前命令若拒绝，保留真实错误。Agent 消息按 Agent 来源处理，多会话协作用团队机制（Skill `genehub-team`）。
-- 用会话标签（`session label`、`agent run --label`、`session list --label`）标明会话的设备、角色或分工，
+- 用会话标签（`session label`、`agent run --label`、`session list --workspace <id> --label <标签>`）标明会话的设备、角色或分工，
   不要把 `[标签]` 写进标题；见 [multi-machine.md](references/multi-machine.md)。
 - 数据留在所属机器：不要为了“方便”把工作区或密钥搬到别的机器；把任务派给持有资源的那台机器。
   用户明确要求传文件时，由接收方 `file download --from <源>`，见 [file-transfer.md](references/file-transfer.md)。
@@ -48,7 +48,9 @@ Agent 已能通过工具执行的事，不应另按项目、设备或角色降�
 
 会话列表默认按 Space 分页：根 Space 最近 10 条，子 Space 展开后读取，更多历史需继续翻页。
 历史未展开不代表空闲；进行中和计数独立读取全部活动页，未确认完整时保留下限／未知，不显示精确零。
-`session list` 的完整查询合同保持不变，团队对账不能仅凭页面当前显示的记录数判断。
+查当前任务用 `session list --active --include-archived`；查历史必须指定 `--workspace <id>`。
+无范围的完整历史命令已禁用，`--lean` 和标签不能替代范围。读取失败表示未知，不能按零会话重新派单。
+团队对账不能仅凭页面当前显示的记录数判断。
 
 ## 按任务导航
 

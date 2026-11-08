@@ -773,6 +773,13 @@ async fn execute(
             lean,
             active,
         } => {
+            if workspace_id.is_none() && !active {
+                return Err(CliFailure::business(
+                    "unboundedQueryDisabled",
+                    "无范围的完整会话历史查询已禁用。查看当前任务用 session list --active --include-archived；查历史请指定 --workspace <id>。--lean 或标签筛选不能替代查询范围。",
+                    None,
+                ));
+            }
             let rpc = connect_selected(selection).await?;
             if let Some(id) = workspace_id.as_deref() {
                 let listed =
@@ -1432,11 +1439,12 @@ fn command_schema(name: &str) -> Value {
             ),
         ),
         "session.list" => (
-            "genet session list [--workspace <id>] [--label <label>]... [--source-kind <kind>] [--include-archived] [--lean] [--active]",
+            "genet session list (--workspace <id> | --active) [--label <label>]... [--source-kind <kind>] [--include-archived] [--lean]",
             true,
             object_input(
                 json!({
-                    "workspaceId": {"type": ["string", "null"], "minLength": 1},
+                    "workspaceId": {"type": ["string", "null"], "minLength": 1,
+                        "description": "--workspace; required for history; unscoped full-history reads are disabled even with --lean or labels"},
                     "labels": {"type": "array", "items": {"type": "string", "minLength": 1},
                         "description": "--label, repeatable; keeps sessions carrying every given label"},
                     "sourceKind": {"enum": ["human", "system", null],

@@ -55,7 +55,7 @@ Hub 查询失败会返回非零退出码和 `complete: false` 的已知条目，
 
 `--` 后面的参数原样交给目标进程，包括 `--version`、`-V` 和 `--help`。例如
 `shell --workspace <id> -- python3 --version` 查询的是目标 Python 的版本。
-`session list --active --include-archived` 返回完整活动集合，独立于历史分页；普通 `session list` 保持完整历史输出。
+`session list --active --include-archived` 返回完整活动集合，独立于历史分页。历史查询必须指定 `--workspace <id>`；无范围的完整历史查询已禁用，`--lean`、`--label` 和 `--source-kind` 不能替代范围。查询失败表示未知，不能当成没有会话或据此重新派单。
 命令分组帮助用 `session --help` 或 `agent run --help`；`schema <command>` 提供机器可读合同。
 
 ## 跨机传文件
@@ -92,7 +92,7 @@ Hub 查询失败会返回非零退出码和 `complete: false` 的已知条目，
 "$GENEHUB_CLI" agent run --machine <machineId> --agent <agentId> --cwd /abs/path --label 4090 --label 组员 "<任务>" --no-wait
 "$GENEHUB_CLI" session label <sessionId> --add 评审 [--machine <machineId>]
 "$GENEHUB_CLI" session label <sessionId> --remove 组员 --add 组长     # 改名：一次请求内先删后加
-"$GENEHUB_CLI" session list --machine <machineId> --label 4090 --label 组员  # 同时带这些标签的会话
+"$GENEHUB_CLI" session list --machine <machineId> --active --include-archived --label 4090 --label 组员  # 同时带这些标签的当前任务
 ```
 
 - 当前标签在 `session get` / `session list` 返回的 `labels` 里；工作台会话列表每条固定三行：标题、时间与项目名、较小的状态图标和标签。状态不写文字。也可在“⋯ → 标签”里增删改。

@@ -763,7 +763,7 @@ def sessions_of(workspace_id, machine=None, max_age=None):
     key = (machine or "", workspace_id)
     cached = _WORKSPACE_SESSIONS_CACHE.get(key)
     if age <= 0 or cached is None or now - cached[0] > age:
-        items = genet("session", "list", "--workspace", workspace_id, *machine_args(machine)).get("sessions")
+        items = genet("session", "list", "--workspace", workspace_id, "--lean", *machine_args(machine)).get("sessions")
         if not isinstance(items, list):
             raise ExpertError("会话列表响应缺少 sessions", "查询结果未知，没有更新目录缓存", "核对原会话与查询回执，不按空列表新建")
         _WORKSPACE_SESSIONS_CACHE[key] = (time.time(), items)
@@ -1865,7 +1865,7 @@ def refresh_live_status(root, force=False):
         wt = open_env(role_dir).get("WORKTREE_DIR") or ("前台" if role == "root" else "未绑定工位（待岗）")
         live = by_workspace.get(wid, [])
         if not live:
-            lines.append("- **%s** (工位: `%s`): 暂无会话" % (role, wt))
+            lines.append("- **%s** (工位: `%s`): 当前无活动" % (role, wt))
         else:
             for item in sorted(live, key=lambda s: -s.get("updatedAtMs", 0))[:3]:
                 lines.append("- **%s** `%s` [%s] (%s) — %s (工位: `%s`)" % (
@@ -2593,23 +2593,29 @@ def session_missing(session_id):
         raise
 
 
-def session_snapshot_by_workspace():
-    """One validated public snapshot for read-only Team overviews."""
+def session_snapshot_by_workspace(workspace_ids=None, *, active=True):
+    """Overviews read current work; historical readers must name their Spaces."""
     by_workspace = {}
-    snapshot = genet("session", "list", "--lean")
-    items = snapshot.get("sessions")
-    if "workspaceId" not in snapshot or snapshot["workspaceId"] is not None or not isinstance(items, list):
-        raise ExpertError("目录会话快照无法核对", "目录未知，没有按空会话处理", "核对原查询回执后重试目录")
+    scopes = [None] if active else sorted(set(workspace_ids or []))
+    if not active and not scopes:
+        return by_workspace
     seen = set()
-    for item in items:
-        if (not isinstance(item, dict) or not isinstance(item.get("id"), str)
-                or not SESSION_ID.match(item["id"]) or item["id"] in seen
-                or not isinstance(item.get("workspaceId"), str) or not item["workspaceId"]
-                or not isinstance(item.get("status"), str)):
-            raise ExpertError("目录会话快照含无法核对的记录", "目录未知，没有发布部分目录", "核对原会话与查询回执")
-        seen.add(item["id"])
-        if not item.get("archived"):
-            by_workspace.setdefault(item["workspaceId"], []).append(item)
+    for scope in scopes:
+        flags = ["--active", "--include-archived"] if active else ["--workspace", scope]
+        snapshot = genet("session", "list", "--lean", *flags)
+        items = snapshot.get("sessions")
+        if "workspaceId" not in snapshot or snapshot["workspaceId"] != scope or not isinstance(items, list):
+            raise ExpertError("目录会话快照无法核对", "目录未知，没有按空会话处理", "核对原查询回执后重试目录")
+        for item in items:
+            if (not isinstance(item, dict) or not isinstance(item.get("id"), str)
+                    or not SESSION_ID.match(item["id"]) or item["id"] in seen
+                    or not isinstance(item.get("workspaceId"), str) or not item["workspaceId"]
+                    or scope is not None and item["workspaceId"] != scope
+                    or not isinstance(item.get("status"), str)):
+                raise ExpertError("目录会话快照含无法核对的记录", "目录未知，没有发布部分目录", "核对原会话与查询回执")
+            seen.add(item["id"])
+            if active or not item.get("archived"):
+                by_workspace.setdefault(item["workspaceId"], []).append(item)
     return by_workspace
 
 
@@ -2631,6 +2637,8 @@ def cmd_directory(args):
     ]
     by_workspace = session_snapshot_by_workspace() if selected else {}
     lines = []
+    if selected:
+        lines.append("会话目录只列当前活动（含待处理及归档中的未完成事项）；历史请按 workspace 查询。")
     for name, expert in selected:
         info = descriptor(expert["root"]) or {}
         lines.append("== %s: %s" % (name, info.get("description", "")))
@@ -3561,7 +3569,7 @@ def user_rounds_since(spaces, since, team_mode=False, limit=None):
     needs to know whether enough rounds piled up."""
     count, last = 0, 0
     target_wids = [wid for role, wid in spaces.items() if role not in ("reflect", "team-reflect")] if team_mode else [spaces["root"]]
-    by_workspace = session_snapshot_by_workspace() if target_wids else {}
+    by_workspace = session_snapshot_by_workspace(target_wids, active=False) if target_wids else {}
     for wid in target_wids:
         for item in sorted(by_workspace.get(wid, []), key=lambda value: -(value.get("updatedAtMs") or 0)):
             if not team_mode and SYSTEM_LABEL in (item.get("labels") or []):
