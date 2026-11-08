@@ -929,7 +929,7 @@ export class Client {
         if (this.catalog !== subscription || this.stopped) return;
         subscription.initializing = false;
         subscription.needsResync = !(error instanceof ClientRequestTooLargeError) && !String(error).includes("directory capacity") && !this.failure;
-        subscription.rejectReady(error);
+        if (!subscription.needsResync) subscription.rejectReady(error);
         this.callListener(() => subscription.handlers.onUnavailable(error));
       } finally { clearTimeout(timer); clearTimeout(stalled!); subscription.progress=undefined; subscription.finish=undefined; subscription.reject=undefined; }
     })();

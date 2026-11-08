@@ -208,6 +208,8 @@ export function MachineDirectoryLists({ connections, directory:sharedDirectory, 
             const reply = section === "projects" ? await target.call({ type: "workspace.remove", payload: { workspaceId: item.id } })
               : await target.call({ type: "session.archive", payload: { sessionId: item.id, archived: !includeArchived } });
             if (section === "projects" ? reply?.type !== "workspaces" : reply?.type !== "session" || reply.data.archived === includeArchived) throw new Error("未收到确认，请核对后再操作");
+            if (reply?.type === "workspaces") source.current?.acceptWorkspaceRemoval(row.target,row.workspaces.filter(w => !reply.data.some(next => next.id === w.id)).map(w => w.id));
+            else if (reply?.type === "session") source.current?.acceptSessionSummary(row.target,reply.data);
           });
           succeeded++;
         } catch (e) { failures.push(`${"name" in item ? item.name : item.title}: ${e instanceof Error ? e.message : String(e)}`); }
@@ -215,8 +217,6 @@ export function MachineDirectoryLists({ connections, directory:sharedDirectory, 
     }
     if (mounted.current) {
       setSelection(new Set());
-      await source.current!.refresh(undefined,undefined,undefined,true);
-      if (useWorkbench.getState().client) { await useWorkbench.getState().refreshWorkspaces(); await useWorkbench.getState().refreshSessions(); }
       if (mounted.current) setError(`${succeeded} 项已${section === "projects" ? "移除" : includeArchived ? "恢复" : "归档"}${failures.length ? `；${failures.join("；")}` : ""}`);
     }
   });

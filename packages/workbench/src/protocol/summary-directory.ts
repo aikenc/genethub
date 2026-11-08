@@ -42,17 +42,24 @@ export interface SummaryDirectory {
 }
 // References/listeners only: the directory remains the sole row owner. The
 // body store reads this view instead of running another summary synchronizer.
-const clientSources = new WeakMap<Client, () => MachineSummary | undefined>();
+const clientSources = new WeakMap<Client, {
+  read(): MachineSummary | undefined;
+  removed(ids: readonly string[]): void;
+  session(summary: SessionSummary): void;
+}>();
+/** Apply acknowledged mutations to the same directory owner, without a refresh. */
+export function acceptWorkspaceRemoval(client: Client, ids: readonly string[]): void {clientSources.get(client)?.removed(ids);}
+export function acceptSessionSummary(client: Client, summary: SessionSummary): void {clientSources.get(client)?.session(summary);}
 const sourceReaders = new WeakMap<Client, Set<(row: MachineSummary) => void>>();
 export function observeCatalogSource(client: Client, reader: (row: MachineSummary) => void): () => void {
   let readers = sourceReaders.get(client);
   if (!readers) {readers=new Set(); sourceReaders.set(client,readers);}
   readers.add(reader);
-  const row = clientSources.get(client)?.(); if (row) reader(row);
+  const row = clientSources.get(client)?.read(); if (row) reader(row);
   return () => readers!.delete(reader);
 }
 export function readCatalogSource(client: Client): Promise<MachineSummary> {
-  const current = clientSources.get(client)?.();
+  const current = clientSources.get(client)?.read();
   if (current?.catalogRevision !== undefined && machineReady(current) && !current.refreshing) return Promise.resolve(current);
   return new Promise((resolve,reject) => {
     let stop = () => {};
@@ -281,6 +288,34 @@ export class MachineSummaryDirectory {
     Object.assign(row, {state:"denied",refreshing:false,stateSource:"request",observedAt:new Date().toISOString(),sessions:[],activeSessions:[],activityComplete:false,workspaces:[],projectPages:undefined,sessionTotal:0,workspaceTotal:0,updatedAt:null,nextCursor:null,version:undefined,sessionEtags:undefined,workspaceEtags:undefined,catalogRevision:undefined,cached:false});
     if (watch) for (const reader of sourceReaders.get(watch.client) ?? []) {try {reader(row);} catch {this.diagnostic("summary.reader","failed");}}
   }
+  acceptWorkspaceRemoval(target: Target, idsToRemove: readonly string[]): void {
+    const row = this.rows.find(row => sameMachine(row.target,target));
+    if (!row || !this.canPublish(row)) return;
+    const removed = new Set(idsToRemove.filter(id => row.workspaces.some(w => w.id === id)));
+    if (!removed.size) return;
+    row.workspaces = row.workspaces.filter(w => !removed.has(w.id));
+    row.sessions = row.sessions.filter(s => !removed.has(s.workspaceId));
+    row.activeSessions = row.activeSessions?.filter(s => !removed.has(s.workspaceId));
+    row.workspaceEtags = Object.fromEntries(Object.entries(row.workspaceEtags ?? {}).filter(([id]) => !removed.has(id)));
+    const ids = new Set(row.sessions.map(s => s.id));
+    row.sessionEtags = Object.fromEntries(Object.entries(row.sessionEtags ?? {}).filter(([id]) => ids.has(id)));
+    row.projectPages = Object.fromEntries(Object.entries(row.projectPages ?? {}).filter(([id]) => !removed.has(id)));
+    row.pageViews = undefined;
+    row.catalogGeneration = (row.catalogGeneration ?? 0) + 1;
+    row.sessionTotal = row.sessions.length; row.workspaceTotal = row.workspaces.length;
+    this.dirtyCache.add(row.target.id); this.emit();
+  }
+  acceptSessionSummary(target: Target, summary: SessionSummary): void {
+    const row = this.rows.find(row => sameMachine(row.target,target));
+    if (!row || !this.canPublish(row)) return;
+    row.sessions = [...new Map([...row.sessions,summary].map(s => [s.id,s])).values()];
+    row.activeSessions = row.activeSessions?.map(s => s.id === summary.id ? summary : s);
+    if (row.sessionEtags) delete row.sessionEtags[summary.id];
+    row.pageViews = undefined;
+    row.catalogGeneration = (row.catalogGeneration ?? 0) + 1;
+    row.sessionTotal = row.sessions.length;
+    this.dirtyCache.add(row.target.id); this.emit();
+  }
   async workspacePage(target: Target, workspaceId: string, cursor: string | null = null) {
     const page = await this.connections.use(target, client => this.currentPage(target,client,workspaceId,cursor,10), undefined, true);
     const row = this.rows.find(row => row.target.id === target.id);
@@ -309,12 +344,13 @@ export class MachineSummaryDirectory {
     const current = () => this.rows.find(row => row.target.id === target.id);
     if (watch?.client === client) {
       if (client.connectionState !== "ready") throw new Error("目录连接尚未恢复，上次状态仍保留。 ");
-      if (force || current()?.cached) {await client.refreshCatalog(); await this.repairVisible(target,client);}
+      if (force || current()?.cached) await client.refreshCatalog();
       else await watch.ready;
+      if (watch.repair) await watch.repair;
+      if (current()?.cached) throw new Error("目录尚未恢复，上次状态仍保留。");
       return;
     }
     watch?.stop();
-    clientSources.set(client,current);
     const row = current()!;
     const changedInstance = row.daemonInstanceId && row.daemonInstanceId !== client.identity?.daemonInstanceId;
     row.daemonInstanceId = client.identity?.daemonInstanceId;
@@ -338,19 +374,14 @@ export class MachineSummaryDirectory {
       onBatch: batch => {
         const row = current(); if (!row || !this.canPublish(row) || this.watches.get(target.id)?.client !== client) return;
         this.applyCatalog(row,batch);
-        if (batch.snapshot && batch.complete) {
-          void this.repairVisible(target,client).then(() => {
-            if (!this.canPublish(row) || current() !== row) return;
-            row.refreshing=false; row.cached=false;
-            row.state=row.nextCursor || row.catalogErrors?.length ? "partial" : "ready";
-            this.emit();
-          }).catch(error => { if (this.canPublish(row)) {row.refreshing=false;row.state=classify(error);this.emit();} });
+        if (batch.complete && (batch.snapshot || batch.removedWorkspaces.length > 0)) {
+          void this.repairVisible(target,client).catch(error => { if (this.canPublish(row) && this.watches.get(target.id)?.client === client) {row.refreshing=false;row.state=classify(error);this.emit();} });
         }
         this.emit();
       },
     });
     watch = {client, ...subscription}; this.watches.set(target.id,watch);
-    try {await watch.ready; await this.repairVisible(target,client);}
+    try {await watch.ready; if (watch.repair) await watch.repair;}
     catch(error) {if (client.connectionState === "closed") {watch.stop();this.watches.delete(target.id);} throw error;}
   }
 
@@ -427,6 +458,11 @@ export class MachineSummaryDirectory {
         if (page.catalogRevision !== row.catalogRevision) throw new Error("目录已更新，请重试此页。");
         row.projectPages={...row.projectPages,[workspace.id]:{nextCursor:page.nextCursor,error:page.error}};
       }
+      if (this.canPublish(row) && this.watches.get(target.id)?.client === client) {
+        row.refreshing=false; row.cached=false;
+        row.state=row.nextCursor || row.catalogErrors?.length ? "partial" : "ready";
+        this.emit();
+      }
     })();
     watch.repair=operation;
     try {await operation;}
@@ -440,6 +476,11 @@ export class MachineSummaryDirectory {
     if (signal.aborted) cancel();
     const timer = setTimeout(() => reading.abort(Object.assign(new Error("summary source timed out"), { code: "timeout" })), SOURCE_TIMEOUT_MS);
     const operation = this.connections.use(target, async client => {
+      clientSources.set(client, {
+        read: () => this.rows.find(row => sameMachine(row.target,target)),
+        removed: ids => this.acceptWorkspaceRemoval(target,ids),
+        session: summary => this.acceptSessionSummary(target,summary),
+      });
       target.deviceHandle ??= client.identity?.machineId;
       target.fingerprint ??= client.identity?.fingerprint;
       if (client.identity?.features?.includes("catalog.sync.v1")) {

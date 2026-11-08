@@ -52,7 +52,7 @@ import {
 import type { AddressScope } from "../location/workbench";
 import type { Client, ConnectionState } from "../protocol/client";
 import { readActivitySessions } from "../protocol/session-pages";
-import { observeCatalogSource, readCatalogSource } from "../protocol/summary-directory";
+import { acceptSessionSummary, acceptWorkspaceRemoval, observeCatalogSource, readCatalogSource } from "../protocol/summary-directory";
 import { PREVIEW_ANNOTATIONS_FEATURE } from "../preview/reviewDraft";
 import { resolveWorkspacePath } from "../preview/resolveArtifactRef";
 import { isAbsoluteFilePath } from "../preview/url";
@@ -1210,6 +1210,7 @@ return create<WorkbenchState>((set, get) => ({
         // Concurrent removals can finish out of order. Apply only the known
         // removals; an older full-catalog reply must not resurrect another team.
         workspaces: state.workspaces.filter(w => !removedIds.has(w.id)),
+        sessions: state.sessions.filter(s => !removedIds.has(s.workspaceId)),
         activeWorkspaceId: nextWorkspaceId,
         activeSessionId: removedWasActive ? null : state.activeSessionId,
         draft: state.draft && removedIds.has(state.draft.workspaceId) ? null : state.draft,
@@ -1225,7 +1226,7 @@ return create<WorkbenchState>((set, get) => ({
         diff: removedWasActive ? null : state.diff,
       };
     });
-    await loadSessions(client, set);
+    acceptWorkspaceRemoval(client, [...removedIds]);
     if (removedWasActive && nextWorkspaceId) {
       get().newSession(nextWorkspaceId, null, { addressScope: "workspace" });
     }
@@ -2568,7 +2569,7 @@ return create<WorkbenchState>((set, get) => ({
     const reply = await asked(set, () => client.call({type: "session.archive", payload: {sessionId, archived}}));
     if (!reply || reply.type !== "session" || reply.data.id !== sessionId || reply.data.archived !== archived) return false;
     set(state => ({sessions: upsertBy(state.sessions,reply.data,s => s.id), sessionObservations: {...state.sessionObservations,[sessionId]:Date.now()}}));
-    await loadSessions(client, set);
+    acceptSessionSummary(client, reply.data);
     return true;
   },
 
