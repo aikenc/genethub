@@ -112,6 +112,8 @@ sys.exit(r.returncode)
     // before any remote business command is attempted.
     const rebuilt = spawnSync(python,[path.join(t.openRoot,"apps/daemon/builtin-skills/genehub/references/spacebuilder/spacebuilder.py"),"build",sourceRoot],{env:sourceEnv,encoding:"utf8"});
     t.assertions.assert(rebuilt.status===0,"cross-machine metadata broke team rebuild: "+rebuilt.stdout+rebuilt.stderr);
+    // External descriptor writers converge through discovery, without a list-time file read.
+    await t.tools.waitUntil(async () => (await cliJson(["workspace","list"])).workspaces.find((w:any)=>w.folders?.[0]?.root===sourceRoot)?.agentSpace?.members?.some((m:any)=>m.workspaceId===qa.id&&m.machineId===machine), 10000);
     const members=(await cliJson(["workspace","list"])).workspaces.find((w:any)=>w.folders?.[0]?.root===sourceRoot)?.agentSpace?.members;
     t.assertions.assert(members?.length===1&&members[0].workspaceId===qa.id&&members[0].machineId===machine&&!Object.hasOwn(members[0],"command"),"build lost the exact remote reference or exposed executor commands");
     const script = (args: string[]) => new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
@@ -128,7 +130,7 @@ sys.exit(r.returncode)
     const pendingDir = path.join(sourceRoot, ".genethub/team/pending"), files = readdirSync(pendingDir).filter(f => f.endsWith(".json"));
     t.assertions.assert(files.length === 1, "one dispatch generated multiple pending sessions");
     const pendingPath = path.join(pendingDir, files[0]!), record = JSON.parse(readFileSync(pendingPath, "utf8"));
-    const sessions = (await cliJson(["session", "list", "--workspace", qa.id], true)).sessions;
+    const sessions = (await cliJson(["session", "list", "--workspace", qa.id, "--limit", "100"], true)).sessions;
     t.assertions.assert(sessions.length === 1 && sessions[0].id === record.sessionId && sessions[0].modelId !== "caller-only-model", "receipt retry created a duplicate or inherited caller model");
     const lock = path.join(targetRoot, "spaces/qa/.genethub/genet-writer.json");
     t.assertions.assert(JSON.parse(readFileSync(lock, "utf8")).session === record.sessionId, "writer marker is missing on executor");
@@ -200,7 +202,7 @@ sys.exit(r.returncode)
     writeFileSync(path.join(targetRoot, "spaces/qa/.genethub/team/dispatch", createHash("sha256").update(unknown.id).digest("hex") + ".json"), JSON.stringify({ request: unknown, status: "unknown", lock: null }));
     const uncertain = await script(dispatch.map(v => v === "one-task" ? "unknown-create" : v));
     t.assertions.assert(uncertain.code !== 0 && uncertain.stderr.includes("unknown"), "unknown create was retried");
-    t.assertions.assert((await cliJson(["session", "list", "--workspace", qa.id], true)).sessions.length === 1, "uncertain creation spawned another session");
+    t.assertions.assert((await cliJson(["session", "list", "--workspace", qa.id, "--limit", "100"], true)).sessions.length === 1, "uncertain creation spawned another session");
     const corruptId = "corrupt-create";
     const corruptPath = path.join(targetRoot, "spaces/qa/.genethub/team/dispatch", createHash("sha256").update(corruptId).digest("hex") + ".json");
     writeFileSync(corruptPath, "{broken");
@@ -232,11 +234,11 @@ sys.exit(r.returncode)
       const finished = await script(["hook"]);
       t.assertions.assert(finished.code === 0 && !existsSync(lock), "fresh task did not retire its own writer lock");
     }
-    t.assertions.assert(freshSessions[0] !== freshSessions[1] && (await cliJson(["session", "list", "--workspace", qa.id], true)).sessions.length === 3, "same-worded new task reused an old session");
+    t.assertions.assert(freshSessions[0] !== freshSessions[1] && (await cliJson(["session", "list", "--workspace", qa.id, "--limit", "100"], true)).sessions.length === 3, "same-worded new task reused an old session");
     const beforeSlowRequest = o.mock.requests.length;
     o.mock.script({ text: "A slow remote result.", delayMs: 30000 }, { text: "Resumed worker." });
     const concurrent = await Promise.all(["racer-a", "racer-b"].map(id => script(dispatch.map(v => v === "one-task" ? id : v))));
-    t.assertions.assert(concurrent.filter(r => r.code === 0).length === 1 && (await cliJson(["session", "list", "--workspace", qa.id], true)).sessions.length === 4, "concurrent callers admitted zero or multiple writers");
+    t.assertions.assert(concurrent.filter(r => r.code === 0).length === 1 && (await cliJson(["session", "list", "--workspace", qa.id, "--limit", "100"], true)).sessions.length === 4, "concurrent callers admitted zero or multiple writers");
     const raceSession = JSON.parse(readFileSync(lock, "utf8")).session;
     // A person's stop pauses the task rather than abandoning its directory.
     // Quiet workers are no longer canceled automatically. Keep the reservation
@@ -256,24 +258,24 @@ sys.exit(r.returncode)
     let lastReleaseState: unknown;
     await t.stage("paused-reservation", async () => {
       await t.tools.waitUntil(async () => {
-        const s = (await cliJson(["session", "list", "--workspace", qa.id], true)).sessions.find((s: any) => s.id === raceSession);
+        const s = (await cliJson(["session", "list", "--workspace", qa.id, "--limit", "100"], true)).sessions.find((s: any) => s.id === raceSession);
         return s?.status === "idle" && s?.inputSummary?.paused;
       }, 30000);
       const pausedHook = await script(["hook"]);
       t.assertions.assert(pausedHook.code === 0 && existsSync(lock), "paused writer lost its reservation");
       t.assertions.assert(JSON.parse(readFileSync(lock, "utf8")).session === raceSession, "paused reservation changed owner");
-      const paused = (await cliJson(["session", "list", "--workspace", qa.id], true)).sessions.find((s: any) => s.id === raceSession);
+      const paused = (await cliJson(["session", "list", "--workspace", qa.id, "--limit", "100"], true)).sessions.find((s: any) => s.id === raceSession);
       t.assertions.assert(paused?.inputSummary?.paused && paused.inputSummary.pendingMessageIds.length > 0, "reconciliation resumed or discarded paused input");
     });
     await cliJson(["session", "send", raceSession, "Continue the same paused task and finish it.", "--message-id", "x.resume-reserved-writer", "--no-wait", "--machine", machine]);
     await t.stage("resumed-release", () => t.tools.waitUntil(async () => {
       const tick = await script(["hook"]);
       if (tick.code !== 0) throw new Error("explicit-stop reconciliation failed: " + tick.stderr);
-      const summaries = (await cliJson(["session", "list", "--workspace", qa.id], true)).sessions;
+      const summaries = (await cliJson(["session", "list", "--workspace", qa.id, "--limit", "100"], true)).sessions;
       lastReleaseState = { targetErrors: peerErrors(t.env.data), sourceErrors: peerErrors(sourceData), relay: { exit: relay.process.exitCode, signal: relay.process.signalCode, logTail: relay.logTail().slice(-1500) }, summaries, pending: readdirSync(pendingDir).map(f => JSON.parse(readFileSync(path.join(pendingDir, f), "utf8"))) };
       return !existsSync(lock);
     }, 30000).catch(() => { throw new Error("resumed writer release did not finish: " + JSON.stringify(lastReleaseState)); }));
-    const resumed = (await cliJson(["session", "list", "--workspace", qa.id], true)).sessions.find((s: any) => s.id === raceSession);
+    const resumed = (await cliJson(["session", "list", "--workspace", qa.id, "--limit", "100"], true)).sessions.find((s: any) => s.id === raceSession);
     t.assertions.assert(resumed?.status === "idle" && !resumed?.inputSummary?.paused && resumed.inputSummary.pendingMessageIds.length === 0, "finished task left input paused or pending");
     // Upgrade the same real source/executor to TaskOwner routing. The source
     // keeps the only task ledger; execution-only remote Owner can ask for help.

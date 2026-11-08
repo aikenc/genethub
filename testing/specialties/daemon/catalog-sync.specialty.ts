@@ -36,6 +36,12 @@ defineSpecialty({...base,
     writeFileSync(join(home,"session-coordination.json"),JSON.stringify({version:1,source:"test",revision:1,updatedAtMs:Date.now(),receivedAtMs:Date.now(),
       sessions:Object.fromEntries(ids.map(id=>[id,{source:"test",active:true,pending:1,ready:0,unknown:0,updatedAtMs:Date.now()}]))}));
     t.assertions.assert(o.client.identity?.features?.includes("catalog.sync.v1") === true,"new directory artifact is not active");
+    // These rows were written externally after the initial projection existed.
+    // Establish the expected read set before testing the handoff protocol.
+    await t.tools.waitUntil(async () => {
+      const reply=await o.client.call({type:"session.page",payload:{requests:[{workspaceId:o.workspaceId,cursor:null,limit:100,activeOnly:true}],includeArchived:true}});
+      return reply?.type==="sessionPages"&&!reply.data[0]?.error&&reply.data[0]?.sessions.length===13;
+    },15000);
     let frames:CatalogBatch[]=[];
     const follow=async(known:CatalogKnownSession[]) => {
       frames=[];

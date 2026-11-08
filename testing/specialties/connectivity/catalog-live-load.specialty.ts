@@ -84,7 +84,7 @@ defineSpecialty({
 
 defineSpecialty({
   id: "specialty.session-catalog.cancelled-readers-recover",
-  title: "Closing the initial or every catalog consumer leaves subsequent real reads usable",
+  title: "Closing the initial or every registry-refresh consumer leaves later real reads usable",
   oracle: "A real carrier closes during a large signed-guest read; another consumer still receives the full catalog, and after all consumers disconnect the next query completes with the same native IDs.",
   catches: ["cancelled initializer strands shared-read waiters", "abandoned shared read stays permanently cached", "one client disconnect aborts another consumer"],
   tags: ["core", "session-catalog", "catalog-live-load"], llm: { default: "none" },
@@ -107,6 +107,10 @@ defineSpecialty({
     }
     const request = { type: "session.list" as const, payload: { workspaceId: null, includeArchived: true, lean: true } };
     const first = await t.flows.main.openSecondClient(o, "catalog-initializer"); clients.push(first);
+    // A new registered home requires a genuinely cold read set. A warm cached
+    // read is now correctly fast, so expiry alone cannot prove cancellation.
+    const coldRoot = join(t.env.root, "cold-registry"); mkdirSync(coldRoot);
+    await o.client.call({type:"workspace.open",payload:{root:coldRoot}});
     let settled = false;
     const abandoned = first.call(request).then(() => { settled = true; }, () => { settled = true; });
     await new Promise(resolve => setTimeout(resolve, 20));
@@ -117,6 +121,8 @@ defineSpecialty({
     t.assertions.assert(result?.type === "sessions" && result.data.length === 64 && result.data.every(s => ids.includes(s.id)), "surviving consumer lost the catalog after initializer disconnect");
     const abandonedClients = await Promise.all(Array.from({ length: 4 }, (_, i) => t.flows.main.openSecondClient(o, `catalog-abandon-${i}`)));
     clients.push(...abandonedClients);
+    const nextRoot = join(t.env.root, "cold-registry-again"); mkdirSync(nextRoot);
+    await o.client.call({type:"workspace.open",payload:{root:nextRoot}});
     const pending = abandonedClients.map(client => client.call(request).catch(() => undefined));
     await new Promise(resolve => setTimeout(resolve, 20));
     abandonedClients.forEach(client => client.close()); await Promise.all(pending);

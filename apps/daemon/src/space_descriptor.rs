@@ -7,9 +7,9 @@
 //! the keys mean. The descriptor is strict JSON, matching SpaceBuilder. A legacy
 //! `.code-workspace` file can still use its existing JSON5 reader.
 //!
-//! The daemon never keeps what it reads. `agentCwd` is read again each time a
-//! session starts, and the scan below looks at the directories again each time
-//! it runs: the files are the truth, and a copy would be a second one.
+//! Files remain authoritative. Execution reads `agentCwd` again when a session
+//! starts; discovery refreshes the derived member view used by workspace.list.
+//! That presentation cache never replaces file validation at execution time.
 
 use std::path::{Component, Path, PathBuf};
 

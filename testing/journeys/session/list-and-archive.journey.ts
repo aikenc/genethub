@@ -42,8 +42,8 @@ defineJourney(
       t.assertions.assert(all?.type === "sessions" && all.data.length === 2, "includeArchived lost a session");
 
       const cli = localGenetCli(t.openRoot, t.env);
-      const cliLive = (cli(["session", "list", "--workspace", opened.workspaceId]).envelope?.data as { sessions: Array<{ id: string }> }).sessions;
-      const cliAll = (cli(["session", "list", "--workspace", opened.workspaceId, "--include-archived"]).envelope?.data as { sessions: Array<{ id: string }> }).sessions;
+      const cliLive = (cli(["session", "list", "--workspace", opened.workspaceId, "--limit", "100"]).envelope?.data as { sessions: Array<{ id: string }> }).sessions;
+      const cliAll = (cli(["session", "list", "--workspace", opened.workspaceId, "--limit", "100", "--include-archived"]).envelope?.data as { sessions: Array<{ id: string }> }).sessions;
       t.assertions.assert(cliLive.length === 1 && cliAll.length === 2 && cliAll.some((item) => item.id === first), "CLI --include-archived did not return the archived session");
     } finally {
       opened.client.close();
