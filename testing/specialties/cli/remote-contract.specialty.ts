@@ -3,7 +3,7 @@ import path from "node:path";
 import { defineSpecialty, parseJson, runGenetAsync, startRelay, type CaseContext } from "../../framework/public.ts";
 
 type Opened=Awaited<ReturnType<CaseContext["flows"]["main"]["openWorkspace"]>>;
-type Reply={type:string;data:any;error?:{code:string;retryable:boolean;details?:{stage?:string}}};
+type Reply={type:string;data:any;error?:{code:string;message:string;retryable:boolean;details?:{stage?:string}}};
 const records=(s:string):Reply[]=>s.split("\n").filter(line=>line.trim().startsWith("{")).map(line=>JSON.parse(line));
 async function fixture(t:CaseContext,run:(f:{opened:Opened;caller:Opened;machine:string;device:string;cli:(args:string[],stdin?:string)=>ReturnType<typeof runGenetAsync>;json:(args:string[])=>Promise<Reply>;settled:(session:string)=>Promise<number>})=>Promise<void>){
   const opened=await t.flows.main.openWorkspace({openRoot:t.openRoot,lease:t.env});
@@ -57,6 +57,10 @@ check("shell-io","Remote shell preserves file bytes, stdin, stderr, child exit a
   const shell=(args:string[],stdin?:string)=>cli(["--machine",machine,"--cwd",opened.workspaceRoot,"shell",...args],stdin);
   const cat=await shell(["--","cat","remote.txt"]);
   if(cat.code!==0||records(cat.stdout).filter(r=>r.type==="shell.output"&&r.data.stream==="stdout").map(r=>r.data.data).join("")!=="on remote")throw new Error("remote file output differs");
+  const outside=path.join(opened.workspaceRoot,"..","outside-project.txt");
+  writeFileSync(outside,"target OS user can read this");
+  const crossProject=await shell(["--","cat",outside]);
+  if(crossProject.code!==0||records(crossProject.stdout).filter(r=>r.type==="shell.output"&&r.data.stream==="stdout").map(r=>r.data.data).join("")!=="target OS user can read this")throw new Error("authenticated full connection was restricted to the project");
   const piped=await shell(["--","cat"],"piped from caller");
   if(piped.code!==0||records(piped.stdout).filter(r=>r.type==="shell.output"&&r.data.stream==="stdout").map(r=>r.data.data).join("")!=="piped from caller")throw new Error("stdin lost");
   const failed=await shell(["--","sh","-c","echo failed 1>&2; exit 7"]);const failedRows=records(failed.stdout);
@@ -64,10 +68,28 @@ check("shell-io","Remote shell preserves file bytes, stdin, stderr, child exit a
   const timeout=await shell(["--timeout","1","--","sleep","60"]);
   if(timeout.code!==0||records(timeout.stdout).at(-1)?.type!=="shell.exit"||records(timeout.stdout).at(-1)?.data.timedOut!==true||records(timeout.stdout).at(-1)?.data.exitCode===0)throw new Error("remote timeout not reported");
 });
-check("revoked","Revoked remote CLI asks to pair again without retrying",async({opened,machine,device,cli})=>{
+check("rejected-then-restored","A rejected peer proof is not called revocation; the original pairing still works after correction",async({caller,machine,cli})=>{
+  const file=path.join(caller.daemon.env.GENEHUB_LOCAL_DATA_DIR!,"machines.json");
+  const original=readFileSync(file);
+  const store=JSON.parse(original.toString("utf8"));
+  store.machines[0].secret="invalid-peer-proof";
+  writeFileSync(file,JSON.stringify(store));
+  try {
+    const result=await cli(["context","--machine",machine]);
+    const reply=parseJson(result.stdout) as unknown as Reply;
+    if(result.code!==4||reply.error?.code!=="credentialRejected"||reply.error.retryable||reply.error.details?.stage!=="remoteAdmission")throw new Error("peer proof rejection lost its failure class");
+    if(!reply.error.message.includes("does not prove device revocation")||reply.error.message.includes("pair again with a fresh invite"))throw new Error("ambiguous rejection directs the user to re-pair");
+  } finally {writeFileSync(file,original);}
+  const recovered=await cli(["context","--machine",machine]);
+  if(recovered.code!==0||(parseJson(recovered.stdout) as unknown as Reply).data.source!=="remoteDaemon")throw new Error("the existing pairing did not recover");
+});
+check("revoked","A revoked device remains denied without inferring more than the peer reports",async({opened,machine,device,cli})=>{
   await opened.client.call({type:"device.revoke",payload:{deviceId:device}});
   const result=await cli(["session","list","--active","--machine",machine]);const reply=parseJson(result.stdout) as unknown as Reply;
-  if(result.code!==4||reply.error?.code!=="credentialRevoked"||reply.error.retryable)throw new Error(`revoked device result: exit=${result.code} error=${JSON.stringify(reply.error)}`);
+  // Device removal is reported by the peer as the same generic admission
+  // refusal as an invalid proof. Only an explicit Fabric Revoked can prove
+  // revocation to the caller; the authorization boundary must still hold.
+  if(result.code!==4||reply.error?.code!=="credentialRejected"||reply.error.retryable||reply.error.details?.stage!=="remoteAdmission")throw new Error(`revoked device result: exit=${result.code} error=${JSON.stringify(reply.error)}`);
 });
 check("stale-identity","A changed paired identity is refused; forget removes local credential",async({caller,machine,cli})=>{
   const file=path.join(caller.daemon.env.GENEHUB_LOCAL_DATA_DIR!,"machines.json");const store=JSON.parse(readFileSync(file,"utf8"));store.machines[0].fingerprint="AA-BB-CC-DD";writeFileSync(file,JSON.stringify(store));

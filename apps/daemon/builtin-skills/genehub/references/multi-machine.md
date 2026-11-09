@@ -49,6 +49,24 @@ Hub 查询失败会返回非零退出码和 `complete: false` 的已知条目，
 - 只有 `retryable: false` 的失败（如 `credentialRevoked`）才是授权或配置问题，按消息如实报告，不要循环重试。
 - 连续多次等待后重试仍失败，报告最后一次真实失败（`reconnected` 不为 `false` 的那次）和已等待时长。
 
+## 连接失败的判断
+
+`hub login` 的 `paired/online` 证明该机加入 Hub；`context --machine <精确 ID>` 成功才证明本次
+目标连接通过认证。认证成功后，完整 Agent 连接按目标 OS 用户能力操作，不需要补 Files/PTY grants。
+只有直连列表为空也不能判定未配对：同账号机器可走 Hub 的现有连接机制。
+
+- 取票阶段失败：保留 `stage: hubTicket` 和上游错误，区分账号、登记、网络与服务问题。
+- `credentialRejected`：路由准入或对端认证被拒，尚不能判定设备已撤销。记录机器 ID、失败阶段、
+  两端版本与实际错误；先核对路由和握手证据，不直接让用户退出登录、生成邀请或重新配对。
+- `credentialExpired`：连接准入过期，可按现有身份重新建立连接、取得新票据；不复用过期票据。
+- `credentialRevoked`：对端明确报告路由或 endpoint 被撤销。停止自动重试，先核对撤销对象；
+  只有确认为设备访问被撤销，且用户授权恢复时才重新配对。
+- `machineOffline` / `relayUnavailable`：按返回的可重试信息处理，不追加授权，也不把失败当成空结果。
+
+旧版本可能把上述拒绝与过期统一报为 `credentialRevoked` 并提示 fresh invite；这段提示本身不是
+设备撤销的证据。说明版本差异和缺失证据，不换身份或读取凭据绕过拒绝。诊断重试只用于连接或只读
+探测；有副作用的任务先核对原 action/run 回执，不能因连接恢复而重复执行。
+
 ## 在目标机器执行命令
 
 ```bash
@@ -145,8 +163,8 @@ Hub 查询失败会返回非零退出码和 `complete: false` 的已知条目，
 - 邀请链接是短期、一次性的 bearer 凭证，谁先打开谁获得设备登记机会。只交给用户本人，不写入文件、提交或日志。
 - Linux 无头机器用 `hub login --wait` 加入 Hub，用 `hub link` 为另一台设备生成连接链接。
 
-## 状态与未验证项
+## 版本差异
 
-以上命令形态来自 CLI 的 `capabilities` / `schema` 合同与实测的本机、错误路径输出。在 Agent 会话身份
-（本机用户、无 `settings`/`devices` 能力）下，没有验证过跨机 `shell` 或 `agent run` 的成功路径；
-遇到与本文不符的行为，以 `schema <命令>` 和命令返回为准，并如实报告差异。
+命令形态以目标版本的 `capabilities` / `schema` 与实际返回为准。旧版的 grants 或项目拒绝不代表当前
+产品仍要求逐能力授权，也不能把目标权限约定说成旧版本已经实现。记录实际版本和已验证范围；
+连接、shell、Agent 任务分别验证，探测成功不能代替原任务完成回执。

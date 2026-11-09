@@ -46,6 +46,8 @@ impl std::error::Error for RpcError {}
 pub enum Refusal {
     Offline,
     Credential,
+    Revoked,
+    Expired,
     Busy,
     Other,
 }
@@ -390,6 +392,8 @@ impl From<rpc_wire::ConnectError> for ConnectError {
                 reason: match reason {
                     rpc_wire::Refusal::Offline => Refusal::Offline,
                     rpc_wire::Refusal::Credential => Refusal::Credential,
+                    rpc_wire::Refusal::Revoked => Refusal::Revoked,
+                    rpc_wire::Refusal::Expired => Refusal::Expired,
                     rpc_wire::Refusal::Busy => Refusal::Busy,
                     rpc_wire::Refusal::Other => Refusal::Other,
                 },
@@ -437,6 +441,8 @@ mod tests {
         for (wire, expected) in [
             (rpc_wire::Refusal::Offline, Refusal::Offline),
             (rpc_wire::Refusal::Credential, Refusal::Credential),
+            (rpc_wire::Refusal::Revoked, Refusal::Revoked),
+            (rpc_wire::Refusal::Expired, Refusal::Expired),
             (rpc_wire::Refusal::Busy, Refusal::Busy),
             (rpc_wire::Refusal::Other, Refusal::Other),
         ] {

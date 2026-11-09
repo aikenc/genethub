@@ -37,9 +37,12 @@ Agent 已能通过工具执行的事，不应另按项目、设备或角色降�
   不要换身份或猜别的路径。`machineNotPaired` 表示指定的直连记录不存在，不代表 Hub 目标不可达。
 - 跨机失败 `retryable: true` 时，等 `details.retryAfterMs` 后原样重试，不要重新配对、换身份或改派别的机器；
   `details.reconnected: false` 表示这次没有真正重连，只是复述刚才的失败。`routeRefused` 也属于这一类。
+
+- Hub 登录/机器在线、目标连接认证、连接后的 OS 操作能力是三个不同事实。认证失败先按
+  [多机排障](references/multi-machine.md#连接失败的判断) 核实，不能直接要求重新配对或追加 grants。
 - 可路由到其他机器：`context`、`shell`、`workspace`、`session`、`agent`（含 `agent run`）、`device`、
   `client`、`process`。只能在本机：`machine`、`speech`、`file`、`daemon` 生命周期、`update`。
-- 配对、`device invite`、授权范围属于授权变更，只在用户明确要求时执行；完整 Agent 连接按上述全权契约理解；不要把包含 Session/任意工具执行的授权称作只读隔离，也不要把邀请链接或码贴进聊天以外的地方。当前 CLI 的旧范围参数按实际版本解释，不自行改变既有设备授权。
+- 配对、`device invite` 属于授权变更，只在用户明确要求时执行；新邀请提供完整 Agent 访问权，不接受逐能力 grants。不要把包含任意工具执行的连接称作只读隔离，也不要把邀请链接或码贴进聊天以外的地方。旧版行为按实际错误说明，不自行改变既有设备授权。
 - 会话控制本机与跨机同规则：完整连接的 Agent 可创建并控制普通会话，来源与真实 Session ID 保留。旧 Workflow 会话仅作历史查看，从 fork 创建普通会话继续；当前命令若拒绝，保留真实错误。Agent 消息按 Agent 来源处理，多会话协作用团队机制（Skill `genehub-team`）。
 - 用会话标签（`session label`、`agent run --label`、`session list --workspace <id> --active --include-archived --label <标签>`）标明会话的设备、角色或分工，
   不要把 `[标签]` 写进标题；见 [multi-machine.md](references/multi-machine.md)。
