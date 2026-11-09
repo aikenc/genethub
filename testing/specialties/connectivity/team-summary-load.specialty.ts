@@ -6,7 +6,7 @@ import { openScaleFleet } from "../../framework/flows/branches/scale-fleet.ts";
 
 defineSpecialty({
   id:"specialty.team-summary.ten-machines-two-hundred-members",title:"The real summary directory reads 200 members through at most four shared control-only owners during full body traffic",
-  oracle:"Ten actual native sources and 200 once-only SDK tasks retain exact member identities; three refreshes use the directory topic plus at most one visible history page per newly connected source, reuse ready-source directories, keep at most four sockets, label evicted sources as cached rather than current, never subscribe to bodies, and keep two history reads active at most",
+  oracle:"Ten actual native sources and 200 once-only SDK tasks retain exact member identities; three refreshes use the directory topic plus at most one visible history page per newly connected source, reuse ready-source directories without rotating live subscriptions after the first refresh, keep at most four sockets, label evicted sources as cached rather than current, never subscribe to bodies, and keep two history reads active at most",
   catches:["one owner or query per member", "summary view accidentally loads bodies", "fresh connections on every refresh exhaust admission", "successful sources hide missing members"],
   tags:["team-summary","team-scale"],llm:{default:"none"},stages:["fleet","load","summary"],
   resources:{environments:1,cpu:12,memoryMb:16384,io:2,browser:0,pool:"exclusive"},expectedDurationMs:180000,timeoutMs:360000,
@@ -35,8 +35,8 @@ defineSpecialty({
   const verify=(r:Awaited<ReturnType<typeof directory.refresh>>)=>{const ids=r.sources.flatMap(s=>s.sessions.map(v=>v.id)).filter(id=>expected.has(id));
     t.note(JSON.stringify({refresh:times.length+1,complete:r.complete,matched:ids.length,unique:new Set(ids).size,sources:r.sources.map(s=>({id:s.target.id,state:s.state,cached:Boolean(s.cached),activityComplete:Boolean(s.activityComplete),sessions:s.sessions.length}))}));
     t.assertions.assert(!r.complete&&r.sources.length===10&&ids.length===200&&new Set(ids).size===200&&r.sources.every(s=>s.state==="ready"&&s.updatedAt!==null)&&r.sources.some(s=>s.cached)&&r.sources.some(s=>!s.cached&&s.activityComplete),"a source/member was omitted or bounded subscription eviction was presented as fully current data");};
-  const times:number[]=[],firstReadyMs:number[]=[];
-  const measure = async () => { const began=performance.now(); let first=0; const result=await directory.refresh(value=>{ if(!first && value.sources.some(s=>s.state==="ready"||s.state==="partial"))first=performance.now()-began; }); firstReadyMs.push(first); verify(result); times.push(performance.now()-began); };
+  const times:number[]=[],firstReadyMs:number[]=[],socketsAfter:number[]=[];
+  const measure = async () => { const began=performance.now(); let first=0; const result=await directory.refresh(value=>{ if(!first && value.sources.some(s=>s.state==="ready"||s.state==="partial"))first=performance.now()-began; }); firstReadyMs.push(first); verify(result); times.push(performance.now()-began); socketsAfter.push(sockets); };
   let bodyEvents=0,repairs=0;const completed=new Set<string>();
   try{
     await measure();
@@ -50,8 +50,11 @@ defineSpecialty({
     await t.tools.waitUntil(()=>completed.size===200,30000);
     let exactBodies=0;const expectedBody=Array.from({length:200},(_,i)=>`f${i} `).join("");
     await Promise.all(fleet.nodes.map(async n=>{for(const id of n.sessions){const r=await n.client.call({type:"session.get",payload:{sessionId:id,recentRounds:1}});if(r?.type==="snapshot"){const text=r.data.items.filter(v=>v.type==="assistantMessage").map(v=>v.type==="assistantMessage"?v.text:"").join("");if(createHash("sha256").update(text).digest("hex")===createHash("sha256").update(expectedBody).digest("hex"))exactBodies++;}}}));
-    t.note(JSON.stringify({bodyEvents,repairs,bodyCompletions:completed.size,exactBodies,nativeSources:10,members:200,refreshes:3,sockets,peakSockets,peakClosingSockets,sessionPages:lists,workspaceLists:workspaces,summaryBodyGets:gets,summarySubscriptions:subscribes,maxConcurrentSources:peak,refreshMs:times.map(Math.round),firstReadyMs:firstReadyMs.map(Math.round),sourceCounts:fleet.nodes.map(n=>({prompt:readControlledAgentJournal(n.agent).filter(e=>e.event==="prompt").length,answered:readControlledAgentJournal(n.agent).filter(e=>e.event==="answered").length}))}));
+    t.note(JSON.stringify({bodyEvents,repairs,bodyCompletions:completed.size,exactBodies,nativeSources:10,members:200,refreshes:3,sockets,socketsAfter,peakSockets,peakClosingSockets,sessionPages:lists,workspaceLists:workspaces,summaryBodyGets:gets,summarySubscriptions:subscribes,maxConcurrentSources:peak,refreshMs:times.map(Math.round),firstReadyMs:firstReadyMs.map(Math.round),sourceCounts:fleet.nodes.map(n=>({prompt:readControlledAgentJournal(n.agent).filter(e=>e.event==="prompt").length,answered:readControlledAgentJournal(n.agent).filter(e=>e.event==="answered").length}))}));
     t.assertions.assert(exactBodies===200&&completed.size===200,"summary pressure lost a source body or completion");
+    // Once every source has been read, background refreshes keep the live
+    // subscriptions instead of rotating sources through the budget.
+    t.assertions.assert(socketsAfter[2]!-socketsAfter[0]!<=4,"background refreshes rotated live subscriptions through the connection budget");
     t.assertions.assert(sockets<=30&&peakSockets<=4&&peakClosingSockets<=8&&lists>=10&&lists<=30&&workspaces===0&&gets===0&&subscribes===0&&peak>0&&peak<=2,"summary connection/query/subscription budget failed");
     // Four retained owners intentionally trade cold handshake cost for a fixed
     // mobile/desktop budget. User access is gated by first source readiness,
