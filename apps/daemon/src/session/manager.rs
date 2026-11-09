@@ -77,9 +77,9 @@ impl std::fmt::Display for SessionMissing {
 impl std::error::Error for SessionMissing {}
 
 /// The user terminated the project this would run in (`workspace.terminate`),
-/// or the project it belongs to. The router maps it to `conflict`. Worded for
-/// the Agent that hits it: retrying cannot help, and lifting it is the user's
-/// call.
+/// or the project it belongs to. The router maps it to `conflict`. The person
+/// and the Agent that hit it read the same words: retrying cannot help, and
+/// lifting it is the user's call.
 #[derive(Debug)]
 pub struct ProjectTerminated {
     pub workspace_id: String,
@@ -95,7 +95,7 @@ impl std::fmt::Display for ProjectTerminated {
         };
         write!(
             f,
-            "{scope} 已被用户终止：平台不会在其中运行 Agent 或定时任务。只有用户本次明确要求恢复时，才执行 `genet workspace resume {}`；否则不要重试或绕过，如实告诉用户。",
+            "{scope} 已被用户终止，平台不会在其中运行 Agent 或定时任务；恢复运行（`genet workspace resume {}`）后才能继续。Agent 只在用户明确要求时恢复，不要重试或绕过。",
             self.by
         )
     }
@@ -1836,9 +1836,9 @@ impl SessionManager {
     /// refuses, whoever asks. Each session is closed
     /// as `session.close` does: its turn and the processes it left are
     /// stopped, a question it is waiting on is canceled and queued input stays
-    /// paused. Input the team queued (anything not from the user) is dropped
-    /// first, so resuming does not replay instructions the user stopped.
-    /// Returns how many sessions were closed.
+    /// paused. A session loaded only to be stopped is let go again, so another
+    /// channel can continue it after a resume. Returns how many sessions were
+    /// closed.
     ///
     /// One wedged Agent must not leave the others running, so every session
     /// is tried and the first failure is returned afterwards.
@@ -1851,21 +1851,19 @@ impl SessionManager {
                 targets.insert(meta.id.clone());
             }
         }
-        targets.extend(
-            self.store
-                .sessions_matching(workspace_ids, |meta| {
-                    store::has_obligation(meta) || meta.inbox.entries.iter().any(unattended)
-                })
-                .await?,
-        );
+        targets.extend(self.store.pending_interactions(workspace_ids).await?);
         let mut closed = 0;
         let mut first_error = None;
         for session_id in targets {
             let result = match self.live(&session_id).await {
-                Ok(live) => match discard_unattended_inputs(&live, &self.store).await {
-                    Ok(()) => self.close(&session_id).await,
-                    Err(error) => Err(error),
-                },
+                Ok(live) => {
+                    let workspace_id = live.meta.lock().await.workspace_id.clone();
+                    let held = self.store.writes_session(&workspace_id, &session_id);
+                    match self.close(&session_id).await {
+                        Ok(()) if !held => self.store.release_session(&workspace_id, &session_id),
+                        result => result,
+                    }
+                }
                 Err(error) if error.downcast_ref::<SessionMissing>().is_some() => continue,
                 Err(error) => Err(error),
             };
@@ -6844,31 +6842,6 @@ async fn stop_agent_for_interaction(
     *live.pending_permissions.lock().await = vec![request.clone()];
     *live.status.lock().await = SessionStatus::Waiting;
     tracing::info!(event = "human_interaction_stopped", request = %request.id);
-    Ok(())
-}
-
-/// Queued input the user did not write: another Agent's or a script's.
-fn unattended(entry: &store::InboxEntry) -> bool {
-    entry.source != "user" && matches!(entry.state.as_str(), "queued" | "sent")
-}
-
-async fn discard_unattended_inputs(live: &Arc<Live>, store: &Store) -> Result<()> {
-    let _admission = live.inbox_lock.lock().await;
-    let mut meta = live.meta.lock().await;
-    if !meta.inbox.entries.iter().any(unattended) {
-        return Ok(());
-    }
-    let mut next = meta.clone();
-    for entry in next
-        .inbox
-        .entries
-        .iter_mut()
-        .filter(|entry| unattended(entry))
-    {
-        entry.state = "handled".into();
-    }
-    store.save_meta(&next)?;
-    *meta = next;
     Ok(())
 }
 

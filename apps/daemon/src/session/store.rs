@@ -969,11 +969,6 @@ fn prune_home(homes: &mut Homes, root: &Path) {
     }
 }
 
-/// The session still owes the user an answer or a continuation.
-pub(super) fn has_obligation(meta: &SessionMeta) -> bool {
-    PageCatalog::has_obligation(meta)
-}
-
 // One rebuildable metadata table. Scope/order indexes contain references only;
 // execution recovery still uses a fresh durable read, independently of this view.
 #[derive(Default)]
@@ -2168,18 +2163,20 @@ impl Store {
     /// Removal needs only durable pending decisions in the checked subtree,
     /// never complete summaries, title repair or unrelated project projection.
     pub(super) async fn has_pending_interactions(&self, workspaces: &[String]) -> Result<bool> {
-        Ok(!self
-            .sessions_matching(workspaces, PageCatalog::has_obligation)
-            .await?
-            .is_empty())
+        Ok(!self.pending_interactions(workspaces).await?.is_empty())
     }
 
-    /// Sessions, loaded or not, whose durable record matches.
-    pub(super) async fn sessions_matching(
-        &self,
-        workspaces: &[String],
-        matches: impl Fn(&SessionMeta) -> bool,
-    ) -> Result<Vec<String>> {
+    pub(super) fn writes_session(&self, workspace_id: &str, session_id: &str) -> bool {
+        self.homes.holds(workspace_id, session_id)
+    }
+
+    /// Lets another daemon write a session this one only touched to stop it.
+    pub(super) fn release_session(&self, workspace_id: &str, session_id: &str) -> Result<()> {
+        self.homes.release(workspace_id, session_id)
+    }
+
+    /// Sessions, loaded or not, that still owe the user an answer.
+    pub(super) async fn pending_interactions(&self, workspaces: &[String]) -> Result<Vec<String>> {
         let mut pending = Vec::new();
         for workspace in workspaces {
             // This is an execution/removal decision, not a presentation read.
@@ -2192,7 +2189,7 @@ impl Store {
                 scan.files
                     .values()
                     .filter_map(|file| file.meta.as_ref())
-                    .filter(|meta| !meta.execution_retired && matches(meta))
+                    .filter(|meta| !meta.execution_retired && PageCatalog::has_obligation(meta))
                     .map(|meta| meta.id.clone()),
             );
         }

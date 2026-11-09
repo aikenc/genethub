@@ -1152,20 +1152,16 @@ impl Workspaces {
             .await?;
         self.refresh_descriptor(&info, std::time::Instant::now(), true);
         Self::apply_descriptor(&mut info, &self.descriptors.lock().expect("never poisoned"));
-        // Another channel may have terminated it, or this one before a removal.
-        let root = PathBuf::from(&info.root);
-        {
-            let mut terminations = self.terminations.lock().expect("never poisoned");
-            match read_termination(&root) {
-                Some(at) => terminations.insert(root, at),
-                None => terminations.remove(&root),
-            };
-        }
         apply_termination(
             &mut info,
             &*self.config.read().await,
             &self.terminations.lock().expect("never poisoned"),
         );
+        // Another channel may have terminated it since the last scan. Only
+        // the scan records that, because it is also what stops the project.
+        if info.terminated_at_ms.is_none() {
+            info.terminated_at_ms = read_termination(Path::new(&info.root));
+        }
         Ok(info)
     }
 
@@ -1413,6 +1409,19 @@ impl Workspaces {
                 "项目 {id} 属于已终止的项目「{name}」（{by}）；请恢复 {by}，它的成员会一起恢复。"
             );
         }
+        if terminated {
+            if self
+                .config_path
+                .parent()
+                .map(|data| data.join("spaces").join("admin"))
+                == Some(root.clone())
+            {
+                anyhow::bail!("内置管理员 Space 不能终止。");
+            }
+            if !root.is_dir() {
+                anyhow::bail!("项目目录 {} 不存在；直接从列表移除即可。", root.display());
+            }
+        }
         let marked = read_termination(root);
         let at = if terminated {
             let at = marked.unwrap_or_else(crate::session::store::now_ms);
@@ -1432,17 +1441,6 @@ impl Workspaces {
             None => terminations.remove(root),
         };
         Ok(planned)
-    }
-
-    /// Whether this project itself, not an ancestor, carries a termination.
-    pub async fn marked_terminated(&self, id: &str) -> bool {
-        let root = self
-            .entries
-            .read()
-            .await
-            .get(id)
-            .map(|entry| entry.root.clone());
-        root.is_some_and(|root| read_termination(&root).is_some())
     }
 
     /// The project whose termination covers `id`, read from the markers.
@@ -1647,19 +1645,18 @@ fn termination_marker(root: &Path) -> PathBuf {
     root.join(".genethub").join("terminated.json")
 }
 
-/// When the user terminated the Space at `root`. A marker that is present but
-/// unreadable still counts: failing open would restart what the user stopped.
+/// When the user terminated the Space at `root`. The marker being there is
+/// the termination; its content only dates it.
 pub(crate) fn read_termination(root: &Path) -> Option<i64> {
-    match std::fs::read(termination_marker(root)) {
-        Ok(body) => Some(
-            serde_json::from_slice::<serde_json::Value>(&body)
-                .ok()
-                .and_then(|marker| marker.get("terminatedAtMs")?.as_i64())
-                .unwrap_or(0),
-        ),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(_) => Some(0),
-    }
+    let marker = termination_marker(root);
+    std::fs::symlink_metadata(&marker).ok()?;
+    Some(
+        std::fs::read(&marker)
+            .ok()
+            .and_then(|body| serde_json::from_slice::<serde_json::Value>(&body).ok())
+            .and_then(|marker| marker.get("terminatedAtMs")?.as_i64())
+            .unwrap_or(0),
+    )
 }
 
 fn write_termination(root: &Path, at: Option<i64>) -> Result<()> {
@@ -3400,6 +3397,18 @@ mod tests {
         assert!(listed
             .iter()
             .any(|w| w.id == seen.id && w.terminated_at_ms.is_some()));
+        let latecomer_dir = tempfile::tempdir().unwrap();
+        let latecomer = workspaces(latecomer_dir.path()).await;
+        let opened = latecomer.open(&project_root, None).await.unwrap();
+        assert!(opened.terminated_at_ms.is_some());
+        assert_eq!(
+            latecomer
+                .scan_spaces(&latecomer_dir.path().join("spaces"), true)
+                .await
+                .terminated,
+            vec![opened.id.clone()],
+            "opening the project hid a termination from the pass that stops it"
+        );
 
         let reloaded = Workspaces::new(
             Arc::new(RwLock::new(Config::load(&config_path).unwrap())),
@@ -3430,6 +3439,30 @@ mod tests {
         }
         assert_eq!(channel.terminated_by(&seen.id).await, None);
         assert!(!project_root.join(".genethub/terminated.json").exists());
+    }
+
+    #[tokio::test]
+    async fn termination_refuses_what_it_cannot_mark_and_trusts_any_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let spaces = workspaces(dir.path()).await;
+        let gone = dir.path().join("gone");
+        write_verified_pipe_space(&gone, &gone);
+        let id = spaces.open(&gone, None).await.unwrap().id;
+        std::fs::remove_dir_all(&gone).unwrap();
+        let refused = spaces.set_terminated(&id, true).await.unwrap_err();
+        assert!(refused.to_string().contains("不存在"), "{refused:#}");
+        assert!(!gone.exists(), "terminating recreated a deleted project");
+
+        let admin = dir.path().join("spaces").join("admin");
+        write_verified_pipe_space(&admin, &admin);
+        let admin_id = spaces.open(&admin, None).await.unwrap().id;
+        assert!(spaces.set_terminated(&admin_id, true).await.is_err());
+        assert_eq!(read_termination(&admin), None);
+
+        let damaged = dir.path().join("damaged");
+        std::fs::create_dir_all(damaged.join(".genethub")).unwrap();
+        std::fs::write(damaged.join(".genethub/terminated.json"), "not json").unwrap();
+        assert_eq!(read_termination(&damaged), Some(0));
     }
 
     #[tokio::test]

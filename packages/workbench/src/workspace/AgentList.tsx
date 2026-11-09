@@ -99,7 +99,7 @@ export function AgentList({
         onPick={() => onPick(node.workspace.id)}
         onRename={(name) => void wb.renameWorkspace(node.workspace.id, name).catch(() => { /* Store already displays the request failure. */ })}
         onRemove={() => wb.removeWorkspace(node.workspace.id)}
-        onTerminate={wb.client?.identity?.features?.includes("workspace.terminate.v1") ? (resume) => wb.terminateWorkspace(node.workspace.id, resume) : undefined}
+        onTerminate={!node.workspace.builtin && wb.client?.identity?.features?.includes("workspace.terminate.v1") ? (resume) => wb.terminateWorkspace(node.workspace.id, resume) : undefined}
         density={density}
         actions={actions}
         pick={pick}

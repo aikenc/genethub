@@ -2281,20 +2281,23 @@ async fn dispatch(
             workspace_id,
             terminate,
         } => Box::pin(async move {
-            // Removing only stops the project; a termination the user chose
-            // explicitly stays for when it is opened again.
-            let keep_termination = state.workspaces.marked_terminated(&workspace_id).await;
-            let planned = if terminate == Some(true) {
-                match terminate_project(state, caller, &workspace_id).await {
-                    Ok(planned) => planned,
-                    Err(handled) => return handled,
-                }
-            } else {
-                match state.workspaces.removal_plan(&workspace_id).await {
-                    Ok(planned) => planned,
-                    Err(error) => return Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
-                }
+            let planned = match state.workspaces.removal_plan(&workspace_id).await {
+                Ok(planned) => planned,
+                Err(error) => return Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
             };
+            // Removing stops the project without terminating it: nothing is
+            // written into it, and anything restarted meanwhile is caught by
+            // the check below.
+            let stop = terminate == Some(true);
+            if stop {
+                state.hooks.stop(&planned);
+                if let Err(error) = state.sessions.stop_workspaces(&planned).await {
+                    return Handled::err(
+                        ErrorCode::Conflict,
+                        format!("有会话未能停下（{error:#}），暂未移除；请稍后重试移除。"),
+                    );
+                }
+            }
             let blocked = match state.sessions.has_blocking_workspace_sessions(&planned).await {
                 Ok(blocked) => blocked,
                 Err(error) => return failed(error),
@@ -2302,8 +2305,8 @@ async fn dispatch(
             if blocked {
                 return Handled::err(
                     ErrorCode::Conflict,
-                    if terminate == Some(true) {
-                        "项目已终止，但仍有会话未能停下，暂未移除；稍后重试移除。"
+                    if stop {
+                        "项目里仍有会话在运行或等待交互（可能由另一个版本的 GeneHub 打开着），暂未移除；请在那边处理后再重试移除。"
                     } else {
                         "项目或成员仍有运行中、等待交互的会话，请先处理后再移除。"
                     },
@@ -2311,13 +2314,10 @@ async fn dispatch(
             }
             match state.workspaces.remove_planned(&workspace_id, &planned).await {
                 Ok(workspaces) => {
-                    if terminate == Some(true) && !keep_termination {
-                        if let Err(error) =
-                            state.workspaces.set_terminated(&workspace_id, false).await
-                        {
-                            tracing::warn!(workspace = %workspace_id, %error, "a removed project stays terminated");
-                        }
+                    if stop {
+                        state.hooks.stop(&planned);
                     }
+                    tracing::info!(workspace = %workspace_id, ?caller, members = planned.len(), stop, "workspace.remove");
                     Handled::ok(Reply::Workspaces(workspaces))
                 }
                 Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),

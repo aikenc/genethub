@@ -389,8 +389,8 @@ export function MachineDirectoryLists({ connections, directory:sharedDirectory, 
     {confirming && <WorkspaceDetailsDialog title={`${actionLabel(confirming)}所选${section === "projects" ? "项目" : "会话"}`} onClose={() => setConfirming(false)}><p className="text-sm">{
       section === "sessions" ? "会话历史保留，归档不会停止任务。"
         : confirming === "resume" ? "解除终止。不会自动重启任何会话；之后发送消息、团队调度和定时任务会照常运行。"
-          : confirming === "terminate" ? `平台会立即停止所选项目及其成员的全部会话、后台进程和定时任务${activeChosen ? `（当前 ${activeChosen} 个会话正在运行或等待交互）` : ""}，取消等待中的提问，并丢弃团队排队未送达的消息。恢复之前平台不会在其中运行任何 Agent 或定时任务；恢复需由你操作或明确要求 Agent 执行。文件和历史会话保留。`
-            : `只移除项目登记，保留磁盘文件和历史会话。${activeChosen ? `其中 ${activeChosen} 个会话正在运行或等待交互，` : ""}仍在运行或等待交互的会话会先被平台停止，团队排队未送达的消息会被丢弃。`
+          : confirming === "terminate" ? `平台会立即停止所选项目及其成员的全部会话、后台进程和定时任务${activeChosen ? `（当前 ${activeChosen} 个会话正在运行或等待交互）` : ""}，并取消等待中的提问。恢复之前平台不会在其中运行任何 Agent 或定时任务（未升级的旧版本 GeneHub 除外）；恢复需由你操作或明确要求 Agent 执行。文件和历史会话保留。`
+            : `只移除项目登记，保留磁盘文件和历史会话。${activeChosen ? `其中 ${activeChosen} 个会话正在运行或等待交互，` : ""}仍在运行或等待交互的会话会先被平台停止。`
     }</p><button className={`mt-3 min-h-11 w-full rounded-lg text-sm text-white ${confirming === "terminate" ? "bg-danger" : "bg-accent"}`} onClick={() => void batch(confirming)}>确认{section === "sessions" ? "处理" : actionLabel(confirming)} {confirming === "resume" ? chosenGroups.filter(g => g.workspace.terminatedAtMs !== undefined).length : chosen.size} 项</button></WorkspaceDetailsDialog>}
     <span className="sr-only">当前正文来自 {endpoint.label}</span>
   </ListPane>;

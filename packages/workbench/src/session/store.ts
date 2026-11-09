@@ -404,14 +404,14 @@ interface WorkbenchState {
   renameWorkspace(workspaceId: string, name: string): Promise<void>;
   /**
    * Hides a workspace registration without deleting files or conversations.
-   * A daemon that supports it first stops the project's sessions, leaving
-   * no termination behind.
+   * A daemon that supports it first stops the project's sessions; nothing is
+   * written into the project.
    */
   removeWorkspace(workspaceId: string): Promise<void>;
   /**
-   * Stops every session of a project and its members, drops team-queued input,
-   * and keeps the platform from running anything there until `resume`. The mark
-   * lives in the project, so every channel honours it; resuming restarts nothing.
+   * Stops every session of a project and its members and keeps the platform
+   * from running anything there until `resume`. The mark lives in the project,
+   * so every channel that knows it honours it; resuming restarts nothing.
    */
   terminateWorkspace(workspaceId: string, resume?: boolean): Promise<WorkspaceInfo[]>;
   /** Applies one Human-authored AgentSpace change under the displayed CAS revision. */
