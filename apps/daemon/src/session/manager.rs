@@ -76,18 +76,27 @@ impl std::fmt::Display for SessionMissing {
 
 impl std::error::Error for SessionMissing {}
 
-/// The user terminated the project this would run in (`workspace.terminate`).
-/// The router maps it to `conflict`. Worded for the automation that hits it:
-/// retrying cannot help, and lifting it is the user's call.
+/// The user terminated the project this would run in (`workspace.terminate`),
+/// or the project it belongs to. The router maps it to `conflict`. Worded for
+/// the Agent that hits it: retrying cannot help, and lifting it is the user's
+/// call.
 #[derive(Debug)]
-pub struct ProjectTerminated(pub String);
+pub struct ProjectTerminated {
+    pub workspace_id: String,
+    pub by: String,
+}
 
 impl std::fmt::Display for ProjectTerminated {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let scope = if self.by == self.workspace_id {
+            format!("项目 {}", self.by)
+        } else {
+            format!("项目 {} 所属的项目 {}", self.workspace_id, self.by)
+        };
         write!(
             f,
-            "项目 {} 已被用户终止：平台不会在其中启动 Agent、新会话或定时任务，直到用户在项目列表中恢复它。不要重试，也不要自行恢复。",
-            self.0
+            "{scope} 已被用户终止：平台不会在其中运行 Agent 或定时任务。只有用户本次明确要求恢复时，才执行 `genet workspace resume {}`；否则不要重试或绕过，如实告诉用户。",
+            self.by
         )
     }
 }
@@ -502,9 +511,9 @@ pub struct SessionManager {
     /// Agent processes receive a fresh proof, so it never becomes project
     /// source or durable user data.
     controller_secret: String,
-    /// Projects the user terminated. The workspace registry holds the durable
-    /// fact; this copy is what every execution start checks.
-    terminated: std::sync::RwLock<HashSet<String>>,
+    /// The daemon config the workspace registry persists; read, never written
+    /// here, so termination has one source of truth. Unset in unit tests.
+    workspace_config: std::sync::OnceLock<Arc<tokio::sync::RwLock<crate::config::Config>>>,
 }
 
 impl SessionManager {
@@ -535,7 +544,7 @@ impl SessionManager {
             skills_dir: None,
             front_door_cli: None,
             controller_secret: uuid::Uuid::new_v4().simple().to_string(),
-            terminated: Default::default(),
+            workspace_config: Default::default(),
         }
     }
 
@@ -706,7 +715,6 @@ impl SessionManager {
             history_only: false,
             imported: None,
         };
-        self.refuse_if_terminated(&meta.workspace_id)?;
         self.store.save_meta(&meta)?;
         // On a Windows host the guest spelling of the cwd is what every
         // adapter payload had been leaking (fb_M5CQD86STboK); log both forms
@@ -999,7 +1007,6 @@ impl SessionManager {
             history_only: false,
             imported: None,
         };
-        self.refuse_if_terminated(&meta.workspace_id)?;
         let write = || -> Result<()> {
             self.store.save_meta(&meta)?;
             // The fork inherits the conversation, not the source's round
@@ -1263,7 +1270,6 @@ impl SessionManager {
             history_only: false,
             imported: None,
         };
-        self.refuse_if_terminated(&meta.workspace_id)?;
         let write = || -> Result<()> {
             self.store.save_meta(&meta)?;
             self.store
@@ -1502,7 +1508,6 @@ impl SessionManager {
                 }),
             }),
         };
-        self.refuse_if_terminated(&meta.workspace_id)?;
         let write = || -> Result<()> {
             self.store.save_meta(&meta)?;
             self.store
@@ -1804,37 +1809,37 @@ impl SessionManager {
         self.store.has_pending_interactions(workspace_ids).await
     }
 
-    /// Loads what the workspace registry recorded as terminated.
-    pub fn set_terminated_workspaces(&self, workspace_ids: impl IntoIterator<Item = String>) {
-        *self.terminated.write().expect("never poisoned") = workspace_ids.into_iter().collect();
+    pub fn follow_workspace_config(&self, config: Arc<tokio::sync::RwLock<crate::config::Config>>) {
+        let _ = self.workspace_config.set(config);
     }
 
-    pub(crate) fn refuse_if_terminated(&self, workspace_id: &str) -> Result<()> {
-        if self
-            .terminated
-            .read()
-            .expect("never poisoned")
-            .contains(workspace_id)
-        {
-            return Err(ProjectTerminated(workspace_id.to_string()).into());
+    /// Every way input reaches an Agent passes here: accepting it, handing a
+    /// turn over, and continuing after a Human answer. Creating an idle
+    /// session runs nothing, so it is not checked.
+    pub(crate) async fn refuse_if_terminated(&self, workspace_id: &str) -> Result<()> {
+        let Some(config) = self.workspace_config.get() else {
+            return Ok(());
+        };
+        match crate::workspace::terminated_by(&*config.read().await, workspace_id) {
+            Some((by, _)) => Err(ProjectTerminated {
+                workspace_id: workspace_id.to_string(),
+                by,
+            }
+            .into()),
+            None => Ok(()),
         }
-        Ok(())
     }
 
-    /// Ends every session of these projects and keeps them ended. Called once
-    /// the registry has recorded the termination; from here on every way a
-    /// turn or a session starts refuses, whoever asks. Each session is closed
+    /// Ends every session of these projects. Called once the registry has
+    /// recorded the termination, so from here on every way a turn starts
+    /// refuses, whoever asks. Each session is closed
     /// as `session.close` does: its turn and the processes it left are
     /// stopped, a question it is waiting on is canceled and queued input stays
     /// paused. Returns how many sessions were closed.
     ///
     /// One wedged Agent must not leave the others running, so every session
     /// is tried and the first failure is returned afterwards.
-    pub async fn terminate_workspaces(&self, workspace_ids: &[String]) -> Result<usize> {
-        self.terminated
-            .write()
-            .expect("never poisoned")
-            .extend(workspace_ids.iter().cloned());
+    pub async fn stop_workspaces(&self, workspace_ids: &[String]) -> Result<usize> {
         let loaded: Vec<Arc<Live>> = self.sessions.read().await.values().cloned().collect();
         let mut targets = std::collections::BTreeSet::new();
         for live in loaded {
@@ -1863,14 +1868,6 @@ impl SessionManager {
         match first_error {
             Some(error) => Err(error),
             None => Ok(closed),
-        }
-    }
-
-    /// Lifts [`Self::terminate_workspaces`]. Nothing restarts here.
-    pub fn resume_workspaces(&self, workspace_ids: &[String]) {
-        let mut terminated = self.terminated.write().expect("never poisoned");
-        for id in workspace_ids {
-            terminated.remove(id);
         }
     }
 
@@ -3143,7 +3140,8 @@ impl SessionManager {
         origin: Option<InputOrigin>,
     ) -> Result<String> {
         let live = self.live(session_id).await?;
-        self.refuse_if_terminated(&live.meta.lock().await.workspace_id)?;
+        let workspace_id = live.meta.lock().await.workspace_id.clone();
+        self.refuse_if_terminated(&workspace_id).await?;
         anyhow::ensure!(
             !live.meta.lock().await.history_only,
             "this is retired execution history; fork to continue"
@@ -4691,7 +4689,8 @@ impl SessionManager {
         continuation: Continuation,
         human_request_id: Option<String>,
     ) -> Result<bool> {
-        self.refuse_if_terminated(&live.meta.lock().await.workspace_id)?;
+        let workspace_id = live.meta.lock().await.workspace_id.clone();
+        self.refuse_if_terminated(&workspace_id).await?;
         let execution = live.claim_execution(true).await?;
         if let Some(current) = live.execution.lock().await.as_mut() {
             current.human_request_id = human_request_id;

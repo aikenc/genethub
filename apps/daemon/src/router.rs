@@ -57,19 +57,25 @@ impl Handled {
 }
 
 /// Records the termination first, so nothing can start while the sessions
-/// that were running are being stopped. Returns the terminated subtree.
-async fn terminate_project(state: &Shared, workspace_id: &str) -> Result<Vec<String>, Handled> {
+/// and hooks that were running are being stopped. Returns the terminated
+/// subtree.
+async fn terminate_project(
+    state: &Shared,
+    caller: &crate::authz::Principal,
+    workspace_id: &str,
+) -> Result<Vec<String>, Handled> {
     let planned = state
         .workspaces
         .set_terminated(workspace_id, true)
         .await
         .map_err(|error| Handled::err(ErrorCode::BadRequest, format!("{error:#}")))?;
+    state.hooks.stop(&planned);
     let closed = state
         .sessions
-        .terminate_workspaces(&planned)
+        .stop_workspaces(&planned)
         .await
         .map_err(failed)?;
-    tracing::info!(workspace = %workspace_id, members = planned.len(), closed, "workspace.terminate");
+    tracing::info!(workspace = %workspace_id, ?caller, members = planned.len(), closed, "workspace.terminate");
     Ok(planned)
 }
 
@@ -2271,7 +2277,7 @@ async fn dispatch(
             terminate,
         } => Box::pin(async move {
             let planned = if terminate == Some(true) {
-                match terminate_project(state, &workspace_id).await {
+                match terminate_project(state, caller, &workspace_id).await {
                     Ok(planned) => planned,
                     Err(handled) => return handled,
                 }
@@ -2302,7 +2308,7 @@ async fn dispatch(
         }).await,
 
         Request::WorkspaceTerminate { workspace_id } => Box::pin(async move {
-            if let Err(handled) = terminate_project(state, &workspace_id).await {
+            if let Err(handled) = terminate_project(state, caller, &workspace_id).await {
                 return handled;
             }
             Handled::ok(Reply::Workspaces(state.workspaces.list().await))
@@ -2311,8 +2317,7 @@ async fn dispatch(
         Request::WorkspaceResume { workspace_id } => Box::pin(async move {
             match state.workspaces.set_terminated(&workspace_id, false).await {
                 Ok(planned) => {
-                    state.sessions.resume_workspaces(&planned);
-                    tracing::info!(workspace = %workspace_id, members = planned.len(), "workspace.resume");
+                    tracing::info!(workspace = %workspace_id, ?caller, members = planned.len(), "workspace.resume");
                     Handled::ok(Reply::Workspaces(state.workspaces.list().await))
                 }
                 Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),

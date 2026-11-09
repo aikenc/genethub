@@ -25,6 +25,18 @@ const byTime = (a: SessionSummary, b: SessionSummary) => latest(b) - latest(a) |
 /** `apply` removes projects or (un)archives sessions; the others are project-only. */
 type BatchAction = "apply" | "terminate" | "resume";
 
+// A member is resumed by its terminated ancestor, so ancestors go first.
+function ancestorsFirst(workspaces: WorkspaceInfo[]) {
+  const depth = (workspace: WorkspaceInfo) => {
+    let count = 0;
+    for (let parent = workspace.agentSpace?.parentWorkspaceId; parent && count < workspaces.length; count++) {
+      parent = workspaces.find(candidate => candidate.id === parent)?.agentSpace?.parentWorkspaceId;
+    }
+    return count;
+  };
+  return [...workspaces].sort((left, right) => depth(left) - depth(right));
+}
+
 export function MachineDirectoryLists({ connections, directory:sharedDirectory, endpoint, section, open, hidden, onOpen, onNewSession, onAddProject, onSources }: {
   connections: MachineConnections; directory:MachineSummaryDirectory; endpoint: Endpoint; section: "sessions" | "projects";
   open: boolean; hidden: boolean;
@@ -199,7 +211,7 @@ export function MachineDirectoryLists({ connections, directory:sharedDirectory, 
     let succeeded = 0;
     const failures: string[] = [];
     for (const row of sources) {
-      for (const item of section === "projects" ? row.workspaces : row.sessions) {
+      for (const item of section === "projects" ? ancestorsFirst(row.workspaces) : row.sessions) {
         if (!chosen.has(keyOf(row.target, item.id))) continue;
         if (action === "resume" && "root" in item && item.terminatedAtMs === undefined) continue;
         if (!mounted.current) return;

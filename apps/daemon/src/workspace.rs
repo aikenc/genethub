@@ -906,6 +906,7 @@ impl Workspaces {
             .map(|_| true);
         apply_space_projection(&mut info, config);
         apply_space_health(&mut info, entry, config);
+        apply_termination(&mut info, config);
         info
     }
 
@@ -1331,50 +1332,47 @@ impl Workspaces {
     }
 
     /// Records, durably and before anything is stopped, that the user
-    /// terminated (or resumed) a project and its members. Returns the subtree
-    /// it applies to. Not a catalogue fact for the Hub, but it changes what
-    /// every client shows, so it advances the revision like a rename.
+    /// terminated (or resumed) this project; its members follow through
+    /// [`terminated_by`]. Returns the registered subtree it covers. Not a
+    /// catalogue fact for the Hub, but it changes what every client shows, so
+    /// it advances the revision like a rename.
     pub async fn set_terminated(&self, id: &str, terminated: bool) -> Result<Vec<String>> {
         let mut entries = self.entries.write().await;
         let mut config = self.config.write().await;
         let planned = removal_ids(&entries, &config, id)?;
-        let at = terminated.then(crate::session::store::now_ms);
-        let mut next = config.clone();
-        let mut changed = Vec::new();
-        for id in &planned {
-            let saved = next
-                .workspaces
-                .iter_mut()
-                .find(|entry| entry.id == *id)
-                .ok_or_else(|| anyhow!("workspace {id} is missing from config"))?;
-            if saved.terminated_at_ms.is_some() != terminated {
-                saved.terminated_at_ms = at;
-                changed.push(id.clone());
+        let marked = entries
+            .get(id)
+            .is_some_and(|entry| entry.terminated_at_ms.is_some());
+        if !terminated {
+            if let Some((by, _)) = terminated_by(&config, id).filter(|(by, _)| by != id) {
+                let name = entries.get(&by).map_or(by.as_str(), |entry| &entry.name);
+                anyhow::bail!(
+                    "项目 {id} 属于已终止的项目「{name}」（{by}）；请恢复 {by}，它的成员会一起恢复。"
+                );
             }
         }
-        if changed.is_empty() {
+        if marked == terminated {
             return Ok(planned);
         }
+        let at = terminated.then(crate::session::store::now_ms);
+        let mut next = config.clone();
+        next.workspaces
+            .iter_mut()
+            .find(|entry| entry.id == id)
+            .ok_or_else(|| anyhow!("workspace {id} is missing from config"))?
+            .terminated_at_ms = at;
         next.workspace_catalog_revision = next.workspace_catalog_revision.saturating_add(1);
         next.save(&self.config_path)?;
         *config = next;
-        for id in &changed {
-            if let Some(entry) = entries.get_mut(id) {
-                entry.terminated_at_ms = at;
-            }
+        if let Some(entry) = entries.get_mut(id) {
+            entry.terminated_at_ms = at;
         }
         Ok(planned)
     }
 
-    /// Every project the user terminated, removed ones included.
-    pub async fn terminated_ids(&self) -> Vec<String> {
-        self.entries
-            .read()
-            .await
-            .values()
-            .filter(|entry| entry.terminated_at_ms.is_some())
-            .map(|entry| entry.id.clone())
-            .collect()
+    /// See [`terminated_by`].
+    pub async fn terminated_by(&self, id: &str) -> Option<String> {
+        terminated_by(&*self.config.read().await, id).map(|(by, _)| by)
     }
 
     /// Changes only the label shown to the user; the directory itself stays put.
@@ -1520,11 +1518,40 @@ fn active_descriptions<'a>(
                 .map(|_| true);
             apply_space_projection(&mut info, config);
             apply_space_health(&mut info, entry, config);
+            apply_termination(&mut info, config);
             info
         })
         .collect();
     out.sort_by(|left, right| left.name.cmp(&right.name));
     out
+}
+
+/// The project whose termination covers `id`, and when it was recorded: `id`
+/// itself or the nearest registered ancestor marked by `workspace.terminate`.
+/// Members added after the termination are covered too; a removed ancestor no
+/// longer covers anything. The single rule every gate and listing uses.
+pub(crate) fn terminated_by(config: &Config, id: &str) -> Option<(String, i64)> {
+    let mut current = id;
+    for depth in 0..=config.agent_spaces.len() {
+        let entry = config.workspaces.iter().find(|entry| entry.id == current)?;
+        if depth > 0 && entry.removed {
+            return None;
+        }
+        if let Some(at) = entry.terminated_at_ms {
+            return Some((current.to_owned(), at));
+        }
+        current = config
+            .agent_spaces
+            .iter()
+            .find(|space| space.workspace_id == current)?
+            .parent_workspace_id
+            .as_deref()?;
+    }
+    None
+}
+
+fn apply_termination(info: &mut WorkspaceInfo, config: &Config) {
+    info.terminated_at_ms = terminated_by(config, &info.id).map(|(_, at)| at);
 }
 
 /// The registration this Workspace carries, plus the older exclusive-role
@@ -3172,8 +3199,8 @@ mod tests {
     #[tokio::test]
     async fn termination_covers_the_team_and_survives_reload_reopen_and_removal() {
         let dir = tempfile::tempdir().unwrap();
-        let (spaces, ids) = open_verified(dir.path(), &["project", "member"]).await;
-        let (project, member) = (ids[0].clone(), ids[1].clone());
+        let (spaces, ids) = open_verified(dir.path(), &["project", "member", "late"]).await;
+        let (project, member, late) = (ids[0].clone(), ids[1].clone(), ids[2].clone());
         mount(
             &spaces,
             &project,
@@ -3190,10 +3217,18 @@ mod tests {
         team.sort();
 
         assert_eq!(spaces.set_terminated(&project, true).await.unwrap(), team);
+        attach(&spaces, &late, &project).await.unwrap();
         let listed = spaces.list().await;
         let at = |id: &str| listed.iter().find(|w| w.id == id).unwrap().terminated_at_ms;
-        assert!(at(&project).is_some() && at(&member).is_some());
+        assert!(at(&project).is_some() && at(&member).is_some() && at(&late).is_some());
         assert!(at(&bystander).is_none());
+        assert_eq!(
+            spaces.terminated_by(&late).await.as_deref(),
+            Some(project.as_str())
+        );
+
+        let refused = spaces.set_terminated(&member, false).await.unwrap_err();
+        assert!(refused.to_string().contains(&project), "{refused:#}");
 
         let config_path = dir.path().join("config.json");
         let reloaded = Workspaces::new(
@@ -3202,9 +3237,11 @@ mod tests {
             WorkspaceHomes::default(),
         );
         reloaded.load().await;
-        let mut kept = reloaded.terminated_ids().await;
-        kept.sort();
-        assert_eq!(kept, team);
+        assert_eq!(
+            reloaded.terminated_by(&member).await.as_deref(),
+            Some(project.as_str())
+        );
+        assert_eq!(reloaded.terminated_by(&bystander).await, None);
 
         let member_root = dir.path().join("project").join("spaces").join("member");
         spaces.remove(&member).await.unwrap();
@@ -3212,9 +3249,16 @@ mod tests {
         assert_eq!(reopened.id, member);
         assert!(reopened.terminated_at_ms.is_some());
 
+        let project_root = dir.path().join("project");
+        spaces.remove(&project).await.unwrap();
+        let reopened = spaces.open(&project_root, None).await.unwrap();
+        assert_eq!(reopened.id, project);
+        assert!(reopened.terminated_at_ms.is_some());
+
         spaces.set_terminated(&project, false).await.unwrap();
-        spaces.set_terminated(&member, false).await.unwrap();
-        assert!(spaces.terminated_ids().await.is_empty());
+        for id in [&project, &member, &late] {
+            assert_eq!(spaces.terminated_by(id).await, None);
+        }
     }
 
     #[tokio::test]

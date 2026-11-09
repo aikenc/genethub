@@ -169,6 +169,8 @@ pub struct Hooks {
     registered: Mutex<HashMap<(String, PathBuf), Registered>>,
     limit: Arc<tokio::sync::Semaphore>,
     active_paths: Arc<Mutex<HashSet<PathBuf>>>,
+    /// Projects the user just terminated; a running hook of one is ended.
+    terminated: tokio::sync::broadcast::Sender<String>,
 }
 
 impl Hooks {
@@ -179,7 +181,16 @@ impl Hooks {
             registered: Mutex::new(HashMap::new()),
             limit: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT)),
             active_paths: Arc::new(Mutex::new(HashSet::new())),
+            terminated: tokio::sync::broadcast::channel(256).0,
         })
+    }
+
+    /// Ends the hooks these projects are running now. Called after the
+    /// termination is recorded, which stops any later run from starting.
+    pub fn stop(&self, workspace_ids: &[String]) {
+        for id in workspace_ids {
+            let _ = self.terminated.send(id.clone());
+        }
     }
 
     /// The hooks in one project as the files say now, with how each last ran.
@@ -244,21 +255,27 @@ impl Hooks {
             let state = state.clone();
             tokio::spawn(async move {
                 let _permit = permit;
+                // Listening first means a termination is either seen by the
+                // check below or delivered to the run.
+                let terminated = hooks.terminated.subscribe();
                 // Scheduling can yield after the roster was read. Check the
                 // current registration immediately before the command starts.
-                let registered =
-                    if let Some(state) = state.upgrade() {
-                        state.workspaces.get(&key.0).await.is_ok_and(|entry| {
-                            entry.root == root && entry.terminated_at_ms.is_none()
-                        })
-                    } else {
-                        false
-                    };
+                let registered = match state.upgrade() {
+                    Some(state) => {
+                        state
+                            .workspaces
+                            .get(&key.0)
+                            .await
+                            .is_ok_and(|entry| entry.root == root)
+                            && state.workspaces.terminated_by(&key.0).await.is_none()
+                    }
+                    None => false,
+                };
                 if !registered {
                     hooks.runs.lock().expect("never poisoned").remove(&key);
                     return;
                 }
-                hooks.run(key, id, root, python).await;
+                hooks.run(key, id, root, python, terminated).await;
             });
         }
     }
@@ -347,6 +364,7 @@ impl Hooks {
         id: String,
         project_root: PathBuf,
         python: Option<PathBuf>,
+        mut terminated: tokio::sync::broadcast::Receiver<String>,
     ) {
         // The task may have yielded after tick_project. Revalidate membership
         // and the current file before acquiring project execution ownership.
@@ -502,9 +520,22 @@ impl Hooks {
             }
             write_status_file(&key.0, &project_root, &runs);
         }
-        let outcome = self
-            .execute(&id, &spec, &project_root, python.as_deref())
-            .await;
+        let workspace_id = key.0.clone();
+        let ended = async move {
+            use tokio::sync::broadcast::error::RecvError;
+            loop {
+                match terminated.recv().await {
+                    Ok(id) if id == workspace_id => return,
+                    Err(RecvError::Closed) => std::future::pending::<()>().await,
+                    _ => {}
+                }
+            }
+        };
+        // Dropping the run drops its process group, which kills the tree.
+        let outcome = tokio::select! {
+            outcome = self.execute(&id, &spec, &project_root, python.as_deref()) => outcome,
+            () = ended => Outcome::failed("ended because the user terminated the project".into()),
+        };
         let finished = Instant::now();
         let mut runs = self.runs.lock().expect("never poisoned");
         let Some(run) = runs.get_mut(&key) else {
