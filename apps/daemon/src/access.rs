@@ -282,6 +282,9 @@ async fn identity(
     Ok((out.code, value))
 }
 
+// One flat constructor for the fixed description of a permission row; every argument is a distinct
+// field of the row and a builder would only restate them.
+#[allow(clippy::too_many_arguments)]
 fn item(
     id: &str,
     group: &str,
