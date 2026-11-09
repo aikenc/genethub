@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use crate::access::*;
 use crate::domain::*;
 use crate::event::{PermissionOutcome, SequencedEvent};
 use crate::speech::*;
@@ -853,6 +854,17 @@ pub enum Request {
         additional_directories: Vec<String>,
     },
 
+    /// What this machine's operating system currently allows the daemon to do.
+    #[serde(rename = "access.list")]
+    AccessList,
+    /// Ask for the listed items (or every recommended one when `ids` is absent).
+    #[serde(rename = "access.request", rename_all = "camelCase")]
+    AccessRequest {
+        #[serde(default)]
+        #[ts(optional)]
+        ids: Option<Vec<String>>,
+    },
+
     // -- files -------------------------------------------------------------
     #[serde(rename = "file.tree", rename_all = "camelCase")]
     FileTree {
@@ -1044,6 +1056,8 @@ pub enum Reply {
     Workspaces(Vec<WorkspaceInfo>),
     Directory(DirectoryListing),
     FileAccess(FileAccessInfo),
+    Access(AccessReport),
+    AccessSetup(AccessSetupResult),
     FileTree(FileNode),
     GitStatus(GitStatus),
     #[serde(rename_all = "camelCase")]

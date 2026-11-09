@@ -79,6 +79,7 @@ Agent 的 CLI 按目的读取（与工作台的显示页大小无关）：
 | 实时联调页面：白屏、DOM、交互、截图、移动端复现 | [client-debug.md](references/client-debug.md) |
 | 本地语音识别 runtime：测试、安装、登记、诊断、移除 | [speech-runtime.md](references/speech-runtime.md) |
 | 把一棵 Space 树（`agent-space.genet.json`、Skill、定时 hook）生成成 Agent 读的规则与 Skill 文件 | [spacebuilder.md](references/spacebuilder.md) |
+| 任务因系统权限（磁盘、网络、被系统拦截运行）卡住或失败：查看缺哪项、能否自动修 | [access.md](references/access.md) |
 | 静态 H5、站点、相册，或影视/DCC/引擎的创作过程预览 | Skill `genehub-preview` |
 | 入口能读、二级链接或资源失败 | Skill `genehub-preview` 的 `references/static.md`：先分清父页 CSP、路径解析、文件授权与页面错误；不用嵌套 iframe 绕过 |
 | 会话历史、转发会话、来源引用 | Skill `genehub-introspect` |

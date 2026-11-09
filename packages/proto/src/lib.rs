@@ -5,6 +5,8 @@
 //! Writing the protocol twice is how frontend and backend drift apart around
 //! the third field rename; generating one from the other makes that impossible.
 
+pub mod access;
+pub use access::*;
 pub mod client_debug;
 pub use client_debug::*;
 pub mod preview_feedback;

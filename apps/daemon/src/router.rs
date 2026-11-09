@@ -479,6 +479,7 @@ async fn dispatch(
                     "preview.feedback.v1".to_string(),
                     "session.switch-agent.v1".to_string(),
                     "agent-tag-routing.v1".to_string(),
+                    "access.status.v1".to_string(),
                     genehub_proto::SPEECH_FEATURE_TRANSCRIBE.to_string(),
                     genehub_proto::SPEECH_FEATURE_PARTIAL.to_string(),
                     genehub_proto::SPEECH_FEATURE_CONTEXT_PREVIEW.to_string(),
@@ -2133,6 +2134,12 @@ async fn dispatch(
             }
         }).await,
 
+        Request::AccessList => Box::pin(async move {
+            Handled::ok(Reply::Access(crate::access::report(state).await))
+        }).await,
+        Request::AccessRequest { ids } => Box::pin(async move {
+            Handled::ok(Reply::AccessSetup(crate::access::request(state, ids).await))
+        }).await,
         Request::FileAccessList => Box::pin(async move {
             Handled::ok(Reply::FileAccess(crate::file_access::info(&*state.config.read().await)))
         }).await,

@@ -2,6 +2,63 @@
 import type { JsonValue } from "./serde_json/JsonValue";
 
 /**
+ * What pressing "request" does for an item.
+ */
+export type AccessAction = "fix" | "prompt" | "settings" | "command" | "none";
+
+export type AccessItem = { 
+/**
+ * Stable identifier, e.g. `mac.full-disk-access`.
+ */
+id: string, 
+/**
+ * `identity` | `disk` | `network` | `desktop`.
+ */
+group: string, label: string, 
+/**
+ * What stops working without it, in the user's words.
+ */
+purpose: string, state: AccessState, 
+/**
+ * Why the state is what it is; shown under the label.
+ */
+detail?: string, 
+/**
+ * The programs the system attributes this permission to.
+ */
+holders: Array<string>, action: AccessAction, 
+/**
+ * Part of the one-click default set.
+ */
+recommended: boolean, 
+/**
+ * A command for an administrator, when `action` is `command`.
+ */
+command?: string, };
+
+export type AccessOutcome = { id: string, kind: AccessOutcomeKind, message: string, };
+
+export type AccessOutcomeKind = "done" | "needsUser" | "denied" | "skipped" | "failed";
+
+export type AccessReport = { 
+/**
+ * `macos` | `windows` | `wsl` | `linux`.
+ */
+platform: string, 
+/**
+ * The graphical session is locked or absent, so no dialog can be answered.
+ */
+locked?: boolean, items: Array<AccessItem>, checkedAt: string, };
+
+export type AccessSetupResult = { outcomes: Array<AccessOutcome>, 
+/**
+ * The state after acting, so a caller never reports "asked" as "granted".
+ */
+report: AccessReport, };
+
+export type AccessState = "granted" | "denied" | "notDetermined" | "unknown" | "needsRecheck" | "notApplicable";
+
+/**
  * One button a script Agent offers. The id is opaque to the platform.
  */
 export type AgentActionInfo = { id: string, label: string, 
@@ -1195,7 +1252,7 @@ export type Reply = { "type": "previewFeedback", "data": PreviewFeedbackResponse
  * True when the requested `sinceSeq` fell outside the retained window
  * and the snapshot is a full reset rather than a continuation.
  */
-reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "agentRequests", "data": Array<AgentUserRequest> } | { "type": "agentTestResult", "data": { passed: boolean, output: string, } } | { "type": "agentLogs", "data": { lines: Array<string>, } } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "callerAuthority", "data": CallerAuthority } | { "type": "providers", "data": Array<ProviderInfo> } | { "type": "providerOperation", "data": ProviderOperationReceipt } | { "type": "speechCapabilities", "data": SpeechCapabilities } | { "type": "speechRuntimeStatus", "data": SpeechRuntimeStatus } | { "type": "speechContext", "data": SpeechContextPack } | { "type": "speechFeedbackReceipt", "data": SpeechFeedbackReceipt } | { "type": "log", "data": LogTail } | { "type": "diagnostics", "data": SupportDiagnostics } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "forkTransfer", "data": ForkTransfer } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionPages", "data": Array<SessionPageResult> } | { "type": "sessionChanges", "data": SessionChangesResult } | { "type": "sessionDrafts", "data": Array<SessionDraft> } | { "type": "previewAnnotations", "data": PreviewReviewDraft } | { "type": "sessionComponents", "data": Array<ComponentInstanceInfo> } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "sessionInspection", "data": SessionInspection } | { "type": "sessionNarrative", "data": SessionNarrativePage } | { "type": "sessionRounds", "data": SessionRoundPage } | { "type": "sessionContext", "data": SessionContext } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "roundTrunks", "data": Array<RoundTrunk> } | { "type": "blob", "data": BlobPayload } | { "type": "blobs", "data": Array<BlobPayload> } | { "type": "sessionArtifactUpload", "data": SessionArtifactUpload } | { "type": "sessionArtifact", "data": SessionArtifactBundle } | { "type": "agentSpaceChangePlan", "data": AgentSpaceChangePlan } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileAccess", "data": FileAccessInfo } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "processes", "data": Array<BackgroundProcess> } | { "type": "ack" };
+reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "agentRequests", "data": Array<AgentUserRequest> } | { "type": "agentTestResult", "data": { passed: boolean, output: string, } } | { "type": "agentLogs", "data": { lines: Array<string>, } } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "callerAuthority", "data": CallerAuthority } | { "type": "providers", "data": Array<ProviderInfo> } | { "type": "providerOperation", "data": ProviderOperationReceipt } | { "type": "speechCapabilities", "data": SpeechCapabilities } | { "type": "speechRuntimeStatus", "data": SpeechRuntimeStatus } | { "type": "speechContext", "data": SpeechContextPack } | { "type": "speechFeedbackReceipt", "data": SpeechFeedbackReceipt } | { "type": "log", "data": LogTail } | { "type": "diagnostics", "data": SupportDiagnostics } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "forkTransfer", "data": ForkTransfer } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionPages", "data": Array<SessionPageResult> } | { "type": "sessionChanges", "data": SessionChangesResult } | { "type": "sessionDrafts", "data": Array<SessionDraft> } | { "type": "previewAnnotations", "data": PreviewReviewDraft } | { "type": "sessionComponents", "data": Array<ComponentInstanceInfo> } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "sessionInspection", "data": SessionInspection } | { "type": "sessionNarrative", "data": SessionNarrativePage } | { "type": "sessionRounds", "data": SessionRoundPage } | { "type": "sessionContext", "data": SessionContext } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "roundTrunks", "data": Array<RoundTrunk> } | { "type": "blob", "data": BlobPayload } | { "type": "blobs", "data": Array<BlobPayload> } | { "type": "sessionArtifactUpload", "data": SessionArtifactUpload } | { "type": "sessionArtifact", "data": SessionArtifactBundle } | { "type": "agentSpaceChangePlan", "data": AgentSpaceChangePlan } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileAccess", "data": FileAccessInfo } | { "type": "access", "data": AccessReport } | { "type": "accessSetup", "data": AccessSetupResult } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "processes", "data": Array<BackgroundProcess> } | { "type": "ack" };
 
 export type Request = { "type": "preview.feedback", "payload": PreviewFeedbackRequest } | { "type": "client.debug", "payload": ClientDebugRequest } | { "type": "connection.identity" } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, 
 /**
@@ -1324,7 +1381,7 @@ name: string | null, } } | { "type": "diagnostics.snapshot" } | { "type": "updat
 /**
  * Independent node uplinks, 1..4. Omission preserves one-channel access.
  */
-channelCount?: number, } } | { "type": "device.remoteDetach" } | { "type": "workspace.list" } | { "type": "workspace.open", "payload": { root: string, } } | { "type": "workspace.addRoot", "payload": { workspaceId: string, root: string, } } | { "type": "workspace.create", "payload": { root: string, name: string, } } | { "type": "workspace.rename", "payload": { workspaceId: string, name: string, } } | { "type": "workspace.remove", "payload": { workspaceId: string, } } | { "type": "directory.list", "payload": { path: string | null, } } | { "type": "directory.mkdir", "payload": { parent: string, name: string, } } | { "type": "fileAccess.list" } | { "type": "fileAccess.configure", "payload": { expectedRevision: string, additionalDirectories: Array<string>, } } | { "type": "file.tree", "payload": { workspaceId: string, path: string | null, depth: number | null, } } | { "type": "file.write", "payload": { workspaceId: string, path: string, content: string, } } | { "type": "file.mkdir", "payload": { workspaceId: string, path: string, } } | { "type": "file.copy", "payload": { workspaceId: string, from: string, to: string, } } | { "type": "file.move", "payload": { workspaceId: string, from: string, to: string, } } | { "type": "file.delete", "payload": { workspaceId: string, paths: Array<string>, } } | { "type": "git.status", "payload": { workspaceId: string, } } | { "type": "git.diff", "payload": { workspaceId: string, path: string | null, } } | { "type": "git.commit", "payload": { workspaceId: string, message: string, 
+channelCount?: number, } } | { "type": "device.remoteDetach" } | { "type": "workspace.list" } | { "type": "workspace.open", "payload": { root: string, } } | { "type": "workspace.addRoot", "payload": { workspaceId: string, root: string, } } | { "type": "workspace.create", "payload": { root: string, name: string, } } | { "type": "workspace.rename", "payload": { workspaceId: string, name: string, } } | { "type": "workspace.remove", "payload": { workspaceId: string, } } | { "type": "directory.list", "payload": { path: string | null, } } | { "type": "directory.mkdir", "payload": { parent: string, name: string, } } | { "type": "fileAccess.list" } | { "type": "fileAccess.configure", "payload": { expectedRevision: string, additionalDirectories: Array<string>, } } | { "type": "access.list" } | { "type": "access.request", "payload": { ids?: Array<string>, } } | { "type": "file.tree", "payload": { workspaceId: string, path: string | null, depth: number | null, } } | { "type": "file.write", "payload": { workspaceId: string, path: string, content: string, } } | { "type": "file.mkdir", "payload": { workspaceId: string, path: string, } } | { "type": "file.copy", "payload": { workspaceId: string, from: string, to: string, } } | { "type": "file.move", "payload": { workspaceId: string, from: string, to: string, } } | { "type": "file.delete", "payload": { workspaceId: string, paths: Array<string>, } } | { "type": "git.status", "payload": { workspaceId: string, } } | { "type": "git.diff", "payload": { workspaceId: string, path: string | null, } } | { "type": "git.commit", "payload": { workspaceId: string, message: string, 
 /**
  * Empty means "everything currently changed".
  */

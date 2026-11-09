@@ -16,7 +16,7 @@ use super::output::{self, CliFailure, CLI_SCHEMA};
 use super::rpc::{ConnectError, Refusal, Rpc, RpcError};
 use super::target::{self, Routing, Selection};
 
-const COMMAND_NAMES: [&str; 79] = [
+const COMMAND_NAMES: [&str; 81] = [
     "schema",
     "status",
     "daemon.status",
@@ -40,6 +40,8 @@ const COMMAND_NAMES: [&str; 79] = [
     "process.killAll",
     "file-access.list",
     "file-access.configure",
+    "access.status",
+    "access.request",
     "workspace.open",
     "workspace.add-root",
     "workspace.list",
@@ -155,6 +157,11 @@ enum Query {
     FileAccessConfigure {
         expected_revision: String,
         directories: Vec<String>,
+    },
+    AccessStatus,
+    /// `ids` empty means "everything recommended that is still missing".
+    AccessRequest {
+        ids: Vec<String>,
     },
     WorkspaceOpen {
         root: String,
@@ -357,6 +364,18 @@ fn parse(args: &[String]) -> Result<Query, CliFailure> {
                 Ok(Query::FileAccessConfigure {expected_revision: revision.clone(), directories: paths})
             }
             _ => Err(CliFailure::invalid_args("usage: genet file-access list | configure --expected-revision <revision> [--directory <path>]...")),
+        },
+        "access" => match rest {
+            [verb] if verb == "status" => Ok(Query::AccessStatus),
+            [verb, ids @ ..] if verb == "request" => {
+                // `--all` is the one-click path; naming items is the fine-grained one.
+                let ids: Vec<String> = ids.iter().filter(|id| id.as_str() != "--all").cloned().collect();
+                if ids.iter().any(|id| id.starts_with('-')) {
+                    return Err(CliFailure::invalid_args("usage: genet access request [--all | <id>...]"));
+                }
+                Ok(Query::AccessRequest { ids })
+            }
+            _ => Err(CliFailure::invalid_args("usage: genet access status | request [--all | <id>...]")),
         },
         "session" => parse_session(rest),
         _ => Err(CliFailure::invalid_args(format!(
@@ -852,6 +871,23 @@ async fn execute(
             match rpc.call(request).await.map_err(rpc_error)? {
                 Reply::FileAccess(info) => Ok((kind, json!(info))),
                 reply => Err(unexpected_reply("file access directories", &reply)),
+            }
+        }
+        Query::AccessStatus | Query::AccessRequest { .. } => {
+            let rpc = connect_selected(selection).await?;
+            match command {
+                Query::AccessStatus => match rpc.call(Request::AccessList).await.map_err(rpc_error)? {
+                    Reply::Access(report) => Ok(("access.status", json!(report))),
+                    reply => Err(unexpected_reply("access status", &reply)),
+                },
+                Query::AccessRequest { ids } => {
+                    let ids = (!ids.is_empty()).then_some(ids);
+                    match rpc.call(Request::AccessRequest { ids }).await.map_err(rpc_error)? {
+                        Reply::AccessSetup(result) => Ok(("access.request", json!(result))),
+                        reply => Err(unexpected_reply("access request", &reply)),
+                    }
+                }
+                _ => unreachable!(),
             }
         }
         Query::WorkspaceOpen { .. } | Query::WorkspaceAddRoot { .. } => {
@@ -1666,6 +1702,8 @@ fn command_schema(name: &str) -> Value {
         ),
         "file-access.list" => ("genet file-access list", true, object_input(json!({}), &[])),
         "file-access.configure" => ("genet file-access configure --expected-revision <revision> [--directory <path>]...", true, object_input(json!({"expectedRevision":{"type":"string"},"directories":{"type":"array","items":{"type":"string"}}}), &["expectedRevision"])),
+        "access.status" => ("genet access status", true, object_input(json!({}), &[])),
+        "access.request" => ("genet access request [--all | <id>...]", true, object_input(json!({"ids":{"type":"array","items":{"type":"string"}}}), &[])),
         "workspace.open" => ("genet workspace open <path>", true, object_input(json!({"root":{"type":"string"}}), &["root"])),
         "workspace.add-root" => ("genet workspace add-root <id> <path>", true, object_input(json!({"workspaceId":{"type":"string"},"root":{"type":"string"}}), &["workspaceId","root"])),
         "workspace.list" => ("genet workspace list", true, object_input(json!({}), &[])),
@@ -2581,6 +2619,8 @@ pub fn reply_kind(reply: &Reply) -> &'static str {
         Reply::Processes(_) => "background processes",
         Reply::PreviewFeedback(_) => "preview feedback",
         Reply::FileAccess(_) => "fileAccess",
+        Reply::Access(_) => "access",
+        Reply::AccessSetup(_) => "accessSetup",
         Reply::Ack => "ack",
     }
 }

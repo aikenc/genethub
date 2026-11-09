@@ -5,6 +5,7 @@ import type {
 } from "@genehub/proto";
 import { useEffect, useState } from "react";
 
+import { AccessSettings } from "./AccessSettings";
 import { FileAccessSettings } from "./FileAccessSettings";
 import { AgentConfigEntry } from "../agents/AgentConfigEntry";
 import { BUILD, PRODUCT_VERSION } from "../build";
@@ -52,6 +53,8 @@ export function SettingsPanel({ host, endpoint }: { host: Host; endpoint?: Endpo
       <Machine identity={client?.identity ?? null} expected={endpoint?.fingerprint} />
 
       {client?.identity?.features?.includes("asset.preview.machine-file.v1") ? <FileAccessSettings client={client} /> : null}
+
+      {client?.identity?.features?.includes("access.status.v1") ? <AccessSettings client={client} /> : null}
 
       <Appearance />
 
