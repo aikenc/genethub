@@ -12,7 +12,8 @@
 //! what happens while the target or its relay is coming back. A caller that
 //! retries in a tight loop would empty the allowance during that gap, so a
 //! failure after a ticket was issued is answered again for a short while
-//! instead of buying another one.
+//! instead of buying another one. Both the failure and its repeats carry
+//! `retryAfterMs`, and a repeat says plainly that it did not connect.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
@@ -101,7 +102,12 @@ pub async fn shared(machine_id: &str) -> Result<Rpc, CliFailure> {
     if let Some((at, failure)) = &held.failed {
         let waited = now.duration_since(*at);
         if waited < HOLD_FAILURE {
-            return Err(held_back(failure, HOLD_FAILURE - waited));
+            return Err(held_back(
+                machine_id,
+                failure,
+                waited,
+                HOLD_FAILURE - waited,
+            ));
         }
     }
     held.failed = None;
@@ -116,25 +122,65 @@ pub async fn shared(machine_id: &str) -> Result<Rpc, CliFailure> {
             });
             Ok(Rpc::shared(remote))
         }
-        Err(Failed { failure, spent }) => {
-            if spent {
-                held.failed = Some((now, failure.clone()));
-            }
-            Err(failure)
+        Err(Failed { failure, spent }) if spent => {
+            held.failed = Some((now, failure.clone()));
+            // Retrying sooner only gets this same failure back.
+            Err(noted(
+                failure,
+                [("retryAfterMs", json!(HOLD_FAILURE.as_millis() as u64))],
+            ))
         }
+        Err(Failed { failure, .. }) => Err(failure),
     };
     drop(held);
     keep_swept();
     result
 }
 
-fn held_back(failure: &CliFailure, left: Duration) -> CliFailure {
+/// The earlier failure, said again without dialling. It must read as exactly
+/// that: a caller who takes it for a fresh attempt concludes the machine is
+/// still down, or worse, that its pairing broke and tears it down.
+fn held_back(
+    machine_id: &str,
+    failure: &CliFailure,
+    waited: Duration,
+    left: Duration,
+) -> CliFailure {
     let mut failure = failure.clone();
+    let after = left.as_millis() as u64;
+    let after_s = after.div_ceil(1000);
+    let ago_s = waited.as_secs();
+    let then = if failure.retryable {
+        format!("retry in {after_s}s and the call will really connect again")
+    } else {
+        format!("a call after {after_s}s will really connect again")
+    };
+    failure.message = format!(
+        "not reconnected: {machine_id} failed {ago_s}s ago and this call did not dial again, \
+         to spare the Hub's route allowance; {then}. The earlier failure was: {}",
+        failure.message
+    );
+    noted(
+        failure,
+        [
+            ("retryAfterMs", json!(after)),
+            ("reconnected", json!(false)),
+            ("failedMsAgo", json!(waited.as_millis() as u64)),
+        ],
+    )
+}
+
+fn noted<const N: usize>(
+    mut failure: CliFailure,
+    notes: [(&str, serde_json::Value); N],
+) -> CliFailure {
     let mut details = match failure.details.take() {
         Some(serde_json::Value::Object(details)) => details,
         _ => serde_json::Map::new(),
     };
-    details.insert("retryAfterMs".into(), json!(left.as_millis() as u64));
+    for (key, value) in notes {
+        details.insert(key.into(), value);
+    }
     failure.details = Some(serde_json::Value::Object(details));
     failure
 }
@@ -264,5 +310,63 @@ async fn ticket(machine_id: &str) -> Result<HubTicket, CliFailure> {
             );
             Err(failure)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unreachable() -> CliFailure {
+        CliFailure {
+            code: "unreachable",
+            message: "relay closed the connection".into(),
+            retryable: true,
+            details: Some(json!({"machineId": "mch_a"})),
+            exit: super::super::EXIT_UNREACHABLE,
+        }
+    }
+
+    #[test]
+    fn a_repeated_failure_says_it_did_not_connect_and_when_one_will() {
+        let held = held_back(
+            "mch_a",
+            &unreachable(),
+            Duration::from_millis(3_200),
+            Duration::from_millis(6_800),
+        );
+        assert_eq!(held.code, "unreachable");
+        assert!(held.retryable);
+        assert!(
+            held.message
+                .starts_with("not reconnected: mch_a failed 3s ago"),
+            "{}",
+            held.message
+        );
+        assert!(held.message.contains("retry in 7s"), "{}", held.message);
+        assert!(
+            held.message.ends_with("relay closed the connection"),
+            "{}",
+            held.message
+        );
+        let details = held.details.unwrap();
+        assert_eq!(details["retryAfterMs"], 6_800);
+        assert_eq!(details["reconnected"], false);
+        assert_eq!(details["failedMsAgo"], 3_200);
+        assert_eq!(details["machineId"], "mch_a");
+    }
+
+    #[test]
+    fn a_repeat_of_a_final_failure_does_not_invite_a_retry() {
+        let mut failure = unreachable();
+        failure.retryable = false;
+        let held = held_back("mch_a", &failure, Duration::ZERO, HOLD_FAILURE);
+        assert!(!held.retryable);
+        assert!(!held.message.contains("retry in"), "{}", held.message);
+        assert!(
+            held.message.contains("after 10s will really connect"),
+            "{}",
+            held.message
+        );
     }
 }

@@ -37,6 +37,18 @@ Hub 查询失败会返回非零退出码和 `complete: false` 的已知条目，
   完整连接没有 `settings` 等逐能力分级；按实际认证、账号/机器归属和连接状态定位失败。
   明确拒绝授权时如实报告；网络故障按返回的可重试信息处理，不要换身份或绕过授权。
 
+### 可重试的跨机失败
+
+经 Hub 的 `--machine` 调用会复用到同一机器的连接，不必为省连接而合并或减少调用。连接失败时：
+
+- `retryable: true`：等 `details.retryAfterMs` 毫秒后原样重试同一命令。提前重试拿到的是同一个失败的复述，
+  `details.reconnected: false`、消息以 `not reconnected:` 开头，并给出 `failedMsAgo` 和剩余等待；
+  这不说明目标仍不可达，也不是新的证据。
+- `routeRefused`（`stage: hostedRoute`）：Hub 刚签发的路由被目标或 relay 暂时拒绝，常见于目标或 relay 刚重启。
+  它不是撤销，不要重新配对、`device invite`、换身份，也不要把团队任务改派到别的机器。
+- 只有 `retryable: false` 的失败（如 `credentialRevoked`）才是授权或配置问题，按消息如实报告，不要循环重试。
+- 连续多次等待后重试仍失败，报告最后一次真实失败（`reconnected` 不为 `false` 的那次）和已等待时长。
+
 ## 在目标机器执行命令
 
 ```bash
