@@ -56,6 +56,23 @@ impl Handled {
     }
 }
 
+/// Records the termination first, so nothing can start while the sessions
+/// that were running are being stopped. Returns the terminated subtree.
+async fn terminate_project(state: &Shared, workspace_id: &str) -> Result<Vec<String>, Handled> {
+    let planned = state
+        .workspaces
+        .set_terminated(workspace_id, true)
+        .await
+        .map_err(|error| Handled::err(ErrorCode::BadRequest, format!("{error:#}")))?;
+    let closed = state
+        .sessions
+        .terminate_workspaces(&planned)
+        .await
+        .map_err(failed)?;
+    tracing::info!(workspace = %workspace_id, members = planned.len(), closed, "workspace.terminate");
+    Ok(planned)
+}
+
 /// Maps an internal failure onto a client-visible error.
 ///
 /// Everything that reaches a user goes through here, so the wording is worth
@@ -71,6 +88,11 @@ fn failed(error: anyhow::Error) -> Handled {
         .is_some()
     {
         ErrorCode::NotFound
+    } else if error
+        .downcast_ref::<crate::session::manager::ProjectTerminated>()
+        .is_some()
+    {
+        ErrorCode::Conflict
     } else if message.contains("invalid session artifact")
         || message.contains("session artifact chunk")
         || message.contains("session artifact metadata")
@@ -480,6 +502,7 @@ async fn dispatch(
                     "session.switch-agent.v1".to_string(),
                     "agent-tag-routing.v1".to_string(),
                     "access.status.v1".to_string(),
+                    "workspace.terminate.v1".to_string(),
                     genehub_proto::SPEECH_FEATURE_TRANSCRIBE.to_string(),
                     genehub_proto::SPEECH_FEATURE_PARTIAL.to_string(),
                     genehub_proto::SPEECH_FEATURE_CONTEXT_PREVIEW.to_string(),
@@ -2243,10 +2266,20 @@ async fn dispatch(
             }
         }).await,
 
-        Request::WorkspaceRemove { workspace_id } => Box::pin(async move {
-            let planned = match state.workspaces.removal_plan(&workspace_id).await {
-                Ok(planned) => planned,
-                Err(error) => return Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
+        Request::WorkspaceRemove {
+            workspace_id,
+            terminate,
+        } => Box::pin(async move {
+            let planned = if terminate == Some(true) {
+                match terminate_project(state, &workspace_id).await {
+                    Ok(planned) => planned,
+                    Err(handled) => return handled,
+                }
+            } else {
+                match state.workspaces.removal_plan(&workspace_id).await {
+                    Ok(planned) => planned,
+                    Err(error) => return Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
+                }
             };
             let blocked = match state.sessions.has_blocking_workspace_sessions(&planned).await {
                 Ok(blocked) => blocked,
@@ -2255,11 +2288,33 @@ async fn dispatch(
             if blocked {
                 return Handled::err(
                     ErrorCode::Conflict,
-                    "项目或成员仍有运行中、等待交互的会话，请先处理后再移除。",
+                    if terminate == Some(true) {
+                        "项目已终止，但仍有会话未能停下，暂未移除；稍后重试移除。"
+                    } else {
+                        "项目或成员仍有运行中、等待交互的会话，请先处理后再移除。"
+                    },
                 );
             }
             match state.workspaces.remove_planned(&workspace_id, &planned).await {
                 Ok(workspaces) => Handled::ok(Reply::Workspaces(workspaces)),
+                Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
+            }
+        }).await,
+
+        Request::WorkspaceTerminate { workspace_id } => Box::pin(async move {
+            if let Err(handled) = terminate_project(state, &workspace_id).await {
+                return handled;
+            }
+            Handled::ok(Reply::Workspaces(state.workspaces.list().await))
+        }).await,
+
+        Request::WorkspaceResume { workspace_id } => Box::pin(async move {
+            match state.workspaces.set_terminated(&workspace_id, false).await {
+                Ok(planned) => {
+                    state.sessions.resume_workspaces(&planned);
+                    tracing::info!(workspace = %workspace_id, members = planned.len(), "workspace.resume");
+                    Handled::ok(Reply::Workspaces(state.workspaces.list().await))
+                }
                 Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
             }
         }).await,
@@ -2605,6 +2660,8 @@ fn diagnostic_operation(request: &Request) -> Option<&'static str> {
         Request::AgentSpaceConfigure { .. } => Some("agentSpace.configure"),
         Request::WorkspaceRename { .. } => Some("workspace.rename"),
         Request::WorkspaceRemove { .. } => Some("workspace.remove"),
+        Request::WorkspaceTerminate { .. } => Some("workspace.terminate"),
+        Request::WorkspaceResume { .. } => Some("workspace.resume"),
         Request::DirectoryList { .. } => Some("directory.list"),
         Request::DirectoryMkdir { .. } => Some("directory.mkdir"),
         Request::FileTree { .. } => Some("file.tree"),

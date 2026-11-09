@@ -16,7 +16,7 @@ use super::output::{self, CliFailure, CLI_SCHEMA};
 use super::rpc::{ConnectError, Refusal, Rpc, RpcError};
 use super::target::{self, Routing, Selection};
 
-const COMMAND_NAMES: [&str; 81] = [
+const COMMAND_NAMES: [&str; 83] = [
     "schema",
     "status",
     "daemon.status",
@@ -47,6 +47,8 @@ const COMMAND_NAMES: [&str; 81] = [
     "workspace.list",
     "workspace.show",
     "workspace.remove",
+    "workspace.terminate",
+    "workspace.resume",
     "space.open",
     "preview.feedback",
     "session.list",
@@ -133,6 +135,8 @@ fn mutates(name: &str) -> bool {
             | "session.describe"
             | "session.model"
             | "workspace.remove"
+            | "workspace.terminate"
+            | "workspace.resume"
             | "machine.pair"
             | "machine.forget"
             | "device.invite"
@@ -175,6 +179,13 @@ enum Query {
         workspace_id: String,
     },
     WorkspaceRemove {
+        workspace_id: String,
+        terminate: bool,
+    },
+    WorkspaceTerminate {
+        workspace_id: String,
+    },
+    WorkspaceResume {
         workspace_id: String,
     },
     SessionList {
@@ -430,13 +441,35 @@ fn parse_workspace(args: &[String]) -> Result<Query, CliFailure> {
         [verb, workspace_id] if verb == "remove" && workspace_id.starts_with("w_") => {
             Ok(Query::WorkspaceRemove {
                 workspace_id: workspace_id.clone(),
+                terminate: false,
+            })
+        }
+        [verb, workspace_id, flag]
+            if verb == "remove" && workspace_id.starts_with("w_") && flag == "--terminate" =>
+        {
+            Ok(Query::WorkspaceRemove {
+                workspace_id: workspace_id.clone(),
+                terminate: true,
             })
         }
         [verb] if verb == "remove" => Err(CliFailure::invalid_args(
             "workspace remove needs a workspace id",
         )),
+        [verb, workspace_id] if verb == "terminate" && workspace_id.starts_with("w_") => {
+            Ok(Query::WorkspaceTerminate {
+                workspace_id: workspace_id.clone(),
+            })
+        }
+        [verb, workspace_id] if verb == "resume" && workspace_id.starts_with("w_") => {
+            Ok(Query::WorkspaceResume {
+                workspace_id: workspace_id.clone(),
+            })
+        }
+        [verb] if verb == "terminate" || verb == "resume" => Err(CliFailure::invalid_args(
+            format!("workspace {verb} needs a workspace id"),
+        )),
         _ => Err(CliFailure::invalid_args(
-            "usage: genet workspace list | genet workspace show <id> | genet workspace remove <id>",
+            "usage: genet workspace list | genet workspace show <id> | genet workspace remove <id> [--terminate] | genet workspace terminate <id> | genet workspace resume <id>",
         )),
     }
 }
@@ -928,16 +961,44 @@ async fn execute(
                 .ok_or_else(|| CliFailure::target_not_found("workspace", &workspace_id))?;
             Ok(("workspace.show", json!({"workspace": workspace})))
         }
-        Query::WorkspaceRemove { workspace_id } => {
+        Query::WorkspaceRemove {
+            workspace_id,
+            terminate,
+        } => {
             let rpc = connect_selected(selection).await?;
             rpc.call(Request::WorkspaceRemove {
                 workspace_id: workspace_id.clone(),
+                terminate: terminate.then_some(true),
             })
             .await
             .map_err(rpc_error)?;
             Ok((
                 "workspace.remove",
                 json!({"workspaceId": workspace_id, "removed": true}),
+            ))
+        }
+        Query::WorkspaceTerminate { workspace_id } => {
+            let rpc = connect_selected(selection).await?;
+            rpc.call(Request::WorkspaceTerminate {
+                workspace_id: workspace_id.clone(),
+            })
+            .await
+            .map_err(rpc_error)?;
+            Ok((
+                "workspace.terminate",
+                json!({"workspaceId": workspace_id, "terminated": true}),
+            ))
+        }
+        Query::WorkspaceResume { workspace_id } => {
+            let rpc = connect_selected(selection).await?;
+            rpc.call(Request::WorkspaceResume {
+                workspace_id: workspace_id.clone(),
+            })
+            .await
+            .map_err(rpc_error)?;
+            Ok((
+                "workspace.resume",
+                json!({"workspaceId": workspace_id, "terminated": false}),
             ))
         }
         Query::SessionChanges {
@@ -1728,10 +1789,30 @@ fn command_schema(name: &str) -> Value {
             ),
         ),
         "workspace.remove" => (
-            "genet workspace remove <id>",
+            "genet workspace remove <id> [--terminate]",
             true,
             object_input(
-                json!({"workspaceId": {"type": "string", "minLength": 1}}),
+                json!({"workspaceId": {"type": "string", "minLength": 1},
+                    "terminate": {"type": "boolean",
+                        "description": "--terminate; first terminate running or waiting sessions, as workspace.terminate does"}}),
+                &["workspaceId"],
+            ),
+        ),
+        "workspace.terminate" => (
+            "genet workspace terminate <id>",
+            true,
+            object_input(
+                json!({"workspaceId": {"type": "string", "minLength": 1,
+                    "description": "stops every session of the project and its members; nothing starts there again until workspace.resume"}}),
+                &["workspaceId"],
+            ),
+        ),
+        "workspace.resume" => (
+            "genet workspace resume <id>",
+            true,
+            object_input(
+                json!({"workspaceId": {"type": "string", "minLength": 1,
+                    "description": "lifts workspace.terminate; restarts nothing by itself"}}),
                 &["workspaceId"],
             ),
         ),
@@ -2698,6 +2779,25 @@ mod tests {
             }
         );
         assert_eq!(
+            parse(&words(&["workspace", "remove", "w_1", "--terminate"])).unwrap(),
+            Query::WorkspaceRemove {
+                workspace_id: "w_1".into(),
+                terminate: true,
+            }
+        );
+        assert_eq!(
+            parse(&words(&["workspace", "terminate", "w_1"])).unwrap(),
+            Query::WorkspaceTerminate {
+                workspace_id: "w_1".into()
+            }
+        );
+        assert_eq!(
+            parse(&words(&["workspace", "resume", "w_1"])).unwrap(),
+            Query::WorkspaceResume {
+                workspace_id: "w_1".into()
+            }
+        );
+        assert_eq!(
             parse(&words(&["session", "get", "s_1"])).unwrap(),
             Query::SessionGet {
                 session_id: "s_1".into(),
@@ -2930,6 +3030,8 @@ mod tests {
         for args in [
             words(&["workspace", "show"]),
             words(&["workspace", "list", "extra"]),
+            words(&["workspace", "terminate"]),
+            words(&["workspace", "remove", "w_1", "--force"]),
             words(&["session", "get"]),
             words(&["context", "extra"]),
             words(&["schema", "not.real"]),

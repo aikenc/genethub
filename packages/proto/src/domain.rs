@@ -536,6 +536,11 @@ pub struct WorkspaceInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub agent_space: Option<AgentSpaceInfo>,
+    /// When the user terminated this project (`workspace.terminate`). While
+    /// set, the daemon starts nothing in it until `workspace.resume`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub terminated_at_ms: Option<i64>,
 }
 
 /// Immutable, Human-reviewable plan for one Component/Parent/lifecycle CAS.

@@ -160,6 +160,7 @@ mod tests {
                 .collect(),
             workspace_file: None,
             agent_space: None,
+            terminated_at_ms: None,
         }
     }
 

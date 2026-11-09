@@ -40,6 +40,7 @@ export function WorkspaceRow({
   onPick,
   onRename,
   onRemove,
+  onTerminate,
   onNewSession,
   children,
   browse = false,
@@ -71,6 +72,8 @@ export function WorkspaceRow({
   onPick(): void;
   onRename(name: string): void;
   onRemove(): Promise<void>;
+  /** Absent when the machine cannot terminate projects. */
+  onTerminate?(resume: boolean): Promise<unknown>;
   onNewSession?(): void;
   children: ReactNode;
 }) {
@@ -80,7 +83,8 @@ export function WorkspaceRow({
   const [editing, setEditing] = useState(false);
   const [menu, setMenu] = useState(false);
   const [details, setDetails] = useState(false);
-  const [removing, setRemoving] = useState(false);
+  const [removing, setRemoving] = useState<"remove" | "terminate" | null>(null);
+  const terminated = workspace.terminatedAtMs !== undefined;
   const [removeBusy, setRemoveBusy] = useState(false);
   const [removeError, setRemoveError] = useState("");
   if (pick) {
@@ -151,6 +155,7 @@ export function WorkspaceRow({
             <EntityAvatar id={workspace.id} name={workspace.name} badge={!activity.error && activity.running && !activity.pending ? <Loader2 aria-label="有执行活动" className="h-3 w-3 animate-spin text-ok" /> : undefined}/>
             <EntityText title={workspace.name} hint="当前会话及仍有活动的归档会话；待办可进入具体处理位置">
               {deviceName && <span className="block truncate text-[11px] text-muted">{deviceName}</span>}
+              {terminated && <span className="block truncate text-[11px] text-danger">已终止 · 恢复前不会运行</span>}
               <span className="truncate">{activity.error ? "会话状态待同步" : activity.partial ? activity.count === undefined ? "展开后读取会话" : `已加载 ${activity.count} 条会话` : activity.count === undefined ? "正在读取会话…" : activity.label || `${relativeTime(activity.recent ?? 0)} · ${activity.count} 个会话`}</span>
             </EntityText>
           </button>
@@ -228,19 +233,34 @@ export function WorkspaceRow({
             >
               重命名
             </button>
+            {onTerminate && (
+              <button
+                type="button"
+                role="menuitem"
+                className="flex min-h-10 w-full items-center px-3 text-left text-sm text-danger hover:bg-raised md:min-h-0 md:py-1.5 md:text-xs"
+                onClick={() => {
+                  setMenu(false);
+                  if (!terminated) { setRemoving("terminate"); return; }
+                  setRemoveError("");
+                  void onTerminate(true).catch(e => setRemoveError(e instanceof Error ? e.message : "恢复失败，请重试"));
+                }}
+              >
+                {terminated ? "恢复运行" : "终止运行"}
+              </button>
+            )}
             <button
               type="button"
               role="menuitem"
-              disabled={running > 0}
+              disabled={running > 0 && !onTerminate}
               title={
-                running > 0
+                running > 0 && !onTerminate
                   ? "先停止这个项目中正在运行或等待的会话"
                   : undefined
               }
               className="flex min-h-10 w-full items-center px-3 text-left text-sm text-danger hover:bg-raised disabled:cursor-not-allowed disabled:opacity-40 md:min-h-0 md:py-1.5 md:text-xs"
               onClick={() => {
                 setMenu(false);
-                setRemoving(true);
+                setRemoving("remove");
               }}
             >
               从列表移除
@@ -249,13 +269,20 @@ export function WorkspaceRow({
         </>
       ) : null}
       {details && <AgentDetailsDialog workspace={workspace} deviceName={deviceName} onClose={() => setDetails(false)} />}
+      {!removing && removeError && <p role="alert" className="mx-1 mb-2 text-xs text-danger">{removeError}</p>}
       {removing ? (
         <div className="mx-1 mb-2 rounded-lg border border-line-strong bg-surface p-3 text-xs">
           <p className="font-medium text-fg">
-            从列表移除「{workspace.name}」及其成员？
+            {removing === "terminate" ? "终止" : "从列表移除"}「{workspace.name}」及其成员？
           </p>
           <p className="mt-1 leading-relaxed text-muted">
-            同时移除其下全部成员的列表登记。文件和历史会话不会删除；运行中或等待交互时会阻止移除。
+            {removing === "terminate"
+              ? "平台会立即停止其中全部会话及其后台进程，并取消等待中的提问。恢复之前不会再启动任何 Agent、新会话或定时任务，团队也无法自行恢复。文件和历史会话保留。"
+              : !onTerminate
+                ? "同时移除其下全部成员的列表登记。文件和历史会话不会删除；运行中或等待交互时会阻止移除。"
+                : running > 0
+                  ? `其中 ${running} 个会话正在运行或等待交互：确认后平台会先终止它们（团队和定时任务也无法再拉起），再移除全部成员的列表登记。文件和历史会话保留。`
+                  : "同时移除其下全部成员的列表登记；仍在运行或等待交互的会话会先被终止。文件和历史会话保留。"}
           </p>
           {removeError && <p role="alert" className="mt-2 text-danger">{removeError}</p>}
           <div className="mt-3 flex justify-end gap-2">
@@ -263,7 +290,7 @@ export function WorkspaceRow({
               type="button"
               disabled={removeBusy}
               className="rounded px-2 py-1 text-muted hover:bg-raised disabled:opacity-40"
-              onClick={() => setRemoving(false)}
+              onClick={() => { setRemoving(null); setRemoveError(""); }}
             >
               取消
             </button>
@@ -274,12 +301,13 @@ export function WorkspaceRow({
               onClick={() => {
                 setRemoveBusy(true);
                 setRemoveError("");
-                void onRemove().then(() => setRemoving(false)).catch(e => {
-                  setRemoveError(e instanceof Error ? e.message : "移除失败，请重试");
+                const terminate = removing === "terminate";
+                void (terminate && onTerminate ? onTerminate(false) : onRemove()).then(() => setRemoving(null)).catch(e => {
+                  setRemoveError(e instanceof Error ? e.message : terminate ? "终止失败，请重试" : "移除失败，请重试");
                 }).finally(() => setRemoveBusy(false));
               }}
             >
-              {removeBusy ? "移除中…" : "确认移除"}
+              {removing === "terminate" ? (removeBusy ? "终止中…" : "确认终止") : removeBusy ? "移除中…" : "确认移除"}
             </button>
           </div>
         </div>

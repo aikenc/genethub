@@ -305,6 +305,16 @@ export class MachineSummaryDirectory {
     row.sessionTotal = row.sessions.length; row.workspaceTotal = row.workspaces.length;
     this.dirtyCache.add(row.target.id); this.emit();
   }
+  /** Applies an action's own reply until the catalog sync repeats it. */
+  acceptWorkspaces(target: Target, updated: readonly WorkspaceInfo[]): void {
+    const row = this.rows.find(row => sameMachine(row.target,target));
+    if (!row || !this.canPublish(row)) return;
+    const next = new Map(updated.map(w => [w.id, w]));
+    if (!row.workspaces.some(w => next.has(w.id))) return;
+    row.workspaces = row.workspaces.map(w => next.get(w.id) ?? w);
+    row.catalogGeneration = (row.catalogGeneration ?? 0) + 1;
+    this.dirtyCache.add(row.target.id); this.emit();
+  }
   acceptSessionSummary(target: Target, summary: SessionSummary): void {
     const row = this.rows.find(row => sameMachine(row.target,target));
     if (!row || !this.canPublish(row)) return;

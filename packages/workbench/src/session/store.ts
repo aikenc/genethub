@@ -402,8 +402,16 @@ interface WorkbenchState {
   selectWorkspace(workspaceId: string): Promise<void>;
   /** Changes a workspace's display name without moving its folders. */
   renameWorkspace(workspaceId: string, name: string): Promise<void>;
-  /** Hides a workspace registration without deleting files or conversations. */
+  /**
+   * Hides a workspace registration without deleting files or conversations.
+   * A daemon that supports it first terminates the project's sessions.
+   */
   removeWorkspace(workspaceId: string): Promise<void>;
+  /**
+   * Stops every session of a project and its members and keeps the platform
+   * from starting anything there until `resume`; resuming restarts nothing.
+   */
+  terminateWorkspace(workspaceId: string, resume?: boolean): Promise<WorkspaceInfo[]>;
   /** Applies one Human-authored AgentSpace change under the displayed CAS revision. */
   configureAgentSpace(
     workspaceId: string,
@@ -1176,6 +1184,18 @@ return create<WorkbenchState>((set, get) => ({
     }));
   },
 
+  async terminateWorkspace(workspaceId, resume = false) {
+    const client = require_(get().client);
+    if (!client.identity?.features?.includes("workspace.terminate.v1")) throw new Error("请先更新这台机器，再终止或恢复项目。");
+    const reply = await client.call({ type: resume ? "workspace.resume" : "workspace.terminate", payload: { workspaceId } });
+    if (reply?.type !== "workspaces") throw new Error(resume ? "未收到恢复结果" : "未收到终止结果");
+    if (get().client !== client) throw new Error("设备已切换");
+    // Merge rather than replace: a concurrent removal's reply may be older.
+    const changed = new Map(reply.data.map(w => [w.id, w]));
+    set((state) => ({ workspaces: state.workspaces.map(w => changed.get(w.id) ?? w) }));
+    return reply.data;
+  },
+
   async removeWorkspace(workspaceId) {
     const client = require_(get().client);
     // The daemon owns subtree membership and activity checks. One request
@@ -1183,7 +1203,8 @@ return create<WorkbenchState>((set, get) => ({
     // and partial removals while background clients query the same team.
     const catalog = { data: get().workspaces };
     const summary = { data: get().sessions };
-    const reply = await client.call({ type: "workspace.remove", payload: { workspaceId } });
+    const terminate = client.identity?.features?.includes("workspace.terminate.v1") ? { terminate: true } : {};
+    const reply = await client.call({ type: "workspace.remove", payload: { workspaceId, ...terminate } });
     if (reply?.type !== "workspaces") throw new Error("未收到移除结果");
     if (get().client !== client) throw new Error("设备已切换");
     const remaining = reply.data;

@@ -246,15 +246,14 @@ impl Hooks {
                 let _permit = permit;
                 // Scheduling can yield after the roster was read. Check the
                 // current registration immediately before the command starts.
-                let registered = if let Some(state) = state.upgrade() {
-                    state
-                        .workspaces
-                        .get(&key.0)
-                        .await
-                        .is_ok_and(|entry| entry.root == root)
-                } else {
-                    false
-                };
+                let registered =
+                    if let Some(state) = state.upgrade() {
+                        state.workspaces.get(&key.0).await.is_ok_and(|entry| {
+                            entry.root == root && entry.terminated_at_ms.is_none()
+                        })
+                    } else {
+                        false
+                    };
                 if !registered {
                     hooks.runs.lock().expect("never poisoned").remove(&key);
                     return;
@@ -902,6 +901,7 @@ pub async fn run_timer(state: Shared) {
                 .list()
                 .await
                 .into_iter()
+                .filter(|workspace| workspace.terminated_at_ms.is_none())
                 .map(|workspace| (workspace.id, PathBuf::from(workspace.root)))
                 .collect();
             refreshed = Some(Instant::now());

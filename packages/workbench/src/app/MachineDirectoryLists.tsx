@@ -22,6 +22,9 @@ const latest = (s: SessionSummary) => s.messagePreview?.atMs ?? s.updatedAtMs;
 const byTime = (a: SessionSummary, b: SessionSummary) => latest(b) - latest(a) || a.id.localeCompare(b.id);
 
 /** A shared directory is a navigation surface, never a change to the active execution target. */
+/** `apply` removes projects or (un)archives sessions; the others are project-only. */
+type BatchAction = "apply" | "terminate" | "resume";
+
 export function MachineDirectoryLists({ connections, directory:sharedDirectory, endpoint, section, open, hidden, onOpen, onNewSession, onAddProject, onSources }: {
   connections: MachineConnections; directory:MachineSummaryDirectory; endpoint: Endpoint; section: "sessions" | "projects";
   open: boolean; hidden: boolean;
@@ -48,7 +51,7 @@ export function MachineDirectoryLists({ connections, directory:sharedDirectory, 
   const readTasks = useRef(new Map<string, Promise<void>>());
   const [refreshing, setRefreshing] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState("");
   const [managing, setManaging] = useState(false), [selection, setSelection] = useState(new Set<string>());
-  const [confirming, setConfirming] = useState(false), [options, setOptions] = useState(false);
+  const [confirming, setConfirming] = useState<false | BatchAction>(false), [options, setOptions] = useState(false);
   const [pinnedClosed, setPinnedClosed] = useState(false);
   const source = useRef<MachineSummaryDirectory>();
   const mounted = useRef(false), initialized = useRef(false), lock = useRef(false), refreshLock = useRef(false);
@@ -187,25 +190,41 @@ export function MachineDirectoryLists({ connections, directory:sharedDirectory, 
   const selectable = section === "projects" ? groups.filter(g => !g.workspace.builtin && (!g.pinned || !pinnedClosed)).map(g => g.key)
     : visibleSessions.filter(({row,session}) => fresh(row) && !session.historyOnly && !session.unsupported).map(({row,session}) => keyOf(row.target, session.id));
   const chosen = new Set([...selection].filter(key => selectable.includes(key)));
+  const chosenGroups = section === "projects" ? groups.filter(g => chosen.has(g.key)) : [];
+  const activeChosen = chosenGroups.flatMap(g => g.allSessions).filter(s => s.status === "running" || s.status === "waiting").length;
+  const actionLabel = (action: BatchAction) => action === "terminate" ? "终止" : action === "resume" ? "恢复运行" : section === "projects" ? "移除" : includeArchived ? "恢复" : "归档";
   const toggle = (key: string) => setSelection(old => { const next = new Set(old); next.has(key) ? next.delete(key) : next.add(key); return next; });
-  const batch = async () => run(async () => {
+  const batch = async (action: BatchAction) => run(async () => {
     setConfirming(false);
     let succeeded = 0;
     const failures: string[] = [];
     for (const row of sources) {
       for (const item of section === "projects" ? row.workspaces : row.sessions) {
         if (!chosen.has(keyOf(row.target, item.id))) continue;
+        if (action === "resume" && "root" in item && item.terminatedAtMs === undefined) continue;
         if (!mounted.current) return;
         try {
           if (!fresh(row)) throw new Error("状态未确认，请先刷新");
           await connections.use(row.target, async target => {
             const state = workbenchForClient(target);
+            const terminable = Boolean(target.identity?.features?.includes("workspace.terminate.v1"));
+            if (section === "projects" && action !== "apply") {
+              if (!terminable) throw new Error("请先更新这台机器，再终止或恢复项目");
+              const resume = action === "resume";
+              const workspaces = state ? await state.terminateWorkspace(item.id, resume) : await (async () => {
+                const reply = await target.call({ type: resume ? "workspace.resume" : "workspace.terminate", payload: { workspaceId: item.id } });
+                if (reply?.type !== "workspaces") throw new Error("未收到确认，请核对后再操作");
+                return reply.data;
+              })();
+              source.current?.acceptWorkspaces(row.target, workspaces);
+              return;
+            }
             if (section === "projects" && state) { await state.removeWorkspace(item.id); return; }
             if (section === "sessions" && state) {
               if (!await state.archiveSession(item.id,!includeArchived)) throw new Error("未收到归档结果，请核对后再操作");
               return;
             }
-            const reply = section === "projects" ? await target.call({ type: "workspace.remove", payload: { workspaceId: item.id } })
+            const reply = section === "projects" ? await target.call({ type: "workspace.remove", payload: { workspaceId: item.id, ...(terminable ? { terminate: true } : {}) } })
               : await target.call({ type: "session.archive", payload: { sessionId: item.id, archived: !includeArchived } });
             if (section === "projects" ? reply?.type !== "workspaces" : reply?.type !== "session" || reply.data.archived === includeArchived) throw new Error("未收到确认，请核对后再操作");
             if (reply?.type === "workspaces") source.current?.acceptWorkspaceRemoval(row.target,row.workspaces.filter(w => !reply.data.some(next => next.id === w.id)).map(w => w.id));
@@ -217,7 +236,7 @@ export function MachineDirectoryLists({ connections, directory:sharedDirectory, 
     }
     if (mounted.current) {
       setSelection(new Set());
-      if (mounted.current) setError(`${succeeded} 项已${section === "projects" ? "移除" : includeArchived ? "恢复" : "归档"}${failures.length ? `；${failures.join("；")}` : ""}`);
+      if (mounted.current) setError(`${succeeded} 项已${actionLabel(action)}${failures.length ? `；${failures.join("；")}` : ""}`);
     }
   });
   const rowButton = (row: MachineSummary, session: SessionSummary) => {
@@ -255,7 +274,7 @@ export function MachineDirectoryLists({ connections, directory:sharedDirectory, 
         const next = new Set(collapsed); next.has(g.key) ? next.delete(g.key) : next.add(g.key); setCollapsed(next); setSelection(new Set());
       }}>
         <AgentAvatar id={g.workspace.id} name={g.workspace.name} />
-        <span className="min-w-0 flex-1"><span className="flex min-w-0 items-center gap-2"><span className="min-w-0 flex-1 truncate text-sm font-medium">{g.workspace.name}</span><span className="shrink-0 text-[10px] text-faint">{g.workspace.builtin ? "内置" : g.time ? relativeTime(g.time) : ""}</span></span>
+        <span className="min-w-0 flex-1"><span className="flex min-w-0 items-center gap-2"><span className="min-w-0 flex-1 truncate text-sm font-medium">{g.workspace.name}</span>{g.workspace.terminatedAtMs !== undefined && <span title="恢复前平台不会在此项目启动任何 Agent、新会话或定时任务" className="shrink-0 rounded bg-danger/10 px-1 text-[10px] text-danger">已终止</span>}<span className="shrink-0 text-[10px] text-faint">{g.workspace.builtin ? "内置" : g.time ? relativeTime(g.time) : ""}</span></span>
           <span className="mt-1 flex min-w-0 items-center gap-2"><SessionActivityIcons sessions={g.allSessions} partial={g.partial} stale={g.stale} />
             <span className={`ml-auto min-w-0 truncate text-[11px] ${["offline","denied","timeout","unavailable","rateLimited"].includes(g.row.state) ? "text-danger" : "text-faint"}`}>{g.machineCount > 1 ? `${g.machineCount} 台机器` : g.row.target.label}{!fresh(g.row) ? ` · ${stateLabel[g.row.state]}` : ""}</span>
           </span>
@@ -351,9 +370,16 @@ export function MachineDirectoryLists({ connections, directory:sharedDirectory, 
     {managing && <footer aria-label="批量操作" className="flex shrink-0 flex-wrap items-center gap-2 border-t border-line p-3">
       <button disabled={busy || !selectable.length} className="min-h-11 text-xs text-accent" onClick={() => setSelection(chosen.size === selectable.length ? new Set() : new Set(selectable))}>{chosen.size === selectable.length && chosen.size ? "取消全选" : "全选当前可见"}</button>
       <span className="min-w-0 flex-1 text-xs text-muted">已选 {chosen.size}</span>
-      <button disabled={!chosen.size || busy} onClick={() => setConfirming(true)} className="min-h-11 rounded-lg border border-line px-3 text-sm disabled:opacity-40">{section === "projects" ? "移除" : includeArchived ? "恢复" : "归档"}</button>
+      {section === "projects" && chosenGroups.some(g => g.workspace.terminatedAtMs !== undefined) && <button disabled={busy} onClick={() => setConfirming("resume")} className="min-h-11 rounded-lg border border-line px-3 text-sm disabled:opacity-40">恢复</button>}
+      {section === "projects" && <button disabled={!chosen.size || busy} onClick={() => setConfirming("terminate")} className="min-h-11 rounded-lg border border-line px-3 text-sm text-danger disabled:opacity-40">终止</button>}
+      <button disabled={!chosen.size || busy} onClick={() => setConfirming("apply")} className="min-h-11 rounded-lg border border-line px-3 text-sm disabled:opacity-40">{actionLabel("apply")}</button>
     </footer>}
-    {confirming && <WorkspaceDetailsDialog title={section === "projects" ? "移除所选项目" : includeArchived ? "恢复所选会话" : "归档所选会话"} onClose={() => setConfirming(false)}><p className="text-sm">{section === "projects" ? "只移除项目登记，保留磁盘文件；运行中的项目由设备拒绝。" : "会话历史保留，归档不会停止任务。"}</p><button className="mt-3 min-h-11 w-full rounded-lg bg-accent text-sm text-white" onClick={() => void batch()}>确认处理 {chosen.size} 项</button></WorkspaceDetailsDialog>}
+    {confirming && <WorkspaceDetailsDialog title={`${actionLabel(confirming)}所选${section === "projects" ? "项目" : "会话"}`} onClose={() => setConfirming(false)}><p className="text-sm">{
+      section === "sessions" ? "会话历史保留，归档不会停止任务。"
+        : confirming === "resume" ? "解除终止。不会自动重启任何会话；之后发送消息、团队调度和定时任务会照常运行。"
+          : confirming === "terminate" ? `平台会立即停止所选项目及其成员的全部会话和后台进程，并取消等待中的提问${activeChosen ? `（当前 ${activeChosen} 个会话正在运行或等待交互）` : ""}。恢复之前不会再启动任何 Agent、新会话或定时任务，团队也无法自行恢复。文件和历史会话保留。`
+            : `只移除项目登记，保留磁盘文件和历史会话。${activeChosen ? `其中 ${activeChosen} 个会话正在运行或等待交互，` : ""}仍在运行或等待交互的会话会先被平台终止，团队和定时任务也无法再拉起它们。`
+    }</p><button className={`mt-3 min-h-11 w-full rounded-lg text-sm text-white ${confirming === "terminate" ? "bg-danger" : "bg-accent"}`} onClick={() => void batch(confirming)}>确认{section === "sessions" ? "处理" : actionLabel(confirming)} {confirming === "resume" ? chosenGroups.filter(g => g.workspace.terminatedAtMs !== undefined).length : chosen.size} 项</button></WorkspaceDetailsDialog>}
     <span className="sr-only">当前正文来自 {endpoint.label}</span>
   </ListPane>;
 }

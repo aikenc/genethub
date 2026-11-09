@@ -1148,6 +1148,7 @@ impl Workspaces {
             // declared name and updates any earlier placeholder (like "expert").
             updated.name = explicit_or_descriptor_name.unwrap_or_else(|| existing.name.clone());
             updated.removed = false;
+            updated.terminated_at_ms = existing.terminated_at_ms;
             if updated == existing {
                 return Ok(self.describe_with_space(&existing, &config));
             }
@@ -1243,6 +1244,7 @@ impl Workspaces {
         let mut updated = parse_code_workspace(path, &body)?;
         updated.id = existing.id.clone();
         updated.name = existing.name.clone();
+        updated.terminated_at_ms = existing.terminated_at_ms;
         let mut config = self.config.write().await;
         let mut next = config.clone();
         for folder in &mut updated.folders {
@@ -1326,6 +1328,53 @@ impl Workspaces {
             &config,
             &self.config_path,
         ))
+    }
+
+    /// Records, durably and before anything is stopped, that the user
+    /// terminated (or resumed) a project and its members. Returns the subtree
+    /// it applies to. Not a catalogue fact for the Hub, but it changes what
+    /// every client shows, so it advances the revision like a rename.
+    pub async fn set_terminated(&self, id: &str, terminated: bool) -> Result<Vec<String>> {
+        let mut entries = self.entries.write().await;
+        let mut config = self.config.write().await;
+        let planned = removal_ids(&entries, &config, id)?;
+        let at = terminated.then(crate::session::store::now_ms);
+        let mut next = config.clone();
+        let mut changed = Vec::new();
+        for id in &planned {
+            let saved = next
+                .workspaces
+                .iter_mut()
+                .find(|entry| entry.id == *id)
+                .ok_or_else(|| anyhow!("workspace {id} is missing from config"))?;
+            if saved.terminated_at_ms.is_some() != terminated {
+                saved.terminated_at_ms = at;
+                changed.push(id.clone());
+            }
+        }
+        if changed.is_empty() {
+            return Ok(planned);
+        }
+        next.workspace_catalog_revision = next.workspace_catalog_revision.saturating_add(1);
+        next.save(&self.config_path)?;
+        *config = next;
+        for id in &changed {
+            if let Some(entry) = entries.get_mut(id) {
+                entry.terminated_at_ms = at;
+            }
+        }
+        Ok(planned)
+    }
+
+    /// Every project the user terminated, removed ones included.
+    pub async fn terminated_ids(&self) -> Vec<String> {
+        self.entries
+            .read()
+            .await
+            .values()
+            .filter(|entry| entry.terminated_at_ms.is_some())
+            .map(|entry| entry.id.clone())
+            .collect()
     }
 
     /// Changes only the label shown to the user; the directory itself stays put.
@@ -1582,6 +1631,7 @@ fn describe(entry: &WorkspaceEntry) -> WorkspaceInfo {
             .as_ref()
             .map(|path| path.display().to_string()),
         agent_space: None,
+        terminated_at_ms: entry.terminated_at_ms,
     }
 }
 
@@ -1714,6 +1764,7 @@ async fn descriptor_workspace(
         folders,
         workspace_file: Some(dir.join(crate::space_descriptor::FILE)),
         removed: false,
+        terminated_at_ms: None,
         is_git_repo: known
             .filter(|entry| entry.root == root)
             .map_or_else(|| root.join(".git").exists(), |entry| entry.is_git_repo),
@@ -1736,6 +1787,7 @@ fn folder_workspace(root: PathBuf, name: Option<String>) -> WorkspaceEntry {
         }],
         workspace_file: None,
         removed: false,
+        terminated_at_ms: None,
         is_git_repo: root.join(".git").exists(),
     }
 }
@@ -1874,6 +1926,7 @@ fn parse_code_workspace(path: &Path, source: &str) -> Result<WorkspaceEntry> {
         folders,
         workspace_file: Some(path.to_path_buf()),
         removed: false,
+        terminated_at_ms: None,
         is_git_repo: root.join(".git").exists(),
     })
 }
@@ -2598,6 +2651,7 @@ mod tests {
                     }],
                     workspace_file: None,
                     removed: false,
+                    terminated_at_ms: None,
                     is_git_repo: false,
                 },
                 WorkspaceEntry {
@@ -2611,6 +2665,7 @@ mod tests {
                     }],
                     workspace_file: Some(file),
                     removed: false,
+                    terminated_at_ms: None,
                     is_git_repo: false,
                 },
             ],
@@ -2900,6 +2955,7 @@ mod tests {
                 }],
                 workspace_file: None,
                 removed: false,
+                terminated_at_ms: None,
                 is_git_repo: false,
             }],
             ..Config::default()
@@ -3111,6 +3167,54 @@ mod tests {
             project,
             "mounting the executor component does not cost a project root its DCG"
         );
+    }
+
+    #[tokio::test]
+    async fn termination_covers_the_team_and_survives_reload_reopen_and_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let (spaces, ids) = open_verified(dir.path(), &["project", "member"]).await;
+        let (project, member) = (ids[0].clone(), ids[1].clone());
+        mount(
+            &spaces,
+            &project,
+            crate::agent_space::COMPONENT_EXECUTOR,
+            None,
+        )
+        .await
+        .unwrap();
+        attach(&spaces, &member, &project).await.unwrap();
+        let other = dir.path().join("other");
+        write_verified_pipe_space(&other, &other);
+        let bystander = spaces.open(&other, None).await.unwrap().id;
+        let mut team = vec![project.clone(), member.clone()];
+        team.sort();
+
+        assert_eq!(spaces.set_terminated(&project, true).await.unwrap(), team);
+        let listed = spaces.list().await;
+        let at = |id: &str| listed.iter().find(|w| w.id == id).unwrap().terminated_at_ms;
+        assert!(at(&project).is_some() && at(&member).is_some());
+        assert!(at(&bystander).is_none());
+
+        let config_path = dir.path().join("config.json");
+        let reloaded = Workspaces::new(
+            Arc::new(RwLock::new(Config::load(&config_path).unwrap())),
+            config_path,
+            WorkspaceHomes::default(),
+        );
+        reloaded.load().await;
+        let mut kept = reloaded.terminated_ids().await;
+        kept.sort();
+        assert_eq!(kept, team);
+
+        let member_root = dir.path().join("project").join("spaces").join("member");
+        spaces.remove(&member).await.unwrap();
+        let reopened = spaces.open(&member_root, None).await.unwrap();
+        assert_eq!(reopened.id, member);
+        assert!(reopened.terminated_at_ms.is_some());
+
+        spaces.set_terminated(&project, false).await.unwrap();
+        spaces.set_terminated(&member, false).await.unwrap();
+        assert!(spaces.terminated_ids().await.is_empty());
     }
 
     #[tokio::test]

@@ -157,6 +157,7 @@ impl AppState {
         let config = Arc::new(RwLock::new(config));
         let workspaces = Workspaces::new(config.clone(), paths.config_file(), homes);
         workspaces.load().await;
+        sessions.set_terminated_workspaces(workspaces.terminated_ids().await);
         if let Some(root) = paths.default_workspace.clone() {
             // A home directory that cannot be written to is unusual but not
             // fatal: the user can still open a folder by hand, and refusing to

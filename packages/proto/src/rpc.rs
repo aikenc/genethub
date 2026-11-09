@@ -829,8 +829,27 @@ pub enum Request {
     #[serde(rename = "workspace.rename", rename_all = "camelCase")]
     WorkspaceRename { workspace_id: String, name: String },
     /// Hides a workspace registration while retaining its identity and history.
+    ///
+    /// Without `terminate` a project whose sessions are still running or
+    /// waiting is refused. With it the daemon first terminates the project
+    /// exactly as `workspace.terminate` does, then removes it.
     #[serde(rename = "workspace.remove", rename_all = "camelCase")]
-    WorkspaceRemove { workspace_id: String },
+    WorkspaceRemove {
+        workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        terminate: Option<bool>,
+    },
+    /// Stops every session of a project and its members and keeps them
+    /// stopped: until `workspace.resume`, the daemon starts no Agent turn,
+    /// session or timer hook there, whoever asks. Requires
+    /// `workspace.terminate.v1`.
+    #[serde(rename = "workspace.terminate", rename_all = "camelCase")]
+    WorkspaceTerminate { workspace_id: String },
+    /// Lifts `workspace.terminate`. Nothing restarts by itself: a session
+    /// runs again only when it is next sent a message.
+    #[serde(rename = "workspace.resume", rename_all = "camelCase")]
+    WorkspaceResume { workspace_id: String },
     /// Lists folders on the daemon's machine before a workspace exists.
     ///
     /// Pass `path: ""` to list machine roots (Windows drive letters). A volume

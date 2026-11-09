@@ -153,6 +153,7 @@ impl SessionManager {
             None => None,
         };
         let live = self.live(session_id).await?;
+        self.refuse_if_terminated(&live.meta.lock().await.workspace_id)?;
         let _admission = live.inbox_lock.lock().await;
         if live.closing.load(Ordering::SeqCst) {
             bail!("the session is closing");

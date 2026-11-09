@@ -2163,6 +2163,12 @@ impl Store {
     /// Removal needs only durable pending decisions in the checked subtree,
     /// never complete summaries, title repair or unrelated project projection.
     pub(super) async fn has_pending_interactions(&self, workspaces: &[String]) -> Result<bool> {
+        Ok(!self.pending_interactions(workspaces).await?.is_empty())
+    }
+
+    /// Sessions, loaded or not, that still owe the user an answer.
+    pub(super) async fn pending_interactions(&self, workspaces: &[String]) -> Result<Vec<String>> {
+        let mut pending = Vec::new();
         for workspace in workspaces {
             // This is an execution/removal decision, not a presentation read.
             // Observe just the affected homes, including external decisions.
@@ -2170,16 +2176,15 @@ impl Store {
             if let Some((_, reason)) = scan.errors.values().next() {
                 anyhow::bail!("{reason}");
             }
-            if scan
-                .files
-                .values()
-                .filter_map(|file| file.meta.as_ref())
-                .any(|meta| !meta.execution_retired && PageCatalog::has_obligation(meta))
-            {
-                return Ok(true);
-            }
+            pending.extend(
+                scan.files
+                    .values()
+                    .filter_map(|file| file.meta.as_ref())
+                    .filter(|meta| !meta.execution_retired && PageCatalog::has_obligation(meta))
+                    .map(|meta| meta.id.clone()),
+            );
         }
-        Ok(false)
+        Ok(pending)
     }
 
     pub(super) fn catalog_scope_errors(&self) -> Vec<genehub_proto::CatalogScopeError> {
