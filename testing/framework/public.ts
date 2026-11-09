@@ -53,6 +53,7 @@ export {
   type TcpTransferSample,
 } from "./drivers/network-link.ts";
 export { daemonEndpoint, waitForDaemonEndpoint, type DaemonEndpoint, type DaemonHandle } from "./drivers/daemon.ts";
+export { observeFileOpens } from "./drivers/file-opens.ts";
 export { startRelay, type RelayHandle } from "./drivers/relay.ts";
 export { startHub, enrollCatalogSource, type HubBrowser, type HubHandle } from "./drivers/hub.ts";
 export { data } from "./builders/index.ts";
