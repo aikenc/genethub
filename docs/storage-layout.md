@@ -45,6 +45,7 @@ Linux 手动 daemon 的原生 CLI 在 `<data>` 保存 `daemon-start.lock`、`dae
   team/                       团队脚本的状态：收件箱、待办、留言、身份指纹、reset 备份（团队自己写，daemon 不读）
   bootstrap-owned.json        内置管理员 Space 上次分发的产品文件清单（只在 <data>/spaces/admin/）
   hooks/<id>.genet.json       定时 hook：一个文件一个 hook，目录就是注册表（见 daemon.md「定时 hook」）
+  terminated.json             用户终止标记：存在即平台不在此项目及其成员中运行 Agent；所有 channel 共用，恢复时删除
   open.env                    项目的本机环境变量，KEY=VALUE；注入 hook 命令的环境
   owner.lock                  滚动升级期间的旧版兼容锁
 ```

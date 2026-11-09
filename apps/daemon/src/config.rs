@@ -245,11 +245,6 @@ pub struct WorkspaceEntry {
     /// project restores its id and therefore its on-disk conversation history.
     #[serde(default)]
     pub removed: bool,
-    /// The user terminated this project (`workspace.terminate`). Removing and
-    /// reopening keep it; only `workspace.resume` clears it, so automation that
-    /// reopens a project does not restart it either.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub terminated_at_ms: Option<i64>,
     /// A revisioned catalogue fact, sampled when the daemon starts or the
     /// workspace is first opened. Keeping it in config prevents a filesystem
     /// change from producing a different Hub snapshot at the same revision.
@@ -981,7 +976,6 @@ mod tests {
             }],
             workspace_file: None,
             removed: false,
-            terminated_at_ms: None,
             is_git_repo: false,
         });
         config.save(&path).unwrap();
@@ -1040,7 +1034,6 @@ mod tests {
             folders: Vec::new(),
             workspace_file: None,
             removed: false,
-            terminated_at_ms: None,
             is_git_repo: false,
         });
         config.save(&path).unwrap();
@@ -1084,7 +1077,6 @@ mod tests {
                     folders: vec![folder.clone()],
                     workspace_file: None,
                     removed: false,
-                    terminated_at_ms: None,
                     is_git_repo: false,
                 },
                 WorkspaceEntry {
@@ -1105,7 +1097,6 @@ mod tests {
                     ],
                     workspace_file: Some(definition.clone()),
                     removed: true,
-                    terminated_at_ms: None,
                     is_git_repo: false,
                 },
             ],
@@ -1152,7 +1143,6 @@ mod tests {
                 }],
                 workspace_file: None,
                 removed: false,
-                terminated_at_ms: None,
                 is_git_repo: false,
             }],
             ..Config::default()
@@ -1327,7 +1317,6 @@ mod tests {
             }],
             workspace_file: None,
             removed: false,
-            terminated_at_ms: None,
             is_git_repo: false,
         });
 

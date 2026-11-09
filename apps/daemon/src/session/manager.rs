@@ -511,8 +511,8 @@ pub struct SessionManager {
     /// Agent processes receive a fresh proof, so it never becomes project
     /// source or durable user data.
     controller_secret: String,
-    /// The daemon config the workspace registry persists; read, never written
-    /// here, so termination has one source of truth. Unset in unit tests.
+    /// The workspace registry's config, read for project ancestry; the
+    /// termination itself is the project's own marker. Unset in unit tests.
     workspace_config: std::sync::OnceLock<Arc<tokio::sync::RwLock<crate::config::Config>>>,
 }
 
@@ -1820,7 +1820,8 @@ impl SessionManager {
         let Some(config) = self.workspace_config.get() else {
             return Ok(());
         };
-        match crate::workspace::terminated_by(&*config.read().await, workspace_id) {
+        let lineage = crate::workspace::lineage(&*config.read().await, workspace_id);
+        match crate::workspace::terminated_by(&lineage, crate::workspace::read_termination) {
             Some((by, _)) => Err(ProjectTerminated {
                 workspace_id: workspace_id.to_string(),
                 by,
@@ -1835,7 +1836,9 @@ impl SessionManager {
     /// refuses, whoever asks. Each session is closed
     /// as `session.close` does: its turn and the processes it left are
     /// stopped, a question it is waiting on is canceled and queued input stays
-    /// paused. Returns how many sessions were closed.
+    /// paused. Input the team queued (anything not from the user) is dropped
+    /// first, so resuming does not replay instructions the user stopped.
+    /// Returns how many sessions were closed.
     ///
     /// One wedged Agent must not leave the others running, so every session
     /// is tried and the first failure is returned afterwards.
@@ -1848,17 +1851,35 @@ impl SessionManager {
                 targets.insert(meta.id.clone());
             }
         }
-        targets.extend(self.store.pending_interactions(workspace_ids).await?);
+        targets.extend(
+            self.store
+                .sessions_matching(workspace_ids, |meta| {
+                    store::has_obligation(meta) || meta.inbox.entries.iter().any(unattended)
+                })
+                .await?,
+        );
         let mut closed = 0;
         let mut first_error = None;
         for session_id in targets {
             let result = match self.live(&session_id).await {
-                Ok(_) => self.close(&session_id).await,
+                Ok(live) => match discard_unattended_inputs(&live, &self.store).await {
+                    Ok(()) => self.close(&session_id).await,
+                    Err(error) => Err(error),
+                },
                 Err(error) if error.downcast_ref::<SessionMissing>().is_some() => continue,
                 Err(error) => Err(error),
             };
             match result {
                 Ok(()) => closed += 1,
+                // Another channel has it open; that daemon sees the
+                // termination in the project and stops it itself.
+                Err(error)
+                    if error
+                        .downcast_ref::<store::SessionWriteContended>()
+                        .is_some() =>
+                {
+                    tracing::info!(session = %session_id, %error, "left to the channel that has it open");
+                }
                 Err(error) => {
                     tracing::error!(session = %session_id, %error, "could not terminate session");
                     first_error.get_or_insert(error);
@@ -6823,6 +6844,31 @@ async fn stop_agent_for_interaction(
     *live.pending_permissions.lock().await = vec![request.clone()];
     *live.status.lock().await = SessionStatus::Waiting;
     tracing::info!(event = "human_interaction_stopped", request = %request.id);
+    Ok(())
+}
+
+/// Queued input the user did not write: another Agent's or a script's.
+fn unattended(entry: &store::InboxEntry) -> bool {
+    entry.source != "user" && matches!(entry.state.as_str(), "queued" | "sent")
+}
+
+async fn discard_unattended_inputs(live: &Arc<Live>, store: &Store) -> Result<()> {
+    let _admission = live.inbox_lock.lock().await;
+    let mut meta = live.meta.lock().await;
+    if !meta.inbox.entries.iter().any(unattended) {
+        return Ok(());
+    }
+    let mut next = meta.clone();
+    for entry in next
+        .inbox
+        .entries
+        .iter_mut()
+        .filter(|entry| unattended(entry))
+    {
+        entry.state = "handled".into();
+    }
+    store.save_meta(&next)?;
+    *meta = next;
     Ok(())
 }
 

@@ -144,10 +144,22 @@ impl Daemon {
                 let mut next_discovery = tokio::time::Instant::now();
                 loop {
                     if tokio::time::Instant::now() >= next_discovery {
-                        state
+                        let report = state
                             .workspaces
                             .scan_spaces(&state.paths.root.join("spaces"), false)
                             .await;
+                        if !report.terminated.is_empty() {
+                            state.hooks.stop(&report.terminated);
+                            if let Err(error) =
+                                state.sessions.stop_workspaces(&report.terminated).await
+                            {
+                                tracing::warn!(%error, "stopping a project terminated elsewhere failed");
+                            }
+                            tracing::info!(
+                                members = report.terminated.len(),
+                                "a project terminated elsewhere stopped here"
+                            );
+                        }
                         next_discovery =
                             tokio::time::Instant::now() + std::time::Duration::from_secs(2);
                     }

@@ -57,6 +57,9 @@ pub struct Workspaces {
     /// What the last discovery pass saw, and whether registering it went
     /// cleanly, so an unchanged tree is not registered again.
     discovery: std::sync::Mutex<Discovered>,
+    /// The termination markers of registered roots, as the discovery owner
+    /// last read them, for listing. Gates read the markers themselves.
+    terminations: std::sync::Mutex<HashMap<PathBuf, i64>>,
 }
 
 #[derive(Default)]
@@ -99,6 +102,9 @@ pub struct ScanReport {
     pub opened: usize,
     /// Parent links registered.
     pub linked: usize,
+    /// Projects whose termination appeared on disk since the last pass, as
+    /// another channel terminating them does, with the members it covers.
+    pub terminated: Vec<String>,
 }
 
 /// How a scan found a Space's directory in the registry.
@@ -319,6 +325,7 @@ impl Workspaces {
             scanned_at: std::sync::Mutex::new(None),
             scanning: std::sync::atomic::AtomicBool::new(false),
             descriptors: Default::default(),
+            terminations: Default::default(),
             discovery: Default::default(),
         }
     }
@@ -407,6 +414,35 @@ impl Workspaces {
             .lock()
             .expect("never poisoned")
             .retain(|dir, _| directories.contains(dir));
+        let mut terminations = HashMap::new();
+        for project in &projects {
+            budget.checkpoint().await;
+            let root = PathBuf::from(&project.root);
+            if let Some(at) = read_termination(&root) {
+                terminations.insert(root, at);
+            }
+        }
+        let fresh: HashSet<PathBuf> = {
+            let known = self.terminations.lock().expect("never poisoned");
+            terminations
+                .keys()
+                .filter(|root| !known.contains_key(*root))
+                .cloned()
+                .collect()
+        };
+        if !fresh.is_empty() {
+            let config = self.config.read().await;
+            report.terminated = projects
+                .iter()
+                .filter(|project| {
+                    lineage(&config, &project.id)
+                        .iter()
+                        .any(|(_, root)| fresh.contains(root))
+                })
+                .map(|project| project.id.clone())
+                .collect();
+        }
+        *self.terminations.lock().expect("never poisoned") = terminations;
         *self.scanned_at.lock().expect("never poisoned") = Some(tokio::time::Instant::now());
         if started.elapsed().as_secs() >= 1 {
             tracing::warn!(
@@ -906,7 +942,11 @@ impl Workspaces {
             .map(|_| true);
         apply_space_projection(&mut info, config);
         apply_space_health(&mut info, entry, config);
-        apply_termination(&mut info, config);
+        apply_termination(
+            &mut info,
+            config,
+            &self.terminations.lock().expect("never poisoned"),
+        );
         info
     }
 
@@ -1112,6 +1152,20 @@ impl Workspaces {
             .await?;
         self.refresh_descriptor(&info, std::time::Instant::now(), true);
         Self::apply_descriptor(&mut info, &self.descriptors.lock().expect("never poisoned"));
+        // Another channel may have terminated it, or this one before a removal.
+        let root = PathBuf::from(&info.root);
+        {
+            let mut terminations = self.terminations.lock().expect("never poisoned");
+            match read_termination(&root) {
+                Some(at) => terminations.insert(root, at),
+                None => terminations.remove(&root),
+            };
+        }
+        apply_termination(
+            &mut info,
+            &*self.config.read().await,
+            &self.terminations.lock().expect("never poisoned"),
+        );
         Ok(info)
     }
 
@@ -1149,7 +1203,6 @@ impl Workspaces {
             // declared name and updates any earlier placeholder (like "expert").
             updated.name = explicit_or_descriptor_name.unwrap_or_else(|| existing.name.clone());
             updated.removed = false;
-            updated.terminated_at_ms = existing.terminated_at_ms;
             if updated == existing {
                 return Ok(self.describe_with_space(&existing, &config));
             }
@@ -1245,7 +1298,6 @@ impl Workspaces {
         let mut updated = parse_code_workspace(path, &body)?;
         updated.id = existing.id.clone();
         updated.name = existing.name.clone();
-        updated.terminated_at_ms = existing.terminated_at_ms;
         let mut config = self.config.write().await;
         let mut next = config.clone();
         for folder in &mut updated.folders {
@@ -1301,6 +1353,7 @@ impl Workspaces {
                 entries.values(),
                 &config,
                 &self.config_path,
+                &self.terminations.lock().expect("never poisoned"),
             ));
         }
         if planned != checked {
@@ -1328,51 +1381,74 @@ impl Workspaces {
             entries.values(),
             &config,
             &self.config_path,
+            &self.terminations.lock().expect("never poisoned"),
         ))
     }
 
     /// Records, durably and before anything is stopped, that the user
     /// terminated (or resumed) this project; its members follow through
-    /// [`terminated_by`]. Returns the registered subtree it covers. Not a
-    /// catalogue fact for the Hub, but it changes what every client shows, so
-    /// it advances the revision like a rename.
+    /// [`lineage`]. Returns the registered subtree it covers.
     pub async fn set_terminated(&self, id: &str, terminated: bool) -> Result<Vec<String>> {
-        let mut entries = self.entries.write().await;
-        let mut config = self.config.write().await;
-        let planned = removal_ids(&entries, &config, id)?;
-        let marked = entries
-            .get(id)
-            .is_some_and(|entry| entry.terminated_at_ms.is_some());
-        if !terminated {
-            if let Some((by, _)) = terminated_by(&config, id).filter(|(by, _)| by != id) {
-                let name = entries.get(&by).map_or(by.as_str(), |entry| &entry.name);
-                anyhow::bail!(
-                    "项目 {id} 属于已终止的项目「{name}」（{by}）；请恢复 {by}，它的成员会一起恢复。"
-                );
+        let (planned, line, ancestor) = {
+            let entries = self.entries.read().await;
+            let config = self.config.read().await;
+            let planned = removal_ids(&entries, &config, id)?;
+            let line = lineage(&config, id);
+            let ancestor = terminated_by(line.get(1..).unwrap_or_default(), read_termination).map(
+                |(by, _)| {
+                    let name = entries
+                        .get(&by)
+                        .map_or(by.clone(), |entry| entry.name.clone());
+                    (by, name)
+                },
+            );
+            (planned, line, ancestor)
+        };
+        let root = &line
+            .first()
+            .ok_or_else(|| anyhow!("no such workspace: {id}"))?
+            .1;
+        if let (false, Some((by, name))) = (terminated, ancestor) {
+            anyhow::bail!(
+                "项目 {id} 属于已终止的项目「{name}」（{by}）；请恢复 {by}，它的成员会一起恢复。"
+            );
+        }
+        let marked = read_termination(root);
+        let at = if terminated {
+            let at = marked.unwrap_or_else(crate::session::store::now_ms);
+            if marked.is_none() {
+                write_termination(root, Some(at))?;
             }
-        }
-        if marked == terminated {
-            return Ok(planned);
-        }
-        let at = terminated.then(crate::session::store::now_ms);
-        let mut next = config.clone();
-        next.workspaces
-            .iter_mut()
-            .find(|entry| entry.id == id)
-            .ok_or_else(|| anyhow!("workspace {id} is missing from config"))?
-            .terminated_at_ms = at;
-        next.workspace_catalog_revision = next.workspace_catalog_revision.saturating_add(1);
-        next.save(&self.config_path)?;
-        *config = next;
-        if let Some(entry) = entries.get_mut(id) {
-            entry.terminated_at_ms = at;
-        }
+            Some(at)
+        } else {
+            if marked.is_some() {
+                write_termination(root, None)?;
+            }
+            None
+        };
+        let mut terminations = self.terminations.lock().expect("never poisoned");
+        match at {
+            Some(at) => terminations.insert(root.clone(), at),
+            None => terminations.remove(root),
+        };
         Ok(planned)
     }
 
-    /// See [`terminated_by`].
+    /// Whether this project itself, not an ancestor, carries a termination.
+    pub async fn marked_terminated(&self, id: &str) -> bool {
+        let root = self
+            .entries
+            .read()
+            .await
+            .get(id)
+            .map(|entry| entry.root.clone());
+        root.is_some_and(|root| read_termination(&root).is_some())
+    }
+
+    /// The project whose termination covers `id`, read from the markers.
     pub async fn terminated_by(&self, id: &str) -> Option<String> {
-        terminated_by(&*self.config.read().await, id).map(|(by, _)| by)
+        let line = lineage(&*self.config.read().await, id);
+        terminated_by(&line, read_termination).map(|(by, _)| by)
     }
 
     /// Changes only the label shown to the user; the directory itself stays put.
@@ -1505,6 +1581,7 @@ fn active_descriptions<'a>(
     entries: impl Iterator<Item = &'a WorkspaceEntry>,
     config: &Config,
     config_path: &Path,
+    terminations: &HashMap<PathBuf, i64>,
 ) -> Vec<WorkspaceInfo> {
     let mut out: Vec<_> = entries
         .filter(|entry| !entry.removed)
@@ -1518,7 +1595,7 @@ fn active_descriptions<'a>(
                 .map(|_| true);
             apply_space_projection(&mut info, config);
             apply_space_health(&mut info, entry, config);
-            apply_termination(&mut info, config);
+            apply_termination(&mut info, config, terminations);
             info
         })
         .collect();
@@ -1526,32 +1603,101 @@ fn active_descriptions<'a>(
     out
 }
 
-/// The project whose termination covers `id`, and when it was recorded: `id`
-/// itself or the nearest registered ancestor marked by `workspace.terminate`.
-/// Members added after the termination are covered too; a removed ancestor no
-/// longer covers anything. The single rule every gate and listing uses.
-pub(crate) fn terminated_by(config: &Config, id: &str) -> Option<(String, i64)> {
+/// `id` and its registered ancestors, nearest first: the Spaces whose
+/// termination covers it, so members added after a termination are covered
+/// too. A removed ancestor no longer covers anything.
+pub(crate) fn lineage(config: &Config, id: &str) -> Vec<(String, PathBuf)> {
+    let mut lineage = Vec::new();
     let mut current = id;
-    for depth in 0..=config.agent_spaces.len() {
-        let entry = config.workspaces.iter().find(|entry| entry.id == current)?;
-        if depth > 0 && entry.removed {
-            return None;
+    while lineage.len() <= config.agent_spaces.len() {
+        let Some(entry) = config.workspaces.iter().find(|entry| entry.id == current) else {
+            break;
+        };
+        if !lineage.is_empty() && entry.removed {
+            break;
         }
-        if let Some(at) = entry.terminated_at_ms {
-            return Some((current.to_owned(), at));
-        }
-        current = config
+        lineage.push((current.to_owned(), entry.root.clone()));
+        let Some(parent) = config
             .agent_spaces
             .iter()
-            .find(|space| space.workspace_id == current)?
-            .parent_workspace_id
-            .as_deref()?;
+            .find(|space| space.workspace_id == current)
+            .and_then(|space| space.parent_workspace_id.as_deref())
+        else {
+            break;
+        };
+        current = parent;
     }
-    None
+    lineage
 }
 
-fn apply_termination(info: &mut WorkspaceInfo, config: &Config) {
-    info.terminated_at_ms = terminated_by(config, &info.id).map(|(_, at)| at);
+/// The nearest Space in `lineage` the user terminated, and when.
+pub(crate) fn terminated_by(
+    lineage: &[(String, PathBuf)],
+    marked: impl Fn(&Path) -> Option<i64>,
+) -> Option<(String, i64)> {
+    lineage
+        .iter()
+        .find_map(|(id, root)| marked(root).map(|at| (id.clone(), at)))
+}
+
+/// Termination is the user's decision about the project, not about one
+/// installation, so it lives in the Space's own `.genethub/` and every channel
+/// that opens the project honours it (`docs/storage-layout.md`).
+fn termination_marker(root: &Path) -> PathBuf {
+    root.join(".genethub").join("terminated.json")
+}
+
+/// When the user terminated the Space at `root`. A marker that is present but
+/// unreadable still counts: failing open would restart what the user stopped.
+pub(crate) fn read_termination(root: &Path) -> Option<i64> {
+    match std::fs::read(termination_marker(root)) {
+        Ok(body) => Some(
+            serde_json::from_slice::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|marker| marker.get("terminatedAtMs")?.as_i64())
+                .unwrap_or(0),
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => Some(0),
+    }
+}
+
+fn write_termination(root: &Path, at: Option<i64>) -> Result<()> {
+    let marker = termination_marker(root);
+    match at {
+        Some(at) => {
+            let home = root.join(".genethub");
+            if !home.exists() {
+                std::fs::create_dir_all(&home)?;
+                crate::config::restrict_dir_to_owner(&home)?;
+            }
+            let ignore = home.join(".gitignore");
+            if !ignore.exists() {
+                std::fs::write(&ignore, "*\n")?;
+            }
+            crate::config::save_private(
+                &marker,
+                serde_json::json!({ "terminatedAtMs": at })
+                    .to_string()
+                    .as_bytes(),
+            )
+        }
+        None => match std::fs::remove_file(&marker) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
+            _ => Ok(()),
+        },
+    }
+}
+
+fn apply_termination(
+    info: &mut WorkspaceInfo,
+    config: &Config,
+    terminations: &HashMap<PathBuf, i64>,
+) {
+    info.terminated_at_ms = terminated_by(&lineage(config, &info.id), |root| {
+        terminations.get(root).copied()
+    })
+    .map(|(_, at)| at);
 }
 
 /// The registration this Workspace carries, plus the older exclusive-role
@@ -1658,7 +1804,7 @@ fn describe(entry: &WorkspaceEntry) -> WorkspaceInfo {
             .as_ref()
             .map(|path| path.display().to_string()),
         agent_space: None,
-        terminated_at_ms: entry.terminated_at_ms,
+        terminated_at_ms: None,
     }
 }
 
@@ -1791,7 +1937,6 @@ async fn descriptor_workspace(
         folders,
         workspace_file: Some(dir.join(crate::space_descriptor::FILE)),
         removed: false,
-        terminated_at_ms: None,
         is_git_repo: known
             .filter(|entry| entry.root == root)
             .map_or_else(|| root.join(".git").exists(), |entry| entry.is_git_repo),
@@ -1814,7 +1959,6 @@ fn folder_workspace(root: PathBuf, name: Option<String>) -> WorkspaceEntry {
         }],
         workspace_file: None,
         removed: false,
-        terminated_at_ms: None,
         is_git_repo: root.join(".git").exists(),
     }
 }
@@ -1953,7 +2097,6 @@ fn parse_code_workspace(path: &Path, source: &str) -> Result<WorkspaceEntry> {
         folders,
         workspace_file: Some(path.to_path_buf()),
         removed: false,
-        terminated_at_ms: None,
         is_git_repo: root.join(".git").exists(),
     })
 }
@@ -2678,7 +2821,6 @@ mod tests {
                     }],
                     workspace_file: None,
                     removed: false,
-                    terminated_at_ms: None,
                     is_git_repo: false,
                 },
                 WorkspaceEntry {
@@ -2692,7 +2834,6 @@ mod tests {
                     }],
                     workspace_file: Some(file),
                     removed: false,
-                    terminated_at_ms: None,
                     is_git_repo: false,
                 },
             ],
@@ -2982,7 +3123,6 @@ mod tests {
                 }],
                 workspace_file: None,
                 removed: false,
-                terminated_at_ms: None,
                 is_git_repo: false,
             }],
             ..Config::default()
@@ -3197,7 +3337,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn termination_covers_the_team_and_survives_reload_reopen_and_removal() {
+    async fn termination_lives_in_the_project_and_covers_its_team_in_every_channel() {
         let dir = tempfile::tempdir().unwrap();
         let (spaces, ids) = open_verified(dir.path(), &["project", "member", "late"]).await;
         let (project, member, late) = (ids[0].clone(), ids[1].clone(), ids[2].clone());
@@ -3215,8 +3355,22 @@ mod tests {
         let bystander = spaces.open(&other, None).await.unwrap().id;
         let mut team = vec![project.clone(), member.clone()];
         team.sort();
+        let config_path = dir.path().join("config.json");
+        let registry = std::fs::read(&config_path).unwrap();
+        let project_root = dir.path().join("project");
+        let channel_dir = tempfile::tempdir().unwrap();
+        let channel = workspaces(channel_dir.path()).await;
+        let seen = channel.open(&project_root, None).await.unwrap();
+        assert!(seen.terminated_at_ms.is_none());
 
         assert_eq!(spaces.set_terminated(&project, true).await.unwrap(), team);
+        assert!(project_root.join(".genethub/terminated.json").is_file());
+        assert!(project_root.join(".genethub/.gitignore").is_file());
+        assert_eq!(
+            std::fs::read(&config_path).unwrap(),
+            registry,
+            "termination rewrote the registry"
+        );
         attach(&spaces, &late, &project).await.unwrap();
         let listed = spaces.list().await;
         let at = |id: &str| listed.iter().find(|w| w.id == id).unwrap().terminated_at_ms;
@@ -3230,7 +3384,23 @@ mod tests {
         let refused = spaces.set_terminated(&member, false).await.unwrap_err();
         assert!(refused.to_string().contains(&project), "{refused:#}");
 
-        let config_path = dir.path().join("config.json");
+        assert_eq!(channel.terminated_by(&seen.id).await, Some(seen.id.clone()));
+        let channel_spaces = channel_dir.path().join("spaces");
+        assert_eq!(
+            channel.scan_spaces(&channel_spaces, true).await.terminated,
+            vec![seen.id.clone()],
+            "another channel did not stop what was terminated elsewhere"
+        );
+        assert!(channel
+            .scan_spaces(&channel_spaces, true)
+            .await
+            .terminated
+            .is_empty());
+        let listed = channel.list().await;
+        assert!(listed
+            .iter()
+            .any(|w| w.id == seen.id && w.terminated_at_ms.is_some()));
+
         let reloaded = Workspaces::new(
             Arc::new(RwLock::new(Config::load(&config_path).unwrap())),
             config_path,
@@ -3249,7 +3419,6 @@ mod tests {
         assert_eq!(reopened.id, member);
         assert!(reopened.terminated_at_ms.is_some());
 
-        let project_root = dir.path().join("project");
         spaces.remove(&project).await.unwrap();
         let reopened = spaces.open(&project_root, None).await.unwrap();
         assert_eq!(reopened.id, project);
@@ -3259,6 +3428,8 @@ mod tests {
         for id in [&project, &member, &late] {
             assert_eq!(spaces.terminated_by(id).await, None);
         }
+        assert_eq!(channel.terminated_by(&seen.id).await, None);
+        assert!(!project_root.join(".genethub/terminated.json").exists());
     }
 
     #[tokio::test]

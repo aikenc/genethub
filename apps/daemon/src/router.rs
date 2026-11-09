@@ -74,7 +74,12 @@ async fn terminate_project(
         .sessions
         .stop_workspaces(&planned)
         .await
-        .map_err(failed)?;
+        .map_err(|error| {
+            Handled::err(
+                ErrorCode::Conflict,
+                format!("项目已终止，但有会话未能完全停下（{error:#}）；可再次终止以重试。"),
+            )
+        })?;
     tracing::info!(workspace = %workspace_id, ?caller, members = planned.len(), closed, "workspace.terminate");
     Ok(planned)
 }
@@ -2276,6 +2281,9 @@ async fn dispatch(
             workspace_id,
             terminate,
         } => Box::pin(async move {
+            // Removing only stops the project; a termination the user chose
+            // explicitly stays for when it is opened again.
+            let keep_termination = state.workspaces.marked_terminated(&workspace_id).await;
             let planned = if terminate == Some(true) {
                 match terminate_project(state, caller, &workspace_id).await {
                     Ok(planned) => planned,
@@ -2302,7 +2310,16 @@ async fn dispatch(
                 );
             }
             match state.workspaces.remove_planned(&workspace_id, &planned).await {
-                Ok(workspaces) => Handled::ok(Reply::Workspaces(workspaces)),
+                Ok(workspaces) => {
+                    if terminate == Some(true) && !keep_termination {
+                        if let Err(error) =
+                            state.workspaces.set_terminated(&workspace_id, false).await
+                        {
+                            tracing::warn!(workspace = %workspace_id, %error, "a removed project stays terminated");
+                        }
+                    }
+                    Handled::ok(Reply::Workspaces(workspaces))
+                }
                 Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
             }
         }).await,

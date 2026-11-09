@@ -286,7 +286,7 @@ export function MachineDirectoryLists({ connections, directory:sharedDirectory, 
         const next = new Set(collapsed); next.has(g.key) ? next.delete(g.key) : next.add(g.key); setCollapsed(next); setSelection(new Set());
       }}>
         <AgentAvatar id={g.workspace.id} name={g.workspace.name} />
-        <span className="min-w-0 flex-1"><span className="flex min-w-0 items-center gap-2"><span className="min-w-0 flex-1 truncate text-sm font-medium">{g.workspace.name}</span>{g.workspace.terminatedAtMs !== undefined && <span title="恢复前平台不会在此项目启动任何 Agent、新会话或定时任务" className="shrink-0 rounded bg-danger/10 px-1 text-[10px] text-danger">已终止</span>}<span className="shrink-0 text-[10px] text-faint">{g.workspace.builtin ? "内置" : g.time ? relativeTime(g.time) : ""}</span></span>
+        <span className="min-w-0 flex-1"><span className="flex min-w-0 items-center gap-2"><span className="min-w-0 flex-1 truncate text-sm font-medium">{g.workspace.name}</span>{g.workspace.terminatedAtMs !== undefined && <span title="恢复前平台不会在此项目运行任何 Agent 或定时任务" className="shrink-0 rounded bg-danger/10 px-1 text-[10px] text-danger">已终止</span>}<span className="shrink-0 text-[10px] text-faint">{g.workspace.builtin ? "内置" : g.time ? relativeTime(g.time) : ""}</span></span>
           <span className="mt-1 flex min-w-0 items-center gap-2"><SessionActivityIcons sessions={g.allSessions} partial={g.partial} stale={g.stale} />
             <span className={`ml-auto min-w-0 truncate text-[11px] ${["offline","denied","timeout","unavailable","rateLimited"].includes(g.row.state) ? "text-danger" : "text-faint"}`}>{g.machineCount > 1 ? `${g.machineCount} 台机器` : g.row.target.label}{!fresh(g.row) ? ` · ${stateLabel[g.row.state]}` : ""}</span>
           </span>
@@ -389,8 +389,8 @@ export function MachineDirectoryLists({ connections, directory:sharedDirectory, 
     {confirming && <WorkspaceDetailsDialog title={`${actionLabel(confirming)}所选${section === "projects" ? "项目" : "会话"}`} onClose={() => setConfirming(false)}><p className="text-sm">{
       section === "sessions" ? "会话历史保留，归档不会停止任务。"
         : confirming === "resume" ? "解除终止。不会自动重启任何会话；之后发送消息、团队调度和定时任务会照常运行。"
-          : confirming === "terminate" ? `平台会立即停止所选项目及其成员的全部会话和后台进程，并取消等待中的提问${activeChosen ? `（当前 ${activeChosen} 个会话正在运行或等待交互）` : ""}。恢复之前不会再启动任何 Agent、新会话或定时任务，团队也无法自行恢复。文件和历史会话保留。`
-            : `只移除项目登记，保留磁盘文件和历史会话。${activeChosen ? `其中 ${activeChosen} 个会话正在运行或等待交互，` : ""}仍在运行或等待交互的会话会先被平台终止，团队和定时任务也无法再拉起它们。`
+          : confirming === "terminate" ? `平台会立即停止所选项目及其成员的全部会话、后台进程和定时任务${activeChosen ? `（当前 ${activeChosen} 个会话正在运行或等待交互）` : ""}，取消等待中的提问，并丢弃团队排队未送达的消息。恢复之前平台不会在其中运行任何 Agent 或定时任务；恢复需由你操作或明确要求 Agent 执行。文件和历史会话保留。`
+            : `只移除项目登记，保留磁盘文件和历史会话。${activeChosen ? `其中 ${activeChosen} 个会话正在运行或等待交互，` : ""}仍在运行或等待交互的会话会先被平台停止，团队排队未送达的消息会被丢弃。`
     }</p><button className={`mt-3 min-h-11 w-full rounded-lg text-sm text-white ${confirming === "terminate" ? "bg-danger" : "bg-accent"}`} onClick={() => void batch(confirming)}>确认{section === "sessions" ? "处理" : actionLabel(confirming)} {confirming === "resume" ? chosenGroups.filter(g => g.workspace.terminatedAtMs !== undefined).length : chosen.size} 项</button></WorkspaceDetailsDialog>}
     <span className="sr-only">当前正文来自 {endpoint.label}</span>
   </ListPane>;
