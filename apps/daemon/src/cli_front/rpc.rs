@@ -215,6 +215,7 @@ impl Rpc {
                     Request::WorkspaceList => "workspace.list",
                     Request::SessionList { .. } => "session.list",
                     Request::SessionPage { .. } => "session.page",
+                    Request::SessionChanges { .. } => "session.changes",
                     _ => "other",
                 };
                 let handled = tokio::spawn(async move {

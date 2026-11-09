@@ -180,6 +180,13 @@ enum Query {
         limit: Option<u32>,
         cursor: Option<String>,
     },
+    /// `session list --since`: what changed in several projects.
+    SessionChanges {
+        workspace_ids: Vec<String>,
+        since: Option<String>,
+        include_archived: bool,
+        lean: bool,
+    },
     SessionGet {
         session_id: String,
         summary_only: bool,
@@ -424,7 +431,8 @@ fn parse_session(args: &[String]) -> Result<Query, CliFailure> {
     };
     match verb {
         "list" => {
-            let mut workspace_id = None;
+            let mut workspace_ids: Vec<String> = Vec::new();
+            let mut since = None;
             let mut labels = Vec::new();
             let mut source_kind = None;
             let mut include_archived = false;
@@ -436,11 +444,6 @@ fn parse_session(args: &[String]) -> Result<Query, CliFailure> {
             while index < args.len() {
                 match args[index].as_str() {
                     "--workspace" => {
-                        if workspace_id.is_some() {
-                            return Err(CliFailure::invalid_args(
-                                "--workspace may be supplied only once",
-                            ));
-                        }
                         index += 1;
                         let value = args.get(index).ok_or_else(|| {
                             CliFailure::invalid_args("--workspace needs a workspace id")
@@ -450,7 +453,25 @@ fn parse_session(args: &[String]) -> Result<Query, CliFailure> {
                                 "--workspace needs a non-empty workspace id",
                             ));
                         }
-                        workspace_id = Some(value.clone());
+                        if workspace_ids.contains(value) {
+                            return Err(CliFailure::invalid_args(
+                                "--workspace may name each project only once",
+                            ));
+                        }
+                        workspace_ids.push(value.clone());
+                    }
+                    "--since" if since.is_none() => {
+                        index += 1;
+                        since = Some(
+                            args.get(index)
+                                .filter(|s| !s.is_empty() && s.len() <= 4096)
+                                .ok_or_else(|| {
+                                    CliFailure::invalid_args(
+                                        "--since needs start or a returned cursor",
+                                    )
+                                })?
+                                .clone(),
+                        );
                     }
                     "--label" => {
                         index += 1;
@@ -519,6 +540,35 @@ fn parse_session(args: &[String]) -> Result<Query, CliFailure> {
                 }
                 index += 1;
             }
+            if let Some(since) = since {
+                if workspace_ids.is_empty() || workspace_ids.len() > 100 {
+                    return Err(CliFailure::invalid_args(
+                        "--since needs 1..100 --workspace projects",
+                    ));
+                }
+                if active
+                    || limit.is_some()
+                    || cursor.is_some()
+                    || !labels.is_empty()
+                    || source_kind.is_some()
+                {
+                    return Err(CliFailure::invalid_args(
+                        "--since combines only with --workspace, --include-archived and --lean",
+                    ));
+                }
+                return Ok(Query::SessionChanges {
+                    workspace_ids,
+                    since: (since != "start").then_some(since),
+                    include_archived,
+                    lean,
+                });
+            }
+            if workspace_ids.len() > 1 {
+                return Err(CliFailure::invalid_args(
+                    "--workspace may be supplied only once without --since",
+                ));
+            }
+            let workspace_id = workspace_ids.pop();
             if cursor.is_some() && limit.is_none() {
                 return Err(CliFailure::invalid_args("--cursor requires --limit"));
             }
@@ -844,6 +894,56 @@ async fn execute(
             Ok((
                 "workspace.remove",
                 json!({"workspaceId": workspace_id, "removed": true}),
+            ))
+        }
+        Query::SessionChanges {
+            workspace_ids,
+            since,
+            include_archived,
+            lean,
+        } => {
+            let rpc = connect_selected(selection).await?;
+            if !rpc
+                .hello()
+                .features
+                .iter()
+                .flatten()
+                .any(|f| f == "session.changes.v1")
+            {
+                return Err(CliFailure::business(
+                    "upgradeRequired",
+                    "target needs session.changes.v1 for --since; read with --limit pages instead",
+                    None,
+                ));
+            }
+            // A cursor this target cannot have issued restarts the scope
+            // instead of failing the caller's sync.
+            let (since, foreign) = match since {
+                None => (None, false),
+                Some(raw) => match decode_page_cursor(&raw, rpc.hello()) {
+                    Ok(cursor) => (Some(cursor), false),
+                    Err(_) => (None, true),
+                },
+            };
+            let reply = rpc
+                .call(Request::SessionChanges {
+                    workspace_ids: workspace_ids.clone(),
+                    since,
+                    include_archived,
+                    lean,
+                    limit: 200,
+                })
+                .await
+                .map_err(rpc_error)?;
+            let Reply::SessionChanges(changes) = reply else {
+                return Err(unexpected_reply("session changes", &reply));
+            };
+            let reset = changes.reset || foreign;
+            Ok((
+                "session.list",
+                json!({"workspaceIds": workspace_ids, "sessions": changes.sessions,
+                "removed": changes.removed, "cursor": encode_page_cursor(changes.cursor, rpc.hello()),
+                "complete": changes.complete, "reset": reset, "machineId": rpc.hello().machine_id}),
             ))
         }
         Query::SessionList {
@@ -1579,7 +1679,7 @@ fn command_schema(name: &str) -> Value {
             ),
         ),
         "session.list" => (
-            "genet session list (--limit <1..100> [--cursor <nextCursor>] | --active) [--workspace <id>] [--include-archived] [--lean]",
+            "genet session list (--limit <1..100> [--cursor <nextCursor>] | --active) [--workspace <id>] [--include-archived] [--lean] | --since <start|cursor> --workspace <id>... [--include-archived] [--lean]",
             true,
             object_input(
                 json!({
@@ -1588,6 +1688,7 @@ fn command_schema(name: &str) -> Value {
                     "limit": {"type": ["integer", "null"], "minimum": 1, "maximum": 100,
                         "description": "--limit; read exactly one bounded summary page; does not auto-follow nextCursor; excludes label/source filters"},
                     "cursor": {"type": ["string", "null"], "description": "--cursor; opaque nextCursor from the same machine and query, requires --limit"},
+                    "since": {"type": ["string", "null"], "description": "--since start|<cursor>; with one or more --workspace, returns sessions changed since the cursor plus removed, cursor, complete and reset; repeat with the returned cursor until complete; reset means the reply restarts the whole scope; needs session.changes.v1"},
                     "labels": {"type": "array", "items": {"type": "string", "minLength": 1},
                         "description": "--label, repeatable; keeps sessions carrying every given label"},
                     "sourceKind": {"enum": ["human", "system", null],
@@ -2391,6 +2492,7 @@ pub fn reply_kind(reply: &Reply) -> &'static str {
         Reply::ForkTransfer(_) => "forkTransfer",
         Reply::Sessions(_) => "sessions",
         Reply::SessionPages(_) => "sessionPages",
+        Reply::SessionChanges(_) => "sessionChanges",
         Reply::SessionDrafts(_) => "session drafts",
         Reply::PreviewAnnotations(_) => "preview annotations",
         Reply::SessionComponents(_) => "session components",
@@ -2597,6 +2699,85 @@ mod tests {
         .unwrap_err();
         assert_eq!(duplicate.code, "invalidArgs");
         assert!(duplicate.message.contains("only once"));
+    }
+
+    #[test]
+    fn session_list_since_reads_changes_across_projects() {
+        assert_eq!(
+            parse(&words(&[
+                "session",
+                "list",
+                "--workspace",
+                "w_1",
+                "--workspace",
+                "w_2",
+                "--since",
+                "start",
+                "--lean"
+            ]))
+            .unwrap(),
+            Query::SessionChanges {
+                workspace_ids: vec!["w_1".into(), "w_2".into()],
+                since: None,
+                include_archived: false,
+                lean: true,
+            }
+        );
+        assert_eq!(
+            parse(&words(&[
+                "session",
+                "list",
+                "--workspace",
+                "w_1",
+                "--since",
+                "abc"
+            ]))
+            .unwrap(),
+            Query::SessionChanges {
+                workspace_ids: vec!["w_1".into()],
+                since: Some("abc".into()),
+                include_archived: false,
+                lean: false,
+            }
+        );
+        for wrong in [
+            &["session", "list", "--since", "start"][..],
+            &[
+                "session",
+                "list",
+                "--workspace",
+                "w_1",
+                "--since",
+                "start",
+                "--limit",
+                "5",
+            ],
+            &[
+                "session",
+                "list",
+                "--workspace",
+                "w_1",
+                "--since",
+                "start",
+                "--active",
+            ],
+            &[
+                "session",
+                "list",
+                "--workspace",
+                "w_1",
+                "--workspace",
+                "w_1",
+                "--since",
+                "start",
+            ],
+        ] {
+            assert_eq!(
+                parse(&words(wrong)).unwrap_err().code,
+                "invalidArgs",
+                "{wrong:?}"
+            );
+        }
     }
 
     #[test]

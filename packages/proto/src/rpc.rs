@@ -217,6 +217,21 @@ pub enum Request {
         #[serde(default)]
         include_archived: bool,
     },
+    /// Sessions in these projects that changed after `since`, an opaque cursor
+    /// from an earlier reply. Without one, or when the daemon cannot continue
+    /// it, the reply pages through the whole scope.
+    #[serde(rename = "session.changes", rename_all = "camelCase")]
+    SessionChanges {
+        workspace_ids: Vec<String>,
+        #[serde(default)]
+        since: Option<String>,
+        #[serde(default)]
+        include_archived: bool,
+        /// Trims rows the way `session.list` does with `lean`.
+        #[serde(default)]
+        lean: bool,
+        limit: u32,
+    },
     #[serde(rename = "session.get", rename_all = "camelCase")]
     SessionGet {
         session_id: String,
@@ -1007,6 +1022,7 @@ pub enum Reply {
     ForkTransfer(ForkTransfer),
     Sessions(Vec<SessionSummary>),
     SessionPages(Vec<SessionPageResult>),
+    SessionChanges(SessionChangesResult),
     SessionDrafts(Vec<crate::SessionDraft>),
     PreviewAnnotations(crate::PreviewReviewDraft),
     SessionComponents(Vec<ComponentInstanceInfo>),
@@ -1083,6 +1099,23 @@ pub struct SessionPageResult {
     pub sessions: Vec<SessionSummary>,
     pub next_cursor: Option<String>,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionChangesResult {
+    /// Current rows of the sessions that changed, oldest change first.
+    pub sessions: Vec<SessionSummary>,
+    /// Sessions that left the scope: deleted, moved, or archived when
+    /// archived sessions were not asked for. Empty when `reset`.
+    pub removed: Vec<CatalogSessionRef>,
+    /// Pass back as `since`. When `complete` is false, more changes follow.
+    pub cursor: String,
+    pub complete: bool,
+    /// `since` could not be continued (daemon restarted, or the cursor is too
+    /// old): `sessions` restarts the whole scope and replaces what the caller held.
+    pub reset: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]

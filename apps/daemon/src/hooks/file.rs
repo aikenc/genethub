@@ -3,13 +3,16 @@
 //! The directory is the registry. Nothing here remembers a hook: every call
 //! reads `<project>/.genethub/hooks/` again, so what a caller sees is what will
 //! run, and a hook that was added, edited, disabled or deleted is the next
-//! read's business. A file that cannot run is returned as invalid, with the
-//! reason, rather than dropped: a broken hook someone cannot see is a hook
-//! that quietly never fires.
+//! read's business. The scheduler decides when to call again from the stamps
+//! [`snapshot_stamped`] reports. A file that cannot run is returned as
+//! invalid, with the reason, rather than dropped: a broken hook someone cannot
+//! see is a hook that quietly never fires.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+use crate::fs_stamp::Stamp;
 
 use serde_json::Value;
 
@@ -64,17 +67,29 @@ impl Entry {
 
 /// Every hook file in `dir`, by id. A directory that is not there has no hooks.
 pub fn snapshot(dir: &Path) -> Vec<Entry> {
+    snapshot_stamped(dir).0
+}
+
+/// [`snapshot`], plus the stamp each hook file had when it was read, so a
+/// caller can tell later whether reading again would say anything new.
+pub fn snapshot_stamped(dir: &Path) -> (Vec<Entry>, Vec<(PathBuf, Option<Stamp>)>) {
     let reader = match std::fs::read_dir(dir) {
         Ok(reader) => reader,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return (Vec::new(), Vec::new())
+        }
         Err(error) => {
-            return vec![Entry::Invalid {
-                id: ".".into(),
-                problem: format!("the hooks directory cannot be read: {error}"),
-            }]
+            return (
+                vec![Entry::Invalid {
+                    id: ".".into(),
+                    problem: format!("the hooks directory cannot be read: {error}"),
+                }],
+                Vec::new(),
+            )
         }
     };
     let mut entries = Vec::new();
+    let mut stamps = Vec::new();
     for item in reader.flatten() {
         let name = item.file_name().to_string_lossy().into_owned();
         // Temporary files from an atomic write, editor backups and anything
@@ -87,13 +102,14 @@ pub fn snapshot(dir: &Path) -> Vec<Entry> {
             continue;
         }
         let path = item.path();
+        stamps.push((path.clone(), Stamp::read_link(&path)));
         entries.push(match read(&path) {
             Ok(spec) => Entry::Valid { id, spec },
             Err(problem) => Entry::Invalid { id, problem },
         });
     }
     entries.sort_by(|a, b| a.id().cmp(b.id()));
-    refuse_duplicates(entries)
+    (refuse_duplicates(entries), stamps)
 }
 
 /// Two files whose ids differ only in case are one id on some filesystems and

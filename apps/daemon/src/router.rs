@@ -469,6 +469,7 @@ async fn dispatch(
                     "session.create-id.v1".to_string(),
                     "session.page.v1".to_string(),
                     "session.active-page.v1".to_string(),
+                    "session.changes.v1".to_string(),
                     "session.summary.v1".to_string(),
                     "catalog.sync.v1".to_string(),
                     "session.prepare.v1".to_string(),
@@ -789,6 +790,18 @@ async fn dispatch(
                 }
             }
             Handled::ok(Reply::SessionPages(pages))
+        }).await,
+
+        Request::SessionChanges { workspace_ids, since, include_archived, lean, limit } => Box::pin(async move {
+            let unique: std::collections::HashSet<_> = workspace_ids.iter().collect();
+            if workspace_ids.is_empty() || workspace_ids.len() > 100 || unique.len() != workspace_ids.len()
+                || limit == 0 || limit > 500 {
+                return Handled::err(ErrorCode::BadRequest, "session changes need 1..100 distinct projects and a limit of 1..500");
+            }
+            match state.sessions.changes(&workspace_ids, since.as_deref(), include_archived, lean, limit).await {
+                Ok(changes) => Handled::ok(Reply::SessionChanges(changes)),
+                Err(error) => failed(error),
+            }
         }).await,
 
         Request::SessionGet {

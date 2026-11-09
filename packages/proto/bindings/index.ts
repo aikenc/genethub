@@ -1195,7 +1195,7 @@ export type Reply = { "type": "previewFeedback", "data": PreviewFeedbackResponse
  * True when the requested `sinceSeq` fell outside the retained window
  * and the snapshot is a full reset rather than a continuation.
  */
-reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "agentRequests", "data": Array<AgentUserRequest> } | { "type": "agentTestResult", "data": { passed: boolean, output: string, } } | { "type": "agentLogs", "data": { lines: Array<string>, } } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "callerAuthority", "data": CallerAuthority } | { "type": "providers", "data": Array<ProviderInfo> } | { "type": "providerOperation", "data": ProviderOperationReceipt } | { "type": "speechCapabilities", "data": SpeechCapabilities } | { "type": "speechRuntimeStatus", "data": SpeechRuntimeStatus } | { "type": "speechContext", "data": SpeechContextPack } | { "type": "speechFeedbackReceipt", "data": SpeechFeedbackReceipt } | { "type": "log", "data": LogTail } | { "type": "diagnostics", "data": SupportDiagnostics } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "forkTransfer", "data": ForkTransfer } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionPages", "data": Array<SessionPageResult> } | { "type": "sessionDrafts", "data": Array<SessionDraft> } | { "type": "previewAnnotations", "data": PreviewReviewDraft } | { "type": "sessionComponents", "data": Array<ComponentInstanceInfo> } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "sessionInspection", "data": SessionInspection } | { "type": "sessionNarrative", "data": SessionNarrativePage } | { "type": "sessionRounds", "data": SessionRoundPage } | { "type": "sessionContext", "data": SessionContext } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "roundTrunks", "data": Array<RoundTrunk> } | { "type": "blob", "data": BlobPayload } | { "type": "blobs", "data": Array<BlobPayload> } | { "type": "sessionArtifactUpload", "data": SessionArtifactUpload } | { "type": "sessionArtifact", "data": SessionArtifactBundle } | { "type": "agentSpaceChangePlan", "data": AgentSpaceChangePlan } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileAccess", "data": FileAccessInfo } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "processes", "data": Array<BackgroundProcess> } | { "type": "ack" };
+reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "agentRequests", "data": Array<AgentUserRequest> } | { "type": "agentTestResult", "data": { passed: boolean, output: string, } } | { "type": "agentLogs", "data": { lines: Array<string>, } } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "callerAuthority", "data": CallerAuthority } | { "type": "providers", "data": Array<ProviderInfo> } | { "type": "providerOperation", "data": ProviderOperationReceipt } | { "type": "speechCapabilities", "data": SpeechCapabilities } | { "type": "speechRuntimeStatus", "data": SpeechRuntimeStatus } | { "type": "speechContext", "data": SpeechContextPack } | { "type": "speechFeedbackReceipt", "data": SpeechFeedbackReceipt } | { "type": "log", "data": LogTail } | { "type": "diagnostics", "data": SupportDiagnostics } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "forkTransfer", "data": ForkTransfer } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionPages", "data": Array<SessionPageResult> } | { "type": "sessionChanges", "data": SessionChangesResult } | { "type": "sessionDrafts", "data": Array<SessionDraft> } | { "type": "previewAnnotations", "data": PreviewReviewDraft } | { "type": "sessionComponents", "data": Array<ComponentInstanceInfo> } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "sessionInspection", "data": SessionInspection } | { "type": "sessionNarrative", "data": SessionNarrativePage } | { "type": "sessionRounds", "data": SessionRoundPage } | { "type": "sessionContext", "data": SessionContext } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "roundTrunks", "data": Array<RoundTrunk> } | { "type": "blob", "data": BlobPayload } | { "type": "blobs", "data": Array<BlobPayload> } | { "type": "sessionArtifactUpload", "data": SessionArtifactUpload } | { "type": "sessionArtifact", "data": SessionArtifactBundle } | { "type": "agentSpaceChangePlan", "data": AgentSpaceChangePlan } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileAccess", "data": FileAccessInfo } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "processes", "data": Array<BackgroundProcess> } | { "type": "ack" };
 
 export type Request = { "type": "preview.feedback", "payload": PreviewFeedbackRequest } | { "type": "client.debug", "payload": ClientDebugRequest } | { "type": "connection.identity" } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, 
 /**
@@ -1228,7 +1228,11 @@ creationId?: string, workspaceId: string, tags: Array<string>, mediaTags: Array<
  * Required when the caller is a SessionController; omitted for a
  * direct authenticated Human UI action.
  */
-planDigest?: string, actionId?: string, } } | { "type": "agentSpace.changePlan", "payload": { workspaceId: string, expectedRevision: number, operation: AgentSpaceOperation, } } | { "type": "agentSpace.children", "payload": { workspaceId: string, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, lean: boolean, } } | { "type": "session.page", "payload": { requests: Array<SessionPageRequest>, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, 
+planDigest?: string, actionId?: string, } } | { "type": "agentSpace.changePlan", "payload": { workspaceId: string, expectedRevision: number, operation: AgentSpaceOperation, } } | { "type": "agentSpace.children", "payload": { workspaceId: string, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, lean: boolean, } } | { "type": "session.page", "payload": { requests: Array<SessionPageRequest>, includeArchived: boolean, } } | { "type": "session.changes", "payload": { workspaceIds: Array<string>, since: string | null, includeArchived: boolean, 
+/**
+ * Trims rows the way `session.list` does with `lean`.
+ */
+lean: boolean, limit: number, } } | { "type": "session.get", "payload": { sessionId: string, 
 /**
  * Metadata and current state only; replies with Session, not Snapshot.
  */
@@ -1475,6 +1479,26 @@ relativePath: string,
  * Relative to the workspace, so a local Agent can open it directly.
  */
 workspacePath: string, maxChunkBytes: number, };
+
+export type SessionChangesResult = { 
+/**
+ * Current rows of the sessions that changed, oldest change first.
+ */
+sessions: Array<SessionSummary>, 
+/**
+ * Sessions that left the scope: deleted, moved, or archived when
+ * archived sessions were not asked for. Empty when `reset`.
+ */
+removed: Array<CatalogSessionRef>, 
+/**
+ * Pass back as `since`. When `complete` is false, more changes follow.
+ */
+cursor: string, complete: boolean, 
+/**
+ * `since` could not be continued (daemon restarted, or the cursor is too
+ * old): `sessions` restarts the whole scope and replaces what the caller held.
+ */
+reset: boolean, };
 
 /**
  * Deterministic, model-free context projection used directly by Agents and

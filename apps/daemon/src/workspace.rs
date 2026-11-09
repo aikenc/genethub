@@ -54,12 +54,30 @@ pub struct Workspaces {
     /// Derived descriptor fields for the registered projects. The existing
     /// discovery owner refreshes them; listing never opens project files.
     descriptors: std::sync::Mutex<HashMap<PathBuf, DescriptorView>>,
+    /// What the last discovery pass saw, and whether registering it went
+    /// cleanly, so an unchanged tree is not registered again.
+    discovery: std::sync::Mutex<Discovered>,
+}
+
+#[derive(Default)]
+struct Discovered {
+    cache: crate::space_descriptor::DiscoveryCache,
+    last: Option<(Vec<crate::space_descriptor::Found>, Vec<String>)>,
+    retired_at: Option<std::time::Instant>,
 }
 
 struct DescriptorView {
-    stamp: Option<(std::time::SystemTime, u64)>,
+    stamp: Option<crate::fs_stamp::Stamp>,
     members: Result<Vec<genehub_proto::SpaceMemberReference>, String>,
+    watch: crate::fs_stamp::Watch,
 }
+
+/// How often a registered project's own descriptor is looked at again.
+const DESCRIPTOR_CADENCE: crate::fs_stamp::Cadence = crate::fs_stamp::Cadence {
+    hot: std::time::Duration::from_secs(2),
+    cold: std::time::Duration::from_secs(30),
+    hot_for: std::time::Duration::from_secs(60),
+};
 
 /// A scan looks at two directory levels, so asking more than this often only
 /// repeats the answer.
@@ -301,6 +319,7 @@ impl Workspaces {
             scanned_at: std::sync::Mutex::new(None),
             scanning: std::sync::atomic::AtomicBool::new(false),
             descriptors: Default::default(),
+            discovery: Default::default(),
         }
     }
 
@@ -327,31 +346,62 @@ impl Workspaces {
             }
         }
         let started = std::time::Instant::now();
-        let discovery = crate::space_descriptor::discover(spaces_root).await;
-        for problem in &discovery.problems {
-            tracing::warn!(%problem, "a Space descriptor cannot be used");
-        }
+        let mut discovered = std::mem::take(&mut *self.discovery.lock().expect("never poisoned"));
+        let discovery =
+            crate::space_descriptor::discover_cached(spaces_root, &mut discovered.cache, force)
+                .await;
+        let unchanged = !force
+            && discovered.last.as_ref().is_some_and(|(roots, problems)| {
+                *roots == discovery.roots && *problems == discovery.problems
+            });
         let mut report = ScanReport::default();
-        let mut links: Vec<(String, Option<String>)> = Vec::new();
         let mut budget = crate::blocking::WorkBudget::new();
-        for root in &discovery.roots {
-            Box::pin(self.scan_tree(root, None, &mut links, &mut report, &mut budget)).await;
-        }
-        if !links.is_empty() {
-            match self.register_scanned_parents(&links).await {
-                Ok(linked) => report.linked = linked,
-                Err(error) => tracing::warn!(%error, "registering scanned Spaces failed"),
+        let mut clean = true;
+        if !unchanged {
+            for problem in &discovery.problems {
+                tracing::warn!(%problem, "a Space descriptor cannot be used");
+            }
+            let mut links: Vec<(String, Option<String>)> = Vec::new();
+            for root in &discovery.roots {
+                clean &= Box::pin(self.scan_tree(root, None, &mut links, &mut report, &mut budget))
+                    .await;
+            }
+            if !links.is_empty() {
+                match self.register_scanned_parents(&links).await {
+                    Ok(linked) => report.linked = linked,
+                    Err(error) => {
+                        clean = false;
+                        tracing::warn!(%error, "registering scanned Spaces failed")
+                    }
+                }
             }
         }
-        if let Err(error) = self.retire_missing_scanned_children(spaces_root).await {
-            tracing::warn!(%error, "retiring missing scanned child Spaces failed");
+        // A registered Space under the root can vanish without changing what
+        // discovery finds, so retiring also runs on the cold cadence.
+        if !unchanged
+            || discovered
+                .retired_at
+                .is_none_or(|at| at.elapsed() >= DESCRIPTOR_CADENCE.cold)
+        {
+            discovered.retired_at = Some(std::time::Instant::now());
+            if let Err(error) = self.retire_missing_scanned_children(spaces_root).await {
+                clean = false;
+                tracing::warn!(%error, "retiring missing scanned child Spaces failed");
+            }
         }
+        if !unchanged {
+            // A tree whose registration failed somewhere is registered again
+            // on the next pass rather than remembered as done.
+            discovered.last = clean.then_some((discovery.roots, discovery.problems));
+        }
+        *self.discovery.lock().expect("never poisoned") = discovered;
         let projects = self.list().await;
         let mut directories = HashSet::new();
+        let now = std::time::Instant::now();
         for project in &projects {
             budget.checkpoint().await;
             directories.insert(Self::descriptor_dir(project));
-            self.refresh_descriptor(project);
+            self.refresh_descriptor(project, now, force);
         }
         self.descriptors
             .lock()
@@ -429,6 +479,7 @@ impl Workspaces {
         Ok(stale.len())
     }
 
+    /// Whether every Space in this subtree was registered or deliberately left out.
     async fn scan_tree(
         &self,
         found: &crate::space_descriptor::Found,
@@ -436,20 +487,23 @@ impl Workspaces {
         links: &mut Vec<(String, Option<String>)>,
         report: &mut ScanReport,
         budget: &mut crate::blocking::WorkBudget,
-    ) {
+    ) -> bool {
         budget.checkpoint().await;
         let id = match self.scanned_workspace(found, report).await {
             Scanned::Id(id) => id,
-            Scanned::Removed | Scanned::Failed => return,
+            Scanned::Removed => return true,
+            Scanned::Failed => return false,
         };
         // A root with no children stays an ordinary project, with no
         // registration of its own.
         if parent.is_some() || !found.children.is_empty() {
             links.push((id.clone(), parent.map(str::to_string)));
         }
+        let mut clean = true;
         for child in &found.children {
-            Box::pin(self.scan_tree(child, Some(&id), links, report, budget)).await;
+            clean &= Box::pin(self.scan_tree(child, Some(&id), links, report, budget)).await;
         }
+        clean
     }
 
     async fn scanned_workspace(
@@ -651,28 +705,46 @@ impl Workspaces {
             .to_path_buf()
     }
 
-    fn refresh_descriptor(&self, info: &WorkspaceInfo) {
+    fn refresh_descriptor(&self, info: &WorkspaceInfo, now: std::time::Instant, force: bool) {
         let dir = Self::descriptor_dir(info);
+        let mut views = self.descriptors.lock().expect("never poisoned");
+        let known = views.get(&dir);
+        if !force && known.is_some_and(|view| !view.watch.due(now)) {
+            return;
+        }
         let stamp = std::fs::symlink_metadata(dir.join(crate::space_descriptor::FILE))
             .ok()
             .filter(|meta| meta.is_file() && !meta.file_type().is_symlink())
-            .and_then(|meta| Some((meta.modified().ok()?, meta.len())));
+            .map(|meta| crate::fs_stamp::Stamp::of(&meta));
         if stamp.is_some()
-            && self
-                .descriptors
-                .lock()
-                .expect("never poisoned")
-                .get(&dir)
-                .is_some_and(|view| view.stamp == stamp)
+            && known.is_some_and(|view| {
+                view.stamp == stamp && crate::fs_stamp::settled(view.stamp.as_ref())
+            })
         {
+            if let Some(view) = views.get_mut(&dir) {
+                view.watch
+                    .looked(stamp.as_ref(), false, now, DESCRIPTOR_CADENCE);
+            }
             return;
         }
         let members = crate::space_descriptor::read(&dir)
             .map(|descriptor| descriptor.map(|d| d.members).unwrap_or_default());
-        self.descriptors
-            .lock()
-            .expect("never poisoned")
-            .insert(dir, DescriptorView { stamp, members });
+        let watch = match views.remove(&dir) {
+            Some(mut view) => {
+                view.watch
+                    .looked(stamp.as_ref(), true, now, DESCRIPTOR_CADENCE);
+                view.watch
+            }
+            None => crate::fs_stamp::Watch::first(&dir, stamp.as_ref(), now, DESCRIPTOR_CADENCE),
+        };
+        views.insert(
+            dir,
+            DescriptorView {
+                stamp,
+                members,
+                watch,
+            },
+        );
     }
 
     fn apply_descriptor(info: &mut WorkspaceInfo, descriptors: &HashMap<PathBuf, DescriptorView>) {
@@ -1037,7 +1109,7 @@ impl Workspaces {
         let mut info = self
             .register_candidate(candidate, explicit_or_descriptor_name, true)
             .await?;
-        self.refresh_descriptor(&info);
+        self.refresh_descriptor(&info, std::time::Instant::now(), true);
         Self::apply_descriptor(&mut info, &self.descriptors.lock().expect("never poisoned"));
         Ok(info)
     }
@@ -2047,6 +2119,41 @@ mod tests {
     async fn workspaces(dir: &Path) -> Workspaces {
         let config = Arc::new(RwLock::new(Config::default()));
         Workspaces::new(config, dir.join("config.json"), WorkspaceHomes::default())
+    }
+
+    #[tokio::test]
+    async fn discovery_registers_a_new_space_without_rereading_an_unchanged_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let spaces = dir.path().join("spaces");
+        write_verified_pipe_space(dir.path(), &spaces.join("alpha"));
+        let workspaces = workspaces(dir.path()).await;
+        assert_eq!(workspaces.scan_spaces(&spaces, true).await.opened, 1);
+
+        *workspaces.scanned_at.lock().unwrap() = None;
+        assert_eq!(workspaces.scan_spaces(&spaces, false).await.opened, 0);
+        assert!(workspaces.discovery.lock().unwrap().last.is_some());
+
+        write_verified_pipe_space(dir.path(), &spaces.join("beta"));
+        *workspaces.scanned_at.lock().unwrap() = None;
+        assert_eq!(workspaces.scan_spaces(&spaces, false).await.opened, 1);
+        let names: Vec<_> = workspaces
+            .list()
+            .await
+            .into_iter()
+            .map(|w| w.name)
+            .collect();
+        assert!(names.contains(&"alpha".to_string()) && names.contains(&"beta".to_string()));
+
+        std::fs::remove_dir_all(spaces.join("beta")).unwrap();
+        *workspaces.scanned_at.lock().unwrap() = None;
+        workspaces.scan_spaces(&spaces, false).await;
+        let names: Vec<_> = workspaces
+            .list()
+            .await
+            .into_iter()
+            .map(|w| w.name)
+            .collect();
+        assert_eq!(names, vec!["alpha".to_string()]);
     }
 
     #[tokio::test]

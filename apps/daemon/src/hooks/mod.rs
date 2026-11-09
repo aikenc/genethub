@@ -8,8 +8,10 @@
 //! command, on time, without ever letting it hurt anything.
 //!
 //! * **The directory is the registry** (`file`): nothing is registered, and
-//!   the daemon keeps no authoritative state. Each tick reads
-//!   `<project>/.genethub/hooks/` again.
+//!   the daemon keeps no authoritative state. A tick reuses what
+//!   `<project>/.genethub/hooks/` said until a stamp there changes, looking
+//!   again every few seconds; every run reads its file again just before it
+//!   starts.
 //! * **A hook cannot hurt the daemon or a Session**: it runs as its own
 //!   process group, ended on timeout, never twice at once, and at most
 //!   [`MAX_CONCURRENT`] at a time. A failure is recorded and shown by
@@ -85,10 +87,37 @@ const MIN_GAP: Duration = Duration::from_secs(1);
 /// inherited them must not hold the record open.
 const SETTLE: Duration = Duration::from_secs(2);
 const STDERR_TAIL: usize = 2048;
-/// How often the set of projects is re-read. Hooks inside a project are read on
-/// every tick; only the roster of projects is cached, because listing projects
-/// is far more expensive than listing a directory.
+/// How often the set of projects is re-read.
 const ROSTER_EVERY: Duration = Duration::from_secs(5);
+/// How often a project's hooks directory is looked at: a stat of 450
+/// directories every second is most of a tick, and a hook written by a
+/// deployment still has to start within a few seconds.
+const HOOKS_CADENCE: crate::fs_stamp::Cadence = crate::fs_stamp::Cadence {
+    hot: Duration::from_secs(1),
+    cold: Duration::from_secs(5),
+    hot_for: Duration::from_secs(10),
+};
+
+/// What one project's hooks directory said when it was last looked at.
+struct Registered {
+    directory: Option<crate::fs_stamp::Stamp>,
+    files: Vec<(PathBuf, Option<crate::fs_stamp::Stamp>)>,
+    entries: Vec<file::Entry>,
+    watch: crate::fs_stamp::Watch,
+}
+
+impl Registered {
+    /// Whether anything the last snapshot depended on looks different.
+    fn stale(&self, directory: Option<&crate::fs_stamp::Stamp>) -> bool {
+        use crate::fs_stamp::{settled, Stamp};
+        directory != self.directory.as_ref()
+            || !settled(self.directory.as_ref())
+            || self
+                .files
+                .iter()
+                .any(|(path, stamp)| !settled(stamp.as_ref()) || Stamp::read_link(path) != *stamp)
+    }
+}
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -137,6 +166,7 @@ type Key = (String, String);
 pub struct Hooks {
     front_door_cli: Option<PathBuf>,
     runs: Mutex<HashMap<Key, Run>>,
+    registered: Mutex<HashMap<(String, PathBuf), Registered>>,
     limit: Arc<tokio::sync::Semaphore>,
     active_paths: Arc<Mutex<HashSet<PathBuf>>>,
 }
@@ -146,6 +176,7 @@ impl Hooks {
         Arc::new(Self {
             front_door_cli,
             runs: Mutex::new(HashMap::new()),
+            registered: Mutex::new(HashMap::new()),
             limit: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT)),
             active_paths: Arc::new(Mutex::new(HashSet::new())),
         })
@@ -181,14 +212,9 @@ impl Hooks {
         python: Option<&Path>,
         state: Weak<crate::state::AppState>,
     ) {
-        let directory = hooks_dir(project_root);
-        if !directory.is_dir() {
-            self.forget_project(workspace_id, project_root, &HashSet::new());
+        let Some(entries) = self.registered_hooks(workspace_id, project_root) else {
             return;
-        }
-        let entries = file::snapshot(&directory);
-        let present: HashSet<String> = entries.iter().map(|e| e.id().to_string()).collect();
-        self.forget_project(workspace_id, project_root, &present);
+        };
         let now = Instant::now();
         for entry in entries {
             let file::Entry::Valid { id, spec } = entry else {
@@ -236,6 +262,64 @@ impl Hooks {
                 hooks.run(key, id, root, python).await;
             });
         }
+    }
+
+    /// The hooks one project's files declare, looked at again only when due.
+    /// `None` when the project has none.
+    fn registered_hooks(
+        &self,
+        workspace_id: &str,
+        project_root: &Path,
+    ) -> Option<Vec<file::Entry>> {
+        let now = std::time::Instant::now();
+        let key = (workspace_id.to_string(), project_root.to_path_buf());
+        let mut registered = self.registered.lock().expect("never poisoned");
+        let directory = hooks_dir(project_root);
+        let known = registered.get(&key);
+        if known.is_some_and(|known| !known.watch.due(now)) {
+            let entries = &known?.entries;
+            return (!entries.is_empty()).then(|| entries.clone());
+        }
+        let stamp = crate::fs_stamp::Stamp::read(&directory);
+        let changed = known.is_none_or(|known| known.stale(stamp.as_ref()));
+        let cadence = HOOKS_CADENCE;
+        if changed {
+            let (entries, files) = match stamp {
+                Some(stamp) if stamp.is_dir() => file::snapshot_stamped(&directory),
+                _ => (Vec::new(), Vec::new()),
+            };
+            let present: HashSet<String> = entries.iter().map(|e| e.id().to_string()).collect();
+            let watch = match registered.remove(&key) {
+                Some(mut known) => {
+                    known.watch.looked(stamp.as_ref(), true, now, cadence);
+                    known.watch
+                }
+                None => crate::fs_stamp::Watch::first(&directory, stamp.as_ref(), now, cadence),
+            };
+            registered.insert(
+                key.clone(),
+                Registered {
+                    directory: stamp,
+                    files,
+                    entries,
+                    watch,
+                },
+            );
+            drop(registered);
+            self.forget_project(workspace_id, project_root, &present);
+            registered = self.registered.lock().expect("never poisoned");
+        } else if let Some(known) = registered.get_mut(&key) {
+            known.watch.looked(stamp.as_ref(), false, now, cadence);
+        }
+        let entries = &registered.get(&key)?.entries;
+        (!entries.is_empty()).then(|| entries.clone())
+    }
+
+    fn forget_registrations_except(&self, workspace_ids: &HashSet<String>) {
+        self.registered
+            .lock()
+            .expect("never poisoned")
+            .retain(|(workspace, _), _| workspace_ids.contains(workspace));
     }
 
     /// Drops run records for hooks of this project that no longer have a file.
@@ -823,12 +907,64 @@ pub async fn run_timer(state: Shared) {
             refreshed = Some(Instant::now());
             let ids: HashSet<String> = roster.iter().map(|(id, _)| id.clone()).collect();
             state.hooks.forget_projects_except(&ids);
+            state.hooks.forget_registrations_except(&ids);
         }
         let python = state.registry.python();
+        let mut budget = crate::blocking::WorkBudget::new();
         for (id, root) in &roster {
+            budget.checkpoint().await;
             state
                 .hooks
                 .tick_project(id, root, python.as_deref(), Arc::downgrade(&state));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HOOK: &str = r#"{"event":"timer","every":"5s","exec":["true"]}"#;
+
+    fn come_due(hooks: &Hooks) {
+        let now = std::time::Instant::now();
+        for known in hooks.registered.lock().unwrap().values_mut() {
+            known.watch.hurry(now);
+        }
+    }
+
+    fn enabled(entries: &[file::Entry]) -> Vec<bool> {
+        entries
+            .iter()
+            .map(|entry| matches!(entry, file::Entry::Valid { spec, .. } if spec.enabled))
+            .collect()
+    }
+
+    #[test]
+    fn a_tick_reuses_the_registry_until_it_is_due_and_then_sees_edits() {
+        let root = tempfile::tempdir().unwrap();
+        let hooks = Hooks::new(None);
+        assert!(hooks.registered_hooks("w", root.path()).is_none());
+
+        let directory = hooks_dir(root.path());
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("team.genet.json"), HOOK).unwrap();
+        assert!(
+            hooks.registered_hooks("w", root.path()).is_none(),
+            "a project without hooks is not looked at again on every tick"
+        );
+        come_due(&hooks);
+        let entries = hooks.registered_hooks("w", root.path()).unwrap();
+        assert_eq!(enabled(&entries), vec![true]);
+
+        let disabled = HOOK.replace("\"exec\"", "\"enabled\":false,\"exec\"");
+        std::fs::write(directory.join("team.genet.json"), disabled).unwrap();
+        come_due(&hooks);
+        let entries = hooks.registered_hooks("w", root.path()).unwrap();
+        assert_eq!(enabled(&entries), vec![false], "an in-place edit is seen");
+
+        std::fs::remove_file(directory.join("team.genet.json")).unwrap();
+        come_due(&hooks);
+        assert!(hooks.registered_hooks("w", root.path()).is_none());
     }
 }

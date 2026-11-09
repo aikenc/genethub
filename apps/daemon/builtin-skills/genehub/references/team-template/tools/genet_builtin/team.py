@@ -141,7 +141,27 @@ def genet(*args, ok_codes=(0,)):
         raise ExpertError("genet 返回了无法核对的响应", "结果未知，不能按空目录或不存在处理", "保留原会话、派单与写锁，先查询原操作回执")
     if len(args) >= 2 and args[0] == "space" and args[1] == "open":
         _WORKSPACES_CACHE["items"] = None
+    if not _reads_only(args):
+        _SYNC["fresh"].clear()
     return envelope.get("data") or {}
+
+
+_READ_VERBS = {
+    "session": {"list", "get", "inspect", "narrative", "rounds", "trunks", "trunk", "blob", "context"},
+    "workspace": {"list", "show"},
+    "machine": None,
+    "context": None,
+    "capabilities": None,
+    "schema": None,
+}
+
+
+def _reads_only(args):
+    """Whether a genet call cannot change sessions, so a synced snapshot stays current."""
+    if not args or args[0] not in _READ_VERBS:
+        return False
+    verbs = _READ_VERBS[args[0]]
+    return verbs is None or (len(args) > 1 and args[1] in verbs)
 
 
 def read_json(path, default=None):
@@ -779,6 +799,153 @@ HOOK_SESSIONS_TTL = 20.0
 
 def clear_sessions_cache():
     _WORKSPACE_SESSIONS_CACHE.clear()
+    _SYNC["fresh"].clear()
+
+
+# 定时钩子每台机器每轮一次 `session list --since` 增量同步，本轮的 sessions_of/session_summary 由它提供；
+# 本轮里自己改过会话（派单、发消息等）后下次读取再同步一次。只换数据来源：每处到点、超时、卡住等时间判定
+# 仍按当前时间每轮照常计算，钩子不因“没有变化”跳过任何一轮。目标机不支持或同步失败时，本轮回到逐个查询。
+_SYNC = {"root": None, "wanted": {}, "fresh": set(), "rows": {}, "covered": {}, "off": set()}
+SYNC_MAX_PAGES = 50
+SYNC_MAX_WORKSPACES = 100
+SYNC_FORGET_MS = 24 * 3600 * 1000
+
+
+def _sync_pull(machine, scope, since):
+    """Changed rows, removed ids, the next cursor, and whether the target restarted the scope."""
+    flags = ["session", "list"]
+    for workspace_id in sorted(scope):
+        flags += ["--workspace", workspace_id]
+    flags += [*machine_args(machine), "--since", since or "start"]
+    changed, removed, reset = {}, set(), False
+    for _ in range(SYNC_MAX_PAGES):
+        page = genet(*flags)
+        rows, gone, cursor = page.get("sessions"), page.get("removed"), page.get("cursor")
+        if not isinstance(rows, list) or not isinstance(gone, list) or not isinstance(cursor, str) or not cursor:
+            raise ExpertError("会话增量响应无法核对", "本轮回到逐个查询，没有按空列表处理", "核对目标机 session list --since 回执")
+        if page.get("reset") is True:
+            changed.clear()
+            removed.clear()
+            reset = True
+        for ref in gone:
+            if not isinstance(ref, dict) or not isinstance(ref.get("id"), str):
+                raise ExpertError("会话增量删除记录无法核对", "本轮回到逐个查询", "核对目标机 session list --since 回执")
+            key = (ref.get("workspaceId"), ref["id"])
+            changed.pop(key, None)
+            removed.add(key)
+        for row in rows:
+            if (not isinstance(row, dict) or not isinstance(row.get("id"), str) or not SESSION_ID.match(row["id"])
+                    or row.get("workspaceId") not in scope or not isinstance(row.get("status"), str)):
+                raise ExpertError("会话增量记录无法核对", "本轮回到逐个查询，没有发布部分结果", "核对目标机 session list --since 回执")
+            key = (row["workspaceId"], row["id"])
+            removed.discard(key)
+            changed[key] = row
+        if page.get("complete") is True:
+            return changed, removed, cursor, reset
+        flags[-1] = cursor
+    raise ExpertError("会话增量同步没有收敛", "本轮回到逐个查询", "核对目标机 session list --since 的 cursor 是否推进")
+
+
+def _sync_state():
+    path = state_dir(_SYNC["root"], "sync.json")
+    state = read_json(path, {}) or {}
+    machines = state.get("machines") if state.get("version") == 1 and isinstance(state.get("machines"), dict) else {}
+    return path, machines
+
+
+def _sync_used(entry, key, now):
+    used = {w: t for w, t in ((entry or {}).get("workspaces") or {}).items()
+            if isinstance(w, str) and isinstance(t, int) and now - t < SYNC_FORGET_MS}
+    for workspace_id in _SYNC["wanted"].get(key, ()):
+        used[workspace_id] = now
+    return used
+
+
+def _sync_machine(key):
+    """Bring one machine's snapshot current with one incremental read, persisting the cursor."""
+    path, machines = _sync_state()
+    entry = machines.get(key) if isinstance(machines.get(key), dict) else {}
+    now = now_ms()
+    used = _sync_used(entry, key, now)
+    scope = set(used)
+    if not scope:
+        _SYNC["off"].add(key)
+        return
+    if len(scope) > SYNC_MAX_WORKSPACES:
+        raise ExpertError("岗位工作区超过增量同步上限", "本轮回到逐个查询", "减少同一机器上的岗位数")
+    machine = key or None
+    covered = set(entry.get("covered") or [])
+    cursor = entry.get("cursor") if isinstance(entry.get("cursor"), str) and covered else None
+    rows = {}
+    for row in entry.get("sessions") or []:
+        if isinstance(row, dict) and row.get("workspaceId") in covered & scope and isinstance(row.get("id"), str):
+            rows[(row["workspaceId"], row["id"])] = row
+    if cursor is None:
+        rows, _, cursor, _ = _sync_pull(machine, scope, None)
+    else:
+        added = scope - covered
+        if added:
+            fresh, _, _, _ = _sync_pull(machine, added, None)
+            rows.update(fresh)
+        changed, removed, cursor, reset = _sync_pull(machine, scope, cursor)
+        if reset:
+            rows = changed
+        else:
+            for gone in removed:
+                rows.pop(gone, None)
+            rows.update(changed)
+    machines[key] = {"cursor": cursor, "covered": sorted(scope), "workspaces": used,
+                     "sessions": list(rows.values()), "syncedAtMs": now_ms()}
+    write_json(path, {"version": 1, "machines": machines})
+    _SYNC["rows"][key] = rows
+    _SYNC["covered"][key] = scope
+    _SYNC["fresh"].add(key)
+
+
+def _sync_remember():
+    """Keep workspaces learned from direct reads so the next tick's sync covers them."""
+    if _SYNC["root"] is None:
+        return
+    path, machines = _sync_state()
+    now, changed = now_ms(), False
+    for key, wanted in _SYNC["wanted"].items():
+        entry = machines.get(key) if isinstance(machines.get(key), dict) else {}
+        if wanted - set(entry.get("workspaces") or {}):
+            machines[key] = dict(entry, workspaces=_sync_used(entry, key, now))
+            changed = True
+    if changed:
+        write_json(path, {"version": 1, "machines": machines})
+
+
+def _synced(machine, workspace_id=None):
+    """This tick's rows for one machine, or None when it must be read directly."""
+    if _SYNC["root"] is None:
+        return None
+    key = machine or ""
+    if key in _SYNC["off"]:
+        return None
+    wanted = _SYNC["wanted"].setdefault(key, set())
+    if key and not wanted:
+        # A remote role's own workspace, as installed, before any read has named it.
+        try:
+            targets = remote_targets(_SYNC["root"])
+        except ExpertError:
+            targets = {}
+        wanted.update(target["workspaceId"] for target in targets.values()
+                      if isinstance(target, dict) and target.get("machineId") == key
+                      and isinstance(target.get("workspaceId"), str) and target["workspaceId"])
+    if workspace_id:
+        wanted.add(workspace_id)
+    if key not in _SYNC["fresh"] or (workspace_id and workspace_id not in _SYNC["covered"].get(key, ())):
+        try:
+            _sync_machine(key)
+        except ExpertError:
+            # Offline or not upgraded: the stored snapshot is kept for the next tick, never used now.
+            _SYNC["off"].add(key)
+            return None
+    if key not in _SYNC["fresh"]:
+        return None
+    return _SYNC["rows"].get(key, {}), _SYNC["covered"].get(key, set())
 
 
 def auto_describe_session(session_id, text):
@@ -843,6 +1010,10 @@ def session_history(workspace_id, machine=None):
 def sessions_of(workspace_id, machine=None, max_age=None):
     if not workspace_id:
         return []
+    synced = _synced(machine, workspace_id)
+    if synced is not None and workspace_id in synced[1]:
+        items = [row for (wid, _), row in synced[0].items() if wid == workspace_id]
+        return sorted(items, key=lambda row: (row.get("updatedAtMs") or 0, row["id"]), reverse=True)
     now = time.time()
     age = SESSIONS_TTL if max_age is None else max_age
     key = (machine or "", workspace_id)
@@ -862,10 +1033,17 @@ def session_summary(session_id, machine=None):
     # Coordination needs live status and inbox metadata, not the Agent's full
     # native conversation. The explicit summary mode skips the history view,
     # including narrative cloning and digesting, in watchdog/lock checks.
+    synced = _synced(machine)
+    if synced is not None:
+        found = [row for (_, sid), row in synced[0].items() if sid == session_id]
+        if len(found) == 1:
+            return found[0]
     result = genet("session", "get", session_id, "--summary", *machine_args(machine))
     summary = result.get("summary")
     if not isinstance(summary, dict) or summary.get("id") != session_id or not isinstance(summary.get("status"), str):
         raise ExpertError("会话摘要响应无法核对原 ID 和状态", "查询结果未知，不能认定会话不存在或已结束", "保留原派单和写锁，查询同一会话回执")
+    if _SYNC["root"] is not None and isinstance(summary.get("workspaceId"), str) and summary["workspaceId"]:
+        _SYNC["wanted"].setdefault(machine or "", set()).add(summary["workspaceId"])
     return summary
 
 
@@ -4653,8 +4831,10 @@ def cmd_hook(_args):
     global SESSIONS_TTL
     SESSIONS_TTL = HOOK_SESSIONS_TTL  # 一轮钩子共用一份 session 快照；非钩子命令仍用 2s
     root = find_root()
+    _SYNC.update(root=root, wanted={}, fresh=set(), rows={}, covered={}, off=set())
     SYSTEM_ISSUES_SEEN.discard(root)
     name, mine = me(root)
+    _SYNC["wanted"][""] = set(mine["spaces"].values())
     builtin_admin = is_builtin_admin(root)
     write_json(state_dir(root, "alive"), {"atMs": now_ms()})
     routines = (sync_identity, clean_temp_hourly) if builtin_admin else (sync_identity, clean_temp_hourly, platform_watch)
@@ -4687,6 +4867,11 @@ def cmd_hook(_args):
     except Exception as error:  # noqa: BLE001 - turned into a system message below, never swallowed
         report(root, name, mine, "出了什么: 未处理的异常 %r\n现在状态: 待办记录都还在 .genethub/team/pending/\n下一步: 检查 tools/team.py；修好后下一次运行自动恢复" % error)
         raise
+    finally:
+        try:
+            _sync_remember()
+        except (OSError, ExpertError):
+            pass
 
 
 SYSTEM_ISSUES_SEEN = set()
