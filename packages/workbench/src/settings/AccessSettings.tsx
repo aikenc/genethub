@@ -71,7 +71,7 @@ export function AccessSettings({ client }: { client: Client }) {
     setBusy(label);
     setProblem("");
     try {
-      const reply = await client.call({ type: "access.request", payload: { ids } });
+      const reply = await client.call({ type: "access.request", payload: ids ? { ids } : {} });
       if (reply?.type !== "accessSetup") throw new Error("设备没有确认申请");
       const result: AccessSetupResult = reply.data;
       setReport(result.report);
