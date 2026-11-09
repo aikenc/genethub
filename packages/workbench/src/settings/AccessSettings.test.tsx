@@ -58,7 +58,7 @@ describe("the system permissions page", () => {
     expect(screen.getByText(/2 项推荐项待处理/)).toBeTruthy();
 
     await userEvent.click(screen.getByRole("button", { name: "一键申请推荐项" }));
-    await waitFor(() => expect(onRequest).toHaveBeenCalledWith({ ids: null }));
+    await waitFor(() => expect(onRequest).toHaveBeenCalledWith({}));
     expect(await screen.findByText("已打开系统设置")).toBeTruthy();
   });
 
