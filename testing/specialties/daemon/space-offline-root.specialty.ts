@@ -5,14 +5,14 @@ import { defineSpecialty } from "../../framework/public.ts";
 defineSpecialty({
   id: "specialty.daemon.space-offline-root-restart",
   title: "A registered Space keeps offline secondary roots across daemon startup",
-  oracle: "A real restart with a detached secondary directory retains its registered root handle and readable local history; descriptor name, order and new roots still refresh, and removal remains final",
+  oracle: "A real restart with a detached secondary directory retains its registered root handle and readable local history; descriptor name, order and new roots still refresh within the 30s cold period, and removal remains final",
   catches: ["startup reopens unavailable registered roots", "discovery silently drops offline folders", "cached roots freeze descriptor edits", "scan resurrects a removed Space"],
   tags: ["core", "daemon", "space-discovery"], llm: { default: "none" },
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
   productInterfaces: ["workspace.list", "workspace.remove", "session.create", "session.get", "settings.get"],
   surfaces: ["daemon", "filesystem", "workbench-client"],
   resources: { environments: 1, cpu: 1, memoryMb: 1024, io: 1, browser: 0 },
-  expectedDurationMs: 12_000, timeoutMs: 90_000,
+  expectedDurationMs: 30_000, timeoutMs: 120_000,
 }, async t => {
   const root = join(t.env.data, "spaces", "offline-fixture");
   const secondary = join(t.env.root, "detachable");
@@ -42,7 +42,8 @@ defineSpecialty({
     mkdirSync(join(root, "new"));
     lay("offline-edited", [external, { path: ".", name: "local" }, { path: "new" }]);
     const saved = () => JSON.parse(readFileSync(join(t.env.data, "config.json"), "utf8")).workspaces as Array<{id: string; name: string}>;
-    await t.tools.waitUntil(() => saved().some(x => x.id === w.id && x.name === "offline-edited"), 15_000);
+    // A descriptor present at startup is looked at again within the 30s cold period.
+    await t.tools.waitUntil(() => saved().some(x => x.id === w.id && x.name === "offline-edited"), 35_000);
     const edited = await o.client.call({ type: "workspace.list" });
     const current = edited?.type === "workspaces" ? edited.data.find(x => x.id === w.id) : undefined;
     t.assertions.assert(current?.folders.map(f => f.name).join(",") === "external,local,new" && current.folders[0]?.rootHandle === w.folders[1]?.rootHandle, "descriptor edits lost order, names, new root or stable handle");

@@ -13,10 +13,10 @@ const shared = {
 defineSpecialty({ ...shared,
   id: "specialty.daemon.legacy-catalog-reconciliation",
   title: "Legacy readers reuse a bounded catalog without weakening strict pages or hiding writes",
-  oracle: "With 1500 real external records a warm legacy read keeps its observed snapshot until reconciliation, strict pages still report corrupt metadata, external changes reconcile within 12 seconds and committed rename/delete appear immediately",
+  oracle: "With 1500 real external records a warm legacy read keeps its observed snapshot until reconciliation, strict pages still report corrupt metadata, records created next to a session this daemon just wrote reconcile within 12 seconds, an in-place edit by another process within the 30s cold period, and committed rename/delete appear immediately",
   catches: ["each sequential observer rescans all history", "tolerant legacy cache hides a strict page error", "cache never reconciles external writers", "committed mutation leaves cached stale history"],
   tags: ["core", "session-pages", "session-read", "catalog-pressure"],
-  expectedDurationMs: 25_000, timeoutMs: 120_000,
+  expectedDurationMs: 45_000, timeoutMs: 150_000,
   resources: { environments: 1, cpu: 1, memoryMb: 768, io: 2, browser: 0, pool: "standard" },
 }, async t => {
   const o = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
@@ -69,7 +69,7 @@ defineSpecialty({ ...shared,
       "a tolerant legacy snapshot suppressed the strict page corruption error");
     unlinkSync(corruptFile);
     const warmMs = performance.now() - warmStart;
-    await t.tools.waitUntil(async () => (await listed()).some(s => s.id === target && s.title === changed.title), 12_000);
+    await t.tools.waitUntil(async () => (await listed()).some(s => s.id === target && s.title === changed.title), 35_000);
     await o.client.call({ type: "session.rename", payload: { sessionId: target, title: "committed rename" } });
     t.assertions.assert((await listed()).some(s => s.id === target && s.title === "committed rename"),
       "warm legacy catalog hid a committed rename");
