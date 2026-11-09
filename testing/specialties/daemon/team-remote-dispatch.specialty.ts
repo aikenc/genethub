@@ -7,8 +7,8 @@ import { defineSpecialty, connectProductClient, registerControlledAgent, parseJs
 defineSpecialty({
   id: "specialty.daemon.team-remote-dispatch",
   title: "Fixed team targets dispatch once and hold the executor's writer lock until reconciliation",
-  oracle: "Two real daemon directories communicate through a real relay: a lost successful receiver stdout recovers the same session, competing writer and changed identity are rejected, target model/media are validated before a writer lock, system notices preserve pause, an unreachable ledger entry cannot block another completion and executor lock release",
-  catches: ["same role short name routes to another team", "two callers write one directory", "lost reply creates duplicate session", "caller model leaks remotely", "remote notice lifts Human pause", "one offline task aborts reconciliation", "a declared remote role is rerouted by --machine or silently runs locally", "an executor accepts a role not installed for it", "remote install needs hand-written paths or scripts"],
+  oracle: "Two real daemon directories communicate through a real relay: a lost successful receiver stdout recovers the same session, competing writer and changed identity are rejected, target model/media are validated before a writer lock, system notices preserve pause, an unreachable ledger entry cannot block another completion and executor lock release; a >8KiB task and restored 300-reference coordination snapshot reach the real remote runtime",
+  catches: ["same role short name routes to another team", "two callers write one directory", "lost reply creates duplicate session", "caller model leaks remotely", "remote notice lifts Human pause", "one offline task aborts reconciliation", "a declared remote role is rerouted by --machine or silently runs locally", "an executor accepts a role not installed for it", "remote install needs hand-written paths or scripts", "JSON business content exceeds the small command head", "Timer success hides a failed remote projection"],
   stages: ["initial-result", "resumed-result", "paused-reservation", "resumed-release"],
   tags: ["core", "expert", "team-remote"], llm: { default: "mock" },
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
@@ -76,10 +76,11 @@ defineSpecialty({
     const wrapper = path.join(targetRoot, "lose-one-reply.py"), dropped = path.join(targetRoot, "reply-dropped");
     const correctionMarker = path.join(targetRoot, "correct-before-release");
     writeFileSync(wrapper, `import json,os,pathlib,subprocess,sys,time
-q=json.loads(sys.argv[-1]); race=pathlib.Path(${JSON.stringify(correctionMarker)})
+body=sys.stdin.read() if sys.argv[-1]=='-' else None
+q=json.loads(body if body is not None else sys.argv[-1]); race=pathlib.Path(${JSON.stringify(correctionMarker)})
 def summary():
  r=subprocess.run([os.environ['GENEHUB_CLI'],'session','get',q['sessionId']],capture_output=True,text=True)
- return json.loads(r.stdout.strip().splitlines()[-1])['data']['session']['summary']
+ return json.loads(r.stdout.strip().splitlines()[-1])['data']['summary']
 if q.get('operation') == 'release' and race.exists():
  race.unlink(); before=(summary().get('latestReply') or {}).get('itemId')
  note={**q,'operation':'notice','purpose':'task','sender':'concurrent-source','text':'Finish the corrected requirement.','messageId':'x.release-correction'}
@@ -91,7 +92,7 @@ if q.get('operation') == 'release' and race.exists():
   if s['status']=='idle' and not (s.get('inputSummary') or {}).get('pendingMessageIds') and (s.get('latestReply') or {}).get('itemId') != before: break
   time.sleep(.02)
  else: raise RuntimeError('correction did not finish')
-r=subprocess.run([sys.executable,*sys.argv[1:]],capture_output=True,text=True)
+r=subprocess.run([sys.executable,*sys.argv[1:]],input=body,capture_output=True,text=True)
 p=pathlib.Path(${JSON.stringify(dropped)})
 if r.returncode == 0 and not p.exists():
  p.write_text('lost')
@@ -121,7 +122,7 @@ sys.exit(r.returncode)
       let stdout = "", stderr = ""; child.stdout.on("data", b => stdout += b); child.stderr.on("data", b => stderr += b);
       child.on("error", reject); child.on("close", code => resolve({ code, stdout, stderr }));
     });
-    const dispatch = ["spawn", "--kind", "work", "--space", "qa", "--machine", machine, "--request-id", "one-task", "--desc", "remote contract", "Complete the check."];
+    const dispatch = ["spawn", "--kind", "work", "--space", "qa", "--machine", machine, "--request-id", "one-task", "--desc", "remote contract", "Complete the check. " + "Remote business requirement. ".repeat(800)];
     o.mock.script({ text: "First remote result." }, { text: "Resumed remote result." }, { text: "Queued notice result." });
     const lost = await script(dispatch);
     t.assertions.assert(lost.code !== 0 && lost.stderr.includes("未确认") && existsSync(dropped), "missing reply was not reported as uncertain after actual execution: " + lost.stderr);
@@ -151,13 +152,13 @@ sys.exit(r.returncode)
     const badMedia = await script([...dispatch.slice(0, -1).map(v => v === "one-task" ? "bad-media" : v), "--model", "deepseek/text-only", "--media", "image", "Complete the check."]);
     t.assertions.assert(badMedia.code !== 0 && badMedia.stderr.includes("支持"), "text-only target model accepted an image task");
     await t.stage("initial-result", () => t.tools.waitUntil(async () => {
-      const snapshot = (await cliJson(["session", "get", record.sessionId], true)).session;
+      const snapshot = await cliJson(["session", "get", record.sessionId], true);
       if (snapshot.summary.status === "failed" || snapshot.summary.inputSummary?.error) throw new Error("initial remote execution failed: " + JSON.stringify(snapshot.summary));
       return snapshot.summary.status === "idle" && !!snapshot.summary.latestReply;
     }, 30000));
-    const initialReply = (await cliJson(["session", "get", record.sessionId], true)).session.summary.latestReply.itemId;
+    const initialReply = (await cliJson(["session", "get", record.sessionId], true)).summary.latestReply.itemId;
     await o.client.call({ type: "session.interrupt", payload: { sessionId: record.sessionId } });
-    const beforeConflict = (await cliJson(["session", "get", record.sessionId], true)).session.summary.inputSummary.pendingMessageIds;
+    const beforeConflict = (await cliJson(["session", "get", record.sessionId], true)).summary.inputSummary.pendingMessageIds;
     const mismatchedSend = await script(["send", "--machine", machine, "--workspace", otherQa.id, "--to", record.sessionId, "Must not reach a different workspace."]);
     t.assertions.assert(mismatchedSend.code !== 0 && mismatchedSend.stderr.includes("workspace"), "exact session ID silently ignored a conflicting workspace selector");
     const emptySend = await script(["send", "--machine", machine, "--workspace", "", "--to", record.sessionId, "Must not ignore an empty workspace selector."]);
@@ -172,13 +173,13 @@ sys.exit(r.returncode)
       t.assertions.assert(invalid.code !== 0 && invalid.stderr.includes("--request-id"), "invalid retry identity generated a new dispatch");
     }
     t.assertions.assert(JSON.stringify(intentsBeforeInvalid) === JSON.stringify(readdirSync(path.join(sourceRoot, ".genethub/team/dispatch")).sort()), "invalid remote options wrote new dispatch intents");
-    const afterConflict = (await cliJson(["session", "get", record.sessionId], true)).session.summary.inputSummary.pendingMessageIds;
+    const afterConflict = (await cliJson(["session", "get", record.sessionId], true)).summary.inputSummary.pendingMessageIds;
     t.assertions.assert(JSON.stringify(beforeConflict) === JSON.stringify(afterConflict), "rejected workspace selector queued a remote message");
     const sent = await script(["send", "--machine", machine, "--workspace", qa.id, "--to", record.sessionId, "Queued while paused."]);
-    t.assertions.assert(sent.code === 0 && (await cliJson(["session", "get", record.sessionId], true)).session.summary.inputSummary.paused, "remote send lifted Human pause");
+    t.assertions.assert(sent.code === 0 && (await cliJson(["session", "get", record.sessionId], true)).summary.inputSummary.paused, "remote send lifted Human pause");
     await t.flows.main.sendPrompt(o.client, record.sessionId, "Resume the task.", null, "u_remote_resume");
     await t.stage("resumed-result", () => t.tools.waitUntil(async () => {
-      const s = (await cliJson(["session", "get", record.sessionId], true)).session.summary;
+      const s = (await cliJson(["session", "get", record.sessionId], true)).summary;
       if (s.status === "failed" || s.inputSummary?.error) throw new Error("resumed remote execution failed: " + JSON.stringify(s));
       return s.status === "idle" && !s.inputSummary.paused && s.inputSummary.pendingMessageIds.length === 0 && !!s.latestReply && s.latestReply.itemId !== initialReply;
     }, 30000));
@@ -193,7 +194,7 @@ sys.exit(r.returncode)
     t.assertions.assert(hook.code === 0, "one unreachable target aborted hook: " + hook.stderr);
     t.assertions.assert(existsSync(path.join(sourceRoot, ".genethub/team/done", files[0]!)) && !existsSync(lock), "successful independent task did not close and release target lock");
     const archived = JSON.parse(readFileSync(path.join(sourceRoot, ".genethub/team/done", files[0]!), "utf8"));
-    t.assertions.assert(archived.done.reply === (await cliJson(["session", "get", record.sessionId], true)).session.summary.latestReply.itemId, "reconciliation delivered the earlier reply instead of the latest corrected result");
+    t.assertions.assert(archived.done.reply === (await cliJson(["session", "get", record.sessionId], true)).summary.latestReply.itemId, "reconciliation delivered the earlier reply instead of the latest corrected result");
     t.assertions.assert(JSON.parse(readFileSync(path.join(pendingDir, "000-offline.json"), "utf8")).lastReconcileError, "offline task lost its retry evidence");
     // A receiver that crashed before recording a session ID must never retry creation.
     const intentDir = path.join(sourceRoot, ".genethub/team/dispatch");
@@ -229,8 +230,8 @@ sys.exit(r.returncode)
       const receipt = JSON.parse(readFileSync(path.join(intentDir,createHash("sha256").update(dispatchId!).digest("hex")+".json"),"utf8"));
       t.assertions.assert(task.sessionId===receipt.receipt.sessionId && task.remoteDispatch.target.workspaceId===qa.id && task.remoteDispatch.target.machineId===machine,"fresh task evidence belongs to another operation or source");
       freshSessions.push(task.sessionId);
-      await t.tools.waitUntil(async () => { const s = (await cliJson(["session", "get", task.sessionId], true)).session.summary; return s.status === "idle" && !!s.latestReply; }, 30000)
-        .catch(async () => { throw new Error("fresh task did not finish: " + JSON.stringify((await cliJson(["session", "get", task.sessionId], true)).session.summary)); });
+      await t.tools.waitUntil(async () => { const s = (await cliJson(["session", "get", task.sessionId], true)).summary; return s.status === "idle" && !!s.latestReply; }, 30000)
+        .catch(async () => { throw new Error("fresh task did not finish: " + JSON.stringify((await cliJson(["session", "get", task.sessionId], true)).summary)); });
       const finished = await script(["hook"]);
       t.assertions.assert(finished.code === 0 && !existsSync(lock), "fresh task did not retire its own writer lock");
     }
@@ -296,9 +297,12 @@ sys.exit(r.returncode)
     writeFileSync(path.join(targetRoot, ".genethub/task-source.json"), JSON.stringify({ machineId: reverse.machine.machineId, workspaceId: sourceQa.id, role: "qa", command: [python, path.join(sourceRoot, "tools/team.py")] }));
     const caller = await cliJson(["agent", "run", "--agent", "ctl-cli-command", "--workspace", sourceProject.id, "--creation-id", "remote.owner.front", "--prepare-only", "--no-wait", "prepare front before dispatch"]);
     const callerSid = caller.sessionId;
-    const inspectSession = async (sid: string, remote = false) => (await cliJson(["session", "get", sid], remote)).session;
+    const inspectSession = async (sid: string, remote = false) => ({
+      summary: (await cliJson(["session", "get", sid], remote)).summary,
+      items: (await cliJson(["session", "narrative", sid, "--limit", "100"], remote)).page.items,
+    });
     const idleSession = (sid: string, remote = false) => t.tools.waitUntil(async () => {
-      const snap = await inspectSession(sid, remote);
+      const snap = await cliJson(["session", "get", sid], remote);
       return snap.summary.status === "idle" && !snap.summary.inputSummary?.pendingMessageIds.length;
     }, 30000);
     const callTask = async (sid: string, root: string, args: string[], remote = false) => {
@@ -373,6 +377,19 @@ sys.exit(r.returncode)
     await t.tools.waitUntil(async () => { const tick = await script(["hook"]); if (tick.code !== 0) throw new Error(tick.stderr); return JSON.parse(readFileSync(sourceTaskFile, "utf8")).state === "delivered"; }, 30000);
     t.assertions.assert(!(await cliJson(["workspace","list"])).workspaces.some((w:any)=>w.id===sourceQa.id),"task return restored a fake local QA workspace");
     t.assertions.assert(!existsSync(boundReply.lock) && !existsSync(lock) && !existsSync(path.join(targetRoot, ".genethub/team/tasks", remoteTask.taskId + ".json")), "remote Owner left a writer or created a second authoritative task ledger");
+    // Restored previous-owner references can outgrow the small exchange head
+    // without increasing the number of currently running workers.
+    const evidenceRefs = Array.from({length: 300}, (_, n) => "s_" + n.toString(16).padStart(32, "0"));
+    const currentTask = JSON.parse(readFileSync(sourceTaskFile, "utf8"));
+    currentTask.state = "active";
+    currentTask.previousOwners = evidenceRefs.map(sessionId => ({sessionId}));
+    writeFileSync(sourceTaskFile, JSON.stringify(currentTask));
+    const projected = await script(["hook"]);
+    t.assertions.assert(projected.code === 0, "large projection maintenance failed: " + projected.stderr);
+    const largeSourceProjection = JSON.parse(readFileSync(path.join(sourceRoot, ".genethub/session-coordination.json"), "utf8"));
+    const largeTargetProjection = JSON.parse(readFileSync(path.join(targetRoot, "spaces/qa/.genethub/session-coordination.json"), "utf8"));
+    t.assertions.assert(Buffer.byteLength(JSON.stringify(largeSourceProjection)) > 8192 && largeTargetProjection.revision === largeSourceProjection.revision && evidenceRefs.every(sid => largeTargetProjection.references.includes(sid)), "Timer success hid a failed large remote projection");
+    currentTask.state = "delivered"; writeFileSync(sourceTaskFile, JSON.stringify(currentTask));
     // Ordered single-source delivery uses receiving time, never wall-clock
     // comparison with the source. Replay and accidental foreign use retain it.
     const projectionPath=path.join(targetRoot,"spaces/qa/.genethub/session-coordination.json");

@@ -80,8 +80,8 @@ check("discovery-contracts", "Help and schemas describe real public command beha
     t.assertions.assert((await json(opened, ["session", "list", "--workspace", opened.workspaceId, "--limit", "100"])).data.sessions.length === before, "discovery created a session");
   }));
 
-check("bounded-session-queries", "Unbounded history fails explicitly in every scope while pages and current work remain usable",
-  "Bare, lean and label/source-filtered global history commands fail with actionable errors and no empty success; a project still returns its idle history and complete activity preserves an archived obligation",
+check("bounded-session-queries", "Default discovery is bounded while legacy complete-history spellings fail explicitly",
+  "Default global/project discovery has explicit completeness; legacy lean and label/source-filtered complete-history commands fail with actionable errors; a project still returns its idle history and complete activity preserves an archived obligation",
   ["lean hides another full history walk", "labels bypass the query scope", "refused read becomes empty work", "restriction breaks project history or archived obligations"],
   async t => workspace(t, async opened => {
     const idle = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
@@ -96,11 +96,15 @@ check("bounded-session-queries", "Unbounded history fails explicitly in every sc
       const r = await opened.client.call({type: "session.page", payload: {requests: [{workspaceId: null, cursor: null, limit: 100, activeOnly: true}], includeArchived: true}});
       return r?.type === "sessionPages" && r.data[0]?.sessions.some(s => s.id === active) === true;
     }, 10000);
-    for (const flags of [[], ["--lean"], ["--label", "old-script"], ["--source-kind", "human"], ["--lean", "--include-archived"], ["--workspace", opened.workspaceId], ["--workspace", opened.workspaceId, "--lean"], ["--workspace", opened.workspaceId, "--include-archived"], ["--workspace", opened.workspaceId, "--source-kind", "human"]]) {
+    for (const flags of [["--lean"], ["--label", "old-script"], ["--source-kind", "human"], ["--lean", "--include-archived"], ["--workspace", opened.workspaceId, "--lean"], ["--workspace", opened.workspaceId, "--source-kind", "human"]]) {
       const result = await command(opened, ["session", "list", ...flags]);
       const last = records(result.stdout).at(-1);
       t.assertions.assert(result.code !== 0 && last?.error?.code === "unboundedQueryDisabled" && !records(result.stdout).some(r => r.type === "session.list"), "unbounded read bypassed scope or became a successful empty result");
       t.assertions.assert(result.stdout.includes("--limit") && result.stdout.includes("--summary") && result.stdout.includes("--active"), "refusal provides no supported replacement");
+    }
+    for (const flags of [[], ["--workspace", opened.workspaceId], ["--workspace", opened.workspaceId, "--include-archived"]]) {
+      const page = (await json(opened, ["session", "list", ...flags])).data;
+      t.assertions.assert(page.complete === true && page.nextCursor === null && page.sessions.some((s: {id: string}) => s.id === idle), "default discovery hid its completeness or idle history");
     }
     const history = (await json(opened, ["session", "list", "--workspace", opened.workspaceId, "--limit", "100", "--lean", "--include-archived"])).data.sessions;
     t.assertions.assert(history.length === 2 && history.some((s: {id: string}) => s.id === idle), "scope restriction hid project history");
@@ -110,15 +114,20 @@ check("bounded-session-queries", "Unbounded history fails explicitly in every sc
     t.assertions.assert(human.some((s: {id: string}) => s.id === active) && !system.some((s: {id: string}) => s.id === active), "display role labels changed Human source classification");
     const current = (await json(opened, ["session", "list", "--active", "--include-archived"])).data.sessions;
     t.assertions.assert(current.length === 1 && current[0].id === active && current[0].archived, "complete current work lost an archived obligation or included idle history");
-    t.note("Nine global/scoped history spellings rejected; bounded idle history and archived current work remain usable.");
+    t.note("Legacy complete-history spellings rejected; default discovery bounded; bounded idle history and archived current work remain usable.");
   }));
 
 check("paged-history-summary", "An Agent can browse one history page and check a task without decoding its chat",
-  "25 real sessions are reachable through explicit bounded CLI pages; incomplete pages carry a machine-bound nextCursor; cold metadata remains readable when chat cannot be decoded; archived and deleted state is respected",
+  "55 real sessions are reachable through explicit bounded CLI pages; incomplete pages carry a machine-bound nextCursor; cold metadata remains readable when chat cannot be decoded; archived and deleted state is respected",
   ["CLI secretly drains all pages", "cursor jumps to another source or scope", "a status check opens chat history", "a summary error becomes idle or missing success"],
   async t => workspace(t, async opened => {
     const ids: string[] = [];
-    for (let i = 0; i < 25; i++) ids.push(await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId));
+    for (let i = 0; i < 55; i++) ids.push(await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId));
+    const defaultPage = (await json(opened, ["session", "list"])).data;
+    t.assertions.assert(defaultPage.sessions.length === 50 && defaultPage.complete === false && typeof defaultPage.nextCursor === "string", "default list expanded history or silently claimed completeness");
+    const defaultNext = (await json(opened, ["session", "list", "--cursor", defaultPage.nextCursor])).data;
+    const allDefault = [...defaultPage.sessions, ...defaultNext.sessions].map(s => s.id);
+    t.assertions.assert(defaultNext.complete === true && allDefault.length === 55 && new Set(allDefault).size === 55, "default cursor continuation lost or duplicated history");
     const first = (await json(opened, ["session", "list", "--limit", "7"])).data;
     t.assertions.assert(first.sessions.length === 7 && first.complete === false && typeof first.nextCursor === "string", "one page expanded history or claimed completeness");
     const found = first.sessions.map((s: {id: string}) => s.id);
@@ -128,10 +137,10 @@ check("paged-history-summary", "An Agent can browse one history page and check a
       t.assertions.assert(page.sessions.length <= 7 && page.complete === (page.nextCursor === null), "continuation violates bounded/completeness contract");
       found.push(...page.sessions.map((s: {id: string}) => s.id)); cursor = page.nextCursor;
     }
-    t.assertions.assert(found.length === 25 && new Set(found).size === 25 && ids.every(id => found.includes(id)), "paged history lost or duplicated a session");
+    t.assertions.assert(found.length === 55 && new Set(found).size === 55 && ids.every(id => found.includes(id)), "paged history lost or duplicated a session");
     const foreign = JSON.parse(Buffer.from(first.nextCursor, "base64url").toString()); foreign.machine_id = "different-machine";
     const wrong = Buffer.from(JSON.stringify(foreign)).toString("base64url");
-    for (const flags of [["--limit", "0"], ["--limit", "101"], ["--cursor", first.nextCursor], ["--limit", "7", "--cursor", wrong], ["--limit", "7", "--label", "tag"]]) {
+    for (const flags of [["--limit", "0"], ["--limit", "101"], ["--limit", "7", "--cursor", wrong], ["--limit", "7", "--label", "tag"]]) {
       t.assertions.assert((await command(opened, ["session", "list", ...flags])).code !== 0, "invalid/foreign page silently returned data");
     }
     const scope = await command(opened, ["session", "list", "--workspace", opened.workspaceId, "--limit", "7", "--cursor", first.nextCursor]);
@@ -145,14 +154,16 @@ check("paged-history-summary", "An Agent can browse one history page and check a
     writeFileSync(path.join(home, cold, "meta.json"), JSON.stringify({...model, id: cold, title: "Cold status only", archived: false}));
     // A real filesystem fault proves this read path must not deserialize chat.
     mkdirSync(path.join(home, cold, "chat.jsonl"));
-    t.assertions.assert((await command(opened, ["session", "get", cold])).code !== 0, "fixture failed to make history unreadable");
-    const summary = (await json(opened, ["session", "get", cold, "--summary"])).data.summary;
+    t.assertions.assert((await command(opened, ["session", "inspect", cold])).code !== 0, "fixture failed to make history unreadable");
+    const summary = (await json(opened, ["session", "get", cold])).data.summary;
     t.assertions.assert(summary.id === cold && summary.title === "Cold status only", "status-only read required history");
+    const alias = (await json(opened, ["session", "get", cold, "--summary"])).data.summary;
+    t.assertions.assert(alias.id === summary.id, "old summary alias changed the default identity");
     const absent = records((await command(opened, ["session", "get", "s_missing_summary", "--summary"])).stdout).at(-1);
     t.assertions.assert(absent?.error?.code === "targetNotFound", "missing status lost typed error");
     await opened.client.call({type: "session.delete", payload: {sessionId: ids[1]!}});
     t.assertions.assert((await command(opened, ["session", "get", ids[1]!, "--summary"])).code !== 0, "deleted task reappeared as a summary");
-    t.note("Four CLI pages returned all 25 IDs; scope/source guards, archive and deletion checked; cold unreadable chat did not block metadata status.");
+    t.note("Default 50-row page and explicit 7-row pages returned all 55 IDs; scope/source guards, archive and deletion checked; cold unreadable chat did not block metadata status.");
   }));
 
 check("route-filters", "Agent filters select routes without a redundant mode switch",
@@ -172,10 +183,10 @@ check("route-filters", "Agent filters select routes without a redundant mode swi
     const sid = accepted.data.sessionId;
     t.assertions.assert(typeof sid === "string", "tag request created no session");
     await t.tools.waitUntil(async () => {
-      const summary = (await json(opened, ["session", "get", sid])).data.session.summary;
+      const summary = (await json(opened, ["session", "get", sid])).data.summary;
       return summary.status === "idle" && summary.latestReply != null;
     }, 30000);
-    const summary = (await json(opened, ["session", "get", sid])).data.session.summary;
+    const summary = (await json(opened, ["session", "get", sid])).data.summary;
     t.assertions.assert(summary.agentId === "genet" && summary.modelId === "deepseek/deepseek-v4-pro", "tag selection did not reach its requested model");
   }), true);
 
