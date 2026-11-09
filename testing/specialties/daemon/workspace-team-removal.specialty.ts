@@ -115,7 +115,7 @@ defineSpecialty({
     await project.getByRole("checkbox",{name:"选择项目 cleanup-target",exact:true}).check();
     await projects.getByRole("button",{name:"移除",exact:true}).click();
     peerAdvertised=true; const before=rosterReads, began=performance.now();
-    await page.getByRole("dialog",{name:"移除所选项目",exact:true}).getByRole("button",{name:"确认处理 1 项",exact:true}).click();
+    await page.getByRole("dialog",{name:"移除所选项目",exact:true}).getByRole("button",{name:"确认移除 1 项",exact:true}).click();
     await project.waitFor({state:"detached",timeout:5000});
     await projects.getByText("1 项已移除",{exact:true}).waitFor({timeout:5000});
     t.assertions.assert(await projects.getByRole("button",{name:"完成",exact:true}).isEnabled(),"removed card disappeared while the entire list stayed busy");
