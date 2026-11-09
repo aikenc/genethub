@@ -8,7 +8,7 @@ use base64::Engine;
 use genehub_proto::{
     BlobRef, ErrorCode, HelloResult, ProtocolError, Reply, Request, RoundLayer, RoundTrunk,
     SessionContext, SessionInspection, SessionNarrativePage, SessionPageRequest, SessionRoundPage,
-    SessionSnapshot, SessionSummary, WorkspaceInfo,
+    SessionSummary, WorkspaceInfo,
 };
 use serde_json::{json, Value};
 
@@ -189,7 +189,6 @@ enum Query {
     },
     SessionGet {
         session_id: String,
-        summary_only: bool,
     },
     SessionComponents {
         session_id: String,
@@ -569,8 +568,13 @@ fn parse_session(args: &[String]) -> Result<Query, CliFailure> {
                 ));
             }
             let workspace_id = workspace_ids.pop();
+            // Discovery is one page by default. Legacy complete-list spellings
+            // remain explicit migration errors rather than silently losing rows.
+            if !active && limit.is_none() && !lean && labels.is_empty() && source_kind.is_none() {
+                limit = Some(50);
+            }
             if cursor.is_some() && limit.is_none() {
-                return Err(CliFailure::invalid_args("--cursor requires --limit"));
+                limit = Some(50);
             }
             if limit.is_some() && (!labels.is_empty() || source_kind.is_some()) {
                 return Err(CliFailure::invalid_args("paged history currently supports --workspace, --active and --include-archived; label/source filters require a scoped complete query"));
@@ -589,12 +593,10 @@ fn parse_session(args: &[String]) -> Result<Query, CliFailure> {
         "get" => match &args[1..] {
             [session_id] if !session_id.trim().is_empty() => Ok(Query::SessionGet {
                 session_id: session_id.clone(),
-                summary_only: false,
             }),
             [session_id, flag] if !session_id.trim().is_empty() && flag == "--summary" => {
                 Ok(Query::SessionGet {
                     session_id: session_id.clone(),
-                    summary_only: true,
                 })
             }
             _ => Err(CliFailure::invalid_args(
@@ -959,7 +961,7 @@ async fn execute(
             if !active && limit.is_none() {
                 return Err(CliFailure::business(
                     "unboundedQueryDisabled",
-                    "无界历史查询已禁用，指定项目也必须分页。查已知会话用 session get <id> --summary；查当前任务用 session list --workspace <id> --active --include-archived；查历史用 session list --workspace <id> --limit 50，并将 nextCursor 原样传给 --cursor 续页。--lean 不能替代 --limit。请修改原脚本的读取方式，保留原任务、会话 ID 和回执；不要原样重试，不要按空结果重新派单。",
+                    "旧完整列表写法已禁用，不能将默认一页当作全部。session list 默认一页（50条）；旧 --lean/标签/来源写法需明确查询范围。查已知会话用 session get <id> --summary；查当前任务用 session list --workspace <id> --active --include-archived；查历史用 session list --workspace <id> --limit 50，并将 nextCursor 原样传给 --cursor 续页。--lean 不能替代 --limit。请修改原脚本的读取方式，保留原任务、会话 ID 和回执；不要原样重试，不要按空结果重新派单。",
                     None,
                 ));
             }
@@ -1109,49 +1111,33 @@ async fn execute(
             });
             Ok((
                 "session.list",
-                json!({"workspaceId": workspace_id, "sessions": sessions}),
+                json!({"workspaceId": workspace_id, "sessions": sessions, "complete": true, "nextCursor": null, "machineId": rpc.hello().machine_id}),
             ))
         }
-        Query::SessionGet {
-            session_id,
-            summary_only,
-        } => {
+        Query::SessionGet { session_id } => {
             let rpc = connect_selected(selection).await?;
-            if summary_only {
-                if !rpc
-                    .hello()
-                    .features
-                    .iter()
-                    .flatten()
-                    .any(|f| f == "session.summary.v1")
-                {
-                    return Err(CliFailure::business("upgradeRequired", "target needs session.summary.v1; history expansion is not a summary fallback", None));
-                }
-                let reply = rpc
-                    .call(Request::SessionGet {
-                        session_id,
-                        summary_only: Some(true),
-                        recent_rounds: None,
-                        before_item_id: None,
-                    })
-                    .await
-                    .map_err(rpc_error)?;
-                return match reply {
-                    Reply::Session(summary) => Ok(("session.get", json!({"summary": summary}))),
-                    other => Err(unexpected_reply("session summary", &other)),
-                };
+            if !rpc
+                .hello()
+                .features
+                .iter()
+                .flatten()
+                .any(|f| f == "session.summary.v1")
+            {
+                return Err(CliFailure::business("upgradeRequired", "target needs session.summary.v1; session get returns status, not history; upgrade the target", None));
             }
-            let snapshot = snapshot(
-                rpc.call(Request::SessionGet {
-                    summary_only: None,
+            let reply = rpc
+                .call(Request::SessionGet {
+                    session_id,
+                    summary_only: Some(true),
                     recent_rounds: None,
                     before_item_id: None,
-                    session_id: session_id.clone(),
                 })
                 .await
-                .map_err(rpc_error)?,
-            )?;
-            Ok(("session.get", json!({"session": snapshot})))
+                .map_err(rpc_error)?;
+            match reply {
+                Reply::Session(summary) => Ok(("session.get", json!({"summary": summary}))),
+                other => Err(unexpected_reply("session summary", &other)),
+            }
         }
         Query::SessionComponents { session_id } => {
             let rpc = connect_selected(selection).await?;
@@ -1706,15 +1692,15 @@ fn command_schema(name: &str) -> Value {
             ),
         ),
         "session.list" => (
-            "genet session list (--limit <1..100> [--cursor <nextCursor>] | --active) [--workspace <id>] [--include-archived] [--lean] | --since <start|cursor> --workspace <id>... [--include-archived] [--lean]",
+            "genet session list [--limit <1..100>] [--cursor <nextCursor>] [--active] [--workspace <id>] [--include-archived] [--lean] | --since <start|cursor> --workspace <id>... [--include-archived] [--lean]",
             true,
             object_input(
                 json!({
                     "workspaceId": {"type": ["string", "null"], "minLength": 1,
-                        "description": "--workspace; scope to a project; history always requires --limit, including scoped/lean queries"},
+                        "description": "--workspace; scope to a project; ordinary discovery defaults to one page of 50"},
                     "limit": {"type": ["integer", "null"], "minimum": 1, "maximum": 100,
-                        "description": "--limit; read exactly one bounded summary page; does not auto-follow nextCursor; excludes label/source filters"},
-                    "cursor": {"type": ["string", "null"], "description": "--cursor; opaque nextCursor from the same machine and query, requires --limit"},
+                        "description": "--limit; one summary page, default 50; does not auto-follow nextCursor; excludes label/source filters"},
+                    "cursor": {"type": ["string", "null"], "description": "--cursor; opaque nextCursor from the same machine and query; page size defaults to 50"},
                     "since": {"type": ["string", "null"], "description": "--since start|<cursor>; with one or more --workspace, returns sessions changed since the cursor plus removed, cursor, complete and reset; repeat with the returned cursor until complete; reset means the reply restarts the whole scope; needs session.changes.v1"},
                     "labels": {"type": "array", "items": {"type": "string", "minLength": 1},
                         "description": "--label, repeatable; keeps sessions carrying every given label"},
@@ -1732,7 +1718,7 @@ fn command_schema(name: &str) -> Value {
             true,
             object_input(
                 json!({"sessionId": {"type": "string", "minLength": 1},
-                    "summaryOnly": {"type": "boolean", "description": "--summary; return data.summary using metadata/current state only; requires session.summary.v1"}}),
+                    "summaryOnly": {"type": "boolean", "description": "Compatibility alias; session get always returns data.summary from metadata/current state, without history; requires session.summary.v1"}}),
                 &["sessionId"],
             ),
         ),
@@ -2414,13 +2400,6 @@ fn sessions(reply: Reply) -> Result<Vec<SessionSummary>, CliFailure> {
     }
 }
 
-fn snapshot(reply: Reply) -> Result<SessionSnapshot, CliFailure> {
-    match reply {
-        Reply::Snapshot(snapshot) => Ok(snapshot),
-        other => Err(unexpected_reply("session snapshot", &other)),
-    }
-}
-
 fn component_instances(
     reply: Reply,
 ) -> Result<Vec<genehub_proto::ComponentInstanceInfo>, CliFailure> {
@@ -2622,7 +2601,6 @@ mod tests {
             parse(&words(&["session", "get", "s_1"])).unwrap(),
             Query::SessionGet {
                 session_id: "s_1".into(),
-                summary_only: false,
             }
         );
         assert_eq!(
@@ -2998,7 +2976,6 @@ mod tests {
             vec![summary]
         );
         assert!(sessions(Reply::Ack).is_err());
-        assert!(snapshot(Reply::Ack).is_err());
     }
 
     #[test]

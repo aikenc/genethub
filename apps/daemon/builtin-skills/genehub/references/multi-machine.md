@@ -85,7 +85,7 @@ Hub 查询失败会返回非零退出码和 `complete: false` 的已知条目，
 
 `--` 后面的参数原样交给目标进程，包括 `--version`、`-V` 和 `--help`。例如
 `shell --workspace <id> -- python3 --version` 查询的是目标 Python 的版本。
-`session list --active --include-archived` 返回完整活动集合，独立于历史分页。找历史用 `session list --limit 50 [--cursor <nextCursor>]`，每次一页摘要；游标绑定机器，查询范围和归档条件也须保持一致，`complete: false` 表示尚有未读取历史。分页暂不支持标签／来源筛选，不能靠读空一页认定全局无匹配。项目历史同样使用 `--workspace <id> --limit 50` 分页读完；所有缺少 `--limit` 的历史查询已禁用，`--workspace`、`--lean`、`--label` 和 `--source-kind` 不能替代分页。遇到 `unboundedQueryDisabled` 应修改原脚本的读取方式，保留原任务、会话 ID 和回执，不原样重试。查询失败表示未知，不能据此重新派单。
+`session list --active --include-archived` 返回完整活动集合，独立于历史分页。找历史用 `session list --limit 50 [--cursor <nextCursor>]`，每次一页摘要；游标绑定机器，查询范围和归档条件也须保持一致，`complete: false` 表示尚有未读取历史。分页暂不支持标签／来源筛选，不能靠读空一页认定全局无匹配。项目历史同样使用 `--workspace <id> --limit 50` 分页读完；默认目录只返回最近 50 条和明确的 complete/nextCursor；旧隐式完整列表查询已禁用，`--workspace`、`--lean`、`--label` 和 `--source-kind` 不能替代分页。遇到 `unboundedQueryDisabled` 应修改原脚本的读取方式，保留原任务、会话 ID 和回执，不原样重试。查询失败表示未知，不能据此重新派单。
 命令分组帮助用 `session --help` 或 `agent run --help`；`schema <command>` 提供机器可读合同。
 
 ## 跨机传文件
@@ -109,7 +109,7 @@ Hub 查询失败会返回非零退出码和 `complete: false` 的已知条目，
   断开而停止。
 - 无人值守时，权限请求默认被拒，除非显式 `--auto-approve`；Agent 提问总会停下等待回答
   （`session respond`）。不要为了让任务继续而默认加 `--auto-approve`，先确认任务范围。
-- 用 `--no-wait` 派发后，用 `session get <id> --summary` 查原任务状态；目录用现有活动查询。轻量模式要求目标声明 `session.summary.v1`，不支持就明确要求升级，不回退读取完整历史；不要把派发成功当成完成。
+- 用 `--no-wait` 派发后，用 `session get <id>` 查原任务状态；目录用现有活动查询。轻量模式要求目标声明 `session.summary.v1`，不支持就明确要求升级，不回退读取完整历史；不要把派发成功当成完成。
 - 把任务派给持有该资源（代码、许可、GPU、外设）的机器，不要把工作区搬到别处。
 - 其他可路由的只读命令：`workspace list/show`、`session get/inspect/narrative/rounds/context`。
 

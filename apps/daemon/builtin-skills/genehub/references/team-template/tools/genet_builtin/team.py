@@ -476,10 +476,10 @@ def remote_receive(target, request):
         raise ExpertError("环境里没有 GENEHUB_CLI", "没有派单", "在 GeneHub 会话内运行")
     argv = [cli, "shell", "--machine", target["machineId"], "--workspace", target["workspaceId"],
             "--timeout", "110", "--max-output", "65536", "--", *target["command"],
-            "receive", json.dumps(request, ensure_ascii=False)]
+            "receive", "-"]
     cause = ""
     try:
-        done = subprocess.run(argv, capture_output=True, text=True, env=env, timeout=120)
+        done = subprocess.run(argv, input=json.dumps(request, ensure_ascii=False), capture_output=True, text=True, env=env, timeout=120)
         frames = [json.loads(line) for line in done.stdout.splitlines() if line.strip()]
         failure = next((f.get("error") for f in frames if isinstance(f.get("error"), dict)), None)
         if failure:
@@ -542,7 +542,10 @@ def _cmd_receive(args):
     Requires an installed team script, but never discovers/registers fronts or starts a timer.
     The shell connection already needed the target account's execution authority.
     """
-    request = json.loads(args.request)
+    raw = sys.stdin.buffer.read(1024 * 1024 + 1) if args.request == "-" else args.request
+    if len(raw if isinstance(raw, bytes) else raw.encode("utf-8")) > 1024 * 1024:
+        raise ExpertError("接单请求超过 1MiB", "没有执行操作，原任务和回执保留", "缩小请求或用已有文件传输传递产物")
+    request = json.loads(raw)
     key = request.get("id")
     if not isinstance(key, str) or not key or len(key) > 200:
         raise ExpertError("缺少有效派单编号", "没有创建会话", "传入 1–200 字符的稳定 id")
@@ -1038,7 +1041,7 @@ def session_summary(session_id, machine=None):
         found = [row for (_, sid), row in synced[0].items() if sid == session_id]
         if len(found) == 1:
             return found[0]
-    result = genet("session", "get", session_id, "--summary", *machine_args(machine))
+    result = genet("session", "get", session_id, *machine_args(machine))
     summary = result.get("summary")
     if not isinstance(summary, dict) or summary.get("id") != session_id or not isinstance(summary.get("status"), str):
         raise ExpertError("会话摘要响应无法核对原 ID 和状态", "查询结果未知，不能认定会话不存在或已结束", "保留原派单和写锁，查询同一会话回执")
@@ -5047,7 +5050,7 @@ def main(argv):
     sub.add_parser("sync-identity")
     sub.add_parser("hook")
     receive = sub.add_parser("receive", help="target-side executor; invoked by a fixed remote binding")
-    receive.add_argument("request", help="dispatch/release JSON envelope")
+    receive.add_argument("request", help="JSON envelope; use - to read the bounded shell stdin body")
     reserved = set(sub.choices) | {"tick", "describe"}
     business = runtime.commands.register(sub, runtime.tasks)
     if not isinstance(business, dict) or not all(isinstance(k, str) and callable(v) for k, v in business.items()):

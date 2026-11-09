@@ -53,7 +53,7 @@ daemon 只有一种事件 `timer`：按间隔运行 Space 的 `.genethub/hooks/<
 |---|---|
 | 在某个岗位 Space 开后台会话 | `agent run <任务> --workspace <id> --title … --label <岗位> --description … --system --message-id <稳定 id> --no-wait`，选路加 `--tag <档位>` 或 `--model` |
 | 给会话发回执、提醒、转交 | `session send <会话> <正文> --system --message-id <稳定 id> --no-wait` |
-| 查状态、找会话 | `session get <会话> --summary`、`session list --workspace <id> --active --include-archived`；历史用 `session list --workspace <id> --limit 50` 按游标续页；正文用 `session rounds <会话>` |
+| 查状态、找会话 | `session get <会话>`、`session list --workspace <id> --active --include-archived`；历史用 `session list --workspace <id> --limit 50` 按游标续页；正文用 `session rounds <会话>` |
 | 卡住时接手 | `session interrupt <会话>` 后重发，或换会话 |
 | 回到原话 | `session narrative <会话> --item <消息>`（`ghref:item:<会话>:<消息>`） |
 
