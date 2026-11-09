@@ -1,17 +1,21 @@
 // Terminating a project is the user's decision that nothing in it runs any
 // more, and the platform keeps it: a team's own scripts, timer hooks and
 // Agents cannot start it again, only an explicit resume of the terminated
-// project can. Members added later are covered too. Removing a busy project
-// terminates it first instead of refusing (fb_KGMfudZVL1CT).
+// project can. Members added later are covered too, and so is every channel
+// that has the project open, because the mark lives in the project. Removing a
+// busy project stops it first instead of refusing, without leaving it
+// terminated (fb_KGMfudZVL1CT).
 
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import {
+  createLease,
   daemonEndpoint,
   defineSpecialty,
   localGenetCli,
   openWorkbenchPage,
+  releaseLease,
   type CaseContext,
 } from "../../framework/public.ts";
 
@@ -161,9 +165,9 @@ defineSpecialty({
 
 defineSpecialty({
   id: "specialty.daemon.workspace-terminate.remove-busy-team",
-  title: "Removing a busy team with terminate stops it and removes every registration",
-  oracle: "workspace.remove with terminate succeeds while a nested member waits on the Human; the member stops waiting, all three registrations go, files and history stay, and reopening the project finds it still terminated",
-  catches: ["a busy project that cannot be removed", "removal that leaves a session waiting or running", "a removed project silently restartable by reopening it"],
+  title: "Removing a busy team stops it, removes every registration and leaves no termination behind",
+  oracle: "workspace.remove with terminate succeeds while a nested member waits on the Human; the member stops waiting, all three registrations go and files and history stay; reopening the project finds it runnable, while a project the user had terminated before removing it is still terminated when reopened",
+  catches: ["a busy project that cannot be removed", "removal that leaves a session waiting or running", "removal that silently terminates the project for every channel", "removal that clears a termination the user chose"],
   tags: ["core", "daemon", "workspace-terminate", "workspace-team-removal"], llm: { default: "mock" },
   expectedDurationMs: 15_000, timeoutMs: 120_000,
   resources: { environments: 1, cpu: 2, memoryMb: 2048, io: 1, browser: 0 },
@@ -177,10 +181,18 @@ defineSpecialty({
     const removed = await opened.client.call({ type: "workspace.remove", payload: { workspaceId: root.id, terminate: true } });
     t.assertions.assert(removed?.type === "workspaces" && ids.every(id => !removed.data.some(w => w.id === id)) && removed.data.some(w => w.id === survivor.id), "terminating removal left registrations or removed an unrelated project");
     t.assertions.assert(readFileSync(path.join(nested.root, "sentinel.txt"), "utf8") === "nested", "removal changed user files");
+    t.assertions.assert(!existsSync(path.join(root.root, ".genethub", "terminated.json")), "removal left a termination in the project");
     const reopened = await opened.client.call({ type: "workspace.open", payload: { root: root.root } });
-    t.assertions.assert(reopened?.type === "workspace" && reopened.data.id === root.id && reopened.data.terminatedAtMs !== undefined, "reopening a terminated project cleared the termination");
+    t.assertions.assert(reopened?.type === "workspace" && reopened.data.id === root.id && reopened.data.terminatedAtMs === undefined, "removal left the reopened project terminated");
     const member = await opened.client.call({ type: "workspace.open", payload: { root: nested.root } });
-    t.assertions.assert(member?.type === "workspace" && member.data.id === nested.id, "the removed member could not be reopened");
+    t.assertions.assert(member?.type === "workspace" && member.data.id === nested.id && member.data.terminatedAtMs === undefined, "the removed member could not be reopened as runnable");
+
+    const chosen = await opened.client.call({ type: "workspace.terminate", payload: { workspaceId: survivor.id } });
+    t.assertions.assert(chosen?.type === "workspaces", "terminating the bystander failed");
+    const gone = await opened.client.call({ type: "workspace.remove", payload: { workspaceId: survivor.id, terminate: true } });
+    t.assertions.assert(gone?.type === "workspaces" && !gone.data.some(w => w.id === survivor.id), "the terminated project was not removed");
+    const kept = await opened.client.call({ type: "workspace.open", payload: { root: survivor.root } });
+    t.assertions.assert(kept?.type === "workspace" && kept.data.terminatedAtMs !== undefined, "removal cleared a termination the user chose");
     const history = await opened.client.call({ type: "session.get", payload: { sessionId: sid } });
     t.assertions.assert(history?.type === "snapshot" && history.data.summary.status !== "waiting" && history.data.summary.status !== "running", "the member session still waited when it was removed");
   } finally { opened.client.close(); opened.daemon.stop(); await opened.mock.stop(); }
@@ -189,7 +201,7 @@ defineSpecialty({
 defineSpecialty({
   id: "specialty.page-experience.workspace-terminate",
   title: "The project list terminates a waiting project and then removes it after confirming",
-  oracle: "In a real browser, 终止 next to 移除 asks for confirmation, stops the waiting session and marks the project 已终止; 移除 on a still-busy project then explains it will terminate first and completes instead of being refused",
+  oracle: "In a real browser, 终止 next to 移除 asks for confirmation that says what it stops and who can resume, stops the waiting session and marks the project 已终止; 移除 on a still-busy project then explains it will stop it first and completes instead of being refused, leaving it runnable when reopened",
   catches: ["no way to stop a project from the list", "termination without confirmation", "removal of a busy project refused (fb_KGMfudZVL1CT)", "terminated state invisible"],
   tags: ["page-experience", "workspace-terminate"], runner: "playwright", llm: { default: "mock" },
   expectedDurationMs: 20_000, timeoutMs: 120_000,
@@ -225,7 +237,8 @@ defineSpecialty({
     await project.getByRole("checkbox", { name: "选择项目 stop-target", exact: true }).check();
     await projects.getByRole("button", { name: "终止", exact: true }).click();
     const terminate = page.getByRole("dialog", { name: "终止所选项目", exact: true });
-    await terminate.getByText("团队也无法自行恢复", { exact: false }).waitFor();
+    await terminate.getByText("丢弃团队排队未送达的消息", { exact: false }).waitFor();
+    await terminate.getByText("恢复需由你操作或明确要求 Agent 执行", { exact: false }).waitFor();
     await terminate.getByRole("button", { name: "确认终止 1 项", exact: true }).click();
     await projects.getByText("1 项已终止", { exact: true }).waitFor({ timeout: 15_000 });
     await project.getByText("已终止", { exact: true }).waitFor({ timeout: 5_000 });
@@ -236,14 +249,80 @@ defineSpecialty({
     await busyProject.getByRole("checkbox", { name: "选择项目 busy-target", exact: true }).check();
     await projects.getByRole("button", { name: "移除", exact: true }).click();
     const remove = page.getByRole("dialog", { name: "移除所选项目", exact: true });
-    await remove.getByText("会先被平台终止", { exact: false }).waitFor();
+    await remove.getByText("会先被平台停止", { exact: false }).waitFor();
     await remove.getByRole("button", { name: "确认移除 1 项", exact: true }).click();
     await busyProject.waitFor({ state: "detached", timeout: 15_000 });
     await projects.getByText("1 项已移除", { exact: true }).waitFor({ timeout: 5_000 });
     const listed = await opened.client.call({ type: "workspace.list" });
     t.assertions.assert(listed?.type === "workspaces" && !listed.data.some(w => w.id === busy), "the busy project is still registered");
     const reopened = await opened.client.call({ type: "workspace.open", payload: { root: busyRoot } });
-    t.assertions.assert(reopened?.type === "workspace" && reopened.data.id === busy && reopened.data.terminatedAtMs !== undefined, "the removal did not terminate the busy project first");
+    t.assertions.assert(reopened?.type === "workspace" && reopened.data.id === busy && reopened.data.terminatedAtMs === undefined, "the removal left the busy project terminated");
     t.assertions.assert(!["waiting", "running"].includes((await status(opened.client, busySid)) ?? ""), "the removed project's session still waited");
   } finally { await browser?.close(); opened.client.close(); opened.daemon.stop(); await opened.mock.stop(); }
+});
+
+type InboxEntry = { messageId: string; state: string; turnId?: string | null };
+const inboxEntry = (root: string, sid: string, messageId: string): InboxEntry | undefined =>
+  (JSON.parse(readFileSync(path.join(root, ".genethub", "sessions", sid, "meta.json"), "utf8")).inbox?.entries as InboxEntry[] | undefined)?.find(entry => entry.messageId === messageId);
+
+defineSpecialty({
+  id: "specialty.daemon.workspace-terminate.every-channel",
+  title: "Terminating a project in one channel stops it in another channel that has it open, and drops the team's queued input",
+  oracle: "Two daemons with separate data directories open the same project; terminating it in the first makes the second stop its waiting session, end the team's timer hook, refuse new input and discard a team notice queued behind the question; resuming in the first lifts it in the second, where the user's next message runs and the discarded notice is never delivered",
+  catches: ["termination kept in one channel's data directory (L13)", "a channel that keeps running a project terminated elsewhere", "a team instruction queued before termination replayed after resume"],
+  tags: ["core", "daemon", "workspace-terminate"], llm: { default: "mock" },
+  expectedDurationMs: 40_000, timeoutMs: 180_000,
+  resources: { environments: 2, cpu: 3, memoryMb: 3072, io: 1, browser: 0 },
+  surfaces: ["daemon"], productInterfaces: ["workspace.terminate", "workspace.resume", "workspace.open", "workspace.list", "session.send", "timer hooks"],
+}, async t => {
+  const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
+  const peerLease = createLease("terminate-peer-");
+  let peer: Opened | undefined;
+  try {
+    peer = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: peerLease });
+    await t.flows.main.configureMockProvider(opened.client, opened.mock);
+    await t.flows.main.configureMockProvider(peer.client, peer.mock);
+    const root = path.join(t.env.root, "spaces", "shared-project");
+    mkdirSync(path.join(root, ".genethub", "hooks"), { recursive: true });
+    const here = await opened.client.call({ type: "workspace.open", payload: { root } });
+    const there = await peer.client.call({ type: "workspace.open", payload: { root } });
+    if (here?.type !== "workspace" || there?.type !== "workspace") throw new Error("opening the shared project failed");
+    writeFileSync(path.join(root, ".genethub", "hooks", "tick.genet.json"), JSON.stringify({ schema: "genet.hook.v1", event: "timer", every: "1s", exec: ["sh", "-c", "date +%s%N >> ticks.log"] }));
+    await t.tools.waitUntil(() => ticks(root) >= 2, 30_000);
+
+    const sid = await waitingSession(t, peer, there.data.id);
+    await peer.client.call({ type: "session.send", payload: { sessionId: sid, messageId: "stale-team-order", text: "团队调度：继续上一个任务", attachments: [], artifactPreviewBaseUrl: null, continuesRound: null, origin: { machineId: "", sessionId: "system" } } });
+    await t.tools.waitUntil(() => inboxEntry(root, sid, "stale-team-order")?.state === "queued", 10_000)
+      .catch(() => t.assertions.assert(false, `the team notice was not queued behind the question: ${JSON.stringify(inboxEntry(root, sid, "stale-team-order"))}`));
+
+    const terminated = await opened.client.call({ type: "workspace.terminate", payload: { workspaceId: here.data.id } });
+    t.assertions.assert(terminated?.type === "workspaces", "terminating in the first channel failed");
+    await t.tools.waitUntil(async () => !["waiting", "running"].includes((await status(peer!.client, sid)) ?? ""), 10_000)
+      .catch(() => t.assertions.assert(false, "the other channel kept its session waiting in a terminated project"));
+    t.assertions.assert((await terminatedIds(peer.client)).includes(there.data.id), "the other channel does not list the project as terminated");
+    const send = await refused(() => peer!.client.call({ type: "session.send", payload: { sessionId: sid, text: "继续干活", attachments: [], artifactPreviewBaseUrl: null, continuesRound: null } }));
+    t.assertions.assert(send.includes(TERMINATED), `the other channel accepted input: ${send}`);
+    await hookStaysQuiet(t, root, "terminated elsewhere");
+    t.assertions.assert(inboxEntry(root, sid, "stale-team-order")?.state === "handled", "termination kept the team's queued notice");
+
+    const resumed = await opened.client.call({ type: "workspace.resume", payload: { workspaceId: here.data.id } });
+    t.assertions.assert(resumed?.type === "workspaces", "resuming in the first channel failed");
+    await t.tools.waitUntil(async () => !(await terminatedIds(peer!.client)).includes(there.data.id), 10_000)
+      .catch(() => t.assertions.assert(false, "the other channel still lists the resumed project as terminated"));
+    const before = ticks(root);
+    await t.tools.waitUntil(() => ticks(root) > before, 30_000);
+    peer.mock.script({ text: "peer-resumed-marker" });
+    await t.flows.main.sendPrompt(peer.client, sid, "恢复后继续");
+    await t.tools.waitUntil(async () => {
+      const got = await peer!.client.call({ type: "session.get", payload: { sessionId: sid } });
+      return got?.type === "snapshot" && got.data.summary.status === "idle" && JSON.stringify(got.data).includes("peer-resumed-marker");
+    }, 45_000);
+    await sleep(2_000);
+    const stale = inboxEntry(root, sid, "stale-team-order");
+    t.assertions.assert(stale?.state === "handled" && !stale.turnId, `the discarded team notice was delivered after resume: ${JSON.stringify(stale)}`);
+  } finally {
+    if (peer) { peer.client.close(); peer.daemon.stop(); await peer.mock.stop(); }
+    releaseLease(peerLease);
+    opened.client.close(); opened.daemon.stop(); await opened.mock.stop();
+  }
 });
