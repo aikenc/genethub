@@ -143,8 +143,9 @@ pub async fn platform() -> Platform {
             if kernel.trim() == "Darwin" {
                 return Platform::Mac;
             }
-            let version = std::fs::read_to_string("/proc/version").unwrap_or_default();
-            if version.to_ascii_lowercase().contains("microsoft") {
+            // Through a command: the guest only sees what the host preopened.
+            let version = run("/bin/sh", &["-c", "cat /proc/version"], QUICK).await;
+            if version.text.to_ascii_lowercase().contains("microsoft") {
                 Platform::Wsl
             } else {
                 Platform::Linux
@@ -1004,7 +1005,7 @@ async fn windows_items(platform: Platform) -> Vec<AccessItem> {
     // Network: an inbound allow rule for the daemon's host, per program path.
     let host = format!("{dir}\\genehub-host.exe");
     let rule = powershell(platform, &format!(
-        "$p=(Get-NetFirewallProfile | Where-Object Enabled -eq True).Count; if ($p -eq 0) {{ 'off' }} else {{ $r = Get-NetFirewallRule -Direction Inbound -Action Allow -Enabled True | Get-NetFirewallApplicationFilter | Where-Object {{ $_.Program -like '{dir}\\genehub-host*' }}; if ($r) {{ 'allowed' }} else {{ 'missing' }} }}"
+        "$p=(Get-NetFirewallProfile | Where-Object Enabled -eq True).Count; if ($p -eq 0) {{ 'off' }} else {{ $r = Get-NetFirewallApplicationFilter | Where-Object {{ $_.Program -like '{dir}\\genehub-host*' }} | Get-NetFirewallRule | Where-Object {{ $_.Direction -eq 'Inbound' -and $_.Action -eq 'Allow' -and $_.Enabled -eq 'True' }}; if ($r) {{ 'allowed' }} else {{ 'missing' }} }}"
     ), QUICK).await;
     let answer = rule.text.trim().to_string();
     let command = format!("New-NetFirewallRule -DisplayName 'GeneHub' -Direction Inbound -Program '{host}' -Action Allow -Profile Private");
