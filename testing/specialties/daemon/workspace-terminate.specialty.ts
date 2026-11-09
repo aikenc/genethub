@@ -1,9 +1,10 @@
 // Terminating a project is the user's decision that nothing in it runs any
 // more, and the platform keeps it: a team's own scripts, timer hooks and
-// Agents cannot start it again, only an explicit resume can. Removing a busy
-// project terminates it first instead of refusing (fb_KGMfudZVL1CT).
+// Agents cannot start it again, only an explicit resume of the terminated
+// project can. Members added later are covered too. Removing a busy project
+// terminates it first instead of refusing (fb_KGMfudZVL1CT).
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import {
@@ -36,7 +37,7 @@ async function team(t: CaseContext, client: Client) {
   const child = await make("member", root.id);
   const nested = await make("nested", child.id);
   const survivor = await make("bystander");
-  return { root, child, nested, survivor, ids: [root.id, child.id, nested.id] };
+  return { make, root, child, nested, survivor, ids: [root.id, child.id, nested.id] };
 }
 
 /** A session in `workspaceId` that is waiting on the Human, as a busy team member is. */
@@ -67,6 +68,11 @@ async function terminatedIds(client: Client): Promise<string[]> {
 const ticks = (root: string) => existsSync(path.join(root, "ticks.log")) ? readFileSync(path.join(root, "ticks.log"), "utf8").split("\n").filter(Boolean).length : 0;
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+/** Running, not merely an unreaped zombie. */
+function alive(pid: number): boolean {
+  try { return !/^\d+ \(.*\) Z/.test(readFileSync(`/proc/${pid}/stat`, "utf8")); } catch { return false; }
+}
+
 async function hookStaysQuiet(t: CaseContext, root: string, why: string) {
   await sleep(2_500);
   const frozen = ticks(root);
@@ -77,21 +83,25 @@ async function hookStaysQuiet(t: CaseContext, root: string, why: string) {
 defineSpecialty({
   id: "specialty.daemon.workspace-terminate.team-stays-stopped",
   title: "A terminated team stays stopped until the user resumes it, across a daemon restart",
-  oracle: "workspace terminate stops a waiting member session and the team's timer hook; session.send, system notices, session.create and the hook are refused or silent before and after a restart; workspace resume lifts it without restarting anything, after which a message runs again",
-  catches: ["termination that a team script or timer hook undoes", "termination lost on restart", "a waiting member left waiting", "termination spilling onto an unrelated project", "resume restarting sessions by itself"],
+  oracle: "workspace terminate stops a waiting member session, ends a running timer hook and keeps the team's hooks silent; session.send, system notices and script sends are refused before and after a restart, also in a member added afterwards and in a session created afterwards; resuming a member points at the terminated project; workspace resume of that project lifts it for the whole team without restarting anything, after which a message runs again",
+  catches: ["termination that a team script or timer hook undoes", "a running hook left running", "a member added after termination escaping it", "termination lost on restart", "a waiting member left waiting", "termination spilling onto an unrelated project", "resume restarting sessions by itself", "a member resume that silently does nothing"],
   tags: ["core", "daemon", "workspace-terminate", "genet-cli"], llm: { default: "mock" },
   expectedDurationMs: 40_000, timeoutMs: 180_000,
   resources: { environments: 1, cpu: 2, memoryMb: 2048, io: 1, browser: 0 },
-  surfaces: ["daemon", "genet-cli"], productInterfaces: ["workspace.terminate", "workspace.resume", "workspace.list", "session.send", "session.create", "timer hooks", "genet workspace terminate", "genet workspace resume"],
+  surfaces: ["daemon", "genet-cli"], productInterfaces: ["workspace.terminate", "workspace.resume", "workspace.list", "agentSpace.configure", "session.send", "session.create", "timer hooks", "genet workspace terminate", "genet workspace resume"],
 }, async t => {
   const cli = localGenetCli(t.openRoot, t.env);
   let opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
   try {
-    const { root, child, nested, survivor, ids } = await team(t, opened.client);
+    const { make, root, child, nested, survivor, ids } = await team(t, opened.client);
     await t.flows.main.configureMockProvider(opened.client, opened.mock);
     mkdirSync(path.join(root.root, ".genethub", "hooks"), { recursive: true });
     writeFileSync(path.join(root.root, ".genethub", "hooks", "tick.genet.json"), JSON.stringify({ schema: "genet.hook.v1", event: "timer", every: "1s", exec: ["sh", "-c", "date +%s%N >> ticks.log"] }));
-    await t.tools.waitUntil(() => ticks(root.root) >= 2, 30_000);
+    writeFileSync(path.join(root.root, "hold"), "");
+    writeFileSync(path.join(root.root, ".genethub", "hooks", "long.genet.json"), JSON.stringify({ schema: "genet.hook.v1", event: "timer", every: "1s", exec: ["sh", "-c", "test -f hold || exit 0; echo $$ > long.pid; exec sleep 25"] }));
+    await t.tools.waitUntil(() => ticks(root.root) >= 2 && existsSync(path.join(root.root, "long.pid")), 30_000);
+    const longPid = Number(readFileSync(path.join(root.root, "long.pid"), "utf8").trim());
+    t.assertions.assert(alive(longPid), "the long hook was not running before termination");
     const sid = await waitingSession(t, opened, nested.id);
 
     const terminated = cli(["workspace", "terminate", root.id]);
@@ -99,14 +109,25 @@ defineSpecialty({
     t.assertions.assert(JSON.stringify((await terminatedIds(opened.client)).sort()) === JSON.stringify([...ids].sort()), "termination did not cover exactly the team and its members");
     const after = await status(opened.client, sid);
     t.assertions.assert(after !== "waiting" && after !== "running", `the member session is still ${after}`);
+    await t.tools.waitUntil(() => !alive(longPid), 10_000).catch(() => t.assertions.assert(false, "termination left the running hook running"));
+    rmSync(path.join(root.root, "hold"));
+
+    const late = await make("late-member", child.id);
+    t.assertions.assert((await terminatedIds(opened.client)).includes(late.id), "a member added after termination is not shown as terminated");
+    const wholeTeam = [...ids, late.id].sort();
+    const memberResume = cli(["workspace", "resume", child.id]);
+    t.assertions.assert(memberResume.code !== 0 && `${memberResume.stdout}${memberResume.stderr}`.includes(root.id), `resuming a member did not point at the terminated project: ${memberResume.code} ${memberResume.stdout.slice(-300)} ${memberResume.stderr.slice(-300)}`);
 
     const refusals = async (client: Client, when: string) => {
       const send = await refused(() => client.call({ type: "session.send", payload: { sessionId: sid, text: "继续干活", attachments: [], artifactPreviewBaseUrl: null, continuesRound: null } }));
       t.assertions.assert(send.includes(TERMINATED), `${when}: session.send was not refused: ${send}`);
       const notice = await refused(() => client.call({ type: "session.send", payload: { sessionId: sid, messageId: `wake-${when}`, text: "团队调度唤醒", attachments: [], artifactPreviewBaseUrl: null, continuesRound: null, origin: { machineId: "", sessionId: "system" } } }));
       t.assertions.assert(notice.includes(TERMINATED), `${when}: a team system notice was not refused: ${notice}`);
-      const create = await refused(() => t.flows.main.createBuiltinSession(client, child.id));
-      t.assertions.assert(create.includes(TERMINATED), `${when}: session.create in a member was not refused: ${create}`);
+      for (const workspaceId of [child.id, late.id]) {
+        const created = await t.flows.main.createBuiltinSession(client, workspaceId);
+        const first = await refused(() => client.call({ type: "session.send", payload: { sessionId: created, text: "新会话开工", attachments: [], artifactPreviewBaseUrl: null, continuesRound: null } }));
+        t.assertions.assert(first.includes(TERMINATED) && first.includes(root.id), `${when}: a session created in ${workspaceId} accepted work: ${first}`);
+      }
       const scripted = cli(["session", "send", sid, "团队脚本补发", "--system", "--message-id", `script-${when}`, "--no-wait"]);
       t.assertions.assert(scripted.code !== 0 && `${scripted.stdout}${scripted.stderr}`.includes(TERMINATED), `${when}: genet session send from a script was not refused: ${scripted.code} ${scripted.stdout.slice(-300)}`);
       await hookStaysQuiet(t, root.root, when);
@@ -118,7 +139,7 @@ defineSpecialty({
     opened.client.close(); opened.daemon.stop(); await opened.mock.stop();
     opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
     await t.flows.main.configureMockProvider(opened.client, opened.mock);
-    t.assertions.assert(JSON.stringify((await terminatedIds(opened.client)).sort()) === JSON.stringify([...ids].sort()), "termination did not survive a daemon restart");
+    t.assertions.assert(JSON.stringify((await terminatedIds(opened.client)).sort()) === JSON.stringify(wholeTeam), "termination did not survive a daemon restart");
     await refusals(opened.client, "restarted");
 
     const resumed = cli(["workspace", "resume", root.id]);
@@ -141,7 +162,7 @@ defineSpecialty({
 defineSpecialty({
   id: "specialty.daemon.workspace-terminate.remove-busy-team",
   title: "Removing a busy team with terminate stops it and removes every registration",
-  oracle: "workspace.remove with terminate succeeds while a nested member waits on the Human; the member stops waiting, all three registrations go, files and history stay, and reopening the member finds it still terminated",
+  oracle: "workspace.remove with terminate succeeds while a nested member waits on the Human; the member stops waiting, all three registrations go, files and history stay, and reopening the project finds it still terminated",
   catches: ["a busy project that cannot be removed", "removal that leaves a session waiting or running", "a removed project silently restartable by reopening it"],
   tags: ["core", "daemon", "workspace-terminate", "workspace-team-removal"], llm: { default: "mock" },
   expectedDurationMs: 15_000, timeoutMs: 120_000,
@@ -156,12 +177,12 @@ defineSpecialty({
     const removed = await opened.client.call({ type: "workspace.remove", payload: { workspaceId: root.id, terminate: true } });
     t.assertions.assert(removed?.type === "workspaces" && ids.every(id => !removed.data.some(w => w.id === id)) && removed.data.some(w => w.id === survivor.id), "terminating removal left registrations or removed an unrelated project");
     t.assertions.assert(readFileSync(path.join(nested.root, "sentinel.txt"), "utf8") === "nested", "removal changed user files");
-    const reopened = await opened.client.call({ type: "workspace.open", payload: { root: nested.root } });
-    t.assertions.assert(reopened?.type === "workspace" && reopened.data.id === nested.id && reopened.data.terminatedAtMs !== undefined, "reopening a terminated member cleared the termination");
+    const reopened = await opened.client.call({ type: "workspace.open", payload: { root: root.root } });
+    t.assertions.assert(reopened?.type === "workspace" && reopened.data.id === root.id && reopened.data.terminatedAtMs !== undefined, "reopening a terminated project cleared the termination");
+    const member = await opened.client.call({ type: "workspace.open", payload: { root: nested.root } });
+    t.assertions.assert(member?.type === "workspace" && member.data.id === nested.id, "the removed member could not be reopened");
     const history = await opened.client.call({ type: "session.get", payload: { sessionId: sid } });
     t.assertions.assert(history?.type === "snapshot" && history.data.summary.status !== "waiting" && history.data.summary.status !== "running", "the member session still waited when it was removed");
-    const send = await refused(() => opened.client.call({ type: "session.send", payload: { sessionId: sid, text: "重新打开后继续", attachments: [], artifactPreviewBaseUrl: null, continuesRound: null } }));
-    t.assertions.assert(send.includes(TERMINATED), `a reopened terminated member accepted work: ${send}`);
   } finally { opened.client.close(); opened.daemon.stop(); await opened.mock.stop(); }
 });
 
